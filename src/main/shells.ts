@@ -1,0 +1,168 @@
+import { promises as fs } from "node:fs";
+import { join, basename } from "node:path";
+import { platform } from "node:os";
+import type { ShellInfo } from "@shared/types";
+
+async function exists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function detectWindows(): Promise<ShellInfo[]> {
+  const out: ShellInfo[] = [];
+  const sysRoot = process.env.SystemRoot || "C:\\Windows";
+  const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+  const programFiles86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+  const localAppData = process.env.LocalAppData || join(process.env.UserProfile || "", "AppData", "Local");
+
+  const candidates: Array<Omit<ShellInfo, "id"> & { id?: string }> = [
+    {
+      label: "PowerShell 7",
+      exe: join(programFiles, "PowerShell", "7", "pwsh.exe"),
+      args: ["-NoLogo"],
+      family: "pwsh",
+    },
+    {
+      label: "PowerShell 7 (x86)",
+      exe: join(programFiles86, "PowerShell", "7", "pwsh.exe"),
+      args: ["-NoLogo"],
+      family: "pwsh",
+    },
+    {
+      label: "Windows PowerShell",
+      exe: join(sysRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+      args: ["-NoLogo"],
+      family: "powershell",
+    },
+    {
+      label: "Command Prompt",
+      exe: join(sysRoot, "System32", "cmd.exe"),
+      args: [],
+      family: "cmd",
+    },
+    {
+      label: "Git Bash",
+      exe: join(programFiles, "Git", "bin", "bash.exe"),
+      args: ["--login", "-i"],
+      family: "bash",
+    },
+    {
+      label: "WSL",
+      exe: join(sysRoot, "System32", "wsl.exe"),
+      args: [],
+      family: "wsl",
+    },
+  ];
+
+  // VS Code-style PowerShell 7 from store/local install
+  const userPwsh = join(localAppData, "Microsoft", "WindowsApps", "pwsh.exe");
+  candidates.push({
+    label: "PowerShell 7 (user)",
+    exe: userPwsh,
+    args: ["-NoLogo"],
+    family: "pwsh",
+  });
+
+  for (const c of candidates) {
+    if (await exists(c.exe)) {
+      out.push({ ...c, id: c.exe });
+    }
+  }
+  // Dedupe by exe path (case-insensitive on Windows)
+  const seen = new Set<string>();
+  return out.filter((s) => {
+    const key = s.exe.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function detectUnix(): Promise<ShellInfo[]> {
+  const out: ShellInfo[] = [];
+  const tried = new Set<string>();
+  const familyOf = (exe: string): ShellInfo["family"] => {
+    const n = basename(exe);
+    if (n === "bash") return "bash";
+    if (n === "zsh") return "zsh";
+    if (n === "fish") return "fish";
+    if (n === "sh") return "sh";
+    return "other";
+  };
+  const labelOf = (exe: string): string => basename(exe);
+
+  // Read /etc/shells
+  try {
+    const raw = await fs.readFile("/etc/shells", "utf8");
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      if (await exists(trimmed)) {
+        if (tried.has(trimmed)) continue;
+        tried.add(trimmed);
+        out.push({
+          id: trimmed,
+          label: labelOf(trimmed),
+          exe: trimmed,
+          args: [],
+          family: familyOf(trimmed),
+        });
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  // Common fallbacks
+  for (const exe of ["/bin/zsh", "/bin/bash", "/usr/bin/zsh", "/usr/bin/bash", "/usr/bin/fish", "/bin/sh"]) {
+    if (tried.has(exe)) continue;
+    if (await exists(exe)) {
+      tried.add(exe);
+      out.push({
+        id: exe,
+        label: labelOf(exe),
+        exe,
+        args: [],
+        family: familyOf(exe),
+      });
+    }
+  }
+
+  return out;
+}
+
+let cache: ShellInfo[] | null = null;
+
+export async function listShells(): Promise<ShellInfo[]> {
+  if (cache) return cache;
+  cache = platform() === "win32" ? await detectWindows() : await detectUnix();
+  return cache;
+}
+
+export async function defaultShell(): Promise<ShellInfo | null> {
+  const shells = await listShells();
+  if (shells.length === 0) return null;
+  // Prefer pwsh > powershell > cmd on Windows, $SHELL > zsh > bash on unix
+  if (platform() === "win32") {
+    return (
+      shells.find((s) => s.family === "pwsh") ??
+      shells.find((s) => s.family === "powershell") ??
+      shells.find((s) => s.family === "cmd") ??
+      shells[0]
+    );
+  }
+  const fromEnv = process.env.SHELL;
+  if (fromEnv) {
+    const match = shells.find((s) => s.exe === fromEnv);
+    if (match) return match;
+  }
+  return (
+    shells.find((s) => s.family === "zsh") ??
+    shells.find((s) => s.family === "bash") ??
+    shells[0]
+  );
+}

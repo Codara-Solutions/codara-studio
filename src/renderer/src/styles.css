@@ -1,0 +1,62 @@
+:root {
+  --bg: oklch(0.16 0 0);
+  --panel: oklch(0.20 0 0);
+  --panel-2: oklch(0.235 0 0);
+  --ink: oklch(0.96 0 0);
+  --ink-dim: oklch(0.78 0 0);
+  --muted: oklch(0.58 0 0);
+  --rule: oklch(0.34 0 0);
+  --rule-strong: oklch(0.50 0 0);
+  --accent: #F0C419;
+  --accent-ink: oklch(0.16 0 0);
+  --danger: oklch(0.70 0.20 25);
+  --ok: oklch(0.78 0.16 145);
+  --info: oklch(0.78 0.13 235);
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", "Consolas", monospace;
+  --row-h: 28px;
+  --rail-w: 240px;
+  --right-w: 360px;
+  --font-size: 13px;
+}
+* { box-sizing: border-box; }
+html, body, #root {
+  margin: 0; padding: 0;
+  background: oklch(0.10 0 0);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--font-size);
+  line-height: 1.45;
+  height: 100%;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+::selection { background: var(--accent); color: var(--accent-ink); }
+button { font-family: inherit; }
+input { font-family: inherit; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--rule); border: 2px solid transparent; background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--rule-strong); background-clip: content-box; border: 2px solid transparent;
+}
+
+@keyframes sparkBlink {
+  0%, 50% { opacity: 1; }
+  50.01%, 100% { opacity: 0; }
+}
+
+/* xterm.js */
+.xterm-host {
+  width: 100%;
+  height: 100%;
+  padding: 6px 8px;
+  background: var(--bg);
+}
+.xterm-host .xterm-viewport,
+.xterm-host .xterm {
+  background: transparent !important;
+}
+.xterm .xterm-screen { background: transparent; }
