@@ -205,17 +205,31 @@ export default function App() {
             position: "relative",
           }}
         >
-          {activeWorkspace ? (
-            <TerminalGrid
-              key={activeWorkspace.id}
-              workspace={activeWorkspace}
-              shells={shells}
-              defaultShell={defaultShell}
-              onAddWorker={(shellId) => addWorker(activeWorkspace.id, shellId)}
-              onRemoveWorker={(workerId) => removeWorker(activeWorkspace.id, workerId)}
-            />
-          ) : (
+          {workspaces.length === 0 ? (
             <NoWorkspace onCreate={createWs} />
+          ) : (
+            // Keep every workspace's grid mounted so PTYs and xterm scrollback
+            // survive workspace switches; hide inactive ones with display:none.
+            workspaces.map((ws) => (
+              <div
+                key={ws.id}
+                style={{
+                  flex: 1,
+                  display: ws.id === activeId ? "flex" : "none",
+                  flexDirection: "column",
+                  minWidth: 0,
+                  minHeight: 0,
+                }}
+              >
+                <TerminalGrid
+                  workspace={ws}
+                  shells={shells}
+                  defaultShell={defaultShell}
+                  onAddWorker={(shellId) => addWorker(ws.id, shellId)}
+                  onRemoveWorker={(workerId) => removeWorker(ws.id, workerId)}
+                />
+              </div>
+            ))
           )}
         </main>
 
