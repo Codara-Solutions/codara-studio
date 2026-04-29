@@ -29,7 +29,7 @@ export default function DevInspector({
       style={{
         display: "flex",
         flexDirection: "column",
-        flex: "1 1 0",
+        flex: "3 1 0",
         minHeight: 0,
         borderBottom: "1px solid var(--rule)",
         background: "var(--bg)",

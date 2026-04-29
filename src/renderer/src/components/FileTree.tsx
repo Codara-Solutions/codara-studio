@@ -157,7 +157,7 @@ export default function FileTree({
         display: "flex",
         flexDirection: "column",
         minHeight: 0,
-        flex: "1 1 0",
+        flex: "0 0 30%",
       }}
     >
       <PanelHeader title="EXPLORER" right={<span style={{ color: "var(--muted)" }}>{basename(cwd)}</span>} />
