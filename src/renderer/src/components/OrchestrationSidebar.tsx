@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import type { RunArtifactPaths, RunState, RunStatus, SparkEvent, Workspace } from "@shared/types";
+import type { PlanFile, RunArtifactPaths, RunState, SparkEvent, Workspace } from "@shared/types";
 import DevInspector from "./DevInspector";
 import SparkAgentPanel from "./SparkAgentPanel";
 
@@ -13,6 +13,8 @@ export default function OrchestrationSidebar({ workspace }: Props) {
   const [events, setEvents] = useState<SparkEvent[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [artifactPaths, setArtifactPaths] = useState<RunArtifactPaths | null>(null);
+  const [planFiles, setPlanFiles] = useState<PlanFile[]>([]);
+  const [selectedPlanPath, setSelectedPlanPath] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,13 +45,23 @@ export default function OrchestrationSidebar({ workspace }: Props) {
   const loadRuns = useCallback(async () => {
     if (!workspace) {
       setRuns([]);
+      setPlanFiles([]);
+      setSelectedPlanPath("");
       await loadRunDetails(null);
       return;
     }
 
     try {
-      const nextRuns = await window.spark.orchestration.listRuns(workspace.id);
+      const [nextRuns, nextPlanFiles] = await Promise.all([
+        window.spark.orchestration.listRuns(workspace.id),
+        window.spark.fs.listMarkdownFiles(workspace.cwd),
+      ]);
       setRuns(nextRuns);
+      setPlanFiles(nextPlanFiles);
+      setSelectedPlanPath((current) => {
+        if (current && nextPlanFiles.some((file) => file.path === current)) return current;
+        return nextPlanFiles[0]?.path ?? "";
+      });
       const nextActive =
         nextRuns.find((run) => run.id === activeRun?.id) ?? nextRuns[0] ?? null;
       await loadRunDetails(nextActive);
@@ -79,17 +91,30 @@ export default function OrchestrationSidebar({ workspace }: Props) {
     });
   }, [activeRun]);
 
-  const createRun = async () => {
+  const startAutopilot = async () => {
     if (!workspace || busy) return;
+    const start = window.spark.orchestration.startAutopilot;
+    if (typeof start !== "function") {
+      setError("Autopilot API is unavailable. Restart Spark Agent to reload the preload bridge.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      const run = await window.spark.orchestration.createRun({
+      const selectedPlan = planFiles.find((file) => file.path === selectedPlanPath);
+      const planText = selectedPlan
+        ? (await window.spark.fs.readText(selectedPlan.path)).content
+        : "";
+      const run = await start({
         workspaceId: workspace.id,
         workspaceName: workspace.name,
         cwd: workspace.cwd,
+        runId: activeRun?.id,
+        planPath: selectedPlan?.path,
+        planTitle: selectedPlan?.name,
+        planText,
       });
-      setRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
+      setRuns((current) => replaceRun([run, ...current], run));
       await loadRunDetails(run);
     } catch (err) {
       setError((err as Error).message);
@@ -98,138 +123,58 @@ export default function OrchestrationSidebar({ workspace }: Props) {
     }
   };
 
-  const appendTestEvent = async () => {
-    if (!activeRun || busy) return;
-    setBusy(true);
+  const pauseActiveRun = async (reason: string) => {
+    if (!activeRun) return;
+    const pause = window.spark.orchestration.pauseRun;
+    if (typeof pause !== "function") {
+      setError("Pause API is unavailable. Restart Spark Agent to reload the preload bridge.");
+      return;
+    }
     setError(null);
     try {
-      const event = await window.spark.orchestration.appendTestEvent(activeRun.id);
-      setEvents((current) => {
-        if (current.some((item) => item.id === event.id)) return current;
-        return [...current, event];
+      const run = await pause({
+        runId: activeRun.id,
+        reason: reason || "Paused by user",
       });
-      setSelectedEventId(event.id);
-      const freshRun = await window.spark.orchestration.getRun(activeRun.id);
-      if (freshRun) {
-        setActiveRun(freshRun);
-        setRuns((current) => replaceRun(current, freshRun));
-      }
+      setActiveRun(run);
+      setRuns((current) => replaceRun(current, run));
+      await loadRunDetails(run);
     } catch (err) {
       setError((err as Error).message);
-    } finally {
-      setBusy(false);
     }
+  };
+
+  const resumeActiveRun = async () => {
+    if (!activeRun || busy) return;
+    const resume = window.spark.orchestration.resumeRun;
+    if (typeof resume !== "function") {
+      setError("Resume API is unavailable. Restart Spark Agent to reload the preload bridge.");
+      return;
+    }
+    await mutateActiveRun(() => resume({ runId: activeRun.id }));
+  };
+
+  const addUserMessage = async (message: string) => {
+    if (!activeRun || busy) return;
+    const addMessage = window.spark.orchestration.addRunMessage;
+    if (typeof addMessage !== "function") {
+      setError("Message API is unavailable. Restart Spark Agent to reload the preload bridge.");
+      return;
+    }
+    await mutateActiveRun(() =>
+      addMessage({
+        runId: activeRun.id,
+        author: "user",
+        kind: "note",
+        message,
+      }),
+    );
   };
 
   const selectRun = async (run: RunState) => {
     if (busy) return;
     setError(null);
     await loadRunDetails(run);
-  };
-
-  const updateStatus = async (status: RunStatus) => {
-    if (!activeRun || busy) return;
-    await mutateActiveRun(() =>
-      window.spark.orchestration.updateRunStatus({
-        runId: activeRun.id,
-        status,
-      }),
-    );
-  };
-
-  const createStep = async () => {
-    if (!activeRun || busy) return;
-    const title = `Step ${activeRun.steps.length + 1}`;
-    await mutateActiveRun(() =>
-      window.spark.orchestration.createStep({
-        runId: activeRun.id,
-        title,
-        goal: title,
-      }),
-    );
-  };
-
-  const createWorkerTask = async () => {
-    if (!activeRun || busy) return;
-    const step =
-      activeRun.steps.find((item) => item.id === activeRun.currentStepId) ?? activeRun.steps[0];
-    const title = `Task ${activeRun.workerTasks.length + 1}`;
-    await mutateActiveRun(() =>
-      window.spark.orchestration.createWorkerTask({
-        runId: activeRun.id,
-        stepId: step?.id,
-        title,
-        description: title,
-        runtimePreference: "manual",
-      }),
-    );
-  };
-
-  const prepareWorkerTask = async () => {
-    if (!activeRun || !workspace || busy) return;
-    const prepare = window.spark.orchestration.prepareWorkerTask;
-    if (typeof prepare !== "function") {
-      setError("Worker prep API is unavailable. Restart Spark Agent to reload the preload bridge.");
-      return;
-    }
-    const task = activeRun.workerTasks[activeRun.workerTasks.length - 1];
-    if (!task) {
-      setError("Create a worker task before preparing an envelope.");
-      return;
-    }
-    await mutateActiveRun(async () => {
-      await prepare({
-        runId: activeRun.id,
-        workerTaskId: task.id,
-        cwd: workspace.cwd,
-      });
-      const freshRun = await window.spark.orchestration.getRun(activeRun.id);
-      if (!freshRun) throw new Error(`Run not found: ${activeRun.id}`);
-      return freshRun;
-    });
-  };
-
-  const launchWorkerAttempt = async () => {
-    if (!activeRun || busy) return;
-    const launch = window.spark.orchestration.launchWorkerAttempt;
-    if (typeof launch !== "function") {
-      setError("Worker launch API is unavailable. Restart Spark Agent to reload the preload bridge.");
-      return;
-    }
-    const attempt =
-      activeRun.workerAttempts
-        .slice()
-        .reverse()
-        .find((item) => item.status === "prompt_ready" || item.status === "failed") ??
-      activeRun.workerAttempts[activeRun.workerAttempts.length - 1];
-    if (!attempt) {
-      setError("Prepare a worker attempt before launching execution.");
-      return;
-    }
-    await mutateActiveRun(() =>
-      launch({
-        runId: activeRun.id,
-        attemptId: attempt.id,
-      }),
-    );
-  };
-
-  const deleteActiveRun = async () => {
-    if (!activeRun || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await window.spark.orchestration.deleteRun(activeRun.id);
-      const nextRuns = workspace
-        ? await window.spark.orchestration.listRuns(workspace.id)
-        : [];
-      setRuns(nextRuns);
-      await loadRunDetails(nextRuns[0] ?? null);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
   };
 
   const mutateActiveRun = async (mutation: () => Promise<RunState>) => {
@@ -260,24 +205,24 @@ export default function OrchestrationSidebar({ workspace }: Props) {
         flexDirection: "column",
         flex: "1 1 0",
         minHeight: 0,
+        overflow: "hidden",
       }}
     >
       <SparkAgentPanel
         workspace={workspace}
         runs={runs}
         activeRun={activeRun}
+        planFiles={planFiles}
+        selectedPlanPath={selectedPlanPath}
         busy={busy}
         error={error}
-        onCreateRun={createRun}
-        onAppendTestEvent={appendTestEvent}
+        onStartAutopilot={startAutopilot}
+        onPauseRun={pauseActiveRun}
+        onResumeRun={resumeActiveRun}
+        onAddUserMessage={addUserMessage}
+        onSelectPlan={setSelectedPlanPath}
         onSelectRun={selectRun}
         onRefresh={loadRuns}
-        onUpdateStatus={updateStatus}
-        onCreateStep={createStep}
-        onCreateWorkerTask={createWorkerTask}
-        onPrepareWorkerTask={prepareWorkerTask}
-        onLaunchWorkerAttempt={launchWorkerAttempt}
-        onDeleteRun={deleteActiveRun}
       />
       <DevInspector
         workspace={workspace}
@@ -292,7 +237,11 @@ export default function OrchestrationSidebar({ workspace }: Props) {
 }
 
 function replaceRun(runs: RunState[], run: RunState): RunState[] {
-  return runs
-    .map((item) => (item.id === run.id ? run : item))
+  const byId = new Map<string, RunState>();
+  for (const item of runs) {
+    byId.set(item.id, item.id === run.id ? run : item);
+  }
+  byId.set(run.id, run);
+  return Array.from(byId.values())
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }

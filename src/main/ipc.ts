@@ -1,10 +1,11 @@
 import { ipcMain, dialog, BrowserWindow, app } from "electron";
 import { listShells, defaultShell } from "./shells";
-import { deleteFile, listDir, readTextFile, renameFile, writeTextFile } from "./fs-tree";
+import { deleteFile, listDir, listMarkdownFiles, readTextFile, renameFile, writeTextFile } from "./fs-tree";
 import { getGitGraph } from "./git-graph";
 import { loadState, saveState } from "./storage";
 import * as pty from "./pty-manager";
 import {
+  addRunMessage,
   appendTestEvent,
   createStep,
   createRun,
@@ -14,13 +15,17 @@ import {
   getRun,
   launchWorkerAttempt,
   listRuns,
+  pauseRun,
   prepareWorkerTask,
+  resumeRun,
+  startAutopilot,
   updateRunStatus,
   updateStep,
   updateWorkerTask,
 } from "./orchestration/run-store";
 import { listEvents } from "./orchestration/event-log";
 import type {
+  AddRunMessageInput,
   AppState,
   CreateStepInput,
   CreateRunInput,
@@ -29,12 +34,16 @@ import type {
   FsFileContent,
   GitGraph,
   LaunchWorkerAttemptInput,
+  PauseRunInput,
   PrepareWorkerTaskInput,
+  ResumeRunInput,
   RenameFileInput,
+  PlanFile,
   RunArtifactPaths,
   RunState,
   ShellInfo,
   SparkEvent,
+  StartAutopilotInput,
   UpdateRunStatusInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
@@ -75,6 +84,10 @@ export function registerIpc(): void {
     return readTextFile(path);
   });
 
+  ipcMain.handle("fs:listMarkdownFiles", async (_e, root: string): Promise<PlanFile[]> => {
+    return listMarkdownFiles(root);
+  });
+
   ipcMain.handle("fs:writeText", async (_e, args: { path: string; content: string }): Promise<FsFileContent> => {
     return writeTextFile(args.path, args.content);
   });
@@ -113,6 +126,22 @@ export function registerIpc(): void {
 
   ipcMain.handle("orchestration:appendTestEvent", async (_e, args: { runId: string; message?: string }): Promise<SparkEvent> => {
     return appendTestEvent(args.runId, args.message);
+  });
+
+  ipcMain.handle("orchestration:startAutopilot", async (_e, input: StartAutopilotInput): Promise<RunState> => {
+    return startAutopilot(input);
+  });
+
+  ipcMain.handle("orchestration:pauseRun", async (_e, input: PauseRunInput): Promise<RunState> => {
+    return pauseRun(input);
+  });
+
+  ipcMain.handle("orchestration:resumeRun", async (_e, input: ResumeRunInput): Promise<RunState> => {
+    return resumeRun(input);
+  });
+
+  ipcMain.handle("orchestration:addRunMessage", async (_e, input: AddRunMessageInput): Promise<RunState> => {
+    return addRunMessage(input);
   });
 
   ipcMain.handle("orchestration:updateRunStatus", async (_e, input: UpdateRunStatusInput): Promise<RunState> => {

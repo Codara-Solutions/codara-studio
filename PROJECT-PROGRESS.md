@@ -7,8 +7,10 @@ thread between build sessions.
 
 Spark Agent is a local-first desktop orchestration app. The current workbench
 already gives us workspace selection, terminals, file tree/editor surfaces, and
-git context. The next goal is to add durable orchestration state and events
-before adding OpenRouter, Claude/Codex workers, or graph visualization.
+git context. The next goal is to turn the durable orchestration foundation into
+a simple manager flow where the human can hand Spark a complete plan, click
+run, pause if the direction looks wrong, add guidance, and resume without
+understanding the low-level worker machinery.
 
 ## Product Decisions
 
@@ -22,6 +24,16 @@ before adding OpenRouter, Claude/Codex workers, or graph visualization.
 - Build order should stay conservative: state/events first, Dev Inspector next,
   visual map after that, real workers later, OpenRouter after the runtime is
   observable.
+- The primary product mode should be autopilot: Spark reads the plan, creates
+  steps/tasks, prepares workers, executes them, reviews progress, and only asks
+  the human when blocked or when approval is needed.
+- Manual mode should remain available for advanced use: create tasks, launch
+  workers, open panes, inspect artifacts, and steer specific agents directly.
+- Users must be able to stop a run, say what they want changed, and resume.
+  Those messages are part of the run record, not transient UI state.
+- Most users will provide the project plan as a Markdown file in the workspace.
+  The primary Spark panel should let them select that file and run it, instead
+  of making them understand step/task/prepare/execute controls.
 
 ## Completed
 
@@ -75,6 +87,30 @@ before adding OpenRouter, Claude/Codex workers, or graph visualization.
   `CREATE -> STEP -> TASK -> PREP -> EXEC`.
 - Added isolated test userData support through `SPARK_USER_DATA_DIR`.
 - Confirmed `npm run test:e2e` passes against the real Electron UI.
+- Added the first Autopilot Run MVP controls.
+- Added durable `autopilot` state on runs.
+- Added durable human/Spark run messages for corrections, answers, and future
+  clarification questions.
+- Added `AUTO`, `STOP`, `RESUME`, and `SEND` controls to the Spark panel.
+- Added orchestration APIs for starting autopilot, pausing runs, resuming runs,
+  and recording run messages.
+- Added an initial one-button manager cycle: create/reuse run, create the first
+  step/task if needed, prepare a worker envelope, launch the controlled worker,
+  and return to review.
+- Added E2E coverage for pause/message/resume and the one-button autopilot
+  cycle.
+- Simplified the primary Spark panel by removing dev-stage buttons from the
+  main user surface.
+- Added workspace Markdown plan discovery for `.md` files.
+- Added a plan selector so the user can choose a plan file from the project and
+  click `RUN`.
+- Autopilot now stores the selected plan as `PlanState` with `sourceFile` and
+  raw Markdown content.
+- Updated E2E coverage so the primary flow starts from a selected `PLAN.md`
+  file.
+- Fixed compact-window right sidebar layout so the Spark panel, Dev Inspector,
+  and Explorer stay ordered instead of visually overlapping.
+- Added E2E coverage for compact-window sidebar ordering.
 
 ## Current State
 
@@ -92,6 +128,8 @@ Implemented foundation:
 - `SparkCall`
 - `ContextPacket`
 - `ReviewDecision`
+- `AutopilotState`
+- `HumanRunMessage`
 - JSONL event log
 - run store
 - orchestration IPC/preload API
@@ -103,17 +141,22 @@ Missing foundation:
 - diagnostics
 - real Claude/Codex worker process launch
 - cancellation and timeout handling
+- a dedicated advanced/manual control surface outside the primary Spark panel
+- a long-running autopilot loop that can continue across many steps without the
+  current controlled runner blocking the UI
+- Spark-generated plan analysis and task decomposition
 
 ## Next Step
 
-Harden controlled worker execution before adding real Claude/Codex launchers.
+Move from the one-cycle Autopilot MVP to a real manager loop.
 
 Immediate target:
 
 ```text
-Execution hardening:
-  add cancellation
-  add timeouts
-  add structured final-report reading and validation
-  add log viewing/opening from Dev Inspector
+Autopilot loop hardening:
+  make the loop continue until complete, paused, blocked, or failed
+  make pause/stop interrupt active work instead of only changing run state
+  parse final-report.json and decide accept/retry/follow-up/question
+  let Spark write clarification questions into the run message stream
+  add cancellation and timeouts before real Claude/Codex launchers
 ```

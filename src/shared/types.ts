@@ -41,6 +41,12 @@ export interface FsFileContent {
   mtimeMs: number;
 }
 
+export interface PlanFile {
+  name: string;
+  path: string;
+  relativePath: string;
+}
+
 export interface RenameFileInput {
   path: string;
   newName: string;
@@ -69,6 +75,7 @@ export type RunStatus =
   | "running"
   | "reviewing"
   | "blocked"
+  | "paused"
   | "complete"
   | "failed"
   | "cancelled";
@@ -148,6 +155,32 @@ export interface RunState {
   workerTasks: WorkerTask[];
   workerAttempts: WorkerAttempt[];
   sparkCalls: SparkCall[];
+  humanMessages: HumanRunMessage[];
+  autopilot?: AutopilotState;
+}
+
+export type AutopilotStatus = "idle" | "running" | "paused" | "blocked" | "complete" | "failed";
+
+export interface AutopilotState {
+  status: AutopilotStatus;
+  lastAction?: string;
+  stopReason?: string;
+  startedAt?: string;
+  pausedAt?: string;
+  resumedAt?: string;
+  updatedAt: string;
+}
+
+export type HumanRunMessageAuthor = "user" | "spark" | "system";
+export type HumanRunMessageKind = "note" | "question" | "answer" | "decision";
+
+export interface HumanRunMessage {
+  id: string;
+  runId: string;
+  author: HumanRunMessageAuthor;
+  kind: HumanRunMessageKind;
+  message: string;
+  createdAt: string;
 }
 
 export interface RunArtifactPaths {
@@ -391,4 +424,30 @@ export interface PrepareWorkerTaskInput {
 export interface LaunchWorkerAttemptInput {
   runId: string;
   attemptId: string;
+}
+
+export interface StartAutopilotInput {
+  workspaceId: string;
+  workspaceName: string;
+  cwd: string;
+  runId?: string;
+  planPath?: string;
+  planTitle?: string;
+  planText?: string;
+}
+
+export interface PauseRunInput {
+  runId: string;
+  reason?: string;
+}
+
+export interface ResumeRunInput {
+  runId: string;
+}
+
+export interface AddRunMessageInput {
+  runId: string;
+  author: HumanRunMessageAuthor;
+  kind: HumanRunMessageKind;
+  message: string;
 }

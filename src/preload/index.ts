@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
+  AddRunMessageInput,
   AppState,
   CreateStepInput,
   CreateRunInput,
@@ -8,12 +9,16 @@ import type {
   FsFileContent,
   GitGraph,
   LaunchWorkerAttemptInput,
+  PauseRunInput,
+  PlanFile,
   PrepareWorkerTaskInput,
+  ResumeRunInput,
   RenameFileInput,
   RunArtifactPaths,
   RunState,
   ShellInfo,
   SparkEvent,
+  StartAutopilotInput,
   UpdateRunStatusInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
@@ -40,6 +45,8 @@ const api = {
   fs: {
     list: (dir: string): Promise<FsEntry[]> => ipcRenderer.invoke("fs:list", dir),
     readText: (path: string): Promise<FsFileContent> => ipcRenderer.invoke("fs:readText", path),
+    listMarkdownFiles: (root: string): Promise<PlanFile[]> =>
+      ipcRenderer.invoke("fs:listMarkdownFiles", root),
     writeText: (path: string, content: string): Promise<FsFileContent> =>
       ipcRenderer.invoke("fs:writeText", { path, content }),
     renameFile: (input: RenameFileInput): Promise<FsEntry> =>
@@ -62,6 +69,14 @@ const api = {
       ipcRenderer.invoke("orchestration:getArtifactPaths", runId),
     appendTestEvent: (runId: string, message?: string): Promise<SparkEvent> =>
       ipcRenderer.invoke("orchestration:appendTestEvent", { runId, message }),
+    startAutopilot: (input: StartAutopilotInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:startAutopilot", input),
+    pauseRun: (input: PauseRunInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:pauseRun", input),
+    resumeRun: (input: ResumeRunInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:resumeRun", input),
+    addRunMessage: (input: AddRunMessageInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:addRunMessage", input),
     updateRunStatus: (input: UpdateRunStatusInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:updateRunStatus", input),
     createStep: (input: CreateStepInput): Promise<RunState> =>

@@ -3,7 +3,10 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type {
+  AddRunMessageInput,
   LaunchWorkerAttemptInput,
+  PauseRunInput,
+  ResumeRunInput,
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
@@ -11,6 +14,7 @@ import type {
   RunArtifactPaths,
   RunState,
   SparkEvent,
+  StartAutopilotInput,
   StepState,
   UpdateRunStatusInput,
   UpdateStepInput,
@@ -29,7 +33,7 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
   const run: RunState = {
     id: makeId("run"),
     workspaceId: input.workspaceId,
-    title: input.title?.trim() || `Test run - ${input.workspaceName}`,
+    title: input.title?.trim() || `Run - ${input.workspaceName}`,
     status: "idle",
     artifactDir: "",
     createdAt: now,
@@ -39,6 +43,11 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     workerTasks: [],
     workerAttempts: [],
     sparkCalls: [],
+    humanMessages: [],
+    autopilot: {
+      status: "idle",
+      updatedAt: now,
+    },
   };
   run.artifactDir = runDir(run.id);
 
@@ -47,7 +56,7 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     workspaceId: run.workspaceId,
     runId: run.id,
     type: "run.created",
-    message: "Test run created",
+    message: "Run created",
     payload: {
       title: run.title,
       cwd: input.cwd,
@@ -62,7 +71,7 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
 export async function getRun(runId: string): Promise<RunState | null> {
   try {
     const raw = await fs.readFile(runPath(runId), "utf8");
-    return JSON.parse(raw) as RunState;
+    return normalizeRun(JSON.parse(raw) as RunState);
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
@@ -117,6 +126,210 @@ export async function appendTestEvent(runId: string, message?: string): Promise<
   run.updatedAt = event.timestamp;
   await saveRun(run);
   return event;
+}
+
+export async function startAutopilot(input: StartAutopilotInput): Promise<RunState> {
+  let run = input.runId ? await requireRun(input.runId) : null;
+  if (!run) {
+    run = await createRun({
+      workspaceId: input.workspaceId,
+      workspaceName: input.workspaceName,
+      cwd: input.cwd,
+      title: input.planTitle ? `Autopilot - ${input.planTitle}` : `Autopilot - ${input.workspaceName}`,
+    });
+  }
+
+  const planText = input.planText?.trim();
+  run = await commitRunChange(run, {
+    type: "autopilot.started",
+    message: "Autopilot started",
+    payload: {
+      cwd: input.cwd,
+      planPath: input.planPath,
+      hasPlanText: Boolean(planText),
+    },
+    mutate: (draft, timestamp) => {
+      draft.status = "running";
+      if (planText) {
+        const existingPlan = input.planPath
+          ? draft.plans.find((plan) => plan.sourceFile === input.planPath)
+          : undefined;
+        if (existingPlan) {
+          existingPlan.rawContent = planText;
+          existingPlan.status = "active";
+          existingPlan.updatedAt = timestamp;
+          draft.planId = existingPlan.id;
+        } else {
+          const plan = {
+            id: makeId("plan"),
+            workspaceId: input.workspaceId,
+            title: input.planTitle?.trim() || "Selected project plan",
+            sourceFile: input.planPath,
+            rawContent: planText,
+            requirements: [],
+            status: "active" as const,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          };
+          draft.plans.push(plan);
+          draft.planId = plan.id;
+        }
+      }
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "started",
+        stopReason: undefined,
+        startedAt: draft.autopilot?.startedAt ?? timestamp,
+        resumedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+
+  if (run.steps.length === 0) {
+    run = await createStep({
+      runId: run.id,
+      title: "Understand project plan",
+      goal: input.planText?.trim() || "Read the project plan and decide the first concrete implementation task.",
+      acceptanceCriteria: ["A worker task is prepared from the current project plan."],
+      verificationCommands: ["npm run typecheck"],
+    });
+  }
+
+  const activeStep = pickAutopilotStep(run);
+  const existingTask = activeStep
+    ? run.workerTasks.find((task) => task.stepId === activeStep.id)
+    : run.workerTasks[0];
+
+  if (!existingTask) {
+    run = await createWorkerTask({
+      runId: run.id,
+      stepId: activeStep?.id,
+      title: "Autopilot task 1",
+      description:
+        input.planText?.trim() ||
+        "Inspect the current project state and produce the next concrete implementation report.",
+      runtimePreference: "manual",
+      expectedOutputs: ["A final report artifact explaining what was done and what remains."],
+      verificationCommands: ["npm run typecheck"],
+      createdBy: "spark",
+    });
+  }
+
+  run = await requireRun(run.id);
+  const task = pickAutopilotTask(run);
+  if (!task) {
+    return askHumanQuestion(run.id, "I could not find a ready task to run. Please clarify the next goal.");
+  }
+
+  let attemptId = run.workerAttempts
+    .slice()
+    .reverse()
+    .find((item) => item.workerTaskId === task.id && (item.status === "prompt_ready" || item.status === "failed"))
+    ?.id;
+  if (!attemptId) {
+    const envelope = await prepareWorkerTask({
+      runId: run.id,
+      workerTaskId: task.id,
+      cwd: input.cwd,
+    });
+    attemptId = envelope.attemptId;
+  }
+
+  run = await launchWorkerAttempt({
+    runId: run.id,
+    attemptId,
+  });
+
+  const latest = await requireRun(run.id);
+  if (latest.status === "paused") return latest;
+
+  return commitRunChange(latest, {
+    type: "autopilot.cycle_completed",
+    message: "Autopilot completed one execution cycle",
+    payload: {
+      workerTasks: latest.workerTasks.length,
+      workerAttempts: latest.workerAttempts.length,
+    },
+    mutate: (draft, timestamp) => {
+      draft.status = "reviewing";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "blocked",
+        lastAction: "worker_cycle_completed_needs_review",
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+export async function pauseRun(input: PauseRunInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const reason = input.reason?.trim() || "Paused by user";
+  return commitRunChange(run, {
+    type: "run.paused",
+    message: reason,
+    payload: { reason },
+    mutate: (draft, timestamp) => {
+      draft.status = "paused";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "paused",
+        lastAction: "paused_by_user",
+        stopReason: reason,
+        pausedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  return commitRunChange(run, {
+    type: "run.resumed",
+    message: "Run resumed",
+    mutate: (draft, timestamp) => {
+      draft.status = "running";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "resumed_by_user",
+        stopReason: undefined,
+        resumedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+export async function addRunMessage(input: AddRunMessageInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const message = input.message.trim();
+  if (!message) throw new Error("Message is required.");
+  const humanMessage = {
+    id: makeId("msg"),
+    runId: run.id,
+    author: input.author,
+    kind: input.kind,
+    message,
+    createdAt: new Date().toISOString(),
+  };
+
+  return commitRunChange(run, {
+    type: `human.${input.kind}`,
+    message: `${input.author}: ${message.slice(0, 160)}`,
+    payload: { message: humanMessage },
+    mutate: (draft, timestamp) => {
+      draft.humanMessages.push({ ...humanMessage, createdAt: timestamp });
+      draft.updatedAt = timestamp;
+    },
+  });
 }
 
 export async function updateRunStatus(input: UpdateRunStatusInput): Promise<RunState> {
@@ -493,6 +706,15 @@ async function requireRun(runId: string): Promise<RunState> {
   return run;
 }
 
+function normalizeRun(run: RunState): RunState {
+  run.humanMessages ??= [];
+  run.autopilot ??= {
+    status: run.status === "running" ? "running" : "idle",
+    updatedAt: run.updatedAt,
+  };
+  return run;
+}
+
 async function commitRunChange(
   run: RunState,
   change: {
@@ -523,6 +745,33 @@ async function commitRunChange(
 function changedFields(input: object, excluded: string[]): string[] {
   const values = input as Record<string, unknown>;
   return Object.keys(values).filter((key) => !excluded.includes(key) && values[key] !== undefined);
+}
+
+function pickAutopilotStep(run: RunState): StepState | undefined {
+  return (
+    run.steps.find((step) => !["complete", "failed", "skipped"].includes(step.status)) ??
+    run.steps[0]
+  );
+}
+
+function pickAutopilotTask(run: RunState): WorkerTask | undefined {
+  return (
+    run.workerTasks.find((task) => ["created", "queued", "failed", "retry_queued"].includes(task.status)) ??
+    run.workerTasks[0]
+  );
+}
+
+async function askHumanQuestion(runId: string, message: string): Promise<RunState> {
+  const run = await addRunMessage({
+    runId,
+    author: "spark",
+    kind: "question",
+    message,
+  });
+  return pauseRun({
+    runId: run.id,
+    reason: "Spark needs human input before continuing.",
+  });
 }
 
 function workerArtifactPaths(

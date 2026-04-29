@@ -1,9 +1,12 @@
 import { shell } from "electron";
 import { promises as fs } from "node:fs";
-import { basename, dirname, extname, join } from "node:path";
-import type { FsEntry, FsFileContent } from "@shared/types";
+import { basename, dirname, extname, join, relative } from "node:path";
+import type { FsEntry, FsFileContent, PlanFile } from "@shared/types";
 
 const MAX_TEXT_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_PLAN_FILES = 200;
+const MAX_PLAN_SCAN_DEPTH = 5;
+const SKIPPED_PLAN_DIRS = new Set([".git", "node_modules", "out", "dist", "build", ".next", ".turbo"]);
 
 export async function listDir(dir: string): Promise<FsEntry[]> {
   let entries: import("node:fs").Dirent[];
@@ -64,6 +67,12 @@ export async function readTextFile(path: string): Promise<FsFileContent> {
   };
 }
 
+export async function listMarkdownFiles(root: string): Promise<PlanFile[]> {
+  const files: PlanFile[] = [];
+  await collectMarkdownFiles(root, root, 0, files);
+  return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath, undefined, { sensitivity: "base" }));
+}
+
 export async function writeTextFile(path: string, content: string): Promise<FsFileContent> {
   await fs.writeFile(path, content, "utf8");
   return readTextFile(path);
@@ -104,4 +113,39 @@ async function makeFileEntry(path: string): Promise<FsEntry> {
     isDir: false,
     ext: extname(name).replace(/^\./, "").toLowerCase() || undefined,
   };
+}
+
+async function collectMarkdownFiles(
+  root: string,
+  dir: string,
+  depth: number,
+  files: PlanFile[],
+): Promise<void> {
+  if (files.length >= MAX_PLAN_FILES || depth > MAX_PLAN_SCAN_DEPTH) return;
+
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "EACCES") return;
+    throw err;
+  }
+
+  for (const entry of entries) {
+    if (files.length >= MAX_PLAN_FILES) return;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!SKIPPED_PLAN_DIRS.has(entry.name)) {
+        await collectMarkdownFiles(root, path, depth + 1, files);
+      }
+      continue;
+    }
+    if (!entry.isFile() || extname(entry.name).toLowerCase() !== ".md") continue;
+    files.push({
+      name: entry.name,
+      path,
+      relativePath: relative(root, path) || entry.name,
+    });
+  }
 }

@@ -8,8 +8,9 @@ and git graph display.
 The next product direction is to turn this workbench into a local-first AI
 coding orchestration runtime. The app should own durable state, events, logs,
 artifacts, safety checks, and terminal execution. Spark, the orchestrator model,
-should make compact structured decisions. Claude Code and Codex CLI workers
-should execute focused local tasks.
+should make compact structured decisions, drive the default autopilot flow, and
+ask the human only when blocked or when approval is needed. Claude Code and
+Codex CLI workers should execute focused local tasks.
 
 ## Project Structure
 
@@ -20,7 +21,7 @@ src/main/
   storage.ts        Workspace UI state persistence in app userData
   pty-manager.ts    node-pty session lifecycle and terminal streaming
   shells.ts         Cross-platform shell detection
-  fs-tree.ts        File tree listing and text file read/write helpers
+  fs-tree.ts        File tree listing, Markdown plan discovery, and text helpers
   git-graph.ts      Git branch and log summary helpers
 
 src/preload/
@@ -53,15 +54,25 @@ context rather than product source.
 - Text files can be opened and edited from the file tree.
 - File rows in the Explorer support right-click rename and move-to-trash.
 - The left rail shows git branch/log information when the workspace is a repo.
-- `SparkAgentPanel` has high-level controls for test runs and test events.
+- The app scans the active workspace for Markdown files and exposes them as
+  selectable project plans.
+- `SparkAgentPanel` is the simple user surface: select a Markdown plan, click
+  `RUN`, stop/resume, and send guidance or answers.
 - `DevInspector` shows raw orchestration events, selected event JSON, current
   run state, workspace info, and artifact paths.
-- Runs can be updated through dev controls for status changes, step creation,
-  worker task creation, and run deletion.
 - Worker task records can be prepared into non-executing envelopes that write
   `task.json`, `prompt.md`, and `workpad.md` artifacts.
 - Prepared manual worker attempts can be launched through a controlled runner
   that captures `stdout.log`, `stderr.log`, `raw.log`, and `final-report.json`.
+- Autopilot has a first one-button manager cycle: create/reuse a run, create
+  the first step/task if needed, prepare a worker envelope, launch the
+  controlled worker, and return to review. The plan text comes from the
+  selected Markdown file.
+- Selected Markdown plans are persisted in `RunState.plans` with `sourceFile`
+  and raw content so future planning/review steps can trace the run input.
+- Runs can be paused, resumed, and annotated with durable human messages. These
+  messages are the path for corrections, answers, and future Spark
+  clarification questions.
 - The app has an initial orchestration run store and JSONL event log under
   Electron userData.
 
@@ -121,6 +132,8 @@ SparkEvent
 SparkCall
 ContextPacket
 ReviewDecision
+AutopilotState
+HumanRunMessage
 ```
 
 Main-process services:
@@ -141,6 +154,10 @@ orchestration:appendTestEvent
 orchestration:onEvent
 orchestration:getArtifactPaths
 orchestration:updateRunStatus
+orchestration:startAutopilot
+orchestration:pauseRun
+orchestration:resumeRun
+orchestration:addRunMessage
 orchestration:createStep
 orchestration:updateStep
 orchestration:createWorkerTask
@@ -148,6 +165,12 @@ orchestration:updateWorkerTask
 orchestration:prepareWorkerTask
 orchestration:launchWorkerAttempt
 orchestration:deleteRun
+```
+
+Workspace filesystem IPC also includes:
+
+```text
+fs:listMarkdownFiles
 ```
 
 Run state is stored separately from workspace UI state. Run data lives under
@@ -183,12 +206,11 @@ Artifacts tab:
   run.json path
   events.jsonl path
 Run mutations:
-  status updates
-  step create/update
-  worker task create/update
+  autopilot start
+  pause/resume
+  durable human messages
   worker task envelope preparation
   controlled manual worker execution
-  run delete
 ```
 
 This keeps the product rule intact:
