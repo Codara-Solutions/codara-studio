@@ -5,6 +5,9 @@ import * as pty from "./pty-manager";
 import { flush } from "./storage";
 
 app.setName("Spark Agent");
+if (process.env.SPARK_USER_DATA_DIR) {
+  app.setPath("userData", process.env.SPARK_USER_DATA_DIR);
+}
 if (process.platform === "win32") {
   app.setAppUserModelId("com.spark.agent");
 }

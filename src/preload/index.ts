@@ -7,6 +7,7 @@ import type {
   FsEntry,
   FsFileContent,
   GitGraph,
+  LaunchWorkerAttemptInput,
   PrepareWorkerTaskInput,
   RenameFileInput,
   RunArtifactPaths,
@@ -73,6 +74,8 @@ const api = {
       ipcRenderer.invoke("orchestration:updateWorkerTask", input),
     prepareWorkerTask: (input: PrepareWorkerTaskInput): Promise<WorkerTaskEnvelope> =>
       ipcRenderer.invoke("orchestration:prepareWorkerTask", input),
+    launchWorkerAttempt: (input: LaunchWorkerAttemptInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:launchWorkerAttempt", input),
     deleteRun: (runId: string): Promise<void> =>
       ipcRenderer.invoke("orchestration:deleteRun", runId),
     onEvent: (handler: OrchestrationEventHandler): (() => void) => {

@@ -163,6 +163,9 @@ function ArtifactsView({
               <PathRow label="TASK JSON" value={artifact.taskJson} />
               <PathRow label="PROMPT MD" value={artifact.promptMd} />
               <PathRow label="WORKPAD MD" value={artifact.workpadMd} />
+              <PathRow label="STDOUT LOG" value={artifact.stdoutLog} />
+              <PathRow label="STDERR LOG" value={artifact.stderrLog} />
+              <PathRow label="RAW LOG" value={artifact.rawLog} />
               <PathRow label="FINAL REPORT" value={artifact.finalReportJson} />
             </div>
           ))}

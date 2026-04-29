@@ -60,6 +60,8 @@ context rather than product source.
   worker task creation, and run deletion.
 - Worker task records can be prepared into non-executing envelopes that write
   `task.json`, `prompt.md`, and `workpad.md` artifacts.
+- Prepared manual worker attempts can be launched through a controlled runner
+  that captures `stdout.log`, `stderr.log`, `raw.log`, and `final-report.json`.
 - The app has an initial orchestration run store and JSONL event log under
   Electron userData.
 
@@ -71,6 +73,7 @@ npm run dev
 npm run typecheck
 npm run build
 npm run start
+npm run test:e2e
 ```
 
 Packaging commands:
@@ -88,6 +91,7 @@ Before committing functional changes, run:
 ```bash
 npm run typecheck
 npm run build
+npm run test:e2e
 ```
 
 For UI/terminal changes, also manually verify:
@@ -142,6 +146,7 @@ orchestration:updateStep
 orchestration:createWorkerTask
 orchestration:updateWorkerTask
 orchestration:prepareWorkerTask
+orchestration:launchWorkerAttempt
 orchestration:deleteRun
 ```
 
@@ -154,6 +159,10 @@ runs/<run-id>/events.jsonl
 runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/task.json
 runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/prompt.md
 runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/workpad.md
+runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/stdout.log
+runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/stderr.log
+runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/raw.log
+runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/final-report.json
 ```
 
 ## Current Engineering Step
@@ -178,6 +187,7 @@ Run mutations:
   step create/update
   worker task create/update
   worker task envelope preparation
+  controlled manual worker execution
   run delete
 ```
 

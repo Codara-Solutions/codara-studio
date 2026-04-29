@@ -61,6 +61,20 @@ before adding OpenRouter, Claude/Codex workers, or graph visualization.
 - Added artifact writing for prepared worker tasks: `task.json`, `prompt.md`,
   and `workpad.md`.
 - Added Dev Inspector artifact display for prepared worker attempts.
+- Validated in the UI that `CREATE -> STEP -> TASK -> PREP` writes the envelope
+  artifacts and emits `worker_task.envelope_prepared`.
+- Added a controlled manual worker execution MVP.
+- Added `orchestration:launchWorkerAttempt` to launch prepared attempts.
+- Added worker attempt lifecycle events for launch request, running, stdout,
+  stderr, and finished.
+- Added worker execution artifacts: `stdout.log`, `stderr.log`, `raw.log`, and
+  `final-report.json`.
+- Added an `EXEC` control in the Spark panel and Dev Inspector artifact paths
+  for worker logs.
+- Added Playwright Electron E2E coverage for
+  `CREATE -> STEP -> TASK -> PREP -> EXEC`.
+- Added isolated test userData support through `SPARK_USER_DATA_DIR`.
+- Confirmed `npm run test:e2e` passes against the real Electron UI.
 
 ## Current State
 
@@ -87,27 +101,19 @@ Missing foundation:
 - run state projection from events
 - persisted settings
 - diagnostics
-- real worker process launch and log capture
+- real Claude/Codex worker process launch
+- cancellation and timeout handling
 
 ## Next Step
 
-Finish Phase 4 validation, then move toward controlled worker execution.
+Harden controlled worker execution before adding real Claude/Codex launchers.
 
 Immediate target:
 
 ```text
-Inspector validation:
-  confirm event stream and run.json stay in sync
-  add explicit refresh/reload behavior where needed
-
-Worker preparation validation:
-  create run -> step -> task -> prep
-  confirm task.json, prompt.md, and workpad.md are written
-  confirm worker_task.envelope_prepared event is emitted
-  confirm RunState has a prompt_ready WorkerAttempt
-
-Controlled execution:
-  launch prepared manual workers from task envelopes
-  capture stdout/stderr/raw logs as artifacts
-  keep all worker output tied back to run state and events
+Execution hardening:
+  add cancellation
+  add timeouts
+  add structured final-report reading and validation
+  add log viewing/opening from Dev Inspector
 ```

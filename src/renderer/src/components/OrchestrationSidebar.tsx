@@ -189,6 +189,31 @@ export default function OrchestrationSidebar({ workspace }: Props) {
     });
   };
 
+  const launchWorkerAttempt = async () => {
+    if (!activeRun || busy) return;
+    const launch = window.spark.orchestration.launchWorkerAttempt;
+    if (typeof launch !== "function") {
+      setError("Worker launch API is unavailable. Restart Spark Agent to reload the preload bridge.");
+      return;
+    }
+    const attempt =
+      activeRun.workerAttempts
+        .slice()
+        .reverse()
+        .find((item) => item.status === "prompt_ready" || item.status === "failed") ??
+      activeRun.workerAttempts[activeRun.workerAttempts.length - 1];
+    if (!attempt) {
+      setError("Prepare a worker attempt before launching execution.");
+      return;
+    }
+    await mutateActiveRun(() =>
+      launch({
+        runId: activeRun.id,
+        attemptId: attempt.id,
+      }),
+    );
+  };
+
   const deleteActiveRun = async () => {
     if (!activeRun || busy) return;
     setBusy(true);
@@ -251,6 +276,7 @@ export default function OrchestrationSidebar({ workspace }: Props) {
         onCreateStep={createStep}
         onCreateWorkerTask={createWorkerTask}
         onPrepareWorkerTask={prepareWorkerTask}
+        onLaunchWorkerAttempt={launchWorkerAttempt}
         onDeleteRun={deleteActiveRun}
       />
       <DevInspector

@@ -164,6 +164,9 @@ export interface WorkerArtifactPaths {
   taskJson: string;
   promptMd: string;
   workpadMd: string;
+  stdoutLog: string;
+  stderrLog: string;
+  rawLog: string;
   finalReportJson: string;
 }
 
@@ -217,6 +220,8 @@ export interface WorkerAttempt {
   finishedAt?: string;
   exitCode?: number;
   promptPath?: string;
+  stdoutLogPath?: string;
+  stderrLogPath?: string;
   rawLogPath?: string;
   workpadPath?: string;
   finalReportPath?: string;
@@ -381,4 +386,9 @@ export interface PrepareWorkerTaskInput {
   runId: string;
   workerTaskId: string;
   cwd: string;
+}
+
+export interface LaunchWorkerAttemptInput {
+  runId: string;
+  attemptId: string;
 }

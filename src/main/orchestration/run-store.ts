@@ -1,7 +1,9 @@
 import { shell } from "electron";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type {
+  LaunchWorkerAttemptInput,
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
@@ -356,6 +358,105 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   return envelope;
 }
 
+export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Promise<RunState> {
+  let run = await requireRun(input.runId);
+  const attempt = run.workerAttempts.find((item) => item.id === input.attemptId);
+  if (!attempt) throw new Error(`Worker attempt not found: ${input.attemptId}`);
+  if (attempt.status !== "prompt_ready" && attempt.status !== "failed") {
+    throw new Error(`Worker attempt is not ready to launch: ${attempt.status}`);
+  }
+  const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
+  if (!task) throw new Error(`Worker task not found: ${attempt.workerTaskId}`);
+
+  const paths = workerArtifactPaths(run.id, task.stepId, task.id, attempt.id);
+  await fs.mkdir(paths.attemptDir, { recursive: true });
+  await Promise.all([
+    fs.writeFile(paths.stdoutLog, "", "utf8"),
+    fs.writeFile(paths.stderrLog, "", "utf8"),
+    fs.writeFile(paths.rawLog, "", "utf8"),
+  ]);
+
+  const command = "node -e <spark-manual-worker-runner>";
+  const launchTimestamp = new Date().toISOString();
+  attempt.status = "launching";
+  attempt.startedAt = launchTimestamp;
+  attempt.finishedAt = undefined;
+  attempt.exitCode = undefined;
+  attempt.error = undefined;
+  attempt.command = command;
+  attempt.promptPath = paths.promptMd;
+  attempt.workpadPath = paths.workpadMd;
+  attempt.stdoutLogPath = paths.stdoutLog;
+  attempt.stderrLogPath = paths.stderrLog;
+  attempt.rawLogPath = paths.rawLog;
+  attempt.finalReportPath = paths.finalReportJson;
+  task.status = "claimed";
+  task.updatedAt = launchTimestamp;
+  run.updatedAt = launchTimestamp;
+  await saveRun(run);
+  await appendEvent({
+    timestamp: launchTimestamp,
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    attemptId: attempt.id,
+    type: "worker_attempt.launch_requested",
+    message: `Worker attempt launch requested: ${task.title}`,
+    payload: {
+      command,
+      paths,
+    },
+  });
+
+  const result = await runManualWorkerProcess({
+    run,
+    task,
+    attemptId: attempt.id,
+    paths,
+    cwd: attempt.cwd,
+    command,
+  });
+
+  run = await requireRun(input.runId);
+  const finishedAttempt = run.workerAttempts.find((item) => item.id === input.attemptId);
+  const finishedTask = run.workerTasks.find((item) => item.id === task.id);
+  if (!finishedAttempt) throw new Error(`Worker attempt not found: ${input.attemptId}`);
+  if (!finishedTask) throw new Error(`Worker task not found: ${task.id}`);
+
+  const finishedAt = new Date().toISOString();
+  finishedAttempt.status = result.exitCode === 0 ? "succeeded" : "failed";
+  finishedAttempt.finishedAt = finishedAt;
+  finishedAttempt.exitCode = result.exitCode;
+  finishedAttempt.error = result.error;
+  finishedAttempt.command = command;
+  finishedAttempt.stdoutLogPath = paths.stdoutLog;
+  finishedAttempt.stderrLogPath = paths.stderrLog;
+  finishedAttempt.rawLogPath = paths.rawLog;
+  finishedAttempt.finalReportPath = paths.finalReportJson;
+  finishedTask.status = result.exitCode === 0 ? "needs_review" : "failed";
+  finishedTask.updatedAt = finishedAt;
+  run.updatedAt = finishedAt;
+  await saveRun(run);
+  await appendEvent({
+    timestamp: finishedAt,
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    stepId: finishedTask.stepId,
+    workerTaskId: finishedTask.id,
+    attemptId: finishedAttempt.id,
+    type: "worker_attempt.finished",
+    message: `Worker attempt finished with exit code ${result.exitCode}`,
+    payload: {
+      exitCode: result.exitCode,
+      error: result.error,
+      paths,
+    },
+  });
+
+  return run;
+}
+
 export async function deleteRun(runId: string): Promise<void> {
   const run = await requireRun(runId);
   const timestamp = new Date().toISOString();
@@ -439,8 +540,164 @@ function workerArtifactPaths(
     taskJson: join(attemptDir, "task.json"),
     promptMd: join(attemptDir, "prompt.md"),
     workpadMd: join(attemptDir, "workpad.md"),
+    stdoutLog: join(attemptDir, "stdout.log"),
+    stderrLog: join(attemptDir, "stderr.log"),
+    rawLog: join(attemptDir, "raw.log"),
     finalReportJson: join(attemptDir, "final-report.json"),
   };
+}
+
+async function runManualWorkerProcess({
+  run,
+  task,
+  attemptId,
+  paths,
+  cwd,
+  command,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attemptId: string;
+  paths: WorkerArtifactPaths;
+  cwd: string;
+  command: string;
+}): Promise<{ exitCode: number; error?: string }> {
+  const child = spawn("node", ["-e", manualWorkerRunnerScript()], {
+    cwd,
+    windowsHide: true,
+    env: {
+      ...process.env,
+      SPARK_RUN_ID: run.id,
+      SPARK_WORKER_TASK_ID: task.id,
+      SPARK_ATTEMPT_ID: attemptId,
+      SPARK_TASK_TITLE: task.title,
+      SPARK_PROMPT_PATH: paths.promptMd,
+      SPARK_WORKPAD_PATH: paths.workpadMd,
+      SPARK_FINAL_REPORT_PATH: paths.finalReportJson,
+    },
+  });
+
+  const runningTimestamp = new Date().toISOString();
+  await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
+  await appendEvent({
+    timestamp: runningTimestamp,
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    attemptId,
+    type: "worker_attempt.running",
+    message: `Worker attempt running: ${task.title}`,
+    payload: {
+      pid: child.pid,
+      command,
+    },
+  });
+
+  return new Promise((resolve) => {
+    const writes: Promise<void>[] = [];
+    let settled = false;
+    child.stdout.on("data", (chunk: Buffer) => {
+      writes.push(recordWorkerOutput(run, task, attemptId, paths, "stdout", chunk.toString("utf8")));
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      writes.push(recordWorkerOutput(run, task, attemptId, paths, "stderr", chunk.toString("utf8")));
+    });
+    child.on("error", (err) => {
+      settled = true;
+      resolve({ exitCode: 1, error: err.message });
+    });
+    child.on("close", async (code) => {
+      if (settled) return;
+      settled = true;
+      await Promise.allSettled(writes);
+      resolve({ exitCode: code ?? 1 });
+    });
+  });
+}
+
+async function markAttemptRunning(
+  runId: string,
+  workerTaskId: string,
+  attemptId: string,
+  timestamp: string,
+): Promise<void> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((item) => item.id === attemptId);
+  const task = run.workerTasks.find((item) => item.id === workerTaskId);
+  if (!attempt || !task) return;
+  attempt.status = "running";
+  task.status = "running";
+  attempt.startedAt = attempt.startedAt ?? timestamp;
+  task.updatedAt = timestamp;
+  run.updatedAt = timestamp;
+  await saveRun(run);
+}
+
+async function recordWorkerOutput(
+  run: RunState,
+  task: WorkerTask,
+  attemptId: string,
+  paths: WorkerArtifactPaths,
+  stream: "stdout" | "stderr",
+  text: string,
+): Promise<void> {
+  const timestamp = new Date().toISOString();
+  const logPath = stream === "stdout" ? paths.stdoutLog : paths.stderrLog;
+  await Promise.all([
+    fs.appendFile(logPath, text, "utf8"),
+    fs.appendFile(paths.rawLog, `[${timestamp}] ${stream}\n${text}\n`, "utf8"),
+  ]);
+  await appendEvent({
+    timestamp,
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    attemptId,
+    type: `worker_attempt.${stream}`,
+    message: text.trim().slice(0, 240) || `${stream} output`,
+    payload: {
+      stream,
+      bytes: Buffer.byteLength(text),
+      text: text.slice(0, 4000),
+    },
+  });
+}
+
+function manualWorkerRunnerScript(): string {
+  return `
+const fs = require("node:fs");
+const reportPath = process.env.SPARK_FINAL_REPORT_PATH;
+const promptPath = process.env.SPARK_PROMPT_PATH;
+const workpadPath = process.env.SPARK_WORKPAD_PATH;
+const title = process.env.SPARK_TASK_TITLE || "Manual worker task";
+console.log("Spark manual worker runner started.");
+console.log("Prompt:", promptPath);
+console.log("Workpad:", workpadPath);
+if (!reportPath) {
+  console.error("SPARK_FINAL_REPORT_PATH is missing.");
+  process.exit(1);
+}
+const report = {
+  status: "partial",
+  summary: "Manual worker launch path verified. No project edits were performed by this runner.",
+  files_changed: [],
+  commands_run: [
+    {
+      command: "spark-manual-worker-runner",
+      exit_code: 0,
+      summary: "Captured stdout/stderr and wrote final-report.json for " + title
+    }
+  ],
+  tests: [],
+  proof: ["Worker process launched and completed.", "Final report artifact was written."],
+  risks: ["This is a controlled runner, not a real Claude/Codex worker yet."],
+  followups: ["Replace manual runner with configured worker runtime once execution controls are stable."]
+};
+fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf8");
+console.log("Final report:", reportPath);
+`;
 }
 
 function renderWorkerPrompt({
