@@ -41,6 +41,11 @@ export interface FsFileContent {
   mtimeMs: number;
 }
 
+export interface RenameFileInput {
+  path: string;
+  newName: string;
+}
+
 export interface GitGraph {
   isRepo: boolean;
   branch?: string;
@@ -143,6 +148,12 @@ export interface RunState {
   workerTasks: WorkerTask[];
   workerAttempts: WorkerAttempt[];
   sparkCalls: SparkCall[];
+}
+
+export interface RunArtifactPaths {
+  runDir: string;
+  runJson: string;
+  eventsJsonl: string;
 }
 
 export interface StepState {

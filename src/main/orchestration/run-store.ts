@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import type { CreateRunInput, RunState, SparkEvent } from "@shared/types";
-import { appendEvent, listEvents, runDir, runsRoot } from "./event-log";
+import type { CreateRunInput, RunArtifactPaths, RunState, SparkEvent } from "@shared/types";
+import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
 
 const RUN_FILE = "run.json";
 
@@ -64,6 +64,14 @@ export async function listRuns(workspaceId?: string): Promise<RunState[]> {
     .filter((run): run is RunState => Boolean(run))
     .filter((run) => !workspaceId || run.workspaceId === workspaceId)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function getRunArtifactPaths(runId: string): RunArtifactPaths {
+  return {
+    runDir: runDir(runId),
+    runJson: runPath(runId),
+    eventsJsonl: eventsPath(runId),
+  };
 }
 
 export async function appendTestEvent(runId: string, message?: string): Promise<SparkEvent> {

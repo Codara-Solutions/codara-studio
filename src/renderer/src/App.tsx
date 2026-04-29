@@ -5,7 +5,7 @@ import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import TerminalGrid from "./components/TerminalGrid";
 import FileTree from "./components/FileTree";
 import EditorGrid from "./components/EditorGrid";
-import SparkAgentPanel from "./components/SparkAgentPanel";
+import OrchestrationSidebar from "./components/OrchestrationSidebar";
 import StatusBar from "./components/StatusBar";
 import { PlusIcon } from "./components/icons";
 import { basename } from "./path-utils";
@@ -302,6 +302,13 @@ export default function App() {
             workspace={activeWorkspace}
             activePath={activeEditorPath}
             onOpenFile={openEditorFile}
+            onDeleteFile={closeEditorFile}
+            onRenameFile={(oldPath, entry) => {
+              setOpenFiles((files) =>
+                files.map((file) => (file.path === oldPath ? entry : file)),
+              );
+              setActiveEditorPath((current) => (current === oldPath ? entry.path : current));
+            }}
           />
         )}
       </div>
@@ -319,10 +326,14 @@ function RightPanel({
   workspace,
   activePath,
   onOpenFile,
+  onDeleteFile,
+  onRenameFile,
 }: {
   workspace: Workspace | null;
   activePath: string | null;
   onOpenFile: (entry: FsEntry) => void;
+  onDeleteFile: (path: string) => void;
+  onRenameFile: (oldPath: string, entry: FsEntry) => void;
 }) {
   const cwd = workspace?.cwd ?? null;
   return (
@@ -338,9 +349,15 @@ function RightPanel({
         overflow: "hidden",
       }}
     >
-      <SparkAgentPanel workspace={workspace} />
+      <OrchestrationSidebar workspace={workspace} />
       {cwd ? (
-        <FileTree cwd={cwd} activePath={activePath} onOpenFile={onOpenFile} />
+        <FileTree
+          cwd={cwd}
+          activePath={activePath}
+          onOpenFile={onOpenFile}
+          onDeleteFile={onDeleteFile}
+          onRenameFile={onRenameFile}
+        />
       ) : (
         <div style={{ padding: "12px 14px", color: "var(--muted)", fontSize: 11 }}>
           No active workspace.

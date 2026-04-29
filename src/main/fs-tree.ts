@@ -1,5 +1,6 @@
+import { shell } from "electron";
 import { promises as fs } from "node:fs";
-import { join, extname } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import type { FsEntry, FsFileContent } from "@shared/types";
 
 const MAX_TEXT_FILE_BYTES = 5 * 1024 * 1024;
@@ -66,4 +67,41 @@ export async function readTextFile(path: string): Promise<FsFileContent> {
 export async function writeTextFile(path: string, content: string): Promise<FsFileContent> {
   await fs.writeFile(path, content, "utf8");
   return readTextFile(path);
+}
+
+export async function renameFile(path: string, newName: string): Promise<FsEntry> {
+  const cleanName = newName.trim();
+  if (!cleanName) throw new Error("File name cannot be empty.");
+  if (cleanName !== basename(cleanName)) {
+    throw new Error("File name cannot include path separators.");
+  }
+
+  const st = await fs.stat(path);
+  if (!st.isFile()) throw new Error("Only files can be renamed from the Explorer.");
+
+  const nextPath = join(dirname(path), cleanName);
+  if (nextPath === path) {
+    return makeFileEntry(nextPath);
+  }
+
+  await fs.rename(path, nextPath);
+  return makeFileEntry(nextPath);
+}
+
+export async function deleteFile(path: string): Promise<void> {
+  const st = await fs.stat(path);
+  if (!st.isFile()) throw new Error("Only files can be deleted from the Explorer.");
+  await shell.trashItem(path);
+}
+
+async function makeFileEntry(path: string): Promise<FsEntry> {
+  const st = await fs.stat(path);
+  if (!st.isFile()) throw new Error("Path is not a file.");
+  const name = basename(path);
+  return {
+    name,
+    path,
+    isDir: false,
+    ext: extname(name).replace(/^\./, "").toLowerCase() || undefined,
+  };
 }

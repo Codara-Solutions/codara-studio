@@ -5,6 +5,8 @@ import type {
   FsEntry,
   FsFileContent,
   GitGraph,
+  RenameFileInput,
+  RunArtifactPaths,
   RunState,
   ShellInfo,
   SparkEvent,
@@ -32,6 +34,9 @@ const api = {
     readText: (path: string): Promise<FsFileContent> => ipcRenderer.invoke("fs:readText", path),
     writeText: (path: string, content: string): Promise<FsFileContent> =>
       ipcRenderer.invoke("fs:writeText", { path, content }),
+    renameFile: (input: RenameFileInput): Promise<FsEntry> =>
+      ipcRenderer.invoke("fs:renameFile", input),
+    deleteFile: (path: string): Promise<void> => ipcRenderer.invoke("fs:deleteFile", path),
   },
   git: {
     graph: (cwd: string): Promise<GitGraph> => ipcRenderer.invoke("git:graph", cwd),
@@ -45,6 +50,8 @@ const api = {
       ipcRenderer.invoke("orchestration:listRuns", workspaceId),
     listEvents: (runId: string): Promise<SparkEvent[]> =>
       ipcRenderer.invoke("orchestration:listEvents", runId),
+    getArtifactPaths: (runId: string): Promise<RunArtifactPaths> =>
+      ipcRenderer.invoke("orchestration:getArtifactPaths", runId),
     appendTestEvent: (runId: string, message?: string): Promise<SparkEvent> =>
       ipcRenderer.invoke("orchestration:appendTestEvent", { runId, message }),
     onEvent: (handler: OrchestrationEventHandler): (() => void) => {

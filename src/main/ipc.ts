@@ -1,12 +1,13 @@
 import { ipcMain, dialog, BrowserWindow, app } from "electron";
 import { listShells, defaultShell } from "./shells";
-import { listDir, readTextFile, writeTextFile } from "./fs-tree";
+import { deleteFile, listDir, readTextFile, renameFile, writeTextFile } from "./fs-tree";
 import { getGitGraph } from "./git-graph";
 import { loadState, saveState } from "./storage";
 import * as pty from "./pty-manager";
 import {
   appendTestEvent,
   createRun,
+  getRunArtifactPaths,
   getRun,
   listRuns,
 } from "./orchestration/run-store";
@@ -14,8 +15,11 @@ import { listEvents } from "./orchestration/event-log";
 import type {
   AppState,
   CreateRunInput,
+  FsEntry,
   FsFileContent,
   GitGraph,
+  RenameFileInput,
+  RunArtifactPaths,
   RunState,
   ShellInfo,
   SparkEvent,
@@ -60,6 +64,14 @@ export function registerIpc(): void {
     return writeTextFile(args.path, args.content);
   });
 
+  ipcMain.handle("fs:renameFile", async (_e, args: RenameFileInput): Promise<FsEntry> => {
+    return renameFile(args.path, args.newName);
+  });
+
+  ipcMain.handle("fs:deleteFile", async (_e, path: string): Promise<void> => {
+    await deleteFile(path);
+  });
+
   ipcMain.handle("git:graph", async (_e, cwd: string): Promise<GitGraph> => {
     return getGitGraph(cwd);
   });
@@ -78,6 +90,10 @@ export function registerIpc(): void {
 
   ipcMain.handle("orchestration:listEvents", async (_e, runId: string): Promise<SparkEvent[]> => {
     return listEvents(runId);
+  });
+
+  ipcMain.handle("orchestration:getArtifactPaths", async (_e, runId: string): Promise<RunArtifactPaths> => {
+    return getRunArtifactPaths(runId);
   });
 
   ipcMain.handle("orchestration:appendTestEvent", async (_e, args: { runId: string; message?: string }): Promise<SparkEvent> => {

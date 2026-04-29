@@ -22,10 +22,26 @@ interface Props {
   cwd: string;
   activePath?: string | null;
   onOpenFile: (entry: FsEntry) => void;
+  onDeleteFile?: (path: string) => void;
+  onRenameFile?: (oldPath: string, entry: FsEntry) => void;
 }
 
-export default function FileTree({ cwd, activePath, onOpenFile }: Props) {
+interface FileContextMenu {
+  x: number;
+  y: number;
+  entry: FsEntry;
+}
+
+export default function FileTree({
+  cwd,
+  activePath,
+  onOpenFile,
+  onDeleteFile,
+  onRenameFile,
+}: Props) {
   const [root, setRoot] = useState<DirNode & { kind: "dir" }>(() => makeDir({ name: basename(cwd), path: cwd, isDir: true }, true));
+  const [contextMenu, setContextMenu] = useState<FileContextMenu | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [, force] = useState(0);
 
   // Reload when cwd changes
@@ -66,6 +82,69 @@ export default function FileTree({ cwd, activePath, onOpenFile }: Props) {
     force((n) => n + 1);
   }, []);
 
+  const refreshDir = useCallback(async (dirPath: string) => {
+    const dir = findDir(root, dirPath);
+    if (!dir) return;
+    dir.loading = true;
+    force((n) => n + 1);
+    try {
+      dir.children = await loadDir(dir.entry.path);
+      dir.loaded = true;
+      dir.error = undefined;
+      setError(null);
+    } catch (err) {
+      dir.error = (err as Error).message;
+      setError((err as Error).message);
+    } finally {
+      dir.loading = false;
+      force((n) => n + 1);
+    }
+  }, [root]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [contextMenu]);
+
+  const renameEntry = async (entry: FsEntry) => {
+    setContextMenu(null);
+    const nextName = window.prompt("Rename file", entry.name);
+    if (nextName === null || nextName.trim() === entry.name) return;
+    try {
+      const renamed = await window.spark.fs.renameFile({ path: entry.path, newName: nextName });
+      await refreshDir(parentPath(entry.path));
+      onRenameFile?.(entry.path, renamed);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const deleteEntry = async (entry: FsEntry) => {
+    setContextMenu(null);
+    const ok = window.confirm(`Delete ${entry.name}?`);
+    if (!ok) return;
+    try {
+      await window.spark.fs.deleteFile(entry.path);
+      await refreshDir(parentPath(entry.path));
+      onDeleteFile?.(entry.path);
+      setError(null);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
   const flat = useMemo(() => flatten(root, 0), [root]);
   // we re-flatten on every render via this memo dep on root identity, but since
   // we mutate root.children we also bump via force(). Ensure flat is recomputed:
@@ -82,6 +161,11 @@ export default function FileTree({ cwd, activePath, onOpenFile }: Props) {
       }}
     >
       <PanelHeader title="EXPLORER" right={<span style={{ color: "var(--muted)" }}>{basename(cwd)}</span>} />
+      {error && (
+        <div style={{ padding: "7px 12px", color: "var(--danger)", fontSize: 11, borderBottom: "1px solid var(--rule)" }}>
+          {error}
+        </div>
+      )}
       <div style={{ padding: "6px 0", overflow: "auto", flex: 1 }}>
         {flatRef.current.map((row, i) => (
           <Row
@@ -91,9 +175,17 @@ export default function FileTree({ cwd, activePath, onOpenFile }: Props) {
             active={row.node.entry.path === activePath}
             onToggle={() => toggleDir(row.node as DirNode & { kind: "dir" })}
             onOpenFile={onOpenFile}
+            onFileContextMenu={(entry, x, y) => setContextMenu({ entry, x, y })}
           />
         ))}
       </div>
+      {contextMenu && (
+        <FileMenu
+          menu={contextMenu}
+          onRename={() => void renameEntry(contextMenu.entry)}
+          onDelete={() => void deleteEntry(contextMenu.entry)}
+        />
+      )}
     </div>
   );
 }
@@ -122,6 +214,16 @@ function makeDir(entry: FsEntry, open = false): DirNode & { kind: "dir" } {
   };
 }
 
+function findDir(node: Node, path: string): (DirNode & { kind: "dir" }) | null {
+  if (node.kind !== "dir") return null;
+  if (node.entry.path === path) return node;
+  for (const child of node.children) {
+    const found = findDir(child, path);
+    if (found) return found;
+  }
+  return null;
+}
+
 async function loadDir(path: string): Promise<Node[]> {
   const entries = await window.spark.fs.list(path);
   return entries.map((e): Node =>
@@ -135,17 +237,25 @@ function Row({
   active,
   onToggle,
   onOpenFile,
+  onFileContextMenu,
 }: {
   node: Node;
   depth: number;
   active: boolean;
   onToggle: () => void;
   onOpenFile: (entry: FsEntry) => void;
+  onFileContextMenu: (entry: FsEntry, x: number, y: number) => void;
 }) {
   const isDir = node.kind === "dir";
   return (
     <div
       onClick={isDir ? onToggle : () => onOpenFile(node.entry)}
+      onContextMenu={(e) => {
+        if (isDir) return;
+        e.preventDefault();
+        e.stopPropagation();
+        onFileContextMenu(node.entry, e.clientX, e.clientY);
+      }}
       style={{
         display: "flex",
         alignItems: "center",
@@ -177,6 +287,77 @@ function Row({
       )}
     </div>
   );
+}
+
+function FileMenu({
+  menu,
+  onRename,
+  onDelete,
+}: {
+  menu: FileContextMenu;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        position: "fixed",
+        zIndex: 100,
+        left: menu.x,
+        top: menu.y,
+        minWidth: 152,
+        background: "var(--panel-2)",
+        border: "1px solid var(--rule-strong)",
+        boxShadow: "0 8px 28px rgba(0,0,0,0.42)",
+        padding: "4px 0",
+      }}
+    >
+      <MenuButton onClick={onRename}>RENAME</MenuButton>
+      <MenuButton danger onClick={onDelete}>DELETE</MenuButton>
+    </div>
+  );
+}
+
+function MenuButton({
+  children,
+  danger,
+  onClick,
+}: {
+  children: React.ReactNode;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        appearance: "none",
+        width: "100%",
+        border: "none",
+        background: "transparent",
+        color: danger ? "var(--danger)" : "var(--ink-dim)",
+        padding: "7px 10px",
+        textAlign: "left",
+        fontFamily: "inherit",
+        fontSize: 10,
+        fontWeight: 800,
+        letterSpacing: "0.08em",
+        cursor: "default",
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--panel)")}
+      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+    >
+      {children}
+    </button>
+  );
+}
+
+function parentPath(path: string): string {
+  const idx = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  if (idx === 2 && path[1] === ":") return path.slice(0, 3);
+  return idx > 0 ? path.slice(0, idx) : path;
 }
 
 function PanelHeader({ title, right }: { title: string; right?: React.ReactNode }) {

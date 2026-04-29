@@ -51,8 +51,11 @@ context rather than product source.
 - Terminal tiles are backed by `node-pty` and survive workspace tab switches.
 - The file tree intentionally shows dotfiles and project files as-is.
 - Text files can be opened and edited from the file tree.
+- File rows in the Explorer support right-click rename and move-to-trash.
 - The left rail shows git branch/log information when the workspace is a repo.
-- `SparkAgentPanel` has temporary Phase 1 controls for test runs and events.
+- `SparkAgentPanel` has high-level controls for test runs and test events.
+- `DevInspector` shows raw orchestration events, selected event JSON, current
+  run state, workspace info, and artifact paths.
 - The app has an initial orchestration run store and JSONL event log under
   Electron userData.
 
@@ -128,6 +131,7 @@ orchestration:listRuns
 orchestration:listEvents
 orchestration:appendTestEvent
 orchestration:onEvent
+orchestration:getArtifactPaths
 ```
 
 Run state is stored separately from workspace UI state. Run data lives under
@@ -138,10 +142,11 @@ runs/<run-id>/run.json
 runs/<run-id>/events.jsonl
 ```
 
-## Next Engineering Step
+## Current Engineering Step
 
-Do not add OpenRouter, Claude/Codex launchers, or the orchestration graph first.
-The next foundation should be the Dev Inspector MVP:
+Do not add OpenRouter, Claude/Codex launchers, or the orchestration graph before
+the runtime remains observable. The current foundation includes the Dev
+Inspector MVP:
 
 ```text
 Events tab:
@@ -152,6 +157,7 @@ State tab:
   workspace info
 Artifacts tab:
   run folder
+  run.json path
   events.jsonl path
 ```
 

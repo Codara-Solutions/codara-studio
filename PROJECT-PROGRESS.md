@@ -44,6 +44,15 @@ before adding OpenRouter, Claude/Codex workers, or graph visualization.
   event, and viewing latest events for the active workspace.
 - Manually validated in the Electron UI that events show up in the Spark panel
   after creating a run and appending test events.
+- Added Phase 2 Dev Inspector MVP.
+- Moved raw event display out of `SparkAgentPanel`.
+- Kept `SparkAgentPanel` focused on high-level run controls and run selection.
+- Added Dev Inspector Events, State, and Artifacts sections.
+- Added selected-event JSON view.
+- Added current `RunState` JSON and workspace info view.
+- Added concrete artifact paths for the run folder, `run.json`, and
+  `events.jsonl`.
+- Added Explorer right-click actions for file rename and move-to-trash.
 
 ## Current State
 
@@ -67,7 +76,6 @@ Implemented foundation:
 
 Missing foundation:
 
-- Dev Inspector
 - run state projection from events
 - richer run/step/task mutation APIs
 - persisted settings
@@ -75,14 +83,18 @@ Missing foundation:
 
 ## Next Step
 
-Move to Phase 2: Dev Inspector MVP.
+Move to Phase 3: make run state more useful before adding real workers.
 
-Phase 2 target:
+Phase 3 target:
 
 ```text
-Dev Inspector:
-  Events tab
-  selected event JSON
-  State tab with current RunState JSON
-  Artifacts tab with current run folder/events.jsonl paths
+Run mutation APIs:
+  create/update steps
+  append worker task records
+  update run status
+  emit events for every state change
+
+Inspector validation:
+  confirm event stream and run.json stay in sync
+  add explicit refresh/reload behavior where needed
 ```
