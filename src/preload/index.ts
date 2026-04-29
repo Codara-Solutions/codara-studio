@@ -1,7 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AppState,
+  CreateStepInput,
   CreateRunInput,
+  CreateWorkerTaskInput,
   FsEntry,
   FsFileContent,
   GitGraph,
@@ -10,6 +12,9 @@ import type {
   RunState,
   ShellInfo,
   SparkEvent,
+  UpdateRunStatusInput,
+  UpdateStepInput,
+  UpdateWorkerTaskInput,
 } from "@shared/types";
 
 type PtyDataHandler = (data: string) => void;
@@ -54,6 +59,18 @@ const api = {
       ipcRenderer.invoke("orchestration:getArtifactPaths", runId),
     appendTestEvent: (runId: string, message?: string): Promise<SparkEvent> =>
       ipcRenderer.invoke("orchestration:appendTestEvent", { runId, message }),
+    updateRunStatus: (input: UpdateRunStatusInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:updateRunStatus", input),
+    createStep: (input: CreateStepInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:createStep", input),
+    updateStep: (input: UpdateStepInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:updateStep", input),
+    createWorkerTask: (input: CreateWorkerTaskInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:createWorkerTask", input),
+    updateWorkerTask: (input: UpdateWorkerTaskInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:updateWorkerTask", input),
+    deleteRun: (runId: string): Promise<void> =>
+      ipcRenderer.invoke("orchestration:deleteRun", runId),
     onEvent: (handler: OrchestrationEventHandler): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, event: SparkEvent) => handler(event);
       ipcRenderer.on("orchestration:event", listener);

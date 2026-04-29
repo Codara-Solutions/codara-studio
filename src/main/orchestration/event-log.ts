@@ -7,6 +7,7 @@ const RUNS_DIR = "runs";
 const EVENTS_FILE = "events.jsonl";
 
 export interface AppendEventInput {
+  timestamp?: string;
   workspaceId: string;
   runId?: string;
   stepId?: string;
@@ -31,10 +32,11 @@ export function eventsPath(runId: string): string {
 }
 
 export async function appendEvent(input: AppendEventInput): Promise<SparkEvent> {
+  const { timestamp, ...eventInput } = input;
   const event: SparkEvent = {
     id: makeId("evt"),
-    timestamp: new Date().toISOString(),
-    ...input,
+    timestamp: timestamp ?? new Date().toISOString(),
+    ...eventInput,
   };
 
   if (event.runId) {

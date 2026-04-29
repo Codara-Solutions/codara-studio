@@ -53,6 +53,10 @@ before adding OpenRouter, Claude/Codex workers, or graph visualization.
 - Added concrete artifact paths for the run folder, `run.json`, and
   `events.jsonl`.
 - Added Explorer right-click actions for file rename and move-to-trash.
+- Added Phase 3 run mutation APIs for run status updates, step create/update,
+  worker task create/update, and run deletion.
+- Added Dev Inspector validation controls for mutating the active run and
+  confirming the matching `run.json` and event stream updates.
 
 ## Current State
 
@@ -77,24 +81,22 @@ Implemented foundation:
 Missing foundation:
 
 - run state projection from events
-- richer run/step/task mutation APIs
 - persisted settings
 - diagnostics
 
 ## Next Step
 
-Move to Phase 3: make run state more useful before adding real workers.
+Finish Phase 3 validation, then move toward controlled worker execution.
 
-Phase 3 target:
+Immediate target:
 
 ```text
-Run mutation APIs:
-  create/update steps
-  append worker task records
-  update run status
-  emit events for every state change
-
 Inspector validation:
   confirm event stream and run.json stay in sync
   add explicit refresh/reload behavior where needed
+
+Worker preparation:
+  turn worker task records into launchable task envelopes
+  write prompts/workpads as artifacts before opening any real worker process
+  keep all worker output tied back to run state and events
 ```

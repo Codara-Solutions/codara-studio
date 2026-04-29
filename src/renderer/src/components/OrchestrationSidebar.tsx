@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import type { RunArtifactPaths, RunState, SparkEvent, Workspace } from "@shared/types";
+import type { RunArtifactPaths, RunState, RunStatus, SparkEvent, Workspace } from "@shared/types";
 import DevInspector from "./DevInspector";
 import SparkAgentPanel from "./SparkAgentPanel";
 
@@ -71,6 +71,11 @@ export default function OrchestrationSidebar({ workspace }: Props) {
         return [...current, event];
       });
       setSelectedEventId((current) => current ?? event.id);
+      void window.spark.orchestration.getRun(activeRun.id).then((freshRun) => {
+        if (!freshRun) return;
+        setActiveRun(freshRun);
+        setRuns((current) => replaceRun(current, freshRun));
+      });
     });
   }, [activeRun]);
 
@@ -107,11 +112,7 @@ export default function OrchestrationSidebar({ workspace }: Props) {
       const freshRun = await window.spark.orchestration.getRun(activeRun.id);
       if (freshRun) {
         setActiveRun(freshRun);
-        setRuns((current) =>
-          current
-            .map((run) => (run.id === freshRun.id ? freshRun : run))
-            .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-        );
+        setRuns((current) => replaceRun(current, freshRun));
       }
     } catch (err) {
       setError((err as Error).message);
@@ -124,6 +125,83 @@ export default function OrchestrationSidebar({ workspace }: Props) {
     if (busy) return;
     setError(null);
     await loadRunDetails(run);
+  };
+
+  const updateStatus = async (status: RunStatus) => {
+    if (!activeRun || busy) return;
+    await mutateActiveRun(() =>
+      window.spark.orchestration.updateRunStatus({
+        runId: activeRun.id,
+        status,
+      }),
+    );
+  };
+
+  const createStep = async () => {
+    if (!activeRun || busy) return;
+    const title = `Step ${activeRun.steps.length + 1}`;
+    await mutateActiveRun(() =>
+      window.spark.orchestration.createStep({
+        runId: activeRun.id,
+        title,
+        goal: title,
+      }),
+    );
+  };
+
+  const createWorkerTask = async () => {
+    if (!activeRun || busy) return;
+    const step =
+      activeRun.steps.find((item) => item.id === activeRun.currentStepId) ?? activeRun.steps[0];
+    const title = `Task ${activeRun.workerTasks.length + 1}`;
+    await mutateActiveRun(() =>
+      window.spark.orchestration.createWorkerTask({
+        runId: activeRun.id,
+        stepId: step?.id,
+        title,
+        description: title,
+        runtimePreference: "manual",
+      }),
+    );
+  };
+
+  const deleteActiveRun = async () => {
+    if (!activeRun || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await window.spark.orchestration.deleteRun(activeRun.id);
+      const nextRuns = workspace
+        ? await window.spark.orchestration.listRuns(workspace.id)
+        : [];
+      setRuns(nextRuns);
+      await loadRunDetails(nextRuns[0] ?? null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const mutateActiveRun = async (mutation: () => Promise<RunState>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const run = await mutation();
+      setActiveRun(run);
+      setRuns((current) => replaceRun(current, run));
+      const [nextEvents, paths] = await Promise.all([
+        window.spark.orchestration.listEvents(run.id),
+        window.spark.orchestration.getArtifactPaths(run.id),
+      ]);
+      setEvents(nextEvents);
+      setArtifactPaths(paths);
+      setSelectedEventId(nextEvents[nextEvents.length - 1]?.id ?? null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -145,6 +223,10 @@ export default function OrchestrationSidebar({ workspace }: Props) {
         onAppendTestEvent={appendTestEvent}
         onSelectRun={selectRun}
         onRefresh={loadRuns}
+        onUpdateStatus={updateStatus}
+        onCreateStep={createStep}
+        onCreateWorkerTask={createWorkerTask}
+        onDeleteRun={deleteActiveRun}
       />
       <DevInspector
         workspace={workspace}
@@ -156,4 +238,10 @@ export default function OrchestrationSidebar({ workspace }: Props) {
       />
     </div>
   );
+}
+
+function replaceRun(runs: RunState[], run: RunState): RunState[] {
+  return runs
+    .map((item) => (item.id === run.id ? run : item))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }

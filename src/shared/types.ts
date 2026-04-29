@@ -290,3 +290,65 @@ export interface CreateRunInput {
   cwd: string;
   title?: string;
 }
+
+export interface UpdateRunStatusInput {
+  runId: string;
+  status: RunStatus;
+  currentStepId?: string;
+}
+
+export interface CreateStepInput {
+  runId: string;
+  title: string;
+  goal?: string;
+  riskLevel?: StepState["riskLevel"];
+  acceptanceCriteria?: string[];
+  verificationCommands?: string[];
+}
+
+export interface UpdateStepInput {
+  runId: string;
+  stepId: string;
+  title?: string;
+  goal?: string;
+  status?: StepStatus;
+  riskLevel?: StepState["riskLevel"];
+  acceptanceCriteria?: string[];
+  verificationCommands?: string[];
+  workerTaskIds?: string[];
+  reviewSummary?: string;
+}
+
+export interface CreateWorkerTaskInput {
+  runId: string;
+  stepId?: string;
+  title: string;
+  description?: string;
+  runtimePreference?: WorkerRuntime;
+  modelHint?: string;
+  effortHint?: WorkerTask["effortHint"];
+  allowedPaths?: string[];
+  forbiddenPaths?: string[];
+  expectedOutputs?: string[];
+  verificationCommands?: string[];
+  canRunParallel?: boolean;
+  conflictsWith?: string[];
+  createdBy?: WorkerTask["createdBy"];
+}
+
+export interface UpdateWorkerTaskInput {
+  runId: string;
+  workerTaskId: string;
+  title?: string;
+  description?: string;
+  status?: WorkerTaskStatus;
+  runtimePreference?: WorkerRuntime;
+  modelHint?: string;
+  effortHint?: WorkerTask["effortHint"];
+  allowedPaths?: string[];
+  forbiddenPaths?: string[];
+  expectedOutputs?: string[];
+  verificationCommands?: string[];
+  canRunParallel?: boolean;
+  conflictsWith?: string[];
+}

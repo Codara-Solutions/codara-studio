@@ -1,6 +1,19 @@
+import { shell } from "electron";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import type { CreateRunInput, RunArtifactPaths, RunState, SparkEvent } from "@shared/types";
+import type {
+  CreateStepInput,
+  CreateRunInput,
+  CreateWorkerTaskInput,
+  RunArtifactPaths,
+  RunState,
+  SparkEvent,
+  StepState,
+  UpdateRunStatusInput,
+  UpdateStepInput,
+  UpdateWorkerTaskInput,
+  WorkerTask,
+} from "@shared/types";
 import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
 
 const RUN_FILE = "run.json";
@@ -94,12 +107,245 @@ export async function appendTestEvent(runId: string, message?: string): Promise<
   return event;
 }
 
+export async function updateRunStatus(input: UpdateRunStatusInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  return commitRunChange(run, {
+    type: "run.status_updated",
+    message: `Run status changed to ${input.status}`,
+    payload: {
+      previousStatus: run.status,
+      status: input.status,
+      currentStepId: input.currentStepId ?? run.currentStepId,
+    },
+    mutate: (draft, timestamp) => {
+      draft.status = input.status;
+      if (input.currentStepId !== undefined) draft.currentStepId = input.currentStepId;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+export async function createStep(input: CreateStepInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const title = input.title.trim();
+  if (!title) throw new Error("Step title is required.");
+
+  const now = new Date().toISOString();
+  const step: StepState = {
+    id: makeId("step"),
+    runId: run.id,
+    index: run.steps.length + 1,
+    title,
+    goal: input.goal?.trim() || title,
+    status: "queued",
+    riskLevel: input.riskLevel,
+    acceptanceCriteria: input.acceptanceCriteria ?? [],
+    verificationCommands: input.verificationCommands ?? [],
+    workerTaskIds: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  return commitRunChange(run, {
+    type: "step.created",
+    message: `Step created: ${step.title}`,
+    stepId: step.id,
+    payload: { step },
+    mutate: (draft, timestamp) => {
+      draft.steps.push({ ...step, createdAt: timestamp, updatedAt: timestamp });
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+export async function updateStep(input: UpdateStepInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const step = run.steps.find((item) => item.id === input.stepId);
+  if (!step) throw new Error(`Step not found: ${input.stepId}`);
+
+  return commitRunChange(run, {
+    type: "step.updated",
+    message: `Step updated: ${step.title}`,
+    stepId: step.id,
+    payload: {
+      stepId: step.id,
+      status: input.status ?? step.status,
+      changedFields: changedFields(input, ["runId", "stepId"]),
+    },
+    mutate: (draft, timestamp) => {
+      const target = draft.steps.find((item) => item.id === input.stepId);
+      if (!target) throw new Error(`Step not found: ${input.stepId}`);
+      if (input.title !== undefined) target.title = input.title.trim();
+      if (input.goal !== undefined) target.goal = input.goal.trim();
+      if (input.status !== undefined) target.status = input.status;
+      if (input.riskLevel !== undefined) target.riskLevel = input.riskLevel;
+      if (input.acceptanceCriteria !== undefined) target.acceptanceCriteria = input.acceptanceCriteria;
+      if (input.verificationCommands !== undefined) target.verificationCommands = input.verificationCommands;
+      if (input.workerTaskIds !== undefined) target.workerTaskIds = input.workerTaskIds;
+      if (input.reviewSummary !== undefined) target.reviewSummary = input.reviewSummary;
+      if (input.status === "running") draft.currentStepId = target.id;
+      if (draft.currentStepId === target.id && ["complete", "failed", "skipped"].includes(target.status)) {
+        draft.currentStepId = undefined;
+      }
+      target.updatedAt = timestamp;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  if (input.stepId && !run.steps.some((step) => step.id === input.stepId)) {
+    throw new Error(`Step not found: ${input.stepId}`);
+  }
+  const title = input.title.trim();
+  if (!title) throw new Error("Worker task title is required.");
+
+  const now = new Date().toISOString();
+  const task: WorkerTask = {
+    id: makeId("task"),
+    runId: run.id,
+    stepId: input.stepId,
+    title,
+    description: input.description?.trim() || title,
+    runtimePreference: input.runtimePreference ?? "manual",
+    modelHint: input.modelHint,
+    effortHint: input.effortHint,
+    status: "created",
+    allowedPaths: input.allowedPaths ?? [],
+    forbiddenPaths: input.forbiddenPaths ?? [],
+    expectedOutputs: input.expectedOutputs ?? [],
+    verificationCommands: input.verificationCommands ?? [],
+    canRunParallel: input.canRunParallel ?? false,
+    conflictsWith: input.conflictsWith ?? [],
+    createdBy: input.createdBy ?? "user",
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  return commitRunChange(run, {
+    type: "worker_task.created",
+    message: `Worker task created: ${task.title}`,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    payload: { workerTask: task },
+    mutate: (draft, timestamp) => {
+      const nextTask = { ...task, createdAt: timestamp, updatedAt: timestamp };
+      draft.workerTasks.push(nextTask);
+      if (nextTask.stepId) {
+        const step = draft.steps.find((item) => item.id === nextTask.stepId);
+        if (step && !step.workerTaskIds.includes(nextTask.id)) {
+          step.workerTaskIds.push(nextTask.id);
+          step.updatedAt = timestamp;
+        }
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+export async function updateWorkerTask(input: UpdateWorkerTaskInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const task = run.workerTasks.find((item) => item.id === input.workerTaskId);
+  if (!task) throw new Error(`Worker task not found: ${input.workerTaskId}`);
+
+  return commitRunChange(run, {
+    type: "worker_task.updated",
+    message: `Worker task updated: ${task.title}`,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    payload: {
+      workerTaskId: task.id,
+      status: input.status ?? task.status,
+      changedFields: changedFields(input, ["runId", "workerTaskId"]),
+    },
+    mutate: (draft, timestamp) => {
+      const target = draft.workerTasks.find((item) => item.id === input.workerTaskId);
+      if (!target) throw new Error(`Worker task not found: ${input.workerTaskId}`);
+      if (input.title !== undefined) target.title = input.title.trim();
+      if (input.description !== undefined) target.description = input.description.trim();
+      if (input.status !== undefined) target.status = input.status;
+      if (input.runtimePreference !== undefined) target.runtimePreference = input.runtimePreference;
+      if (input.modelHint !== undefined) target.modelHint = input.modelHint;
+      if (input.effortHint !== undefined) target.effortHint = input.effortHint;
+      if (input.allowedPaths !== undefined) target.allowedPaths = input.allowedPaths;
+      if (input.forbiddenPaths !== undefined) target.forbiddenPaths = input.forbiddenPaths;
+      if (input.expectedOutputs !== undefined) target.expectedOutputs = input.expectedOutputs;
+      if (input.verificationCommands !== undefined) target.verificationCommands = input.verificationCommands;
+      if (input.canRunParallel !== undefined) target.canRunParallel = input.canRunParallel;
+      if (input.conflictsWith !== undefined) target.conflictsWith = input.conflictsWith;
+      target.updatedAt = timestamp;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+export async function deleteRun(runId: string): Promise<void> {
+  const run = await requireRun(runId);
+  const timestamp = new Date().toISOString();
+  await appendEvent({
+    timestamp,
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    type: "run.deleted",
+    message: `Run deleted: ${run.title}`,
+    payload: {
+      title: run.title,
+      artifactDir: run.artifactDir,
+    },
+  });
+
+  try {
+    await shell.trashItem(runDir(run.id));
+  } catch {
+    await fs.rm(runDir(run.id), { recursive: true, force: true });
+  }
+}
+
 async function saveRun(run: RunState): Promise<void> {
   await fs.mkdir(runDir(run.id), { recursive: true });
   const path = runPath(run.id);
   const tmp = `${path}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(run, null, 2), "utf8");
   await fs.rename(tmp, path);
+}
+
+async function requireRun(runId: string): Promise<RunState> {
+  const run = await getRun(runId);
+  if (!run) throw new Error(`Run not found: ${runId}`);
+  return run;
+}
+
+async function commitRunChange(
+  run: RunState,
+  change: {
+    type: string;
+    message: string;
+    stepId?: string;
+    workerTaskId?: string;
+    payload?: Record<string, unknown>;
+    mutate: (draft: RunState, timestamp: string) => void;
+  },
+): Promise<RunState> {
+  const timestamp = new Date().toISOString();
+  change.mutate(run, timestamp);
+  await saveRun(run);
+  await appendEvent({
+    timestamp,
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    stepId: change.stepId,
+    workerTaskId: change.workerTaskId,
+    type: change.type,
+    message: change.message,
+    payload: change.payload,
+  });
+  return run;
+}
+
+function changedFields(input: object, excluded: string[]): string[] {
+  const values = input as Record<string, unknown>;
+  return Object.keys(values).filter((key) => !excluded.includes(key) && values[key] !== undefined);
 }
 
 function runPath(runId: string): string {

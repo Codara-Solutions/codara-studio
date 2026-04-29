@@ -6,15 +6,23 @@ import { loadState, saveState } from "./storage";
 import * as pty from "./pty-manager";
 import {
   appendTestEvent,
+  createStep,
   createRun,
+  createWorkerTask,
+  deleteRun,
   getRunArtifactPaths,
   getRun,
   listRuns,
+  updateRunStatus,
+  updateStep,
+  updateWorkerTask,
 } from "./orchestration/run-store";
 import { listEvents } from "./orchestration/event-log";
 import type {
   AppState,
+  CreateStepInput,
   CreateRunInput,
+  CreateWorkerTaskInput,
   FsEntry,
   FsFileContent,
   GitGraph,
@@ -23,6 +31,9 @@ import type {
   RunState,
   ShellInfo,
   SparkEvent,
+  UpdateRunStatusInput,
+  UpdateStepInput,
+  UpdateWorkerTaskInput,
 } from "@shared/types";
 
 export function registerIpc(): void {
@@ -98,6 +109,30 @@ export function registerIpc(): void {
 
   ipcMain.handle("orchestration:appendTestEvent", async (_e, args: { runId: string; message?: string }): Promise<SparkEvent> => {
     return appendTestEvent(args.runId, args.message);
+  });
+
+  ipcMain.handle("orchestration:updateRunStatus", async (_e, input: UpdateRunStatusInput): Promise<RunState> => {
+    return updateRunStatus(input);
+  });
+
+  ipcMain.handle("orchestration:createStep", async (_e, input: CreateStepInput): Promise<RunState> => {
+    return createStep(input);
+  });
+
+  ipcMain.handle("orchestration:updateStep", async (_e, input: UpdateStepInput): Promise<RunState> => {
+    return updateStep(input);
+  });
+
+  ipcMain.handle("orchestration:createWorkerTask", async (_e, input: CreateWorkerTaskInput): Promise<RunState> => {
+    return createWorkerTask(input);
+  });
+
+  ipcMain.handle("orchestration:updateWorkerTask", async (_e, input: UpdateWorkerTaskInput): Promise<RunState> => {
+    return updateWorkerTask(input);
+  });
+
+  ipcMain.handle("orchestration:deleteRun", async (_e, runId: string): Promise<void> => {
+    await deleteRun(runId);
   });
 
   ipcMain.handle(

@@ -56,6 +56,8 @@ context rather than product source.
 - `SparkAgentPanel` has high-level controls for test runs and test events.
 - `DevInspector` shows raw orchestration events, selected event JSON, current
   run state, workspace info, and artifact paths.
+- Runs can be updated through dev controls for status changes, step creation,
+  worker task creation, and run deletion.
 - The app has an initial orchestration run store and JSONL event log under
   Electron userData.
 
@@ -132,6 +134,12 @@ orchestration:listEvents
 orchestration:appendTestEvent
 orchestration:onEvent
 orchestration:getArtifactPaths
+orchestration:updateRunStatus
+orchestration:createStep
+orchestration:updateStep
+orchestration:createWorkerTask
+orchestration:updateWorkerTask
+orchestration:deleteRun
 ```
 
 Run state is stored separately from workspace UI state. Run data lives under
@@ -159,6 +167,11 @@ Artifacts tab:
   run folder
   run.json path
   events.jsonl path
+Run mutations:
+  status updates
+  step create/update
+  worker task create/update
+  run delete
 ```
 
 This keeps the product rule intact:

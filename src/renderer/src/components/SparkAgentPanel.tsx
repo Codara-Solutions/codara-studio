@@ -1,5 +1,5 @@
-import React from "react";
-import type { RunState, Workspace } from "@shared/types";
+import React, { useEffect, useState } from "react";
+import type { RunState, RunStatus, Workspace } from "@shared/types";
 
 interface Props {
   workspace: Workspace | null;
@@ -11,6 +11,10 @@ interface Props {
   onAppendTestEvent: () => void;
   onSelectRun: (run: RunState) => void;
   onRefresh: () => void;
+  onUpdateStatus: (status: RunStatus) => void;
+  onCreateStep: () => void;
+  onCreateWorkerTask: () => void;
+  onDeleteRun: () => void;
 }
 
 export default function SparkAgentPanel({
@@ -23,7 +27,26 @@ export default function SparkAgentPanel({
   onAppendTestEvent,
   onSelectRun,
   onRefresh,
+  onUpdateStatus,
+  onCreateStep,
+  onCreateWorkerTask,
+  onDeleteRun,
 }: Props) {
+  const [deleteArmed, setDeleteArmed] = useState(false);
+
+  useEffect(() => {
+    setDeleteArmed(false);
+  }, [activeRun?.id]);
+
+  const handleDeleteRun = () => {
+    if (!deleteArmed) {
+      setDeleteArmed(true);
+      return;
+    }
+    setDeleteArmed(false);
+    onDeleteRun();
+  };
+
   return (
     <section
       style={{
@@ -83,6 +106,32 @@ export default function SparkAgentPanel({
         </PanelButton>
         <PanelButton disabled={!workspace || busy} onClick={onRefresh}>
           REFRESH
+        </PanelButton>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+          gap: 6,
+          padding: "0 12px 10px",
+          borderBottom: "1px solid var(--rule)",
+        }}
+      >
+        <PanelButton disabled={!activeRun || busy} onClick={() => onUpdateStatus("running")}>
+          RUN
+        </PanelButton>
+        <PanelButton disabled={!activeRun || busy} onClick={() => onUpdateStatus("complete")}>
+          DONE
+        </PanelButton>
+        <PanelButton disabled={!activeRun || busy} onClick={onCreateStep}>
+          STEP
+        </PanelButton>
+        <PanelButton disabled={!activeRun || busy} onClick={onCreateWorkerTask}>
+          TASK
+        </PanelButton>
+        <PanelButton disabled={!activeRun || busy} onClick={handleDeleteRun} danger>
+          {deleteArmed ? "SURE" : "DEL"}
         </PanelButton>
       </div>
 
@@ -194,10 +243,12 @@ function MetaRow({ label, value }: { label: string; value: string }) {
 function PanelButton({
   disabled,
   onClick,
+  danger,
   children,
 }: {
   disabled: boolean;
   onClick: () => void;
+  danger?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -209,7 +260,7 @@ function PanelButton({
         appearance: "none",
         background: "transparent",
         border: "1px solid var(--rule-strong)",
-        color: disabled ? "var(--muted)" : "var(--ink-dim)",
+        color: disabled ? "var(--muted)" : danger ? "var(--danger)" : "var(--ink-dim)",
         minHeight: 28,
         padding: "5px 7px",
         fontFamily: "inherit",
