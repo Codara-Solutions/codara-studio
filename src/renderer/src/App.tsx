@@ -299,7 +299,7 @@ export default function App() {
 
         {showRight && (
           <RightPanel
-            cwd={activeWorkspace?.cwd ?? null}
+            workspace={activeWorkspace}
             activePath={activeEditorPath}
             onOpenFile={openEditorFile}
           />
@@ -316,14 +316,15 @@ export default function App() {
 }
 
 function RightPanel({
-  cwd,
+  workspace,
   activePath,
   onOpenFile,
 }: {
-  cwd: string | null;
+  workspace: Workspace | null;
   activePath: string | null;
   onOpenFile: (entry: FsEntry) => void;
 }) {
+  const cwd = workspace?.cwd ?? null;
   return (
     <aside
       style={{
@@ -337,7 +338,7 @@ function RightPanel({
         overflow: "hidden",
       }}
     >
-      <SparkAgentPanel />
+      <SparkAgentPanel workspace={workspace} />
       {cwd ? (
         <FileTree cwd={cwd} activePath={activePath} onOpenFile={onOpenFile} />
       ) : (

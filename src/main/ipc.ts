@@ -4,7 +4,22 @@ import { listDir, readTextFile, writeTextFile } from "./fs-tree";
 import { getGitGraph } from "./git-graph";
 import { loadState, saveState } from "./storage";
 import * as pty from "./pty-manager";
-import type { AppState, FsFileContent, GitGraph, ShellInfo } from "@shared/types";
+import {
+  appendTestEvent,
+  createRun,
+  getRun,
+  listRuns,
+} from "./orchestration/run-store";
+import { listEvents } from "./orchestration/event-log";
+import type {
+  AppState,
+  CreateRunInput,
+  FsFileContent,
+  GitGraph,
+  RunState,
+  ShellInfo,
+  SparkEvent,
+} from "@shared/types";
 
 export function registerIpc(): void {
   ipcMain.handle("state:load", async (): Promise<AppState> => {
@@ -47,6 +62,26 @@ export function registerIpc(): void {
 
   ipcMain.handle("git:graph", async (_e, cwd: string): Promise<GitGraph> => {
     return getGitGraph(cwd);
+  });
+
+  ipcMain.handle("orchestration:createRun", async (_e, input: CreateRunInput): Promise<RunState> => {
+    return createRun(input);
+  });
+
+  ipcMain.handle("orchestration:getRun", async (_e, runId: string): Promise<RunState | null> => {
+    return getRun(runId);
+  });
+
+  ipcMain.handle("orchestration:listRuns", async (_e, workspaceId?: string): Promise<RunState[]> => {
+    return listRuns(workspaceId);
+  });
+
+  ipcMain.handle("orchestration:listEvents", async (_e, runId: string): Promise<SparkEvent[]> => {
+    return listEvents(runId);
+  });
+
+  ipcMain.handle("orchestration:appendTestEvent", async (_e, args: { runId: string; message?: string }): Promise<SparkEvent> => {
+    return appendTestEvent(args.runId, args.message);
   });
 
   ipcMain.handle(
