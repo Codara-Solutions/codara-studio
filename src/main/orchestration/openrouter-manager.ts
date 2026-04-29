@@ -1,14 +1,16 @@
-import type { AppSettings, RunState, WorkerRuntime, WorkerTask } from "@shared/types";
+import type { AppSettings, PlannedStepAgent, RunState, WorkerRuntime, WorkerTask } from "@shared/types";
 
 export interface OpenRouterConfig {
   apiKey: string;
   baseUrl: string;
   model: string;
+  structuredOutputFallbackModel: string;
 }
 
 export interface SparkManagerStepDecision {
   title: string;
   goal: string;
+  plannedAgents: PlannedStepAgent[];
   acceptanceCriteria: string[];
   verificationCommands: string[];
   riskLevel?: "low" | "medium" | "high";
@@ -92,12 +94,15 @@ export interface OpenRouterManagerResult {
   decision: SparkManagerDecision;
   rawResponse: OpenRouterResponse;
   durationMs: number;
+  model: string;
+  fallbackFrom?: string;
   promptTokens?: number;
   completionTokens?: number;
 }
 
 const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-flash-latest";
+const DEFAULT_STRUCTURED_OUTPUT_FALLBACK_MODEL = "openai/gpt-4o-mini";
 const SPARK_MANAGER_DECISION_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -122,10 +127,26 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["title", "goal", "acceptanceCriteria", "verificationCommands", "riskLevel"],
+        required: ["title", "goal", "plannedAgents", "acceptanceCriteria", "verificationCommands", "riskLevel"],
         properties: {
           title: { type: "string" },
           goal: { type: "string" },
+          plannedAgents: {
+            type: "array",
+            description: "Agents Spark plans to run in this step, as a compact durable overview.",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              required: ["label", "summary", "runtimePreference", "modelHint", "effortHint"],
+              properties: {
+                label: { type: "string" },
+                summary: { type: "string" },
+                runtimePreference: { type: "string", enum: ["claude", "codex", "manual", "shell"] },
+                modelHint: { type: "string" },
+                effortHint: { type: "string", enum: ["low", "medium", "high", "xhigh"] },
+              },
+            },
+          },
           acceptanceCriteria: { type: "array", items: { type: "string" } },
           verificationCommands: { type: "array", items: { type: "string" } },
           riskLevel: { type: "string", enum: ["low", "medium", "high"] },
@@ -184,6 +205,10 @@ export function readOpenRouterConfig(settings?: AppSettings): OpenRouterConfig |
     apiKey,
     baseUrl: (process.env.SPARK_OPENROUTER_BASE_URL || DEFAULT_OPENROUTER_BASE_URL).replace(/\/+$/, ""),
     model: (settings?.openRouterModel || process.env.SPARK_OPENROUTER_MODEL || DEFAULT_OPENROUTER_MODEL).trim(),
+    structuredOutputFallbackModel: (
+      process.env.SPARK_OPENROUTER_STRUCTURED_FALLBACK_MODEL ||
+      DEFAULT_STRUCTURED_OUTPUT_FALLBACK_MODEL
+    ).trim(),
   };
 }
 
@@ -228,12 +253,14 @@ export function buildOpenRouterManagerRequest(input: {
           "The human should only select a workspace, select a Markdown plan, click run, pause, answer a necessary question, or correct direction.",
           "You own decomposition, worker count, worker runtime choice, model/effort hints, prompt quality, collision avoidance, and review.",
           "Ask the human one concise question only when a required product, scope, credential, destructive action, or safety decision is missing.",
+          "Do not ask for subjective implementation details such as visual style, layout, names, or minor feature choices. Choose sensible defaults and continue.",
           "Return JSON matching the provided schema only. Do not include markdown, prose outside JSON, or hidden reasoning.",
           "",
           "Core operating model:",
           "- First create a durable step-by-step division of the project plan. Each step is a batch: all workers in one step may run at the same time.",
+          "- In that step division, list the intended agents for each step in this style: agent 1 -> compact work overview -> model/runtime hint -> thinking/effort level.",
           "- After the step division exists, assume your previous planning context is wiped. Future decisions must work from only the project plan, saved step division, current step, worker reports, and human messages.",
-          "- For the current step, create the least amount of work per worker. Scale with more independent workers when it is useful, but never split tasks that can collide or need sequential state.",
+          "- For the current step, give each worker the least amount of work possible. Scale with more independent workers when useful, but never split tasks that can collide or need sequential state.",
           "- When a worker finishes, review only its assignment, final report, relevant evidence, the plan, and the step division. Accept, ask, or create the smallest follow-up task.",
           "- The app persists state; do not rely on memory. Put concrete goals, acceptance criteria, verification commands, expected artifacts, and final-report requirements into structured fields.",
           "",
@@ -245,7 +272,9 @@ export function buildOpenRouterManagerRequest(input: {
           "- Prefer Claude for broad exploration, architecture-sensitive implementation, ambiguous UI/product work, and repo-level reasoning.",
           "- Prefer Codex for precise code edits, refactors, tests, validation, and bug fixes.",
           "- Prefer shell only for deterministic command-only tasks. Prefer manual only when execution cannot be automated safely.",
-          "- Use modelHint and effortHint as hints for the local worker CLI when helpful; the human does not configure workers per task.",
+          "- Use CLI-ready modelHint values. Claude examples: sonnet, opus, claude-sonnet-4-6, claude-opus-4-7. Codex examples: gpt-5.5, gpt-5.4, gpt-5.3-codex.",
+          "- Use effortHint as the worker thinking level: low, medium, high, or xhigh.",
+          "- Do not write terminal launch commands in your decision. The app opens terminals and builds Claude/Codex commands from runtimePreference, modelHint, and effortHint.",
         ].join("\n"),
       },
       {
@@ -259,8 +288,9 @@ export function buildOpenRouterManagerRequest(input: {
           "- Claude Code and Codex are local subscription-backed workers and should do implementation work.",
           "- Spark decides worker runtime, model hints, effort hints, parallelism, and prompts. The human does not configure Claude/Codex per task.",
           "- A step is a parallel batch. Everything inside one step may run at the same time, so avoid overlapping write scopes.",
-          "- Use one worker when the task is naturally sequential or small. Use more workers only for truly independent workstreams.",
+          "- Use one worker when the task is naturally sequential or small. Use multiple workers when there are truly independent workstreams.",
           "- If the selected plan is too ambiguous, ask one concise human question instead of guessing.",
+          "- For small demo plans, choose reasonable defaults instead of asking aesthetic follow-up questions.",
           "- Obey the mode-specific output rules below exactly.",
           "- During worker-result review, return complete when the plan is satisfied; otherwise create only the next necessary follow-up tasks.",
           "",
@@ -314,41 +344,7 @@ export function buildOpenRouterManagerRequest(input: {
           "MODE-SPECIFIC OUTPUT RULES",
           formatModeRules(mode),
           "",
-          "Return JSON with this shape:",
-          JSON.stringify(
-            {
-              status: "run_workers | ask_user | complete",
-              summary: "short manager summary",
-              question: "only when status is ask_user, otherwise empty string",
-              steps: [
-                {
-                  title: "Step title",
-                  goal: "Step goal",
-                  acceptanceCriteria: ["clear acceptance criteria"],
-                  verificationCommands: ["npm run typecheck"],
-                  riskLevel: "low | medium | high",
-                },
-              ],
-              tasks: [
-                {
-                  stepIndex: 0,
-                  title: "Worker task title",
-                  description: "full high-quality worker prompt for the assigned task",
-                  runtimePreference: "claude | codex | manual | shell",
-                  modelHint: "optional, empty string if not needed",
-                  effortHint: "low | medium | high | xhigh",
-                  allowedPaths: ["optional paths"],
-                  forbiddenPaths: ["optional paths"],
-                  expectedOutputs: ["expected artifact or result"],
-                  verificationCommands: ["npm run typecheck"],
-                  canRunParallel: true,
-                  conflictsWith: [],
-                },
-              ],
-            },
-            null,
-            2,
-          ),
+          "Use the structured output schema supplied in the API request. Do not restate or explain the schema in your answer.",
         ].join("\n"),
       },
     ],
@@ -361,6 +357,62 @@ export async function requestOpenRouterManagerDecision(
   mode: OpenRouterManagerMode,
 ): Promise<OpenRouterManagerResult> {
   const started = Date.now();
+  try {
+    return await performOpenRouterManagerRequest({
+      config,
+      requestBody,
+      mode,
+      started,
+      model: requestBody.model,
+    });
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    const fallbackModel = config.structuredOutputFallbackModel.trim();
+    if (
+      !isStructuredOutputUnsupportedError(error) ||
+      !fallbackModel ||
+      fallbackModel === requestBody.model
+    ) {
+      throw err;
+    }
+
+    return performOpenRouterManagerRequest({
+      config,
+      requestBody: { ...requestBody, model: fallbackModel },
+      mode,
+      started,
+      model: fallbackModel,
+      fallbackFrom: requestBody.model,
+    });
+  }
+}
+
+export function isStructuredOutputUnsupportedError(error: string): boolean {
+  const normalized = error.toLowerCase();
+  return (
+    normalized.includes("no endpoints found") && normalized.includes("requested parameters")
+  ) || (
+    normalized.includes("response_format") && normalized.includes("not support")
+  ) || (
+    normalized.includes("json_schema") && normalized.includes("not support")
+  );
+}
+
+async function performOpenRouterManagerRequest({
+  config,
+  requestBody,
+  mode,
+  started,
+  model,
+  fallbackFrom,
+}: {
+  config: OpenRouterConfig;
+  requestBody: OpenRouterManagerRequest;
+  mode: OpenRouterManagerMode;
+  started: number;
+  model: string;
+  fallbackFrom?: string;
+}): Promise<OpenRouterManagerResult> {
   const response = await fetch(`${config.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
@@ -383,6 +435,8 @@ export async function requestOpenRouterManagerDecision(
     decision: normalizeManagerDecision(parsed, mode),
     rawResponse,
     durationMs: Date.now() - started,
+    model,
+    fallbackFrom,
     promptTokens: rawResponse.usage?.prompt_tokens,
     completionTokens: rawResponse.usage?.completion_tokens,
   };
@@ -477,7 +531,7 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
     status: "run_workers",
     summary: normalizeText(raw.summary, "Spark planned the next worker task."),
     steps,
-    tasks: tasks.slice(0, 2),
+    tasks,
   };
 }
 
@@ -494,9 +548,23 @@ function normalizeSteps(value: unknown): SparkManagerStepDecision[] {
     .map((item, index) => ({
       title: normalizeText(item.title, `Spark planned step ${index + 1}`),
       goal: normalizeText(item.goal, "Complete the next concrete part of the selected plan."),
+      plannedAgents: normalizePlannedAgents(item.plannedAgents),
       acceptanceCriteria: normalizeStringList(item.acceptanceCriteria),
       verificationCommands: normalizeStringList(item.verificationCommands),
       riskLevel: normalizeRisk(item.riskLevel),
+    }));
+}
+
+function normalizePlannedAgents(value: unknown): PlannedStepAgent[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item, index) => ({
+      label: normalizeText(item.label, `agent ${index + 1}`),
+      summary: normalizeText(item.summary, "Complete a focused part of this step."),
+      runtimePreference: normalizeRuntime(item.runtimePreference),
+      modelHint: typeof item.modelHint === "string" ? item.modelHint.trim() : undefined,
+      effortHint: normalizeEffort(item.effortHint),
     }));
 }
 
@@ -556,6 +624,7 @@ function formatStepDivision(run: RunState): string {
       [
         `${step.index}. ${step.title}`,
         `Goal: ${step.goal}`,
+        `Agents: ${formatPlannedAgents(step.plannedAgents)}`,
         `Status: ${step.status}`,
         `Acceptance: ${step.acceptanceCriteria.length ? step.acceptanceCriteria.join("; ") : "not specified"}`,
         `Verification: ${step.verificationCommands.length ? step.verificationCommands.join("; ") : "not specified"}`,
@@ -564,12 +633,24 @@ function formatStepDivision(run: RunState): string {
     .join("\n\n");
 }
 
+function formatPlannedAgents(agents: PlannedStepAgent[] | undefined): string {
+  if (!agents?.length) return "not specified";
+  return agents
+    .map((agent, index) => {
+      const model = agent.modelHint?.trim() || agent.runtimePreference;
+      const effort = agent.effortHint ? `thinking level ${agent.effortHint}` : "thinking level not specified";
+      return `${agent.label || `agent ${index + 1}`} -> ${agent.summary} -> ${model} (${effort})`;
+    })
+    .join("; ");
+}
+
 function formatModeRules(mode: OpenRouterManagerMode): string {
   if (mode === "plan_analysis") {
     return [
       "- Return status run_workers with the full durable step-by-step division in steps.",
       "- Return tasks as an empty array. Do not generate implementation prompts in this mode.",
       "- Each step is a parallel execution batch and must be independently understandable after manager context is wiped.",
+      "- Each step must include plannedAgents: agent label, compact overview, runtimePreference, modelHint, and effortHint.",
       "- Each step must describe the outcome, boundaries, acceptance criteria, verification commands, and risk level.",
       "- Prefer several small sequential steps over one vague large step.",
       "- Ask the user if the plan lacks a required product decision, scope boundary, or safety approval.",
@@ -584,7 +665,7 @@ function formatModeRules(mode: OpenRouterManagerMode): string {
       "- The worker task description must be the actual high-quality prompt the worker will receive: objective, context, exact scope, constraints, validation, final-report expectations, and collision warnings.",
       "- Choose runtimePreference, modelHint, and effortHint yourself.",
       "- Keep write scopes independent. If two tasks might edit the same file or need each other's output, use one task.",
-      "- Use no more than two tasks for now, and only split when they can run at the same time without shared state.",
+      "- Create as many small worker tasks as are useful for the current step, but only when they can run at the same time without shared state.",
       "- Set question to an empty string unless status is ask_user.",
     ].join("\n");
   }

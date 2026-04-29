@@ -254,14 +254,26 @@ understanding the low-level worker machinery.
 - Switched OpenRouter manager requests from basic JSON mode to strict
   `json_schema` structured outputs with `strict: true` and provider
   `require_parameters: true`.
-- Fixed the strict structured-output failure path so unsupported OpenRouter
-  manager models produce a clear "choose a compatible model" Spark question
-  instead of the misleading "OpenRouter is not configured" message.
+- Added an automatic strict structured-output fallback model. If the selected
+  OpenRouter manager model cannot handle `json_schema`, Spark retries the same
+  manager call with `SPARK_OPENROUTER_STRUCTURED_FALLBACK_MODEL` or the default
+  `openai/gpt-4o-mini`, then records `spark_call.model_fallback`.
 - Made worker PTY sessions resize through the same app path as normal terminal
   panes.
 - Changed initial worker prompt submission to write prompts in small PTY chunks
   and send Enter only after the chunks finish, which should make Claude/Codex
   panes behave closer to normal user-opened terminals.
+- Changed normal Claude/Codex worker launch to open the user's configured
+  default terminal first, then run the selected worker CLI command inside it.
+  Spark now uses Claude Code `--dangerously-skip-permissions`, `--model`, and
+  `--effort`, plus Codex `--yolo`, `-m`, and `model_reasoning_effort`
+  arguments derived from the manager's modelHint and effortHint.
+- The manager structured output does not include launch commands. Spark reads
+  runtimePreference/modelHint/effortHint from JSON and the app builds and runs
+  the actual terminal commands.
+- Extended the manager step division schema with planned agents so the saved
+  plan can look like `agent 1 -> overview -> model -> thinking level` before
+  the context is wiped for worker prompt generation.
 - Confirmed `npm run typecheck` and deterministic `npm run test:e2e` pass after
   the prompt-loop split. The real user-flow test remains explicit because it
   launches real local workers.

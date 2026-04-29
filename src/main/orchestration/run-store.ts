@@ -13,6 +13,7 @@ import type {
   ReviewDecision,
   RunArtifactPaths,
   RunState,
+  ShellInfo,
   SparkCall,
   SparkEvent,
   StartAutopilotInput,
@@ -28,8 +29,10 @@ import type {
 } from "@shared/types";
 import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
 import { loadSettings } from "../storage";
+import { defaultShell, listShells } from "../shells";
 import {
   buildOpenRouterManagerRequest,
+  isStructuredOutputUnsupportedError,
   readOpenRouterConfig,
   requestOpenRouterManagerDecision,
   type SparkManagerDecision,
@@ -280,14 +283,28 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   return scheduledAttemptIds.length > 0 ? await requireRun(run.id) : run;
 }
 
-function scheduleInitialAutopilotPlanning(runId: string, input: StartAutopilotInput): void {
-  if (activeAutopilotPlans.has(runId)) return;
-  const cycle = runInitialAutopilotPlanning(runId, input)
+function scheduleInitialAutopilotPlanning(
+  runId: string,
+  input: StartAutopilotInput,
+  opts?: { afterCurrent?: boolean },
+): void {
+  const existing = activeAutopilotPlans.get(runId);
+  if (existing && !opts?.afterCurrent) return;
+
+  const start = existing && opts?.afterCurrent ? existing.catch(() => undefined) : Promise.resolve();
+  const cycle = start
+    .then(async () => {
+      const latest = await getRun(runId);
+      if (!latest || latest.status === "paused" || latest.status === "cancelled") return;
+      await runInitialAutopilotPlanning(runId, input);
+    })
     .catch(async (err) => {
       await markInitialAutopilotPlanningFailed(runId, err);
     })
     .finally(() => {
-      activeAutopilotPlans.delete(runId);
+      if (activeAutopilotPlans.get(runId) === cycle) {
+        activeAutopilotPlans.delete(runId);
+      }
     });
   activeAutopilotPlans.set(runId, cycle);
   void cycle;
@@ -615,6 +632,7 @@ async function askOpenRouterManager(
     ...(run.settingsSnapshot ?? {}),
     openRouterModel: config.model,
     openRouterBaseUrl: config.baseUrl,
+    openRouterStructuredOutputFallbackModel: config.structuredOutputFallbackModel,
     langSmithProject: langSmithConfig?.project,
     langSmithEndpoint: langSmithConfig?.endpoint,
   };
@@ -652,6 +670,8 @@ async function askOpenRouterManager(
         decision: result.decision,
         rawResponse: result.rawResponse,
         durationMs: result.durationMs,
+        model: result.model,
+        fallbackFrom: result.fallbackFrom,
         promptTokens: result.promptTokens,
         completionTokens: result.completionTokens,
       },
@@ -666,6 +686,7 @@ async function askOpenRouterManager(
     const completedAt = new Date().toISOString();
     if (targetCall) {
       targetCall.status = "completed";
+      targetCall.model = result.model;
       targetCall.durationMs = result.durationMs;
       targetCall.promptTokens = result.promptTokens;
       targetCall.completionTokens = result.completionTokens;
@@ -673,6 +694,22 @@ async function askOpenRouterManager(
     }
     latest.updatedAt = completedAt;
     await saveRun(latest);
+    if (result.fallbackFrom) {
+      await appendEvent({
+        timestamp: completedAt,
+        workspaceId: latest.workspaceId,
+        runId: latest.id,
+        sparkCallId: callId,
+        type: "spark_call.model_fallback",
+        message: `Spark manager retried with structured-output fallback model: ${result.model}`,
+        payload: {
+          mode,
+          requestedModel: result.fallbackFrom,
+          fallbackModel: result.model,
+          reason: "requested model did not support strict JSON Schema structured outputs",
+        },
+      });
+    }
     await appendEvent({
       timestamp: completedAt,
       workspaceId: latest.workspaceId,
@@ -682,7 +719,9 @@ async function askOpenRouterManager(
       message: `Spark manager call completed: ${result.decision.status}`,
       payload: {
         mode,
-        model: config.model,
+        model: result.model,
+        requestedModel: result.fallbackFrom ?? config.model,
+        fallbackFrom: result.fallbackFrom,
         durationMs: result.durationMs,
         promptTokens: result.promptTokens,
         completionTokens: result.completionTokens,
@@ -736,17 +775,6 @@ async function askOpenRouterManager(
   }
 }
 
-function isStructuredOutputUnsupportedError(error: string): boolean {
-  const normalized = error.toLowerCase();
-  return (
-    normalized.includes("no endpoints found") && normalized.includes("requested parameters")
-  ) || (
-    normalized.includes("response_format") && normalized.includes("not support")
-  ) || (
-    normalized.includes("json_schema") && normalized.includes("not support")
-  );
-}
-
 async function applySparkManagerDecision(
   run: RunState,
   decision: SparkManagerDecision,
@@ -787,8 +815,10 @@ async function applySparkManagerDecision(
           {
             title: "Spark planned work",
             goal: decision.summary,
+            plannedAgents: [],
             acceptanceCriteria: ["The selected worker tasks complete and report final evidence."],
             verificationCommands: ["npm run typecheck"],
+            riskLevel: undefined,
           },
         ];
 
@@ -797,6 +827,7 @@ async function applySparkManagerDecision(
       runId: latest.id,
       title: step.title,
       goal: step.goal,
+      plannedAgents: step.plannedAgents,
       riskLevel: step.riskLevel,
       acceptanceCriteria: step.acceptanceCriteria,
       verificationCommands: step.verificationCommands,
@@ -912,7 +943,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     if (resumed.workerAttempts.length > 0) {
       scheduleAutopilotReview(resumed.id, resumeInput.cwd);
     } else {
-      scheduleInitialAutopilotPlanning(resumed.id, resumeInput);
+      scheduleInitialAutopilotPlanning(resumed.id, resumeInput, { afterCurrent: true });
     }
   }
   return resumed;
@@ -973,8 +1004,9 @@ export async function createStep(input: CreateStepInput): Promise<RunState> {
     title,
     goal: input.goal?.trim() || title,
     status: "queued",
-    riskLevel: input.riskLevel,
-    acceptanceCriteria: input.acceptanceCriteria ?? [],
+      riskLevel: input.riskLevel,
+      plannedAgents: input.plannedAgents ?? [],
+      acceptanceCriteria: input.acceptanceCriteria ?? [],
     verificationCommands: input.verificationCommands ?? [],
     workerTaskIds: [],
     createdAt: now,
@@ -1012,6 +1044,7 @@ export async function updateStep(input: UpdateStepInput): Promise<RunState> {
       if (!target) throw new Error(`Step not found: ${input.stepId}`);
       if (input.title !== undefined) target.title = input.title.trim();
       if (input.goal !== undefined) target.goal = input.goal.trim();
+      if (input.plannedAgents !== undefined) target.plannedAgents = input.plannedAgents;
       if (input.status !== undefined) target.status = input.status;
       if (input.riskLevel !== undefined) target.riskLevel = input.riskLevel;
       if (input.acceptanceCriteria !== undefined) target.acceptanceCriteria = input.acceptanceCriteria;
@@ -1200,7 +1233,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   ]);
 
   const promptText = await readWorkerPromptForLaunch(paths);
-  const workerCommand = buildWorkerCommand(task, paths, promptText);
+  const workerCommand = await buildWorkerCommand(task, paths, promptText);
   const command = workerCommand.display;
   const launchTimestamp = new Date().toISOString();
   attempt.status = "launching";
@@ -1480,6 +1513,9 @@ async function requireRun(runId: string): Promise<RunState> {
 
 function normalizeRun(run: RunState): RunState {
   run.humanMessages ??= [];
+  for (const step of run.steps ?? []) {
+    step.plannedAgents ??= [];
+  }
   run.autopilot ??= {
     status: run.status === "running" ? "running" : "idle",
     updatedAt: run.updatedAt,
@@ -1542,7 +1578,6 @@ function pickAutopilotTasks(run: RunState): WorkerTask[] {
       continue;
     }
     selected.push(task);
-    if (selected.length >= 2) break;
   }
   return selected.length > 0 ? selected : [first];
 }
@@ -1948,7 +1983,7 @@ async function readWorkerPromptForLaunch(paths: WorkerArtifactPaths): Promise<st
   }
 }
 
-function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths, promptText: string): WorkerCommand {
+async function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths, promptText: string): Promise<WorkerCommand> {
   if (task.runtimePreference === "manual") {
     return {
       exe: process.execPath,
@@ -1964,8 +1999,10 @@ function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths, prompt
     const command = configuredWorkerCommand(
       "SPARK_CLAUDE_WORKER_COMMAND",
       "SPARK_CLAUDE_WORKER_ARGS",
-      process.platform === "win32" ? "claude.exe" : "claude",
     );
+    if (!command) {
+      return shellInteractiveWorkerCommand(await resolveDefaultWorkerShell(), buildClaudeStartupCommand(task), paths, promptText);
+    }
     return {
       ...command,
       display: command.display || "claude",
@@ -1984,8 +2021,10 @@ function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths, prompt
     const command = configuredWorkerCommand(
       "SPARK_CODEX_WORKER_COMMAND",
       "SPARK_CODEX_WORKER_ARGS",
-      process.platform === "win32" ? "codex.cmd" : "codex",
     );
+    if (!command) {
+      return shellInteractiveWorkerCommand(await resolveDefaultWorkerShell(), buildCodexStartupCommand(task), paths, promptText);
+    }
     return {
       ...command,
       display: command.display || "codex",
@@ -2000,12 +2039,11 @@ function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths, prompt
     };
   }
 
-  const shellExe = process.platform === "win32" ? process.env.ComSpec || "cmd.exe" : process.env.SHELL || "sh";
-  const shellArgs = process.platform === "win32" ? ["/d", "/s"] : [];
+  const shell = await resolveDefaultWorkerShell();
   return {
-    exe: shellExe,
-    args: shellArgs,
-    display: `${shellExe} ${shellArgs.join(" ")}`.trim(),
+    exe: shell.exe,
+    args: shell.args,
+    display: shell.label,
     initialInput: renderInteractiveWorkerLaunchInput(paths, promptText),
     initialInputChunkSize: 1000,
     initialInputChunkDelayMs: 20,
@@ -2014,14 +2052,92 @@ function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths, prompt
   };
 }
 
-function configuredWorkerCommand(commandEnv: string, argsEnv: string, fallbackExe: string): WorkerCommand {
-  const exe = process.env[commandEnv]?.trim() || fallbackExe;
+function configuredWorkerCommand(commandEnv: string, argsEnv: string): WorkerCommand | null {
+  const exe = process.env[commandEnv]?.trim();
+  if (!exe) return null;
   const args = parseWorkerArgs(process.env[argsEnv]);
   return {
     exe,
     args,
     display: `${exe} ${args.join(" ")}`.trim(),
   };
+}
+
+async function resolveDefaultWorkerShell(): Promise<ShellInfo> {
+  const [settings, shells, detectedDefault] = await Promise.all([loadSettings(), listShells(), defaultShell()]);
+  const configured = settings.defaultShellId
+    ? shells.find((shell) => shell.id === settings.defaultShellId)
+    : undefined;
+  const shell = configured ?? detectedDefault ?? shells[0];
+  if (shell) return shell;
+
+  if (process.platform === "win32") {
+    return {
+      id: process.env.ComSpec || "cmd.exe",
+      label: "Command Prompt",
+      exe: process.env.ComSpec || "cmd.exe",
+      args: [],
+      family: "cmd",
+    };
+  }
+
+  return {
+    id: process.env.SHELL || "sh",
+    label: process.env.SHELL || "sh",
+    exe: process.env.SHELL || "sh",
+    args: [],
+    family: "sh",
+  };
+}
+
+function shellInteractiveWorkerCommand(
+  shell: ShellInfo,
+  startupCommand: string,
+  paths: WorkerArtifactPaths,
+  promptText: string,
+): WorkerCommand {
+  return {
+    exe: shell.exe,
+    args: shell.args,
+    display: `${shell.label} -> ${startupCommand}`,
+    startupInput: `${startupCommand}\r`,
+    startupInputDelayMs: 250,
+    initialInput: renderInteractiveWorkerLaunchInput(paths, promptText),
+    initialInputDelayMs: 1800,
+    initialInputMaxDelayMs: 9000,
+    initialInputWaitForOutput: true,
+    initialInputChunkSize: 1000,
+    initialInputChunkDelayMs: 20,
+    initialSubmitInput: "\r",
+    initialSubmitDelayMs: 1200,
+  };
+}
+
+function buildClaudeStartupCommand(task: WorkerTask): string {
+  const args = ["claude", "--dangerously-skip-permissions"];
+  if (task.modelHint?.trim()) {
+    args.push("--model", quoteShellArg(task.modelHint.trim()));
+  }
+  if (task.effortHint) {
+    args.push("--effort", task.effortHint === "xhigh" ? "xhigh" : task.effortHint);
+  }
+  return args.join(" ");
+}
+
+function buildCodexStartupCommand(task: WorkerTask): string {
+  const args = ["codex", "--yolo"];
+  if (task.modelHint?.trim()) {
+    args.push("-m", quoteShellArg(task.modelHint.trim()));
+  }
+  if (task.effortHint) {
+    args.push("-c", quoteShellArg(`model_reasoning_effort="${task.effortHint}"`));
+  }
+  return args.join(" ");
+}
+
+function quoteShellArg(value: string): string {
+  if (/^[A-Za-z0-9_./:@+=,-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, "''")}'`;
 }
 
 function parseWorkerArgs(raw: string | undefined): string[] {
@@ -2234,12 +2350,24 @@ function formatRunStepDivision(run: RunState): string {
       [
         `${step.index}. ${step.title}`,
         `Goal: ${step.goal}`,
+        `Agents: ${formatPlannedStepAgents(step.plannedAgents)}`,
         `Status: ${step.status}`,
         `Acceptance: ${step.acceptanceCriteria.length ? step.acceptanceCriteria.join("; ") : "not specified"}`,
         `Verification: ${step.verificationCommands.length ? step.verificationCommands.join("; ") : "not specified"}`,
       ].join("\n"),
     )
     .join("\n\n");
+}
+
+function formatPlannedStepAgents(agents: StepState["plannedAgents"]): string {
+  if (!agents?.length) return "not specified";
+  return agents
+    .map((agent, index) => {
+      const model = agent.modelHint?.trim() || agent.runtimePreference;
+      const effort = agent.effortHint ? `thinking level ${agent.effortHint}` : "thinking level not specified";
+      return `${agent.label || `agent ${index + 1}`} -> ${agent.summary} -> ${model} (${effort})`;
+    })
+    .join("; ");
 }
 
 function truncateText(value: string, maxLength: number): string {

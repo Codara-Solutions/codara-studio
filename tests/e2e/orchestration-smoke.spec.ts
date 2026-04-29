@@ -224,7 +224,8 @@ test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
         SPARK_USER_DATA_DIR: userDataDir,
         SPARK_OPENROUTER_API_KEY: "test-key",
         SPARK_OPENROUTER_BASE_URL: server.baseUrl,
-        SPARK_OPENROUTER_MODEL: "test/spark-manager",
+        SPARK_OPENROUTER_MODEL: "test/unsupported-manager",
+        SPARK_OPENROUTER_STRUCTURED_FALLBACK_MODEL: "test/spark-manager",
         LANGSMITH_API_KEY: "test-langsmith-key",
         LANGSMITH_ENDPOINT: langSmith.baseUrl,
         LANGSMITH_PROJECT: "spark-agent-e2e",
@@ -338,6 +339,7 @@ async function startFakeOpenRouterServer(): Promise<{ baseUrl: string; close: ()
     });
     req.on("end", () => {
       const parsedBody = JSON.parse(body) as {
+        model?: string;
         messages?: Array<{ content?: string }>;
         provider?: { require_parameters?: boolean };
         response_format?: {
@@ -355,6 +357,18 @@ async function startFakeOpenRouterServer(): Promise<{ baseUrl: string; close: ()
         res.end(JSON.stringify({ error: { message: "Expected strict OpenRouter structured output request." } }));
         return;
       }
+      if (parsedBody.model === "test/unsupported-manager") {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: {
+              message:
+                "No endpoints found that can handle the requested parameters. To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection",
+            },
+          }),
+        );
+        return;
+      }
       const prompt = parsedBody.messages?.map((message) => message.content ?? "").join("\n") ?? "";
       const mode = prompt.match(/MANAGER MODE\n([a-z_]+)/)?.[1];
       const isPlanAnalysis = mode === "plan_analysis";
@@ -367,6 +381,22 @@ async function startFakeOpenRouterServer(): Promise<{ baseUrl: string; close: ()
               {
                 title: "Run local subscription workers",
                 goal: "Launch local coding workers through Spark's worker control path.",
+                plannedAgents: [
+                  {
+                    label: "agent 1",
+                    summary: "Run Claude Code fixture worker for broad implementation slice.",
+                    runtimePreference: "claude",
+                    modelHint: "sonnet",
+                    effortHint: "low",
+                  },
+                  {
+                    label: "agent 2",
+                    summary: "Run Codex fixture worker for validation slice.",
+                    runtimePreference: "codex",
+                    modelHint: "gpt-5.5",
+                    effortHint: "low",
+                  },
+                ],
                 acceptanceCriteria: ["Both worker tasks write final reports."],
                 verificationCommands: ["npm run typecheck"],
                 riskLevel: "low",
@@ -374,6 +404,15 @@ async function startFakeOpenRouterServer(): Promise<{ baseUrl: string; close: ()
               {
                 title: "Review worker evidence",
                 goal: "Compare final reports against the project plan and decide whether work is complete.",
+                plannedAgents: [
+                  {
+                    label: "agent 1",
+                    summary: "Review compact worker reports and decide completion.",
+                    runtimePreference: "codex",
+                    modelHint: "gpt-5.5",
+                    effortHint: "low",
+                  },
+                ],
                 acceptanceCriteria: ["Spark accepts evidence or creates the next focused follow-up."],
                 verificationCommands: ["npm run typecheck"],
                 riskLevel: "low",

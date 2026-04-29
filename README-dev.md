@@ -77,6 +77,10 @@ context rather than product source.
 - Worker PTY sessions resize through the same renderer path as normal terminal
   panes, and initial prompts are written in small chunks before Spark sends the
   submit keystroke.
+- For normal Claude/Codex workers, Spark starts the user's configured default
+  terminal first, then types the selected worker CLI command into that terminal.
+  This keeps worker panes behaving like user-opened terminals instead of
+  directly spawning a bare `claude.exe` or `codex.cmd` process.
 - When `SPARK_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` is configured,
   Spark asks OpenRouter for manager decisions before creating worker tasks.
   Manager calls write `spark_call.*` events and durable
@@ -85,8 +89,8 @@ context rather than product source.
   `response_format.type = "json_schema"`, `strict: true`, and provider
   `require_parameters: true` so Spark gets schema-shaped decisions or a clear
   provider failure. If the selected manager model cannot handle strict JSON
-  Schema, Spark asks the user to choose a compatible manager model instead of
-  misreporting the API key as missing.
+  Schema, Spark automatically retries the same manager call with a
+  structured-output fallback model and records `spark_call.model_fallback`.
 - When LangSmith tracing is configured, Spark also sends manager request and
   response traces to LangSmith while still making the actual model request
   through OpenRouter.
@@ -284,15 +288,18 @@ Environment variables are still supported for local development:
 SPARK_OPENROUTER_API_KEY=...
 SPARK_OPENROUTER_MODEL=google/gemini-flash-latest
 SPARK_OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+SPARK_OPENROUTER_STRUCTURED_FALLBACK_MODEL=openai/gpt-4o-mini
 LANGSMITH_API_KEY=...
 LANGSMITH_PROJECT=spark-agent-dev
 LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 ```
 
 `OPENROUTER_API_KEY` is also accepted. The model defaults to
-`google/gemini-flash-latest`. Saved app settings take precedence over the API
-key and model environment variables. `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT`,
-and `LANGCHAIN_ENDPOINT` are also accepted as LangSmith aliases.
+`google/gemini-flash-latest`. If that selected model cannot serve strict
+`json_schema`, Spark retries with `openai/gpt-4o-mini` by default. Saved app
+settings take precedence over the API key and model environment variables.
+`LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT`, and `LANGCHAIN_ENDPOINT` are also
+accepted as LangSmith aliases.
 
 Local worker command routing is Spark-owned. These environment variables exist
 for development and deterministic tests, not as a normal user setup surface:
@@ -307,13 +314,20 @@ SPARK_CODEX_WORKER_ARGS=
 The args variables accept either a JSON string array or a simple shell-style
 argument string. On Windows the built-in defaults are `claude.exe` and
 `codex.cmd` so the visible worker panes open the real local CLIs when those are
-available on `PATH`. Spark sends the full prepared task prompt into the worker
-terminal after the CLI has started producing output when possible, with a
-bounded fallback delay. Spark then sends the submit keystroke as a separate
-delayed PTY write after prompt chunks finish so Claude/Codex should run
-automatically without the human pressing Enter. The prompt artifact path is
-still included for traceability, but the worker should not only see a generic
-"read this file" wrapper.
+available on `PATH`. For real Claude/Codex workers, Spark opens the configured
+default shell, runs
+`claude --dangerously-skip-permissions --model <model> --effort <level>` or
+`codex --yolo -m <model> -c 'model_reasoning_effort="<level>"'`, then sends the
+full prepared task prompt after the CLI has started producing output when
+possible, with a bounded fallback delay. Spark then sends the submit keystroke
+as a separate delayed PTY write after prompt chunks finish so Claude/Codex
+should run automatically without the human pressing Enter. The prompt artifact
+path is still included for traceability, but the worker should not only see a
+generic "read this file" wrapper.
+
+The manager model does not return terminal launch commands. Its structured
+output contains the worker runtime, model hint, effort hint, and task details;
+the app reads that JSON and opens the corresponding terminal sessions itself.
 
 Initial manager planning is scheduled in the background. The `RUN` action
 creates/updates the run and returns control to the UI while OpenRouter plan

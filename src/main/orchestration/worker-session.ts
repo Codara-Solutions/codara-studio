@@ -5,6 +5,8 @@ export interface WorkerCommand {
   exe: string;
   args: string[];
   display: string;
+  startupInput?: string;
+  startupInputDelayMs?: number;
   initialInput?: string;
   initialInputDelayMs?: number;
   initialInputMaxDelayMs?: number;
@@ -67,6 +69,9 @@ export function startWorkerSession(opts: StartWorkerSessionOptions): WorkerSessi
   });
   const startedAt = Date.now();
   let outputSeen = false;
+  let startupInputSent = false;
+  let startupInputSentAt = startedAt;
+  let postStartupOutputSeen = false;
   let initialInputSent = false;
   let initialInputFinished = false;
   let initialSubmitSent = false;
@@ -116,25 +121,42 @@ export function startWorkerSession(opts: StartWorkerSessionOptions): WorkerSessi
   };
 
   sessions.set(opts.id, session);
-  if (opts.command.initialInput) {
+  if (opts.command.startupInput) {
+    scheduleStartupInput(opts.command);
+  } else if (opts.command.initialInput) {
     scheduleInitialInput(opts.command);
   }
   return session;
 
   function markOutputSeen(): void {
     outputSeen = true;
+    if (startupInputSent) postStartupOutputSeen = true;
     maybeSendInitialInput();
   }
 
   function maybeSendInitialInput(): void {
     if (!opts.command.initialInput || initialInputSent || settled) return;
-    const elapsedMs = Date.now() - startedAt;
+    if (opts.command.startupInput && !startupInputSent) return;
+    const elapsedMs = Date.now() - startupInputSentAt;
     const minDelayMs = Math.max(0, opts.command.initialInputDelayMs ?? 50);
     const maxDelayMs = Math.max(minDelayMs, opts.command.initialInputMaxDelayMs ?? minDelayMs);
     if (elapsedMs < minDelayMs) return;
-    if (opts.command.initialInputWaitForOutput && !outputSeen && elapsedMs < maxDelayMs) return;
+    const hasOutput = opts.command.startupInput ? postStartupOutputSeen : outputSeen;
+    if (opts.command.initialInputWaitForOutput && !hasOutput && elapsedMs < maxDelayMs) return;
     initialInputSent = true;
     void writeInitialInput(opts.command);
+  }
+
+  function scheduleStartupInput(command: WorkerCommand): void {
+    const delayMs = Math.max(0, command.startupInputDelayMs ?? 150);
+    setTimeout(() => {
+      if (!command.startupInput || startupInputSent || settled) return;
+      startupInputSent = true;
+      startupInputSentAt = Date.now();
+      postStartupOutputSeen = false;
+      session.write(command.startupInput);
+      if (command.initialInput) scheduleInitialInput(command);
+    }, delayMs);
   }
 
   function scheduleInitialInput(command: WorkerCommand): void {

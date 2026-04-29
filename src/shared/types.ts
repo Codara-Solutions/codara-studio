@@ -223,6 +223,7 @@ export interface StepState {
   index: number;
   title: string;
   goal: string;
+  plannedAgents?: PlannedStepAgent[];
   status: StepStatus;
   riskLevel?: "low" | "medium" | "high";
   acceptanceCriteria: string[];
@@ -231,6 +232,14 @@ export interface StepState {
   reviewSummary?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PlannedStepAgent {
+  label: string;
+  summary: string;
+  runtimePreference: WorkerRuntime;
+  modelHint?: string;
+  effortHint?: WorkerTask["effortHint"];
 }
 
 export interface WorkerTask {
@@ -377,6 +386,7 @@ export interface CreateStepInput {
   runId: string;
   title: string;
   goal?: string;
+  plannedAgents?: PlannedStepAgent[];
   riskLevel?: StepState["riskLevel"];
   acceptanceCriteria?: string[];
   verificationCommands?: string[];
@@ -387,6 +397,7 @@ export interface UpdateStepInput {
   stepId: string;
   title?: string;
   goal?: string;
+  plannedAgents?: PlannedStepAgent[];
   status?: StepStatus;
   riskLevel?: StepState["riskLevel"];
   acceptanceCriteria?: string[];
