@@ -41,6 +41,7 @@ interface ActiveWorkerProcess {
 }
 
 const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
+const activeAutopilotCycles = new Map<string, Promise<void>>();
 
 export async function createRun(input: CreateRunInput): Promise<RunState> {
   const now = new Date().toISOString();
@@ -252,15 +253,43 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
     attemptId = envelope.attemptId;
   }
 
-  run = await launchWorkerAttempt({
-    runId: run.id,
-    attemptId,
-  });
+  run = await requireRun(run.id);
+  if (!activeAutopilotCycles.has(autopilotCycleKey(run.id, attemptId))) {
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId,
+      type: "autopilot.cycle_scheduled",
+      message: "Autopilot worker cycle scheduled",
+      payload: {
+        workerTasks: run.workerTasks.length,
+        workerAttempts: run.workerAttempts.length,
+      },
+    });
+    scheduleAutopilotCycle(run.id, attemptId);
+  }
 
-  const latest = await requireRun(run.id);
-  if (latest.status === "paused") return latest;
+  return run;
+}
 
-  return commitRunChange(latest, {
+async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promise<void> {
+  let launched: RunState;
+  try {
+    launched = await launchWorkerAttempt({
+      runId,
+      attemptId,
+    });
+  } catch (err) {
+    await markAutopilotCycleFailed(runId, attemptId, err);
+    return;
+  }
+
+  const latest = await requireRun(launched.id);
+  if (latest.status === "paused") return;
+
+  await commitRunChange(latest, {
     type: "autopilot.cycle_completed",
     message: "Autopilot completed one execution cycle",
     payload: {
@@ -278,6 +307,53 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       draft.updatedAt = timestamp;
     },
   });
+}
+
+function scheduleAutopilotCycle(runId: string, attemptId: string): void {
+  const key = autopilotCycleKey(runId, attemptId);
+  if (activeAutopilotCycles.has(key)) return;
+
+  const cycle = runAutopilotWorkerCycle(runId, attemptId)
+    .catch(async (err) => {
+      try {
+        await markAutopilotCycleFailed(runId, attemptId, err);
+      } catch {
+        /* run may have been deleted while the background cycle was failing */
+      }
+    })
+    .finally(() => {
+      activeAutopilotCycles.delete(key);
+    });
+  activeAutopilotCycles.set(key, cycle);
+  void cycle;
+}
+
+async function markAutopilotCycleFailed(runId: string, attemptId: string, err: unknown): Promise<void> {
+  const run = await getRun(runId);
+  if (!run) return;
+  const error = err instanceof Error ? err.message : String(err);
+  await commitRunChange(run, {
+    type: "autopilot.cycle_failed",
+    message: `Autopilot worker cycle failed: ${error}`,
+    payload: {
+      attemptId,
+      error,
+    },
+    mutate: (draft, timestamp) => {
+      draft.status = "failed";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "failed",
+        lastAction: "worker_cycle_failed",
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+function autopilotCycleKey(runId: string, attemptId: string): string {
+  return `${runId}:${attemptId}`;
 }
 
 export async function pauseRun(input: PauseRunInput): Promise<RunState> {

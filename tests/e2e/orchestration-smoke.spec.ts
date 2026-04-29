@@ -15,6 +15,7 @@ test("autopilot runs from a selected markdown plan", async () => {
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,
+        SPARK_MANUAL_WORKER_DELAY_MS: "5000",
       },
     });
     const page = await app.firstWindow();
@@ -24,11 +25,11 @@ test("autopilot runs from a selected markdown plan", async () => {
 
     await expect(page.locator("select")).toHaveValue(/PLAN\.md$/);
     await clickButton(page, "RUN");
-    await expectEvent(page, "autopilot.cycle_completed", 10_000);
-    await expect(page.getByText("FINAL REPORT")).toBeVisible();
+    await expectEvent(page, "worker_attempt.running", 10_000);
 
     await page.getByPlaceholder("Plan, instruction, correction, or answer...").fill("Pause before real workers.");
     await clickButton(page, "STOP");
+    await expectEvent(page, "worker_attempt.pause_signal_sent");
     await expectEvent(page, "run.paused");
 
     await page.getByPlaceholder("Plan, instruction, correction, or answer...").fill("Keep the user flow simple.");
@@ -36,13 +37,17 @@ test("autopilot runs from a selected markdown plan", async () => {
     await expectEvent(page, "human.note");
 
     await clickButton(page, "RESUME");
+    await expectEvent(page, "worker_attempt.resume_signal_sent");
     await expectEvent(page, "run.resumed");
+    await expectEvent(page, "autopilot.cycle_completed", 10_000);
+    await expect(page.getByText("FINAL REPORT")).toBeVisible();
 
     const run = await readOnlyRun(userDataDir);
     expect(run.workerAttempts).toHaveLength(1);
     expect(run.workerAttempts[0].status).toBe("succeeded");
     expect(run.workerTasks[0].status).toBe("needs_review");
-    expect(run.status).toBe("running");
+    expect(run.status).toBe("reviewing");
+    expect(run.autopilot?.status).toBe("blocked");
     expect(run.plans[0].sourceFile).toMatch(/PLAN\.md$/);
     expect(run.plans[0].rawContent).toContain("Build the first autonomous manager loop.");
     expect(run.humanMessages.map((message) => message.message)).toContain("Pause before real workers.");

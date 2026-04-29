@@ -121,6 +121,14 @@ understanding the low-level worker machinery.
   built from the user's pause reason or latest message.
 - The controlled manual worker runner now understands pause/resume input so the
   same contract can be used by real terminal-backed Claude/Codex workers later.
+- Autopilot worker cycles now run in the background instead of blocking the
+  `RUN` request.
+- Added an `autopilot.cycle_scheduled` event so the UI can observe that manager
+  work has been handed off.
+- Added background-cycle failure handling that marks the run/autopilot failed
+  and records `autopilot.cycle_failed`.
+- Updated E2E coverage to stop a delayed active worker, resume it with user
+  guidance, and wait for the background cycle to complete.
 
 ## Current State
 
@@ -152,8 +160,7 @@ Missing foundation:
 - real Claude/Codex worker process launch
 - cancellation and timeout handling
 - a dedicated advanced/manual control surface outside the primary Spark panel
-- a long-running autopilot loop that can continue across many steps without the
-  current controlled runner blocking the UI
+- a long-running autopilot loop that can continue across many steps
 - Spark-generated plan analysis and task decomposition
 
 ## Next Step
@@ -165,7 +172,6 @@ Immediate target:
 ```text
 Autopilot loop hardening:
   make the loop continue until complete, paused, blocked, or failed
-  move worker execution off the blocking startAutopilot request path
   route real Claude/Codex workers through terminal-backed controllable sessions
   parse final-report.json and decide accept/retry/follow-up/question
   let Spark write clarification questions into the run message stream

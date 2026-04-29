@@ -66,8 +66,8 @@ context rather than product source.
   that captures `stdout.log`, `stderr.log`, `raw.log`, and `final-report.json`.
 - Autopilot has a first one-button manager cycle: create/reuse a run, create
   the first step/task if needed, prepare a worker envelope, launch the
-  controlled worker, and return to review. The plan text comes from the
-  selected Markdown file.
+  controlled worker in the background, and return to review. The plan text
+  comes from the selected Markdown file.
 - Selected Markdown plans are persisted in `RunState.plans` with `sourceFile`
   and raw content so future planning/review steps can trace the run input.
 - Runs can be paused, resumed, and annotated with durable human messages. These
@@ -213,7 +213,7 @@ Run mutations:
   pause/resume with active worker control signals
   durable human messages
   worker task envelope preparation
-  controlled manual worker execution
+  background controlled manual worker execution
 ```
 
 This keeps the product rule intact:
