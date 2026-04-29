@@ -1,9 +1,10 @@
 import { ipcMain, dialog, BrowserWindow, app } from "electron";
 import { listShells, defaultShell } from "./shells";
-import { listDir } from "./fs-tree";
+import { listDir, readTextFile, writeTextFile } from "./fs-tree";
+import { getGitGraph } from "./git-graph";
 import { loadState, saveState } from "./storage";
 import * as pty from "./pty-manager";
-import type { AppState, ShellInfo } from "@shared/types";
+import type { AppState, FsFileContent, GitGraph, ShellInfo } from "@shared/types";
 
 export function registerIpc(): void {
   ipcMain.handle("state:load", async (): Promise<AppState> => {
@@ -34,6 +35,18 @@ export function registerIpc(): void {
 
   ipcMain.handle("fs:list", async (_e, dir: string) => {
     return listDir(dir);
+  });
+
+  ipcMain.handle("fs:readText", async (_e, path: string): Promise<FsFileContent> => {
+    return readTextFile(path);
+  });
+
+  ipcMain.handle("fs:writeText", async (_e, args: { path: string; content: string }): Promise<FsFileContent> => {
+    return writeTextFile(args.path, args.content);
+  });
+
+  ipcMain.handle("git:graph", async (_e, cwd: string): Promise<GitGraph> => {
+    return getGitGraph(cwd);
   });
 
   ipcMain.handle(

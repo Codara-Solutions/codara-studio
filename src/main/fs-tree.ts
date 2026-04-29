@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 import { join, extname } from "node:path";
-import type { FsEntry } from "@shared/types";
+import type { FsEntry, FsFileContent } from "@shared/types";
+
+const MAX_TEXT_FILE_BYTES = 5 * 1024 * 1024;
 
 export async function listDir(dir: string): Promise<FsEntry[]> {
   let entries: import("node:fs").Dirent[];
@@ -14,10 +16,6 @@ export async function listDir(dir: string): Promise<FsEntry[]> {
 
   const out: FsEntry[] = [];
   for (const e of entries) {
-    if (e.name.startsWith(".") && e.name !== ".env" && e.name !== ".env.local" && e.name !== ".gitignore") {
-      // hide most dotfiles to keep the tree tidy; show common configs
-      // (tweak later if needed)
-    }
     const isDir = e.isDirectory() || (e.isSymbolicLink() && await isDirSafe(join(dir, e.name)));
     out.push({
       name: e.name,
@@ -41,4 +39,31 @@ async function isDirSafe(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export async function readTextFile(path: string): Promise<FsFileContent> {
+  const st = await fs.stat(path);
+  if (!st.isFile()) {
+    throw new Error("Path is not a file.");
+  }
+  if (st.size > MAX_TEXT_FILE_BYTES) {
+    throw new Error("File is too large to open in the editor.");
+  }
+
+  const buffer = await fs.readFile(path);
+  if (buffer.includes(0)) {
+    throw new Error("Binary files cannot be opened in the editor.");
+  }
+
+  return {
+    path,
+    content: buffer.toString("utf8"),
+    size: st.size,
+    mtimeMs: st.mtimeMs,
+  };
+}
+
+export async function writeTextFile(path: string, content: string): Promise<FsFileContent> {
+  await fs.writeFile(path, content, "utf8");
+  return readTextFile(path);
 }

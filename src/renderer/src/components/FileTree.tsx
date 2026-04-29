@@ -20,9 +20,11 @@ type Node = (DirNode & { kind: "dir" }) | (FileNode & { kind: "file" });
 
 interface Props {
   cwd: string;
+  activePath?: string | null;
+  onOpenFile: (entry: FsEntry) => void;
 }
 
-export default function FileTree({ cwd }: Props) {
+export default function FileTree({ cwd, activePath, onOpenFile }: Props) {
   const [root, setRoot] = useState<DirNode & { kind: "dir" }>(() => makeDir({ name: basename(cwd), path: cwd, isDir: true }, true));
   const [, force] = useState(0);
 
@@ -86,7 +88,9 @@ export default function FileTree({ cwd }: Props) {
             key={row.node.entry.path + i}
             node={row.node}
             depth={row.depth}
+            active={row.node.entry.path === activePath}
             onToggle={() => toggleDir(row.node as DirNode & { kind: "dir" })}
+            onOpenFile={onOpenFile}
           />
         ))}
       </div>
@@ -125,18 +129,31 @@ async function loadDir(path: string): Promise<Node[]> {
   );
 }
 
-function Row({ node, depth, onToggle }: { node: Node; depth: number; onToggle: () => void }) {
+function Row({
+  node,
+  depth,
+  active,
+  onToggle,
+  onOpenFile,
+}: {
+  node: Node;
+  depth: number;
+  active: boolean;
+  onToggle: () => void;
+  onOpenFile: (entry: FsEntry) => void;
+}) {
   const isDir = node.kind === "dir";
   return (
     <div
-      onClick={isDir ? onToggle : undefined}
+      onClick={isDir ? onToggle : () => onOpenFile(node.entry)}
       style={{
         display: "flex",
         alignItems: "center",
         gap: 8,
         padding: "3px 12px 3px 0",
         paddingLeft: 12 + depth * 14,
-        color: "var(--ink-dim)",
+        background: active ? "var(--panel-2)" : "transparent",
+        color: active ? "var(--ink)" : "var(--ink-dim)",
         fontSize: 12,
         cursor: isDir ? "default" : "default",
       }}

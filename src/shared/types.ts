@@ -33,3 +33,27 @@ export interface FsEntry {
   isDir: boolean;
   ext?: string;
 }
+
+export interface FsFileContent {
+  path: string;
+  content: string;
+  size: number;
+  mtimeMs: number;
+}
+
+export interface GitGraph {
+  isRepo: boolean;
+  branch?: string;
+  branches: GitBranch[];
+  remoteBranches: string[];
+  lines: string[];
+  error?: string;
+}
+
+export interface GitBranch {
+  name: string;
+  current: boolean;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+}

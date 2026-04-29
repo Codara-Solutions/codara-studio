@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { AppState, FsEntry, ShellInfo } from "@shared/types";
+import type { AppState, FsEntry, FsFileContent, GitGraph, ShellInfo } from "@shared/types";
 
 type PtyDataHandler = (data: string) => void;
 type PtyExitHandler = (info: { exitCode: number; signal?: number }) => void;
@@ -19,6 +19,12 @@ const api = {
   },
   fs: {
     list: (dir: string): Promise<FsEntry[]> => ipcRenderer.invoke("fs:list", dir),
+    readText: (path: string): Promise<FsFileContent> => ipcRenderer.invoke("fs:readText", path),
+    writeText: (path: string, content: string): Promise<FsFileContent> =>
+      ipcRenderer.invoke("fs:writeText", { path, content }),
+  },
+  git: {
+    graph: (cwd: string): Promise<GitGraph> => ipcRenderer.invoke("git:graph", cwd),
   },
   pty: {
     spawn: (args: {

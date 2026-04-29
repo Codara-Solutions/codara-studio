@@ -1,18 +1,28 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AppState, ShellInfo, Workspace } from "@shared/types";
+import type { AppState, FsEntry, ShellInfo, Workspace } from "@shared/types";
 import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import TerminalGrid from "./components/TerminalGrid";
 import FileTree from "./components/FileTree";
+import EditorGrid from "./components/EditorGrid";
 import SparkAgentPanel from "./components/SparkAgentPanel";
 import StatusBar from "./components/StatusBar";
+import { PlusIcon } from "./components/icons";
 import { basename } from "./path-utils";
 
 const RAIL_WIDTH = 240;
 const RIGHT_WIDTH = 360;
+type WorkbenchTab = "workers" | "editor";
 
 function uid(prefix = "id"): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function gridDims(n: number): { cols: number; rows: number } {
+  if (n <= 0) return { cols: 1, rows: 1 };
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  return { cols, rows };
 }
 
 export default function App() {
@@ -23,6 +33,9 @@ export default function App() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showLeft, setShowLeft] = useState(true);
   const [showRight, setShowRight] = useState(true);
+  const [openFiles, setOpenFiles] = useState<FsEntry[]>([]);
+  const [activeEditorPath, setActiveEditorPath] = useState<string | null>(null);
+  const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WorkbenchTab>("workers");
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [defaultShell, setDefaultShell] = useState<ShellInfo | null>(null);
   const [platform, setPlatform] = useState<string>("");
@@ -77,6 +90,12 @@ export default function App() {
   useEffect(() => {
     if (!showLeft) setEditingId(null);
   }, [showLeft]);
+
+  useEffect(() => {
+    setOpenFiles([]);
+    setActiveEditorPath(null);
+    setActiveWorkbenchTab("workers");
+  }, [activeId]);
 
   const activeWorkspace = useMemo(
     () => workspaces.find((w) => w.id === activeId) ?? null,
@@ -152,6 +171,26 @@ export default function App() {
     );
   }, []);
 
+  const openEditorFile = useCallback((entry: FsEntry) => {
+    setOpenFiles((files) =>
+      files.some((file) => file.path === entry.path) ? files : [...files, entry],
+    );
+    setActiveEditorPath(entry.path);
+    setActiveWorkbenchTab("editor");
+  }, []);
+
+  const closeEditorFile = useCallback((path: string) => {
+    setOpenFiles((files) => {
+      const next = files.filter((file) => file.path !== path);
+      setActiveEditorPath((current) => {
+        if (current !== path) return current;
+        return next[next.length - 1]?.path ?? null;
+      });
+      if (next.length === 0) setActiveWorkbenchTab("workers");
+      return next;
+    });
+  }, []);
+
   if (bootError) {
     return (
       <div style={{ padding: 20, color: "var(--danger)" }}>
@@ -185,9 +224,15 @@ export default function App() {
           <WorkspaceRail
             workspaces={workspaces}
             activeId={activeId}
+            activeWorkspace={activeWorkspace}
             editingId={editingId}
             width={RAIL_WIDTH}
-            onActivate={(id) => setActiveId(id)}
+            onActivate={(id) => {
+              setOpenFiles([]);
+              setActiveEditorPath(null);
+              setActiveWorkbenchTab("workers");
+              setActiveId(id);
+            }}
             onEdit={(id) => setEditingId((prev) => (prev === id ? null : id))}
             onChange={updateWs}
             onDelete={deleteWs}
@@ -221,20 +266,43 @@ export default function App() {
                   minHeight: 0,
                 }}
               >
-                <TerminalGrid
-                  workspace={ws}
+                <WorkbenchTabs
+                  active={activeWorkbenchTab}
+                  workerCount={ws.workers.length}
+                  fileCount={openFiles.length}
                   shells={shells}
                   defaultShell={defaultShell}
+                  onSelect={setActiveWorkbenchTab}
                   onAddWorker={(shellId) => addWorker(ws.id, shellId)}
-                  onRemoveWorker={(workerId) => removeWorker(ws.id, workerId)}
                 />
+                <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: activeWorkbenchTab === "workers" ? "flex" : "none" }}>
+                  <TerminalGrid
+                    workspace={ws}
+                    shells={shells}
+                    defaultShell={defaultShell}
+                    onAddWorker={(shellId) => addWorker(ws.id, shellId)}
+                    onRemoveWorker={(workerId) => removeWorker(ws.id, workerId)}
+                  />
+                </div>
+                <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: activeWorkbenchTab === "editor" ? "flex" : "none" }}>
+                  <EditorGrid
+                    files={openFiles}
+                    activePath={activeEditorPath}
+                    onActivateFile={setActiveEditorPath}
+                    onCloseFile={closeEditorFile}
+                  />
+                </div>
               </div>
             ))
           )}
         </main>
 
         {showRight && (
-          <RightPanel cwd={activeWorkspace?.cwd ?? null} />
+          <RightPanel
+            cwd={activeWorkspace?.cwd ?? null}
+            activePath={activeEditorPath}
+            onOpenFile={openEditorFile}
+          />
         )}
       </div>
 
@@ -247,7 +315,15 @@ export default function App() {
   );
 }
 
-function RightPanel({ cwd }: { cwd: string | null }) {
+function RightPanel({
+  cwd,
+  activePath,
+  onOpenFile,
+}: {
+  cwd: string | null;
+  activePath: string | null;
+  onOpenFile: (entry: FsEntry) => void;
+}) {
   return (
     <aside
       style={{
@@ -263,13 +339,275 @@ function RightPanel({ cwd }: { cwd: string | null }) {
     >
       <SparkAgentPanel />
       {cwd ? (
-        <FileTree cwd={cwd} />
+        <FileTree cwd={cwd} activePath={activePath} onOpenFile={onOpenFile} />
       ) : (
         <div style={{ padding: "12px 14px", color: "var(--muted)", fontSize: 11 }}>
           No active workspace.
         </div>
       )}
     </aside>
+  );
+}
+
+function WorkbenchTabs({
+  active,
+  workerCount,
+  fileCount,
+  shells,
+  defaultShell,
+  onSelect,
+  onAddWorker,
+}: {
+  active: WorkbenchTab;
+  workerCount: number;
+  fileCount: number;
+  shells: ShellInfo[];
+  defaultShell: ShellInfo | null;
+  onSelect: (tab: WorkbenchTab) => void;
+  onAddWorker: (shellId: string) => void;
+}) {
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement | null>(null);
+  const workerDims = gridDims(workerCount);
+  const activeDims = active === "editor" ? gridDims(fileCount) : workerDims;
+
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (pickerRef.current && e.target instanceof Node && !pickerRef.current.contains(e.target)) {
+        setPickerOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPickerOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [pickerOpen]);
+
+  const handleAdd = () => {
+    onSelect("workers");
+    if (shells.length === 1 && defaultShell) {
+      onAddWorker(defaultShell.id);
+      return;
+    }
+    setPickerOpen((open) => !open);
+  };
+
+  return (
+    <div
+      style={{
+        flex: "0 0 34px",
+        display: "flex",
+        alignItems: "stretch",
+        background: "var(--panel)",
+        borderBottom: "1px solid var(--rule)",
+        position: "relative",
+      }}
+    >
+      <WorkbenchTabButton
+        label="WORKERS"
+        count={workerCount}
+        active={active === "workers"}
+        onClick={() => onSelect("workers")}
+      />
+      {fileCount > 0 && (
+        <WorkbenchTabButton
+          label="EDITOR"
+          count={fileCount}
+          active={active === "editor"}
+          onClick={() => onSelect("editor")}
+        />
+      )}
+      <div style={{ flex: 1 }} />
+      {active === "workers" && (
+        <div ref={pickerRef} style={{ position: "relative", display: "flex", alignItems: "center", padding: "0 8px" }}>
+          <button
+            type="button"
+            onClick={handleAdd}
+            disabled={shells.length === 0}
+            title="New worker"
+            style={{
+              appearance: "none",
+              width: 24,
+              height: 24,
+              border: "1px solid var(--rule-strong)",
+              background: "var(--bg)",
+              color: shells.length > 0 ? "var(--ink-dim)" : "var(--muted)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 0,
+              cursor: "default",
+            }}
+          >
+            <PlusIcon />
+          </button>
+          {pickerOpen && (
+            <ShellPicker
+              shells={shells}
+              defaultShell={defaultShell}
+              onPick={(shell) => {
+                setPickerOpen(false);
+                onAddWorker(shell.id);
+              }}
+            />
+          )}
+        </div>
+      )}
+      <div
+        style={{
+          padding: "0 14px",
+          display: "flex",
+          alignItems: "center",
+          color: "var(--muted)",
+          fontSize: 10,
+          letterSpacing: "0.08em",
+        }}
+      >
+        LAYOUT&nbsp;<b style={{ color: "var(--ink-dim)" }}>{activeDims.cols}×{activeDims.rows}</b>
+      </div>
+    </div>
+  );
+}
+
+function WorkbenchTabButton({
+  label,
+  count,
+  active,
+  onClick,
+}: {
+  label: string;
+  count?: number;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        appearance: "none",
+        border: "none",
+        borderRight: "1px solid var(--rule)",
+        background: active ? "var(--bg)" : "transparent",
+        color: active ? "var(--ink)" : "var(--ink-dim)",
+        padding: "0 16px",
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        fontFamily: "inherit",
+        fontSize: 11,
+        fontWeight: 700,
+        letterSpacing: "0.08em",
+        cursor: "default",
+        position: "relative",
+      }}
+    >
+      {active && (
+        <span
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 2,
+            background: "var(--accent)",
+          }}
+        />
+      )}
+      <span>{label}</span>
+      {count !== undefined && (
+        <span
+          style={{
+            minWidth: 20,
+            textAlign: "center",
+            padding: "1px 5px",
+            border: "1px solid var(--rule-strong)",
+            color: active ? "var(--ink)" : "var(--muted)",
+            fontSize: 10,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {String(count).padStart(2, "0")}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function ShellPicker({
+  shells,
+  defaultShell,
+  onPick,
+}: {
+  shells: ShellInfo[];
+  defaultShell: ShellInfo | null;
+  onPick: (shell: ShellInfo) => void;
+}) {
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: 34,
+        right: 0,
+        zIndex: 50,
+        background: "var(--panel-2)",
+        border: "1px solid var(--rule-strong)",
+        boxShadow: "0 6px 24px rgba(0,0,0,0.4)",
+        minWidth: 240,
+      }}
+    >
+      <div
+        style={{
+          padding: "8px 12px",
+          fontSize: 10,
+          letterSpacing: "0.14em",
+          fontWeight: 700,
+          color: "var(--muted)",
+          borderBottom: "1px solid var(--rule)",
+        }}
+      >
+        SHELL
+      </div>
+      <div style={{ maxHeight: 320, overflow: "auto" }}>
+        {shells.map((shell) => {
+          const isDefault = defaultShell?.id === shell.id;
+          return (
+            <button
+              key={shell.id}
+              type="button"
+              onClick={() => onPick(shell)}
+              style={{
+                appearance: "none",
+                width: "100%",
+                textAlign: "left",
+                background: "transparent",
+                border: "none",
+                padding: "8px 12px",
+                color: "var(--ink)",
+                fontFamily: "inherit",
+                fontSize: 12,
+                cursor: "default",
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--panel)")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+            >
+              <span style={{ width: 8, height: 8, background: "var(--accent)", opacity: isDefault ? 1 : 0 }} />
+              <span style={{ flex: 1 }}>{shell.label}</span>
+              <span style={{ color: "var(--muted)", fontSize: 10 }}>{shell.family}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

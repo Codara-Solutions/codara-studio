@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { Workspace } from "@shared/types";
 import { PlusIcon } from "./icons";
+import GitGraph from "./GitGraph";
 
 const WORKSPACE_COLORS = [
   "#F0C419",
@@ -18,6 +19,7 @@ interface RailProps {
   activeId: string | null;
   editingId: string | null;
   width: number;
+  activeWorkspace: Workspace | null;
   onActivate: (id: string) => void;
   onEdit: (id: string) => void;
   onChange: (id: string, patch: Partial<Workspace>) => void;
@@ -42,22 +44,25 @@ export default function WorkspaceRail(props: RailProps) {
       }}
     >
       <RailHeader onCreate={onCreate} />
-      <div style={{ flex: 1, overflow: "auto" }}>
-        <RailSectionHeader label="WORKSPACES" count={workspaces.length} />
-        {workspaces.length === 0 && <EmptyState onCreate={onCreate} />}
-        {workspaces.map((w) => (
-          <WorkspaceRow
-            key={w.id}
-            ws={w}
-            active={w.id === props.activeId}
-            editing={w.id === props.editingId}
-            onActivate={() => props.onActivate(w.id)}
-            onEdit={() => props.onEdit(w.id)}
-            onChange={(patch) => props.onChange(w.id, patch)}
-            onDelete={() => props.onDelete(w.id)}
-            onCloseEditor={props.onCloseEditor}
-          />
-        ))}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
+        <div style={{ flex: "1 1 50%", overflow: "auto", minHeight: 0 }}>
+          <RailSectionHeader label="WORKSPACES" count={workspaces.length} />
+          {workspaces.length === 0 && <EmptyState onCreate={onCreate} />}
+          {workspaces.map((w) => (
+            <WorkspaceRow
+              key={w.id}
+              ws={w}
+              active={w.id === props.activeId}
+              editing={w.id === props.editingId}
+              onActivate={() => props.onActivate(w.id)}
+              onEdit={() => props.onEdit(w.id)}
+              onChange={(patch) => props.onChange(w.id, patch)}
+              onDelete={() => props.onDelete(w.id)}
+              onCloseEditor={props.onCloseEditor}
+            />
+          ))}
+        </div>
+        <GitGraph cwd={props.activeWorkspace?.cwd ?? null} />
       </div>
     </aside>
   );

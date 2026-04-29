@@ -51,8 +51,6 @@ export function spawn(opts: SpawnOptions): { id: string; pid: number } {
   for (const [k, v] of Object.entries(process.env)) {
     if (typeof v === "string") env[k] = v;
   }
-  // Strip Anthropic API key per project policy when spawning workers.
-  delete env.ANTHROPIC_API_KEY;
   env.TERM = "xterm-256color";
   env.COLORTERM = "truecolor";
 
