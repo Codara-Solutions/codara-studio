@@ -73,6 +73,9 @@ context rather than product source.
 - Runs can be paused, resumed, and annotated with durable human messages. These
   messages are the path for corrections, answers, and future Spark
   clarification questions.
+- Pausing a run sends an Esc control signal to active worker attempts before the
+  run is marked paused. Resuming sends active workers either plain `continue` or
+  a Spark manager update built from the user's pause reason/latest message.
 - The app has an initial orchestration run store and JSONL event log under
   Electron userData.
 
@@ -207,7 +210,7 @@ Artifacts tab:
   events.jsonl path
 Run mutations:
   autopilot start
-  pause/resume
+  pause/resume with active worker control signals
   durable human messages
   worker task envelope preparation
   controlled manual worker execution

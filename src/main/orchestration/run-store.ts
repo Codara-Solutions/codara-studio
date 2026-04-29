@@ -1,5 +1,5 @@
 import { shell } from "electron";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -27,6 +27,20 @@ import type {
 import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
 
 const RUN_FILE = "run.json";
+const ESC_KEY = "\x1b";
+const CONTINUE_INPUT = "continue\n";
+
+interface ActiveWorkerProcess {
+  runId: string;
+  stepId?: string;
+  workerTaskId: string;
+  attemptId: string;
+  pid?: number;
+  command: string;
+  child: ChildProcessWithoutNullStreams;
+}
+
+const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
 
 export async function createRun(input: CreateRunInput): Promise<RunState> {
   const now = new Date().toISOString();
@@ -269,11 +283,27 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
 export async function pauseRun(input: PauseRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   const reason = input.reason?.trim() || "Paused by user";
+  await sendPauseSignals(run, reason);
   return commitRunChange(run, {
     type: "run.paused",
     message: reason,
-    payload: { reason },
+    payload: {
+      reason,
+      activeWorkerAttempts: activeWorkersForRun(run.id).map((worker) => worker.attemptId),
+      controlSignal: "escape",
+      messageRecorded: reason !== "Paused by user",
+    },
     mutate: (draft, timestamp) => {
+      if (reason !== "Paused by user") {
+        draft.humanMessages.push({
+          id: makeId("msg"),
+          runId: draft.id,
+          author: "user",
+          kind: "note",
+          message: reason,
+          createdAt: timestamp,
+        });
+      }
       draft.status = "paused";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
@@ -290,9 +320,16 @@ export async function pauseRun(input: PauseRunInput): Promise<RunState> {
 
 export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
+  const resumePrompt = buildResumePrompt(run);
+  await sendResumeSignals(run, resumePrompt);
   return commitRunChange(run, {
     type: "run.resumed",
-    message: "Run resumed",
+    message: resumePrompt.kind === "prompt" ? "Run resumed with user update" : "Run resumed",
+    payload: {
+      activeWorkerAttempts: activeWorkersForRun(run.id).map((worker) => worker.attemptId),
+      controlSignal: resumePrompt.kind,
+      messageId: resumePrompt.messageId,
+    },
     mutate: (draft, timestamp) => {
       draft.status = "running";
       draft.autopilot = {
@@ -774,6 +811,106 @@ async function askHumanQuestion(runId: string, message: string): Promise<RunStat
   });
 }
 
+function activeWorkersForRun(runId: string): ActiveWorkerProcess[] {
+  return Array.from(activeWorkerProcesses.values()).filter((worker) => worker.runId === runId);
+}
+
+async function sendPauseSignals(run: RunState, reason: string): Promise<void> {
+  const workers = activeWorkersForRun(run.id);
+  await Promise.all(
+    workers.map(async (worker) => {
+      writeWorkerInput(worker, ESC_KEY);
+      await appendEvent({
+        workspaceId: run.workspaceId,
+        runId: run.id,
+        stepId: worker.stepId,
+        workerTaskId: worker.workerTaskId,
+        attemptId: worker.attemptId,
+        type: "worker_attempt.pause_signal_sent",
+        message: "Pause signal sent to worker attempt",
+        payload: {
+          signal: "escape",
+          reason,
+          pid: worker.pid,
+          command: worker.command,
+        },
+      });
+    }),
+  );
+}
+
+async function sendResumeSignals(
+  run: RunState,
+  resumePrompt: { kind: "continue" | "prompt"; input: string; messageId?: string },
+): Promise<void> {
+  const workers = activeWorkersForRun(run.id);
+  await Promise.all(
+    workers.map(async (worker) => {
+      writeWorkerInput(worker, resumePrompt.input);
+      await appendEvent({
+        workspaceId: run.workspaceId,
+        runId: run.id,
+        stepId: worker.stepId,
+        workerTaskId: worker.workerTaskId,
+        attemptId: worker.attemptId,
+        type: "worker_attempt.resume_signal_sent",
+        message:
+          resumePrompt.kind === "prompt"
+            ? "Resume prompt sent to worker attempt"
+            : "Continue signal sent to worker attempt",
+        payload: {
+          signal: resumePrompt.kind,
+          messageId: resumePrompt.messageId,
+          pid: worker.pid,
+          command: worker.command,
+        },
+      });
+    }),
+  );
+}
+
+function writeWorkerInput(worker: ActiveWorkerProcess, input: string): void {
+  if (worker.child.stdin.destroyed || !worker.child.stdin.writable) return;
+  worker.child.stdin.write(input);
+}
+
+function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input: string; messageId?: string } {
+  const pausedAt = run.autopilot?.pausedAt;
+  const userUpdate = run.humanMessages
+    .slice()
+    .reverse()
+    .find((message) => {
+      if (message.author !== "user") return false;
+      if (!pausedAt) return true;
+      return message.createdAt >= pausedAt;
+    });
+
+  const pauseReason = run.autopilot?.stopReason?.trim();
+  const promptText =
+    userUpdate?.message ??
+    (pauseReason && pauseReason !== "Paused by user" ? pauseReason : undefined);
+
+  if (!promptText) {
+    return { kind: "continue", input: CONTINUE_INPUT };
+  }
+
+  return {
+    kind: "prompt",
+    messageId: userUpdate?.id,
+    input: [
+      "",
+      "SPARK MANAGER UPDATE",
+      "The user changed or clarified the direction while this worker was paused.",
+      "Use this instruction if it applies to your task; otherwise continue with the existing assignment.",
+      "",
+      promptText,
+      "",
+      "continue",
+      "",
+    ].join("\n"),
+  };
+}
+
 function workerArtifactPaths(
   runId: string,
   stepId: string | undefined,
@@ -843,6 +980,16 @@ async function runManualWorkerProcess({
     },
   });
 
+  activeWorkerProcesses.set(attemptId, {
+    runId: run.id,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    attemptId,
+    pid: child.pid,
+    command,
+    child,
+  });
+
   return new Promise((resolve) => {
     const writes: Promise<void>[] = [];
     let settled = false;
@@ -854,11 +1001,13 @@ async function runManualWorkerProcess({
     });
     child.on("error", (err) => {
       settled = true;
+      activeWorkerProcesses.delete(attemptId);
       resolve({ exitCode: 1, error: err.message });
     });
     child.on("close", async (code) => {
       if (settled) return;
       settled = true;
+      activeWorkerProcesses.delete(attemptId);
       await Promise.allSettled(writes);
       resolve({ exitCode: code ?? 1 });
     });
@@ -921,6 +1070,10 @@ const reportPath = process.env.SPARK_FINAL_REPORT_PATH;
 const promptPath = process.env.SPARK_PROMPT_PATH;
 const workpadPath = process.env.SPARK_WORKPAD_PATH;
 const title = process.env.SPARK_TASK_TITLE || "Manual worker task";
+const finishDelayMs = Math.max(0, Number(process.env.SPARK_MANUAL_WORKER_DELAY_MS || 0));
+let paused = false;
+let finished = false;
+let finishTimer = null;
 console.log("Spark manual worker runner started.");
 console.log("Prompt:", promptPath);
 console.log("Workpad:", workpadPath);
@@ -928,24 +1081,55 @@ if (!reportPath) {
   console.error("SPARK_FINAL_REPORT_PATH is missing.");
   process.exit(1);
 }
-const report = {
-  status: "partial",
-  summary: "Manual worker launch path verified. No project edits were performed by this runner.",
-  files_changed: [],
-  commands_run: [
-    {
-      command: "spark-manual-worker-runner",
-      exit_code: 0,
-      summary: "Captured stdout/stderr and wrote final-report.json for " + title
-    }
-  ],
-  tests: [],
-  proof: ["Worker process launched and completed.", "Final report artifact was written."],
-  risks: ["This is a controlled runner, not a real Claude/Codex worker yet."],
-  followups: ["Replace manual runner with configured worker runtime once execution controls are stable."]
-};
-fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf8");
-console.log("Final report:", reportPath);
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (data) => {
+  if (data.includes(String.fromCharCode(27))) {
+    paused = true;
+    if (finishTimer) clearTimeout(finishTimer);
+    console.log("Spark worker pause signal received.");
+    return;
+  }
+  const text = String(data).trim();
+  if (!text) return;
+  paused = false;
+  console.log("Spark worker resume input received.");
+  if (text.toLowerCase() !== "continue") {
+    console.log(text);
+  }
+  scheduleFinish();
+});
+process.stdin.resume();
+scheduleFinish();
+
+function scheduleFinish() {
+  if (paused || finished) return;
+  if (finishTimer) clearTimeout(finishTimer);
+  finishTimer = setTimeout(finish, finishDelayMs);
+}
+
+function finish() {
+  if (paused || finished) return;
+  finished = true;
+  const report = {
+    status: "partial",
+    summary: "Manual worker launch path verified. No project edits were performed by this runner.",
+    files_changed: [],
+    commands_run: [
+      {
+        command: "spark-manual-worker-runner",
+        exit_code: 0,
+        summary: "Captured stdout/stderr and wrote final-report.json for " + title
+      }
+    ],
+    tests: [],
+    proof: ["Worker process launched and completed.", "Final report artifact was written."],
+    risks: ["This is a controlled runner, not a real Claude/Codex worker yet."],
+    followups: ["Replace manual runner with configured worker runtime once execution controls are stable."]
+  };
+  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf8");
+  console.log("Final report:", reportPath);
+  process.exit(0);
+}
 `;
 }
 

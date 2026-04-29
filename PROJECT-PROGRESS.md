@@ -31,6 +31,9 @@ understanding the low-level worker machinery.
   workers, open panes, inspect artifacts, and steer specific agents directly.
 - Users must be able to stop a run, say what they want changed, and resume.
   Those messages are part of the run record, not transient UI state.
+- Stop should send an interrupt-style signal to active worker terminals or
+  processes. Resume should let Spark decide whether a worker receives plain
+  `continue` or a new manager prompt based on the user's correction.
 - Most users will provide the project plan as a Markdown file in the workspace.
   The primary Spark panel should let them select that file and run it, instead
   of making them understand step/task/prepare/execute controls.
@@ -111,6 +114,13 @@ understanding the low-level worker machinery.
 - Fixed compact-window right sidebar layout so the Spark panel, Dev Inspector,
   and Explorer stay ordered instead of visually overlapping.
 - Added E2E coverage for compact-window sidebar ordering.
+- Added active worker process tracking for launched worker attempts.
+- `STOP` now sends an Esc control signal to active worker attempts before
+  marking the run paused.
+- `RESUME` now sends active workers either `continue` or a manager update prompt
+  built from the user's pause reason or latest message.
+- The controlled manual worker runner now understands pause/resume input so the
+  same contract can be used by real terminal-backed Claude/Codex workers later.
 
 ## Current State
 
@@ -155,7 +165,8 @@ Immediate target:
 ```text
 Autopilot loop hardening:
   make the loop continue until complete, paused, blocked, or failed
-  make pause/stop interrupt active work instead of only changing run state
+  move worker execution off the blocking startAutopilot request path
+  route real Claude/Codex workers through terminal-backed controllable sessions
   parse final-report.json and decide accept/retry/follow-up/question
   let Spark write clarification questions into the run message stream
   add cancellation and timeouts before real Claude/Codex launchers

@@ -45,6 +45,7 @@ test("autopilot runs from a selected markdown plan", async () => {
     expect(run.status).toBe("running");
     expect(run.plans[0].sourceFile).toMatch(/PLAN\.md$/);
     expect(run.plans[0].rawContent).toContain("Build the first autonomous manager loop.");
+    expect(run.humanMessages.map((message) => message.message)).toContain("Pause before real workers.");
     expect(run.humanMessages.map((message) => message.message)).toContain("Keep the user flow simple.");
 
     const attempt = run.workerAttempts[0];

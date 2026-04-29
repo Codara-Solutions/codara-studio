@@ -45,6 +45,7 @@ export default function SparkAgentPanel({
 
   const stopRun = () => {
     const reason = humanInput.trim();
+    if (reason) setHumanInput("");
     onPauseRun(reason || "Paused by user");
   };
 
