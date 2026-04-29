@@ -7,6 +7,8 @@ export interface WorkerCommand {
   display: string;
   initialInput?: string;
   initialInputDelayMs?: number;
+  initialInputMaxDelayMs?: number;
+  initialInputWaitForOutput?: boolean;
   env?: Record<string, string>;
 }
 
@@ -58,11 +60,15 @@ export function startWorkerSession(opts: StartWorkerSessionOptions): WorkerSessi
   const done = new Promise<{ exitCode: number; signal?: number }>((resolve) => {
     resolveDone = resolve;
   });
+  const startedAt = Date.now();
+  let outputSeen = false;
+  let initialInputSent = false;
 
   pty.onData((data) => {
     appendOutput(opts.id, data);
     opts.onOutput(data);
     sendData(opts.id, data);
+    markOutputSeen();
   });
   pty.onExit(({ exitCode, signal }) => {
     if (settled) return;
@@ -97,10 +103,32 @@ export function startWorkerSession(opts: StartWorkerSessionOptions): WorkerSessi
 
   sessions.set(opts.id, session);
   if (opts.command.initialInput) {
-    const delayMs = Math.max(0, opts.command.initialInputDelayMs ?? 50);
-    setTimeout(() => session.write(opts.command.initialInput ?? ""), delayMs);
+    scheduleInitialInput(opts.command);
   }
   return session;
+
+  function markOutputSeen(): void {
+    outputSeen = true;
+    maybeSendInitialInput();
+  }
+
+  function maybeSendInitialInput(): void {
+    if (!opts.command.initialInput || initialInputSent || settled) return;
+    const elapsedMs = Date.now() - startedAt;
+    const minDelayMs = Math.max(0, opts.command.initialInputDelayMs ?? 50);
+    const maxDelayMs = Math.max(minDelayMs, opts.command.initialInputMaxDelayMs ?? minDelayMs);
+    if (elapsedMs < minDelayMs) return;
+    if (opts.command.initialInputWaitForOutput && !outputSeen && elapsedMs < maxDelayMs) return;
+    initialInputSent = true;
+    session.write(opts.command.initialInput);
+  }
+
+  function scheduleInitialInput(command: WorkerCommand): void {
+    const minDelayMs = Math.max(0, command.initialInputDelayMs ?? 50);
+    const maxDelayMs = Math.max(minDelayMs, command.initialInputMaxDelayMs ?? minDelayMs);
+    setTimeout(maybeSendInitialInput, minDelayMs);
+    if (maxDelayMs !== minDelayMs) setTimeout(maybeSendInitialInput, maxDelayMs);
+  }
 }
 
 export function getWorkerSession(id: string): WorkerSession | undefined {

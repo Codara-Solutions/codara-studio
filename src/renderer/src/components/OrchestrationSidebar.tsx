@@ -109,7 +109,6 @@ export default function OrchestrationSidebar({ workspace }: Props) {
         workspaceId: workspace.id,
         workspaceName: workspace.name,
         cwd: workspace.cwd,
-        runId: activeRun?.id,
         planPath: selectedPlan?.path,
         planTitle: selectedPlan?.name,
         planText,
@@ -234,6 +233,7 @@ export default function OrchestrationSidebar({ workspace }: Props) {
         workspace={workspace}
         runs={runs}
         activeRun={activeRun}
+        events={events}
         planFiles={planFiles}
         selectedPlanPath={selectedPlanPath}
         busy={busy}

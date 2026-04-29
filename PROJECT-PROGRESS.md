@@ -144,8 +144,8 @@ understanding the low-level worker machinery.
   `request.json`, `response.json`, and `parsed-decision.json`.
 - Added `spark_call.started`, `spark_call.completed`, `spark_call.failed`, and
   `spark_manager.decision_applied` events.
-- Added a fake-OpenRouter Electron E2E test that verifies Spark can plan one
-  Claude task and one Codex task, route both through configured worker commands,
+- Added a fake-OpenRouter Electron E2E test that verifies Spark can plan
+  fixture Claude/Codex tasks, route both through configured worker commands,
   and review both reports.
 - Fixed the first multi-worker scheduling race by preparing selected attempts
   before scheduling launches and queueing the background launches sequentially.
@@ -195,6 +195,24 @@ understanding the low-level worker machinery.
   user-created terminals instead of naming panes `CLAUDE` or `CODEX`.
 - Updated E2E coverage for background planning, visible worker panes, settings,
   run deletion, and parallel fake Claude/Codex worker routing.
+- Added the first manager review loop after worker completion. Once all
+  parallel worker attempts finish, Spark sends accepted worker report summaries
+  back through OpenRouter and can mark the run complete, create follow-up
+  workers, or ask the user a question.
+- Added a compact `SPARK DECISION` summary to the primary panel so the user can
+  see the manager's latest action without opening raw Dev Inspector JSON.
+- Hardened interactive Claude/Codex prompt sending by waiting for terminal
+  output when possible, with a bounded fallback delay.
+- Updated E2E coverage so fake Claude/Codex workers complete, Spark performs a
+  second manager review call, and the run is marked complete.
+- Added `npm run test:user-flow`, a real-flow Playwright test that uses
+  `C:\Users\Etienne\Documents\workspace\test`, copies the saved Spark settings
+  into isolated userData, selects `plan.md`, calls the real OpenRouter manager,
+  launches real Claude/Codex worker panes, and sends `STOP` after launch
+  verification.
+- Fixed the paused question path: when Spark asks the user a question before
+  workers exist, the user can answer, click `RESUME`, and Spark calls the
+  manager again with the updated run messages.
 
 ## Current State
 
@@ -223,26 +241,28 @@ Missing foundation:
 - run state projection from events
 - diagnostics
 - real Claude/Codex worker command configuration UI and production defaults
-- richer Claude/Codex terminal startup detection beyond the current delayed
-  prompt send
+- richer Claude/Codex terminal startup detection beyond output-aware prompt
+  send
 - cancellation and timeout handling
 - a dedicated advanced/manual control surface outside the primary Spark panel
-- a long-running autopilot loop that can continue across many steps
+- a long-running autopilot loop with retry/follow-up/question policies across
+  many steps
 - Spark-generated plan analysis and task decomposition beyond the initial
   manager-decision spike
+- CI-safe separation between deterministic fake-worker tests and explicit
+  local real-worker tests
 
 ## Next Step
 
-Move from the one-cycle Autopilot MVP to a real manager loop.
+Harden the manager loop for real projects and long-running workers.
 
 Immediate target:
 
 ```text
 Autopilot loop hardening:
-  make the loop continue until complete, paused, blocked, or failed
   add user-facing worker command settings
-  connect real Claude/Codex commands to production defaults
   turn deterministic report review into accept/retry/follow-up/question actions
-  let Spark write clarification questions into the run message stream
   add cancellation and timeouts before long-running real Claude/Codex sessions
+  add a stronger user-facing activity/decision timeline
+  keep expanding npm run test:user-flow as the canonical local smoke test
 ```

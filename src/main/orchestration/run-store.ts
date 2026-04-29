@@ -1,6 +1,6 @@
 import { shell } from "electron";
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type {
   AddRunMessageInput,
   LaunchWorkerAttemptInput,
@@ -33,6 +33,7 @@ import {
   readOpenRouterConfig,
   requestOpenRouterManagerDecision,
   type SparkManagerDecision,
+  type SparkManagerWorkerReportContext,
 } from "./openrouter-manager";
 import { disposeWorkerSession, startWorkerSession, type WorkerCommand, type WorkerSession } from "./worker-session";
 
@@ -53,6 +54,7 @@ interface ActiveWorkerProcess {
 const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
 const activeAutopilotCycles = new Map<string, Promise<void>>();
 const activeAutopilotPlans = new Map<string, Promise<void>>();
+const activeAutopilotReviews = new Map<string, Promise<void>>();
 const runWriteQueues = new Map<string, Promise<void>>();
 
 export async function createRun(input: CreateRunInput): Promise<RunState> {
@@ -326,11 +328,13 @@ async function markInitialAutopilotPlanningFailed(runId: string, err: unknown): 
 
 async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promise<void> {
   let launched: RunState;
+  let cwd = "";
   try {
     launched = await launchWorkerAttempt({
       runId,
       attemptId,
     });
+    cwd = launched.workerAttempts.find((attempt) => attempt.id === attemptId)?.cwd ?? "";
   } catch (err) {
     await markAutopilotCycleFailed(runId, attemptId, err);
     return;
@@ -338,6 +342,8 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
 
   const latest = await requireRun(launched.id);
   if (latest.status === "paused") return;
+  const hasOtherActiveCycles = hasOtherAutopilotCycles(runId, attemptId);
+  const hasOtherActiveWorkers = activeWorkersForRun(runId).some((worker) => worker.attemptId !== attemptId);
 
   await commitRunChange(latest, {
     type: "autopilot.cycle_completed",
@@ -345,18 +351,26 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     payload: {
       workerTasks: latest.workerTasks.length,
       workerAttempts: latest.workerAttempts.length,
+      waitingForOtherWorkers: hasOtherActiveCycles || hasOtherActiveWorkers,
     },
     mutate: (draft, timestamp) => {
-      draft.status = "reviewing";
+      draft.status = hasOtherActiveCycles || hasOtherActiveWorkers ? "running" : "reviewing";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
-        status: "blocked",
-        lastAction: "worker_cycle_completed_needs_review",
+        status: hasOtherActiveCycles || hasOtherActiveWorkers ? "running" : "blocked",
+        lastAction:
+          hasOtherActiveCycles || hasOtherActiveWorkers
+            ? "worker_cycle_completed_waiting_for_parallel_workers"
+            : "worker_cycle_completed_needs_manager_review",
         updatedAt: timestamp,
       };
       draft.updatedAt = timestamp;
     },
   });
+
+  if (!hasOtherActiveCycles && !hasOtherActiveWorkers) {
+    scheduleAutopilotReview(runId, cwd);
+  }
 }
 
 function scheduleAutopilotCycles(runId: string, attemptIds: string[]): void {
@@ -386,6 +400,63 @@ function scheduleAutopilotCycles(runId: string, attemptIds: string[]): void {
   }
 }
 
+function scheduleAutopilotReview(runId: string, cwd: string): void {
+  if (activeAutopilotReviews.has(runId)) return;
+  const review = new Promise<void>((resolve, reject) => {
+    setTimeout(() => {
+      runAutopilotManagerReview(runId, cwd).then(resolve, reject);
+    }, 0);
+  })
+    .catch(async (err) => {
+      await markAutopilotCycleFailed(runId, "manager-review", err);
+    })
+    .finally(() => {
+      activeAutopilotReviews.delete(runId);
+    });
+  activeAutopilotReviews.set(runId, review);
+  void review;
+}
+
+async function runAutopilotManagerReview(runId: string, cwd: string): Promise<void> {
+  let run = await requireRun(runId);
+  if (run.status === "paused" || run.status === "cancelled") return;
+  if (hasAutopilotCycles(runId) || activeWorkersForRun(runId).length > 0) return;
+
+  const settings = await loadSettings();
+  const config = readOpenRouterConfig(settings);
+  if (!config) {
+    if (manualFallbackEnabled()) {
+      await appendEvent({
+        workspaceId: run.workspaceId,
+        runId: run.id,
+        type: "autopilot.manager_review_skipped",
+        message: "Spark manager review skipped because OpenRouter is not configured",
+        payload: {
+          reason: "manual_fallback",
+        },
+      });
+      return;
+    }
+    await askHumanQuestion(
+      run.id,
+      "Worker results are ready, but OpenRouter is not configured for Spark manager review. Add the API key in Settings, then resume the run.",
+    );
+    return;
+  }
+
+  run = await askOpenRouterManager(run, cwd, "worker_result_review") ?? run;
+  if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
+  const tasks = pickAutopilotTasks(run);
+  if (tasks.length === 0) return;
+
+  await startAutopilot({
+    workspaceId: run.workspaceId,
+    workspaceName: run.title,
+    cwd,
+    runId: run.id,
+  });
+}
+
 async function markAutopilotCycleFailed(runId: string, attemptId: string, err: unknown): Promise<void> {
   const run = await getRun(runId);
   if (!run) return;
@@ -412,6 +483,15 @@ async function markAutopilotCycleFailed(runId: string, attemptId: string, err: u
 
 function autopilotCycleKey(runId: string, attemptId: string): string {
   return `${runId}:${attemptId}`;
+}
+
+function hasOtherAutopilotCycles(runId: string, attemptId: string): boolean {
+  const currentKey = autopilotCycleKey(runId, attemptId);
+  return [...activeAutopilotCycles.keys()].some((key) => key.startsWith(`${runId}:`) && key !== currentKey);
+}
+
+function hasAutopilotCycles(runId: string): boolean {
+  return [...activeAutopilotCycles.keys()].some((key) => key.startsWith(`${runId}:`));
 }
 
 function manualFallbackEnabled(): boolean {
@@ -443,6 +523,14 @@ async function createFallbackAutopilotTask(run: RunState, input: StartAutopilotI
 }
 
 async function askOpenRouterManagerForInitialTasks(run: RunState, cwd: string): Promise<RunState | null> {
+  return askOpenRouterManager(run, cwd, "step_planning");
+}
+
+async function askOpenRouterManager(
+  run: RunState,
+  cwd: string,
+  mode: SparkCall["mode"],
+): Promise<RunState | null> {
   const settings = await loadSettings();
   const config = readOpenRouterConfig(settings);
   if (!config) return null;
@@ -452,7 +540,14 @@ async function askOpenRouterManagerForInitialTasks(run: RunState, cwd: string): 
   const requestPath = join(callDir, "request.json");
   const responsePath = join(callDir, "response.json");
   const parsedJsonPath = join(callDir, "parsed-decision.json");
-  const requestBody = buildOpenRouterManagerRequest({ run, cwd, model: config.model });
+  const workerReports = await collectWorkerReportContext(run);
+  const requestBody = buildOpenRouterManagerRequest({
+    run,
+    cwd,
+    model: config.model,
+    mode: mode === "worker_result_review" ? "worker_result_review" : "step_planning",
+    workerReports,
+  });
   await fs.mkdir(callDir, { recursive: true });
   await fs.writeFile(requestPath, JSON.stringify(requestBody, null, 2), "utf8");
 
@@ -460,7 +555,7 @@ async function askOpenRouterManagerForInitialTasks(run: RunState, cwd: string): 
   const sparkCall: SparkCall = {
     id: callId,
     runId: run.id,
-    mode: "step_planning",
+    mode,
     model: config.model,
     status: "started",
     requestPath,
@@ -484,7 +579,7 @@ async function askOpenRouterManagerForInitialTasks(run: RunState, cwd: string): 
     type: "spark_call.started",
     message: `Spark manager call started: ${config.model}`,
     payload: {
-      mode: "step_planning",
+      mode,
       model: config.model,
       requestPath,
     },
@@ -517,7 +612,7 @@ async function askOpenRouterManagerForInitialTasks(run: RunState, cwd: string): 
       type: "spark_call.completed",
       message: `Spark manager call completed: ${result.decision.status}`,
       payload: {
-        mode: "step_planning",
+        mode,
         model: config.model,
         durationMs: result.durationMs,
         promptTokens: result.promptTokens,
@@ -549,7 +644,7 @@ async function askOpenRouterManagerForInitialTasks(run: RunState, cwd: string): 
       type: "spark_call.failed",
       message: `Spark manager call failed: ${error}`,
       payload: {
-        mode: "step_planning",
+        mode,
         model: config.model,
         error,
       },
@@ -688,7 +783,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   const resumePrompt = buildResumePrompt(run);
   await sendResumeSignals(run, resumePrompt);
-  return commitRunChange(run, {
+  const resumed = await commitRunChange(run, {
     type: "run.resumed",
     message: resumePrompt.kind === "prompt" ? "Run resumed with user update" : "Run resumed",
     payload: {
@@ -709,6 +804,15 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
       draft.updatedAt = timestamp;
     },
   });
+  if (shouldResumeManagerPlanning(run)) {
+    const resumeInput = autopilotInputFromRun(resumed);
+    if (resumed.workerAttempts.length > 0) {
+      scheduleAutopilotReview(resumed.id, resumeInput.cwd);
+    } else {
+      scheduleInitialAutopilotPlanning(resumed.id, resumeInput);
+    }
+  }
+  return resumed;
 }
 
 export async function addRunMessage(input: AddRunMessageInput): Promise<RunState> {
@@ -1092,6 +1196,7 @@ export async function deleteRun(runId: string): Promise<void> {
     if (key.startsWith(`${run.id}:`)) activeAutopilotCycles.delete(key);
   }
   activeAutopilotPlans.delete(run.id);
+  activeAutopilotReviews.delete(run.id);
   await appendEvent({
     timestamp,
     workspaceId: run.workspaceId,
@@ -1192,6 +1297,30 @@ async function reviewWorkerReportArtifact({
   return latest;
 }
 
+async function collectWorkerReportContext(run: RunState): Promise<SparkManagerWorkerReportContext[]> {
+  const contexts: SparkManagerWorkerReportContext[] = [];
+  for (const attempt of run.workerAttempts.slice(-8)) {
+    const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
+    if (!task) continue;
+    const reportPath =
+      attempt.finalReportPath ??
+      workerArtifactPaths(run.id, task.stepId, task.id, attempt.id).finalReportJson;
+    const report = await readWorkerReport(reportPath);
+    contexts.push({
+      taskTitle: task.title,
+      runtime: attempt.runtime,
+      taskStatus: task.status,
+      attemptStatus: attempt.status,
+      reportStatus: report?.status,
+      summary: report?.summary,
+      proof: report?.proof ?? [],
+      risks: report?.risks ?? [],
+      followups: report?.followups ?? [],
+    });
+  }
+  return contexts;
+}
+
 async function saveRun(run: RunState): Promise<void> {
   const previous = runWriteQueues.get(run.id) ?? Promise.resolve();
   const next = previous
@@ -1212,14 +1341,31 @@ async function writeRunFile(run: RunState): Promise<void> {
   const path = runPath(run.id);
   const tmp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(run, null, 2), "utf8");
-  try {
-    await fs.rename(tmp, path);
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== "EEXIST" && code !== "EPERM") throw err;
-    await fs.rm(path, { force: true });
-    await fs.rename(tmp, path);
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await fs.rename(tmp, path);
+      return;
+    } catch (err: unknown) {
+      lastError = err;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (!["EEXIST", "EPERM", "EBUSY"].includes(code ?? "")) throw err;
+      await fs.rm(path, { force: true }).catch(() => undefined);
+      await delay(25 * (attempt + 1));
+    }
   }
+
+  try {
+    await fs.rm(path, { force: true }).catch(() => undefined);
+    await fs.copyFile(tmp, path);
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+  } catch (err) {
+    throw lastError ?? err;
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function requireRun(runId: string): Promise<RunState> {
@@ -1312,6 +1458,32 @@ async function askHumanQuestion(runId: string, message: string): Promise<RunStat
 
 function activeWorkersForRun(runId: string): ActiveWorkerProcess[] {
   return Array.from(activeWorkerProcesses.values()).filter((worker) => worker.runId === runId);
+}
+
+function shouldResumeManagerPlanning(run: RunState): boolean {
+  if (activeWorkersForRun(run.id).length > 0) return false;
+  if (run.status !== "paused" || run.autopilot?.status !== "paused") return false;
+  return run.humanMessages.some((message) => message.author === "spark" && message.kind === "question");
+}
+
+function autopilotInputFromRun(run: RunState): StartAutopilotInput {
+  const plan = run.planId
+    ? run.plans.find((item) => item.id === run.planId)
+    : run.plans.at(-1);
+  const latestAttemptCwd = run.workerAttempts
+    .slice()
+    .reverse()
+    .find((attempt) => attempt.cwd)?.cwd;
+  const cwd = latestAttemptCwd || (plan?.sourceFile ? dirname(plan.sourceFile) : process.cwd());
+  return {
+    runId: run.id,
+    workspaceId: run.workspaceId,
+    workspaceName: run.title.replace(/^Autopilot -\s*/i, "") || "workspace",
+    cwd,
+    planPath: plan?.sourceFile,
+    planText: plan?.rawContent,
+    planTitle: plan?.title,
+  };
 }
 
 async function sendPauseSignals(run: RunState, reason: string): Promise<void> {
@@ -1702,6 +1874,8 @@ function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths): Worke
       display: command.display || "claude",
       initialInput: renderInteractiveWorkerLaunchInput(paths),
       initialInputDelayMs: 1800,
+      initialInputMaxDelayMs: 6500,
+      initialInputWaitForOutput: true,
     };
   }
 
@@ -1716,6 +1890,8 @@ function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths): Worke
       display: command.display || "codex",
       initialInput: renderInteractiveWorkerLaunchInput(paths),
       initialInputDelayMs: 2200,
+      initialInputMaxDelayMs: 7000,
+      initialInputWaitForOutput: true,
     };
   }
 
@@ -1853,6 +2029,9 @@ function renderWorkerPrompt({
     "RUN",
     `${run.title} (${run.id})`,
     "",
+    "PROJECT PLAN SNAPSHOT",
+    formatPlanSnapshot(run),
+    "",
     "CURRENT STEP",
     step ? `${step.title}\n${step.goal}` : "No step is assigned to this task.",
     "",
@@ -1910,6 +2089,21 @@ function renderWorkerPrompt({
     "```",
     "",
   ].join("\n");
+}
+
+function formatPlanSnapshot(run: RunState): string {
+  const plan = run.planId
+    ? run.plans.find((item) => item.id === run.planId)
+    : run.plans.at(-1);
+  const content = plan?.rawContent?.trim() || plan?.summary?.trim();
+  if (!content) return "No selected project plan content was captured for this run.";
+  const source = plan?.sourceFile ? `Source: ${plan.sourceFile}\n\n` : "";
+  return source + truncateText(content, 12000);
+}
+
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}\n\n[truncated ${value.length - maxLength} characters]`;
 }
 
 function renderInitialWorkpad({

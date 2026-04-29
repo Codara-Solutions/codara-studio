@@ -96,6 +96,11 @@ context rather than product source.
   a Spark manager update built from the user's pause reason/latest message.
 - Finished worker attempts parse `final-report.json` and emit deterministic
   `worker_report.parsed` and `worker_report.reviewed` events.
+- After all parallel workers in a cycle finish, Spark performs a manager review
+  call with compact worker report summaries. The manager can mark the run
+  complete, create follow-up workers, or ask the user for clarification.
+- The primary Spark panel shows a compact `SPARK DECISION` summary for the
+  latest manager call; raw event/state/artifact JSON stays in Dev Inspector.
 - The app has an initial orchestration run store and JSONL event log under
   Electron userData.
 
@@ -239,6 +244,7 @@ Run mutations:
   worker task envelope preparation
   background PTY-backed worker session execution
   worker report parsing and deterministic review decisions
+  OpenRouter-backed manager review after worker completion
 ```
 
 This keeps the product rule intact:
@@ -277,14 +283,38 @@ SPARK_CODEX_WORKER_ARGS=
 The args variables accept either a JSON string array or a simple shell-style
 argument string. On Windows the built-in defaults are `claude.exe` and
 `codex.cmd` so the visible worker panes open the real local CLIs when those are
-available on `PATH`. Spark sends the prepared task prompt after a short CLI
-startup delay and includes the submit keystroke.
+available on `PATH`. Spark sends the prepared task prompt after the CLI has
+started producing output when possible, with a bounded fallback delay, and
+includes the submit keystroke.
 
 Initial manager planning is scheduled in the background. The `RUN` action
 creates/updates the run and returns control to the UI while OpenRouter planning,
 worker preparation, and worker launch events stream into the Dev Inspector.
 When the manager returns split-safe Claude/Codex tasks, Spark schedules those
 worker attempts in parallel and shows them as normal terminal panes.
+
+Worker completion now feeds back into the manager. Spark reads the finished
+attempts' `final-report.json` files, sends compact report context in a
+`worker_result_review` manager call, and applies the next manager decision. A
+`complete` decision marks the run complete; a `run_workers` decision creates
+the next focused worker tasks and schedules another cycle; an `ask_user`
+decision writes a Spark question into the run message stream and pauses.
+If the human answers in the text box and clicks `RESUME`, Spark now resumes
+manager planning when there are no active worker sessions yet. This covers the
+real flow where the manager asks a clarification question before creating the
+Claude/Codex worker tasks.
+
+Real user-flow test:
+
+```bash
+npm run test:user-flow
+```
+
+This builds the app, launches Electron through Playwright, uses the real test
+workspace at `C:\Users\Etienne\Documents\workspace\test`, copies the saved Spark
+settings into an isolated test userData folder, selects `plan.md`, calls the
+real OpenRouter manager, handles a manager question if one appears, verifies
+that real Claude/Codex worker terminal panes open, and then sends `STOP`.
 
 Test-only fallback:
 

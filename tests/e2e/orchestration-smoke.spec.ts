@@ -171,6 +171,44 @@ test("runs can be deleted from the run list inline", async () => {
   }
 });
 
+test("run uses the latest selected plan text instead of reusing old worker tasks", async () => {
+  const { userDataDir, workspaceDir } = await prepareElectronWorkspace("spark-agent-plan-refresh-e2e-");
+
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...process.env,
+        SPARK_USER_DATA_DIR: userDataDir,
+        SPARK_MANUAL_WORKER_DELAY_MS: "100",
+        SPARK_ENABLE_MANUAL_FALLBACK: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+
+    await expect(page.locator("select")).toHaveValue(/PLAN\.md$/);
+    await clickButton(page, "RUN");
+    await waitForRunCount(userDataDir, 1);
+
+    await writeFile(join(workspaceDir, "PLAN.md"), "# Plan\n\nBuild a one file HTML calculator.\n", "utf8");
+    await clickButton(page, "RUN");
+    const latest = await waitForRunWithPlanText(userDataDir, "Build a one file HTML calculator.");
+
+    expect(latest.plans[0].rawContent).toContain("Build a one file HTML calculator.");
+    expect(latest.workerTasks[0].description).toContain("Build a one file HTML calculator.");
+
+    const promptPath = latest.workerAttempts[0].promptPath;
+    expect(promptPath && existsSync(promptPath)).toBeTruthy();
+    const prompt = await readFile(promptPath, "utf8");
+    expect(prompt).toContain("PROJECT PLAN SNAPSHOT");
+    expect(prompt).toContain("Build a one file HTML calculator.");
+  } finally {
+    await app?.close();
+  }
+});
+
 test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
   const { userDataDir } = await prepareElectronWorkspace("spark-agent-openrouter-e2e-");
   const server = await startFakeOpenRouterServer();
@@ -198,16 +236,22 @@ test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
     await expect(page.locator("select")).toHaveValue(/PLAN\.md$/);
     await clickButton(page, "RUN");
 
-    await expectEvent(page, "spark_call.completed", 10_000);
-    await expectEvent(page, "spark_manager.decision_applied", 10_000);
+    await waitForOnlyRun(userDataDir, (candidate) =>
+      candidate.sparkCalls.some((call) => call.status === "completed") &&
+      candidate.workerTasks.length === 2,
+    );
     await expect(page.locator(".xterm-host")).toHaveCount(2, { timeout: 10_000 });
-    await expect(page.locator("button").filter({ hasText: "worker_report.reviewed" })).toHaveCount(2, {
-      timeout: 15_000,
-    });
+    const run = await waitForOnlyRun(userDataDir, (candidate) =>
+      candidate.status === "complete" &&
+      candidate.workerAttempts.length === 2 &&
+      candidate.workerAttempts.every((attempt) => attempt.status === "succeeded") &&
+      candidate.workerTasks.every((task) => task.status === "accepted"),
+    );
 
-    const run = await readOnlyRun(userDataDir);
-    expect(run.sparkCalls).toHaveLength(1);
-    expect(run.sparkCalls[0].status).toBe("completed");
+    expect(run.sparkCalls).toHaveLength(2);
+    expect(run.sparkCalls.every((call) => call.status === "completed")).toBe(true);
+    expect(run.status).toBe("complete");
+    expect(run.autopilot?.status).toBe("complete");
     expect(run.workerTasks).toHaveLength(2);
     expect(run.workerTasks.map((task) => task.runtimePreference).sort()).toEqual(["claude", "codex"]);
     expect(run.workerAttempts).toHaveLength(2);
@@ -267,55 +311,71 @@ async function startFakeOpenRouterServer(): Promise<{ baseUrl: string; close: ()
       return;
     }
 
-    req.resume();
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                status: "run_workers",
-                summary: "Split the demo into one Claude worker task and one Codex worker task.",
-                steps: [
-                  {
-                    title: "Run local subscription workers",
-                    goal: "Launch Claude and Codex through Spark's worker control path.",
-                    acceptanceCriteria: ["Both worker tasks write final reports."],
-                    verificationCommands: ["npm run typecheck"],
-                    riskLevel: "low",
-                  },
-                ],
-                tasks: [
-                  {
-                    stepIndex: 0,
-                    title: "Claude demo task",
-                    description: "Use Claude Code to inspect the plan and report the first implementation slice.",
-                    runtimePreference: "claude",
-                    expectedOutputs: ["final-report.json"],
-                    verificationCommands: ["npm run typecheck"],
-                    canRunParallel: true,
-                  },
-                  {
-                    stepIndex: 0,
-                    title: "Codex demo task",
-                    description: "Use Codex to inspect the plan and report risks or missing pieces.",
-                    runtimePreference: "codex",
-                    expectedOutputs: ["final-report.json"],
-                    verificationCommands: ["npm run typecheck"],
-                    canRunParallel: true,
-                  },
-                ],
-              }),
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const isReview = body.includes("worker_result_review");
+      const decision = isReview
+        ? {
+            status: "complete",
+            summary: "Both local subscription worker fixture reports are accepted, so the run is complete.",
+            steps: [],
+            tasks: [],
+          }
+        : {
+            status: "run_workers",
+            summary: "Split the fixture plan into one Claude worker task and one Codex worker task.",
+            steps: [
+              {
+                title: "Run local subscription workers",
+                goal: "Launch Claude and Codex through Spark's worker control path.",
+                acceptanceCriteria: ["Both worker tasks write final reports."],
+                verificationCommands: ["npm run typecheck"],
+                riskLevel: "low",
+              },
+            ],
+            tasks: [
+              {
+                stepIndex: 0,
+                title: "Claude fixture task",
+                description: "Use Claude Code to inspect the plan and report the first implementation slice.",
+                runtimePreference: "claude",
+                expectedOutputs: ["final-report.json"],
+                verificationCommands: ["npm run typecheck"],
+                canRunParallel: true,
+              },
+              {
+                stepIndex: 0,
+                title: "Codex fixture task",
+                description: "Use Codex to inspect the plan and report risks or missing pieces.",
+                runtimePreference: "codex",
+                expectedOutputs: ["final-report.json"],
+                verificationCommands: ["npm run typecheck"],
+                canRunParallel: true,
+              },
+            ],
+          };
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify(decision),
+              },
             },
+          ],
+          usage: {
+            prompt_tokens: 100,
+            completion_tokens: 50,
           },
-        ],
-        usage: {
-          prompt_tokens: 100,
-          completion_tokens: 50,
-        },
-      }),
-    );
+        }),
+      );
+    });
   });
 
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -359,6 +419,7 @@ async function readOnlyRun(userDataDir: string): Promise<{
   workerTasks: Array<{ status: string; runtimePreference: string }>;
   workerAttempts: Array<{
     status: string;
+    promptPath?: string;
     stdoutLogPath?: string;
     stderrLogPath?: string;
     rawLogPath?: string;
@@ -370,4 +431,81 @@ async function readOnlyRun(userDataDir: string): Promise<{
   expect(entries).toHaveLength(1);
   const raw = await readFile(join(runsDir, entries[0], "run.json"), "utf8");
   return JSON.parse(raw);
+}
+
+async function waitForOnlyRun(
+  userDataDir: string,
+  predicate: (run: Awaited<ReturnType<typeof readOnlyRun>>) => boolean,
+): Promise<Awaited<ReturnType<typeof readOnlyRun>>> {
+  await expect
+    .poll(async () => {
+      try {
+        return predicate(await readOnlyRun(userDataDir));
+      } catch {
+        return false;
+      }
+    }, { timeout: 20_000 })
+    .toBe(true);
+  return readOnlyRun(userDataDir);
+}
+
+async function waitForRunCount(
+  userDataDir: string,
+  count: number,
+): Promise<Array<{
+  createdAt: string;
+  plans: Array<{ rawContent?: string }>;
+  workerTasks: Array<{ description: string }>;
+  workerAttempts: Array<{ promptPath?: string }>;
+}>> {
+  await expect
+    .poll(async () => {
+      const runs = await readRuns(userDataDir);
+      const latest = runs.at(-1);
+      return runs.length === count && latest?.workerAttempts?.[0]?.promptPath ? count : runs.length;
+    }, { timeout: 10_000 })
+    .toBe(count);
+  return readRuns(userDataDir);
+}
+
+async function readRuns(userDataDir: string): Promise<Array<{
+  createdAt: string;
+  plans: Array<{ rawContent?: string }>;
+  workerTasks: Array<{ description: string }>;
+  workerAttempts: Array<{ promptPath?: string }>;
+}>> {
+  const runsDir = join(userDataDir, "runs");
+  const entries = await readdir(runsDir).catch(() => []);
+  const runs = (
+    await Promise.all(
+      entries.map(async (entry) => {
+        try {
+          return JSON.parse(await readFile(join(runsDir, entry, "run.json"), "utf8"));
+        } catch {
+          return null;
+        }
+      }),
+    )
+  ).filter(Boolean);
+  return runs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+async function waitForRunWithPlanText(
+  userDataDir: string,
+  text: string,
+): Promise<{
+  createdAt: string;
+  plans: Array<{ rawContent?: string }>;
+  workerTasks: Array<{ description: string }>;
+  workerAttempts: Array<{ promptPath?: string }>;
+}> {
+  await expect
+    .poll(async () => {
+      const run = (await readRuns(userDataDir)).find((item) => item.plans[0]?.rawContent?.includes(text));
+      const promptPath = run?.workerAttempts[0]?.promptPath;
+      const prompt = promptPath && existsSync(promptPath) ? await readFile(promptPath, "utf8") : "";
+      return Boolean(run?.workerTasks[0]?.description?.includes(text) && prompt.includes(text));
+    }, { timeout: 10_000 })
+    .toBe(true);
+  return (await readRuns(userDataDir)).find((item) => item.plans[0]?.rawContent?.includes(text))!;
 }

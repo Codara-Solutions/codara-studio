@@ -37,6 +37,18 @@ export interface SparkManagerDecision {
   tasks: SparkManagerTaskDecision[];
 }
 
+export interface SparkManagerWorkerReportContext {
+  taskTitle: string;
+  runtime: WorkerRuntime;
+  taskStatus: WorkerTask["status"];
+  attemptStatus: string;
+  reportStatus?: string;
+  summary?: string;
+  proof: string[];
+  risks: string[];
+  followups: string[];
+}
+
 interface OpenRouterMessage {
   role: "system" | "user";
   content: string;
@@ -95,7 +107,10 @@ export function buildOpenRouterManagerRequest(input: {
   run: RunState;
   cwd: string;
   model: string;
+  mode?: "step_planning" | "worker_result_review";
+  workerReports?: SparkManagerWorkerReportContext[];
 }): OpenRouterManagerRequest {
+  const mode = input.mode ?? "step_planning";
   const activePlan = input.run.planId
     ? input.run.plans.find((plan) => plan.id === input.run.planId)
     : input.run.plans.at(-1);
@@ -116,6 +131,7 @@ export function buildOpenRouterManagerRequest(input: {
           "You are Spark Agent, a local-first coding manager.",
           "You do not edit code yourself. You plan focused worker tasks for local Claude Code and Codex CLI workers.",
           "Keep the human-facing flow simple: ask a question only when the project plan is missing a required decision.",
+          "For worker-result review, decide whether accepted worker evidence is enough to continue, complete, retry, or ask the user.",
           "Return strict JSON only. Do not wrap the JSON in markdown.",
         ].join("\n"),
       },
@@ -130,6 +146,10 @@ export function buildOpenRouterManagerRequest(input: {
           "- For this integration spike, create no more than two worker tasks.",
           "- Prefer one Claude task and one Codex task when the work can be split without conflict.",
           "- If the plan is too ambiguous, ask one concise human question instead of guessing.",
+          "- During worker-result review, return complete when the plan is satisfied; otherwise create only the next necessary follow-up tasks.",
+          "",
+          "MANAGER MODE",
+          mode,
           "",
           "WORKSPACE",
           input.cwd,
@@ -141,19 +161,33 @@ export function buildOpenRouterManagerRequest(input: {
               title: input.run.title,
               status: input.run.status,
               existingSteps: input.run.steps.map((step) => ({
+                id: step.id,
                 title: step.title,
                 status: step.status,
+                reviewSummary: step.reviewSummary,
               })),
               existingTasks: input.run.workerTasks.map((task) => ({
+                id: task.id,
                 title: task.title,
                 runtimePreference: task.runtimePreference,
                 status: task.status,
+                expectedOutputs: task.expectedOutputs,
+              })),
+              workerAttempts: input.run.workerAttempts.map((attempt) => ({
+                workerTaskId: attempt.workerTaskId,
+                runtime: attempt.runtime,
+                status: attempt.status,
+                exitCode: attempt.exitCode,
+                finalReportPath: attempt.finalReportPath,
               })),
               recentMessages,
             },
             null,
             2,
           ),
+          "",
+          "WORKER REPORTS",
+          JSON.stringify(input.workerReports ?? [], null, 2),
           "",
           "PROJECT PLAN",
           truncate(activePlan?.rawContent || activePlan?.summary || "No plan content was provided.", 24000),

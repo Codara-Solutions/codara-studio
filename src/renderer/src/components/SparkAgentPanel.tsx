@@ -1,10 +1,11 @@
 import React, { useState } from "react";
-import type { PlanFile, RunState, Workspace } from "@shared/types";
+import type { PlanFile, RunState, SparkEvent, Workspace } from "@shared/types";
 
 interface Props {
   workspace: Workspace | null;
   runs: RunState[];
   activeRun: RunState | null;
+  events: SparkEvent[];
   planFiles: PlanFile[];
   selectedPlanPath: string;
   busy: boolean;
@@ -23,6 +24,7 @@ export default function SparkAgentPanel({
   workspace,
   runs,
   activeRun,
+  events,
   planFiles,
   selectedPlanPath,
   busy,
@@ -54,6 +56,7 @@ export default function SparkAgentPanel({
 
   const selectedPlan = planFiles.find((file) => file.path === selectedPlanPath);
   const activeRunDeletePending = Boolean(activeRun && deleteConfirmRunId === activeRun.id);
+  const latestDecision = latestSparkDecision(events);
 
   return (
     <section
@@ -269,6 +272,10 @@ export default function SparkAgentPanel({
         </div>
       )}
 
+      {latestDecision && (
+        <SparkDecisionSummary decision={latestDecision} />
+      )}
+
       {error && (
         <div style={{ padding: "8px 12px", color: "var(--danger)", fontSize: 11, borderBottom: "1px solid var(--rule)" }}>
           {error}
@@ -295,6 +302,97 @@ export default function SparkAgentPanel({
         )}
       </div>
     </section>
+  );
+}
+
+interface SparkDecision {
+  status: string;
+  summary: string;
+  tasks: Array<{ title: string; runtimePreference?: string }>;
+}
+
+function latestSparkDecision(events: SparkEvent[]): SparkDecision | null {
+  for (const event of events.slice().reverse()) {
+    if (event.type !== "spark_call.completed") continue;
+    const decision = event.payload?.decision;
+    if (!decision || typeof decision !== "object") continue;
+    const value = decision as Record<string, unknown>;
+    const tasks = Array.isArray(value.tasks)
+      ? value.tasks
+          .filter((task): task is Record<string, unknown> => Boolean(task) && typeof task === "object")
+          .map((task) => ({
+            title: typeof task.title === "string" ? task.title : "Worker task",
+            runtimePreference:
+              typeof task.runtimePreference === "string" ? task.runtimePreference : undefined,
+          }))
+      : [];
+    return {
+      status: typeof value.status === "string" ? value.status : "unknown",
+      summary: typeof value.summary === "string" ? value.summary : "Spark decided the next action.",
+      tasks,
+    };
+  }
+  return null;
+}
+
+function SparkDecisionSummary({ decision }: { decision: SparkDecision }) {
+  return (
+    <div style={{ padding: "8px 12px", borderBottom: "1px solid var(--rule)" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginBottom: 5,
+          color: "var(--ink)",
+          fontSize: 10,
+          fontWeight: 800,
+          letterSpacing: "0.08em",
+        }}
+      >
+        <span>SPARK DECISION</span>
+        <span style={{ flex: 1 }} />
+        <span style={{ color: "var(--muted)" }}>{decision.status}</span>
+      </div>
+      <div
+        title={decision.summary}
+        style={{
+          color: "var(--ink-dim)",
+          fontSize: 10,
+          lineHeight: 1.45,
+          overflow: "hidden",
+          display: "-webkit-box",
+          WebkitLineClamp: 2,
+          WebkitBoxOrient: "vertical",
+        }}
+      >
+        {decision.summary}
+      </div>
+      {decision.tasks.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 7 }}>
+          {decision.tasks.slice(0, 2).map((task, index) => (
+            <div
+              key={`${task.title}-${index}`}
+              title={task.title}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "44px minmax(0, 1fr)",
+                gap: 7,
+                color: "var(--ink-dim)",
+                fontSize: 10,
+              }}
+            >
+              <span style={{ color: "var(--muted)", fontWeight: 800 }}>
+                {(task.runtimePreference ?? "task").toUpperCase()}
+              </span>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {task.title}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
