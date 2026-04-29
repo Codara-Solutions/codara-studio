@@ -165,6 +165,30 @@ export default function OrchestrationSidebar({ workspace }: Props) {
     );
   };
 
+  const prepareWorkerTask = async () => {
+    if (!activeRun || !workspace || busy) return;
+    const prepare = window.spark.orchestration.prepareWorkerTask;
+    if (typeof prepare !== "function") {
+      setError("Worker prep API is unavailable. Restart Spark Agent to reload the preload bridge.");
+      return;
+    }
+    const task = activeRun.workerTasks[activeRun.workerTasks.length - 1];
+    if (!task) {
+      setError("Create a worker task before preparing an envelope.");
+      return;
+    }
+    await mutateActiveRun(async () => {
+      await prepare({
+        runId: activeRun.id,
+        workerTaskId: task.id,
+        cwd: workspace.cwd,
+      });
+      const freshRun = await window.spark.orchestration.getRun(activeRun.id);
+      if (!freshRun) throw new Error(`Run not found: ${activeRun.id}`);
+      return freshRun;
+    });
+  };
+
   const deleteActiveRun = async () => {
     if (!activeRun || busy) return;
     setBusy(true);
@@ -226,6 +250,7 @@ export default function OrchestrationSidebar({ workspace }: Props) {
         onUpdateStatus={updateStatus}
         onCreateStep={createStep}
         onCreateWorkerTask={createWorkerTask}
+        onPrepareWorkerTask={prepareWorkerTask}
         onDeleteRun={deleteActiveRun}
       />
       <DevInspector

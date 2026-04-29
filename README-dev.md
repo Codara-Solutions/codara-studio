@@ -58,6 +58,8 @@ context rather than product source.
   run state, workspace info, and artifact paths.
 - Runs can be updated through dev controls for status changes, step creation,
   worker task creation, and run deletion.
+- Worker task records can be prepared into non-executing envelopes that write
+  `task.json`, `prompt.md`, and `workpad.md` artifacts.
 - The app has an initial orchestration run store and JSONL event log under
   Electron userData.
 
@@ -139,6 +141,7 @@ orchestration:createStep
 orchestration:updateStep
 orchestration:createWorkerTask
 orchestration:updateWorkerTask
+orchestration:prepareWorkerTask
 orchestration:deleteRun
 ```
 
@@ -148,6 +151,9 @@ Electron userData:
 ```text
 runs/<run-id>/run.json
 runs/<run-id>/events.jsonl
+runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/task.json
+runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/prompt.md
+runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/workpad.md
 ```
 
 ## Current Engineering Step
@@ -171,6 +177,7 @@ Run mutations:
   status updates
   step create/update
   worker task create/update
+  worker task envelope preparation
   run delete
 ```
 

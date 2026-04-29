@@ -57,6 +57,10 @@ before adding OpenRouter, Claude/Codex workers, or graph visualization.
   worker task create/update, and run deletion.
 - Added Dev Inspector validation controls for mutating the active run and
   confirming the matching `run.json` and event stream updates.
+- Added Phase 4 worker task envelope preparation without launching workers.
+- Added artifact writing for prepared worker tasks: `task.json`, `prompt.md`,
+  and `workpad.md`.
+- Added Dev Inspector artifact display for prepared worker attempts.
 
 ## Current State
 
@@ -83,10 +87,11 @@ Missing foundation:
 - run state projection from events
 - persisted settings
 - diagnostics
+- real worker process launch and log capture
 
 ## Next Step
 
-Finish Phase 3 validation, then move toward controlled worker execution.
+Finish Phase 4 validation, then move toward controlled worker execution.
 
 Immediate target:
 
@@ -95,8 +100,14 @@ Inspector validation:
   confirm event stream and run.json stay in sync
   add explicit refresh/reload behavior where needed
 
-Worker preparation:
-  turn worker task records into launchable task envelopes
-  write prompts/workpads as artifacts before opening any real worker process
+Worker preparation validation:
+  create run -> step -> task -> prep
+  confirm task.json, prompt.md, and workpad.md are written
+  confirm worker_task.envelope_prepared event is emitted
+  confirm RunState has a prompt_ready WorkerAttempt
+
+Controlled execution:
+  launch prepared manual workers from task envelopes
+  capture stdout/stderr/raw logs as artifacts
   keep all worker output tied back to run state and events
 ```

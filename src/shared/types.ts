@@ -154,6 +154,17 @@ export interface RunArtifactPaths {
   runDir: string;
   runJson: string;
   eventsJsonl: string;
+  workerArtifacts: WorkerArtifactPaths[];
+}
+
+export interface WorkerArtifactPaths {
+  workerTaskId: string;
+  attemptId: string;
+  attemptDir: string;
+  taskJson: string;
+  promptMd: string;
+  workpadMd: string;
+  finalReportJson: string;
 }
 
 export interface StepState {
@@ -211,6 +222,19 @@ export interface WorkerAttempt {
   finalReportPath?: string;
   diffPath?: string;
   error?: string;
+}
+
+export interface WorkerTaskEnvelope {
+  runId: string;
+  workerTaskId: string;
+  attemptId: string;
+  runtime: WorkerRuntime;
+  cwd: string;
+  executionDisabled: true;
+  task: WorkerTask;
+  step?: StepState;
+  paths: WorkerArtifactPaths;
+  createdAt: string;
 }
 
 export interface WorkerReport {
@@ -351,4 +375,10 @@ export interface UpdateWorkerTaskInput {
   verificationCommands?: string[];
   canRunParallel?: boolean;
   conflictsWith?: string[];
+}
+
+export interface PrepareWorkerTaskInput {
+  runId: string;
+  workerTaskId: string;
+  cwd: string;
 }

@@ -13,6 +13,7 @@ import {
   getRunArtifactPaths,
   getRun,
   listRuns,
+  prepareWorkerTask,
   updateRunStatus,
   updateStep,
   updateWorkerTask,
@@ -26,6 +27,7 @@ import type {
   FsEntry,
   FsFileContent,
   GitGraph,
+  PrepareWorkerTaskInput,
   RenameFileInput,
   RunArtifactPaths,
   RunState,
@@ -129,6 +131,10 @@ export function registerIpc(): void {
 
   ipcMain.handle("orchestration:updateWorkerTask", async (_e, input: UpdateWorkerTaskInput): Promise<RunState> => {
     return updateWorkerTask(input);
+  });
+
+  ipcMain.handle("orchestration:prepareWorkerTask", async (_e, input: PrepareWorkerTaskInput) => {
+    return prepareWorkerTask(input);
   });
 
   ipcMain.handle("orchestration:deleteRun", async (_e, runId: string): Promise<void> => {

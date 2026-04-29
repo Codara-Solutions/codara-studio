@@ -7,6 +7,7 @@ import type {
   FsEntry,
   FsFileContent,
   GitGraph,
+  PrepareWorkerTaskInput,
   RenameFileInput,
   RunArtifactPaths,
   RunState,
@@ -15,6 +16,7 @@ import type {
   UpdateRunStatusInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
+  WorkerTaskEnvelope,
 } from "@shared/types";
 
 type PtyDataHandler = (data: string) => void;
@@ -69,6 +71,8 @@ const api = {
       ipcRenderer.invoke("orchestration:createWorkerTask", input),
     updateWorkerTask: (input: UpdateWorkerTaskInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:updateWorkerTask", input),
+    prepareWorkerTask: (input: PrepareWorkerTaskInput): Promise<WorkerTaskEnvelope> =>
+      ipcRenderer.invoke("orchestration:prepareWorkerTask", input),
     deleteRun: (runId: string): Promise<void> =>
       ipcRenderer.invoke("orchestration:deleteRun", runId),
     onEvent: (handler: OrchestrationEventHandler): (() => void) => {

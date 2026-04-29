@@ -143,6 +143,31 @@ function ArtifactsView({
       <PathRow label="RUN FOLDER" value={artifactPaths.runDir} />
       <PathRow label="RUN JSON" value={artifactPaths.runJson} />
       <PathRow label="EVENTS JSONL" value={artifactPaths.eventsJsonl} />
+      {artifactPaths.workerArtifacts.length > 0 && (
+        <div style={{ marginTop: 12, borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
+          <div
+            style={{
+              color: "var(--muted)",
+              fontSize: 10,
+              fontWeight: 800,
+              letterSpacing: "0.12em",
+              marginBottom: 8,
+            }}
+          >
+            WORKER ARTIFACTS
+          </div>
+          {artifactPaths.workerArtifacts.map((artifact) => (
+            <div key={artifact.attemptId} style={{ marginBottom: 12 }}>
+              <MetaRow label="TASK" value={artifact.workerTaskId} />
+              <MetaRow label="ATTEMPT" value={artifact.attemptId} />
+              <PathRow label="TASK JSON" value={artifact.taskJson} />
+              <PathRow label="PROMPT MD" value={artifact.promptMd} />
+              <PathRow label="WORKPAD MD" value={artifact.workpadMd} />
+              <PathRow label="FINAL REPORT" value={artifact.finalReportJson} />
+            </div>
+          ))}
+        </div>
+      )}
       <div style={{ marginTop: 12, borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
         <MetaRow label="ARTIFACT DIR" value={activeRun.artifactDir} />
         <MetaRow label="UPDATED" value={formatDateTime(activeRun.updatedAt)} />

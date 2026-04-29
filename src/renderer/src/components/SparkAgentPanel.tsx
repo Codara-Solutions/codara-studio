@@ -14,6 +14,7 @@ interface Props {
   onUpdateStatus: (status: RunStatus) => void;
   onCreateStep: () => void;
   onCreateWorkerTask: () => void;
+  onPrepareWorkerTask: () => void;
   onDeleteRun: () => void;
 }
 
@@ -30,6 +31,7 @@ export default function SparkAgentPanel({
   onUpdateStatus,
   onCreateStep,
   onCreateWorkerTask,
+  onPrepareWorkerTask,
   onDeleteRun,
 }: Props) {
   const [deleteArmed, setDeleteArmed] = useState(false);
@@ -112,7 +114,7 @@ export default function SparkAgentPanel({
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+          gridTemplateColumns: "repeat(6, minmax(0, 1fr))",
           gap: 6,
           padding: "0 12px 10px",
           borderBottom: "1px solid var(--rule)",
@@ -129,6 +131,9 @@ export default function SparkAgentPanel({
         </PanelButton>
         <PanelButton disabled={!activeRun || busy} onClick={onCreateWorkerTask}>
           TASK
+        </PanelButton>
+        <PanelButton disabled={!activeRun || activeRun.workerTasks.length === 0 || busy} onClick={onPrepareWorkerTask}>
+          PREP
         </PanelButton>
         <PanelButton disabled={!activeRun || busy} onClick={handleDeleteRun} danger>
           {deleteArmed ? "SURE" : "DEL"}

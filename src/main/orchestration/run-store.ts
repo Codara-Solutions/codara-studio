@@ -5,6 +5,7 @@ import type {
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
+  PrepareWorkerTaskInput,
   RunArtifactPaths,
   RunState,
   SparkEvent,
@@ -13,6 +14,9 @@ import type {
   UpdateStepInput,
   UpdateWorkerTaskInput,
   WorkerTask,
+  WorkerAttempt,
+  WorkerArtifactPaths,
+  WorkerTaskEnvelope,
 } from "@shared/types";
 import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
 
@@ -79,11 +83,17 @@ export async function listRuns(workspaceId?: string): Promise<RunState[]> {
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-export function getRunArtifactPaths(runId: string): RunArtifactPaths {
+export async function getRunArtifactPaths(runId: string): Promise<RunArtifactPaths> {
+  const run = await getRun(runId);
   return {
     runDir: runDir(runId),
     runJson: runPath(runId),
     eventsJsonl: eventsPath(runId),
+    workerArtifacts:
+      run?.workerAttempts.map((attempt) => {
+        const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
+        return workerArtifactPaths(runId, task?.stepId, attempt.workerTaskId, attempt.id);
+      }) ?? [],
   };
 }
 
@@ -280,6 +290,72 @@ export async function updateWorkerTask(input: UpdateWorkerTaskInput): Promise<Ru
   });
 }
 
+export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<WorkerTaskEnvelope> {
+  const run = await requireRun(input.runId);
+  const task = run.workerTasks.find((item) => item.id === input.workerTaskId);
+  if (!task) throw new Error(`Worker task not found: ${input.workerTaskId}`);
+  const step = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
+  const timestamp = new Date().toISOString();
+  const attemptNumber =
+    run.workerAttempts.filter((attempt) => attempt.workerTaskId === task.id).length + 1;
+  const attempt: WorkerAttempt = {
+    id: makeId("attempt"),
+    runId: run.id,
+    workerTaskId: task.id,
+    attemptNumber,
+    runtime: task.runtimePreference,
+    cwd: input.cwd,
+    status: "prompt_ready",
+  };
+  const paths = workerArtifactPaths(run.id, task.stepId, task.id, attempt.id);
+  task.status = "queued";
+  task.updatedAt = timestamp;
+  const envelope: WorkerTaskEnvelope = {
+    runId: run.id,
+    workerTaskId: task.id,
+    attemptId: attempt.id,
+    runtime: task.runtimePreference,
+    cwd: input.cwd,
+    executionDisabled: true,
+    task,
+    step,
+    paths,
+    createdAt: timestamp,
+  };
+  const prompt = renderWorkerPrompt({ cwd: input.cwd, run, step, task, paths });
+  const workpad = renderInitialWorkpad({ run, step, task });
+
+  await fs.mkdir(paths.attemptDir, { recursive: true });
+  await fs.writeFile(paths.taskJson, JSON.stringify(envelope, null, 2), "utf8");
+  await fs.writeFile(paths.promptMd, prompt, "utf8");
+  await fs.writeFile(paths.workpadMd, workpad, "utf8");
+
+  attempt.promptPath = paths.promptMd;
+  attempt.workpadPath = paths.workpadMd;
+  attempt.finalReportPath = paths.finalReportJson;
+
+  run.workerAttempts.push(attempt);
+  run.updatedAt = timestamp;
+  await saveRun(run);
+  await appendEvent({
+    timestamp,
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    attemptId: attempt.id,
+    type: "worker_task.envelope_prepared",
+    message: `Worker task envelope prepared: ${task.title}`,
+    payload: {
+      executionDisabled: true,
+      attemptId: attempt.id,
+      paths,
+    },
+  });
+
+  return envelope;
+}
+
 export async function deleteRun(runId: string): Promise<void> {
   const run = await requireRun(runId);
   const timestamp = new Date().toISOString();
@@ -346,6 +422,154 @@ async function commitRunChange(
 function changedFields(input: object, excluded: string[]): string[] {
   const values = input as Record<string, unknown>;
   return Object.keys(values).filter((key) => !excluded.includes(key) && values[key] !== undefined);
+}
+
+function workerArtifactPaths(
+  runId: string,
+  stepId: string | undefined,
+  workerTaskId: string,
+  attemptId: string,
+): WorkerArtifactPaths {
+  const stepSegment = stepId ?? "no-step";
+  const attemptDir = join(runDir(runId), "steps", stepSegment, "workers", workerTaskId, "attempts", attemptId);
+  return {
+    workerTaskId,
+    attemptId,
+    attemptDir,
+    taskJson: join(attemptDir, "task.json"),
+    promptMd: join(attemptDir, "prompt.md"),
+    workpadMd: join(attemptDir, "workpad.md"),
+    finalReportJson: join(attemptDir, "final-report.json"),
+  };
+}
+
+function renderWorkerPrompt({
+  cwd,
+  run,
+  step,
+  task,
+  paths,
+}: {
+  cwd: string;
+  run: RunState;
+  step?: StepState;
+  task: WorkerTask;
+  paths: WorkerArtifactPaths;
+}): string {
+  return [
+    "You are a worker agent running inside the user's project.",
+    "",
+    "WORKSPACE",
+    `Project directory: ${cwd}`,
+    "",
+    "RUN",
+    `${run.title} (${run.id})`,
+    "",
+    "CURRENT STEP",
+    step ? `${step.title}\n${step.goal}` : "No step is assigned to this task.",
+    "",
+    "YOUR TASK",
+    task.title,
+    task.description,
+    "",
+    "ALLOWED FILES / FOLDERS",
+    formatList(task.allowedPaths, "No explicit allowed paths. Keep changes tightly scoped to the task."),
+    "",
+    "FORBIDDEN FILES / FOLDERS",
+    formatList(task.forbiddenPaths, "No explicit forbidden paths."),
+    "",
+    "WORKPAD",
+    `Before editing, create or update: ${paths.workpadMd}`,
+    "",
+    "Your workpad must include:",
+    "- goal",
+    "- plan",
+    "- acceptance criteria",
+    "- progress",
+    "- validation",
+    "- blockers",
+    "- final evidence",
+    "",
+    "CONSTRAINTS",
+    "- Keep the change focused.",
+    "- Do not redesign unrelated parts of the app.",
+    "- Do not delete existing user work.",
+    "- Do not install new dependencies unless explicitly allowed.",
+    "- Prefer small, understandable changes.",
+    "- If blocked, report the blocker clearly instead of guessing.",
+    "",
+    "VERIFICATION",
+    formatList(task.verificationCommands, "No verification commands were specified."),
+    "",
+    "FINAL REPORT",
+    `Write final JSON to: ${paths.finalReportJson}`,
+    "The JSON must match this schema:",
+    "```json",
+    JSON.stringify(
+      {
+        status: "complete | partial | blocked | failed",
+        summary: "...",
+        files_changed: [{ path: "...", reason: "..." }],
+        commands_run: [{ command: "...", exit_code: 0, summary: "..." }],
+        tests: [{ command: "...", result: "passed | failed | not_run", details: "..." }],
+        proof: ["..."],
+        risks: ["..."],
+        followups: ["..."],
+      },
+      null,
+      2,
+    ),
+    "```",
+    "",
+  ].join("\n");
+}
+
+function renderInitialWorkpad({
+  run,
+  step,
+  task,
+}: {
+  run: RunState;
+  step?: StepState;
+  task: WorkerTask;
+}): string {
+  return [
+    `# Workpad - ${task.title}`,
+    "",
+    "## Goal",
+    task.description,
+    "",
+    "## Run",
+    `- ${run.title}`,
+    `- ${run.id}`,
+    "",
+    "## Step",
+    step ? `- ${step.title}\n- ${step.goal}` : "- No step assigned",
+    "",
+    "## Plan",
+    "- Pending worker execution.",
+    "",
+    "## Acceptance Criteria",
+    formatList(task.expectedOutputs, "- Pending definition."),
+    "",
+    "## Progress",
+    "- Envelope prepared. Execution has not started.",
+    "",
+    "## Validation",
+    formatList(task.verificationCommands, "- No verification commands specified."),
+    "",
+    "## Blockers",
+    "- None recorded.",
+    "",
+    "## Final Evidence",
+    "- Pending worker execution.",
+    "",
+  ].join("\n");
+}
+
+function formatList(values: string[], emptyText: string): string {
+  if (values.length === 0) return emptyText;
+  return values.map((value) => `- ${value}`).join("\n");
 }
 
 function runPath(runId: string): string {
