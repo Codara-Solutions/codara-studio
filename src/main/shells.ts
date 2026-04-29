@@ -1,7 +1,11 @@
 import { promises as fs } from "node:fs";
 import { join, basename } from "node:path";
 import { platform } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { ShellInfo } from "@shared/types";
+
+const execFileAsync = promisify(execFile);
 
 async function exists(p: string): Promise<boolean> {
   try {
@@ -67,6 +71,15 @@ async function detectWindows(): Promise<ShellInfo[]> {
     family: "pwsh",
   });
 
+  for (const exe of await where("pwsh")) {
+    candidates.push({
+      label: "PowerShell 7",
+      exe,
+      args: ["-NoLogo"],
+      family: "pwsh",
+    });
+  }
+
   for (const c of candidates) {
     if (await exists(c.exe)) {
       out.push({ ...c, id: c.exe });
@@ -80,6 +93,19 @@ async function detectWindows(): Promise<ShellInfo[]> {
     seen.add(key);
     return true;
   });
+}
+
+async function where(command: string): Promise<string[]> {
+  if (platform() !== "win32") return [];
+  try {
+    const { stdout } = await execFileAsync("where.exe", [command], { windowsHide: true });
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 async function detectUnix(): Promise<ShellInfo[]> {

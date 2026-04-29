@@ -136,6 +136,45 @@ understanding the low-level worker machinery.
 - Added configurable Claude/Codex worker command routing through
   `SPARK_CLAUDE_WORKER_COMMAND`, `SPARK_CLAUDE_WORKER_ARGS`,
   `SPARK_CODEX_WORKER_COMMAND`, and `SPARK_CODEX_WORKER_ARGS`.
+- Added the first OpenRouter-backed Spark manager adapter.
+- Spark can now use `SPARK_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` plus
+  `SPARK_OPENROUTER_MODEL` to ask a cheap manager model for initial steps and
+  worker tasks.
+- Added durable Spark call artifacts under `runs/<run-id>/spark-calls/`:
+  `request.json`, `response.json`, and `parsed-decision.json`.
+- Added `spark_call.started`, `spark_call.completed`, `spark_call.failed`, and
+  `spark_manager.decision_applied` events.
+- Added a fake-OpenRouter Electron E2E test that verifies Spark can plan one
+  Claude task and one Codex task, route both through configured worker commands,
+  and review both reports.
+- Fixed the first multi-worker scheduling race by preparing selected attempts
+  before scheduling launches and queueing the background launches sequentially.
+- Added visible attach-mode worker panes in the Workers tab for Spark-launched
+  attempts.
+- The visible worker terminal attaches to the orchestration PTY session, so
+  Claude/Codex output and user input go through the same worker process Spark is
+  tracking.
+- Windows defaults now use `claude.exe` and `codex.cmd` for real local worker
+  launches when no explicit worker command env vars are set.
+- Normal app runs no longer silently launch the manual test runner when
+  OpenRouter is missing. Spark asks the user to configure the manager model
+  instead; `SPARK_ENABLE_MANUAL_FALLBACK=1` keeps the E2E fallback available.
+- Shell detection now also checks `where pwsh` so packaged/WindowsApps
+  PowerShell 7 installs are detected and preferred as the default terminal.
+- Spark worker panes are not persisted to `spark-state.json`; they are runtime
+  views of active orchestration sessions.
+- Updated E2E coverage to verify that planned Claude and Codex worker panes are
+  visible in the Workers tab.
+- Made the Settings button open a real tabbed settings dialog.
+- Added persisted user settings in `spark-settings.json`.
+- Added a Default Terminal settings tab that controls which detected shell new
+  manual worker panes use.
+- Added an API + Model settings tab for the OpenRouter API key and manager
+  model, and wired those settings into Spark manager planning.
+- Restored run deletion from the primary Spark panel with an inline two-step
+  `DELETE RUN` / `CONFIRM DELETE` action instead of a native popup.
+- Run deletion now disposes active worker sessions for that run before removing
+  the run artifact folder.
 - Added `final-report.json` parsing and deterministic worker review events:
   `worker_report.parsed`, `worker_report.reviewed`, and
   `worker_report.missing`.
@@ -145,6 +184,17 @@ understanding the low-level worker machinery.
   Explorer in the normal app viewport.
 - Updated E2E coverage to verify worker report review and the Artifacts tab
   final report path.
+- Moved initial OpenRouter manager planning fully into the background so
+  clicking `RUN` returns control to the UI immediately instead of waiting on
+  the model call.
+- Changed split-safe worker scheduling so Claude/Codex attempts launch in
+  parallel instead of waiting for the previous worker to exit.
+- Worker launch prompts now include the submit keystroke after a short startup
+  delay, so the prompt is sent to interactive CLIs instead of only being typed.
+- Spark-launched worker panes now use the same terminal header style as normal
+  user-created terminals instead of naming panes `CLAUDE` or `CODEX`.
+- Updated E2E coverage for background planning, visible worker panes, settings,
+  run deletion, and parallel fake Claude/Codex worker routing.
 
 ## Current State
 
@@ -171,13 +221,15 @@ Implemented foundation:
 Missing foundation:
 
 - run state projection from events
-- persisted settings
 - diagnostics
 - real Claude/Codex worker command configuration UI and production defaults
+- richer Claude/Codex terminal startup detection beyond the current delayed
+  prompt send
 - cancellation and timeout handling
 - a dedicated advanced/manual control surface outside the primary Spark panel
 - a long-running autopilot loop that can continue across many steps
-- Spark-generated plan analysis and task decomposition
+- Spark-generated plan analysis and task decomposition beyond the initial
+  manager-decision spike
 
 ## Next Step
 
@@ -188,8 +240,9 @@ Immediate target:
 ```text
 Autopilot loop hardening:
   make the loop continue until complete, paused, blocked, or failed
-  connect real Claude/Codex command configuration to task runtime selection
+  add user-facing worker command settings
+  connect real Claude/Codex commands to production defaults
   turn deterministic report review into accept/retry/follow-up/question actions
   let Spark write clarification questions into the run message stream
-  add cancellation and timeouts before real Claude/Codex launchers
+  add cancellation and timeouts before long-running real Claude/Codex sessions
 ```

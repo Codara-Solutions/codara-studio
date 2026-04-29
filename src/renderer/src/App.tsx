@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AppState, FsEntry, ShellInfo, Workspace } from "@shared/types";
+import type { AppSettings, AppState, FsEntry, ShellInfo, SparkEvent, Worker, Workspace } from "@shared/types";
 import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import TerminalGrid from "./components/TerminalGrid";
@@ -7,12 +7,19 @@ import FileTree from "./components/FileTree";
 import EditorGrid from "./components/EditorGrid";
 import OrchestrationSidebar from "./components/OrchestrationSidebar";
 import StatusBar from "./components/StatusBar";
+import SettingsDialog from "./components/SettingsDialog";
 import { PlusIcon } from "./components/icons";
 import { basename } from "./path-utils";
 
 const RAIL_WIDTH = 240;
 const RIGHT_WIDTH = 360;
 type WorkbenchTab = "workers" | "editor";
+
+const DEFAULT_SETTINGS: AppSettings = {
+  defaultShellId: null,
+  openRouterApiKey: "",
+  openRouterModel: "google/gemini-flash-latest",
+};
 
 function uid(prefix = "id"): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -23,6 +30,14 @@ function gridDims(n: number): { cols: number; rows: number } {
   const cols = Math.ceil(Math.sqrt(n));
   const rows = Math.ceil(n / cols);
   return { cols, rows };
+}
+
+function resolveDefaultShell(
+  shells: ShellInfo[],
+  settings: AppSettings,
+  detectedDefault: ShellInfo | null,
+): ShellInfo | null {
+  return shells.find((shell) => shell.id === settings.defaultShellId) ?? detectedDefault ?? shells[0] ?? null;
 }
 
 export default function App() {
@@ -38,6 +53,9 @@ export default function App() {
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WorkbenchTab>("workers");
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [defaultShell, setDefaultShell] = useState<ShellInfo | null>(null);
+  const [detectedDefaultShell, setDetectedDefaultShell] = useState<ShellInfo | null>(null);
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [platform, setPlatform] = useState<string>("");
   const [home, setHome] = useState<string>("");
   const saveTimer = useRef<number | null>(null);
@@ -47,8 +65,9 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        const [state, sh, def, plat, hm] = await Promise.all([
+        const [state, appSettings, sh, def, plat, hm] = await Promise.all([
           window.spark.state.load(),
+          window.spark.settings.load(),
           window.spark.shells.list(),
           window.spark.shells.default(),
           window.spark.app.platform(),
@@ -57,8 +76,10 @@ export default function App() {
         if (cancelled) return;
         setWorkspaces(state.workspaces);
         setActiveId(state.activeWorkspaceId);
+        setSettings(appSettings);
         setShells(sh);
-        setDefaultShell(def);
+        setDetectedDefaultShell(def);
+        setDefaultShell(resolveDefaultShell(sh, appSettings, def));
         setPlatform(plat);
         setHome(hm);
         setBooted(true);
@@ -108,6 +129,51 @@ export default function App() {
     const accent = activeWorkspace?.color || "#F0C419";
     document.documentElement.style.setProperty("--accent", accent);
   }, [activeWorkspace?.color]);
+
+  useEffect(() => {
+    if (!booted) return;
+    const shellId = defaultShell?.id ?? shells[0]?.id;
+    if (!shellId) return;
+
+    const addSparkWorkerPane = async (event: SparkEvent) => {
+      if (event.type !== "worker_task.envelope_prepared") return;
+      if (!event.runId || !event.workerTaskId || !event.attemptId) return;
+
+      let runtime: Worker["runtime"] = undefined;
+      try {
+        const run = await window.spark.orchestration.getRun(event.runId);
+        const task = run?.workerTasks.find((item) => item.id === event.workerTaskId);
+        if (task) {
+          runtime = task.runtimePreference;
+        }
+      } catch {
+        /* the event already has enough information to create a visible pane */
+      }
+
+      const pane: Worker = {
+        id: event.attemptId,
+        shellId,
+        kind: "orchestration",
+        runtime,
+        runId: event.runId,
+        workerTaskId: event.workerTaskId,
+        attemptId: event.attemptId,
+      };
+
+      setWorkspaces((list) =>
+        list.map((workspace) => {
+          if (workspace.id !== event.workspaceId) return workspace;
+          if (workspace.workers.some((worker) => worker.id === pane.id)) return workspace;
+          return { ...workspace, workers: [...workspace.workers, pane] };
+        }),
+      );
+      if (event.workspaceId === activeId) setActiveWorkbenchTab("workers");
+    };
+
+    return window.spark.orchestration.onEvent((event) => {
+      void addSparkWorkerPane(event);
+    });
+  }, [activeId, booted, defaultShell?.id, shells]);
 
   const updateWs = useCallback((id: string, patch: Partial<Workspace>) => {
     setWorkspaces((ws) => ws.map((w) => (w.id === id ? { ...w, ...patch } : w)));
@@ -217,6 +283,7 @@ export default function App() {
         rightOn={showRight}
         onToggleLeft={() => setShowLeft((v) => !v)}
         onToggleRight={() => setShowRight((v) => !v)}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       <div style={{ flex: 1, display: "flex", minHeight: 0, position: "relative" }}>
@@ -308,6 +375,20 @@ export default function App() {
                 files.map((file) => (file.path === oldPath ? entry : file)),
               );
               setActiveEditorPath((current) => (current === oldPath ? entry.path : current));
+            }}
+          />
+        )}
+
+        {settingsOpen && (
+          <SettingsDialog
+            settings={settings}
+            shells={shells}
+            defaultShell={defaultShell}
+            onClose={() => setSettingsOpen(false)}
+            onSave={async (nextSettings) => {
+              const saved = await window.spark.settings.save(nextSettings);
+              setSettings(saved);
+              setDefaultShell(resolveDefaultShell(shells, saved, detectedDefaultShell));
             }}
           />
         )}

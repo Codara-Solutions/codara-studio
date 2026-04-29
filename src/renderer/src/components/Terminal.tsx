@@ -12,6 +12,7 @@ interface Props {
   onPid: (pid: number) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   fontSize?: number;
+  attachOnly?: boolean;
 }
 
 const THEME: ITheme = {
@@ -46,6 +47,7 @@ export default function TerminalView({
   onPid,
   onExit,
   fontSize = 13,
+  attachOnly = false,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
@@ -98,6 +100,14 @@ export default function TerminalView({
     let cancelled = false;
     (async () => {
       try {
+        if (attachOnly) {
+          const res = await window.spark.orchestration.attachWorkerSession(workerId);
+          if (cancelled) return;
+          spawnedRef.current = true;
+          if (res.pid !== undefined) onPid(res.pid);
+          term.focus();
+          return;
+        }
         const res = await window.spark.pty.spawn({ id: workerId, shell, cwd, cols, rows });
         if (cancelled) return;
         spawnedRef.current = true;
@@ -135,7 +145,11 @@ export default function TerminalView({
       } catch {
         /* ignore */
       }
-      void window.spark.pty.dispose(ptyIdRef.current);
+      if (attachOnly) {
+        void window.spark.orchestration.detachWorkerSession(ptyIdRef.current);
+      } else {
+        void window.spark.pty.dispose(ptyIdRef.current);
+      }
       termRef.current = null;
       fitRef.current = null;
     };

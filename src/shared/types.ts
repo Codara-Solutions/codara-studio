@@ -12,6 +12,11 @@ export interface Worker {
   id: string;
   name?: string;
   shellId: ShellId;
+  kind?: "terminal" | "orchestration";
+  runtime?: WorkerRuntime;
+  runId?: string;
+  workerTaskId?: string;
+  attemptId?: string;
 }
 
 export interface Workspace {
@@ -25,6 +30,12 @@ export interface Workspace {
 export interface AppState {
   workspaces: Workspace[];
   activeWorkspaceId: string | null;
+}
+
+export interface AppSettings {
+  defaultShellId: string | null;
+  openRouterApiKey: string;
+  openRouterModel: string;
 }
 
 export interface FsEntry {

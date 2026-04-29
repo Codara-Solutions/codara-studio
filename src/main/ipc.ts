@@ -2,7 +2,7 @@ import { ipcMain, dialog, BrowserWindow, app } from "electron";
 import { listShells, defaultShell } from "./shells";
 import { deleteFile, listDir, listMarkdownFiles, readTextFile, renameFile, writeTextFile } from "./fs-tree";
 import { getGitGraph } from "./git-graph";
-import { loadState, saveState } from "./storage";
+import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import * as pty from "./pty-manager";
 import {
   addRunMessage,
@@ -23,9 +23,16 @@ import {
   updateStep,
   updateWorkerTask,
 } from "./orchestration/run-store";
+import {
+  attachWorkerSession,
+  detachWorkerSession,
+  disposeWorkerSession,
+  writeWorkerSessionInput,
+} from "./orchestration/worker-session";
 import { listEvents } from "./orchestration/event-log";
 import type {
   AddRunMessageInput,
+  AppSettings,
   AppState,
   CreateStepInput,
   CreateRunInput,
@@ -56,6 +63,14 @@ export function registerIpc(): void {
 
   ipcMain.handle("state:save", async (_e, state: AppState): Promise<void> => {
     await saveState(state);
+  });
+
+  ipcMain.handle("settings:load", async (): Promise<AppSettings> => {
+    return loadSettings();
+  });
+
+  ipcMain.handle("settings:save", async (_e, settings: AppSettings): Promise<AppSettings> => {
+    return saveSettings(settings);
   });
 
   ipcMain.handle("shells:list", async (): Promise<ShellInfo[]> => {
@@ -176,6 +191,14 @@ export function registerIpc(): void {
     await deleteRun(runId);
   });
 
+  ipcMain.handle("orchestration:attachWorkerSession", async (e, attemptId: string) => {
+    return attachWorkerSession(attemptId, e.sender);
+  });
+
+  ipcMain.handle("orchestration:detachWorkerSession", async (e, attemptId: string): Promise<void> => {
+    detachWorkerSession(attemptId, e.sender);
+  });
+
   ipcMain.handle(
     "pty:spawn",
     async (e, args: { id: string; shell: ShellInfo; cwd: string; cols: number; rows: number }) => {
@@ -192,6 +215,7 @@ export function registerIpc(): void {
 
   ipcMain.handle("pty:write", async (_e, args: { id: string; data: string }) => {
     pty.write(args.id, args.data);
+    writeWorkerSessionInput(args.id, args.data);
   });
 
   ipcMain.handle("pty:resize", async (_e, args: { id: string; cols: number; rows: number }) => {
@@ -200,6 +224,7 @@ export function registerIpc(): void {
 
   ipcMain.handle("pty:dispose", async (_e, args: { id: string }) => {
     pty.dispose(args.id);
+    disposeWorkerSession(args.id);
   });
 
   ipcMain.handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);

@@ -150,6 +150,7 @@ function WorkerPane({
           active={active}
           onPid={onPid}
           fontSize={fontSize}
+          attachOnly={worker.kind === "orchestration"}
         />
       </div>
     </div>

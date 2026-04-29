@@ -51,6 +51,7 @@ context rather than product source.
 
 - Workspaces are created by selecting a local directory.
 - Workspace state is persisted to `spark-state.json` under Electron userData.
+- User settings are persisted to `spark-settings.json` under Electron userData.
 - Terminal tiles are backed by `node-pty` and survive workspace tab switches.
 - The file tree intentionally shows dotfiles and project files as-is.
 - Text files can be opened and edited from the file tree.
@@ -60,6 +61,8 @@ context rather than product source.
   selectable project plans.
 - `SparkAgentPanel` is the simple user surface: select a Markdown plan, click
   `RUN`, stop/resume, and send guidance or answers.
+- The window Settings button opens tabbed settings for the default terminal and
+  the OpenRouter API key/model used by Spark manager planning.
 - `DevInspector` shows raw orchestration events, selected event JSON, current
   run state, workspace info, and artifact paths.
 - Worker task records can be prepared into non-executing envelopes that write
@@ -67,13 +70,22 @@ context rather than product source.
 - Prepared worker attempts launch through hidden PTY-backed worker sessions.
   The manual runner is still the default test runtime, and Claude/Codex
   runtimes can be routed through configured commands when tasks request them.
+- Spark worker attempts also appear as visible attach-mode panes in the
+  Workers tab. The visible terminal attaches to the orchestration PTY session
+  instead of spawning a second process.
+- When `SPARK_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` is configured,
+  Spark asks OpenRouter for the initial manager decision before creating
+  worker tasks. The manager call writes `spark_call.*` events and durable
+  request/response/parsed-decision artifacts.
 - Worker sessions capture `stdout.log`, `stderr.log`, `raw.log`, and
   `final-report.json`; `STOP` and `RESUME` write control input into the active
   session.
-- Autopilot has a first one-button manager cycle: create/reuse a run, create
-  the first step/task if needed, prepare a worker envelope, launch the
-  controlled worker in the background, and return to review. The plan text
-  comes from the selected Markdown file.
+- Autopilot has a first one-button manager cycle: create/reuse a run, ask the
+  OpenRouter-backed Spark manager for initial steps/tasks when configured,
+  prepare worker envelopes, launch controlled workers in the background, and
+  return to review. Without an OpenRouter key the app asks the user to
+  configure the manager model instead of silently launching the manual test
+  runner. The plan text comes from the selected Markdown file.
 - Selected Markdown plans are persisted in `RunState.plans` with `sourceFile`
   and raw content so future planning/review steps can trace the run input.
 - Runs can be paused, resumed, and annotated with durable human messages. These
@@ -190,6 +202,9 @@ Electron userData:
 ```text
 runs/<run-id>/run.json
 runs/<run-id>/events.jsonl
+runs/<run-id>/spark-calls/<spark-call-id>/request.json
+runs/<run-id>/spark-calls/<spark-call-id>/response.json
+runs/<run-id>/spark-calls/<spark-call-id>/parsed-decision.json
 runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/task.json
 runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/prompt.md
 runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/workpad.md
@@ -201,9 +216,8 @@ runs/<run-id>/steps/<step-id>/workers/<worker-task-id>/attempts/<attempt-id>/fin
 
 ## Current Engineering Step
 
-Do not add OpenRouter, Claude/Codex launchers, or the orchestration graph before
-the runtime remains observable. The current foundation includes the Dev
-Inspector MVP:
+Do not add the orchestration graph before the runtime remains observable. The
+current foundation includes the Dev Inspector MVP:
 
 ```text
 Events tab:
@@ -220,6 +234,8 @@ Run mutations:
   autopilot start
   pause/resume with active worker control signals
   durable human messages
+  OpenRouter-backed initial manager planning
+  visible attach-mode worker terminal panes
   worker task envelope preparation
   background PTY-backed worker session execution
   worker report parsing and deterministic review decisions
@@ -233,3 +249,48 @@ Events explain state changes.
 Terminals are execution surfaces, not the source of truth.
 Spark receives compact context packets, not raw logs.
 ```
+
+## Manager And Worker Configuration
+
+OpenRouter manager settings are available in the app Settings dialog under
+`API + MODEL`. Environment variables are still supported for local development:
+
+```bash
+SPARK_OPENROUTER_API_KEY=...
+SPARK_OPENROUTER_MODEL=google/gemini-flash-latest
+SPARK_OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+```
+
+`OPENROUTER_API_KEY` is also accepted. The model defaults to
+`google/gemini-flash-latest`. Saved app settings take precedence over the API
+key and model environment variables.
+
+Local worker command routing:
+
+```bash
+SPARK_CLAUDE_WORKER_COMMAND=claude
+SPARK_CLAUDE_WORKER_ARGS=
+SPARK_CODEX_WORKER_COMMAND=codex
+SPARK_CODEX_WORKER_ARGS=
+```
+
+The args variables accept either a JSON string array or a simple shell-style
+argument string. On Windows the built-in defaults are `claude.exe` and
+`codex.cmd` so the visible worker panes open the real local CLIs when those are
+available on `PATH`. Spark sends the prepared task prompt after a short CLI
+startup delay and includes the submit keystroke.
+
+Initial manager planning is scheduled in the background. The `RUN` action
+creates/updates the run and returns control to the UI while OpenRouter planning,
+worker preparation, and worker launch events stream into the Dev Inspector.
+When the manager returns split-safe Claude/Codex tasks, Spark schedules those
+worker attempts in parallel and shows them as normal terminal panes.
+
+Test-only fallback:
+
+```bash
+SPARK_ENABLE_MANUAL_FALLBACK=1
+```
+
+This enables the manual runner used by E2E tests. Normal app runs should use
+OpenRouter manager planning plus real Claude/Codex worker commands.

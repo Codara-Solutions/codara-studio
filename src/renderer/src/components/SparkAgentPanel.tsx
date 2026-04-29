@@ -13,6 +13,7 @@ interface Props {
   onPauseRun: (reason: string) => void;
   onResumeRun: () => void;
   onAddUserMessage: (message: string) => void;
+  onDeleteRun: (run: RunState) => void;
   onSelectPlan: (path: string) => void;
   onSelectRun: (run: RunState) => void;
   onRefresh: () => void;
@@ -30,11 +31,13 @@ export default function SparkAgentPanel({
   onPauseRun,
   onResumeRun,
   onAddUserMessage,
+  onDeleteRun,
   onSelectPlan,
   onSelectRun,
   onRefresh,
 }: Props) {
   const [humanInput, setHumanInput] = useState("");
+  const [deleteConfirmRunId, setDeleteConfirmRunId] = useState<string | null>(null);
 
   const sendHumanInput = () => {
     const message = humanInput.trim();
@@ -50,6 +53,7 @@ export default function SparkAgentPanel({
   };
 
   const selectedPlan = planFiles.find((file) => file.path === selectedPlanPath);
+  const activeRunDeletePending = Boolean(activeRun && deleteConfirmRunId === activeRun.id);
 
   return (
     <section
@@ -177,6 +181,9 @@ export default function SparkAgentPanel({
         style={{
           padding: "8px 12px",
           borderBottom: "1px solid var(--rule)",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
         }}
       >
         <button
@@ -197,6 +204,34 @@ export default function SparkAgentPanel({
           }}
         >
           REFRESH PLANS
+        </button>
+        <span style={{ flex: 1 }} />
+        <button
+          type="button"
+          disabled={!activeRun || busy}
+          onClick={() => {
+            if (!activeRun) return;
+            if (activeRunDeletePending) {
+              setDeleteConfirmRunId(null);
+              onDeleteRun(activeRun);
+              return;
+            }
+            setDeleteConfirmRunId(activeRun.id);
+          }}
+          style={{
+            appearance: "none",
+            background: "transparent",
+            border: "none",
+            color: !activeRun || busy ? "var(--muted)" : activeRunDeletePending ? "var(--danger)" : "var(--ink-dim)",
+            padding: 0,
+            fontFamily: "inherit",
+            fontSize: 10,
+            fontWeight: 800,
+            letterSpacing: "0.08em",
+            cursor: "default",
+          }}
+        >
+          {activeRunDeletePending ? "CONFIRM DELETE" : "DELETE RUN"}
         </button>
       </div>
 
@@ -251,7 +286,10 @@ export default function SparkAgentPanel({
               key={run.id}
               run={run}
               active={run.id === activeRun?.id}
-              onClick={() => onSelectRun(run)}
+              onClick={() => {
+                setDeleteConfirmRunId(null);
+                onSelectRun(run);
+              }}
             />
           ))
         )}

@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AddRunMessageInput,
+  AppSettings,
   AppState,
   CreateStepInput,
   CreateRunInput,
@@ -33,6 +34,10 @@ const api = {
   state: {
     load: (): Promise<AppState> => ipcRenderer.invoke("state:load"),
     save: (state: AppState): Promise<void> => ipcRenderer.invoke("state:save", state),
+  },
+  settings: {
+    load: (): Promise<AppSettings> => ipcRenderer.invoke("settings:load"),
+    save: (settings: AppSettings): Promise<AppSettings> => ipcRenderer.invoke("settings:save", settings),
   },
   shells: {
     list: (): Promise<ShellInfo[]> => ipcRenderer.invoke("shells:list"),
@@ -93,6 +98,17 @@ const api = {
       ipcRenderer.invoke("orchestration:launchWorkerAttempt", input),
     deleteRun: (runId: string): Promise<void> =>
       ipcRenderer.invoke("orchestration:deleteRun", runId),
+    attachWorkerSession: (
+      attemptId: string,
+    ): Promise<{
+      id: string;
+      attached: boolean;
+      pid?: number;
+      command?: string;
+      exited?: { exitCode: number; signal?: number };
+    }> => ipcRenderer.invoke("orchestration:attachWorkerSession", attemptId),
+    detachWorkerSession: (attemptId: string): Promise<void> =>
+      ipcRenderer.invoke("orchestration:detachWorkerSession", attemptId),
     onEvent: (handler: OrchestrationEventHandler): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, event: SparkEvent) => handler(event);
       ipcRenderer.on("orchestration:event", listener);

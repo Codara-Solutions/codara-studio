@@ -2,7 +2,7 @@ import { app, BrowserWindow, shell } from "electron";
 import { join } from "node:path";
 import { registerIpc } from "./ipc";
 import * as pty from "./pty-manager";
-import { disposeAllWorkerSessions } from "./orchestration/worker-session";
+import { detachWorkerSessionsForWebContents, disposeAllWorkerSessions } from "./orchestration/worker-session";
 import { flush } from "./storage";
 
 app.setName("Spark Agent");
@@ -56,6 +56,7 @@ function createWindow(): void {
 
   mainWindow.webContents.on("destroyed", () => {
     pty.disposeForWebContents(mainWindow!.webContents);
+    detachWorkerSessionsForWebContents(mainWindow!.webContents);
   });
 
   if (isDev && process.env.ELECTRON_RENDERER_URL) {

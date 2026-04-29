@@ -171,6 +171,28 @@ export default function OrchestrationSidebar({ workspace }: Props) {
     );
   };
 
+  const deleteExistingRun = async (run: RunState) => {
+    if (busy) return;
+    const deleteRun = window.spark.orchestration.deleteRun;
+    if (typeof deleteRun !== "function") {
+      setError("Delete run API is unavailable. Restart Spark Agent to reload the preload bridge.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteRun(run.id);
+      const nextRuns = runs.filter((item) => item.id !== run.id);
+      setRuns(nextRuns);
+      const nextActive = activeRun?.id === run.id ? nextRuns[0] ?? null : activeRun;
+      await loadRunDetails(nextActive);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const selectRun = async (run: RunState) => {
     if (busy) return;
     setError(null);
@@ -220,6 +242,7 @@ export default function OrchestrationSidebar({ workspace }: Props) {
         onPauseRun={pauseActiveRun}
         onResumeRun={resumeActiveRun}
         onAddUserMessage={addUserMessage}
+        onDeleteRun={deleteExistingRun}
         onSelectPlan={setSelectedPlanPath}
         onSelectRun={selectRun}
         onRefresh={loadRuns}

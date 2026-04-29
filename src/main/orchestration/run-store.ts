@@ -13,6 +13,7 @@ import type {
   ReviewDecision,
   RunArtifactPaths,
   RunState,
+  SparkCall,
   SparkEvent,
   StartAutopilotInput,
   StepState,
@@ -26,11 +27,18 @@ import type {
   WorkerTaskEnvelope,
 } from "@shared/types";
 import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
-import { startWorkerSession, type WorkerCommand, type WorkerSession } from "./worker-session";
+import { loadSettings } from "../storage";
+import {
+  buildOpenRouterManagerRequest,
+  readOpenRouterConfig,
+  requestOpenRouterManagerDecision,
+  type SparkManagerDecision,
+} from "./openrouter-manager";
+import { disposeWorkerSession, startWorkerSession, type WorkerCommand, type WorkerSession } from "./worker-session";
 
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
-const CONTINUE_INPUT = "continue\n";
+const CONTINUE_INPUT = "continue\r";
 
 interface ActiveWorkerProcess {
   runId: string;
@@ -44,6 +52,7 @@ interface ActiveWorkerProcess {
 
 const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
 const activeAutopilotCycles = new Map<string, Promise<void>>();
+const activeAutopilotPlans = new Map<string, Promise<void>>();
 const runWriteQueues = new Map<string, Promise<void>>();
 
 export async function createRun(input: CreateRunInput): Promise<RunState> {
@@ -206,64 +215,50 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
     },
   });
 
-  if (run.steps.length === 0) {
-    run = await createStep({
-      runId: run.id,
-      title: "Understand project plan",
-      goal: input.planText?.trim() || "Read the project plan and decide the first concrete implementation task.",
-      acceptanceCriteria: ["A worker task is prepared from the current project plan."],
-      verificationCommands: ["npm run typecheck"],
-    });
-  }
-
-  const activeStep = pickAutopilotStep(run);
-  const existingTask = activeStep
-    ? run.workerTasks.find((task) => task.stepId === activeStep.id)
-    : run.workerTasks[0];
-
-  if (!existingTask) {
-    run = await createWorkerTask({
-      runId: run.id,
-      stepId: activeStep?.id,
-      title: "Autopilot task 1",
-      description:
-        input.planText?.trim() ||
-        "Inspect the current project state and produce the next concrete implementation report.",
-      runtimePreference: "manual",
-      expectedOutputs: ["A final report artifact explaining what was done and what remains."],
-      verificationCommands: ["npm run typecheck"],
-      createdBy: "spark",
-    });
+  if (run.steps.length === 0 && run.workerTasks.length === 0) {
+    scheduleInitialAutopilotPlanning(run.id, input);
+    return run;
   }
 
   run = await requireRun(run.id);
-  const task = pickAutopilotTask(run);
-  if (!task) {
+  const tasks = pickAutopilotTasks(run);
+  if (tasks.length === 0) {
     return askHumanQuestion(run.id, "I could not find a ready task to run. Please clarify the next goal.");
   }
 
-  let attemptId = run.workerAttempts
-    .slice()
-    .reverse()
-    .find((item) => item.workerTaskId === task.id && (item.status === "prompt_ready" || item.status === "failed"))
-    ?.id;
-  if (!attemptId) {
-    const envelope = await prepareWorkerTask({
-      runId: run.id,
-      workerTaskId: task.id,
-      cwd: input.cwd,
-    });
-    attemptId = envelope.attemptId;
+  const launchQueue: Array<{ task: WorkerTask; attemptId: string }> = [];
+  for (const task of tasks) {
+    let attemptId = run.workerAttempts
+      .slice()
+      .reverse()
+      .find((item) => item.workerTaskId === task.id && (item.status === "prompt_ready" || item.status === "failed"))
+      ?.id;
+    if (!attemptId) {
+      const envelope = await prepareWorkerTask({
+        runId: run.id,
+        workerTaskId: task.id,
+        cwd: input.cwd,
+      });
+      attemptId = envelope.attemptId;
+      run = await requireRun(run.id);
+    }
+
+    if (activeAutopilotCycles.has(autopilotCycleKey(run.id, attemptId))) continue;
+    launchQueue.push({ task, attemptId });
   }
 
   run = await requireRun(run.id);
-  if (!activeAutopilotCycles.has(autopilotCycleKey(run.id, attemptId))) {
+  const scheduledAttemptIds: string[] = [];
+  for (const item of launchQueue) {
+    if (activeAutopilotCycles.has(autopilotCycleKey(run.id, item.attemptId))) continue;
+    const latestTask = run.workerTasks.find((task) => task.id === item.task.id) ?? item.task;
+    scheduledAttemptIds.push(item.attemptId);
     await appendEvent({
       workspaceId: run.workspaceId,
       runId: run.id,
-      stepId: task.stepId,
-      workerTaskId: task.id,
-      attemptId,
+      stepId: latestTask.stepId,
+      workerTaskId: latestTask.id,
+      attemptId: item.attemptId,
       type: "autopilot.cycle_scheduled",
       message: "Autopilot worker cycle scheduled",
       payload: {
@@ -271,10 +266,62 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
         workerAttempts: run.workerAttempts.length,
       },
     });
-    scheduleAutopilotCycle(run.id, attemptId);
+  }
+  scheduleAutopilotCycles(run.id, scheduledAttemptIds);
+
+  return scheduledAttemptIds.length > 0 ? await requireRun(run.id) : run;
+}
+
+function scheduleInitialAutopilotPlanning(runId: string, input: StartAutopilotInput): void {
+  if (activeAutopilotPlans.has(runId)) return;
+  const cycle = runInitialAutopilotPlanning(runId, input)
+    .catch(async (err) => {
+      await markInitialAutopilotPlanningFailed(runId, err);
+    })
+    .finally(() => {
+      activeAutopilotPlans.delete(runId);
+    });
+  activeAutopilotPlans.set(runId, cycle);
+  void cycle;
+}
+
+async function runInitialAutopilotPlanning(runId: string, input: StartAutopilotInput): Promise<void> {
+  let run = await requireRun(runId);
+  if (run.status === "paused" || run.status === "cancelled") return;
+
+  const managerPlannedRun = await askOpenRouterManagerForInitialTasks(run, input.cwd);
+  if (!managerPlannedRun && !manualFallbackEnabled()) {
+    await askHumanQuestion(
+      run.id,
+      "OpenRouter is not configured, so Spark cannot plan Claude/Codex worker tasks yet. Add the API key in Settings, then run the plan again.",
+    );
+    return;
   }
 
-  return run;
+  run = managerPlannedRun ?? (await createFallbackAutopilotTask(run, input));
+  if (run.status === "paused" || run.status === "cancelled") return;
+  await startAutopilot({ ...input, runId: run.id });
+}
+
+async function markInitialAutopilotPlanningFailed(runId: string, err: unknown): Promise<void> {
+  const run = await getRun(runId);
+  if (!run) return;
+  const error = err instanceof Error ? err.message : String(err);
+  await commitRunChange(run, {
+    type: "autopilot.planning_failed",
+    message: `Autopilot planning failed: ${error}`,
+    payload: { error },
+    mutate: (draft, timestamp) => {
+      draft.status = "failed";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "failed",
+        lastAction: "manager_planning_failed",
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
 }
 
 async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promise<void> {
@@ -312,23 +359,31 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   });
 }
 
-function scheduleAutopilotCycle(runId: string, attemptId: string): void {
-  const key = autopilotCycleKey(runId, attemptId);
-  if (activeAutopilotCycles.has(key)) return;
+function scheduleAutopilotCycles(runId: string, attemptIds: string[]): void {
+  for (const attemptId of attemptIds) {
+    const key = autopilotCycleKey(runId, attemptId);
+    if (activeAutopilotCycles.has(key)) continue;
 
-  const cycle = runAutopilotWorkerCycle(runId, attemptId)
-    .catch(async (err) => {
-      try {
-        await markAutopilotCycleFailed(runId, attemptId, err);
-      } catch {
-        /* run may have been deleted while the background cycle was failing */
-      }
-    })
-    .finally(() => {
-      activeAutopilotCycles.delete(key);
-    });
-  activeAutopilotCycles.set(key, cycle);
-  void cycle;
+    const cycle = Promise.resolve()
+      .then(async () => {
+        const run = await getRun(runId);
+        if (!run || run.status === "paused" || run.status === "cancelled") return;
+        await runAutopilotWorkerCycle(runId, attemptId);
+      })
+      .catch(async (err) => {
+        try {
+          await markAutopilotCycleFailed(runId, attemptId, err);
+        } catch {
+          /* run may have been deleted while the background cycle was failing */
+        }
+      })
+      .finally(() => {
+        activeAutopilotCycles.delete(key);
+      });
+
+    activeAutopilotCycles.set(key, cycle);
+    void cycle;
+  }
 }
 
 async function markAutopilotCycleFailed(runId: string, attemptId: string, err: unknown): Promise<void> {
@@ -357,6 +412,238 @@ async function markAutopilotCycleFailed(runId: string, attemptId: string, err: u
 
 function autopilotCycleKey(runId: string, attemptId: string): string {
   return `${runId}:${attemptId}`;
+}
+
+function manualFallbackEnabled(): boolean {
+  return process.env.SPARK_ENABLE_MANUAL_FALLBACK === "1";
+}
+
+async function createFallbackAutopilotTask(run: RunState, input: StartAutopilotInput): Promise<RunState> {
+  run = await createStep({
+    runId: run.id,
+    title: "Understand project plan",
+    goal: input.planText?.trim() || "Read the project plan and decide the first concrete implementation task.",
+    acceptanceCriteria: ["A worker task is prepared from the current project plan."],
+    verificationCommands: ["npm run typecheck"],
+  });
+
+  const activeStep = pickAutopilotStep(run);
+  return createWorkerTask({
+    runId: run.id,
+    stepId: activeStep?.id,
+    title: "Autopilot task 1",
+    description:
+      input.planText?.trim() ||
+      "Inspect the current project state and produce the next concrete implementation report.",
+    runtimePreference: "manual",
+    expectedOutputs: ["A final report artifact explaining what was done and what remains."],
+    verificationCommands: ["npm run typecheck"],
+    createdBy: "spark",
+  });
+}
+
+async function askOpenRouterManagerForInitialTasks(run: RunState, cwd: string): Promise<RunState | null> {
+  const settings = await loadSettings();
+  const config = readOpenRouterConfig(settings);
+  if (!config) return null;
+
+  const callId = makeId("spark");
+  const callDir = join(runDir(run.id), "spark-calls", callId);
+  const requestPath = join(callDir, "request.json");
+  const responsePath = join(callDir, "response.json");
+  const parsedJsonPath = join(callDir, "parsed-decision.json");
+  const requestBody = buildOpenRouterManagerRequest({ run, cwd, model: config.model });
+  await fs.mkdir(callDir, { recursive: true });
+  await fs.writeFile(requestPath, JSON.stringify(requestBody, null, 2), "utf8");
+
+  const startedAt = new Date().toISOString();
+  const sparkCall: SparkCall = {
+    id: callId,
+    runId: run.id,
+    mode: "step_planning",
+    model: config.model,
+    status: "started",
+    requestPath,
+    responsePath,
+    parsedJsonPath,
+    createdAt: startedAt,
+  };
+  run.sparkCalls.push(sparkCall);
+  run.settingsSnapshot = {
+    ...(run.settingsSnapshot ?? {}),
+    openRouterModel: config.model,
+    openRouterBaseUrl: config.baseUrl,
+  };
+  run.updatedAt = startedAt;
+  await saveRun(run);
+  await appendEvent({
+    timestamp: startedAt,
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    sparkCallId: callId,
+    type: "spark_call.started",
+    message: `Spark manager call started: ${config.model}`,
+    payload: {
+      mode: "step_planning",
+      model: config.model,
+      requestPath,
+    },
+  });
+
+  try {
+    const result = await requestOpenRouterManagerDecision(config, requestBody);
+    await Promise.all([
+      fs.writeFile(responsePath, JSON.stringify(result.rawResponse, null, 2), "utf8"),
+      fs.writeFile(parsedJsonPath, JSON.stringify(result.decision, null, 2), "utf8"),
+    ]);
+
+    const latest = await requireRun(run.id);
+    const targetCall = latest.sparkCalls.find((call) => call.id === callId);
+    const completedAt = new Date().toISOString();
+    if (targetCall) {
+      targetCall.status = "completed";
+      targetCall.durationMs = result.durationMs;
+      targetCall.promptTokens = result.promptTokens;
+      targetCall.completionTokens = result.completionTokens;
+      targetCall.completedAt = completedAt;
+    }
+    latest.updatedAt = completedAt;
+    await saveRun(latest);
+    await appendEvent({
+      timestamp: completedAt,
+      workspaceId: latest.workspaceId,
+      runId: latest.id,
+      sparkCallId: callId,
+      type: "spark_call.completed",
+      message: `Spark manager call completed: ${result.decision.status}`,
+      payload: {
+        mode: "step_planning",
+        model: config.model,
+        durationMs: result.durationMs,
+        promptTokens: result.promptTokens,
+        completionTokens: result.completionTokens,
+        parsedJsonPath,
+        decision: result.decision,
+      },
+    });
+
+    return applySparkManagerDecision(latest, result.decision);
+  } catch (err) {
+    const latest = await requireRun(run.id);
+    const targetCall = latest.sparkCalls.find((call) => call.id === callId);
+    const completedAt = new Date().toISOString();
+    const error = err instanceof Error ? err.message : String(err);
+    if (targetCall) {
+      targetCall.status = "failed";
+      targetCall.error = error;
+      targetCall.completedAt = completedAt;
+      targetCall.durationMs = Date.now() - Date.parse(startedAt);
+    }
+    latest.updatedAt = completedAt;
+    await saveRun(latest);
+    await appendEvent({
+      timestamp: completedAt,
+      workspaceId: latest.workspaceId,
+      runId: latest.id,
+      sparkCallId: callId,
+      type: "spark_call.failed",
+      message: `Spark manager call failed: ${error}`,
+      payload: {
+        mode: "step_planning",
+        model: config.model,
+        error,
+      },
+    });
+    return null;
+  }
+}
+
+async function applySparkManagerDecision(run: RunState, decision: SparkManagerDecision): Promise<RunState> {
+  if (decision.status === "ask_user") {
+    return askHumanQuestion(run.id, decision.question || "Please clarify what Spark should do next.");
+  }
+
+  if (decision.status === "complete") {
+    return commitRunChange(run, {
+      type: "spark_manager.completed_run",
+      message: "Spark manager marked the run complete",
+      payload: {
+        summary: decision.summary,
+      },
+      mutate: (draft, timestamp) => {
+        draft.status = "complete";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+          status: "complete",
+          lastAction: "manager_marked_complete",
+          updatedAt: timestamp,
+        };
+        draft.updatedAt = timestamp;
+      },
+    });
+  }
+
+  let latest = run;
+  const stepIds: string[] = [];
+  const steps =
+    decision.steps.length > 0
+      ? decision.steps
+      : [
+          {
+            title: "Spark planned work",
+            goal: decision.summary,
+            acceptanceCriteria: ["The selected worker tasks complete and report final evidence."],
+            verificationCommands: ["npm run typecheck"],
+          },
+        ];
+
+  for (const step of steps) {
+    latest = await createStep({
+      runId: latest.id,
+      title: step.title,
+      goal: step.goal,
+      riskLevel: step.riskLevel,
+      acceptanceCriteria: step.acceptanceCriteria,
+      verificationCommands: step.verificationCommands,
+    });
+    stepIds.push(latest.steps.at(-1)?.id ?? "");
+  }
+
+  for (const task of decision.tasks) {
+    const stepId = stepIds[Math.max(0, Math.min(task.stepIndex ?? 0, stepIds.length - 1))] || stepIds[0];
+    latest = await createWorkerTask({
+      runId: latest.id,
+      stepId,
+      title: task.title,
+      description: task.description,
+      runtimePreference: task.runtimePreference,
+      modelHint: task.modelHint,
+      effortHint: task.effortHint,
+      allowedPaths: task.allowedPaths,
+      forbiddenPaths: task.forbiddenPaths,
+      expectedOutputs: task.expectedOutputs,
+      verificationCommands: task.verificationCommands,
+      canRunParallel: task.canRunParallel,
+      conflictsWith: task.conflictsWith,
+      createdBy: "spark",
+    });
+  }
+
+  latest = await requireRun(latest.id);
+  await appendEvent({
+    workspaceId: latest.workspaceId,
+    runId: latest.id,
+    type: "spark_manager.decision_applied",
+    message: "Spark manager decision applied",
+    payload: {
+      summary: decision.summary,
+      status: decision.status,
+      stepsCreated: steps.length,
+      tasksCreated: decision.tasks.length,
+      runtimes: decision.tasks.map((task) => task.runtimePreference),
+    },
+  });
+  return latest;
 }
 
 export async function pauseRun(input: PauseRunInput): Promise<RunState> {
@@ -797,6 +1084,14 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
 export async function deleteRun(runId: string): Promise<void> {
   const run = await requireRun(runId);
   const timestamp = new Date().toISOString();
+  for (const worker of activeWorkersForRun(run.id)) {
+    disposeWorkerSession(worker.attemptId);
+    activeWorkerProcesses.delete(worker.attemptId);
+  }
+  for (const key of [...activeAutopilotCycles.keys()]) {
+    if (key.startsWith(`${run.id}:`)) activeAutopilotCycles.delete(key);
+  }
+  activeAutopilotPlans.delete(run.id);
   await appendEvent({
     timestamp,
     workspaceId: run.workspaceId,
@@ -981,11 +1276,25 @@ function pickAutopilotStep(run: RunState): StepState | undefined {
   );
 }
 
-function pickAutopilotTask(run: RunState): WorkerTask | undefined {
-  return (
-    run.workerTasks.find((task) => ["created", "queued", "failed", "retry_queued"].includes(task.status)) ??
-    run.workerTasks[0]
+function pickAutopilotTasks(run: RunState): WorkerTask[] {
+  const candidates = run.workerTasks.filter((task) =>
+    ["created", "queued", "failed", "retry_queued"].includes(task.status),
   );
+  if (candidates.length === 0) return [];
+
+  const first = candidates[0];
+  if (!first.canRunParallel) return [first];
+
+  const selected: WorkerTask[] = [];
+  for (const task of candidates) {
+    if (!task.canRunParallel) continue;
+    if (selected.some((other) => other.conflictsWith.includes(task.id) || task.conflictsWith.includes(other.id))) {
+      continue;
+    }
+    selected.push(task);
+    if (selected.length >= 2) break;
+  }
+  return selected.length > 0 ? selected : [first];
 }
 
 async function askHumanQuestion(runId: string, message: string): Promise<RunState> {
@@ -1096,7 +1405,7 @@ function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input:
       "",
       "continue",
       "",
-    ].join("\n"),
+    ].join("\r\n"),
   };
 }
 
@@ -1383,20 +1692,30 @@ function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths): Worke
   }
 
   if (task.runtimePreference === "claude") {
-    const command = configuredWorkerCommand("SPARK_CLAUDE_WORKER_COMMAND", "SPARK_CLAUDE_WORKER_ARGS", "claude");
+    const command = configuredWorkerCommand(
+      "SPARK_CLAUDE_WORKER_COMMAND",
+      "SPARK_CLAUDE_WORKER_ARGS",
+      process.platform === "win32" ? "claude.exe" : "claude",
+    );
     return {
       ...command,
       display: command.display || "claude",
       initialInput: renderInteractiveWorkerLaunchInput(paths),
+      initialInputDelayMs: 1800,
     };
   }
 
   if (task.runtimePreference === "codex") {
-    const command = configuredWorkerCommand("SPARK_CODEX_WORKER_COMMAND", "SPARK_CODEX_WORKER_ARGS", "codex");
+    const command = configuredWorkerCommand(
+      "SPARK_CODEX_WORKER_COMMAND",
+      "SPARK_CODEX_WORKER_ARGS",
+      process.platform === "win32" ? "codex.cmd" : "codex",
+    );
     return {
       ...command,
       display: command.display || "codex",
       initialInput: renderInteractiveWorkerLaunchInput(paths),
+      initialInputDelayMs: 2200,
     };
   }
 
@@ -1434,12 +1753,12 @@ function parseWorkerArgs(raw: string | undefined): string[] {
 
 function renderInteractiveWorkerLaunchInput(paths: WorkerArtifactPaths): string {
   return [
-    "Please run this Spark worker task.",
-    `Read the full assignment from: ${paths.promptMd}`,
-    `Use this workpad: ${paths.workpadMd}`,
-    `When finished, write the required final JSON report to: ${paths.finalReportJson}`,
-    "",
-  ].join("\n");
+    "Please run this Spark worker task. ",
+    `Read the full assignment from: ${paths.promptMd}. `,
+    `Use this workpad: ${paths.workpadMd}. `,
+    `When finished, write the required final JSON report to: ${paths.finalReportJson}.`,
+    "\r",
+  ].join("");
 }
 
 function manualWorkerRunnerScript(): string {
