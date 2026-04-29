@@ -7,3 +7,4 @@ release/
 .vscode/
 .idea/
 *.tsbuildinfo
+local-docs/
