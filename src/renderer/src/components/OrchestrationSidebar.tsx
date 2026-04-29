@@ -203,8 +203,8 @@ export default function OrchestrationSidebar({ workspace }: Props) {
       style={{
         display: "flex",
         flexDirection: "column",
-        flex: "1 1 0",
-        minHeight: 0,
+        flex: "1.35 1 0",
+        minHeight: 260,
         overflow: "hidden",
       }}
     >

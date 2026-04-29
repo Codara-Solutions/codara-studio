@@ -129,6 +129,22 @@ understanding the low-level worker machinery.
   and records `autopilot.cycle_failed`.
 - Updated E2E coverage to stop a delayed active worker, resume it with user
   guidance, and wait for the background cycle to complete.
+- Added hidden PTY-backed worker sessions for orchestration worker attempts.
+- Replaced direct child-process worker control with terminal-style session
+  control so `STOP` and `RESUME` write into the same path real Claude/Codex
+  workers will use.
+- Added configurable Claude/Codex worker command routing through
+  `SPARK_CLAUDE_WORKER_COMMAND`, `SPARK_CLAUDE_WORKER_ARGS`,
+  `SPARK_CODEX_WORKER_COMMAND`, and `SPARK_CODEX_WORKER_ARGS`.
+- Added `final-report.json` parsing and deterministic worker review events:
+  `worker_report.parsed`, `worker_report.reviewed`, and
+  `worker_report.missing`.
+- Added run-save serialization and Windows-safe temp-file replacement so
+  concurrent pause/resume/worker-finish writes do not strand `run.json.tmp`.
+- Tightened right-sidebar sizing so the Dev Inspector remains visible above the
+  Explorer in the normal app viewport.
+- Updated E2E coverage to verify worker report review and the Artifacts tab
+  final report path.
 
 ## Current State
 
@@ -157,7 +173,7 @@ Missing foundation:
 - run state projection from events
 - persisted settings
 - diagnostics
-- real Claude/Codex worker process launch
+- real Claude/Codex worker command configuration UI and production defaults
 - cancellation and timeout handling
 - a dedicated advanced/manual control surface outside the primary Spark panel
 - a long-running autopilot loop that can continue across many steps
@@ -172,8 +188,8 @@ Immediate target:
 ```text
 Autopilot loop hardening:
   make the loop continue until complete, paused, blocked, or failed
-  route real Claude/Codex workers through terminal-backed controllable sessions
-  parse final-report.json and decide accept/retry/follow-up/question
+  connect real Claude/Codex command configuration to task runtime selection
+  turn deterministic report review into accept/retry/follow-up/question actions
   let Spark write clarification questions into the run message stream
   add cancellation and timeouts before real Claude/Codex launchers
 ```

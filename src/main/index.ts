@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell } from "electron";
 import { join } from "node:path";
 import { registerIpc } from "./ipc";
 import * as pty from "./pty-manager";
+import { disposeAllWorkerSessions } from "./orchestration/worker-session";
 import { flush } from "./storage";
 
 app.setName("Spark Agent");
@@ -75,10 +76,12 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", async () => {
   pty.disposeAll();
+  disposeAllWorkerSessions();
   await flush();
   if (process.platform !== "darwin") app.quit();
 });
 
 app.on("before-quit", () => {
   pty.disposeAll();
+  disposeAllWorkerSessions();
 });

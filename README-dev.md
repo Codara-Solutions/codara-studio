@@ -20,6 +20,8 @@ src/main/
   ipc.ts            Main-process IPC handlers exposed to the renderer
   storage.ts        Workspace UI state persistence in app userData
   pty-manager.ts    node-pty session lifecycle and terminal streaming
+  orchestration/worker-session.ts
+                    Hidden PTY-backed worker session lifecycle
   shells.ts         Cross-platform shell detection
   fs-tree.ts        File tree listing, Markdown plan discovery, and text helpers
   git-graph.ts      Git branch and log summary helpers
@@ -62,8 +64,12 @@ context rather than product source.
   run state, workspace info, and artifact paths.
 - Worker task records can be prepared into non-executing envelopes that write
   `task.json`, `prompt.md`, and `workpad.md` artifacts.
-- Prepared manual worker attempts can be launched through a controlled runner
-  that captures `stdout.log`, `stderr.log`, `raw.log`, and `final-report.json`.
+- Prepared worker attempts launch through hidden PTY-backed worker sessions.
+  The manual runner is still the default test runtime, and Claude/Codex
+  runtimes can be routed through configured commands when tasks request them.
+- Worker sessions capture `stdout.log`, `stderr.log`, `raw.log`, and
+  `final-report.json`; `STOP` and `RESUME` write control input into the active
+  session.
 - Autopilot has a first one-button manager cycle: create/reuse a run, create
   the first step/task if needed, prepare a worker envelope, launch the
   controlled worker in the background, and return to review. The plan text
@@ -76,6 +82,8 @@ context rather than product source.
 - Pausing a run sends an Esc control signal to active worker attempts before the
   run is marked paused. Resuming sends active workers either plain `continue` or
   a Spark manager update built from the user's pause reason/latest message.
+- Finished worker attempts parse `final-report.json` and emit deterministic
+  `worker_report.parsed` and `worker_report.reviewed` events.
 - The app has an initial orchestration run store and JSONL event log under
   Electron userData.
 
@@ -213,7 +221,8 @@ Run mutations:
   pause/resume with active worker control signals
   durable human messages
   worker task envelope preparation
-  background controlled manual worker execution
+  background PTY-backed worker session execution
+  worker report parsing and deterministic review decisions
 ```
 
 This keeps the product rule intact:

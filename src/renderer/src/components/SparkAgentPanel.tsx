@@ -58,7 +58,7 @@ export default function SparkAgentPanel({
         flexDirection: "column",
         flex: "0 1 auto",
         minHeight: 168,
-        maxHeight: "52vh",
+        maxHeight: 280,
         overflow: "auto",
         borderBottom: "1px solid var(--rule)",
         background: "var(--panel)",

@@ -1,5 +1,4 @@
 import { shell } from "electron";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -11,6 +10,7 @@ import type {
   CreateRunInput,
   CreateWorkerTaskInput,
   PrepareWorkerTaskInput,
+  ReviewDecision,
   RunArtifactPaths,
   RunState,
   SparkEvent,
@@ -22,9 +22,11 @@ import type {
   WorkerTask,
   WorkerAttempt,
   WorkerArtifactPaths,
+  WorkerReport,
   WorkerTaskEnvelope,
 } from "@shared/types";
 import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
+import { startWorkerSession, type WorkerCommand, type WorkerSession } from "./worker-session";
 
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
@@ -37,11 +39,12 @@ interface ActiveWorkerProcess {
   attemptId: string;
   pid?: number;
   command: string;
-  child: ChildProcessWithoutNullStreams;
+  session: WorkerSession;
 }
 
 const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
 const activeAutopilotCycles = new Map<string, Promise<void>>();
+const runWriteQueues = new Map<string, Promise<void>>();
 
 export async function createRun(input: CreateRunInput): Promise<RunState> {
   const now = new Date().toISOString();
@@ -702,7 +705,8 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     fs.writeFile(paths.rawLog, "", "utf8"),
   ]);
 
-  const command = "node -e <spark-manual-worker-runner>";
+  const workerCommand = buildWorkerCommand(task, paths);
+  const command = workerCommand.display;
   const launchTimestamp = new Date().toISOString();
   attempt.status = "launching";
   attempt.startedAt = launchTimestamp;
@@ -735,13 +739,13 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     },
   });
 
-  const result = await runManualWorkerProcess({
+  const result = await runWorkerSession({
     run,
     task,
     attemptId: attempt.id,
     paths,
     cwd: attempt.cwd,
-    command,
+    workerCommand,
   });
 
   run = await requireRun(input.runId);
@@ -780,6 +784,13 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     },
   });
 
+  run = await reviewWorkerReportArtifact({
+    run,
+    task: finishedTask,
+    attempt: finishedAttempt,
+    paths,
+  });
+
   return run;
 }
 
@@ -805,12 +816,115 @@ export async function deleteRun(runId: string): Promise<void> {
   }
 }
 
+async function reviewWorkerReportArtifact({
+  run,
+  task,
+  attempt,
+  paths,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attempt: WorkerAttempt;
+  paths: WorkerArtifactPaths;
+}): Promise<RunState> {
+  const report = await readWorkerReport(paths.finalReportJson);
+  if (!report) {
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId: attempt.id,
+      type: "worker_report.missing",
+      message: "Worker report is missing or invalid",
+      payload: {
+        finalReportJson: paths.finalReportJson,
+      },
+    });
+    return run;
+  }
+
+  await appendEvent({
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    attemptId: attempt.id,
+    type: "worker_report.parsed",
+    message: `Worker report parsed: ${report.status}`,
+    payload: {
+      report,
+      finalReportJson: paths.finalReportJson,
+    },
+  });
+
+  const decision = decideWorkerReport(report);
+  const latest = await requireRun(run.id);
+  const reviewedTask = latest.workerTasks.find((item) => item.id === task.id);
+  const reviewedStep = task.stepId ? latest.steps.find((item) => item.id === task.stepId) : undefined;
+  if (!reviewedTask) return latest;
+
+  const timestamp = new Date().toISOString();
+  if (decision.decision === "accept") {
+    reviewedTask.status = "accepted";
+    if (reviewedStep) reviewedStep.status = "reviewing";
+  } else {
+    reviewedTask.status = "needs_review";
+    if (reviewedStep) reviewedStep.status = "reviewing";
+  }
+  if (reviewedStep) {
+    reviewedStep.reviewSummary = decision.reason;
+    reviewedStep.updatedAt = timestamp;
+  }
+  reviewedTask.updatedAt = timestamp;
+  latest.updatedAt = timestamp;
+  await saveRun(latest);
+  await appendEvent({
+    timestamp,
+    workspaceId: latest.workspaceId,
+    runId: latest.id,
+    stepId: reviewedTask.stepId,
+    workerTaskId: reviewedTask.id,
+    attemptId: attempt.id,
+    type: "worker_report.reviewed",
+    message: `Worker report review decision: ${decision.decision}`,
+    payload: {
+      decision,
+      reportStatus: report.status,
+    },
+  });
+
+  return latest;
+}
+
 async function saveRun(run: RunState): Promise<void> {
+  const previous = runWriteQueues.get(run.id) ?? Promise.resolve();
+  const next = previous
+    .catch(() => {
+      /* keep later writes moving after an earlier failure */
+    })
+    .then(() => writeRunFile(run));
+  runWriteQueues.set(run.id, next);
+  try {
+    await next;
+  } finally {
+    if (runWriteQueues.get(run.id) === next) runWriteQueues.delete(run.id);
+  }
+}
+
+async function writeRunFile(run: RunState): Promise<void> {
   await fs.mkdir(runDir(run.id), { recursive: true });
   const path = runPath(run.id);
-  const tmp = `${path}.tmp`;
+  const tmp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(run, null, 2), "utf8");
-  await fs.rename(tmp, path);
+  try {
+    await fs.rename(tmp, path);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "EEXIST" && code !== "EPERM") throw err;
+    await fs.rm(path, { force: true });
+    await fs.rename(tmp, path);
+  }
 }
 
 async function requireRun(runId: string): Promise<RunState> {
@@ -946,8 +1060,7 @@ async function sendResumeSignals(
 }
 
 function writeWorkerInput(worker: ActiveWorkerProcess, input: string): void {
-  if (worker.child.stdin.destroyed || !worker.child.stdin.writable) return;
-  worker.child.stdin.write(input);
+  worker.session.write(input);
 }
 
 function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input: string; messageId?: string } {
@@ -987,6 +1100,128 @@ function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input:
   };
 }
 
+async function readWorkerReport(path: string): Promise<WorkerReport | null> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(path, "utf8");
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+
+  try {
+    return normalizeWorkerReport(JSON.parse(raw) as Record<string, unknown>);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeWorkerReport(raw: Record<string, unknown>): WorkerReport {
+  const status = raw.status;
+  if (status !== "complete" && status !== "partial" && status !== "blocked" && status !== "failed") {
+    throw new Error("Invalid worker report status.");
+  }
+
+  return {
+    status,
+    summary: typeof raw.summary === "string" ? raw.summary : "",
+    filesChanged: normalizeReportItems(raw.filesChanged ?? raw.files_changed, ["path", "reason"]),
+    commandsRun: normalizeCommandReports(raw.commandsRun ?? raw.commands_run),
+    tests: normalizeTestReports(raw.tests),
+    proof: normalizeStringList(raw.proof),
+    risks: normalizeStringList(raw.risks),
+    followups: normalizeStringList(raw.followups),
+  };
+}
+
+function normalizeReportItems(value: unknown, keys: ["path", "reason"]): WorkerReport["filesChanged"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => {
+      const path = item[keys[0]];
+      const reason = item[keys[1]];
+      return {
+        path: typeof path === "string" ? path : "",
+        reason: typeof reason === "string" ? reason : "",
+      };
+    });
+}
+
+function normalizeCommandReports(value: unknown): WorkerReport["commandsRun"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => ({
+      command: typeof item.command === "string" ? item.command : "",
+      exitCode: typeof item.exitCode === "number" ? item.exitCode : typeof item.exit_code === "number" ? item.exit_code : undefined,
+      summary: typeof item.summary === "string" ? item.summary : "",
+    }));
+}
+
+function normalizeTestReports(value: unknown): WorkerReport["tests"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => {
+      const result = item.result;
+      return {
+        command: typeof item.command === "string" ? item.command : "",
+        result: result === "passed" || result === "failed" || result === "not_run" ? result : "not_run",
+        details: typeof item.details === "string" ? item.details : undefined,
+      };
+    });
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function decideWorkerReport(report: WorkerReport): ReviewDecision {
+  if (report.status === "complete" && report.risks.length === 0 && report.followups.length === 0) {
+    return {
+      decision: "accept",
+      confidence: 0.7,
+      reason: report.summary || "Worker reported completion with no risks or followups.",
+      issues: [],
+      acceptedEvidence: report.proof,
+      nextStepAllowed: true,
+    };
+  }
+
+  if (report.status === "failed") {
+    return {
+      decision: "retry_same_worker",
+      confidence: 0.65,
+      reason: report.summary || "Worker reported failure.",
+      issues: [...report.risks, ...report.followups],
+      acceptedEvidence: report.proof,
+      nextStepAllowed: false,
+    };
+  }
+
+  if (report.status === "blocked") {
+    return {
+      decision: "escalate_to_user",
+      confidence: 0.75,
+      reason: report.summary || "Worker reported a blocker.",
+      issues: [...report.risks, ...report.followups],
+      acceptedEvidence: report.proof,
+      nextStepAllowed: false,
+    };
+  }
+
+  return {
+    decision: "escalate_to_user",
+    confidence: 0.55,
+    reason: report.summary || "Worker produced a partial report that needs review.",
+    issues: [...report.risks, ...report.followups],
+    acceptedEvidence: report.proof,
+    nextStepAllowed: false,
+  };
+}
+
 function workerArtifactPaths(
   runId: string,
   stepId: string | undefined,
@@ -1009,35 +1244,44 @@ function workerArtifactPaths(
   };
 }
 
-async function runManualWorkerProcess({
+async function runWorkerSession({
   run,
   task,
   attemptId,
   paths,
   cwd,
-  command,
+  workerCommand,
 }: {
   run: RunState;
   task: WorkerTask;
   attemptId: string;
   paths: WorkerArtifactPaths;
   cwd: string;
-  command: string;
+  workerCommand: WorkerCommand;
 }): Promise<{ exitCode: number; error?: string }> {
-  const child = spawn("node", ["-e", manualWorkerRunnerScript()], {
-    cwd,
-    windowsHide: true,
-    env: {
-      ...process.env,
-      SPARK_RUN_ID: run.id,
-      SPARK_WORKER_TASK_ID: task.id,
-      SPARK_ATTEMPT_ID: attemptId,
-      SPARK_TASK_TITLE: task.title,
-      SPARK_PROMPT_PATH: paths.promptMd,
-      SPARK_WORKPAD_PATH: paths.workpadMd,
-      SPARK_FINAL_REPORT_PATH: paths.finalReportJson,
-    },
-  });
+  const writes: Promise<void>[] = [];
+  let session: WorkerSession;
+  try {
+    session = startWorkerSession({
+      id: attemptId,
+      command: workerCommand,
+      cwd,
+      env: {
+        SPARK_RUN_ID: run.id,
+        SPARK_WORKER_TASK_ID: task.id,
+        SPARK_ATTEMPT_ID: attemptId,
+        SPARK_TASK_TITLE: task.title,
+        SPARK_PROMPT_PATH: paths.promptMd,
+        SPARK_WORKPAD_PATH: paths.workpadMd,
+        SPARK_FINAL_REPORT_PATH: paths.finalReportJson,
+      },
+      onOutput: (text) => {
+        writes.push(recordWorkerOutput(run, task, attemptId, paths, "stdout", text));
+      },
+    });
+  } catch (err) {
+    return { exitCode: 1, error: err instanceof Error ? err.message : String(err) };
+  }
 
   const runningTimestamp = new Date().toISOString();
   await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
@@ -1051,8 +1295,10 @@ async function runManualWorkerProcess({
     type: "worker_attempt.running",
     message: `Worker attempt running: ${task.title}`,
     payload: {
-      pid: child.pid,
-      command,
+      pid: session.pid,
+      command: session.command,
+      runtime: task.runtimePreference,
+      session: "pty",
     },
   });
 
@@ -1061,33 +1307,18 @@ async function runManualWorkerProcess({
     stepId: task.stepId,
     workerTaskId: task.id,
     attemptId,
-    pid: child.pid,
-    command,
-    child,
+    pid: session.pid,
+    command: session.command,
+    session,
   });
 
-  return new Promise((resolve) => {
-    const writes: Promise<void>[] = [];
-    let settled = false;
-    child.stdout.on("data", (chunk: Buffer) => {
-      writes.push(recordWorkerOutput(run, task, attemptId, paths, "stdout", chunk.toString("utf8")));
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      writes.push(recordWorkerOutput(run, task, attemptId, paths, "stderr", chunk.toString("utf8")));
-    });
-    child.on("error", (err) => {
-      settled = true;
-      activeWorkerProcesses.delete(attemptId);
-      resolve({ exitCode: 1, error: err.message });
-    });
-    child.on("close", async (code) => {
-      if (settled) return;
-      settled = true;
-      activeWorkerProcesses.delete(attemptId);
-      await Promise.allSettled(writes);
-      resolve({ exitCode: code ?? 1 });
-    });
-  });
+  const result = await session.done;
+  activeWorkerProcesses.delete(attemptId);
+  await Promise.allSettled(writes);
+  return {
+    exitCode: result.exitCode ?? 1,
+    error: result.signal ? `Worker session exited from signal ${result.signal}` : undefined,
+  };
 }
 
 async function markAttemptRunning(
@@ -1137,6 +1368,78 @@ async function recordWorkerOutput(
       text: text.slice(0, 4000),
     },
   });
+}
+
+function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths): WorkerCommand {
+  if (task.runtimePreference === "manual") {
+    return {
+      exe: process.execPath,
+      args: ["-e", manualWorkerRunnerScript()],
+      display: `${process.execPath} -e <spark-manual-worker-runner>`,
+      env: {
+        ELECTRON_RUN_AS_NODE: "1",
+      },
+    };
+  }
+
+  if (task.runtimePreference === "claude") {
+    const command = configuredWorkerCommand("SPARK_CLAUDE_WORKER_COMMAND", "SPARK_CLAUDE_WORKER_ARGS", "claude");
+    return {
+      ...command,
+      display: command.display || "claude",
+      initialInput: renderInteractiveWorkerLaunchInput(paths),
+    };
+  }
+
+  if (task.runtimePreference === "codex") {
+    const command = configuredWorkerCommand("SPARK_CODEX_WORKER_COMMAND", "SPARK_CODEX_WORKER_ARGS", "codex");
+    return {
+      ...command,
+      display: command.display || "codex",
+      initialInput: renderInteractiveWorkerLaunchInput(paths),
+    };
+  }
+
+  const shellExe = process.platform === "win32" ? process.env.ComSpec || "cmd.exe" : process.env.SHELL || "sh";
+  const shellArgs = process.platform === "win32" ? ["/d", "/s"] : [];
+  return {
+    exe: shellExe,
+    args: shellArgs,
+    display: `${shellExe} ${shellArgs.join(" ")}`.trim(),
+    initialInput: renderInteractiveWorkerLaunchInput(paths),
+  };
+}
+
+function configuredWorkerCommand(commandEnv: string, argsEnv: string, fallbackExe: string): WorkerCommand {
+  const exe = process.env[commandEnv]?.trim() || fallbackExe;
+  const args = parseWorkerArgs(process.env[argsEnv]);
+  return {
+    exe,
+    args,
+    display: `${exe} ${args.join(" ")}`.trim(),
+  };
+}
+
+function parseWorkerArgs(raw: string | undefined): string[] {
+  const text = raw?.trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) return parsed;
+  } catch {
+    /* fall back to a simple command-line split */
+  }
+  return text.match(/"([^"]*)"|'([^']*)'|\S+/g)?.map((part) => part.replace(/^["']|["']$/g, "")) ?? [];
+}
+
+function renderInteractiveWorkerLaunchInput(paths: WorkerArtifactPaths): string {
+  return [
+    "Please run this Spark worker task.",
+    `Read the full assignment from: ${paths.promptMd}`,
+    `Use this workpad: ${paths.workpadMd}`,
+    `When finished, write the required final JSON report to: ${paths.finalReportJson}`,
+    "",
+  ].join("\n");
 }
 
 function manualWorkerRunnerScript(): string {

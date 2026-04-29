@@ -39,7 +39,9 @@ test("autopilot runs from a selected markdown plan", async () => {
     await clickButton(page, "RESUME");
     await expectEvent(page, "worker_attempt.resume_signal_sent");
     await expectEvent(page, "run.resumed");
+    await expectEvent(page, "worker_report.reviewed", 10_000);
     await expectEvent(page, "autopilot.cycle_completed", 10_000);
+    await page.getByRole("button", { name: "ARTIFACTS" }).click();
     await expect(page.getByText("FINAL REPORT")).toBeVisible();
 
     const run = await readOnlyRun(userDataDir);
