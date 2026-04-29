@@ -17,7 +17,7 @@ test("autopilot runs from a selected markdown plan", async () => {
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,
-        SPARK_MANUAL_WORKER_DELAY_MS: "5000",
+        SPARK_MANUAL_WORKER_DELAY_MS: "15000",
         SPARK_ENABLE_MANUAL_FALLBACK: "1",
       },
     });
@@ -42,8 +42,8 @@ test("autopilot runs from a selected markdown plan", async () => {
     await clickButton(page, "RESUME");
     await expectEvent(page, "worker_attempt.resume_signal_sent");
     await expectEvent(page, "run.resumed");
-    await expectEvent(page, "worker_report.reviewed", 10_000);
-    await expectEvent(page, "autopilot.cycle_completed", 10_000);
+    await expectEvent(page, "worker_report.reviewed", 25_000);
+    await expectEvent(page, "autopilot.cycle_completed", 25_000);
     await page.getByRole("button", { name: "ARTIFACTS" }).click();
     await expect(page.getByText("FINAL REPORT")).toBeVisible();
 
@@ -122,7 +122,7 @@ test("settings dialog saves default terminal and OpenRouter model settings", asy
     await terminalButton.click();
 
     await page.getByRole("button", { name: "API + MODEL" }).click();
-    await page.getByLabel("API KEY").fill("test-openrouter-key");
+    await page.getByLabel("OPENROUTER API KEY").fill("test-openrouter-key");
     await page.getByLabel("MODEL").fill("test/settings-model");
     await clickButton(page, "SAVE");
     await expect(page.getByRole("dialog", { name: "Settings" })).toBeHidden();
@@ -212,6 +212,7 @@ test("run uses the latest selected plan text instead of reusing old worker tasks
 test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
   const { userDataDir } = await prepareElectronWorkspace("spark-agent-openrouter-e2e-");
   const server = await startFakeOpenRouterServer();
+  const langSmith = await startFakeLangSmithServer();
   const workerArgs = JSON.stringify(["-e", fakeWorkerScript()]);
 
   let app: ElectronApplication | null = null;
@@ -224,6 +225,11 @@ test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
         SPARK_OPENROUTER_API_KEY: "test-key",
         SPARK_OPENROUTER_BASE_URL: server.baseUrl,
         SPARK_OPENROUTER_MODEL: "test/spark-manager",
+        LANGSMITH_API_KEY: "test-langsmith-key",
+        LANGSMITH_ENDPOINT: langSmith.baseUrl,
+        LANGSMITH_PROJECT: "spark-agent-e2e",
+        LANGSMITH_TRACING: "true",
+        LANGCHAIN_TRACING_V2: "true",
         SPARK_CLAUDE_WORKER_COMMAND: process.execPath,
         SPARK_CLAUDE_WORKER_ARGS: workerArgs,
         SPARK_CODEX_WORKER_COMMAND: process.execPath,
@@ -248,7 +254,7 @@ test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
       candidate.workerTasks.every((task) => task.status === "accepted"),
     );
 
-    expect(run.sparkCalls).toHaveLength(2);
+    expect(run.sparkCalls).toHaveLength(3);
     expect(run.sparkCalls.every((call) => call.status === "completed")).toBe(true);
     expect(run.status).toBe("complete");
     expect(run.autopilot?.status).toBe("complete");
@@ -257,9 +263,23 @@ test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
     expect(run.workerAttempts).toHaveLength(2);
     expect(run.workerAttempts.every((attempt) => attempt.status === "succeeded")).toBe(true);
     expect(run.workerTasks.every((task) => task.status === "accepted")).toBe(true);
+    const reports = await Promise.all(
+      run.workerAttempts.map(async (attempt) =>
+        JSON.parse(await readFile(attempt.finalReportPath!, "utf8")) as { proof?: string[] },
+      ),
+    );
+    expect(reports.every((report) => report.proof?.some((item) => item.includes("STEP-BY-STEP DIVISION")))).toBe(
+      true,
+    );
+    expect(reports.every((report) => report.proof?.some((item) => item.includes("YOUR TASK")))).toBe(true);
+    expect(langSmith.posts).toHaveLength(3);
+    expect(langSmith.patches).toHaveLength(3);
+    expect(langSmith.posts.every((post) => post.session_name === "spark-agent-e2e")).toBe(true);
+    expect(langSmith.posts.every((post) => post.inputs?.provider === "openrouter")).toBe(true);
   } finally {
     await app?.close();
     await server.close();
+    await langSmith.close();
   }
 });
 
@@ -317,8 +337,51 @@ async function startFakeOpenRouterServer(): Promise<{ baseUrl: string; close: ()
       body += chunk;
     });
     req.on("end", () => {
-      const isReview = body.includes("worker_result_review");
-      const decision = isReview
+      const parsedBody = JSON.parse(body) as {
+        messages?: Array<{ content?: string }>;
+        provider?: { require_parameters?: boolean };
+        response_format?: {
+          type?: string;
+          json_schema?: { strict?: boolean; schema?: { required?: string[] } };
+        };
+      };
+      if (
+        parsedBody.provider?.require_parameters !== true ||
+        parsedBody.response_format?.type !== "json_schema" ||
+        parsedBody.response_format.json_schema?.strict !== true ||
+        !parsedBody.response_format.json_schema.schema?.required?.includes("tasks")
+      ) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "Expected strict OpenRouter structured output request." } }));
+        return;
+      }
+      const prompt = parsedBody.messages?.map((message) => message.content ?? "").join("\n") ?? "";
+      const mode = prompt.match(/MANAGER MODE\n([a-z_]+)/)?.[1];
+      const isPlanAnalysis = mode === "plan_analysis";
+      const isReview = mode === "worker_result_review";
+      const decision = isPlanAnalysis
+        ? {
+            status: "run_workers",
+            summary: "Analyze the fixture plan into a durable step-by-step division.",
+            steps: [
+              {
+                title: "Run local subscription workers",
+                goal: "Launch local coding workers through Spark's worker control path.",
+                acceptanceCriteria: ["Both worker tasks write final reports."],
+                verificationCommands: ["npm run typecheck"],
+                riskLevel: "low",
+              },
+              {
+                title: "Review worker evidence",
+                goal: "Compare final reports against the project plan and decide whether work is complete.",
+                acceptanceCriteria: ["Spark accepts evidence or creates the next focused follow-up."],
+                verificationCommands: ["npm run typecheck"],
+                riskLevel: "low",
+              },
+            ],
+            tasks: [],
+          }
+        : isReview
         ? {
             status: "complete",
             summary: "Both local subscription worker fixture reports are accepted, so the run is complete.",
@@ -327,16 +390,8 @@ async function startFakeOpenRouterServer(): Promise<{ baseUrl: string; close: ()
           }
         : {
             status: "run_workers",
-            summary: "Split the fixture plan into one Claude worker task and one Codex worker task.",
-            steps: [
-              {
-                title: "Run local subscription workers",
-                goal: "Launch Claude and Codex through Spark's worker control path.",
-                acceptanceCriteria: ["Both worker tasks write final reports."],
-                verificationCommands: ["npm run typecheck"],
-                riskLevel: "low",
-              },
-            ],
+            summary: "Create first-step worker prompts from the existing step division.",
+            steps: [],
             tasks: [
               {
                 stepIndex: 0,
@@ -389,23 +444,86 @@ async function startFakeOpenRouterServer(): Promise<{ baseUrl: string; close: ()
   };
 }
 
+async function startFakeLangSmithServer(): Promise<{
+  baseUrl: string;
+  posts: Array<{ session_name?: string; inputs?: { provider?: string } }>;
+  patches: Array<Record<string, unknown>>;
+  close: () => Promise<void>;
+}> {
+  const posts: Array<{ session_name?: string; inputs?: { provider?: string } }> = [];
+  const patches: Array<Record<string, unknown>> = [];
+  const server = createServer((req, res) => {
+    const isPostRun = req.method === "POST" && req.url === "/runs";
+    const isPatchRun = req.method === "PATCH" && Boolean(req.url?.startsWith("/runs/"));
+    if (!isPostRun && !isPatchRun) {
+      res.writeHead(404).end();
+      return;
+    }
+
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => {
+      const parsed = JSON.parse(body || "{}") as Record<string, unknown>;
+      if (isPostRun) {
+        posts.push(parsed as { session_name?: string; inputs?: { provider?: string } });
+        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ id: parsed.id }));
+        return;
+      }
+      patches.push(parsed);
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
+    });
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as AddressInfo;
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    posts,
+    patches,
+    close: () =>
+      new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      }),
+  };
+}
+
 function fakeWorkerScript(): string {
   return `
 const fs = require("node:fs");
 const reportPath = process.env.SPARK_FINAL_REPORT_PATH;
 const title = process.env.SPARK_TASK_TITLE || "fake worker";
 if (!reportPath) process.exit(1);
-fs.writeFileSync(reportPath, JSON.stringify({
-  status: "complete",
-  summary: title + " finished through the configured worker command.",
-  files_changed: [],
-  commands_run: [{ command: "fake-worker", exit_code: 0, summary: "Wrote final-report.json." }],
-  tests: [],
-  proof: ["Configured worker command launched."],
-  risks: [],
-  followups: []
-}, null, 2), "utf8");
-console.log("fake worker complete:", title);
+let input = "";
+let finished = false;
+console.log("fake worker ready:", title);
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  input += chunk;
+  if (input.includes("\\r")) finish();
+});
+setTimeout(() => finish(), 8000);
+process.stdin.resume();
+
+function finish() {
+  if (finished) return;
+  finished = true;
+  const hasStructuredPrompt = input.includes("STEP-BY-STEP DIVISION") && input.includes("YOUR TASK");
+  fs.writeFileSync(reportPath, JSON.stringify({
+    status: hasStructuredPrompt ? "complete" : "failed",
+    summary: title + " received " + (hasStructuredPrompt ? "the structured Spark prompt." : "an incomplete Spark prompt."),
+    files_changed: [],
+    commands_run: [{ command: "fake-worker", exit_code: hasStructuredPrompt ? 0 : 1, summary: "Captured terminal input and wrote final-report.json." }],
+    tests: [],
+    proof: [input.includes("STEP-BY-STEP DIVISION") ? "Received STEP-BY-STEP DIVISION." : "Missing STEP-BY-STEP DIVISION.", input.includes("YOUR TASK") ? "Received YOUR TASK." : "Missing YOUR TASK."],
+    risks: hasStructuredPrompt ? [] : ["Worker did not receive the full structured prompt in terminal input."],
+    followups: []
+  }, null, 2), "utf8");
+  console.log("fake worker complete:", title);
+  process.exit(hasStructuredPrompt ? 0 : 1);
+}
 `;
 }
 

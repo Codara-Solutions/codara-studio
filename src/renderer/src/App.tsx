@@ -19,6 +19,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
   openRouterApiKey: "",
   openRouterModel: "google/gemini-flash-latest",
+  langSmithApiKey: "",
+  langSmithProject: "spark-agent-dev",
+  langSmithEndpoint: "https://api.smith.langchain.com",
 };
 
 function uid(prefix = "id"): string {

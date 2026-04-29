@@ -6,12 +6,17 @@ import type { AppSettings, AppState, Workspace } from "@shared/types";
 const STATE_FILE = "spark-state.json";
 const SETTINGS_FILE = "spark-settings.json";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-flash-latest";
+const DEFAULT_LANGSMITH_ENDPOINT = "https://api.smith.langchain.com";
+const DEFAULT_LANGSMITH_PROJECT = "spark-agent-dev";
 
 const EMPTY: AppState = { workspaces: [], activeWorkspaceId: null };
 const EMPTY_SETTINGS: AppSettings = {
   defaultShellId: null,
   openRouterApiKey: "",
   openRouterModel: DEFAULT_OPENROUTER_MODEL,
+  langSmithApiKey: "",
+  langSmithProject: DEFAULT_LANGSMITH_PROJECT,
+  langSmithEndpoint: DEFAULT_LANGSMITH_ENDPOINT,
 };
 
 let cache: AppState | null = null;
@@ -77,6 +82,16 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
       typeof settings.openRouterModel === "string" && settings.openRouterModel.trim()
         ? settings.openRouterModel.trim()
         : DEFAULT_OPENROUTER_MODEL,
+    langSmithApiKey:
+      typeof settings.langSmithApiKey === "string" ? settings.langSmithApiKey.trim() : "",
+    langSmithProject:
+      typeof settings.langSmithProject === "string" && settings.langSmithProject.trim()
+        ? settings.langSmithProject.trim()
+        : DEFAULT_LANGSMITH_PROJECT,
+    langSmithEndpoint:
+      typeof settings.langSmithEndpoint === "string" && settings.langSmithEndpoint.trim()
+        ? settings.langSmithEndpoint.trim().replace(/\/+$/, "")
+        : DEFAULT_LANGSMITH_ENDPOINT,
   };
 }
 

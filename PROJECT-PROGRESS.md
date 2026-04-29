@@ -37,6 +37,15 @@ understanding the low-level worker machinery.
 - Most users will provide the project plan as a Markdown file in the workspace.
   The primary Spark panel should let them select that file and run it, instead
   of making them understand step/task/prepare/execute controls.
+- The user should not configure Claude/Codex worker routing for normal use.
+  Spark owns worker selection and should decide whether Claude, Codex, shell,
+  or no worker is appropriate for each task.
+- The manager loop should first create a durable step-by-step division of the
+  selected plan. After that, worker planning should use a compact context made
+  from the project plan plus that step division, not the full earlier manager
+  conversation.
+- OpenRouter manager calls should use strict JSON Schema structured outputs,
+  not loose JSON mode, so malformed manager decisions fail clearly.
 
 ## Completed
 
@@ -213,6 +222,49 @@ understanding the low-level worker machinery.
 - Fixed the paused question path: when Spark asks the user a question before
   workers exist, the user can answer, click `RESUME`, and Spark calls the
   manager again with the updated run messages.
+- Split initial manager work into `plan_analysis` and `step_planning`.
+  `plan_analysis` creates the durable step-by-step division only. Then
+  `step_planning` receives the selected plan plus that division and creates
+  focused worker prompts for the first executable step.
+- Updated worker prompts so Claude/Codex receive the selected plan, full step
+  division, assigned step, focused task, constraints, verification commands,
+  and final-report schema.
+- Fixed worker terminal launch input so Claude/Codex receive the full prepared
+  structured prompt in the terminal, not only the old generic "read prompt.md"
+  wrapper. The prompt artifact path remains appended for traceability.
+- Changed interactive worker launch to send the full prompt and the submit
+  keystroke as separate delayed PTY writes so Claude/Codex should start without
+  the user pressing Enter manually.
+- Stopped writing every PTY stdout/stderr chunk as a durable event. Terminal
+  output still streams live and is written to `stdout.log`, `stderr.log`, and
+  `raw.log`, but the Dev Inspector event list should no longer flood.
+- Added optional LangSmith tracing for Spark manager calls. Requests still go
+  to OpenRouter, while LangSmith receives separate trace records for the
+  manager prompt, response, parsed decision, and errors. Tracing can be
+  configured through Settings or `LANGSMITH_*` / `LANGCHAIN_*` environment
+  variables.
+- Updated the manager prompt policy with researched prompt-engineering
+  principles: clear success criteria, delimited context, plan-before-execute,
+  compact worker context, independent parallelism only, grounded evidence, and
+  concise user questions when blocked.
+- Replaced the terse manager prompt with an orchestrator prompt that describes
+  Spark's real job: preserve compact context, create durable step batches,
+  generate worker prompts only after the step division exists, avoid worker
+  collisions, and review worker evidence.
+- Switched OpenRouter manager requests from basic JSON mode to strict
+  `json_schema` structured outputs with `strict: true` and provider
+  `require_parameters: true`.
+- Fixed the strict structured-output failure path so unsupported OpenRouter
+  manager models produce a clear "choose a compatible model" Spark question
+  instead of the misleading "OpenRouter is not configured" message.
+- Made worker PTY sessions resize through the same app path as normal terminal
+  panes.
+- Changed initial worker prompt submission to write prompts in small PTY chunks
+  and send Enter only after the chunks finish, which should make Claude/Codex
+  panes behave closer to normal user-opened terminals.
+- Confirmed `npm run typecheck` and deterministic `npm run test:e2e` pass after
+  the prompt-loop split. The real user-flow test remains explicit because it
+  launches real local workers.
 
 ## Current State
 
@@ -240,7 +292,7 @@ Missing foundation:
 
 - run state projection from events
 - diagnostics
-- real Claude/Codex worker command configuration UI and production defaults
+- production defaults for Spark-owned Claude/Codex worker launch
 - richer Claude/Codex terminal startup detection beyond output-aware prompt
   send
 - cancellation and timeout handling
@@ -259,10 +311,12 @@ Harden the manager loop for real projects and long-running workers.
 Immediate target:
 
 ```text
-Autopilot loop hardening:
-  add user-facing worker command settings
+Autopilot prompt and behavior hardening:
+  build a small prompt-eval fixture set for different project plans
+  test whether Spark produces good step divisions before launching workers
+  test whether first-step worker prompts are specific enough for Claude/Codex
   turn deterministic report review into accept/retry/follow-up/question actions
   add cancellation and timeouts before long-running real Claude/Codex sessions
   add a stronger user-facing activity/decision timeline
-  keep expanding npm run test:user-flow as the canonical local smoke test
+  keep npm run test:user-flow as the explicit local smoke test, not the default
 ```

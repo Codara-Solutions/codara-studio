@@ -49,6 +49,9 @@ export default function SettingsDialog({
         ...draft,
         openRouterApiKey: draft.openRouterApiKey.trim(),
         openRouterModel: draft.openRouterModel.trim(),
+        langSmithApiKey: draft.langSmithApiKey.trim(),
+        langSmithProject: draft.langSmithProject.trim(),
+        langSmithEndpoint: draft.langSmithEndpoint.trim().replace(/\/+$/, ""),
       });
       onClose();
     } catch (err) {
@@ -238,7 +241,7 @@ function ApiSettings({
   return (
     <div style={{ display: "grid", gap: 14 }}>
       <SectionTitle title="OpenRouter" detail="Used by Spark Agent to plan Claude/Codex worker tasks." />
-      <Label text="API KEY">
+      <Label text="OPENROUTER API KEY">
         <input
           type="password"
           value={draft.openRouterApiKey}
@@ -253,6 +256,35 @@ function ApiSettings({
           value={draft.openRouterModel}
           onChange={(event) => onChange({ ...draft, openRouterModel: event.currentTarget.value })}
           placeholder="google/gemini-flash-latest"
+          style={inputStyle}
+        />
+      </Label>
+
+      <SectionTitle title="LangSmith" detail="Optional tracing for Spark manager calls. OpenRouter remains the model transport." />
+      <Label text="LANGSMITH API KEY">
+        <input
+          type="password"
+          value={draft.langSmithApiKey}
+          onChange={(event) => onChange({ ...draft, langSmithApiKey: event.currentTarget.value })}
+          placeholder="lsv2_..."
+          style={inputStyle}
+        />
+      </Label>
+      <Label text="PROJECT">
+        <input
+          type="text"
+          value={draft.langSmithProject}
+          onChange={(event) => onChange({ ...draft, langSmithProject: event.currentTarget.value })}
+          placeholder="spark-agent-dev"
+          style={inputStyle}
+        />
+      </Label>
+      <Label text="ENDPOINT">
+        <input
+          type="text"
+          value={draft.langSmithEndpoint}
+          onChange={(event) => onChange({ ...draft, langSmithEndpoint: event.currentTarget.value })}
+          placeholder="https://api.smith.langchain.com"
           style={inputStyle}
         />
       </Label>

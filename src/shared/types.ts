@@ -36,6 +36,9 @@ export interface AppSettings {
   defaultShellId: string | null;
   openRouterApiKey: string;
   openRouterModel: string;
+  langSmithApiKey: string;
+  langSmithProject: string;
+  langSmithEndpoint: string;
 }
 
 export interface FsEntry {

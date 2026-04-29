@@ -61,31 +61,46 @@ context rather than product source.
   selectable project plans.
 - `SparkAgentPanel` is the simple user surface: select a Markdown plan, click
   `RUN`, stop/resume, and send guidance or answers.
-- The window Settings button opens tabbed settings for the default terminal and
-  the OpenRouter API key/model used by Spark manager planning.
+- The window Settings button opens tabbed settings for the default terminal,
+  the OpenRouter API key/model used by Spark manager planning, and optional
+  LangSmith tracing for manager calls.
 - `DevInspector` shows raw orchestration events, selected event JSON, current
   run state, workspace info, and artifact paths.
 - Worker task records can be prepared into non-executing envelopes that write
   `task.json`, `prompt.md`, and `workpad.md` artifacts.
 - Prepared worker attempts launch through hidden PTY-backed worker sessions.
-  The manual runner is still the default test runtime, and Claude/Codex
-  runtimes can be routed through configured commands when tasks request them.
+  Spark owns Claude/Codex runtime selection; the user should not need to
+  configure per-task worker routing.
 - Spark worker attempts also appear as visible attach-mode panes in the
   Workers tab. The visible terminal attaches to the orchestration PTY session
   instead of spawning a second process.
+- Worker PTY sessions resize through the same renderer path as normal terminal
+  panes, and initial prompts are written in small chunks before Spark sends the
+  submit keystroke.
 - When `SPARK_OPENROUTER_API_KEY` or `OPENROUTER_API_KEY` is configured,
-  Spark asks OpenRouter for the initial manager decision before creating
-  worker tasks. The manager call writes `spark_call.*` events and durable
+  Spark asks OpenRouter for manager decisions before creating worker tasks.
+  Manager calls write `spark_call.*` events and durable
   request/response/parsed-decision artifacts.
+- OpenRouter manager calls use strict structured outputs with
+  `response_format.type = "json_schema"`, `strict: true`, and provider
+  `require_parameters: true` so Spark gets schema-shaped decisions or a clear
+  provider failure. If the selected manager model cannot handle strict JSON
+  Schema, Spark asks the user to choose a compatible manager model instead of
+  misreporting the API key as missing.
+- When LangSmith tracing is configured, Spark also sends manager request and
+  response traces to LangSmith while still making the actual model request
+  through OpenRouter.
 - Worker sessions capture `stdout.log`, `stderr.log`, `raw.log`, and
   `final-report.json`; `STOP` and `RESUME` write control input into the active
-  session.
+  session. Raw PTY output is streamed to the terminal and log files instead of
+  being written as one event per output chunk.
 - Autopilot has a first one-button manager cycle: create/reuse a run, ask the
-  OpenRouter-backed Spark manager for initial steps/tasks when configured,
-  prepare worker envelopes, launch controlled workers in the background, and
-  return to review. Without an OpenRouter key the app asks the user to
-  configure the manager model instead of silently launching the manual test
-  runner. The plan text comes from the selected Markdown file.
+  OpenRouter-backed Spark manager for a step-by-step plan division, wipe the
+  manager context down to the selected plan plus that division, ask for first
+  step worker prompts, prepare worker envelopes, launch controlled workers in
+  the background, and return to review. Without an OpenRouter key the app asks
+  the user to configure the manager model instead of silently launching the
+  manual test runner. The plan text comes from the selected Markdown file.
 - Selected Markdown plans are persisted in `RunState.plans` with `sourceFile`
   and raw content so future planning/review steps can trace the run input.
 - Runs can be paused, resumed, and annotated with durable human messages. These
@@ -96,6 +111,9 @@ context rather than product source.
   a Spark manager update built from the user's pause reason/latest message.
 - Finished worker attempts parse `final-report.json` and emit deterministic
   `worker_report.parsed` and `worker_report.reviewed` events.
+- Worker prompts include the selected project plan, the manager's step-by-step
+  division, the assigned step, the focused worker task, constraints,
+  verification commands, and final-report schema.
 - After all parallel workers in a cycle finish, Spark performs a manager review
   call with compact worker report summaries. The manager can mark the run
   complete, create follow-up workers, or ask the user for clarification.
@@ -259,19 +277,25 @@ Spark receives compact context packets, not raw logs.
 ## Manager And Worker Configuration
 
 OpenRouter manager settings are available in the app Settings dialog under
-`API + MODEL`. Environment variables are still supported for local development:
+`API + MODEL`. LangSmith tracing settings are in the same tab and are optional.
+Environment variables are still supported for local development:
 
 ```bash
 SPARK_OPENROUTER_API_KEY=...
 SPARK_OPENROUTER_MODEL=google/gemini-flash-latest
 SPARK_OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+LANGSMITH_API_KEY=...
+LANGSMITH_PROJECT=spark-agent-dev
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 ```
 
 `OPENROUTER_API_KEY` is also accepted. The model defaults to
 `google/gemini-flash-latest`. Saved app settings take precedence over the API
-key and model environment variables.
+key and model environment variables. `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT`,
+and `LANGCHAIN_ENDPOINT` are also accepted as LangSmith aliases.
 
-Local worker command routing:
+Local worker command routing is Spark-owned. These environment variables exist
+for development and deterministic tests, not as a normal user setup surface:
 
 ```bash
 SPARK_CLAUDE_WORKER_COMMAND=claude
@@ -283,15 +307,20 @@ SPARK_CODEX_WORKER_ARGS=
 The args variables accept either a JSON string array or a simple shell-style
 argument string. On Windows the built-in defaults are `claude.exe` and
 `codex.cmd` so the visible worker panes open the real local CLIs when those are
-available on `PATH`. Spark sends the prepared task prompt after the CLI has
-started producing output when possible, with a bounded fallback delay, and
-includes the submit keystroke.
+available on `PATH`. Spark sends the full prepared task prompt into the worker
+terminal after the CLI has started producing output when possible, with a
+bounded fallback delay. Spark then sends the submit keystroke as a separate
+delayed PTY write after prompt chunks finish so Claude/Codex should run
+automatically without the human pressing Enter. The prompt artifact path is
+still included for traceability, but the worker should not only see a generic
+"read this file" wrapper.
 
 Initial manager planning is scheduled in the background. The `RUN` action
-creates/updates the run and returns control to the UI while OpenRouter planning,
-worker preparation, and worker launch events stream into the Dev Inspector.
-When the manager returns split-safe Claude/Codex tasks, Spark schedules those
-worker attempts in parallel and shows them as normal terminal panes.
+creates/updates the run and returns control to the UI while OpenRouter plan
+analysis, first-step worker prompt planning, worker preparation, and worker
+launch events stream into the Dev Inspector. When the manager returns
+split-safe Claude/Codex tasks, Spark schedules those worker attempts in
+parallel and shows them as normal terminal panes.
 
 Worker completion now feeds back into the manager. Spark reads the finished
 attempts' `final-report.json` files, sends compact report context in a

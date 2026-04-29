@@ -9,6 +9,10 @@ export interface WorkerCommand {
   initialInputDelayMs?: number;
   initialInputMaxDelayMs?: number;
   initialInputWaitForOutput?: boolean;
+  initialInputChunkSize?: number;
+  initialInputChunkDelayMs?: number;
+  initialSubmitInput?: string;
+  initialSubmitDelayMs?: number;
   env?: Record<string, string>;
 }
 
@@ -17,6 +21,7 @@ export interface WorkerSession {
   pid: number;
   command: string;
   write: (input: string) => void;
+  resize: (cols: number, rows: number) => void;
   kill: () => void;
   done: Promise<{ exitCode: number; signal?: number }>;
 }
@@ -63,6 +68,8 @@ export function startWorkerSession(opts: StartWorkerSessionOptions): WorkerSessi
   const startedAt = Date.now();
   let outputSeen = false;
   let initialInputSent = false;
+  let initialInputFinished = false;
+  let initialSubmitSent = false;
 
   pty.onData((data) => {
     appendOutput(opts.id, data);
@@ -87,6 +94,13 @@ export function startWorkerSession(opts: StartWorkerSessionOptions): WorkerSessi
     write: (input: string) => {
       try {
         pty.write(input);
+      } catch {
+        /* the PTY may have exited */
+      }
+    },
+    resize: (cols, rows) => {
+      try {
+        pty.resize(Math.max(1, cols | 0), Math.max(1, rows | 0));
       } catch {
         /* the PTY may have exited */
       }
@@ -120,7 +134,7 @@ export function startWorkerSession(opts: StartWorkerSessionOptions): WorkerSessi
     if (elapsedMs < minDelayMs) return;
     if (opts.command.initialInputWaitForOutput && !outputSeen && elapsedMs < maxDelayMs) return;
     initialInputSent = true;
-    session.write(opts.command.initialInput);
+    void writeInitialInput(opts.command);
   }
 
   function scheduleInitialInput(command: WorkerCommand): void {
@@ -128,6 +142,31 @@ export function startWorkerSession(opts: StartWorkerSessionOptions): WorkerSessi
     const maxDelayMs = Math.max(minDelayMs, command.initialInputMaxDelayMs ?? minDelayMs);
     setTimeout(maybeSendInitialInput, minDelayMs);
     if (maxDelayMs !== minDelayMs) setTimeout(maybeSendInitialInput, maxDelayMs);
+  }
+
+  function scheduleInitialSubmit(command: WorkerCommand): void {
+    if (!command.initialSubmitInput || initialSubmitSent || settled || !initialInputFinished) return;
+    const delayMs = Math.max(0, command.initialSubmitDelayMs ?? 500);
+    setTimeout(() => {
+      if (!command.initialSubmitInput || initialSubmitSent || settled) return;
+      initialSubmitSent = true;
+      session.write(command.initialSubmitInput);
+    }, delayMs);
+  }
+
+  async function writeInitialInput(command: WorkerCommand): Promise<void> {
+    const input = command.initialInput;
+    if (!input || settled) return;
+    const chunkSize = Math.max(128, command.initialInputChunkSize ?? 1200);
+    const chunkDelayMs = Math.max(0, command.initialInputChunkDelayMs ?? 15);
+    for (let index = 0; index < input.length && !settled; index += chunkSize) {
+      session.write(input.slice(index, index + chunkSize));
+      if (chunkDelayMs > 0 && index + chunkSize < input.length) {
+        await new Promise((resolve) => setTimeout(resolve, chunkDelayMs));
+      }
+    }
+    initialInputFinished = true;
+    scheduleInitialSubmit(command);
   }
 }
 
@@ -185,6 +224,10 @@ export function detachWorkerSessionsForWebContents(webContents: WebContents): vo
 
 export function writeWorkerSessionInput(id: string, input: string): void {
   sessions.get(id)?.write(input);
+}
+
+export function resizeWorkerSession(id: string, cols: number, rows: number): void {
+  sessions.get(id)?.resize(cols, rows);
 }
 
 export function disposeWorkerSession(id: string): void {

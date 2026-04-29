@@ -27,6 +27,7 @@ import {
   attachWorkerSession,
   detachWorkerSession,
   disposeWorkerSession,
+  resizeWorkerSession,
   writeWorkerSessionInput,
 } from "./orchestration/worker-session";
 import { listEvents } from "./orchestration/event-log";
@@ -220,6 +221,7 @@ export function registerIpc(): void {
 
   ipcMain.handle("pty:resize", async (_e, args: { id: string; cols: number; rows: number }) => {
     pty.resize(args.id, args.cols, args.rows);
+    resizeWorkerSession(args.id, args.cols, args.rows);
   });
 
   ipcMain.handle("pty:dispose", async (_e, args: { id: string }) => {

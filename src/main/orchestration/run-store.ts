@@ -35,6 +35,12 @@ import {
   type SparkManagerDecision,
   type SparkManagerWorkerReportContext,
 } from "./openrouter-manager";
+import {
+  finishLangSmithManagerTrace,
+  readLangSmithConfig,
+  startLangSmithManagerTrace,
+  type LangSmithTrace,
+} from "./langsmith-tracer";
 import { disposeWorkerSession, startWorkerSession, type WorkerCommand, type WorkerSession } from "./worker-session";
 
 const RUN_FILE = "run.json";
@@ -291,7 +297,17 @@ async function runInitialAutopilotPlanning(runId: string, input: StartAutopilotI
   let run = await requireRun(runId);
   if (run.status === "paused" || run.status === "cancelled") return;
 
-  const managerPlannedRun = await askOpenRouterManagerForInitialTasks(run, input.cwd);
+  let managerPlannedRun = await askOpenRouterManagerForInitialTasks(run, input.cwd);
+  if (
+    managerPlannedRun &&
+    managerPlannedRun.status !== "paused" &&
+    managerPlannedRun.status !== "cancelled" &&
+    managerPlannedRun.steps.length > 0 &&
+    managerPlannedRun.workerTasks.length === 0
+  ) {
+    managerPlannedRun = await askOpenRouterManager(managerPlannedRun, input.cwd, "step_planning");
+  }
+
   if (!managerPlannedRun && !manualFallbackEnabled()) {
     await askHumanQuestion(
       run.id,
@@ -498,6 +514,35 @@ function manualFallbackEnabled(): boolean {
   return process.env.SPARK_ENABLE_MANUAL_FALLBACK === "1";
 }
 
+function normalizeOpenRouterManagerMode(
+  mode: SparkCall["mode"],
+): "plan_analysis" | "step_planning" | "worker_result_review" {
+  if (mode === "worker_result_review") return "worker_result_review";
+  if (mode === "plan_analysis") return "plan_analysis";
+  return "step_planning";
+}
+
+async function safeStartLangSmithManagerTrace(
+  input: Parameters<typeof startLangSmithManagerTrace>[0],
+): Promise<LangSmithTrace | null> {
+  try {
+    return await startLangSmithManagerTrace(input);
+  } catch (err) {
+    console.warn("[langsmith] failed to start manager trace:", err);
+    return null;
+  }
+}
+
+async function safeFinishLangSmithManagerTrace(
+  input: Parameters<typeof finishLangSmithManagerTrace>[0],
+): Promise<void> {
+  try {
+    await finishLangSmithManagerTrace(input);
+  } catch (err) {
+    console.warn("[langsmith] failed to finish manager trace:", err);
+  }
+}
+
 async function createFallbackAutopilotTask(run: RunState, input: StartAutopilotInput): Promise<RunState> {
   run = await createStep({
     runId: run.id,
@@ -523,7 +568,7 @@ async function createFallbackAutopilotTask(run: RunState, input: StartAutopilotI
 }
 
 async function askOpenRouterManagerForInitialTasks(run: RunState, cwd: string): Promise<RunState | null> {
-  return askOpenRouterManager(run, cwd, "step_planning");
+  return askOpenRouterManager(run, cwd, "plan_analysis");
 }
 
 async function askOpenRouterManager(
@@ -534,6 +579,7 @@ async function askOpenRouterManager(
   const settings = await loadSettings();
   const config = readOpenRouterConfig(settings);
   if (!config) return null;
+  const langSmithConfig = readLangSmithConfig(settings);
 
   const callId = makeId("spark");
   const callDir = join(runDir(run.id), "spark-calls", callId);
@@ -541,11 +587,12 @@ async function askOpenRouterManager(
   const responsePath = join(callDir, "response.json");
   const parsedJsonPath = join(callDir, "parsed-decision.json");
   const workerReports = await collectWorkerReportContext(run);
+  const managerMode = normalizeOpenRouterManagerMode(mode);
   const requestBody = buildOpenRouterManagerRequest({
     run,
     cwd,
     model: config.model,
-    mode: mode === "worker_result_review" ? "worker_result_review" : "step_planning",
+    mode: managerMode,
     workerReports,
   });
   await fs.mkdir(callDir, { recursive: true });
@@ -568,6 +615,8 @@ async function askOpenRouterManager(
     ...(run.settingsSnapshot ?? {}),
     openRouterModel: config.model,
     openRouterBaseUrl: config.baseUrl,
+    langSmithProject: langSmithConfig?.project,
+    langSmithEndpoint: langSmithConfig?.endpoint,
   };
   run.updatedAt = startedAt;
   await saveRun(run);
@@ -585,8 +634,28 @@ async function askOpenRouterManager(
     },
   });
 
+  let langSmithTrace: LangSmithTrace | null = null;
   try {
-    const result = await requestOpenRouterManagerDecision(config, requestBody);
+    langSmithTrace = await safeStartLangSmithManagerTrace({
+      config: langSmithConfig,
+      runId: run.id,
+      workspaceId: run.workspaceId,
+      sparkCallId: callId,
+      mode,
+      requestBody,
+    });
+    const result = await requestOpenRouterManagerDecision(config, requestBody, managerMode);
+    await safeFinishLangSmithManagerTrace({
+      config: langSmithConfig,
+      trace: langSmithTrace,
+      output: {
+        decision: result.decision,
+        rawResponse: result.rawResponse,
+        durationMs: result.durationMs,
+        promptTokens: result.promptTokens,
+        completionTokens: result.completionTokens,
+      },
+    });
     await Promise.all([
       fs.writeFile(responsePath, JSON.stringify(result.rawResponse, null, 2), "utf8"),
       fs.writeFile(parsedJsonPath, JSON.stringify(result.decision, null, 2), "utf8"),
@@ -622,12 +691,17 @@ async function askOpenRouterManager(
       },
     });
 
-    return applySparkManagerDecision(latest, result.decision);
+    return applySparkManagerDecision(latest, result.decision, mode);
   } catch (err) {
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     const completedAt = new Date().toISOString();
     const error = err instanceof Error ? err.message : String(err);
+    await safeFinishLangSmithManagerTrace({
+      config: langSmithConfig,
+      trace: langSmithTrace,
+      error,
+    });
     if (targetCall) {
       targetCall.status = "failed";
       targetCall.error = error;
@@ -649,11 +723,35 @@ async function askOpenRouterManager(
         error,
       },
     });
+    if (isStructuredOutputUnsupportedError(error)) {
+      return askHumanQuestion(
+        latest.id,
+        [
+          "The selected OpenRouter manager model does not support strict JSON Schema structured outputs.",
+          "Choose a manager model that supports `response_format: json_schema` in Settings, then resume the run.",
+        ].join(" "),
+      );
+    }
     return null;
   }
 }
 
-async function applySparkManagerDecision(run: RunState, decision: SparkManagerDecision): Promise<RunState> {
+function isStructuredOutputUnsupportedError(error: string): boolean {
+  const normalized = error.toLowerCase();
+  return (
+    normalized.includes("no endpoints found") && normalized.includes("requested parameters")
+  ) || (
+    normalized.includes("response_format") && normalized.includes("not support")
+  ) || (
+    normalized.includes("json_schema") && normalized.includes("not support")
+  );
+}
+
+async function applySparkManagerDecision(
+  run: RunState,
+  decision: SparkManagerDecision,
+  mode: SparkCall["mode"],
+): Promise<RunState> {
   if (decision.status === "ask_user") {
     return askHumanQuestion(run.id, decision.question || "Please clarify what Spark should do next.");
   }
@@ -681,9 +779,11 @@ async function applySparkManagerDecision(run: RunState, decision: SparkManagerDe
   let latest = run;
   const stepIds: string[] = [];
   const steps =
-    decision.steps.length > 0
+    mode === "plan_analysis" && decision.steps.length > 0
       ? decision.steps
-      : [
+      : run.steps.length > 0
+        ? []
+        : [
           {
             title: "Spark planned work",
             goal: decision.summary,
@@ -705,7 +805,10 @@ async function applySparkManagerDecision(run: RunState, decision: SparkManagerDe
   }
 
   for (const task of decision.tasks) {
-    const stepId = stepIds[Math.max(0, Math.min(task.stepIndex ?? 0, stepIds.length - 1))] || stepIds[0];
+    const availableStepIds = stepIds.length > 0 ? stepIds : latest.steps.map((step) => step.id);
+    const stepId =
+      availableStepIds[Math.max(0, Math.min(task.stepIndex ?? 0, availableStepIds.length - 1))] ||
+      availableStepIds[0];
     latest = await createWorkerTask({
       runId: latest.id,
       stepId,
@@ -1096,7 +1199,8 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     fs.writeFile(paths.rawLog, "", "utf8"),
   ]);
 
-  const workerCommand = buildWorkerCommand(task, paths);
+  const promptText = await readWorkerPromptForLaunch(paths);
+  const workerCommand = buildWorkerCommand(task, paths, promptText);
   const command = workerCommand.display;
   const launchTimestamp = new Date().toISOString();
   attempt.status = "launching";
@@ -1834,24 +1938,17 @@ async function recordWorkerOutput(
     fs.appendFile(logPath, text, "utf8"),
     fs.appendFile(paths.rawLog, `[${timestamp}] ${stream}\n${text}\n`, "utf8"),
   ]);
-  await appendEvent({
-    timestamp,
-    workspaceId: run.workspaceId,
-    runId: run.id,
-    stepId: task.stepId,
-    workerTaskId: task.id,
-    attemptId,
-    type: `worker_attempt.${stream}`,
-    message: text.trim().slice(0, 240) || `${stream} output`,
-    payload: {
-      stream,
-      bytes: Buffer.byteLength(text),
-      text: text.slice(0, 4000),
-    },
-  });
 }
 
-function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths): WorkerCommand {
+async function readWorkerPromptForLaunch(paths: WorkerArtifactPaths): Promise<string> {
+  try {
+    return await fs.readFile(paths.promptMd, "utf8");
+  } catch {
+    return renderInteractiveWorkerLaunchFallback(paths);
+  }
+}
+
+function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths, promptText: string): WorkerCommand {
   if (task.runtimePreference === "manual") {
     return {
       exe: process.execPath,
@@ -1872,10 +1969,14 @@ function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths): Worke
     return {
       ...command,
       display: command.display || "claude",
-      initialInput: renderInteractiveWorkerLaunchInput(paths),
+      initialInput: renderInteractiveWorkerLaunchInput(paths, promptText),
       initialInputDelayMs: 1800,
       initialInputMaxDelayMs: 6500,
       initialInputWaitForOutput: true,
+      initialInputChunkSize: 1000,
+      initialInputChunkDelayMs: 20,
+      initialSubmitInput: "\r",
+      initialSubmitDelayMs: 1200,
     };
   }
 
@@ -1888,10 +1989,14 @@ function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths): Worke
     return {
       ...command,
       display: command.display || "codex",
-      initialInput: renderInteractiveWorkerLaunchInput(paths),
+      initialInput: renderInteractiveWorkerLaunchInput(paths, promptText),
       initialInputDelayMs: 2200,
       initialInputMaxDelayMs: 7000,
       initialInputWaitForOutput: true,
+      initialInputChunkSize: 1000,
+      initialInputChunkDelayMs: 20,
+      initialSubmitInput: "\r",
+      initialSubmitDelayMs: 1200,
     };
   }
 
@@ -1901,7 +2006,11 @@ function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths): Worke
     exe: shellExe,
     args: shellArgs,
     display: `${shellExe} ${shellArgs.join(" ")}`.trim(),
-    initialInput: renderInteractiveWorkerLaunchInput(paths),
+    initialInput: renderInteractiveWorkerLaunchInput(paths, promptText),
+    initialInputChunkSize: 1000,
+    initialInputChunkDelayMs: 20,
+    initialSubmitInput: "\r",
+    initialSubmitDelayMs: 300,
   };
 }
 
@@ -1927,14 +2036,28 @@ function parseWorkerArgs(raw: string | undefined): string[] {
   return text.match(/"([^"]*)"|'([^']*)'|\S+/g)?.map((part) => part.replace(/^["']|["']$/g, "")) ?? [];
 }
 
-function renderInteractiveWorkerLaunchInput(paths: WorkerArtifactPaths): string {
+function renderInteractiveWorkerLaunchInput(paths: WorkerArtifactPaths, promptText: string): string {
   return [
-    "Please run this Spark worker task. ",
-    `Read the full assignment from: ${paths.promptMd}. `,
-    `Use this workpad: ${paths.workpadMd}. `,
-    `When finished, write the required final JSON report to: ${paths.finalReportJson}.`,
-    "\r",
-  ].join("");
+    promptText.trim(),
+    "",
+    "SPARK ARTIFACT PATHS",
+    `Prompt artifact: ${paths.promptMd}`,
+    `Workpad: ${paths.workpadMd}`,
+    `Final report JSON: ${paths.finalReportJson}`,
+  ].join("\n");
+}
+
+function renderInteractiveWorkerLaunchFallback(paths: WorkerArtifactPaths): string {
+  return [
+    "You are a Spark worker agent running inside the user's project.",
+    "",
+    "The prepared prompt artifact could not be read before launch, so use these artifacts directly.",
+    `Prompt artifact: ${paths.promptMd}`,
+    `Workpad: ${paths.workpadMd}`,
+    `Final report JSON: ${paths.finalReportJson}`,
+    "",
+    "Read the prompt artifact, complete the task, and write the final JSON report to the final report path.",
+  ].join("\n");
 }
 
 function manualWorkerRunnerScript(): string {
@@ -2032,6 +2155,9 @@ function renderWorkerPrompt({
     "PROJECT PLAN SNAPSHOT",
     formatPlanSnapshot(run),
     "",
+    "STEP-BY-STEP DIVISION",
+    formatRunStepDivision(run),
+    "",
     "CURRENT STEP",
     step ? `${step.title}\n${step.goal}` : "No step is assigned to this task.",
     "",
@@ -2099,6 +2225,21 @@ function formatPlanSnapshot(run: RunState): string {
   if (!content) return "No selected project plan content was captured for this run.";
   const source = plan?.sourceFile ? `Source: ${plan.sourceFile}\n\n` : "";
   return source + truncateText(content, 12000);
+}
+
+function formatRunStepDivision(run: RunState): string {
+  if (run.steps.length === 0) return "No manager step division was captured for this run.";
+  return run.steps
+    .map((step) =>
+      [
+        `${step.index}. ${step.title}`,
+        `Goal: ${step.goal}`,
+        `Status: ${step.status}`,
+        `Acceptance: ${step.acceptanceCriteria.length ? step.acceptanceCriteria.join("; ") : "not specified"}`,
+        `Verification: ${step.verificationCommands.length ? step.verificationCommands.join("; ") : "not specified"}`,
+      ].join("\n"),
+    )
+    .join("\n\n");
 }
 
 function truncateText(value: string, maxLength: number): string {
