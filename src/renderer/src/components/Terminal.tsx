@@ -72,6 +72,7 @@ export default function TerminalView({
   const spawnedRef = useRef(false);
   const resizeTimerRef = useRef<number | null>(null);
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
+  const forceResizeRef = useRef<() => void>(() => undefined);
   const integrationRef = useRef<ShellIntegration | null>(null);
   const onShellIntegrationRef = useRef(onShellIntegration);
   onShellIntegrationRef.current = onShellIntegration;
@@ -111,17 +112,6 @@ export default function TerminalView({
       integrationRef.current = integration;
       onShellIntegrationRef.current?.(integration);
     }
-
-    let cols = 80;
-    let rows = 24;
-    try {
-      fit.fit();
-      cols = term.cols;
-      rows = term.rows;
-    } catch {
-      /* DOM may not be ready; fall back to defaults */
-    }
-    lastSentSizeRef.current = { cols, rows };
 
     const offData = window.spark.pty.onData(workerId, (data) => {
       // Main process now ships Uint8Array. xterm.js's parser preserves byte
@@ -188,54 +178,89 @@ export default function TerminalView({
     };
     hostRef.current.addEventListener("contextmenu", onContextMenu);
 
+    // Debounced resize. ConPTY emits a fresh redraw on every resize; without
+    // debouncing, drag-resize floods scrollback with duplicate frames and the
+    // terminal looks broken. Always xterm-resize first, then pty-resize.
+    const fitAndReportSize = (force = false): { cols: number; rows: number } | null => {
+      if (!fitRef.current || !termRef.current) return null;
+      try {
+        fitRef.current.fit();
+      } catch {
+        return null;
+      }
+      const c = termRef.current.cols;
+      const r = termRef.current.rows;
+      if (c <= 1 || r <= 1) return null;
+      const last = lastSentSizeRef.current;
+      const changed = !last || last.cols !== c || last.rows !== r;
+      lastSentSizeRef.current = { cols: c, rows: r };
+      try {
+        termRef.current.refresh(0, Math.max(0, r - 1));
+      } catch {
+        /* redraw is best-effort */
+      }
+      if (spawnedRef.current && (force || changed)) {
+        void window.spark.pty.resize(workerId, c, r);
+      }
+      return { cols: c, rows: r };
+    };
+
+    forceResizeRef.current = () => {
+      fitAndReportSize(true);
+    };
+
+    const scheduleResize = (force = false) => {
+      if (resizeTimerRef.current !== null) {
+        window.clearTimeout(resizeTimerRef.current);
+      }
+      resizeTimerRef.current = window.setTimeout(() => {
+        resizeTimerRef.current = null;
+        fitAndReportSize(force);
+      }, RESIZE_DEBOUNCE_MS);
+    };
+
+    const ro = new ResizeObserver(() => scheduleResize(false));
+    ro.observe(hostRef.current);
+
     let cancelled = false;
+    const stabilizationTimers: number[] = [];
+    const afterLayout = () => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+    const scheduleStabilizingResize = () => {
+      for (const delay of [0, 80, 240, 600]) {
+        const id = window.setTimeout(() => {
+          if (!cancelled) fitAndReportSize(true);
+        }, delay);
+        stabilizationTimers.push(id);
+      }
+    };
+
     (async () => {
       try {
-        const res = await window.spark.pty.spawn({ id: workerId, shell, cwd, cols, rows });
+        await afterLayout();
+        if (cancelled) return;
+        const size = fitAndReportSize(false) ?? { cols: 80, rows: 24 };
+        const res = await window.spark.pty.spawn({ id: workerId, shell, cwd, cols: size.cols, rows: size.rows });
         if (cancelled) return;
         spawnedRef.current = true;
         onPid(res.pid);
+        fitAndReportSize(true);
+        scheduleStabilizingResize();
         term.focus();
       } catch (err) {
         term.write(`\r\n\x1b[31mfailed to spawn: ${(err as Error).message}\x1b[0m\r\n`);
       }
     })();
 
-    // Debounced resize. ConPTY emits a fresh redraw on every resize; without
-    // debouncing, drag-resize floods scrollback with duplicate frames and the
-    // terminal looks broken. Always xterm-resize first, then pty-resize.
-    const scheduleResize = () => {
-      if (resizeTimerRef.current !== null) {
-        window.clearTimeout(resizeTimerRef.current);
-      }
-      resizeTimerRef.current = window.setTimeout(() => {
-        resizeTimerRef.current = null;
-        if (!fitRef.current || !termRef.current) return;
-        try {
-          fitRef.current.fit();
-        } catch {
-          return;
-        }
-        const c = termRef.current.cols;
-        const r = termRef.current.rows;
-        const last = lastSentSizeRef.current;
-        if (last && last.cols === c && last.rows === r) return;
-        lastSentSizeRef.current = { cols: c, rows: r };
-        if (spawnedRef.current) {
-          void window.spark.pty.resize(workerId, c, r);
-        }
-      }, RESIZE_DEBOUNCE_MS);
-    };
-
-    const ro = new ResizeObserver(scheduleResize);
-    ro.observe(hostRef.current);
-
     return () => {
       cancelled = true;
+      for (const id of stabilizationTimers) window.clearTimeout(id);
       if (resizeTimerRef.current !== null) {
         window.clearTimeout(resizeTimerRef.current);
         resizeTimerRef.current = null;
       }
+      forceResizeRef.current = () => undefined;
       ro.disconnect();
       hostRef.current?.removeEventListener("contextmenu", onContextMenu);
       dataDisposable.dispose();
@@ -261,17 +286,14 @@ export default function TerminalView({
   useEffect(() => {
     if (termRef.current) {
       termRef.current.options.fontSize = fontSize;
-      try {
-        fitRef.current?.fit();
-      } catch {
-        /* ignore */
-      }
+      requestAnimationFrame(() => forceResizeRef.current());
     }
   }, [fontSize]);
 
   useEffect(() => {
     if (active && termRef.current) {
       termRef.current.focus();
+      requestAnimationFrame(() => forceResizeRef.current());
     }
   }, [active]);
 

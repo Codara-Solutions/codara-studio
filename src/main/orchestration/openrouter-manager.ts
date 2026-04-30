@@ -325,6 +325,7 @@ export function buildOpenRouterManagerRequest(input: {
               status: input.run.status,
               existingSteps: input.run.steps.map((step) => ({
                 id: step.id,
+                index: step.index,
                 title: step.title,
                 status: step.status,
                 reviewSummary: step.reviewSummary,
@@ -712,6 +713,7 @@ function formatModeRules(mode: OpenRouterManagerMode): string {
     return [
       "- Do not rewrite the full step division unless a small correction is necessary.",
       "- Create worker tasks only for the first queued or active step. The task.stepIndex must point at that step.",
+      "- stepIndex is zero-based in the schema: step 1 uses stepIndex 0, step 2 uses stepIndex 1, and so on.",
       "- One worker task per plannedAgent in that step. A step with three plannedAgents should produce three worker tasks that can run in parallel.",
       "- Each worker task description must be the actual high-quality prompt the worker will receive: objective, context, exact scope, constraints, validation, final-report expectations, and collision warnings.",
       "- Each task's runtimePreference, modelHint, and effortHint must come from AVAILABLE RUNTIMES (installed runtimes only). If the desired runtime is not installed, route to an installed alternative or shell/manual.",

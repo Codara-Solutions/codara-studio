@@ -841,10 +841,7 @@ async function applySparkManagerDecision(
   }
 
   for (const task of decision.tasks) {
-    const availableStepIds = stepIds.length > 0 ? stepIds : latest.steps.map((step) => step.id);
-    const stepId =
-      availableStepIds[Math.max(0, Math.min(task.stepIndex ?? 0, availableStepIds.length - 1))] ||
-      availableStepIds[0];
+    const stepId = resolveTaskStepId(latest, task.stepIndex, stepIds);
     latest = await createWorkerTask({
       runId: latest.id,
       stepId,
@@ -1173,6 +1170,10 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   const paths = workerArtifactPaths(run.id, task.stepId, task.id, attempt.id);
   task.status = "queued";
   task.updatedAt = timestamp;
+  if (step && !["running", "reviewing", "complete", "failed", "skipped"].includes(step.status)) {
+    step.status = "ready";
+    step.updatedAt = timestamp;
+  }
   const envelope: WorkerTaskEnvelope = {
     runId: run.id,
     workerTaskId: task.id,
@@ -1253,6 +1254,12 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   attempt.finalReportPath = paths.finalReportJson;
   task.status = "claimed";
   task.updatedAt = launchTimestamp;
+  const launchStep = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
+  if (launchStep && !["complete", "failed", "skipped"].includes(launchStep.status)) {
+    launchStep.status = "running";
+    launchStep.updatedAt = launchTimestamp;
+    run.currentStepId = launchStep.id;
+  }
   run.updatedAt = launchTimestamp;
   await saveRun(run);
   await appendEvent({
@@ -1299,6 +1306,16 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   finishedAttempt.finalReportPath = paths.finalReportJson;
   finishedTask.status = result.exitCode === 0 ? "needs_review" : "failed";
   finishedTask.updatedAt = finishedAt;
+  const finishedStep = finishedTask.stepId ? run.steps.find((item) => item.id === finishedTask.stepId) : undefined;
+  if (finishedStep && !["complete", "skipped"].includes(finishedStep.status)) {
+    if (result.exitCode !== 0) {
+      finishedStep.status = "failed";
+      if (run.currentStepId === finishedStep.id) run.currentStepId = undefined;
+    } else if (!hasActiveStepWorkers(run, finishedStep.id, finishedTask.id)) {
+      finishedStep.status = "reviewing";
+    }
+    finishedStep.updatedAt = finishedAt;
+  }
   run.updatedAt = finishedAt;
   await saveRun(run);
   await appendEvent({
@@ -1417,7 +1434,12 @@ async function reviewWorkerReportArtifact({
       const allAccepted =
         stepTasks.length > 0 &&
         stepTasks.every((t) => (t.id === reviewedTask.id ? true : t.status === "accepted"));
-      reviewedStep.status = allAccepted ? "complete" : "reviewing";
+      reviewedStep.status = allAccepted
+        ? "complete"
+        : hasActiveStepWorkers(latest, reviewedStep.id, reviewedTask.id)
+          ? "running"
+          : "reviewing";
+      if (allAccepted && latest.currentStepId === reviewedStep.id) latest.currentStepId = undefined;
     }
   } else {
     reviewedTask.status = "needs_review";
@@ -1577,9 +1599,11 @@ function pickAutopilotStep(run: RunState): StepState | undefined {
 }
 
 function pickAutopilotTasks(run: RunState): WorkerTask[] {
-  const candidates = run.workerTasks.filter((task) =>
-    ["created", "queued", "failed", "retry_queued"].includes(task.status),
-  );
+  const activeStep = pickAutopilotStep(run);
+  const candidates = run.workerTasks.filter((task) => {
+    if (!["created", "queued", "failed", "retry_queued"].includes(task.status)) return false;
+    return !activeStep || task.stepId === activeStep.id;
+  });
   if (candidates.length === 0) return [];
 
   const first = candidates[0];
@@ -1594,6 +1618,37 @@ function pickAutopilotTasks(run: RunState): WorkerTask[] {
     selected.push(task);
   }
   return selected.length > 0 ? selected : [first];
+}
+
+function resolveTaskStepId(run: RunState, requestedStepIndex: number | undefined, createdStepIds: string[]): string | undefined {
+  if (run.steps.length === 0) return undefined;
+  const activeStep = pickAutopilotStep(run);
+  if (activeStep) return activeStep.id;
+
+  const availableStepIds = createdStepIds.length > 0 ? createdStepIds : run.steps.map((step) => step.id);
+  const requested = requestedStepIndex ?? 0;
+  const zeroBased = availableStepIds[requested];
+  if (zeroBased) return zeroBased;
+
+  const oneBasedStep = run.steps.find((step) => step.index === requested);
+  return oneBasedStep?.id ?? availableStepIds[0];
+}
+
+function hasActiveStepWorkers(run: RunState, stepId: string, excludingTaskId?: string): boolean {
+  const activeTaskIds = new Set(
+    run.workerTasks
+      .filter((task) =>
+        task.stepId === stepId &&
+        task.id !== excludingTaskId &&
+        ["claimed", "running"].includes(task.status),
+      )
+      .map((task) => task.id),
+  );
+  return run.workerAttempts.some(
+    (attempt) =>
+      activeTaskIds.has(attempt.workerTaskId) &&
+      ["preparing", "prompt_ready", "launching", "running", "finishing"].includes(attempt.status),
+  );
 }
 
 async function askHumanQuestion(runId: string, message: string): Promise<RunState> {
@@ -2051,10 +2106,16 @@ async function markAttemptRunning(
   const attempt = run.workerAttempts.find((item) => item.id === attemptId);
   const task = run.workerTasks.find((item) => item.id === workerTaskId);
   if (!attempt || !task) return;
+  const step = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
   attempt.status = "running";
   task.status = "running";
   attempt.startedAt = attempt.startedAt ?? timestamp;
   task.updatedAt = timestamp;
+  if (step && !["complete", "failed", "skipped"].includes(step.status)) {
+    step.status = "running";
+    step.updatedAt = timestamp;
+    run.currentStepId = step.id;
+  }
   run.updatedAt = timestamp;
   await saveRun(run);
 }

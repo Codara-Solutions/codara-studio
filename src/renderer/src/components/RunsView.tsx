@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   PlannedStepAgent,
   RunArtifactPaths,
@@ -10,6 +10,9 @@ import type {
   Workspace,
 } from "@shared/types";
 import DevInspector from "./DevInspector";
+
+const MIN_RUN_CANVAS_ZOOM = 0.45;
+const MAX_RUN_CANVAS_ZOOM = 1.4;
 
 interface Props {
   workspace: Workspace | null;
@@ -377,6 +380,25 @@ function Metric({ label, value }: { label: string; value: string | number }) {
 
 function RunCanvas({ run }: { run: RunState }) {
   const [zoom, setZoom] = useState(0.72);
+  const [isPanning, setIsPanning] = useState(false);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const zoomRef = useRef(zoom);
+  const pendingZoomAnchorRef = useRef<{
+    previousZoom: number;
+    pointerX: number;
+    pointerY: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null>(null);
+  const wheelFrameRef = useRef<number | null>(null);
+  const wheelDeltaRef = useRef(0);
+  const wheelPointerRef = useRef<{ x: number; y: number } | null>(null);
+  const panStartRef = useRef<{
+    pointerX: number;
+    pointerY: number;
+    scrollLeft: number;
+    scrollTop: number;
+  } | null>(null);
   const maps = useMemo(() => buildRunMaps(run), [run]);
   const orderedSteps = useMemo(() => sortSteps(run.steps), [run.steps]);
   const graphWidth = orderedSteps.length === 0
@@ -385,8 +407,101 @@ function RunCanvas({ run }: { run: RunState }) {
   const contentWidth = Math.max(920, graphWidth);
   const contentHeight = orderedSteps.length === 0 ? 460 : 560;
   const zoomLabel = `${Math.round(zoom * 100)}%`;
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  useEffect(() => {
+    return () => {
+      if (wheelFrameRef.current !== null) cancelAnimationFrame(wheelFrameRef.current);
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const pending = pendingZoomAnchorRef.current;
+    const viewport = viewportRef.current;
+    if (!pending || !viewport) return;
+    pendingZoomAnchorRef.current = null;
+
+    const nextZoom = zoomRef.current;
+    const ratio = nextZoom / pending.previousZoom;
+    viewport.scrollLeft = ((pending.scrollLeft + pending.pointerX) * ratio) - pending.pointerX;
+    viewport.scrollTop = ((pending.scrollTop + pending.pointerY) * ratio) - pending.pointerY;
+  }, [zoom]);
+
+  const setZoomFromViewportPoint = (next: number, pointerX?: number, pointerY?: number) => {
+    const viewport = viewportRef.current;
+    const currentZoom = zoomRef.current;
+    const nextZoom = clampZoom(next);
+    if (nextZoom === currentZoom) return;
+
+    if (viewport) {
+      pendingZoomAnchorRef.current = {
+        previousZoom: currentZoom,
+        pointerX: pointerX ?? viewport.clientWidth / 2,
+        pointerY: pointerY ?? viewport.clientHeight / 2,
+        scrollLeft: viewport.scrollLeft,
+        scrollTop: viewport.scrollTop,
+      };
+    }
+    zoomRef.current = nextZoom;
+    setZoom(nextZoom);
+  };
+
   const setBoundedZoom = (next: number) => {
-    setZoom(Math.min(1.4, Math.max(0.45, Number(next.toFixed(2)))));
+    setZoomFromViewportPoint(next);
+  };
+
+  const zoomAtPoint = (event: React.WheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const viewport = event.currentTarget;
+    const rect = viewport.getBoundingClientRect();
+    wheelPointerRef.current = {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
+    wheelDeltaRef.current += event.deltaY;
+
+    if (wheelFrameRef.current !== null) return;
+    wheelFrameRef.current = requestAnimationFrame(() => {
+      wheelFrameRef.current = null;
+      const delta = wheelDeltaRef.current;
+      wheelDeltaRef.current = 0;
+      const pointer = wheelPointerRef.current;
+      wheelPointerRef.current = null;
+      if (!pointer || delta === 0) return;
+
+      const factor = Math.exp(-delta * 0.0018);
+      setZoomFromViewportPoint(zoomRef.current * factor, pointer.x, pointer.y);
+    });
+  };
+  const startPanning = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    panStartRef.current = {
+      pointerX: event.clientX,
+      pointerY: event.clientY,
+      scrollLeft: event.currentTarget.scrollLeft,
+      scrollTop: event.currentTarget.scrollTop,
+    };
+    setIsPanning(true);
+  };
+  const movePanning = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isPanning || !panStartRef.current) return;
+    event.preventDefault();
+    const start = panStartRef.current;
+    event.currentTarget.scrollLeft = start.scrollLeft - (event.clientX - start.pointerX);
+    event.currentTarget.scrollTop = start.scrollTop - (event.clientY - start.pointerY);
+  };
+  const stopPanning = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!isPanning) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    panStartRef.current = null;
+    setIsPanning(false);
   };
 
   return (
@@ -427,10 +542,19 @@ function RunCanvas({ run }: { run: RunState }) {
       </div>
 
       <div
+        ref={viewportRef}
+        onWheel={zoomAtPoint}
+        onPointerDown={startPanning}
+        onPointerMove={movePanning}
+        onPointerUp={stopPanning}
+        onPointerCancel={stopPanning}
         style={{
           position: "absolute",
           inset: 0,
           overflow: "auto",
+          cursor: isPanning ? "grabbing" : "grab",
+          userSelect: isPanning ? "none" : undefined,
+          overscrollBehavior: "contain",
         }}
       >
         <div
@@ -438,17 +562,19 @@ function RunCanvas({ run }: { run: RunState }) {
             width: Math.ceil(contentWidth * zoom) + 72,
             minHeight: Math.ceil(contentHeight * zoom) + 88,
             padding: "34px 36px",
+            contain: "layout size",
           }}
         >
           <div
             style={{
               width: contentWidth,
-              transform: `scale(${zoom})`,
-              transformOrigin: "top left",
+              zoom,
+              textRendering: "geometricPrecision",
+              WebkitFontSmoothing: "antialiased",
               display: "flex",
               flexDirection: "column",
               gap: 22,
-            }}
+            } as React.CSSProperties & { zoom: number }}
           >
             {orderedSteps.length === 0 ? (
               <PlanningGraph run={run} />
@@ -1178,6 +1304,10 @@ function findBestRun(runs: RunState[]): RunState | null {
 
 function isLiveRun(run: RunState): boolean {
   return ["planning", "running", "reviewing", "blocked", "paused"].includes(run.status);
+}
+
+function clampZoom(value: number): number {
+  return Math.min(MAX_RUN_CANVAS_ZOOM, Math.max(MIN_RUN_CANVAS_ZOOM, Number(value.toFixed(2))));
 }
 
 function connectorLabel(prev: StepState, next: StepState): string {

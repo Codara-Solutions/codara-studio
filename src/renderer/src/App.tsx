@@ -244,7 +244,6 @@ export default function App() {
           return { ...workspace, workers: [...real, pane] };
         }),
       );
-      if (event.workspaceId === activeId) setActiveWorkbenchTab("workers");
     };
 
     return window.spark.orchestration.onEvent((event) => {
