@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import type { PlanFile, RunState, SparkEvent, Workspace } from "@shared/types";
+import type { PlanFile, RunState, Workspace } from "@shared/types";
 import SparkAgentPanel from "./SparkAgentPanel";
 
 interface Props {
@@ -10,7 +10,6 @@ interface Props {
 export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) {
   const [runs, setRuns] = useState<RunState[]>([]);
   const [activeRun, setActiveRun] = useState<RunState | null>(null);
-  const [events, setEvents] = useState<SparkEvent[]>([]);
   const [planFiles, setPlanFiles] = useState<PlanFile[]>([]);
   const [selectedPlanPath, setSelectedPlanPath] = useState<string>("");
   const [busy, setBusy] = useState(false);
@@ -19,17 +18,12 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
   const loadRunDetails = useCallback(async (run: RunState | null) => {
     if (!run) {
       setActiveRun(null);
-      setEvents([]);
       return;
     }
 
-    const [freshRun, nextEvents] = await Promise.all([
-      window.spark.orchestration.getRun(run.id),
-      window.spark.orchestration.listEvents(run.id),
-    ]);
+    const freshRun = await window.spark.orchestration.getRun(run.id);
     const nextRun = freshRun ?? run;
     setActiveRun(nextRun);
-    setEvents(nextEvents);
   }, []);
 
   // Only the workspace identity (id + cwd) should trigger a reload — not the
@@ -87,10 +81,6 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
   useEffect(() => {
     return window.spark.orchestration.onEvent((event) => {
       if (!activeRun || event.runId !== activeRun.id) return;
-      setEvents((current) => {
-        if (current.some((item) => item.id === event.id)) return current;
-        return [...current, event];
-      });
       void window.spark.orchestration.getRun(activeRun.id).then((freshRun) => {
         if (!freshRun) return;
         setActiveRun(freshRun);
@@ -200,12 +190,6 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
     }
   };
 
-  const selectRun = async (run: RunState) => {
-    if (busy) return;
-    setError(null);
-    await loadRunDetails(run);
-  };
-
   const mutateActiveRun = async (mutation: () => Promise<RunState>) => {
     setBusy(true);
     setError(null);
@@ -213,8 +197,6 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
       const run = await mutation();
       setActiveRun(run);
       setRuns((current) => replaceRun(current, run));
-      const nextEvents = await window.spark.orchestration.listEvents(run.id);
-      setEvents(nextEvents);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -234,9 +216,7 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
     >
       <SparkAgentPanel
         workspace={workspace}
-        runs={runs}
         activeRun={activeRun}
-        events={events}
         planFiles={planFiles}
         selectedPlanPath={selectedPlanPath}
         busy={busy}
@@ -247,7 +227,6 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
         onAddUserMessage={addUserMessage}
         onDeleteRun={deleteExistingRun}
         onSelectPlan={setSelectedPlanPath}
-        onSelectRun={selectRun}
         onRefresh={loadRuns}
         onQuickTest={onQuickTest}
       />
