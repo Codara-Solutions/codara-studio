@@ -1,6 +1,6 @@
-import React from "react";
+import React, { useState } from "react";
 
-function GearIcon({ size = 15 }: { size?: number }) {
+function GearIcon({ size = 14 }: { size?: number }) {
   // Classic 8-tooth cog with a center hub. Strokes only — matches the chrome's
   // monoline aesthetic. Generated, not lifted, so it stays visually consistent
   // with the other window-chrome glyphs.
@@ -31,11 +31,14 @@ interface PanelToggleProps {
 function PanelToggle({ on, side, onClick, title }: PanelToggleProps) {
   const fillColor = on ? "var(--accent)" : "currentColor";
   const fillOpacity = on ? 1 : 0.55;
+  const [hover, setHover] = useState(false);
   return (
     <button
       type="button"
       onClick={onClick}
       title={title}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
         appearance: "none",
         width: 38,
@@ -43,12 +46,14 @@ function PanelToggle({ on, side, onClick, title }: PanelToggleProps) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "transparent",
+        background: hover ? "var(--hover)" : "transparent",
         border: "none",
-        borderRight: "1px solid var(--rule)",
+        borderRight: "1px solid var(--rule-soft)",
         color: on ? "var(--ink)" : "var(--ink-dim)",
         cursor: "default",
         padding: 0,
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
       <svg width="18" height="14" viewBox="0 0 18 14" fill="none">
@@ -86,6 +91,7 @@ export default function WindowChrome({
   onToggleRight,
   onOpenSettings,
 }: Props) {
+  const [gearHover, setGearHover] = useState(false);
   return (
     <div
       style={{
@@ -105,21 +111,32 @@ export default function WindowChrome({
           gap: 10,
           padding: "0 14px",
           borderRight: "1px solid var(--rule)",
-          fontWeight: 800,
-          letterSpacing: "0.04em",
+          fontSize: 14,
+          fontWeight: 600,
+          letterSpacing: "-0.01em",
         }}
       >
-        <span style={{ display: "inline-block", width: 10, height: 10, background: "var(--accent)" }} />
-        <span>SPARK&nbsp;APP</span>
+        <span
+          style={{
+            display: "inline-block",
+            width: 8,
+            height: 8,
+            background: "var(--accent)",
+            boxShadow: "inset 0 0 0 1px color-mix(in oklch, var(--accent) 50%, black)",
+          }}
+        />
+        <span>Spark</span>
       </div>
       <div style={{ flex: 1 }} />
-      <div style={{ display: "flex", alignItems: "stretch", borderLeft: "1px solid var(--rule)" }}>
+      <div style={{ display: "flex", alignItems: "stretch", borderLeft: "1px solid var(--rule-soft)" }}>
         <PanelToggle on={leftOn} side="left" onClick={onToggleLeft} title="Toggle workspaces" />
         <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" />
         <button
           type="button"
           title="Settings"
           onClick={() => onOpenSettings?.()}
+          onMouseEnter={() => setGearHover(true)}
+          onMouseLeave={() => setGearHover(false)}
           style={{
             appearance: "none",
             width: 38,
@@ -127,12 +144,14 @@ export default function WindowChrome({
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            background: "transparent",
+            background: gearHover ? "var(--hover)" : "transparent",
             border: "none",
-            borderLeft: "1px solid var(--rule)",
-            color: "var(--ink-dim)",
+            borderLeft: "1px solid var(--rule-soft)",
+            color: gearHover ? "var(--ink)" : "var(--ink-dim)",
             cursor: "default",
             padding: 0,
+            transition:
+              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
           }}
         >
           <GearIcon />

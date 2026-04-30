@@ -67,6 +67,12 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
 
   const lineCount = useMemo(() => Math.max(1, content.split("\n").length), [content]);
 
+  // Split file name into base + extension so we can render the extension in mono
+  // while the human-readable base sits in sans, matching the hybrid type rule.
+  const dotIdx = file.name.lastIndexOf(".");
+  const nameBase = dotIdx > 0 ? file.name.slice(0, dotIdx) : file.name;
+  const nameExt = dotIdx > 0 ? file.name.slice(dotIdx) : "";
+
   return (
     <section
       onMouseDown={onActivate}
@@ -77,8 +83,9 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
         minHeight: 0,
         minWidth: 0,
         overflow: "hidden",
-        outline: active ? "1px solid var(--accent)" : "none",
-        outlineOffset: -1,
+        border: active ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
+        boxShadow: active ? "0 0 0 1px var(--accent-edge)" : "none",
+        transition: "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       <div
@@ -87,8 +94,9 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
           flex: "0 0 36px",
           display: "flex",
           alignItems: "stretch",
-          borderBottom: "1px solid var(--rule)",
+          borderBottom: "1px solid var(--rule-soft)",
           background: active ? "var(--panel-2)" : "var(--panel)",
+          transition: "background var(--motion-fast) var(--ease-out)",
         }}
       >
         <div
@@ -99,25 +107,27 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
             alignItems: "center",
             gap: 8,
             padding: "0 12px",
-            borderRight: "1px solid var(--rule)",
+            borderRight: "1px solid var(--rule-soft)",
             background: "var(--bg)",
             color: "var(--ink)",
             fontSize: 12,
-            fontWeight: 700,
             position: "relative",
           }}
           title={file.path}
         >
-          <span
-            style={{
-              position: "absolute",
-              top: -1,
-              left: 0,
-              right: 0,
-              height: 2,
-              background: "var(--accent)",
-            }}
-          />
+          {active && (
+            <span
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 1.5,
+                background: "var(--accent)",
+                boxShadow: "0 0 12px var(--accent-glow)",
+              }}
+            />
+          )}
           <FileIcon ext={file.ext} />
           <span
             style={{
@@ -125,9 +135,16 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
+              fontFamily: "var(--font-sans)",
+              fontWeight: 600,
             }}
           >
-            {file.name}
+            {nameBase}
+            {nameExt && (
+              <span style={{ fontFamily: "var(--font-mono)", fontWeight: 400, color: "var(--ink-dim)" }}>
+                {nameExt}
+              </span>
+            )}
           </span>
           {dirty && <span style={{ color: "var(--accent)" }}>*</span>}
         </div>
@@ -146,17 +163,25 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
             appearance: "none",
             background: "transparent",
             border: "none",
-            borderLeft: "1px solid var(--rule)",
+            borderLeft: "1px solid var(--rule-soft)",
             color: dirty && !error ? "var(--ink)" : "var(--muted)",
             padding: "0 14px",
-            fontFamily: "inherit",
+            fontFamily: "var(--font-sans)",
             fontSize: 11,
-            fontWeight: 700,
-            letterSpacing: "0.06em",
+            fontWeight: 600,
+            letterSpacing: "0.1em",
+            textTransform: "uppercase",
             cursor: "default",
+            transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+          }}
+          onMouseEnter={(e) => {
+            if (dirty && !error) e.currentTarget.style.background = "var(--hover)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
           }}
         >
-          {saving ? "SAVING" : "SAVE"}
+          {saving ? "Saving" : "Save"}
         </button>
         <button
           type="button"
@@ -169,7 +194,7 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
             appearance: "none",
             background: "transparent",
             border: "none",
-            borderLeft: "1px solid var(--rule)",
+            borderLeft: "1px solid var(--rule-soft)",
             color: "var(--muted)",
             width: 36,
             display: "flex",
@@ -177,6 +202,15 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
             justifyContent: "center",
             padding: 0,
             cursor: "default",
+            transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "var(--hover)";
+            e.currentTarget.style.color = "var(--ink-dim)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.color = "var(--muted)";
           }}
         >
           <CloseIcon />
@@ -236,18 +270,34 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
           minHeight: 26,
           display: "flex",
           alignItems: "center",
-          gap: 14,
-          padding: "4px 10px",
-          borderTop: "1px solid var(--rule)",
+          gap: 16,
+          padding: "4px 12px",
+          borderTop: "1px solid var(--rule-soft)",
           background: "var(--panel)",
           color: "var(--muted)",
           fontSize: 10,
-          letterSpacing: "0.04em",
         }}
       >
-        <span>{dirty ? "UNSAVED" : "SAVED"}</span>
-        <span>{lineCount} lines</span>
-        {status && <span>{status}</span>}
+        <span
+          style={{
+            fontFamily: "var(--font-sans)",
+            fontWeight: 600,
+            fontSize: 10,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+            color: dirty ? "var(--accent)" : "var(--muted)",
+          }}
+        >
+          {dirty ? "UNSAVED" : "SAVED"}
+        </span>
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
+          {lineCount} lines
+        </span>
+        {status && (
+          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
+            {status}
+          </span>
+        )}
       </div>
     </section>
   );
@@ -267,11 +317,12 @@ function LineGutter({ count }: { count: number }) {
         minWidth: 46,
         maxWidth: 68,
         overflow: "hidden",
-        borderRight: "1px solid var(--rule)",
+        borderRight: "1px solid var(--rule-soft)",
         background: "var(--panel)",
         color: "var(--muted)",
         fontFamily: "var(--font-mono)",
         fontSize: 12,
+        fontVariantNumeric: "tabular-nums",
         lineHeight: 1.55,
         textAlign: "right",
         userSelect: "none",

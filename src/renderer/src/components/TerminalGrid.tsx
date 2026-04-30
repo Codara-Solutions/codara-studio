@@ -62,7 +62,7 @@ export default function TerminalGrid({
         flexDirection: "column",
         minWidth: 0,
         minHeight: 0,
-        borderTop: "1px solid var(--rule)",
+        borderTop: "1px solid var(--rule-soft)",
       }}
     >
       {workers.length === 0 ? (
@@ -79,7 +79,7 @@ export default function TerminalGrid({
             gridTemplateColumns: `repeat(${dims.cols}, 1fr)`,
             gridAutoRows: "1fr",
             gap: 1,
-            background: "var(--rule)",
+            background: "var(--rule-soft)",
             minHeight: 0,
           }}
         >
@@ -158,11 +158,12 @@ function WorkerPane({
         display: "flex",
         flexDirection: "column",
         background: "var(--bg)",
-        outline: active ? "1px solid var(--accent)" : "none",
-        outlineOffset: -1,
+        border: active ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
+        boxShadow: active ? "0 0 0 1px var(--accent-edge)" : "none",
         overflow: "hidden",
         minWidth: 0,
         minHeight: 0,
+        transition: "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       <PaneHeader
@@ -207,30 +208,42 @@ function PaneHeader({
         alignItems: "center",
         gap: 10,
         padding: "6px 10px",
-        borderBottom: "1px solid var(--rule)",
+        borderBottom: "1px solid var(--rule-soft)",
         background: active ? "var(--panel-2)" : "var(--panel)",
         flex: "0 0 auto",
         fontSize: 11,
+        transition: "background var(--motion-fast) var(--ease-out)",
       }}
     >
       <ShellGlyph family={shell.family} />
       <span
         style={{
-          fontWeight: 700,
+          fontFamily: "var(--font-sans)",
+          fontWeight: 600,
+          fontSize: 11,
           color: active ? "var(--ink)" : "var(--ink-dim)",
           textTransform: "uppercase",
-          letterSpacing: "0.06em",
+          letterSpacing: "0.12em",
         }}
       >
         {shell.family}
       </span>
       <span style={{ color: "var(--muted)" }}>·</span>
-      <span style={{ color: "var(--ink-dim)" }}>
+      <span style={{ color: "var(--ink-dim)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
         {worker.name || shellLabel(shell)}
       </span>
       <span style={{ flex: 1 }} />
       {pid !== undefined && (
-        <span style={{ color: "var(--muted)", fontSize: 10 }}>pid {pid}</span>
+        <span
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          pid {pid}
+        </span>
       )}
       <button
         type="button"
@@ -242,7 +255,7 @@ function PaneHeader({
         style={{
           appearance: "none",
           background: "transparent",
-          border: "1px solid var(--rule)",
+          border: "1px solid var(--rule-soft)",
           color: "var(--muted)",
           width: 20,
           height: 20,
@@ -251,6 +264,15 @@ function PaneHeader({
           justifyContent: "center",
           padding: 0,
           cursor: "default",
+          transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "var(--hover)";
+          e.currentTarget.style.color = "var(--ink-dim)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "transparent";
+          e.currentTarget.style.color = "var(--muted)";
         }}
       >
         <CloseIcon />
@@ -286,9 +308,11 @@ function EmptyPane({
           alignItems: "center",
           justifyContent: "center",
           color: "var(--muted)",
-          fontSize: 9,
-          letterSpacing: "0.12em",
-          fontWeight: 700,
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          letterSpacing: "0.14em",
+          textTransform: "uppercase",
+          fontWeight: 600,
           userSelect: "none",
         }}
       >
@@ -306,17 +330,28 @@ function EmptyPane({
         alignItems: "center",
         justifyContent: "center",
         color: "var(--muted)",
-        fontSize: 22,
-        fontWeight: 200,
+        fontFamily: "var(--font-sans)",
+        fontSize: 12,
+        fontWeight: 500,
         cursor: target ? "default" : "not-allowed",
-        opacity: 0.35,
         minWidth: 0,
         minHeight: 0,
         userSelect: "none",
+        transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+      }}
+      onMouseEnter={(e) => {
+        if (target) {
+          e.currentTarget.style.background = "var(--hover)";
+          e.currentTarget.style.color = "var(--ink-dim)";
+        }
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "var(--bg)";
+        e.currentTarget.style.color = "var(--muted)";
       }}
       title={target ? `New ${target.label}` : "No shells available"}
     >
-      +
+      + Add worker
     </div>
   );
 }
@@ -376,16 +411,28 @@ function EmptyWorkers({
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        gap: 14,
+        gap: 12,
         background: "var(--bg)",
         color: "var(--muted)",
+        padding: 24,
       }}
     >
-      <div style={{ fontSize: 11, letterSpacing: "0.14em", fontWeight: 700 }}>NO WORKERS</div>
-      <div style={{ fontSize: 11, color: "var(--muted)" }}>
+      <div
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+          letterSpacing: "0.14em",
+          textTransform: "uppercase",
+          fontWeight: 600,
+          color: "var(--ink-dim)",
+        }}
+      >
+        NO WORKERS
+      </div>
+      <div style={{ fontFamily: "var(--font-sans)", fontSize: 13, color: "var(--muted)" }}>
         Spawn a terminal in this workspace's directory.
       </div>
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center", maxWidth: 600 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center", maxWidth: 600, marginTop: 4 }}>
         {(defaultShell ? [defaultShell, ...shells.filter((s) => s.id !== defaultShell.id)] : shells).map((s) => (
           <button
             key={s.id}
@@ -396,11 +443,21 @@ function EmptyWorkers({
               background: "transparent",
               border: "1px solid var(--rule-strong)",
               color: "var(--ink-dim)",
-              padding: "6px 10px",
-              fontSize: 11,
-              fontFamily: "inherit",
+              padding: "8px 12px",
+              fontFamily: "var(--font-sans)",
+              fontSize: 12,
+              fontWeight: 500,
               cursor: "default",
-              letterSpacing: "0.06em",
+              letterSpacing: "0.02em",
+              transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "var(--hover)";
+              e.currentTarget.style.color = "var(--ink)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+              e.currentTarget.style.color = "var(--ink-dim)";
             }}
           >
             + {s.label}

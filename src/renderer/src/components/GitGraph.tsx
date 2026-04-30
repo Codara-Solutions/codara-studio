@@ -59,7 +59,7 @@ export default function GitGraph({ cwd }: Props) {
       style={{
         flex: "1 1 50%",
         minHeight: 0,
-        borderTop: "1px solid var(--rule)",
+        borderTop: "1px solid var(--rule-soft)",
         display: "flex",
         flexDirection: "column",
       }}
@@ -69,17 +69,48 @@ export default function GitGraph({ cwd }: Props) {
           padding: "10px 14px 6px",
           display: "flex",
           alignItems: "center",
-          gap: 8,
-          fontSize: 10,
-          letterSpacing: "0.14em",
-          fontWeight: 700,
+          gap: 10,
           color: "var(--muted)",
           flex: "0 0 auto",
         }}
       >
-        <span>SOURCE</span>
-        <span style={{ flex: 1, height: 1, background: "var(--rule)" }} />
-        <span>{loading ? "..." : String(branches.length).padStart(2, "0")}</span>
+        <span
+          style={{
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+            fontWeight: 600,
+          }}
+        >
+          GIT
+        </span>
+        {branch && (
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              color: "var(--ink-dim)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              minWidth: 0,
+            }}
+            title={branch}
+          >
+            {branch}
+          </span>
+        )}
+        <span style={{ flex: 1, height: 1, background: "var(--rule-soft)" }} />
+        <span
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {loading ? "..." : String(branches.length).padStart(2, "0")}
+        </span>
       </div>
 
       <div style={{ padding: "0 0 8px", overflow: "auto", flex: 1, minHeight: 0 }}>
@@ -122,7 +153,7 @@ function BranchSummary({
     <div style={{ padding: "0 10px 10px" }}>
       <div
         style={{
-          padding: "7px 4px 8px",
+          padding: "8px 4px 10px",
           display: "flex",
           alignItems: "center",
           gap: 8,
@@ -136,8 +167,9 @@ function BranchSummary({
             minWidth: 0,
             flex: 1,
             color: "var(--ink)",
+            fontFamily: "var(--font-mono)",
             fontSize: 12,
-            fontWeight: 800,
+            fontWeight: 600,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -171,17 +203,32 @@ function MiniSection({ label, count }: { label: string; count: number }) {
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 7,
+        gap: 8,
         padding: "8px 4px 4px",
         color: "var(--muted)",
-        fontSize: 9,
-        fontWeight: 800,
-        letterSpacing: "0.12em",
       }}
     >
-      <span>{label}</span>
-      <span style={{ flex: 1, height: 1, background: "var(--rule)" }} />
-      <span>{String(count).padStart(2, "0")}</span>
+      <span
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          fontWeight: 600,
+          letterSpacing: "0.14em",
+          textTransform: "uppercase",
+        }}
+      >
+        {label}
+      </span>
+      <span style={{ flex: 1, height: 1, background: "var(--rule-soft)" }} />
+      <span
+        style={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {String(count).padStart(2, "0")}
+      </span>
     </div>
   );
 }
@@ -193,10 +240,11 @@ function BranchRow({ branch }: { branch: GitBranch }) {
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 7,
+        gap: 8,
         minWidth: 0,
-        padding: "3px 4px",
+        padding: "4px 4px",
         color: branch.current ? "var(--ink)" : "var(--ink-dim)",
+        fontFamily: "var(--font-mono)",
         fontSize: 11,
       }}
     >
@@ -205,9 +253,21 @@ function BranchRow({ branch }: { branch: GitBranch }) {
         {branch.name}
       </span>
       {(branch.ahead > 0 || branch.behind > 0) && (
-        <span style={{ color: branch.behind > 0 ? "var(--accent)" : "var(--muted)", fontSize: 10 }}>
-          {branch.behind > 0 && `↓${branch.behind}`}
-          {branch.ahead > 0 && ` ↑${branch.ahead}`}
+        <span
+          style={{
+            display: "inline-flex",
+            gap: 6,
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {branch.behind > 0 && (
+            <span style={{ color: "var(--danger)" }}>↓{branch.behind}</span>
+          )}
+          {branch.ahead > 0 && (
+            <span style={{ color: "var(--accent)" }}>↑{branch.ahead}</span>
+          )}
         </span>
       )}
     </div>
@@ -221,10 +281,11 @@ function RemoteBranchRow({ name }: { name: string }) {
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 7,
+        gap: 8,
         minWidth: 0,
-        padding: "3px 4px",
+        padding: "4px 4px",
         color: "var(--ink-dim)",
+        fontFamily: "var(--font-mono)",
         fontSize: 11,
       }}
     >
@@ -252,9 +313,9 @@ function BranchGlyph({ active = false }: { active?: boolean }) {
 
 function SyncBadge({ branch }: { branch: GitBranch }) {
   const { text, color } = (() => {
-    if (branch.behind > 0 && branch.ahead > 0) return { text: `PULL ${branch.behind} / PUSH ${branch.ahead}`, color: "var(--accent)" };
-    if (branch.behind > 0) return { text: `PULL ${branch.behind}`, color: "var(--accent)" };
-    if (branch.ahead > 0) return { text: `PUSH ${branch.ahead}`, color: "var(--info)" };
+    if (branch.behind > 0 && branch.ahead > 0) return { text: `PULL ${branch.behind} / PUSH ${branch.ahead}`, color: "var(--danger)" };
+    if (branch.behind > 0) return { text: `PULL ${branch.behind}`, color: "var(--danger)" };
+    if (branch.ahead > 0) return { text: `PUSH ${branch.ahead}`, color: "var(--accent)" };
     if (!branch.upstream) return { text: "NO UPSTREAM", color: "var(--muted)" };
     return { text: "SYNCED", color: "var(--ok)" };
   })();
@@ -264,12 +325,14 @@ function SyncBadge({ branch }: { branch: GitBranch }) {
       title={branch.upstream}
       style={{
         flex: "0 0 auto",
-        border: "1px solid var(--rule-strong)",
-        padding: "1px 5px",
+        border: "1px solid var(--rule-soft)",
+        padding: "2px 6px",
         color,
-        fontSize: 9,
-        fontWeight: 800,
-        letterSpacing: "0.08em",
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        fontWeight: 600,
+        fontVariantNumeric: "tabular-nums",
+        letterSpacing: "0.04em",
         whiteSpace: "nowrap",
       }}
     >
@@ -290,31 +353,32 @@ function GraphLine({ line }: { line: string }) {
       style={{
         display: "grid",
         gridTemplateColumns: "auto minmax(0, 1fr)",
-        gap: 7,
+        gap: 8,
         alignItems: "baseline",
         minWidth: 0,
         padding: "2px 0",
+        fontFamily: "var(--font-mono)",
         fontSize: 11,
-        lineHeight: 1.35,
+        lineHeight: 1.4,
       }}
     >
       <span
         style={{
           color: "var(--accent)",
           whiteSpace: "pre",
-          fontWeight: 800,
+          fontWeight: 700,
         }}
       >
         {parsed.graph}
       </span>
       <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {parsed.hash && (
-          <span style={{ color: "var(--info)", fontWeight: 700, marginRight: 7 }}>{parsed.hash}</span>
+          <span style={{ color: "var(--info)", fontWeight: 600, marginRight: 8, fontVariantNumeric: "tabular-nums" }}>{parsed.hash}</span>
         )}
         {parsed.decorate && (
-          <span style={{ color: "var(--ok)", marginRight: 7 }}>{parsed.decorate}</span>
+          <span style={{ color: "var(--ok)", marginRight: 8 }}>{parsed.decorate}</span>
         )}
-        <span style={{ color: "var(--ink-dim)" }}>{parsed.subject}</span>
+        <span style={{ color: "var(--ink-dim)", fontFamily: "var(--font-sans)" }}>{parsed.subject}</span>
       </span>
     </div>
   );

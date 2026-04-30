@@ -286,6 +286,9 @@ function Row({
   onFileContextMenu: (entry: FsEntry, x: number, y: number) => void;
 }) {
   const isDir = node.kind === "dir";
+  const [hover, setHover] = useState(false);
+  const indentBoxes = Array.from({ length: depth }, (_, i) => i);
+  const activeBg = "color-mix(in oklch, var(--accent) 12%, var(--panel))";
   return (
     <div
       onClick={isDir ? onToggle : () => onOpenFile(node.entry)}
@@ -295,34 +298,55 @@ function Row({
         e.stopPropagation();
         onFileContextMenu(node.entry, e.clientX, e.clientY);
       }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 8,
-        padding: "3px 12px 3px 0",
-        paddingLeft: 12 + depth * 14,
-        background: active ? "var(--panel-2)" : "transparent",
+        gap: 6,
+        height: 28,
+        padding: "0 12px 0 0",
+        background: active ? activeBg : hover ? "var(--hover)" : "transparent",
         color: active ? "var(--ink)" : "var(--ink-dim)",
-        fontSize: 12,
-        cursor: isDir ? "default" : "default",
+        cursor: "default",
+        transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
-      {isDir ? <ChevronIcon open={(node as DirNode).open} /> : <span style={{ display: "inline-block", width: 12 }} />}
-      {isDir ? <FolderIcon open={(node as DirNode).open} /> : <FileIcon ext={node.entry.ext} />}
-      <span
-        style={{
-          fontWeight: isDir ? 700 : 500,
-          color: isDir ? "var(--ink)" : "var(--ink-dim)",
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-        }}
-        title={node.entry.path}
-      >
-        {node.entry.name}
+      {indentBoxes.map((i) => (
+        <span
+          key={i}
+          aria-hidden="true"
+          style={{
+            display: "inline-block",
+            width: 14,
+            height: "100%",
+            marginLeft: i === 0 ? 8 : 0,
+            borderLeft: "1px solid var(--rule-soft)",
+            flex: "0 0 14px",
+          }}
+        />
+      ))}
+      <span style={{ display: "inline-flex", marginLeft: depth === 0 ? 8 : 0, gap: 6, alignItems: "center", minWidth: 0, flex: 1 }}>
+        {isDir ? <ChevronIcon open={(node as DirNode).open} /> : <span style={{ display: "inline-block", width: 12 }} />}
+        {isDir ? <FolderIcon open={(node as DirNode).open} /> : <FileIcon ext={node.entry.ext} />}
+        <span
+          style={{
+            fontFamily: "var(--font-sans)",
+            fontSize: 13,
+            fontWeight: isDir ? 600 : 400,
+            color: active ? "var(--ink)" : isDir ? "var(--ink)" : "var(--ink-dim)",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            minWidth: 0,
+          }}
+          title={node.entry.path}
+        >
+          {node.entry.name}
+        </span>
       </span>
       {isDir && (node as DirNode).loading && (
-        <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--muted)" }}>…</span>
+        <span style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--muted)" }}>…</span>
       )}
     </div>
   );
@@ -492,11 +516,11 @@ function RenameDialog({
           height: 30,
           background: "var(--bg)",
           color: "var(--ink)",
-          border: "1px solid var(--rule-strong)",
+          border: "1px solid var(--accent-edge)",
           outline: "none",
           padding: "5px 8px",
-          fontFamily: "inherit",
-          fontSize: 11,
+          fontFamily: "var(--font-mono)",
+          fontSize: 12,
         }}
       />
       <div style={{ color: "var(--muted)", fontSize: 9, marginTop: 7, overflowWrap: "anywhere" }}>
@@ -665,21 +689,28 @@ function PanelHeader({ title, right }: { title: string; right?: React.ReactNode 
     <div
       style={{
         padding: "8px 12px",
-        borderBottom: "1px solid var(--rule)",
+        borderBottom: "1px solid var(--rule-soft)",
         background: "var(--panel)",
         display: "flex",
         alignItems: "center",
         gap: 10,
         flex: "0 0 auto",
-        fontSize: 10,
-        letterSpacing: "0.14em",
-        fontWeight: 700,
         color: "var(--ink)",
       }}
     >
-      <span>{title}</span>
+      <span
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          letterSpacing: "0.14em",
+          textTransform: "uppercase",
+          fontWeight: 600,
+        }}
+      >
+        {title}
+      </span>
       <span style={{ flex: 1 }} />
-      <span style={{ fontWeight: 500, letterSpacing: "0.04em", color: "var(--muted)" }}>{right}</span>
+      <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>{right}</span>
     </div>
   );
 }

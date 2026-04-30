@@ -31,7 +31,7 @@ export default function DevInspector({
         flexDirection: "column",
         flex: "3 1 0",
         minHeight: 0,
-        borderBottom: "1px solid var(--rule)",
+        borderBottom: "1px solid var(--rule-soft)",
         background: "var(--bg)",
       }}
     >
@@ -41,7 +41,7 @@ export default function DevInspector({
           display: "grid",
           gridTemplateColumns: "repeat(3, 1fr)",
           gap: 0,
-          borderBottom: "1px solid var(--rule)",
+          borderBottom: "1px solid var(--rule-soft)",
           flex: "0 0 auto",
         }}
       >
@@ -84,7 +84,7 @@ function EventsView({
         gridTemplateColumns: "minmax(120px, 42%) minmax(0, 1fr)",
       }}
     >
-      <div style={{ minHeight: 0, overflow: "auto", borderRight: "1px solid var(--rule)" }}>
+      <div style={{ minHeight: 0, overflow: "auto", borderRight: "1px solid var(--rule-soft)" }}>
         {events.length === 0 ? (
           <EmptyText>No events yet.</EmptyText>
         ) : (
@@ -115,7 +115,7 @@ function StateView({
 }) {
   return (
     <div style={{ height: "100%", minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <div style={{ padding: "9px 12px", borderBottom: "1px solid var(--rule)", flex: "0 0 auto" }}>
+      <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--rule-soft)", flex: "0 0 auto" }}>
         <MetaRow label="WORKSPACE" value={workspace?.name ?? "none"} />
         <MetaRow label="WORKSPACE ID" value={workspace?.id ?? "none"} />
         <MetaRow label="CWD" value={workspace?.cwd ?? "none"} />
@@ -139,18 +139,20 @@ function ArtifactsView({
   }
 
   return (
-    <div style={{ height: "100%", minHeight: 0, overflow: "auto", padding: "10px 12px" }}>
+    <div style={{ height: "100%", minHeight: 0, overflow: "auto", padding: "12px 16px" }}>
       <PathRow label="RUN FOLDER" value={artifactPaths.runDir} />
       <PathRow label="RUN JSON" value={artifactPaths.runJson} />
       <PathRow label="EVENTS JSONL" value={artifactPaths.eventsJsonl} />
       {artifactPaths.workerArtifacts.length > 0 && (
-        <div style={{ marginTop: 12, borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
+        <div style={{ marginTop: 16, borderTop: "1px solid var(--rule-soft)", paddingTop: 12 }}>
           <div
             style={{
               color: "var(--muted)",
+              fontFamily: "var(--font-sans)",
               fontSize: 10,
-              fontWeight: 800,
-              letterSpacing: "0.12em",
+              fontWeight: 600,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
               marginBottom: 8,
             }}
           >
@@ -171,7 +173,7 @@ function ArtifactsView({
           ))}
         </div>
       )}
-      <div style={{ marginTop: 12, borderTop: "1px solid var(--rule)", paddingTop: 10 }}>
+      <div style={{ marginTop: 16, borderTop: "1px solid var(--rule-soft)", paddingTop: 12 }}>
         <MetaRow label="ARTIFACT DIR" value={activeRun.artifactDir} />
         <MetaRow label="UPDATED" value={formatDateTime(activeRun.updatedAt)} />
       </div>
@@ -188,23 +190,29 @@ function TabButton({
   active: boolean;
   onClick: () => void;
 }) {
+  const [hover, setHover] = useState(false);
   return (
     <button
       type="button"
       onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
         appearance: "none",
         border: "none",
-        borderRight: "1px solid var(--rule)",
-        background: active ? "var(--panel)" : "transparent",
+        borderRight: "1px solid var(--rule-soft)",
+        background: active ? "var(--panel)" : hover ? "var(--hover)" : "transparent",
         color: active ? "var(--ink)" : "var(--muted)",
-        height: 28,
-        fontFamily: "inherit",
+        height: 30,
+        fontFamily: "var(--font-sans)",
         fontSize: 10,
-        fontWeight: 800,
-        letterSpacing: "0.08em",
+        fontWeight: 600,
+        letterSpacing: "0.14em",
+        textTransform: "uppercase",
         cursor: "default",
         position: "relative",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
       {active && (
@@ -216,6 +224,7 @@ function TabButton({
             right: 0,
             height: 2,
             background: "var(--accent)",
+            boxShadow: "0 0 8px var(--accent-glow)",
           }}
         />
       )}
@@ -233,33 +242,44 @@ function EventButton({
   active: boolean;
   onClick: () => void;
 }) {
+  const [hover, setHover] = useState(false);
+  const background = active
+    ? "var(--hover-strong)"
+    : hover
+      ? "var(--hover)"
+      : "transparent";
   return (
     <button
       type="button"
       onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       title={event.id}
       style={{
         appearance: "none",
         width: "100%",
-        border: "none",
-        borderBottom: "1px solid var(--rule)",
-        background: active ? "var(--panel-2)" : "transparent",
+        border: active ? "1px solid var(--accent-edge)" : "1px solid transparent",
+        borderBottom: active ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
+        background,
         color: active ? "var(--ink)" : "var(--ink-dim)",
         textAlign: "left",
-        padding: "8px 9px",
-        fontFamily: "inherit",
+        padding: "9px 12px",
+        fontFamily: "var(--font-sans)",
         cursor: "default",
         display: "flex",
         flexDirection: "column",
-        gap: 3,
+        gap: 4,
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     >
-      <span style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+      <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
         <span
           style={{
             width: 7,
             height: 7,
             flex: "0 0 7px",
+            borderRadius: 999,
             background: event.type === "run.created" ? "var(--accent)" : "var(--info)",
           }}
         />
@@ -269,19 +289,33 @@ function EventButton({
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
-            fontSize: 11,
-            fontWeight: 800,
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: "0.06em",
+            textTransform: "uppercase",
           }}
         >
           {event.type}
         </span>
       </span>
-      <span style={{ color: "var(--muted)", fontSize: 10 }}>{formatTime(event.timestamp)}</span>
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
+        {formatTime(event.timestamp)}
+      </span>
       {event.message && (
         <span
           style={{
             color: "var(--ink-dim)",
-            fontSize: 10,
+            fontFamily: "var(--font-sans)",
+            fontSize: 12,
+            lineHeight: 1.4,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -302,12 +336,12 @@ function JsonPane({ value, emptyText }: { value: unknown; emptyText: string }) {
       style={{
         height: "100%",
         margin: 0,
-        padding: 10,
+        padding: 12,
         overflow: "auto",
         color: "var(--ink-dim)",
         fontFamily: "var(--font-mono)",
-        fontSize: 10,
-        lineHeight: 1.45,
+        fontSize: 11,
+        lineHeight: 1.5,
         whiteSpace: "pre-wrap",
         overflowWrap: "anywhere",
       }}
@@ -319,14 +353,16 @@ function JsonPane({ value, emptyText }: { value: unknown; emptyText: string }) {
 
 function PathRow({ label, value }: { label: string; value: string }) {
   return (
-    <div style={{ marginBottom: 10 }}>
+    <div style={{ marginBottom: 12 }}>
       <div
         style={{
           color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
           fontSize: 10,
-          fontWeight: 800,
-          letterSpacing: "0.12em",
-          marginBottom: 4,
+          fontWeight: 600,
+          letterSpacing: "0.14em",
+          textTransform: "uppercase",
+          marginBottom: 6,
         }}
       >
         {label}
@@ -334,12 +370,14 @@ function PathRow({ label, value }: { label: string; value: string }) {
       <div
         title={value}
         style={{
-          border: "1px solid var(--rule)",
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 4,
           background: "var(--panel)",
           color: "var(--ink-dim)",
-          padding: "7px 8px",
-          fontSize: 10,
-          lineHeight: 1.4,
+          padding: "8px 10px",
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          lineHeight: 1.45,
           overflowWrap: "anywhere",
           userSelect: "text",
         }}
@@ -355,20 +393,30 @@ function MetaRow({ label, value }: { label: string; value: string }) {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "90px minmax(0, 1fr)",
-        gap: 8,
+        gridTemplateColumns: "100px minmax(0, 1fr)",
+        gap: 12,
         alignItems: "baseline",
-        fontSize: 10,
         lineHeight: 1.7,
       }}
     >
-      <span style={{ color: "var(--muted)", letterSpacing: "0.12em", fontWeight: 800 }}>
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          letterSpacing: "0.14em",
+          fontWeight: 600,
+          textTransform: "uppercase",
+        }}
+      >
         {label}
       </span>
       <span
         title={value}
         style={{
           color: "var(--ink-dim)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
           minWidth: 0,
           overflow: "hidden",
           textOverflow: "ellipsis",
@@ -385,20 +433,27 @@ function PanelHeader({ title, right }: { title: string; right?: React.ReactNode 
   return (
     <div
       style={{
-        padding: "8px 12px",
-        borderBottom: "1px solid var(--rule)",
+        padding: "10px 16px",
+        borderBottom: "1px solid var(--rule-soft)",
         background: "var(--panel)",
         display: "flex",
         alignItems: "center",
-        gap: 10,
+        gap: 12,
         flex: "0 0 auto",
-        fontSize: 10,
-        letterSpacing: "0.14em",
-        fontWeight: 800,
-        color: "var(--ink)",
       }}
     >
-      <span>{title}</span>
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          letterSpacing: "0.14em",
+          fontWeight: 600,
+          textTransform: "uppercase",
+        }}
+      >
+        {title}
+      </span>
       <span style={{ flex: 1 }} />
       <span
         title={typeof right === "string" ? right : undefined}
@@ -407,9 +462,10 @@ function PanelHeader({ title, right }: { title: string; right?: React.ReactNode 
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
-          fontWeight: 500,
-          letterSpacing: "0.04em",
-          color: "var(--muted)",
+          color: "var(--ink-dim)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          fontVariantNumeric: "tabular-nums",
         }}
       >
         {right}
@@ -419,7 +475,18 @@ function PanelHeader({ title, right }: { title: string; right?: React.ReactNode 
 }
 
 function EmptyText({ children }: { children: React.ReactNode }) {
-  return <div style={{ padding: 12, color: "var(--muted)", fontSize: 11 }}>{children}</div>;
+  return (
+    <div
+      style={{
+        padding: 16,
+        color: "var(--muted)",
+        fontFamily: "var(--font-sans)",
+        fontSize: 12,
+      }}
+    >
+      {children}
+    </div>
+  );
 }
 
 function formatTime(value: string): string {

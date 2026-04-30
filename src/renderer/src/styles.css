@@ -1,48 +1,139 @@
+/* ──────────────────────────────────────────────────────────────────────────
+   Spark Agent — design tokens
+   Dark, terminal-native, warm-tinted (chroma drifts toward the brand yellow's
+   hue ≈ 85). Two type families: a humanist sans for chrome and a monospace
+   for code, data, timestamps. Tokens are append-only — every name that
+   existed before still exists with the same semantics.
+   ──────────────────────────────────────────────────────────────────────── */
+
 :root {
-  --bg: oklch(0.16 0 0);
-  --panel: oklch(0.20 0 0);
-  --panel-2: oklch(0.235 0 0);
-  --ink: oklch(0.96 0 0);
-  --ink-dim: oklch(0.78 0 0);
-  --muted: oklch(0.58 0 0);
-  --rule: oklch(0.34 0 0);
-  --rule-strong: oklch(0.50 0 0);
+  /* Surfaces — warm-tinted neutrals (h ≈ 85, very low chroma) */
+  --bg: oklch(0.158 0.004 85);
+  --panel: oklch(0.198 0.005 85);
+  --panel-2: oklch(0.236 0.006 85);
+  --panel-3: oklch(0.275 0.006 85);
+
+  /* Ink */
+  --ink: oklch(0.965 0.003 85);
+  --ink-dim: oklch(0.795 0.005 85);
+  --muted: oklch(0.58 0.008 85);
+  --muted-2: oklch(0.46 0.008 85);
+
+  /* Rules */
+  --rule: oklch(0.32 0.006 85);
+  --rule-strong: oklch(0.46 0.008 85);
+  --rule-soft: oklch(0.255 0.006 85);
+
+  /* Brand accent — overwritten at runtime to the active workspace color.
+     Soft variants are low-chroma derivatives for backgrounds and tints. */
   --accent: #F0C419;
-  --accent-ink: oklch(0.16 0 0);
+  --accent-ink: oklch(0.18 0.01 85);
+  --accent-soft: color-mix(in oklch, var(--accent) 18%, transparent);
+  --accent-edge: color-mix(in oklch, var(--accent) 40%, transparent);
+  --accent-glow: color-mix(in oklch, var(--accent) 28%, transparent);
+
+  /* Status */
   --danger: oklch(0.70 0.20 25);
+  --danger-soft: color-mix(in oklch, var(--danger) 16%, transparent);
   --ok: oklch(0.78 0.16 145);
+  --ok-soft: color-mix(in oklch, var(--ok) 14%, transparent);
   --info: oklch(0.78 0.13 235);
-  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", "Consolas", monospace;
+  --info-soft: color-mix(in oklch, var(--info) 14%, transparent);
+  --warn: oklch(0.80 0.16 80);
+
+  /* Type — humanist sans for chrome, mono for data/code.
+     Both use system fallbacks: Inter / Segoe UI Variable / SF Pro on
+     mac/win/linux. JetBrains Mono for the mono stack with sensible
+     fallbacks. No network fonts; all ship with the OS. */
+  --font-sans:
+    "Inter", "Inter Variable", -apple-system, "SF Pro Text",
+    "Segoe UI Variable Text", "Segoe UI", Roboto, system-ui, sans-serif;
+  --font-mono:
+    "JetBrains Mono", "JetBrainsMono NF", ui-monospace,
+    "SF Mono", "Cascadia Mono", "Consolas", "Liberation Mono", monospace;
+
+  /* Layout */
   --row-h: 28px;
   --rail-w: 240px;
   --right-w: 360px;
   --font-size: 13px;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);          /* expo-ish out  */
+  --ease-out-fast: cubic-bezier(0.32, 0.72, 0, 1);     /* swift settle  */
+  --motion-fast: 120ms;
+  --motion: 200ms;
+  --motion-slow: 360ms;
+
+  /* Surface treatments */
+  --hover: color-mix(in oklch, var(--ink) 5%, transparent);
+  --hover-strong: color-mix(in oklch, var(--ink) 9%, transparent);
+  --focus-ring: 0 0 0 1px color-mix(in oklch, var(--accent) 70%, transparent),
+                0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent);
+  --shadow-1: 0 1px 0 oklch(1 0 0 / 0.02), 0 8px 22px rgba(0, 0, 0, 0.28);
+  --shadow-2: 0 1px 0 oklch(1 0 0 / 0.03), 0 18px 44px rgba(0, 0, 0, 0.36);
+  --shadow-glow: 0 0 0 1px var(--accent-edge),
+                 0 0 28px var(--accent-glow);
 }
+
 * { box-sizing: border-box; }
+
 html, body, #root {
-  margin: 0; padding: 0;
-  background: oklch(0.10 0 0);
+  margin: 0;
+  padding: 0;
+  background: oklch(0.10 0.003 85);
   color: var(--ink);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--font-size);
-  line-height: 1.45;
+  line-height: 1.5;
   height: 100%;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "ss01", "cv11", "cv02";  /* niceties when Inter is present, no-ops otherwise */
+  font-variant-numeric: tabular-nums;
+  font-synthesis: none;
 }
-::selection { background: var(--accent); color: var(--accent-ink); }
-button { font-family: inherit; }
-input { font-family: inherit; }
 
+::selection {
+  background: color-mix(in oklch, var(--accent) 60%, transparent);
+  color: var(--ink);
+}
+
+button, input, textarea, select {
+  font-family: inherit;
+  color: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+a { color: inherit; }
+
+/* ── Scrollbars ─────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: var(--rule); border: 2px solid transparent; background-clip: content-box;
+  background: color-mix(in oklch, var(--rule) 70%, transparent);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--rule-strong); background-clip: content-box; border: 2px solid transparent;
+  background: var(--rule-strong);
+  background-clip: content-box;
+  border: 2px solid transparent;
 }
+::-webkit-scrollbar-corner { background: transparent; }
 
+/* ── Animations ─────────────────────────────────────────────────────────── */
 @keyframes sparkBlink {
   0%, 50% { opacity: 1; }
   50.01%, 100% { opacity: 0; }
@@ -53,15 +144,42 @@ input { font-family: inherit; }
   50% { opacity: 0.45; transform: scale(0.7); }
 }
 
-/* xterm.js */
+@keyframes spark-fade-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes spark-shimmer {
+  0%   { background-position: -120% 0; }
+  100% { background-position: 220% 0; }
+}
+
+@keyframes spark-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── xterm.js host ──────────────────────────────────────────────────────── */
 .xterm-host {
   width: 100%;
   height: 100%;
   padding: 6px 8px;
   background: var(--bg);
+  font-family: var(--font-mono);
 }
 .xterm-host .xterm-viewport,
 .xterm-host .xterm {
   background: transparent !important;
 }
 .xterm .xterm-screen { background: transparent; }
+
+/* ── Utility classes (opt-in; existing inline styles still work) ────────── */
+.spark-mono { font-family: var(--font-mono); }
+.spark-num  { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+.spark-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.spark-fade-in { animation: spark-fade-in var(--motion) var(--ease-out) both; }

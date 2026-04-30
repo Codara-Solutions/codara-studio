@@ -70,7 +70,10 @@ export default function SettingsDialog({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "rgba(0,0,0,0.55)",
+        background: "rgba(0, 0, 0, 0.55)",
+        backdropFilter: "blur(2px)",
+        WebkitBackdropFilter: "blur(2px)",
+        fontFamily: "var(--font-sans)",
       }}
       onMouseDown={onClose}
     >
@@ -79,59 +82,73 @@ export default function SettingsDialog({
         aria-modal="true"
         aria-label="Settings"
         style={{
-          width: "min(720px, calc(100vw - 44px))",
-          maxHeight: "min(620px, calc(100vh - 44px))",
+          width: "min(520px, calc(100vw - 44px))",
+          maxHeight: "min(640px, calc(100vh - 44px))",
           display: "flex",
           flexDirection: "column",
           background: "var(--panel)",
-          border: "1px solid var(--rule-strong)",
-          boxShadow: "0 18px 80px rgba(0,0,0,0.55)",
+          border: "1px solid var(--rule)",
+          borderRadius: 8,
+          boxShadow: "var(--shadow-2)",
           overflow: "hidden",
+          padding: 0,
         }}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header
           style={{
-            flex: "0 0 42px",
+            flex: "0 0 auto",
+            padding: "16px 20px",
+            borderBottom: "1px solid var(--rule-soft)",
             display: "flex",
             alignItems: "center",
-            borderBottom: "1px solid var(--rule)",
           }}
         >
           <div
             style={{
-              padding: "0 14px",
-              fontSize: 11,
-              fontWeight: 800,
-              letterSpacing: "0.14em",
+              fontFamily: "var(--font-sans)",
+              fontSize: 16,
+              fontWeight: 600,
+              color: "var(--ink)",
+              letterSpacing: "-0.005em",
             }}
           >
-            SETTINGS
+            Settings
           </div>
-          <div style={{ flex: 1 }} />
-          <button type="button" onClick={onClose} style={chromeButtonStyle}>
-            CLOSE
-          </button>
         </header>
 
-        <div style={{ display: "flex", minHeight: 0 }}>
+        <div style={{ display: "flex", minHeight: 0, flex: 1 }}>
           <nav
             style={{
-              flex: "0 0 180px",
-              borderRight: "1px solid var(--rule)",
+              flex: "0 0 168px",
+              borderRight: "1px solid var(--rule-soft)",
               background: "var(--bg)",
-              padding: 8,
+              padding: "12px 8px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 2,
             }}
           >
             <TabButton
-              label="DEFAULT TERMINAL"
+              label="Default terminal"
               active={activeTab === "terminal"}
               onClick={() => setActiveTab("terminal")}
             />
-            <TabButton label="API + MODEL" active={activeTab === "api"} onClick={() => setActiveTab("api")} />
+            <TabButton
+              label="API and model"
+              active={activeTab === "api"}
+              onClick={() => setActiveTab("api")}
+            />
           </nav>
 
-          <div style={{ flex: 1, minWidth: 0, padding: 16, overflow: "auto" }}>
+          <div
+            style={{
+              flex: 1,
+              minWidth: 0,
+              padding: "20px 20px 24px",
+              overflow: "auto",
+            }}
+          >
             {activeTab === "terminal" ? (
               <TerminalSettings
                 shells={shells}
@@ -149,19 +166,30 @@ export default function SettingsDialog({
             flex: "0 0 auto",
             display: "flex",
             alignItems: "center",
-            gap: 10,
-            padding: 12,
-            borderTop: "1px solid var(--rule)",
+            gap: 8,
+            padding: "12px 20px",
+            borderTop: "1px solid var(--rule-soft)",
           }}
         >
-          {error && <div style={{ color: "var(--danger)", fontSize: 11, flex: 1 }}>{error}</div>}
-          {!error && <div style={{ flex: 1 }} />}
-          <button type="button" onClick={onClose} style={secondaryButtonStyle}>
-            CANCEL
-          </button>
-          <button type="button" onClick={save} disabled={saving} style={primaryButtonStyle}>
-            {saving ? "SAVING" : "SAVE"}
-          </button>
+          {error ? (
+            <div
+              style={{
+                color: "var(--danger)",
+                fontFamily: "var(--font-sans)",
+                fontSize: 12,
+                flex: 1,
+                lineHeight: 1.4,
+              }}
+            >
+              {error}
+            </div>
+          ) : (
+            <div style={{ flex: 1 }} />
+          )}
+          <FooterButton onClick={onClose}>Cancel</FooterButton>
+          <FooterButton onClick={save} disabled={saving} primary>
+            {saving ? "Saving" : "Save"}
+          </FooterButton>
         </footer>
       </section>
     </div>
@@ -179,55 +207,120 @@ function TerminalSettings({
 }) {
   return (
     <div>
-      <SectionTitle title="Default Terminal" detail="Used for new manual worker panes." />
+      <SectionTitle title="Default terminal" detail="Used for new manual worker panes." />
       <div style={{ display: "grid", gap: 8 }}>
-        {shells.length === 0 && <div style={{ color: "var(--muted)", fontSize: 12 }}>No terminals detected.</div>}
-        {shells.map((shell) => {
-          const selected = shell.id === selectedShellId;
-          return (
-            <button
-              key={shell.id}
-              type="button"
-              aria-label={`Use ${shell.label} as default terminal`}
-              onClick={() => onSelect(shell.id)}
-              style={{
-                appearance: "none",
-                width: "100%",
-                textAlign: "left",
-                border: selected ? "1px solid var(--accent)" : "1px solid var(--rule)",
-                background: selected ? "var(--panel-2)" : "transparent",
-                color: "var(--ink)",
-                padding: "10px 12px",
-                fontFamily: "inherit",
-                cursor: "default",
-                display: "grid",
-                gridTemplateColumns: "10px minmax(0, 1fr) auto",
-                gap: 10,
-                alignItems: "center",
-              }}
-            >
-              <span style={{ width: 8, height: 8, background: selected ? "var(--accent)" : "var(--rule)" }} />
-              <span style={{ minWidth: 0 }}>
-                <span style={{ display: "block", fontSize: 12, fontWeight: 700 }}>{shell.label}</span>
-                <span
-                  style={{
-                    display: "block",
-                    color: "var(--muted)",
-                    fontSize: 10,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {shell.exe}
-                </span>
-              </span>
-              <span style={{ color: "var(--muted)", fontSize: 10 }}>{shell.family}</span>
-            </button>
-          );
-        })}
+        {shells.length === 0 && (
+          <div
+            style={{
+              color: "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 12,
+            }}
+          >
+            No terminals detected.
+          </div>
+        )}
+        {shells.map((shell) => (
+          <ShellOption
+            key={shell.id}
+            shell={shell}
+            selected={shell.id === selectedShellId}
+            onSelect={() => onSelect(shell.id)}
+          />
+        ))}
       </div>
     </div>
+  );
+}
+
+function ShellOption({
+  shell,
+  selected,
+  onSelect,
+}: {
+  shell: ShellInfo;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-label={`Use ${shell.label} as default terminal`}
+      onClick={onSelect}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        width: "100%",
+        textAlign: "left",
+        border: selected
+          ? "1px solid var(--accent-edge)"
+          : "1px solid var(--rule)",
+        borderRadius: 4,
+        background: selected
+          ? "var(--accent-soft)"
+          : hover
+            ? "var(--hover)"
+            : "var(--panel-2)",
+        color: "var(--ink)",
+        padding: "10px 12px",
+        fontFamily: "var(--font-sans)",
+        cursor: "default",
+        display: "grid",
+        gridTemplateColumns: "10px minmax(0, 1fr) auto",
+        gap: 12,
+        alignItems: "center",
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <span
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: selected ? "var(--accent)" : "var(--rule-strong)",
+          transition: "background var(--motion-fast) var(--ease-out)",
+        }}
+      />
+      <span style={{ minWidth: 0 }}>
+        <span
+          style={{
+            display: "block",
+            fontFamily: "var(--font-sans)",
+            fontSize: 13,
+            fontWeight: 600,
+            color: "var(--ink)",
+          }}
+        >
+          {shell.label}
+        </span>
+        <span
+          style={{
+            display: "block",
+            color: "var(--muted)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            marginTop: 2,
+          }}
+        >
+          {shell.exe}
+        </span>
+      </span>
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+        }}
+      >
+        {shell.family}
+      </span>
+    </button>
   );
 }
 
@@ -239,78 +332,97 @@ function ApiSettings({
   onChange: (settings: AppSettings) => void;
 }) {
   return (
-    <div style={{ display: "grid", gap: 14 }}>
-      <SectionTitle title="OpenRouter" detail="Used by Spark Agent to plan Claude/Codex worker tasks." />
-      <Label text="OPENROUTER API KEY">
-        <input
-          type="password"
-          value={draft.openRouterApiKey}
-          onChange={(event) => onChange({ ...draft, openRouterApiKey: event.currentTarget.value })}
-          placeholder="sk-or-..."
-          style={inputStyle}
+    <div style={{ display: "grid", gap: 20 }}>
+      <div style={{ display: "grid", gap: 12 }}>
+        <SectionTitle
+          title="OpenRouter"
+          detail="Used by Spark Agent to plan Claude and Codex worker tasks."
         />
-      </Label>
-      <Label text="MODEL">
-        <input
-          type="text"
-          value={draft.openRouterModel}
-          onChange={(event) => onChange({ ...draft, openRouterModel: event.currentTarget.value })}
-          placeholder="google/gemini-flash-latest"
-          style={inputStyle}
-        />
-      </Label>
+        <Label text="OpenRouter API key">
+          <input
+            type="password"
+            value={draft.openRouterApiKey}
+            onChange={(event) => onChange({ ...draft, openRouterApiKey: event.currentTarget.value })}
+            placeholder="sk-or-..."
+            style={inputStyle}
+          />
+        </Label>
+        <Label text="Model">
+          <input
+            type="text"
+            value={draft.openRouterModel}
+            onChange={(event) => onChange({ ...draft, openRouterModel: event.currentTarget.value })}
+            placeholder="google/gemini-flash-latest"
+            style={{ ...inputStyle, fontFamily: "var(--font-mono)", fontSize: 12 }}
+          />
+        </Label>
+      </div>
 
-      <SectionTitle title="LangSmith" detail="Optional tracing for Spark manager calls. OpenRouter remains the model transport." />
-      <Label text="LANGSMITH API KEY">
-        <input
-          type="password"
-          value={draft.langSmithApiKey}
-          onChange={(event) => onChange({ ...draft, langSmithApiKey: event.currentTarget.value })}
-          placeholder="lsv2_..."
-          style={inputStyle}
+      <div style={{ display: "grid", gap: 12 }}>
+        <SectionTitle
+          title="LangSmith"
+          detail="Optional tracing for Spark manager calls. OpenRouter remains the model transport."
         />
-      </Label>
-      <Label text="PROJECT">
-        <input
-          type="text"
-          value={draft.langSmithProject}
-          onChange={(event) => onChange({ ...draft, langSmithProject: event.currentTarget.value })}
-          placeholder="spark-agent-dev"
-          style={inputStyle}
-        />
-      </Label>
-      <Label text="ENDPOINT">
-        <input
-          type="text"
-          value={draft.langSmithEndpoint}
-          onChange={(event) => onChange({ ...draft, langSmithEndpoint: event.currentTarget.value })}
-          placeholder="https://api.smith.langchain.com"
-          style={inputStyle}
-        />
-      </Label>
+        <Label text="LangSmith API key">
+          <input
+            type="password"
+            value={draft.langSmithApiKey}
+            onChange={(event) => onChange({ ...draft, langSmithApiKey: event.currentTarget.value })}
+            placeholder="lsv2_..."
+            style={inputStyle}
+          />
+        </Label>
+        <Label text="Project">
+          <input
+            type="text"
+            value={draft.langSmithProject}
+            onChange={(event) => onChange({ ...draft, langSmithProject: event.currentTarget.value })}
+            placeholder="spark-agent-dev"
+            style={{ ...inputStyle, fontFamily: "var(--font-mono)", fontSize: 12 }}
+          />
+        </Label>
+        <Label text="Endpoint">
+          <input
+            type="text"
+            value={draft.langSmithEndpoint}
+            onChange={(event) => onChange({ ...draft, langSmithEndpoint: event.currentTarget.value })}
+            placeholder="https://api.smith.langchain.com"
+            style={{ ...inputStyle, fontFamily: "var(--font-mono)", fontSize: 12 }}
+          />
+        </Label>
+      </div>
     </div>
   );
 }
 
 function TabButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  const [hover, setHover] = useState(false);
   return (
     <button
       type="button"
       onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
         appearance: "none",
         width: "100%",
         border: "none",
-        borderLeft: active ? "2px solid var(--accent)" : "2px solid transparent",
-        background: active ? "var(--panel)" : "transparent",
+        borderRadius: 4,
+        background: active
+          ? "var(--panel-2)"
+          : hover
+            ? "var(--hover)"
+            : "transparent",
         color: active ? "var(--ink)" : "var(--ink-dim)",
-        padding: "9px 10px",
+        padding: "8px 10px",
         textAlign: "left",
-        fontFamily: "inherit",
-        fontSize: 11,
-        fontWeight: 800,
-        letterSpacing: "0.1em",
+        fontFamily: "var(--font-sans)",
+        fontSize: 12,
+        fontWeight: active ? 600 : 500,
+        letterSpacing: "0.005em",
         cursor: "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
       {label}
@@ -320,11 +432,28 @@ function TabButton({ label, active, onClick }: { label: string; active: boolean;
 
 function SectionTitle({ title, detail }: { title: string; detail: string }) {
   return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.12em", textTransform: "uppercase" }}>
+    <div>
+      <div
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 13,
+          fontWeight: 600,
+          color: "var(--ink)",
+        }}
+      >
         {title}
       </div>
-      <div style={{ marginTop: 4, color: "var(--muted)", fontSize: 11 }}>{detail}</div>
+      <div
+        style={{
+          marginTop: 4,
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12,
+          lineHeight: 1.45,
+        }}
+      >
+        {detail}
+      </div>
     </div>
   );
 }
@@ -332,7 +461,16 @@ function SectionTitle({ title, detail }: { title: string; detail: string }) {
 function Label({ text, children }: { text: string; children: React.ReactNode }) {
   return (
     <label style={{ display: "grid", gap: 6 }}>
-      <span style={{ color: "var(--ink-dim)", fontSize: 10, fontWeight: 800, letterSpacing: "0.12em" }}>
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+          fontWeight: 600,
+          letterSpacing: "0.1em",
+          textTransform: "uppercase",
+        }}
+      >
         {text}
       </span>
       {children}
@@ -340,48 +478,67 @@ function Label({ text, children }: { text: string; children: React.ReactNode }) 
   );
 }
 
-const chromeButtonStyle: React.CSSProperties = {
-  appearance: "none",
-  alignSelf: "stretch",
-  border: "none",
-  borderLeft: "1px solid var(--rule)",
-  background: "transparent",
-  color: "var(--ink-dim)",
-  padding: "0 14px",
-  fontFamily: "inherit",
-  fontSize: 10,
-  fontWeight: 800,
-  letterSpacing: "0.1em",
-  cursor: "default",
-};
+function FooterButton({
+  onClick,
+  disabled,
+  children,
+  primary,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+  primary?: boolean;
+}) {
+  const [hover, setHover] = useState(false);
+  const base: React.CSSProperties = {
+    appearance: "none",
+    border: primary
+      ? "1px solid var(--accent-edge)"
+      : "1px solid var(--rule-strong)",
+    borderRadius: 4,
+    background: primary ? "var(--accent-soft)" : "transparent",
+    color: disabled ? "var(--muted)" : "var(--ink)",
+    padding: "8px 14px",
+    fontFamily: "var(--font-sans)",
+    fontSize: 12,
+    fontWeight: 600,
+    letterSpacing: "0.01em",
+    cursor: "default",
+    transition:
+      "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+  };
+  if (hover && !disabled) {
+    if (primary) {
+      base.background = "color-mix(in oklch, var(--accent) 28%, transparent)";
+    } else {
+      base.background = "var(--hover-strong)";
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={base}
+    >
+      {children}
+    </button>
+  );
+}
 
 const inputStyle: React.CSSProperties = {
   width: "100%",
+  boxSizing: "border-box",
   border: "1px solid var(--rule-strong)",
-  background: "var(--bg)",
-  color: "var(--ink)",
-  padding: "9px 10px",
-  fontFamily: "inherit",
-  fontSize: 12,
-  outline: "none",
-};
-
-const secondaryButtonStyle: React.CSSProperties = {
-  appearance: "none",
-  border: "1px solid var(--rule-strong)",
-  background: "transparent",
-  color: "var(--ink-dim)",
-  padding: "8px 14px",
-  fontFamily: "inherit",
-  fontSize: 10,
-  fontWeight: 800,
-  letterSpacing: "0.1em",
-  cursor: "default",
-};
-
-const primaryButtonStyle: React.CSSProperties = {
-  ...secondaryButtonStyle,
-  border: "1px solid var(--accent)",
-  color: "var(--ink)",
+  borderRadius: 4,
   background: "var(--panel-2)",
+  color: "var(--ink)",
+  padding: "8px 10px",
+  fontFamily: "var(--font-sans)",
+  fontSize: 13,
+  outline: "none",
+  transition:
+    "border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
 };

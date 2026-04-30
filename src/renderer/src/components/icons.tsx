@@ -121,20 +121,54 @@ export function FileIcon({ ext }: { ext?: string }) {
   }
 }
 
-export function PlusIcon({ size = 12 }: { size?: number }) {
+export function PlusIcon({ size = 14 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4">
-      <line x1="6" y1="2" x2="6" y2="10" />
-      <line x1="2" y1="6" x2="10" y2="6" />
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+    >
+      <line x1="7" y1="3" x2="7" y2="11" />
+      <line x1="3" y1="7" x2="11" y2="7" />
     </svg>
   );
 }
 
-export function CloseIcon({ size = 10 }: { size?: number }) {
+export function CloseIcon({ size = 14 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
-      <line x1="2" y1="2" x2="8" y2="8" />
-      <line x1="8" y1="2" x2="2" y2="8" />
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+    >
+      <line x1="3.5" y1="3.5" x2="10.5" y2="10.5" />
+      <line x1="10.5" y1="3.5" x2="3.5" y2="10.5" />
+    </svg>
+  );
+}
+
+export function SparkIcon({ size = 14 }: { size?: number }) {
+  // Lightning bolt — Spark's primary mark. Uses currentColor so the parent
+  // controls tint (typically var(--accent) at the rail header).
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="currentColor"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinejoin="round"
+    >
+      <path d="M8 1 L2.5 8 H6.5 L5.5 13 L11.5 6 H7.5 L8 1 Z" />
     </svg>
   );
 }

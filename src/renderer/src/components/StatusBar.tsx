@@ -9,10 +9,10 @@ interface Props {
 
 export default function StatusBar({ workspace, defaultShell, platform }: Props) {
   const items = [
-    { l: "WORKSPACE", v: workspace?.name ?? "—" },
-    { l: "PATH", v: workspace?.cwd ?? "—" },
-    { l: "SHELL", v: defaultShell?.label ?? "—" },
-    { l: "OS", v: platform || "—" },
+    { l: "WORKSPACE", v: workspace?.name ?? "—", mono: false },
+    { l: "PATH", v: workspace?.cwd ?? "—", mono: true },
+    { l: "SHELL", v: defaultShell?.label ?? "—", mono: true },
+    { l: "OS", v: platform || "—", mono: true },
   ];
   const right = [
     { l: "WORKERS", v: String((workspace?.workers.length ?? 0)).padStart(2, "0") },
@@ -26,29 +26,40 @@ export default function StatusBar({ workspace, defaultShell, platform }: Props) 
         borderTop: "1px solid var(--rule)",
         display: "flex",
         alignItems: "stretch",
-        fontSize: 10,
-        letterSpacing: "0.06em",
         color: "var(--ink-dim)",
       }}
     >
-      <div style={{ width: 8, background: workspace?.color || "var(--accent)", flex: "0 0 8px" }} />
+      <div style={{ width: 6, background: workspace?.color || "var(--accent)", flex: "0 0 6px" }} />
       {items.map((it, i) => (
         <div
           key={i}
           style={{
-            padding: "0 12px",
+            padding: "0 14px",
             display: "flex",
             alignItems: "center",
-            gap: 6,
-            borderRight: "1px solid var(--rule)",
+            gap: 8,
+            borderRight: "1px solid var(--rule-soft)",
             minWidth: 0,
           }}
         >
-          <span style={{ color: "var(--muted)", fontWeight: 700 }}>{it.l}</span>
           <span
             style={{
-              color: "var(--ink)",
-              fontWeight: 700,
+              color: "var(--muted)",
+              fontWeight: 600,
+              fontSize: 9,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+            }}
+          >
+            {it.l}
+          </span>
+          <span
+            style={{
+              color: "var(--ink-dim)",
+              fontSize: 10,
+              fontFamily: it.mono ? "var(--font-mono)" : "inherit",
+              fontWeight: it.mono ? 400 : 500,
+              fontVariantNumeric: "tabular-nums",
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -65,15 +76,34 @@ export default function StatusBar({ workspace, defaultShell, platform }: Props) 
         <div
           key={i}
           style={{
-            padding: "0 12px",
+            padding: "0 14px",
             display: "flex",
             alignItems: "center",
-            gap: 6,
-            borderLeft: "1px solid var(--rule)",
+            gap: 8,
+            borderLeft: "1px solid var(--rule-soft)",
           }}
         >
-          <span style={{ color: "var(--muted)", fontWeight: 700 }}>{it.l}</span>
-          <span style={{ color: "var(--ink)", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{it.v}</span>
+          <span
+            style={{
+              color: "var(--muted)",
+              fontWeight: 600,
+              fontSize: 9,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+            }}
+          >
+            {it.l}
+          </span>
+          <span
+            style={{
+              color: "var(--ink-dim)",
+              fontSize: 10,
+              fontFamily: "var(--font-mono)",
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {it.v}
+          </span>
         </div>
       ))}
     </div>

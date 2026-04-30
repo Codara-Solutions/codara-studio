@@ -43,10 +43,9 @@ export default function WorkspaceRail(props: RailProps) {
         position: "relative",
       }}
     >
-      <RailHeader onCreate={onCreate} />
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div style={{ flex: "1 1 50%", overflow: "auto", minHeight: 0 }}>
-          <RailSectionHeader label="WORKSPACES" count={workspaces.length} />
+          <RailSectionHeader label="WORKSPACES" count={workspaces.length} onCreate={onCreate} />
           {workspaces.length === 0 && <EmptyState onCreate={onCreate} />}
           {workspaces.map((w) => (
             <WorkspaceRow
@@ -68,107 +67,96 @@ export default function WorkspaceRail(props: RailProps) {
   );
 }
 
-function RailHeader({ onCreate }: { onCreate: () => void }) {
+function RailSectionHeader({
+  label,
+  count,
+  onCreate,
+}: {
+  label: string;
+  count: number;
+  onCreate?: () => void;
+}) {
+  const [hover, setHover] = useState(false);
   return (
     <div
       style={{
-        padding: "12px 14px",
-        borderBottom: "1px solid var(--rule)",
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-      }}
-    >
-      <div
-        style={{
-          width: 22,
-          height: 22,
-          border: "1px solid var(--ink)",
-          display: "grid",
-          placeItems: "center",
-          fontWeight: 800,
-          fontSize: 11,
-        }}
-      >
-        S
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.1 }}>
-        <span style={{ fontWeight: 700, letterSpacing: "0.04em" }}>SPARK</span>
-        <span style={{ fontSize: 10, color: "var(--muted)" }}>v0.1 · {navPlatformLabel()}</span>
-      </div>
-      <div style={{ flex: 1 }} />
-      <button
-        type="button"
-        onClick={onCreate}
-        title="New workspace"
-        style={{
-          width: 22,
-          height: 22,
-          border: "1px solid var(--rule)",
-          background: "transparent",
-          color: "var(--ink-dim)",
-          display: "grid",
-          placeItems: "center",
-          cursor: "default",
-          padding: 0,
-        }}
-      >
-        <PlusIcon />
-      </button>
-    </div>
-  );
-}
-
-function navPlatformLabel(): string {
-  const ua = navigator.userAgent.toLowerCase();
-  if (ua.includes("win")) return "windows";
-  if (ua.includes("mac")) return "macos";
-  if (ua.includes("linux")) return "linux";
-  return "desktop";
-}
-
-function RailSectionHeader({ label, count }: { label: string; count: number }) {
-  return (
-    <div
-      style={{
-        padding: "10px 14px 6px",
+        padding: "14px 12px 8px 14px",
         display: "flex",
         alignItems: "center",
         gap: 8,
         fontSize: 10,
         letterSpacing: "0.14em",
-        fontWeight: 700,
+        fontWeight: 600,
         color: "var(--muted)",
+        textTransform: "uppercase",
       }}
     >
       <span>{label}</span>
-      <span style={{ flex: 1, height: 1, background: "var(--rule)" }} />
-      <span style={{ color: "var(--muted)" }}>{String(count).padStart(2, "0")}</span>
+      <span style={{ flex: 1, height: 1, background: "var(--rule-soft)" }} />
+      <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
+        {String(count).padStart(2, "0")}
+      </span>
+      {onCreate && (
+        <button
+          type="button"
+          onClick={onCreate}
+          title="New workspace"
+          onMouseEnter={() => setHover(true)}
+          onMouseLeave={() => setHover(false)}
+          style={{
+            width: 22,
+            height: 22,
+            border: "1px solid var(--rule-soft)",
+            background: hover ? "var(--hover)" : "transparent",
+            color: hover ? "var(--ink)" : "var(--ink-dim)",
+            display: "grid",
+            placeItems: "center",
+            cursor: "default",
+            padding: 0,
+            marginLeft: 2,
+            transition:
+              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+          }}
+        >
+          <PlusIcon size={11} />
+        </button>
+      )}
     </div>
   );
 }
 
 function EmptyState({ onCreate }: { onCreate: () => void }) {
+  const [hover, setHover] = useState(false);
   return (
-    <div style={{ padding: "20px 14px", color: "var(--muted)", fontSize: 11, lineHeight: 1.6 }}>
-      <div style={{ marginBottom: 12 }}>No workspaces yet.</div>
+    <div style={{ padding: "20px 14px", lineHeight: 1.55 }}>
+      <div style={{ marginBottom: 4, fontSize: 14, fontWeight: 600, color: "var(--ink)" }}>
+        No workspaces yet
+      </div>
+      <div style={{ marginBottom: 16, fontSize: 12, color: "var(--muted)" }}>
+        Create one to start orchestrating workers.
+      </div>
       <button
         type="button"
         onClick={onCreate}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
         style={{
           appearance: "none",
-          background: "transparent",
+          background: hover ? "var(--hover)" : "transparent",
           border: "1px solid var(--rule-strong)",
-          color: "var(--ink-dim)",
+          color: hover ? "var(--ink)" : "var(--ink-dim)",
           padding: "6px 10px",
           fontSize: 11,
           letterSpacing: "0.08em",
-          fontWeight: 700,
+          fontWeight: 600,
           cursor: "default",
           fontFamily: "inherit",
+          textTransform: "uppercase",
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
         }}
       >
-        + NEW WORKSPACE
+        + New workspace
       </button>
     </div>
   );
@@ -200,6 +188,8 @@ function WorkspaceRow({
   const colorRef = useRef<HTMLInputElement | null>(null);
   const rowRef = useRef<HTMLDivElement | null>(null);
   const [name, setName] = useState(ws.name);
+  const [rowHover, setRowHover] = useState(false);
+  const [moreHover, setMoreHover] = useState(false);
 
   useEffect(() => setName(ws.name), [ws.id, ws.name]);
   useEffect(() => {
@@ -234,22 +224,33 @@ function WorkspaceRow({
     if (v && v !== ws.name) onChange({ name: v });
   };
 
+  const background = active
+    ? "color-mix(in oklch, var(--accent) 12%, var(--panel-2))"
+    : editing
+      ? "var(--panel-2)"
+      : rowHover
+        ? "var(--hover)"
+        : "transparent";
+
   return (
     <div
       ref={rowRef}
       onClick={editing ? undefined : onActivate}
+      onMouseEnter={() => setRowHover(true)}
+      onMouseLeave={() => setRowHover(false)}
       style={{
         display: "flex",
         flexDirection: "column",
-        padding: editing ? "8px 14px 10px" : "8px 14px",
-        borderLeft: active || editing ? `2px solid ${accent}` : "2px solid transparent",
-        background: editing || active ? "var(--panel-2)" : "transparent",
+        padding: editing ? "8px 14px 12px" : "8px 14px",
+        background,
         cursor: "default",
         position: "relative",
-        borderTop: editing ? "1px solid var(--rule)" : "none",
-        borderBottom: editing ? "1px solid var(--rule)" : "none",
+        borderTop: editing ? "1px solid var(--rule-soft)" : "none",
+        borderBottom: editing ? "1px solid var(--rule-soft)" : "none",
         marginTop: editing ? -1 : 0,
         marginBottom: editing ? -1 : 0,
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -267,11 +268,13 @@ function WorkspaceRow({
             padding: 0,
             width: 10,
             height: 10,
+            borderRadius: 2,
             background: accent,
             flex: "0 0 10px",
-            cursor: editing ? "default" : "default",
-            outline: editing ? "1px solid var(--rule-strong)" : "none",
-            outlineOffset: 2,
+            cursor: "default",
+            boxShadow: editing
+              ? "0 0 0 2px var(--rule-strong)"
+              : "inset 0 0 0 1px color-mix(in oklch, black 25%, transparent), 0 1px 2px rgba(0,0,0,0.25)",
           }}
         />
         {editing && (
@@ -317,17 +320,18 @@ function WorkspaceRow({
               borderBottom: `1px solid ${accent}`,
               color: "var(--ink)",
               fontFamily: "inherit",
-              fontSize: 13,
-              fontWeight: 700,
+              fontSize: 14,
+              fontWeight: 600,
               padding: "3px 0",
               outline: "none",
             }}
           />
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+          <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1, gap: 2 }}>
             <span
               style={{
-                fontWeight: active ? 700 : 500,
+                fontSize: 14,
+                fontWeight: 600,
                 color: active ? "var(--ink)" : "var(--ink-dim)",
                 whiteSpace: "nowrap",
                 overflow: "hidden",
@@ -338,7 +342,9 @@ function WorkspaceRow({
             </span>
             <span
               style={{
-                fontSize: 10,
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                fontWeight: 400,
                 color: "var(--muted)",
                 whiteSpace: "nowrap",
                 overflow: "hidden",
@@ -361,20 +367,24 @@ function WorkspaceRow({
               onEdit();
             }
           }}
+          onMouseEnter={() => setMoreHover(true)}
+          onMouseLeave={() => setMoreHover(false)}
           title={editing ? "Done" : "Edit workspace"}
           style={{
             appearance: "none",
-            background: "transparent",
+            background: moreHover ? "var(--hover-strong)" : "transparent",
             border: "none",
-            color: editing ? accent : "var(--muted)",
-            width: 22,
-            height: 22,
+            color: editing ? accent : moreHover ? "var(--ink)" : "var(--muted)",
+            width: 24,
+            height: 24,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             cursor: "default",
-            padding: 0,
-            flex: "0 0 22px",
+            padding: 4,
+            flex: "0 0 24px",
+            transition:
+              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
           }}
         >
           {editing ? (
@@ -390,7 +400,7 @@ function WorkspaceRow({
               <polyline points="1.5,5.5 4,8 8.5,2.5" />
             </svg>
           ) : (
-            <svg width="11" height="11" viewBox="0 0 10 10" fill="currentColor">
+            <svg width="12" height="12" viewBox="0 0 10 10" fill="currentColor">
               <circle cx="2" cy="5" r="1" />
               <circle cx="5" cy="5" r="1" />
               <circle cx="8" cy="5" r="1" />
@@ -402,40 +412,52 @@ function WorkspaceRow({
       {editing && (
         <div
           style={{
-            marginTop: 8,
+            marginTop: 12,
             paddingLeft: 20,
             display: "flex",
             alignItems: "center",
           }}
         >
-          <button
-            type="button"
+          <DeleteButton
             onClick={(e) => {
               e.stopPropagation();
               onCloseEditor();
               onDelete();
             }}
-            title="Delete workspace"
-            style={{
-              appearance: "none",
-              background: "transparent",
-              border: "none",
-              color: "var(--muted)",
-              fontFamily: "inherit",
-              fontSize: 10,
-              fontWeight: 700,
-              letterSpacing: "0.14em",
-              padding: "2px 0",
-              cursor: "default",
-            }}
-            onMouseEnter={(e) => (e.currentTarget.style.color = "var(--danger)")}
-            onMouseLeave={(e) => (e.currentTarget.style.color = "var(--muted)")}
-          >
-            DELETE
-          </button>
+          />
         </div>
       )}
     </div>
+  );
+}
+
+function DeleteButton({ onClick }: { onClick: (e: React.MouseEvent) => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title="Delete workspace"
+      style={{
+        appearance: "none",
+        background: hover ? "var(--danger-soft)" : "transparent",
+        border: "none",
+        color: hover ? "var(--danger)" : "var(--muted)",
+        fontFamily: "inherit",
+        fontSize: 10,
+        fontWeight: 600,
+        letterSpacing: "0.14em",
+        textTransform: "uppercase",
+        padding: "4px 8px",
+        cursor: "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      Delete
+    </button>
   );
 }
 

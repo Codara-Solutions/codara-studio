@@ -32,7 +32,7 @@ export default function EditorGrid({
         flexDirection: "column",
         minWidth: 0,
         minHeight: 0,
-        borderTop: "1px solid var(--rule)",
+        borderTop: "1px solid var(--rule-soft)",
       }}
     >
       {files.length === 0 ? (
@@ -45,7 +45,7 @@ export default function EditorGrid({
             gridTemplateColumns: `repeat(${dims.cols}, 1fr)`,
             gridAutoRows: "1fr",
             gap: 1,
-            background: "var(--rule)",
+            background: "var(--rule-soft)",
             minHeight: 0,
           }}
         >
@@ -74,9 +74,11 @@ function EmptyEditor() {
         justifyContent: "center",
         background: "var(--bg)",
         color: "var(--muted)",
+        fontFamily: "var(--font-sans)",
         fontSize: 11,
-        letterSpacing: "0.12em",
-        fontWeight: 700,
+        letterSpacing: "0.14em",
+        textTransform: "uppercase",
+        fontWeight: 600,
       }}
     >
       NO FILES OPEN

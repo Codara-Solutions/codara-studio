@@ -1,93 +1,59 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import type { PlanFile, RunState, Workspace } from "@shared/types";
 import SparkAgentPanel from "./SparkAgentPanel";
 
 interface Props {
   workspace: Workspace | null;
+  runs: RunState[];
+  activeRunId: string | null;
+  onSelectRun: (id: string | null) => void;
   onQuickTest: (runtime: "claude" | "codex") => void;
 }
 
-export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) {
-  const [runs, setRuns] = useState<RunState[]>([]);
-  const [activeRun, setActiveRun] = useState<RunState | null>(null);
+export default function OrchestrationSidebar({
+  workspace,
+  runs,
+  activeRunId,
+  onSelectRun,
+  onQuickTest,
+}: Props) {
   const [planFiles, setPlanFiles] = useState<PlanFile[]>([]);
   const [selectedPlanPath, setSelectedPlanPath] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadRunDetails = useCallback(async (run: RunState | null) => {
-    if (!run) {
-      setActiveRun(null);
-      return;
-    }
+  const activeRun = useMemo(
+    () => runs.find((run) => run.id === activeRunId) ?? null,
+    [runs, activeRunId],
+  );
 
-    const freshRun = await window.spark.orchestration.getRun(run.id);
-    const nextRun = freshRun ?? run;
-    setActiveRun(nextRun);
-  }, []);
-
-  // Only the workspace identity (id + cwd) should trigger a reload — not the
-  // whole workspace object, which is replaced every time workers[] changes.
-  // Reloading on every worker spawn was racing with the live event subscription
-  // and wiping events that hadn't been persisted yet.
+  // Plan files are filesystem-derived, so they only need to refresh when the
+  // workspace changes — not on every orchestration event.
   const workspaceId = workspace?.id ?? null;
   const workspaceCwd = workspace?.cwd ?? null;
 
-  const loadRuns = useCallback(async () => {
-    if (!workspaceId || !workspaceCwd) {
-      setRuns([]);
+  const loadPlans = useCallback(async () => {
+    if (!workspaceCwd) {
       setPlanFiles([]);
       setSelectedPlanPath("");
-      await loadRunDetails(null);
       return;
     }
-
     try {
-      const [nextRuns, nextPlanFiles] = await Promise.all([
-        window.spark.orchestration.listRuns(workspaceId),
-        window.spark.fs.listMarkdownFiles(workspaceCwd),
-      ]);
-      setRuns(nextRuns);
-      setPlanFiles(nextPlanFiles);
+      const next = await window.spark.fs.listMarkdownFiles(workspaceCwd);
+      setPlanFiles(next);
       setSelectedPlanPath((current) => {
-        if (current && nextPlanFiles.some((file) => file.path === current)) return current;
-        return nextPlanFiles[0]?.path ?? "";
-      });
-      setActiveRun((currentActive) => {
-        const stillExists = currentActive
-          ? nextRuns.find((run) => run.id === currentActive.id)
-          : null;
-        if (stillExists) return stillExists;
-        const fallback = nextRuns[0] ?? null;
-        if (!fallback) {
-          // Defer the events/paths reset to a microtask so we don't fight the
-          // live event subscription mid-render.
-          void loadRunDetails(null);
-        } else {
-          void loadRunDetails(fallback);
-        }
-        return fallback;
+        if (current && next.some((file) => file.path === current)) return current;
+        return next[0]?.path ?? "";
       });
       setError(null);
     } catch (err) {
       setError((err as Error).message);
     }
-  }, [loadRunDetails, workspaceId, workspaceCwd]);
+  }, [workspaceCwd]);
 
   useEffect(() => {
-    void loadRuns();
-  }, [loadRuns]);
-
-  useEffect(() => {
-    return window.spark.orchestration.onEvent((event) => {
-      if (!activeRun || event.runId !== activeRun.id) return;
-      void window.spark.orchestration.getRun(activeRun.id).then((freshRun) => {
-        if (!freshRun) return;
-        setActiveRun(freshRun);
-        setRuns((current) => replaceRun(current, freshRun));
-      });
-    });
-  }, [activeRun]);
+    void loadPlans();
+  }, [loadPlans]);
 
   const startAutopilot = async () => {
     if (!workspace || busy) return;
@@ -111,8 +77,10 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
         planTitle: selectedPlan?.name,
         planText,
       });
-      setRuns((current) => replaceRun([run, ...current], run));
-      await loadRunDetails(run);
+      // Lifted state in App will refresh `runs` via the event subscription;
+      // selecting the new run id makes the right panel jump to it as soon as
+      // the next listRuns lands.
+      onSelectRun(run.id);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -129,13 +97,10 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
     }
     setError(null);
     try {
-      const run = await pause({
+      await pause({
         runId: activeRun.id,
         reason: reason || "Paused by user",
       });
-      setActiveRun(run);
-      setRuns((current) => replaceRun(current, run));
-      await loadRunDetails(run);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -168,7 +133,7 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
     );
   };
 
-  const deleteExistingRun = async (run: RunState) => {
+  const deleteRunById = async (runId: string) => {
     if (busy) return;
     const deleteRun = window.spark.orchestration.deleteRun;
     if (typeof deleteRun !== "function") {
@@ -178,11 +143,9 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
     setBusy(true);
     setError(null);
     try {
-      await deleteRun(run.id);
-      const nextRuns = runs.filter((item) => item.id !== run.id);
-      setRuns(nextRuns);
-      const nextActive = activeRun?.id === run.id ? nextRuns[0] ?? null : activeRun;
-      await loadRunDetails(nextActive);
+      await deleteRun(runId);
+      // App's event subscription will refresh `runs` and the reconcile effect
+      // will pick a new active. No local state to keep in sync.
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -194,9 +157,7 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
     setBusy(true);
     setError(null);
     try {
-      const run = await mutation();
-      setActiveRun(run);
-      setRuns((current) => replaceRun(current, run));
+      await mutation();
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -216,6 +177,7 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
     >
       <SparkAgentPanel
         workspace={workspace}
+        runs={runs}
         activeRun={activeRun}
         planFiles={planFiles}
         selectedPlanPath={selectedPlanPath}
@@ -225,21 +187,11 @@ export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) 
         onPauseRun={pauseActiveRun}
         onResumeRun={resumeActiveRun}
         onAddUserMessage={addUserMessage}
-        onDeleteRun={deleteExistingRun}
+        onSelectRun={onSelectRun}
+        onDeleteRun={deleteRunById}
         onSelectPlan={setSelectedPlanPath}
-        onRefresh={loadRuns}
         onQuickTest={onQuickTest}
       />
     </div>
   );
-}
-
-function replaceRun(runs: RunState[], run: RunState): RunState[] {
-  const byId = new Map<string, RunState>();
-  for (const item of runs) {
-    byId.set(item.id, item.id === run.id ? run : item);
-  }
-  byId.set(run.id, run);
-  return Array.from(byId.values())
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }

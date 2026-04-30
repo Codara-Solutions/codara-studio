@@ -19,6 +19,11 @@ const ZOOM_EASE = 0.32;
 
 interface Props {
   workspace: Workspace | null;
+  // Lifted state from App: the runs list and selection are owned upstream so
+  // the right-panel SparkAgentPanel and this canvas always agree.
+  runs: RunState[];
+  activeRunId: string | null;
+  onSelectRun: (id: string | null) => void;
 }
 
 interface AgentRow {
@@ -27,46 +32,21 @@ interface AgentRow {
   attempt?: WorkerAttempt;
 }
 
-export default function RunsView({ workspace }: Props) {
-  const [runs, setRuns] = useState<RunState[]>([]);
-  const [activeRun, setActiveRun] = useState<RunState | null>(null);
+export default function RunsView({ workspace, runs, activeRunId }: Props) {
+  // Canvas-local state — events, the chosen event, and resolved artifact
+  // paths. The runs list and active selection live in App.tsx.
   const [events, setEvents] = useState<SparkEvent[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [artifactPaths, setArtifactPaths] = useState<RunArtifactPaths | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const workspaceId = workspace?.id ?? null;
-  const activeRunId = activeRun?.id ?? null;
+  const activeRun = useMemo(
+    () => runs.find((run) => run.id === activeRunId) ?? null,
+    [runs, activeRunId],
+  );
 
-  const loadRuns = useCallback(async (preferredRunId?: string) => {
-    if (!workspaceId) {
-      setRuns([]);
-      setActiveRun(null);
-      return;
-    }
-
-    try {
-      const next = await window.spark.orchestration.listRuns(workspaceId);
-      setRuns(next);
-      setActiveRun((current) => {
-        const preferred = preferredRunId
-          ? next.find((run) => run.id === preferredRunId)
-          : null;
-        if (preferred) return preferred;
-        const stillExists = current ? next.find((run) => run.id === current.id) : null;
-        if (stillExists) return stillExists;
-        return findBestRun(next);
-      });
-      setError(null);
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  }, [workspaceId]);
-
-  useEffect(() => {
-    void loadRuns();
-  }, [loadRuns]);
-
+  // Reload events + artifact paths whenever the selected run changes.
   useEffect(() => {
     if (!activeRunId) {
       setEvents([]);
@@ -77,15 +57,10 @@ export default function RunsView({ workspace }: Props) {
 
     let cancelled = false;
     void Promise.all([
-      window.spark.orchestration.getRun(activeRunId),
       window.spark.orchestration.listEvents(activeRunId),
       window.spark.orchestration.getArtifactPaths(activeRunId),
-    ]).then(([fresh, nextEvents, paths]) => {
+    ]).then(([nextEvents, paths]) => {
       if (cancelled) return;
-      if (fresh) {
-        setActiveRun(fresh);
-        setRuns((current) => replaceRun(current, fresh));
-      }
       setEvents(nextEvents);
       setArtifactPaths(paths);
       setSelectedEventId((current) => {
@@ -102,41 +77,21 @@ export default function RunsView({ workspace }: Props) {
     };
   }, [activeRunId]);
 
+  // Live-append events for the currently-selected run.
   useEffect(() => {
-    if (!workspaceId) return undefined;
+    if (!workspaceId || !activeRunId) return undefined;
 
     return window.spark.orchestration.onEvent((event) => {
       if (event.workspaceId !== workspaceId) return;
-      if (!event.runId) {
-        void loadRuns();
-        return;
-      }
-      if (event.type === "run.deleted") {
-        void loadRuns(event.runId);
-        return;
-      }
-
-      void window.spark.orchestration.getRun(event.runId).then((fresh) => {
-        if (!fresh || fresh.workspaceId !== workspaceId) return;
-        setRuns((current) => replaceRun(current, fresh));
-        setActiveRun((current) => {
-          if (!current) return fresh;
-          if (current.id === fresh.id) return fresh;
-          if (isLiveRun(fresh) && !isLiveRun(current)) return fresh;
-          return current;
-        });
-        if (event.runId === activeRunId) {
-          setEvents((current) => {
-            if (current.some((item) => item.id === event.id)) return current;
-            return [...current, event];
-          });
-          setSelectedEventId((current) => current ?? event.id);
-          void window.spark.orchestration.getArtifactPaths(event.runId).then(setArtifactPaths);
-        }
-        setError(null);
-      }).catch((err) => setError((err as Error).message));
+      if (event.runId !== activeRunId) return;
+      setEvents((current) => {
+        if (current.some((item) => item.id === event.id)) return current;
+        return [...current, event];
+      });
+      setSelectedEventId((current) => current ?? event.id);
+      void window.spark.orchestration.getArtifactPaths(activeRunId).then(setArtifactPaths);
     });
-  }, [activeRunId, loadRuns, workspaceId]);
+  }, [activeRunId, workspaceId]);
 
   if (!workspace) {
     return <EmptyState text="No active workspace." />;
@@ -146,11 +101,14 @@ export default function RunsView({ workspace }: Props) {
   }
   if (runs.length === 0) {
     return (
-      <EmptyState text="No runs yet. Pick a plan in the right sidebar and press RUN to start one." />
+      <EmptyState
+        heading="No runs yet."
+        text="Pick a plan in the right panel and press Run."
+      />
     );
   }
   if (!activeRun) {
-    return <EmptyState text="Select a run." />;
+    return <EmptyState text="Select a run from the right panel." />;
   }
 
   return (
@@ -165,11 +123,6 @@ export default function RunsView({ workspace }: Props) {
         color: "var(--ink)",
       }}
     >
-      <RunSidebar
-        runs={runs}
-        activeRunId={activeRun.id}
-        onSelect={(run) => setActiveRun(run)}
-      />
       <main
         style={{
           flex: 1,
@@ -206,120 +159,6 @@ export default function RunsView({ workspace }: Props) {
   );
 }
 
-function RunSidebar({
-  runs,
-  activeRunId,
-  onSelect,
-}: {
-  runs: RunState[];
-  activeRunId: string;
-  onSelect: (run: RunState) => void;
-}) {
-  return (
-    <aside
-      style={{
-        width: 68,
-        flex: "0 0 68px",
-        borderRight: "1px solid var(--rule)",
-        background: "var(--panel)",
-        minHeight: 0,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "stretch",
-      }}
-    >
-      <div
-        style={{
-          flex: "0 0 auto",
-          padding: "8px 6px 7px",
-          borderBottom: "1px solid var(--rule)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 4,
-        }}
-      >
-        <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.12em" }}>RUNS</span>
-        <span style={{ color: "var(--muted)", fontSize: 9, fontWeight: 800 }}>
-          {formatRunIndex(runs.length)}
-        </span>
-      </div>
-      <div style={{ overflow: "auto", minHeight: 0, padding: "7px 6px", display: "flex", flexDirection: "column", gap: 6 }}>
-        {runs.map((run, index) => (
-          <RunButton
-            key={run.id}
-            run={run}
-            index={index + 1}
-            active={run.id === activeRunId}
-            onClick={() => onSelect(run)}
-          />
-        ))}
-      </div>
-    </aside>
-  );
-}
-
-function RunButton({
-  run,
-  index,
-  active,
-  onClick,
-}: {
-  run: RunState;
-  index: number;
-  active: boolean;
-  onClick: () => void;
-}) {
-  const description = `${run.title}\n${run.status} · ${run.steps.length} steps · ${formatTime(run.updatedAt)}`;
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={description}
-      style={{
-        appearance: "none",
-        width: "100%",
-        aspectRatio: "1 / 0.82",
-        border: `1px solid ${active ? "var(--accent)" : "var(--rule)"}`,
-        borderLeft: `3px solid ${active ? "var(--accent)" : "transparent"}`,
-        background: active ? "var(--panel-2)" : "transparent",
-        color: active ? "var(--ink)" : "var(--ink-dim)",
-        padding: "5px 4px",
-        textAlign: "center",
-        fontFamily: "inherit",
-        cursor: "default",
-        display: "grid",
-        gridTemplateRows: "auto minmax(0, 1fr)",
-        alignItems: "center",
-        justifyItems: "center",
-        gap: 3,
-      }}
-    >
-      <span
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr auto",
-          alignItems: "center",
-          width: "100%",
-        }}
-      >
-        <span />
-        <StatusDot status={run.status} />
-      </span>
-      <span
-        style={{
-          color: active ? "var(--ink)" : "var(--muted)",
-          fontSize: 13,
-          fontWeight: 900,
-          lineHeight: 1,
-        }}
-      >
-        {formatRunIndex(index)}
-      </span>
-    </button>
-  );
-}
-
 function RunHeader({ run }: { run: RunState }) {
   const activeStep = run.steps.find((step) => step.id === run.currentStepId)
     ?? run.steps.find((step) => step.status === "running" || step.status === "reviewing")
@@ -330,16 +169,16 @@ function RunHeader({ run }: { run: RunState }) {
       style={{
         flex: "0 0 auto",
         background: "var(--panel)",
-        borderBottom: "1px solid var(--rule)",
-        padding: "12px 16px 10px",
+        borderBottom: "1px solid var(--rule-soft)",
+        padding: "14px 20px 12px",
         display: "grid",
         gridTemplateColumns: "minmax(0, 1fr) auto",
-        gap: 16,
+        gap: 20,
         alignItems: "center",
       }}
     >
-      <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 5 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+      <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
           <span
             title={run.title}
             style={{
@@ -348,8 +187,10 @@ function RunHeader({ run }: { run: RunState }) {
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
               color: "var(--ink)",
-              fontSize: 15,
-              fontWeight: 900,
+              fontFamily: "var(--font-sans)",
+              fontSize: 18,
+              fontWeight: 700,
+              letterSpacing: "-0.005em",
             }}
           >
             {run.title}
@@ -360,13 +201,14 @@ function RunHeader({ run }: { run: RunState }) {
           title={activeStep?.goal}
           style={{
             color: "var(--ink-dim)",
-            fontSize: 10,
+            fontFamily: "var(--font-sans)",
+            fontSize: 12,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
           }}
         >
-          {activeStep ? `Current: ${activeStep.title}` : "Waiting for Spark to plan the first step"}
+          {activeStep ? `Now: ${activeStep.title}` : "Waiting for Spark to plan the first step"}
         </div>
       </div>
       <div
@@ -405,19 +247,30 @@ function Metric({
         alignItems: "flex-start",
         justifyContent: "center",
         minWidth: isNumber ? 62 : 86,
-        padding: "0 18px",
-        borderLeft: separated ? "1px solid var(--rule)" : "none",
+        padding: "0 20px",
+        borderLeft: separated ? "1px solid var(--rule-soft)" : "none",
       }}
     >
-      <span style={{ color: "var(--muted)", fontSize: 9, letterSpacing: "0.12em", fontWeight: 800 }}>
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          letterSpacing: "0.12em",
+          fontWeight: 600,
+          textTransform: "uppercase",
+        }}
+      >
         {label}
       </span>
       <b
         style={{
           color: "var(--ink)",
-          fontSize: isNumber ? 18 : 14,
+          fontFamily: "var(--font-sans)",
+          fontSize: isNumber ? 22 : 13,
           lineHeight: 1,
-          fontWeight: 850,
+          fontWeight: isNumber ? 700 : 600,
+          fontVariantNumeric: "tabular-nums",
         }}
       >
         {value}
@@ -656,27 +509,37 @@ function RunCanvas({ run }: { run: RunState }) {
         position: "relative",
         backgroundColor: "var(--bg)",
         backgroundImage:
-          "radial-gradient(circle, color-mix(in oklch, var(--muted) 38%, transparent) 1px, transparent 1px)",
-        backgroundSize: "22px 22px",
+          "radial-gradient(circle, color-mix(in oklch, var(--muted) 32%, transparent) 1px, transparent 1px)",
+        backgroundSize: "24px 24px",
       }}
     >
       <div
         style={{
           position: "absolute",
-          top: 10,
+          top: 12,
           right: 12,
           zIndex: 2,
           display: "flex",
           alignItems: "center",
-          gap: 6,
+          gap: 4,
           background: "var(--panel)",
-          border: "1px solid var(--rule)",
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 6,
           padding: 4,
-          boxShadow: "0 10px 24px rgba(0,0,0,0.22)",
+          boxShadow: "var(--shadow-1)",
         }}
       >
         <ZoomButton label="-" title="Zoom out" onClick={() => zoomBy(-0.12)} />
-        <span style={{ width: 42, textAlign: "center", color: "var(--ink-dim)", fontSize: 10 }}>
+        <span
+          style={{
+            width: 44,
+            textAlign: "center",
+            color: "var(--ink-dim)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
           {zoomLabel}
         </span>
         <ZoomButton label="+" title="Zoom in" onClick={() => zoomBy(0.12)} />
@@ -752,24 +615,31 @@ function ZoomButton({
   wide?: boolean;
   onClick: () => void;
 }) {
+  const [hover, setHover] = useState(false);
   return (
     <button
       type="button"
       title={title}
       onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
         appearance: "none",
-        width: wide ? 34 : 24,
+        width: wide ? 36 : 24,
         height: 24,
-        border: "1px solid var(--rule-strong)",
-        background: "var(--bg)",
-        color: "var(--ink-dim)",
-        fontFamily: "inherit",
-        fontSize: wide ? 9 : 13,
-        fontWeight: 900,
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 4,
+        background: hover ? "var(--hover-strong)" : "transparent",
+        color: hover ? "var(--ink)" : "var(--ink-dim)",
+        fontFamily: wide ? "var(--font-mono)" : "var(--font-sans)",
+        fontSize: wide ? 10 : 13,
+        fontWeight: wide ? 600 : 700,
+        fontVariantNumeric: "tabular-nums",
         lineHeight: 1,
         padding: 0,
         cursor: "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     >
       {label}
@@ -848,40 +718,64 @@ function StartBlock({ label, subtitle }: { label: string; subtitle: string }) {
         minHeight: 66,
         background: "oklch(0.13 0 0)",
         border: "1px solid var(--rule-strong)",
+        borderRadius: 6,
         display: "flex",
         flexDirection: "column",
         justifyContent: "center",
         alignItems: "center",
         gap: 6,
         color: "var(--ink)",
-        boxShadow: "0 12px 30px rgba(0,0,0,0.22)",
+        boxShadow: "var(--shadow-1)",
       }}
     >
-      <span style={{ width: 8, height: 8, background: "var(--accent)" }} />
-      <span style={{ fontSize: 11, fontWeight: 900, letterSpacing: "0.08em" }}>{label}</span>
-      <span style={{ color: "var(--muted)", fontSize: 9 }}>{subtitle}</span>
+      <span style={{ width: 8, height: 8, background: "var(--accent)", borderRadius: 2 }} />
+      <span
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+          fontWeight: 700,
+          letterSpacing: "0.08em",
+        }}
+      >
+        {label}
+      </span>
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+        }}
+      >
+        {subtitle}
+      </span>
     </div>
   );
 }
 
 function EndBlock({ status }: { status: RunState["status"] }) {
+  const complete = status === "complete";
   return (
     <div
       style={{
         minHeight: 54,
-        border: "1px solid var(--rule)",
-        background: "color-mix(in oklch, var(--panel) 86%, transparent)",
-        color: status === "complete" ? "var(--ok)" : "var(--muted)",
+        border: `1px solid ${complete ? "var(--ok)" : "var(--rule)"}`,
+        borderRadius: 6,
+        background: complete
+          ? "var(--ok-soft)"
+          : "color-mix(in oklch, var(--panel) 86%, transparent)",
+        color: complete ? "var(--ok)" : "var(--muted)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
+        fontFamily: "var(--font-sans)",
         fontSize: 10,
-        fontWeight: 900,
-        letterSpacing: "0.12em",
+        fontWeight: 600,
+        letterSpacing: "0.1em",
         textTransform: "uppercase",
+        boxShadow: complete ? "0 0 14px var(--accent-glow)" : "none",
       }}
     >
-      {status === "complete" ? "complete" : "pending"}
+      {complete ? "complete" : "pending"}
     </div>
   );
 }
@@ -900,7 +794,7 @@ function Connector({ label }: { label: string }) {
       <span
         style={{
           width: "100%",
-          borderTop: "1px dashed var(--rule-strong)",
+          borderTop: "1px dashed var(--rule)",
         }}
       />
       <span
@@ -910,10 +804,12 @@ function Connector({ label }: { label: string }) {
           left: "50%",
           transform: "translateX(-50%)",
           color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
           fontSize: 9,
+          letterSpacing: "0.06em",
           whiteSpace: "nowrap",
           background: "var(--bg)",
-          padding: "0 4px",
+          padding: "0 6px",
         }}
       >
         {label}
@@ -949,26 +845,28 @@ function StepNode({
         background: nodeActive
           ? "linear-gradient(135deg, color-mix(in oklch, var(--panel-2) 86%, var(--accent) 14%), color-mix(in oklch, var(--panel) 94%, transparent))"
           : "linear-gradient(135deg, color-mix(in oklch, var(--panel) 92%, white 2%), color-mix(in oklch, var(--panel) 92%, transparent))",
-        border: `1px solid ${nodeActive ? "var(--accent)" : "var(--rule-strong)"}`,
-        borderRadius: 6,
+        border: `1px solid ${nodeActive ? "var(--accent-edge)" : "var(--rule-strong)"}`,
+        borderRadius: 8,
         boxShadow: nodeActive
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 36%, transparent), 0 0 24px color-mix(in oklch, var(--accent) 22%, transparent), 0 18px 44px rgba(0,0,0,0.34)"
-          : "0 12px 34px rgba(0,0,0,0.22)",
-        padding: "12px 13px",
+          ? "0 0 0 1px var(--accent-edge), 0 0 24px var(--accent-glow), 0 18px 44px rgba(0,0,0,0.34)"
+          : "var(--shadow-2)",
+        padding: "12px 14px",
         display: "flex",
         flexDirection: "column",
-        gap: 9,
+        gap: 10,
+        fontFamily: "var(--font-sans)",
       }}
     >
       <div style={{ display: "grid", gridTemplateColumns: "32px minmax(0, 1fr) auto", gap: 8, alignItems: "start" }}>
         <StepIcon step={step} />
-        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
           <div
             style={{
               color: "var(--muted)",
-              fontSize: 8,
-              fontWeight: 900,
-              letterSpacing: "0.12em",
+              fontFamily: "var(--font-sans)",
+              fontSize: 9,
+              fontWeight: 600,
+              letterSpacing: "0.14em",
               textTransform: "uppercase",
             }}
           >
@@ -977,8 +875,10 @@ function StepNode({
           <div
             style={{
               color: "var(--ink)",
-              fontSize: 13,
-              fontWeight: 900,
+              fontFamily: "var(--font-sans)",
+              fontSize: 14,
+              fontWeight: 600,
+              lineHeight: 1.2,
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
@@ -987,7 +887,16 @@ function StepNode({
             {step.title}
           </div>
         </div>
-        <span style={{ color: tone, fontSize: 9, fontWeight: 900, textTransform: "uppercase" }}>
+        <span
+          style={{
+            color: tone,
+            fontFamily: "var(--font-sans)",
+            fontSize: 9,
+            fontWeight: 600,
+            letterSpacing: "0.08em",
+            textTransform: "uppercase",
+          }}
+        >
           {stepStatusLabel(step.status)}
         </span>
       </div>
@@ -995,9 +904,10 @@ function StepNode({
       <div
         style={{
           color: "var(--ink-dim)",
-          fontSize: 10,
-          lineHeight: 1.35,
-          minHeight: 28,
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+          lineHeight: 1.45,
+          minHeight: 30,
           overflow: "hidden",
           display: "-webkit-box",
           WebkitLineClamp: 2,
@@ -1007,7 +917,7 @@ function StepNode({
         {step.goal || "Worker activity for this step."}
       </div>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, minHeight: 24 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, minHeight: 24 }}>
         {rows.length === 0 ? (
           <Tag muted>waiting for agents</Tag>
         ) : (
@@ -1025,10 +935,21 @@ function StepNode({
           gridTemplateColumns: "1fr auto",
           gap: 8,
           color: "var(--muted)",
-          fontSize: 9,
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
         }}
       >
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: tone, fontWeight: 900, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            color: tone,
+            fontWeight: 600,
+            letterSpacing: "0.08em",
+            textTransform: "uppercase",
+          }}
+        >
           <StatusDot status={step.status} small />
           {stepStatusLabel(step.status)}
         </span>
@@ -1057,22 +978,52 @@ function ProcessCard({
         width: 260,
         minHeight: 132,
         background: "color-mix(in oklch, var(--panel-2) 88%, var(--accent) 8%)",
-        border: "1px solid var(--accent)",
-        padding: "12px",
-        boxShadow: "0 18px 40px rgba(0,0,0,0.28)",
+        border: "1px solid var(--accent-edge)",
+        borderRadius: 8,
+        padding: "14px",
+        boxShadow: "var(--shadow-2)",
         display: "flex",
         flexDirection: "column",
         gap: 8,
+        fontFamily: "var(--font-sans)",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <StatusDot status={status} />
-        <span style={{ color: "var(--muted)", fontSize: 9, fontWeight: 900, letterSpacing: "0.12em" }}>
+        <span
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 9,
+            fontWeight: 600,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+          }}
+        >
           {eyebrow}
         </span>
       </div>
-      <div style={{ color: "var(--ink)", fontSize: 13, fontWeight: 900 }}>{title}</div>
-      <div style={{ color: "var(--ink-dim)", fontSize: 10, lineHeight: 1.45 }}>{summary}</div>
+      <div
+        style={{
+          color: "var(--ink)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 14,
+          fontWeight: 600,
+          lineHeight: 1.2,
+        }}
+      >
+        {title}
+      </div>
+      <div
+        style={{
+          color: "var(--ink-dim)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+          lineHeight: 1.45,
+        }}
+      >
+        {summary}
+      </div>
     </article>
   );
 }
@@ -1083,17 +1034,37 @@ function GhostCard({ title, subtitle }: { title: string; subtitle: string }) {
       style={{
         width: 240,
         minHeight: 112,
-        border: "1px dashed var(--rule-strong)",
+        border: "1px dashed var(--rule)",
+        borderRadius: 8,
         background: "color-mix(in oklch, var(--panel) 62%, transparent)",
         display: "flex",
         flexDirection: "column",
         justifyContent: "center",
-        gap: 7,
-        padding: "14px",
+        gap: 6,
+        padding: "16px",
+        fontFamily: "var(--font-sans)",
       }}
     >
-      <span style={{ color: "var(--ink-dim)", fontSize: 12, fontWeight: 900 }}>{title}</span>
-      <span style={{ color: "var(--muted)", fontSize: 10, lineHeight: 1.4 }}>{subtitle}</span>
+      <span
+        style={{
+          color: "var(--ink-dim)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 13,
+          fontWeight: 600,
+        }}
+      >
+        {title}
+      </span>
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+          lineHeight: 1.45,
+        }}
+      >
+        {subtitle}
+      </span>
     </div>
   );
 }
@@ -1105,14 +1076,16 @@ function StepIcon({ step }: { step: StepState }) {
       style={{
         width: 28,
         height: 28,
+        borderRadius: 6,
         border: `1px solid ${stepStatusColor(step.status)}`,
         background: "color-mix(in oklch, var(--panel-2) 78%, var(--accent) 10%)",
         color: stepStatusColor(step.status),
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
+        fontFamily: "var(--font-sans)",
         fontSize: 12,
-        fontWeight: 900,
+        fontWeight: 700,
       }}
     >
       {letter}
@@ -1131,17 +1104,31 @@ function AgentTag({ row, stepStatus }: { row: AgentRow; stepStatus: StepState["s
         maxWidth: "100%",
         display: "inline-flex",
         alignItems: "center",
-        gap: 5,
+        gap: 6,
         border: `1px solid ${tone.border}`,
         background: tone.bg,
         color: "var(--ink-dim)",
-        padding: "3px 6px",
-        fontSize: 9,
+        padding: "3px 7px",
+        borderRadius: 3,
+        fontFamily: "var(--font-sans)",
+        fontSize: 10,
         lineHeight: 1.2,
       }}
     >
       <StatusDot status={status} small />
-      <b style={{ color: tone.label, textTransform: "uppercase" }}>{row.agent.runtimePreference}</b>
+      <b
+        style={{
+          color: tone.label,
+          fontFamily: "var(--font-mono)",
+          fontSize: 9,
+          fontWeight: 700,
+          fontVariantNumeric: "tabular-nums",
+          textTransform: "uppercase",
+          letterSpacing: "0.04em",
+        }}
+      >
+        {row.agent.runtimePreference}
+      </b>
       <span
         style={{
           minWidth: 0,
@@ -1161,10 +1148,13 @@ function Tag({ children, muted }: { children: React.ReactNode; muted?: boolean }
     <span
       style={{
         border: "1px solid var(--rule)",
+        borderRadius: 3,
         background: "var(--bg)",
         color: muted ? "var(--muted)" : "var(--ink-dim)",
-        padding: "3px 6px",
-        fontSize: 9,
+        padding: "3px 7px",
+        fontFamily: "var(--font-sans)",
+        fontSize: 10,
+        fontWeight: 500,
       }}
     >
       {children}
@@ -1215,22 +1205,44 @@ function RunDetails({
       >
         {activeStep ? (
           <>
-            <div style={{ color: "var(--ink)", fontSize: 16, fontWeight: 900, lineHeight: 1.15 }}>
+            <div
+              style={{
+                color: "var(--ink)",
+                fontFamily: "var(--font-sans)",
+                fontSize: 16,
+                fontWeight: 700,
+                lineHeight: 1.2,
+              }}
+            >
               {activeStep.title}
             </div>
-            <div style={{ color: "var(--ink-dim)", fontSize: 11, lineHeight: 1.5 }}>
+            <div
+              style={{
+                color: "var(--ink-dim)",
+                fontFamily: "var(--font-sans)",
+                fontSize: 12,
+                lineHeight: 1.5,
+              }}
+            >
               {activeStep.goal || "No goal recorded for this step yet."}
             </div>
             <div
               style={{
-                border: "1px solid var(--rule)",
+                border: "1px solid var(--rule-soft)",
                 background: "color-mix(in oklch, var(--bg) 58%, transparent)",
-                borderRadius: 5,
+                borderRadius: 6,
                 overflow: "hidden",
               }}
             >
               {workItems.length === 0 ? (
-                <div style={{ padding: "13px 14px", color: "var(--muted)", fontSize: 11 }}>
+                <div
+                  style={{
+                    padding: "14px 16px",
+                    color: "var(--muted)",
+                    fontFamily: "var(--font-sans)",
+                    fontSize: 11,
+                  }}
+                >
                   Waiting for Spark to attach acceptance or verification work.
                 </div>
               ) : (
@@ -1240,33 +1252,62 @@ function RunDetails({
               )}
             </div>
             {taskProgress === null ? (
-              <div style={{ color: "var(--muted)", fontSize: 10 }}>
+              <div
+                style={{
+                  color: "var(--muted)",
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 11,
+                }}
+              >
                 Worker task progress appears here once Spark creates task records for this step.
               </div>
             ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 10, alignItems: "center" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 12, alignItems: "center" }}>
                 <ProgressBar value={taskProgress} active={isRunningStatus(activeStep.status)} />
-                <span style={{ color: "var(--ink-dim)", fontSize: 11 }}>
+                <span
+                  style={{
+                    color: "var(--ink-dim)",
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 11,
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
                   {completeTasks} / {activeTasks.length}
                 </span>
               </div>
             )}
           </>
         ) : (
-          <div style={{ color: "var(--muted)", fontSize: 10 }}>Spark has not planned a step yet.</div>
+          <div
+            style={{
+              color: "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 11,
+            }}
+          >
+            Spark has not planned a step yet.
+          </div>
         )}
       </DetailPanel>
 
       <DetailPanel title="WORKERS & ACTIVITY" meta={`${activeTasks.length || recentAttempts.length} live`}>
         {activeTasks.length === 0 && recentAttempts.length === 0 ? (
-          <div style={{ color: "var(--muted)", fontSize: 10 }}>No worker activity yet.</div>
+          <div
+            style={{
+              color: "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 11,
+            }}
+          >
+            No worker activity yet.
+          </div>
         ) : (
           <>
             <div
               style={{
-                border: "1px solid var(--rule)",
+                border: "1px solid var(--rule-soft)",
                 background: "color-mix(in oklch, var(--bg) 58%, transparent)",
-                borderRadius: 5,
+                borderRadius: 6,
                 overflow: "hidden",
               }}
             >
@@ -1280,7 +1321,7 @@ function RunDetails({
                   ))}
             </div>
             {recentAttempts.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 {recentAttempts.map((attempt) => (
                   <ActivityLine key={attempt.id} attempt={attempt} />
                 ))}
@@ -1307,26 +1348,44 @@ function DetailPanel({
   return (
     <section
       style={{
-        border: "1px solid var(--rule)",
-        borderRadius: 6,
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 8,
         background:
           "linear-gradient(135deg, color-mix(in oklch, var(--panel) 94%, white 3%), color-mix(in oklch, var(--panel) 90%, transparent))",
-        boxShadow: "0 16px 42px rgba(0,0,0,0.25)",
+        boxShadow: "var(--shadow-2)",
         minHeight: 222,
-        padding: "14px 16px",
+        padding: "16px 18px",
         display: "flex",
         flexDirection: "column",
-        gap: 10,
+        gap: 12,
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ color: "var(--muted)", fontSize: 10, fontWeight: 900, letterSpacing: "0.12em" }}>
+        <span
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+          }}
+        >
           {title}
         </span>
         {meta && (
           <>
             <span style={{ color: "var(--muted)", fontSize: 10 }}>·</span>
-            <span style={{ color: "var(--accent)", fontSize: 10, fontWeight: 900, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+            <span
+              style={{
+                color: "var(--accent)",
+                fontFamily: "var(--font-sans)",
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: "0.1em",
+                textTransform: "uppercase",
+              }}
+            >
               {meta}
             </span>
           </>
@@ -1353,23 +1412,31 @@ function WorkItemRow({ item }: { item: StepWorkItem }) {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "18px minmax(0, 1fr) auto",
-        gap: 10,
+        gridTemplateColumns: "20px minmax(0, 1fr) auto",
+        gap: 12,
         alignItems: "center",
-        padding: "10px 12px",
-        borderTop: "1px solid var(--rule)",
+        padding: "12px 14px",
+        borderTop: "1px solid var(--rule-soft)",
       }}
     >
       <WorkStatusIcon status={item.status} />
       <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
-        <span style={{ color: item.status === "done" ? "var(--accent)" : "var(--ink-dim)", fontSize: 11, fontWeight: 800 }}>
+        <span
+          style={{
+            color: item.status === "done" ? "var(--accent)" : "var(--ink-dim)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 11,
+            fontWeight: 600,
+            letterSpacing: "0.04em",
+          }}
+        >
           {item.label}
         </span>
         <span
           style={{
             color: "var(--muted)",
-            fontSize: 10,
-            fontFamily: item.monospace ? "var(--font-mono)" : undefined,
+            fontFamily: item.monospace ? "var(--font-mono)" : "var(--font-sans)",
+            fontSize: 11,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -1381,10 +1448,12 @@ function WorkItemRow({ item }: { item: StepWorkItem }) {
       <span
         style={{
           color: item.status ? statusColor(item.status) : "var(--muted)",
+          fontFamily: "var(--font-sans)",
           fontSize: 10,
-          fontWeight: item.status ? 800 : undefined,
+          fontWeight: item.status ? 600 : 500,
           fontVariantNumeric: "tabular-nums",
           textTransform: item.status ? "uppercase" : undefined,
+          letterSpacing: item.status ? "0.06em" : undefined,
           whiteSpace: "nowrap",
         }}
       >
@@ -1401,12 +1470,11 @@ function WorkerLine({ task, attempt }: { task: WorkerTask; attempt?: WorkerAttem
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "88px minmax(0, 1fr) auto auto",
+        gridTemplateColumns: "92px minmax(0, 1fr) auto auto",
         gap: 12,
         alignItems: "center",
-        padding: "9px 12px",
-        borderTop: "1px solid var(--rule)",
-        fontSize: 10,
+        padding: "10px 14px",
+        borderTop: "1px solid var(--rule-soft)",
       }}
     >
       <span
@@ -1415,8 +1483,14 @@ function WorkerLine({ task, attempt }: { task: WorkerTask; attempt?: WorkerAttem
           background: tone.bg,
           border: `1px solid ${tone.border}`,
           padding: "3px 7px",
-          fontWeight: 900,
+          borderRadius: 3,
+          fontFamily: "var(--font-mono)",
+          fontSize: 9,
+          fontWeight: 700,
+          fontVariantNumeric: "tabular-nums",
           textTransform: "uppercase",
+          letterSpacing: "0.04em",
+          textAlign: "center",
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
@@ -1428,6 +1502,8 @@ function WorkerLine({ task, attempt }: { task: WorkerTask; attempt?: WorkerAttem
         title={task.title}
         style={{
           color: "var(--ink-dim)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
@@ -1435,10 +1511,26 @@ function WorkerLine({ task, attempt }: { task: WorkerTask; attempt?: WorkerAttem
       >
         {task.title}
       </span>
-      <span style={{ color: statusColor(status), fontWeight: 900, textTransform: "uppercase" }}>
+      <span
+        style={{
+          color: statusColor(status),
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          fontWeight: 600,
+          letterSpacing: "0.06em",
+          textTransform: "uppercase",
+        }}
+      >
         {attempt?.status ?? task.status}
       </span>
-      <span style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
         {attempt ? formatDuration(attempt.startedAt, attempt.finishedAt) : "--:--"}
       </span>
     </div>
@@ -1447,14 +1539,53 @@ function WorkerLine({ task, attempt }: { task: WorkerTask; attempt?: WorkerAttem
 
 function AttemptLine({ attempt }: { attempt: WorkerAttempt }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "88px minmax(0, 1fr) auto", gap: 12, padding: "9px 12px", borderTop: "1px solid var(--rule)", fontSize: 10 }}>
-      <span style={{ color: runtimeTone(attempt.runtime).label, fontWeight: 900, textTransform: "uppercase" }}>
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "92px minmax(0, 1fr) auto",
+        gap: 12,
+        alignItems: "center",
+        padding: "10px 14px",
+        borderTop: "1px solid var(--rule-soft)",
+      }}
+    >
+      <span
+        style={{
+          color: runtimeTone(attempt.runtime).label,
+          fontFamily: "var(--font-mono)",
+          fontSize: 9,
+          fontWeight: 700,
+          fontVariantNumeric: "tabular-nums",
+          textTransform: "uppercase",
+          letterSpacing: "0.04em",
+        }}
+      >
         {attempt.runtime}
       </span>
-      <span style={{ color: "var(--ink-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <span
+        style={{
+          color: "var(--ink-dim)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
         attempt {attempt.attemptNumber}
       </span>
-      <span style={{ color: attemptStatusColor(attempt.status), fontWeight: 800 }}>{attempt.status}</span>
+      <span
+        style={{
+          color: attemptStatusColor(attempt.status),
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          fontWeight: 600,
+          letterSpacing: "0.06em",
+          textTransform: "uppercase",
+        }}
+      >
+        {attempt.status}
+      </span>
     </div>
   );
 }
@@ -1472,22 +1603,40 @@ function ActivityLine({ attempt }: { attempt: WorkerAttempt }) {
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "64px 12px minmax(0, 1fr)",
-        gap: 7,
+        gridTemplateColumns: "68px 12px minmax(0, 1fr)",
+        gap: 8,
         alignItems: "baseline",
         color: "var(--muted)",
-        fontSize: 10,
-        lineHeight: 1.45,
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        lineHeight: 1.5,
       }}
     >
-      <span style={{ color: attemptStatusColor(attempt.status), fontVariantNumeric: "tabular-nums" }}>
+      <span
+        style={{
+          color: attemptStatusColor(attempt.status),
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
         {time ? formatClock(time) : "--:--:--"}
       </span>
-      <span style={{ color: attemptStatusColor(attempt.status), fontWeight: 900 }}>{">"}</span>
+      <span
+        style={{
+          color: attemptStatusColor(attempt.status),
+          fontFamily: "var(--font-mono)",
+          fontWeight: 700,
+        }}
+      >
+        {">"}
+      </span>
       <span
         title={text}
         style={{
           minWidth: 0,
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
@@ -1503,9 +1652,9 @@ function ProgressBar({ value, active }: { value: number; active: boolean }) {
   return (
     <div
       style={{
-        height: 6,
+        height: 4,
         borderRadius: 999,
-        background: "color-mix(in oklch, var(--rule) 52%, transparent)",
+        background: "var(--rule-soft)",
         overflow: "hidden",
       }}
     >
@@ -1517,7 +1666,8 @@ function ProgressBar({ value, active }: { value: number; active: boolean }) {
           background: active
             ? "linear-gradient(90deg, var(--accent), color-mix(in oklch, var(--accent) 72%, white 18%))"
             : "var(--ok)",
-          boxShadow: active ? "0 0 14px color-mix(in oklch, var(--accent) 42%, transparent)" : undefined,
+          boxShadow: active ? "0 0 12px var(--accent-glow)" : undefined,
+          transition: "width var(--motion) var(--ease-out)",
         }}
       />
     </div>
@@ -1526,26 +1676,55 @@ function ProgressBar({ value, active }: { value: number; active: boolean }) {
 
 function WorkStatusIcon({ status }: { status?: AgentStatusKind }) {
   const color = status ? statusColor(status) : "var(--muted)";
+  const fill = status === "done" ? "var(--ok)" : status === "blocked" ? "var(--danger)" : "transparent";
   const filled = status === "done" || status === "blocked";
   return (
     <span
       style={{
-        width: 14,
-        height: 14,
+        width: 16,
+        height: 16,
         borderRadius: 999,
-        border: `1px solid ${color}`,
-        background: filled ? color : "transparent",
+        border: `1.4px solid ${color}`,
+        background: fill,
         color: "var(--bg)",
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
-        fontSize: 9,
-        fontWeight: 900,
         lineHeight: 1,
         animation: status === "running" ? "spark-pulse 1.2s ease-in-out infinite" : undefined,
       }}
     >
-      {status === "blocked" ? "x" : null}
+      {status === "done" && (
+        <svg width="9" height="9" viewBox="0 0 9 9" fill="none" aria-hidden>
+          <path
+            d="M1.4 4.6 L3.6 6.8 L7.6 2.2"
+            stroke="var(--bg)"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
+      {status === "blocked" && (
+        <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden>
+          <path
+            d="M1.5 1.5 L6.5 6.5 M6.5 1.5 L1.5 6.5"
+            stroke="var(--bg)"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+          />
+        </svg>
+      )}
+      {!filled && status === "running" && (
+        <span
+          style={{
+            width: 5,
+            height: 5,
+            borderRadius: 999,
+            background: color,
+          }}
+        />
+      )}
     </span>
   );
 }
@@ -1564,14 +1743,15 @@ function ElapsedChip({
         alignItems: "center",
         gap: 6,
         color: "var(--ink-dim)",
+        fontFamily: "var(--font-mono)",
         fontSize: 11,
         fontVariantNumeric: "tabular-nums",
       }}
     >
       <span
         style={{
-          width: 10,
-          height: 10,
+          width: 8,
+          height: 8,
           borderRadius: 999,
           border: "1px solid var(--muted)",
         }}
@@ -1587,9 +1767,11 @@ function StatusPill({ status }: { status: RunState["status"] }) {
       style={{
         color: runStatusColor(status),
         border: `1px solid ${runStatusColor(status)}`,
-        padding: "2px 6px",
-        fontSize: 9,
-        fontWeight: 900,
+        padding: "3px 8px",
+        borderRadius: 3,
+        fontFamily: "var(--font-sans)",
+        fontSize: 10,
+        fontWeight: 600,
         letterSpacing: "0.1em",
         textTransform: "uppercase",
         flex: "0 0 auto",
@@ -1622,21 +1804,52 @@ function StatusDot({
   );
 }
 
-function EmptyState({ text, tone }: { text: string; tone?: "danger" }) {
+function EmptyState({
+  text,
+  heading,
+  tone,
+}: {
+  text: string;
+  heading?: string;
+  tone?: "danger";
+}) {
   return (
     <div
       style={{
         flex: 1,
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
         background: "var(--bg)",
-        color: tone === "danger" ? "var(--danger)" : "var(--muted)",
-        fontSize: 12,
+        color: tone === "danger" ? "var(--danger)" : "var(--ink-dim)",
+        fontFamily: "var(--font-sans)",
+        gap: 8,
         padding: 32,
+        textAlign: "center",
       }}
     >
-      {text}
+      {heading && (
+        <span
+          style={{
+            color: "var(--ink)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 16,
+            fontWeight: 600,
+          }}
+        >
+          {heading}
+        </span>
+      )}
+      <span
+        style={{
+          color: tone === "danger" ? "var(--danger)" : "var(--ink-dim)",
+          fontFamily: "var(--font-sans)",
+          fontSize: heading ? 13 : 14,
+        }}
+      >
+        {text}
+      </span>
     </div>
   );
 }

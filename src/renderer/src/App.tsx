@@ -1,5 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AppSettings, AppState, FsEntry, ShellInfo, SparkEvent, Worker, Workspace } from "@shared/types";
+import type {
+  AppSettings,
+  AppState,
+  FsEntry,
+  RunState,
+  ShellInfo,
+  SparkEvent,
+  Worker,
+  Workspace,
+} from "@shared/types";
 import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import TerminalGrid from "./components/TerminalGrid";
@@ -58,6 +67,13 @@ export default function App() {
   const [activeEditorPath, setActiveEditorPath] = useState<string | null>(null);
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WorkbenchTab>("workers");
   const [runCountsByWorkspace, setRunCountsByWorkspace] = useState<Record<string, number>>({});
+  // Runs for the currently active workspace, plus the user's selection. Lifted
+  // here so the workbench RunsView and the right-panel SparkAgentPanel both
+  // read from the same source of truth — picking a run on the right updates
+  // the canvas in the centre, deleting a run on the right removes it
+  // everywhere.
+  const [runs, setRuns] = useState<RunState[]>([]);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [defaultShell, setDefaultShell] = useState<ShellInfo | null>(null);
   const [detectedDefaultShell, setDetectedDefaultShell] = useState<ShellInfo | null>(null);
@@ -154,6 +170,41 @@ export default function App() {
     }
   }, []);
 
+  // Refresh the lifted runs list for whichever workspace is active right now.
+  // Reads activeId via the closure, so wrap the body in a function that takes
+  // the workspaceId explicitly to avoid stale-closure issues in subscriptions.
+  const refreshRunsFor = useCallback(async (workspaceId: string | null) => {
+    if (!workspaceId) {
+      setRuns([]);
+      return;
+    }
+    try {
+      const next = await window.spark.orchestration.listRuns(workspaceId);
+      setRuns(next);
+    } catch {
+      /* Surface details elsewhere; this is opportunistic. */
+    }
+  }, []);
+
+  // Initial load + reload on workspace change.
+  useEffect(() => {
+    if (!booted) return;
+    void refreshRunsFor(activeId);
+  }, [activeId, booted, refreshRunsFor]);
+
+  // When the runs list changes, reconcile the active selection: keep the
+  // current pick if it's still present, otherwise jump to the most live one,
+  // otherwise the most recent, otherwise nothing.
+  useEffect(() => {
+    setActiveRunId((current) => {
+      if (current && runs.some((run) => run.id === current)) return current;
+      const live = runs.find((run) =>
+        ["planning", "running", "reviewing", "blocked", "paused"].includes(run.status),
+      );
+      return live?.id ?? runs[0]?.id ?? null;
+    });
+  }, [runs]);
+
   useEffect(() => {
     if (!booted) return;
     const ids = workspaces.map((workspace) => workspace.id);
@@ -180,11 +231,17 @@ export default function App() {
     return window.spark.orchestration.onEvent((event) => {
       if (!event.workspaceId) return;
       void refreshRunCount(event.workspaceId);
+      if (event.workspaceId === activeId) {
+        void refreshRunsFor(event.workspaceId);
+      }
       if (event.type === "run.deleted") {
-        window.setTimeout(() => void refreshRunCount(event.workspaceId), 500);
+        window.setTimeout(() => {
+          void refreshRunCount(event.workspaceId);
+          if (event.workspaceId === activeId) void refreshRunsFor(event.workspaceId);
+        }, 500);
       }
     });
-  }, [booted, refreshRunCount]);
+  }, [booted, refreshRunCount, refreshRunsFor, activeId]);
 
   useEffect(() => {
     if (activeWorkbenchTab !== "runs") return;
@@ -502,7 +559,12 @@ export default function App() {
                   />
                 </div>
                 <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: activeWorkbenchTab === "runs" ? "flex" : "none" }}>
-                  <RunsView workspace={ws} />
+                  <RunsView
+                    workspace={ws}
+                    runs={ws.id === activeId ? runs : []}
+                    activeRunId={ws.id === activeId ? activeRunId : null}
+                    onSelectRun={setActiveRunId}
+                  />
                 </div>
               </div>
             ))
@@ -513,6 +575,9 @@ export default function App() {
           <RightPanel
             workspace={activeWorkspace}
             activePath={activeEditorPath}
+            runs={runs}
+            activeRunId={activeRunId}
+            onSelectRun={setActiveRunId}
             onOpenFile={openEditorFile}
             onDeleteFile={closeEditorFile}
             onRenameFile={(oldPath, entry) => {
@@ -552,6 +617,9 @@ export default function App() {
 function RightPanel({
   workspace,
   activePath,
+  runs,
+  activeRunId,
+  onSelectRun,
   onOpenFile,
   onDeleteFile,
   onRenameFile,
@@ -559,6 +627,9 @@ function RightPanel({
 }: {
   workspace: Workspace | null;
   activePath: string | null;
+  runs: RunState[];
+  activeRunId: string | null;
+  onSelectRun: (id: string | null) => void;
   onOpenFile: (entry: FsEntry) => void;
   onDeleteFile: (path: string) => void;
   onRenameFile: (oldPath: string, entry: FsEntry) => void;
@@ -578,7 +649,13 @@ function RightPanel({
         overflow: "hidden",
       }}
     >
-      <OrchestrationSidebar workspace={workspace} onQuickTest={onQuickTest} />
+      <OrchestrationSidebar
+        workspace={workspace}
+        runs={runs}
+        activeRunId={activeRunId}
+        onSelectRun={onSelectRun}
+        onQuickTest={onQuickTest}
+      />
       {cwd ? (
         <FileTree
           cwd={cwd}
@@ -650,11 +727,11 @@ function WorkbenchTabs({
   return (
     <div
       style={{
-        flex: "0 0 34px",
+        flex: "0 0 36px",
         display: "flex",
         alignItems: "stretch",
         background: "var(--panel)",
-        borderBottom: "1px solid var(--rule)",
+        borderBottom: "1px solid var(--rule-soft)",
         position: "relative",
       }}
     >
@@ -690,9 +767,9 @@ function WorkbenchTabs({
             title="New worker"
             style={{
               appearance: "none",
-              width: 24,
-              height: 24,
-              border: "1px solid var(--rule-strong)",
+              width: 28,
+              height: 28,
+              border: "1px solid var(--rule-soft)",
               background: "var(--bg)",
               color: shells.length > 0 ? "var(--ink-dim)" : "var(--muted)",
               display: "flex",
@@ -700,6 +777,13 @@ function WorkbenchTabs({
               justifyContent: "center",
               padding: 0,
               cursor: "default",
+              transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+            }}
+            onMouseEnter={(e) => {
+              if (shells.length > 0) e.currentTarget.style.background = "var(--hover)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "var(--bg)";
             }}
           >
             <PlusIcon />
@@ -718,15 +802,34 @@ function WorkbenchTabs({
       )}
       <div
         style={{
-          padding: "0 14px",
+          padding: "0 16px",
           display: "flex",
           alignItems: "center",
+          gap: 8,
           color: "var(--muted)",
-          fontSize: 10,
-          letterSpacing: "0.08em",
         }}
       >
-        LAYOUT&nbsp;<b style={{ color: "var(--ink-dim)" }}>{activeDims.cols}×{activeDims.rows}</b>
+        <span
+          style={{
+            fontFamily: "var(--font-sans)",
+            fontWeight: 600,
+            fontSize: 10,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+          }}
+        >
+          LAYOUT
+        </span>
+        <span
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            fontVariantNumeric: "tabular-nums",
+            color: "var(--ink-dim)",
+          }}
+        >
+          {activeDims.cols}×{activeDims.rows}
+        </span>
       </div>
     </div>
   );
@@ -750,19 +853,28 @@ function WorkbenchTabButton({
       style={{
         appearance: "none",
         border: "none",
-        borderRight: "1px solid var(--rule)",
+        borderRight: "1px solid var(--rule-soft)",
         background: active ? "var(--bg)" : "transparent",
         color: active ? "var(--ink)" : "var(--ink-dim)",
         padding: "0 16px",
         display: "flex",
         alignItems: "center",
-        gap: 9,
-        fontFamily: "inherit",
+        gap: 8,
+        fontFamily: "var(--font-sans)",
         fontSize: 11,
-        fontWeight: 700,
-        letterSpacing: "0.08em",
+        fontWeight: 600,
+        letterSpacing: "0.1em",
+        textTransform: "uppercase",
         cursor: "default",
         position: "relative",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+      }}
+      onMouseEnter={(e) => {
+        if (!active) e.currentTarget.style.background = "var(--hover)";
+      }}
+      onMouseLeave={(e) => {
+        if (!active) e.currentTarget.style.background = "transparent";
       }}
     >
       {active && (
@@ -772,8 +884,9 @@ function WorkbenchTabButton({
             top: 0,
             left: 0,
             right: 0,
-            height: 2,
+            height: 1.5,
             background: "var(--accent)",
+            boxShadow: "0 0 12px var(--accent-glow)",
           }}
         />
       )}
@@ -781,13 +894,17 @@ function WorkbenchTabButton({
       {count !== undefined && (
         <span
           style={{
-            minWidth: 20,
+            minWidth: 18,
             textAlign: "center",
-            padding: "1px 5px",
-            border: "1px solid var(--rule-strong)",
+            padding: "1px 6px",
+            border: "1px solid var(--rule-soft)",
+            background: active ? "var(--accent-soft)" : "transparent",
             color: active ? "var(--ink)" : "var(--muted)",
+            fontFamily: "var(--font-mono)",
             fontSize: 10,
             fontVariantNumeric: "tabular-nums",
+            letterSpacing: 0,
+            textTransform: "none",
           }}
         >
           {String(count).padStart(2, "0")}
@@ -810,23 +927,25 @@ function ShellPicker({
     <div
       style={{
         position: "absolute",
-        top: 34,
+        top: 36,
         right: 0,
         zIndex: 50,
         background: "var(--panel-2)",
         border: "1px solid var(--rule-strong)",
-        boxShadow: "0 6px 24px rgba(0,0,0,0.4)",
+        boxShadow: "var(--shadow-2)",
         minWidth: 240,
       }}
     >
       <div
         style={{
           padding: "8px 12px",
+          fontFamily: "var(--font-sans)",
           fontSize: 10,
           letterSpacing: "0.14em",
-          fontWeight: 700,
+          textTransform: "uppercase",
+          fontWeight: 600,
           color: "var(--muted)",
-          borderBottom: "1px solid var(--rule)",
+          borderBottom: "1px solid var(--rule-soft)",
         }}
       >
         SHELL
@@ -847,19 +966,21 @@ function ShellPicker({
                 border: "none",
                 padding: "8px 12px",
                 color: "var(--ink)",
-                fontFamily: "inherit",
+                fontFamily: "var(--font-sans)",
                 fontSize: 12,
                 cursor: "default",
                 display: "flex",
                 alignItems: "center",
                 gap: 10,
+                transition:
+                  "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
               }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--panel)")}
+              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--hover-strong)")}
               onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
             >
-              <span style={{ width: 8, height: 8, background: "var(--accent)", opacity: isDefault ? 1 : 0 }} />
+              <span style={{ width: 6, height: 6, borderRadius: 999, background: "var(--accent)", opacity: isDefault ? 1 : 0, flex: "0 0 6px" }} />
               <span style={{ flex: 1 }}>{shell.label}</span>
-              <span style={{ color: "var(--muted)", fontSize: 10 }}>{shell.family}</span>
+              <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>{shell.family}</span>
             </button>
           );
         })}
@@ -877,12 +998,37 @@ function NoWorkspace({ onCreate }: { onCreate: () => void }) {
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        gap: 16,
+        gap: 12,
         background: "var(--bg)",
+        backgroundImage:
+          "radial-gradient(circle, var(--rule-soft) 1px, transparent 1px)",
+        backgroundSize: "24px 24px",
         color: "var(--muted)",
+        padding: 32,
       }}
     >
-      <div style={{ fontSize: 12, letterSpacing: "0.18em", fontWeight: 700 }}>NO WORKSPACE</div>
+      <div
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 24,
+          fontWeight: 700,
+          color: "var(--ink)",
+          letterSpacing: "-0.005em",
+        }}
+      >
+        Your workspace is empty
+      </div>
+      <div
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 13,
+          fontWeight: 400,
+          color: "var(--ink-dim)",
+          marginBottom: 8,
+        }}
+      >
+        Pick a folder to start orchestrating workers in it.
+      </div>
       <button
         type="button"
         onClick={onCreate}
@@ -891,16 +1037,38 @@ function NoWorkspace({ onCreate }: { onCreate: () => void }) {
           background: "transparent",
           border: "1px solid var(--rule-strong)",
           color: "var(--ink-dim)",
-          padding: "8px 14px",
-          fontSize: 11,
-          fontFamily: "inherit",
-          letterSpacing: "0.1em",
-          fontWeight: 700,
+          padding: "10px 18px",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12,
+          letterSpacing: "0.04em",
+          fontWeight: 600,
           cursor: "default",
+          transition:
+            "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "var(--accent-soft)";
+          e.currentTarget.style.borderColor = "var(--accent-edge)";
+          e.currentTarget.style.color = "var(--ink)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "transparent";
+          e.currentTarget.style.borderColor = "var(--rule-strong)";
+          e.currentTarget.style.color = "var(--ink-dim)";
         }}
       >
-        + NEW WORKSPACE
+        + Add a workspace
       </button>
+      <div
+        style={{
+          marginTop: 12,
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          color: "var(--muted)",
+        }}
+      >
+        Spark stores its data in ~/.SparkAgent
+      </div>
     </div>
   );
 }
