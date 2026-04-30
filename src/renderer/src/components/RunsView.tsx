@@ -11,8 +11,11 @@ import type {
 } from "@shared/types";
 import DevInspector from "./DevInspector";
 
-const MIN_RUN_CANVAS_ZOOM = 0.45;
-const MAX_RUN_CANVAS_ZOOM = 1.4;
+const MIN_RUN_CANVAS_ZOOM = 0.3;
+const MAX_RUN_CANVAS_ZOOM = 2.5;
+const DEFAULT_RUN_CANVAS_ZOOM = 1;
+const WHEEL_ZOOM_SENSITIVITY = 0.0014;
+const ZOOM_EASE = 0.32;
 
 interface Props {
   workspace: Workspace | null;
@@ -215,33 +218,38 @@ function RunSidebar({
   return (
     <aside
       style={{
-        width: 230,
-        flex: "0 0 230px",
+        width: 68,
+        flex: "0 0 68px",
         borderRight: "1px solid var(--rule)",
         background: "var(--panel)",
         minHeight: 0,
         display: "flex",
         flexDirection: "column",
+        alignItems: "stretch",
       }}
     >
       <div
         style={{
           flex: "0 0 auto",
-          padding: "10px 12px",
+          padding: "8px 6px 7px",
           borderBottom: "1px solid var(--rule)",
           display: "flex",
-          alignItems: "baseline",
-          gap: 8,
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 4,
         }}
       >
-        <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.12em" }}>RUNS</span>
-        <span style={{ color: "var(--muted)", fontSize: 10 }}>{runs.length}</span>
+        <span style={{ fontSize: 9, fontWeight: 800, letterSpacing: "0.12em" }}>RUNS</span>
+        <span style={{ color: "var(--muted)", fontSize: 9, fontWeight: 800 }}>
+          {formatRunIndex(runs.length)}
+        </span>
       </div>
-      <div style={{ overflow: "auto", minHeight: 0 }}>
-        {runs.map((run) => (
+      <div style={{ overflow: "auto", minHeight: 0, padding: "7px 6px", display: "flex", flexDirection: "column", gap: 6 }}>
+        {runs.map((run, index) => (
           <RunButton
             key={run.id}
             run={run}
+            index={index + 1}
             active={run.id === activeRunId}
             onClick={() => onSelect(run)}
           />
@@ -253,58 +261,60 @@ function RunSidebar({
 
 function RunButton({
   run,
+  index,
   active,
   onClick,
 }: {
   run: RunState;
+  index: number;
   active: boolean;
   onClick: () => void;
 }) {
+  const description = `${run.title}\n${run.status} · ${run.steps.length} steps · ${formatTime(run.updatedAt)}`;
   return (
     <button
       type="button"
       onClick={onClick}
-      title={run.title}
+      title={description}
       style={{
         appearance: "none",
         width: "100%",
-        border: "none",
-        borderBottom: "1px solid var(--rule)",
+        aspectRatio: "1 / 0.82",
+        border: `1px solid ${active ? "var(--accent)" : "var(--rule)"}`,
+        borderLeft: `3px solid ${active ? "var(--accent)" : "transparent"}`,
         background: active ? "var(--panel-2)" : "transparent",
         color: active ? "var(--ink)" : "var(--ink-dim)",
-        padding: "9px 12px",
-        textAlign: "left",
+        padding: "5px 4px",
+        textAlign: "center",
         fontFamily: "inherit",
         cursor: "default",
-        display: "flex",
-        flexDirection: "column",
-        gap: 5,
+        display: "grid",
+        gridTemplateRows: "auto minmax(0, 1fr)",
+        alignItems: "center",
+        justifyItems: "center",
+        gap: 3,
       }}
     >
       <span
         style={{
-          display: "flex",
+          display: "grid",
+          gridTemplateColumns: "1fr auto",
           alignItems: "center",
-          gap: 7,
-          minWidth: 0,
+          width: "100%",
         }}
       >
+        <span />
         <StatusDot status={run.status} />
-        <span
-          style={{
-            minWidth: 0,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            fontSize: 11,
-            fontWeight: 800,
-          }}
-        >
-          {run.title}
-        </span>
       </span>
-      <span style={{ color: "var(--muted)", fontSize: 9 }}>
-        {run.status} · {run.steps.length} steps · {formatTime(run.updatedAt)}
+      <span
+        style={{
+          color: active ? "var(--ink)" : "var(--muted)",
+          fontSize: 13,
+          fontWeight: 900,
+          lineHeight: 1,
+        }}
+      >
+        {formatRunIndex(index)}
       </span>
     </button>
   );
@@ -359,144 +369,276 @@ function RunHeader({ run }: { run: RunState }) {
           {activeStep ? `Current: ${activeStep.title}` : "Waiting for Spark to plan the first step"}
         </div>
       </div>
-      <div style={{ display: "flex", gap: 16, color: "var(--muted)", fontSize: 10 }}>
-        <Metric label="steps" value={run.steps.length} />
-        <Metric label="tasks" value={run.workerTasks.length} />
-        <Metric label="attempts" value={run.workerAttempts.length} />
-        <Metric label="auto" value={run.autopilot?.status ?? "idle"} />
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(4, max-content)",
+          alignItems: "stretch",
+          color: "var(--muted)",
+        }}
+      >
+        <Metric label="STEPS" value={run.steps.length} />
+        <Metric label="TASKS" value={run.workerTasks.length} separated />
+        <Metric label="ATTEMPTS" value={run.workerAttempts.length} separated />
+        <Metric label="AUTO" value={run.autopilot?.status ?? "idle"} separated />
       </div>
     </header>
   );
 }
 
-function Metric({ label, value }: { label: string; value: string | number }) {
+function Metric({
+  label,
+  value,
+  separated,
+}: {
+  label: string;
+  value: string | number;
+  separated?: boolean;
+}) {
+  const isNumber = typeof value === "number";
   return (
-    <span style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "flex-end" }}>
-      <span style={{ color: "var(--muted)", fontSize: 9, letterSpacing: "0.1em" }}>{label}</span>
-      <b style={{ color: "var(--ink-dim)", fontSize: 11 }}>{value}</b>
+    <span
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        alignItems: "flex-start",
+        justifyContent: "center",
+        minWidth: isNumber ? 62 : 86,
+        padding: "0 18px",
+        borderLeft: separated ? "1px solid var(--rule)" : "none",
+      }}
+    >
+      <span style={{ color: "var(--muted)", fontSize: 9, letterSpacing: "0.12em", fontWeight: 800 }}>
+        {label}
+      </span>
+      <b
+        style={{
+          color: "var(--ink)",
+          fontSize: isNumber ? 18 : 14,
+          lineHeight: 1,
+          fontWeight: 850,
+        }}
+      >
+        {value}
+      </b>
     </span>
   );
 }
 
 function RunCanvas({ run }: { run: RunState }) {
-  const [zoom, setZoom] = useState(0.72);
+  const [zoomLabel, setZoomLabel] = useState(`${Math.round(DEFAULT_RUN_CANVAS_ZOOM * 100)}%`);
   const [isPanning, setIsPanning] = useState(false);
+
   const viewportRef = useRef<HTMLDivElement | null>(null);
-  const zoomRef = useRef(zoom);
-  const pendingZoomAnchorRef = useRef<{
-    previousZoom: number;
-    pointerX: number;
-    pointerY: number;
-    scrollLeft: number;
-    scrollTop: number;
+  const panRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+
+  // Live transform — written directly to the DOM so animation never blocks on React.
+  // x/y go on the pan layer (transform: translate3d), z goes on the inner content as
+  // CSS `zoom` so text re-lays-out crisply at every scale instead of bitmap-scaling.
+  const xRef = useRef(0);
+  const yRef = useRef(0);
+  const zRef = useRef(1);
+  const targetZRef = useRef(DEFAULT_RUN_CANVAS_ZOOM);
+  // Cursor anchor for the in-flight zoom animation: world point + screen point that should stay aligned.
+  const anchorRef = useRef<{
+    worldX: number;
+    worldY: number;
+    cursorX: number;
+    cursorY: number;
   } | null>(null);
-  const wheelFrameRef = useRef<number | null>(null);
-  const wheelDeltaRef = useRef(0);
-  const wheelPointerRef = useRef<{ x: number; y: number } | null>(null);
+  const animationRef = useRef<number | null>(null);
   const panStartRef = useRef<{
-    pointerX: number;
-    pointerY: number;
-    scrollLeft: number;
-    scrollTop: number;
+    pointerId: number;
+    startCx: number;
+    startCy: number;
+    startX: number;
+    startY: number;
   } | null>(null);
+  const centeredRunIdRef = useRef<string | null>(null);
+
   const maps = useMemo(() => buildRunMaps(run), [run]);
   const orderedSteps = useMemo(() => sortSteps(run.steps), [run.steps]);
   const graphWidth = orderedSteps.length === 0
     ? 784
     : 110 + (orderedSteps.length * 320) + 208;
   const contentWidth = Math.max(920, graphWidth);
-  const contentHeight = orderedSteps.length === 0 ? 460 : 560;
-  const zoomLabel = `${Math.round(zoom * 100)}%`;
 
-  useEffect(() => {
-    zoomRef.current = zoom;
-  }, [zoom]);
+  const applyTransform = () => {
+    const pan = panRef.current;
+    const content = contentRef.current;
+    if (!pan || !content) return;
+    // Round translate to integer device pixels so the pan layer doesn't get raster-tiled
+    // at sub-pixel offsets (which softens text). 2D translate (not translate3d) keeps the
+    // browser from forcing a permanent compositor layer that downsamples on re-raster.
+    const tx = Math.round(xRef.current);
+    const ty = Math.round(yRef.current);
+    pan.style.transform = `translate(${tx}px, ${ty}px)`;
+    content.style.setProperty("zoom", String(zRef.current));
+  };
 
-  useEffect(() => {
-    return () => {
-      if (wheelFrameRef.current !== null) cancelAnimationFrame(wheelFrameRef.current);
+  const updateZoomLabel = () => {
+    const next = `${Math.round(zRef.current * 100)}%`;
+    setZoomLabel((cur) => (cur === next ? cur : next));
+  };
+
+  const stopAnimation = () => {
+    if (animationRef.current !== null) {
+      cancelAnimationFrame(animationRef.current);
+      animationRef.current = null;
+    }
+  };
+
+  const startAnimation = () => {
+    if (animationRef.current !== null) return;
+    const tick = () => {
+      const dz = targetZRef.current - zRef.current;
+      const anchor = anchorRef.current;
+      if (Math.abs(dz) < 0.0008) {
+        zRef.current = targetZRef.current;
+        if (anchor) {
+          xRef.current = anchor.cursorX - anchor.worldX * zRef.current;
+          yRef.current = anchor.cursorY - anchor.worldY * zRef.current;
+        }
+        applyTransform();
+        updateZoomLabel();
+        animationRef.current = null;
+        return;
+      }
+      zRef.current += dz * ZOOM_EASE;
+      if (anchor) {
+        xRef.current = anchor.cursorX - anchor.worldX * zRef.current;
+        yRef.current = anchor.cursorY - anchor.worldY * zRef.current;
+      }
+      applyTransform();
+      updateZoomLabel();
+      animationRef.current = requestAnimationFrame(tick);
     };
+    animationRef.current = requestAnimationFrame(tick);
+  };
+
+  const zoomToward = (nextTargetZ: number, cursorX: number, cursorY: number) => {
+    const clamped = clampZoom(nextTargetZ);
+    if (clamped === targetZRef.current && clamped === zRef.current) return;
+    // Anchor on the current rendered position so easing keeps the cursor stable.
+    const worldX = (cursorX - xRef.current) / zRef.current;
+    const worldY = (cursorY - yRef.current) / zRef.current;
+    anchorRef.current = { worldX, worldY, cursorX, cursorY };
+    targetZRef.current = clamped;
+    startAnimation();
+  };
+
+  const zoomBy = (delta: number) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    zoomToward(
+      targetZRef.current + delta,
+      viewport.clientWidth / 2,
+      viewport.clientHeight / 2,
+    );
+  };
+
+  const zoomToValue = (value: number) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    zoomToward(value, viewport.clientWidth / 2, viewport.clientHeight / 2);
+  };
+
+  // Native, non-passive wheel listener so preventDefault always works.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const rect = viewport.getBoundingClientRect();
+      const cursorX = event.clientX - rect.left;
+      const cursorY = event.clientY - rect.top;
+      const lineHeight = 16;
+      const deltaScale = event.deltaMode === 1
+        ? lineHeight
+        : event.deltaMode === 2
+          ? viewport.clientHeight
+          : 1;
+      const deltaY = event.deltaY * deltaScale;
+      const factor = Math.exp(-deltaY * WHEEL_ZOOM_SENSITIVITY);
+
+      // If a pan is somehow still active, end it cleanly.
+      if (panStartRef.current) {
+        if (viewport.hasPointerCapture(panStartRef.current.pointerId)) {
+          viewport.releasePointerCapture(panStartRef.current.pointerId);
+        }
+        panStartRef.current = null;
+        setIsPanning(false);
+      }
+
+      zoomToward(targetZRef.current * factor, cursorX, cursorY);
+    };
+
+    viewport.addEventListener("wheel", onWheel, { passive: false });
+    return () => viewport.removeEventListener("wheel", onWheel);
   }, []);
 
+  useEffect(() => () => stopAnimation(), []);
+
+  // Center the graph the first time we see a given run. Default to native 100% so
+  // text always renders at its true size — sub-100% CSS zoom rasterizes fonts at
+  // fractional sizes which looks soft. If the content is wider than the viewport,
+  // it just overflows and the user pans; the wheel still zooms out smoothly.
   useLayoutEffect(() => {
-    const pending = pendingZoomAnchorRef.current;
+    if (centeredRunIdRef.current === run.id) return;
     const viewport = viewportRef.current;
-    if (!pending || !viewport) return;
-    pendingZoomAnchorRef.current = null;
+    const content = contentRef.current;
+    if (!viewport || !content) return;
+    // BCR returns the on-screen visual size — divide by current zoom to get the natural size.
+    const rect = content.getBoundingClientRect();
+    const naturalW = rect.width / zRef.current;
+    const naturalH = rect.height / zRef.current;
+    const vw = viewport.clientWidth;
+    const vh = viewport.clientHeight;
+    if (naturalW <= 0 || naturalH <= 0 || vw <= 0 || vh <= 0) return;
+    centeredRunIdRef.current = run.id;
+    const z = clampZoom(DEFAULT_RUN_CANVAS_ZOOM);
+    stopAnimation();
+    zRef.current = z;
+    targetZRef.current = z;
+    xRef.current = (vw - naturalW * z) / 2;
+    yRef.current = (vh - naturalH * z) / 2;
+    anchorRef.current = null;
+    applyTransform();
+    updateZoomLabel();
+  }, [run.id]);
 
-    const nextZoom = zoomRef.current;
-    const ratio = nextZoom / pending.previousZoom;
-    viewport.scrollLeft = ((pending.scrollLeft + pending.pointerX) * ratio) - pending.pointerX;
-    viewport.scrollTop = ((pending.scrollTop + pending.pointerY) * ratio) - pending.pointerY;
-  }, [zoom]);
-
-  const setZoomFromViewportPoint = (next: number, pointerX?: number, pointerY?: number) => {
-    const viewport = viewportRef.current;
-    const currentZoom = zoomRef.current;
-    const nextZoom = clampZoom(next);
-    if (nextZoom === currentZoom) return;
-
-    if (viewport) {
-      pendingZoomAnchorRef.current = {
-        previousZoom: currentZoom,
-        pointerX: pointerX ?? viewport.clientWidth / 2,
-        pointerY: pointerY ?? viewport.clientHeight / 2,
-        scrollLeft: viewport.scrollLeft,
-        scrollTop: viewport.scrollTop,
-      };
-    }
-    zoomRef.current = nextZoom;
-    setZoom(nextZoom);
-  };
-
-  const setBoundedZoom = (next: number) => {
-    setZoomFromViewportPoint(next);
-  };
-
-  const zoomAtPoint = (event: React.WheelEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const viewport = event.currentTarget;
-    const rect = viewport.getBoundingClientRect();
-    wheelPointerRef.current = {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top,
-    };
-    wheelDeltaRef.current += event.deltaY;
-
-    if (wheelFrameRef.current !== null) return;
-    wheelFrameRef.current = requestAnimationFrame(() => {
-      wheelFrameRef.current = null;
-      const delta = wheelDeltaRef.current;
-      wheelDeltaRef.current = 0;
-      const pointer = wheelPointerRef.current;
-      wheelPointerRef.current = null;
-      if (!pointer || delta === 0) return;
-
-      const factor = Math.exp(-delta * 0.0018);
-      setZoomFromViewportPoint(zoomRef.current * factor, pointer.x, pointer.y);
-    });
-  };
   const startPanning = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
+    stopAnimation();
+    targetZRef.current = zRef.current;
+    anchorRef.current = null;
     panStartRef.current = {
-      pointerX: event.clientX,
-      pointerY: event.clientY,
-      scrollLeft: event.currentTarget.scrollLeft,
-      scrollTop: event.currentTarget.scrollTop,
+      pointerId: event.pointerId,
+      startCx: event.clientX,
+      startCy: event.clientY,
+      startX: xRef.current,
+      startY: yRef.current,
     };
     setIsPanning(true);
   };
+
   const movePanning = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!isPanning || !panStartRef.current) return;
-    event.preventDefault();
     const start = panStartRef.current;
-    event.currentTarget.scrollLeft = start.scrollLeft - (event.clientX - start.pointerX);
-    event.currentTarget.scrollTop = start.scrollTop - (event.clientY - start.pointerY);
+    if (!start || start.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    xRef.current = start.startX + (event.clientX - start.startCx);
+    yRef.current = start.startY + (event.clientY - start.startCy);
+    applyTransform();
   };
+
   const stopPanning = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!isPanning) return;
+    const start = panStartRef.current;
+    if (!start || start.pointerId !== event.pointerId) return;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
@@ -533,17 +675,16 @@ function RunCanvas({ run }: { run: RunState }) {
           boxShadow: "0 10px 24px rgba(0,0,0,0.22)",
         }}
       >
-        <ZoomButton label="-" title="Zoom out" onClick={() => setBoundedZoom(zoom - 0.1)} />
+        <ZoomButton label="-" title="Zoom out" onClick={() => zoomBy(-0.12)} />
         <span style={{ width: 42, textAlign: "center", color: "var(--ink-dim)", fontSize: 10 }}>
           {zoomLabel}
         </span>
-        <ZoomButton label="+" title="Zoom in" onClick={() => setBoundedZoom(zoom + 0.1)} />
-        <ZoomButton label="1:1" title="Reset zoom" wide onClick={() => setBoundedZoom(1)} />
+        <ZoomButton label="+" title="Zoom in" onClick={() => zoomBy(0.12)} />
+        <ZoomButton label="1:1" title="Reset zoom" wide onClick={() => zoomToValue(1)} />
       </div>
 
       <div
         ref={viewportRef}
-        onWheel={zoomAtPoint}
         onPointerDown={startPanning}
         onPointerMove={movePanning}
         onPointerUp={stopPanning}
@@ -551,30 +692,31 @@ function RunCanvas({ run }: { run: RunState }) {
         style={{
           position: "absolute",
           inset: 0,
-          overflow: "auto",
+          overflow: "hidden",
           cursor: isPanning ? "grabbing" : "grab",
-          userSelect: isPanning ? "none" : undefined,
-          overscrollBehavior: "contain",
+          userSelect: "none",
+          touchAction: "none",
         }}
       >
         <div
+          ref={panRef}
           style={{
-            width: Math.ceil(contentWidth * zoom) + 72,
-            minHeight: Math.ceil(contentHeight * zoom) + 88,
-            padding: "34px 36px",
-            contain: "layout size",
+            position: "absolute",
+            top: 0,
+            left: 0,
+            transformOrigin: "0 0",
           }}
         >
           <div
+            ref={contentRef}
             style={{
               width: contentWidth,
-              zoom,
-              textRendering: "geometricPrecision",
-              WebkitFontSmoothing: "antialiased",
               display: "flex",
               flexDirection: "column",
               gap: 22,
-            } as React.CSSProperties & { zoom: number }}
+              textRendering: "geometricPrecision",
+              WebkitFontSmoothing: "antialiased",
+            }}
           >
             {orderedSteps.length === 0 ? (
               <PlanningGraph run={run} />
@@ -675,7 +817,7 @@ function StepsGraph({
       style={{
         minHeight: 280,
         display: "grid",
-        gridTemplateColumns: `110px ${steps.map(() => "82px 238px").join(" ")} 82px 126px`,
+        gridTemplateColumns: `110px ${steps.map(() => "82px 258px").join(" ")} 82px 126px`,
         alignItems: "center",
       }}
     >
@@ -796,33 +938,46 @@ function StepNode({
   const rows = agentRowsForStep(step, taskById, attemptByTask);
   const tone = stepStatusColor(step.status);
   const nodeActive = active || step.status === "running" || step.status === "reviewing";
+  const primaryRow = rows[0];
 
   return (
     <article
       title={step.goal || step.title}
       style={{
-        width: 238,
-        minHeight: 146,
+        width: 258,
+        minHeight: 166,
         background: nodeActive
-          ? "color-mix(in oklch, var(--panel-2) 88%, var(--accent) 12%)"
-          : "color-mix(in oklch, var(--panel) 92%, transparent)",
+          ? "linear-gradient(135deg, color-mix(in oklch, var(--panel-2) 86%, var(--accent) 14%), color-mix(in oklch, var(--panel) 94%, transparent))"
+          : "linear-gradient(135deg, color-mix(in oklch, var(--panel) 92%, white 2%), color-mix(in oklch, var(--panel) 92%, transparent))",
         border: `1px solid ${nodeActive ? "var(--accent)" : "var(--rule-strong)"}`,
+        borderRadius: 6,
         boxShadow: nodeActive
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 36%, transparent), 0 18px 40px rgba(0,0,0,0.28)"
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 36%, transparent), 0 0 24px color-mix(in oklch, var(--accent) 22%, transparent), 0 18px 44px rgba(0,0,0,0.34)"
           : "0 12px 34px rgba(0,0,0,0.22)",
-        padding: "11px 12px",
+        padding: "12px 13px",
         display: "flex",
         flexDirection: "column",
-        gap: 8,
+        gap: 9,
       }}
     >
-      <div style={{ display: "grid", gridTemplateColumns: "32px minmax(0, 1fr) auto", gap: 8 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "32px minmax(0, 1fr) auto", gap: 8, alignItems: "start" }}>
         <StepIcon step={step} />
-        <div style={{ minWidth: 0 }}>
+        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+          <div
+            style={{
+              color: "var(--muted)",
+              fontSize: 8,
+              fontWeight: 900,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+            }}
+          >
+            STEP {displayIndex}
+          </div>
           <div
             style={{
               color: "var(--ink)",
-              fontSize: 12,
+              fontSize: 13,
               fontWeight: 900,
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -831,19 +986,10 @@ function StepNode({
           >
             {step.title}
           </div>
-          <div
-            style={{
-              color: "var(--muted)",
-              fontSize: 9,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            step {displayIndex}
-          </div>
         </div>
-        <StatusDot status={step.status} />
+        <span style={{ color: tone, fontSize: 9, fontWeight: 900, textTransform: "uppercase" }}>
+          {stepStatusLabel(step.status)}
+        </span>
       </div>
 
       <div
@@ -861,15 +1007,15 @@ function StepNode({
         {step.goal || "Worker activity for this step."}
       </div>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, minHeight: 24 }}>
         {rows.length === 0 ? (
           <Tag muted>waiting for agents</Tag>
         ) : (
-          rows.slice(0, 4).map((row, index) => (
+          rows.slice(0, 2).map((row, index) => (
             <AgentTag key={index} row={row} stepStatus={step.status} />
           ))
         )}
-        {rows.length > 4 && <Tag muted>+{rows.length - 4}</Tag>}
+        {rows.length > 2 && <Tag muted>+{rows.length - 2}</Tag>}
       </div>
 
       <div
@@ -882,10 +1028,13 @@ function StepNode({
           fontSize: 9,
         }}
       >
-        <span style={{ color: tone, fontWeight: 900, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          {step.status}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: tone, fontWeight: 900, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+          <StatusDot status={step.status} small />
+          {stepStatusLabel(step.status)}
         </span>
-        <span>{step.workerTaskIds.length} task{step.workerTaskIds.length === 1 ? "" : "s"}</span>
+        <span>
+          {primaryRow?.task?.status ?? `${step.workerTaskIds.length} task${step.workerTaskIds.length === 1 ? "" : "s"}`}
+        </span>
       </div>
     </article>
   );
@@ -1041,29 +1190,66 @@ function RunDetails({
   const activeTasks = activeStep
     ? activeStep.workerTaskIds.map((id) => taskById.get(id)).filter((task): task is WorkerTask => Boolean(task))
     : [];
-  const recentAttempts = run.workerAttempts.slice(-4).reverse();
+  const activeAttempts = activeTasks
+    .map((task) => attemptByTask.get(task.id))
+    .filter((attempt): attempt is WorkerAttempt => Boolean(attempt));
+  const activeAttempt = activeAttempts.find((attempt) => isActiveAttemptStatus(attempt.status)) ?? activeAttempts[0];
+  const workItems = activeStep ? buildStepWorkItems(activeStep, activeTasks, attemptByTask) : [];
+  const completeTasks = activeTasks.filter(isCompletedTask).length;
+  const taskProgress = activeTasks.length === 0 ? null : Math.round((completeTasks / activeTasks.length) * 100);
+  const recentAttempts = run.workerAttempts.slice(-5).reverse();
 
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "minmax(260px, 1.2fr) minmax(260px, 1fr)",
-        gap: 14,
-        maxWidth: 920,
+        gridTemplateColumns: "minmax(420px, 0.9fr) minmax(520px, 1.1fr)",
+        gap: 16,
+        maxWidth: 1260,
       }}
     >
-      <DetailPanel title={activeStep ? `STEP ${activeStepNumber}` : "RUN"}>
+      <DetailPanel
+        title={activeStep ? `STEP ${activeStepNumber}` : "RUN"}
+        meta={activeStep ? stepStatusLabel(activeStep.status) : run.status}
+        right={activeStep ? <ElapsedChip attempt={activeAttempt} fallback={activeStep.updatedAt} /> : undefined}
+      >
         {activeStep ? (
           <>
-            <div style={{ color: "var(--ink)", fontSize: 12, fontWeight: 900 }}>{activeStep.title}</div>
-            <div style={{ color: "var(--ink-dim)", fontSize: 10, lineHeight: 1.5 }}>
+            <div style={{ color: "var(--ink)", fontSize: 16, fontWeight: 900, lineHeight: 1.15 }}>
+              {activeStep.title}
+            </div>
+            <div style={{ color: "var(--ink-dim)", fontSize: 11, lineHeight: 1.5 }}>
               {activeStep.goal || "No goal recorded for this step yet."}
             </div>
-            {activeStep.acceptanceCriteria.length > 0 && (
-              <CompactList label="acceptance" items={activeStep.acceptanceCriteria} />
-            )}
-            {activeStep.verificationCommands.length > 0 && (
-              <CompactList label="verify" items={activeStep.verificationCommands} monospace />
+            <div
+              style={{
+                border: "1px solid var(--rule)",
+                background: "color-mix(in oklch, var(--bg) 58%, transparent)",
+                borderRadius: 5,
+                overflow: "hidden",
+              }}
+            >
+              {workItems.length === 0 ? (
+                <div style={{ padding: "13px 14px", color: "var(--muted)", fontSize: 11 }}>
+                  Waiting for Spark to attach acceptance or verification work.
+                </div>
+              ) : (
+                workItems.map((item, index) => (
+                  <WorkItemRow key={`${item.label}-${index}`} item={item} />
+                ))
+              )}
+            </div>
+            {taskProgress === null ? (
+              <div style={{ color: "var(--muted)", fontSize: 10 }}>
+                Worker task progress appears here once Spark creates task records for this step.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 10, alignItems: "center" }}>
+                <ProgressBar value={taskProgress} active={isRunningStatus(activeStep.status)} />
+                <span style={{ color: "var(--ink-dim)", fontSize: 11 }}>
+                  {completeTasks} / {activeTasks.length}
+                </span>
+              </div>
             )}
           </>
         ) : (
@@ -1071,20 +1257,35 @@ function RunDetails({
         )}
       </DetailPanel>
 
-      <DetailPanel title="WORKERS">
+      <DetailPanel title="WORKERS & ACTIVITY" meta={`${activeTasks.length || recentAttempts.length} live`}>
         {activeTasks.length === 0 && recentAttempts.length === 0 ? (
           <div style={{ color: "var(--muted)", fontSize: 10 }}>No worker activity yet.</div>
         ) : (
           <>
-            {activeTasks.slice(0, 4).map((task) => {
-              const attempt = attemptByTask.get(task.id);
-              return (
-                <WorkerLine key={task.id} task={task} attempt={attempt} />
-              );
-            })}
-            {activeTasks.length === 0 && recentAttempts.map((attempt) => (
-              <AttemptLine key={attempt.id} attempt={attempt} />
-            ))}
+            <div
+              style={{
+                border: "1px solid var(--rule)",
+                background: "color-mix(in oklch, var(--bg) 58%, transparent)",
+                borderRadius: 5,
+                overflow: "hidden",
+              }}
+            >
+              {activeTasks.length > 0
+                ? activeTasks.slice(0, 4).map((task) => {
+                    const attempt = attemptByTask.get(task.id);
+                    return <WorkerLine key={task.id} task={task} attempt={attempt} />;
+                  })
+                : recentAttempts.slice(0, 3).map((attempt) => (
+                    <AttemptLine key={attempt.id} attempt={attempt} />
+                  ))}
+            </div>
+            {recentAttempts.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                {recentAttempts.map((attempt) => (
+                  <ActivityLine key={attempt.id} attempt={attempt} />
+                ))}
+              </div>
+            )}
           </>
         )}
       </DetailPanel>
@@ -1092,61 +1293,135 @@ function RunDetails({
   );
 }
 
-function DetailPanel({ title, children }: { title: string; children: React.ReactNode }) {
+function DetailPanel({
+  title,
+  meta,
+  right,
+  children,
+}: {
+  title: string;
+  meta?: string;
+  right?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
     <section
       style={{
         border: "1px solid var(--rule)",
-        background: "color-mix(in oklch, var(--panel) 88%, transparent)",
-        padding: "10px 12px",
+        borderRadius: 6,
+        background:
+          "linear-gradient(135deg, color-mix(in oklch, var(--panel) 94%, white 3%), color-mix(in oklch, var(--panel) 90%, transparent))",
+        boxShadow: "0 16px 42px rgba(0,0,0,0.25)",
+        minHeight: 222,
+        padding: "14px 16px",
         display: "flex",
         flexDirection: "column",
-        gap: 8,
+        gap: 10,
       }}
     >
-      <div style={{ color: "var(--muted)", fontSize: 9, fontWeight: 900, letterSpacing: "0.12em" }}>
-        {title}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ color: "var(--muted)", fontSize: 10, fontWeight: 900, letterSpacing: "0.12em" }}>
+          {title}
+        </span>
+        {meta && (
+          <>
+            <span style={{ color: "var(--muted)", fontSize: 10 }}>·</span>
+            <span style={{ color: "var(--accent)", fontSize: 10, fontWeight: 900, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+              {meta}
+            </span>
+          </>
+        )}
+        <span style={{ flex: 1 }} />
+        {right}
       </div>
       {children}
     </section>
   );
 }
 
-function CompactList({
-  label,
-  items,
-  monospace,
-}: {
+interface StepWorkItem {
   label: string;
-  items: string[];
+  text: string;
+  status?: AgentStatusKind;
+  statusLabel: string;
   monospace?: boolean;
-}) {
+  meta?: string;
+}
+
+function WorkItemRow({ item }: { item: StepWorkItem }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-      <span style={{ color: "var(--muted)", fontSize: 9, fontWeight: 800 }}>{label}</span>
-      {items.slice(0, 3).map((item, index) => (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "18px minmax(0, 1fr) auto",
+        gap: 10,
+        alignItems: "center",
+        padding: "10px 12px",
+        borderTop: "1px solid var(--rule)",
+      }}
+    >
+      <WorkStatusIcon status={item.status} />
+      <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+        <span style={{ color: item.status === "done" ? "var(--accent)" : "var(--ink-dim)", fontSize: 11, fontWeight: 800 }}>
+          {item.label}
+        </span>
         <span
-          key={index}
           style={{
-            color: "var(--ink-dim)",
+            color: "var(--muted)",
             fontSize: 10,
-            lineHeight: 1.35,
-            fontFamily: monospace ? "var(--font-mono)" : undefined,
-            wordBreak: "break-word",
+            fontFamily: item.monospace ? "var(--font-mono)" : undefined,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
           }}
         >
-          {item}
+          {item.text}
         </span>
-      ))}
+      </div>
+      <span
+        style={{
+          color: item.status ? statusColor(item.status) : "var(--muted)",
+          fontSize: 10,
+          fontWeight: item.status ? 800 : undefined,
+          fontVariantNumeric: "tabular-nums",
+          textTransform: item.status ? "uppercase" : undefined,
+          whiteSpace: "nowrap",
+        }}
+      >
+        {item.meta ?? item.statusLabel}
+      </span>
     </div>
   );
 }
 
 function WorkerLine({ task, attempt }: { task: WorkerTask; attempt?: WorkerAttempt }) {
   const status = deriveAgentStatus(task, attempt, "running");
+  const tone = runtimeTone(task.runtimePreference);
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "74px minmax(0, 1fr) auto", gap: 8, fontSize: 10 }}>
-      <span style={{ color: runtimeTone(task.runtimePreference).label, fontWeight: 900, textTransform: "uppercase" }}>
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "88px minmax(0, 1fr) auto auto",
+        gap: 12,
+        alignItems: "center",
+        padding: "9px 12px",
+        borderTop: "1px solid var(--rule)",
+        fontSize: 10,
+      }}
+    >
+      <span
+        style={{
+          color: tone.label,
+          background: tone.bg,
+          border: `1px solid ${tone.border}`,
+          padding: "3px 7px",
+          fontWeight: 900,
+          textTransform: "uppercase",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
         {task.runtimePreference}
       </span>
       <span
@@ -1160,14 +1435,19 @@ function WorkerLine({ task, attempt }: { task: WorkerTask; attempt?: WorkerAttem
       >
         {task.title}
       </span>
-      <span style={{ color: statusColor(status), fontWeight: 800 }}>{attempt?.status ?? task.status}</span>
+      <span style={{ color: statusColor(status), fontWeight: 900, textTransform: "uppercase" }}>
+        {attempt?.status ?? task.status}
+      </span>
+      <span style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+        {attempt ? formatDuration(attempt.startedAt, attempt.finishedAt) : "--:--"}
+      </span>
     </div>
   );
 }
 
 function AttemptLine({ attempt }: { attempt: WorkerAttempt }) {
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "74px minmax(0, 1fr) auto", gap: 8, fontSize: 10 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "88px minmax(0, 1fr) auto", gap: 12, padding: "9px 12px", borderTop: "1px solid var(--rule)", fontSize: 10 }}>
       <span style={{ color: runtimeTone(attempt.runtime).label, fontWeight: 900, textTransform: "uppercase" }}>
         {attempt.runtime}
       </span>
@@ -1176,6 +1456,128 @@ function AttemptLine({ attempt }: { attempt: WorkerAttempt }) {
       </span>
       <span style={{ color: attemptStatusColor(attempt.status), fontWeight: 800 }}>{attempt.status}</span>
     </div>
+  );
+}
+
+function ActivityLine({ attempt }: { attempt: WorkerAttempt }) {
+  const time = attempt.startedAt ?? attempt.finishedAt ?? "";
+  const text = attempt.error
+    ? attempt.error
+    : attempt.command
+      ? attempt.command
+      : attempt.finalReportPath
+        ? "final report written"
+        : `attempt ${attempt.attemptNumber}`;
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "64px 12px minmax(0, 1fr)",
+        gap: 7,
+        alignItems: "baseline",
+        color: "var(--muted)",
+        fontSize: 10,
+        lineHeight: 1.45,
+      }}
+    >
+      <span style={{ color: attemptStatusColor(attempt.status), fontVariantNumeric: "tabular-nums" }}>
+        {time ? formatClock(time) : "--:--:--"}
+      </span>
+      <span style={{ color: attemptStatusColor(attempt.status), fontWeight: 900 }}>{">"}</span>
+      <span
+        title={text}
+        style={{
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {text}
+      </span>
+    </div>
+  );
+}
+
+function ProgressBar({ value, active }: { value: number; active: boolean }) {
+  return (
+    <div
+      style={{
+        height: 6,
+        borderRadius: 999,
+        background: "color-mix(in oklch, var(--rule) 52%, transparent)",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          width: `${Math.max(4, Math.min(100, value))}%`,
+          height: "100%",
+          borderRadius: 999,
+          background: active
+            ? "linear-gradient(90deg, var(--accent), color-mix(in oklch, var(--accent) 72%, white 18%))"
+            : "var(--ok)",
+          boxShadow: active ? "0 0 14px color-mix(in oklch, var(--accent) 42%, transparent)" : undefined,
+        }}
+      />
+    </div>
+  );
+}
+
+function WorkStatusIcon({ status }: { status?: AgentStatusKind }) {
+  const color = status ? statusColor(status) : "var(--muted)";
+  const filled = status === "done" || status === "blocked";
+  return (
+    <span
+      style={{
+        width: 14,
+        height: 14,
+        borderRadius: 999,
+        border: `1px solid ${color}`,
+        background: filled ? color : "transparent",
+        color: "var(--bg)",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        fontSize: 9,
+        fontWeight: 900,
+        lineHeight: 1,
+        animation: status === "running" ? "spark-pulse 1.2s ease-in-out infinite" : undefined,
+      }}
+    >
+      {status === "blocked" ? "x" : null}
+    </span>
+  );
+}
+
+function ElapsedChip({
+  attempt,
+  fallback,
+}: {
+  attempt?: WorkerAttempt;
+  fallback?: string;
+}) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        color: "var(--ink-dim)",
+        fontSize: 11,
+        fontVariantNumeric: "tabular-nums",
+      }}
+    >
+      <span
+        style={{
+          width: 10,
+          height: 10,
+          borderRadius: 999,
+          border: "1px solid var(--muted)",
+        }}
+      />
+      {attempt ? formatDuration(attempt.startedAt, attempt.finishedAt) : fallback ? formatSince(fallback) : "--:--:--"}
+    </span>
   );
 }
 
@@ -1356,6 +1758,48 @@ function deriveAgentStatus(
   return "queued";
 }
 
+function buildStepWorkItems(
+  step: StepState,
+  tasks: WorkerTask[],
+  attemptByTask: Map<string, WorkerAttempt>,
+): StepWorkItem[] {
+  const requirementRows: StepWorkItem[] = [
+    ...step.acceptanceCriteria.slice(0, 3).map((text) => ({
+      label: "Acceptance",
+      text,
+      statusLabel: "required",
+    })),
+    ...step.verificationCommands.slice(0, 3).map((text) => ({
+      label: "Verify",
+      text,
+      monospace: true,
+      statusLabel: "command",
+    })),
+  ];
+
+  if (requirementRows.length > 0) return requirementRows.slice(0, 4);
+
+  return tasks.slice(0, 4).map((task) => {
+    const attempt = attemptByTask.get(task.id);
+    const status = deriveAgentStatus(task, attempt, step.status);
+    return {
+      label: task.runtimePreference.toUpperCase(),
+      text: task.description || task.title,
+      status,
+      statusLabel: attempt?.status ?? task.status,
+      meta: attempt ? formatDuration(attempt.startedAt, attempt.finishedAt) : formatTime(task.updatedAt),
+    };
+  });
+}
+
+function isCompletedTask(task: WorkerTask): boolean {
+  return task.status === "accepted" || task.status === "needs_review";
+}
+
+function isActiveAttemptStatus(status: WorkerAttempt["status"]): boolean {
+  return ["preparing", "prompt_ready", "launching", "running", "finishing"].includes(status);
+}
+
 function runtimeTone(runtime: PlannedStepAgent["runtimePreference"]): { label: string; border: string; bg: string } {
   switch (runtime) {
     case "claude":
@@ -1374,6 +1818,27 @@ function statusColor(status: RunState["status"] | StepState["status"] | AgentSta
   if (status === "complete" || status === "done") return "var(--ok)";
   if (status === "blocked" || status === "failed") return "var(--danger)";
   return "var(--muted)";
+}
+
+function stepStatusLabel(status: StepState["status"]): string {
+  switch (status) {
+    case "running":
+    case "reviewing":
+      return "running";
+    case "ready":
+      return "ready";
+    case "complete":
+      return "complete";
+    case "blocked":
+    case "failed":
+      return status;
+    case "planning":
+      return "planning";
+    case "skipped":
+      return "skipped";
+    default:
+      return "queued";
+  }
 }
 
 function attemptStatusColor(status: WorkerAttempt["status"]): string {
@@ -1399,4 +1864,36 @@ function formatTime(value: string): string {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatRunIndex(value: number): string {
+  return value.toString().padStart(2, "0");
+}
+
+function formatClock(value: string): string {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "--:--:--";
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
+function formatSince(value: string): string {
+  const start = new Date(value).getTime();
+  if (Number.isNaN(start)) return "--:--:--";
+  return formatDurationMs(Math.max(0, Date.now() - start));
+}
+
+function formatDuration(startedAt?: string, finishedAt?: string): string {
+  if (!startedAt) return "--:--:--";
+  const start = new Date(startedAt).getTime();
+  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
+  if (Number.isNaN(start) || Number.isNaN(end)) return "--:--:--";
+  return formatDurationMs(Math.max(0, end - start));
+}
+
+function formatDurationMs(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }

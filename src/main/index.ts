@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell } from "electron";
 import { join } from "node:path";
 import { registerIpc } from "./ipc";
 import * as pty from "./pty-manager";
+import { ensureSparkHomeSync } from "./spark-home";
 import { flush } from "./storage";
 
 app.setName("Spark Agent");
@@ -65,6 +66,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  ensureSparkHomeSync();
   registerIpc();
   createWindow();
 

@@ -2,6 +2,7 @@ import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type { AppSettings, AppState, Workspace } from "@shared/types";
+import { sparkHome } from "./spark-home";
 
 const STATE_FILE = "spark-state.json";
 const SETTINGS_FILE = "spark-settings.json";
@@ -25,11 +26,11 @@ let writing: Promise<void> = Promise.resolve();
 let settingsWriting: Promise<void> = Promise.resolve();
 
 function statePath(): string {
-  return join(app.getPath("userData"), STATE_FILE);
+  return join(sparkHome(), STATE_FILE);
 }
 
 function settingsPath(): string {
-  return join(app.getPath("userData"), SETTINGS_FILE);
+  return join(sparkHome(), SETTINGS_FILE);
 }
 
 async function readFromDisk(): Promise<AppState> {
