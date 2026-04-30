@@ -41,6 +41,30 @@ export interface AppSettings {
   langSmithEndpoint: string;
 }
 
+export type AgentRuntimeKind = "claude" | "codex";
+
+export type AgentEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+
+export interface AgentRuntimeModel {
+  id: string;
+  label: string;
+  effortLevels: AgentEffortLevel[];
+  isDefault?: boolean;
+}
+
+export interface AgentRuntimeDiagnostic {
+  kind: AgentRuntimeKind;
+  label: string;
+  installed: boolean;
+  executablePath: string | null;
+  version: string | null;
+  versionError: string | null;
+  models: AgentRuntimeModel[];
+  recommendedWorkerCommand: string | null;
+  installHint: string;
+  lastCheckedAt: string;
+}
+
 export interface FsEntry {
   name: string;
   path: string;

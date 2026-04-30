@@ -42,8 +42,15 @@ export default function OrchestrationSidebar({ workspace }: Props) {
     });
   }, []);
 
+  // Only the workspace identity (id + cwd) should trigger a reload — not the
+  // whole workspace object, which is replaced every time workers[] changes.
+  // Reloading on every worker spawn was racing with the live event subscription
+  // and wiping events that hadn't been persisted yet.
+  const workspaceId = workspace?.id ?? null;
+  const workspaceCwd = workspace?.cwd ?? null;
+
   const loadRuns = useCallback(async () => {
-    if (!workspace) {
+    if (!workspaceId || !workspaceCwd) {
       setRuns([]);
       setPlanFiles([]);
       setSelectedPlanPath("");
@@ -53,8 +60,8 @@ export default function OrchestrationSidebar({ workspace }: Props) {
 
     try {
       const [nextRuns, nextPlanFiles] = await Promise.all([
-        window.spark.orchestration.listRuns(workspace.id),
-        window.spark.fs.listMarkdownFiles(workspace.cwd),
+        window.spark.orchestration.listRuns(workspaceId),
+        window.spark.fs.listMarkdownFiles(workspaceCwd),
       ]);
       setRuns(nextRuns);
       setPlanFiles(nextPlanFiles);
@@ -62,14 +69,26 @@ export default function OrchestrationSidebar({ workspace }: Props) {
         if (current && nextPlanFiles.some((file) => file.path === current)) return current;
         return nextPlanFiles[0]?.path ?? "";
       });
-      const nextActive =
-        nextRuns.find((run) => run.id === activeRun?.id) ?? nextRuns[0] ?? null;
-      await loadRunDetails(nextActive);
+      setActiveRun((currentActive) => {
+        const stillExists = currentActive
+          ? nextRuns.find((run) => run.id === currentActive.id)
+          : null;
+        if (stillExists) return stillExists;
+        const fallback = nextRuns[0] ?? null;
+        if (!fallback) {
+          // Defer the events/paths reset to a microtask so we don't fight the
+          // live event subscription mid-render.
+          void loadRunDetails(null);
+        } else {
+          void loadRunDetails(fallback);
+        }
+        return fallback;
+      });
       setError(null);
     } catch (err) {
       setError((err as Error).message);
     }
-  }, [activeRun?.id, loadRunDetails, workspace]);
+  }, [loadRunDetails, workspaceId, workspaceCwd]);
 
   useEffect(() => {
     void loadRuns();

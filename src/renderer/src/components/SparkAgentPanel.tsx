@@ -1,5 +1,14 @@
 import React, { useState } from "react";
-import type { PlanFile, RunState, SparkEvent, Workspace } from "@shared/types";
+import type {
+  PlanFile,
+  PlannedStepAgent,
+  RunState,
+  SparkEvent,
+  StepState,
+  WorkerAttempt,
+  WorkerTask,
+  Workspace,
+} from "@shared/types";
 
 interface Props {
   workspace: Workspace | null;
@@ -276,6 +285,10 @@ export default function SparkAgentPanel({
         <SparkDecisionSummary decision={latestDecision} />
       )}
 
+      {activeRun && activeRun.steps.length > 0 && (
+        <PlanStepsPanel run={activeRun} />
+      )}
+
       {error && (
         <div style={{ padding: "8px 12px", color: "var(--danger)", fontSize: 11, borderBottom: "1px solid var(--rule)" }}>
           {error}
@@ -394,6 +407,332 @@ function SparkDecisionSummary({ decision }: { decision: SparkDecision }) {
       )}
     </div>
   );
+}
+
+function PlanStepsPanel({ run }: { run: RunState }) {
+  const taskById = new Map<string, WorkerTask>();
+  for (const t of run.workerTasks) taskById.set(t.id, t);
+  const attemptByTask = new Map<string, WorkerAttempt>();
+  for (const a of run.workerAttempts) {
+    const prev = attemptByTask.get(a.workerTaskId);
+    if (!prev || a.attemptNumber >= prev.attemptNumber) attemptByTask.set(a.workerTaskId, a);
+  }
+
+  return (
+    <div style={{ borderBottom: "1px solid var(--rule)" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "8px 12px 4px",
+          color: "var(--ink)",
+          fontSize: 10,
+          fontWeight: 800,
+          letterSpacing: "0.08em",
+        }}
+      >
+        <span>PLAN STEPS</span>
+        <span style={{ color: "var(--muted)" }}>·</span>
+        <span style={{ color: "var(--muted)" }}>{run.steps.length}</span>
+        <span style={{ flex: 1 }} />
+        <PlanStepsLegend />
+      </div>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          maxHeight: 240,
+          overflow: "auto",
+          padding: "2px 0 6px",
+        }}
+      >
+        {run.steps.map((step) => (
+          <PlanStepRow
+            key={step.id}
+            step={step}
+            taskById={taskById}
+            attemptByTask={attemptByTask}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PlanStepsLegend() {
+  return (
+    <div style={{ display: "flex", gap: 8, color: "var(--muted)", fontSize: 9 }}>
+      <span><StatusGlyph status="running" />&nbsp;run</span>
+      <span><StatusGlyph status="complete" />&nbsp;done</span>
+      <span><StatusGlyph status="queued" />&nbsp;queued</span>
+    </div>
+  );
+}
+
+function PlanStepRow({
+  step,
+  taskById,
+  attemptByTask,
+}: {
+  step: StepState;
+  taskById: Map<string, WorkerTask>;
+  attemptByTask: Map<string, WorkerAttempt>;
+}) {
+  const tone = stepTone(step.status);
+  const stepTasks = step.workerTaskIds
+    .map((id) => taskById.get(id))
+    .filter((t): t is WorkerTask => Boolean(t));
+  const planned = step.plannedAgents ?? [];
+  const agentRows: AgentRow[] = planned.length > 0
+    ? planned.map((agent, i) => ({
+        agent,
+        task: stepTasks[i],
+        attempt: stepTasks[i] ? attemptByTask.get(stepTasks[i].id) : undefined,
+      }))
+    : stepTasks.map((task) => ({
+        agent: {
+          label: task.title,
+          summary: "",
+          runtimePreference: task.runtimePreference,
+          modelHint: task.modelHint,
+          effortHint: task.effortHint,
+        },
+        task,
+        attempt: attemptByTask.get(task.id),
+      }));
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+        padding: "6px 12px",
+        borderTop: "1px solid var(--rule)",
+        background: step.status === "running" ? "var(--panel-2)" : "transparent",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <StatusGlyph status={step.status} />
+        <span style={{ color: "var(--muted)", fontSize: 10, fontWeight: 800, width: 14, textAlign: "right" }}>
+          {step.index + 1}
+        </span>
+        <span
+          title={step.goal}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            color: "var(--ink)",
+            fontSize: 11,
+            fontWeight: 700,
+          }}
+        >
+          {step.title}
+        </span>
+        <span
+          style={{
+            color: tone,
+            fontSize: 9,
+            fontWeight: 800,
+            letterSpacing: "0.08em",
+            textTransform: "uppercase",
+          }}
+        >
+          {step.status}
+        </span>
+      </div>
+      {agentRows.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, paddingLeft: 22 }}>
+          {agentRows.map((row, i) => (
+            <AgentChip key={i} row={row} stepStatus={step.status} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface AgentRow {
+  agent: PlannedStepAgent;
+  task?: WorkerTask;
+  attempt?: WorkerAttempt;
+}
+
+function AgentChip({ row, stepStatus }: { row: AgentRow; stepStatus: StepState["status"] }) {
+  const { agent, task, attempt } = row;
+  const status = agentStatus(task, attempt, stepStatus);
+  const tone = agentTone(agent.runtimePreference);
+  const model = agent.modelHint?.trim();
+  const summary = task?.title || agent.summary || agent.label;
+  return (
+    <div
+      title={summary}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "2px 6px",
+        border: `1px solid ${tone.border}`,
+        background: tone.bg,
+        color: "var(--ink-dim)",
+        fontSize: 9.5,
+        lineHeight: 1.2,
+        maxWidth: 260,
+      }}
+    >
+      <StatusDot status={status} />
+      <span
+        style={{
+          color: tone.label,
+          fontWeight: 800,
+          letterSpacing: "0.06em",
+          textTransform: "uppercase",
+        }}
+      >
+        {agent.runtimePreference}
+      </span>
+      {model && (
+        <span style={{ color: "var(--muted)" }}>{model}</span>
+      )}
+      <span
+        style={{
+          color: "var(--ink-dim)",
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {summary}
+      </span>
+    </div>
+  );
+}
+
+type AgentStatusKind = "queued" | "running" | "done" | "blocked" | "skipped";
+
+function agentStatus(
+  task: WorkerTask | undefined,
+  attempt: WorkerAttempt | undefined,
+  stepStatus: StepState["status"],
+): AgentStatusKind {
+  if (
+    attempt?.status === "running" ||
+    attempt?.status === "launching" ||
+    attempt?.status === "preparing" ||
+    attempt?.status === "prompt_ready" ||
+    attempt?.status === "finishing"
+  ) {
+    return "running";
+  }
+  if (task?.status === "running" || task?.status === "claimed" || task?.status === "needs_review") return "running";
+  if (task?.status === "accepted" || attempt?.status === "succeeded") return "done";
+  if (
+    task?.status === "blocked" ||
+    task?.status === "failed" ||
+    task?.status === "cancelled" ||
+    attempt?.status === "failed" ||
+    attempt?.status === "timed_out" ||
+    attempt?.status === "cancelled"
+  ) {
+    return "blocked";
+  }
+  if (stepStatus === "complete") return "done";
+  if (stepStatus === "blocked" || stepStatus === "failed") return "blocked";
+  return "queued";
+}
+
+function agentTone(runtime: PlannedStepAgent["runtimePreference"]): {
+  label: string;
+  border: string;
+  bg: string;
+} {
+  switch (runtime) {
+    case "claude":
+      return { label: "var(--accent)", border: "var(--accent)", bg: "rgba(240,196,25,0.06)" };
+    case "codex":
+      return { label: "var(--info)", border: "var(--info)", bg: "rgba(127,179,255,0.06)" };
+    case "shell":
+      return { label: "var(--ok)", border: "var(--rule-strong)", bg: "transparent" };
+    default:
+      return { label: "var(--ink-dim)", border: "var(--rule-strong)", bg: "transparent" };
+  }
+}
+
+function StatusGlyph({ status }: { status: StepState["status"] | AgentStatusKind }) {
+  const { glyph, color } = stepGlyph(status);
+  return (
+    <span
+      style={{
+        width: 12,
+        height: 12,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color,
+        fontSize: 12,
+        lineHeight: 1,
+      }}
+    >
+      {glyph}
+    </span>
+  );
+}
+
+function StatusDot({ status }: { status: AgentStatusKind }) {
+  const color =
+    status === "running" ? "var(--accent)" :
+    status === "done" ? "var(--ok)" :
+    status === "blocked" ? "var(--danger)" :
+    "var(--muted)";
+  return (
+    <span
+      style={{
+        width: 6,
+        height: 6,
+        background: color,
+        flex: "0 0 auto",
+        animation: status === "running" ? "spark-pulse 1.2s ease-in-out infinite" : undefined,
+      }}
+    />
+  );
+}
+
+function stepTone(status: StepState["status"]): string {
+  switch (status) {
+    case "running":
+    case "reviewing":
+      return "var(--accent)";
+    case "complete":
+      return "var(--ok)";
+    case "blocked":
+    case "failed":
+      return "var(--danger)";
+    default:
+      return "var(--muted)";
+  }
+}
+
+function stepGlyph(status: StepState["status"] | AgentStatusKind): { glyph: string; color: string } {
+  switch (status) {
+    case "running":
+    case "reviewing":
+      return { glyph: "◐", color: "var(--accent)" };
+    case "complete":
+    case "done":
+      return { glyph: "●", color: "var(--ok)" };
+    case "blocked":
+    case "failed":
+      return { glyph: "✕", color: "var(--danger)" };
+    case "skipped":
+      return { glyph: "—", color: "var(--muted)" };
+    default:
+      return { glyph: "○", color: "var(--muted)" };
+  }
 }
 
 function RunRow({

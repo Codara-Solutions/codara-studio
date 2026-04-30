@@ -6,16 +6,20 @@ interface Session {
   id: string;
   pty: nodePty.IPty;
   webContents: WebContents;
+  dataChannel: string;
+  exitChannel: string;
+  pendingChunks: Buffer[];
+  pendingBytes: number;
+  flushTimer: NodeJS.Timeout | null;
 }
 
 const sessions = new Map<string, Session>();
 
-// Kills are delayed by GRACE_MS so a same-id spawn arriving in the same tick
-// can cancel them. This keeps PTYs alive across React StrictMode's dev
-// mount→unmount→mount dry-cycle without requiring the renderer to know
-// anything about it.
 const pendingKills = new Map<string, NodeJS.Timeout>();
-const GRACE_MS = 50;
+const GRACE_MS = 250;
+
+const FLUSH_MS = 16;
+const MAX_BUFFER_BYTES = 96_000;
 
 export interface SpawnOptions {
   id: string;
@@ -27,15 +31,12 @@ export interface SpawnOptions {
 }
 
 export function spawn(opts: SpawnOptions): { id: string; pid: number } {
-  // Cancel a pending kill for this id (same-id remount within grace window).
   const pending = pendingKills.get(opts.id);
   if (pending) {
     clearTimeout(pending);
     pendingKills.delete(opts.id);
   }
 
-  // If a session is already alive for this id, rebind it to the (possibly
-  // refreshed) renderer and resize. This is the path StrictMode hits.
   const existing = sessions.get(opts.id);
   if (existing) {
     existing.webContents = opts.webContents;
@@ -47,42 +48,65 @@ export function spawn(opts: SpawnOptions): { id: string; pid: number } {
     return { id: opts.id, pid: existing.pty.pid };
   }
 
+  const cols = Math.max(1, opts.cols | 0);
+  const rows = Math.max(1, opts.rows | 0);
+
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (typeof v === "string") env[k] = v;
   }
+  // Ink/React-CLI (Claude Code, Codex) inspects these to pick interactive/colour
+  // mode. Inheriting CI=true or NO_COLOR from a parent shell silently disables
+  // ANSI cursor sequences and produces visually corrupt redraws.
   env.TERM = "xterm-256color";
   env.COLORTERM = "truecolor";
+  env.FORCE_COLOR = "3";
+  env.COLUMNS = String(cols);
+  env.LINES = String(rows);
+  delete env.CI;
+  delete env.NO_COLOR;
+  delete env.NODE_DISABLE_COLORS;
+  delete env.NODE_NO_READLINE;
 
-  // node-pty on Windows fails silently with an empty cwd — the PTY looks
-  // alive but never echoes input. Fall back to home/cwd.
   const cwd =
     opts.cwd && opts.cwd.trim().length > 0
       ? opts.cwd
       : process.env.UserProfile || process.env.HOME || process.cwd();
 
+  // encoding:null asks node-pty for raw Buffers so we can preserve byte
+  // boundaries for ANSI/UTF-8 across IPC. xterm.js's parser/decoder reassembles
+  // partial sequences across writes when fed Uint8Array.
   const pty = nodePty.spawn(opts.shell.exe, opts.shell.args, {
     name: "xterm-256color",
-    cols: Math.max(1, opts.cols | 0),
-    rows: Math.max(1, opts.rows | 0),
+    cols,
+    rows,
     cwd,
     env,
-  });
+    encoding: null as unknown as string,
+    useConpty: process.platform === "win32" ? true : undefined,
+  } as nodePty.IPtyForkOptions);
 
-  const dataChannel = `pty:data:${opts.id}`;
-  const exitChannel = `pty:exit:${opts.id}`;
+  const session: Session = {
+    id: opts.id,
+    pty,
+    webContents: opts.webContents,
+    dataChannel: `pty:data:${opts.id}`,
+    exitChannel: `pty:exit:${opts.id}`,
+    pendingChunks: [],
+    pendingBytes: 0,
+    flushTimer: null,
+  };
 
-  // Look up webContents on every send instead of capturing in the closure, so
-  // a rebind via the existing-session path above takes effect immediately.
-  pty.onData((data) => {
-    const s = sessions.get(opts.id);
-    if (s && !s.webContents.isDestroyed()) s.webContents.send(dataChannel, data);
-  });
+  pty.onData((data: string | Buffer) => enqueueData(opts.id, data));
 
   pty.onExit(({ exitCode, signal }) => {
     const s = sessions.get(opts.id);
-    if (s && !s.webContents.isDestroyed()) {
-      s.webContents.send(exitChannel, { exitCode, signal });
+    if (s) {
+      flushDataNow(s);
+      if (!s.webContents.isDestroyed()) {
+        s.webContents.send(s.exitChannel, { exitCode, signal });
+      }
+      if (s.flushTimer) clearTimeout(s.flushTimer);
     }
     sessions.delete(opts.id);
     const t = pendingKills.get(opts.id);
@@ -92,8 +116,47 @@ export function spawn(opts: SpawnOptions): { id: string; pid: number } {
     }
   });
 
-  sessions.set(opts.id, { id: opts.id, pty, webContents: opts.webContents });
+  sessions.set(opts.id, session);
   return { id: opts.id, pid: pty.pid };
+}
+
+function enqueueData(id: string, data: string | Buffer): void {
+  const s = sessions.get(id);
+  if (!s) return;
+
+  const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
+  s.pendingChunks.push(chunk);
+  s.pendingBytes += chunk.length;
+
+  if (s.pendingBytes >= MAX_BUFFER_BYTES) {
+    flushDataNow(s);
+    return;
+  }
+
+  if (s.flushTimer) return;
+  s.flushTimer = setTimeout(() => {
+    s.flushTimer = null;
+    flushDataNow(s);
+  }, FLUSH_MS);
+}
+
+function flushDataNow(s: Session): void {
+  if (s.flushTimer) {
+    clearTimeout(s.flushTimer);
+    s.flushTimer = null;
+  }
+  if (s.pendingChunks.length === 0) return;
+  if (s.webContents.isDestroyed()) {
+    s.pendingChunks = [];
+    s.pendingBytes = 0;
+    return;
+  }
+  const merged = s.pendingChunks.length === 1 ? s.pendingChunks[0] : Buffer.concat(s.pendingChunks, s.pendingBytes);
+  s.pendingChunks = [];
+  s.pendingBytes = 0;
+  // Ship as Uint8Array so the renderer can hand it directly to xterm.js
+  // without going through a string round-trip.
+  s.webContents.send(s.dataChannel, new Uint8Array(merged.buffer, merged.byteOffset, merged.byteLength));
 }
 
 export function write(id: string, data: string): void {
@@ -142,9 +205,11 @@ function killNow(id: string): void {
   const s = sessions.get(id);
   if (!s) return;
   try {
+    flushDataNow(s);
     s.pty.kill();
   } catch {
     /* ignore */
   }
+  if (s.flushTimer) clearTimeout(s.flushTimer);
   sessions.delete(id);
 }

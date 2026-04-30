@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import type { ShellInfo, Worker, Workspace } from "@shared/types";
 import TerminalView from "./Terminal";
+import BlockStrip from "./BlockStrip";
+import type { ShellIntegration } from "../terminal/shell-integration";
 import { CloseIcon } from "./icons";
 
 interface Props {
@@ -14,9 +16,11 @@ interface Props {
 
 function gridDims(n: number): { cols: number; rows: number } {
   if (n <= 0) return { cols: 1, rows: 1 };
-  const cols = Math.ceil(Math.sqrt(n));
-  const rows = Math.ceil(n / cols);
-  return { cols, rows };
+  // True square grid: side = ceil(sqrt(n)) for both axes. 1 → 1×1, 2-4 → 2×2,
+  // 5-9 → 3×3. Slots beyond `n` render as empty placeholders so the visible
+  // pane sizes stay consistent as workers are added/removed.
+  const side = Math.ceil(Math.sqrt(n));
+  return { cols: side, rows: side };
 }
 
 function shellLabel(s: ShellInfo): string {
@@ -44,6 +48,7 @@ export default function TerminalGrid({
   }, [workers, activeWorker]);
 
   const dims = gridDims(workers.length);
+  const hasOrchestration = workers.some((w) => w.kind === "orchestration");
 
   return (
     <div
@@ -92,6 +97,15 @@ export default function TerminalGrid({
               />
             );
           })}
+          {Array.from({ length: Math.max(0, dims.cols * dims.rows - workers.length) }).map((_, i) => (
+            <EmptyPane
+              key={`empty-${i}`}
+              shells={shells}
+              defaultShell={defaultShell}
+              onAdd={onAddWorker}
+              orchestrationActive={hasOrchestration}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -121,6 +135,9 @@ function WorkerPane({
   onPid,
   fontSize,
 }: WorkerPaneProps) {
+  const [integration, setIntegration] = useState<ShellIntegration | null>(null);
+  const isOrchestration = worker.kind === "orchestration";
+
   return (
     <div
       onMouseDown={onActivate}
@@ -142,6 +159,14 @@ function WorkerPane({
         pid={pid}
         onClose={onClose}
       />
+      {!isOrchestration && (
+        <BlockStrip
+          integration={integration}
+          onCopy={(text) => {
+            void navigator.clipboard?.writeText(text);
+          }}
+        />
+      )}
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
         <TerminalView
           workerId={worker.id}
@@ -150,7 +175,8 @@ function WorkerPane({
           active={active}
           onPid={onPid}
           fontSize={fontSize}
-          attachOnly={worker.kind === "orchestration"}
+          attachOnly={isOrchestration}
+          onShellIntegration={isOrchestration ? undefined : setIntegration}
         />
       </div>
     </div>
@@ -225,6 +251,68 @@ function PaneHeader({
       >
         <CloseIcon />
       </button>
+    </div>
+  );
+}
+
+function EmptyPane({
+  shells,
+  defaultShell,
+  onAdd,
+  orchestrationActive,
+}: {
+  shells: ShellInfo[];
+  defaultShell: ShellInfo | null;
+  onAdd: (shellId: string) => void;
+  orchestrationActive: boolean;
+}) {
+  // While an orchestration run is filling worker slots, the empty cells are
+  // reserved for agents Spark will spawn itself. Showing a clickable "+" there
+  // is a footgun — the user accidentally spawns an unrelated pwsh in the
+  // middle of a run. Render an inert placeholder instead.
+  if (orchestrationActive) {
+    return (
+      <div
+        style={{
+          background: "var(--bg)",
+          minWidth: 0,
+          minHeight: 0,
+          opacity: 0.4,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--muted)",
+          fontSize: 9,
+          letterSpacing: "0.12em",
+          fontWeight: 700,
+          userSelect: "none",
+        }}
+      >
+        AGENT&nbsp;SLOT
+      </div>
+    );
+  }
+  const target = defaultShell ?? shells[0] ?? null;
+  return (
+    <div
+      onClick={() => target && onAdd(target.id)}
+      style={{
+        background: "var(--bg)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: "var(--muted)",
+        fontSize: 22,
+        fontWeight: 200,
+        cursor: target ? "default" : "not-allowed",
+        opacity: 0.35,
+        minWidth: 0,
+        minHeight: 0,
+        userSelect: "none",
+      }}
+      title={target ? `New ${target.label}` : "No shells available"}
+    >
+      +
     </div>
   );
 }

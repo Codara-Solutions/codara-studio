@@ -31,8 +31,10 @@ import {
   writeWorkerSessionInput,
 } from "./orchestration/worker-session";
 import { listEvents } from "./orchestration/event-log";
+import { detectAgentRuntimes } from "./agent-runtimes";
 import type {
   AddRunMessageInput,
+  AgentRuntimeDiagnostic,
   AppSettings,
   AppState,
   CreateStepInput,
@@ -80,6 +82,10 @@ export function registerIpc(): void {
 
   ipcMain.handle("shells:default", async (): Promise<ShellInfo | null> => {
     return defaultShell();
+  });
+
+  ipcMain.handle("agents:diagnostics", async (_e, force?: boolean): Promise<AgentRuntimeDiagnostic[]> => {
+    return detectAgentRuntimes(Boolean(force));
   });
 
   ipcMain.handle("dialog:openDirectory", async (e, defaultPath?: string): Promise<string | null> => {

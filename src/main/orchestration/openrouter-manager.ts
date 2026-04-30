@@ -1,4 +1,4 @@
-import type { AppSettings, PlannedStepAgent, RunState, WorkerRuntime, WorkerTask } from "@shared/types";
+import type { AgentRuntimeDiagnostic, AppSettings, PlannedStepAgent, RunState, WorkerRuntime, WorkerTask } from "@shared/types";
 
 export interface OpenRouterConfig {
   apiKey: string;
@@ -218,6 +218,7 @@ export function buildOpenRouterManagerRequest(input: {
   model: string;
   mode?: OpenRouterManagerMode;
   workerReports?: SparkManagerWorkerReportContext[];
+  availableRuntimes?: AgentRuntimeDiagnostic[];
 }): OpenRouterManagerRequest {
   const mode = input.mode ?? "step_planning";
   const activePlan = input.run.planId
@@ -269,12 +270,25 @@ export function buildOpenRouterManagerRequest(input: {
           "- Include objective, workspace context, assigned step, exact task, allowed/forbidden paths when known, constraints, verification, and expected final report.",
           "- Tell workers what evidence to produce: changed files, commands/tests run, proof, risks, and follow-ups.",
           "- Keep implementation prompts free of big code dumps unless the plan explicitly requires exact code.",
-          "- Prefer Claude for broad exploration, architecture-sensitive implementation, ambiguous UI/product work, and repo-level reasoning.",
-          "- Prefer Codex for precise code edits, refactors, tests, validation, and bug fixes.",
+          "- Runtime balancing — HARD RULES when both Claude and Codex are listed as INSTALLED:",
+          "  * Step 1 must use Claude. Claude is the default lead runtime for architectural and exploratory work.",
+          "  * Across the entire run, neither Claude nor Codex may exceed 60% of plannedAgents. Count and rebalance before emitting steps.",
+          "  * Alternate runtime by step index unless the work strongly demands otherwise: if step N is Claude, prefer Codex for step N+1, and vice versa.",
+          "  * Within any step that has 2+ plannedAgents, mix runtimes: prefer one Claude + one Codex over two of the same runtime.",
+          "  * Routing the whole run to one runtime is a planning failure, not a default. If you are tempted to do this, you are wrong — find work for the other runtime.",
+          "- Runtime affinity (use as a TIEBREAKER only, after the balance rules above are satisfied):",
+          "  * Claude — architectural design, UI/visual/product-flavoured implementation, exploratory/research, multi-file reasoning, writing tests with intent, conceptual refactors, ambiguous decomposition.",
+          "  * Codex — fast targeted edits inside one file, bug fixes with a known site, mechanical refactors, deterministic transformations, API plumbing, validation passes.",
+          "  * Shell — deterministic command-only work (run a build, run a script).",
+          "  * Manual — only when automation is unsafe.",
           "- Prefer shell only for deterministic command-only tasks. Prefer manual only when execution cannot be automated safely.",
           "- Use CLI-ready modelHint values. Claude examples: sonnet, opus, claude-sonnet-4-6, claude-opus-4-7. Codex examples: gpt-5.5, gpt-5.4, gpt-5.3-codex.",
           "- Use effortHint as the worker thinking level: low, medium, high, or xhigh.",
           "- Do not write terminal launch commands in your decision. The app opens terminals and builds Claude/Codex commands from runtimePreference, modelHint, and effortHint.",
+          "- Only choose runtimePreference values that are listed as installed in AVAILABLE RUNTIMES below. If a runtime is missing, route work to an installed one or to shell/manual.",
+          "- Only choose modelHint and effortHint values from the per-runtime model lists in AVAILABLE RUNTIMES.",
+          "- Prefer many small atomic steps over a few large ones. Each step should ideally produce one cohesive change a worker can finish without sub-decisions.",
+          "- A step may contain multiple plannedAgents running in parallel when their write scopes do not overlap. Use this when independent files or aspects can be tackled simultaneously.",
         ].join("\n"),
       },
       {
@@ -299,6 +313,9 @@ export function buildOpenRouterManagerRequest(input: {
           "",
           "WORKSPACE",
           input.cwd,
+          "",
+          "AVAILABLE RUNTIMES",
+          formatAvailableRuntimes(input.availableRuntimes),
           "",
           "RUN STATE",
           JSON.stringify(
@@ -617,6 +634,28 @@ function truncate(value: string, maxLength: number): string {
   return `${value.slice(0, maxLength)}\n\n[truncated]`;
 }
 
+function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined): string {
+  if (!runtimes || runtimes.length === 0) {
+    return "Runtime detection has not been performed. Assume only `shell` and `manual` are reliably available.";
+  }
+  const lines: string[] = [];
+  for (const r of runtimes) {
+    if (!r.installed) {
+      lines.push(`- ${r.kind} (${r.label}): NOT INSTALLED — do not assign work to this runtime.`);
+      continue;
+    }
+    const versionPart = r.version ? ` v${r.version.split(/\s+/)[0]}` : "";
+    const modelList = r.models.map((m) => {
+      const efforts = m.effortLevels.join("/");
+      return `${m.id} [${efforts}]`;
+    }).join(", ");
+    lines.push(`- ${r.kind} (${r.label})${versionPart} INSTALLED. Models: ${modelList}`);
+  }
+  lines.push("- shell: always available (deterministic command-only tasks).");
+  lines.push("- manual: always available (human executes; only when automation is unsafe).");
+  return lines.join("\n");
+}
+
 function formatStepDivision(run: RunState): string {
   if (run.steps.length === 0) return "No step-by-step division exists yet.";
   return run.steps
@@ -649,11 +688,15 @@ function formatModeRules(mode: OpenRouterManagerMode): string {
     return [
       "- Return status run_workers with the full durable step-by-step division in steps.",
       "- Return tasks as an empty array. Do not generate implementation prompts in this mode.",
-      "- Each step is a parallel execution batch and must be independently understandable after manager context is wiped.",
-      "- Each step must include plannedAgents: agent label, compact overview, runtimePreference, modelHint, and effortHint.",
+      "- Each step is a parallel execution batch: every plannedAgent in one step runs at the same time, so their write scopes must not overlap.",
+      "- Decompose aggressively. Prefer many small atomic steps over a few large ones. A typical small project plan should yield 4-8 steps, not 2-3.",
+      "- A single step may include multiple plannedAgents when the work has independent sub-pieces (e.g. one agent writes HTML structure while another writes CSS for a different file). Use this whenever it shaves wall-clock time without creating collisions.",
+      "- Each step must be independently understandable after manager context is wiped.",
+      "- Each plannedAgent entry must include: agent label, compact overview of its slice, runtimePreference, modelHint, effortHint.",
+      "- runtimePreference must be one of the runtimes listed as INSTALLED in AVAILABLE RUNTIMES, or shell/manual.",
+      "- modelHint must be a model id listed for that runtime in AVAILABLE RUNTIMES; effortHint must be one of the effort levels listed for that model.",
       "- Each step must describe the outcome, boundaries, acceptance criteria, verification commands, and risk level.",
-      "- Prefer several small sequential steps over one vague large step.",
-      "- Ask the user if the plan lacks a required product decision, scope boundary, or safety approval.",
+      "- Ask the user only if the plan lacks a required product decision, scope boundary, or safety approval.",
       "- Set question to an empty string unless status is ask_user.",
     ].join("\n");
   }
@@ -662,10 +705,10 @@ function formatModeRules(mode: OpenRouterManagerMode): string {
     return [
       "- Do not rewrite the full step division unless a small correction is necessary.",
       "- Create worker tasks only for the first queued or active step. The task.stepIndex must point at that step.",
-      "- The worker task description must be the actual high-quality prompt the worker will receive: objective, context, exact scope, constraints, validation, final-report expectations, and collision warnings.",
-      "- Choose runtimePreference, modelHint, and effortHint yourself.",
-      "- Keep write scopes independent. If two tasks might edit the same file or need each other's output, use one task.",
-      "- Create as many small worker tasks as are useful for the current step, but only when they can run at the same time without shared state.",
+      "- One worker task per plannedAgent in that step. A step with three plannedAgents should produce three worker tasks that can run in parallel.",
+      "- Each worker task description must be the actual high-quality prompt the worker will receive: objective, context, exact scope, constraints, validation, final-report expectations, and collision warnings.",
+      "- Each task's runtimePreference, modelHint, and effortHint must come from AVAILABLE RUNTIMES (installed runtimes only). If the desired runtime is not installed, route to an installed alternative or shell/manual.",
+      "- Keep write scopes independent. If two tasks might edit the same file or need each other's output, merge them into one task or sequence them across steps.",
       "- Set question to an empty string unless status is ask_user.",
     ].join("\n");
   }

@@ -2,11 +2,18 @@ node_modules/
 out/
 dist/
 release/
-*.log
+coverage/
 test-results/
 playwright-report/
+local-docs/
+*.log
 .DS_Store
 .vscode/
 .idea/
 *.tsbuildinfo
-local-docs/
+
+# Secrets / local observability config
+.env
+.env.local
+.env.*
+!.env.example

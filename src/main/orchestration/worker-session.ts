@@ -15,6 +15,8 @@ export interface WorkerCommand {
   initialInputChunkDelayMs?: number;
   initialSubmitInput?: string;
   initialSubmitDelayMs?: number;
+  initialSubmitInputRetries?: number;
+  initialSubmitInputRetryDelayMs?: number;
   env?: Record<string, string>;
 }
 
@@ -52,6 +54,11 @@ export function startWorkerSession(opts: StartWorkerSessionOptions): WorkerSessi
     ...opts.command.env,
     TERM: "xterm-256color",
     COLORTERM: "truecolor",
+    // Worker shells host Ink-based TUIs (Claude Code, Codex) that don't emit
+    // OSC 133/633 themselves. Loading our shell-integration script into the
+    // wrapper pwsh would write OSC bytes / hook PSReadLine and visibly corrupt
+    // the child TUI's rendering. Skip it here.
+    SPARK_NO_SHELL_INTEGRATION: "1",
   });
 
   const pty = nodePty.spawn(opts.command.exe, opts.command.args, {
@@ -173,6 +180,17 @@ export function startWorkerSession(opts: StartWorkerSessionOptions): WorkerSessi
       if (!command.initialSubmitInput || initialSubmitSent || settled) return;
       initialSubmitSent = true;
       session.write(command.initialSubmitInput);
+      // Some TUIs (notably Codex CLI in paste mode) need a second Enter after
+      // the first to commit the paste. Repeat-Enter is a no-op on empty input
+      // for Claude and Codex, so this is safe.
+      const retries = Math.max(0, command.initialSubmitInputRetries ?? 0);
+      const retryDelay = Math.max(50, command.initialSubmitInputRetryDelayMs ?? 800);
+      for (let i = 1; i <= retries; i++) {
+        setTimeout(() => {
+          if (settled || !command.initialSubmitInput) return;
+          session.write(command.initialSubmitInput);
+        }, retryDelay * i);
+      }
     }, delayMs);
   }
 

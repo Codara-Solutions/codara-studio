@@ -3,7 +3,20 @@ import { join, basename } from "node:path";
 import { platform } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { app } from "electron";
 import type { ShellInfo } from "@shared/types";
+
+function shellIntegrationPath(name: string): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "shell-integration", name)
+    : join(__dirname, "..", "..", "resources", "shell-integration", name);
+}
+
+// PowerShell single-quoted strings escape ' as ''. Anything else is literal,
+// so backslashes in Windows paths are safe.
+function pwshSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
 
 const execFileAsync = promisify(execFile);
 
@@ -23,23 +36,33 @@ async function detectWindows(): Promise<ShellInfo[]> {
   const programFiles86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
   const localAppData = process.env.LocalAppData || join(process.env.UserProfile || "", "AppData", "Local");
 
+  // -NoExit -Command runs after $PROFILE loads, then drops to the interactive
+  // prompt. We disable PSReadLine predictions (matches a stock terminal) and
+  // dot-source spark.ps1, which installs OSC 133 / 633 boundary markers so the
+  // BlockStrip can group output into per-command blocks.
+  const sparkPs1 = shellIntegrationPath("spark.ps1");
+  const pwshStartup = [
+    "Set-PSReadLineOption -PredictionSource None -ErrorAction SilentlyContinue",
+    `if (Test-Path ${pwshSingleQuote(sparkPs1)}) { . ${pwshSingleQuote(sparkPs1)} }`,
+  ].join("; ");
+  const pwshArgs = ["-NoLogo", "-NoExit", "-Command", pwshStartup];
   const candidates: Array<Omit<ShellInfo, "id"> & { id?: string }> = [
     {
       label: "PowerShell 7",
       exe: join(programFiles, "PowerShell", "7", "pwsh.exe"),
-      args: ["-NoLogo"],
+      args: pwshArgs,
       family: "pwsh",
     },
     {
       label: "PowerShell 7 (x86)",
       exe: join(programFiles86, "PowerShell", "7", "pwsh.exe"),
-      args: ["-NoLogo"],
+      args: pwshArgs,
       family: "pwsh",
     },
     {
       label: "Windows PowerShell",
       exe: join(sysRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-      args: ["-NoLogo"],
+      args: pwshArgs,
       family: "powershell",
     },
     {
@@ -67,7 +90,7 @@ async function detectWindows(): Promise<ShellInfo[]> {
   candidates.push({
     label: "PowerShell 7 (user)",
     exe: userPwsh,
-    args: ["-NoLogo"],
+    args: pwshArgs,
     family: "pwsh",
   });
 
@@ -75,7 +98,7 @@ async function detectWindows(): Promise<ShellInfo[]> {
     candidates.push({
       label: "PowerShell 7",
       exe,
-      args: ["-NoLogo"],
+      args: pwshArgs,
       family: "pwsh",
     });
   }

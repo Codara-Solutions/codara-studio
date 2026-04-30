@@ -5,6 +5,7 @@ import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import TerminalGrid from "./components/TerminalGrid";
 import FileTree from "./components/FileTree";
 import EditorGrid from "./components/EditorGrid";
+import RunsView from "./components/RunsView";
 import OrchestrationSidebar from "./components/OrchestrationSidebar";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
@@ -13,7 +14,7 @@ import { basename } from "./path-utils";
 
 const RAIL_WIDTH = 240;
 const RIGHT_WIDTH = 360;
-type WorkbenchTab = "workers" | "editor";
+type WorkbenchTab = "workers" | "editor" | "runs";
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
@@ -362,6 +363,9 @@ export default function App() {
                     onCloseFile={closeEditorFile}
                   />
                 </div>
+                <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: activeWorkbenchTab === "runs" ? "flex" : "none" }}>
+                  <RunsView workspace={ws} />
+                </div>
               </div>
             ))
           )}
@@ -516,6 +520,11 @@ function WorkbenchTabs({
         count={workerCount}
         active={active === "workers"}
         onClick={() => onSelect("workers")}
+      />
+      <WorkbenchTabButton
+        label="RUNS"
+        active={active === "runs"}
+        onClick={() => onSelect("runs")}
       />
       {fileCount > 0 && (
         <WorkbenchTabButton

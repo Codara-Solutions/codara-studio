@@ -45,6 +45,7 @@ import {
   type LangSmithTrace,
 } from "./langsmith-tracer";
 import { disposeWorkerSession, startWorkerSession, type WorkerCommand, type WorkerSession } from "./worker-session";
+import { detectAgentRuntimes } from "../agent-runtimes";
 
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
@@ -605,12 +606,14 @@ async function askOpenRouterManager(
   const parsedJsonPath = join(callDir, "parsed-decision.json");
   const workerReports = await collectWorkerReportContext(run);
   const managerMode = normalizeOpenRouterManagerMode(mode);
+  const availableRuntimes = await detectAgentRuntimes().catch(() => []);
   const requestBody = buildOpenRouterManagerRequest({
     run,
     cwd,
     model: config.model,
     mode: managerMode,
     workerReports,
+    availableRuntimes,
   });
   await fs.mkdir(callDir, { recursive: true });
   await fs.writeFile(requestPath, JSON.stringify(requestBody, null, 2), "utf8");
@@ -2013,7 +2016,9 @@ async function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths, 
       initialInputChunkSize: 1000,
       initialInputChunkDelayMs: 20,
       initialSubmitInput: "\r",
-      initialSubmitDelayMs: 1200,
+      initialSubmitDelayMs: 2500,
+      initialSubmitInputRetries: 2,
+      initialSubmitInputRetryDelayMs: 1000,
     };
   }
 
@@ -2035,7 +2040,9 @@ async function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths, 
       initialInputChunkSize: 1000,
       initialInputChunkDelayMs: 20,
       initialSubmitInput: "\r",
-      initialSubmitDelayMs: 1200,
+      initialSubmitDelayMs: 2500,
+      initialSubmitInputRetries: 2,
+      initialSubmitInputRetryDelayMs: 1000,
     };
   }
 
@@ -2090,6 +2097,25 @@ async function resolveDefaultWorkerShell(): Promise<ShellInfo> {
   };
 }
 
+// Wrapper pwsh sessions that host Claude / Codex don't need the user's
+// $PROFILE — oh-my-posh, posh-git, Terminal-Icons, PSReadLine history, and
+// other startup work are pure overhead here, plus they race when two agents
+// in the same step spawn in parallel (oh-my-posh's init script writes a temp
+// file that becomes locked under concurrent reads). -NoProfile makes the
+// wrapper boot fast, deterministic, and safe to spawn in parallel.
+function workerShellArgs(shell: ShellInfo): string[] {
+  if (shell.family === "pwsh" || shell.family === "powershell") {
+    return ["-NoLogo", "-NoProfile"];
+  }
+  if (shell.family === "cmd") {
+    return ["/d"]; // skip AutoRun, equivalent to /D in cmd /D
+  }
+  if (shell.family === "bash" || shell.family === "zsh" || shell.family === "sh") {
+    return ["--noprofile", "--norc"];
+  }
+  return shell.args;
+}
+
 function shellInteractiveWorkerCommand(
   shell: ShellInfo,
   startupCommand: string,
@@ -2098,7 +2124,7 @@ function shellInteractiveWorkerCommand(
 ): WorkerCommand {
   return {
     exe: shell.exe,
-    args: shell.args,
+    args: workerShellArgs(shell),
     display: `${shell.label} -> ${startupCommand}`,
     startupInput: `${startupCommand}\r`,
     startupInputDelayMs: 250,
@@ -2109,7 +2135,12 @@ function shellInteractiveWorkerCommand(
     initialInputChunkSize: 1000,
     initialInputChunkDelayMs: 20,
     initialSubmitInput: "\r",
-    initialSubmitDelayMs: 1200,
+    // Codex's TUI shows long prompts as "[Pasted Content N chars]" and needs a
+    // brief idle window before Enter is treated as submit (vs. as part of the
+    // paste). 2.5s + 2 retries covers both Codex and slower Claude boots.
+    initialSubmitDelayMs: 2500,
+    initialSubmitInputRetries: 2,
+    initialSubmitInputRetryDelayMs: 1000,
   };
 }
 
@@ -2259,88 +2290,99 @@ function renderWorkerPrompt({
   task: WorkerTask;
   paths: WorkerArtifactPaths;
 }): string {
-  return [
-    "You are a worker agent running inside the user's project.",
+  const lines: string[] = [];
+
+  lines.push(
+    "You are a worker agent in Spark Agent. Execute the single task below — nothing else.",
+    "Make the smallest change that satisfies the acceptance criteria. Stop and report on blockers; do not guess.",
     "",
-    "WORKSPACE",
-    `Project directory: ${cwd}`,
-    "",
-    "RUN",
-    `${run.title} (${run.id})`,
-    "",
-    "PROJECT PLAN SNAPSHOT",
-    formatPlanSnapshot(run),
-    "",
-    "STEP-BY-STEP DIVISION",
-    formatRunStepDivision(run),
-    "",
-    "CURRENT STEP",
-    step ? `${step.title}\n${step.goal}` : "No step is assigned to this task.",
-    "",
-    "YOUR TASK",
+    "## TASK",
     task.title,
-    task.description,
     "",
-    "ALLOWED FILES / FOLDERS",
-    formatList(task.allowedPaths, "No explicit allowed paths. Keep changes tightly scoped to the task."),
+    task.description.trim(),
+  );
+
+  if (step?.acceptanceCriteria?.length) {
+    lines.push("", "Acceptance criteria:", ...step.acceptanceCriteria.map((c) => `- ${c}`));
+  }
+
+  if (task.verificationCommands?.length) {
+    lines.push(
+      "",
+      "Verify with these commands when done:",
+      ...task.verificationCommands.map((c) => `- ${c}`),
+    );
+  }
+
+  lines.push("", "## WORKSPACE", cwd);
+
+  if (step) {
+    const stepHeader = `Step ${step.index}: ${step.title}`;
+    lines.push("", "## YOUR STEP IN THE RUN", stepHeader, step.goal.trim());
+  }
+
+  const planSnippet = formatPlanSnapshot(run, 3500);
+  if (planSnippet) {
+    lines.push("", "## PROJECT PLAN (read-only context)", planSnippet);
+  }
+
+  const division = formatRunStepDivisionCompact(run, step?.id);
+  if (division) {
+    lines.push("", "## RUN STEPS (read-only context)", division);
+  }
+
+  if (task.allowedPaths?.length) {
+    lines.push("", "## ALLOWED PATHS", ...task.allowedPaths.map((p) => `- ${p}`));
+  }
+  if (task.forbiddenPaths?.length) {
+    lines.push("", "## FORBIDDEN PATHS", ...task.forbiddenPaths.map((p) => `- ${p}`));
+  }
+
+  lines.push(
     "",
-    "FORBIDDEN FILES / FOLDERS",
-    formatList(task.forbiddenPaths, "No explicit forbidden paths."),
+    "## RULES",
+    "- Stay strictly within this task's scope. Do not touch unrelated files.",
+    "- Do not delete or rewrite the user's existing work.",
+    "- Do not install new dependencies unless the task explicitly says so.",
+    "- Prefer small, reviewable changes over rewrites.",
+    "- If blocked or ambiguous, record the blocker in the workpad and stop.",
     "",
-    "WORKPAD",
-    `Before editing, create or update: ${paths.workpadMd}`,
+    "## WORKPAD",
+    `Maintain this file as you work: ${paths.workpadMd}`,
+    "Sections required: goal, plan, acceptance, progress, validation, blockers, evidence.",
     "",
-    "Your workpad must include:",
-    "- goal",
-    "- plan",
-    "- acceptance criteria",
-    "- progress",
-    "- validation",
-    "- blockers",
-    "- final evidence",
-    "",
-    "CONSTRAINTS",
-    "- Keep the change focused.",
-    "- Do not redesign unrelated parts of the app.",
-    "- Do not delete existing user work.",
-    "- Do not install new dependencies unless explicitly allowed.",
-    "- Prefer small, understandable changes.",
-    "- If blocked, report the blocker clearly instead of guessing.",
-    "",
-    "VERIFICATION",
-    formatList(task.verificationCommands, "No verification commands were specified."),
-    "",
-    "FINAL REPORT",
-    `Write final JSON to: ${paths.finalReportJson}`,
-    "The JSON must match this schema:",
+    "## FINAL REPORT (required)",
+    `When you finish or stop, write JSON to: ${paths.finalReportJson}`,
+    "Schema:",
     "```json",
     JSON.stringify(
       {
         status: "complete | partial | blocked | failed",
-        summary: "...",
-        files_changed: [{ path: "...", reason: "..." }],
-        commands_run: [{ command: "...", exit_code: 0, summary: "..." }],
-        tests: [{ command: "...", result: "passed | failed | not_run", details: "..." }],
-        proof: ["..."],
-        risks: ["..."],
-        followups: ["..."],
+        summary: "1-3 sentences describing what changed and why.",
+        files_changed: [{ path: "absolute or repo-relative", reason: "why this file was edited" }],
+        commands_run: [{ command: "string", exit_code: 0, summary: "what it produced" }],
+        tests: [{ command: "string", result: "passed | failed | not_run", details: "string" }],
+        proof: ["short evidence strings: file excerpts, command outputs, etc."],
+        risks: ["anything that could break or surprise the user"],
+        followups: ["work this task did NOT do but should be considered next"],
       },
       null,
       2,
     ),
     "```",
-    "",
-  ].join("\n");
+  );
+
+  return lines.join("\n");
 }
 
-function formatPlanSnapshot(run: RunState): string {
+function formatPlanSnapshot(run: RunState, maxLength = 12000): string {
   const plan = run.planId
     ? run.plans.find((item) => item.id === run.planId)
     : run.plans.at(-1);
   const content = plan?.rawContent?.trim() || plan?.summary?.trim();
-  if (!content) return "No selected project plan content was captured for this run.";
+  if (!content) return "";
   const source = plan?.sourceFile ? `Source: ${plan.sourceFile}\n\n` : "";
-  return source + truncateText(content, 12000);
+  return source + truncateText(content, maxLength);
 }
 
 function formatRunStepDivision(run: RunState): string {
@@ -2357,6 +2399,16 @@ function formatRunStepDivision(run: RunState): string {
       ].join("\n"),
     )
     .join("\n\n");
+}
+
+function formatRunStepDivisionCompact(run: RunState, currentStepId?: string): string {
+  if (run.steps.length === 0) return "";
+  return run.steps
+    .map((step) => {
+      const marker = step.id === currentStepId ? "→" : " ";
+      return `${marker} ${step.index}. [${step.status}] ${step.title}`;
+    })
+    .join("\n");
 }
 
 function formatPlannedStepAgents(agents: StepState["plannedAgents"]): string {

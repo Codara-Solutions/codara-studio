@@ -47,7 +47,11 @@
       "package.json"
     ],
     "extraResources": [
-      "build/icon.ico"
+      "build/icon.ico",
+      {
+        "from": "resources/shell-integration",
+        "to": "shell-integration"
+      }
     ],
     "directories": {
       "buildResources": "build"

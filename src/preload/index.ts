@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AddRunMessageInput,
+  AgentRuntimeDiagnostic,
   AppSettings,
   AppState,
   CreateStepInput,
@@ -26,7 +27,7 @@ import type {
   WorkerTaskEnvelope,
 } from "@shared/types";
 
-type PtyDataHandler = (data: string) => void;
+type PtyDataHandler = (data: Uint8Array | string) => void;
 type PtyExitHandler = (info: { exitCode: number; signal?: number }) => void;
 type OrchestrationEventHandler = (event: SparkEvent) => void;
 
@@ -42,6 +43,10 @@ const api = {
   shells: {
     list: (): Promise<ShellInfo[]> => ipcRenderer.invoke("shells:list"),
     default: (): Promise<ShellInfo | null> => ipcRenderer.invoke("shells:default"),
+  },
+  agents: {
+    diagnostics: (force?: boolean): Promise<AgentRuntimeDiagnostic[]> =>
+      ipcRenderer.invoke("agents:diagnostics", force === true),
   },
   dialog: {
     openDirectory: (defaultPath?: string): Promise<string | null> =>
@@ -130,7 +135,7 @@ const api = {
     dispose: (id: string): Promise<void> => ipcRenderer.invoke("pty:dispose", { id }),
     onData: (id: string, handler: PtyDataHandler): (() => void) => {
       const channel = `pty:data:${id}`;
-      const listener = (_e: Electron.IpcRendererEvent, data: string) => handler(data);
+      const listener = (_e: Electron.IpcRendererEvent, data: Uint8Array | string) => handler(data);
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.off(channel, listener);
     },
