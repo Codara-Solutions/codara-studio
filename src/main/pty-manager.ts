@@ -11,9 +11,18 @@ interface Session {
   pendingChunks: Buffer[];
   pendingBytes: number;
   flushTimer: NodeJS.Timeout | null;
+  resizedAt: number;
+  exited: boolean;
 }
 
 const sessions = new Map<string, Session>();
+// Listeners for "session id became available" — orchestration uses this to
+// wait until the renderer-side TerminalView has called pty:spawn before we
+// start typing into the pwsh shell.
+const spawnWaiters = new Map<string, Array<() => void>>();
+// Listeners for pty exit — orchestration uses this to release the run loop
+// when the user closes the worker pane mid-task.
+const exitWaiters = new Map<string, Array<(info: { exitCode: number; signal?: number }) => void>>();
 
 const pendingKills = new Map<string, NodeJS.Timeout>();
 const GRACE_MS = 250;
@@ -95,6 +104,8 @@ export function spawn(opts: SpawnOptions): { id: string; pid: number } {
     pendingChunks: [],
     pendingBytes: 0,
     flushTimer: null,
+    resizedAt: 0,
+    exited: false,
   };
 
   pty.onData((data: string | Buffer) => enqueueData(opts.id, data));
@@ -102,6 +113,7 @@ export function spawn(opts: SpawnOptions): { id: string; pid: number } {
   pty.onExit(({ exitCode, signal }) => {
     const s = sessions.get(opts.id);
     if (s) {
+      s.exited = true;
       flushDataNow(s);
       if (!s.webContents.isDestroyed()) {
         s.webContents.send(s.exitChannel, { exitCode, signal });
@@ -114,9 +126,27 @@ export function spawn(opts: SpawnOptions): { id: string; pid: number } {
       clearTimeout(t);
       pendingKills.delete(opts.id);
     }
+    const waiters = exitWaiters.get(opts.id) ?? [];
+    exitWaiters.delete(opts.id);
+    for (const w of waiters) {
+      try {
+        w({ exitCode, signal });
+      } catch {
+        /* ignore */
+      }
+    }
   });
 
   sessions.set(opts.id, session);
+  const waiters = spawnWaiters.get(opts.id) ?? [];
+  spawnWaiters.delete(opts.id);
+  for (const w of waiters) {
+    try {
+      w();
+    } catch {
+      /* ignore */
+    }
+  }
   return { id: opts.id, pid: pty.pid };
 }
 
@@ -170,9 +200,74 @@ export function resize(id: string, cols: number, rows: number): void {
   if (!s) return;
   try {
     s.pty.resize(Math.max(1, cols | 0), Math.max(1, rows | 0));
+    s.resizedAt = Date.now();
   } catch {
     /* pty may have exited */
   }
+}
+
+export function hasSession(id: string): boolean {
+  return sessions.has(id);
+}
+
+// Wait for a renderer-spawned session to come online. Used by orchestration
+// after it emits the "envelope_prepared" event — the renderer adds the pane,
+// TerminalView mounts, calls pty:spawn, and main can then start typing into
+// the (now-warm) pwsh shell. Resolves false on timeout.
+export function waitForSpawn(id: string, timeoutMs: number): Promise<boolean> {
+  if (sessions.has(id)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      const list = spawnWaiters.get(id);
+      if (list) {
+        const idx = list.indexOf(onSpawn);
+        if (idx >= 0) list.splice(idx, 1);
+        if (list.length === 0) spawnWaiters.delete(id);
+      }
+      resolve(ok);
+    };
+    const onSpawn = () => finish(true);
+    const list = spawnWaiters.get(id) ?? [];
+    list.push(onSpawn);
+    spawnWaiters.set(id, list);
+    setTimeout(() => finish(false), Math.max(0, timeoutMs));
+  });
+}
+
+// Wait until the renderer has reported a real pane size, so the launch
+// command goes into a pty already sized to its actual visible width. Without
+// this, claude/codex paint at 80x24 and smear once the renderer reports the
+// real size mid-render.
+export function waitForResize(id: string, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    const tick = () => {
+      const s = sessions.get(id);
+      if (s && s.resizedAt > 0) return resolve(true);
+      if (Date.now() - startedAt >= timeoutMs) return resolve(false);
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+}
+
+export function onExit(
+  id: string,
+  handler: (info: { exitCode: number; signal?: number }) => void,
+): () => void {
+  const list = exitWaiters.get(id) ?? [];
+  list.push(handler);
+  exitWaiters.set(id, list);
+  return () => {
+    const cur = exitWaiters.get(id);
+    if (!cur) return;
+    const idx = cur.indexOf(handler);
+    if (idx >= 0) cur.splice(idx, 1);
+    if (cur.length === 0) exitWaiters.delete(id);
+  };
 }
 
 export function dispose(id: string): void {

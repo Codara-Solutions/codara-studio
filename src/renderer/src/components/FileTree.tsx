@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FsEntry } from "@shared/types";
-import { ChevronIcon, FileIcon, FolderIcon } from "./icons";
+import { ChevronIcon, CloseIcon, FileIcon, FolderIcon } from "./icons";
 import { basename } from "../path-utils";
 
 interface DirNode {
@@ -41,6 +41,9 @@ export default function FileTree({
 }: Props) {
   const [root, setRoot] = useState<DirNode & { kind: "dir" }>(() => makeDir({ name: basename(cwd), path: cwd, isDir: true }, true));
   const [contextMenu, setContextMenu] = useState<FileContextMenu | null>(null);
+  const [renameTarget, setRenameTarget] = useState<FsEntry | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<FsEntry | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [, force] = useState(0);
 
@@ -117,28 +120,44 @@ export default function FileTree({
     };
   }, [contextMenu]);
 
-  const renameEntry = async (entry: FsEntry) => {
+  const beginRename = (entry: FsEntry) => {
     setContextMenu(null);
-    const nextName = window.prompt("Rename file", entry.name);
-    if (nextName === null || nextName.trim() === entry.name) return;
+    setDeleteTarget(null);
+    setRenameTarget(entry);
+    setRenameValue(entry.name);
+  };
+
+  const renameEntry = async () => {
+    if (!renameTarget) return;
+    const nextName = renameValue.trim();
+    if (!nextName || nextName === renameTarget.name) {
+      setRenameTarget(null);
+      return;
+    }
     try {
-      const renamed = await window.spark.fs.renameFile({ path: entry.path, newName: nextName });
-      await refreshDir(parentPath(entry.path));
-      onRenameFile?.(entry.path, renamed);
+      const renamed = await window.spark.fs.renameFile({ path: renameTarget.path, newName: nextName });
+      await refreshDir(parentPath(renameTarget.path));
+      onRenameFile?.(renameTarget.path, renamed);
+      setRenameTarget(null);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
     }
   };
 
-  const deleteEntry = async (entry: FsEntry) => {
+  const beginDelete = (entry: FsEntry) => {
     setContextMenu(null);
-    const ok = window.confirm(`Delete ${entry.name}?`);
-    if (!ok) return;
+    setRenameTarget(null);
+    setDeleteTarget(entry);
+  };
+
+  const deleteEntry = async () => {
+    if (!deleteTarget) return;
     try {
-      await window.spark.fs.deleteFile(entry.path);
-      await refreshDir(parentPath(entry.path));
-      onDeleteFile?.(entry.path);
+      await window.spark.fs.deleteFile(deleteTarget.path);
+      await refreshDir(parentPath(deleteTarget.path));
+      onDeleteFile?.(deleteTarget.path);
+      setDeleteTarget(null);
       setError(null);
     } catch (err) {
       setError((err as Error).message);
@@ -182,8 +201,28 @@ export default function FileTree({
       {contextMenu && (
         <FileMenu
           menu={contextMenu}
-          onRename={() => void renameEntry(contextMenu.entry)}
-          onDelete={() => void deleteEntry(contextMenu.entry)}
+          onOpen={() => {
+            setContextMenu(null);
+            onOpenFile(contextMenu.entry);
+          }}
+          onRename={() => beginRename(contextMenu.entry)}
+          onDelete={() => beginDelete(contextMenu.entry)}
+        />
+      )}
+      {renameTarget && (
+        <RenameDialog
+          entry={renameTarget}
+          value={renameValue}
+          onChange={setRenameValue}
+          onClose={() => setRenameTarget(null)}
+          onSubmit={() => void renameEntry()}
+        />
+      )}
+      {deleteTarget && (
+        <DeleteDialog
+          entry={deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={() => void deleteEntry()}
         />
       )}
     </div>
@@ -291,40 +330,302 @@ function Row({
 
 function FileMenu({
   menu,
+  onOpen,
   onRename,
   onDelete,
 }: {
   menu: FileContextMenu;
+  onOpen: () => void;
   onRename: () => void;
   onDelete: () => void;
 }) {
+  const x = Math.min(menu.x, window.innerWidth - 236);
+  const y = Math.min(menu.y, window.innerHeight - 226);
   return (
     <div
       onClick={(e) => e.stopPropagation()}
       style={{
         position: "fixed",
         zIndex: 100,
-        left: menu.x,
-        top: menu.y,
-        minWidth: 152,
+        left: Math.max(8, x),
+        top: Math.max(8, y),
+        width: 228,
         background: "var(--panel-2)",
         border: "1px solid var(--rule-strong)",
-        boxShadow: "0 8px 28px rgba(0,0,0,0.42)",
-        padding: "4px 0",
+        boxShadow: "0 18px 50px rgba(0,0,0,0.48)",
+        padding: 6,
       }}
     >
-      <MenuButton onClick={onRename}>RENAME</MenuButton>
-      <MenuButton danger onClick={onDelete}>DELETE</MenuButton>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "22px minmax(0, 1fr)",
+          gap: 8,
+          alignItems: "center",
+          padding: "8px 8px 10px",
+          borderBottom: "1px solid var(--rule)",
+          marginBottom: 4,
+        }}
+      >
+        <FileIcon ext={menu.entry.ext} />
+        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+          <span
+            title={menu.entry.name}
+            style={{
+              color: "var(--ink)",
+              fontSize: 11,
+              fontWeight: 800,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {menu.entry.name}
+          </span>
+          <span style={{ color: "var(--muted)", fontSize: 9 }}>
+            {menu.entry.ext ? `${menu.entry.ext.toUpperCase()} file` : "file"}
+          </span>
+        </div>
+      </div>
+      <MenuButton icon="O" onClick={onOpen} hint="Enter">Open</MenuButton>
+      <MenuButton icon="R" onClick={onRename}>Rename</MenuButton>
+      <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
+      <MenuButton icon="D" danger onClick={onDelete}>Delete</MenuButton>
     </div>
   );
 }
 
 function MenuButton({
   children,
+  icon,
+  hint,
   danger,
   onClick,
 }: {
   children: React.ReactNode;
+  icon: string;
+  hint?: string;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        appearance: "none",
+        width: "100%",
+        border: "none",
+        background: hovered ? "var(--panel)" : "transparent",
+        color: danger ? "var(--danger)" : hovered ? "var(--ink)" : "var(--ink-dim)",
+        padding: "7px 8px",
+        textAlign: "left",
+        fontFamily: "inherit",
+        fontSize: 11,
+        fontWeight: 700,
+        cursor: "default",
+        display: "grid",
+        gridTemplateColumns: "22px minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 8,
+      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <span
+        style={{
+          width: 18,
+          height: 18,
+          border: "1px solid var(--rule)",
+          color: danger ? "var(--danger)" : "var(--muted)",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 9,
+          fontWeight: 900,
+        }}
+      >
+        {icon}
+      </span>
+      <span>{children}</span>
+      {hint && <span style={{ color: "var(--muted)", fontSize: 9 }}>{hint}</span>}
+    </button>
+  );
+}
+
+function RenameDialog({
+  entry,
+  value,
+  onChange,
+  onClose,
+  onSubmit,
+}: {
+  entry: FsEntry;
+  value: string;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  return (
+    <DialogShell title="Rename file" onClose={onClose}>
+      <div style={{ color: "var(--muted)", fontSize: 10, marginBottom: 8 }}>
+        Update the file name in the current folder.
+      </div>
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") onSubmit();
+          if (event.key === "Escape") onClose();
+        }}
+        style={{
+          width: "100%",
+          height: 30,
+          background: "var(--bg)",
+          color: "var(--ink)",
+          border: "1px solid var(--rule-strong)",
+          outline: "none",
+          padding: "5px 8px",
+          fontFamily: "inherit",
+          fontSize: 11,
+        }}
+      />
+      <div style={{ color: "var(--muted)", fontSize: 9, marginTop: 7, overflowWrap: "anywhere" }}>
+        {entry.path}
+      </div>
+      <DialogActions>
+        <DialogButton onClick={onClose}>Cancel</DialogButton>
+        <DialogButton primary onClick={onSubmit}>Rename</DialogButton>
+      </DialogActions>
+    </DialogShell>
+  );
+}
+
+function DeleteDialog({
+  entry,
+  onClose,
+  onConfirm,
+}: {
+  entry: FsEntry;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <DialogShell title="Delete file" onClose={onClose}>
+      <div style={{ color: "var(--ink-dim)", fontSize: 11, lineHeight: 1.45 }}>
+        Move <b style={{ color: "var(--ink)" }}>{entry.name}</b> to the system trash?
+      </div>
+      <div style={{ color: "var(--muted)", fontSize: 9, marginTop: 8, overflowWrap: "anywhere" }}>
+        {entry.path}
+      </div>
+      <DialogActions>
+        <DialogButton onClick={onClose}>Cancel</DialogButton>
+        <DialogButton danger onClick={onConfirm}>Delete</DialogButton>
+      </DialogActions>
+    </DialogShell>
+  );
+}
+
+function DialogShell({
+  title,
+  children,
+  onClose,
+}: {
+  title: string;
+  children: React.ReactNode;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      onMouseDown={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 120,
+        background: "rgba(0,0,0,0.42)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 16,
+      }}
+    >
+      <section
+        onMouseDown={(event) => event.stopPropagation()}
+        style={{
+          width: "min(360px, 100%)",
+          background: "var(--panel-2)",
+          border: "1px solid var(--rule-strong)",
+          boxShadow: "0 20px 70px rgba(0,0,0,0.55)",
+        }}
+      >
+        <div
+          style={{
+            height: 36,
+            padding: "0 10px 0 12px",
+            borderBottom: "1px solid var(--rule)",
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+          }}
+        >
+          <span style={{ color: "var(--ink)", fontSize: 11, fontWeight: 900, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+            {title}
+          </span>
+          <span style={{ flex: 1 }} />
+          <button
+            type="button"
+            title="Close"
+            onClick={onClose}
+            style={{
+              appearance: "none",
+              width: 22,
+              height: 22,
+              border: "1px solid var(--rule)",
+              background: "var(--bg)",
+              color: "var(--muted)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 0,
+              cursor: "default",
+            }}
+          >
+            <CloseIcon size={9} />
+          </button>
+        </div>
+        <div style={{ padding: 12 }}>
+          {children}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function DialogActions({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+      {children}
+    </div>
+  );
+}
+
+function DialogButton({
+  children,
+  primary,
+  danger,
+  onClick,
+}: {
+  children: React.ReactNode;
+  primary?: boolean;
   danger?: boolean;
   onClick: () => void;
 }) {
@@ -334,20 +635,19 @@ function MenuButton({
       onClick={onClick}
       style={{
         appearance: "none",
-        width: "100%",
-        border: "none",
-        background: "transparent",
-        color: danger ? "var(--danger)" : "var(--ink-dim)",
-        padding: "7px 10px",
-        textAlign: "left",
+        minWidth: 78,
+        height: 28,
+        border: `1px solid ${primary ? "var(--accent)" : danger ? "var(--danger)" : "var(--rule-strong)"}`,
+        background: primary ? "var(--accent)" : "transparent",
+        color: primary ? "var(--accent-ink)" : danger ? "var(--danger)" : "var(--ink-dim)",
+        padding: "0 10px",
         fontFamily: "inherit",
         fontSize: 10,
-        fontWeight: 800,
+        fontWeight: 900,
         letterSpacing: "0.08em",
+        textTransform: "uppercase",
         cursor: "default",
       }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--panel)")}
-      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
     >
       {children}
     </button>

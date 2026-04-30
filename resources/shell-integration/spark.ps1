@@ -53,19 +53,21 @@ function Global:Prompt {
 
     $out = ''
 
-    # Emit E + C + D retroactively for the command that just finished. Reading
-    # from Get-History is robust against TUI exits, Ctrl+C, and paste, and
-    # avoids hooking PSReadLine's input path (which can desync the cursor and
-    # break child TUIs like Claude / Codex).
+    # We emit C live (on Enter, see PSReadLine hook below). If a TUI ate the
+    # whole turn without ever yielding C — e.g. shell crash, Ctrl-C before
+    # exec — fall back to the retroactive E+C path so the block still closes.
     if ($Global:__SparkPromptStarted) {
-        $hist = Get-History -Count 1
-        if ($hist -and $hist.Id -ne $Global:__SparkLastHistoryId) {
-            $Global:__SparkLastHistoryId = $hist.Id
-            $out += __Spark-Osc ('633;E;' + (__Spark-Esc $hist.CommandLine))
-            $out += __Spark-Osc '633;C'
+        if (-not $Global:__SparkCommandRunning) {
+            $hist = Get-History -Count 1
+            if ($hist -and $hist.Id -ne $Global:__SparkLastHistoryId) {
+                $Global:__SparkLastHistoryId = $hist.Id
+                $out += __Spark-Osc ('633;E;' + (__Spark-Esc $hist.CommandLine))
+                $out += __Spark-Osc '633;C'
+            }
         }
         $out += __Spark-Osc "633;D;$exit"
     }
+    $Global:__SparkCommandRunning = $false
 
     $cwd = (Get-Location).Path
     if ($cwd) {
@@ -83,4 +85,31 @@ function Global:Prompt {
     $out += __Spark-Osc '633;B'
     $Global:__SparkPromptStarted = $true
     return $out
+}
+
+# Hook Enter so OSC 633;C fires the moment the user submits — *before* the
+# command starts producing output. Without this, claude/codex run for minutes
+# without the renderer knowing the pane is busy, because the next Prompt
+# (which emits C retroactively) only fires once the TUI exits.
+#
+# We don't replace PSReadLine's AcceptLine logic; we just emit the markers
+# straight to the host's RawUI BEFORE forwarding to the original handler.
+# That keeps PSReadLine's cursor/selection bookkeeping intact, which is what
+# previously broke when the integration tried to fully take over Enter.
+if (Get-Module -ListAvailable PSReadLine) {
+    Import-Module PSReadLine -ErrorAction SilentlyContinue
+    if (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue) {
+        $Global:__SparkAcceptLine = {
+            param($key, $arg)
+            $line = $null
+            $cursor = $null
+            [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+            $marker = (__Spark-Osc ('633;E;' + (__Spark-Esc $line))) + (__Spark-Osc '633;C')
+            [Console]::Write($marker)
+            $Global:__SparkCommandRunning = $true
+            [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine($key, $arg)
+        }
+        Set-PSReadLineKeyHandler -Key Enter -ScriptBlock $Global:__SparkAcceptLine
+        Set-PSReadLineKeyHandler -Key Ctrl+m -ScriptBlock $Global:__SparkAcceptLine
+    }
 }

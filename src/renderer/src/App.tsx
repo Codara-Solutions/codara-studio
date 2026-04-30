@@ -10,6 +10,7 @@ import OrchestrationSidebar from "./components/OrchestrationSidebar";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
 import { PlusIcon } from "./components/icons";
+import type { ShellIntegration } from "./terminal/shell-integration";
 import { basename } from "./path-utils";
 
 const RAIL_WIDTH = 240;
@@ -31,9 +32,10 @@ function uid(prefix = "id"): string {
 
 function gridDims(n: number): { cols: number; rows: number } {
   if (n <= 0) return { cols: 1, rows: 1 };
-  const cols = Math.ceil(Math.sqrt(n));
-  const rows = Math.ceil(n / cols);
-  return { cols, rows };
+  // Match TerminalGrid: true square (side x side). The LAYOUT label in the
+  // header has to agree with what the grid actually renders.
+  const side = Math.ceil(Math.sqrt(n));
+  return { cols: side, rows: side };
 }
 
 function resolveDefaultShell(
@@ -55,6 +57,7 @@ export default function App() {
   const [openFiles, setOpenFiles] = useState<FsEntry[]>([]);
   const [activeEditorPath, setActiveEditorPath] = useState<string | null>(null);
   const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WorkbenchTab>("workers");
+  const [runCountsByWorkspace, setRunCountsByWorkspace] = useState<Record<string, number>>({});
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [defaultShell, setDefaultShell] = useState<ShellInfo | null>(null);
   const [detectedDefaultShell, setDetectedDefaultShell] = useState<ShellInfo | null>(null);
@@ -63,6 +66,17 @@ export default function App() {
   const [platform, setPlatform] = useState<string>("");
   const [home, setHome] = useState<string>("");
   const saveTimer = useRef<number | null>(null);
+  // Per-pane shell integrations registered as WorkerPanes mount. Used to ask
+  // "is this terminal currently running a command or hosting a TUI?" before
+  // pasting test prompts into it.
+  const workerIntegrationsRef = useRef<Map<string, ShellIntegration>>(new Map());
+  const registerWorkerIntegration = useCallback(
+    (workerId: string, integration: ShellIntegration | null) => {
+      if (integration) workerIntegrationsRef.current.set(workerId, integration);
+      else workerIntegrationsRef.current.delete(workerId);
+    },
+    [],
+  );
 
   // Initial load
   useEffect(() => {
@@ -126,6 +140,58 @@ export default function App() {
     () => workspaces.find((w) => w.id === activeId) ?? null,
     [workspaces, activeId],
   );
+  const workspaceIdsKey = useMemo(() => workspaces.map((w) => w.id).join("\0"), [workspaces]);
+
+  const refreshRunCount = useCallback(async (workspaceId: string) => {
+    try {
+      const runs = await window.spark.orchestration.listRuns(workspaceId);
+      setRunCountsByWorkspace((current) => ({
+        ...current,
+        [workspaceId]: runs.length,
+      }));
+    } catch {
+      /* The Runs view will surface detailed orchestration errors. */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!booted) return;
+    const ids = workspaces.map((workspace) => workspace.id);
+    if (ids.length === 0) {
+      setRunCountsByWorkspace({});
+      return;
+    }
+    let cancelled = false;
+    void Promise.all(
+      ids.map(async (id) => [id, (await window.spark.orchestration.listRuns(id)).length] as const),
+    ).then((entries) => {
+      if (cancelled) return;
+      setRunCountsByWorkspace(Object.fromEntries(entries));
+    }).catch(() => {
+      /* Counts are only for tab visibility; failures should not block boot. */
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [booted, workspaceIdsKey, workspaces]);
+
+  useEffect(() => {
+    if (!booted) return undefined;
+    return window.spark.orchestration.onEvent((event) => {
+      if (!event.workspaceId) return;
+      void refreshRunCount(event.workspaceId);
+      if (event.type === "run.deleted") {
+        window.setTimeout(() => void refreshRunCount(event.workspaceId), 500);
+      }
+    });
+  }, [booted, refreshRunCount]);
+
+  useEffect(() => {
+    if (activeWorkbenchTab !== "runs") return;
+    if (!activeId || (runCountsByWorkspace[activeId] ?? 0) === 0) {
+      setActiveWorkbenchTab("workers");
+    }
+  }, [activeId, activeWorkbenchTab, runCountsByWorkspace]);
 
   // Theme the entire UI with the active workspace's color. Falls back to the
   // default yellow when nothing is active.
@@ -168,7 +234,14 @@ export default function App() {
         list.map((workspace) => {
           if (workspace.id !== event.workspaceId) return workspace;
           if (workspace.workers.some((worker) => worker.id === pane.id)) return workspace;
-          return { ...workspace, workers: [...workspace.workers, pane] };
+          // Sweep stale autofill panes from earlier versions of this code. We
+          // no longer pad — the grid auto-sizes around the actual worker
+          // count, so 1 worker = 1 pane, 4 workers = 2x2, etc.
+          const real = workspace.workers.filter((w) => w.kind !== "autofill");
+          for (const stale of workspace.workers) {
+            if (stale.kind === "autofill") void window.spark.pty.dispose(stale.id);
+          }
+          return { ...workspace, workers: [...real, pane] };
         }),
       );
       if (event.workspaceId === activeId) setActiveWorkbenchTab("workers");
@@ -240,6 +313,70 @@ export default function App() {
       ),
     );
   }, []);
+
+  // Quick-test buttons: launch claude/codex in the first non-orchestration
+  // worker pane, or spawn a new one if none exist. Mirrors what the user does
+  // manually — types `claude --dangerously-skip-permissions ... ⏎`, waits for
+  // the CLI to start, types the test prompt, presses Enter.
+  const handleQuickTest = useCallback(
+    async (runtime: "claude" | "codex") => {
+      if (!activeWorkspace) return;
+      const reusable = activeWorkspace.workers.find((w) => {
+        if (w.kind === "orchestration") return false;
+        // The integration's state flips to "running" the moment Enter is
+        // pressed (spark.ps1 emits OSC 633;C live via PSReadLine), so a pane
+        // hosting an active CLI is correctly skipped. Once the CLI exits and
+        // pwsh re-prompts (633;D + 633;A), state goes idle and the pane is
+        // up for grabs again.
+        const integration = workerIntegrationsRef.current.get(w.id);
+        if (integration?.isBusy()) return false;
+        return true;
+      });
+      let workerId = reusable?.id;
+      let waitForSpawnMs = 0;
+      if (!workerId) {
+        const shellId = defaultShell?.id ?? shells[0]?.id;
+        if (!shellId) return;
+        const id = uid("w");
+        workerId = id;
+        setWorkspaces((list) =>
+          list.map((w) =>
+            w.id === activeWorkspace.id
+              ? { ...w, workers: [...w.workers, { id, shellId, kind: "terminal" }] }
+              : w,
+          ),
+        );
+        waitForSpawnMs = 1500;
+      }
+      setActiveWorkbenchTab("workers");
+      if (waitForSpawnMs > 0) await new Promise((r) => setTimeout(r, waitForSpawnMs));
+      const launch =
+        runtime === "claude"
+          ? "claude --dangerously-skip-permissions --model claude-opus-4-7 --effort medium\r"
+          : "codex --yolo\r";
+      await window.spark.pty.write(workerId, launch);
+      const cliWarmupMs = runtime === "claude" ? 3500 : 4000;
+      await new Promise((r) => setTimeout(r, cliWarmupMs));
+      const promptBody = "make a one file html calculator";
+      if (runtime === "codex") {
+        // Codex's input box is in multi-line mode by default — a bare \r
+        // inserts a newline, you have to lift it out of paste mode and then
+        // press Enter to submit. Bracket the body as a paste, idle ~1.2s for
+        // the TUI to commit it, then Enter twice (some codex builds need a
+        // second to confirm).
+        const PASTE_BEGIN = "\x1b[200~";
+        const PASTE_END = "\x1b[201~";
+        await window.spark.pty.write(workerId, `${PASTE_BEGIN}${promptBody}${PASTE_END}`);
+        await new Promise((r) => setTimeout(r, 1200));
+        await window.spark.pty.write(workerId, "\r");
+        await new Promise((r) => setTimeout(r, 700));
+        await window.spark.pty.write(workerId, "\r");
+      } else {
+        await window.spark.pty.write(workerId, `${promptBody}\r`);
+      }
+    },
+    [activeWorkspace, defaultShell, shells],
+  );
 
   const openEditorFile = useCallback((entry: FsEntry) => {
     setOpenFiles((files) =>
@@ -341,6 +478,7 @@ export default function App() {
                   active={activeWorkbenchTab}
                   workerCount={ws.workers.length}
                   fileCount={openFiles.length}
+                  runCount={runCountsByWorkspace[ws.id] ?? 0}
                   shells={shells}
                   defaultShell={defaultShell}
                   onSelect={setActiveWorkbenchTab}
@@ -353,6 +491,7 @@ export default function App() {
                     defaultShell={defaultShell}
                     onAddWorker={(shellId) => addWorker(ws.id, shellId)}
                     onRemoveWorker={(workerId) => removeWorker(ws.id, workerId)}
+                    onWorkerIntegration={registerWorkerIntegration}
                   />
                 </div>
                 <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: activeWorkbenchTab === "editor" ? "flex" : "none" }}>
@@ -383,6 +522,7 @@ export default function App() {
               );
               setActiveEditorPath((current) => (current === oldPath ? entry.path : current));
             }}
+            onQuickTest={handleQuickTest}
           />
         )}
 
@@ -416,12 +556,14 @@ function RightPanel({
   onOpenFile,
   onDeleteFile,
   onRenameFile,
+  onQuickTest,
 }: {
   workspace: Workspace | null;
   activePath: string | null;
   onOpenFile: (entry: FsEntry) => void;
   onDeleteFile: (path: string) => void;
   onRenameFile: (oldPath: string, entry: FsEntry) => void;
+  onQuickTest: (runtime: "claude" | "codex") => void;
 }) {
   const cwd = workspace?.cwd ?? null;
   return (
@@ -437,7 +579,7 @@ function RightPanel({
         overflow: "hidden",
       }}
     >
-      <OrchestrationSidebar workspace={workspace} />
+      <OrchestrationSidebar workspace={workspace} onQuickTest={onQuickTest} />
       {cwd ? (
         <FileTree
           cwd={cwd}
@@ -459,6 +601,7 @@ function WorkbenchTabs({
   active,
   workerCount,
   fileCount,
+  runCount,
   shells,
   defaultShell,
   onSelect,
@@ -467,6 +610,7 @@ function WorkbenchTabs({
   active: WorkbenchTab;
   workerCount: number;
   fileCount: number;
+  runCount: number;
   shells: ShellInfo[];
   defaultShell: ShellInfo | null;
   onSelect: (tab: WorkbenchTab) => void;
@@ -521,11 +665,14 @@ function WorkbenchTabs({
         active={active === "workers"}
         onClick={() => onSelect("workers")}
       />
-      <WorkbenchTabButton
-        label="RUNS"
-        active={active === "runs"}
-        onClick={() => onSelect("runs")}
-      />
+      {runCount > 0 && (
+        <WorkbenchTabButton
+          label="RUNS"
+          count={runCount}
+          active={active === "runs"}
+          onClick={() => onSelect("runs")}
+        />
+      )}
       {fileCount > 0 && (
         <WorkbenchTabButton
           label="EDITOR"

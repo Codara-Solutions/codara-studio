@@ -12,7 +12,7 @@ export interface Worker {
   id: string;
   name?: string;
   shellId: ShellId;
-  kind?: "terminal" | "orchestration";
+  kind?: "terminal" | "orchestration" | "autofill";
   runtime?: WorkerRuntime;
   runId?: string;
   workerTaskId?: string;

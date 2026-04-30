@@ -174,6 +174,14 @@ export class ShellIntegration {
     };
   }
 
+  // True if a foreground command or full-screen TUI is currently occupying
+  // the pane. Used by quick-test buttons to skip panes that already have a
+  // running agent (so pressing TEST CODEX while Claude is up doesn't shove
+  // `codex --yolo` into Claude's input box).
+  isBusy(): boolean {
+    return this.state === "running" || this.altScreen;
+  }
+
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
     listener(this.getState());

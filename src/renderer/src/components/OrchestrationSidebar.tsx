@@ -1,18 +1,16 @@
 import React, { useCallback, useEffect, useState } from "react";
-import type { PlanFile, RunArtifactPaths, RunState, SparkEvent, Workspace } from "@shared/types";
-import DevInspector from "./DevInspector";
+import type { PlanFile, RunState, SparkEvent, Workspace } from "@shared/types";
 import SparkAgentPanel from "./SparkAgentPanel";
 
 interface Props {
   workspace: Workspace | null;
+  onQuickTest: (runtime: "claude" | "codex") => void;
 }
 
-export default function OrchestrationSidebar({ workspace }: Props) {
+export default function OrchestrationSidebar({ workspace, onQuickTest }: Props) {
   const [runs, setRuns] = useState<RunState[]>([]);
   const [activeRun, setActiveRun] = useState<RunState | null>(null);
   const [events, setEvents] = useState<SparkEvent[]>([]);
-  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
-  const [artifactPaths, setArtifactPaths] = useState<RunArtifactPaths | null>(null);
   const [planFiles, setPlanFiles] = useState<PlanFile[]>([]);
   const [selectedPlanPath, setSelectedPlanPath] = useState<string>("");
   const [busy, setBusy] = useState(false);
@@ -22,24 +20,16 @@ export default function OrchestrationSidebar({ workspace }: Props) {
     if (!run) {
       setActiveRun(null);
       setEvents([]);
-      setSelectedEventId(null);
-      setArtifactPaths(null);
       return;
     }
 
-    const [freshRun, nextEvents, paths] = await Promise.all([
+    const [freshRun, nextEvents] = await Promise.all([
       window.spark.orchestration.getRun(run.id),
       window.spark.orchestration.listEvents(run.id),
-      window.spark.orchestration.getArtifactPaths(run.id),
     ]);
     const nextRun = freshRun ?? run;
     setActiveRun(nextRun);
     setEvents(nextEvents);
-    setArtifactPaths(paths);
-    setSelectedEventId((current) => {
-      if (current && nextEvents.some((event) => event.id === current)) return current;
-      return nextEvents[nextEvents.length - 1]?.id ?? null;
-    });
   }, []);
 
   // Only the workspace identity (id + cwd) should trigger a reload — not the
@@ -101,7 +91,6 @@ export default function OrchestrationSidebar({ workspace }: Props) {
         if (current.some((item) => item.id === event.id)) return current;
         return [...current, event];
       });
-      setSelectedEventId((current) => current ?? event.id);
       void window.spark.orchestration.getRun(activeRun.id).then((freshRun) => {
         if (!freshRun) return;
         setActiveRun(freshRun);
@@ -224,13 +213,8 @@ export default function OrchestrationSidebar({ workspace }: Props) {
       const run = await mutation();
       setActiveRun(run);
       setRuns((current) => replaceRun(current, run));
-      const [nextEvents, paths] = await Promise.all([
-        window.spark.orchestration.listEvents(run.id),
-        window.spark.orchestration.getArtifactPaths(run.id),
-      ]);
+      const nextEvents = await window.spark.orchestration.listEvents(run.id);
       setEvents(nextEvents);
-      setArtifactPaths(paths);
-      setSelectedEventId(nextEvents[nextEvents.length - 1]?.id ?? null);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -265,14 +249,7 @@ export default function OrchestrationSidebar({ workspace }: Props) {
         onSelectPlan={setSelectedPlanPath}
         onSelectRun={selectRun}
         onRefresh={loadRuns}
-      />
-      <DevInspector
-        workspace={workspace}
-        activeRun={activeRun}
-        events={events}
-        selectedEventId={selectedEventId}
-        artifactPaths={artifactPaths}
-        onSelectEvent={setSelectedEventId}
+        onQuickTest={onQuickTest}
       />
     </div>
   );

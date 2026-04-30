@@ -103,17 +103,6 @@ const api = {
       ipcRenderer.invoke("orchestration:launchWorkerAttempt", input),
     deleteRun: (runId: string): Promise<void> =>
       ipcRenderer.invoke("orchestration:deleteRun", runId),
-    attachWorkerSession: (
-      attemptId: string,
-    ): Promise<{
-      id: string;
-      attached: boolean;
-      pid?: number;
-      command?: string;
-      exited?: { exitCode: number; signal?: number };
-    }> => ipcRenderer.invoke("orchestration:attachWorkerSession", attemptId),
-    detachWorkerSession: (attemptId: string): Promise<void> =>
-      ipcRenderer.invoke("orchestration:detachWorkerSession", attemptId),
     onEvent: (handler: OrchestrationEventHandler): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, event: SparkEvent) => handler(event);
       ipcRenderer.on("orchestration:event", listener);

@@ -13,7 +13,6 @@ import type {
   ReviewDecision,
   RunArtifactPaths,
   RunState,
-  ShellInfo,
   SparkCall,
   SparkEvent,
   StartAutopilotInput,
@@ -29,7 +28,6 @@ import type {
 } from "@shared/types";
 import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
 import { loadSettings } from "../storage";
-import { defaultShell, listShells } from "../shells";
 import {
   buildOpenRouterManagerRequest,
   isStructuredOutputUnsupportedError,
@@ -44,13 +42,16 @@ import {
   startLangSmithManagerTrace,
   type LangSmithTrace,
 } from "./langsmith-tracer";
-import { disposeWorkerSession, startWorkerSession, type WorkerCommand, type WorkerSession } from "./worker-session";
+import * as pty from "../pty-manager";
 import { detectAgentRuntimes } from "../agent-runtimes";
 
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
 const CONTINUE_INPUT = "continue\r";
 
+// Lightweight handle for a running worker. The pty itself lives in
+// pty-manager (same place user-spawned terminals live); this just remembers
+// where to send pause/resume keystrokes and how to kill the pane.
 interface ActiveWorkerProcess {
   runId: string;
   stepId?: string;
@@ -58,7 +59,8 @@ interface ActiveWorkerProcess {
   attemptId: string;
   pid?: number;
   command: string;
-  session: WorkerSession;
+  write: (input: string) => void;
+  kill: () => void;
 }
 
 const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
@@ -1184,15 +1186,12 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
     createdAt: timestamp,
   };
   const prompt = renderWorkerPrompt({ cwd: input.cwd, run, step, task, paths });
-  const workpad = renderInitialWorkpad({ run, step, task });
 
   await fs.mkdir(paths.attemptDir, { recursive: true });
   await fs.writeFile(paths.taskJson, JSON.stringify(envelope, null, 2), "utf8");
   await fs.writeFile(paths.promptMd, prompt, "utf8");
-  await fs.writeFile(paths.workpadMd, workpad, "utf8");
 
   attempt.promptPath = paths.promptMd;
-  attempt.workpadPath = paths.workpadMd;
   attempt.finalReportPath = paths.finalReportJson;
 
   run.workerAttempts.push(attempt);
@@ -1236,8 +1235,10 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   ]);
 
   const promptText = await readWorkerPromptForLaunch(paths);
-  const workerCommand = await buildWorkerCommand(task, paths, promptText);
-  const command = workerCommand.display;
+  const launchCommand = buildLaunchCommandLine(task);
+  const command = launchCommand
+    ? `pwsh -> ${launchCommand}`
+    : "pwsh (manual)";
   const launchTimestamp = new Date().toISOString();
   attempt.status = "launching";
   attempt.startedAt = launchTimestamp;
@@ -1246,7 +1247,6 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   attempt.error = undefined;
   attempt.command = command;
   attempt.promptPath = paths.promptMd;
-  attempt.workpadPath = paths.workpadMd;
   attempt.stdoutLogPath = paths.stdoutLog;
   attempt.stderrLogPath = paths.stderrLog;
   attempt.rawLogPath = paths.rawLog;
@@ -1276,7 +1276,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     attemptId: attempt.id,
     paths,
     cwd: attempt.cwd,
-    workerCommand,
+    launchCommand,
+    promptText,
+    command,
   });
 
   run = await requireRun(input.runId);
@@ -1329,7 +1331,7 @@ export async function deleteRun(runId: string): Promise<void> {
   const run = await requireRun(runId);
   const timestamp = new Date().toISOString();
   for (const worker of activeWorkersForRun(run.id)) {
-    disposeWorkerSession(worker.attemptId);
+    worker.kill();
     activeWorkerProcesses.delete(worker.attemptId);
   }
   for (const key of [...activeAutopilotCycles.keys()]) {
@@ -1407,7 +1409,16 @@ async function reviewWorkerReportArtifact({
   const timestamp = new Date().toISOString();
   if (decision.decision === "accept") {
     reviewedTask.status = "accepted";
-    if (reviewedStep) reviewedStep.status = "reviewing";
+    if (reviewedStep) {
+      // Promote step to "complete" once every task in it is accepted. Without
+      // this the step sits at "reviewing" forever and the user sees workers
+      // finish with no green check on the plan-step view.
+      const stepTasks = latest.workerTasks.filter((t) => t.stepId === reviewedStep.id);
+      const allAccepted =
+        stepTasks.length > 0 &&
+        stepTasks.every((t) => (t.id === reviewedTask.id ? true : t.status === "accepted"));
+      reviewedStep.status = allAccepted ? "complete" : "reviewing";
+    }
   } else {
     reviewedTask.status = "needs_review";
     if (reviewedStep) reviewedStep.status = "reviewing";
@@ -1683,7 +1694,7 @@ async function sendResumeSignals(
 }
 
 function writeWorkerInput(worker: ActiveWorkerProcess, input: string): void {
-  worker.session.write(input);
+  worker.write(input);
 }
 
 function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input: string; messageId?: string } {
@@ -1802,12 +1813,15 @@ function normalizeStringList(value: unknown): string[] {
 }
 
 function decideWorkerReport(report: WorkerReport): ReviewDecision {
-  if (report.status === "complete" && report.risks.length === 0 && report.followups.length === 0) {
+  if (report.status === "complete") {
+    // Trust complete-status reports. Workers are full Claude/Codex harnesses
+    // and can run their own verification — risks/followups are advisory, not
+    // blockers. The manager loop reviews them when planning the next step.
     return {
       decision: "accept",
       confidence: 0.7,
-      reason: report.summary || "Worker reported completion with no risks or followups.",
-      issues: [],
+      reason: report.summary || "Worker reported completion.",
+      issues: [...report.risks, ...report.followups],
       acceptedEvidence: report.proof,
       nextStepAllowed: true,
     };
@@ -1867,44 +1881,45 @@ function workerArtifactPaths(
   };
 }
 
+// The orchestration worker now uses the EXACT same pty path as a user-opened
+// terminal (and the TEST CLAUDE button): the renderer's TerminalView spawns
+// pwsh via pty-manager, sizes it to its real pane, and we just type into it
+// from main — first the launch command, then the prompt followed by Enter.
+// No second pty stack, no attachOnly mode, no stripped -NoProfile shell.
 async function runWorkerSession({
   run,
   task,
   attemptId,
   paths,
-  cwd,
-  workerCommand,
+  launchCommand,
+  promptText,
+  command,
 }: {
   run: RunState;
   task: WorkerTask;
   attemptId: string;
   paths: WorkerArtifactPaths;
   cwd: string;
-  workerCommand: WorkerCommand;
+  launchCommand: string | null;
+  promptText: string;
+  command: string;
 }): Promise<{ exitCode: number; error?: string }> {
-  const writes: Promise<void>[] = [];
-  let session: WorkerSession;
-  try {
-    session = startWorkerSession({
-      id: attemptId,
-      command: workerCommand,
-      cwd,
-      env: {
-        SPARK_RUN_ID: run.id,
-        SPARK_WORKER_TASK_ID: task.id,
-        SPARK_ATTEMPT_ID: attemptId,
-        SPARK_TASK_TITLE: task.title,
-        SPARK_PROMPT_PATH: paths.promptMd,
-        SPARK_WORKPAD_PATH: paths.workpadMd,
-        SPARK_FINAL_REPORT_PATH: paths.finalReportJson,
-      },
-      onOutput: (text) => {
-        writes.push(recordWorkerOutput(run, task, attemptId, paths, "stdout", text));
-      },
-    });
-  } catch (err) {
-    return { exitCode: 1, error: err instanceof Error ? err.message : String(err) };
+  // Wait until the renderer's TerminalView mounts and calls pty:spawn for
+  // this attempt. The "envelope_prepared" event triggers the pane add in
+  // App.tsx; from there it's normally <1s before pty-manager has a session.
+  const spawned = await pty.waitForSpawn(attemptId, 30_000);
+  if (!spawned) {
+    return { exitCode: 1, error: "Worker pane never spawned (renderer did not call pty:spawn within 30s)." };
   }
+
+  // Hold off on typing until the renderer has reported a real pane size, so
+  // claude/codex paint at the correct width from the very first frame.
+  await pty.waitForResize(attemptId, 5_000);
+
+  const handle = {
+    write: (input: string) => pty.write(attemptId, input),
+    kill: () => pty.dispose(attemptId),
+  };
 
   const runningTimestamp = new Date().toISOString();
   await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
@@ -1918,8 +1933,7 @@ async function runWorkerSession({
     type: "worker_attempt.running",
     message: `Worker attempt running: ${task.title}`,
     payload: {
-      pid: session.pid,
-      command: session.command,
+      command,
       runtime: task.runtimePreference,
       session: "pty",
     },
@@ -1930,18 +1944,101 @@ async function runWorkerSession({
     stepId: task.stepId,
     workerTaskId: task.id,
     attemptId,
-    pid: session.pid,
-    command: session.command,
-    session,
+    command,
+    write: handle.write,
+    kill: handle.kill,
   });
 
-  const result = await session.done;
+  // Resolve when either:
+  //   * the worker writes final-report.json (success path), or
+  //   * the user closes the pane (ptyExit), or
+  //   * we hit the hard timeout (90 minutes).
+  const exitPromise = new Promise<{ exitCode: number; error?: string }>((resolve) => {
+    let settled = false;
+    const finish = (value: { exitCode: number; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      offExit();
+      clearInterval(reportPoll);
+      clearTimeout(hardTimeout);
+      resolve(value);
+    };
+    const offExit = pty.onExit(attemptId, (info) => {
+      finish({
+        exitCode: info.exitCode ?? 1,
+        error: info.signal ? `Worker pane closed (signal ${info.signal})` : "Worker pane closed before final report",
+      });
+    });
+    const reportPoll = setInterval(() => {
+      void fs.access(paths.finalReportJson)
+        .then(() => finish({ exitCode: 0 }))
+        .catch(() => {
+          /* not yet written */
+        });
+    }, 750);
+    const hardTimeout = setTimeout(() => {
+      finish({ exitCode: 1, error: "Worker timed out after 90 minutes." });
+    }, 90 * 60 * 1000);
+  });
+
+  // Stagger launch + prompt the same way the TEST CLAUDE button does:
+  //  1. wait 1.5s for pwsh to render its prompt,
+  //  2. type `claude --dangerously-skip-permissions ...\r`,
+  //  3. wait 3.5–4s for the CLI to enter its TUI,
+  //  4. paste the prompt and submit.
+  void (async () => {
+    try {
+      await delay(1500);
+      if (launchCommand) {
+        handle.write(`${launchCommand}\r`);
+        // Claude boots in ~3s; codex is a bit slower. Be generous — typing
+        // into the wrong screen is the failure mode we're avoiding.
+        await delay(task.runtimePreference === "codex" ? 4500 : 3500);
+      }
+      await pasteAndSubmit(handle, promptText, task.runtimePreference);
+    } catch (err) {
+      await recordWorkerOutput(run, task, attemptId, paths, "stderr",
+        `\n[spark] failed to drive worker pane: ${(err as Error).message}\n`);
+    }
+  })();
+
+  const result = await exitPromise;
   activeWorkerProcesses.delete(attemptId);
-  await Promise.allSettled(writes);
-  return {
-    exitCode: result.exitCode ?? 1,
-    error: result.signal ? `Worker session exited from signal ${result.signal}` : undefined,
-  };
+  return result;
+}
+
+// Send a multi-line prompt as a single bracketed paste (so Ink-based TUIs
+// don't treat each newline as Enter), then submit with \r. Empty prompt =>
+// no-op (manual runtime: user drives the shell themselves).
+async function pasteAndSubmit(
+  handle: { write: (input: string) => void },
+  promptText: string,
+  runtime: WorkerTask["runtimePreference"],
+): Promise<void> {
+  const body = promptText.replace(/\r\n?/g, "\n").trim();
+  if (!body) return;
+  if (runtime === "claude" || runtime === "codex") {
+    const PASTE_BEGIN = "\x1b[200~";
+    const PASTE_END = "\x1b[201~";
+    handle.write(`${PASTE_BEGIN}${body}${PASTE_END}`);
+    // Codex's TUI shows the paste as "[Pasted Content N chars]" and needs a
+    // brief idle before Enter is treated as submit (vs. as part of the paste).
+    await delay(runtime === "codex" ? 1200 : 600);
+    handle.write("\r");
+    if (runtime === "codex") {
+      // Some codex builds need a second Enter to actually submit.
+      await delay(700);
+      handle.write("\r");
+    }
+    return;
+  }
+  // Manual / shell runtimes: just dump the prompt as text into pwsh as a
+  // here-string comment so the user can read it. They drive the work
+  // themselves and write the final-report.json by hand.
+  handle.write(`# Prompt:\r`);
+  for (const line of body.split("\n")) {
+    handle.write(`# ${line}\r`);
+  }
 }
 
 async function markAttemptRunning(
@@ -1978,192 +2075,27 @@ async function recordWorkerOutput(
   ]);
 }
 
-async function readWorkerPromptForLaunch(paths: WorkerArtifactPaths): Promise<string> {
-  try {
-    return await fs.readFile(paths.promptMd, "utf8");
-  } catch {
-    return renderInteractiveWorkerLaunchFallback(paths);
-  }
-}
-
-async function buildWorkerCommand(task: WorkerTask, paths: WorkerArtifactPaths, promptText: string): Promise<WorkerCommand> {
-  if (task.runtimePreference === "manual") {
-    return {
-      exe: process.execPath,
-      args: ["-e", manualWorkerRunnerScript()],
-      display: `${process.execPath} -e <spark-manual-worker-runner>`,
-      env: {
-        ELECTRON_RUN_AS_NODE: "1",
-      },
-    };
-  }
-
+// Returns the full command line we type into pwsh — the same string a user
+// would type at TEST CLAUDE: `claude --dangerously-skip-permissions ...`.
+// Returns null for runtimes that don't auto-launch (manual / shell), in
+// which case the worker pane is just a plain pwsh and the prompt is dumped
+// as comments for the user to drive themselves.
+function buildLaunchCommandLine(task: WorkerTask): string | null {
   if (task.runtimePreference === "claude") {
-    const command = configuredWorkerCommand(
-      "SPARK_CLAUDE_WORKER_COMMAND",
-      "SPARK_CLAUDE_WORKER_ARGS",
-    );
-    if (!command) {
-      return shellInteractiveWorkerCommand(await resolveDefaultWorkerShell(), buildClaudeStartupCommand(task), paths, promptText);
-    }
-    return {
-      ...command,
-      display: command.display || "claude",
-      initialInput: renderInteractiveWorkerLaunchInput(paths, promptText),
-      initialInputDelayMs: 1800,
-      initialInputMaxDelayMs: 6500,
-      initialInputWaitForOutput: true,
-      initialInputChunkSize: 1000,
-      initialInputChunkDelayMs: 20,
-      initialSubmitInput: "\r",
-      initialSubmitDelayMs: 2500,
-      initialSubmitInputRetries: 2,
-      initialSubmitInputRetryDelayMs: 1000,
-    };
+    const args = ["claude", "--dangerously-skip-permissions"];
+    if (task.modelHint?.trim()) args.push("--model", quoteShellArg(task.modelHint.trim()));
+    if (task.effortHint) args.push("--effort", task.effortHint === "xhigh" ? "xhigh" : task.effortHint);
+    return args.join(" ");
   }
-
   if (task.runtimePreference === "codex") {
-    const command = configuredWorkerCommand(
-      "SPARK_CODEX_WORKER_COMMAND",
-      "SPARK_CODEX_WORKER_ARGS",
-    );
-    if (!command) {
-      return shellInteractiveWorkerCommand(await resolveDefaultWorkerShell(), buildCodexStartupCommand(task), paths, promptText);
+    const args = ["codex", "--yolo"];
+    if (task.modelHint?.trim()) args.push("-m", quoteShellArg(task.modelHint.trim()));
+    if (task.effortHint) {
+      args.push("-c", quoteShellArg(`model_reasoning_effort="${task.effortHint}"`));
     }
-    return {
-      ...command,
-      display: command.display || "codex",
-      initialInput: renderInteractiveWorkerLaunchInput(paths, promptText),
-      initialInputDelayMs: 2200,
-      initialInputMaxDelayMs: 7000,
-      initialInputWaitForOutput: true,
-      initialInputChunkSize: 1000,
-      initialInputChunkDelayMs: 20,
-      initialSubmitInput: "\r",
-      initialSubmitDelayMs: 2500,
-      initialSubmitInputRetries: 2,
-      initialSubmitInputRetryDelayMs: 1000,
-    };
+    return args.join(" ");
   }
-
-  const shell = await resolveDefaultWorkerShell();
-  return {
-    exe: shell.exe,
-    args: shell.args,
-    display: shell.label,
-    initialInput: renderInteractiveWorkerLaunchInput(paths, promptText),
-    initialInputChunkSize: 1000,
-    initialInputChunkDelayMs: 20,
-    initialSubmitInput: "\r",
-    initialSubmitDelayMs: 300,
-  };
-}
-
-function configuredWorkerCommand(commandEnv: string, argsEnv: string): WorkerCommand | null {
-  const exe = process.env[commandEnv]?.trim();
-  if (!exe) return null;
-  const args = parseWorkerArgs(process.env[argsEnv]);
-  return {
-    exe,
-    args,
-    display: `${exe} ${args.join(" ")}`.trim(),
-  };
-}
-
-async function resolveDefaultWorkerShell(): Promise<ShellInfo> {
-  const [settings, shells, detectedDefault] = await Promise.all([loadSettings(), listShells(), defaultShell()]);
-  const configured = settings.defaultShellId
-    ? shells.find((shell) => shell.id === settings.defaultShellId)
-    : undefined;
-  const shell = configured ?? detectedDefault ?? shells[0];
-  if (shell) return shell;
-
-  if (process.platform === "win32") {
-    return {
-      id: process.env.ComSpec || "cmd.exe",
-      label: "Command Prompt",
-      exe: process.env.ComSpec || "cmd.exe",
-      args: [],
-      family: "cmd",
-    };
-  }
-
-  return {
-    id: process.env.SHELL || "sh",
-    label: process.env.SHELL || "sh",
-    exe: process.env.SHELL || "sh",
-    args: [],
-    family: "sh",
-  };
-}
-
-// Wrapper pwsh sessions that host Claude / Codex don't need the user's
-// $PROFILE — oh-my-posh, posh-git, Terminal-Icons, PSReadLine history, and
-// other startup work are pure overhead here, plus they race when two agents
-// in the same step spawn in parallel (oh-my-posh's init script writes a temp
-// file that becomes locked under concurrent reads). -NoProfile makes the
-// wrapper boot fast, deterministic, and safe to spawn in parallel.
-function workerShellArgs(shell: ShellInfo): string[] {
-  if (shell.family === "pwsh" || shell.family === "powershell") {
-    return ["-NoLogo", "-NoProfile"];
-  }
-  if (shell.family === "cmd") {
-    return ["/d"]; // skip AutoRun, equivalent to /D in cmd /D
-  }
-  if (shell.family === "bash" || shell.family === "zsh" || shell.family === "sh") {
-    return ["--noprofile", "--norc"];
-  }
-  return shell.args;
-}
-
-function shellInteractiveWorkerCommand(
-  shell: ShellInfo,
-  startupCommand: string,
-  paths: WorkerArtifactPaths,
-  promptText: string,
-): WorkerCommand {
-  return {
-    exe: shell.exe,
-    args: workerShellArgs(shell),
-    display: `${shell.label} -> ${startupCommand}`,
-    startupInput: `${startupCommand}\r`,
-    startupInputDelayMs: 250,
-    initialInput: renderInteractiveWorkerLaunchInput(paths, promptText),
-    initialInputDelayMs: 1800,
-    initialInputMaxDelayMs: 9000,
-    initialInputWaitForOutput: true,
-    initialInputChunkSize: 1000,
-    initialInputChunkDelayMs: 20,
-    initialSubmitInput: "\r",
-    // Codex's TUI shows long prompts as "[Pasted Content N chars]" and needs a
-    // brief idle window before Enter is treated as submit (vs. as part of the
-    // paste). 2.5s + 2 retries covers both Codex and slower Claude boots.
-    initialSubmitDelayMs: 2500,
-    initialSubmitInputRetries: 2,
-    initialSubmitInputRetryDelayMs: 1000,
-  };
-}
-
-function buildClaudeStartupCommand(task: WorkerTask): string {
-  const args = ["claude", "--dangerously-skip-permissions"];
-  if (task.modelHint?.trim()) {
-    args.push("--model", quoteShellArg(task.modelHint.trim()));
-  }
-  if (task.effortHint) {
-    args.push("--effort", task.effortHint === "xhigh" ? "xhigh" : task.effortHint);
-  }
-  return args.join(" ");
-}
-
-function buildCodexStartupCommand(task: WorkerTask): string {
-  const args = ["codex", "--yolo"];
-  if (task.modelHint?.trim()) {
-    args.push("-m", quoteShellArg(task.modelHint.trim()));
-  }
-  if (task.effortHint) {
-    args.push("-c", quoteShellArg(`model_reasoning_effort="${task.effortHint}"`));
-  }
-  return args.join(" ");
+  return null;
 }
 
 function quoteShellArg(value: string): string {
@@ -2171,115 +2103,20 @@ function quoteShellArg(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-function parseWorkerArgs(raw: string | undefined): string[] {
-  const text = raw?.trim();
-  if (!text) return [];
+async function readWorkerPromptForLaunch(paths: WorkerArtifactPaths): Promise<string> {
   try {
-    const parsed = JSON.parse(text) as unknown;
-    if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) return parsed;
+    return await fs.readFile(paths.promptMd, "utf8");
   } catch {
-    /* fall back to a simple command-line split */
+    return [
+      "You are a Spark worker. The prepared prompt could not be read at launch.",
+      `Read it now: ${paths.promptMd}`,
+      `Then complete the task and write the final JSON report to ${paths.finalReportJson}.`,
+    ].join("\n");
   }
-  return text.match(/"([^"]*)"|'([^']*)'|\S+/g)?.map((part) => part.replace(/^["']|["']$/g, "")) ?? [];
-}
-
-function renderInteractiveWorkerLaunchInput(paths: WorkerArtifactPaths, promptText: string): string {
-  return [
-    promptText.trim(),
-    "",
-    "SPARK ARTIFACT PATHS",
-    `Prompt artifact: ${paths.promptMd}`,
-    `Workpad: ${paths.workpadMd}`,
-    `Final report JSON: ${paths.finalReportJson}`,
-  ].join("\n");
-}
-
-function renderInteractiveWorkerLaunchFallback(paths: WorkerArtifactPaths): string {
-  return [
-    "You are a Spark worker agent running inside the user's project.",
-    "",
-    "The prepared prompt artifact could not be read before launch, so use these artifacts directly.",
-    `Prompt artifact: ${paths.promptMd}`,
-    `Workpad: ${paths.workpadMd}`,
-    `Final report JSON: ${paths.finalReportJson}`,
-    "",
-    "Read the prompt artifact, complete the task, and write the final JSON report to the final report path.",
-  ].join("\n");
-}
-
-function manualWorkerRunnerScript(): string {
-  return `
-const fs = require("node:fs");
-const reportPath = process.env.SPARK_FINAL_REPORT_PATH;
-const promptPath = process.env.SPARK_PROMPT_PATH;
-const workpadPath = process.env.SPARK_WORKPAD_PATH;
-const title = process.env.SPARK_TASK_TITLE || "Manual worker task";
-const finishDelayMs = Math.max(0, Number(process.env.SPARK_MANUAL_WORKER_DELAY_MS || 0));
-let paused = false;
-let finished = false;
-let finishTimer = null;
-console.log("Spark manual worker runner started.");
-console.log("Prompt:", promptPath);
-console.log("Workpad:", workpadPath);
-if (!reportPath) {
-  console.error("SPARK_FINAL_REPORT_PATH is missing.");
-  process.exit(1);
-}
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (data) => {
-  if (data.includes(String.fromCharCode(27))) {
-    paused = true;
-    if (finishTimer) clearTimeout(finishTimer);
-    console.log("Spark worker pause signal received.");
-    return;
-  }
-  const text = String(data).trim();
-  if (!text) return;
-  paused = false;
-  console.log("Spark worker resume input received.");
-  if (text.toLowerCase() !== "continue") {
-    console.log(text);
-  }
-  scheduleFinish();
-});
-process.stdin.resume();
-scheduleFinish();
-
-function scheduleFinish() {
-  if (paused || finished) return;
-  if (finishTimer) clearTimeout(finishTimer);
-  finishTimer = setTimeout(finish, finishDelayMs);
-}
-
-function finish() {
-  if (paused || finished) return;
-  finished = true;
-  const report = {
-    status: "partial",
-    summary: "Manual worker launch path verified. No project edits were performed by this runner.",
-    files_changed: [],
-    commands_run: [
-      {
-        command: "spark-manual-worker-runner",
-        exit_code: 0,
-        summary: "Captured stdout/stderr and wrote final-report.json for " + title
-      }
-    ],
-    tests: [],
-    proof: ["Worker process launched and completed.", "Final report artifact was written."],
-    risks: ["This is a controlled runner, not a real Claude/Codex worker yet."],
-    followups: ["Replace manual runner with configured worker runtime once execution controls are stable."]
-  };
-  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf8");
-  console.log("Final report:", reportPath);
-  process.exit(0);
-}
-`;
 }
 
 function renderWorkerPrompt({
   cwd,
-  run,
   step,
   task,
   paths,
@@ -2293,8 +2130,9 @@ function renderWorkerPrompt({
   const lines: string[] = [];
 
   lines.push(
-    "You are a worker agent in Spark Agent. Execute the single task below — nothing else.",
-    "Make the smallest change that satisfies the acceptance criteria. Stop and report on blockers; do not guess.",
+    "You are a Spark worker. Do exactly the task below — nothing else.",
+    "You have a real terminal: run any commands you need, edit files, verify your work.",
+    "Stop and report on blockers; do not guess.",
     "",
     "## TASK",
     task.title,
@@ -2303,177 +2141,29 @@ function renderWorkerPrompt({
   );
 
   if (step?.acceptanceCriteria?.length) {
-    lines.push("", "Acceptance criteria:", ...step.acceptanceCriteria.map((c) => `- ${c}`));
+    lines.push("", "Acceptance:", ...step.acceptanceCriteria.map((c) => `- ${c}`));
   }
 
   if (task.verificationCommands?.length) {
     lines.push(
       "",
-      "Verify with these commands when done:",
+      "Verify before reporting (run these and check they pass):",
       ...task.verificationCommands.map((c) => `- ${c}`),
     );
   }
 
-  lines.push("", "## WORKSPACE", cwd);
-
-  if (step) {
-    const stepHeader = `Step ${step.index}: ${step.title}`;
-    lines.push("", "## YOUR STEP IN THE RUN", stepHeader, step.goal.trim());
-  }
-
-  const planSnippet = formatPlanSnapshot(run, 3500);
-  if (planSnippet) {
-    lines.push("", "## PROJECT PLAN (read-only context)", planSnippet);
-  }
-
-  const division = formatRunStepDivisionCompact(run, step?.id);
-  if (division) {
-    lines.push("", "## RUN STEPS (read-only context)", division);
-  }
-
-  if (task.allowedPaths?.length) {
-    lines.push("", "## ALLOWED PATHS", ...task.allowedPaths.map((p) => `- ${p}`));
-  }
-  if (task.forbiddenPaths?.length) {
-    lines.push("", "## FORBIDDEN PATHS", ...task.forbiddenPaths.map((p) => `- ${p}`));
-  }
-
   lines.push(
     "",
-    "## RULES",
-    "- Stay strictly within this task's scope. Do not touch unrelated files.",
-    "- Do not delete or rewrite the user's existing work.",
-    "- Do not install new dependencies unless the task explicitly says so.",
-    "- Prefer small, reviewable changes over rewrites.",
-    "- If blocked or ambiguous, record the blocker in the workpad and stop.",
+    `Workspace: ${cwd}`,
     "",
-    "## WORKPAD",
-    `Maintain this file as you work: ${paths.workpadMd}`,
-    "Sections required: goal, plan, acceptance, progress, validation, blockers, evidence.",
-    "",
-    "## FINAL REPORT (required)",
-    `When you finish or stop, write JSON to: ${paths.finalReportJson}`,
-    "Schema:",
-    "```json",
-    JSON.stringify(
-      {
-        status: "complete | partial | blocked | failed",
-        summary: "1-3 sentences describing what changed and why.",
-        files_changed: [{ path: "absolute or repo-relative", reason: "why this file was edited" }],
-        commands_run: [{ command: "string", exit_code: 0, summary: "what it produced" }],
-        tests: [{ command: "string", result: "passed | failed | not_run", details: "string" }],
-        proof: ["short evidence strings: file excerpts, command outputs, etc."],
-        risks: ["anything that could break or surprise the user"],
-        followups: ["work this task did NOT do but should be considered next"],
-      },
-      null,
-      2,
-    ),
-    "```",
+    `When done, write JSON to ${paths.finalReportJson}:`,
+    "{ status, summary, files_changed, commands_run, tests, risks, followups }",
+    "status: complete | partial | blocked | failed.",
   );
 
   return lines.join("\n");
 }
 
-function formatPlanSnapshot(run: RunState, maxLength = 12000): string {
-  const plan = run.planId
-    ? run.plans.find((item) => item.id === run.planId)
-    : run.plans.at(-1);
-  const content = plan?.rawContent?.trim() || plan?.summary?.trim();
-  if (!content) return "";
-  const source = plan?.sourceFile ? `Source: ${plan.sourceFile}\n\n` : "";
-  return source + truncateText(content, maxLength);
-}
-
-function formatRunStepDivision(run: RunState): string {
-  if (run.steps.length === 0) return "No manager step division was captured for this run.";
-  return run.steps
-    .map((step) =>
-      [
-        `${step.index}. ${step.title}`,
-        `Goal: ${step.goal}`,
-        `Agents: ${formatPlannedStepAgents(step.plannedAgents)}`,
-        `Status: ${step.status}`,
-        `Acceptance: ${step.acceptanceCriteria.length ? step.acceptanceCriteria.join("; ") : "not specified"}`,
-        `Verification: ${step.verificationCommands.length ? step.verificationCommands.join("; ") : "not specified"}`,
-      ].join("\n"),
-    )
-    .join("\n\n");
-}
-
-function formatRunStepDivisionCompact(run: RunState, currentStepId?: string): string {
-  if (run.steps.length === 0) return "";
-  return run.steps
-    .map((step) => {
-      const marker = step.id === currentStepId ? "→" : " ";
-      return `${marker} ${step.index}. [${step.status}] ${step.title}`;
-    })
-    .join("\n");
-}
-
-function formatPlannedStepAgents(agents: StepState["plannedAgents"]): string {
-  if (!agents?.length) return "not specified";
-  return agents
-    .map((agent, index) => {
-      const model = agent.modelHint?.trim() || agent.runtimePreference;
-      const effort = agent.effortHint ? `thinking level ${agent.effortHint}` : "thinking level not specified";
-      return `${agent.label || `agent ${index + 1}`} -> ${agent.summary} -> ${model} (${effort})`;
-    })
-    .join("; ");
-}
-
-function truncateText(value: string, maxLength: number): string {
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, maxLength)}\n\n[truncated ${value.length - maxLength} characters]`;
-}
-
-function renderInitialWorkpad({
-  run,
-  step,
-  task,
-}: {
-  run: RunState;
-  step?: StepState;
-  task: WorkerTask;
-}): string {
-  return [
-    `# Workpad - ${task.title}`,
-    "",
-    "## Goal",
-    task.description,
-    "",
-    "## Run",
-    `- ${run.title}`,
-    `- ${run.id}`,
-    "",
-    "## Step",
-    step ? `- ${step.title}\n- ${step.goal}` : "- No step assigned",
-    "",
-    "## Plan",
-    "- Pending worker execution.",
-    "",
-    "## Acceptance Criteria",
-    formatList(task.expectedOutputs, "- Pending definition."),
-    "",
-    "## Progress",
-    "- Envelope prepared. Execution has not started.",
-    "",
-    "## Validation",
-    formatList(task.verificationCommands, "- No verification commands specified."),
-    "",
-    "## Blockers",
-    "- None recorded.",
-    "",
-    "## Final Evidence",
-    "- Pending worker execution.",
-    "",
-  ].join("\n");
-}
-
-function formatList(values: string[], emptyText: string): string {
-  if (values.length === 0) return emptyText;
-  return values.map((value) => `- ${value}`).join("\n");
-}
 
 function runPath(runId: string): string {
   return join(runDir(runId), RUN_FILE);

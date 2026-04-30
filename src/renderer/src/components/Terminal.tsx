@@ -14,7 +14,6 @@ interface Props {
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   onShellIntegration?: (integration: ShellIntegration | null) => void;
   fontSize?: number;
-  attachOnly?: boolean;
 }
 
 const THEME: ITheme = {
@@ -64,7 +63,6 @@ export default function TerminalView({
   onExit,
   onShellIntegration,
   fontSize = 13,
-  attachOnly = false,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
@@ -105,11 +103,10 @@ export default function TerminalView({
     termRef.current = term;
     fitRef.current = fit;
 
-    // Block-strip parser. We only attach for shells we spawn ourselves
-    // (regular terminals). Orchestration panes run Claude/Codex which paint
-    // alt-screen TUIs and never emit OSC 133/633, so the strip would be empty
-    // noise.
-    if (!attachOnly) {
+    // Block-strip parser. Attached for every pane — orchestration workers
+    // are now plain pwsh sessions too, so the OSC 133/633 markers from the
+    // user's spark.ps1 shell-integration land here just like a manual term.
+    {
       const integration = new ShellIntegration(term);
       integrationRef.current = integration;
       onShellIntegrationRef.current?.(integration);
@@ -194,14 +191,6 @@ export default function TerminalView({
     let cancelled = false;
     (async () => {
       try {
-        if (attachOnly) {
-          const res = await window.spark.orchestration.attachWorkerSession(workerId);
-          if (cancelled) return;
-          spawnedRef.current = true;
-          if (res.pid !== undefined) onPid(res.pid);
-          term.focus();
-          return;
-        }
         const res = await window.spark.pty.spawn({ id: workerId, shell, cwd, cols, rows });
         if (cancelled) return;
         spawnedRef.current = true;
@@ -262,11 +251,7 @@ export default function TerminalView({
       } catch {
         /* ignore */
       }
-      if (attachOnly) {
-        void window.spark.orchestration.detachWorkerSession(ptyIdRef.current);
-      } else {
-        void window.spark.pty.dispose(ptyIdRef.current);
-      }
+      void window.spark.pty.dispose(ptyIdRef.current);
       termRef.current = null;
       fitRef.current = null;
     };

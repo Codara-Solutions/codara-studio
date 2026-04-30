@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from "react";
 import type { ShellInfo, Worker, Workspace } from "@shared/types";
 import TerminalView from "./Terminal";
-import BlockStrip from "./BlockStrip";
 import type { ShellIntegration } from "../terminal/shell-integration";
 import { CloseIcon } from "./icons";
 
@@ -11,6 +10,7 @@ interface Props {
   defaultShell: ShellInfo | null;
   onAddWorker: (shellId: string) => void;
   onRemoveWorker: (workerId: string) => void;
+  onWorkerIntegration?: (workerId: string, integration: ShellIntegration | null) => void;
   fontSize?: number;
 }
 
@@ -33,6 +33,7 @@ export default function TerminalGrid({
   defaultShell,
   onAddWorker,
   onRemoveWorker,
+  onWorkerIntegration,
   fontSize,
 }: Props) {
   const workers = workspace.workers;
@@ -48,7 +49,10 @@ export default function TerminalGrid({
   }, [workers, activeWorker]);
 
   const dims = gridDims(workers.length);
-  const hasOrchestration = workers.some((w) => w.kind === "orchestration");
+  // Empty cells next to orchestration panes are reserved for slots Spark may
+  // still spawn into — keep them inert (no '+' click target) so the user
+  // doesn't accidentally drop an unrelated pwsh into the grid mid-run.
+  const hasActiveRun = workers.some((w) => w.kind === "orchestration");
 
   return (
     <div
@@ -93,6 +97,7 @@ export default function TerminalGrid({
                 onActivate={() => setActiveWorker(w.id)}
                 onClose={() => onRemoveWorker(w.id)}
                 onPid={(pid) => setPids((m) => ({ ...m, [w.id]: pid }))}
+                onWorkerIntegration={onWorkerIntegration}
                 fontSize={fontSize}
               />
             );
@@ -103,7 +108,7 @@ export default function TerminalGrid({
               shells={shells}
               defaultShell={defaultShell}
               onAdd={onAddWorker}
-              orchestrationActive={hasOrchestration}
+              orchestrationActive={hasActiveRun}
             />
           ))}
         </div>
@@ -121,6 +126,7 @@ interface WorkerPaneProps {
   onActivate: () => void;
   onClose: () => void;
   onPid: (pid: number) => void;
+  onWorkerIntegration?: (workerId: string, integration: ShellIntegration | null) => void;
   fontSize?: number;
 }
 
@@ -133,10 +139,17 @@ function WorkerPane({
   onActivate,
   onClose,
   onPid,
+  onWorkerIntegration,
   fontSize,
 }: WorkerPaneProps) {
   const [integration, setIntegration] = useState<ShellIntegration | null>(null);
-  const isOrchestration = worker.kind === "orchestration";
+
+  useEffect(() => {
+    onWorkerIntegration?.(worker.id, integration);
+    return () => {
+      onWorkerIntegration?.(worker.id, null);
+    };
+  }, [worker.id, integration, onWorkerIntegration]);
 
   return (
     <div
@@ -159,14 +172,6 @@ function WorkerPane({
         pid={pid}
         onClose={onClose}
       />
-      {!isOrchestration && (
-        <BlockStrip
-          integration={integration}
-          onCopy={(text) => {
-            void navigator.clipboard?.writeText(text);
-          }}
-        />
-      )}
       <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
         <TerminalView
           workerId={worker.id}
@@ -175,8 +180,7 @@ function WorkerPane({
           active={active}
           onPid={onPid}
           fontSize={fontSize}
-          attachOnly={isOrchestration}
-          onShellIntegration={isOrchestration ? undefined : setIntegration}
+          onShellIntegration={setIntegration}
         />
       </div>
     </div>

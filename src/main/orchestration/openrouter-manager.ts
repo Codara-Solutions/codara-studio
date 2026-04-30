@@ -563,7 +563,7 @@ function normalizeSteps(value: unknown): SparkManagerStepDecision[] {
     .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
     .slice(0, 12)
     .map((item, index) => ({
-      title: normalizeText(item.title, `Spark planned step ${index + 1}`),
+      title: stripStepPrefix(normalizeText(item.title, `Spark planned step ${index + 1}`)),
       goal: normalizeText(item.goal, "Complete the next concrete part of the selected plan."),
       plannedAgents: normalizePlannedAgents(item.plannedAgents),
       acceptanceCriteria: normalizeStringList(item.acceptanceCriteria),
@@ -622,6 +622,13 @@ function normalizeRisk(value: unknown): SparkManagerStepDecision["riskLevel"] {
 
 function normalizeText(value: unknown, fallback: string): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+// Manager LLMs sometimes echo `Step N:` back into the title itself. The renderer
+// already prepends the index, so leaving the prefix in place produces
+// "Step 2: Step 2: Implement HTML Structure" in worker prompts and the sidebar.
+function stripStepPrefix(value: string): string {
+  return value.replace(/^\s*step\s*\d+\s*[:.\-)]?\s*/i, "").trim() || value;
 }
 
 function normalizeStringList(value: unknown): string[] {

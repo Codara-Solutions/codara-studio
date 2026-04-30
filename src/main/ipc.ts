@@ -23,13 +23,6 @@ import {
   updateStep,
   updateWorkerTask,
 } from "./orchestration/run-store";
-import {
-  attachWorkerSession,
-  detachWorkerSession,
-  disposeWorkerSession,
-  resizeWorkerSession,
-  writeWorkerSessionInput,
-} from "./orchestration/worker-session";
 import { listEvents } from "./orchestration/event-log";
 import { detectAgentRuntimes } from "./agent-runtimes";
 import type {
@@ -198,14 +191,6 @@ export function registerIpc(): void {
     await deleteRun(runId);
   });
 
-  ipcMain.handle("orchestration:attachWorkerSession", async (e, attemptId: string) => {
-    return attachWorkerSession(attemptId, e.sender);
-  });
-
-  ipcMain.handle("orchestration:detachWorkerSession", async (e, attemptId: string): Promise<void> => {
-    detachWorkerSession(attemptId, e.sender);
-  });
-
   ipcMain.handle(
     "pty:spawn",
     async (e, args: { id: string; shell: ShellInfo; cwd: string; cols: number; rows: number }) => {
@@ -222,17 +207,14 @@ export function registerIpc(): void {
 
   ipcMain.handle("pty:write", async (_e, args: { id: string; data: string }) => {
     pty.write(args.id, args.data);
-    writeWorkerSessionInput(args.id, args.data);
   });
 
   ipcMain.handle("pty:resize", async (_e, args: { id: string; cols: number; rows: number }) => {
     pty.resize(args.id, args.cols, args.rows);
-    resizeWorkerSession(args.id, args.cols, args.rows);
   });
 
   ipcMain.handle("pty:dispose", async (_e, args: { id: string }) => {
     pty.dispose(args.id);
-    disposeWorkerSession(args.id);
   });
 
   ipcMain.handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);

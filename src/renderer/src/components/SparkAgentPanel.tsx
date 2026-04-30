@@ -27,6 +27,7 @@ interface Props {
   onSelectPlan: (path: string) => void;
   onSelectRun: (run: RunState) => void;
   onRefresh: () => void;
+  onQuickTest: (runtime: "claude" | "codex") => void;
 }
 
 export default function SparkAgentPanel({
@@ -46,6 +47,7 @@ export default function SparkAgentPanel({
   onSelectPlan,
   onSelectRun,
   onRefresh,
+  onQuickTest,
 }: Props) {
   const [humanInput, setHumanInput] = useState("");
   const [deleteConfirmRunId, setDeleteConfirmRunId] = useState<string | null>(null);
@@ -66,6 +68,10 @@ export default function SparkAgentPanel({
   const selectedPlan = planFiles.find((file) => file.path === selectedPlanPath);
   const activeRunDeletePending = Boolean(activeRun && deleteConfirmRunId === activeRun.id);
   const latestDecision = latestSparkDecision(events);
+  // "Open question": the most recent spark question with no later user reply.
+  // Surfaced as its own block so the user can read the full text and knows
+  // why the run is paused.
+  const openQuestion = activeRun ? findOpenQuestion(activeRun) : null;
 
   return (
     <section
@@ -191,6 +197,23 @@ export default function SparkAgentPanel({
 
       <div
         style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: 6,
+          padding: "8px 12px",
+          borderBottom: "1px solid var(--rule)",
+        }}
+      >
+        <PanelButton disabled={!workspace} onClick={() => onQuickTest("claude")}>
+          TEST&nbsp;CLAUDE
+        </PanelButton>
+        <PanelButton disabled={!workspace} onClick={() => onQuickTest("codex")}>
+          TEST&nbsp;CODEX
+        </PanelButton>
+      </div>
+
+      <div
+        style={{
           padding: "8px 12px",
           borderBottom: "1px solid var(--rule)",
           display: "flex",
@@ -246,6 +269,43 @@ export default function SparkAgentPanel({
           {activeRunDeletePending ? "CONFIRM DELETE" : "DELETE RUN"}
         </button>
       </div>
+
+      {openQuestion && (
+        <div
+          style={{
+            padding: "10px 12px",
+            borderBottom: "1px solid var(--rule)",
+            background: "var(--panel-2)",
+            borderLeft: "3px solid var(--accent)",
+          }}
+        >
+          <div
+            style={{
+              fontSize: 9,
+              fontWeight: 800,
+              letterSpacing: "0.14em",
+              color: "var(--accent)",
+              marginBottom: 6,
+            }}
+          >
+            QUESTION&nbsp;FROM&nbsp;SPARK
+          </div>
+          <div
+            style={{
+              fontSize: 11,
+              color: "var(--ink)",
+              lineHeight: 1.45,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+            }}
+          >
+            {openQuestion.message}
+          </div>
+          <div style={{ fontSize: 9, color: "var(--muted)", marginTop: 6 }}>
+            Type your answer above and press SEND, then RESUME to continue the run.
+          </div>
+        </div>
+      )}
 
       {activeRun?.humanMessages && activeRun.humanMessages.length > 0 && (
         <div style={{ maxHeight: 76, overflow: "auto", borderBottom: "1px solid var(--rule)" }}>
@@ -322,6 +382,20 @@ interface SparkDecision {
   status: string;
   summary: string;
   tasks: Array<{ title: string; runtimePreference?: string }>;
+}
+
+// Latest spark question with no later user reply. Walks the message log
+// backwards: any user message after the question means it's been answered.
+function findOpenQuestion(run: RunState): RunState["humanMessages"][number] | null {
+  const msgs = run.humanMessages ?? [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.author === "spark" && m.kind === "question") {
+      const answeredLater = msgs.slice(i + 1).some((later) => later.author === "user");
+      return answeredLater ? null : m;
+    }
+  }
+  return null;
 }
 
 function latestSparkDecision(events: SparkEvent[]): SparkDecision | null {
@@ -410,6 +484,7 @@ function SparkDecisionSummary({ decision }: { decision: SparkDecision }) {
 }
 
 function PlanStepsPanel({ run }: { run: RunState }) {
+  const orderedSteps = sortSteps(run.steps);
   const taskById = new Map<string, WorkerTask>();
   for (const t of run.workerTasks) taskById.set(t.id, t);
   const attemptByTask = new Map<string, WorkerAttempt>();
@@ -447,10 +522,11 @@ function PlanStepsPanel({ run }: { run: RunState }) {
           padding: "2px 0 6px",
         }}
       >
-        {run.steps.map((step) => (
+        {orderedSteps.map((step, index) => (
           <PlanStepRow
             key={step.id}
             step={step}
+            displayIndex={index + 1}
             taskById={taskById}
             attemptByTask={attemptByTask}
           />
@@ -462,20 +538,22 @@ function PlanStepsPanel({ run }: { run: RunState }) {
 
 function PlanStepsLegend() {
   return (
-    <div style={{ display: "flex", gap: 8, color: "var(--muted)", fontSize: 9 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--muted)", fontSize: 9 }}>
+      <span><StatusGlyph status="queued" />&nbsp;queued</span>
       <span><StatusGlyph status="running" />&nbsp;run</span>
       <span><StatusGlyph status="complete" />&nbsp;done</span>
-      <span><StatusGlyph status="queued" />&nbsp;queued</span>
     </div>
   );
 }
 
 function PlanStepRow({
   step,
+  displayIndex,
   taskById,
   attemptByTask,
 }: {
   step: StepState;
+  displayIndex: number;
   taskById: Map<string, WorkerTask>;
   attemptByTask: Map<string, WorkerAttempt>;
 }) {
@@ -516,7 +594,7 @@ function PlanStepRow({
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <StatusGlyph status={step.status} />
         <span style={{ color: "var(--muted)", fontSize: 10, fontWeight: 800, width: 14, textAlign: "right" }}>
-          {step.index + 1}
+          {displayIndex}
         </span>
         <span
           title={step.goal}
@@ -629,8 +707,8 @@ function agentStatus(
   ) {
     return "running";
   }
-  if (task?.status === "running" || task?.status === "claimed" || task?.status === "needs_review") return "running";
-  if (task?.status === "accepted" || attempt?.status === "succeeded") return "done";
+  if (task?.status === "running" || task?.status === "claimed") return "running";
+  if (task?.status === "accepted" || task?.status === "needs_review" || attempt?.status === "succeeded") return "done";
   if (
     task?.status === "blocked" ||
     task?.status === "failed" ||
@@ -664,7 +742,8 @@ function agentTone(runtime: PlannedStepAgent["runtimePreference"]): {
 }
 
 function StatusGlyph({ status }: { status: StepState["status"] | AgentStatusKind }) {
-  const { glyph, color } = stepGlyph(status);
+  const tone = statusTone(status);
+  const isBlocked = status === "blocked" || status === "failed";
   return (
     <span
       style={{
@@ -673,12 +752,18 @@ function StatusGlyph({ status }: { status: StepState["status"] | AgentStatusKind
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
-        color,
-        fontSize: 12,
+        borderRadius: 999,
+        border: `1px solid ${tone.color}`,
+        background: tone.filled ? tone.color : "transparent",
+        color: "var(--bg)",
+        fontSize: 9,
+        fontWeight: 900,
         lineHeight: 1,
+        flex: "0 0 auto",
+        animation: status === "running" ? "spark-pulse 1.2s ease-in-out infinite" : undefined,
       }}
     >
-      {glyph}
+      {isBlocked ? "x" : null}
     </span>
   );
 }
@@ -694,6 +779,7 @@ function StatusDot({ status }: { status: AgentStatusKind }) {
       style={{
         width: 6,
         height: 6,
+        borderRadius: 999,
         background: color,
         flex: "0 0 auto",
         animation: status === "running" ? "spark-pulse 1.2s ease-in-out infinite" : undefined,
@@ -717,22 +803,30 @@ function stepTone(status: StepState["status"]): string {
   }
 }
 
-function stepGlyph(status: StepState["status"] | AgentStatusKind): { glyph: string; color: string } {
+function statusTone(status: StepState["status"] | AgentStatusKind): { color: string; filled: boolean } {
   switch (status) {
     case "running":
     case "reviewing":
-      return { glyph: "◐", color: "var(--accent)" };
+      return { color: "var(--accent)", filled: true };
     case "complete":
     case "done":
-      return { glyph: "●", color: "var(--ok)" };
+      return { color: "var(--ok)", filled: true };
     case "blocked":
     case "failed":
-      return { glyph: "✕", color: "var(--danger)" };
+      return { color: "var(--danger)", filled: true };
     case "skipped":
-      return { glyph: "—", color: "var(--muted)" };
+      return { color: "var(--muted)", filled: false };
     default:
-      return { glyph: "○", color: "var(--muted)" };
+      return { color: "var(--muted)", filled: false };
   }
+}
+
+function sortSteps(steps: StepState[]): StepState[] {
+  return [...steps].sort((a, b) => {
+    const indexDelta = a.index - b.index;
+    if (indexDelta !== 0) return indexDelta;
+    return a.createdAt.localeCompare(b.createdAt);
+  });
 }
 
 function RunRow({
