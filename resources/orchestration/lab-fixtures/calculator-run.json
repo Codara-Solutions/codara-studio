@@ -1,0 +1,42 @@
+{
+  "id": "lab-run-calculator",
+  "workspaceId": "lab-workspace",
+  "title": "Prompt Lab - Calculator Demo",
+  "status": "running",
+  "planId": "lab-plan-calculator",
+  "pipelinePreset": "prompt-lab",
+  "artifactDir": "prompt-lab",
+  "createdAt": "2026-05-01T00:00:00.000Z",
+  "updatedAt": "2026-05-01T00:00:00.000Z",
+  "plans": [
+    {
+      "id": "lab-plan-calculator",
+      "workspaceId": "lab-workspace",
+      "title": "One-file calculator",
+      "rawContent": "# One-file calculator\n\nBuild a polished one-file HTML calculator in `calculator.html`.\n\nRequirements:\n- Basic arithmetic: add, subtract, multiply, divide.\n- Keyboard input for numbers, operators, Enter, Backspace, Escape.\n- Clear display states for current value and previous operation.\n- Responsive layout that works on small screens.\n- No build step and no external dependencies.\n",
+      "requirements": [],
+      "status": "active",
+      "createdAt": "2026-05-01T00:00:00.000Z",
+      "updatedAt": "2026-05-01T00:00:00.000Z"
+    }
+  ],
+  "steps": [],
+  "workerTasks": [],
+  "workerAttempts": [],
+  "sparkCalls": [],
+  "humanMessages": [
+    {
+      "id": "lab-message-1",
+      "runId": "lab-run-calculator",
+      "author": "user",
+      "kind": "note",
+      "message": "Keep the task small and make the worker prompt unambiguous.",
+      "createdAt": "2026-05-01T00:00:00.000Z"
+    }
+  ],
+  "autopilot": {
+    "status": "running",
+    "lastAction": "prompt_lab_fixture",
+    "updatedAt": "2026-05-01T00:00:00.000Z"
+  }
+}

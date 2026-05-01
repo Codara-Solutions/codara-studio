@@ -21,6 +21,7 @@ import type {
   UpdateStepInput,
   UpdateWorkerTaskInput,
   WorkerTask,
+  WorkerTaskStatus,
   WorkerAttempt,
   WorkerArtifactPaths,
   WorkerReport,
@@ -34,8 +35,10 @@ import {
   readOpenRouterConfig,
   requestOpenRouterManagerDecision,
   type SparkManagerDecision,
+  type SparkManagerStepDecision,
   type SparkManagerWorkerReportContext,
 } from "./openrouter-manager";
+import { loadManagerPromptProfile } from "./prompt-profile";
 import {
   finishLangSmithManagerTrace,
   readLangSmithConfig,
@@ -322,6 +325,16 @@ async function runInitialAutopilotPlanning(runId: string, input: StartAutopilotI
     managerPlannedRun &&
     managerPlannedRun.status !== "paused" &&
     managerPlannedRun.status !== "cancelled" &&
+    managerPlannedRun.steps.length > 0
+  ) {
+    // If plan_analysis lands on a brake as the first step, resolve it and
+    // replan before asking step_planning for worker prompts.
+    managerPlannedRun = await resolveActiveBrakeAndReplan(managerPlannedRun, input.cwd);
+  }
+  if (
+    managerPlannedRun &&
+    managerPlannedRun.status !== "paused" &&
+    managerPlannedRun.status !== "cancelled" &&
     managerPlannedRun.steps.length > 0 &&
     managerPlannedRun.workerTasks.length === 0
   ) {
@@ -482,7 +495,21 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
 
   run = await askOpenRouterManager(run, cwd, "worker_result_review") ?? run;
   if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
-  const tasks = pickAutopilotTasks(run);
+  // Brake checkpoint: if the next active step is a brake, resolve it and
+  // re-invoke plan_analysis so the manager can extend the plan with prior
+  // worker reports as evidence.
+  run = await resolveActiveBrakeAndReplan(run, cwd);
+  if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
+  // After advancing past a worker (and possibly a brake), the next active step
+  // is usually a worker_batch that has plannedAgents but no worker tasks yet.
+  // Call step_planning so the manager turns those plannedAgents into worker
+  // task prompts before we try to launch.
+  let tasks = pickAutopilotTasks(run);
+  if (tasks.length === 0 && needsStepPlanning(run)) {
+    run = (await askOpenRouterManager(run, cwd, "step_planning")) ?? run;
+    if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
+    tasks = pickAutopilotTasks(run);
+  }
   if (tasks.length === 0) return;
 
   await startAutopilot({
@@ -589,6 +616,39 @@ async function createFallbackAutopilotTask(run: RunState, input: StartAutopilotI
 
 async function askOpenRouterManagerForInitialTasks(run: RunState, cwd: string): Promise<RunState | null> {
   return askOpenRouterManager(run, cwd, "plan_analysis");
+}
+
+// Brake support: when the next active step has kind="brake", treat it as a
+// no-op checkpoint. Mark it complete (no workers run) and re-invoke
+// plan_analysis with the run's accumulated worker reports in context, so the
+// manager can extend the plan based on what's been learned. The manager is
+// instructed (via plan_analysis modeRules) to only emit *new* steps for the
+// remaining work, so we append rather than replace.
+//
+// Loops are bounded: the same brake will not come back as the active step
+// after resolution because we mark it complete. If the manager were to emit
+// another brake as the very next step, this still terminates because
+// pickAutopilotStep advances and we call ourselves only once per autopilot
+// hop (initial planning + each worker_result_review).
+async function resolveActiveBrakeAndReplan(run: RunState, cwd: string): Promise<RunState> {
+  const next = pickAutopilotStep(run);
+  if (!next || (next.kind ?? "worker_batch") !== "brake") return run;
+
+  const updated = await updateStep({
+    runId: run.id,
+    stepId: next.id,
+    status: "complete",
+    reviewSummary: "Brake checkpoint reached; replanning downstream steps with accumulated worker evidence.",
+  });
+  await appendEvent({
+    workspaceId: updated.workspaceId,
+    runId: updated.id,
+    stepId: next.id,
+    type: "autopilot.brake_resolved",
+    message: `Brake step "${next.title}" resolved; replanning with worker evidence`,
+    payload: { stepId: next.id, stepIndex: next.index },
+  });
+  return (await askOpenRouterManager(updated, cwd, "plan_analysis")) ?? updated;
 }
 
 async function askOpenRouterManager(
@@ -790,6 +850,28 @@ async function applySparkManagerDecision(
   }
 
   if (decision.status === "complete") {
+    // Refuse premature completion: the manager occasionally returns "complete"
+    // after a single worker review even when the planned step division still
+    // has queued/in-progress steps. Trusting it here would skip the brake
+    // checkpoint and the remaining worker_batch steps. Demote to a no-op so
+    // the autopilot loop advances to the next step instead.
+    const pendingSteps = run.steps.filter(
+      (step) => !["complete", "failed", "skipped"].includes(step.status),
+    );
+    if (pendingSteps.length > 0) {
+      await appendEvent({
+        workspaceId: run.workspaceId,
+        runId: run.id,
+        type: "spark_manager.completion_refused",
+        message: `Manager returned complete with ${pendingSteps.length} step(s) still pending; advancing instead`,
+        payload: {
+          summary: decision.summary,
+          pendingStepIds: pendingSteps.map((step) => step.id),
+          pendingStepTitles: pendingSteps.map((step) => step.title),
+        },
+      });
+      return run;
+    }
     return commitRunChange(run, {
       type: "spark_manager.completed_run",
       message: "Spark manager marked the run complete",
@@ -811,31 +893,46 @@ async function applySparkManagerDecision(
 
   let latest = run;
   const stepIds: string[] = [];
-  const steps =
+  const steps: SparkManagerStepDecision[] =
     mode === "plan_analysis" && decision.steps.length > 0
       ? decision.steps
       : run.steps.length > 0
         ? []
         : [
           {
+            kind: "worker_batch",
             title: "Spark planned work",
             goal: decision.summary,
             plannedAgents: [],
             acceptanceCriteria: ["The selected worker tasks complete and report final evidence."],
-            verificationCommands: ["npm run typecheck"],
             riskLevel: undefined,
           },
         ];
+
+  // Brake replan: when plan_analysis fires after a brake checkpoint resolves,
+  // the run already has terminal steps for the work done so far AND a queued
+  // tail from the initial plan. The manager now re-emits the entire downstream
+  // plan with fresh evidence — appending it would duplicate every queued step
+  // (we saw 3-7 dup as 8-12, then again as 13-15). Drop the still-queued tail
+  // before appending so the plan stays linear and indices stay coherent.
+  if (mode === "plan_analysis" && steps.length > 0 && latest.steps.length > 0) {
+    const stale = latest.steps.filter((step) =>
+      ["queued", "planning", "ready", "blocked"].includes(step.status),
+    );
+    if (stale.length > 0) {
+      latest = await pruneQueuedTailSteps(latest, stale.map((step) => step.id));
+    }
+  }
 
   for (const step of steps) {
     latest = await createStep({
       runId: latest.id,
       title: step.title,
       goal: step.goal,
+      kind: step.kind,
       plannedAgents: step.plannedAgents,
       riskLevel: step.riskLevel,
       acceptanceCriteria: step.acceptanceCriteria,
-      verificationCommands: step.verificationCommands,
     });
     stepIds.push(latest.steps.at(-1)?.id ?? "");
   }
@@ -1005,6 +1102,7 @@ export async function createStep(input: CreateStepInput): Promise<RunState> {
     index: run.steps.length + 1,
     title,
     goal: input.goal?.trim() || title,
+    kind: input.kind ?? "worker_batch",
     status: "queued",
       riskLevel: input.riskLevel,
       plannedAgents: input.plannedAgents ?? [],
@@ -1046,6 +1144,7 @@ export async function updateStep(input: UpdateStepInput): Promise<RunState> {
       if (!target) throw new Error(`Step not found: ${input.stepId}`);
       if (input.title !== undefined) target.title = input.title.trim();
       if (input.goal !== undefined) target.goal = input.goal.trim();
+      if (input.kind !== undefined) target.kind = input.kind;
       if (input.plannedAgents !== undefined) target.plannedAgents = input.plannedAgents;
       if (input.status !== undefined) target.status = input.status;
       if (input.riskLevel !== undefined) target.riskLevel = input.riskLevel;
@@ -1058,6 +1157,40 @@ export async function updateStep(input: UpdateStepInput): Promise<RunState> {
         draft.currentStepId = undefined;
       }
       target.updatedAt = timestamp;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Drop steps the brake-replan is about to make stale. Removes the matching
+// step rows (and any worker tasks pinned to them — there should be none for
+// "queued" steps, but worker_batch steps with plannedAgents may have task
+// rows generated by step_planning that never started). Indices on the
+// surviving steps are not renumbered: pruning removes a contiguous tail, so
+// existing indices remain dense up to the kept prefix and freshly-created
+// steps continue from `run.steps.length + 1`.
+async function pruneQueuedTailSteps(run: RunState, stepIds: string[]): Promise<RunState> {
+  if (stepIds.length === 0) return run;
+  const idSet = new Set(stepIds);
+  const removedTitles = run.steps
+    .filter((step) => idSet.has(step.id))
+    .map((step) => `${step.index}. ${step.title}`);
+  return commitRunChange(run, {
+    type: "autopilot.steps_pruned",
+    message: `Replanning after brake — pruned ${stepIds.length} stale queued step(s)`,
+    payload: {
+      stepIds: [...idSet],
+      stepTitles: removedTitles,
+      reason: "brake_replan",
+    },
+    mutate: (draft, timestamp) => {
+      draft.steps = draft.steps.filter((step) => !idSet.has(step.id));
+      draft.workerTasks = draft.workerTasks.filter(
+        (task) => !task.stepId || !idSet.has(task.stepId),
+      );
+      if (draft.currentStepId && idSet.has(draft.currentStepId)) {
+        draft.currentStepId = undefined;
+      }
       draft.updatedAt = timestamp;
     },
   });
@@ -1620,6 +1753,21 @@ function pickAutopilotTasks(run: RunState): WorkerTask[] {
   return selected.length > 0 ? selected : [first];
 }
 
+// True when the next active step is a worker_batch with plannedAgents but no
+// queueable worker tasks. Used by the autopilot review loop to decide whether
+// to invoke step_planning before declaring "nothing to do".
+function needsStepPlanning(run: RunState): boolean {
+  const active = pickAutopilotStep(run);
+  if (!active) return false;
+  if ((active.kind ?? "worker_batch") !== "worker_batch") return false;
+  if ((active.plannedAgents?.length ?? 0) === 0) return false;
+  const queueable: WorkerTaskStatus[] = ["created", "queued", "retry_queued"];
+  const hasQueueable = run.workerTasks.some(
+    (task) => task.stepId === active.id && queueable.includes(task.status),
+  );
+  return !hasQueueable;
+}
+
 function resolveTaskStepId(run: RunState, requestedStepIndex: number | undefined, createdStepIds: string[]): string | undefined {
   if (run.steps.length === 0) return undefined;
   const activeStep = pickAutopilotStep(run);
@@ -1789,7 +1937,7 @@ function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input:
   };
 }
 
-async function readWorkerReport(path: string): Promise<WorkerReport | null> {
+export async function readWorkerReport(path: string): Promise<WorkerReport | null> {
   let raw: string;
   try {
     raw = await fs.readFile(path, "utf8");
@@ -2005,9 +2153,11 @@ async function runWorkerSession({
   });
 
   // Resolve when either:
+  //   * the launch driver detects the agent never started (fast fail), or
   //   * the worker writes final-report.json (success path), or
   //   * the user closes the pane (ptyExit), or
   //   * we hit the hard timeout (90 minutes).
+  let failFast: (reason: string) => void = () => undefined;
   const exitPromise = new Promise<{ exitCode: number; error?: string }>((resolve) => {
     let settled = false;
     const finish = (value: { exitCode: number; error?: string }) => {
@@ -2034,21 +2184,37 @@ async function runWorkerSession({
     const hardTimeout = setTimeout(() => {
       finish({ exitCode: 1, error: "Worker timed out after 90 minutes." });
     }, 90 * 60 * 1000);
+    failFast = (reason: string) => finish({ exitCode: 1, error: reason });
   });
 
   // Stagger launch + prompt the same way the TEST CLAUDE button does:
   //  1. wait 1.5s for pwsh to render its prompt,
   //  2. type `claude --dangerously-skip-permissions ...\r`,
-  //  3. wait 3.5–4s for the CLI to enter its TUI,
+  //  3. sniff pty output for the agent's TUI banner (claude/codex), with a
+  //     hard timeout so a bad launch command (codex not installed, wrong
+  //     model id, etc.) fails the worker fast instead of hanging the whole
+  //     run waiting for a final report that will never come,
   //  4. paste the prompt and submit.
   void (async () => {
     try {
       await delay(1500);
       if (launchCommand) {
         handle.write(`${launchCommand}\r`);
-        // Claude boots in ~3s; codex is a bit slower. Be generous — typing
-        // into the wrong screen is the failure mode we're avoiding.
-        await delay(task.runtimePreference === "codex" ? 4500 : 3500);
+        const launched = await waitForAgentTui(attemptId, task.runtimePreference);
+        if (!launched.ok) {
+          await recordWorkerOutput(
+            run,
+            task,
+            attemptId,
+            paths,
+            "stderr",
+            `\n[spark] ${task.runtimePreference} TUI did not start within ${launched.timeoutMs}ms — ${launched.reason}.\n` +
+              "Aborting paste; check that the runtime is installed, logged in, and the model id is valid.\n",
+          );
+          await writeAutoFailureReport(paths, task, launched.reason);
+          failFast(`${task.runtimePreference} CLI failed to launch: ${launched.reason}`);
+          return;
+        }
       }
       await pasteAndSubmit(handle, promptText, task.runtimePreference);
     } catch (err) {
@@ -2060,6 +2226,116 @@ async function runWorkerSession({
   const result = await exitPromise;
   activeWorkerProcesses.delete(attemptId);
   return result;
+}
+
+// Sniff the pty output stream for an agent-TUI marker so we know the launch
+// command actually became the foreground process. If we don't see one inside
+// the budget, the launch failed — pwsh is back at its prompt and pasting the
+// worker prompt would just shove it in as command input. Returns the reason
+// for failure so we can log + write a fail-report.
+async function waitForAgentTui(
+  attemptId: string,
+  runtime: WorkerTask["runtimePreference"],
+): Promise<{ ok: true } | { ok: false; reason: string; timeoutMs: number }> {
+  // Markers that indicate the CLI's TUI is running. Both claude and codex
+  // emit their model name on first paint, plus Ink/React-CLI specific frames.
+  // We also look for the "bypass permissions" banner claude prints with our
+  // launch flag, and codex's "/help" or "Pasted Content" hints.
+  const claudeMarkers = [
+    "bypass permissions",
+    "Sonnet",
+    "Opus",
+    "Haiku",
+    "claude-sonnet",
+    "claude-opus",
+    "claude-haiku",
+  ];
+  const codexMarkers = [
+    "GPT-",
+    "gpt-5",
+    "/help",
+    "Pasted Content",
+    "Codex",
+    "codex >",
+    "Reasoning effort",
+  ];
+  const markers = runtime === "codex" ? codexMarkers : claudeMarkers;
+  // Patterns that signal a hard launch failure — pwsh complaining the binary
+  // isn't on PATH, or a CommandNotFoundException. If we see any of these we
+  // bail immediately rather than waiting out the budget.
+  const failureMarkers = [
+    "is not recognized as the name of a cmdlet",
+    "CommandNotFoundException",
+    "command not found",
+    "ENOENT",
+  ];
+  const timeoutMs = runtime === "codex" ? 12_000 : 9_000;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let buffer = "";
+    const finish = (value: { ok: true } | { ok: false; reason: string; timeoutMs: number }) => {
+      if (settled) return;
+      settled = true;
+      offTap();
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const offTap = pty.tap(attemptId, (chunk) => {
+      // Strip ANSI escape codes for matching — TUIs heavily decorate output.
+      // Keep the ring buffer small; we only need the most recent visible text.
+      buffer = (buffer + chunk.toString("utf8")).slice(-4096);
+      const visible = buffer.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+      for (const marker of markers) {
+        if (visible.includes(marker)) {
+          finish({ ok: true });
+          return;
+        }
+      }
+      for (const marker of failureMarkers) {
+        if (visible.includes(marker)) {
+          finish({
+            ok: false,
+            reason: `runtime binary did not start (saw '${marker}')`,
+            timeoutMs,
+          });
+          return;
+        }
+      }
+    });
+    const timer = setTimeout(() => {
+      finish({ ok: false, reason: "no TUI banner observed", timeoutMs });
+    }, timeoutMs);
+  });
+}
+
+// Write a synthetic final-report so the autopilot review loop can consume the
+// failure as worker evidence (the manager will see status=failed and decide
+// whether to retry, route to a different runtime, or ask the user).
+async function writeAutoFailureReport(
+  paths: WorkerArtifactPaths,
+  task: WorkerTask,
+  reason: string,
+): Promise<void> {
+  const report: WorkerReport = {
+    status: "failed",
+    summary: `Spark could not start the ${task.runtimePreference} CLI for this task: ${reason}.`,
+    filesChanged: [],
+    commandsRun: [],
+    tests: [],
+    proof: [],
+    risks: [
+      `${task.runtimePreference} CLI failed to launch — verify it is installed, logged in, and the model id is valid.`,
+    ],
+    followups: [
+      "Check Settings → Diagnostics for runtime status and re-run after fixing the install.",
+    ],
+  };
+  try {
+    await fs.writeFile(paths.finalReportJson, JSON.stringify(report, null, 2), "utf8");
+  } catch {
+    /* if we can't write the report the watchdog still resolves on pty exit */
+  }
 }
 
 // Send a multi-line prompt as a single bracketed paste (so Ink-based TUIs
@@ -2149,12 +2425,13 @@ function buildLaunchCommandLine(task: WorkerTask): string | null {
     return args.join(" ");
   }
   if (task.runtimePreference === "codex") {
-    const args = ["codex", "--yolo"];
-    if (task.modelHint?.trim()) args.push("-m", quoteShellArg(task.modelHint.trim()));
-    if (task.effortHint) {
-      args.push("-c", quoteShellArg(`model_reasoning_effort="${task.effortHint}"`));
-    }
-    return args.join(" ");
+    // Match the known-working Test Codex command exactly. Adding `-m <model>`
+    // or `-c "model_reasoning_effort=..."` here was preventing the codex CLI
+    // from actually starting (TUI never appeared, prompt got pasted into a
+    // bare pwsh prompt). Codex picks up model/effort defaults from
+    // ~/.codex/config.toml; the manager's modelHint/effortHint for codex
+    // tasks are advisory until we re-verify the CLI's actual flag surface.
+    return "codex --yolo";
   }
   return null;
 }
@@ -2189,11 +2466,10 @@ function renderWorkerPrompt({
   paths: WorkerArtifactPaths;
 }): string {
   const lines: string[] = [];
+  const promptProfile = loadManagerPromptProfile();
 
   lines.push(
-    "You are a Spark worker. Do exactly the task below — nothing else.",
-    "You have a real terminal: run any commands you need, edit files, verify your work.",
-    "Stop and report on blockers; do not guess.",
+    ...promptProfile.workerPrompt.opening,
     "",
     "## TASK",
     task.title,
@@ -2201,25 +2477,71 @@ function renderWorkerPrompt({
     task.description.trim(),
   );
 
+  if (step) {
+    lines.push(
+      "",
+      "## STEP CONTEXT",
+      `Step ${step.index}: ${step.title}`,
+      `Goal: ${step.goal}`,
+      `Status: ${step.status}`,
+    );
+  }
+
   if (step?.acceptanceCriteria?.length) {
-    lines.push("", "Acceptance:", ...step.acceptanceCriteria.map((c) => `- ${c}`));
+    lines.push("", "## ACCEPTANCE", ...step.acceptanceCriteria.map((c) => `- ${c}`));
+  }
+
+  if (task.allowedPaths.length || task.forbiddenPaths.length || task.conflictsWith.length || task.canRunParallel) {
+    lines.push("", "## BOUNDARIES");
+    if (task.allowedPaths.length) {
+      lines.push("Allowed paths:", ...task.allowedPaths.map((p) => `- ${p}`));
+    }
+    if (task.forbiddenPaths.length) {
+      lines.push("Forbidden paths:", ...task.forbiddenPaths.map((p) => `- ${p}`));
+    }
+    if (task.canRunParallel) {
+      lines.push("- This task may be running alongside other workers. Keep your edits inside the assigned scope.");
+    }
+    if (task.conflictsWith.length) {
+      lines.push("Conflicts with:", ...task.conflictsWith.map((id) => `- ${id}`));
+    }
+  }
+
+  if (task.expectedOutputs.length) {
+    lines.push("", "## EXPECTED OUTPUTS", ...task.expectedOutputs.map((output) => `- ${output}`));
   }
 
   if (task.verificationCommands?.length) {
     lines.push(
       "",
-      "Verify before reporting (run these and check they pass):",
+      "## VERIFICATION",
       ...task.verificationCommands.map((c) => `- ${c}`),
     );
   }
 
   lines.push(
     "",
+    "## WORKSPACE",
     `Workspace: ${cwd}`,
     "",
-    `When done, write JSON to ${paths.finalReportJson}:`,
-    "{ status, summary, files_changed, commands_run, tests, risks, followups }",
-    "status: complete | partial | blocked | failed.",
+    "## FINAL REPORT",
+    `When done, write valid JSON to ${paths.finalReportJson}.`,
+    ...promptProfile.workerPrompt.finalReportIntro,
+    "Use this shape:",
+    JSON.stringify(
+      {
+        status: "complete | partial | blocked | failed",
+        summary: "What changed and why.",
+        files_changed: [{ path: "path/to/file", reason: "Why it changed." }],
+        commands_run: [{ command: "npm run typecheck", exitCode: 0, summary: "What the command proved." }],
+        tests: [{ command: "npm run typecheck", result: "passed | failed | not_run", details: "Optional detail." }],
+        proof: ["Concrete evidence that the task is done."],
+        risks: ["Known risk or empty array."],
+        followups: ["Useful next task or empty array."],
+      },
+      null,
+      2,
+    ),
   );
 
   return lines.join("\n");

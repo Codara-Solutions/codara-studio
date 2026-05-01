@@ -183,6 +183,16 @@ export default function TerminalView({
     // terminal looks broken. Always xterm-resize first, then pty-resize.
     const fitAndReportSize = (force = false): { cols: number; rows: number } | null => {
       if (!fitRef.current || !termRef.current) return null;
+      // When the parent tab is hidden (display:none) the host's box is 0×0.
+      // Letting FitAddon run in that state computes a tiny cols/rows pair
+      // (sometimes ~7 cols), and we'd ship that down to the pty — ConPTY then
+      // reflows the buffer and the visible output gets column-mangled when the
+      // user comes back. Skip the fit/resize entirely while hidden; the
+      // active-prop effect re-runs forceResize when the tab becomes visible.
+      const host = hostRef.current;
+      if (!host || host.offsetParent === null) return null;
+      const rect = host.getBoundingClientRect();
+      if (rect.width < 8 || rect.height < 8) return null;
       try {
         fitRef.current.fit();
       } catch {

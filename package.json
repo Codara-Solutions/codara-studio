@@ -52,6 +52,10 @@
       {
         "from": "resources/shell-integration",
         "to": "shell-integration"
+      },
+      {
+        "from": "resources/orchestration",
+        "to": "orchestration"
       }
     ],
     "directories": {

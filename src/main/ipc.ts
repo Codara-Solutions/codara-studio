@@ -17,6 +17,7 @@ import {
   listRuns,
   pauseRun,
   prepareWorkerTask,
+  readWorkerReport,
   resumeRun,
   startAutopilot,
   updateRunStatus,
@@ -25,6 +26,13 @@ import {
 } from "./orchestration/run-store";
 import { listEvents } from "./orchestration/event-log";
 import { detectAgentRuntimes } from "./agent-runtimes";
+import {
+  buildPromptLabStage,
+  getPromptLabState,
+  resetPromptLabDraftFromLive,
+  savePromptLabDraft,
+  simulatePromptLabStage,
+} from "./orchestration/prompt-lab-service";
 import type {
   AddRunMessageInput,
   AgentRuntimeDiagnostic,
@@ -42,6 +50,10 @@ import type {
   ResumeRunInput,
   RenameFileInput,
   PlanFile,
+  PromptLabSaveDraftInput,
+  PromptLabSimulateStageInput,
+  PromptLabSimulateStageResult,
+  PromptLabState,
   RunArtifactPaths,
   RunState,
   ShellInfo,
@@ -80,6 +92,32 @@ export function registerIpc(): void {
   ipcMain.handle("agents:diagnostics", async (_e, force?: boolean): Promise<AgentRuntimeDiagnostic[]> => {
     return detectAgentRuntimes(Boolean(force));
   });
+
+  ipcMain.handle("promptLab:getState", async (): Promise<PromptLabState> => {
+    return getPromptLabState();
+  });
+
+  ipcMain.handle("promptLab:saveDraft", async (_e, input: PromptLabSaveDraftInput): Promise<PromptLabState> => {
+    return savePromptLabDraft(input);
+  });
+
+  ipcMain.handle("promptLab:resetDraft", async (): Promise<PromptLabState> => {
+    return resetPromptLabDraftFromLive();
+  });
+
+  ipcMain.handle(
+    "promptLab:buildStage",
+    async (_e, input: PromptLabSimulateStageInput): Promise<PromptLabSimulateStageResult> => {
+      return buildPromptLabStage(input);
+    },
+  );
+
+  ipcMain.handle(
+    "promptLab:simulateStage",
+    async (_e, input: PromptLabSimulateStageInput): Promise<PromptLabSimulateStageResult> => {
+      return simulatePromptLabStage(input);
+    },
+  );
 
   ipcMain.handle("dialog:openDirectory", async (e, defaultPath?: string): Promise<string | null> => {
     const win = BrowserWindow.fromWebContents(e.sender);
@@ -185,6 +223,10 @@ export function registerIpc(): void {
 
   ipcMain.handle("orchestration:launchWorkerAttempt", async (_e, input: LaunchWorkerAttemptInput): Promise<RunState> => {
     return launchWorkerAttempt(input);
+  });
+
+  ipcMain.handle("orchestration:readWorkerReport", async (_e, path: string) => {
+    return readWorkerReport(path);
   });
 
   ipcMain.handle("orchestration:deleteRun", async (_e, runId: string): Promise<void> => {

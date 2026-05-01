@@ -23,6 +23,10 @@ const spawnWaiters = new Map<string, Array<() => void>>();
 // Listeners for pty exit — orchestration uses this to release the run loop
 // when the user closes the worker pane mid-task.
 const exitWaiters = new Map<string, Array<(info: { exitCode: number; signal?: number }) => void>>();
+// Main-process taps on a session's output stream. Orchestration uses this to
+// sniff for agent-TUI banners (so we know the launch command actually started
+// the agent rather than failing back to a pwsh prompt).
+const dataTaps = new Map<string, Array<(chunk: Buffer) => void>>();
 
 const pendingKills = new Map<string, NodeJS.Timeout>();
 const GRACE_MS = 250;
@@ -155,6 +159,18 @@ function enqueueData(id: string, data: string | Buffer): void {
   if (!s) return;
 
   const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
+  // Fan out to main-process taps before buffering for the renderer. Taps
+  // observe the live byte stream and must not modify it.
+  const taps = dataTaps.get(id);
+  if (taps && taps.length > 0) {
+    for (const tap of taps) {
+      try {
+        tap(chunk);
+      } catch {
+        /* tap handlers are best-effort; never let one break IPC */
+      }
+    }
+  }
   s.pendingChunks.push(chunk);
   s.pendingBytes += chunk.length;
 
@@ -252,6 +268,22 @@ export function waitForResize(id: string, timeoutMs: number): Promise<boolean> {
     };
     tick();
   });
+}
+
+// Subscribe to the raw byte stream of a session. Returns an unsubscribe fn.
+// Used by orchestration to detect whether a launch command actually started
+// the agent TUI (vs falling back to a pwsh prompt because the binary errored).
+export function tap(id: string, handler: (chunk: Buffer) => void): () => void {
+  const list = dataTaps.get(id) ?? [];
+  list.push(handler);
+  dataTaps.set(id, list);
+  return () => {
+    const cur = dataTaps.get(id);
+    if (!cur) return;
+    const idx = cur.indexOf(handler);
+    if (idx >= 0) cur.splice(idx, 1);
+    if (cur.length === 0) dataTaps.delete(id);
+  };
 }
 
 export function onExit(

@@ -8,6 +8,8 @@ playwright-report/
 local-docs/
 *.log
 .spark-run-inspections/
+resources/orchestration/manager-profile.draft.json
+experiments/
 .DS_Store
 .vscode/
 .idea/

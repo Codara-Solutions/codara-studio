@@ -692,19 +692,35 @@ function StepsGraph({
       }}
     >
       <StartBlock label="SPARK" subtitle={run.status} />
-      {steps.map((step, index) => (
-        <React.Fragment key={step.id}>
-          <Connector label={index === 0 ? "planned" : connectorLabel(steps[index - 1], step)} />
-          <StepNode
-            step={step}
-            displayIndex={index + 1}
-            taskById={taskById}
-            attemptByTask={attemptByTask}
-            active={step.id === run.currentStepId}
-          />
-        </React.Fragment>
-      ))}
-      <Connector label={run.status === "complete" ? "done" : "finish"} />
+      {steps.map((step, index) => {
+        const prev = index === 0 ? null : steps[index - 1];
+        // Energy "flows" along the connector when the previous step is busy
+        // (running/reviewing) and this step is still waiting. The first
+        // connector (SPARK → step 1) flows when run is running and step 1 is
+        // still queued — i.e. Spark is currently planning.
+        const flowing = prev
+          ? isFlowingBetween(prev, step)
+          : run.status === "running" && (step.status === "queued" || step.status === "ready" || step.status === "planning");
+        return (
+          <React.Fragment key={step.id}>
+            <Connector
+              label={index === 0 ? "planned" : connectorLabel(prev!, step)}
+              flowing={flowing}
+            />
+            <StepNode
+              step={step}
+              displayIndex={index + 1}
+              taskById={taskById}
+              attemptByTask={attemptByTask}
+              active={step.id === run.currentStepId}
+            />
+          </React.Fragment>
+        );
+      })}
+      <Connector
+        label={run.status === "complete" ? "done" : "finish"}
+        flowing={run.status === "running" && steps.length > 0 && steps[steps.length - 1].status !== "complete" && steps[steps.length - 1].status !== "skipped" && steps[steps.length - 1].status !== "failed"}
+      />
       <EndBlock status={run.status} />
     </div>
   );
@@ -780,7 +796,7 @@ function EndBlock({ status }: { status: RunState["status"] }) {
   );
 }
 
-function Connector({ label }: { label: string }) {
+function Connector({ label, flowing = false }: { label: string; flowing?: boolean }) {
   return (
     <div
       style={{
@@ -789,33 +805,83 @@ function Connector({ label }: { label: string }) {
         height: 54,
         display: "flex",
         alignItems: "center",
+        overflow: "hidden",
       }}
     >
       <span
         style={{
           width: "100%",
-          borderTop: "1px dashed var(--rule)",
+          borderTop: `1px ${flowing ? "solid" : "dashed"} ${flowing ? "var(--accent, #f0c419)" : "var(--rule)"}`,
+          opacity: flowing ? 0.55 : 1,
+          transition: "opacity 200ms ease-out",
         }}
       />
+      {flowing && (
+        <>
+          {/* Travelling spark — a small bright dot riding the line. */}
+          <span
+            aria-hidden
+            style={{
+              position: "absolute",
+              top: "50%",
+              left: 0,
+              width: 36,
+              height: 2,
+              transform: "translateY(-50%)",
+              background:
+                "linear-gradient(90deg, rgba(240,196,25,0) 0%, rgba(240,196,25,0.95) 50%, rgba(240,196,25,0) 100%)",
+              filter: "blur(0.4px) drop-shadow(0 0 4px var(--accent, #f0c419))",
+              animation: "spark-connector-flow 1.6s cubic-bezier(.55,.05,.55,.95) infinite",
+              pointerEvents: "none",
+            }}
+          />
+          {/* Soft halo behind the line so the whole connector feels alive. */}
+          <span
+            aria-hidden
+            style={{
+              position: "absolute",
+              top: "50%",
+              left: 0,
+              right: 0,
+              height: 8,
+              transform: "translateY(-50%)",
+              background:
+                "radial-gradient(ellipse at center, rgba(240,196,25,0.18) 0%, rgba(240,196,25,0) 70%)",
+              animation: "spark-connector-halo 1.6s ease-in-out infinite",
+              pointerEvents: "none",
+            }}
+          />
+        </>
+      )}
       <span
         style={{
           position: "absolute",
           top: 0,
           left: "50%",
           transform: "translateX(-50%)",
-          color: "var(--muted)",
+          color: flowing ? "var(--accent, #f0c419)" : "var(--muted)",
           fontFamily: "var(--font-sans)",
           fontSize: 9,
           letterSpacing: "0.06em",
           whiteSpace: "nowrap",
           background: "var(--bg)",
           padding: "0 6px",
+          textShadow: flowing ? "0 0 8px rgba(240,196,25,0.45)" : "none",
         }}
       >
         {label}
       </span>
     </div>
   );
+}
+
+// True when prev is actively producing output and next is waiting for it —
+// that's when we want to show energy flowing across the connector.
+function isFlowingBetween(prev: StepState, next: StepState): boolean {
+  const prevBusy = prev.status === "running" || prev.status === "reviewing";
+  const nextWaiting =
+    next.status === "queued" || next.status === "ready" || next.status === "planning";
+  return prevBusy && nextWaiting;
 }
 
 function StepNode({
@@ -1327,11 +1393,252 @@ function RunDetails({
                 ))}
               </div>
             )}
+            <LatestReportPreview attempts={run.workerAttempts} taskById={taskById} />
           </>
         )}
       </DetailPanel>
     </div>
   );
+}
+
+// Pulls the most recent attempt that produced a finalReport and renders a
+// compact summary (status, summary line, files changed, proof, risks). This
+// is what the user wanted surfaced in the run canvas instead of having to
+// jump to the Workers tab to read agent output.
+function LatestReportPreview({
+  attempts,
+  taskById,
+}: {
+  attempts: WorkerAttempt[];
+  taskById: Map<string, WorkerTask>;
+}) {
+  const reported = useMemo(
+    () => attempts.filter((attempt) => attempt.finalReportPath).slice().reverse(),
+    [attempts],
+  );
+  const latest = reported[0];
+  const [report, setReport] = useState<import("@shared/types").WorkerReport | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!latest?.finalReportPath) {
+      setReport(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+    void window.spark.orchestration
+      .readWorkerReport(latest.finalReportPath)
+      .then((next) => {
+        if (cancelled) return;
+        setReport(next);
+        setLoading(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setLoadError((err as Error).message);
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Re-load whenever a different attempt's report becomes available, or the
+    // path itself changes (e.g. retry overwrote the file).
+  }, [latest?.id, latest?.finalReportPath, latest?.finishedAt]);
+
+  if (!latest) return null;
+  const task = taskById.get(latest.workerTaskId);
+  const labelTone = runtimeTone(latest.runtime);
+
+  return (
+    <div
+      style={{
+        marginTop: 10,
+        border: "1px solid var(--rule-soft)",
+        background: "color-mix(in oklch, var(--bg) 70%, transparent)",
+        borderRadius: 6,
+        padding: "10px 12px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span
+          style={{
+            color: labelTone.label,
+            background: labelTone.bg,
+            border: `1px solid ${labelTone.border}`,
+            padding: "2px 6px",
+            borderRadius: 3,
+            fontFamily: "var(--font-mono)",
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: "0.04em",
+            textTransform: "uppercase",
+          }}
+        >
+          {latest.runtime}
+        </span>
+        <span
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+          }}
+        >
+          Latest report
+        </span>
+        <span
+          style={{
+            color: "var(--ink-dim)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 11,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            flex: 1,
+          }}
+          title={task?.title}
+        >
+          {task?.title ?? `attempt ${latest.attemptNumber}`}
+        </span>
+        {report && (
+          <span
+            style={{
+              color: reportStatusColor(report.status),
+              fontFamily: "var(--font-sans)",
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+            }}
+          >
+            {report.status}
+          </span>
+        )}
+      </div>
+      {loading ? (
+        <div style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 11 }}>
+          Loading report…
+        </div>
+      ) : loadError ? (
+        <div style={{ color: "var(--danger, #d77)", fontFamily: "var(--font-sans)", fontSize: 11 }}>
+          Could not read report: {loadError}
+        </div>
+      ) : !report ? (
+        <div style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 11 }}>
+          {latest.status === "running" || latest.status === "launching" || latest.status === "preparing"
+            ? "Worker hasn't written a final report yet."
+            : "No structured report on disk for this attempt."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {report.summary && (
+            <div
+              style={{
+                color: "var(--ink)",
+                fontFamily: "var(--font-sans)",
+                fontSize: 12,
+                lineHeight: 1.45,
+              }}
+            >
+              {report.summary}
+            </div>
+          )}
+          {report.filesChanged.length > 0 && (
+            <ReportSection label="Files changed">
+              {report.filesChanged.slice(0, 6).map((entry, index) => (
+                <div key={`${entry.path}-${index}`} style={reportListItemStyle}>
+                  <span style={{ color: "var(--accent)" }}>{entry.path}</span>
+                  {entry.reason ? (
+                    <span style={{ color: "var(--muted)" }}> — {entry.reason}</span>
+                  ) : null}
+                </div>
+              ))}
+              {report.filesChanged.length > 6 && (
+                <div style={{ color: "var(--muted)", fontSize: 11 }}>
+                  +{report.filesChanged.length - 6} more
+                </div>
+              )}
+            </ReportSection>
+          )}
+          {report.proof.length > 0 && (
+            <ReportSection label="Proof">
+              {report.proof.slice(0, 4).map((line, index) => (
+                <div key={index} style={reportListItemStyle}>
+                  {line}
+                </div>
+              ))}
+            </ReportSection>
+          )}
+          {(report.risks.length > 0 || report.followups.length > 0) && (
+            <ReportSection label="Risks / follow-ups">
+              {report.risks.slice(0, 3).map((line, index) => (
+                <div key={`r-${index}`} style={{ ...reportListItemStyle, color: "var(--warn, #d9a86a)" }}>
+                  {line}
+                </div>
+              ))}
+              {report.followups.slice(0, 3).map((line, index) => (
+                <div key={`f-${index}`} style={reportListItemStyle}>
+                  → {line}
+                </div>
+              ))}
+            </ReportSection>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReportSection({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 9,
+          fontWeight: 600,
+          letterSpacing: "0.14em",
+          textTransform: "uppercase",
+        }}
+      >
+        {label}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+const reportListItemStyle: React.CSSProperties = {
+  color: "var(--ink-dim)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  lineHeight: 1.5,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+function reportStatusColor(status: import("@shared/types").WorkerReport["status"]): string {
+  switch (status) {
+    case "complete":
+      return "var(--success, #6ec27a)";
+    case "partial":
+      return "var(--warn, #d9a86a)";
+    case "blocked":
+    case "failed":
+      return "var(--danger, #d77)";
+    default:
+      return "var(--ink-dim)";
+  }
 }
 
 function DetailPanel({

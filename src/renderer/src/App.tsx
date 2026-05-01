@@ -15,6 +15,7 @@ import TerminalGrid from "./components/TerminalGrid";
 import FileTree from "./components/FileTree";
 import EditorGrid from "./components/EditorGrid";
 import RunsView from "./components/RunsView";
+import PromptLabView from "./components/PromptLabView";
 import OrchestrationSidebar from "./components/OrchestrationSidebar";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
@@ -24,7 +25,7 @@ import { basename } from "./path-utils";
 
 const RAIL_WIDTH = 240;
 const RIGHT_WIDTH = 360;
-type WorkbenchTab = "workers" | "editor" | "runs";
+type WorkbenchTab = "workers" | "editor" | "runs" | "lab";
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
@@ -566,6 +567,9 @@ export default function App() {
                     onSelectRun={setActiveRunId}
                   />
                 </div>
+                <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: activeWorkbenchTab === "lab" ? "flex" : "none" }}>
+                  <PromptLabView workspace={ws} />
+                </div>
               </div>
             ))
           )}
@@ -749,6 +753,11 @@ function WorkbenchTabs({
           onClick={() => onSelect("runs")}
         />
       )}
+      <WorkbenchTabButton
+        label="PROMPT LAB"
+        active={active === "lab"}
+        onClick={() => onSelect("lab")}
+      />
       {fileCount > 0 && (
         <WorkbenchTabButton
           label="EDITOR"

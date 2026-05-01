@@ -13,6 +13,10 @@ import type {
   LaunchWorkerAttemptInput,
   PauseRunInput,
   PlanFile,
+  PromptLabSaveDraftInput,
+  PromptLabSimulateStageInput,
+  PromptLabSimulateStageResult,
+  PromptLabState,
   PrepareWorkerTaskInput,
   ResumeRunInput,
   RenameFileInput,
@@ -24,6 +28,7 @@ import type {
   UpdateRunStatusInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
+  WorkerReport,
   WorkerTaskEnvelope,
 } from "@shared/types";
 
@@ -47,6 +52,16 @@ const api = {
   agents: {
     diagnostics: (force?: boolean): Promise<AgentRuntimeDiagnostic[]> =>
       ipcRenderer.invoke("agents:diagnostics", force === true),
+  },
+  promptLab: {
+    getState: (): Promise<PromptLabState> => ipcRenderer.invoke("promptLab:getState"),
+    saveDraft: (input: PromptLabSaveDraftInput): Promise<PromptLabState> =>
+      ipcRenderer.invoke("promptLab:saveDraft", input),
+    resetDraft: (): Promise<PromptLabState> => ipcRenderer.invoke("promptLab:resetDraft"),
+    buildStage: (input: PromptLabSimulateStageInput): Promise<PromptLabSimulateStageResult> =>
+      ipcRenderer.invoke("promptLab:buildStage", input),
+    simulateStage: (input: PromptLabSimulateStageInput): Promise<PromptLabSimulateStageResult> =>
+      ipcRenderer.invoke("promptLab:simulateStage", input),
   },
   dialog: {
     openDirectory: (defaultPath?: string): Promise<string | null> =>
@@ -101,6 +116,8 @@ const api = {
       ipcRenderer.invoke("orchestration:prepareWorkerTask", input),
     launchWorkerAttempt: (input: LaunchWorkerAttemptInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:launchWorkerAttempt", input),
+    readWorkerReport: (path: string): Promise<WorkerReport | null> =>
+      ipcRenderer.invoke("orchestration:readWorkerReport", path),
     deleteRun: (runId: string): Promise<void> =>
       ipcRenderer.invoke("orchestration:deleteRun", runId),
     onEvent: (handler: OrchestrationEventHandler): (() => void) => {

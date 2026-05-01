@@ -34,22 +34,38 @@ const CLAUDE_MODELS: AgentRuntimeModel[] = [
   },
 ];
 
+// Source: https://developers.openai.com/codex/models (May 2026).
+// Effort levels: https://developers.openai.com/codex/config-reference —
+// `model_reasoning_effort` accepts minimal | low | medium | high | xhigh,
+// with the docs noting "xhigh is model-dependent". gpt-5.5 is ChatGPT-login
+// only; the rest work via API key too. gpt-5.3-codex-spark is a research
+// preview gated to ChatGPT Pro.
 const CODEX_MODELS: AgentRuntimeModel[] = [
   {
     id: "gpt-5.5",
     label: "GPT-5.5",
-    effortLevels: ["low", "medium", "high"],
+    effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
     isDefault: true,
   },
   {
-    id: "o3",
-    label: "o3",
-    effortLevels: ["low", "medium", "high"],
+    id: "gpt-5.4",
+    label: "GPT-5.4",
+    effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
   },
   {
-    id: "o3-mini",
-    label: "o3-mini",
-    effortLevels: ["low", "medium", "high"],
+    id: "gpt-5.4-mini",
+    label: "GPT-5.4 mini",
+    effortLevels: ["minimal", "low", "medium", "high"],
+  },
+  {
+    id: "gpt-5.3-codex",
+    label: "GPT-5.3-Codex",
+    effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
+  },
+  {
+    id: "gpt-5.3-codex-spark",
+    label: "GPT-5.3-Codex-Spark",
+    effortLevels: ["minimal", "low", "medium", "high"],
   },
 ];
 

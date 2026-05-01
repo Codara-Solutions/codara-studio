@@ -43,7 +43,7 @@ export interface AppSettings {
 
 export type AgentRuntimeKind = "claude" | "codex";
 
-export type AgentEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+export type AgentEffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface AgentRuntimeModel {
   id: string;
@@ -130,6 +130,11 @@ export type StepStatus =
   | "blocked"
   | "failed"
   | "skipped";
+
+// "brake" steps have no workers; they are checkpoints where the orchestrator
+// pauses worker execution and re-invokes plan_analysis so the manager can
+// replan downstream steps using prior worker reports as evidence.
+export type StepKind = "worker_batch" | "brake";
 
 export type WorkerRuntime = "claude" | "codex" | "shell" | "manual";
 
@@ -247,6 +252,7 @@ export interface StepState {
   index: number;
   title: string;
   goal: string;
+  kind?: StepKind;
   plannedAgents?: PlannedStepAgent[];
   status: StepStatus;
   riskLevel?: "low" | "medium" | "high";
@@ -274,7 +280,7 @@ export interface WorkerTask {
   description: string;
   runtimePreference: WorkerRuntime;
   modelHint?: string;
-  effortHint?: "low" | "medium" | "high" | "xhigh";
+  effortHint?: "minimal" | "low" | "medium" | "high" | "xhigh";
   status: WorkerTaskStatus;
   allowedPaths: string[];
   forbiddenPaths: string[];
@@ -368,6 +374,114 @@ export interface SparkCall {
   completedAt?: string;
 }
 
+export type SparkManagerMode = "plan_analysis" | "step_planning" | "worker_result_review";
+
+export interface SparkPromptLabMessage {
+  role: "system" | "user";
+  content: string;
+}
+
+export interface SparkPromptLabRequest {
+  model: string;
+  temperature: number;
+  provider: {
+    require_parameters: true;
+  };
+  response_format: {
+    type: "json_schema";
+    json_schema: {
+      name: "spark_manager_decision";
+      strict: true;
+      schema: Record<string, unknown>;
+    };
+  };
+  messages: SparkPromptLabMessage[];
+}
+
+export interface SparkPromptLabWorkerPromptPreview {
+  title: string;
+  runtimePreference: WorkerRuntime;
+  modelHint?: string;
+  effortHint?: WorkerTask["effortHint"];
+  prompt: string;
+}
+
+export interface PromptLabState {
+  draftProfilePath: string;
+  liveProfilePath: string;
+  fixturePath: string;
+  draftProfileText: string;
+  liveProfileText: string;
+  fixtureText: string;
+  defaultFlow: SparkManagerMode[];
+  defaultModel: string;
+  langSmithProject?: string;
+  langSmithEndpoint?: string;
+  openRouterConfigured: boolean;
+  langSmithConfigured: boolean;
+  /** Default system prompt built from the draft profile when no per-mode override exists. */
+  defaultSystemPrompt: string;
+  /** Per-mode system prompt overrides currently saved in the draft profile. */
+  modeSystemPromptOverrides: Partial<Record<SparkManagerMode, string>>;
+}
+
+export interface PromptLabEvaluateInput {
+  profileText: string;
+  fixtureText: string;
+  cwd: string;
+  flow: SparkManagerMode[];
+  model: string;
+  temperature: number;
+  requestOverride?: SparkPromptLabRequest;
+}
+
+export interface PromptLabSimulateStageInput {
+  profileText: string;
+  fixtureText: string;
+  cwd: string;
+  mode: SparkManagerMode;
+  model?: string;
+  temperature?: number;
+  /**
+   * When provided, this run state replaces the fixture-derived run state
+   * for this stage. Used to thread an accepted upstream stage's decision
+   * (e.g. plan_analysis steps) into the next stage's request body.
+   */
+  runStateOverride?: RunState;
+}
+
+export interface PromptLabSimulateStageResult {
+  step: PromptLabStepResult;
+  /** Run state with this stage's decision applied. Caller passes this
+   *  back as runStateOverride for the next stage. */
+  updatedRun: RunState;
+}
+
+export interface PromptLabStepResult {
+  mode: SparkManagerMode;
+  request: SparkPromptLabRequest;
+  durationMs?: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  decision?: Record<string, unknown>;
+  rawResponse?: unknown;
+  workerPromptPreviews: SparkPromptLabWorkerPromptPreview[];
+  error?: string;
+  langSmithTraceId?: string;
+  langSmithProject?: string;
+  langSmithEndpoint?: string;
+}
+
+export interface PromptLabEvaluateResult {
+  steps: PromptLabStepResult[];
+  simulatedRun: RunState;
+  createdAt: string;
+}
+
+export interface PromptLabSaveDraftInput {
+  profileText: string;
+}
+
 export interface ContextPacket {
   id: string;
   runId: string;
@@ -410,6 +524,7 @@ export interface CreateStepInput {
   runId: string;
   title: string;
   goal?: string;
+  kind?: StepKind;
   plannedAgents?: PlannedStepAgent[];
   riskLevel?: StepState["riskLevel"];
   acceptanceCriteria?: string[];
@@ -421,6 +536,7 @@ export interface UpdateStepInput {
   stepId: string;
   title?: string;
   goal?: string;
+  kind?: StepKind;
   plannedAgents?: PlannedStepAgent[];
   status?: StepStatus;
   riskLevel?: StepState["riskLevel"];
