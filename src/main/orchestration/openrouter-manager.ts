@@ -149,7 +149,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
             type: "string",
             enum: ["worker_batch", "brake"],
             description:
-              "worker_batch: 1+ parallel workers with non-overlapping write scopes. brake: no workers; plannedAgents=[]; checkpoint where Spark replans downstream steps using prior worker reports.",
+              "worker_batch: 1+ parallel workers with non-overlapping write scopes. brake: no workers; plannedAgents=[]; checkpoint where Spark replans downstream steps using prior worker reports. HARD STOP: when you emit a brake, the steps array MUST end at that brake. Do not emit any step after a brake; Spark will re-invoke plan_analysis once the brake resolves and you will plan the next slice then.",
           },
           title: { type: "string" },
           goal: { type: "string" },
@@ -159,13 +159,19 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
             items: {
               type: "object",
               additionalProperties: false,
-              required: ["label", "summary", "runtimePreference", "modelHint", "effortHint"],
+              required: ["label", "summary", "runtimePreference", "modelHint", "effortHint", "taskClass"],
               properties: {
                 label: { type: "string" },
                 summary: { type: "string" },
                 runtimePreference: { type: "string", enum: ["claude", "codex", "manual", "shell"] },
                 modelHint: { type: "string" },
                 effortHint: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh"] },
+                taskClass: {
+                  type: "string",
+                  enum: ["skeleton", "feature", "leaf"],
+                  description:
+                    "skeleton: architectural decisions later workers inherit (file layout, base components, state shape, design tokens) — strongest available model + highest effort. feature: standard implementation against an established skeleton — mid model + medium effort. leaf: mechanical, well-defined work (rename, plumb a known transformation, write tests against an existing API) — cheapest available model + low effort.",
+                },
               },
             },
           },
@@ -642,7 +648,7 @@ function normalizeStatus(value: unknown): SparkManagerDecision["status"] {
 
 function normalizeSteps(value: unknown): SparkManagerStepDecision[] {
   if (!Array.isArray(value)) return [];
-  return value
+  const normalized = value
     .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
     .slice(0, 12)
     .map((item, index) => {
@@ -659,6 +665,35 @@ function normalizeSteps(value: unknown): SparkManagerStepDecision[] {
         riskLevel: normalizeRisk(item.riskLevel),
       };
     });
+  // Skeleton-then-brake enforcement: any worker_batch step containing a
+  // skeleton-class plannedAgent must be followed by a brake so Spark can
+  // inspect the foundation before committing more workers to it. The system
+  // prompt requires this; we inject a synthetic brake when the model forgets.
+  const enforced: SparkManagerStepDecision[] = [];
+  for (let i = 0; i < normalized.length; i++) {
+    const step = normalized[i];
+    enforced.push(step);
+    const hasSkeleton =
+      step.kind === "worker_batch" && step.plannedAgents.some((agent) => agent.taskClass === "skeleton");
+    if (!hasSkeleton) continue;
+    const next = normalized[i + 1];
+    if (!next || next.kind === "brake") continue;
+    enforced.push({
+      kind: "brake",
+      title: "Verify foundation",
+      goal: "Inspect the architectural skeleton laid by the prior step before committing further workers to it.",
+      plannedAgents: [],
+      acceptanceCriteria: [],
+      riskLevel: undefined,
+    });
+  }
+  // Hard-stop at the first brake: anything past a brake is speculation made
+  // before the brake's evidence exists. Spark re-invokes plan_analysis once
+  // the brake resolves and the manager emits the next slice with prior worker
+  // reports in context. The system prompt forbids speculating past a brake;
+  // this is the enforcement layer for models that ignore the rule.
+  const firstBrake = enforced.findIndex((step) => step.kind === "brake");
+  return firstBrake === -1 ? enforced : enforced.slice(0, firstBrake + 1);
 }
 
 function normalizeStepKind(value: unknown): StepKind {
@@ -676,7 +711,16 @@ function normalizePlannedAgents(value: unknown): PlannedStepAgent[] {
       runtimePreference: normalizeRuntime(item.runtimePreference),
       modelHint: typeof item.modelHint === "string" ? item.modelHint.trim() : undefined,
       effortHint: normalizeEffort(item.effortHint),
+      taskClass: normalizeTaskClass(item.taskClass),
     }));
+}
+
+function normalizeTaskClass(value: unknown): PlannedStepAgent["taskClass"] {
+  if (value === "skeleton" || value === "feature" || value === "leaf") return value;
+  // Default to "feature" when the model omits the class. Skeleton must be an
+  // explicit choice so we never force a synthetic brake on an unintentional
+  // step.
+  return "feature";
 }
 
 function normalizeTasks(value: unknown): SparkManagerTaskDecision[] {

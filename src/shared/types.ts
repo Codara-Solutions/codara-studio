@@ -90,6 +90,11 @@ export interface RenameFileInput {
   newName: string;
 }
 
+export interface FsChangeEvent {
+  root: string;
+  dirs: string[];
+}
+
 export interface GitGraph {
   isRepo: boolean;
   branch?: string;
@@ -264,12 +269,19 @@ export interface StepState {
   updatedAt: string;
 }
 
+// Task class drives model + effort selection. The strongest available model
+// goes to skeleton work (architecture, base components, decisions later
+// workers inherit); the cheapest model handles leaf work (mechanical,
+// well-defined). "feature" is the standard middle.
+export type PlannedStepAgentTaskClass = "skeleton" | "feature" | "leaf";
+
 export interface PlannedStepAgent {
   label: string;
   summary: string;
   runtimePreference: WorkerRuntime;
   modelHint?: string;
   effortHint?: WorkerTask["effortHint"];
+  taskClass?: PlannedStepAgentTaskClass;
 }
 
 export interface WorkerTask {
