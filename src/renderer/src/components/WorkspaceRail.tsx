@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { Workspace } from "@shared/types";
-import { PlusIcon } from "./icons";
+import { MinusIcon, PlusIcon } from "./icons";
 import GitGraph from "./GitGraph";
 
 const WORKSPACE_COLORS = [
@@ -30,6 +30,11 @@ interface RailProps {
 
 export default function WorkspaceRail(props: RailProps) {
   const { workspaces, width, onCreate } = props;
+  const deleteActiveWorkspace = () => {
+    if (!props.activeId) return;
+    props.onCloseEditor();
+    props.onDelete(props.activeId);
+  };
   return (
     <aside
       style={{
@@ -45,21 +50,28 @@ export default function WorkspaceRail(props: RailProps) {
     >
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div style={{ flex: "1 1 50%", overflow: "auto", minHeight: 0 }}>
-          <RailSectionHeader label="WORKSPACES" count={workspaces.length} onCreate={onCreate} />
-          {workspaces.length === 0 && <EmptyState onCreate={onCreate} />}
-          {workspaces.map((w) => (
-            <WorkspaceRow
-              key={w.id}
-              ws={w}
-              active={w.id === props.activeId}
-              editing={w.id === props.editingId}
-              onActivate={() => props.onActivate(w.id)}
-              onEdit={() => props.onEdit(w.id)}
-              onChange={(patch) => props.onChange(w.id, patch)}
-              onDelete={() => props.onDelete(w.id)}
-              onCloseEditor={props.onCloseEditor}
-            />
-          ))}
+          <RailSectionHeader
+            label="WORKSPACES"
+            count={workspaces.length}
+            onCreate={onCreate}
+            onDelete={deleteActiveWorkspace}
+            deleteDisabled={!props.activeId}
+          />
+          <div style={{ padding: "2px 8px 10px" }}>
+            {workspaces.length === 0 && <EmptyState onCreate={onCreate} />}
+            {workspaces.map((w) => (
+              <WorkspaceRow
+                key={w.id}
+                ws={w}
+                active={w.id === props.activeId}
+                editing={w.id === props.editingId}
+                onActivate={() => props.onActivate(w.id)}
+                onEdit={() => props.onEdit(w.id)}
+                onChange={(patch) => props.onChange(w.id, patch)}
+                onCloseEditor={props.onCloseEditor}
+              />
+            ))}
+          </div>
         </div>
         <GitGraph cwd={props.activeWorkspace?.cwd ?? null} />
       </div>
@@ -71,22 +83,25 @@ function RailSectionHeader({
   label,
   count,
   onCreate,
+  onDelete,
+  deleteDisabled = false,
 }: {
   label: string;
   count: number;
   onCreate?: () => void;
+  onDelete?: () => void;
+  deleteDisabled?: boolean;
 }) {
-  const [hover, setHover] = useState(false);
   return (
     <div
       style={{
-        padding: "14px 12px 8px 14px",
+        padding: "14px 10px 9px 14px",
         display: "flex",
         alignItems: "center",
-        gap: 8,
-        fontSize: 10,
-        letterSpacing: "0.14em",
-        fontWeight: 600,
+        gap: 6,
+        fontSize: 9,
+        letterSpacing: "0.18em",
+        fontWeight: 700,
         color: "var(--muted)",
         textTransform: "uppercase",
       }}
@@ -97,38 +112,87 @@ function RailSectionHeader({
         {String(count).padStart(2, "0")}
       </span>
       {onCreate && (
-        <button
-          type="button"
-          onClick={onCreate}
+        <RailIconButton
           title="New workspace"
-          onMouseEnter={() => setHover(true)}
-          onMouseLeave={() => setHover(false)}
-          style={{
-            width: 22,
-            height: 22,
-            border: "1px solid var(--rule-soft)",
-            background: hover ? "var(--hover)" : "transparent",
-            color: hover ? "var(--ink)" : "var(--ink-dim)",
-            display: "grid",
-            placeItems: "center",
-            cursor: "default",
-            padding: 0,
-            marginLeft: 2,
-            transition:
-              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-          }}
+          onClick={onCreate}
         >
           <PlusIcon size={11} />
-        </button>
+        </RailIconButton>
+      )}
+      {onDelete && (
+        <RailIconButton
+          title={deleteDisabled ? "Select a workspace to delete" : "Delete selected workspace"}
+          onClick={onDelete}
+          disabled={deleteDisabled}
+          danger
+        >
+          <MinusIcon size={11} />
+        </RailIconButton>
       )}
     </div>
+  );
+}
+
+function RailIconButton({
+  title,
+  onClick,
+  disabled = false,
+  danger = false,
+  children,
+}: {
+  title: string;
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+  children: React.ReactNode;
+}) {
+  const [hover, setHover] = useState(false);
+  const active = hover && !disabled;
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!disabled) onClick();
+      }}
+      disabled={disabled}
+      title={title}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        width: 20,
+        height: 20,
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 4,
+        background: active
+          ? danger
+            ? "var(--danger-soft)"
+            : "var(--hover)"
+          : "transparent",
+        color: disabled
+          ? "var(--muted-2)"
+          : active && danger
+            ? "var(--danger)"
+            : active
+              ? "var(--ink)"
+              : "var(--ink-dim)",
+        display: "grid",
+        placeItems: "center",
+        cursor: disabled ? "not-allowed" : "default",
+        padding: 0,
+        opacity: disabled ? 0.42 : 1,
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
 function EmptyState({ onCreate }: { onCreate: () => void }) {
   const [hover, setHover] = useState(false);
   return (
-    <div style={{ padding: "20px 14px", lineHeight: 1.55 }}>
+    <div style={{ padding: "18px 6px", lineHeight: 1.55 }}>
       <div style={{ marginBottom: 4, fontSize: 14, fontWeight: 600, color: "var(--ink)" }}>
         No workspaces yet
       </div>
@@ -169,7 +233,6 @@ interface RowProps {
   onActivate: () => void;
   onEdit: () => void;
   onChange: (patch: Partial<Workspace>) => void;
-  onDelete: () => void;
   onCloseEditor: () => void;
 }
 
@@ -180,7 +243,6 @@ function WorkspaceRow({
   onActivate,
   onEdit,
   onChange,
-  onDelete,
   onCloseEditor,
 }: RowProps) {
   const accent = ws.color || "var(--accent)";
@@ -225,12 +287,12 @@ function WorkspaceRow({
   };
 
   const background = active
-    ? "color-mix(in oklch, var(--accent) 12%, var(--panel-2))"
+    ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
     : editing
-      ? "var(--panel-2)"
+      ? "color-mix(in oklch, var(--ink) 6%, var(--panel))"
       : rowHover
-        ? "var(--hover)"
-        : "transparent";
+        ? "color-mix(in oklch, var(--ink) 5%, transparent)"
+        : "color-mix(in oklch, var(--ink) 2%, transparent)";
 
   return (
     <div
@@ -240,20 +302,29 @@ function WorkspaceRow({
       onMouseLeave={() => setRowHover(false)}
       style={{
         display: "flex",
-        flexDirection: "column",
-        padding: editing ? "8px 14px 12px" : "8px 14px",
+        alignItems: "center",
+        minHeight: 32,
+        padding: editing ? "5px 7px 5px 9px" : "5px 6px 5px 9px",
         background,
         cursor: "default",
         position: "relative",
-        borderTop: editing ? "1px solid var(--rule-soft)" : "none",
-        borderBottom: editing ? "1px solid var(--rule-soft)" : "none",
-        marginTop: editing ? -1 : 0,
-        marginBottom: editing ? -1 : 0,
+        border: active
+          ? `1px solid color-mix(in oklch, ${accent} 48%, var(--rule-strong))`
+          : editing
+            ? `1px solid color-mix(in oklch, ${accent} 35%, var(--rule-soft))`
+            : "1px solid transparent",
+        borderRadius: 7,
+        boxShadow: active
+          ? `0 0 0 1px color-mix(in oklch, ${accent} 18%, transparent), 0 8px 18px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.035)`
+          : rowHover || editing
+            ? "inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+            : "none",
+        marginBottom: 5,
         transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minWidth: 0 }}>
         <button
           type="button"
           onClick={(e) => {
@@ -266,15 +337,17 @@ function WorkspaceRow({
             appearance: "none",
             border: "none",
             padding: 0,
-            width: 10,
-            height: 10,
-            borderRadius: 2,
+            width: active ? 9 : 8,
+            height: active ? 9 : 8,
+            borderRadius: 999,
             background: accent,
-            flex: "0 0 10px",
+            flex: `0 0 ${active ? 9 : 8}px`,
             cursor: "default",
             boxShadow: editing
-              ? "0 0 0 2px var(--rule-strong)"
-              : "inset 0 0 0 1px color-mix(in oklch, black 25%, transparent), 0 1px 2px rgba(0,0,0,0.25)",
+              ? `0 0 0 3px color-mix(in oklch, ${accent} 24%, transparent)`
+              : active
+                ? `0 0 0 3px color-mix(in oklch, ${accent} 16%, transparent), 0 0 12px color-mix(in oklch, ${accent} 42%, transparent)`
+                : "0 0 0 2px color-mix(in oklch, var(--ink) 4%, transparent)",
           }}
         />
         {editing && (
@@ -327,10 +400,10 @@ function WorkspaceRow({
             }}
           />
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1, gap: 2 }}>
+          <div style={{ display: "flex", alignItems: "center", minWidth: 0, flex: 1 }}>
             <span
               style={{
-                fontSize: 14,
+                fontSize: 12,
                 fontWeight: 600,
                 color: active ? "var(--ink)" : "var(--ink-dim)",
                 whiteSpace: "nowrap",
@@ -339,19 +412,6 @@ function WorkspaceRow({
               }}
             >
               {ws.name}
-            </span>
-            <span
-              style={{
-                fontFamily: "var(--font-mono)",
-                fontSize: 11,
-                fontWeight: 400,
-                color: "var(--muted)",
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {ws.cwd}
             </span>
           </div>
         )}
@@ -372,19 +432,25 @@ function WorkspaceRow({
           title={editing ? "Done" : "Edit workspace"}
           style={{
             appearance: "none",
-            background: moreHover ? "var(--hover-strong)" : "transparent",
+            background: editing
+              ? "transparent"
+              : moreHover
+                ? "transparent"
+                : "transparent",
             border: "none",
-            color: editing ? accent : moreHover ? "var(--ink)" : "var(--muted)",
-            width: 24,
-            height: 24,
+            borderRadius: 0,
+            color: editing ? accent : moreHover || active ? "var(--ink-dim)" : "var(--muted-2)",
+            width: 18,
+            height: 20,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             cursor: "default",
-            padding: 4,
-            flex: "0 0 24px",
+            padding: 0,
+            flex: "0 0 18px",
+            opacity: moreHover || active || editing ? 1 : 0.72,
             transition:
-              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+              "color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
           }}
         >
           {editing ? (
@@ -408,56 +474,7 @@ function WorkspaceRow({
           )}
         </button>
       </div>
-
-      {editing && (
-        <div
-          style={{
-            marginTop: 12,
-            paddingLeft: 20,
-            display: "flex",
-            alignItems: "center",
-          }}
-        >
-          <DeleteButton
-            onClick={(e) => {
-              e.stopPropagation();
-              onCloseEditor();
-              onDelete();
-            }}
-          />
-        </div>
-      )}
     </div>
-  );
-}
-
-function DeleteButton({ onClick }: { onClick: (e: React.MouseEvent) => void }) {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title="Delete workspace"
-      style={{
-        appearance: "none",
-        background: hover ? "var(--danger-soft)" : "transparent",
-        border: "none",
-        color: hover ? "var(--danger)" : "var(--muted)",
-        fontFamily: "inherit",
-        fontSize: 10,
-        fontWeight: 600,
-        letterSpacing: "0.14em",
-        textTransform: "uppercase",
-        padding: "4px 8px",
-        cursor: "default",
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      Delete
-    </button>
   );
 }
 

@@ -1,5 +1,9 @@
 import React, { useState } from "react";
 
+type AppRegionStyle = React.CSSProperties & {
+  WebkitAppRegion?: "drag" | "no-drag";
+};
+
 function GearIcon({ size = 14 }: { size?: number }) {
   // Classic 8-tooth cog with a center hub. Strokes only — matches the chrome's
   // monoline aesthetic. Generated, not lifted, so it stays visually consistent
@@ -26,47 +30,53 @@ interface PanelToggleProps {
   side: "left" | "right";
   onClick: () => void;
   title: string;
+  edge?: "left" | "right";
 }
 
-function PanelToggle({ on, side, onClick, title }: PanelToggleProps) {
+function PanelToggle({ on, side, onClick, title, edge }: PanelToggleProps) {
   const fillColor = on ? "var(--accent)" : "currentColor";
   const fillOpacity = on ? 1 : 0.55;
   const [hover, setHover] = useState(false);
   return (
     <button
       type="button"
+      data-window-control
       onClick={onClick}
       title={title}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      style={{
-        appearance: "none",
-        width: 38,
-        height: "100%",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: hover ? "var(--hover)" : "transparent",
-        border: "none",
-        borderRight: "1px solid var(--rule-soft)",
-        color: on ? "var(--ink)" : "var(--ink-dim)",
-        cursor: "default",
-        padding: 0,
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-      }}
+      style={
+        {
+          appearance: "none",
+          width: 30,
+          height: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: hover ? "var(--hover)" : "transparent",
+          border: "none",
+          borderLeft: edge === "right" ? "1px solid var(--rule-soft)" : "none",
+          borderRight: edge === "left" ? "1px solid var(--rule-soft)" : "none",
+          color: on ? "var(--ink)" : "var(--ink-dim)",
+          cursor: "default",
+          padding: 0,
+          WebkitAppRegion: "no-drag",
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        } as AppRegionStyle
+      }
     >
-      <svg width="18" height="14" viewBox="0 0 18 14" fill="none">
-        <rect x="1.25" y="1.25" width="15.5" height="11.5" rx="2" stroke="currentColor" strokeWidth="1.1" />
+      <svg width="15" height="12" viewBox="0 0 18 14" fill="none">
+        <rect x="1.5" y="1.5" width="15" height="11" rx="2" stroke="currentColor" strokeWidth="1" />
         {side === "left" ? (
-          <rect x="2.25" y="2.25" width="3.5" height="9.5" rx="1" fill={fillColor} fillOpacity={fillOpacity} />
+          <rect x="2.75" y="2.75" width="3.2" height="8.5" rx="0.8" fill={fillColor} fillOpacity={fillOpacity} />
         ) : (
           <rect
-            x="12.25"
-            y="2.25"
-            width="3.5"
-            height="9.5"
-            rx="1"
+            x="12.05"
+            y="2.75"
+            width="3.2"
+            height="8.5"
+            rx="0.8"
             fill={fillColor}
             fillOpacity={fillOpacity}
           />
@@ -77,6 +87,7 @@ function PanelToggle({ on, side, onClick, title }: PanelToggleProps) {
 }
 
 interface Props {
+  platform?: string;
   leftOn: boolean;
   rightOn: boolean;
   onToggleLeft: () => void;
@@ -85,6 +96,7 @@ interface Props {
 }
 
 export default function WindowChrome({
+  platform,
   leftOn,
   rightOn,
   onToggleLeft,
@@ -92,69 +104,109 @@ export default function WindowChrome({
   onOpenSettings,
 }: Props) {
   const [gearHover, setGearHover] = useState(false);
+  const nativeControlsWidth = platform === "win32" ? 138 : 0;
+
+  const handleToggleMaximize = () => {
+    void window.spark.windowControls.toggleMaximize().catch(() => undefined);
+  };
+
+  const handleChromeDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target;
+    if (target instanceof Element && target.closest("[data-window-control]")) return;
+    handleToggleMaximize();
+  };
+
   return (
     <div
-      style={{
-        height: 36,
-        display: "flex",
-        alignItems: "stretch",
-        borderBottom: "1px solid var(--rule)",
-        background: "var(--bg)",
-        flex: "0 0 auto",
-        userSelect: "none",
-      }}
+      onDoubleClick={handleChromeDoubleClick}
+      style={
+        {
+          height: 30,
+          display: "flex",
+          alignItems: "stretch",
+          borderBottom: "1px solid var(--rule)",
+          background: "color-mix(in oklch, var(--panel) 70%, var(--bg))",
+          flex: "0 0 auto",
+          userSelect: "none",
+          position: "relative",
+          WebkitAppRegion: "drag",
+        } as AppRegionStyle
+      }
     >
       <div
         style={{
+          position: "absolute",
+          left: 0,
+          top: 0,
+          bottom: 0,
+          display: "flex",
+          alignItems: "stretch",
+        }}
+      >
+        <PanelToggle on={leftOn} side="left" onClick={onToggleLeft} title="Toggle workspaces" edge="left" />
+      </div>
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
           display: "flex",
           alignItems: "center",
-          gap: 10,
-          padding: "0 14px",
-          borderRight: "1px solid var(--rule)",
-          fontSize: 14,
-          fontWeight: 600,
-          letterSpacing: "-0.01em",
+          justifyContent: "center",
+          pointerEvents: "none",
         }}
       >
         <span
           style={{
-            display: "inline-block",
-            width: 8,
-            height: 8,
-            background: "var(--accent)",
-            boxShadow: "inset 0 0 0 1px color-mix(in oklch, var(--accent) 50%, black)",
+            color: "var(--ink-dim)",
+            fontSize: 11,
+            fontWeight: 600,
+            letterSpacing: "0",
+            lineHeight: 1,
           }}
-        />
-        <span>Spark</span>
+        >
+          Spark App
+        </span>
       </div>
       <div style={{ flex: 1 }} />
-      <div style={{ display: "flex", alignItems: "stretch", borderLeft: "1px solid var(--rule-soft)" }}>
-        <PanelToggle on={leftOn} side="left" onClick={onToggleLeft} title="Toggle workspaces" />
-        <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" />
+      <div
+        style={{
+          position: "absolute",
+          right: nativeControlsWidth,
+          top: 0,
+          bottom: 0,
+          display: "flex",
+          alignItems: "stretch",
+        }}
+      >
+        <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" edge="right" />
         <button
           type="button"
+          data-window-control
           title="Settings"
           onClick={() => onOpenSettings?.()}
           onMouseEnter={() => setGearHover(true)}
           onMouseLeave={() => setGearHover(false)}
-          style={{
-            appearance: "none",
-            width: 38,
-            height: "100%",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: gearHover ? "var(--hover)" : "transparent",
-            border: "none",
-            borderLeft: "1px solid var(--rule-soft)",
-            color: gearHover ? "var(--ink)" : "var(--ink-dim)",
-            cursor: "default",
-            padding: 0,
-            transition:
-              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-          }}
+          style={
+            {
+              appearance: "none",
+              width: 30,
+              height: "100%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: gearHover ? "var(--hover)" : "transparent",
+              border: "none",
+              borderLeft: "1px solid var(--rule-soft)",
+              color: gearHover ? "var(--ink)" : "var(--ink-dim)",
+              cursor: "default",
+              padding: 0,
+              WebkitAppRegion: "no-drag",
+              transition:
+                "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+            } as AppRegionStyle
+          }
         >
-          <GearIcon />
+          <GearIcon size={12} />
         </button>
       </div>
     </div>

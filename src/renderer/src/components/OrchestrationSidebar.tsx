@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import type { PlanFile, RunState, Workspace } from "@shared/types";
+import type { HumanRunMessageKind, PlanFile, RunState, Workspace } from "@shared/types";
 import SparkAgentPanel from "./SparkAgentPanel";
 
 interface Props {
@@ -7,7 +7,6 @@ interface Props {
   runs: RunState[];
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
-  onQuickTest: (runtime: "claude" | "codex") => void;
 }
 
 export default function OrchestrationSidebar({
@@ -15,7 +14,6 @@ export default function OrchestrationSidebar({
   runs,
   activeRunId,
   onSelectRun,
-  onQuickTest,
 }: Props) {
   const [planFiles, setPlanFiles] = useState<PlanFile[]>([]);
   const [selectedPlanPath, setSelectedPlanPath] = useState<string>("");
@@ -116,7 +114,7 @@ export default function OrchestrationSidebar({
     await mutateActiveRun(() => resume({ runId: activeRun.id }));
   };
 
-  const addUserMessage = async (message: string) => {
+  const addUserMessage = async (message: string, kind: HumanRunMessageKind = "note") => {
     if (!activeRun || busy) return;
     const addMessage = window.spark.orchestration.addRunMessage;
     if (typeof addMessage !== "function") {
@@ -127,10 +125,35 @@ export default function OrchestrationSidebar({
       addMessage({
         runId: activeRun.id,
         author: "user",
-        kind: "note",
+        kind,
         message,
       }),
     );
+  };
+
+  const answerActiveQuestion = async (message: string) => {
+    if (!activeRun || busy) return;
+    const addMessage = window.spark.orchestration.addRunMessage;
+    const resume = window.spark.orchestration.resumeRun;
+    if (typeof addMessage !== "function" || typeof resume !== "function") {
+      setError("Question response API is unavailable. Restart Spark Agent to reload the preload bridge.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await addMessage({
+        runId: activeRun.id,
+        author: "user",
+        kind: "answer",
+        message,
+      });
+      await resume({ runId: activeRun.id });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const deleteRunById = async (runId: string) => {
@@ -187,10 +210,10 @@ export default function OrchestrationSidebar({
         onPauseRun={pauseActiveRun}
         onResumeRun={resumeActiveRun}
         onAddUserMessage={addUserMessage}
+        onAnswerQuestion={answerActiveQuestion}
         onSelectRun={onSelectRun}
         onDeleteRun={deleteRunById}
         onSelectPlan={setSelectedPlanPath}
-        onQuickTest={onQuickTest}
       />
     </div>
   );

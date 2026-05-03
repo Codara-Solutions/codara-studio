@@ -180,8 +180,5 @@
     "finalReportIntro": [
       "The report is how Spark decides whether the task is done, so include concrete proof and honest risks."
     ]
-  },
-  "lab": {
-    "defaultFlow": ["plan_analysis", "step_planning"]
   }
 }

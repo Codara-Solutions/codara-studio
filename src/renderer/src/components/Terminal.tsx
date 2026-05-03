@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from "react";
 import { Terminal as XTerm, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import type { ShellInfo } from "@shared/types";
+import type { ShellInfo, WorkerRuntime } from "@shared/types";
 import { ShellIntegration } from "../terminal/shell-integration";
 
 interface Props {
@@ -14,6 +14,7 @@ interface Props {
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   onShellIntegration?: (integration: ShellIntegration | null) => void;
   fontSize?: number;
+  runtime?: WorkerRuntime;
 }
 
 const THEME: ITheme = {
@@ -40,7 +41,9 @@ const THEME: ITheme = {
   brightWhite: "#ffffff",
 };
 
-const RESIZE_DEBOUNCE_MS = 120;
+const RESIZE_DEBOUNCE_MS = 160;
+const POST_RESIZE_REFRESH_DELAYS_MS = [40, 160, 320];
+const TUI_REDRAW_INPUT = "\x0c";
 
 function detectWindowsPty():
   | { backend: "conpty" | "winpty"; buildNumber: number }
@@ -63,6 +66,7 @@ export default function TerminalView({
   onExit,
   onShellIntegration,
   fontSize = 13,
+  runtime,
 }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XTerm | null>(null);
@@ -71,6 +75,8 @@ export default function TerminalView({
   const disposeListenersRef = useRef<Array<() => void>>([]);
   const spawnedRef = useRef(false);
   const resizeTimerRef = useRef<number | null>(null);
+  const redrawTimerRefs = useRef<number[]>([]);
+  const resizeEpochRef = useRef(0);
   const lastSentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const forceResizeRef = useRef<() => void>(() => undefined);
   const integrationRef = useRef<ShellIntegration | null>(null);
@@ -178,9 +184,45 @@ export default function TerminalView({
     };
     hostRef.current.addEventListener("contextmenu", onContextMenu);
 
+    const clearScheduledRedraws = () => {
+      for (const id of redrawTimerRefs.current) window.clearTimeout(id);
+      redrawTimerRefs.current = [];
+    };
+
+    const refreshVisibleRows = () => {
+      const t = termRef.current;
+      if (!t) return;
+      try {
+        (t as XTerm & { clearTextureAtlas?: () => void }).clearTextureAtlas?.();
+        t.refresh(0, Math.max(0, t.rows - 1));
+      } catch {
+        /* redraw is best-effort */
+      }
+    };
+
+    const schedulePostResizeRedraw = () => {
+      const epoch = ++resizeEpochRef.current;
+      clearScheduledRedraws();
+      for (const [index, delay] of POST_RESIZE_REFRESH_DELAYS_MS.entries()) {
+        const id = window.setTimeout(() => {
+          if (resizeEpochRef.current !== epoch) return;
+          const t = termRef.current;
+          if (!t) return;
+          refreshVisibleRows();
+          if (index === 1 && t.buffer.active.type === "alternate" && shouldSendResizeRedrawInput(runtime)) {
+            void window.spark.pty.write(workerId, TUI_REDRAW_INPUT);
+          }
+        }, delay);
+        redrawTimerRefs.current.push(id);
+      }
+    };
+
     // Debounced resize. ConPTY emits a fresh redraw on every resize; without
-    // debouncing, drag-resize floods scrollback with duplicate frames and the
-    // terminal looks broken. Always xterm-resize first, then pty-resize.
+    // debouncing, drag-resize floods Ink-based TUIs with partial frames.
+    // Always xterm-resize first, then pty-resize, then request a normal TUI
+    // redraw. Do not clear xterm's alternate screen here: Claude/Codex keep
+    // their own virtual screen and diff against it, so erasing the buffer
+    // behind their back creates missing/stale cells on the next render.
     const fitAndReportSize = (force = false): { cols: number; rows: number } | null => {
       if (!fitRef.current || !termRef.current) return null;
       // When the parent tab is hidden (display:none) the host's box is 0×0.
@@ -204,13 +246,12 @@ export default function TerminalView({
       const last = lastSentSizeRef.current;
       const changed = !last || last.cols !== c || last.rows !== r;
       lastSentSizeRef.current = { cols: c, rows: r };
-      try {
-        termRef.current.refresh(0, Math.max(0, r - 1));
-      } catch {
-        /* redraw is best-effort */
-      }
+      refreshVisibleRows();
       if (spawnedRef.current && (force || changed)) {
-        void window.spark.pty.resize(workerId, c, r);
+        const wasAltScreen = termRef.current.buffer.active.type === "alternate";
+        void window.spark.pty.resize(workerId, c, r).then(() => {
+          if (wasAltScreen) schedulePostResizeRedraw();
+        });
       }
       return { cols: c, rows: r };
     };
@@ -270,6 +311,7 @@ export default function TerminalView({
         window.clearTimeout(resizeTimerRef.current);
         resizeTimerRef.current = null;
       }
+      clearScheduledRedraws();
       forceResizeRef.current = () => undefined;
       ro.disconnect();
       hostRef.current?.removeEventListener("contextmenu", onContextMenu);
@@ -317,4 +359,8 @@ export default function TerminalView({
       }}
     />
   );
+}
+
+function shouldSendResizeRedrawInput(runtime: WorkerRuntime | undefined): boolean {
+  return runtime === undefined || runtime === "claude" || runtime === "codex";
 }

@@ -182,6 +182,16 @@ export class ShellIntegration {
     return this.state === "running" || this.altScreen;
   }
 
+  // True when the pane is safe for Spark to take over as an orchestration
+  // worker: the shell is sitting at a prompt, and the visible/user history is
+  // either brand new or explicitly cleared.
+  isReusablePrompt(): boolean {
+    if (this.isBusy() || this.state !== "in_prompt") return false;
+    if (this.blocks.length === 0) return true;
+    const last = this.blocks[this.blocks.length - 1];
+    return last.status === "done" && isClearCommand(last.command);
+  }
+
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener);
     listener(this.getState());
@@ -204,4 +214,9 @@ export class ShellIntegration {
     this.disposables.length = 0;
     this.listeners.clear();
   }
+}
+
+function isClearCommand(command: string): boolean {
+  const normalized = command.trim().toLowerCase();
+  return normalized === "clear" || normalized === "cls" || normalized === "clear-host";
 }

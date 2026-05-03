@@ -4,6 +4,7 @@ import { deleteFile, listDir, listMarkdownFiles, readTextFile, renameFile, write
 import { getGitGraph } from "./git-graph";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import * as pty from "./pty-manager";
+import * as fsWatcher from "./fs-watcher";
 import {
   addRunMessage,
   appendTestEvent,
@@ -25,17 +26,8 @@ import {
   updateWorkerTask,
 } from "./orchestration/run-store";
 import { listEvents } from "./orchestration/event-log";
-import { detectAgentRuntimes } from "./agent-runtimes";
-import {
-  buildPromptLabStage,
-  getPromptLabState,
-  resetPromptLabDraftFromLive,
-  savePromptLabDraft,
-  simulatePromptLabStage,
-} from "./orchestration/prompt-lab-service";
 import type {
   AddRunMessageInput,
-  AgentRuntimeDiagnostic,
   AppSettings,
   AppState,
   CreateStepInput,
@@ -50,10 +42,6 @@ import type {
   ResumeRunInput,
   RenameFileInput,
   PlanFile,
-  PromptLabSaveDraftInput,
-  PromptLabSimulateStageInput,
-  PromptLabSimulateStageResult,
-  PromptLabState,
   RunArtifactPaths,
   RunState,
   ShellInfo,
@@ -89,36 +77,6 @@ export function registerIpc(): void {
     return defaultShell();
   });
 
-  ipcMain.handle("agents:diagnostics", async (_e, force?: boolean): Promise<AgentRuntimeDiagnostic[]> => {
-    return detectAgentRuntimes(Boolean(force));
-  });
-
-  ipcMain.handle("promptLab:getState", async (): Promise<PromptLabState> => {
-    return getPromptLabState();
-  });
-
-  ipcMain.handle("promptLab:saveDraft", async (_e, input: PromptLabSaveDraftInput): Promise<PromptLabState> => {
-    return savePromptLabDraft(input);
-  });
-
-  ipcMain.handle("promptLab:resetDraft", async (): Promise<PromptLabState> => {
-    return resetPromptLabDraftFromLive();
-  });
-
-  ipcMain.handle(
-    "promptLab:buildStage",
-    async (_e, input: PromptLabSimulateStageInput): Promise<PromptLabSimulateStageResult> => {
-      return buildPromptLabStage(input);
-    },
-  );
-
-  ipcMain.handle(
-    "promptLab:simulateStage",
-    async (_e, input: PromptLabSimulateStageInput): Promise<PromptLabSimulateStageResult> => {
-      return simulatePromptLabStage(input);
-    },
-  );
-
   ipcMain.handle("dialog:openDirectory", async (e, defaultPath?: string): Promise<string | null> => {
     const win = BrowserWindow.fromWebContents(e.sender);
     const result = await dialog.showOpenDialog(win!, {
@@ -151,6 +109,10 @@ export function registerIpc(): void {
 
   ipcMain.handle("fs:deleteFile", async (_e, path: string): Promise<void> => {
     await deleteFile(path);
+  });
+
+  ipcMain.handle("fs:setWatchRoot", async (e, root: string | null): Promise<void> => {
+    fsWatcher.setWatchRoot(e.sender, root);
   });
 
   ipcMain.handle("git:graph", async (_e, cwd: string): Promise<GitGraph> => {
@@ -257,6 +219,29 @@ export function registerIpc(): void {
 
   ipcMain.handle("pty:dispose", async (_e, args: { id: string }) => {
     pty.dispose(args.id);
+  });
+
+  ipcMain.handle("window:minimize", async (e): Promise<void> => {
+    BrowserWindow.fromWebContents(e.sender)?.minimize();
+  });
+
+  ipcMain.handle("window:toggleMaximize", async (e): Promise<boolean> => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win) return false;
+    if (win.isMaximized()) {
+      win.unmaximize();
+    } else {
+      win.maximize();
+    }
+    return win.isMaximized();
+  });
+
+  ipcMain.handle("window:isMaximized", async (e): Promise<boolean> => {
+    return BrowserWindow.fromWebContents(e.sender)?.isMaximized() ?? false;
+  });
+
+  ipcMain.handle("window:close", async (e): Promise<void> => {
+    BrowserWindow.fromWebContents(e.sender)?.close();
   });
 
   ipcMain.handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);

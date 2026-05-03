@@ -2,10 +2,11 @@ import { app, BrowserWindow, shell } from "electron";
 import { join } from "node:path";
 import { registerIpc } from "./ipc";
 import * as pty from "./pty-manager";
+import * as fsWatcher from "./fs-watcher";
 import { ensureSparkHomeSync } from "./spark-home";
 import { flush } from "./storage";
 
-app.setName("Spark Agent");
+app.setName("Spark App");
 if (process.env.SPARK_USER_DATA_DIR) {
   app.setPath("userData", process.env.SPARK_USER_DATA_DIR);
 }
@@ -20,6 +21,13 @@ const windowIcon = app.isPackaged
 
 let mainWindow: BrowserWindow | null = null;
 
+function sendWindowState(win: BrowserWindow): void {
+  if (win.webContents.isDestroyed()) return;
+  win.webContents.send("window:state-changed", {
+    maximized: win.isMaximized(),
+  });
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -29,9 +37,16 @@ function createWindow(): void {
     show: false,
     autoHideMenuBar: true,
     backgroundColor: "#1a1a1a",
-    title: "Spark Agent",
+    title: "Spark App",
     icon: windowIcon,
-    frame: true, // keep native frame for now; UI also has its own chrome but native frame is more reliable cross-platform
+    titleBarStyle: process.platform === "win32" ? "hidden" : undefined,
+    titleBarOverlay: process.platform === "win32"
+      ? {
+          color: "#20211f",
+          symbolColor: "#c7c9c3",
+          height: 30,
+        }
+      : undefined,
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       sandbox: false,
@@ -39,6 +54,10 @@ function createWindow(): void {
       nodeIntegration: false,
     },
   });
+
+  const windowForEvents = mainWindow;
+  windowForEvents.on("maximize", () => sendWindowState(windowForEvents));
+  windowForEvents.on("unmaximize", () => sendWindowState(windowForEvents));
 
   mainWindow.on("ready-to-show", () => mainWindow?.show());
 
@@ -56,6 +75,7 @@ function createWindow(): void {
 
   mainWindow.webContents.on("destroyed", () => {
     pty.disposeForWebContents(mainWindow!.webContents);
+    fsWatcher.disposeForWebContents(mainWindow!.webContents);
   });
 
   if (isDev && process.env.ELECTRON_RENDERER_URL) {
@@ -77,10 +97,12 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", async () => {
   pty.disposeAll();
+  fsWatcher.disposeAll();
   await flush();
   if (process.platform !== "darwin") app.quit();
 });
 
 app.on("before-quit", () => {
   pty.disposeAll();
+  fsWatcher.disposeAll();
 });

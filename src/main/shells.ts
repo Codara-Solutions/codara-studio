@@ -108,14 +108,27 @@ async function detectWindows(): Promise<ShellInfo[]> {
       out.push({ ...c, id: c.exe });
     }
   }
-  // Dedupe by exe path (case-insensitive on Windows)
+  const userPwshKey = normalizeWindowsPath(userPwsh);
+  const hasRealPwsh = out.some(
+    (s) => s.family === "pwsh" && normalizeWindowsPath(s.exe) !== userPwshKey,
+  );
+
+  // Dedupe by exe path (case-insensitive on Windows). Hide the WindowsApps
+  // per-user pwsh alias when a real PowerShell 7 install is present; otherwise
+  // the shell picker shows both "PowerShell 7" and "PowerShell 7 (user)" even
+  // though they launch the same Store-installed pwsh.
   const seen = new Set<string>();
   return out.filter((s) => {
-    const key = s.exe.toLowerCase();
+    const key = normalizeWindowsPath(s.exe);
+    if (hasRealPwsh && key === userPwshKey) return false;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
+}
+
+function normalizeWindowsPath(path: string): string {
+  return path.replace(/\//g, "\\").toLowerCase();
 }
 
 async function where(command: string): Promise<string[]> {

@@ -1,4 +1,6 @@
 import * as nodePty from "node-pty";
+import { promises as fsp } from "node:fs";
+import { join } from "node:path";
 import type { WebContents } from "electron";
 import type { ShellInfo } from "@shared/types";
 
@@ -34,6 +36,27 @@ const GRACE_MS = 250;
 const FLUSH_MS = 16;
 const MAX_BUFFER_BYTES = 96_000;
 
+// Some shells run user-profile work that writes shared on-disk caches at
+// startup (Terminal-Icons calls Export-Clixml on its theme files every time
+// `Import-Module Terminal-Icons` runs, in $PROFILE). Spawning two pwsh
+// processes in parallel — which Spark does on app launch when restoring
+// multiple terminals — makes them race those writes and corrupt the file,
+// after which the next pwsh start fails Import-Clixml. Serialize spawns
+// per shell-family so each shell's $PROFILE completes before the next starts.
+// Timeout is generous: $PROFILE with Terminal-Icons + Oh-My-Posh routinely
+// takes 3–5s, and the lock is released early on the OSC 633;A prompt marker,
+// so the timeout only kicks in when shell integration didn't load.
+const FAMILIES_WITH_SHARED_PROFILE_WRITES = new Set(["pwsh", "powershell"]);
+const SPAWN_LOCK_TIMEOUT_MS = 10_000;
+const PROMPT_READY_BYTES = Buffer.from([0x1b, 0x5d, 0x36, 0x33, 0x33, 0x3b, 0x41]); // ESC ] 6 3 3 ; A
+const spawnLocks = new Map<string, Promise<void>>();
+
+const TERMINAL_ICONS_CACHE_DIR =
+  process.platform === "win32" && process.env.APPDATA
+    ? join(process.env.APPDATA, "powershell", "Community", "Terminal-Icons")
+    : null;
+let profileCacheRepairPromise: Promise<void> | null = null;
+
 export interface SpawnOptions {
   id: string;
   shell: ShellInfo;
@@ -43,7 +66,7 @@ export interface SpawnOptions {
   webContents: WebContents;
 }
 
-export function spawn(opts: SpawnOptions): { id: string; pid: number } {
+export async function spawn(opts: SpawnOptions): Promise<{ id: string; pid: number }> {
   const pending = pendingKills.get(opts.id);
   if (pending) {
     clearTimeout(pending);
@@ -61,6 +84,28 @@ export function spawn(opts: SpawnOptions): { id: string; pid: number } {
     return { id: opts.id, pid: existing.pty.pid };
   }
 
+  // See FAMILIES_WITH_SHARED_PROFILE_WRITES — wait for the previous spawn of
+  // this family to finish $PROFILE before starting the next one.
+  const family = opts.shell.family;
+  if (FAMILIES_WITH_SHARED_PROFILE_WRITES.has(family)) {
+    await repairProfileCachesOnce();
+  }
+  const releaseLock = FAMILIES_WITH_SHARED_PROFILE_WRITES.has(family)
+    ? await acquireSpawnLock(family)
+    : null;
+
+  try {
+    return doSpawn(opts, releaseLock);
+  } catch (err) {
+    releaseLock?.();
+    throw err;
+  }
+}
+
+function doSpawn(
+  opts: SpawnOptions,
+  releaseLock: (() => void) | null,
+): { id: string; pid: number } {
   const cols = Math.max(1, opts.cols | 0);
   const rows = Math.max(1, opts.rows | 0);
 
@@ -151,7 +196,83 @@ export function spawn(opts: SpawnOptions): { id: string; pid: number } {
       /* ignore */
     }
   }
+
+  if (releaseLock) {
+    // Release the family lock once $PROFILE has finished — detected via the
+    // OSC 633;A "prompt start" marker that spark.ps1 emits at the first
+    // prompt. Falls back to a timeout for shells that don't load the
+    // integration (e.g. workers with SPARK_NO_SHELL_INTEGRATION=1).
+    waitForPromptReady(opts.id, SPAWN_LOCK_TIMEOUT_MS).finally(releaseLock);
+  }
+
   return { id: opts.id, pid: pty.pid };
+}
+
+// Recover from the corruption mode described in FAMILIES_WITH_SHARED_PROFILE_WRITES:
+// if a prior race truncated a Terminal-Icons cache file, every subsequent pwsh
+// start prints `Import-Clixml: 'Key' is an unexpected token`/`Index operation
+// failed` and the module fails to load. We used to bracket-check each cache
+// file and delete only the malformed ones, but a half-overwritten file can
+// still pass that check (intact <Objs> open and </Objs> close, garbage in the
+// middle). Just delete the whole cache once per app session — Terminal-Icons
+// regenerates it on next Import-Module, and the spawn lock above guarantees
+// the regen is single-writer.
+function repairProfileCachesOnce(): Promise<void> {
+  if (profileCacheRepairPromise) return profileCacheRepairPromise;
+  profileCacheRepairPromise = (async () => {
+    if (!TERMINAL_ICONS_CACHE_DIR) return;
+    let entries: string[];
+    try {
+      entries = await fsp.readdir(TERMINAL_ICONS_CACHE_DIR);
+    } catch {
+      return;
+    }
+    await Promise.all(
+      entries
+        .filter((name) => name.toLowerCase().endsWith(".xml"))
+        .map(async (name) => {
+          const path = join(TERMINAL_ICONS_CACHE_DIR, name);
+          try {
+            await fsp.unlink(path);
+          } catch {
+            /* best-effort */
+          }
+        }),
+    );
+  })();
+  return profileCacheRepairPromise;
+}
+
+function acquireSpawnLock(family: string): Promise<() => void> {
+  const prev = spawnLocks.get(family) ?? Promise.resolve();
+  let release!: () => void;
+  const next = new Promise<void>((resolve) => {
+    release = () => {
+      if (spawnLocks.get(family) === next) spawnLocks.delete(family);
+      resolve();
+    };
+  });
+  spawnLocks.set(family, next);
+  return prev.then(() => release);
+}
+
+function waitForPromptReady(id: string, timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      untap();
+      clearTimeout(timer);
+      offExitFn();
+      resolve();
+    };
+    const untap = tap(id, (chunk) => {
+      if (chunk.includes(PROMPT_READY_BYTES)) finish();
+    });
+    const offExitFn = onExit(id, () => finish());
+    const timer = setTimeout(finish, timeoutMs);
+  });
 }
 
 function enqueueData(id: string, data: string | Buffer): void {

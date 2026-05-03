@@ -83,9 +83,15 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
         minHeight: 0,
         minWidth: 0,
         overflow: "hidden",
-        border: active ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
-        boxShadow: active ? "0 0 0 1px var(--accent-edge)" : "none",
-        transition: "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+        border: active
+          ? "1px solid color-mix(in oklch, var(--accent) 45%, var(--rule-strong))"
+          : "1px solid var(--rule-soft)",
+        borderRadius: 8,
+        boxShadow: active
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.03)"
+          : "none",
+        transition:
+          "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       <div
@@ -93,9 +99,11 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
           height: 36,
           flex: "0 0 36px",
           display: "flex",
-          alignItems: "stretch",
+          alignItems: "center",
+          gap: 8,
+          padding: "0 10px",
           borderBottom: "1px solid var(--rule-soft)",
-          background: active ? "var(--panel-2)" : "var(--panel)",
+          background: "var(--panel)",
           transition: "background var(--motion-fast) var(--ease-out)",
         }}
       >
@@ -105,26 +113,37 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
             maxWidth: "70%",
             display: "flex",
             alignItems: "center",
-            gap: 8,
-            padding: "0 12px",
-            borderRight: "1px solid var(--rule-soft)",
-            background: "var(--bg)",
+            gap: 7,
+            minHeight: 26,
+            padding: "0 9px",
+            border: active
+              ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
+              : "1px solid var(--rule-soft)",
+            borderRadius: 7,
+            background: active
+              ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
+              : "color-mix(in oklch, var(--ink) 2%, transparent)",
             color: "var(--ink)",
             fontSize: 12,
             position: "relative",
+            boxShadow: active
+              ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), 0 8px 18px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+              : "none",
+            transition:
+              "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
           }}
           title={file.path}
         >
           {active && (
             <span
+              aria-hidden
               style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                height: 1.5,
+                width: 7,
+                height: 7,
+                borderRadius: 999,
                 background: "var(--accent)",
-                boxShadow: "0 0 12px var(--accent-glow)",
+                boxShadow: "0 0 9px var(--accent-glow)",
+                flex: "0 0 7px",
               }}
             />
           )}
@@ -161,24 +180,38 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
           title="Save"
           style={{
             appearance: "none",
-            background: "transparent",
-            border: "none",
-            borderLeft: "1px solid var(--rule-soft)",
+            background: dirty && !error
+              ? "color-mix(in oklch, var(--ink) 3%, transparent)"
+              : "transparent",
+            border: dirty && !error
+              ? "1px solid var(--accent-edge)"
+              : "1px solid var(--rule-soft)",
+            borderRadius: 999,
             color: dirty && !error ? "var(--ink)" : "var(--muted)",
-            padding: "0 14px",
+            minHeight: 24,
+            padding: "0 11px",
             fontFamily: "var(--font-sans)",
-            fontSize: 11,
-            fontWeight: 600,
-            letterSpacing: "0.1em",
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.12em",
             textTransform: "uppercase",
             cursor: "default",
-            transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+            transition:
+              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
           }}
           onMouseEnter={(e) => {
-            if (dirty && !error) e.currentTarget.style.background = "var(--hover)";
+            if (dirty && !error) {
+              e.currentTarget.style.background = "var(--hover)";
+              e.currentTarget.style.borderColor = "var(--accent-edge)";
+            }
           }}
           onMouseLeave={(e) => {
-            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.background = dirty && !error
+              ? "color-mix(in oklch, var(--ink) 3%, transparent)"
+              : "transparent";
+            e.currentTarget.style.borderColor = dirty && !error
+              ? "var(--accent-edge)"
+              : "var(--rule-soft)";
           }}
         >
           {saving ? "Saving" : "Save"}
@@ -194,9 +227,9 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
             appearance: "none",
             background: "transparent",
             border: "none",
-            borderLeft: "1px solid var(--rule-soft)",
             color: "var(--muted)",
-            width: 36,
+            width: 24,
+            height: 24,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -205,7 +238,7 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
             transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
           }}
           onMouseEnter={(e) => {
-            e.currentTarget.style.background = "var(--hover)";
+            e.currentTarget.style.background = "transparent";
             e.currentTarget.style.color = "var(--ink-dim)";
           }}
           onMouseLeave={(e) => {

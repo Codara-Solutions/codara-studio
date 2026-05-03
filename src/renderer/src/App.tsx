@@ -15,17 +15,17 @@ import TerminalGrid from "./components/TerminalGrid";
 import FileTree from "./components/FileTree";
 import EditorGrid from "./components/EditorGrid";
 import RunsView from "./components/RunsView";
-import PromptLabView from "./components/PromptLabView";
 import OrchestrationSidebar from "./components/OrchestrationSidebar";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
 import { PlusIcon } from "./components/icons";
 import type { ShellIntegration } from "./terminal/shell-integration";
 import { basename } from "./path-utils";
+import { getWorkerGridLayout } from "./worker-grid-layout";
 
 const RAIL_WIDTH = 240;
 const RIGHT_WIDTH = 360;
-type WorkbenchTab = "workers" | "editor" | "runs" | "lab";
+type WorkbenchTab = "workers" | "editor" | "runs";
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
@@ -42,10 +42,8 @@ function uid(prefix = "id"): string {
 
 function gridDims(n: number): { cols: number; rows: number } {
   if (n <= 0) return { cols: 1, rows: 1 };
-  // Match TerminalGrid: true square (side x side). The LAYOUT label in the
-  // header has to agree with what the grid actually renders.
-  const side = Math.ceil(Math.sqrt(n));
-  return { cols: side, rows: side };
+  const cols = Math.ceil(Math.sqrt(n));
+  return { cols, rows: Math.ceil(n / cols) };
 }
 
 function resolveDefaultShell(
@@ -54,6 +52,14 @@ function resolveDefaultShell(
   detectedDefault: ShellInfo | null,
 ): ShellInfo | null {
   return shells.find((shell) => shell.id === settings.defaultShellId) ?? detectedDefault ?? shells[0] ?? null;
+}
+
+function isReusableWorkerSlot(
+  worker: Worker,
+  integrations: Map<string, ShellIntegration>,
+): boolean {
+  if (worker.kind === "autofill") return false;
+  return integrations.get(worker.id)?.isReusablePrompt() === true;
 }
 
 export default function App() {
@@ -293,11 +299,25 @@ export default function App() {
           if (workspace.id !== event.workspaceId) return workspace;
           if (workspace.workers.some((worker) => worker.id === pane.id)) return workspace;
           // Sweep stale autofill panes from earlier versions of this code. We
-          // no longer pad — the grid auto-sizes around the actual worker
-          // count, so 1 worker = 1 pane, 4 workers = 2x2, etc.
+          // no longer pad: the grid auto-sizes around actual panes. Before
+          // appending, reuse a pane the user left at a fresh/cleared prompt.
           const real = workspace.workers.filter((w) => w.kind !== "autofill");
           for (const stale of workspace.workers) {
             if (stale.kind === "autofill") void window.spark.pty.dispose(stale.id);
+          }
+          const reusable = real.find((worker) =>
+            isReusableWorkerSlot(worker, workerIntegrationsRef.current),
+          );
+          if (reusable) {
+            void window.spark.pty.dispose(reusable.id);
+            return {
+              ...workspace,
+              workers: real.map((worker) =>
+                worker.id === reusable.id
+                  ? { ...pane, shellId: reusable.shellId }
+                  : worker,
+              ),
+            };
           }
           return { ...workspace, workers: [...real, pane] };
         }),
@@ -371,70 +391,6 @@ export default function App() {
     );
   }, []);
 
-  // Quick-test buttons: launch claude/codex in the first non-orchestration
-  // worker pane, or spawn a new one if none exist. Mirrors what the user does
-  // manually — types `claude --dangerously-skip-permissions ... ⏎`, waits for
-  // the CLI to start, types the test prompt, presses Enter.
-  const handleQuickTest = useCallback(
-    async (runtime: "claude" | "codex") => {
-      if (!activeWorkspace) return;
-      const reusable = activeWorkspace.workers.find((w) => {
-        if (w.kind === "orchestration") return false;
-        // The integration's state flips to "running" the moment Enter is
-        // pressed (spark.ps1 emits OSC 633;C live via PSReadLine), so a pane
-        // hosting an active CLI is correctly skipped. Once the CLI exits and
-        // pwsh re-prompts (633;D + 633;A), state goes idle and the pane is
-        // up for grabs again.
-        const integration = workerIntegrationsRef.current.get(w.id);
-        if (integration?.isBusy()) return false;
-        return true;
-      });
-      let workerId = reusable?.id;
-      let waitForSpawnMs = 0;
-      if (!workerId) {
-        const shellId = defaultShell?.id ?? shells[0]?.id;
-        if (!shellId) return;
-        const id = uid("w");
-        workerId = id;
-        setWorkspaces((list) =>
-          list.map((w) =>
-            w.id === activeWorkspace.id
-              ? { ...w, workers: [...w.workers, { id, shellId, kind: "terminal" }] }
-              : w,
-          ),
-        );
-        waitForSpawnMs = 1500;
-      }
-      setActiveWorkbenchTab("workers");
-      if (waitForSpawnMs > 0) await new Promise((r) => setTimeout(r, waitForSpawnMs));
-      const launch =
-        runtime === "claude"
-          ? "claude --dangerously-skip-permissions --model claude-opus-4-7 --effort medium\r"
-          : "codex --yolo\r";
-      await window.spark.pty.write(workerId, launch);
-      const cliWarmupMs = runtime === "claude" ? 3500 : 4000;
-      await new Promise((r) => setTimeout(r, cliWarmupMs));
-      const promptBody = "make a one file html calculator";
-      if (runtime === "codex") {
-        // Codex's input box is in multi-line mode by default — a bare \r
-        // inserts a newline, you have to lift it out of paste mode and then
-        // press Enter to submit. Bracket the body as a paste, idle ~1.2s for
-        // the TUI to commit it, then Enter twice (some codex builds need a
-        // second to confirm).
-        const PASTE_BEGIN = "\x1b[200~";
-        const PASTE_END = "\x1b[201~";
-        await window.spark.pty.write(workerId, `${PASTE_BEGIN}${promptBody}${PASTE_END}`);
-        await new Promise((r) => setTimeout(r, 1200));
-        await window.spark.pty.write(workerId, "\r");
-        await new Promise((r) => setTimeout(r, 700));
-        await window.spark.pty.write(workerId, "\r");
-      } else {
-        await window.spark.pty.write(workerId, `${promptBody}\r`);
-      }
-    },
-    [activeWorkspace, defaultShell, shells],
-  );
-
   const openEditorFile = useCallback((entry: FsEntry) => {
     setOpenFiles((files) =>
       files.some((file) => file.path === entry.path) ? files : [...files, entry],
@@ -477,6 +433,7 @@ export default function App() {
       }}
     >
       <WindowChrome
+        platform={platform}
         leftOn={showLeft}
         rightOn={showRight}
         onToggleLeft={() => setShowLeft((v) => !v)}
@@ -567,9 +524,6 @@ export default function App() {
                     onSelectRun={setActiveRunId}
                   />
                 </div>
-                <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: activeWorkbenchTab === "lab" ? "flex" : "none" }}>
-                  <PromptLabView workspace={ws} />
-                </div>
               </div>
             ))
           )}
@@ -590,7 +544,6 @@ export default function App() {
               );
               setActiveEditorPath((current) => (current === oldPath ? entry.path : current));
             }}
-            onQuickTest={handleQuickTest}
           />
         )}
 
@@ -627,7 +580,6 @@ function RightPanel({
   onOpenFile,
   onDeleteFile,
   onRenameFile,
-  onQuickTest,
 }: {
   workspace: Workspace | null;
   activePath: string | null;
@@ -637,7 +589,6 @@ function RightPanel({
   onOpenFile: (entry: FsEntry) => void;
   onDeleteFile: (path: string) => void;
   onRenameFile: (oldPath: string, entry: FsEntry) => void;
-  onQuickTest: (runtime: "claude" | "codex") => void;
 }) {
   const cwd = workspace?.cwd ?? null;
   return (
@@ -645,8 +596,8 @@ function RightPanel({
       style={{
         width: RIGHT_WIDTH,
         flex: `0 0 ${RIGHT_WIDTH}px`,
-        borderLeft: "1px solid var(--rule)",
-        background: "var(--panel)",
+        borderLeft: "1px solid var(--rule-soft)",
+        background: "var(--bg)",
         display: "flex",
         flexDirection: "column",
         minHeight: 0,
@@ -658,7 +609,6 @@ function RightPanel({
         runs={runs}
         activeRunId={activeRunId}
         onSelectRun={onSelectRun}
-        onQuickTest={onQuickTest}
       />
       {cwd ? (
         <FileTree
@@ -698,7 +648,7 @@ function WorkbenchTabs({
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement | null>(null);
-  const workerDims = gridDims(workerCount);
+  const workerDims = getWorkerGridLayout(workerCount);
   const activeDims = active === "editor" ? gridDims(fileCount) : workerDims;
 
   useEffect(() => {
@@ -733,7 +683,9 @@ function WorkbenchTabs({
       style={{
         flex: "0 0 36px",
         display: "flex",
-        alignItems: "stretch",
+        alignItems: "center",
+        gap: 6,
+        padding: "0 10px",
         background: "var(--panel)",
         borderBottom: "1px solid var(--rule-soft)",
         position: "relative",
@@ -753,11 +705,6 @@ function WorkbenchTabs({
           onClick={() => onSelect("runs")}
         />
       )}
-      <WorkbenchTabButton
-        label="PROMPT LAB"
-        active={active === "lab"}
-        onClick={() => onSelect("lab")}
-      />
       {fileCount > 0 && (
         <WorkbenchTabButton
           label="EDITOR"
@@ -768,7 +715,7 @@ function WorkbenchTabs({
       )}
       <div style={{ flex: 1 }} />
       {active === "workers" && (
-        <div ref={pickerRef} style={{ position: "relative", display: "flex", alignItems: "center", padding: "0 8px" }}>
+        <div ref={pickerRef} style={{ position: "relative", display: "flex", alignItems: "center" }}>
           <button
             type="button"
             onClick={handleAdd}
@@ -776,26 +723,32 @@ function WorkbenchTabs({
             title="New worker"
             style={{
               appearance: "none",
-              width: 28,
-              height: 28,
+              width: 24,
+              height: 24,
               border: "1px solid var(--rule-soft)",
-              background: "var(--bg)",
+              borderRadius: 5,
+              background: "color-mix(in oklch, var(--ink) 2%, transparent)",
               color: shells.length > 0 ? "var(--ink-dim)" : "var(--muted)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               padding: 0,
               cursor: "default",
-              transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+              transition:
+                "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
             }}
             onMouseEnter={(e) => {
-              if (shells.length > 0) e.currentTarget.style.background = "var(--hover)";
+              if (shells.length > 0) {
+                e.currentTarget.style.background = "var(--hover)";
+                e.currentTarget.style.borderColor = "var(--rule-strong)";
+              }
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.background = "var(--bg)";
+              e.currentTarget.style.background = "color-mix(in oklch, var(--ink) 2%, transparent)";
+              e.currentTarget.style.borderColor = "var(--rule-soft)";
             }}
           >
-            <PlusIcon />
+            <PlusIcon size={12} />
           </button>
           {pickerOpen && (
             <ShellPicker
@@ -811,19 +764,23 @@ function WorkbenchTabs({
       )}
       <div
         style={{
-          padding: "0 16px",
+          height: 24,
+          padding: "0 10px",
           display: "flex",
           alignItems: "center",
-          gap: 8,
+          gap: 7,
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 999,
+          background: "color-mix(in oklch, var(--ink) 2%, transparent)",
           color: "var(--muted)",
         }}
       >
         <span
           style={{
             fontFamily: "var(--font-sans)",
-            fontWeight: 600,
-            fontSize: 10,
-            letterSpacing: "0.14em",
+            fontWeight: 700,
+            fontSize: 9,
+            letterSpacing: "0.16em",
             textTransform: "uppercase",
           }}
         >
@@ -832,7 +789,7 @@ function WorkbenchTabs({
         <span
           style={{
             fontFamily: "var(--font-mono)",
-            fontSize: 11,
+            fontSize: 10,
             fontVariantNumeric: "tabular-nums",
             color: "var(--ink-dim)",
           }}
@@ -855,47 +812,56 @@ function WorkbenchTabButton({
   active: boolean;
   onClick: () => void;
 }) {
+  const [hover, setHover] = useState(false);
   return (
     <button
       type="button"
       onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
         appearance: "none",
-        border: "none",
-        borderRight: "1px solid var(--rule-soft)",
-        background: active ? "var(--bg)" : "transparent",
-        color: active ? "var(--ink)" : "var(--ink-dim)",
-        padding: "0 16px",
+        border: active
+          ? "1px solid color-mix(in oklch, var(--accent) 54%, var(--rule-strong))"
+          : hover
+            ? "1px solid var(--rule-soft)"
+            : "1px solid transparent",
+        borderRadius: 7,
+        background: active
+          ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
+          : hover
+            ? "color-mix(in oklch, var(--ink) 4%, transparent)"
+            : "transparent",
+        color: active ? "var(--ink)" : hover ? "var(--ink-dim)" : "var(--muted)",
+        minHeight: 26,
+        padding: "0 9px 0 10px",
         display: "flex",
         alignItems: "center",
-        gap: 8,
+        gap: 7,
         fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: 600,
-        letterSpacing: "0.1em",
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: "0.12em",
         textTransform: "uppercase",
         cursor: "default",
         position: "relative",
+        boxShadow: active
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent), 0 8px 18px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+          : "none",
         transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-      }}
-      onMouseEnter={(e) => {
-        if (!active) e.currentTarget.style.background = "var(--hover)";
-      }}
-      onMouseLeave={(e) => {
-        if (!active) e.currentTarget.style.background = "transparent";
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       {active && (
         <span
+          aria-hidden
           style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            right: 0,
-            height: 1.5,
+            width: 7,
+            height: 7,
+            borderRadius: 999,
             background: "var(--accent)",
-            boxShadow: "0 0 12px var(--accent-glow)",
+            boxShadow: "0 0 9px var(--accent-glow)",
+            flex: "0 0 7px",
           }}
         />
       )}
@@ -905,12 +871,15 @@ function WorkbenchTabButton({
           style={{
             minWidth: 18,
             textAlign: "center",
-            padding: "1px 6px",
-            border: "1px solid var(--rule-soft)",
-            background: active ? "var(--accent-soft)" : "transparent",
-            color: active ? "var(--ink)" : "var(--muted)",
+            padding: "1px 5px",
+            border: active
+              ? "1px solid color-mix(in oklch, var(--accent) 34%, var(--rule-soft))"
+              : "1px solid var(--rule-soft)",
+            borderRadius: 4,
+            background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+            color: active ? "var(--ink-dim)" : "var(--muted)",
             fontFamily: "var(--font-mono)",
-            fontSize: 10,
+            fontSize: 9,
             fontVariantNumeric: "tabular-nums",
             letterSpacing: 0,
             textTransform: "none",
@@ -936,13 +905,15 @@ function ShellPicker({
     <div
       style={{
         position: "absolute",
-        top: 36,
+        top: 30,
         right: 0,
         zIndex: 50,
         background: "var(--panel-2)",
         border: "1px solid var(--rule-strong)",
+        borderRadius: 8,
         boxShadow: "var(--shadow-2)",
         minWidth: 240,
+        overflow: "hidden",
       }}
     >
       <div

@@ -3,6 +3,11 @@ import type { FsEntry } from "@shared/types";
 import { ChevronIcon, CloseIcon, FileIcon, FolderIcon } from "./icons";
 import { basename } from "../path-utils";
 
+function normalizePath(path: string): string {
+  // fs.watch on Windows can produce mixed separators; normalize for set lookups.
+  return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
 interface DirNode {
   entry: FsEntry;
   open: boolean;
@@ -46,6 +51,8 @@ export default function FileTree({
   const [renameValue, setRenameValue] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [, force] = useState(0);
+  const rootRef = useRef(root);
+  rootRef.current = root;
 
   // Reload when cwd changes
   useEffect(() => {
@@ -91,9 +98,7 @@ export default function FileTree({
     dir.loading = true;
     force((n) => n + 1);
     try {
-      dir.children = await loadDir(dir.entry.path);
-      dir.loaded = true;
-      dir.error = undefined;
+      await reloadDirInPlace(dir);
       setError(null);
     } catch (err) {
       dir.error = (err as Error).message;
@@ -103,6 +108,27 @@ export default function FileTree({
       force((n) => n + 1);
     }
   }, [root]);
+
+  // Watch the workspace for filesystem changes and refresh affected dirs.
+  useEffect(() => {
+    let cancelled = false;
+    void window.spark.fs.setWatchRoot(cwd);
+    const unsub = window.spark.fs.onChanged((event) => {
+      if (cancelled || event.root !== cwd) return;
+      const changed = new Set(event.dirs.map(normalizePath));
+      const matches: (DirNode & { kind: "dir" })[] = [];
+      collectMatchingDirs(rootRef.current, changed, matches);
+      if (matches.length === 0) return;
+      void Promise.all(matches.map((d) => reloadDirInPlace(d))).then(() => {
+        if (!cancelled) force((n) => n + 1);
+      });
+    });
+    return () => {
+      cancelled = true;
+      unsub();
+      void window.spark.fs.setWatchRoot(null);
+    };
+  }, [cwd]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -191,6 +217,8 @@ export default function FileTree({
             key={row.node.entry.path + i}
             node={row.node}
             depth={row.depth}
+            branches={row.branches}
+            isLast={row.isLast}
             active={row.node.entry.path === activePath}
             onToggle={() => toggleDir(row.node as DirNode & { kind: "dir" })}
             onOpenFile={onOpenFile}
@@ -232,12 +260,17 @@ export default function FileTree({
 interface FlatRow {
   node: Node;
   depth: number;
+  branches: boolean[];
+  isLast: boolean;
 }
 
-function flatten(node: Node, depth: number): FlatRow[] {
-  const out: FlatRow[] = [{ node, depth }];
+function flatten(node: Node, depth: number, branches: boolean[] = [], isLast = true): FlatRow[] {
+  const out: FlatRow[] = [{ node, depth, branches, isLast }];
   if (node.kind === "dir" && node.open) {
-    for (const c of node.children) out.push(...flatten(c, depth + 1));
+    const childBranches = depth === 0 ? [] : [...branches, !isLast];
+    node.children.forEach((child, index) => {
+      out.push(...flatten(child, depth + 1, childBranches, index === node.children.length - 1));
+    });
   }
   return out;
 }
@@ -270,9 +303,39 @@ async function loadDir(path: string): Promise<Node[]> {
   );
 }
 
+// Re-list a directory while preserving DirNode identity (and thus `open` /
+// `loaded` / `children` state) for children that still exist.
+async function reloadDirInPlace(dir: DirNode & { kind: "dir" }): Promise<void> {
+  const entries = await window.spark.fs.list(dir.entry.path);
+  const oldByPath = new Map<string, Node>();
+  for (const child of dir.children) oldByPath.set(child.entry.path, child);
+  dir.children = entries.map((e): Node => {
+    if (e.isDir) {
+      const old = oldByPath.get(e.path);
+      if (old?.kind === "dir") return old;
+      return makeDir(e, false);
+    }
+    return { kind: "file", entry: e };
+  });
+  dir.loaded = true;
+  dir.error = undefined;
+}
+
+function collectMatchingDirs(
+  node: Node,
+  matches: Set<string>,
+  out: (DirNode & { kind: "dir" })[],
+): void {
+  if (node.kind !== "dir") return;
+  if (node.loaded && matches.has(normalizePath(node.entry.path))) out.push(node);
+  for (const child of node.children) collectMatchingDirs(child, matches, out);
+}
+
 function Row({
   node,
   depth,
+  branches,
+  isLast,
   active,
   onToggle,
   onOpenFile,
@@ -280,6 +343,8 @@ function Row({
 }: {
   node: Node;
   depth: number;
+  branches: boolean[];
+  isLast: boolean;
   active: boolean;
   onToggle: () => void;
   onOpenFile: (entry: FsEntry) => void;
@@ -287,8 +352,11 @@ function Row({
 }) {
   const isDir = node.kind === "dir";
   const [hover, setHover] = useState(false);
-  const indentBoxes = Array.from({ length: depth }, (_, i) => i);
-  const activeBg = "color-mix(in oklch, var(--accent) 12%, var(--panel))";
+  const activeBg = "color-mix(in oklch, var(--ink) 4%, var(--panel))";
+  const dirNode = isDir ? (node as DirNode & { kind: "dir" }) : null;
+  const connectorColor = active
+    ? "color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
+    : "var(--rule-soft)";
   return (
     <div
       onClick={isDir ? onToggle : () => onOpenFile(node.entry)}
@@ -303,36 +371,80 @@ function Row({
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 6,
-        height: 28,
-        padding: "0 12px 0 0",
-        background: active ? activeBg : hover ? "var(--hover)" : "transparent",
+        gap: 0,
+        minHeight: 29,
+        padding: "0 9px 0 0",
+        margin: "0 8px 3px",
+        background: active
+          ? activeBg
+          : hover
+            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
+            : "transparent",
+        border: active
+          ? "1px solid color-mix(in oklch, var(--accent) 45%, var(--rule-strong))"
+          : "1px solid transparent",
+        borderRadius: 7,
+        boxShadow: active
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+          : hover
+            ? "inset 0 1px 0 rgba(255, 255, 255, 0.03)"
+            : "none",
         color: active ? "var(--ink)" : "var(--ink-dim)",
         cursor: "default",
-        transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
-      {indentBoxes.map((i) => (
-        <span
-          key={i}
-          aria-hidden="true"
-          style={{
-            display: "inline-block",
-            width: 14,
-            height: "100%",
-            marginLeft: i === 0 ? 8 : 0,
-            borderLeft: "1px solid var(--rule-soft)",
-            flex: "0 0 14px",
-          }}
-        />
-      ))}
-      <span style={{ display: "inline-flex", marginLeft: depth === 0 ? 8 : 0, gap: 6, alignItems: "center", minWidth: 0, flex: 1 }}>
-        {isDir ? <ChevronIcon open={(node as DirNode).open} /> : <span style={{ display: "inline-block", width: 12 }} />}
-        {isDir ? <FolderIcon open={(node as DirNode).open} /> : <FileIcon ext={node.entry.ext} />}
+      <span
+        aria-hidden
+        style={{
+          display: "inline-flex",
+          alignItems: "stretch",
+          height: 29,
+          marginLeft: depth === 0 ? 7 : 2,
+          flex: "0 0 auto",
+        }}
+      >
+        {branches.map((continues, index) => (
+          <TreeGuide key={index} continues={continues} color="var(--rule-soft)" />
+        ))}
+        {depth > 0 && <TreeElbow isLast={isLast} color={connectorColor} />}
+      </span>
+
+      <button
+        type="button"
+        onClick={(event) => {
+          if (!isDir) return;
+          event.stopPropagation();
+          onToggle();
+        }}
+        title={isDir ? (dirNode?.open ? "Collapse folder" : "Expand folder") : undefined}
+        tabIndex={isDir ? 0 : -1}
+        style={{
+          appearance: "none",
+          width: 16,
+          height: 22,
+          border: "none",
+          background: "transparent",
+          color: isDir ? "var(--muted)" : "transparent",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 0,
+          marginRight: 4,
+          cursor: "default",
+          flex: "0 0 16px",
+        }}
+      >
+        {isDir && <ChevronIcon open={Boolean(dirNode?.open)} />}
+      </button>
+
+      <span style={{ display: "inline-flex", gap: 6, alignItems: "center", minWidth: 0, flex: 1 }}>
+        {isDir ? <FolderIcon open={Boolean(dirNode?.open)} /> : <FileIcon ext={node.entry.ext} />}
         <span
           style={{
             fontFamily: "var(--font-sans)",
-            fontSize: 13,
+            fontSize: 12,
             fontWeight: isDir ? 600 : 400,
             color: active ? "var(--ink)" : isDir ? "var(--ink)" : "var(--ink-dim)",
             whiteSpace: "nowrap",
@@ -345,10 +457,73 @@ function Row({
           {node.entry.name}
         </span>
       </span>
-      {isDir && (node as DirNode).loading && (
+      {isDir && dirNode?.loading && (
         <span style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--muted)" }}>…</span>
       )}
     </div>
+  );
+}
+
+function TreeGuide({ continues, color }: { continues: boolean; color: string }) {
+  return (
+    <span
+      style={{
+        width: 16,
+        height: "100%",
+        position: "relative",
+        flex: "0 0 16px",
+      }}
+    >
+      {continues && (
+        <span
+          style={{
+            position: "absolute",
+            left: 7,
+            top: 0,
+            bottom: 0,
+            width: 1,
+            background: color,
+            opacity: 0.82,
+          }}
+        />
+      )}
+    </span>
+  );
+}
+
+function TreeElbow({ isLast, color }: { isLast: boolean; color: string }) {
+  return (
+    <span
+      style={{
+        width: 17,
+        height: "100%",
+        position: "relative",
+        flex: "0 0 17px",
+      }}
+    >
+      <span
+        style={{
+          position: "absolute",
+          left: 7,
+          top: 0,
+          bottom: isLast ? "50%" : 0,
+          width: 1,
+          background: color,
+          opacity: 0.9,
+        }}
+      />
+      <span
+        style={{
+          position: "absolute",
+          left: 7,
+          top: "50%",
+          width: 10,
+          height: 1,
+          background: color,
+          opacity: 0.9,
+        }}
+      />
+    </span>
   );
 }
 
@@ -376,8 +551,10 @@ function FileMenu({
         width: 228,
         background: "var(--panel-2)",
         border: "1px solid var(--rule-strong)",
+        borderRadius: 8,
         boxShadow: "0 18px 50px rgba(0,0,0,0.48)",
         padding: 6,
+        overflow: "hidden",
       }}
     >
       <div
@@ -443,6 +620,7 @@ function MenuButton({
         border: "none",
         background: hovered ? "var(--panel)" : "transparent",
         color: danger ? "var(--danger)" : hovered ? "var(--ink)" : "var(--ink-dim)",
+        borderRadius: 6,
         padding: "7px 8px",
         textAlign: "left",
         fontFamily: "inherit",
@@ -461,7 +639,8 @@ function MenuButton({
         style={{
           width: 18,
           height: 18,
-          border: "1px solid var(--rule)",
+          border: "1px solid transparent",
+          borderRadius: 999,
           color: danger ? "var(--danger)" : "var(--muted)",
           display: "inline-flex",
           alignItems: "center",
@@ -517,6 +696,7 @@ function RenameDialog({
           background: "var(--bg)",
           color: "var(--ink)",
           border: "1px solid var(--accent-edge)",
+          borderRadius: 7,
           outline: "none",
           padding: "5px 8px",
           fontFamily: "var(--font-mono)",
@@ -588,7 +768,9 @@ function DialogShell({
           width: "min(360px, 100%)",
           background: "var(--panel-2)",
           border: "1px solid var(--rule-strong)",
+          borderRadius: 10,
           boxShadow: "0 20px 70px rgba(0,0,0,0.55)",
+          overflow: "hidden",
         }}
       >
         <div
@@ -614,7 +796,8 @@ function DialogShell({
               width: 22,
               height: 22,
               border: "1px solid var(--rule)",
-              background: "var(--bg)",
+              borderRadius: 999,
+              background: "transparent",
               color: "var(--muted)",
               display: "flex",
               alignItems: "center",
@@ -662,8 +845,9 @@ function DialogButton({
         minWidth: 78,
         height: 28,
         border: `1px solid ${primary ? "var(--accent)" : danger ? "var(--danger)" : "var(--rule-strong)"}`,
-        background: primary ? "var(--accent)" : "transparent",
-        color: primary ? "var(--accent-ink)" : danger ? "var(--danger)" : "var(--ink-dim)",
+        borderRadius: 999,
+        background: "transparent",
+        color: primary ? "var(--ink)" : danger ? "var(--danger)" : "var(--ink-dim)",
         padding: "0 10px",
         fontFamily: "inherit",
         fontSize: 10,
@@ -688,29 +872,42 @@ function PanelHeader({ title, right }: { title: string; right?: React.ReactNode 
   return (
     <div
       style={{
-        padding: "8px 12px",
+        padding: "10px 10px 8px 14px",
         borderBottom: "1px solid var(--rule-soft)",
         background: "var(--panel)",
         display: "flex",
         alignItems: "center",
-        gap: 10,
+        gap: 7,
         flex: "0 0 auto",
-        color: "var(--ink)",
+        color: "var(--muted)",
       }}
     >
       <span
         style={{
           fontFamily: "var(--font-sans)",
-          fontSize: 10,
-          letterSpacing: "0.14em",
+          fontSize: 9,
+          letterSpacing: "0.18em",
           textTransform: "uppercase",
-          fontWeight: 600,
+          fontWeight: 700,
         }}
       >
         {title}
       </span>
-      <span style={{ flex: 1 }} />
-      <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 400, color: "var(--muted)" }}>{right}</span>
+      <span style={{ flex: 1, height: 1, background: "var(--rule-soft)" }} />
+      <span
+        style={{
+          maxWidth: 128,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          fontWeight: 400,
+          color: "var(--muted)",
+        }}
+      >
+        {right}
+      </span>
     </div>
   );
 }

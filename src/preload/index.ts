@@ -1,22 +1,18 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AddRunMessageInput,
-  AgentRuntimeDiagnostic,
   AppSettings,
   AppState,
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
+  FsChangeEvent,
   FsEntry,
   FsFileContent,
   GitGraph,
   LaunchWorkerAttemptInput,
   PauseRunInput,
   PlanFile,
-  PromptLabSaveDraftInput,
-  PromptLabSimulateStageInput,
-  PromptLabSimulateStageResult,
-  PromptLabState,
   PrepareWorkerTaskInput,
   ResumeRunInput,
   RenameFileInput,
@@ -35,6 +31,8 @@ import type {
 type PtyDataHandler = (data: Uint8Array | string) => void;
 type PtyExitHandler = (info: { exitCode: number; signal?: number }) => void;
 type OrchestrationEventHandler = (event: SparkEvent) => void;
+type FsChangeHandler = (event: FsChangeEvent) => void;
+type WindowStateHandler = (state: { maximized: boolean }) => void;
 
 const api = {
   state: {
@@ -48,20 +46,6 @@ const api = {
   shells: {
     list: (): Promise<ShellInfo[]> => ipcRenderer.invoke("shells:list"),
     default: (): Promise<ShellInfo | null> => ipcRenderer.invoke("shells:default"),
-  },
-  agents: {
-    diagnostics: (force?: boolean): Promise<AgentRuntimeDiagnostic[]> =>
-      ipcRenderer.invoke("agents:diagnostics", force === true),
-  },
-  promptLab: {
-    getState: (): Promise<PromptLabState> => ipcRenderer.invoke("promptLab:getState"),
-    saveDraft: (input: PromptLabSaveDraftInput): Promise<PromptLabState> =>
-      ipcRenderer.invoke("promptLab:saveDraft", input),
-    resetDraft: (): Promise<PromptLabState> => ipcRenderer.invoke("promptLab:resetDraft"),
-    buildStage: (input: PromptLabSimulateStageInput): Promise<PromptLabSimulateStageResult> =>
-      ipcRenderer.invoke("promptLab:buildStage", input),
-    simulateStage: (input: PromptLabSimulateStageInput): Promise<PromptLabSimulateStageResult> =>
-      ipcRenderer.invoke("promptLab:simulateStage", input),
   },
   dialog: {
     openDirectory: (defaultPath?: string): Promise<string | null> =>
@@ -77,6 +61,13 @@ const api = {
     renameFile: (input: RenameFileInput): Promise<FsEntry> =>
       ipcRenderer.invoke("fs:renameFile", input),
     deleteFile: (path: string): Promise<void> => ipcRenderer.invoke("fs:deleteFile", path),
+    setWatchRoot: (root: string | null): Promise<void> =>
+      ipcRenderer.invoke("fs:setWatchRoot", root),
+    onChanged: (handler: FsChangeHandler): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, event: FsChangeEvent) => handler(event);
+      ipcRenderer.on("fs:changed", listener);
+      return () => ipcRenderer.off("fs:changed", listener);
+    },
   },
   git: {
     graph: (cwd: string): Promise<GitGraph> => ipcRenderer.invoke("git:graph", cwd),
@@ -151,6 +142,17 @@ const api = {
         handler(info);
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.off(channel, listener);
+    },
+  },
+  windowControls: {
+    minimize: (): Promise<void> => ipcRenderer.invoke("window:minimize"),
+    toggleMaximize: (): Promise<boolean> => ipcRenderer.invoke("window:toggleMaximize"),
+    isMaximized: (): Promise<boolean> => ipcRenderer.invoke("window:isMaximized"),
+    close: (): Promise<void> => ipcRenderer.invoke("window:close"),
+    onStateChanged: (handler: WindowStateHandler): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, state: { maximized: boolean }) => handler(state);
+      ipcRenderer.on("window:state-changed", listener);
+      return () => ipcRenderer.off("window:state-changed", listener);
     },
   },
   app: {

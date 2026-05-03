@@ -98,6 +98,11 @@ function Global:Prompt {
 # previously broke when the integration tried to fully take over Enter.
 if (Get-Module -ListAvailable PSReadLine) {
     Import-Module PSReadLine -ErrorAction SilentlyContinue
+    # Disable inline prediction (gray-text autocomplete). The same cmdlet is
+    # also fired from shells.ts -Command, but PSReadLine isn't always loaded
+    # at that point so the call can no-op. Re-applying it here, after we've
+    # explicitly imported the module, makes the setting actually stick.
+    Set-PSReadLineOption -PredictionSource None -ErrorAction SilentlyContinue
     if (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue) {
         $Global:__SparkAcceptLine = {
             param($key, $arg)

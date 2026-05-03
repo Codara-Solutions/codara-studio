@@ -682,6 +682,7 @@ function StepsGraph({
   taskById: Map<string, WorkerTask>;
   attemptByTask: Map<string, WorkerAttempt>;
 }) {
+  const promptGenerationTargetStepId = promptGenerationTargetStep(run)?.id;
   return (
     <div
       style={{
@@ -694,18 +695,12 @@ function StepsGraph({
       <StartBlock label="SPARK" subtitle={run.status} />
       {steps.map((step, index) => {
         const prev = index === 0 ? null : steps[index - 1];
-        // Energy "flows" along the connector when the previous step is busy
-        // (running/reviewing) and this step is still waiting. The first
-        // connector (SPARK → step 1) flows when run is running and step 1 is
-        // still queued — i.e. Spark is currently planning.
-        const flowing = prev
-          ? isFlowingBetween(prev, step)
-          : run.status === "running" && (step.status === "queued" || step.status === "ready" || step.status === "planning");
+        const generatingPrompt = step.id === promptGenerationTargetStepId;
         return (
           <React.Fragment key={step.id}>
             <Connector
-              label={index === 0 ? "planned" : connectorLabel(prev!, step)}
-              flowing={flowing}
+              label={generatingPrompt ? "prompt" : index === 0 ? "planned" : connectorLabel(prev!, step)}
+              flowing={generatingPrompt}
             />
             <StepNode
               step={step}
@@ -719,7 +714,6 @@ function StepsGraph({
       })}
       <Connector
         label={run.status === "complete" ? "done" : "finish"}
-        flowing={run.status === "running" && steps.length > 0 && steps[steps.length - 1].status !== "complete" && steps[steps.length - 1].status !== "skipped" && steps[steps.length - 1].status !== "failed"}
       />
       <EndBlock status={run.status} />
     </div>
@@ -797,6 +791,9 @@ function EndBlock({ status }: { status: RunState["status"] }) {
 }
 
 function Connector({ label, flowing = false }: { label: string; flowing?: boolean }) {
+  const strokeColor = flowing ? "var(--accent, #f0c419)" : "var(--rule)";
+  const strokeStyle = flowing ? "solid" : "dashed";
+
   return (
     <div
       style={{
@@ -809,11 +806,31 @@ function Connector({ label, flowing = false }: { label: string; flowing?: boolea
       }}
     >
       <span
+        aria-hidden
         style={{
-          width: "100%",
-          borderTop: `1px ${flowing ? "solid" : "dashed"} ${flowing ? "var(--accent, #f0c419)" : "var(--rule)"}`,
+          position: "absolute",
+          top: "50%",
+          left: 0,
+          right: 9,
+          borderTop: `1px ${strokeStyle} ${strokeColor}`,
           opacity: flowing ? 0.55 : 1,
           transition: "opacity 200ms ease-out",
+        }}
+      />
+      <span
+        aria-hidden
+        style={{
+          position: "absolute",
+          top: "50%",
+          right: 2,
+          width: 8,
+          height: 8,
+          borderTop: `1px solid ${strokeColor}`,
+          borderRight: `1px solid ${strokeColor}`,
+          opacity: flowing ? 0.9 : 0.72,
+          transform: "translateY(-50%) rotate(45deg)",
+          filter: flowing ? "drop-shadow(0 0 4px var(--accent, #f0c419))" : "none",
+          transition: "opacity 200ms ease-out, filter 200ms ease-out",
         }}
       />
       {flowing && (
@@ -875,13 +892,25 @@ function Connector({ label, flowing = false }: { label: string; flowing?: boolea
   );
 }
 
-// True when prev is actively producing output and next is waiting for it —
-// that's when we want to show energy flowing across the connector.
-function isFlowingBetween(prev: StepState, next: StepState): boolean {
-  const prevBusy = prev.status === "running" || prev.status === "reviewing";
-  const nextWaiting =
-    next.status === "queued" || next.status === "ready" || next.status === "planning";
-  return prevBusy && nextWaiting;
+// The connector glow represents Spark generating worker prompts for the step
+// it is about to run. Worker execution itself should light the step card, not
+// the connector into the next queued step.
+function promptGenerationTargetStep(run: RunState): StepState | undefined {
+  const activePromptCall = run.sparkCalls
+    .slice()
+    .reverse()
+    .find((call) =>
+      call.status === "started" &&
+      (call.mode === "step_planning" || call.mode === "worker_prompt_generation")
+    );
+  if (!activePromptCall) return undefined;
+
+  return sortSteps(run.steps).find((step) => {
+    if (["complete", "failed", "skipped"].includes(step.status)) return false;
+    if ((step.kind ?? "worker_batch") !== "worker_batch") return false;
+    if ((step.plannedAgents?.length ?? 0) === 0) return false;
+    return !run.workerTasks.some((task) => task.stepId === step.id && task.status !== "cancelled");
+  });
 }
 
 function StepNode({
@@ -897,7 +926,11 @@ function StepNode({
   attemptByTask: Map<string, WorkerAttempt>;
   active: boolean;
 }) {
-  const rows = agentRowsForStep(step, taskById, attemptByTask);
+  if ((step.kind ?? "worker_batch") === "brake") {
+    return <BrakeStepNode step={step} displayIndex={displayIndex} active={active} />;
+  }
+
+  const rows = agentRowsForStep(step, taskById, attemptByTask, displayIndex);
   const tone = stepStatusColor(step.status);
   const nodeActive = active || step.status === "running" || step.status === "reviewing";
   const primaryRow = rows[0];
@@ -924,7 +957,7 @@ function StepNode({
       }}
     >
       <div style={{ display: "grid", gridTemplateColumns: "32px minmax(0, 1fr) auto", gap: 8, alignItems: "start" }}>
-        <StepIcon step={step} />
+        <StepIcon step={step} displayIndex={displayIndex} />
         <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
           <div
             style={{
@@ -1022,6 +1055,116 @@ function StepNode({
         <span>
           {primaryRow?.task?.status ?? `${step.workerTaskIds.length} task${step.workerTaskIds.length === 1 ? "" : "s"}`}
         </span>
+      </div>
+    </article>
+  );
+}
+
+function BrakeStepNode({
+  step,
+  displayIndex,
+  active,
+}: {
+  step: StepState;
+  displayIndex: number;
+  active: boolean;
+}) {
+  const tone = stepStatusColor(step.status);
+  const nodeActive = active || step.status === "running" || step.status === "reviewing";
+
+  return (
+    <article
+      title={step.goal || step.title}
+      style={{
+        width: 198,
+        minHeight: 126,
+        justifySelf: "center",
+        background: nodeActive
+          ? "linear-gradient(135deg, color-mix(in oklch, var(--panel-2) 88%, var(--accent) 12%), color-mix(in oklch, var(--panel) 92%, transparent))"
+          : "color-mix(in oklch, var(--panel) 82%, transparent)",
+        border: `1px dashed ${nodeActive ? "var(--accent-edge)" : "var(--rule-strong)"}`,
+        borderRadius: 8,
+        boxShadow: nodeActive ? "0 0 18px var(--accent-glow), var(--shadow-2)" : "var(--shadow-1)",
+        padding: "12px 14px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        fontFamily: "var(--font-sans)",
+      }}
+    >
+      <div style={{ display: "grid", gridTemplateColumns: "28px minmax(0, 1fr)", gap: 8, alignItems: "center" }}>
+        <CheckpointIcon status={step.status} />
+        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+          <span
+            style={{
+              color: "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 9,
+              fontWeight: 600,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
+            }}
+          >
+            STEP {displayIndex} / CHECKPOINT
+          </span>
+          <span
+            style={{
+              color: "var(--ink)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 13,
+              fontWeight: 600,
+              lineHeight: 1.2,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {step.title}
+          </span>
+        </div>
+      </div>
+      <div
+        style={{
+          color: "var(--ink-dim)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+          lineHeight: 1.45,
+          minHeight: 30,
+          overflow: "hidden",
+          display: "-webkit-box",
+          WebkitLineClamp: 2,
+          WebkitBoxOrient: "vertical",
+        }}
+      >
+        {step.goal || "Checkpoint"}
+      </div>
+      <div
+        style={{
+          marginTop: "auto",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+        }}
+      >
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            color: tone,
+            fontWeight: 600,
+            letterSpacing: "0.08em",
+            textTransform: "uppercase",
+          }}
+        >
+          <StatusDot status={step.status} small />
+          {stepStatusLabel(step.status)}
+        </span>
+        <span>checkpoint</span>
       </div>
     </article>
   );
@@ -1135,8 +1278,8 @@ function GhostCard({ title, subtitle }: { title: string; subtitle: string }) {
   );
 }
 
-function StepIcon({ step }: { step: StepState }) {
-  const letter = step.title.trim().charAt(0).toUpperCase() || String(step.index + 1);
+function StepIcon({ step, displayIndex }: { step: StepState; displayIndex: number }) {
+  const number = String(displayIndex);
   return (
     <span
       style={{
@@ -1152,9 +1295,57 @@ function StepIcon({ step }: { step: StepState }) {
         fontFamily: "var(--font-sans)",
         fontSize: 12,
         fontWeight: 700,
+        fontVariantNumeric: "tabular-nums",
       }}
     >
-      {letter}
+      {number}
+    </span>
+  );
+}
+
+function CheckpointIcon({ status }: { status: StepState["status"] }) {
+  const tone = stepStatusColor(status);
+  const complete = status === "complete" || status === "skipped";
+
+  return (
+    <span
+      aria-hidden
+      title={complete ? "Checkpoint passed" : "Checkpoint"}
+      style={{
+        width: 24,
+        height: 24,
+        borderRadius: 6,
+        border: `1px solid ${tone}`,
+        color: tone,
+        background: complete ? "var(--ok-soft)" : "transparent",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      {complete ? (
+        <svg width="17" height="12" viewBox="0 0 17 12" fill="none" aria-hidden>
+          <path
+            d="M2.5 2 V10 M5.5 2 V10"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+          />
+          <path
+            d="M10 2.5 L14.7 6 L10 9.5 Z"
+            fill="currentColor"
+          />
+        </svg>
+      ) : (
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+          <path
+            d="M4 2.5 V9.5 M8 2.5 V9.5"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+          />
+        </svg>
+      )}
     </span>
   );
 }
@@ -2183,6 +2374,7 @@ function agentRowsForStep(
   step: StepState,
   taskById: Map<string, WorkerTask>,
   attemptByTask: Map<string, WorkerAttempt>,
+  displayIndex: number,
 ): AgentRow[] {
   const tasks = step.workerTaskIds
     .map((id) => taskById.get(id))
@@ -2193,7 +2385,10 @@ function agentRowsForStep(
     return planned.map((agent, index) => {
       const task = tasks[index];
       return {
-        agent,
+        agent: {
+          ...agent,
+          label: displayAgentLabel(agent.label, displayIndex, index + 1),
+        },
         task,
         attempt: task ? attemptByTask.get(task.id) : undefined,
       };
@@ -2211,6 +2406,14 @@ function agentRowsForStep(
     task,
     attempt: attemptByTask.get(task.id),
   }));
+}
+
+function displayAgentLabel(label: string | undefined, stepIndex: number, agentIndex: number): string {
+  const trimmed = label?.trim() ?? "";
+  const workerStepLabel = trimmed.match(/^worker\s+\d+\.(\d+)$/i);
+  if (workerStepLabel) return `worker ${stepIndex}.${workerStepLabel[1]}`;
+  if (/^worker\s+\d+$/i.test(trimmed)) return `worker ${stepIndex}.${agentIndex}`;
+  return trimmed || `worker ${stepIndex}.${agentIndex}`;
 }
 
 function replaceRun(runs: RunState[], run: RunState): RunState[] {

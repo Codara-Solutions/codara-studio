@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from "react";
 import type {
+  HumanRunMessageKind,
   PlanFile,
   RunState,
   Workspace,
 } from "@shared/types";
+
+const HUMAN_INPUT_PAUSE_REASON = "Spark needs human input before continuing.";
 
 interface Props {
   workspace: Workspace | null;
@@ -16,11 +19,11 @@ interface Props {
   onStartAutopilot: () => void;
   onPauseRun: (reason: string) => void;
   onResumeRun: () => void;
-  onAddUserMessage: (message: string) => void;
+  onAddUserMessage: (message: string, kind?: HumanRunMessageKind) => void;
+  onAnswerQuestion: (message: string) => void | Promise<void>;
   onSelectRun: (id: string | null) => void;
   onDeleteRun: (id: string) => void;
   onSelectPlan: (path: string) => void;
-  onQuickTest: (runtime: "claude" | "codex") => void;
 }
 
 export default function SparkAgentPanel({
@@ -35,12 +38,13 @@ export default function SparkAgentPanel({
   onPauseRun,
   onResumeRun,
   onAddUserMessage,
+  onAnswerQuestion,
   onSelectRun,
   onDeleteRun,
   onSelectPlan,
-  onQuickTest,
 }: Props) {
   const [humanInput, setHumanInput] = useState("");
+  const [answerInput, setAnswerInput] = useState("");
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
 
   // Auto-clear the per-row delete confirmation after a short window so a
@@ -55,7 +59,7 @@ export default function SparkAgentPanel({
     const message = humanInput.trim();
     if (!message) return;
     setHumanInput("");
-    onAddUserMessage(message);
+    onAddUserMessage(message, "note");
   };
 
   const stopRun = () => {
@@ -68,6 +72,18 @@ export default function SparkAgentPanel({
   // Surfaced as its own block so the user can read the full text and knows
   // why the run is paused.
   const openQuestion = activeRun ? findOpenQuestion(activeRun) : null;
+  const openQuestionId = openQuestion?.id ?? null;
+
+  useEffect(() => {
+    setAnswerInput("");
+  }, [activeRun?.id, openQuestionId]);
+
+  const sendAnswer = () => {
+    const message = answerInput.trim();
+    if (!message) return;
+    setAnswerInput("");
+    void onAnswerQuestion(message);
+  };
 
   const runStatus = activeRun ? activeRun.status : "idle";
   const runIsActive = Boolean(
@@ -76,6 +92,8 @@ export default function SparkAgentPanel({
   const runEnabled = Boolean(workspace) && !busy && Boolean(selectedPlanPath);
   const stopEnabled = Boolean(activeRun);
   const sendEnabled = Boolean(activeRun) && !busy && humanInput.trim().length > 0;
+  const answerEnabled = Boolean(openQuestion) && !busy && answerInput.trim().length > 0;
+  const visibleMessages = activeRun?.humanMessages.filter((message) => !isSyntheticPauseMessage(message)) ?? [];
 
   return (
     <section
@@ -85,7 +103,7 @@ export default function SparkAgentPanel({
         flex: "4 1 0",
         minHeight: 0,
         overflow: "auto",
-        borderBottom: "1px solid var(--rule)",
+        borderBottom: "1px solid var(--rule-soft)",
         background: "var(--panel)",
         fontFamily: "var(--font-sans)",
       }}
@@ -93,11 +111,11 @@ export default function SparkAgentPanel({
       {/* Hero header */}
       <div
         style={{
-          padding: "14px 16px",
+          padding: "10px 14px",
           borderBottom: "1px solid var(--rule-soft)",
           display: "flex",
           alignItems: "center",
-          gap: 12,
+          gap: 9,
         }}
       >
         <SparkGlyph />
@@ -107,18 +125,21 @@ export default function SparkAgentPanel({
             flexDirection: "column",
             lineHeight: 1.2,
             minWidth: 0,
-            gap: 2,
+            gap: 3,
+            flex: 1,
           }}
         >
           <span
             style={{
               fontFamily: "var(--font-sans)",
-              fontWeight: 600,
-              fontSize: 14,
-              color: "var(--ink)",
+              fontWeight: 700,
+              fontSize: 10,
+              letterSpacing: "0.16em",
+              textTransform: "uppercase",
+              color: "var(--ink-dim)",
             }}
           >
-            Spark Agent
+            Spark
           </span>
           <span
             style={{
@@ -130,7 +151,7 @@ export default function SparkAgentPanel({
               gap: 6,
             }}
           >
-            {runIsActive && <PulseDot />}
+            <PulseDot live={runIsActive} />
             {runStatus}
           </span>
         </div>
@@ -153,15 +174,28 @@ export default function SparkAgentPanel({
         }}
       />
 
+      {openQuestion && (
+        <QuestionCard
+          question={openQuestion.message}
+          answer={answerInput}
+          disabled={!answerEnabled}
+          busy={busy}
+          onChange={setAnswerInput}
+          onSubmit={sendAnswer}
+        />
+      )}
+
       {/* Composer surface (plan select + textarea) */}
       <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--rule-soft)" }}>
         <div
           style={{
-            border: "1px solid var(--rule)",
-            borderRadius: 4,
-            background: "var(--panel-2)",
+            border: "1px solid var(--rule-soft)",
+            borderRadius: 8,
+            background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+            boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.035)",
             overflow: "hidden",
-            transition: "border-color var(--motion-fast) var(--ease-out)",
+            transition:
+              "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
           }}
         >
           <select
@@ -233,7 +267,7 @@ export default function SparkAgentPanel({
           styleOverride={
             runEnabled
               ? {
-                  background: "var(--accent-soft)",
+                  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
                   borderColor: "var(--accent-edge)",
                   color: "var(--ink)",
                 }
@@ -242,8 +276,7 @@ export default function SparkAgentPanel({
           hoverOverride={
             runEnabled
               ? {
-                  background:
-                    "color-mix(in oklch, var(--accent) 24%, transparent)",
+                  background: "var(--hover)",
                   borderColor: "var(--accent-edge)",
                 }
               : undefined
@@ -268,95 +301,8 @@ export default function SparkAgentPanel({
         </PanelButton>
       </div>
 
-      {/* Diagnostics group */}
-      <div
-        style={{
-          padding: "12px 16px",
-          borderBottom: "1px solid var(--rule-soft)",
-        }}
-      >
-        <div
-          style={{
-            fontFamily: "var(--font-sans)",
-            fontSize: 10,
-            fontWeight: 600,
-            letterSpacing: "0.14em",
-            textTransform: "uppercase",
-            color: "var(--muted)",
-            marginBottom: 8,
-          }}
-        >
-          Diagnostics
-        </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr",
-            gap: 8,
-          }}
-        >
-          <PanelButton disabled={!workspace} onClick={() => onQuickTest("claude")} sentenceCase>
-            Test Claude
-          </PanelButton>
-          <PanelButton disabled={!workspace} onClick={() => onQuickTest("codex")} sentenceCase>
-            Test Codex
-          </PanelButton>
-        </div>
-      </div>
-
-      {/* Open question callout */}
-      {openQuestion && (
-        <div
-          style={{
-            margin: "12px 16px",
-            padding: "12px 14px",
-            background:
-              "color-mix(in oklch, var(--accent) 10%, var(--panel-2))",
-            border: "1px solid var(--accent-edge)",
-            borderRadius: 6,
-          }}
-        >
-          <div
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontSize: 10,
-              fontWeight: 600,
-              letterSpacing: "0.14em",
-              textTransform: "uppercase",
-              color: "var(--accent)",
-              marginBottom: 8,
-            }}
-          >
-            Question from Spark
-          </div>
-          <div
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontSize: 13,
-              color: "var(--ink)",
-              lineHeight: 1.5,
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-            }}
-          >
-            {openQuestion.message}
-          </div>
-          <div
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontSize: 11,
-              color: "var(--muted)",
-              marginTop: 8,
-              lineHeight: 1.45,
-            }}
-          >
-            Type your answer above and press SEND, then RESUME to continue.
-          </div>
-        </div>
-      )}
-
       {/* Recent human messages */}
-      {activeRun?.humanMessages && activeRun.humanMessages.length > 0 && (
+      {visibleMessages.length > 0 && (
         <div
           style={{
             maxHeight: 96,
@@ -364,7 +310,7 @@ export default function SparkAgentPanel({
             borderBottom: "1px solid var(--rule-soft)",
           }}
         >
-          {activeRun.humanMessages.slice(-3).map((message, idx) => (
+          {visibleMessages.slice(-3).map((message, idx) => (
             <div
               key={message.id}
               title={message.message}
@@ -428,6 +374,155 @@ export default function SparkAgentPanel({
   );
 }
 
+function QuestionCard({
+  question,
+  answer,
+  disabled,
+  busy,
+  onChange,
+  onSubmit,
+}: {
+  question: string;
+  answer: string;
+  disabled: boolean;
+  busy: boolean;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+}) {
+  const [focused, setFocused] = useState(false);
+  return (
+    <div
+      style={{
+        margin: "12px 16px 0",
+        border: "1px solid var(--accent-edge)",
+        borderRadius: 9,
+        background: "color-mix(in oklch, var(--ink) 4%, var(--panel))",
+        boxShadow:
+          "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), 0 10px 24px rgba(0, 0, 0, 0.24)",
+        overflow: "hidden",
+      }}
+    >
+      <div style={{ padding: "12px 14px 10px", display: "flex", flexDirection: "column", gap: 8 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            color: "var(--accent)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: 999,
+              background: "var(--accent)",
+              boxShadow: "0 0 8px var(--accent-glow)",
+            }}
+          />
+          Spark needs input
+        </div>
+        <div
+          style={{
+            color: "var(--ink)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 13,
+            lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+          }}
+        >
+          {question}
+        </div>
+      </div>
+      <div
+        style={{
+          borderTop: "1px solid var(--rule-soft)",
+          background: "color-mix(in oklch, var(--bg) 42%, transparent)",
+          padding: 10,
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+        }}
+      >
+        <textarea
+          value={answer}
+          onChange={(event) => onChange(event.target.value)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          placeholder="Write your answer"
+          rows={4}
+          disabled={busy}
+          style={{
+            width: "100%",
+            boxSizing: "border-box",
+            resize: "vertical",
+            minHeight: 78,
+            maxHeight: 170,
+            border: `1px solid ${focused ? "var(--accent-edge)" : "var(--rule)"}`,
+            borderRadius: 7,
+            background: "var(--bg)",
+            color: "var(--ink)",
+            padding: "9px 10px",
+            fontFamily: "var(--font-sans)",
+            fontSize: 12,
+            lineHeight: 1.5,
+            outline: "none",
+            boxShadow: focused ? "0 0 0 1px var(--accent-edge)" : "none",
+            transition:
+              "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+          }}
+        />
+        <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10, alignItems: "center" }}>
+          <span
+            style={{
+              color: "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 11,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {busy ? "Sending answer..." : "Ready to send"}
+          </span>
+          <PanelButton
+            disabled={disabled}
+            onClick={onSubmit}
+            styleOverride={
+              !disabled
+                ? {
+                    background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+                    borderColor: "var(--accent-edge)",
+                    color: "var(--ink)",
+                    minWidth: 118,
+                  }
+                : { minWidth: 118 }
+            }
+            hoverOverride={
+              !disabled
+                ? {
+                    background: "var(--hover)",
+                    borderColor: "var(--accent-edge)",
+                  }
+                : undefined
+            }
+            sentenceCase
+          >
+            {"Send & resume"}
+          </PanelButton>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RunsList({
   runs,
   activeRunId,
@@ -454,11 +549,11 @@ function RunsList({
           padding: "10px 16px 4px",
           display: "flex",
           alignItems: "center",
-          gap: 8,
+          gap: 7,
           fontFamily: "var(--font-sans)",
-          fontSize: 10,
-          fontWeight: 600,
-          letterSpacing: "0.14em",
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: "0.18em",
           textTransform: "uppercase",
           color: "var(--muted)",
         }}
@@ -469,7 +564,7 @@ function RunsList({
           style={{
             fontFamily: "var(--font-mono)",
             fontVariantNumeric: "tabular-nums",
-            color: "var(--ink-dim)",
+            color: "var(--muted)",
           }}
         >
           {String(runs.length).padStart(2, "0")}
@@ -488,7 +583,7 @@ function RunsList({
           No runs yet. Pick a plan below and press RUN.
         </div>
       ) : (
-        <div style={{ padding: "4px 0 8px" }}>
+        <div style={{ padding: "4px 8px 8px" }}>
           {runs.map((run, index) => (
             <RunRow
               key={run.id}
@@ -528,10 +623,10 @@ function RunRow({
   const [trashHover, setTrashHover] = useState(false);
 
   const background = active
-    ? "color-mix(in oklch, var(--accent) 12%, var(--panel-2))"
+    ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
     : hover
-      ? "var(--hover)"
-      : "transparent";
+      ? "color-mix(in oklch, var(--ink) 5%, transparent)"
+      : "color-mix(in oklch, var(--ink) 2%, transparent)";
   const titleColor = active ? "var(--ink)" : "var(--ink-dim)";
   const indexColor = active ? "var(--ink)" : "var(--muted)";
   const dotColor = statusDotColor(run.status);
@@ -545,28 +640,24 @@ function RunRow({
         gridTemplateColumns: "12px 26px minmax(0, 1fr) 24px",
         alignItems: "center",
         gap: 10,
-        padding: "0 14px 0 16px",
-        height: 30,
+        padding: "0 8px 0 9px",
+        height: 31,
         background,
         position: "relative",
-        transition: "background var(--motion-fast) var(--ease-out)",
+        border: active
+          ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
+          : "1px solid transparent",
+        borderRadius: 7,
+        marginBottom: 5,
+        boxShadow: active
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent), 0 8px 18px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+          : hover
+            ? "inset 0 1px 0 rgba(255, 255, 255, 0.03)"
+            : "none",
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
-      {active && (
-        <span
-          aria-hidden
-          style={{
-            position: "absolute",
-            left: 0,
-            top: 6,
-            bottom: 6,
-            width: 2,
-            background: "var(--accent)",
-            borderRadius: "0 2px 2px 0",
-            boxShadow: "0 0 8px var(--accent-glow)",
-          }}
-        />
-      )}
       <span
         aria-hidden
         title={run.status}
@@ -656,16 +747,16 @@ function RunRow({
           background: confirmingDelete
             ? "var(--danger-soft)"
             : trashHover
-              ? "var(--hover-strong)"
+              ? "transparent"
               : "transparent",
           border: confirmingDelete ? "1px solid var(--danger)" : "1px solid transparent",
-          borderRadius: 4,
+          borderRadius: confirmingDelete ? 999 : 0,
           color: confirmingDelete
             ? "var(--danger)"
             : trashHover
               ? "var(--danger)"
               : "var(--muted)",
-          width: 22,
+          width: 20,
           height: 22,
           display: "inline-flex",
           alignItems: "center",
@@ -741,11 +832,25 @@ function findOpenQuestion(run: RunState): RunState["humanMessages"][number] | nu
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
     if (m.author === "spark" && m.kind === "question") {
-      const answeredLater = msgs.slice(i + 1).some((later) => later.author === "user");
+      const answeredLater = msgs.slice(i + 1).some(isUserAnswerMessage);
       return answeredLater ? null : m;
     }
   }
   return null;
+}
+
+function isUserAnswerMessage(message: RunState["humanMessages"][number]): boolean {
+  if (message.author !== "user") return false;
+  if (isSyntheticPauseMessage(message)) return false;
+  return message.kind === "answer" || message.kind === "decision" || message.kind === "note";
+}
+
+function isSyntheticPauseMessage(message: RunState["humanMessages"][number]): boolean {
+  return (
+    message.author === "user" &&
+    message.kind === "note" &&
+    message.message.trim() === HUMAN_INPUT_PAUSE_REASON
+  );
 }
 
 function PanelButton({
@@ -775,10 +880,11 @@ function PanelButton({
   const baseStyle: React.CSSProperties = {
     appearance: "none",
     background: "transparent",
-    border: "1px solid var(--rule-strong)",
+    border: "1px solid var(--rule-soft)",
+    borderRadius: 999,
     color: baseColor,
-    minHeight: 30,
-    padding: "7px 10px",
+    minHeight: 28,
+    padding: "6px 10px",
     fontFamily: "var(--font-sans)",
     fontSize: 11,
     fontWeight: 600,
@@ -815,13 +921,12 @@ function PanelButton({
 }
 
 function SparkGlyph() {
-  // 16x16 inline spark/star glyph using currentColor.
   return (
     <span
       aria-hidden="true"
       style={{
-        width: 16,
-        height: 16,
+        width: 13,
+        height: 13,
         flex: "0 0 auto",
         display: "inline-flex",
         alignItems: "center",
@@ -830,8 +935,8 @@ function SparkGlyph() {
       }}
     >
       <svg
-        width={16}
-        height={16}
+        width={13}
+        height={13}
         viewBox="0 0 16 16"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
@@ -845,7 +950,7 @@ function SparkGlyph() {
   );
 }
 
-function PulseDot() {
+function PulseDot({ live }: { live: boolean }) {
   return (
     <span
       aria-hidden="true"
@@ -855,7 +960,8 @@ function PulseDot() {
         borderRadius: "50%",
         background: "var(--accent)",
         boxShadow: "0 0 6px var(--accent-glow)",
-        animation: "spark-fade-in var(--motion-slow) var(--ease-out) infinite alternate",
+        opacity: live ? 1 : 0.45,
+        animation: live ? "spark-pulse 1.2s ease-in-out infinite" : undefined,
         flex: "0 0 auto",
       }}
     />

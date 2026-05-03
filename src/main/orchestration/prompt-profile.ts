@@ -12,8 +12,6 @@ export interface ManagerPromptProfile {
      * Per-mode system prompt overrides. When set and non-empty for a mode,
      * the override completely replaces the default identity + core operating
      * model + worker prompt engineering rules concatenation for that mode.
-     * Used by the Prompt Lab draft profile so users can iterate on per-stage
-     * system prompts without touching the live profile.
      */
     systemPromptOverrides?: Partial<Record<OpenRouterManagerMode, string>>;
   };
@@ -22,9 +20,6 @@ export interface ManagerPromptProfile {
   workerPrompt: {
     opening: string[];
     finalReportIntro: string[];
-  };
-  lab: {
-    defaultFlow: OpenRouterManagerMode[];
   };
 }
 
@@ -211,9 +206,6 @@ export const DEFAULT_MANAGER_PROMPT_PROFILE: ManagerPromptProfile = {
       "The report is how Spark decides whether the task is done, so include concrete proof and honest risks.",
     ],
   },
-  lab: {
-    defaultFlow: ["plan_analysis", "step_planning"],
-  },
 };
 
 let cachedProfile: ManagerPromptProfile | null = null;
@@ -285,7 +277,6 @@ export function normalizeManagerPromptProfile(value: unknown): ManagerPromptProf
   const manager = isRecord(raw.manager) ? raw.manager : {};
   const modeRules = isRecord(raw.modeRules) ? raw.modeRules : {};
   const workerPrompt = isRecord(raw.workerPrompt) ? raw.workerPrompt : {};
-  const lab = isRecord(raw.lab) ? raw.lab : {};
   const fallback = DEFAULT_MANAGER_PROMPT_PROFILE;
 
   return {
@@ -309,9 +300,6 @@ export function normalizeManagerPromptProfile(value: unknown): ManagerPromptProf
       opening: stringList(workerPrompt.opening, fallback.workerPrompt.opening),
       finalReportIntro: stringList(workerPrompt.finalReportIntro, fallback.workerPrompt.finalReportIntro),
     },
-    lab: {
-      defaultFlow: modeList(lab.defaultFlow, fallback.lab.defaultFlow),
-    },
   };
 }
 
@@ -322,14 +310,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function stringList(value: unknown, fallback: string[]): string[] {
   if (!Array.isArray(value)) return fallback;
   const normalized = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
-  return normalized.length > 0 ? normalized : fallback;
-}
-
-function modeList(value: unknown, fallback: OpenRouterManagerMode[]): OpenRouterManagerMode[] {
-  if (!Array.isArray(value)) return fallback;
-  const normalized = value.filter((item): item is OpenRouterManagerMode =>
-    item === "plan_analysis" || item === "step_planning" || item === "worker_result_review",
-  );
   return normalized.length > 0 ? normalized : fallback;
 }
 

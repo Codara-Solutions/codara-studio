@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 import type {
   AddRunMessageInput,
+  AgentRuntimeModel,
   LaunchWorkerAttemptInput,
   PauseRunInput,
   ResumeRunInput,
@@ -51,6 +52,7 @@ import { detectAgentRuntimes } from "../agent-runtimes";
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
 const CONTINUE_INPUT = "continue\r";
+const HUMAN_INPUT_PAUSE_REASON = "Spark needs human input before continuing.";
 
 // Lightweight handle for a running worker. The pty itself lives in
 // pty-manager (same place user-spawned terminals live); this just remembers
@@ -71,6 +73,15 @@ const activeAutopilotCycles = new Map<string, Promise<void>>();
 const activeAutopilotPlans = new Map<string, Promise<void>>();
 const activeAutopilotReviews = new Map<string, Promise<void>>();
 const runWriteQueues = new Map<string, Promise<void>>();
+
+interface RuntimeReroute {
+  [key: string]: unknown;
+  from: WorkerTask["runtimePreference"];
+  to: WorkerTask["runtimePreference"];
+  modelHint?: string;
+  effortHint?: WorkerTask["effortHint"];
+  reason: string;
+}
 
 export async function createRun(input: CreateRunInput): Promise<RunState> {
   const now = new Date().toISOString();
@@ -846,6 +857,23 @@ async function applySparkManagerDecision(
   mode: SparkCall["mode"],
 ): Promise<RunState> {
   if (decision.status === "ask_user") {
+    if (mode === "plan_analysis" && hasPlannedWorkAfterBrake(run)) {
+      const activeStep = pickAutopilotStep(run);
+      await appendEvent({
+        workspaceId: run.workspaceId,
+        runId: run.id,
+        stepId: activeStep?.id,
+        type: "spark_manager.question_deferred",
+        message: "Spark manager asked for input while planned work remained; continuing the existing plan",
+        payload: {
+          summary: decision.summary,
+          question: decision.question,
+          activeStepId: activeStep?.id,
+          activeStepTitle: activeStep?.title,
+        },
+      });
+      return run;
+    }
     return askHumanQuestion(run.id, decision.question || "Please clarify what Spark should do next.");
   }
 
@@ -977,6 +1005,7 @@ async function applySparkManagerDecision(
 export async function pauseRun(input: PauseRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   const reason = input.reason?.trim() || "Paused by user";
+  const recordPauseMessage = shouldRecordPauseReasonAsUserNote(reason);
   await sendPauseSignals(run, reason);
   return commitRunChange(run, {
     type: "run.paused",
@@ -985,10 +1014,10 @@ export async function pauseRun(input: PauseRunInput): Promise<RunState> {
       reason,
       activeWorkerAttempts: activeWorkersForRun(run.id).map((worker) => worker.attemptId),
       controlSignal: "escape",
-      messageRecorded: reason !== "Paused by user",
+      messageRecorded: recordPauseMessage,
     },
     mutate: (draft, timestamp) => {
-      if (reason !== "Paused by user") {
+      if (recordPauseMessage) {
         draft.humanMessages.push({
           id: makeId("msg"),
           runId: draft.id,
@@ -1096,16 +1125,17 @@ export async function createStep(input: CreateStepInput): Promise<RunState> {
   if (!title) throw new Error("Step title is required.");
 
   const now = new Date().toISOString();
+  const stepIndex = run.steps.length + 1;
   const step: StepState = {
     id: makeId("step"),
     runId: run.id,
-    index: run.steps.length + 1,
+    index: stepIndex,
     title,
     goal: input.goal?.trim() || title,
     kind: input.kind ?? "worker_batch",
     status: "queued",
       riskLevel: input.riskLevel,
-      plannedAgents: input.plannedAgents ?? [],
+      plannedAgents: normalizePlannedAgentLabels(input.plannedAgents ?? [], stepIndex),
       acceptanceCriteria: input.acceptanceCriteria ?? [],
     verificationCommands: input.verificationCommands ?? [],
     workerTaskIds: [],
@@ -1289,6 +1319,7 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   if (!task) throw new Error(`Worker task not found: ${input.workerTaskId}`);
   const step = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
   const timestamp = new Date().toISOString();
+  const runtimeReroute = await rerouteSparkShellTaskToAgent(task);
   const attemptNumber =
     run.workerAttempts.filter((attempt) => attempt.workerTaskId === task.id).length + 1;
   const attempt: WorkerAttempt = {
@@ -1346,8 +1377,62 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
       paths,
     },
   });
+  if (runtimeReroute) {
+    await appendEvent({
+      timestamp,
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId: attempt.id,
+      type: "worker_task.runtime_rerouted",
+      message: `Worker runtime rerouted: ${runtimeReroute.from} -> ${runtimeReroute.to}`,
+      payload: runtimeReroute,
+    });
+  }
 
   return envelope;
+}
+
+async function rerouteSparkShellTaskToAgent(task: WorkerTask): Promise<RuntimeReroute | null> {
+  if (task.createdBy !== "spark" || task.runtimePreference !== "shell") return null;
+  const runtimes = await detectAgentRuntimes().catch(() => []);
+  const target =
+    runtimes.find((runtime) => runtime.kind === "codex" && runtime.installed) ??
+    runtimes.find((runtime) => runtime.kind === "claude" && runtime.installed);
+  if (!target) return null;
+
+  const model = target.models.find((item) => item.isDefault) ?? target.models[0];
+  const effortHint = normalizeWorkerEffortForModel(task.effortHint, model);
+  const modelHint = task.modelHint?.trim() || model?.id;
+
+  task.runtimePreference = target.kind;
+  task.modelHint = modelHint;
+  task.effortHint = effortHint;
+
+  return {
+    from: "shell",
+    to: target.kind,
+    modelHint,
+    effortHint,
+    reason:
+      "Spark-created shell workers are not autonomous yet; route command-heavy work through an installed agent so it can inspect output and write the final report.",
+  };
+}
+
+function normalizeWorkerEffortForModel(
+  existing: WorkerTask["effortHint"],
+  model: AgentRuntimeModel | undefined,
+): WorkerTask["effortHint"] {
+  const allowed = new Set(model?.effortLevels.filter(isWorkerEffort) ?? []);
+  if (existing && (allowed.size === 0 || allowed.has(existing))) return existing;
+  if (allowed.has("medium")) return "medium";
+  if (allowed.has("low")) return "low";
+  return [...allowed][0] ?? "medium";
+}
+
+function isWorkerEffort(value: string): value is NonNullable<WorkerTask["effortHint"]> {
+  return value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh";
 }
 
 export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Promise<RunState> {
@@ -1768,6 +1853,17 @@ function needsStepPlanning(run: RunState): boolean {
   return !hasQueueable;
 }
 
+function hasPlannedWorkAfterBrake(run: RunState): boolean {
+  const active = pickAutopilotStep(run);
+  if (!active) return false;
+  if ((active.kind ?? "worker_batch") !== "worker_batch") return false;
+  if ((active.plannedAgents?.length ?? 0) > 0) return true;
+  return run.workerTasks.some((task) => {
+    if (task.stepId !== active.id) return false;
+    return !["accepted", "cancelled"].includes(task.status);
+  });
+}
+
 function resolveTaskStepId(run: RunState, requestedStepIndex: number | undefined, createdStepIds: string[]): string | undefined {
   if (run.steps.length === 0) return undefined;
   const activeStep = pickAutopilotStep(run);
@@ -1808,8 +1904,30 @@ async function askHumanQuestion(runId: string, message: string): Promise<RunStat
   });
   return pauseRun({
     runId: run.id,
-    reason: "Spark needs human input before continuing.",
+    reason: HUMAN_INPUT_PAUSE_REASON,
   });
+}
+
+function shouldRecordPauseReasonAsUserNote(reason: string): boolean {
+  return reason !== "Paused by user" && reason !== HUMAN_INPUT_PAUSE_REASON;
+}
+
+function normalizePlannedAgentLabels(
+  agents: NonNullable<StepState["plannedAgents"]>,
+  stepIndex: number,
+): NonNullable<StepState["plannedAgents"]> {
+  return agents.map((agent, index) => ({
+    ...agent,
+    label: normalizePlannedAgentLabel(agent.label, stepIndex, index + 1),
+  }));
+}
+
+function normalizePlannedAgentLabel(label: string | undefined, stepIndex: number, agentIndex: number): string {
+  const trimmed = label?.trim() ?? "";
+  const workerStepLabel = trimmed.match(/^worker\s+\d+\.(\d+)$/i);
+  if (workerStepLabel) return `worker ${stepIndex}.${workerStepLabel[1]}`;
+  if (/^worker\s+\d+$/i.test(trimmed)) return `worker ${stepIndex}.${agentIndex}`;
+  return trimmed || `worker ${stepIndex}.${agentIndex}`;
 }
 
 function activeWorkersForRun(runId: string): ActiveWorkerProcess[] {
@@ -2328,7 +2446,7 @@ async function writeAutoFailureReport(
       `${task.runtimePreference} CLI failed to launch — verify it is installed, logged in, and the model id is valid.`,
     ],
     followups: [
-      "Check Settings → Diagnostics for runtime status and re-run after fixing the install.",
+      "Verify the CLI is installed, on PATH, and logged in, then re-run.",
     ],
   };
   try {
@@ -2351,13 +2469,20 @@ async function pasteAndSubmit(
   if (runtime === "claude" || runtime === "codex") {
     const PASTE_BEGIN = "\x1b[200~";
     const PASTE_END = "\x1b[201~";
-    handle.write(`${PASTE_BEGIN}${body}${PASTE_END}`);
-    // Codex's TUI shows the paste as "[Pasted Content N chars]" and needs a
-    // brief idle before Enter is treated as submit (vs. as part of the paste).
-    await delay(runtime === "codex" ? 1200 : 600);
+    handle.write(PASTE_BEGIN);
+    await delay(25);
+    handle.write(body);
+    await delay(25);
+    handle.write(PASTE_END);
+    // Long Spark prompts take a moment for the agent TUI to commit from
+    // bracketed-paste into the actual input box. Submitting too early leaves
+    // Claude sitting there with the prompt visible but unsent.
+    await delay(promptSubmitSettleMs(runtime, body.length));
     handle.write("\r");
-    if (runtime === "codex") {
-      // Some codex builds need a second Enter to actually submit.
+    if (runtime === "claude" || runtime === "codex") {
+      // Some TUI builds drop the first Enter right after a large paste. A
+      // second Enter is harmless while the agent is busy and fixes the stuck
+      // "prompt typed but not submitted" state.
       await delay(700);
       handle.write("\r");
     }
@@ -2370,6 +2495,20 @@ async function pasteAndSubmit(
   for (const line of body.split("\n")) {
     handle.write(`# ${line}\r`);
   }
+}
+
+function promptSubmitSettleMs(
+  runtime: WorkerTask["runtimePreference"],
+  promptLength: number,
+): number {
+  const sizeCost = Math.ceil(promptLength / 2048) * 150;
+  if (runtime === "claude") return clamp(1800 + sizeCost, 1800, 5000);
+  if (runtime === "codex") return clamp(1200 + sizeCost, 1200, 4500);
+  return 0;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
 }
 
 async function markAttemptRunning(

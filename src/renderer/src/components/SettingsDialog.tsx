@@ -70,9 +70,9 @@ export default function SettingsDialog({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "rgba(0, 0, 0, 0.55)",
-        backdropFilter: "blur(2px)",
-        WebkitBackdropFilter: "blur(2px)",
+        background: "rgba(0, 0, 0, 0.58)",
+        backdropFilter: "blur(4px)",
+        WebkitBackdropFilter: "blur(4px)",
         fontFamily: "var(--font-sans)",
       }}
       onMouseDown={onClose}
@@ -82,13 +82,13 @@ export default function SettingsDialog({
         aria-modal="true"
         aria-label="Settings"
         style={{
-          width: "min(520px, calc(100vw - 44px))",
+          width: "min(540px, calc(100vw - 44px))",
           maxHeight: "min(640px, calc(100vh - 44px))",
           display: "flex",
           flexDirection: "column",
           background: "var(--panel)",
-          border: "1px solid var(--rule)",
-          borderRadius: 8,
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 12,
           boxShadow: "var(--shadow-2)",
           overflow: "hidden",
           padding: 0,
@@ -98,19 +98,31 @@ export default function SettingsDialog({
         <header
           style={{
             flex: "0 0 auto",
-            padding: "16px 20px",
+            padding: "13px 18px",
             borderBottom: "1px solid var(--rule-soft)",
             display: "flex",
             alignItems: "center",
+            gap: 9,
           }}
         >
+          <span
+            aria-hidden
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: 999,
+              background: "var(--accent)",
+              boxShadow: "0 0 9px var(--accent-glow)",
+            }}
+          />
           <div
             style={{
               fontFamily: "var(--font-sans)",
-              fontSize: 16,
-              fontWeight: 600,
+              fontSize: 11,
+              fontWeight: 700,
               color: "var(--ink)",
-              letterSpacing: "-0.005em",
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
             }}
           >
             Settings
@@ -122,11 +134,11 @@ export default function SettingsDialog({
             style={{
               flex: "0 0 168px",
               borderRight: "1px solid var(--rule-soft)",
-              background: "var(--bg)",
-              padding: "12px 8px",
+              background: "color-mix(in oklch, var(--bg) 60%, var(--panel))",
+              padding: "12px 9px",
               display: "flex",
               flexDirection: "column",
-              gap: 2,
+              gap: 5,
             }}
           >
             <TabButton
@@ -167,7 +179,7 @@ export default function SettingsDialog({
             display: "flex",
             alignItems: "center",
             gap: 8,
-            padding: "12px 20px",
+            padding: "12px 18px",
             borderTop: "1px solid var(--rule-soft)",
           }}
         >
@@ -255,24 +267,29 @@ function ShellOption({
         width: "100%",
         textAlign: "left",
         border: selected
-          ? "1px solid var(--accent-edge)"
-          : "1px solid var(--rule)",
-        borderRadius: 4,
-        background: selected
-          ? "var(--accent-soft)"
+          ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
           : hover
-            ? "var(--hover)"
-            : "var(--panel-2)",
+            ? "1px solid var(--rule-soft)"
+            : "1px solid transparent",
+        borderRadius: 8,
+        background: selected
+          ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
+          : hover
+            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
+            : "color-mix(in oklch, var(--ink) 2%, transparent)",
         color: "var(--ink)",
-        padding: "10px 12px",
+        padding: "9px 10px",
         fontFamily: "var(--font-sans)",
         cursor: "default",
         display: "grid",
         gridTemplateColumns: "10px minmax(0, 1fr) auto",
         gap: 12,
         alignItems: "center",
+        boxShadow: selected
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent), 0 8px 18px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+          : "none",
         transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       <span
@@ -281,6 +298,7 @@ function ShellOption({
           height: 8,
           borderRadius: "50%",
           background: selected ? "var(--accent)" : "var(--rule-strong)",
+          boxShadow: selected ? "0 0 9px var(--accent-glow)" : "none",
           transition: "background var(--motion-fast) var(--ease-out)",
         }}
       />
@@ -406,25 +424,48 @@ function TabButton({ label, active, onClick }: { label: string; active: boolean;
       style={{
         appearance: "none",
         width: "100%",
-        border: "none",
-        borderRadius: 4,
-        background: active
-          ? "var(--panel-2)"
+        border: active
+          ? "1px solid color-mix(in oklch, var(--accent) 46%, var(--rule-strong))"
           : hover
-            ? "var(--hover)"
+            ? "1px solid var(--rule-soft)"
+            : "1px solid transparent",
+        borderRadius: 999,
+        background: active
+          ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
+          : hover
+            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
             : "transparent",
         color: active ? "var(--ink)" : "var(--ink-dim)",
-        padding: "8px 10px",
+        padding: "7px 10px",
         textAlign: "left",
         fontFamily: "var(--font-sans)",
-        fontSize: 12,
-        fontWeight: active ? 600 : 500,
+        fontSize: 11,
+        fontWeight: active ? 700 : 600,
         letterSpacing: "0.005em",
         cursor: "default",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        boxShadow: active
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+          : "none",
         transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
+      {active && (
+        <span
+          aria-hidden
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: 999,
+            background: "var(--accent)",
+            boxShadow: "0 0 8px var(--accent-glow)",
+            flex: "0 0 7px",
+          }}
+        />
+      )}
       {label}
     </button>
   );
@@ -436,9 +477,11 @@ function SectionTitle({ title, detail }: { title: string; detail: string }) {
       <div
         style={{
           fontFamily: "var(--font-sans)",
-          fontSize: 13,
-          fontWeight: 600,
-          color: "var(--ink)",
+          fontSize: 10,
+          fontWeight: 700,
+          letterSpacing: "0.14em",
+          textTransform: "uppercase",
+          color: "var(--ink-dim)",
         }}
       >
         {title}
@@ -493,12 +536,14 @@ function FooterButton({
   const base: React.CSSProperties = {
     appearance: "none",
     border: primary
-      ? "1px solid var(--accent-edge)"
+      ? "1px solid color-mix(in oklch, var(--accent) 50%, var(--rule-strong))"
       : "1px solid var(--rule-strong)",
-    borderRadius: 4,
-    background: primary ? "var(--accent-soft)" : "transparent",
+    borderRadius: 999,
+    background: primary
+      ? "color-mix(in oklch, var(--ink) 3%, transparent)"
+      : "transparent",
     color: disabled ? "var(--muted)" : "var(--ink)",
-    padding: "8px 14px",
+    padding: "7px 14px",
     fontFamily: "var(--font-sans)",
     fontSize: 12,
     fontWeight: 600,
@@ -509,7 +554,7 @@ function FooterButton({
   };
   if (hover && !disabled) {
     if (primary) {
-      base.background = "color-mix(in oklch, var(--accent) 28%, transparent)";
+      base.background = "var(--hover)";
     } else {
       base.background = "var(--hover-strong)";
     }
@@ -531,9 +576,9 @@ function FooterButton({
 const inputStyle: React.CSSProperties = {
   width: "100%",
   boxSizing: "border-box",
-  border: "1px solid var(--rule-strong)",
-  borderRadius: 4,
-  background: "var(--panel-2)",
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 7,
+  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
   color: "var(--ink)",
   padding: "8px 10px",
   fontFamily: "var(--font-sans)",
