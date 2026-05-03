@@ -1,0 +1,26 @@
+{
+  "$comment": [
+    "Spark variant: Grok-4.3 manager + max-everything Claude/Codex worker pool.",
+    "This is the default for `--adapter spark_full` when no --config is passed.",
+    "Cost rationale: workers (Claude Code + Codex CLI) are subscription-flat;",
+    "Spark's manager goes through OpenRouter at pay-per-token. Grok-4.3 is the",
+    "cheapest credible manager among the four candidates and the variant we",
+    "expect to one-shot the most tasks for the lowest variable cost.",
+    "Effort: 'max' is the provider-native string we pass through to OpenRouter.",
+    "If the model doesn't honor it, OpenRouter typically clamps or ignores."
+  ],
+  "variantId": "spark_full_grok43",
+  "agent": "spark",
+  "manager": {
+    "model": "x-ai/grok-4.3",
+    "effort": "max",
+    "profilePath": "resources/orchestration/manager-profile.json"
+  },
+  "pool": [
+    { "runtime": "claude_code", "model": "claude-opus-4-7", "effort": "max" },
+    { "runtime": "codex",       "model": "gpt-5.5",         "effort": "xhigh" }
+  ],
+  "perRoleOverrides": {
+    "visual_review": { "runtime": "openrouter", "model": "anthropic/claude-opus-4-7" }
+  }
+}

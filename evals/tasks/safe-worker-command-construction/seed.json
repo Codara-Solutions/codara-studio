@@ -1,0 +1,7 @@
+{
+  "taskId": "safe-worker-command-construction",
+  "seedCommit": "9fbf1ba33e001c3f8c1b7dd5a1eacfc452f4030a",
+  "seedBranch": "main",
+  "repinnedAt": "2026-05-03T00:00:00.000Z",
+  "notes": "Pinned to the current main HEAD when Task A was authored. Re-pin via `node evals/scripts/repin-seed.cjs safe-worker-command-construction` only when the task fixtures themselves change."
+}
