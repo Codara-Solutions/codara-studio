@@ -4,6 +4,13 @@ import { registerIpc } from "./ipc";
 import * as pty from "./pty-manager";
 import { ensureSparkHomeSync } from "./spark-home";
 import { flush } from "./storage";
+import { readHeadlessEvalArgs } from "./eval/headless-args";
+import {
+  emitFinalSummary,
+  exitCodeFor,
+  fail as failHeadless,
+  runHeadlessEval,
+} from "./eval/headless-runner";
 
 app.setName("Spark Agent");
 if (process.env.SPARK_USER_DATA_DIR) {
@@ -12,6 +19,12 @@ if (process.env.SPARK_USER_DATA_DIR) {
 if (process.platform === "win32") {
   app.setAppUserModelId("com.spark.agent");
 }
+
+// Headless eval mode kicks in only when --eval-plan is on argv. Otherwise
+// Spark boots normally. We read this BEFORE app.whenReady() so the headless
+// branch can skip BrowserWindow + IPC setup entirely.
+const headlessArgs = readHeadlessEvalArgs(process.argv);
+const isHeadlessEval = headlessArgs.enabled && Boolean(headlessArgs.args);
 
 const isDev = !app.isPackaged;
 const windowIcon = app.isPackaged
@@ -65,8 +78,31 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   ensureSparkHomeSync();
+
+  if (isHeadlessEval) {
+    // Headless eval mode: never create a BrowserWindow, never wire renderer
+    // IPC. The headless runner drives the autopilot directly and prints a
+    // single JSON summary on stdout when done.
+    if (headlessArgs.error) {
+      failHeadless(2, headlessArgs.error);
+      return;
+    }
+    try {
+      const outcome = await runHeadlessEval(headlessArgs.args!);
+      emitFinalSummary(outcome);
+      pty.disposeAll();
+      await flush();
+      app.exit(exitCodeFor(outcome));
+    } catch (err) {
+      pty.disposeAll();
+      await flush().catch(() => undefined);
+      failHeadless(1, (err as Error).message || String(err));
+    }
+    return;
+  }
+
   registerIpc();
   createWindow();
 
@@ -76,6 +112,10 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", async () => {
+  // In headless mode the app is already quitting via app.exit() in the
+  // headless branch; this guard prevents a stray window-all-closed handler
+  // from triggering a quit before the summary is flushed.
+  if (isHeadlessEval) return;
   pty.disposeAll();
   await flush();
   if (process.platform !== "darwin") app.quit();

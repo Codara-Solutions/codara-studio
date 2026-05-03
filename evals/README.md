@@ -288,11 +288,23 @@ for the judges. It scores 6 dimensions (correctness, robustness, polish,
 tests, fit, deployability) with explicit anchors. Per-dimension disagreement
 greater than 2 across judges is flagged in `flaggedDisagreements`.
 
+## How `spark_full` works (headless mode)
+
+Spark exposes a `--eval-plan <path>` startup flag (see
+`src/main/eval/headless-runner.ts`) that boots Spark's main process without
+creating any BrowserWindow, applies a variant config in-memory (manager
+model + effort + profile path) so the operator's interactive
+`~/.SparkAgent/spark-settings.json` is left untouched, then runs the same
+autopilot kickoff the desktop UI's start button calls. The adapter spawns
+this Electron entry as a child process, parses one structured JSON line per
+event from stderr, and reads a single JSON summary line from stdout when
+the run reaches terminal state. Manual mode is gone — the operator no
+longer has to drive Spark's UI by hand to score a run. The harness still
+honors `--budget` end-to-end, sending SIGTERM (then SIGKILL) to headless
+Spark on adapter timeout while Spark itself enforces the same budget
+internally via its run-store.
+
 ## What's intentionally not here
 
 - Codex adapter — out of scope for the eval slice.
-- Headless Spark — the `spark_full` adapter currently asks the operator to
-  drive the desktop UI manually, then watches `~/.SparkAgent/runs/` for
-  terminal state. AUTO mode is wired but waits on Spark gaining a `--eval`
-  CLI flag (next-step roadmap).
 - Cost telemetry — we measure quality, not dollars.

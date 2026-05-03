@@ -62,7 +62,29 @@ export async function listEvents(runId: string): Promise<SparkEvent[]> {
   }
 }
 
+// Main-process subscribers used by the headless eval entry point. The
+// renderer subscribes via the IPC fan-out below; the headless runner has no
+// renderer and instead listens here so it can react to envelope_prepared
+// (spawn the worker pty) and run.* terminal events without polling the
+// run-store. Subscribers are best-effort: a throwing handler must not break
+// the fan-out for the next subscriber.
+const mainSubscribers = new Set<(event: SparkEvent) => void>();
+
+export function subscribeToEvents(handler: (event: SparkEvent) => void): () => void {
+  mainSubscribers.add(handler);
+  return () => {
+    mainSubscribers.delete(handler);
+  };
+}
+
 function broadcast(event: SparkEvent): void {
+  for (const handler of mainSubscribers) {
+    try {
+      handler(event);
+    } catch (err) {
+      console.warn("[spark] event subscriber threw:", err);
+    }
+  }
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.webContents.isDestroyed()) {
       win.webContents.send("orchestration:event", event);

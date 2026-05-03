@@ -5,7 +5,10 @@ import type { ShellInfo } from "@shared/types";
 interface Session {
   id: string;
   pty: nodePty.IPty;
-  webContents: WebContents;
+  // Renderer sink for live output. Null in headless eval mode — orchestration
+  // drives workers without a BrowserWindow, so pty bytes go only to main-process
+  // taps (the agent-TUI sniffer) and the writer writes/exit waiters.
+  webContents: WebContents | null;
   dataChannel: string;
   exitChannel: string;
   pendingChunks: Buffer[];
@@ -40,7 +43,10 @@ export interface SpawnOptions {
   cwd: string;
   cols: number;
   rows: number;
-  webContents: WebContents;
+  // Optional. Pass null/undefined to spawn a pty without a renderer sink
+  // (headless eval mode — orchestration drives the worker via main-process
+  // taps and writes only).
+  webContents?: WebContents | null;
 }
 
 export function spawn(opts: SpawnOptions): { id: string; pid: number } {
@@ -52,9 +58,10 @@ export function spawn(opts: SpawnOptions): { id: string; pid: number } {
 
   const existing = sessions.get(opts.id);
   if (existing) {
-    existing.webContents = opts.webContents;
+    if (opts.webContents) existing.webContents = opts.webContents;
     try {
       existing.pty.resize(Math.max(1, opts.cols | 0), Math.max(1, opts.rows | 0));
+      existing.resizedAt = Date.now();
     } catch {
       /* may have exited */
     }
@@ -102,7 +109,7 @@ export function spawn(opts: SpawnOptions): { id: string; pid: number } {
   const session: Session = {
     id: opts.id,
     pty,
-    webContents: opts.webContents,
+    webContents: opts.webContents ?? null,
     dataChannel: `pty:data:${opts.id}`,
     exitChannel: `pty:exit:${opts.id}`,
     pendingChunks: [],
@@ -119,7 +126,7 @@ export function spawn(opts: SpawnOptions): { id: string; pid: number } {
     if (s) {
       s.exited = true;
       flushDataNow(s);
-      if (!s.webContents.isDestroyed()) {
+      if (s.webContents && !s.webContents.isDestroyed()) {
         s.webContents.send(s.exitChannel, { exitCode, signal });
       }
       if (s.flushTimer) clearTimeout(s.flushTimer);
@@ -192,6 +199,13 @@ function flushDataNow(s: Session): void {
     s.flushTimer = null;
   }
   if (s.pendingChunks.length === 0) return;
+  // Headless eval: no renderer sink, so we just drop the buffered bytes —
+  // taps already saw them and that's all main needs.
+  if (!s.webContents) {
+    s.pendingChunks = [];
+    s.pendingBytes = 0;
+    return;
+  }
   if (s.webContents.isDestroyed()) {
     s.pendingChunks = [];
     s.pendingBytes = 0;

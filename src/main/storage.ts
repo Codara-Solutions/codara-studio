@@ -149,6 +149,21 @@ export async function saveSettings(settings: AppSettings): Promise<AppSettings> 
   return settingsCache;
 }
 
+// In-memory settings override used by the headless eval entry point. Loads
+// the on-disk settings, applies a partial override (variant config: manager
+// model + LangSmith tweaks), and pins the result in the module cache so
+// every subsequent `loadSettings()` returns the merged value WITHOUT
+// touching spark-settings.json on disk. Returns the merged settings object
+// for callers that want to inspect what they pinned.
+export async function applyInMemorySettingsOverride(
+  partial: Partial<AppSettings>,
+): Promise<AppSettings> {
+  const live = await readSettingsFromDisk();
+  const merged = normalizeSettings({ ...live, ...partial });
+  settingsCache = merged;
+  return merged;
+}
+
 export async function flush(): Promise<void> {
   await writing;
   await settingsWriting;

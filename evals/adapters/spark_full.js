@@ -1,42 +1,30 @@
 // Adapter: SparkFullRunner
 //
-// Invokes the full Spark Agent run loop on a plan and waits for terminal
-// state. Spark is an Electron app — it cannot run truly headless today —
-// so this adapter has two operational modes:
+// Spawns Spark Agent's main process in headless eval mode. Spark used to
+// require an operator to drive its UI, but it now exposes a `--eval-plan`
+// startup flag (see src/main/eval/headless-runner.ts) that boots the same
+// autopilot loop the renderer's start button calls — without ever creating
+// a BrowserWindow.
 //
-//   AUTO (env SPARK_EVAL_AUTO=1):
-//     Spawns `npx electron-vite preview` (or a compiled binary if present)
-//     pre-seeded with a workspace + plan. This requires Spark to support a
-//     "--eval" CLI flag, which is on the next-step roadmap. If Spark
-//     doesn't recognize the flag, the adapter falls back to MANUAL mode.
+// Headless contract (mirrored from src/main/eval/headless-runner.ts):
+//   stdin:  ignored
+//   stdout: exactly one JSON line on terminal state, e.g.
+//             {"runId":"run-abc","runDir":"/path","status":"completed","durationSeconds":42}
+//   stderr: structured progress, one JSON object per line ("ts" + "type" +
+//           payload). Adapters can stream these to surface live progress.
+//   exit:   0  -> completed; 1  -> failed/cancelled/paused;
+//           2  -> adapter error (bad args, missing config); 124 -> timed_out
 //
-//   MANUAL (default until Spark grows the CLI flag):
-//     Prints the exact steps the operator must perform inside Spark's UI:
-//       1. Open a workspace pointed at <seedRepoPath>
-//       2. Drop the plan file (`evals/tasks/<task>/plan.md`) into the
-//          plan picker
-//       3. Click "Start Autopilot"
-//     Then watches `~/.SparkAgent/runs/` for a new run.json whose
-//     workspace cwd matches our seedRepoPath. When that run reaches a
-//     terminal status (complete | failed | cancelled), the adapter
-//     captures run.json + events.jsonl as artifacts and returns.
-//
-// MANUAL mode is honest: the operator drives the desktop app, the harness
-// records the result. AUTO mode will replace it once Spark has a headless
-// entry point. The downstream eval (judge panel + gates) is identical.
-//
-// Watchdog: in either mode the adapter respects budgetSeconds. When the
-// budget elapses we record a "budget_exhausted" run and abort.
+// On budget exhaustion this adapter sends SIGTERM, then SIGKILL if the
+// process refuses to exit cleanly. We mirror the harness's `budgetSeconds`
+// onto Spark via `--eval-budget`; Spark also enforces it internally so we
+// have two stops (process kill + run-store budget) covering both Electron
+// crashes and a stuck OpenRouter call.
 //
 // Default variant config (when --config is omitted):
 //   evals/configs/spark_full-grok43.json (variantId=spark_full_grok43)
 // The four Spark variants we compare differ only in the manager — workers
-// are always max-everything Claude/Codex (subscription-flat). The actual
-// default-resolution mapping lives in lib/variant-config.js DEFAULT_CONFIGS.
-// The other three variants are opt-in via `--config`:
-//   evals/configs/spark_full-sonnet46.json
-//   evals/configs/spark_full-gpt55.json
-//   evals/configs/spark_full-gemini25.json
+// are always max-everything Claude/Codex (subscription-flat).
 
 "use strict";
 
@@ -50,7 +38,7 @@ const variantConfig = require("../lib/variant-config");
 const seedRepoLib = require("../lib/seed-repo");
 
 const ID = "spark_full";
-const LABEL = "Spark Agent (full orchestration)";
+const LABEL = "Spark Agent (full orchestration, headless)";
 
 function sparkHomeDir() {
   const override = process.env.SPARK_HOME_DIR || process.env.SPARK_USER_DATA_DIR;
@@ -62,159 +50,70 @@ function runsRoot() {
   return path.join(sparkHomeDir(), "runs");
 }
 
-function isTerminal(status) {
-  return status === "complete" || status === "failed" || status === "cancelled";
-}
-
-/**
- * Watch ~/.SparkAgent/runs/ for a new run.json whose cwd matches the seed
- * repo and that reaches terminal state within the budget. Returns the
- * matched run id + the absolute paths of run.json and events.jsonl.
- */
-async function waitForTerminalRun({ seedRepoPath, transcript, budgetSeconds, onEvent }) {
-  const startedMs = Date.now();
-  const budgetMs = budgetSeconds * 1000;
-  const seenRuns = new Map(); // runId -> last status
-  // First pass: snapshot existing runs so we don't pick up an old one.
-  const baseline = new Set(safeReaddir(runsRoot()));
-  transcript.push(runnerLib.event("watch:start", `${runsRoot()}, baseline=${baseline.size} runs`));
-
-  while (Date.now() - startedMs < budgetMs) {
-    const dirs = safeReaddir(runsRoot());
-    for (const d of dirs) {
-      if (baseline.has(d)) continue;
-      const runJsonPath = path.join(runsRoot(), d, "run.json");
-      let parsed;
-      try {
-        parsed = JSON.parse(fs.readFileSync(runJsonPath, "utf8"));
-      } catch {
-        continue; // run.json not yet flushed
-      }
-      const cwdMatches =
-        parsed.cwd && path.resolve(parsed.cwd) === path.resolve(seedRepoPath);
-      // Some Spark installs put cwd on the workspace, not the run.
-      const workspaceCwdMatches =
-        parsed.workspaceCwd && path.resolve(parsed.workspaceCwd) === path.resolve(seedRepoPath);
-      if (!cwdMatches && !workspaceCwdMatches) continue;
-
-      if (!seenRuns.has(d)) {
-        seenRuns.set(d, parsed.status);
-        transcript.push(
-          runnerLib.event("run:detected", d, { status: parsed.status }),
-        );
-        onEvent({ kind: "run:detected", runId: d, status: parsed.status });
-      }
-      if (parsed.status !== seenRuns.get(d)) {
-        seenRuns.set(d, parsed.status);
-        transcript.push(
-          runnerLib.event("run:status", d, { status: parsed.status }),
-        );
-        onEvent({ kind: "run:status", runId: d, status: parsed.status });
-      }
-      if (isTerminal(parsed.status)) {
-        return {
-          runId: d,
-          runJsonPath,
-          eventsJsonlPath: path.join(runsRoot(), d, "events.jsonl"),
-          status: parsed.status,
-          attemptCount:
-            (parsed.workerAttempts && parsed.workerAttempts.length) || 1,
-          humanInterventions:
-            (parsed.humanMessages || []).filter((m) => m.author === "human").length,
-        };
-      }
-    }
-    await delay(1500);
-  }
-  // Budget elapsed.
-  const matchedAny = [...seenRuns.entries()];
-  return {
-    runId: matchedAny.length ? matchedAny[matchedAny.length - 1][0] : null,
-    runJsonPath: null,
-    eventsJsonlPath: null,
-    status: "budget_exhausted",
-    attemptCount: 0,
-    humanInterventions: 0,
-  };
-}
-
-function safeReaddir(dir) {
+// Locate the Electron entry point we'll spawn for headless mode. We use
+// node's module resolver to find the electron binary from the source repo
+// (works for both standalone installs and git worktrees that share the
+// parent repo's node_modules). The compiled main bundle lives at
+// out/main/index.js after `npm run build`.
+function resolveLaunchCommand({ repoRoot, planFile, evalConfigPath, outputDir, budgetSeconds }) {
+  let electronBin;
   try {
-    return fs.readdirSync(dir);
+    // require('electron') returns the absolute path of the binary, courtesy
+    // of the @electron/get postinstall hook. Resolve from repoRoot so we
+    // pick up the project's pinned electron version even when the harness
+    // is invoked from a different cwd.
+    const electronPkg = require.resolve("electron", { paths: [repoRoot] });
+    // electronPkg points at electron/index.js; the binary lives next to it
+    // exposed by electron's own package main.
+    electronBin = require(electronPkg);
+  } catch (err) {
+    throw new Error(
+      `could not locate electron from ${repoRoot}: ${err.message}. Run 'npm install' first.`,
+    );
+  }
+  if (typeof electronBin !== "string" || !fs.existsSync(electronBin)) {
+    throw new Error(
+      `electron module did not resolve to a real binary path (got ${electronBin}). Run 'npm install' from ${repoRoot}.`,
+    );
+  }
+  const mainBundle = path.join(repoRoot, "out", "main", "index.js");
+  if (!fs.existsSync(mainBundle)) {
+    throw new Error(
+      `compiled main bundle not found at ${mainBundle} — run 'npm run build' from ${repoRoot} before running the eval.`,
+    );
+  }
+  const args = [
+    mainBundle,
+    "--eval-plan", planFile,
+    "--eval-budget", String(budgetSeconds),
+  ];
+  if (evalConfigPath) args.push("--eval-config", evalConfigPath);
+  if (outputDir) args.push("--eval-output-dir", outputDir);
+  return { command: electronBin, args };
+}
+
+function parseStderrLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    return JSON.parse(trimmed);
   } catch {
-    return [];
+    return null;
+  }
+}
+
+function parseStdoutLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
   }
 }
 
 function delay(ms) {
   return new Promise((res) => setTimeout(res, ms));
-}
-
-/**
- * AUTO-mode launch. Spawns whatever Spark binary is available with the
- * (future) --eval CLI flag and watches for terminal state. Returns the
- * spawned process so we can kill it on budget exhaustion. If Spark doesn't
- * support the flag yet, returns null and the caller falls back to MANUAL.
- */
-function tryAutoLaunch({ seedRepoPath, planFile, transcript }) {
-  // Check for a packaged binary first; otherwise fall back to dev preview.
-  const repoRoot = runnerLib && require("../lib/seed-repo").findSourceRepo();
-  const candidates = [
-    process.platform === "win32"
-      ? path.join(repoRoot, "out", "win-unpacked", "Spark Agent.exe")
-      : null,
-    process.platform === "win32"
-      ? path.join(repoRoot, "build", "win-unpacked", "Spark Agent.exe")
-      : null,
-    process.platform === "darwin"
-      ? path.join(repoRoot, "out", "mac", "Spark Agent.app", "Contents", "MacOS", "Spark Agent")
-      : null,
-  ].filter(Boolean);
-  for (const c of candidates) {
-    if (fs.existsSync(c)) {
-      transcript.push(runnerLib.event("auto:bin", c));
-      const child = spawn(c, [
-        "--eval",
-        "--workspace", seedRepoPath,
-        "--plan", planFile,
-      ], { stdio: "ignore", detached: false });
-      return { child };
-    }
-  }
-  transcript.push(
-    runnerLib.event(
-      "auto:skipped",
-      "No packaged Spark binary found; falling back to MANUAL mode.",
-    ),
-  );
-  return null;
-}
-
-function printManualInstructions({ seedRepoPath, planFile }) {
-  const lines = [
-    "",
-    "================================================================",
-    "  Spark Agent eval — MANUAL launch needed",
-    "================================================================",
-    "",
-    "  The eval harness has prepared a fresh seed repo. Now drive Spark:",
-    "",
-    `    1. Launch Spark Agent (e.g. 'npm run dev' or the installed app).`,
-    `    2. In Spark, create / select a workspace whose cwd is:`,
-    `         ${seedRepoPath}`,
-    `    3. Open the plan file:`,
-    `         ${planFile}`,
-    `    4. Click 'Start Autopilot' and let the run complete.`,
-    "",
-    "  The harness is watching ~/.SparkAgent/runs/ and will exit when",
-    "  it sees a run on this workspace reach a terminal status.",
-    "",
-    "  Tip: set SPARK_EVAL_AUTO=1 once Spark grows a --eval CLI flag",
-    "  and the harness will skip these manual steps.",
-    "================================================================",
-    "",
-  ];
-  process.stderr.write(lines.join("\n"));
 }
 
 function createRunner(opts = {}) {
@@ -226,13 +125,6 @@ function createRunner(opts = {}) {
       const transcript = [];
       transcript.push(runnerLib.event("adapter:start", LABEL));
 
-      // Pull the variant config off the runner input and snapshot it for
-      // the operator. The pilot has already verified the live Spark
-      // settings/profile match (or the operator passed --skip-config-check
-      // and accepts that the run is not exactly reproducible). We snapshot
-      // the configResolved blob (profile hash, settings path) into the
-      // adapter's artifact dir so the eval-result has it even if the live
-      // settings file changes after the run.
       const cfg = input.config || null;
       transcript.push(
         runnerLib.event(
@@ -253,67 +145,251 @@ function createRunner(opts = {}) {
         );
       }
 
-      const auto = process.env.SPARK_EVAL_AUTO === "1"
-        ? tryAutoLaunch({
-            seedRepoPath: input.seedRepoPath,
-            planFile: input.planFile,
-            transcript,
-          })
-        : null;
-      if (!auto) {
-        printManualInstructions({
-          seedRepoPath: input.seedRepoPath,
-          planFile: input.planFile,
+      // Stage the seed repo's plan as the headless plan file. The plan
+      // shipped under evals/tasks/<id>/plan.md is the canonical prompt; we
+      // pass it through unchanged. (Spark uses the plan file's parent dir
+      // as the workspace cwd, so we copy plan.md into the seed repo first.)
+      const planInRepo = path.join(input.seedRepoPath, "spark-eval-plan.md");
+      try {
+        fs.copyFileSync(input.planFile, planInRepo);
+      } catch (err) {
+        const msg = `failed to stage plan file in seed repo: ${err.message}`;
+        transcript.push(runnerLib.event("error", msg));
+        return errorResult({
+          input,
+          transcript,
+          startedAtMs,
+          exitReason: "launch_failed",
+          errorMessage: msg,
         });
       }
 
-      const watchResult = await waitForTerminalRun({
-        seedRepoPath: input.seedRepoPath,
-        transcript,
-        budgetSeconds: input.budgetSeconds,
-        onEvent: () => undefined,
+      // Where Spark should mirror its run dir for harness consumption.
+      const artifactsDir = path.join(
+        path.dirname(input.seedRepoPath),
+        `${input.runId}-artifacts`,
+      );
+      fs.mkdirSync(artifactsDir, { recursive: true });
+      const sparkRunMirror = path.join(artifactsDir, "spark-run");
+
+      let launch;
+      try {
+        launch = resolveLaunchCommand({
+          repoRoot,
+          planFile: planInRepo,
+          evalConfigPath: cfg ? cfg._sourcePath : null,
+          outputDir: sparkRunMirror,
+          budgetSeconds: input.budgetSeconds,
+        });
+      } catch (err) {
+        transcript.push(runnerLib.event("error", err.message));
+        return errorResult({
+          input,
+          transcript,
+          startedAtMs,
+          exitReason: "launch_failed",
+          errorMessage: err.message,
+        });
+      }
+
+      transcript.push(runnerLib.event("spawn", `${launch.command} ${launch.args.join(" ")}`));
+
+      // Spark in headless mode listens to spark-settings.json for the
+      // OpenRouter API key plus environment overrides. Forward env from the
+      // pilot so the operator's existing auth (SPARK_OPENROUTER_API_KEY,
+      // OPENROUTER_API_KEY) reaches the child without a settings round-trip.
+      const env = { ...process.env, ...input.env };
+
+      const child = spawn(launch.command, launch.args, {
+        cwd: input.seedRepoPath,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
       });
 
-      // Budget exhausted, but Spark may still be running. Kill the auto
-      // process if we own it; otherwise leave the desktop instance alone.
-      if (auto && watchResult.status === "budget_exhausted") {
-        try {
-          auto.child.kill();
-        } catch {
-          /* ignore */
+      let summary = null;
+      const stdoutBuf = [];
+      const stderrBuf = [];
+      let stdoutLineRemainder = "";
+      let stderrLineRemainder = "";
+
+      child.stdout.on("data", (chunk) => {
+        const text = chunk.toString("utf8");
+        stdoutBuf.push(text);
+        // The headless runner promises a single JSON line on stdout at the
+        // very end; capture it incrementally so we can pluck the summary as
+        // soon as it appears. We tolerate Spark printing other stdout lines
+        // earlier (e.g. Electron diagnostics) by always picking the LAST
+        // parseable JSON line we see.
+        stdoutLineRemainder += text;
+        const lines = stdoutLineRemainder.split(/\r?\n/);
+        stdoutLineRemainder = lines.pop() || "";
+        for (const line of lines) {
+          const parsed = parseStdoutLine(line);
+          if (parsed && parsed.runId && parsed.status) summary = parsed;
+        }
+      });
+      child.stderr.on("data", (chunk) => {
+        const text = chunk.toString("utf8");
+        stderrBuf.push(text);
+        stderrLineRemainder += text;
+        const lines = stderrLineRemainder.split(/\r?\n/);
+        stderrLineRemainder = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const parsed = parseStderrLine(line);
+          if (parsed && parsed.type) {
+            transcript.push(runnerLib.event(`spark:${parsed.type}`, "", parsed));
+          } else {
+            transcript.push(runnerLib.event("stderr", line));
+          }
+        }
+      });
+
+      // Process supervision. The harness's wall-clock budget is the master;
+      // Spark also enforces an internal budget, so we add a small grace
+      // period before SIGTERM so the run-store can flush the final summary.
+      const budgetMs = Math.max(60_000, input.budgetSeconds * 1000);
+      const exitInfo = await new Promise((resolve) => {
+        let settled = false;
+        const finish = (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(budgetTimer);
+          resolve(value);
+        };
+        const budgetTimer = setTimeout(() => {
+          transcript.push(
+            runnerLib.event(
+              "budget-exhausted",
+              `Adapter budget hit after ${budgetMs}ms; sending SIGTERM to headless Spark.`,
+            ),
+          );
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            /* ignore */
+          }
+          setTimeout(() => {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              /* ignore */
+            }
+          }, 10_000);
+          finish({ code: null, signal: "SIGTERM", budgetExhausted: true });
+        }, budgetMs + 30_000);
+
+        child.on("error", (err) => {
+          transcript.push(runnerLib.event("error", err.message));
+          finish({ code: null, signal: null, error: err.message });
+        });
+        child.on("exit", (code, signal) => {
+          // Drain any tail line from stderr / stdout into the transcript /
+          // summary lookup before we resolve.
+          if (stderrLineRemainder.trim()) {
+            const parsed = parseStderrLine(stderrLineRemainder);
+            if (parsed && parsed.type) {
+              transcript.push(runnerLib.event(`spark:${parsed.type}`, "", parsed));
+            } else {
+              transcript.push(runnerLib.event("stderr", stderrLineRemainder));
+            }
+            stderrLineRemainder = "";
+          }
+          if (stdoutLineRemainder.trim()) {
+            const parsed = parseStdoutLine(stdoutLineRemainder);
+            if (parsed && parsed.runId && parsed.status) summary = parsed;
+            stdoutLineRemainder = "";
+          }
+          transcript.push(runnerLib.event("exit", "", { code, signal }));
+          finish({ code, signal });
+        });
+      });
+
+      // Persist headless stdout/stderr alongside the existing run.json
+      // mirror so reviewers can replay the agent's launch banner + any
+      // Electron diagnostics.
+      const stdoutPath = path.join(artifactsDir, "spark.stdout.log");
+      const stderrPath = path.join(artifactsDir, "spark.stderr.log");
+      try {
+        fs.writeFileSync(stdoutPath, stdoutBuf.join(""), "utf8");
+        fs.writeFileSync(stderrPath, stderrBuf.join(""), "utf8");
+      } catch (err) {
+        transcript.push(runnerLib.event("error", `failed to persist agent logs: ${err.message}`));
+      }
+
+      // Map exit code + summary status to RunnerResult.exitReason. The
+      // headless runner's mapping is authoritative when we have a summary;
+      // exit code is used only as a fallback for crashes / signals.
+      let exitReason;
+      let errorMessage;
+      if (summary) {
+        if (summary.status === "completed") exitReason = "completed";
+        else if (summary.status === "timed_out") {
+          exitReason = "budget_exhausted";
+          errorMessage = "Headless Spark exited with timed_out (run-store budget)";
+        } else {
+          exitReason = "crashed";
+          errorMessage = `Headless Spark reported status: ${summary.status}`;
+        }
+      } else if (exitInfo.budgetExhausted) {
+        exitReason = "budget_exhausted";
+        errorMessage = `No final summary from headless Spark within ${input.budgetSeconds}s`;
+      } else if (exitInfo.signal && exitInfo.signal !== "SIGTERM") {
+        exitReason = "crashed";
+        errorMessage = `Headless Spark received signal ${exitInfo.signal}`;
+      } else if (typeof exitInfo.code === "number" && exitInfo.code !== 0) {
+        exitReason = "crashed";
+        errorMessage = `Headless Spark exited with code ${exitInfo.code}`;
+      } else {
+        exitReason = "completed";
+      }
+
+      const artifacts = [
+        { name: "spark.stdout.log", path: stdoutPath, kind: "agent-log" },
+        { name: "spark.stderr.log", path: stderrPath, kind: "agent-log" },
+      ];
+
+      // The mirror dir contains run.json + events.jsonl; surface them as
+      // typed artifacts so the pilot can extract routing.
+      if (summary && summary.runDir && fs.existsSync(summary.runDir)) {
+        const runJsonPath = path.join(summary.runDir, "run.json");
+        const eventsPath = path.join(summary.runDir, "events.jsonl");
+        if (fs.existsSync(runJsonPath)) {
+          artifacts.push({ name: "run.json", path: runJsonPath, kind: "spark-state" });
+        }
+        if (fs.existsSync(eventsPath)) {
+          artifacts.push({ name: "events.jsonl", path: eventsPath, kind: "spark-events" });
+        }
+      } else {
+        // Fallback to the canonical Spark home dir when --eval-output-dir
+        // mirroring failed.
+        const fallbackRunDir =
+          summary && summary.runId ? path.join(runsRoot(), summary.runId) : null;
+        if (fallbackRunDir && fs.existsSync(fallbackRunDir)) {
+          const runJsonPath = path.join(fallbackRunDir, "run.json");
+          const eventsPath = path.join(fallbackRunDir, "events.jsonl");
+          if (fs.existsSync(runJsonPath)) {
+            artifacts.push({ name: "run.json", path: runJsonPath, kind: "spark-state" });
+          }
+          if (fs.existsSync(eventsPath)) {
+            artifacts.push({ name: "events.jsonl", path: eventsPath, kind: "spark-events" });
+          }
         }
       }
 
-      // Collect run.json + events.jsonl as artifacts (if we found a run).
-      const artifacts = [];
-      if (watchResult.runJsonPath && fs.existsSync(watchResult.runJsonPath)) {
-        artifacts.push({
-          name: "run.json",
-          path: watchResult.runJsonPath,
-          kind: "spark-state",
-        });
-      }
-      if (watchResult.eventsJsonlPath && fs.existsSync(watchResult.eventsJsonlPath)) {
-        artifacts.push({
-          name: "events.jsonl",
-          path: watchResult.eventsJsonlPath,
-          kind: "spark-events",
-        });
-      }
-
       // Snapshot the resolved variant config + extracted routing into the
-      // adapter's artifact dir. We extract routing from the captured
-      // run.json (when present) so the snapshot stands on its own even if
-      // the live Spark state later changes.
+      // adapter's artifact dir. We pull routing from the run.json artifact
+      // we just located so the snapshot stands on its own even if the live
+      // Spark home dir is wiped later.
       if (cfg) {
-        const artifactsDir = path.join(
-          path.dirname(input.seedRepoPath),
-          `${input.runId}-artifacts`,
-        );
         let routing = [];
-        if (watchResult.runJsonPath && fs.existsSync(watchResult.runJsonPath)) {
+        const runJsonArtifact = artifacts.find(
+          (a) => a.name === "run.json" && a.kind === "spark-state",
+        );
+        if (runJsonArtifact && fs.existsSync(runJsonArtifact.path)) {
           try {
-            const runJson = JSON.parse(fs.readFileSync(watchResult.runJsonPath, "utf8"));
+            const runJson = JSON.parse(fs.readFileSync(runJsonArtifact.path, "utf8"));
             routing = variantConfig.extractRoutingFromSparkRun(runJson);
           } catch {
             /* leave routing empty — pilot will surface the parse failure */
@@ -334,33 +410,52 @@ function createRunner(opts = {}) {
         }
       }
 
-      const durationSeconds = (Date.now() - startedAtMs) / 1000;
-      let exitReason;
-      let errorMessage;
-      if (watchResult.status === "complete") exitReason = "completed";
-      else if (watchResult.status === "failed") {
-        exitReason = "crashed";
-        errorMessage = "Spark run reached terminal status: failed";
-      } else if (watchResult.status === "cancelled") {
-        exitReason = "aborted";
-        errorMessage = "Spark run was cancelled";
-      } else {
-        exitReason = "budget_exhausted";
-        errorMessage = `No terminal run on workspace within ${input.budgetSeconds}s`;
+      // Attempt count + human interventions are extracted from the captured
+      // run.json when present.
+      let attemptCount = 1;
+      let humanInterventions = 0;
+      const runJsonArtifact = artifacts.find(
+        (a) => a.name === "run.json" && a.kind === "spark-state",
+      );
+      if (runJsonArtifact && fs.existsSync(runJsonArtifact.path)) {
+        try {
+          const runJson = JSON.parse(fs.readFileSync(runJsonArtifact.path, "utf8"));
+          attemptCount = (runJson.workerAttempts && runJson.workerAttempts.length) || 1;
+          humanInterventions =
+            (runJson.humanMessages || []).filter((m) => m.author === "user").length;
+        } catch {
+          /* keep defaults */
+        }
       }
 
+      const durationSeconds = (Date.now() - startedAtMs) / 1000;
       return {
         finalRepoPath: input.seedRepoPath,
         transcript,
         artifacts,
-        attemptCount: watchResult.attemptCount || 1,
-        humanInterventions: watchResult.humanInterventions || 0,
+        attemptCount,
+        humanInterventions,
         durationSeconds,
         exitReason,
         errorMessage,
         label: LABEL,
       };
     },
+  };
+}
+
+function errorResult({ input, transcript, startedAtMs, exitReason, errorMessage }) {
+  const durationSeconds = (Date.now() - startedAtMs) / 1000;
+  return {
+    finalRepoPath: input.seedRepoPath,
+    transcript,
+    artifacts: [],
+    attemptCount: 0,
+    humanInterventions: 0,
+    durationSeconds,
+    exitReason,
+    errorMessage,
+    label: LABEL,
   };
 }
 
