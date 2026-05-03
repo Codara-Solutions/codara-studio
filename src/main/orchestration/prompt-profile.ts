@@ -220,6 +220,25 @@ export function resetManagerPromptProfileCache(): void {
   cachedProfile = null;
 }
 
+// Headless eval: load a manager profile from an explicit absolute path and
+// pin it into the module cache for the rest of the process. No disk write.
+// Returns the loaded profile (or null when the file does not exist or is
+// malformed — callers may then fall back to the bundled default).
+export function loadManagerPromptProfileFromPath(
+  filePath: string,
+): ManagerPromptProfile | null {
+  if (!filePath || !existsSync(filePath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
+    const profile = normalizeManagerPromptProfile(parsed);
+    cachedProfile = profile;
+    return profile;
+  } catch (err) {
+    console.warn(`[spark] failed to load manager prompt profile at ${filePath}:`, err);
+    return null;
+  }
+}
+
 export function buildManagerSystemPrompt(
   profile: ManagerPromptProfile,
   mode?: OpenRouterManagerMode,
