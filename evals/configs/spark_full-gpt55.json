@@ -1,0 +1,25 @@
+{
+  "$comment": [
+    "Spark variant: GPT-5.5 manager + max-everything worker pool.",
+    "Cost rationale: GPT-5.5 is OpenAI's frontier reasoning model. Tests whether",
+    "an OpenAI manager routes Codex/Claude workers better than a Claude or",
+    "third-party manager does.",
+    "Effort: 'xhigh' is OpenAI's top reasoning_effort tier (per OpenAI docs:",
+    "minimal|low|medium|high|xhigh). Passed through to OpenRouter; if the",
+    "model rejects xhigh, OpenRouter typically falls back to 'high'."
+  ],
+  "variantId": "spark_full_gpt55",
+  "agent": "spark",
+  "manager": {
+    "model": "openai/gpt-5.5",
+    "effort": "xhigh",
+    "profilePath": "resources/orchestration/manager-profile.json"
+  },
+  "pool": [
+    { "runtime": "claude_code", "model": "claude-opus-4-7", "effort": "max" },
+    { "runtime": "codex",       "model": "gpt-5.5",         "effort": "xhigh" }
+  ],
+  "perRoleOverrides": {
+    "visual_review": { "runtime": "openrouter", "model": "anthropic/claude-opus-4-7" }
+  }
+}

@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "suite": { "id": "frontier-one-shot", "version": "1.0" },
+  "task": { "id": "safe-worker-command-construction" },
+  "adapter": { "id": "claude_best_single", "label": "Claude Code (opus-4-7, max effort)" },
+  "run": {
+    "id": "example-run-0001",
+    "startedAt": "2026-05-03T12:00:00.000Z",
+    "finishedAt": "2026-05-03T12:18:32.000Z",
+    "durationSeconds": 1112,
+    "attemptCount": 1,
+    "humanInterventions": 0,
+    "exitReason": "completed"
+  },
+  "diff": {
+    "changedFiles": [
+      { "status": "M", "path": "src/main/pty-manager.ts" },
+      { "status": "M", "path": "src/main/orchestration/run-store.ts" },
+      { "status": "A", "path": "src/main/worker-launch.ts" }
+    ],
+    "lineCount": 412
+  },
+  "gates": {
+    "public": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "failedIds": [],
+      "results": [
+        { "id": "npm run typecheck", "kind": "public", "ok": true, "durationMs": 18234, "exitCode": 0, "stdoutTail": "...", "stderrTail": "" }
+      ]
+    },
+    "hidden": {
+      "total": 6,
+      "passed": 5,
+      "failed": 1,
+      "failedIds": ["04-allowed-paths-traversal"],
+      "results": [
+        { "id": "01-shell-metacharacter-injection", "ok": true, "durationMs": 312, "message": "blocked" },
+        { "id": "02-prompt-newlines-and-backticks", "ok": true, "durationMs": 287, "message": "round-trip preserved" },
+        { "id": "03-env-var-no-expansion", "ok": true, "durationMs": 165, "message": "literal preserved" },
+        { "id": "04-allowed-paths-traversal", "ok": false, "durationMs": 102, "message": "../ accepted as allowedPath, expected rejection" },
+        { "id": "05-windows-pwsh-roundtrip", "ok": true, "durationMs": 203, "message": "ok" },
+        { "id": "06-bash-roundtrip", "ok": true, "durationMs": 189, "message": "ok" }
+      ]
+    }
+  },
+  "judges": {
+    "rubricId": "professional-grade-code",
+    "panel": [
+      {
+        "judgeId": "anthropic/claude-opus-4-7",
+        "family": "anthropic",
+        "verdict": "borderline",
+        "overallScore": 3.85,
+        "scores": { "correctness": 4, "robustness": 3, "polish": 4, "tests": 3, "fit": 5, "deployability": 4 },
+        "justifications": {
+          "correctness": "Implements the new safe-arg path; happy paths covered.",
+          "robustness": "Path traversal in allowedPaths not validated; would let a worker escape root.",
+          "polish": "Helpers are well-named and small; quoteShellArg moved to its own module.",
+          "tests": "New unit tests cover injection but skip the env-var case.",
+          "fit": "Matches existing patterns; uses node-pty consistently.",
+          "deployability": "Type-checks; build was not exercised in the diff."
+        },
+        "issues": [
+          { "dimension": "robustness", "severity": "high", "message": "allowedPaths.includes('..') reaches the worker without normalization." }
+        ]
+      }
+    ],
+    "aggregated": {
+      "correctness": { "mean": 4.0, "min": 4, "max": 4, "scores": [4] }
+    },
+    "weightedTotal": 3.85,
+    "flaggedDisagreements": [],
+    "mergedIssues": []
+  },
+  "headline": { "passed": false, "score": 3.0, "hiddenRatio": 0.833, "publicGatesGreen": true },
+  "transcriptHead": [
+    { "ts": "2026-05-03T12:00:00.000Z", "kind": "spawn", "message": "claude --dangerously-skip-permissions --model claude-opus-4-7" }
+  ],
+  "artifacts": []
+}

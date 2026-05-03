@@ -1,0 +1,23 @@
+{
+  "$comment": [
+    "Spark variant: Claude Sonnet 4.6 manager + max-everything worker pool.",
+    "Cost rationale: Sonnet 4.6 is mid-tier on Anthropic's pricing — cheaper",
+    "than Opus, more capable than Haiku. Tests whether a same-family-as-worker",
+    "manager produces better routing than a cross-family one.",
+    "Effort: 'max' is Anthropic's top thinking level; passed through to OpenRouter."
+  ],
+  "variantId": "spark_full_sonnet46",
+  "agent": "spark",
+  "manager": {
+    "model": "anthropic/claude-sonnet-4-6",
+    "effort": "max",
+    "profilePath": "resources/orchestration/manager-profile.json"
+  },
+  "pool": [
+    { "runtime": "claude_code", "model": "claude-opus-4-7", "effort": "max" },
+    { "runtime": "codex",       "model": "gpt-5.5",         "effort": "xhigh" }
+  ],
+  "perRoleOverrides": {
+    "visual_review": { "runtime": "openrouter", "model": "anthropic/claude-opus-4-7" }
+  }
+}

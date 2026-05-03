@@ -1,0 +1,99 @@
+{
+  "id": "professional-grade-code",
+  "version": "1.0",
+  "scale": { "min": 0, "max": 5 },
+  "description": "Senior-engineer rubric for one-shot, professional-grade software. Scores quality, robustness, polish, and deployability — NOT cost or speed. Each dimension is scored 0-5; weighted total is the headline number. Anchors describe what each level looks like in the diff.",
+  "dimensions": [
+    {
+      "id": "correctness",
+      "label": "Correctness",
+      "weight": 0.30,
+      "description": "Does it actually do what was asked, with the right semantics? Hidden gates passing is a hard floor.",
+      "anchors": {
+        "0": "Does not run, does not address the task, or fails the visible task.",
+        "1": "Surface-level only — happy path only, breaks on the first non-trivial input.",
+        "2": "Most of the visible task works; obvious edge cases are wrong.",
+        "3": "Visible task works end-to-end; some subtle edge cases mishandled.",
+        "4": "Visible task plus most of the obvious-but-tricky cases handled correctly.",
+        "5": "All visible behaviour correct, including the hidden-gate fixtures a senior reviewer would inject."
+      }
+    },
+    {
+      "id": "robustness",
+      "label": "Robustness & defensive design",
+      "weight": 0.20,
+      "description": "Adversarial inputs, untrusted data, error paths, retries, timeouts. The 'thought of every angle' axis.",
+      "anchors": {
+        "0": "No input validation. Trusts strings as commands. No error handling.",
+        "1": "Token validation — sanity checks but trivially bypassable.",
+        "2": "Error paths exist for the obvious failures; injection / escape are wide open.",
+        "3": "Untrusted data is escaped or quoted; failures degrade rather than crash.",
+        "4": "Multiple defensive layers; clearly-named primitives for the dangerous operations; tests cover the adversarial cases.",
+        "5": "Adversarial mindset visible throughout: argument arrays not interpolated strings, allow-lists, path traversal blocks, encoding-aware boundaries, explicit failure modes documented."
+      }
+    },
+    {
+      "id": "polish",
+      "label": "Polish & code quality",
+      "weight": 0.15,
+      "description": "Readable names, clean abstractions, sensible structure, comments where they add value, no dead code.",
+      "anchors": {
+        "0": "Hard to follow. Cryptic names, copy-paste, magic numbers.",
+        "1": "Works but feels rushed — inconsistent naming, missing types, no comments.",
+        "2": "Reasonable structure; some rough edges (overlong functions, ad-hoc helpers).",
+        "3": "Clear intent throughout; types where it matters; comments explain non-obvious choices.",
+        "4": "A senior would land it with minor nits.",
+        "5": "Polish you would expect from a staff engineer's PR — abstractions feel inevitable, comments explain *why*, no extraneous code."
+      }
+    },
+    {
+      "id": "tests",
+      "label": "Tests & verifiability",
+      "weight": 0.15,
+      "description": "Tests that actually pin behaviour, especially the adversarial cases. Type-checks, assertions, repro instructions.",
+      "anchors": {
+        "0": "No tests. Cannot verify behaviour.",
+        "1": "Smoke test only — proves nothing about the dangerous cases.",
+        "2": "Some unit tests; happy path coverage.",
+        "3": "Tests cover happy path plus a couple of failure cases.",
+        "4": "Tests pin the adversarial cases that motivated the task.",
+        "5": "Tests are themselves a spec — anyone reading them learns the invariants the code enforces."
+      }
+    },
+    {
+      "id": "fit",
+      "label": "Architectural fit",
+      "weight": 0.10,
+      "description": "Changes flow with the surrounding codebase: existing patterns, types, file layout. No drive-by refactors that overflow scope.",
+      "anchors": {
+        "0": "Wholesale departure from existing patterns. Random files moved.",
+        "1": "Conflicts with existing conventions (mismatched style, duplicated helpers).",
+        "2": "Mostly fits; a few unforced inconsistencies.",
+        "3": "Matches existing patterns; uses existing helpers where they exist.",
+        "4": "Code reads as if it has always been there.",
+        "5": "Improves the surrounding code's coherence without expanding scope."
+      }
+    },
+    {
+      "id": "deployability",
+      "label": "Deployability",
+      "weight": 0.10,
+      "description": "Can this ship? Type-check, build, no half-finished migrations or TODO-as-feature, no broken imports.",
+      "anchors": {
+        "0": "Will not build / type-check.",
+        "1": "Builds with warnings; obvious runtime issues on first launch.",
+        "2": "Builds; some parts visibly unfinished or stubbed.",
+        "3": "Builds and runs the happy path.",
+        "4": "Builds, type-checks, all visible features work.",
+        "5": "Production-ready: type-checks clean, public gates green, no TODOs masquerading as features, behaves correctly on a fresh checkout."
+      }
+    }
+  ],
+  "judging_protocol": {
+    "blinded": "Judges must not know which adapter produced the diff. Variant labels (`spark`, `claude`, `codex`) are stripped from artifacts before judging.",
+    "position_randomized": "When comparing two diffs, the harness randomizes A/B order independently per judge.",
+    "independent": "Each judge sees only the rubric and the diff. Judges do not see each other's verdicts.",
+    "structured_output": "Each judge returns JSON with per-dimension scores (0-5), a per-dimension justification, a per-issue list, and an overall verdict. Parse failures retried once.",
+    "panel_aggregation": "Per-dimension: mean of three judges. Total: weighted mean of dimension means. Disagreement: max - min per dimension; flagged when > 2."
+  }
+}

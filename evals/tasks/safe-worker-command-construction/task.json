@@ -1,0 +1,41 @@
+{
+  "id": "safe-worker-command-construction",
+  "title": "Safe worker command construction across shells",
+  "version": "1.0",
+  "budgetSeconds": 1800,
+  "allowedPaths": [
+    "src/main/",
+    "tests/"
+  ],
+  "forbiddenPaths": [
+    "src/renderer/",
+    "src/preload/",
+    "src/shared/",
+    "resources/orchestration/",
+    "evals/",
+    "package.json",
+    "package-lock.json",
+    "electron.vite.config.ts",
+    "playwright.config.ts"
+  ],
+  "publicGates": [
+    "public-gates.json"
+  ],
+  "judgeBlindList": [
+    "spark",
+    "Spark",
+    "SPARK",
+    "claude_best_single",
+    "claude_best",
+    "ClaudeBestSingle",
+    "ClaudeBestSingleRunner",
+    "spark_full",
+    "SparkFullRunner",
+    "Codex",
+    "codex",
+    "spark-agent",
+    "SparkAgent"
+  ],
+  "publicGateSummaryForJudge": "npm run typecheck must pass.",
+  "hiddenGateSummaryForJudgeTemplate": "Hidden adversarial fixtures: {passed}/{total} passed."
+}
