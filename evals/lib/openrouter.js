@@ -103,7 +103,7 @@ async function chatCompletion(cfg, body, opts = {}) {
         // Same titles Spark sends so usage shows up under the same OpenRouter
         // app entry the user already configured.
         "HTTP-Referer": "https://spark-agent.local",
-        "X-Title": "Spark Agent — Eval Harness",
+        "X-Title": "Spark Agent - Eval Harness",
       },
       body: JSON.stringify(body),
       signal: controller.signal,
