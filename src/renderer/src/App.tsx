@@ -16,6 +16,7 @@ import FileTree from "./components/FileTree";
 import EditorWorkbench from "./components/EditorWorkbench";
 import RunsView from "./components/RunsView";
 import OrchestrationSidebar from "./components/OrchestrationSidebar";
+import PlanDiffReview from "./components/PlanDiffReview/PlanDiffReview";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
 import SearchPanel from "./components/Search/SearchPanel";
@@ -692,6 +693,17 @@ export default function App() {
         workspace={activeWorkspace}
         defaultShell={defaultShell}
         platform={platform}
+      />
+
+      {/* Plan-mode overlay. Renders only when the active run has queued
+          mutations; mounted at root level so its backdrop-blur sheet covers
+          the workbench (centre) and the SparkAgentPanel (right) without
+          fighting the absolute-positioned WindowChrome / StatusBar / search
+          panel for stacking-context ownership. The active-run lookup mirrors
+          OrchestrationSidebar so the overlay binds to whatever the user has
+          selected on the right pane. */}
+      <PlanDiffReview
+        run={runs.find((r) => r.id === activeRunId) ?? null}
       />
     </div>
   );

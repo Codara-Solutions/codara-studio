@@ -290,6 +290,97 @@ export interface RunState {
    * read the classification regardless of when in the run it fires.
    */
   taskComplexity?: TaskComplexity;
+  /**
+   * AI plan mode flag — when true, mutating manager decisions (worker task
+   * launches that would touch the workspace) are queued into
+   * `pendingMutations` instead of being dispatched. The user reviews them in
+   * the PlanDiffReview overlay and applies/discards atomically. Per-run
+   * (no global setting); toggled by the `/plan` and `/auto` slash commands
+   * in the chat composer.
+   */
+  planMode?: boolean;
+  /**
+   * Mutations queued by the manager while `planMode === true`. Each entry is
+   * a worker-task launch that the user has not yet approved. Apply pops the
+   * entry, creates the worker task, and lets the autopilot pick it up;
+   * discard pops without dispatching.
+   */
+  pendingMutations?: PendingMutation[];
+}
+
+export type PendingMutationSource = "manager_decision";
+
+export interface PendingMutation {
+  /** uuid for the mutation; stable across apply/discard. */
+  id: string;
+  /** Origin of the queued action; "manager_decision" today, "worker_output" later. */
+  source: PendingMutationSource;
+  /** ISO timestamp when this mutation was proposed. */
+  proposedAt: string;
+  /** Human-readable summary surfaced in the review card. */
+  description: string;
+  /**
+   * The worker task the manager wanted to launch. We persist the full input
+   * (not a partial WorkerTask) so apply can call createWorkerTask verbatim.
+   */
+  workerTaskInput: PendingWorkerTaskInput;
+  /**
+   * Optional pre-execution diff preview. Empty for the MVP since worker output
+   * isn't known until execution. Reserved for future "worker_output" sources
+   * where individual edits ARE inspectable before commit.
+   */
+  diffPreview?: PendingDiffPreview;
+}
+
+export interface PendingWorkerTaskInput {
+  stepId?: string;
+  title: string;
+  description: string;
+  runtimePreference: WorkerRuntime;
+  modelHint?: string;
+  effortHint?: WorkerTask["effortHint"];
+  allowedPaths: string[];
+  forbiddenPaths: string[];
+  expectedOutputs: string[];
+  verificationCommands: string[];
+  canRunParallel: boolean;
+  conflictsWith: string[];
+  taskClass?: PlannedStepAgentTaskClass;
+}
+
+export interface PendingDiffPreview {
+  files: PendingFileDiff[];
+  totals: {
+    addedLines: number;
+    removedLines: number;
+    filesChanged: number;
+  };
+}
+
+export interface PendingFileDiff {
+  path: string;
+  before?: string;
+  after?: string;
+  unifiedDiff: string;
+  added: number;
+  removed: number;
+}
+
+export interface SetPlanModeInput {
+  runId: string;
+  enabled: boolean;
+}
+
+export interface ApplyPendingMutationsInput {
+  runId: string;
+  /** When undefined, applies every queued mutation. */
+  ids?: string[];
+}
+
+export interface DiscardPendingMutationsInput {
+  runId: string;
+  /** When undefined, discards every queued mutation. */
+  ids?: string[];
 }
 
 export type AutopilotStatus = "idle" | "running" | "paused" | "blocked" | "complete" | "failed" | "cancelled";
