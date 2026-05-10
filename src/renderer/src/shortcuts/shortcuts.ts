@@ -13,9 +13,16 @@ export type ShortcutId =
   | "sidebar.toggle"
   | "search.open"
   | "terminal.toggle"
-  | "view.selectByIndex";
+  | "view.selectByIndex"
+  | "tab.newTerminal"
+  | "tab.newEditor"
+  | "tab.newPreview"
+  | "tab.close"
+  | "tab.closeOthers"
+  | "tab.cycleNext"
+  | "tab.cyclePrev";
 
-export type ShortcutGroup = "General" | "Navigation" | "View";
+export type ShortcutGroup = "General" | "Navigation" | "View" | "Tabs";
 
 export type Shortcut = {
   id: ShortcutId;
@@ -65,18 +72,77 @@ export const SHORTCUTS: Shortcut[] = [
   },
   {
     id: "terminal.toggle",
-    label: "Toggle terminal strip",
+    label: "Toggle terminal",
     keys: [MOD_KEY, "`"],
     group: "View",
     match: (e) => isMod(e) && (e.key === "`" || e.code === "Backquote"),
   },
   {
     id: "view.selectByIndex",
-    label: "Switch run / view 1–9",
+    label: "Switch tab 1–9",
     keys: [MOD_KEY, "1…9"],
-    group: "Navigation",
-    match: (e) => isMod(e) && /^[1-9]$/.test(e.key),
+    group: "Tabs",
+    match: (e) => isMod(e) && !e.shiftKey && /^[1-9]$/.test(e.key),
+  },
+  {
+    id: "tab.newTerminal",
+    label: "New terminal tab",
+    keys: [MOD_KEY, "T"],
+    group: "Tabs",
+    match: (e) => isMod(e) && !e.shiftKey && e.key.toLowerCase() === "t",
+  },
+  {
+    id: "tab.newEditor",
+    label: "New editor tab",
+    keys: [MOD_KEY, "E"],
+    group: "Tabs",
+    match: (e) => isMod(e) && !e.shiftKey && e.key.toLowerCase() === "e",
+  },
+  {
+    id: "tab.newPreview",
+    label: "New preview tab",
+    keys: [MOD_KEY, "P"],
+    group: "Tabs",
+    // Mod+Shift+P is reserved for the (future) command palette; keep this
+    // unshifted so the chord is accessible without a stretch.
+    match: (e) => isMod(e) && !e.shiftKey && e.key.toLowerCase() === "p",
+  },
+  {
+    id: "tab.close",
+    label: "Close active tab",
+    keys: [MOD_KEY, "W"],
+    group: "Tabs",
+    match: (e) => isMod(e) && !e.shiftKey && e.key.toLowerCase() === "w",
+  },
+  {
+    id: "tab.closeOthers",
+    label: "Close other tabs",
+    keys: [MOD_KEY, "Shift", "W"],
+    group: "Tabs",
+    match: (e) => isMod(e) && e.shiftKey && e.key.toLowerCase() === "w",
+  },
+  {
+    id: "tab.cycleNext",
+    label: "Cycle to next tab",
+    keys: ["Ctrl", "Tab"],
+    group: "Tabs",
+    // Use Ctrl explicitly (not Mod) so this works the same way on macOS,
+    // where Ctrl+Tab is the cross-app convention. Avoids stomping on
+    // Cmd+Tab (system app switcher).
+    match: (e) => e.ctrlKey && !e.shiftKey && e.key === "Tab",
+  },
+  {
+    id: "tab.cyclePrev",
+    label: "Cycle to previous tab",
+    keys: ["Ctrl", "Shift", "Tab"],
+    group: "Tabs",
+    match: (e) => e.ctrlKey && e.shiftKey && e.key === "Tab",
   },
 ];
 
-export const SHORTCUT_GROUPS: ShortcutGroup[] = ["General", "Navigation", "View"];
+export const SHORTCUT_GROUPS: ShortcutGroup[] = [
+  "General",
+  "Navigation",
+  "View",
+  "Tabs",
+];

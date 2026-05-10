@@ -11,25 +11,25 @@ import type {
 } from "@shared/types";
 import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
-import TerminalGrid from "./components/TerminalGrid";
 import FileTree from "./components/FileTree";
-import EditorWorkbench from "./components/EditorWorkbench";
-import RunsView from "./components/RunsView";
 import OrchestrationSidebar from "./components/OrchestrationSidebar";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
 import SearchPanel from "./components/Search/SearchPanel";
-import TerminalStrip from "./components/Terminal/TerminalStrip";
-import { PlusIcon } from "./components/icons";
+import TerminalGrid from "./components/TerminalGrid";
+import TabBar from "./tabs/TabBar";
+import EditorStack from "./tabs/EditorStack";
+import TerminalStack from "./tabs/TerminalStack";
+import PreviewStack from "./tabs/PreviewStack";
+import RunsStack from "./tabs/RunsStack";
+import { useTabs } from "./tabs/useTabs";
 import type { ShellIntegration } from "./terminal/shell-integration";
 import { basename } from "./path-utils";
-import { getWorkerGridLayout } from "./worker-grid-layout";
 import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
 
 const RAIL_WIDTH = 240;
 const RIGHT_WIDTH = 360;
-type WorkbenchTab = "workers" | "editor" | "runs";
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
@@ -60,6 +60,22 @@ function isReusableWorkerSlot(
   return integrations.get(worker.id)?.isReusablePrompt() === true;
 }
 
+function entryFromPath(path: string): FsEntry {
+  const segments = path.split(/[\\/]/);
+  const name = segments[segments.length - 1] || path;
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : undefined;
+  return { name, path, isDir: false, ext };
+}
+
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return a === b;
+  }
+}
+
 export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
@@ -68,9 +84,6 @@ export default function App() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showLeft, setShowLeft] = useState(true);
   const [showRight, setShowRight] = useState(true);
-  const [openFiles, setOpenFiles] = useState<FsEntry[]>([]);
-  const [activeEditorPath, setActiveEditorPath] = useState<string | null>(null);
-  const [activeWorkbenchTab, setActiveWorkbenchTab] = useState<WorkbenchTab>("workers");
   const [runCountsByWorkspace, setRunCountsByWorkspace] = useState<Record<string, number>>({});
   // Runs for the currently active workspace, plus the user's selection. Lifted
   // here so the workbench RunsView and the right-panel SparkAgentPanel both
@@ -83,7 +96,7 @@ export default function App() {
   const [defaultShell, setDefaultShell] = useState<ShellInfo | null>(null);
   const [detectedDefaultShell, setDetectedDefaultShell] = useState<ShellInfo | null>(null);
   // Default shell augmented with the bundled OSC 7/133/633/8888 shell
-  // integration. Used exclusively by the bottom-strip terminal so a fresh
+  // integration. Used as the launch profile for terminal tabs so a fresh
   // interactive pane reports cwd/prompt/open-file events to the renderer.
   const [integratedShell, setIntegratedShell] = useState<ShellInfo | null>(null);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
@@ -93,9 +106,12 @@ export default function App() {
   const [platform, setPlatform] = useState<string>("");
   const [home, setHome] = useState<string>("");
   const saveTimer = useRef<number | null>(null);
-  // Per-pane shell integrations registered as WorkerPanes mount. Used to ask
-  // "is this terminal currently running a command or hosting a TUI?" before
-  // pasting test prompts into it.
+  // Per-pane shell integrations registered as orchestration worker panes
+  // mount. Spark's orchestration runner uses this to ask "is this terminal
+  // currently running a command or hosting a TUI?" before pasting prompts.
+  // Worker panes themselves are no longer rendered in the workspace tab
+  // strip — they live on the runs canvas only — but the orchestration
+  // event flow that creates them still runs, so the registry is wired up.
   const workerIntegrationsRef = useRef<Map<string, ShellIntegration>>(new Map());
   const registerWorkerIntegration = useCallback(
     (workerId: string, integration: ShellIntegration | null) => {
@@ -104,6 +120,10 @@ export default function App() {
     },
     [],
   );
+
+  // Tabs are scoped per-workspace so each workspace remembers its own layout.
+  // useTabs internally swaps tab lists when the workspaceId argument changes.
+  const tabs = useTabs(activeId);
 
   // Initial load
   useEffect(() => {
@@ -174,16 +194,10 @@ export default function App() {
     };
   }, [workspaces, activeId, booted]);
 
-  // Close editor when rail hidden
+  // Close editor when rail hidden — kept for parity with old behaviour.
   useEffect(() => {
     if (!showLeft) setEditingId(null);
   }, [showLeft]);
-
-  useEffect(() => {
-    setOpenFiles([]);
-    setActiveEditorPath(null);
-    setActiveWorkbenchTab("workers");
-  }, [activeId]);
 
   const activeWorkspace = useMemo(
     () => workspaces.find((w) => w.id === activeId) ?? null,
@@ -275,13 +289,6 @@ export default function App() {
       }
     });
   }, [booted, refreshRunCount, refreshRunsFor, activeId]);
-
-  useEffect(() => {
-    if (activeWorkbenchTab !== "runs") return;
-    if (!activeId || (runCountsByWorkspace[activeId] ?? 0) === 0) {
-      setActiveWorkbenchTab("workers");
-    }
-  }, [activeId, activeWorkbenchTab, runCountsByWorkspace]);
 
   // Theme the entire UI with the active workspace's color. Falls back to the
   // default yellow when nothing is active.
@@ -424,52 +431,124 @@ export default function App() {
     void window.spark.pty.dispose(workerId);
     setWorkspaces((list) =>
       list.map((w) =>
-        w.id === workspaceId ? { ...w, workers: w.workers.filter((x) => x.id !== workerId) } : w,
+        w.id === workspaceId
+          ? { ...w, workers: w.workers.filter((x) => x.id !== workerId) }
+          : w,
       ),
     );
   }, []);
 
-  const openEditorFile = useCallback((entry: FsEntry) => {
-    setOpenFiles((files) =>
-      files.some((file) => file.path === entry.path) ? files : [...files, entry],
-    );
-    setActiveEditorPath(entry.path);
-    setActiveWorkbenchTab("editor");
-  }, []);
+  // ── File / editor tab integration ──────────────────────────────────────────
 
-  // Open a file by absolute path. Used by the terminal strip's OSC 8888
-  // handler (`tp <file>` / `spark_open <file>` from a shell). Falls back to
-  // a synthesized FsEntry when the renderer cannot reach the on-disk record
-  // — opening a file is best-effort UX, not a critical path.
+  const openEditorFile = useCallback(
+    (entry: FsEntry) => {
+      tabs.openEditorTab(entry);
+    },
+    [tabs],
+  );
+
+  // Open a file by absolute path. Used by the terminal's OSC 8888 handler
+  // (`tp <file>` / `spark_open <file>` from a shell). Falls back to a
+  // synthesized FsEntry — opening a file is best-effort UX.
   const openFileByPath = useCallback(
     (path: string) => {
       if (!path) return;
-      const segments = path.split(/[\\/]/);
-      const name = segments[segments.length - 1] || path;
-      const dot = name.lastIndexOf(".");
-      const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : undefined;
-      openEditorFile({ name, path, isDir: false, ext });
+      tabs.openEditorTab(entryFromPath(path));
     },
-    [openEditorFile],
+    [tabs],
   );
 
-  const closeEditorFile = useCallback((path: string) => {
-    setOpenFiles((files) => {
-      const next = files.filter((file) => file.path !== path);
-      setActiveEditorPath((current) => {
-        if (current !== path) return current;
-        return next[next.length - 1]?.path ?? null;
-      });
-      if (next.length === 0) setActiveWorkbenchTab("workers");
-      return next;
-    });
+  // ── Detected URL → preview tab ─────────────────────────────────────────────
+
+  // Ports we auto-spawn a preview tab for when a terminal sniffs the URL on
+  // its stdout. Anything else just shows the detected-URL chip in the
+  // status bar (or the user can open via the Ports preset dropdown).
+  const AUTO_PREVIEW_PORTS = useMemo(
+    () => new Set([3000, 3001, 4173, 4200, 4321, 5173, 5174, 6006, 8000, 8080, 8888]),
+    [],
+  );
+
+  // Per-terminal-tab "last URL we already opened" cache so a chatty dev
+  // server printing its URL on every change doesn't spam preview tabs.
+  const lastOpenedUrlByTerminalRef = useRef<Map<string, string>>(new Map());
+
+  const handleDetectedUrl = useCallback(
+    (terminalId: string, url: string) => {
+      tabs.setDetectedUrl(terminalId, url);
+      // Re-broadcast so other listeners (status bar, agent bridge) can
+      // react without coupling directly to the terminal stack.
+      window.dispatchEvent(
+        new CustomEvent("spark:detected-url", {
+          detail: { url, sessionId: terminalId },
+        }),
+      );
+
+      let port: number | null = null;
+      try {
+        const u = new URL(url);
+        if (u.port) port = Number(u.port);
+      } catch {
+        return;
+      }
+      if (port === null || !AUTO_PREVIEW_PORTS.has(port)) return;
+
+      // Suppress repeats for this terminal pointing at the same origin.
+      const last = lastOpenedUrlByTerminalRef.current.get(terminalId);
+      if (last && sameOrigin(last, url)) return;
+      lastOpenedUrlByTerminalRef.current.set(terminalId, url);
+
+      // If a preview tab already shows the same origin, focus it instead
+      // of stacking a duplicate — multi-tab parity with how editors dedupe
+      // open paths.
+      const existing = tabs.tabs.find(
+        (t) => t.kind === "preview" && sameOrigin(t.url, url),
+      );
+      if (existing) {
+        tabs.setActiveTab(existing.id);
+        return;
+      }
+      tabs.newPreviewTab(url);
+    },
+    [AUTO_PREVIEW_PORTS, tabs],
+  );
+
+  // ── Tab toolbar handlers ───────────────────────────────────────────────────
+
+  const handleNewTerminalTab = useCallback(() => {
+    tabs.newTerminalTab(activeWorkspace?.cwd ?? undefined);
+  }, [tabs, activeWorkspace?.cwd]);
+
+  const handleNewEditorTab = useCallback(() => {
+    // No native "open file" dialog wired up yet; surface the search modal,
+    // which is the existing path the user knows for picking a file.
+    setSearchOpen(true);
   }, []);
 
-  // Global keyboard shortcuts. Capture-phase + stopImmediatePropagation in
-  // useGlobalShortcuts ensures these chords win over xterm/CodeMirror panes
-  // that would otherwise eat the keystroke. Cross-module side-effects
-  // (focus the chat composer, ask other panels to toggle) are broadcast as
-  // `spark:*` CustomEvents so listeners can wire up without prop drilling.
+  const handleNewPreviewTab = useCallback(() => {
+    const raw = window.prompt("URL to preview", "http://localhost:3000");
+    if (!raw) return;
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    const url = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+    tabs.newPreviewTab(url);
+  }, [tabs]);
+
+  const handlePreviewUrlChange = useCallback(
+    (id: string, url: string) => {
+      // Reflect navigation back into the persisted tab state so a reload
+      // restores the user where they were.
+      tabs.setPreviewUrl(id, url);
+    },
+    [tabs],
+  );
+
+  // ── Global keyboard shortcuts ──────────────────────────────────────────────
+
+  // Capture-phase + stopImmediatePropagation in useGlobalShortcuts ensures
+  // these chords win over xterm/CodeMirror panes that would otherwise eat
+  // the keystroke. Cross-module side-effects (focus the chat composer, ask
+  // other panels to toggle) are broadcast as `spark:*` CustomEvents so
+  // listeners can wire up without prop drilling.
   const shortcutHandlers = useMemo<ShortcutHandlers>(
     () => ({
       "shortcuts.open": () => setShortcutsOpen((open) => !open),
@@ -486,27 +565,66 @@ export default function App() {
       },
       "search.open": () => {
         setSearchOpen(true);
-        // Mirror the other modal events so background panels can react if
-        // they ever need to (e.g. dim themselves while search is up).
         window.dispatchEvent(new CustomEvent("spark:open-search"));
       },
       "terminal.toggle": () => {
-        // The strip is the single subscriber for this CustomEvent — keeping
-        // the toggle decoupled means a future detached-window terminal
-        // implementation can reuse the same chord without rewiring.
-        window.dispatchEvent(new CustomEvent("spark:toggle-terminal"));
+        // Without the bottom strip the chord now spawns or focuses a
+        // terminal tab. If a terminal tab already exists and is active,
+        // fall back to cycling to the next one for parity with the
+        // "toggle visible terminal" mental model.
+        const existing = tabs.tabs.find((t) => t.kind === "terminal");
+        if (!existing) {
+          handleNewTerminalTab();
+          return;
+        }
+        if (tabs.activeId === existing.id) {
+          // Find any other terminal to cycle to; otherwise leave the
+          // current one selected.
+          const others = tabs.tabs.filter((t) => t.kind === "terminal" && t.id !== existing.id);
+          if (others.length > 0) tabs.setActiveTab(others[0].id);
+        } else {
+          tabs.setActiveTab(existing.id);
+        }
       },
       "view.selectByIndex": (event) => {
         const index = Number.parseInt(event.key, 10);
+        if (Number.isFinite(index) && index >= 1) {
+          tabs.selectByIndex(index - 1);
+        }
+        // Keep the legacy event so any listener (e.g. right panel run
+        // selector) can also respond.
         window.dispatchEvent(
           new CustomEvent("spark:select-view", { detail: { index } }),
         );
       },
+      "tab.newTerminal": handleNewTerminalTab,
+      "tab.newEditor": handleNewEditorTab,
+      "tab.newPreview": handleNewPreviewTab,
+      "tab.close": () => {
+        if (tabs.activeId) tabs.closeTab(tabs.activeId);
+      },
+      "tab.closeOthers": () => {
+        if (tabs.activeId) tabs.closeOthers(tabs.activeId);
+      },
+      "tab.cycleNext": () => tabs.cycleNext(),
+      "tab.cyclePrev": () => tabs.cyclePrev(),
     }),
-    [],
+    [handleNewEditorTab, handleNewPreviewTab, handleNewTerminalTab, tabs],
   );
 
   useGlobalShortcuts(shortcutHandlers);
+
+  // Dispose PTYs when terminal tabs close.
+  const onTerminalExit = useCallback(
+    (tabId: string) => {
+      void window.spark.pty.dispose(tabId);
+      // Reflect "exited" by closing the tab automatically would be too
+      // aggressive — many users want to read the final stdout. We just
+      // let it sit; closing the tab via the X disposes the pty.
+      void tabId;
+    },
+    [],
+  );
 
   if (bootError) {
     return (
@@ -518,6 +636,8 @@ export default function App() {
   if (!booted) {
     return <div style={{ padding: 20, color: "var(--muted)" }}>Loading…</div>;
   }
+
+  const terminalShell = integratedShell ?? defaultShell;
 
   return (
     <div
@@ -550,9 +670,6 @@ export default function App() {
             editingId={editingId}
             width={RAIL_WIDTH}
             onActivate={(id) => {
-              setOpenFiles([]);
-              setActiveEditorPath(null);
-              setActiveWorkbenchTab("workers");
               setActiveId(id);
             }}
             onEdit={(id) => setEditingId((prev) => (prev === id ? null : id))}
@@ -575,75 +692,47 @@ export default function App() {
           {workspaces.length === 0 ? (
             <NoWorkspace onCreate={createWs} />
           ) : (
-            // Keep every workspace's grid mounted so PTYs and xterm scrollback
-            // survive workspace switches; hide inactive ones with display:none.
-            workspaces.map((ws) => (
-              <div
-                key={ws.id}
-                style={{
-                  flex: 1,
-                  display: ws.id === activeId ? "flex" : "none",
-                  flexDirection: "column",
-                  minWidth: 0,
-                  minHeight: 0,
-                }}
-              >
-                <WorkbenchTabs
-                  active={activeWorkbenchTab}
-                  workerCount={ws.workers.length}
-                  fileCount={openFiles.length}
-                  runCount={runCountsByWorkspace[ws.id] ?? 0}
-                  shells={shells}
-                  defaultShell={defaultShell}
-                  onSelect={setActiveWorkbenchTab}
-                  onAddWorker={(shellId) => addWorker(ws.id, shellId)}
-                />
-                <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: activeWorkbenchTab === "workers" ? "flex" : "none" }}>
-                  <TerminalGrid
-                    workspace={ws}
-                    shells={shells}
-                    defaultShell={defaultShell}
-                    onAddWorker={(shellId) => addWorker(ws.id, shellId)}
-                    onRemoveWorker={(workerId) => removeWorker(ws.id, workerId)}
-                    onWorkerIntegration={registerWorkerIntegration}
-                  />
-                </div>
-                <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: activeWorkbenchTab === "editor" ? "flex" : "none" }}>
-                  <EditorWorkbench
-                    files={openFiles}
-                    activePath={activeEditorPath}
-                    onActivateFile={setActiveEditorPath}
-                    onCloseFile={closeEditorFile}
-                  />
-                </div>
-                <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: activeWorkbenchTab === "runs" ? "flex" : "none" }}>
-                  <RunsView
-                    workspace={ws}
-                    runs={ws.id === activeId ? runs : []}
-                    activeRunId={ws.id === activeId ? activeRunId : null}
-                    onSelectRun={setActiveRunId}
-                  />
-                </div>
-              </div>
-            ))
+            <Workspace
+              tabs={tabs}
+              workspace={activeWorkspace}
+              shell={terminalShell}
+              shells={shells}
+              defaultShell={defaultShell}
+              runs={runs}
+              activeRunId={activeRunId}
+              onSelectRun={setActiveRunId}
+              onDetectedUrl={handleDetectedUrl}
+              onSparkOpenFile={openFileByPath}
+              onTerminalExit={onTerminalExit}
+              onPreviewUrlChange={handlePreviewUrlChange}
+              onAddWorker={(shellId) =>
+                activeWorkspace && addWorker(activeWorkspace.id, shellId)
+              }
+              onRemoveWorker={(workerId) =>
+                activeWorkspace && removeWorker(activeWorkspace.id, workerId)
+              }
+              onWorkerIntegration={registerWorkerIntegration}
+              onNewTerminalTab={handleNewTerminalTab}
+              onNewEditorTab={handleNewEditorTab}
+              onNewPreviewTab={handleNewPreviewTab}
+            />
           )}
         </main>
 
         {showRight && (
           <RightPanel
             workspace={activeWorkspace}
-            activePath={activeEditorPath}
+            activePath={
+              tabs.activeTab && tabs.activeTab.kind === "editor"
+                ? tabs.activeTab.path
+                : null
+            }
             runs={runs}
             activeRunId={activeRunId}
             onSelectRun={setActiveRunId}
             onOpenFile={openEditorFile}
-            onDeleteFile={closeEditorFile}
-            onRenameFile={(oldPath, entry) => {
-              setOpenFiles((files) =>
-                files.map((file) => (file.path === oldPath ? entry : file)),
-              );
-              setActiveEditorPath((current) => (current === oldPath ? entry.path : current));
-            }}
+            onDeleteFile={(path) => tabs.closeEditorByPath(path)}
+            onRenameFile={(oldPath, entry) => tabs.setEditorEntry(oldPath, entry)}
           />
         )}
 
@@ -671,28 +760,140 @@ export default function App() {
           cwd={activeWorkspace?.cwd ?? null}
           onClose={() => setSearchOpen(false)}
           onOpenFile={(entry) => {
-            // Reuse the editor-open path: the SearchPanel hands us the
-            // FsEntry and the line/column it matched on. We open the file
-            // (deduped by `openEditorFile`) and focus the editor tab so
-            // the user lands somewhere they can navigate. The panel also
-            // dispatches `spark:open-file` for any future seek listener.
             openEditorFile(entry);
             setSearchOpen(false);
           }}
         />
       </div>
 
-      <TerminalStrip
-        shell={integratedShell ?? defaultShell}
-        cwd={activeWorkspace?.cwd ?? null}
-        onOpenFile={openFileByPath}
-      />
-
       <StatusBar
         workspace={activeWorkspace}
         defaultShell={defaultShell}
         platform={platform}
       />
+    </div>
+  );
+}
+
+// ── Workspace pane (tab strip + stacks) ──────────────────────────────────────
+
+interface WorkspaceProps {
+  tabs: ReturnType<typeof useTabs>;
+  workspace: Workspace | null;
+  shell: ShellInfo | null;
+  shells: ShellInfo[];
+  defaultShell: ShellInfo | null;
+  runs: RunState[];
+  activeRunId: string | null;
+  onSelectRun: (id: string | null) => void;
+  onDetectedUrl: (terminalId: string, url: string) => void;
+  onSparkOpenFile: (path: string) => void;
+  onTerminalExit: (terminalId: string) => void;
+  onPreviewUrlChange: (id: string, url: string) => void;
+  onAddWorker: (shellId: string) => void;
+  onRemoveWorker: (workerId: string) => void;
+  onWorkerIntegration: (id: string, integration: ShellIntegration | null) => void;
+  onNewTerminalTab: () => void;
+  onNewEditorTab: () => void;
+  onNewPreviewTab: () => void;
+}
+
+function Workspace({
+  tabs,
+  workspace,
+  shell,
+  shells,
+  defaultShell,
+  runs,
+  activeRunId,
+  onSelectRun,
+  onDetectedUrl,
+  onSparkOpenFile,
+  onTerminalExit,
+  onPreviewUrlChange,
+  onAddWorker,
+  onRemoveWorker,
+  onWorkerIntegration,
+  onNewTerminalTab,
+  onNewEditorTab,
+  onNewPreviewTab,
+}: WorkspaceProps) {
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        minWidth: 0,
+        minHeight: 0,
+      }}
+    >
+      <TabBar
+        tabs={tabs.tabs}
+        activeId={tabs.activeId}
+        onSelect={(id) => tabs.setActiveTab(id)}
+        onClose={(id) => tabs.closeTab(id)}
+        onNewTerminal={onNewTerminalTab}
+        onNewEditor={onNewEditorTab}
+        onNewPreview={onNewPreviewTab}
+      />
+      <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
+        <EditorStack
+          tabs={tabs.tabs}
+          activeId={tabs.activeId}
+          onDirtyChange={(id, dirty) => tabs.setDirty(id, dirty)}
+          onClose={(id) => tabs.closeTab(id)}
+        />
+        <TerminalStack
+          tabs={tabs.tabs}
+          activeId={tabs.activeId}
+          shell={shell}
+          onDetectedUrl={onDetectedUrl}
+          onSparkOpen={(input) => onSparkOpenFile(input.file)}
+          onExit={(id) => onTerminalExit(id)}
+        />
+        <PreviewStack
+          tabs={tabs.tabs}
+          activeId={tabs.activeId}
+          onUrlChange={onPreviewUrlChange}
+        />
+        <RunsStack
+          tabs={tabs.tabs}
+          activeId={tabs.activeId}
+          workspace={workspace}
+          runs={runs}
+          activeRunId={activeRunId}
+          onSelectRun={onSelectRun}
+        />
+        {/* Orchestration worker grid is mounted hidden so worker PTYs stay
+            alive across tab switches and orchestration writes can target
+            the right session. The user-facing surface is the runs canvas;
+            the grid here is purely for keeping the underlying xterms
+            attached and reporting integration state. Without this mount,
+            the renderer would never call pty.spawn for orchestration
+            workers, breaking every run. */}
+        {workspace ? (
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              inset: 0,
+              visibility: "hidden",
+              pointerEvents: "none",
+              zIndex: 0,
+            }}
+          >
+            <TerminalGrid
+              workspace={workspace}
+              shells={shells}
+              defaultShell={defaultShell}
+              onAddWorker={onAddWorker}
+              onRemoveWorker={onRemoveWorker}
+              onWorkerIntegration={onWorkerIntegration}
+            />
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -750,351 +951,6 @@ function RightPanel({
         </div>
       )}
     </aside>
-  );
-}
-
-function WorkbenchTabs({
-  active,
-  workerCount,
-  fileCount,
-  runCount,
-  shells,
-  defaultShell,
-  onSelect,
-  onAddWorker,
-}: {
-  active: WorkbenchTab;
-  workerCount: number;
-  fileCount: number;
-  runCount: number;
-  shells: ShellInfo[];
-  defaultShell: ShellInfo | null;
-  onSelect: (tab: WorkbenchTab) => void;
-  onAddWorker: (shellId: string) => void;
-}) {
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const pickerRef = useRef<HTMLDivElement | null>(null);
-  const workerDims = getWorkerGridLayout(workerCount);
-  const activeDims = workerDims;
-  const showLayoutPill = active === "workers";
-
-  useEffect(() => {
-    if (!pickerOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (pickerRef.current && e.target instanceof Node && !pickerRef.current.contains(e.target)) {
-        setPickerOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPickerOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [pickerOpen]);
-
-  const handleAdd = () => {
-    onSelect("workers");
-    if (shells.length === 1 && defaultShell) {
-      onAddWorker(defaultShell.id);
-      return;
-    }
-    setPickerOpen((open) => !open);
-  };
-
-  return (
-    <div
-      style={{
-        flex: "0 0 36px",
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "0 10px",
-        background: "var(--panel)",
-        borderBottom: "1px solid var(--rule-soft)",
-        position: "relative",
-      }}
-    >
-      <WorkbenchTabButton
-        label="WORKERS"
-        count={workerCount}
-        active={active === "workers"}
-        onClick={() => onSelect("workers")}
-      />
-      {runCount > 0 && (
-        <WorkbenchTabButton
-          label="RUNS"
-          count={runCount}
-          active={active === "runs"}
-          onClick={() => onSelect("runs")}
-        />
-      )}
-      {fileCount > 0 && (
-        <WorkbenchTabButton
-          label="EDITOR"
-          count={fileCount}
-          active={active === "editor"}
-          onClick={() => onSelect("editor")}
-        />
-      )}
-      <div style={{ flex: 1 }} />
-      {active === "workers" && (
-        <div ref={pickerRef} style={{ position: "relative", display: "flex", alignItems: "center" }}>
-          <button
-            type="button"
-            onClick={handleAdd}
-            disabled={shells.length === 0}
-            title="New worker"
-            style={{
-              appearance: "none",
-              width: 24,
-              height: 24,
-              border: "1px solid var(--rule-soft)",
-              borderRadius: 5,
-              background: "color-mix(in oklch, var(--ink) 2%, transparent)",
-              color: shells.length > 0 ? "var(--ink-dim)" : "var(--muted)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: 0,
-              cursor: "default",
-              transition:
-                "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-            }}
-            onMouseEnter={(e) => {
-              if (shells.length > 0) {
-                e.currentTarget.style.background = "var(--hover)";
-                e.currentTarget.style.borderColor = "var(--rule-strong)";
-              }
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "color-mix(in oklch, var(--ink) 2%, transparent)";
-              e.currentTarget.style.borderColor = "var(--rule-soft)";
-            }}
-          >
-            <PlusIcon size={12} />
-          </button>
-          {pickerOpen && (
-            <ShellPicker
-              shells={shells}
-              defaultShell={defaultShell}
-              onPick={(shell) => {
-                setPickerOpen(false);
-                onAddWorker(shell.id);
-              }}
-            />
-          )}
-        </div>
-      )}
-      {showLayoutPill && (
-        <div
-          style={{
-            height: 24,
-            padding: "0 10px",
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-            border: "1px solid var(--rule-soft)",
-            borderRadius: 999,
-            background: "color-mix(in oklch, var(--ink) 2%, transparent)",
-            color: "var(--muted)",
-          }}
-        >
-          <span
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontWeight: 700,
-              fontSize: 9,
-              letterSpacing: "0.16em",
-              textTransform: "uppercase",
-            }}
-          >
-            LAYOUT
-          </span>
-          <span
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: 10,
-              fontVariantNumeric: "tabular-nums",
-              color: "var(--ink-dim)",
-            }}
-          >
-            {activeDims.cols}×{activeDims.rows}
-          </span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function WorkbenchTabButton({
-  label,
-  count,
-  active,
-  onClick,
-}: {
-  label: string;
-  count?: number;
-  active: boolean;
-  onClick: () => void;
-}) {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        appearance: "none",
-        border: active
-          ? "1px solid color-mix(in oklch, var(--accent) 54%, var(--rule-strong))"
-          : hover
-            ? "1px solid var(--rule-soft)"
-            : "1px solid transparent",
-        borderRadius: 7,
-        background: active
-          ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
-          : hover
-            ? "color-mix(in oklch, var(--ink) 4%, transparent)"
-            : "transparent",
-        color: active ? "var(--ink)" : hover ? "var(--ink-dim)" : "var(--muted)",
-        minHeight: 26,
-        padding: "0 9px 0 10px",
-        display: "flex",
-        alignItems: "center",
-        gap: 7,
-        fontFamily: "var(--font-sans)",
-        fontSize: 10,
-        fontWeight: 700,
-        letterSpacing: "0.12em",
-        textTransform: "uppercase",
-        cursor: "default",
-        position: "relative",
-        boxShadow: active
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent), 0 8px 18px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
-          : "none",
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      {active && (
-        <span
-          aria-hidden
-          style={{
-            width: 7,
-            height: 7,
-            borderRadius: 999,
-            background: "var(--accent)",
-            boxShadow: "0 0 9px var(--accent-glow)",
-            flex: "0 0 7px",
-          }}
-        />
-      )}
-      <span>{label}</span>
-      {count !== undefined && (
-        <span
-          style={{
-            minWidth: 18,
-            textAlign: "center",
-            padding: "1px 5px",
-            border: active
-              ? "1px solid color-mix(in oklch, var(--accent) 34%, var(--rule-soft))"
-              : "1px solid var(--rule-soft)",
-            borderRadius: 4,
-            background: "color-mix(in oklch, var(--ink) 3%, transparent)",
-            color: active ? "var(--ink-dim)" : "var(--muted)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 9,
-            fontVariantNumeric: "tabular-nums",
-            letterSpacing: 0,
-            textTransform: "none",
-          }}
-        >
-          {String(count).padStart(2, "0")}
-        </span>
-      )}
-    </button>
-  );
-}
-
-function ShellPicker({
-  shells,
-  defaultShell,
-  onPick,
-}: {
-  shells: ShellInfo[];
-  defaultShell: ShellInfo | null;
-  onPick: (shell: ShellInfo) => void;
-}) {
-  return (
-    <div
-      style={{
-        position: "absolute",
-        top: 30,
-        right: 0,
-        zIndex: 50,
-        background: "var(--panel-2)",
-        border: "1px solid var(--rule-strong)",
-        borderRadius: 8,
-        boxShadow: "var(--shadow-2)",
-        minWidth: 240,
-        overflow: "hidden",
-      }}
-    >
-      <div
-        style={{
-          padding: "8px 12px",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10,
-          letterSpacing: "0.14em",
-          textTransform: "uppercase",
-          fontWeight: 600,
-          color: "var(--muted)",
-          borderBottom: "1px solid var(--rule-soft)",
-        }}
-      >
-        SHELL
-      </div>
-      <div style={{ maxHeight: 320, overflow: "auto" }}>
-        {shells.map((shell) => {
-          const isDefault = defaultShell?.id === shell.id;
-          return (
-            <button
-              key={shell.id}
-              type="button"
-              onClick={() => onPick(shell)}
-              style={{
-                appearance: "none",
-                width: "100%",
-                textAlign: "left",
-                background: "transparent",
-                border: "none",
-                padding: "8px 12px",
-                color: "var(--ink)",
-                fontFamily: "var(--font-sans)",
-                fontSize: 12,
-                cursor: "default",
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                transition:
-                  "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = "var(--hover-strong)")}
-              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-            >
-              <span style={{ width: 6, height: 6, borderRadius: 999, background: "var(--accent)", opacity: isDefault ? 1 : 0, flex: "0 0 6px" }} />
-              <span style={{ flex: 1 }}>{shell.label}</span>
-              <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>{shell.family}</span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
   );
 }
 
