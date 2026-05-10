@@ -261,6 +261,18 @@ export default function App() {
     document.documentElement.style.setProperty("--accent", accent);
   }, [activeWorkspace?.color]);
 
+  // Open the dedicated Settings BrowserWindow when any part of the app
+  // dispatches the `spark:open-settings` window event. The keyboard
+  // shortcuts agent in this same wave dispatches it for Mod+,; this handler
+  // is the single subscriber so the binding stays decoupled.
+  useEffect(() => {
+    const handler = () => {
+      void window.spark.settings.open();
+    };
+    window.addEventListener("spark:open-settings", handler);
+    return () => window.removeEventListener("spark:open-settings", handler);
+  }, []);
+
   useEffect(() => {
     if (!booted) return;
     const shellId = defaultShell?.id ?? shells[0]?.id;
@@ -467,6 +479,9 @@ export default function App() {
         onToggleLeft={() => setShowLeft((v) => !v)}
         onToggleRight={() => setShowRight((v) => !v)}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenPreferences={() => {
+          void window.spark.settings.open();
+        }}
       />
 
       <div style={{ flex: 1, display: "flex", minHeight: 0, position: "relative" }}>

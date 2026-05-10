@@ -41,6 +41,27 @@ export interface AppSettings {
   langSmithEndpoint: string;
 }
 
+// User-facing preferences (theme, editor flags, etc.) live in a separate
+// JSON file from AppSettings so the per-window settings UI can read/write
+// them without needing access to the integration credentials. Future agents
+// extend this interface — additive only, every key has a default.
+export type ThemePref = "system" | "light" | "dark";
+
+export interface AppPreferences {
+  theme: ThemePref;
+}
+
+export const DEFAULT_PREFERENCES: AppPreferences = {
+  theme: "system",
+};
+
+export type PrefKey = keyof AppPreferences;
+
+export interface PreferencesChange<K extends PrefKey = PrefKey> {
+  key: K;
+  value: AppPreferences[K];
+}
+
 export type AgentRuntimeKind = "claude" | "codex";
 
 export type AgentEffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";

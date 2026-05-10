@@ -1,8 +1,10 @@
-import { ipcMain, dialog, BrowserWindow, app, shell } from "electron";
+import { ipcMain, dialog, BrowserWindow, app, shell, webContents } from "electron";
 import { listShells, defaultShell } from "./shells";
 import { createFile, createFolder, deleteFile, listDir, listMarkdownFiles, readTextFile, renameFile, writeTextFile } from "./fs-tree";
 import { getGitGraph } from "./git-graph";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
+import { loadPreferences, setPreference } from "./preferences-store";
+import { openSettingsWindow } from "./settings-window";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import {
@@ -29,6 +31,7 @@ import {
 import { listEvents } from "./orchestration/event-log";
 import type {
   AddRunMessageInput,
+  AppPreferences,
   AppSettings,
   AppState,
   CreateEntryInput,
@@ -41,6 +44,8 @@ import type {
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   PauseRunInput,
+  PrefKey,
+  PreferencesChange,
   PrepareWorkerTaskInput,
   ResumeRunInput,
   RenameFileInput,
@@ -54,6 +59,18 @@ import type {
   UpdateStepInput,
   UpdateWorkerTaskInput,
 } from "@shared/types";
+
+// Fan a preferences change out to every live webContents so the main window
+// and the settings window stay in sync regardless of which one wrote.
+function broadcastPreferencesChanged<K extends PrefKey>(
+  change: PreferencesChange<K>,
+): void {
+  const payload: PreferencesChange = change;
+  for (const wc of webContents.getAllWebContents()) {
+    if (wc.isDestroyed()) continue;
+    wc.send("preferences:changed", payload);
+  }
+}
 
 export function registerIpc(): void {
   ipcMain.handle("state:load", async (): Promise<AppState> => {
@@ -70,6 +87,27 @@ export function registerIpc(): void {
 
   ipcMain.handle("settings:save", async (_e, settings: AppSettings): Promise<AppSettings> => {
     return saveSettings(settings);
+  });
+
+  ipcMain.handle("preferences:load", async (): Promise<AppPreferences> => {
+    return loadPreferences();
+  });
+
+  ipcMain.handle(
+    "preferences:set",
+    async <K extends PrefKey>(
+      _e: Electron.IpcMainInvokeEvent,
+      args: { key: K; value: AppPreferences[K] },
+    ): Promise<AppPreferences> => {
+      const next = await setPreference(args.key, args.value);
+      broadcastPreferencesChanged({ key: args.key, value: next[args.key] });
+      return next;
+    },
+  );
+
+  ipcMain.handle("settings:open", async (e): Promise<void> => {
+    const parent = BrowserWindow.fromWebContents(e.sender);
+    openSettingsWindow(parent);
   });
 
   ipcMain.handle("shells:list", async (): Promise<ShellInfo[]> => {

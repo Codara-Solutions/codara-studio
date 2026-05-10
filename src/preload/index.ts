@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AddRunMessageInput,
+  AppPreferences,
   AppSettings,
   AppState,
   CreateEntryInput,
@@ -15,6 +16,8 @@ import type {
   LaunchWorkerAttemptInput,
   PauseRunInput,
   PlanFile,
+  PrefKey,
+  PreferencesChange,
   PrepareWorkerTaskInput,
   ResumeRunInput,
   RenameFileInput,
@@ -35,6 +38,7 @@ type PtyExitHandler = (info: { exitCode: number; signal?: number }) => void;
 type OrchestrationEventHandler = (event: SparkEvent) => void;
 type FsChangeHandler = (event: FsChangeEvent) => void;
 type WindowStateHandler = (state: { maximized: boolean }) => void;
+type PreferencesChangeHandler = (change: PreferencesChange) => void;
 
 const api = {
   state: {
@@ -44,6 +48,22 @@ const api = {
   settings: {
     load: (): Promise<AppSettings> => ipcRenderer.invoke("settings:load"),
     save: (settings: AppSettings): Promise<AppSettings> => ipcRenderer.invoke("settings:save", settings),
+    // Open the dedicated Settings BrowserWindow. Idempotent — focuses the
+    // existing window if one is already open.
+    open: (): Promise<void> => ipcRenderer.invoke("settings:open"),
+  },
+  preferences: {
+    load: (): Promise<AppPreferences> => ipcRenderer.invoke("preferences:load"),
+    set: <K extends PrefKey>(
+      key: K,
+      value: AppPreferences[K],
+    ): Promise<AppPreferences> => ipcRenderer.invoke("preferences:set", { key, value }),
+    onChanged: (handler: PreferencesChangeHandler): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, change: PreferencesChange) =>
+        handler(change);
+      ipcRenderer.on("preferences:changed", listener);
+      return () => ipcRenderer.off("preferences:changed", listener);
+    },
   },
   shells: {
     list: (): Promise<ShellInfo[]> => ipcRenderer.invoke("shells:list"),

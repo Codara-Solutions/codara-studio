@@ -23,6 +23,7 @@
   },
   "include": [
     "src/renderer/src/**/*",
+    "src/renderer/settings/**/*",
     "src/shared/**/*",
     "src/preload/preload-types.d.ts"
   ]

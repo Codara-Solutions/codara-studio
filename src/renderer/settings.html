@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Spark — Settings</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data:; connect-src 'self' ws://localhost:* http://localhost:*; script-src 'self' 'unsafe-inline'"
+    />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      // Apply theme synchronously before paint to avoid a flash. Reads the
+      // shadow copy of the last applied theme; the persisted source of truth
+      // (settings file via IPC) overrides this on mount.
+      (function () {
+        try {
+          var t = localStorage.getItem("spark-ui-theme-shadow");
+          var resolved =
+            t === "light" || t === "dark"
+              ? t
+              : window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light";
+          document.documentElement.classList.add(resolved);
+          document.documentElement.dataset.chrome = "settings";
+        } catch (e) {}
+      })();
+    </script>
+    <style>
+      html, body { margin: 0; height: 100%; background: oklch(0.158 0.004 85); color-scheme: dark; }
+      html.light, html.light body { background: #f7f7f6; color-scheme: light; }
+    </style>
+  </head>
+  <body>
+    <div id="settings-root"></div>
+    <script type="module" src="/settings/main.tsx"></script>
+  </body>
+</html>
