@@ -12,6 +12,7 @@ export type ShortcutId =
   | "composer.focus"
   | "sidebar.toggle"
   | "search.open"
+  | "terminal.toggle"
   | "view.selectByIndex";
 
 export type ShortcutGroup = "General" | "Navigation" | "View";
@@ -61,6 +62,13 @@ export const SHORTCUTS: Shortcut[] = [
     keys: [MOD_KEY, "Shift", "F"],
     group: "Navigation",
     match: (e) => isMod(e) && e.shiftKey && e.key.toLowerCase() === "f",
+  },
+  {
+    id: "terminal.toggle",
+    label: "Toggle terminal strip",
+    keys: [MOD_KEY, "`"],
+    group: "View",
+    match: (e) => isMod(e) && (e.key === "`" || e.code === "Backquote"),
   },
   {
     id: "view.selectByIndex",

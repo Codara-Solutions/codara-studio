@@ -6,6 +6,11 @@ export interface ShellInfo {
   exe: string;
   args: string[];
   family: "pwsh" | "powershell" | "cmd" | "bash" | "zsh" | "fish" | "sh" | "wsl" | "other";
+  // Optional env overrides applied on top of the inherited process env when
+  // pty-manager spawns this shell. Used by the integrated default shell to
+  // route ZDOTDIR / SPARK_USER_ZDOTDIR / SPARK_TERMINAL into the child so
+  // bundled shell-integration scripts can hook themselves at startup.
+  env?: Record<string, string>;
 }
 
 export interface Worker {

@@ -86,6 +86,12 @@ const api = {
   shells: {
     list: (): Promise<ShellInfo[]> => ipcRenderer.invoke("shells:list"),
     default: (): Promise<ShellInfo | null> => ipcRenderer.invoke("shells:default"),
+    // Returns the user's default shell with bundled OSC 7/133/633/8888
+    // shell-integration wired in via cwd-staged scripts. Used by the bottom
+    // terminal strip so a fresh interactive pane gets cwd/prompt/open-file
+    // markers without touching the orchestration shell list.
+    integratedDefault: (): Promise<ShellInfo> =>
+      ipcRenderer.invoke("shells:integratedDefault"),
   },
   dialog: {
     openDirectory: (defaultPath?: string): Promise<string | null> =>
@@ -249,6 +255,12 @@ const api = {
     cancel: (searchId: string): Promise<void> =>
       ipcRenderer.invoke("search:cancel", searchId),
   },
+  // Convenience shortcut for the terminal pane's URL chip and the WebLinks
+  // addon. Routes through Electron's shell.openExternal in the main process,
+  // which is the only handler that survives Chrome's external-navigation
+  // block in BrowserWindow.
+  openExternal: (url: string): Promise<void> =>
+    ipcRenderer.invoke("app:openExternal", url),
 };
 
 contextBridge.exposeInMainWorld("spark", api);

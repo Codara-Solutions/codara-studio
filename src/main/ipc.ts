@@ -1,5 +1,6 @@
 import { ipcMain, dialog, BrowserWindow, app, shell, webContents } from "electron";
 import { listShells, defaultShell } from "./shells";
+import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, listDir, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
 import { getGitGraph } from "./git-graph";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
@@ -122,6 +123,23 @@ export function registerIpc(): void {
 
   ipcMain.handle("shells:default", async (): Promise<ShellInfo | null> => {
     return defaultShell();
+  });
+
+  ipcMain.handle("shells:integratedDefault", async (): Promise<ShellInfo> => {
+    // Materializes the bundled OSC 7/133/633/8888 shell-integration scripts
+    // into ~/.cache/spark/shell-integration/ and returns a ShellInfo whose
+    // args/env wire the shell to dot-source them on startup. Used by the
+    // bottom-strip terminal so a fresh interactive pane gets cwd/prompt/
+    // open-file markers without modifying the orchestration shell list.
+    const launch = await buildIntegratedShellLaunch();
+    return {
+      id: launch.exe,
+      label: launch.label,
+      exe: launch.exe,
+      args: launch.args,
+      family: launch.family,
+      env: launch.env,
+    };
   });
 
   ipcMain.handle("dialog:openDirectory", async (e, defaultPath?: string): Promise<string | null> => {
@@ -353,6 +371,20 @@ export function registerIpc(): void {
     if (handle) {
       handle.cancel();
       activeSearches.delete(searchId);
+    }
+  });
+
+  ipcMain.handle("app:openExternal", async (_e, url: string): Promise<void> => {
+    if (typeof url !== "string" || url.length === 0) return;
+    // Electron's shell.openExternal accepts http(s) and a few extra schemes by
+    // default; reject anything else so a malicious URL detected on the PTY
+    // stream cannot launch arbitrary handlers.
+    const safe = /^(https?:|file:|mailto:)/i.test(url);
+    if (!safe) return;
+    try {
+      await shell.openExternal(url);
+    } catch {
+      /* shell.openExternal rejects when no handler is registered; ignore. */
     }
   });
 }

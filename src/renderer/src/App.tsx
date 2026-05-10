@@ -19,6 +19,7 @@ import OrchestrationSidebar from "./components/OrchestrationSidebar";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
 import SearchPanel from "./components/Search/SearchPanel";
+import TerminalStrip from "./components/Terminal/TerminalStrip";
 import { PlusIcon } from "./components/icons";
 import type { ShellIntegration } from "./terminal/shell-integration";
 import { basename } from "./path-utils";
@@ -81,6 +82,10 @@ export default function App() {
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [defaultShell, setDefaultShell] = useState<ShellInfo | null>(null);
   const [detectedDefaultShell, setDetectedDefaultShell] = useState<ShellInfo | null>(null);
+  // Default shell augmented with the bundled OSC 7/133/633/8888 shell
+  // integration. Used exclusively by the bottom-strip terminal so a fresh
+  // interactive pane reports cwd/prompt/open-file events to the renderer.
+  const [integratedShell, setIntegratedShell] = useState<ShellInfo | null>(null);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -131,6 +136,28 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  // Resolve the integrated-shell launch profile lazily. Materializing the
+  // bundled scripts touches the user's home directory; no need to block
+  // initial paint on it. A failure here just means the strip falls back to
+  // the orchestration default shell, which still works (without inline
+  // OSC 7/8888 from a Unix shell). Re-runs once `home` is known so the
+  // call is gated on the main process having a usable HOME.
+  useEffect(() => {
+    if (!booted) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const shell = await window.spark.shells.integratedDefault();
+        if (!cancelled) setIntegratedShell(shell);
+      } catch {
+        /* fall back to defaultShell */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [booted]);
 
   // Persist on change (debounced)
   useEffect(() => {
@@ -410,6 +437,22 @@ export default function App() {
     setActiveWorkbenchTab("editor");
   }, []);
 
+  // Open a file by absolute path. Used by the terminal strip's OSC 8888
+  // handler (`tp <file>` / `spark_open <file>` from a shell). Falls back to
+  // a synthesized FsEntry when the renderer cannot reach the on-disk record
+  // — opening a file is best-effort UX, not a critical path.
+  const openFileByPath = useCallback(
+    (path: string) => {
+      if (!path) return;
+      const segments = path.split(/[\\/]/);
+      const name = segments[segments.length - 1] || path;
+      const dot = name.lastIndexOf(".");
+      const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : undefined;
+      openEditorFile({ name, path, isDir: false, ext });
+    },
+    [openEditorFile],
+  );
+
   const closeEditorFile = useCallback((path: string) => {
     setOpenFiles((files) => {
       const next = files.filter((file) => file.path !== path);
@@ -446,6 +489,12 @@ export default function App() {
         // Mirror the other modal events so background panels can react if
         // they ever need to (e.g. dim themselves while search is up).
         window.dispatchEvent(new CustomEvent("spark:open-search"));
+      },
+      "terminal.toggle": () => {
+        // The strip is the single subscriber for this CustomEvent — keeping
+        // the toggle decoupled means a future detached-window terminal
+        // implementation can reuse the same chord without rewiring.
+        window.dispatchEvent(new CustomEvent("spark:toggle-terminal"));
       },
       "view.selectByIndex": (event) => {
         const index = Number.parseInt(event.key, 10);
@@ -632,6 +681,12 @@ export default function App() {
           }}
         />
       </div>
+
+      <TerminalStrip
+        shell={integratedShell ?? defaultShell}
+        cwd={activeWorkspace?.cwd ?? null}
+        onOpenFile={openFileByPath}
+      />
 
       <StatusBar
         workspace={activeWorkspace}
