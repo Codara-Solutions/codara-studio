@@ -93,6 +93,31 @@ interface Props {
   onToggleLeft: () => void;
   onToggleRight: () => void;
   onOpenSettings?: () => void;
+  onOpenPreferences?: () => void;
+}
+
+function SlidersIcon({ size = 12 }: { size?: number }) {
+  // Three-row mixer slider — visually distinct from the cog so the new
+  // preferences window has its own affordance.
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <line x1="4" y1="6" x2="20" y2="6" />
+      <line x1="4" y1="12" x2="20" y2="12" />
+      <line x1="4" y1="18" x2="20" y2="18" />
+      <circle cx="9" cy="6" r="2.2" fill="currentColor" />
+      <circle cx="15" cy="12" r="2.2" fill="currentColor" />
+      <circle cx="8" cy="18" r="2.2" fill="currentColor" />
+    </svg>
+  );
 }
 
 export default function WindowChrome({
@@ -102,8 +127,10 @@ export default function WindowChrome({
   onToggleLeft,
   onToggleRight,
   onOpenSettings,
+  onOpenPreferences,
 }: Props) {
   const [gearHover, setGearHover] = useState(false);
+  const [prefsHover, setPrefsHover] = useState(false);
   const nativeControlsWidth = platform === "win32" ? 138 : 0;
 
   const handleToggleMaximize = () => {
@@ -179,10 +206,41 @@ export default function WindowChrome({
         }}
       >
         <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" edge="right" />
+        {onOpenPreferences && (
+          <button
+            type="button"
+            data-window-control
+            title="Preferences"
+            onClick={() => onOpenPreferences()}
+            onMouseEnter={() => setPrefsHover(true)}
+            onMouseLeave={() => setPrefsHover(false)}
+            style={
+              {
+                appearance: "none",
+                width: 30,
+                height: "100%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: prefsHover ? "var(--hover)" : "transparent",
+                border: "none",
+                borderLeft: "1px solid var(--rule-soft)",
+                color: prefsHover ? "var(--ink)" : "var(--ink-dim)",
+                cursor: "default",
+                padding: 0,
+                WebkitAppRegion: "no-drag",
+                transition:
+                  "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+              } as AppRegionStyle
+            }
+          >
+            <SlidersIcon size={12} />
+          </button>
+        )}
         <button
           type="button"
           data-window-control
-          title="Settings"
+          title="Connections & shells"
           onClick={() => onOpenSettings?.()}
           onMouseEnter={() => setGearHover(true)}
           onMouseLeave={() => setGearHover(false)}
