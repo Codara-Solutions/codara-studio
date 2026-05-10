@@ -11,6 +11,7 @@ export type ShortcutId =
   | "settings.open"
   | "composer.focus"
   | "sidebar.toggle"
+  | "terminal.toggle"
   | "view.selectByIndex";
 
 export type ShortcutGroup = "General" | "Navigation" | "View";
@@ -53,6 +54,18 @@ export const SHORTCUTS: Shortcut[] = [
     keys: [MOD_KEY, "B"],
     group: "View",
     match: (e) => isMod(e) && !e.shiftKey && e.key.toLowerCase() === "b",
+  },
+  {
+    id: "terminal.toggle",
+    label: "Toggle terminal strip",
+    keys: [MOD_KEY, "`"],
+    group: "View",
+    // The grave-accent / backtick key. Some IME / OS combos report the chord
+    // with `e.key === "`"`; on Windows-PowerToys the same physical key may
+    // surface as "Dead" with code "Backquote". Match both so the shortcut
+    // works regardless of the active layout.
+    match: (e) =>
+      isMod(e) && (e.key === "`" || e.code === "Backquote"),
   },
   {
     id: "view.selectByIndex",

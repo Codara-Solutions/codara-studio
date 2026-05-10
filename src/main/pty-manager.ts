@@ -1,4 +1,5 @@
 import * as nodePty from "node-pty";
+import { spawn as spawnChild } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import type { WebContents } from "electron";
@@ -132,6 +133,16 @@ function doSpawn(
   delete env.NO_COLOR;
   delete env.NODE_DISABLE_COLORS;
   delete env.NODE_NO_READLINE;
+
+  // Per-shell env overrides (e.g. integrated strip shells set ZDOTDIR /
+  // SPARK_USER_ZDOTDIR so the bundled zshrc loads the user's existing
+  // config, and SPARK_TERMINAL=1 so subprocesses can detect they're in a
+  // Spark pane). Kept after the base env so shell config wins.
+  if (opts.shell.env) {
+    for (const [k, v] of Object.entries(opts.shell.env)) {
+      if (typeof v === "string") env[k] = v;
+    }
+  }
 
   const cwd =
     opts.cwd && opts.cwd.trim().length > 0
@@ -471,6 +482,35 @@ function killNow(id: string): void {
     s.pty.kill();
   } catch {
     /* ignore */
+  }
+  // On Windows, ConPTY can leave descendant processes alive (a `cmd /c npm
+  // start` started a node + esbuild + nodemon tree, and only the cmd is the
+  // direct child of conhost). `taskkill /T /F /PID` walks the descendant
+  // tree and SIGKILLs everything, which is what users expect when they
+  // close a terminal pane that was running a dev server. We do this in
+  // addition to pty.kill() — pty.kill drops the pseudo-console, taskkill
+  // reaps the actual process tree.
+  if (process.platform === "win32") {
+    const pid = s.pty.pid;
+    if (typeof pid === "number" && pid > 0) {
+      try {
+        const child = spawnChild(
+          "taskkill",
+          ["/T", "/F", "/PID", String(pid)],
+          {
+            windowsHide: true,
+            stdio: "ignore",
+            detached: false,
+          },
+        );
+        // The fire-and-forget child can outlive the pty close path; ensure
+        // we never let an unhandled error crash the main process.
+        child.on("error", () => undefined);
+        child.unref();
+      } catch {
+        /* taskkill missing in PATH should be impossible on Windows; ignore */
+      }
+    }
   }
   if (s.flushTimer) clearTimeout(s.flushTimer);
   sessions.delete(id);

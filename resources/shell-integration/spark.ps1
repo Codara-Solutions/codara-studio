@@ -47,6 +47,47 @@ function Global:__Spark-Osc {
     return ([char]27 + ']' + $payload + [char]7)
 }
 
+# URL-encode a UTF-8 string so multi-byte paths stay valid in the `file://`
+# URI emitted via OSC 7. Spec-correct (unreserved chars + slash kept as-is).
+function Global:__Spark-UrlEncode {
+    param([string]$s)
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($s)
+    $sb = [System.Text.StringBuilder]::new($bytes.Length)
+    foreach ($b in $bytes) {
+        if (($b -ge 0x30 -and $b -le 0x39) -or
+            ($b -ge 0x41 -and $b -le 0x5A) -or
+            ($b -ge 0x61 -and $b -le 0x7A) -or
+            $b -eq 0x2F -or $b -eq 0x2E -or $b -eq 0x5F -or
+            $b -eq 0x7E -or $b -eq 0x2D) {
+            [void]$sb.Append([char]$b)
+        } else {
+            [void]$sb.AppendFormat('%{0:X2}', $b)
+        }
+    }
+    $sb.ToString()
+}
+
+# spark_open: open file in editor tab via OSC 8888.
+# Usage: spark_open <file>
+function Global:spark_open {
+    param([Parameter(Mandatory)][string]$file)
+    if (-not $file) {
+        Write-Error 'usage: spark_open <file>'
+        return
+    }
+    if (-not [System.IO.Path]::IsPathRooted($file)) {
+        $file = Join-Path (Get-Location).Path $file
+    }
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        Write-Error "spark_open: not a file: $file"
+        return
+    }
+    $encoded = __Spark-UrlEncode $file
+    [Console]::Write((__Spark-Osc "8888;file=$encoded"))
+}
+
+Set-Alias -Name tp -Value spark_open -Scope Global -ErrorAction SilentlyContinue
+
 function Global:Prompt {
     $exit = $LASTEXITCODE
     if ($null -eq $exit) { $exit = if ($?) { 0 } else { 1 } }
@@ -69,12 +110,24 @@ function Global:Prompt {
     }
     $Global:__SparkCommandRunning = $false
 
-    $cwd = (Get-Location).Path
-    if ($cwd) {
+    $loc = Get-Location
+    if ($loc -and $loc.Provider.Name -eq 'FileSystem') {
+        $cwd = $loc.ProviderPath
         $out += __Spark-Osc ('633;P;Cwd=' + (__Spark-Esc $cwd))
+        # OSC 7: classic cwd reporting consumed by VS Code, iTerm2, kitty,
+        # and the Spark renderer's TerminalStrip. Forward-slashed and
+        # leading-slashed for Windows so the URL parses as a real `file://`.
+        $cwdNorm = $cwd -replace '\\','/'
+        if ($cwdNorm -match '^[A-Za-z]:') { $cwdNorm = "/$cwdNorm" }
+        $hostName = [System.Environment]::MachineName
+        $out += __Spark-Osc ("7;file://$hostName" + (__Spark-UrlEncode $cwdNorm))
     }
 
     $out += __Spark-Osc '633;A'
+    # Emit FinalTerm OSC 133 ; A so the strip's prompt-marker tracker can
+    # land an inline marker. VS Code's 633 is a superset, but the strip's
+    # generic OSC 7/133/8888 module also listens to plain 133.
+    $out += __Spark-Osc '133;A'
 
     try {
         $out += & $Global:__SparkOriginalPrompt
