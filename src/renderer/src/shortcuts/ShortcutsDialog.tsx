@@ -1,0 +1,209 @@
+import React, { useEffect } from "react";
+import { SHORTCUTS, SHORTCUT_GROUPS } from "./shortcuts";
+
+// Cheat-sheet rendered straight off the `SHORTCUTS` table so labels and
+// chips stay in lockstep with the dispatcher. The chrome mirrors
+// SettingsDialog so the two modals feel like siblings.
+
+interface ShortcutsDialogProps {
+  open: boolean;
+  onClose: () => void;
+}
+
+export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 100,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "rgba(0, 0, 0, 0.58)",
+        backdropFilter: "blur(4px)",
+        WebkitBackdropFilter: "blur(4px)",
+        fontFamily: "var(--font-sans)",
+      }}
+      onMouseDown={onClose}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-label="Keyboard shortcuts"
+        style={{
+          width: "min(540px, calc(100vw - 44px))",
+          maxHeight: "min(640px, calc(100vh - 44px))",
+          display: "flex",
+          flexDirection: "column",
+          background: "var(--panel)",
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 12,
+          boxShadow: "var(--shadow-2)",
+          overflow: "hidden",
+        }}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header
+          style={{
+            flex: "0 0 auto",
+            padding: "13px 18px",
+            borderBottom: "1px solid var(--rule-soft)",
+            display: "flex",
+            alignItems: "center",
+            gap: 9,
+          }}
+        >
+          <span
+            aria-hidden
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: 999,
+              background: "var(--accent)",
+              boxShadow: "0 0 9px var(--accent-glow)",
+            }}
+          />
+          <div
+            style={{
+              fontFamily: "var(--font-sans)",
+              fontSize: 13,
+              fontWeight: 700,
+              letterSpacing: "0.02em",
+              color: "var(--ink)",
+            }}
+          >
+            Keyboard shortcuts
+          </div>
+          <div style={{ flex: 1 }} />
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            style={{
+              appearance: "none",
+              border: "1px solid var(--rule-soft)",
+              borderRadius: 6,
+              background: "transparent",
+              color: "var(--muted)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              padding: "3px 8px",
+              cursor: "default",
+            }}
+          >
+            ESC
+          </button>
+        </header>
+
+        <div
+          style={{
+            flex: 1,
+            minHeight: 0,
+            overflow: "auto",
+            padding: "14px 18px 18px",
+            display: "flex",
+            flexDirection: "column",
+            gap: 18,
+          }}
+        >
+          {SHORTCUT_GROUPS.map((group) => {
+            const items = SHORTCUTS.filter((s) => s.group === group);
+            if (items.length === 0) return null;
+            return (
+              <section key={group} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <h3
+                  style={{
+                    margin: 0,
+                    fontFamily: "var(--font-sans)",
+                    fontSize: 9,
+                    fontWeight: 700,
+                    letterSpacing: "0.16em",
+                    textTransform: "uppercase",
+                    color: "var(--muted)",
+                  }}
+                >
+                  {group}
+                </h3>
+                <ul
+                  style={{
+                    listStyle: "none",
+                    margin: 0,
+                    padding: 0,
+                    display: "flex",
+                    flexDirection: "column",
+                  }}
+                >
+                  {items.map((s) => (
+                    <li
+                      key={s.id}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 12,
+                        padding: "8px 0",
+                        borderBottom: "1px solid var(--rule-soft)",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontFamily: "var(--font-sans)",
+                          fontSize: 12,
+                          color: "var(--ink)",
+                        }}
+                      >
+                        {s.label}
+                      </span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        {s.keys.map((k, i) => (
+                          <Kbd key={i}>{k}</Kbd>
+                        ))}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            );
+          })}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        minWidth: 22,
+        height: 22,
+        padding: "0 6px",
+        border: "1px solid var(--rule-strong)",
+        borderRadius: 5,
+        background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+        color: "var(--ink-dim)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 11,
+        fontWeight: 600,
+        boxShadow: "inset 0 -1px 0 rgba(0, 0, 0, 0.25)",
+      }}
+    >
+      {children}
+    </kbd>
+  );
+}
