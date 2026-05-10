@@ -47,12 +47,49 @@ export interface AppSettings {
 // extend this interface — additive only, every key has a default.
 export type ThemePref = "system" | "light" | "dark";
 
+// CodeMirror 6 editor theme ids exposed in the editor settings dropdown.
+// Each id maps to an Extension in src/renderer/src/components/editor-cm/themes.ts.
+export type EditorThemeId =
+  | "atomone"
+  | "aura"
+  | "copilot"
+  | "github-dark"
+  | "github-light"
+  | "nord"
+  | "tokyo-night"
+  | "xcode-dark"
+  | "xcode-light";
+
+export const EDITOR_THEME_IDS: readonly EditorThemeId[] = [
+  "atomone",
+  "aura",
+  "copilot",
+  "github-dark",
+  "github-light",
+  "nord",
+  "tokyo-night",
+  "xcode-dark",
+  "xcode-light",
+] as const;
+
 export interface AppPreferences {
   theme: ThemePref;
+  vimMode: boolean;
+  editorTheme: EditorThemeId;
+  inlineAutocompleteEnabled: boolean;
+  // OpenRouter model id used for inline ghost-text autocomplete. Free-text
+  // input — OpenRouter has hundreds of models, no dropdown.
+  inlineAutocompleteModelId: string;
 }
+
+export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "x-ai/grok-code-fast-1";
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
   theme: "system",
+  vimMode: false,
+  editorTheme: "github-dark",
+  inlineAutocompleteEnabled: true,
+  inlineAutocompleteModelId: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
 };
 
 export type PrefKey = keyof AppPreferences;
@@ -99,6 +136,16 @@ export interface FsFileContent {
   size: number;
   mtimeMs: number;
 }
+
+// Discriminated read result returned by `fs:readEx`. The plain `fs:readText`
+// IPC throws on binary or oversize files; the editor wants to render a
+// dedicated banner instead, so we surface those states explicitly.
+export const FS_READ_TEXT_LIMIT_BYTES = 5 * 1024 * 1024;
+
+export type FsReadResult =
+  | { kind: "text"; path: string; content: string; size: number; mtimeMs: number }
+  | { kind: "binary"; path: string; size: number }
+  | { kind: "toolarge"; path: string; size: number; limit: number };
 
 export interface PlanFile {
   name: string;

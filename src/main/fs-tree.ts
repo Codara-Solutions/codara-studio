@@ -1,9 +1,11 @@
 import { shell } from "electron";
 import { promises as fs } from "node:fs";
 import { basename, dirname, extname, join, relative } from "node:path";
-import type { FsEntry, FsFileContent, PlanFile } from "@shared/types";
+import type { FsEntry, FsFileContent, FsReadResult, PlanFile } from "@shared/types";
+import { FS_READ_TEXT_LIMIT_BYTES } from "@shared/types";
+import { writeFileAtomic } from "./fs-atomic";
 
-const MAX_TEXT_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_TEXT_FILE_BYTES = FS_READ_TEXT_LIMIT_BYTES;
 const MAX_PLAN_FILES = 200;
 const MAX_PLAN_SCAN_DEPTH = 5;
 const SKIPPED_PLAN_DIRS = new Set([".git", "node_modules", "out", "dist", "build", ".next", ".turbo"]);
@@ -67,6 +69,30 @@ export async function readTextFile(path: string): Promise<FsFileContent> {
   };
 }
 
+// Discriminated-union read used by the CodeMirror editor so it can render a
+// dedicated banner for binary/oversize files instead of throwing. Mirrors
+// the terax-scout pattern (kind: text | binary | toolarge).
+export async function readFileEx(path: string): Promise<FsReadResult> {
+  const st = await fs.stat(path);
+  if (!st.isFile()) {
+    throw new Error("Path is not a file.");
+  }
+  if (st.size > MAX_TEXT_FILE_BYTES) {
+    return { kind: "toolarge", path, size: st.size, limit: MAX_TEXT_FILE_BYTES };
+  }
+  const buffer = await fs.readFile(path);
+  if (buffer.includes(0)) {
+    return { kind: "binary", path, size: st.size };
+  }
+  return {
+    kind: "text",
+    path,
+    content: buffer.toString("utf8"),
+    size: st.size,
+    mtimeMs: st.mtimeMs,
+  };
+}
+
 export async function listMarkdownFiles(root: string): Promise<PlanFile[]> {
   const files: PlanFile[] = [];
   await collectMarkdownFiles(root, root, 0, files);
@@ -74,7 +100,7 @@ export async function listMarkdownFiles(root: string): Promise<PlanFile[]> {
 }
 
 export async function writeTextFile(path: string, content: string): Promise<FsFileContent> {
-  await fs.writeFile(path, content, "utf8");
+  await writeFileAtomic(path, content);
   return readTextFile(path);
 }
 
