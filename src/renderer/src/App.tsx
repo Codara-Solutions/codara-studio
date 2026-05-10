@@ -22,6 +22,8 @@ import { PlusIcon } from "./components/icons";
 import type { ShellIntegration } from "./terminal/shell-integration";
 import { basename } from "./path-utils";
 import { getWorkerGridLayout } from "./worker-grid-layout";
+import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
+import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
 
 const RAIL_WIDTH = 240;
 const RIGHT_WIDTH = 360;
@@ -80,6 +82,7 @@ export default function App() {
   const [detectedDefaultShell, setDetectedDefaultShell] = useState<ShellInfo | null>(null);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [platform, setPlatform] = useState<string>("");
   const [home, setHome] = useState<string>("");
   const saveTimer = useRef<number | null>(null);
@@ -405,6 +408,37 @@ export default function App() {
     });
   }, []);
 
+  // Global keyboard shortcuts. Capture-phase + stopImmediatePropagation in
+  // useGlobalShortcuts ensures these chords win over xterm/CodeMirror panes
+  // that would otherwise eat the keystroke. Cross-module side-effects
+  // (focus the chat composer, ask other panels to toggle) are broadcast as
+  // `spark:*` CustomEvents so listeners can wire up without prop drilling.
+  const shortcutHandlers = useMemo<ShortcutHandlers>(
+    () => ({
+      "shortcuts.open": () => setShortcutsOpen((open) => !open),
+      "settings.open": () => {
+        setSettingsOpen(true);
+        window.dispatchEvent(new CustomEvent("spark:open-settings"));
+      },
+      "composer.focus": () => {
+        window.dispatchEvent(new CustomEvent("spark:focus-composer"));
+      },
+      "sidebar.toggle": () => {
+        setShowRight((visible) => !visible);
+        window.dispatchEvent(new CustomEvent("spark:toggle-sidebar"));
+      },
+      "view.selectByIndex": (event) => {
+        const index = Number.parseInt(event.key, 10);
+        window.dispatchEvent(
+          new CustomEvent("spark:select-view", { detail: { index } }),
+        );
+      },
+    }),
+    [],
+  );
+
+  useGlobalShortcuts(shortcutHandlers);
+
   if (bootError) {
     return (
       <div style={{ padding: 20, color: "var(--danger)" }}>
@@ -554,6 +588,11 @@ export default function App() {
             }}
           />
         )}
+
+        <ShortcutsDialog
+          open={shortcutsOpen}
+          onClose={() => setShortcutsOpen(false)}
+        />
       </div>
 
       <StatusBar
