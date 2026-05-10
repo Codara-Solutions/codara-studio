@@ -23,9 +23,13 @@ import type {
   RenameFileInput,
   RunArtifactPaths,
   RunState,
+  SearchHit,
+  SearchOptions,
+  SearchSummary,
   ShellInfo,
   SparkEvent,
   StartAutopilotInput,
+  StartSearchResponse,
   UpdateRunStatusInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
@@ -39,6 +43,19 @@ type OrchestrationEventHandler = (event: SparkEvent) => void;
 type FsChangeHandler = (event: FsChangeEvent) => void;
 type WindowStateHandler = (state: { maximized: boolean }) => void;
 type PreferencesChangeHandler = (change: PreferencesChange) => void;
+type SearchHitHandler = (hit: SearchHit) => void;
+type SearchDoneHandler = (summary: SearchSummary) => void;
+
+export interface SearchStartCallbacks {
+  onHit: SearchHitHandler;
+  onDone: SearchDoneHandler;
+}
+
+export interface SearchHandle {
+  searchId: string;
+  /** Cancels the search and removes the streaming listeners. */
+  cancel: () => Promise<void>;
+}
 
 const api = {
   state: {
@@ -187,6 +204,48 @@ const api = {
   app: {
     platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke("app:platform"),
     home: (): Promise<string> => ipcRenderer.invoke("app:home"),
+  },
+  search: {
+    /**
+     * Start a streaming search. The promise resolves to a handle exposing
+     * the assigned `searchId` and a `cancel()` that both kills the rg
+     * process in main and unsubscribes the renderer-side listeners. Hits
+     * arrive via `onHit` and the search ends with a single `onDone` call
+     * carrying the summary.
+     */
+    start: async (
+      opts: SearchOptions,
+      callbacks: SearchStartCallbacks,
+    ): Promise<SearchHandle> => {
+      const { searchId } = (await ipcRenderer.invoke(
+        "search:start",
+        opts,
+      )) as StartSearchResponse;
+      const hitChannel = `search:hit:${searchId}`;
+      const doneChannel = `search:done:${searchId}`;
+      const hitListener = (_e: Electron.IpcRendererEvent, hit: SearchHit) =>
+        callbacks.onHit(hit);
+      const doneListener = (
+        _e: Electron.IpcRendererEvent,
+        summary: SearchSummary,
+      ) => {
+        ipcRenderer.off(hitChannel, hitListener);
+        ipcRenderer.off(doneChannel, doneListener);
+        callbacks.onDone(summary);
+      };
+      ipcRenderer.on(hitChannel, hitListener);
+      ipcRenderer.on(doneChannel, doneListener);
+      return {
+        searchId,
+        cancel: async () => {
+          ipcRenderer.off(hitChannel, hitListener);
+          ipcRenderer.off(doneChannel, doneListener);
+          await ipcRenderer.invoke("search:cancel", searchId);
+        },
+      };
+    },
+    cancel: (searchId: string): Promise<void> =>
+      ipcRenderer.invoke("search:cancel", searchId),
   },
 };
 

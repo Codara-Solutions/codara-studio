@@ -7,6 +7,7 @@ import { loadPreferences, setPreference } from "./preferences-store";
 import { openSettingsWindow } from "./settings-window";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
+import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import {
   addRunMessage,
   appendTestEvent,
@@ -52,9 +53,13 @@ import type {
   PlanFile,
   RunArtifactPaths,
   RunState,
+  SearchHit,
+  SearchOptions,
+  SearchSummary,
   ShellInfo,
   SparkEvent,
   StartAutopilotInput,
+  StartSearchResponse,
   UpdateRunStatusInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
@@ -307,4 +312,42 @@ export function registerIpc(): void {
 
   ipcMain.handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);
   ipcMain.handle("app:home", async (): Promise<string> => app.getPath("home"));
+
+  // Project-wide search. The renderer kicks off a search and gets back an
+  // ID; the main process then streams `search:hit:<id>` and ends with
+  // `search:done:<id>`. Cancellation goes through `search:cancel`.
+  const activeSearches = new Map<string, StreamGrepHandle>();
+  let searchCounter = 0;
+
+  ipcMain.handle(
+    "search:start",
+    async (e, opts: SearchOptions): Promise<StartSearchResponse> => {
+      const sender = e.sender;
+      const searchId = `search-${Date.now().toString(36)}-${(searchCounter++).toString(36)}`;
+      const hitChannel = `search:hit:${searchId}`;
+      const doneChannel = `search:done:${searchId}`;
+      const handle = streamGrep(
+        opts,
+        (hit: SearchHit) => {
+          if (sender.isDestroyed()) return;
+          sender.send(hitChannel, hit);
+        },
+        (summary: SearchSummary) => {
+          activeSearches.delete(searchId);
+          if (sender.isDestroyed()) return;
+          sender.send(doneChannel, summary);
+        },
+      );
+      activeSearches.set(searchId, handle);
+      return { searchId };
+    },
+  );
+
+  ipcMain.handle("search:cancel", async (_e, searchId: string): Promise<void> => {
+    const handle = activeSearches.get(searchId);
+    if (handle) {
+      handle.cancel();
+      activeSearches.delete(searchId);
+    }
+  });
 }

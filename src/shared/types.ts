@@ -620,3 +620,47 @@ export interface InterruptRunWithMessageInput {
   mode: RunInterruptMode;
   reason?: string;
 }
+
+// ── Project-wide content search ─────────────────────────────────────────────
+// Streaming find-in-files driven by a bundled ripgrep binary. The renderer
+// asks the main process to start a search; main spawns rg with --json and
+// forwards each match as a `search:hit:<id>` IPC message so the panel can
+// render hits as they arrive instead of blocking on the full result set.
+export interface SearchOptions {
+  root: string;
+  query: string;
+  isRegex?: boolean;
+  caseSensitive?: boolean;
+  wholeWord?: boolean;
+  includeGlobs?: string[];
+  excludeGlobs?: string[];
+  /** Per-file size cap forwarded as `--max-filesize`. Default 5 MB. */
+  maxFileSize?: number;
+  /** Stop streaming once this many hits have been emitted. Default 2000. */
+  maxHits?: number;
+}
+
+export interface SearchHit {
+  path: string;
+  line: number;
+  column: number;
+  /** Full line text the hit lives on (without trailing newline). */
+  text: string;
+  preMatch: string;
+  matchText: string;
+  postMatch: string;
+}
+
+export interface SearchSummary {
+  totalHits: number;
+  filesSearched: number;
+  hitCap: boolean;
+  /** Set when rg exited with an error or the spawn itself failed. */
+  error?: string;
+  /** Wall-clock duration in milliseconds. */
+  durationMs: number;
+}
+
+export interface StartSearchResponse {
+  searchId: string;
+}

@@ -18,6 +18,7 @@ import RunsView from "./components/RunsView";
 import OrchestrationSidebar from "./components/OrchestrationSidebar";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
+import SearchPanel from "./components/Search/SearchPanel";
 import { PlusIcon } from "./components/icons";
 import type { ShellIntegration } from "./terminal/shell-integration";
 import { basename } from "./path-utils";
@@ -83,6 +84,7 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [platform, setPlatform] = useState<string>("");
   const [home, setHome] = useState<string>("");
   const saveTimer = useRef<number | null>(null);
@@ -439,6 +441,12 @@ export default function App() {
         setShowRight((visible) => !visible);
         window.dispatchEvent(new CustomEvent("spark:toggle-sidebar"));
       },
+      "search.open": () => {
+        setSearchOpen(true);
+        // Mirror the other modal events so background panels can react if
+        // they ever need to (e.g. dim themselves while search is up).
+        window.dispatchEvent(new CustomEvent("spark:open-search"));
+      },
       "view.selectByIndex": (event) => {
         const index = Number.parseInt(event.key, 10);
         window.dispatchEvent(
@@ -607,6 +615,21 @@ export default function App() {
         <ShortcutsDialog
           open={shortcutsOpen}
           onClose={() => setShortcutsOpen(false)}
+        />
+
+        <SearchPanel
+          open={searchOpen}
+          cwd={activeWorkspace?.cwd ?? null}
+          onClose={() => setSearchOpen(false)}
+          onOpenFile={(entry) => {
+            // Reuse the editor-open path: the SearchPanel hands us the
+            // FsEntry and the line/column it matched on. We open the file
+            // (deduped by `openEditorFile`) and focus the editor tab so
+            // the user lands somewhere they can navigate. The panel also
+            // dispatches `spark:open-file` for any future seek listener.
+            openEditorFile(entry);
+            setSearchOpen(false);
+          }}
         />
       </div>
 

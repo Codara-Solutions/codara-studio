@@ -11,6 +11,7 @@ export type ShortcutId =
   | "settings.open"
   | "composer.focus"
   | "sidebar.toggle"
+  | "search.open"
   | "view.selectByIndex";
 
 export type ShortcutGroup = "General" | "Navigation" | "View";
@@ -53,6 +54,13 @@ export const SHORTCUTS: Shortcut[] = [
     keys: [MOD_KEY, "B"],
     group: "View",
     match: (e) => isMod(e) && !e.shiftKey && e.key.toLowerCase() === "b",
+  },
+  {
+    id: "search.open",
+    label: "Search in files",
+    keys: [MOD_KEY, "Shift", "F"],
+    group: "Navigation",
+    match: (e) => isMod(e) && e.shiftKey && e.key.toLowerCase() === "f",
   },
   {
     id: "view.selectByIndex",
