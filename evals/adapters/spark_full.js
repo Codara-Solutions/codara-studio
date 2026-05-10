@@ -194,11 +194,39 @@ function createRunner(opts = {}) {
 
       transcript.push(runnerLib.event("spawn", `${launch.command} ${launch.args.join(" ")}`));
 
+      // Isolate the headless Spark's state dir per-eval so concurrent
+      // runs (another eval + the operator's desktop app, two evals in
+      // parallel, etc.) cannot collide on spark-state.json /
+      // spark-settings.json / runs/<runId>. Each eval gets a fresh
+      // `.SparkAgent` under its artifacts dir; the existing user
+      // settings (OpenRouter key, LangSmith config) are mirrored over
+      // so the manager can authenticate. Spark Agent already honors
+      // SPARK_HOME_DIR via spark-home.ts.
+      const isolatedHome = path.join(artifactsDir, ".SparkAgent");
+      fs.mkdirSync(isolatedHome, { recursive: true });
+      try {
+        const userSettings = path.join(sparkHomeDir(), "spark-settings.json");
+        if (fs.existsSync(userSettings)) {
+          fs.copyFileSync(userSettings, path.join(isolatedHome, "spark-settings.json"));
+        }
+      } catch (err) {
+        transcript.push(
+          runnerLib.event(
+            "warn",
+            `failed to mirror spark-settings.json into isolated home: ${err.message}`,
+          ),
+        );
+      }
+
       // Spark in headless mode listens to spark-settings.json for the
       // OpenRouter API key plus environment overrides. Forward env from the
       // pilot so the operator's existing auth (SPARK_OPENROUTER_API_KEY,
       // OPENROUTER_API_KEY) reaches the child without a settings round-trip.
-      const env = { ...process.env, ...input.env };
+      const env = {
+        ...process.env,
+        ...input.env,
+        SPARK_HOME_DIR: isolatedHome,
+      };
 
       const child = spawn(launch.command, launch.args, {
         cwd: input.seedRepoPath,

@@ -1,0 +1,7 @@
+[
+  {
+    "id": "linter-tests",
+    "command": "npm",
+    "args": ["test", "--prefix", "vendor/markdown-linter"]
+  }
+]

@@ -1,10 +1,10 @@
 {
-  "id": "safe-worker-command-construction",
-  "title": "Safe worker command construction across shells",
+  "id": "fix-with-regression-test",
+  "title": "Fix the OpenRouter structured-output classifier with a regression test",
   "version": "1.0",
-  "budgetSeconds": 7200,
+  "budgetSeconds": 3600,
   "allowedPaths": [
-    "src/main/",
+    "src/main/orchestration/",
     "tests/"
   ],
   "forbiddenPaths": [
@@ -36,6 +36,6 @@
     "spark-agent",
     "SparkAgent"
   ],
-  "publicGateSummaryForJudge": "npm run typecheck must pass.",
+  "publicGateSummaryForJudge": "npm run typecheck must pass and the regression test (`node --test --experimental-strip-types tests/openrouter-error-classifier.test.ts`) must exit zero.",
   "hiddenGateSummaryForJudgeTemplate": "Hidden adversarial fixtures: {passed}/{total} passed."
 }

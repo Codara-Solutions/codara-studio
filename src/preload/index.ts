@@ -10,6 +10,7 @@ import type {
   FsEntry,
   FsFileContent,
   GitGraph,
+  InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   PauseRunInput,
   PlanFile,
@@ -63,6 +64,7 @@ const api = {
     deleteFile: (path: string): Promise<void> => ipcRenderer.invoke("fs:deleteFile", path),
     setWatchRoot: (root: string | null): Promise<void> =>
       ipcRenderer.invoke("fs:setWatchRoot", root),
+    revealInOS: (path: string): Promise<void> => ipcRenderer.invoke("fs:revealInOS", path),
     onChanged: (handler: FsChangeHandler): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, event: FsChangeEvent) => handler(event);
       ipcRenderer.on("fs:changed", listener);
@@ -93,6 +95,8 @@ const api = {
       ipcRenderer.invoke("orchestration:resumeRun", input),
     addRunMessage: (input: AddRunMessageInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:addRunMessage", input),
+    interruptRunWithMessage: (input: InterruptRunWithMessageInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:interruptRunWithMessage", input),
     updateRunStatus: (input: UpdateRunStatusInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:updateRunStatus", input),
     createStep: (input: CreateStepInput): Promise<RunState> =>

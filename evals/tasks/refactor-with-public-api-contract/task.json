@@ -1,11 +1,12 @@
 {
-  "id": "safe-worker-command-construction",
-  "title": "Safe worker command construction across shells",
+  "id": "refactor-with-public-api-contract",
+  "title": "Rename loadSettings to getAppSettings across the main process",
   "version": "1.0",
-  "budgetSeconds": 7200,
+  "budgetSeconds": 5400,
   "allowedPaths": [
     "src/main/",
-    "tests/"
+    "tests/",
+    "CHANGELOG-eval.md"
   ],
   "forbiddenPaths": [
     "src/renderer/",
@@ -34,7 +35,8 @@
     "Codex",
     "codex",
     "spark-agent",
-    "SparkAgent"
+    "SparkAgent",
+    "loadSettings"
   ],
   "publicGateSummaryForJudge": "npm run typecheck must pass.",
   "hiddenGateSummaryForJudgeTemplate": "Hidden adversarial fixtures: {passed}/{total} passed."

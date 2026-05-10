@@ -205,20 +205,33 @@ export default function FileTree({
         flex: "0 0 30%",
       }}
     >
-      <PanelHeader title="EXPLORER" right={<span style={{ color: "var(--muted)" }}>{basename(cwd)}</span>} />
+      <PanelHeader
+        title="Explorer"
+        right={<span style={{ color: "var(--muted)" }}>{basename(cwd)}</span>}
+        actions={
+          <RevealInOSButton
+            onClick={async () => {
+              try {
+                await window.spark.fs.revealInOS(cwd);
+                setError(null);
+              } catch (err) {
+                setError((err as Error).message);
+              }
+            }}
+          />
+        }
+      />
       {error && (
-        <div style={{ padding: "7px 12px", color: "var(--danger)", fontSize: 11, borderBottom: "1px solid var(--rule)" }}>
+        <div style={{ padding: "6px 16px", color: "var(--danger)", fontSize: 11 }}>
           {error}
         </div>
       )}
-      <div style={{ padding: "6px 0", overflow: "auto", flex: 1 }}>
+      <div style={{ padding: "2px 0 8px", overflow: "auto", flex: 1 }}>
         {flatRef.current.map((row, i) => (
           <Row
             key={row.node.entry.path + i}
             node={row.node}
             depth={row.depth}
-            branches={row.branches}
-            isLast={row.isLast}
             active={row.node.entry.path === activePath}
             onToggle={() => toggleDir(row.node as DirNode & { kind: "dir" })}
             onOpenFile={onOpenFile}
@@ -260,17 +273,14 @@ export default function FileTree({
 interface FlatRow {
   node: Node;
   depth: number;
-  branches: boolean[];
-  isLast: boolean;
 }
 
-function flatten(node: Node, depth: number, branches: boolean[] = [], isLast = true): FlatRow[] {
-  const out: FlatRow[] = [{ node, depth, branches, isLast }];
+function flatten(node: Node, depth: number): FlatRow[] {
+  const out: FlatRow[] = [{ node, depth }];
   if (node.kind === "dir" && node.open) {
-    const childBranches = depth === 0 ? [] : [...branches, !isLast];
-    node.children.forEach((child, index) => {
-      out.push(...flatten(child, depth + 1, childBranches, index === node.children.length - 1));
-    });
+    for (const child of node.children) {
+      out.push(...flatten(child, depth + 1));
+    }
   }
   return out;
 }
@@ -334,8 +344,6 @@ function collectMatchingDirs(
 function Row({
   node,
   depth,
-  branches,
-  isLast,
   active,
   onToggle,
   onOpenFile,
@@ -343,8 +351,6 @@ function Row({
 }: {
   node: Node;
   depth: number;
-  branches: boolean[];
-  isLast: boolean;
   active: boolean;
   onToggle: () => void;
   onOpenFile: (entry: FsEntry) => void;
@@ -352,11 +358,16 @@ function Row({
 }) {
   const isDir = node.kind === "dir";
   const [hover, setHover] = useState(false);
-  const activeBg = "color-mix(in oklch, var(--ink) 4%, var(--panel))";
   const dirNode = isDir ? (node as DirNode & { kind: "dir" }) : null;
-  const connectorColor = active
-    ? "color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
-    : "var(--rule-soft)";
+  const indentStep = 8;
+  const baseLeft = 6;
+  const rowPaddingLeft = baseLeft + depth * indentStep;
+  const background = active
+    ? "color-mix(in oklch, var(--ink) 9%, transparent)"
+    : hover
+      ? "color-mix(in oklch, var(--ink) 4%, transparent)"
+      : "transparent";
+
   return (
     <div
       onClick={isDir ? onToggle : () => onOpenFile(node.entry)}
@@ -369,161 +380,78 @@ function Row({
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
+        position: "relative",
         display: "flex",
         alignItems: "center",
-        gap: 0,
-        minHeight: 29,
-        padding: "0 9px 0 0",
-        margin: "0 8px 3px",
-        background: active
-          ? activeBg
-          : hover
-            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
-            : "transparent",
-        border: active
-          ? "1px solid color-mix(in oklch, var(--accent) 45%, var(--rule-strong))"
-          : "1px solid transparent",
-        borderRadius: 7,
-        boxShadow: active
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
-          : hover
-            ? "inset 0 1px 0 rgba(255, 255, 255, 0.03)"
-            : "none",
+        gap: 4,
+        height: 22,
+        padding: `0 8px 0 ${rowPaddingLeft}px`,
+        background,
         color: active ? "var(--ink)" : "var(--ink-dim)",
         cursor: "default",
-        transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
+      {Array.from({ length: depth }, (_, i) => (
+        <span
+          key={i}
+          aria-hidden
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            left: baseLeft + i * indentStep + 4,
+            width: 1,
+            background: "var(--rule-soft)",
+            opacity: 0.6,
+          }}
+        />
+      ))}
+
       <span
         aria-hidden
         style={{
-          display: "inline-flex",
-          alignItems: "stretch",
-          height: 29,
-          marginLeft: depth === 0 ? 7 : 2,
-          flex: "0 0 auto",
-        }}
-      >
-        {branches.map((continues, index) => (
-          <TreeGuide key={index} continues={continues} color="var(--rule-soft)" />
-        ))}
-        {depth > 0 && <TreeElbow isLast={isLast} color={connectorColor} />}
-      </span>
-
-      <button
-        type="button"
-        onClick={(event) => {
-          if (!isDir) return;
-          event.stopPropagation();
-          onToggle();
-        }}
-        title={isDir ? (dirNode?.open ? "Collapse folder" : "Expand folder") : undefined}
-        tabIndex={isDir ? 0 : -1}
-        style={{
-          appearance: "none",
-          width: 16,
-          height: 22,
-          border: "none",
-          background: "transparent",
-          color: isDir ? "var(--muted)" : "transparent",
+          width: 12,
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
-          padding: 0,
-          marginRight: 4,
-          cursor: "default",
-          flex: "0 0 16px",
+          flex: "0 0 12px",
+          color: "var(--muted)",
         }}
       >
         {isDir && <ChevronIcon open={Boolean(dirNode?.open)} />}
-      </button>
+      </span>
 
-      <span style={{ display: "inline-flex", gap: 6, alignItems: "center", minWidth: 0, flex: 1 }}>
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          color: isDir ? "var(--muted)" : "var(--muted)",
+          flex: "0 0 auto",
+        }}
+      >
         {isDir ? <FolderIcon open={Boolean(dirNode?.open)} /> : <FileIcon ext={node.entry.ext} />}
-        <span
-          style={{
-            fontFamily: "var(--font-sans)",
-            fontSize: 12,
-            fontWeight: isDir ? 600 : 400,
-            color: active ? "var(--ink)" : isDir ? "var(--ink)" : "var(--ink-dim)",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            minWidth: 0,
-          }}
-          title={node.entry.path}
-        >
-          {node.entry.name}
-        </span>
+      </span>
+
+      <span
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 13,
+          fontWeight: 400,
+          color: active ? "var(--ink)" : "var(--ink-dim)",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          minWidth: 0,
+          flex: 1,
+        }}
+        title={node.entry.path}
+      >
+        {node.entry.name}
       </span>
       {isDir && dirNode?.loading && (
-        <span style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--muted)" }}>…</span>
+        <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--muted)" }}>…</span>
       )}
     </div>
-  );
-}
-
-function TreeGuide({ continues, color }: { continues: boolean; color: string }) {
-  return (
-    <span
-      style={{
-        width: 16,
-        height: "100%",
-        position: "relative",
-        flex: "0 0 16px",
-      }}
-    >
-      {continues && (
-        <span
-          style={{
-            position: "absolute",
-            left: 7,
-            top: 0,
-            bottom: 0,
-            width: 1,
-            background: color,
-            opacity: 0.82,
-          }}
-        />
-      )}
-    </span>
-  );
-}
-
-function TreeElbow({ isLast, color }: { isLast: boolean; color: string }) {
-  return (
-    <span
-      style={{
-        width: 17,
-        height: "100%",
-        position: "relative",
-        flex: "0 0 17px",
-      }}
-    >
-      <span
-        style={{
-          position: "absolute",
-          left: 7,
-          top: 0,
-          bottom: isLast ? "50%" : 0,
-          width: 1,
-          background: color,
-          opacity: 0.9,
-        }}
-      />
-      <span
-        style={{
-          position: "absolute",
-          left: 7,
-          top: "50%",
-          width: 10,
-          height: 1,
-          background: color,
-          opacity: 0.9,
-        }}
-      />
-    </span>
   );
 }
 
@@ -868,46 +796,100 @@ function parentPath(path: string): string {
   return idx > 0 ? path.slice(0, idx) : path;
 }
 
-function PanelHeader({ title, right }: { title: string; right?: React.ReactNode }) {
+function PanelHeader({
+  title,
+  right,
+  actions,
+}: {
+  title: string;
+  right?: React.ReactNode;
+  actions?: React.ReactNode;
+}) {
   return (
     <div
       style={{
-        padding: "10px 10px 8px 14px",
-        borderBottom: "1px solid var(--rule-soft)",
-        background: "var(--panel)",
+        height: 22,
+        padding: "0 6px 0 14px",
+        background: "transparent",
         display: "flex",
         alignItems: "center",
-        gap: 7,
-        flex: "0 0 auto",
+        gap: 8,
+        flex: "0 0 22px",
         color: "var(--muted)",
       }}
     >
       <span
         style={{
           fontFamily: "var(--font-sans)",
-          fontSize: 9,
-          letterSpacing: "0.18em",
+          fontSize: 11,
+          letterSpacing: "0.04em",
           textTransform: "uppercase",
-          fontWeight: 700,
+          fontWeight: 600,
+          color: "var(--ink-dim)",
         }}
       >
         {title}
       </span>
-      <span style={{ flex: 1, height: 1, background: "var(--rule-soft)" }} />
+      <span style={{ flex: 1 }} />
       <span
         style={{
           maxWidth: 128,
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
-          fontFamily: "var(--font-mono)",
-          fontSize: 10,
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
           fontWeight: 400,
           color: "var(--muted)",
         }}
       >
         {right}
       </span>
+      {actions}
     </div>
+  );
+}
+
+function RevealInOSButton({ onClick }: { onClick: () => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title="Reveal in File Explorer"
+      style={{
+        appearance: "none",
+        width: 20,
+        height: 20,
+        border: "none",
+        borderRadius: 3,
+        background: hover ? "var(--hover)" : "transparent",
+        color: hover ? "var(--ink)" : "var(--ink-dim)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 0,
+        cursor: "default",
+      }}
+    >
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+        <path
+          d="M2 4 H5 L6.5 5.5 H12 V11 H2 Z"
+          stroke="currentColor"
+          strokeWidth="1"
+          fill="none"
+        />
+        <path
+          d="M8.5 7.5 L11 7.5 L11 10 M11 7.5 L7.5 11"
+          stroke="currentColor"
+          strokeWidth="1"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          fill="none"
+        />
+      </svg>
+    </button>
   );
 }

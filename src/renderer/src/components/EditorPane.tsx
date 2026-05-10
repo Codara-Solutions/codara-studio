@@ -1,15 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import type { FsEntry } from "@shared/types";
-import { CloseIcon, FileIcon } from "./icons";
 
 interface Props {
   file: FsEntry;
-  active: boolean;
-  onActivate: () => void;
-  onClose: () => void;
+  onDirtyChange?: (path: string, dirty: boolean) => void;
 }
 
-export default function EditorPane({ file, active, onActivate, onClose }: Props) {
+export default function EditorPane({ file, onDirtyChange }: Props) {
   const [content, setContent] = useState("");
   const [savedContent, setSavedContent] = useState("");
   const [loading, setLoading] = useState(true);
@@ -18,6 +15,10 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
   const [status, setStatus] = useState<string | null>(null);
 
   const dirty = content !== savedContent;
+
+  useEffect(() => {
+    onDirtyChange?.(file.path, dirty);
+  }, [dirty, file.path, onDirtyChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -34,7 +35,7 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
         if (cancelled) return;
         setContent(result.content);
         setSavedContent(result.content);
-        setStatus(`${formatBytes(result.size)} loaded`);
+        setStatus(formatBytes(result.size));
       } catch (err) {
         if (cancelled) return;
         setError((err as Error).message);
@@ -67,15 +68,8 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
 
   const lineCount = useMemo(() => Math.max(1, content.split("\n").length), [content]);
 
-  // Split file name into base + extension so we can render the extension in mono
-  // while the human-readable base sits in sans, matching the hybrid type rule.
-  const dotIdx = file.name.lastIndexOf(".");
-  const nameBase = dotIdx > 0 ? file.name.slice(0, dotIdx) : file.name;
-  const nameExt = dotIdx > 0 ? file.name.slice(dotIdx) : "";
-
   return (
-    <section
-      onMouseDown={onActivate}
+    <div
       style={{
         background: "var(--bg)",
         display: "flex",
@@ -83,173 +77,9 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
         minHeight: 0,
         minWidth: 0,
         overflow: "hidden",
-        border: active
-          ? "1px solid color-mix(in oklch, var(--accent) 45%, var(--rule-strong))"
-          : "1px solid var(--rule-soft)",
-        borderRadius: 8,
-        boxShadow: active
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.03)"
-          : "none",
-        transition:
-          "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+        flex: 1,
       }}
     >
-      <div
-        style={{
-          height: 36,
-          flex: "0 0 36px",
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "0 10px",
-          borderBottom: "1px solid var(--rule-soft)",
-          background: "var(--panel)",
-          transition: "background var(--motion-fast) var(--ease-out)",
-        }}
-      >
-        <div
-          style={{
-            minWidth: 0,
-            maxWidth: "70%",
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-            minHeight: 26,
-            padding: "0 9px",
-            border: active
-              ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
-              : "1px solid var(--rule-soft)",
-            borderRadius: 7,
-            background: active
-              ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
-              : "color-mix(in oklch, var(--ink) 2%, transparent)",
-            color: "var(--ink)",
-            fontSize: 12,
-            position: "relative",
-            boxShadow: active
-              ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), 0 8px 18px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
-              : "none",
-            transition:
-              "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-          }}
-          title={file.path}
-        >
-          {active && (
-            <span
-              aria-hidden
-              style={{
-                width: 7,
-                height: 7,
-                borderRadius: 999,
-                background: "var(--accent)",
-                boxShadow: "0 0 9px var(--accent-glow)",
-                flex: "0 0 7px",
-              }}
-            />
-          )}
-          <FileIcon ext={file.ext} />
-          <span
-            style={{
-              minWidth: 0,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              fontFamily: "var(--font-sans)",
-              fontWeight: 600,
-            }}
-          >
-            {nameBase}
-            {nameExt && (
-              <span style={{ fontFamily: "var(--font-mono)", fontWeight: 400, color: "var(--ink-dim)" }}>
-                {nameExt}
-              </span>
-            )}
-          </span>
-          {dirty && <span style={{ color: "var(--accent)" }}>*</span>}
-        </div>
-
-        <div style={{ flex: 1 }} />
-
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            void save();
-          }}
-          disabled={!dirty || saving || loading || Boolean(error)}
-          title="Save"
-          style={{
-            appearance: "none",
-            background: dirty && !error
-              ? "color-mix(in oklch, var(--ink) 3%, transparent)"
-              : "transparent",
-            border: dirty && !error
-              ? "1px solid var(--accent-edge)"
-              : "1px solid var(--rule-soft)",
-            borderRadius: 999,
-            color: dirty && !error ? "var(--ink)" : "var(--muted)",
-            minHeight: 24,
-            padding: "0 11px",
-            fontFamily: "var(--font-sans)",
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: "0.12em",
-            textTransform: "uppercase",
-            cursor: "default",
-            transition:
-              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-          }}
-          onMouseEnter={(e) => {
-            if (dirty && !error) {
-              e.currentTarget.style.background = "var(--hover)";
-              e.currentTarget.style.borderColor = "var(--accent-edge)";
-            }
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = dirty && !error
-              ? "color-mix(in oklch, var(--ink) 3%, transparent)"
-              : "transparent";
-            e.currentTarget.style.borderColor = dirty && !error
-              ? "var(--accent-edge)"
-              : "var(--rule-soft)";
-          }}
-        >
-          {saving ? "Saving" : "Save"}
-        </button>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onClose();
-          }}
-          title="Close editor"
-          style={{
-            appearance: "none",
-            background: "transparent",
-            border: "none",
-            color: "var(--muted)",
-            width: 24,
-            height: 24,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 0,
-            cursor: "default",
-            transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = "transparent";
-            e.currentTarget.style.color = "var(--ink-dim)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = "transparent";
-            e.currentTarget.style.color = "var(--muted)";
-          }}
-        >
-          <CloseIcon />
-        </button>
-      </div>
-
       <div
         style={{
           flex: 1,
@@ -260,7 +90,7 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
         }}
       >
         {loading ? (
-          <EditorMessage text="Loading file..." />
+          <EditorMessage text="Loading file…" />
         ) : error ? (
           <EditorMessage text={error} danger />
         ) : (
@@ -284,10 +114,10 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
                 outline: "none",
                 background: "transparent",
                 color: "var(--ink)",
-                padding: "12px 14px",
+                padding: "8px 16px",
                 fontFamily: "var(--font-mono)",
-                fontSize: 12,
-                lineHeight: 1.55,
+                fontSize: 13,
+                lineHeight: 1.5,
                 whiteSpace: "pre",
                 overflow: "auto",
                 tabSize: 2,
@@ -299,40 +129,30 @@ export default function EditorPane({ file, active, onActivate, onClose }: Props)
 
       <div
         style={{
-          flex: "0 0 auto",
-          minHeight: 26,
+          flex: "0 0 22px",
+          height: 22,
           display: "flex",
           alignItems: "center",
-          gap: 16,
-          padding: "4px 12px",
-          borderTop: "1px solid var(--rule-soft)",
+          gap: 14,
+          padding: "0 12px",
           background: "var(--panel)",
           color: "var(--muted)",
-          fontSize: 10,
+          fontSize: 11,
         }}
       >
-        <span
-          style={{
-            fontFamily: "var(--font-sans)",
-            fontWeight: 600,
-            fontSize: 10,
-            letterSpacing: "0.14em",
-            textTransform: "uppercase",
-            color: dirty ? "var(--accent)" : "var(--muted)",
-          }}
-        >
-          {dirty ? "UNSAVED" : "SAVED"}
-        </span>
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
-          {lineCount} lines
+        <span style={{ fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
+          {lineCount} {lineCount === 1 ? "line" : "lines"}
         </span>
         {status && (
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
+          <span style={{ fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
             {status}
           </span>
         )}
+        <span style={{ flex: 1 }} />
+        {saving && <span>Saving…</span>}
+        {dirty && !saving && <span>Modified</span>}
       </div>
-    </section>
+    </div>
   );
 }
 
@@ -346,17 +166,16 @@ function LineGutter({ count }: { count: number }) {
       aria-hidden="true"
       style={{
         margin: 0,
-        padding: "12px 8px 12px 12px",
-        minWidth: 46,
-        maxWidth: 68,
+        padding: "8px 10px 8px 12px",
+        minWidth: 48,
+        maxWidth: 72,
         overflow: "hidden",
-        borderRight: "1px solid var(--rule-soft)",
-        background: "var(--panel)",
-        color: "var(--muted)",
+        background: "transparent",
+        color: "var(--muted-2)",
         fontFamily: "var(--font-mono)",
-        fontSize: 12,
+        fontSize: 13,
         fontVariantNumeric: "tabular-nums",
-        lineHeight: 1.55,
+        lineHeight: 1.5,
         textAlign: "right",
         userSelect: "none",
       }}

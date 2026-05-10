@@ -114,10 +114,27 @@ app.whenReady().then(async () => {
       emitFinalSummary(outcome);
       pty.disposeAll();
       await flush();
-      app.exit(exitCodeFor(outcome));
+      // Schedule a hard process.exit() fallback before app.exit(): on Windows,
+      // node-pty's conPTY teardown can leave non-daemon worker handles that
+      // keep the Electron event loop alive even after every Spark resource
+      // is disposed. Pilot runs were observed hanging 30+ minutes post-
+      // status=complete because of this. The grace gives Electron a real
+      // chance to exit cleanly (preserves stdout flush, atexit, etc.); the
+      // fallback guarantees the process dies regardless.
+      const exitCode = exitCodeFor(outcome);
+      const hardExitTimer = setTimeout(() => {
+        process.stderr.write(
+          `spark headless eval: forcing process.exit(${exitCode}) after Electron exit grace\n`,
+        );
+        process.exit(exitCode);
+      }, 3000);
+      hardExitTimer.unref();
+      app.exit(exitCode);
     } catch (err) {
       pty.disposeAll();
       await flush().catch(() => undefined);
+      const hardExitTimer = setTimeout(() => process.exit(1), 3000);
+      hardExitTimer.unref();
       failHeadless(1, (err as Error).message || String(err));
     }
     return;

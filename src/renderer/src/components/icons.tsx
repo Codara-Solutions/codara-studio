@@ -28,7 +28,7 @@ export function FolderIcon({ open = false }: { open?: boolean }) {
     ) : (
       <path d="M1 4 H5.5 L7 5.5 H13 V12 H1 Z" stroke="currentColor" strokeWidth="1" />
     ),
-    "var(--accent)",
+    "currentColor",
   );
 }
 
@@ -46,7 +46,7 @@ export function FileIcon({ ext }: { ext?: string }) {
           <path d="M4.5 7 H7 M5.75 7 V10.5" stroke="currentColor" strokeWidth="1" />
           <path d="M9.5 7 H8 V8.5 H9.5 V10.5 H8" stroke="currentColor" strokeWidth="1" fill="none" />
         </>,
-        "var(--info)",
+        "currentColor",
       );
     case "js":
     case "jsx":
@@ -57,7 +57,7 @@ export function FileIcon({ ext }: { ext?: string }) {
           <path d="M8 10 Q8 11 9 11 Q10 11 10 10 V9 H8.5 V8 Q8.5 7 9.5 7"
                 stroke="currentColor" strokeWidth="1" fill="none" />
         </>,
-        "var(--accent)",
+        "currentColor",
       );
     case "json":
       return wrap(
@@ -76,7 +76,7 @@ export function FileIcon({ ext }: { ext?: string }) {
             fill="none"
           />
         </>,
-        "var(--accent)",
+        "currentColor",
       );
     case "yaml":
     case "yml":
@@ -85,7 +85,7 @@ export function FileIcon({ ext }: { ext?: string }) {
           {docFrame}
           <path d="M5 7 L7 9 L9 7 M7 9 V11" stroke="currentColor" strokeWidth="1" fill="none" />
         </>,
-        "var(--ink-dim)",
+        "currentColor",
       );
     case "md":
       return wrap(
@@ -93,7 +93,7 @@ export function FileIcon({ ext }: { ext?: string }) {
           {docFrame}
           <path d="M5 11 V7 L7 9.5 L9 7 V11" stroke="currentColor" strokeWidth="1" fill="none" />
         </>,
-        "var(--ink-dim)",
+        "currentColor",
       );
     case "env":
       return wrap(
@@ -106,7 +106,7 @@ export function FileIcon({ ext }: { ext?: string }) {
             strokeWidth="1"
           />
         </>,
-        "var(--muted)",
+        "currentColor",
       );
     default:
       return wrap(
@@ -116,7 +116,7 @@ export function FileIcon({ ext }: { ext?: string }) {
           <line x1="4.5" y1="9" x2="9.5" y2="9" stroke="currentColor" strokeWidth="1" />
           <line x1="4.5" y1="10.5" x2="7.5" y2="10.5" stroke="currentColor" strokeWidth="1" />
         </>,
-        "var(--muted)",
+        "currentColor",
       );
   }
 }

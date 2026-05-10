@@ -1,0 +1,6 @@
+{
+  "variantId": "codex_best_single_gpt55",
+  "agent": "codex",
+  "model": "gpt-5.5",
+  "effort": "xhigh"
+}

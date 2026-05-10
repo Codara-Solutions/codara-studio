@@ -1,16 +1,12 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   PlannedStepAgent,
-  RunArtifactPaths,
   RunState,
-  SparkEvent,
   StepState,
   WorkerAttempt,
   WorkerTask,
   Workspace,
 } from "@shared/types";
-import DevInspector from "./DevInspector";
-
 const MIN_RUN_CANVAS_ZOOM = 0.3;
 const MAX_RUN_CANVAS_ZOOM = 2.5;
 const DEFAULT_RUN_CANVAS_ZOOM = 1;
@@ -35,69 +31,13 @@ interface AgentRow {
 export default function RunsView({ workspace, runs, activeRunId }: Props) {
   // Canvas-local state — events, the chosen event, and resolved artifact
   // paths. The runs list and active selection live in App.tsx.
-  const [events, setEvents] = useState<SparkEvent[]>([]);
-  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
-  const [artifactPaths, setArtifactPaths] = useState<RunArtifactPaths | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const workspaceId = workspace?.id ?? null;
   const activeRun = useMemo(
     () => runs.find((run) => run.id === activeRunId) ?? null,
     [runs, activeRunId],
   );
 
-  // Reload events + artifact paths whenever the selected run changes.
-  useEffect(() => {
-    if (!activeRunId) {
-      setEvents([]);
-      setSelectedEventId(null);
-      setArtifactPaths(null);
-      return;
-    }
-
-    let cancelled = false;
-    void Promise.all([
-      window.spark.orchestration.listEvents(activeRunId),
-      window.spark.orchestration.getArtifactPaths(activeRunId),
-    ]).then(([nextEvents, paths]) => {
-      if (cancelled) return;
-      setEvents(nextEvents);
-      setArtifactPaths(paths);
-      setSelectedEventId((current) => {
-        if (current && nextEvents.some((event) => event.id === current)) return current;
-        return nextEvents[nextEvents.length - 1]?.id ?? null;
-      });
-      setError(null);
-    }).catch((err) => {
-      if (!cancelled) setError((err as Error).message);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeRunId]);
-
-  // Live-append events for the currently-selected run.
-  useEffect(() => {
-    if (!workspaceId || !activeRunId) return undefined;
-
-    return window.spark.orchestration.onEvent((event) => {
-      if (event.workspaceId !== workspaceId) return;
-      if (event.runId !== activeRunId) return;
-      setEvents((current) => {
-        if (current.some((item) => item.id === event.id)) return current;
-        return [...current, event];
-      });
-      setSelectedEventId((current) => current ?? event.id);
-      void window.spark.orchestration.getArtifactPaths(activeRunId).then(setArtifactPaths);
-    });
-  }, [activeRunId, workspaceId]);
-
   if (!workspace) {
     return <EmptyState text="No active workspace." />;
-  }
-  if (error) {
-    return <EmptyState text={`Error: ${error}`} tone="danger" />;
   }
   if (runs.length === 0) {
     return (
@@ -134,26 +74,7 @@ export default function RunsView({ workspace, runs, activeRunId }: Props) {
         }}
       >
         <RunHeader run={activeRun} />
-        <div
-          style={{
-            flex: 1,
-            minWidth: 0,
-            minHeight: 0,
-            overflow: "hidden",
-            display: "grid",
-            gridTemplateRows: "minmax(240px, 1fr) minmax(210px, 34%)",
-          }}
-        >
-          <RunCanvas run={activeRun} />
-          <DevInspector
-            workspace={workspace}
-            activeRun={activeRun}
-            events={events}
-            selectedEventId={selectedEventId}
-            artifactPaths={artifactPaths}
-            onSelectEvent={setSelectedEventId}
-          />
-        </div>
+        <RunCanvas run={activeRun} />
       </main>
     </div>
   );
@@ -196,6 +117,7 @@ function RunHeader({ run }: { run: RunState }) {
             {run.title}
           </span>
           <StatusPill status={run.status} />
+          <RunIdChip runId={run.id} />
         </div>
         <div
           title={activeStep?.goal}
@@ -225,6 +147,77 @@ function RunHeader({ run }: { run: RunState }) {
         <Metric label="AUTO" value={run.autopilot?.status ?? "idle"} separated />
       </div>
     </header>
+  );
+}
+
+function RunIdChip({ runId }: { runId: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(runId);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Clipboard API can fail in non-secure contexts; degrade silently.
+    }
+  };
+  // Run ids are long. Show the first 8 chars; full id in the title attribute
+  // and on hover reveal a copy affordance to the right.
+  const short = runId.slice(0, 8);
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      title={`Run id: ${runId}\nClick to copy.`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "2px 8px",
+        background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+        color: "var(--muted)",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 999,
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        letterSpacing: "0.04em",
+        cursor: "pointer",
+        transition: "color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.color = "var(--ink-dim)";
+        e.currentTarget.style.borderColor = "var(--rule-strong)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.color = "var(--muted)";
+        e.currentTarget.style.borderColor = "var(--rule-soft)";
+      }}
+    >
+      <span style={{ opacity: 0.7 }}>id</span>
+      <span style={{ color: "var(--ink-dim)" }}>{short}</span>
+      <span
+        aria-hidden
+        style={{
+          width: 12,
+          height: 12,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: copied ? "var(--ok)" : "currentColor",
+        }}
+      >
+        {copied ? (
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+            <path d="M2 6.5l2.5 2.5L10 3.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        ) : (
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+            <rect x="3.5" y="3.5" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.2" />
+            <path d="M2.5 8.5V2.5h6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+          </svg>
+        )}
+      </span>
+    </button>
   );
 }
 
@@ -282,6 +275,13 @@ function Metric({
 function RunCanvas({ run }: { run: RunState }) {
   const [zoomLabel, setZoomLabel] = useState(`${Math.round(DEFAULT_RUN_CANVAS_ZOOM * 100)}%`);
   const [isPanning, setIsPanning] = useState(false);
+  // Selecting a step card surfaces its tasks/attempts in a strip below the
+  // canvas so the user can drill in without leaving this view.
+  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
+  // Worker selection is mutually exclusive with step selection: clicking a
+  // worker chip opens a separate prompt drawer below the canvas. Keeping a
+  // single "what's open" surface keeps the UI from competing with itself.
+  const [selectedWorkerTaskId, setSelectedWorkerTaskId] = useState<string | null>(null);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const panRef = useRef<HTMLDivElement | null>(null);
@@ -499,6 +499,16 @@ function RunCanvas({ run }: { run: RunState }) {
     setIsPanning(false);
   };
 
+  const selectedStep = selectedStepId
+    ? orderedSteps.find((step) => step.id === selectedStepId) ?? null
+    : null;
+  const selectedWorkerTask = selectedWorkerTaskId
+    ? maps.taskById.get(selectedWorkerTaskId) ?? null
+    : null;
+  const selectedWorkerAttempt = selectedWorkerTask
+    ? maps.attemptByTask.get(selectedWorkerTask.id) ?? null
+    : null;
+
   return (
     <section
       style={{
@@ -507,6 +517,8 @@ function RunCanvas({ run }: { run: RunState }) {
         minWidth: 0,
         overflow: "hidden",
         position: "relative",
+        display: "flex",
+        flexDirection: "column",
         backgroundColor: "var(--bg)",
         backgroundImage:
           "radial-gradient(circle, color-mix(in oklch, var(--muted) 32%, transparent) 1px, transparent 1px)",
@@ -547,60 +559,562 @@ function RunCanvas({ run }: { run: RunState }) {
       </div>
 
       <div
-        ref={viewportRef}
-        onPointerDown={startPanning}
-        onPointerMove={movePanning}
-        onPointerUp={stopPanning}
-        onPointerCancel={stopPanning}
         style={{
-          position: "absolute",
-          inset: 0,
-          overflow: "hidden",
-          cursor: isPanning ? "grabbing" : "grab",
-          userSelect: "none",
-          touchAction: "none",
+          flex: 1,
+          minHeight: 0,
+          position: "relative",
         }}
       >
         <div
-          ref={panRef}
+          ref={viewportRef}
+          onPointerDown={startPanning}
+          onPointerMove={movePanning}
+          onPointerUp={stopPanning}
+          onPointerCancel={stopPanning}
           style={{
             position: "absolute",
-            top: 0,
-            left: 0,
-            transformOrigin: "0 0",
+            inset: 0,
+            overflow: "hidden",
+            cursor: isPanning ? "grabbing" : "grab",
+            userSelect: "none",
+            touchAction: "none",
           }}
         >
           <div
-            ref={contentRef}
+            ref={panRef}
             style={{
-              width: contentWidth,
-              display: "flex",
-              flexDirection: "column",
-              gap: 22,
-              textRendering: "geometricPrecision",
-              WebkitFontSmoothing: "antialiased",
+              position: "absolute",
+              top: 0,
+              left: 0,
+              transformOrigin: "0 0",
             }}
           >
-            {orderedSteps.length === 0 ? (
-              <PlanningGraph run={run} />
-            ) : (
-              <StepsGraph
+            <div
+              ref={contentRef}
+              style={{
+                width: contentWidth,
+                display: "flex",
+                flexDirection: "column",
+                gap: 22,
+                textRendering: "geometricPrecision",
+                WebkitFontSmoothing: "antialiased",
+              }}
+            >
+              {orderedSteps.length === 0 ? (
+                <PlanningGraph run={run} />
+              ) : (
+                <StepsGraph
+                  run={run}
+                  steps={orderedSteps}
+                  taskById={maps.taskById}
+                  attemptByTask={maps.attemptByTask}
+                  selectedStepId={selectedStepId}
+                  selectedWorkerTaskId={selectedWorkerTaskId}
+                  onSelectStep={(id) => {
+                    setSelectedWorkerTaskId(null);
+                    setSelectedStepId((current) => (current === id ? null : id));
+                  }}
+                  onSelectWorker={(id) => {
+                    setSelectedStepId(null);
+                    setSelectedWorkerTaskId((current) => (current === id ? null : id));
+                  }}
+                />
+              )}
+              <RunDetails
                 run={run}
                 steps={orderedSteps}
                 taskById={maps.taskById}
                 attemptByTask={maps.attemptByTask}
               />
-            )}
-            <RunDetails
-              run={run}
-              steps={orderedSteps}
-              taskById={maps.taskById}
-              attemptByTask={maps.attemptByTask}
-            />
+            </div>
           </div>
         </div>
       </div>
+
+      {selectedStep && (
+        <StepDetailsStrip
+          step={selectedStep}
+          taskById={maps.taskById}
+          attemptByTask={maps.attemptByTask}
+          onClose={() => setSelectedStepId(null)}
+        />
+      )}
+
+      {selectedWorkerTask && (
+        <WorkerDetailsStrip
+          task={selectedWorkerTask}
+          attempt={selectedWorkerAttempt}
+          onClose={() => setSelectedWorkerTaskId(null)}
+        />
+      )}
     </section>
+  );
+}
+
+function StepDetailsStrip({
+  step,
+  taskById,
+  attemptByTask,
+  onClose,
+}: {
+  step: StepState;
+  taskById: Map<string, WorkerTask>;
+  attemptByTask: Map<string, WorkerAttempt>;
+  onClose: () => void;
+}) {
+  const tasks = step.workerTaskIds
+    .map((id) => taskById.get(id))
+    .filter((task): task is WorkerTask => Boolean(task));
+  const stepTone = stepStatusColor(step.status);
+  return (
+    <div
+      style={{
+        flex: "0 0 auto",
+        maxHeight: "44%",
+        overflow: "auto",
+        background: "var(--panel)",
+        borderTop: "1px solid var(--rule-soft)",
+        boxShadow: "0 -8px 24px rgba(0, 0, 0, 0.18)",
+        padding: "14px 20px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          minWidth: 0,
+        }}
+      >
+        <span
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: "0.18em",
+            textTransform: "uppercase",
+          }}
+        >
+          Step
+        </span>
+        <span
+          style={{
+            color: "var(--ink)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 14,
+            fontWeight: 700,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            flex: 1,
+          }}
+          title={step.title}
+        >
+          {step.title}
+        </span>
+        <span
+          style={{
+            color: stepTone,
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.1em",
+            textTransform: "uppercase",
+          }}
+        >
+          {stepStatusLabel(step.status)}
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          title="Collapse details"
+          style={{
+            appearance: "none",
+            border: "1px solid var(--rule-soft)",
+            background: "transparent",
+            color: "var(--muted)",
+            width: 24,
+            height: 24,
+            borderRadius: 999,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 0,
+            cursor: "default",
+          }}
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden>
+            <path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+        </button>
+      </header>
+
+      {step.goal && (
+        <p
+          style={{
+            margin: 0,
+            color: "var(--ink-dim)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 12,
+            lineHeight: 1.55,
+          }}
+        >
+          {step.goal}
+        </p>
+      )}
+
+      {tasks.length === 0 ? (
+        <div
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 12,
+            padding: "8px 0",
+          }}
+        >
+          No worker tasks yet — Spark will queue them as the step runs.
+        </div>
+      ) : (
+        <ul
+          style={{
+            margin: 0,
+            padding: 0,
+            listStyle: "none",
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+          }}
+        >
+          {tasks.map((task) => {
+            const attempt = attemptByTask.get(task.id);
+            const accepted = task.status === "accepted";
+            const failed = task.status === "needs_review" && attempt?.status === "failed";
+            const tone = accepted
+              ? "var(--ok)"
+              : failed
+                ? "var(--danger)"
+                : task.status === "running"
+                  ? "var(--accent)"
+                  : "var(--muted)";
+            return (
+              <li
+                key={task.id}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "20px minmax(0, 1fr) auto",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "8px 10px",
+                  border: "1px solid var(--rule-soft)",
+                  borderRadius: 7,
+                  background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+                }}
+              >
+                <span
+                  style={{
+                    width: 18,
+                    height: 18,
+                    borderRadius: 999,
+                    border: `1px solid ${tone}`,
+                    color: tone,
+                    background: accepted ? "var(--ok-soft)" : "transparent",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                  title={`Task status: ${task.status}`}
+                >
+                  {accepted ? (
+                    <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden>
+                      <path d="M3 7.5l2.5 2.5L11 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  ) : failed ? (
+                    <svg width="9" height="9" viewBox="0 0 12 12" fill="none" aria-hidden>
+                      <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                    </svg>
+                  ) : (
+                    <span
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: 999,
+                        background: tone,
+                        animation: task.status === "running" ? "spark-pulse 1.2s ease-in-out infinite" : undefined,
+                      }}
+                    />
+                  )}
+                </span>
+                <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                  <span
+                    title={task.title}
+                    style={{
+                      color: "var(--ink)",
+                      fontFamily: "var(--font-sans)",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {task.title}
+                  </span>
+                  <span
+                    style={{
+                      color: "var(--muted)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 10,
+                    }}
+                  >
+                    {task.runtimePreference ?? "any"} · {task.modelHint ?? "auto"}
+                    {attempt ? ` · attempt ${attempt.id.slice(-4)}` : ""}
+                  </span>
+                </div>
+                <span
+                  style={{
+                    color: tone,
+                    fontFamily: "var(--font-sans)",
+                    fontSize: 10,
+                    fontWeight: 700,
+                    letterSpacing: "0.1em",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  {attempt?.status ?? task.status}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function WorkerDetailsStrip({
+  task,
+  attempt,
+  onClose,
+}: {
+  task: WorkerTask;
+  attempt: WorkerAttempt | null;
+  onClose: () => void;
+}) {
+  // Lazy-load the rendered worker prompt from the attempt artifact directory.
+  // We don't cache it on the run state because prompts can be large and only
+  // matter when the user explicitly opens this drawer.
+  const [prompt, setPrompt] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const promptPath = attempt?.promptPath ?? null;
+
+  useEffect(() => {
+    if (!promptPath) {
+      setPrompt(null);
+      setLoadError(null);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setLoadError(null);
+    void window.spark.fs
+      .readText(promptPath)
+      .then((file) => {
+        if (cancelled) return;
+        setPrompt(file.content);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setLoadError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [promptPath]);
+
+  const tone = runtimeTone(task.runtimePreference);
+  const status = deriveAgentStatus(task, attempt ?? undefined, "running");
+
+  return (
+    <div
+      style={{
+        flex: "0 0 auto",
+        maxHeight: "44%",
+        overflow: "auto",
+        background: "var(--panel)",
+        borderTop: "1px solid var(--rule-soft)",
+        boxShadow: "0 -8px 24px rgba(0, 0, 0, 0.18)",
+        padding: "14px 20px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          minWidth: 0,
+        }}
+      >
+        <span
+          style={{
+            color: tone.label,
+            background: tone.bg,
+            border: `1px solid ${tone.border}`,
+            padding: "3px 8px",
+            borderRadius: 4,
+            fontFamily: "var(--font-mono)",
+            fontSize: 9,
+            fontWeight: 700,
+            textTransform: "uppercase",
+            letterSpacing: "0.06em",
+          }}
+        >
+          {task.runtimePreference}
+        </span>
+        <span
+          style={{
+            color: "var(--ink)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 14,
+            fontWeight: 700,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            flex: 1,
+          }}
+          title={task.title}
+        >
+          {task.title}
+        </span>
+        <span
+          style={{
+            color: statusColor(status),
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.1em",
+            textTransform: "uppercase",
+          }}
+        >
+          {attempt?.status ?? task.status}
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          title="Collapse details"
+          style={{
+            appearance: "none",
+            border: "1px solid var(--rule-soft)",
+            background: "transparent",
+            color: "var(--muted)",
+            width: 24,
+            height: 24,
+            borderRadius: 999,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 0,
+            cursor: "pointer",
+          }}
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden>
+            <path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+        </button>
+      </header>
+
+      <div
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          letterSpacing: "0.04em",
+        }}
+      >
+        {[
+          task.modelHint ? `model ${task.modelHint}` : null,
+          task.effortHint ? `effort ${task.effortHint}` : null,
+          attempt ? `attempt ${attempt.attemptNumber}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ") || "no attempt yet"}
+      </div>
+
+      {task.description && (
+        <p
+          style={{
+            margin: 0,
+            color: "var(--ink-dim)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 12,
+            lineHeight: 1.55,
+          }}
+        >
+          {task.description}
+        </p>
+      )}
+
+      <section
+        style={{
+          marginTop: 4,
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+          minHeight: 0,
+        }}
+      >
+        <div
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+          }}
+        >
+          Prompt sent to worker
+        </div>
+        <pre
+          style={{
+            margin: 0,
+            padding: "12px 14px",
+            background: "color-mix(in oklch, var(--bg) 70%, transparent)",
+            border: "1px solid var(--rule-soft)",
+            borderRadius: 7,
+            color: "var(--ink-dim)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            lineHeight: 1.55,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            maxHeight: 360,
+            overflow: "auto",
+          }}
+        >
+          {!promptPath
+            ? "No prompt artifact yet — Spark will render and store the worker prompt as soon as the attempt is prepared."
+            : loading
+              ? "Loading prompt…"
+              : loadError
+                ? `Failed to read prompt: ${loadError}`
+                : prompt ?? ""}
+        </pre>
+      </section>
+    </div>
   );
 }
 
@@ -676,47 +1190,270 @@ function StepsGraph({
   steps,
   taskById,
   attemptByTask,
+  selectedStepId,
+  selectedWorkerTaskId,
+  onSelectStep,
+  onSelectWorker,
 }: {
   run: RunState;
   steps: StepState[];
   taskById: Map<string, WorkerTask>;
   attemptByTask: Map<string, WorkerAttempt>;
+  selectedStepId: string | null;
+  selectedWorkerTaskId: string | null;
+  onSelectStep: (id: string) => void;
+  onSelectWorker: (id: string) => void;
 }) {
   const promptGenerationTargetStepId = promptGenerationTargetStep(run)?.id;
+  // Connectors and the start/end blocks should align with the step row's
+  // vertical centerline (~half of STEP_NODE_HEIGHT). Worker child nodes hang
+  // below the step in its own column, so the grid's row anchor is the top.
   return (
     <div
       style={{
         minHeight: 280,
         display: "grid",
         gridTemplateColumns: `110px ${steps.map(() => "82px 258px").join(" ")} 82px 126px`,
-        alignItems: "center",
+        alignItems: "start",
       }}
     >
-      <StartBlock label="SPARK" subtitle={run.status} />
+      <RowAlign anchor="step"><StartBlock label="SPARK" subtitle={run.status} /></RowAlign>
       {steps.map((step, index) => {
         const prev = index === 0 ? null : steps[index - 1];
         const generatingPrompt = step.id === promptGenerationTargetStepId;
         return (
           <React.Fragment key={step.id}>
-            <Connector
-              label={generatingPrompt ? "prompt" : index === 0 ? "planned" : connectorLabel(prev!, step)}
-              flowing={generatingPrompt}
-            />
-            <StepNode
+            <RowAlign anchor="step">
+              <Connector
+                label={generatingPrompt ? "prompt" : index === 0 ? "planned" : connectorLabel(prev!, step)}
+                flowing={generatingPrompt}
+              />
+            </RowAlign>
+            <StepColumn
               step={step}
               displayIndex={index + 1}
               taskById={taskById}
               attemptByTask={attemptByTask}
-              active={step.id === run.currentStepId}
+              run={run}
+              selectedStepId={selectedStepId}
+              selectedWorkerTaskId={selectedWorkerTaskId}
+              onSelectStep={onSelectStep}
+              onSelectWorker={onSelectWorker}
             />
           </React.Fragment>
         );
       })}
-      <Connector
-        label={run.status === "complete" ? "done" : "finish"}
-      />
-      <EndBlock status={run.status} />
+      <RowAlign anchor="step">
+        <Connector
+          label={run.status === "complete" ? "done" : "finish"}
+        />
+      </RowAlign>
+      <RowAlign anchor="step"><EndBlock status={run.status} /></RowAlign>
     </div>
+  );
+}
+
+// Centers a piece of step-row content (start/end block, connector) on the
+// vertical mid-line of a StepNode so adjacent step columns line up cleanly
+// even when their worker child nodes extend the column downward.
+const STEP_NODE_HEIGHT = 166;
+function RowAlign({ anchor: _anchor, children }: { anchor: "step"; children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        height: STEP_NODE_HEIGHT,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function StepColumn({
+  step,
+  displayIndex,
+  taskById,
+  attemptByTask,
+  run,
+  selectedStepId,
+  selectedWorkerTaskId,
+  onSelectStep,
+  onSelectWorker,
+}: {
+  step: StepState;
+  displayIndex: number;
+  taskById: Map<string, WorkerTask>;
+  attemptByTask: Map<string, WorkerAttempt>;
+  run: RunState;
+  selectedStepId: string | null;
+  selectedWorkerTaskId: string | null;
+  onSelectStep: (id: string) => void;
+  onSelectWorker: (id: string) => void;
+}) {
+  const rows = agentRowsForStep(step, taskById, attemptByTask, displayIndex);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 0 }}>
+      <StepNode
+        step={step}
+        displayIndex={displayIndex}
+        taskById={taskById}
+        attemptByTask={attemptByTask}
+        active={step.id === run.currentStepId}
+        selected={step.id === selectedStepId}
+        onClick={() => onSelectStep(step.id)}
+      />
+      {rows.length > 0 && (
+        <WorkerStack
+          rows={rows}
+          stepStatus={step.status}
+          selectedWorkerTaskId={selectedWorkerTaskId}
+          onSelectWorker={onSelectWorker}
+        />
+      )}
+    </div>
+  );
+}
+
+function WorkerStack({
+  rows,
+  stepStatus,
+  selectedWorkerTaskId,
+  onSelectWorker,
+}: {
+  rows: AgentRow[];
+  stepStatus: StepState["status"];
+  selectedWorkerTaskId: string | null;
+  onSelectWorker: (id: string) => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 6,
+        marginTop: 10,
+      }}
+    >
+      {/* Drop-down line from step → first worker */}
+      <span
+        aria-hidden
+        style={{
+          width: 1,
+          height: 14,
+          background: "var(--rule-strong)",
+          opacity: 0.7,
+        }}
+      />
+      {rows.map((row, index) => (
+        <React.Fragment key={row.task?.id ?? `${row.agent.label}-${index}`}>
+          <WorkerNode
+            row={row}
+            stepStatus={stepStatus}
+            selected={Boolean(row.task && row.task.id === selectedWorkerTaskId)}
+            onClick={() => {
+              if (row.task) onSelectWorker(row.task.id);
+            }}
+            disabled={!row.task}
+          />
+          {index < rows.length - 1 && (
+            <span
+              aria-hidden
+              style={{
+                width: 1,
+                height: 8,
+                background: "var(--rule-soft)",
+              }}
+            />
+          )}
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+function WorkerNode({
+  row,
+  stepStatus,
+  selected,
+  onClick,
+  disabled,
+}: {
+  row: AgentRow;
+  stepStatus: StepState["status"];
+  selected: boolean;
+  onClick: () => void;
+  disabled: boolean;
+}) {
+  const status = deriveAgentStatus(row.task, row.attempt, stepStatus);
+  const tone = runtimeTone(row.agent.runtimePreference);
+  const label = row.agent.label || row.task?.title || row.agent.runtimePreference;
+  const titleAttr = disabled
+    ? "Worker not yet queued"
+    : `${row.task?.title ?? label}\n\nClick to view the prompt sent to this worker.`;
+  return (
+    <button
+      type="button"
+      title={titleAttr}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!disabled) onClick();
+      }}
+      onPointerDown={(e) => e.stopPropagation()}
+      disabled={disabled}
+      style={{
+        appearance: "none",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.55 : 1,
+        maxWidth: 220,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        border: `1px solid ${selected ? "var(--accent)" : tone.border}`,
+        background: selected
+          ? "color-mix(in oklch, var(--accent) 12%, var(--panel))"
+          : tone.bg,
+        color: "var(--ink-dim)",
+        padding: "5px 10px",
+        borderRadius: 6,
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        lineHeight: 1.2,
+        boxShadow: selected
+          ? "0 0 0 2px color-mix(in oklch, var(--accent) 28%, transparent), var(--shadow-1)"
+          : "var(--shadow-1)",
+        transition:
+          "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <StatusDot status={status} small />
+      <b
+        style={{
+          color: tone.label,
+          fontFamily: "var(--font-mono)",
+          fontSize: 9,
+          fontWeight: 700,
+          fontVariantNumeric: "tabular-nums",
+          textTransform: "uppercase",
+          letterSpacing: "0.04em",
+        }}
+      >
+        {row.agent.runtimePreference}
+      </b>
+      <span
+        style={{
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </span>
+    </button>
   );
 }
 
@@ -919,15 +1656,19 @@ function StepNode({
   taskById,
   attemptByTask,
   active,
+  selected,
+  onClick,
 }: {
   step: StepState;
   displayIndex: number;
   taskById: Map<string, WorkerTask>;
   attemptByTask: Map<string, WorkerAttempt>;
   active: boolean;
+  selected: boolean;
+  onClick: () => void;
 }) {
   if ((step.kind ?? "worker_batch") === "brake") {
-    return <BrakeStepNode step={step} displayIndex={displayIndex} active={active} />;
+    return <BrakeStepNode step={step} displayIndex={displayIndex} active={active} selected={selected} onClick={onClick} />;
   }
 
   const rows = agentRowsForStep(step, taskById, attemptByTask, displayIndex);
@@ -937,23 +1678,33 @@ function StepNode({
 
   return (
     <article
-      title={step.goal || step.title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      onPointerDown={(e) => e.stopPropagation()}
+      title={`${step.goal || step.title}\n\nClick to ${selected ? "collapse" : "see tasks for this step"}.`}
       style={{
         width: 258,
         minHeight: 166,
         background: nodeActive
           ? "linear-gradient(135deg, color-mix(in oklch, var(--panel-2) 86%, var(--accent) 14%), color-mix(in oklch, var(--panel) 94%, transparent))"
           : "linear-gradient(135deg, color-mix(in oklch, var(--panel) 92%, white 2%), color-mix(in oklch, var(--panel) 92%, transparent))",
-        border: `1px solid ${nodeActive ? "var(--accent-edge)" : "var(--rule-strong)"}`,
+        border: `1px solid ${selected ? "var(--accent)" : nodeActive ? "var(--accent-edge)" : "var(--rule-strong)"}`,
         borderRadius: 8,
-        boxShadow: nodeActive
-          ? "0 0 0 1px var(--accent-edge), 0 0 24px var(--accent-glow), 0 18px 44px rgba(0,0,0,0.34)"
-          : "var(--shadow-2)",
+        boxShadow: selected
+          ? "0 0 0 2px var(--accent), 0 0 0 4px color-mix(in oklch, var(--accent) 24%, transparent), 0 14px 32px rgba(0,0,0,0.32)"
+          : nodeActive
+            ? "0 0 0 1px var(--accent-edge), 0 0 24px var(--accent-glow), 0 18px 44px rgba(0,0,0,0.34)"
+            : "var(--shadow-2)",
         padding: "12px 14px",
         display: "flex",
         flexDirection: "column",
         gap: 10,
         fontFamily: "var(--font-sans)",
+        cursor: "pointer",
+        transition:
+          "transform var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     >
       <div style={{ display: "grid", gridTemplateColumns: "32px minmax(0, 1fr) auto", gap: 8, alignItems: "start" }}>
@@ -1016,17 +1767,6 @@ function StepNode({
         {step.goal || "Worker activity for this step."}
       </div>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, minHeight: 24 }}>
-        {rows.length === 0 ? (
-          <Tag muted>waiting for agents</Tag>
-        ) : (
-          rows.slice(0, 2).map((row, index) => (
-            <AgentTag key={index} row={row} stepStatus={step.status} />
-          ))
-        )}
-        {rows.length > 2 && <Tag muted>+{rows.length - 2}</Tag>}
-      </div>
-
       <div
         style={{
           marginTop: "auto",
@@ -1053,7 +1793,9 @@ function StepNode({
           {stepStatusLabel(step.status)}
         </span>
         <span>
-          {primaryRow?.task?.status ?? `${step.workerTaskIds.length} task${step.workerTaskIds.length === 1 ? "" : "s"}`}
+          {rows.length === 0
+            ? "waiting for agents"
+            : primaryRow?.task?.status ?? `${rows.length} worker${rows.length === 1 ? "" : "s"}`}
         </span>
       </div>
     </article>
@@ -1064,17 +1806,26 @@ function BrakeStepNode({
   step,
   displayIndex,
   active,
+  selected,
+  onClick,
 }: {
   step: StepState;
   displayIndex: number;
   active: boolean;
+  selected: boolean;
+  onClick: () => void;
 }) {
   const tone = stepStatusColor(step.status);
   const nodeActive = active || step.status === "running" || step.status === "reviewing";
 
   return (
     <article
-      title={step.goal || step.title}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      onPointerDown={(e) => e.stopPropagation()}
+      title={`${step.goal || step.title}\n\nClick to ${selected ? "collapse" : "see details"}.`}
       style={{
         width: 198,
         minHeight: 126,
@@ -1082,14 +1833,21 @@ function BrakeStepNode({
         background: nodeActive
           ? "linear-gradient(135deg, color-mix(in oklch, var(--panel-2) 88%, var(--accent) 12%), color-mix(in oklch, var(--panel) 92%, transparent))"
           : "color-mix(in oklch, var(--panel) 82%, transparent)",
-        border: `1px dashed ${nodeActive ? "var(--accent-edge)" : "var(--rule-strong)"}`,
+        border: `1px ${selected ? "solid" : "dashed"} ${selected ? "var(--accent)" : nodeActive ? "var(--accent-edge)" : "var(--rule-strong)"}`,
         borderRadius: 8,
-        boxShadow: nodeActive ? "0 0 18px var(--accent-glow), var(--shadow-2)" : "var(--shadow-1)",
+        boxShadow: selected
+          ? "0 0 0 2px var(--accent), 0 0 0 4px color-mix(in oklch, var(--accent) 24%, transparent), 0 14px 28px rgba(0,0,0,0.3)"
+          : nodeActive
+            ? "0 0 18px var(--accent-glow), var(--shadow-2)"
+            : "var(--shadow-1)",
         padding: "12px 14px",
         display: "flex",
         flexDirection: "column",
         gap: 10,
         fontFamily: "var(--font-sans)",
+        cursor: "pointer",
+        transition:
+          "transform var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     >
       <div style={{ display: "grid", gridTemplateColumns: "28px minmax(0, 1fr)", gap: 8, alignItems: "center" }}>
@@ -1279,16 +2037,25 @@ function GhostCard({ title, subtitle }: { title: string; subtitle: string }) {
 }
 
 function StepIcon({ step, displayIndex }: { step: StepState; displayIndex: number }) {
-  const number = String(displayIndex);
+  const tone = stepStatusColor(step.status);
+  const complete = step.status === "complete";
+  const failed = step.status === "failed";
+  const skipped = step.status === "skipped";
+  // Light up completed steps with a green tick so users get a clear "done"
+  // signal instead of having to read the status pill.
+  const showCheck = complete || skipped;
   return (
     <span
+      title={`Step ${displayIndex} · ${step.status}`}
       style={{
         width: 28,
         height: 28,
         borderRadius: 6,
-        border: `1px solid ${stepStatusColor(step.status)}`,
-        background: "color-mix(in oklch, var(--panel-2) 78%, var(--accent) 10%)",
-        color: stepStatusColor(step.status),
+        border: `1px solid ${tone}`,
+        background: complete
+          ? "var(--ok-soft)"
+          : "color-mix(in oklch, var(--panel-2) 78%, var(--accent) 10%)",
+        color: tone,
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
@@ -1298,7 +2065,23 @@ function StepIcon({ step, displayIndex }: { step: StepState; displayIndex: numbe
         fontVariantNumeric: "tabular-nums",
       }}
     >
-      {number}
+      {showCheck ? (
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+          <path
+            d="M3 7.5l2.5 2.5L11 4"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      ) : failed ? (
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+          <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+      ) : (
+        String(displayIndex)
+      )}
     </span>
   );
 }
@@ -2486,17 +3269,41 @@ function buildStepWorkItems(
   tasks: WorkerTask[],
   attemptByTask: Map<string, WorkerAttempt>,
 ): StepWorkItem[] {
+  // Acceptance criteria + verification commands are step-level, so their per-row
+  // status mirrors the step's overall state. When the step is complete, every
+  // criterion shows the green tick; while running, they pulse; on failure they
+  // show the X. Avoids the screenshotted "empty circle / required" deadweight.
+  const stepStatusKind: AgentStatusKind | undefined = stepStatusToAgentStatus(step.status);
+  const stepStatusText =
+    step.status === "complete" || step.status === "skipped"
+      ? "met"
+      : step.status === "failed" || step.status === "blocked"
+        ? "failed"
+        : step.status === "running" || step.status === "reviewing"
+          ? "checking"
+          : "required";
+  const verifyStatusText =
+    step.status === "complete" || step.status === "skipped"
+      ? "passed"
+      : step.status === "failed" || step.status === "blocked"
+        ? "failed"
+        : step.status === "running" || step.status === "reviewing"
+          ? "running"
+          : "command";
+
   const requirementRows: StepWorkItem[] = [
     ...step.acceptanceCriteria.slice(0, 3).map((text) => ({
       label: "Acceptance",
       text,
-      statusLabel: "required",
+      status: stepStatusKind,
+      statusLabel: stepStatusText,
     })),
     ...step.verificationCommands.slice(0, 3).map((text) => ({
       label: "Verify",
       text,
       monospace: true,
-      statusLabel: "command",
+      status: stepStatusKind,
+      statusLabel: verifyStatusText,
     })),
   ];
 
@@ -2517,6 +3324,13 @@ function buildStepWorkItems(
 
 function isCompletedTask(task: WorkerTask): boolean {
   return task.status === "accepted" || task.status === "needs_review";
+}
+
+function stepStatusToAgentStatus(status: StepState["status"]): AgentStatusKind | undefined {
+  if (status === "complete" || status === "skipped") return "done";
+  if (status === "failed" || status === "blocked") return "blocked";
+  if (status === "running" || status === "reviewing") return "running";
+  return undefined;
 }
 
 function isActiveAttemptStatus(status: WorkerAttempt["status"]): boolean {

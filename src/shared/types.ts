@@ -205,9 +205,16 @@ export interface RunState {
   sparkCalls: SparkCall[];
   humanMessages: HumanRunMessage[];
   autopilot?: AutopilotState;
+  /**
+   * Complexity bucket the manager classified the run into during plan_analysis.
+   * Drives downstream verifier depth and step caps. Persisted on the run state
+   * so worker_result_review (and any code-level enforcement around it) can
+   * read the classification regardless of when in the run it fires.
+   */
+  taskComplexity?: TaskComplexity;
 }
 
-export type AutopilotStatus = "idle" | "running" | "paused" | "blocked" | "complete" | "failed";
+export type AutopilotStatus = "idle" | "running" | "paused" | "blocked" | "complete" | "failed" | "cancelled";
 
 export interface AutopilotState {
   status: AutopilotStatus;
@@ -217,6 +224,7 @@ export interface AutopilotState {
   pausedAt?: string;
   resumedAt?: string;
   updatedAt: string;
+  consecutiveCompletionRefusals?: number;
 }
 
 export type HumanRunMessageAuthor = "user" | "spark" | "system";
@@ -269,11 +277,28 @@ export interface StepState {
   updatedAt: string;
 }
 
-// Task class drives model + effort selection. The strongest available model
-// goes to skeleton work (architecture, base components, decisions later
-// workers inherit); the cheapest model handles leaf work (mechanical,
-// well-defined). "feature" is the standard middle.
-export type PlannedStepAgentTaskClass = "skeleton" | "feature" | "leaf";
+// Task class drives model + effort selection AND prompt rendering. The
+// strongest available model goes to skeleton work (architecture, base
+// components, decisions later workers inherit); the cheapest model handles
+// leaf work (mechanical, well-defined). "feature" is the standard middle.
+// "verifier" is a follow-up class spawned after an implementation worker:
+// read-only tool surface, peer-strength model, never trusts the prior
+// worker's report — re-derives ground truth from the filesystem.
+export type PlannedStepAgentTaskClass = "skeleton" | "feature" | "leaf" | "verifier";
+
+// Run-level complexity bucket, classified by the manager once during
+// plan_analysis. Drives pipeline depth (verifier count, step cap, atomic
+// claims). Adaptive depth is the orchestrator's largest wall-clock lever:
+// over-decomposition + dual-verifier on a 3-bug fix turns 3 minutes of work
+// into 45 minutes of work.
+//   - trivial: single-module fix, ≤3 atomic acceptance criteria, no public
+//              API touch. 0 verifier follow-ups; the implementation worker's
+//              SELF-CHECK is enough.
+//   - standard: multi-file change OR public API touch with clear scope. 1
+//              verifier follow-up (cross-provider, single peer).
+//   - complex: subtle/byte-level work where atomic claims compound. 2 peer
+//              verifiers in parallel (Claude + Codex) — the existing pattern.
+export type TaskComplexity = "trivial" | "standard" | "complex";
 
 export interface PlannedStepAgent {
   label: string;
@@ -292,7 +317,7 @@ export interface WorkerTask {
   description: string;
   runtimePreference: WorkerRuntime;
   modelHint?: string;
-  effortHint?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  effortHint?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   status: WorkerTaskStatus;
   allowedPaths: string[];
   forbiddenPaths: string[];
@@ -300,6 +325,7 @@ export interface WorkerTask {
   verificationCommands: string[];
   canRunParallel: boolean;
   conflictsWith: string[];
+  taskClass?: PlannedStepAgentTaskClass;
   createdBy: "spark" | "user" | "system";
   createdAt: string;
   updatedAt: string;
@@ -349,6 +375,24 @@ export interface WorkerReport {
   proof: string[];
   risks: string[];
   followups: string[];
+  /**
+   * Populated only by verifier-class workers. The 5-confidence-ladder verdict
+   * the manager uses during worker_result_review to decide accept / retry-impl
+   * with corrective_prompt / escalate-to-human.
+   */
+  verifier?: VerifierVerdict;
+}
+
+export interface VerifierVerdict {
+  status: "verified" | "failed" | "unsure";
+  confidence: "PERFECT" | "VERIFIED" | "PARTIAL" | "FEEDBACK" | "FAILED";
+  atomicClaims: Array<{
+    claim: string;
+    verdict: "verified" | "failed" | "unsure";
+    evidence: string;
+  }>;
+  correctivePrompt?: string;
+  missingOracle?: string;
 }
 
 export interface ReviewDecision {
@@ -466,6 +510,7 @@ export interface CreateWorkerTaskInput {
   verificationCommands?: string[];
   canRunParallel?: boolean;
   conflictsWith?: string[];
+  taskClass?: PlannedStepAgentTaskClass;
   createdBy?: WorkerTask["createdBy"];
 }
 
@@ -505,6 +550,9 @@ export interface StartAutopilotInput {
   planPath?: string;
   planTitle?: string;
   planText?: string;
+  // Pre-run note written by the user in the plan composer. Appended as the
+  // first human message on the run so the manager sees it during plan_analysis.
+  initialUserNote?: string;
 }
 
 export interface PauseRunInput {
@@ -516,9 +564,33 @@ export interface ResumeRunInput {
   runId: string;
 }
 
+export interface CancelRunInput {
+  runId: string;
+  reason?: string;
+}
+
 export interface AddRunMessageInput {
   runId: string;
   author: HumanRunMessageAuthor;
   kind: HumanRunMessageKind;
   message: string;
+}
+
+// Interrupt mode for an in-flight run when the user wants their message to
+// affect the next manager decision immediately rather than wait in the queue.
+//   "graceful" — pause the run + send ESC to active worker ptys; workers may
+//                still finish their current generation and emit a final
+//                report. Manager won't take its next decision until the user
+//                resumes.
+//   "hard"     — pause + send ESC + dispose worker ptys outright; in-flight
+//                attempts transition to cancelled. Faster turnaround but
+//                discards any partial worker output.
+export type RunInterruptMode = "graceful" | "hard";
+
+export interface InterruptRunWithMessageInput {
+  runId: string;
+  message: string;
+  kind?: HumanRunMessageKind;
+  mode: RunInterruptMode;
+  reason?: string;
 }

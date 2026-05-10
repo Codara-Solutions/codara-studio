@@ -6,6 +6,7 @@ import type {
   PlannedStepAgent,
   RunState,
   StepKind,
+  TaskComplexity,
   WorkerRuntime,
   WorkerTask,
 } from "@shared/types";
@@ -45,6 +46,7 @@ export interface SparkManagerTaskDecision {
   verificationCommands: string[];
   canRunParallel: boolean;
   conflictsWith: string[];
+  taskClass?: PlannedStepAgent["taskClass"];
 }
 
 export interface SparkManagerDecision {
@@ -53,6 +55,19 @@ export interface SparkManagerDecision {
   question?: string;
   steps: SparkManagerStepDecision[];
   tasks: SparkManagerTaskDecision[];
+  /**
+   * Set by plan_analysis on the first manager call. Drives downstream
+   * verifier depth (trivial=0, standard=1, complex=2) and the step cap.
+   * Optional on later modes — those propagate the persisted RunState value.
+   */
+  taskComplexity?: TaskComplexity;
+  /**
+   * Natural-language reply addressed to the user. Populated only when the most
+   * recent humanMessage is a fresh user note that asked Spark to do something
+   * (or asked a question). Empty string otherwise. Surfaced as a Spark chat
+   * bubble in the run chat — keep it 1-3 sentences, plain English, no JSON.
+   */
+  chatReply?: string;
 }
 
 export interface SparkManagerWorkerReportContext {
@@ -65,6 +80,19 @@ export interface SparkManagerWorkerReportContext {
   proof: string[];
   risks: string[];
   followups: string[];
+  /**
+   * Set when the worker that produced this report is a verifier-class
+   * follow-up. The 5-confidence-ladder verdict the manager uses to decide
+   * accept / retry-with-corrective_prompt / escalate.
+   */
+  verifier?: {
+    status: "verified" | "failed" | "unsure";
+    confidence: "PERFECT" | "VERIFIED" | "PARTIAL" | "FEEDBACK" | "FAILED";
+    atomicClaims: Array<{ claim: string; verdict: string; evidence: string }>;
+    correctivePrompt?: string;
+    missingOracle?: string;
+  };
+  taskClass?: "skeleton" | "feature" | "leaf" | "verifier";
 }
 
 export interface OpenRouterMessage {
@@ -79,6 +107,9 @@ export interface OpenRouterManagerRequest {
   temperature: number;
   provider: {
     require_parameters: true;
+    only?: string[];
+    order?: string[];
+    allow_fallbacks?: boolean;
   };
   response_format: {
     type: "json_schema";
@@ -122,7 +153,7 @@ const DEFAULT_STRUCTURED_OUTPUT_FALLBACK_MODEL = "openai/gpt-4o-mini";
 const SPARK_MANAGER_DECISION_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["status", "summary", "question", "steps", "tasks"],
+  required: ["status", "summary", "question", "chatReply", "steps", "tasks", "taskComplexity"],
   properties: {
     status: {
       type: "string",
@@ -136,6 +167,17 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
     question: {
       type: "string",
       description: "Concise question for the human. Empty unless status is ask_user.",
+    },
+    chatReply: {
+      type: "string",
+      description:
+        "Natural-language reply to the user, surfaced in the run chat as a Spark bubble. Populate ONLY when the most recent human message is a fresh user note/answer that asks for action or for a status update. 1-3 plain sentences, no JSON, no markdown headings. Empty string when there is no fresh user message to respond to.",
+    },
+    taskComplexity: {
+      type: "string",
+      enum: ["trivial", "standard", "complex", ""],
+      description:
+        "Required during plan_analysis: classify the WHOLE RUN's complexity. Drives verifier depth (trivial=0, standard=1, complex=2 peer verifiers) and the step cap. trivial: single-module fix, ≤3 atomic acceptance criteria, no public API touch (max 2 worker_batch steps, no recon, no skeleton). standard: multi-file change OR public API touch with clear scope (max 3-4 steps). complex: subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics (no step cap). Bias toward standard on uncertainty — false-trivial costs one redo via cascade, false-complex burns 9 workers. Empty string \"\" allowed only on step_planning / worker_result_review modes (those propagate the persisted classification).",
     },
     steps: {
       type: "array",
@@ -168,9 +210,9 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
                 effortHint: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh"] },
                 taskClass: {
                   type: "string",
-                  enum: ["skeleton", "feature", "leaf"],
+                  enum: ["skeleton", "feature", "leaf", "verifier"],
                   description:
-                    "skeleton: architectural decisions later workers inherit (file layout, base components, state shape, design tokens) — strongest available model + highest effort. feature: standard implementation against an established skeleton — mid model + medium effort. leaf: mechanical, well-defined work (rename, plumb a known transformation, write tests against an existing API) — cheapest available model + low effort.",
+                    "skeleton: architectural decisions later workers inherit (file layout, base components, state shape, design tokens) — strongest available model + highest effort. feature: standard implementation against an established skeleton — mid model + medium effort. leaf: mechanical, well-defined work (rename, plumb a known transformation, write tests against an existing API) — cheapest available model + low effort. verifier: read-only follow-up class spawned ONLY by worker_result_review after an implementation worker completes; never appears in a plan_analysis plannedAgents list — peer-strength model + high effort, allowedPaths=[], re-derives ground truth from filesystem.",
                 },
               },
             },
@@ -199,6 +241,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
           "verificationCommands",
           "canRunParallel",
           "conflictsWith",
+          "taskClass",
         ],
         properties: {
           stepIndex: { type: "integer", minimum: 0 },
@@ -213,6 +256,12 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
           verificationCommands: { type: "array", items: { type: "string" } },
           canRunParallel: { type: "boolean" },
           conflictsWith: { type: "array", items: { type: "string" } },
+          taskClass: {
+            type: "string",
+            enum: ["skeleton", "feature", "leaf", "verifier"],
+            description:
+              "Optional. Mirror the parent plannedAgent's taskClass. Use 'verifier' only when this task is a follow-up read-only re-execution check spawned by worker_result_review (never in plan_analysis). Defaults to 'feature' when omitted.",
+          },
         },
       },
     },
@@ -262,9 +311,7 @@ export function buildOpenRouterManagerRequest(input: {
   return {
     model: input.model,
     temperature: 0.2,
-    provider: {
-      require_parameters: true,
-    },
+    provider: buildProviderPreference(),
     response_format: {
       type: "json_schema",
       json_schema: {
@@ -293,6 +340,23 @@ export function buildOpenRouterManagerRequest(input: {
       },
     ],
   };
+}
+
+// Build the OpenRouter `provider` preference block from env. `only` pins
+// fulfillment to a specific upstream provider (e.g. "sambanova") for routes
+// where we want guaranteed throughput / TPS. `allow_fallbacks=false` makes the
+// request fail loudly instead of silently rerouting to a slow provider.
+function buildProviderPreference(): OpenRouterManagerRequest["provider"] {
+  const pref: OpenRouterManagerRequest["provider"] = { require_parameters: true };
+  const onlyRaw = (process.env.SPARK_OPENROUTER_PROVIDER_ONLY ?? "").trim();
+  if (onlyRaw) {
+    const only = onlyRaw.split(",").map((s) => s.trim()).filter(Boolean);
+    if (only.length > 0) {
+      pref.only = only;
+      pref.allow_fallbacks = false;
+    }
+  }
+  return pref;
 }
 
 interface ManagerUserMessageInput {
@@ -329,6 +393,16 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
     lines.push("WORKSPACE CONTENTS", listWorkspaceContents(cwd), "");
   } else {
     lines.push("WORKSPACE", cwd, "");
+    // Re-inject the run-level complexity classification so worker_result_review
+    // and step_planning can apply the depth-adaptive verifier rule. plan_analysis
+    // sets this once; downstream modes propagate it via the persisted RunState.
+    if (run.taskComplexity) {
+      lines.push(
+        "TASK COMPLEXITY",
+        formatTaskComplexity(run.taskComplexity),
+        "",
+      );
+    }
   }
 
   lines.push(
@@ -571,14 +645,18 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
   const steps = normalizeSteps(raw.steps);
   const tasks = normalizeTasks(raw.tasks);
   const question = typeof raw.question === "string" ? raw.question.trim() : undefined;
+  const chatReply = typeof raw.chatReply === "string" ? raw.chatReply.trim() : undefined;
+  const taskComplexity = normalizeTaskComplexity(raw.taskComplexity);
 
   if (status === "ask_user") {
     return {
       status,
       summary: normalizeText(raw.summary, "Spark needs user input before creating worker tasks."),
       question: question || "Please clarify the next decision Spark should make.",
+      chatReply,
       steps: [],
       tasks: [],
+      taskComplexity,
     };
   }
 
@@ -586,8 +664,10 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
     return {
       status,
       summary: normalizeText(raw.summary, "Spark thinks the run is complete."),
+      chatReply,
       steps: [],
       tasks: [],
+      taskComplexity,
     };
   }
 
@@ -597,16 +677,20 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
         status: "ask_user",
         summary: "Spark could not create a step-by-step division from the plan.",
         question: question || "Please clarify the concrete outcome this project plan should produce.",
+        chatReply,
         steps: [],
         tasks: [],
+        taskComplexity,
       };
     }
 
     return {
       status: "run_workers",
       summary: normalizeText(raw.summary, "Spark analyzed the plan into concrete steps."),
+      chatReply,
       steps,
       tasks: [],
+      taskComplexity,
     };
   }
 
@@ -620,25 +704,36 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
       return {
         status: "run_workers",
         summary: normalizeText(raw.summary, "Spark accepted the worker; advancing to the next step."),
+        chatReply,
         steps,
         tasks: [],
+        taskComplexity,
       };
     }
     return {
       status: "ask_user",
       summary: "Spark could not produce a worker task from the plan.",
       question: question || "Please clarify the first concrete task to run.",
+      chatReply,
       steps: [],
       tasks: [],
+      taskComplexity,
     };
   }
 
   return {
     status: "run_workers",
     summary: normalizeText(raw.summary, "Spark planned the next worker task."),
+    chatReply,
     steps,
     tasks,
+    taskComplexity,
   };
+}
+
+function normalizeTaskComplexity(value: unknown): TaskComplexity | undefined {
+  if (value === "trivial" || value === "standard" || value === "complex") return value;
+  return undefined;
 }
 
 function normalizeStatus(value: unknown): SparkManagerDecision["status"] {
@@ -716,10 +811,18 @@ function normalizePlannedAgents(value: unknown): PlannedStepAgent[] {
 }
 
 function normalizeTaskClass(value: unknown): PlannedStepAgent["taskClass"] {
-  if (value === "skeleton" || value === "feature" || value === "leaf") return value;
+  if (
+    value === "skeleton" ||
+    value === "feature" ||
+    value === "leaf" ||
+    value === "verifier"
+  ) {
+    return value;
+  }
   // Default to "feature" when the model omits the class. Skeleton must be an
   // explicit choice so we never force a synthetic brake on an unintentional
-  // step.
+  // step. Verifier must also be explicit — it's always a follow-up class
+  // chosen by worker_result_review, never a plan_analysis default.
   return "feature";
 }
 
@@ -727,20 +830,67 @@ function normalizeTasks(value: unknown): SparkManagerTaskDecision[] {
   if (!Array.isArray(value)) return [];
   return value
     .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
-    .map((item, index) => ({
-      stepIndex: typeof item.stepIndex === "number" ? item.stepIndex : 0,
-      title: normalizeText(item.title, `Spark worker task ${index + 1}`),
-      description: normalizeText(item.description, "Work on the next focused implementation task."),
-      runtimePreference: normalizeRuntime(item.runtimePreference),
-      modelHint: typeof item.modelHint === "string" ? item.modelHint : undefined,
-      effortHint: normalizeEffort(item.effortHint),
-      allowedPaths: normalizeStringList(item.allowedPaths),
-      forbiddenPaths: normalizeStringList(item.forbiddenPaths),
-      expectedOutputs: normalizeStringList(item.expectedOutputs),
-      verificationCommands: normalizeStringList(item.verificationCommands),
-      canRunParallel: item.canRunParallel === true,
-      conflictsWith: normalizeStringList(item.conflictsWith),
-    }));
+    .map((item, index) => {
+      const title = normalizeText(item.title, `Spark worker task ${index + 1}`);
+      const description = normalizeText(
+        item.description,
+        "Work on the next focused implementation task.",
+      );
+      const expectedOutputs = normalizeStringList(item.expectedOutputs);
+      const explicitClass =
+        item.taskClass === undefined ? undefined : normalizeTaskClass(item.taskClass);
+      // Defensive fallback: even when the model omits taskClass on a follow-up
+      // task spawned by worker_result_review, detect the verifier intent from
+      // the title/description/expectedOutputs and tag it. Otherwise the worker
+      // would render with the implementation prompt and the verifier loop
+      // collapses to a regular retry.
+      const taskClass = explicitClass ?? inferVerifierClassFromShape({
+        title,
+        description,
+        expectedOutputs,
+      });
+      return {
+        stepIndex: typeof item.stepIndex === "number" ? item.stepIndex : 0,
+        title,
+        description,
+        runtimePreference: normalizeRuntime(item.runtimePreference),
+        modelHint: typeof item.modelHint === "string" ? item.modelHint : undefined,
+        effortHint: normalizeEffort(item.effortHint),
+        allowedPaths: normalizeStringList(item.allowedPaths),
+        forbiddenPaths: normalizeStringList(item.forbiddenPaths),
+        expectedOutputs,
+        verificationCommands: normalizeStringList(item.verificationCommands),
+        canRunParallel: item.canRunParallel === true,
+        conflictsWith: normalizeStringList(item.conflictsWith),
+        taskClass,
+      };
+    });
+}
+
+function inferVerifierClassFromShape(shape: {
+  title: string;
+  description: string;
+  expectedOutputs: string[];
+}): PlannedStepAgent["taskClass"] | undefined {
+  const titleLower = shape.title.toLowerCase();
+  if (/^verify\b/.test(titleLower)) return "verifier";
+  if (/^verifier:/.test(titleLower)) return "verifier";
+  const descLower = shape.description.toLowerCase();
+  if (
+    descLower.includes("you are a spark verifier") ||
+    descLower.includes("you are a verifier") ||
+    descLower.includes("do not trust the prior worker") ||
+    descLower.includes("re-derive ground truth")
+  ) {
+    return "verifier";
+  }
+  for (const out of shape.expectedOutputs) {
+    const o = out.toLowerCase();
+    if (o.includes("verification report") || o.includes("atomic_claims") || o.includes("corrective_prompt")) {
+      return "verifier";
+    }
+  }
+  return undefined;
 }
 
 function normalizeRuntime(value: unknown): WorkerRuntime {
@@ -806,6 +956,27 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
   lines.push("- shell: always available (deterministic command-only tasks).");
   lines.push("- manual: always available (human executes; only when automation is unsafe).");
   return lines.join("\n");
+}
+
+function formatTaskComplexity(complexity: TaskComplexity): string {
+  switch (complexity) {
+    case "trivial":
+      return [
+        "trivial — single-module fix, ≤3 atomic acceptance criteria, no public API touch.",
+        "Verifier policy: ZERO verifier follow-ups. After an implementation worker reports complete, return tasks=[] and let the step advance — the worker's SELF-CHECK is enough.",
+        "Cascade rule: if the implementation worker reports partial/failed/blocked OR public gates fail, treat the next corrective round AS-IF standard (queue ONE cross-provider verifier on the corrective implementation). Cap promotions at 1 to prevent runaway.",
+      ].join("\n");
+    case "standard":
+      return [
+        "standard — multi-file change OR public API touch, with clear scope.",
+        "Verifier policy: ONE verifier follow-up after each implementation worker. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-4-7 OR gpt-5.5; effortHint = high; allowedPaths = []; taskClass = verifier.",
+      ].join("\n");
+    case "complex":
+      return [
+        "complex — subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics.",
+        "Verifier policy: TWO peer verifiers IN PARALLEL after each implementation worker — one Claude (claude-opus-4-7@high) and one Codex (gpt-5.5@high). Both with taskClass=verifier, allowedPaths=[], canRunParallel=true. Two model families = two blind spots; peer disagreement IS the signal.",
+      ].join("\n");
+  }
 }
 
 function formatStepDivision(run: RunState): string {

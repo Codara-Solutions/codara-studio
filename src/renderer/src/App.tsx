@@ -13,7 +13,7 @@ import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import TerminalGrid from "./components/TerminalGrid";
 import FileTree from "./components/FileTree";
-import EditorGrid from "./components/EditorGrid";
+import EditorWorkbench from "./components/EditorWorkbench";
 import RunsView from "./components/RunsView";
 import OrchestrationSidebar from "./components/OrchestrationSidebar";
 import StatusBar from "./components/StatusBar";
@@ -38,12 +38,6 @@ const DEFAULT_SETTINGS: AppSettings = {
 
 function uid(prefix = "id"): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-}
-
-function gridDims(n: number): { cols: number; rows: number } {
-  if (n <= 0) return { cols: 1, rows: 1 };
-  const cols = Math.ceil(Math.sqrt(n));
-  return { cols, rows: Math.ceil(n / cols) };
 }
 
 function resolveDefaultShell(
@@ -509,7 +503,7 @@ export default function App() {
                   />
                 </div>
                 <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: activeWorkbenchTab === "editor" ? "flex" : "none" }}>
-                  <EditorGrid
+                  <EditorWorkbench
                     files={openFiles}
                     activePath={activeEditorPath}
                     onActivateFile={setActiveEditorPath}
@@ -649,7 +643,8 @@ function WorkbenchTabs({
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement | null>(null);
   const workerDims = getWorkerGridLayout(workerCount);
-  const activeDims = active === "editor" ? gridDims(fileCount) : workerDims;
+  const activeDims = workerDims;
+  const showLayoutPill = active === "workers";
 
   useEffect(() => {
     if (!pickerOpen) return;
@@ -762,41 +757,43 @@ function WorkbenchTabs({
           )}
         </div>
       )}
-      <div
-        style={{
-          height: 24,
-          padding: "0 10px",
-          display: "flex",
-          alignItems: "center",
-          gap: 7,
-          border: "1px solid var(--rule-soft)",
-          borderRadius: 999,
-          background: "color-mix(in oklch, var(--ink) 2%, transparent)",
-          color: "var(--muted)",
-        }}
-      >
-        <span
+      {showLayoutPill && (
+        <div
           style={{
-            fontFamily: "var(--font-sans)",
-            fontWeight: 700,
-            fontSize: 9,
-            letterSpacing: "0.16em",
-            textTransform: "uppercase",
+            height: 24,
+            padding: "0 10px",
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
+            border: "1px solid var(--rule-soft)",
+            borderRadius: 999,
+            background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+            color: "var(--muted)",
           }}
         >
-          LAYOUT
-        </span>
-        <span
-          style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            fontVariantNumeric: "tabular-nums",
-            color: "var(--ink-dim)",
-          }}
-        >
-          {activeDims.cols}×{activeDims.rows}
-        </span>
-      </div>
+          <span
+            style={{
+              fontFamily: "var(--font-sans)",
+              fontWeight: 700,
+              fontSize: 9,
+              letterSpacing: "0.16em",
+              textTransform: "uppercase",
+            }}
+          >
+            LAYOUT
+          </span>
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              fontVariantNumeric: "tabular-nums",
+              color: "var(--ink-dim)",
+            }}
+          >
+            {activeDims.cols}×{activeDims.rows}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

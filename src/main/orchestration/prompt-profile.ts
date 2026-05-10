@@ -20,6 +20,19 @@ export interface ManagerPromptProfile {
   workerPrompt: {
     opening: string[];
     finalReportIntro: string[];
+    /**
+     * Opening lines used when rendering a verifier-class worker. The verifier
+     * gets a different identity than the implementation worker — see
+     * renderWorkerPrompt's verifier branch. When unset, falls back to the
+     * default verifier opening so older profiles keep working.
+     */
+    verifierOpening?: string[];
+    /**
+     * Final-report intro lines for verifier-class workers. The verifier's
+     * report shape (status / confidence / atomic_claims / corrective_prompt /
+     * missing_oracle) is rendered separately — this string just precedes it.
+     */
+    verifierFinalReportIntro?: string[];
   };
 }
 
@@ -35,6 +48,7 @@ export const DEFAULT_MANAGER_PROMPT_PROFILE: ManagerPromptProfile = {
       "Ask the human one concise question only when a required product, scope, credential, destructive action, or safety decision is missing.",
       "Do not ask for subjective implementation details such as visual style, layout, names, or minor feature choices. Choose sensible defaults and continue.",
       "Return JSON matching the provided schema only. Do not include markdown, prose outside JSON, or hidden reasoning.",
+      "Conversational reply rule: when the most recent humanMessage is from the user (author=user, kind=note|answer) and was added AFTER the prior manager decision, set the schema's chatReply field to a short plain-English reply (1-3 sentences) acknowledging what they asked and stating concretely what you'll do next. Otherwise set chatReply to an empty string. chatReply is the ONLY user-facing prose; the rest of the JSON is for Spark internals.",
     ],
     coreOperatingModel: [
       "- First create a durable step-by-step division of the project plan. Each step is a batch: all workers in one step may run at the same time.",
@@ -93,6 +107,7 @@ export const DEFAULT_MANAGER_PROMPT_PROFILE: ManagerPromptProfile = {
         "- Each step must describe outcome, boundaries, acceptance criteria, and risk level.",
         "- Return tasks=[] in this mode. Set question=\"\" unless status=ask_user.",
         "- Ask the user only for hard product/scope/credential/safety gaps. Never for taste (style, naming, colours).",
+        "- chatReply: when the most recent humanMessage is from the user (author=user) and was added AFTER the prior decision, set chatReply to a 1-3 sentence plain-English acknowledgment + concrete next action. Otherwise empty string.",
       ].join("\n"),
       step_planning: [
         "You write the worker tasks for ONE step. Output JSON matching the schema, nothing else.",
@@ -123,6 +138,7 @@ export const DEFAULT_MANAGER_PROMPT_PROFILE: ManagerPromptProfile = {
         "- allowedPaths / forbiddenPaths: list when realistic, otherwise [].",
         "- No code dumps inside descriptions unless the plan literally requires verbatim code.",
         "- Return steps=[] in this mode (the division already exists; do not rewrite it). Set question=\"\" unless status=ask_user.",
+        "- chatReply: when the most recent humanMessage is a fresh user note since the prior decision, set chatReply to a 1-3 sentence acknowledgment + what you're about to do. Otherwise empty string.",
       ].join("\n"),
       worker_result_review: [
         "You review one worker's report. Output JSON matching the schema, nothing else.",
@@ -137,6 +153,7 @@ export const DEFAULT_MANAGER_PROMPT_PROFILE: ManagerPromptProfile = {
         "",
         "- Default to ACCEPT (run_workers, tasks=[]) when the worker's evidence covers its task and other steps are still queued. Do not invent work outside this slice; cross-step gaps belong to a brake checkpoint or the next plan_analysis pass.",
         "- Return steps=[] in this mode (the division already exists). Set question=\"\" unless status=ask_user.",
+        "- chatReply: when the most recent humanMessage is a fresh user note since the prior decision, set chatReply to a 1-3 sentence acknowledgment + what you'll do (accept, retry, escalate, etc.). Otherwise empty string.",
       ].join("\n"),
     },
   },
@@ -204,6 +221,20 @@ export const DEFAULT_MANAGER_PROMPT_PROFILE: ManagerPromptProfile = {
     ],
     finalReportIntro: [
       "The report is how Spark decides whether the task is done, so include concrete proof and honest risks.",
+    ],
+    verifierOpening: [
+      "You are a Spark VERIFIER. Your job is to PROVE OR DISPROVE the claims of the implementation worker that just finished.",
+      "You do NOT build, you do NOT extend, you do NOT fix. You verify, and if you find problems you produce a CORRECTIVE PROMPT that the manager will use to re-run the implementation worker.",
+      "Your tool surface is read-only: read files, grep, list directories, and run read-only shell commands (cat, head, tail, diff, git diff/status/log/show/blame, jq, ls, wc, exit-code probes, dry-run runners, npm test in --dry-run mode if available, and the verificationCommands listed below). Do NOT run anything that writes: no Write/Edit, no >, >>, tee, rm, mv, chmod, npm install, package mutations, git commit, git push, or destructive SQL. If the verificationCommands include a build/test runner, run it AS-IS (those are read-mostly).",
+      "DECOMPOSE every acceptanceCriterion and expectedOutput into atomic claims. 'Helper X is exported and tested' is THREE claims: X is defined, X is exported, X has at least one test that exercises X. Verify each independently. A single PASS hiding three unverified sub-claims is worse than three explicit FAILs.",
+      "EVIDENCE BEATS ASSERTION. Every verified claim must cite deterministic tool output: file:line for source claims, or command + exit code + stdout (truncated to 600 chars) for runtime claims. Without cited evidence the verdict is `unsure`, not `verified`.",
+      "If a claim FAILS, write a CORRECTIVE PROMPT (200-400 words) — the exact prompt the manager will hand to the next implementation worker. Be specific: exact paths, exact failing assertions, exact suggested fix. The corrective_prompt IS the documentation the next worker learns from.",
+      "If you cannot verify a claim — no fixture, no harness, no oracle, ambiguous spec — set verdict=unsure and explain in missing_oracle WHAT would let you verify it. Do NOT guess.",
+      "DO NOT TRUST the prior worker's filesChanged list, summary, or proof[]. Treat them as ORIENTATION ONLY. Re-derive ground truth from the filesystem.",
+    ],
+    verifierFinalReportIntro: [
+      "Your final report MUST be a JSON object with the verifier shape below — not the implementation-worker shape.",
+      "Spark uses your `confidence` ladder to decide whether to ACCEPT the implementation, retry it with your corrective_prompt, or escalate to the human.",
     ],
   },
 };
@@ -318,6 +349,14 @@ export function normalizeManagerPromptProfile(value: unknown): ManagerPromptProf
     workerPrompt: {
       opening: stringList(workerPrompt.opening, fallback.workerPrompt.opening),
       finalReportIntro: stringList(workerPrompt.finalReportIntro, fallback.workerPrompt.finalReportIntro),
+      verifierOpening: stringList(
+        workerPrompt.verifierOpening,
+        fallback.workerPrompt.verifierOpening ?? [],
+      ),
+      verifierFinalReportIntro: stringList(
+        workerPrompt.verifierFinalReportIntro,
+        fallback.workerPrompt.verifierFinalReportIntro ?? [],
+      ),
     },
   };
 }

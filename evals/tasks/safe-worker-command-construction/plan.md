@@ -75,6 +75,22 @@ following invariants are unambiguous, defended, and tested:
 - Refactored launcher that builds launch commands from argument arrays.
 - A new helper module exporting `quoteForShell(arg, family)` plus
   `normalizeAllowedPath(path, cwd)` (or equivalents — names are yours).
+- A small leaf file under `src/main/` that re-exports `pasteAndSubmit`
+  and the launch-command builder (e.g. `buildLaunchCommandLine`) as
+  named exports, so they can be unit-tested in isolation without
+  loading the full orchestrator. Re-export from the leaf, not from
+  `run-store.ts` directly.
+  - The exported `buildLaunchCommandLine(task)` MUST return either
+    `{ args: string[] }` (preferred — exposes the arg-array form
+    directly so callers and unit tests can inspect each token) or a
+    fully-shell-quoted string. Do NOT return a wrapping object like
+    `{ command, args, env, ... }` — invariant 2 cares about the args
+    being inspectable as a single token per element. When given a
+    `modelHint` containing spaces or quotes (e.g.
+    `"claude-opus-4-7 'evil'"`), the literal hint MUST appear as one
+    element in `args` (no splitting on spaces, no escape-doubling),
+    and a string-shape return MUST contain the hint enclosed in
+    matching quotes that survive a single-pass shell tokenization.
 - Unit tests covering the quoting matrix and path-normalization.
 - All existing tests still pass.
 

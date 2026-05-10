@@ -3,17 +3,23 @@ import type {
   HumanRunMessageKind,
   PlanFile,
   RunState,
+  SparkEvent,
   Workspace,
 } from "@shared/types";
+import RunChatView from "./RunChatView";
 
-const HUMAN_INPUT_PAUSE_REASON = "Spark needs human input before continuing.";
+export type PlanMode = "file" | "typed";
 
 interface Props {
   workspace: Workspace | null;
   runs: RunState[];
   activeRun: RunState | null;
+  events: SparkEvent[];
   planFiles: PlanFile[];
   selectedPlanPath: string;
+  planMode: PlanMode;
+  typedPlanText: string;
+  humanInput: string;
   busy: boolean;
   error: string | null;
   onStartAutopilot: () => void;
@@ -24,76 +30,46 @@ interface Props {
   onSelectRun: (id: string | null) => void;
   onDeleteRun: (id: string) => void;
   onSelectPlan: (path: string) => void;
+  onPlanModeChange: (mode: PlanMode) => void;
+  onTypedPlanTextChange: (text: string) => void;
+  onHumanInputChange: (value: string) => void;
 }
 
 export default function SparkAgentPanel({
   workspace,
   runs,
   activeRun,
+  events,
   planFiles,
   selectedPlanPath,
+  planMode,
+  typedPlanText,
+  humanInput,
   busy,
   error,
   onStartAutopilot,
   onPauseRun,
   onResumeRun,
-  onAddUserMessage,
-  onAnswerQuestion,
+  onAddUserMessage: _onAddUserMessage,
+  onAnswerQuestion: _onAnswerQuestion,
   onSelectRun,
   onDeleteRun,
   onSelectPlan,
+  onPlanModeChange,
+  onTypedPlanTextChange,
+  onHumanInputChange,
 }: Props) {
-  const [humanInput, setHumanInput] = useState("");
-  const [answerInput, setAnswerInput] = useState("");
-  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
-
-  // Auto-clear the per-row delete confirmation after a short window so a
-  // stale "Confirm?" affordance doesn't sit there indefinitely.
-  useEffect(() => {
-    if (!confirmingDeleteId) return undefined;
-    const t = window.setTimeout(() => setConfirmingDeleteId(null), 3500);
-    return () => window.clearTimeout(t);
-  }, [confirmingDeleteId]);
-
-  const sendHumanInput = () => {
-    const message = humanInput.trim();
-    if (!message) return;
-    setHumanInput("");
-    onAddUserMessage(message, "note");
-  };
-
-  const stopRun = () => {
-    const reason = humanInput.trim();
-    if (reason) setHumanInput("");
-    onPauseRun(reason || "Paused by user");
-  };
-
-  // "Open question": the most recent spark question with no later user reply.
-  // Surfaced as its own block so the user can read the full text and knows
-  // why the run is paused.
-  const openQuestion = activeRun ? findOpenQuestion(activeRun) : null;
-  const openQuestionId = openQuestion?.id ?? null;
-
-  useEffect(() => {
-    setAnswerInput("");
-  }, [activeRun?.id, openQuestionId]);
-
-  const sendAnswer = () => {
-    const message = answerInput.trim();
-    if (!message) return;
-    setAnswerInput("");
-    void onAnswerQuestion(message);
-  };
-
   const runStatus = activeRun ? activeRun.status : "idle";
   const runIsActive = Boolean(
     activeRun && (activeRun.status === "running" || activeRun.status === "planning"),
   );
-  const runEnabled = Boolean(workspace) && !busy && Boolean(selectedPlanPath);
-  const stopEnabled = Boolean(activeRun);
-  const sendEnabled = Boolean(activeRun) && !busy && humanInput.trim().length > 0;
-  const answerEnabled = Boolean(openQuestion) && !busy && answerInput.trim().length > 0;
-  const visibleMessages = activeRun?.humanMessages.filter((message) => !isSyntheticPauseMessage(message)) ?? [];
+  const runEnabled =
+    Boolean(workspace) &&
+    !busy &&
+    !activeRun &&
+    (planMode === "file"
+      ? Boolean(selectedPlanPath)
+      : typedPlanText.trim().length > 0);
 
   return (
     <section
@@ -102,7 +78,7 @@ export default function SparkAgentPanel({
         flexDirection: "column",
         flex: "4 1 0",
         minHeight: 0,
-        overflow: "auto",
+        overflow: "hidden",
         borderBottom: "1px solid var(--rule-soft)",
         background: "var(--panel)",
         fontFamily: "var(--font-sans)",
@@ -111,6 +87,7 @@ export default function SparkAgentPanel({
       {/* Hero header */}
       <div
         style={{
+          flex: "0 0 auto",
           padding: "10px 14px",
           borderBottom: "1px solid var(--rule-soft)",
           display: "flex",
@@ -155,38 +132,136 @@ export default function SparkAgentPanel({
             {runStatus}
           </span>
         </div>
+        {activeRun && (
+          <div style={{ display: "flex", gap: 6 }}>
+            {(activeRun.status === "running" || activeRun.status === "planning") && (
+              <HeaderButton
+                onClick={() => onPauseRun("Paused by user")}
+                disabled={busy}
+                title="Pause the manager and any active workers (graceful — workers may still finish their current generation)."
+              >
+                Pause
+              </HeaderButton>
+            )}
+            {(activeRun.status === "paused" || activeRun.status === "blocked") && (
+              <HeaderButton
+                onClick={onResumeRun}
+                disabled={busy}
+                accent
+                title="Resume the run."
+              >
+                Resume
+              </HeaderButton>
+            )}
+            <HeaderButton
+              onClick={() => onSelectRun(null)}
+              disabled={busy}
+              title="Start a new run (deselect this one and return to the plan picker)."
+            >
+              + New run
+            </HeaderButton>
+          </div>
+        )}
       </div>
 
-      {/* Runs list */}
-      <RunsList
-        runs={runs}
-        activeRunId={activeRun?.id ?? null}
-        confirmingDeleteId={confirmingDeleteId}
-        busy={busy}
-        onSelect={onSelectRun}
-        onRequestDelete={(runId) => {
-          if (confirmingDeleteId === runId) {
-            setConfirmingDeleteId(null);
-            onDeleteRun(runId);
-          } else {
-            setConfirmingDeleteId(runId);
-          }
+      {/* Runs list — always visible, with an internal cap so it never crowds
+          out the chat / plan UI below. */}
+      <div
+        style={{
+          flex: "0 0 auto",
+          maxHeight: activeRun ? 168 : 240,
+          overflow: "auto",
         }}
-      />
-
-      {openQuestion && (
-        <QuestionCard
-          question={openQuestion.message}
-          answer={answerInput}
-          disabled={!answerEnabled}
+      >
+        <RunsList
+          runs={runs}
+          activeRunId={activeRun?.id ?? null}
           busy={busy}
-          onChange={setAnswerInput}
-          onSubmit={sendAnswer}
+          onSelect={onSelectRun}
+          onRequestDelete={(runId) => {
+            const run = runs.find((r) => r.id === runId);
+            const title = run?.title ?? runId;
+            // Single-click delete with a clear native prompt — replaces a
+            // fiddly two-click confirmation that often went unnoticed. The
+            // backend trashes the artifact dir to the OS recycle bin, so an
+            // accidental delete is recoverable from there.
+            const ok = window.confirm(
+              `Delete run "${title}"?\n\nIts artifacts will be moved to the system trash. Active workers will be killed.`,
+            );
+            if (ok) onDeleteRun(runId);
+          }}
+        />
+      </div>
+
+      {activeRun ? (
+        // Cursor-style chat for the selected run. Owns its own scroll, takes
+        // the remaining vertical space.
+        <RunChatView run={activeRun} events={events} />
+      ) : (
+        <PlanComposer
+          workspace={workspace}
+          planFiles={planFiles}
+          selectedPlanPath={selectedPlanPath}
+          planMode={planMode}
+          typedPlanText={typedPlanText}
+          humanInput={humanInput}
+          busy={busy}
+          runEnabled={runEnabled}
+          error={error}
+          onStartAutopilot={onStartAutopilot}
+          onSelectPlan={onSelectPlan}
+          onPlanModeChange={onPlanModeChange}
+          onTypedPlanTextChange={onTypedPlanTextChange}
+          onHumanInputChange={onHumanInputChange}
         />
       )}
+    </section>
+  );
+}
 
-      {/* Composer surface (plan select + textarea) */}
+function PlanComposer({
+  workspace,
+  planFiles,
+  selectedPlanPath,
+  planMode,
+  typedPlanText,
+  humanInput,
+  busy,
+  runEnabled,
+  error,
+  onStartAutopilot,
+  onSelectPlan,
+  onPlanModeChange,
+  onTypedPlanTextChange,
+  onHumanInputChange,
+}: {
+  workspace: Workspace | null;
+  planFiles: PlanFile[];
+  selectedPlanPath: string;
+  planMode: PlanMode;
+  typedPlanText: string;
+  humanInput: string;
+  busy: boolean;
+  runEnabled: boolean;
+  error: string | null;
+  onStartAutopilot: () => void;
+  onSelectPlan: (path: string) => void;
+  onPlanModeChange: (mode: PlanMode) => void;
+  onTypedPlanTextChange: (text: string) => void;
+  onHumanInputChange: (value: string) => void;
+}) {
+  return (
+    <div
+      style={{
+        flex: 1,
+        minHeight: 0,
+        overflow: "auto",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
       <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--rule-soft)" }}>
+        <PlanModeTabs mode={planMode} disabled={busy} onChange={onPlanModeChange} />
         <div
           style={{
             border: "1px solid var(--rule-soft)",
@@ -194,71 +269,99 @@ export default function SparkAgentPanel({
             background: "color-mix(in oklch, var(--ink) 3%, transparent)",
             boxShadow: "inset 0 1px 0 rgba(255, 255, 255, 0.035)",
             overflow: "hidden",
+            marginTop: 8,
             transition:
               "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
           }}
         >
-          <select
-            value={selectedPlanPath}
-            onChange={(event) => onSelectPlan(event.target.value)}
-            disabled={!workspace || busy || planFiles.length === 0}
-            style={{
-              width: "100%",
-              boxSizing: "border-box",
-              background: "transparent",
-              color: "var(--ink)",
-              border: "none",
-              borderBottom: "1px solid var(--rule-soft)",
-              height: 32,
-              padding: "6px 10px",
-              fontFamily: "var(--font-sans)",
-              fontSize: 12,
-              outline: "none",
-            }}
-          >
-            {planFiles.length === 0 ? (
-              <option value="">No markdown plans found</option>
-            ) : (
-              planFiles.map((file) => (
-                <option key={file.path} value={file.path}>
-                  {file.relativePath}
-                </option>
-              ))
-            )}
-          </select>
-          <textarea
-            value={humanInput}
-            onChange={(event) => setHumanInput(event.target.value)}
-            placeholder="Plan, instruction, correction, or answer"
-            rows={3}
-            style={{
-              width: "100%",
-              boxSizing: "border-box",
-              resize: "vertical",
-              minHeight: 56,
-              maxHeight: 120,
-              background: "transparent",
-              color: "var(--ink)",
-              border: "none",
-              padding: "8px 10px",
-              fontFamily: "var(--font-sans)",
-              fontSize: 12,
-              lineHeight: 1.5,
-              outline: "none",
-              display: "block",
-            }}
-          />
+          {planMode === "file" ? (
+            <>
+              <select
+                value={selectedPlanPath}
+                onChange={(event) => onSelectPlan(event.target.value)}
+                disabled={!workspace || busy || planFiles.length === 0}
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  background: "transparent",
+                  color: "var(--ink)",
+                  border: "none",
+                  borderBottom: "1px solid var(--rule-soft)",
+                  height: 32,
+                  padding: "6px 10px",
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 12,
+                  outline: "none",
+                }}
+              >
+                {planFiles.length === 0 ? (
+                  <option value="">No markdown plans found</option>
+                ) : (
+                  planFiles.map((file) => (
+                    <option key={file.path} value={file.path}>
+                      {file.relativePath}
+                    </option>
+                  ))
+                )}
+              </select>
+              <textarea
+                value={humanInput}
+                onChange={(event) => onHumanInputChange(event.target.value)}
+                placeholder="Optional: pre-run note or correction"
+                rows={3}
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  resize: "vertical",
+                  minHeight: 56,
+                  maxHeight: 120,
+                  background: "transparent",
+                  color: "var(--ink)",
+                  border: "none",
+                  padding: "8px 10px",
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  outline: "none",
+                  display: "block",
+                }}
+              />
+            </>
+          ) : (
+            <textarea
+              value={typedPlanText}
+              onChange={(event) => onTypedPlanTextChange(event.target.value)}
+              placeholder={
+                "# Plan title\n\nDescribe the goal, invariants, deliverables, and constraints..."
+              }
+              rows={10}
+              disabled={!workspace || busy}
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+                resize: "vertical",
+                minHeight: 180,
+                maxHeight: 360,
+                background: "transparent",
+                color: "var(--ink)",
+                border: "none",
+                padding: "10px 10px",
+                fontFamily: "var(--font-mono)",
+                fontSize: 12,
+                lineHeight: 1.5,
+                outline: "none",
+                display: "block",
+              }}
+            />
+          )}
         </div>
       </div>
 
-      {/* Primary actions */}
       <div
         style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-          gap: 8,
           padding: "12px 16px",
           borderBottom: "1px solid var(--rule-soft)",
+          display: "flex",
         }}
       >
         <PanelButton
@@ -267,11 +370,12 @@ export default function SparkAgentPanel({
           styleOverride={
             runEnabled
               ? {
+                  flex: 1,
                   background: "color-mix(in oklch, var(--ink) 3%, transparent)",
                   borderColor: "var(--accent-edge)",
                   color: "var(--ink)",
                 }
-              : undefined
+              : { flex: 1 }
           }
           hoverOverride={
             runEnabled
@@ -284,76 +388,8 @@ export default function SparkAgentPanel({
         >
           RUN
         </PanelButton>
-        <PanelButton
-          disabled={!stopEnabled}
-          onClick={stopRun}
-          styleOverride={
-            stopEnabled && runIsActive ? { color: "var(--danger)" } : undefined
-          }
-        >
-          STOP
-        </PanelButton>
-        <PanelButton disabled={!activeRun || busy} onClick={onResumeRun}>
-          RESUME
-        </PanelButton>
-        <PanelButton disabled={!sendEnabled} onClick={sendHumanInput}>
-          SEND
-        </PanelButton>
       </div>
 
-      {/* Recent human messages */}
-      {visibleMessages.length > 0 && (
-        <div
-          style={{
-            maxHeight: 96,
-            overflow: "auto",
-            borderBottom: "1px solid var(--rule-soft)",
-          }}
-        >
-          {visibleMessages.slice(-3).map((message, idx) => (
-            <div
-              key={message.id}
-              title={message.message}
-              style={{
-                display: "grid",
-                gridTemplateColumns: "64px minmax(0, 1fr)",
-                gap: 12,
-                padding: "8px 16px",
-                borderTop: idx === 0 ? "none" : "1px solid var(--rule-soft)",
-                alignItems: "baseline",
-              }}
-            >
-              <span
-                style={{
-                  fontFamily: "var(--font-sans)",
-                  fontSize: 10,
-                  fontWeight: 600,
-                  letterSpacing: "0.12em",
-                  textTransform: "uppercase",
-                  color: "var(--muted)",
-                }}
-              >
-                {message.author}
-              </span>
-              <span
-                style={{
-                  fontFamily: "var(--font-sans)",
-                  fontSize: 12,
-                  color: "var(--ink-dim)",
-                  minWidth: 0,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {message.message}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Error toast */}
       {error && (
         <div
           style={{
@@ -370,155 +406,69 @@ export default function SparkAgentPanel({
           {error}
         </div>
       )}
-    </section>
+    </div>
   );
 }
 
-function QuestionCard({
-  question,
-  answer,
+function PlanModeTabs({
+  mode,
   disabled,
-  busy,
   onChange,
-  onSubmit,
 }: {
-  question: string;
-  answer: string;
+  mode: PlanMode;
   disabled: boolean;
-  busy: boolean;
-  onChange: (value: string) => void;
-  onSubmit: () => void;
+  onChange: (mode: PlanMode) => void;
 }) {
-  const [focused, setFocused] = useState(false);
+  const options: Array<{ value: PlanMode; label: string }> = [
+    { value: "file", label: "Plan file" },
+    { value: "typed", label: "Typed plan" },
+  ];
   return (
     <div
+      role="tablist"
+      aria-label="Plan input mode"
       style={{
-        margin: "12px 16px 0",
-        border: "1px solid var(--accent-edge)",
-        borderRadius: 9,
-        background: "color-mix(in oklch, var(--ink) 4%, var(--panel))",
-        boxShadow:
-          "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), 0 10px 24px rgba(0, 0, 0, 0.24)",
-        overflow: "hidden",
+        display: "inline-flex",
+        gap: 0,
+        padding: 2,
+        borderRadius: 7,
+        background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+        border: "1px solid var(--rule-soft)",
       }}
     >
-      <div style={{ padding: "12px 14px 10px", display: "flex", flexDirection: "column", gap: 8 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            color: "var(--accent)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: "0.14em",
-            textTransform: "uppercase",
-          }}
-        >
-          <span
-            aria-hidden
+      {options.map((option) => {
+        const active = option.value === mode;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => !disabled && onChange(option.value)}
+            disabled={disabled}
             style={{
-              width: 7,
-              height: 7,
-              borderRadius: 999,
-              background: "var(--accent)",
-              boxShadow: "0 0 8px var(--accent-glow)",
-            }}
-          />
-          Spark needs input
-        </div>
-        <div
-          style={{
-            color: "var(--ink)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 13,
-            lineHeight: 1.5,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-          }}
-        >
-          {question}
-        </div>
-      </div>
-      <div
-        style={{
-          borderTop: "1px solid var(--rule-soft)",
-          background: "color-mix(in oklch, var(--bg) 42%, transparent)",
-          padding: 10,
-          display: "flex",
-          flexDirection: "column",
-          gap: 8,
-        }}
-      >
-        <textarea
-          value={answer}
-          onChange={(event) => onChange(event.target.value)}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          placeholder="Write your answer"
-          rows={4}
-          disabled={busy}
-          style={{
-            width: "100%",
-            boxSizing: "border-box",
-            resize: "vertical",
-            minHeight: 78,
-            maxHeight: 170,
-            border: `1px solid ${focused ? "var(--accent-edge)" : "var(--rule)"}`,
-            borderRadius: 7,
-            background: "var(--bg)",
-            color: "var(--ink)",
-            padding: "9px 10px",
-            fontFamily: "var(--font-sans)",
-            fontSize: 12,
-            lineHeight: 1.5,
-            outline: "none",
-            boxShadow: focused ? "0 0 0 1px var(--accent-edge)" : "none",
-            transition:
-              "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-          }}
-        />
-        <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10, alignItems: "center" }}>
-          <span
-            style={{
-              color: "var(--muted)",
+              appearance: "none",
+              border: "1px solid transparent",
+              borderColor: active ? "var(--accent-edge)" : "transparent",
+              background: active
+                ? "color-mix(in oklch, var(--ink) 6%, var(--panel))"
+                : "transparent",
+              color: active ? "var(--ink)" : "var(--muted)",
+              padding: "5px 12px",
+              borderRadius: 5,
               fontFamily: "var(--font-sans)",
               fontSize: 11,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
+              fontWeight: active ? 700 : 500,
+              letterSpacing: "0.04em",
+              cursor: disabled ? "not-allowed" : "default",
+              transition:
+                "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
             }}
           >
-            {busy ? "Sending answer..." : "Ready to send"}
-          </span>
-          <PanelButton
-            disabled={disabled}
-            onClick={onSubmit}
-            styleOverride={
-              !disabled
-                ? {
-                    background: "color-mix(in oklch, var(--ink) 3%, transparent)",
-                    borderColor: "var(--accent-edge)",
-                    color: "var(--ink)",
-                    minWidth: 118,
-                  }
-                : { minWidth: 118 }
-            }
-            hoverOverride={
-              !disabled
-                ? {
-                    background: "var(--hover)",
-                    borderColor: "var(--accent-edge)",
-                  }
-                : undefined
-            }
-            sentenceCase
-          >
-            {"Send & resume"}
-          </PanelButton>
-        </div>
-      </div>
+            {option.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -526,14 +476,12 @@ function QuestionCard({
 function RunsList({
   runs,
   activeRunId,
-  confirmingDeleteId,
   busy,
   onSelect,
   onRequestDelete,
 }: {
   runs: RunState[];
   activeRunId: string | null;
-  confirmingDeleteId: string | null;
   busy: boolean;
   onSelect: (id: string) => void;
   onRequestDelete: (id: string) => void;
@@ -590,7 +538,6 @@ function RunsList({
               run={run}
               index={index + 1}
               active={run.id === activeRunId}
-              confirmingDelete={run.id === confirmingDeleteId}
               busy={busy}
               onSelect={() => onSelect(run.id)}
               onRequestDelete={() => onRequestDelete(run.id)}
@@ -606,7 +553,6 @@ function RunRow({
   run,
   index,
   active,
-  confirmingDelete,
   busy,
   onSelect,
   onRequestDelete,
@@ -614,7 +560,6 @@ function RunRow({
   run: RunState;
   index: number;
   active: boolean;
-  confirmingDelete: boolean;
   busy: boolean;
   onSelect: () => void;
   onRequestDelete: () => void;
@@ -741,21 +686,13 @@ function RunRow({
         onMouseEnter={() => setTrashHover(true)}
         onMouseLeave={() => setTrashHover(false)}
         disabled={busy}
-        title={confirmingDelete ? "Click again to confirm" : "Delete run"}
+        title="Delete run"
         style={{
           appearance: "none",
-          background: confirmingDelete
-            ? "var(--danger-soft)"
-            : trashHover
-              ? "transparent"
-              : "transparent",
-          border: confirmingDelete ? "1px solid var(--danger)" : "1px solid transparent",
-          borderRadius: confirmingDelete ? 999 : 0,
-          color: confirmingDelete
-            ? "var(--danger)"
-            : trashHover
-              ? "var(--danger)"
-              : "var(--muted)",
+          background: trashHover ? "var(--danger-soft)" : "transparent",
+          border: `1px solid ${trashHover ? "var(--danger)" : "transparent"}`,
+          borderRadius: 999,
+          color: trashHover ? "var(--danger)" : "var(--muted)",
           width: 20,
           height: 22,
           display: "inline-flex",
@@ -767,7 +704,7 @@ function RunRow({
             "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
         }}
       >
-        {confirmingDelete ? <ConfirmGlyph /> : <TrashGlyph />}
+        <TrashGlyph />
       </button>
     </div>
   );
@@ -795,21 +732,50 @@ function TrashGlyph() {
   );
 }
 
-function ConfirmGlyph() {
+function HeaderButton({
+  children,
+  onClick,
+  disabled,
+  title,
+  accent,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+  title?: string;
+  accent?: boolean;
+}) {
+  const [hover, setHover] = useState(false);
+  const baseBg = accent
+    ? "color-mix(in oklch, var(--accent) 18%, var(--panel))"
+    : "color-mix(in oklch, var(--ink) 3%, transparent)";
+  const baseBorder = accent ? "var(--accent-edge)" : "var(--rule-strong)";
+  const ink = accent ? "var(--ink)" : "var(--ink-dim)";
   return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 14 14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        background: disabled ? "transparent" : hover ? "var(--hover)" : baseBg,
+        border: `1px solid ${disabled ? "var(--rule-soft)" : baseBorder}`,
+        borderRadius: 7,
+        color: disabled ? "var(--muted)" : ink,
+        padding: "5px 10px",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        fontWeight: 600,
+        cursor: disabled ? "not-allowed" : "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+      }}
     >
-      <path d="M3 7.5l2.5 2.5L11 4" />
-    </svg>
+      {children}
+    </button>
   );
 }
 
@@ -823,34 +789,6 @@ function statusDotColor(status: RunState["status"]): string {
 
 function isLiveStatus(status: RunState["status"]): boolean {
   return status === "running" || status === "reviewing" || status === "planning";
-}
-
-// Latest spark question with no later user reply. Walks the message log
-// backwards: any user message after the question means it's been answered.
-function findOpenQuestion(run: RunState): RunState["humanMessages"][number] | null {
-  const msgs = run.humanMessages ?? [];
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const m = msgs[i];
-    if (m.author === "spark" && m.kind === "question") {
-      const answeredLater = msgs.slice(i + 1).some(isUserAnswerMessage);
-      return answeredLater ? null : m;
-    }
-  }
-  return null;
-}
-
-function isUserAnswerMessage(message: RunState["humanMessages"][number]): boolean {
-  if (message.author !== "user") return false;
-  if (isSyntheticPauseMessage(message)) return false;
-  return message.kind === "answer" || message.kind === "decision" || message.kind === "note";
-}
-
-function isSyntheticPauseMessage(message: RunState["humanMessages"][number]): boolean {
-  return (
-    message.author === "user" &&
-    message.kind === "note" &&
-    message.message.trim() === HUMAN_INPUT_PAUSE_REASON
-  );
 }
 
 function PanelButton({

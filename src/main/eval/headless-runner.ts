@@ -30,7 +30,8 @@ import * as pty from "../pty-manager";
 import { defaultShell } from "../shells";
 import { applyInMemorySettingsOverride, flush as flushStorage } from "../storage";
 import { detectAgentRuntimes } from "../agent-runtimes";
-import { startAutopilot, getRun } from "../orchestration/run-store";
+import { startAutopilot, getRun, cancelRun } from "../orchestration/run-store";
+import { sanitizeWorkspace } from "../workspace-sanitize";
 import { runDir } from "../orchestration/event-log";
 import { subscribeToEvents } from "../orchestration/event-log";
 import { loadManagerPromptProfileFromPath } from "../orchestration/prompt-profile";
@@ -143,8 +144,47 @@ export async function runHeadlessEval(args: HeadlessEvalArgs): Promise<HeadlessO
   // is just a safety net so a missed event still lets the runner exit.
   const finalStatus = await waitForTerminalStatus(run.id, budgetMs);
 
+  // If we exited because the budget elapsed (or the run paused indefinitely),
+  // the run-store still thinks it is running. Mark it cancelled so run.json
+  // reflects reality and any in-flight workers receive a stop signal.
+  if (finalStatus.kind === "timed_out" || finalStatus.kind === "paused_blocked") {
+    try {
+      await cancelRun({
+        runId: run.id,
+        reason:
+          finalStatus.kind === "timed_out"
+            ? `Budget exhausted (${Math.round(budgetMs / 1000)}s)`
+            : "Paused without resumption",
+      });
+    } catch (err) {
+      emitEvent("eval.cancel_failed", {
+        runId: run.id,
+        error: (err as Error).message,
+      });
+    }
+  }
+
   stopEvents();
   stopWorkers();
+
+  // Sanitize the workspace BEFORE the harness captures the diff. Workers
+  // sometimes leave behind compiler scratch dirs or planning markdowns the
+  // diff-hygiene rule forbids; judges score those as polish/fit failures
+  // even when the actual fix is correct. Conservative pattern list — only
+  // names that are unambiguously scratch (`.tmp-*` dirs, two named
+  // planning markdowns) — so this never destroys real work.
+  try {
+    const sanitized = await sanitizeWorkspace(cwd);
+    if (sanitized.removed.length > 0 || sanitized.errors.length > 0) {
+      emitEvent("eval.workspace_sanitized", {
+        cwd,
+        removed: sanitized.removed,
+        errors: sanitized.errors,
+      });
+    }
+  } catch (err) {
+    emitEvent("eval.sanitize_failed", { cwd, error: (err as Error).message });
+  }
 
   // Persist any pending settings/state writes to disk before the process
   // exits — the run-store has its own write queues but this picks up any

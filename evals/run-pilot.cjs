@@ -215,7 +215,7 @@ async function main() {
     });
   } catch (err) {
     process.stderr.write(`adapter raised: ${err && err.message}\n`);
-    if (err && err.code === "CLAUDE_CLI_NOT_FOUND") {
+    if (err && (err.code === "CLAUDE_CLI_NOT_FOUND" || err.code === "CODEX_CLI_NOT_FOUND")) {
       if (!args.keep) seedRepo.cleanupSeedRepo(seedDir);
       process.exit(2);
     }
@@ -344,6 +344,12 @@ async function main() {
       }
     } else if (config.agent === "claude_code") {
       pipeline.routing = variantConfig.buildClaudeBaselineRouting({
+        config,
+        runId,
+        exitReason: runnerResult.exitReason,
+      });
+    } else if (config.agent === "codex") {
+      pipeline.routing = variantConfig.buildCodexBaselineRouting({
         config,
         runId,
         exitReason: runnerResult.exitReason,

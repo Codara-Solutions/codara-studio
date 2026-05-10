@@ -29,6 +29,7 @@ const os = require("node:os");
 // among the four candidates we compare.
 const DEFAULT_CONFIGS = {
   claude_best_single: "claude_best_single-opus47-max.json",
+  codex_best_single: "codex_best_single-gpt55-xhigh.json",
   spark_full: "spark_full-grok43.json",
   // noop intentionally has no default config — config is optional for it.
 };
@@ -277,6 +278,23 @@ function buildClaudeBaselineRouting({ config, runId, exitReason }) {
 }
 
 /**
+ * Build the single-entry routing record for a Codex baseline run.
+ */
+function buildCodexBaselineRouting({ config, runId, exitReason }) {
+  return [
+    {
+      subtaskId: runId,
+      title: "single-shot",
+      runtime: "codex",
+      model: config.model || null,
+      effort: config.effort || null,
+      attempt: runId,
+      status: exitReason,
+    },
+  ];
+}
+
+/**
  * Write a config-resolved.json artifact next to other adapter artifacts.
  * Returns the absolute path written, or null if the write failed (we don't
  * want to crash the pilot for a missing artifact dir).
@@ -308,5 +326,6 @@ module.exports = {
   buildPipelineRecord,
   extractRoutingFromSparkRun,
   buildClaudeBaselineRouting,
+  buildCodexBaselineRouting,
   writeConfigResolvedArtifact,
 };

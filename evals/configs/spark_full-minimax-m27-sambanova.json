@@ -1,0 +1,23 @@
+{
+  "$comment": [
+    "Spark variant: MiniMax-M2.7 manager pinned to SambaNova on OpenRouter (~120 TPS).",
+    "Workers stay max-everything Claude/Codex (subscription-flat).",
+    "Provider pinning is enforced at runtime via SPARK_OPENROUTER_PROVIDER_ONLY=sambanova",
+    "(see openrouter-manager.ts buildProviderPreference). Without that env var the",
+    "request still works but OpenRouter may route through a slower provider."
+  ],
+  "variantId": "spark_full_minimax_m27_sambanova",
+  "agent": "spark",
+  "manager": {
+    "model": "minimax/minimax-m2.7",
+    "effort": "max",
+    "profilePath": "resources/orchestration/manager-profile.json"
+  },
+  "pool": [
+    { "runtime": "claude_code", "model": "claude-opus-4-7", "effort": "max" },
+    { "runtime": "codex",       "model": "gpt-5.5",         "effort": "xhigh" }
+  ],
+  "perRoleOverrides": {
+    "visual_review": { "runtime": "openrouter", "model": "anthropic/claude-opus-4-7" }
+  }
+}

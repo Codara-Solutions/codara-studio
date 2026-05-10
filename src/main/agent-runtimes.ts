@@ -171,7 +171,19 @@ export async function detectAgentRuntimes(force = false): Promise<AgentRuntimeDi
   if (!force && cache && cache.expires > now) {
     return cache.value;
   }
-  const value = await Promise.all(RUNTIMES.map(diagnoseRuntime));
+  const masked = (process.env.SPARK_DISABLE_RUNTIMES ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const value = await Promise.all(
+    RUNTIMES.map(async (spec) => {
+      const diag = await diagnoseRuntime(spec);
+      if (masked.includes(spec.kind.toLowerCase())) {
+        return { ...diag, installed: false, version: null };
+      }
+      return diag;
+    }),
+  );
   cache = { value, expires: now + CACHE_MS };
   return value;
 }

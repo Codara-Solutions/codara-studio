@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow, app } from "electron";
+import { ipcMain, dialog, BrowserWindow, app, shell } from "electron";
 import { listShells, defaultShell } from "./shells";
 import { deleteFile, listDir, listMarkdownFiles, readTextFile, renameFile, writeTextFile } from "./fs-tree";
 import { getGitGraph } from "./git-graph";
@@ -14,6 +14,7 @@ import {
   deleteRun,
   getRunArtifactPaths,
   getRun,
+  interruptRunWithMessage,
   launchWorkerAttempt,
   listRuns,
   pauseRun,
@@ -36,6 +37,7 @@ import type {
   FsEntry,
   FsFileContent,
   GitGraph,
+  InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   PauseRunInput,
   PrepareWorkerTaskInput,
@@ -115,6 +117,11 @@ export function registerIpc(): void {
     fsWatcher.setWatchRoot(e.sender, root);
   });
 
+  ipcMain.handle("fs:revealInOS", async (_e, path: string): Promise<void> => {
+    const err = await shell.openPath(path);
+    if (err) throw new Error(err);
+  });
+
   ipcMain.handle("git:graph", async (_e, cwd: string): Promise<GitGraph> => {
     return getGitGraph(cwd);
   });
@@ -158,6 +165,13 @@ export function registerIpc(): void {
   ipcMain.handle("orchestration:addRunMessage", async (_e, input: AddRunMessageInput): Promise<RunState> => {
     return addRunMessage(input);
   });
+
+  ipcMain.handle(
+    "orchestration:interruptRunWithMessage",
+    async (_e, input: InterruptRunWithMessageInput): Promise<RunState> => {
+      return interruptRunWithMessage(input);
+    },
+  );
 
   ipcMain.handle("orchestration:updateRunStatus", async (_e, input: UpdateRunStatusInput): Promise<RunState> => {
     return updateRunStatus(input);
