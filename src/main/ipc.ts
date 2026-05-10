@@ -12,10 +12,12 @@ import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import {
   addRunMessage,
   appendTestEvent,
+  applyPendingMutations,
   createStep,
   createRun,
   createWorkerTask,
   deleteRun,
+  discardPendingMutations,
   getRunArtifactPaths,
   getRun,
   interruptRunWithMessage,
@@ -25,6 +27,7 @@ import {
   prepareWorkerTask,
   readWorkerReport,
   resumeRun,
+  setPlanMode,
   startAutopilot,
   updateRunStatus,
   updateStep,
@@ -33,6 +36,7 @@ import {
 import { listEvents } from "./orchestration/event-log";
 import type {
   AddRunMessageInput,
+  ApplyPendingMutationsInput,
   AppPreferences,
   AppSettings,
   AppState,
@@ -40,6 +44,7 @@ import type {
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
+  DiscardPendingMutationsInput,
   FsEntry,
   FsFileContent,
   FsReadResult,
@@ -58,6 +63,7 @@ import type {
   SearchHit,
   SearchOptions,
   SearchSummary,
+  SetPlanModeInput,
   ShellInfo,
   SparkEvent,
   StartAutopilotInput,
@@ -283,6 +289,30 @@ export function registerIpc(): void {
   ipcMain.handle("orchestration:deleteRun", async (_e, runId: string): Promise<void> => {
     await deleteRun(runId);
   });
+
+  // Plan-mode IPC. setPlanMode toggles the per-run flag; apply/discard
+  // operate on the pendingMutations queue so the renderer can flush or drop
+  // the entire queue (or a specific subset) atomically.
+  ipcMain.handle(
+    "orchestration:setPlanMode",
+    async (_e, input: SetPlanModeInput): Promise<RunState> => {
+      return setPlanMode(input);
+    },
+  );
+
+  ipcMain.handle(
+    "orchestration:applyPendingMutations",
+    async (_e, input: ApplyPendingMutationsInput): Promise<RunState> => {
+      return applyPendingMutations(input);
+    },
+  );
+
+  ipcMain.handle(
+    "orchestration:discardPendingMutations",
+    async (_e, input: DiscardPendingMutationsInput): Promise<RunState> => {
+      return discardPendingMutations(input);
+    },
+  );
 
   ipcMain.handle(
     "pty:spawn",

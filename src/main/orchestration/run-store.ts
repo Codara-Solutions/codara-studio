@@ -5,19 +5,24 @@ import { dirname, join } from "node:path";
 import type {
   AddRunMessageInput,
   AgentRuntimeModel,
+  ApplyPendingMutationsInput,
+  DiscardPendingMutationsInput,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   PauseRunInput,
   CancelRunInput,
+  PendingMutation,
+  PendingWorkerTaskInput,
   ResumeRunInput,
+  ReviewDecision,
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
   PlannedStepAgent,
   PrepareWorkerTaskInput,
-  ReviewDecision,
   RunArtifactPaths,
   RunState,
+  SetPlanModeInput,
   SparkCall,
   SparkEvent,
   StartAutopilotInput,
@@ -114,6 +119,8 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
       status: "idle",
       updatedAt: now,
     },
+    planMode: false,
+    pendingMutations: [],
   };
   run.artifactDir = runDir(run.id);
 
@@ -274,6 +281,14 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   }
 
   run = await requireRun(run.id);
+  // Plan-mode short-circuit: if the manager queued worker dispatches into
+  // pendingMutations (instead of creating worker tasks), the autopilot has
+  // nothing to launch yet — but we DON'T want to fall into the
+  // "no ready task / ask user" branch below, because the run is intentionally
+  // waiting on the user's review. Idle until applyPendingMutations runs.
+  if (run.planMode && (run.pendingMutations?.length ?? 0) > 0) {
+    return run;
+  }
   const tasks = pickAutopilotTasks(run);
   if (tasks.length === 0) {
     return askHumanQuestion(run.id, "I could not find a ready task to run. Please clarify the next goal.");
@@ -1895,26 +1910,79 @@ async function applySparkManagerDecision(
     });
   }
 
-  for (const task of decision.tasks) {
-    const stepId = resolveTaskStepId(latest, task.stepIndex, stepIds);
-    if (skippedStepIds.has(stepId ?? "")) continue;
-    latest = await createWorkerTask({
-      runId: latest.id,
-      stepId,
-      title: task.title,
-      description: task.description,
-      runtimePreference: task.runtimePreference,
-      modelHint: task.modelHint,
-      effortHint: task.effortHint,
-      allowedPaths: task.allowedPaths,
-      forbiddenPaths: task.forbiddenPaths,
-      expectedOutputs: task.expectedOutputs,
-      verificationCommands: task.verificationCommands,
-      canRunParallel: task.canRunParallel,
-      conflictsWith: task.conflictsWith,
-      taskClass: task.taskClass,
-      createdBy: "spark",
-    });
+  // Plan-mode branch: when the user has flipped the run into plan mode, the
+  // manager's worker dispatches are mutating actions we want the user to
+  // review BEFORE Spark touches the workspace. Queue each task into
+  // pendingMutations and skip createWorkerTask. The autopilot loop will see
+  // no new tasks were created and naturally idle until the user applies via
+  // the PlanDiffReview overlay (which calls applyPendingMutations to flush
+  // them through createWorkerTask + scheduleAutopilotCycles).
+  const planModeOn = latest.planMode === true;
+  const queuedMutations: PendingMutation[] = [];
+  if (planModeOn && decision.tasks.length > 0) {
+    const proposedAt = new Date().toISOString();
+    for (const task of decision.tasks) {
+      const stepId = resolveTaskStepId(latest, task.stepIndex, stepIds);
+      if (skippedStepIds.has(stepId ?? "")) continue;
+      queuedMutations.push({
+        id: makeId("pmut"),
+        source: "manager_decision",
+        proposedAt,
+        description: task.title,
+        workerTaskInput: {
+          stepId,
+          title: task.title,
+          description: task.description,
+          runtimePreference: task.runtimePreference,
+          modelHint: task.modelHint,
+          effortHint: task.effortHint,
+          allowedPaths: task.allowedPaths,
+          forbiddenPaths: task.forbiddenPaths,
+          expectedOutputs: task.expectedOutputs,
+          verificationCommands: task.verificationCommands,
+          canRunParallel: task.canRunParallel,
+          conflictsWith: task.conflictsWith,
+          taskClass: task.taskClass,
+        },
+      });
+    }
+    if (queuedMutations.length > 0) {
+      latest = await commitRunChange(latest, {
+        type: "spark_manager.pending_mutations_added",
+        message: `Plan mode queued ${queuedMutations.length} worker task(s) for review`,
+        payload: {
+          count: queuedMutations.length,
+          ids: queuedMutations.map((m) => m.id),
+          titles: queuedMutations.map((m) => m.description),
+        },
+        mutate: (draft, timestamp) => {
+          draft.pendingMutations = [...(draft.pendingMutations ?? []), ...queuedMutations];
+          draft.updatedAt = timestamp;
+        },
+      });
+    }
+  } else {
+    for (const task of decision.tasks) {
+      const stepId = resolveTaskStepId(latest, task.stepIndex, stepIds);
+      if (skippedStepIds.has(stepId ?? "")) continue;
+      latest = await createWorkerTask({
+        runId: latest.id,
+        stepId,
+        title: task.title,
+        description: task.description,
+        runtimePreference: task.runtimePreference,
+        modelHint: task.modelHint,
+        effortHint: task.effortHint,
+        allowedPaths: task.allowedPaths,
+        forbiddenPaths: task.forbiddenPaths,
+        expectedOutputs: task.expectedOutputs,
+        verificationCommands: task.verificationCommands,
+        canRunParallel: task.canRunParallel,
+        conflictsWith: task.conflictsWith,
+        taskClass: task.taskClass,
+        createdBy: "spark",
+      });
+    }
   }
 
   latest = await requireRun(latest.id);
@@ -1927,7 +1995,9 @@ async function applySparkManagerDecision(
       summary: decision.summary,
       status: decision.status,
       stepsCreated: steps.length,
-      tasksCreated: decision.tasks.length,
+      tasksCreated: planModeOn ? 0 : decision.tasks.length,
+      tasksQueued: planModeOn ? queuedMutations.length : 0,
+      planMode: planModeOn,
       runtimes: decision.tasks.map((task) => task.runtimePreference),
     },
   });
@@ -2736,6 +2806,160 @@ export async function deleteRun(runId: string): Promise<void> {
   }
 }
 
+// ── AI plan mode ────────────────────────────────────────────────────────────
+// Plan mode is a per-run flag that intercepts mutating manager decisions
+// (worker dispatches that would touch the workspace) and queues them as
+// pendingMutations for the user to review in the PlanDiffReview overlay.
+//
+// setPlanMode flips the flag and emits a system message so the chat shows
+// the toggle. applyPendingMutations replays a queued worker_task_input
+// through createWorkerTask + scheduleAutopilotCycles (the same path the
+// autopilot uses post-decision); discardPendingMutations drops them
+// entirely. Both leave the manager prompts untouched — the manager doesn't
+// need to know about plan mode; the gating happens after its decision lands.
+
+export async function setPlanMode(input: SetPlanModeInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const enabled = Boolean(input.enabled);
+  if ((run.planMode ?? false) === enabled) return run;
+  return commitRunChange(run, {
+    type: enabled ? "run.plan_mode_enabled" : "run.plan_mode_disabled",
+    message: enabled
+      ? "Plan mode enabled — Spark will queue mutating actions for review"
+      : "Plan mode disabled — Spark will execute mutating actions automatically",
+    payload: { enabled, pending: run.pendingMutations?.length ?? 0 },
+    mutate: (draft, timestamp) => {
+      draft.planMode = enabled;
+      draft.humanMessages.push({
+        id: makeId("msg"),
+        runId: draft.id,
+        author: "system",
+        kind: "decision",
+        message: enabled
+          ? "Plan mode on. Spark will queue worker dispatches for your review before executing."
+          : "Plan mode off. Spark will resume executing worker dispatches automatically.",
+        createdAt: timestamp,
+      });
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+export async function applyPendingMutations(
+  input: ApplyPendingMutationsInput,
+): Promise<RunState> {
+  let run = await requireRun(input.runId);
+  const queue = run.pendingMutations ?? [];
+  if (queue.length === 0) return run;
+
+  const idFilter = input.ids && input.ids.length > 0 ? new Set(input.ids) : null;
+  const toApply = idFilter ? queue.filter((m) => idFilter.has(m.id)) : queue.slice();
+  if (toApply.length === 0) return run;
+  const applyIds = new Set(toApply.map((m) => m.id));
+
+  // Pop from the queue first so a mid-loop failure doesn't leave a half-
+  // applied stripe of "still queued" entries. createWorkerTask is itself
+  // idempotent-by-id, so re-running apply on the same set is safe.
+  run = await commitRunChange(run, {
+    type: "run.pending_mutations_applying",
+    message: `Applying ${toApply.length} queued mutation(s)`,
+    payload: {
+      ids: toApply.map((m) => m.id),
+      titles: toApply.map((m) => m.description),
+    },
+    mutate: (draft, timestamp) => {
+      draft.pendingMutations = (draft.pendingMutations ?? []).filter(
+        (m) => !applyIds.has(m.id),
+      );
+      draft.updatedAt = timestamp;
+    },
+  });
+
+  for (const mutation of toApply) {
+    const w = mutation.workerTaskInput;
+    run = await createWorkerTask({
+      runId: run.id,
+      stepId: w.stepId,
+      title: w.title,
+      description: w.description,
+      runtimePreference: w.runtimePreference,
+      modelHint: w.modelHint,
+      effortHint: w.effortHint,
+      allowedPaths: w.allowedPaths,
+      forbiddenPaths: w.forbiddenPaths,
+      expectedOutputs: w.expectedOutputs,
+      verificationCommands: w.verificationCommands,
+      canRunParallel: w.canRunParallel,
+      conflictsWith: w.conflictsWith,
+      taskClass: w.taskClass,
+      createdBy: "spark",
+    });
+  }
+
+  await appendEvent({
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    type: "run.pending_mutations_applied",
+    message: `Applied ${toApply.length} queued mutation(s)`,
+    payload: {
+      ids: toApply.map((m) => m.id),
+      titles: toApply.map((m) => m.description),
+      remaining: run.pendingMutations?.length ?? 0,
+    },
+  });
+
+  // Hand the new tasks to the autopilot so they actually launch. We re-run
+  // startAutopilot — it picks up unrun work via pickAutopilotTasks and
+  // schedules attempts the same way the post-decision path would.
+  if (run.status !== "paused" && run.status !== "cancelled") {
+    const autopilotInput = autopilotInputFromRun(run);
+    void startAutopilot(autopilotInput).catch(() => {
+      /* startAutopilot logs its own failures via appendEvent */
+    });
+  }
+
+  return run;
+}
+
+export async function discardPendingMutations(
+  input: DiscardPendingMutationsInput,
+): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const queue = run.pendingMutations ?? [];
+  if (queue.length === 0) return run;
+
+  const idFilter = input.ids && input.ids.length > 0 ? new Set(input.ids) : null;
+  const toDiscard = idFilter ? queue.filter((m) => idFilter.has(m.id)) : queue.slice();
+  if (toDiscard.length === 0) return run;
+  const discardIds = new Set(toDiscard.map((m) => m.id));
+
+  return commitRunChange(run, {
+    type: "run.pending_mutations_discarded",
+    message: `Discarded ${toDiscard.length} queued mutation(s)`,
+    payload: {
+      ids: toDiscard.map((m) => m.id),
+      titles: toDiscard.map((m) => m.description),
+    },
+    mutate: (draft, timestamp) => {
+      draft.pendingMutations = (draft.pendingMutations ?? []).filter(
+        (m) => !discardIds.has(m.id),
+      );
+      draft.humanMessages.push({
+        id: makeId("msg"),
+        runId: draft.id,
+        author: "system",
+        kind: "decision",
+        message:
+          toDiscard.length === 1
+            ? `Discarded queued mutation: ${toDiscard[0].description}`
+            : `Discarded ${toDiscard.length} queued mutations.`,
+        createdAt: timestamp,
+      });
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 async function reviewWorkerReportArtifact({
   run,
   task,
@@ -2927,6 +3151,10 @@ function normalizeRun(run: RunState): RunState {
     status: run.status === "running" ? "running" : "idle",
     updatedAt: run.updatedAt,
   };
+  // Plan-mode fields are additive; older run.json files predate them and
+  // would otherwise read as undefined and break consumers that expect arrays.
+  run.planMode ??= false;
+  run.pendingMutations ??= [];
   return run;
 }
 

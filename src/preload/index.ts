@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AddRunMessageInput,
+  ApplyPendingMutationsInput,
   AppPreferences,
   AppSettings,
   AppState,
@@ -8,6 +9,7 @@ import type {
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
+  DiscardPendingMutationsInput,
   FsChangeEvent,
   FsEntry,
   FsFileContent,
@@ -27,6 +29,7 @@ import type {
   SearchHit,
   SearchOptions,
   SearchSummary,
+  SetPlanModeInput,
   ShellInfo,
   SparkEvent,
   StartAutopilotInput,
@@ -165,6 +168,15 @@ const api = {
       ipcRenderer.invoke("orchestration:readWorkerReport", path),
     deleteRun: (runId: string): Promise<void> =>
       ipcRenderer.invoke("orchestration:deleteRun", runId),
+    // Plan-mode. setPlanMode toggles the per-run flag; apply/discard flush
+    // or drop entries from run.pendingMutations. apply hands the resulting
+    // worker tasks back to the autopilot so they actually launch.
+    setPlanMode: (input: SetPlanModeInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:setPlanMode", input),
+    applyPendingMutations: (input: ApplyPendingMutationsInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:applyPendingMutations", input),
+    discardPendingMutations: (input: DiscardPendingMutationsInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:discardPendingMutations", input),
     onEvent: (handler: OrchestrationEventHandler): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, event: SparkEvent) => handler(event);
       ipcRenderer.on("orchestration:event", listener);
