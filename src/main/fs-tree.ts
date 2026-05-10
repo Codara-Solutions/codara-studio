@@ -79,39 +79,72 @@ export async function writeTextFile(path: string, content: string): Promise<FsFi
 }
 
 export async function renameFile(path: string, newName: string): Promise<FsEntry> {
-  const cleanName = newName.trim();
-  if (!cleanName) throw new Error("File name cannot be empty.");
-  if (cleanName !== basename(cleanName)) {
-    throw new Error("File name cannot include path separators.");
-  }
+  const cleanName = sanitizeName(newName);
 
   const st = await fs.stat(path);
-  if (!st.isFile()) throw new Error("Only files can be renamed from the Explorer.");
 
   const nextPath = join(dirname(path), cleanName);
   if (nextPath === path) {
-    return makeFileEntry(nextPath);
+    return makeEntry(nextPath, st.isDirectory());
+  }
+
+  // Guard against accidental clobber.
+  try {
+    await fs.access(nextPath);
+    throw new Error(`A file named "${cleanName}" already exists in this folder.`);
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") throw err;
   }
 
   await fs.rename(path, nextPath);
-  return makeFileEntry(nextPath);
+  return makeEntry(nextPath, st.isDirectory());
 }
 
 export async function deleteFile(path: string): Promise<void> {
-  const st = await fs.stat(path);
-  if (!st.isFile()) throw new Error("Only files can be deleted from the Explorer.");
+  // Allow trashing both files and directories.
   await shell.trashItem(path);
 }
 
-async function makeFileEntry(path: string): Promise<FsEntry> {
-  const st = await fs.stat(path);
-  if (!st.isFile()) throw new Error("Path is not a file.");
+export async function createFile(parentPath: string, name: string): Promise<FsEntry> {
+  const cleanName = sanitizeName(name);
+  const target = join(parentPath, cleanName);
+  // wx mode = exclusive create; fail if exists.
+  const handle = await fs.open(target, "wx");
+  await handle.close();
+  return makeEntry(target, false);
+}
+
+export async function createFolder(parentPath: string, name: string): Promise<FsEntry> {
+  const cleanName = sanitizeName(name);
+  const target = join(parentPath, cleanName);
+  await fs.mkdir(target, { recursive: false });
+  return makeEntry(target, true);
+}
+
+function sanitizeName(name: string): string {
+  const cleanName = name.trim();
+  if (!cleanName) throw new Error("Name cannot be empty.");
+  if (cleanName !== basename(cleanName)) {
+    throw new Error("Name cannot include path separators.");
+  }
+  if (cleanName === "." || cleanName === "..") {
+    throw new Error("Name cannot be '.' or '..'.");
+  }
+  // Reject reserved Windows characters that node will accept silently.
+  if (/[<>:"|?*]/.test(cleanName)) {
+    throw new Error("Name contains invalid characters.");
+  }
+  return cleanName;
+}
+
+async function makeEntry(path: string, isDir: boolean): Promise<FsEntry> {
   const name = basename(path);
   return {
     name,
     path,
-    isDir: false,
-    ext: extname(name).replace(/^\./, "").toLowerCase() || undefined,
+    isDir,
+    ext: isDir ? undefined : extname(name).replace(/^\./, "").toLowerCase() || undefined,
   };
 }
 

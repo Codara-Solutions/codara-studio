@@ -3,6 +3,7 @@ import type {
   AddRunMessageInput,
   AppSettings,
   AppState,
+  CreateEntryInput,
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
@@ -62,6 +63,10 @@ const api = {
     renameFile: (input: RenameFileInput): Promise<FsEntry> =>
       ipcRenderer.invoke("fs:renameFile", input),
     deleteFile: (path: string): Promise<void> => ipcRenderer.invoke("fs:deleteFile", path),
+    createFile: (input: CreateEntryInput): Promise<FsEntry> =>
+      ipcRenderer.invoke("fs:createFile", input),
+    createFolder: (input: CreateEntryInput): Promise<FsEntry> =>
+      ipcRenderer.invoke("fs:createFolder", input),
     setWatchRoot: (root: string | null): Promise<void> =>
       ipcRenderer.invoke("fs:setWatchRoot", root),
     revealInOS: (path: string): Promise<void> => ipcRenderer.invoke("fs:revealInOS", path),
