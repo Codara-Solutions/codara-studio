@@ -1,6 +1,6 @@
 import { ipcMain, dialog, BrowserWindow, app, shell } from "electron";
 import { listShells, defaultShell } from "./shells";
-import { deleteFile, listDir, listMarkdownFiles, readTextFile, renameFile, writeTextFile } from "./fs-tree";
+import { createFile, createFolder, deleteFile, listDir, listMarkdownFiles, readTextFile, renameFile, writeTextFile } from "./fs-tree";
 import { getGitGraph } from "./git-graph";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import * as pty from "./pty-manager";
@@ -31,6 +31,7 @@ import type {
   AddRunMessageInput,
   AppSettings,
   AppState,
+  CreateEntryInput,
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
@@ -111,6 +112,14 @@ export function registerIpc(): void {
 
   ipcMain.handle("fs:deleteFile", async (_e, path: string): Promise<void> => {
     await deleteFile(path);
+  });
+
+  ipcMain.handle("fs:createFile", async (_e, args: CreateEntryInput): Promise<FsEntry> => {
+    return createFile(args.parentPath, args.name);
+  });
+
+  ipcMain.handle("fs:createFolder", async (_e, args: CreateEntryInput): Promise<FsEntry> => {
+    return createFolder(args.parentPath, args.name);
   });
 
   ipcMain.handle("fs:setWatchRoot", async (e, root: string | null): Promise<void> => {

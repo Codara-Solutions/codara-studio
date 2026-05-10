@@ -90,6 +90,11 @@ export interface RenameFileInput {
   newName: string;
 }
 
+export interface CreateEntryInput {
+  parentPath: string;
+  name: string;
+}
+
 export interface FsChangeEvent {
   root: string;
   dirs: string[];
