@@ -65,6 +65,10 @@ function createWindow(): void {
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
+      // Enable Electron's <webview> tag so the preview tab kind can host a
+      // sandboxed embedded browser with full Chromium controls (back/forward,
+      // reload, devtools, capturePage). Without this flag <webview> is inert.
+      webviewTag: true,
     },
   });
 
