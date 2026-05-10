@@ -1,6 +1,6 @@
 import { ipcMain, dialog, BrowserWindow, app, shell, webContents } from "electron";
 import { listShells, defaultShell } from "./shells";
-import { createFile, createFolder, deleteFile, listDir, listMarkdownFiles, readTextFile, renameFile, writeTextFile } from "./fs-tree";
+import { createFile, createFolder, deleteFile, listDir, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
 import { getGitGraph } from "./git-graph";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { loadPreferences, setPreference } from "./preferences-store";
@@ -40,6 +40,7 @@ import type {
   CreateWorkerTaskInput,
   FsEntry,
   FsFileContent,
+  FsReadResult,
   GitGraph,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
@@ -134,6 +135,10 @@ export function registerIpc(): void {
 
   ipcMain.handle("fs:readText", async (_e, path: string): Promise<FsFileContent> => {
     return readTextFile(path);
+  });
+
+  ipcMain.handle("fs:readEx", async (_e, path: string): Promise<FsReadResult> => {
+    return readFileEx(path);
   });
 
   ipcMain.handle("fs:listMarkdownFiles", async (_e, root: string): Promise<PlanFile[]> => {

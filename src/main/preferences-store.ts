@@ -2,7 +2,9 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import {
   DEFAULT_PREFERENCES,
+  EDITOR_THEME_IDS,
   type AppPreferences,
+  type EditorThemeId,
   type PrefKey,
 } from "@shared/types";
 import { sparkHome } from "./spark-home";
@@ -19,13 +21,30 @@ function prefsPath(): string {
   return join(sparkHome(), PREFS_FILE);
 }
 
+function isEditorThemeId(value: unknown): value is EditorThemeId {
+  return typeof value === "string" && (EDITOR_THEME_IDS as readonly string[]).includes(value);
+}
+
 function normalize(input: Partial<AppPreferences> | null | undefined): AppPreferences {
   const src = input && typeof input === "object" ? input : {};
+  const inlineModel =
+    typeof src.inlineAutocompleteModelId === "string" && src.inlineAutocompleteModelId.trim()
+      ? src.inlineAutocompleteModelId.trim()
+      : DEFAULT_PREFERENCES.inlineAutocompleteModelId;
   return {
     theme:
       src.theme === "light" || src.theme === "dark" || src.theme === "system"
         ? src.theme
         : DEFAULT_PREFERENCES.theme,
+    vimMode: typeof src.vimMode === "boolean" ? src.vimMode : DEFAULT_PREFERENCES.vimMode,
+    editorTheme: isEditorThemeId(src.editorTheme)
+      ? src.editorTheme
+      : DEFAULT_PREFERENCES.editorTheme,
+    inlineAutocompleteEnabled:
+      typeof src.inlineAutocompleteEnabled === "boolean"
+        ? src.inlineAutocompleteEnabled
+        : DEFAULT_PREFERENCES.inlineAutocompleteEnabled,
+    inlineAutocompleteModelId: inlineModel,
   };
 }
 

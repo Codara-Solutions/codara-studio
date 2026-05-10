@@ -189,6 +189,78 @@ html, body, #settings-root {
   background: color-mix(in oklch, var(--ink) 1.5%, transparent);
 }
 
+.settings-select,
+.settings-input {
+  appearance: none;
+  width: 100%;
+  height: 34px;
+  padding: 0 11px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--ink) 2%, var(--panel));
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+
+.settings-select:focus,
+.settings-input:focus {
+  border-color: var(--accent-edge);
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 18%, transparent);
+}
+
+.settings-field-help {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.settings-field-help code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in oklch, var(--ink) 5%, transparent);
+}
+
+.settings-switch {
+  appearance: none;
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid var(--rule-soft);
+  background: color-mix(in oklch, var(--ink) 5%, var(--panel));
+  cursor: default;
+  flex-shrink: 0;
+  transition: background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out);
+}
+
+.settings-switch[data-on="true"] {
+  background: var(--accent);
+  border-color: var(--accent-edge);
+}
+
+.settings-switch-thumb {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--bg);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.settings-switch[data-on="true"] .settings-switch-thumb {
+  transform: translateX(16px);
+}
+
 .settings-meta-grid {
   display: grid;
   grid-template-columns: 110px 1fr;

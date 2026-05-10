@@ -11,6 +11,7 @@ import type {
   FsChangeEvent,
   FsEntry,
   FsFileContent,
+  FsReadResult,
   GitGraph,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
@@ -76,6 +77,7 @@ const api = {
   fs: {
     list: (dir: string): Promise<FsEntry[]> => ipcRenderer.invoke("fs:list", dir),
     readText: (path: string): Promise<FsFileContent> => ipcRenderer.invoke("fs:readText", path),
+    readEx: (path: string): Promise<FsReadResult> => ipcRenderer.invoke("fs:readEx", path),
     listMarkdownFiles: (root: string): Promise<PlanFile[]> =>
       ipcRenderer.invoke("fs:listMarkdownFiles", root),
     writeText: (path: string, content: string): Promise<FsFileContent> =>
