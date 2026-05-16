@@ -151,11 +151,15 @@ function Global:Prompt {
 # previously broke when the integration tried to fully take over Enter.
 if (Get-Module -ListAvailable PSReadLine) {
     Import-Module PSReadLine -ErrorAction SilentlyContinue
-    # Disable inline prediction (gray-text autocomplete). The same cmdlet is
-    # also fired from shells.ts -Command, but PSReadLine isn't always loaded
-    # at that point so the call can no-op. Re-applying it here, after we've
-    # explicitly imported the module, makes the setting actually stick.
-    Set-PSReadLineOption -PredictionSource None -ErrorAction SilentlyContinue
+    # Disable inline prediction (gray-text autocomplete). PredictionSource was
+    # added in PSReadLine 2.1; on Windows PowerShell 5.1 the bundled module is
+    # often 2.0, where the parameter doesn't exist and -ErrorAction can't
+    # suppress the binding error. Probe the cmdlet first so older hosts stay
+    # silent.
+    $__sparkPsrCmd = Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue
+    if ($__sparkPsrCmd -and $__sparkPsrCmd.Parameters.ContainsKey('PredictionSource')) {
+        Set-PSReadLineOption -PredictionSource None -ErrorAction SilentlyContinue
+    }
     if (Get-Command Set-PSReadLineKeyHandler -ErrorAction SilentlyContinue) {
         $Global:__SparkAcceptLine = {
             param($key, $arg)

@@ -1,0 +1,19 @@
+{
+  "id": "bug-fix-cart-total",
+  "category": "bug_fix",
+  "seed": "seed",
+  "budgetSeconds": 600,
+  "publicGates": [
+    {
+      "id": "public-quantity-discount",
+      "command": "node -e \"const { total } = require('./cart'); const got = total([{ price: 10, qty: 2 }], 0.1); if (got !== 18) throw new Error('expected 18, got '+got);\""
+    }
+  ],
+  "hiddenGates": [
+    {
+      "id": "hidden-rounding-and-mixed-lines",
+      "command": "node -e \"const { total } = require('./cart'); const got = total([{ price: 1.255, qty: 2 }, { price: 3, qty: 1 }], 0.2); if (got !== 4.41) throw new Error('expected 4.41, got '+got);\""
+    }
+  ]
+}
+

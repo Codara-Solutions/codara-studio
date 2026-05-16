@@ -20,3 +20,7 @@ experiments/
 .env.local
 .env.*
 !.env.example
+
+# Local-only artifacts (not source)
+.claude/
+evals/results/

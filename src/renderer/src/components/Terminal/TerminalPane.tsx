@@ -27,11 +27,15 @@ interface Props {
   shell: ShellInfo;
   visible: boolean;
   initialCwd?: string;
+  initialCommand?: string;
+  extraEnv?: Record<string, string>;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   onCwd?: (cwd: string) => void;
   onDetectedLocalUrl?: (url: string) => void;
   onSparkOpen?: (input: SparkOpenInput) => void;
+  onActivity?: () => void;
+  onAgentState?: (state: { runtime: "claude" | "codex" | null; running: boolean }) => void;
 }
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
@@ -41,11 +45,15 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       shell,
       visible,
       initialCwd,
+      initialCommand,
+      extraEnv,
       onSearchReady,
       onExit,
       onCwd,
       onDetectedLocalUrl,
       onSparkOpen,
+      onActivity,
+      onAgentState,
     },
     ref,
   ) {
@@ -57,11 +65,15 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       sessionId,
       shell,
       initialCwd,
+      initialCommand,
+      extraEnv,
       onSearchReady,
       onExit,
       onCwd,
       onDetectedLocalUrl,
       onSparkOpen,
+      onActivity,
+      onAgentState,
     });
 
     useImperativeHandle(

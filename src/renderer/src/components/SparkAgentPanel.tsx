@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useState } from "react";
 import type {
   HumanRunMessageKind,
   PlanFile,
@@ -6,6 +6,7 @@ import type {
   SparkEvent,
   Workspace,
 } from "@shared/types";
+import { isRunningStatus, runStatusColor } from "../lib/run-status";
 import RunChatView from "./RunChatView";
 
 export type PlanMode = "file" | "typed";
@@ -24,6 +25,8 @@ interface Props {
   error: string | null;
   onStartAutopilot: () => void;
   onPauseRun: (reason: string) => void;
+  onPauseAfterWorkers: () => void | Promise<void>;
+  onForcePauseRun: () => void | Promise<void>;
   onResumeRun: () => void;
   onAddUserMessage: (message: string, kind?: HumanRunMessageKind) => void;
   onAnswerQuestion: (message: string) => void | Promise<void>;
@@ -49,6 +52,8 @@ export default function SparkAgentPanel({
   error,
   onStartAutopilot,
   onPauseRun,
+  onPauseAfterWorkers,
+  onForcePauseRun,
   onResumeRun,
   onAddUserMessage: _onAddUserMessage,
   onAnswerQuestion: _onAnswerQuestion,
@@ -71,6 +76,26 @@ export default function SparkAgentPanel({
       ? Boolean(selectedPlanPath)
       : typedPlanText.trim().length > 0);
 
+  // Stable per-run delete request handler. RunsList passes this straight to
+  // each memoized RunRow, so it must not be re-created every render or the
+  // React.memo on RunRow would never hit. Keyed by id; resolves the run for
+  // the confirm() title at click time.
+  const requestDeleteRun = useCallback(
+    (runId: string) => {
+      const run = runs.find((r) => r.id === runId);
+      const title = run?.title ?? runId;
+      // Single-click delete with a clear native prompt. The backend
+      // hard-kills any active workers and removes the artifact dir
+      // directly (no recycle bin, so the OS doesn't prompt). This is
+      // permanent — for a stuck/long-running run, click "Force pause"
+      // first so file handles are released cleanly.
+      const ok = window.confirm(
+        `Delete run "${title}"?\n\nThis is permanent. Active workers will be killed and the artifact directory will be removed.`,
+      );
+      if (ok) onDeleteRun(runId);
+    },
+    [runs, onDeleteRun],
+  );
   return (
     <section
       style={{
@@ -132,36 +157,6 @@ export default function SparkAgentPanel({
             {runStatus}
           </span>
         </div>
-        {activeRun && (
-          <div style={{ display: "flex", gap: 6 }}>
-            {(activeRun.status === "running" || activeRun.status === "planning") && (
-              <HeaderButton
-                onClick={() => onPauseRun("Paused by user")}
-                disabled={busy}
-                title="Pause the manager and any active workers (graceful — workers may still finish their current generation)."
-              >
-                Pause
-              </HeaderButton>
-            )}
-            {(activeRun.status === "paused" || activeRun.status === "blocked") && (
-              <HeaderButton
-                onClick={onResumeRun}
-                disabled={busy}
-                accent
-                title="Resume the run."
-              >
-                Resume
-              </HeaderButton>
-            )}
-            <HeaderButton
-              onClick={() => onSelectRun(null)}
-              disabled={busy}
-              title="Start a new run (deselect this one and return to the plan picker)."
-            >
-              + New run
-            </HeaderButton>
-          </div>
-        )}
       </div>
 
       {/* Runs list — always visible, with an internal cap so it never crowds
@@ -175,21 +170,16 @@ export default function SparkAgentPanel({
       >
         <RunsList
           runs={runs}
+          activeRun={activeRun}
           activeRunId={activeRun?.id ?? null}
           busy={busy}
           onSelect={onSelectRun}
-          onRequestDelete={(runId) => {
-            const run = runs.find((r) => r.id === runId);
-            const title = run?.title ?? runId;
-            // Single-click delete with a clear native prompt — replaces a
-            // fiddly two-click confirmation that often went unnoticed. The
-            // backend trashes the artifact dir to the OS recycle bin, so an
-            // accidental delete is recoverable from there.
-            const ok = window.confirm(
-              `Delete run "${title}"?\n\nIts artifacts will be moved to the system trash. Active workers will be killed.`,
-            );
-            if (ok) onDeleteRun(runId);
-          }}
+          onNewRun={() => onSelectRun(null)}
+          onPause={() => onPauseRun("Paused by user")}
+          onPauseAfterWorkers={onPauseAfterWorkers}
+          onForcePause={onForcePauseRun}
+          onResume={onResumeRun}
+          onRequestDelete={requestDeleteRun}
         />
       </div>
 
@@ -475,15 +465,27 @@ function PlanModeTabs({
 
 function RunsList({
   runs,
+  activeRun,
   activeRunId,
   busy,
   onSelect,
+  onNewRun,
+  onPause,
+  onPauseAfterWorkers,
+  onForcePause,
+  onResume,
   onRequestDelete,
 }: {
   runs: RunState[];
+  activeRun: RunState | null;
   activeRunId: string | null;
   busy: boolean;
   onSelect: (id: string) => void;
+  onNewRun: () => void;
+  onPause: () => void;
+  onPauseAfterWorkers: () => void | Promise<void>;
+  onForcePause: () => void | Promise<void>;
+  onResume: () => void;
   onRequestDelete: (id: string) => void;
 }) {
   return (
@@ -517,6 +519,15 @@ function RunsList({
         >
           {String(runs.length).padStart(2, "0")}
         </span>
+        <RunControlsMenu
+          activeRun={activeRun}
+          busy={busy}
+          onNewRun={onNewRun}
+          onPause={onPause}
+          onPauseAfterWorkers={onPauseAfterWorkers}
+          onForcePause={onForcePause}
+          onResume={onResume}
+        />
       </div>
       {runs.length === 0 ? (
         <div
@@ -536,11 +547,17 @@ function RunsList({
             <RunRow
               key={run.id}
               run={run}
-              index={index + 1}
+              // listRuns returns newest-first; we want the chronological label
+              // (1 = first run started) so the oldest reads as 01 and the
+              // newest reads as the highest number.
+              index={runs.length - index}
               active={run.id === activeRunId}
               busy={busy}
-              onSelect={() => onSelect(run.id)}
-              onRequestDelete={() => onRequestDelete(run.id)}
+              // Pass the id-keyed callbacks straight through (no inline
+              // closure) so RunRow's React.memo can actually short-circuit:
+              // onSelect/onRequestDelete are stable across renders.
+              onSelect={onSelect}
+              onRequestDelete={onRequestDelete}
             />
           ))}
         </div>
@@ -549,7 +566,169 @@ function RunsList({
   );
 }
 
-function RunRow({
+function RunControlsMenu({
+  activeRun,
+  busy,
+  onNewRun,
+  onPause,
+  onPauseAfterWorkers,
+  onForcePause,
+  onResume,
+}: {
+  activeRun: RunState | null;
+  busy: boolean;
+  onNewRun: () => void;
+  onPause: () => void;
+  onPauseAfterWorkers: () => void | Promise<void>;
+  onForcePause: () => void | Promise<void>;
+  onResume: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState(false);
+  if (!activeRun) return null;
+
+  const isLive = activeRun.status === "running" || activeRun.status === "planning";
+  const canResume = activeRun.status === "paused" || activeRun.status === "blocked";
+  const canForce =
+    activeRun.status !== "complete" &&
+    activeRun.status !== "failed" &&
+    activeRun.status !== "cancelled";
+
+  const runAction = (action: () => void | Promise<void>) => {
+    setOpen(false);
+    void action();
+  };
+
+  return (
+    <div style={{ position: "relative", flex: "0 0 auto" }}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        disabled={busy}
+        title="Run controls"
+        style={{
+          appearance: "none",
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 6,
+          background: hover || open ? "var(--hover)" : "transparent",
+          color: busy ? "var(--muted)" : "var(--ink-dim)",
+          minHeight: 23,
+          padding: "3px 8px",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          fontWeight: 700,
+          letterSpacing: "0.04em",
+          textTransform: "none",
+          cursor: busy ? "not-allowed" : "default",
+          whiteSpace: "nowrap",
+        }}
+      >
+        Controls
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: 28,
+            right: 0,
+            zIndex: 20,
+            minWidth: 178,
+            padding: 5,
+            border: "1px solid var(--rule-strong)",
+            borderRadius: 7,
+            background: "var(--panel-2)",
+            boxShadow: "var(--shadow-2)",
+          }}
+        >
+          {isLive && (
+            <>
+              <RunActionButton
+                onClick={() => runAction(onPauseAfterWorkers)}
+                title="Stop Spark from launching more work after the currently running workers finish."
+              >
+                Stop after workers
+              </RunActionButton>
+              <RunActionButton
+                onClick={() => runAction(onPause)}
+                title="Pause now and send a pause signal to active workers."
+              >
+                Pause now
+              </RunActionButton>
+            </>
+          )}
+          {canResume && (
+            <RunActionButton onClick={() => runAction(onResume)} accent title="Resume this run.">
+              Resume
+            </RunActionButton>
+          )}
+          {canForce && (
+            <RunActionButton
+              onClick={() => runAction(onForcePause)}
+              danger
+              title="Hard-kill active worker processes and stop the autopilot loop."
+            >
+              Force pause
+            </RunActionButton>
+          )}
+          <RunActionButton onClick={() => runAction(onNewRun)} title="Open the plan picker for a new run.">
+            New run
+          </RunActionButton>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RunActionButton({
+  children,
+  onClick,
+  title,
+  accent,
+  danger,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  title?: string;
+  accent?: boolean;
+  danger?: boolean;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      title={title}
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        width: "100%",
+        minHeight: 28,
+        border: "1px solid transparent",
+        borderRadius: 5,
+        background: hover ? "var(--hover)" : "transparent",
+        color: danger ? "var(--danger)" : accent ? "var(--ink)" : "var(--ink-dim)",
+        padding: "6px 8px",
+        textAlign: "left",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        fontWeight: 600,
+        cursor: "default",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+// Memoized: the runs list re-renders on every orchestration event, but a
+// given row's appearance only depends on its run object, index, active and
+// busy flags. The onSelect/onRequestDelete callbacks are id-keyed and stable
+// (see RunsList), so React.memo's shallow prop compare skips untouched rows.
+const RunRow = React.memo(function RunRow({
   run,
   index,
   active,
@@ -561,8 +740,8 @@ function RunRow({
   index: number;
   active: boolean;
   busy: boolean;
-  onSelect: () => void;
-  onRequestDelete: () => void;
+  onSelect: (id: string) => void;
+  onRequestDelete: (id: string) => void;
 }) {
   const [hover, setHover] = useState(false);
   const [trashHover, setTrashHover] = useState(false);
@@ -574,7 +753,7 @@ function RunRow({
       : "color-mix(in oklch, var(--ink) 2%, transparent)";
   const titleColor = active ? "var(--ink)" : "var(--ink-dim)";
   const indexColor = active ? "var(--ink)" : "var(--muted)";
-  const dotColor = statusDotColor(run.status);
+  const dotColor = active ? "var(--accent)" : runStatusColor(run.status);
 
   return (
     <div
@@ -612,12 +791,12 @@ function RunRow({
           borderRadius: 999,
           background: dotColor,
           flex: "0 0 7px",
-          animation: isLiveStatus(run.status) ? "spark-pulse 1.2s ease-in-out infinite" : undefined,
+          animation: isRunningStatus(run.status) ? "spark-pulse 1.2s ease-in-out infinite" : undefined,
         }}
       />
       <button
         type="button"
-        onClick={onSelect}
+        onClick={() => onSelect(run.id)}
         title={`${run.title} · ${run.status}`}
         style={{
           appearance: "none",
@@ -642,7 +821,7 @@ function RunRow({
       </button>
       <button
         type="button"
-        onClick={onSelect}
+        onClick={() => onSelect(run.id)}
         title={`${run.title} · ${run.status}`}
         style={{
           appearance: "none",
@@ -681,7 +860,7 @@ function RunRow({
         type="button"
         onClick={(e) => {
           e.stopPropagation();
-          onRequestDelete();
+          onRequestDelete(run.id);
         }}
         onMouseEnter={() => setTrashHover(true)}
         onMouseLeave={() => setTrashHover(false)}
@@ -708,7 +887,7 @@ function RunRow({
       </button>
     </div>
   );
-}
+});
 
 function TrashGlyph() {
   return (
@@ -730,65 +909,6 @@ function TrashGlyph() {
       <path d="M8 6.25v3.5" />
     </svg>
   );
-}
-
-function HeaderButton({
-  children,
-  onClick,
-  disabled,
-  title,
-  accent,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  disabled?: boolean;
-  title?: string;
-  accent?: boolean;
-}) {
-  const [hover, setHover] = useState(false);
-  const baseBg = accent
-    ? "color-mix(in oklch, var(--accent) 18%, var(--panel))"
-    : "color-mix(in oklch, var(--ink) 3%, transparent)";
-  const baseBorder = accent ? "var(--accent-edge)" : "var(--rule-strong)";
-  const ink = accent ? "var(--ink)" : "var(--ink-dim)";
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        appearance: "none",
-        background: disabled ? "transparent" : hover ? "var(--hover)" : baseBg,
-        border: `1px solid ${disabled ? "var(--rule-soft)" : baseBorder}`,
-        borderRadius: 7,
-        color: disabled ? "var(--muted)" : ink,
-        padding: "5px 10px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: 600,
-        cursor: disabled ? "not-allowed" : "default",
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function statusDotColor(status: RunState["status"]): string {
-  if (status === "running" || status === "reviewing" || status === "planning") return "var(--accent)";
-  if (status === "complete") return "var(--ok)";
-  if (status === "blocked" || status === "failed") return "var(--danger)";
-  if (status === "paused") return "var(--info)";
-  return "var(--muted)";
-}
-
-function isLiveStatus(status: RunState["status"]): boolean {
-  return status === "running" || status === "reviewing" || status === "planning";
 }
 
 function PanelButton({

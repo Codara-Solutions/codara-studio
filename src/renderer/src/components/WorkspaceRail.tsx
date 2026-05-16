@@ -23,12 +23,18 @@ interface RailProps {
   onActivate: (id: string) => void;
   onEdit: (id: string) => void;
   onChange: (id: string, patch: Partial<Workspace>) => void;
+  onPreviewColor: (id: string, color: string) => void;
   onDelete: (id: string) => void;
   onCloseEditor: () => void;
   onCreate: () => void;
 }
 
-export default function WorkspaceRail(props: RailProps) {
+// Memoized: App hoists every prop to a stable reference (the `workspaces`
+// array changes only on a real workspace mutation; `onActivate`/`onEdit`/
+// `onChange`/`onDelete`/`onCloseEditor`/`onCreate` are all useCallback). So
+// the rail skips re-renders driven by unrelated App state — most importantly
+// the live `--accent` color drag, which previously repainted the whole rail.
+function WorkspaceRail(props: RailProps) {
   const { workspaces, width, onCreate } = props;
   const deleteActiveWorkspace = () => {
     if (!props.activeId) return;
@@ -68,6 +74,7 @@ export default function WorkspaceRail(props: RailProps) {
                 onActivate={() => props.onActivate(w.id)}
                 onEdit={() => props.onEdit(w.id)}
                 onChange={(patch) => props.onChange(w.id, patch)}
+                onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
                 onCloseEditor={props.onCloseEditor}
               />
             ))}
@@ -78,6 +85,8 @@ export default function WorkspaceRail(props: RailProps) {
     </aside>
   );
 }
+
+export default React.memo(WorkspaceRail);
 
 function RailSectionHeader({
   label,
@@ -233,6 +242,7 @@ interface RowProps {
   onActivate: () => void;
   onEdit: () => void;
   onChange: (patch: Partial<Workspace>) => void;
+  onPreviewColor: (color: string) => void;
   onCloseEditor: () => void;
 }
 
@@ -243,17 +253,78 @@ function WorkspaceRow({
   onActivate,
   onEdit,
   onChange,
+  onPreviewColor,
   onCloseEditor,
 }: RowProps) {
-  const accent = ws.color || "var(--accent)";
   const inputRef = useRef<HTMLInputElement | null>(null);
   const colorRef = useRef<HTMLInputElement | null>(null);
   const rowRef = useRef<HTMLDivElement | null>(null);
   const [name, setName] = useState(ws.name);
   const [rowHover, setRowHover] = useState(false);
   const [moreHover, setMoreHover] = useState(false);
+  // In-flight color while the OS color dialog is open. The native
+  // <input type="color"> streams `input` events 30-60×/sec (sometimes faster)
+  // during a drag. We keep the live value here for a LOCAL preview only — just
+  // this row's color dot + border — and lift to App state exactly once, on the
+  // final `change` event. Crucially we do NOT touch the global `--accent`
+  // variable or App state during the drag: doing so re-tinted the whole app
+  // (every `color-mix(--accent)` recalculated) and re-themed every terminal on
+  // every tick, which dropped frames. The whole-app accent applies on commit.
+  const [draftColor, setDraftColor] = useState<string | null>(null);
+  // The `input` stream can outrun the frame rate, so the local preview update
+  // is coalesced to at most one setState per animation frame.
+  const colorRaf = useRef<number | null>(null);
+  const pendingColor = useRef<string>("");
+  const committedColor = useRef(normalizeHex(ws.color));
+  const latestOnChange = useRef(onChange);
+  const latestOnPreviewColor = useRef(onPreviewColor);
+  const commitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // The live draft (if a pick is in progress) wins over the committed color.
+  const accent = draftColor || ws.color || "var(--accent)";
 
   useEffect(() => setName(ws.name), [ws.id, ws.name]);
+  useEffect(() => {
+    latestOnChange.current = onChange;
+  }, [onChange]);
+  useEffect(() => {
+    latestOnPreviewColor.current = onPreviewColor;
+  }, [onPreviewColor]);
+  useEffect(() => {
+    committedColor.current = normalizeHex(ws.color);
+  }, [ws.color]);
+  // Clear any pending timers / frames if the row unmounts mid-pick.
+  useEffect(() => {
+    return () => {
+      if (commitTimer.current) clearTimeout(commitTimer.current);
+      if (colorRaf.current !== null) cancelAnimationFrame(colorRaf.current);
+    };
+  }, []);
+  useEffect(() => {
+    const input = colorRef.current;
+    if (!editing || !input) return;
+
+    const commitColor = () => {
+      if (commitTimer.current) {
+        clearTimeout(commitTimer.current);
+        commitTimer.current = null;
+      }
+      const value = normalizeHex(input.value || pendingColor.current || committedColor.current);
+      pendingColor.current = value;
+      if (value !== committedColor.current) {
+        committedColor.current = value;
+        latestOnChange.current({ color: value });
+      }
+      setDraftColor(null);
+    };
+
+    input.addEventListener("change", commitColor);
+    input.addEventListener("blur", commitColor);
+    return () => {
+      input.removeEventListener("change", commitColor);
+      input.removeEventListener("blur", commitColor);
+    };
+  }, [editing]);
   useEffect(() => {
     if (editing && inputRef.current) {
       inputRef.current.focus();
@@ -354,8 +425,37 @@ function WorkspaceRow({
           <input
             ref={colorRef}
             type="color"
-            value={normalizeHex(ws.color)}
-            onChange={(e) => onChange({ color: e.target.value })}
+            // Show the draft mid-pick so the native swatch tracks the drag;
+            // otherwise reflect the committed color.
+            value={normalizeHex(draftColor ?? ws.color)}
+            // `input` fires continuously while dragging inside the OS picker.
+            // We deliberately do NOT call onChange (App state) or write the
+            // global `--accent` variable here — only this row's local draft
+            // preview is updated (coalesced to one setState per frame). A
+            // global mutation per tick re-tinted the whole app and re-themed
+            // every terminal; the whole-app accent is applied once, on commit.
+            onInput={(e) => {
+              pendingColor.current = e.currentTarget.value;
+              if (colorRaf.current === null) {
+                colorRaf.current = requestAnimationFrame(() => {
+                  colorRaf.current = null;
+                  const value = normalizeHex(pendingColor.current);
+                  pendingColor.current = value;
+                  setDraftColor(value);
+                  latestOnPreviewColor.current(value);
+                });
+              }
+              if (commitTimer.current) clearTimeout(commitTimer.current);
+              commitTimer.current = setTimeout(() => {
+                commitTimer.current = null;
+                const value = normalizeHex(pendingColor.current);
+                if (value !== committedColor.current) {
+                  committedColor.current = value;
+                  latestOnChange.current({ color: value });
+                }
+                setDraftColor(null);
+              }, 260);
+            }}
             style={{
               position: "absolute",
               width: 0,

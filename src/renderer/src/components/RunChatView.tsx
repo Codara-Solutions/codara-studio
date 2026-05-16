@@ -47,49 +47,12 @@ export default function RunChatView({ run, events }: Props) {
   const isTerminal =
     run.status === "complete" || run.status === "failed" || run.status === "cancelled";
 
-  // Slash-command interception. Composer scans the leading token before
-  // anything is sent: /plan flips planMode on, /auto and /exec flip it
-  // off, /plan off|exit also flips off. The command itself isn't sent as
-  // a chat message — setPlanMode emits a system-author HumanRunMessage so
-  // the toggle still shows up in the timeline.
-  const tryRunSlashCommand = async (raw: string): Promise<boolean> => {
-    const trimmed = raw.trim();
-    if (!trimmed.startsWith("/")) return false;
-    const [head, ...rest] = trimmed.slice(1).split(/\s+/);
-    const tail = rest.join(" ").trim().toLowerCase();
-    switch (head.toLowerCase()) {
-      case "plan": {
-        const enable = !(tail === "off" || tail === "exit" || tail === "stop");
-        await window.spark.orchestration.setPlanMode({
-          runId: run.id,
-          enabled: enable,
-        });
-        return true;
-      }
-      case "auto":
-      case "exec": {
-        await window.spark.orchestration.setPlanMode({
-          runId: run.id,
-          enabled: false,
-        });
-        return true;
-      }
-      default:
-        return false;
-    }
-  };
-
   const sendQueued = async () => {
     const message = draft.trim();
     if (!message || busy) return;
     setBusy(true);
     setError(null);
     try {
-      const handled = await tryRunSlashCommand(message);
-      if (handled) {
-        setDraft("");
-        return;
-      }
       await window.spark.orchestration.addRunMessage({
         runId: run.id,
         author: "user",
@@ -241,21 +204,6 @@ export default function RunChatView({ run, events }: Props) {
           gap: 10,
         }}
       >
-        <PlanModeChip
-          run={run}
-          busy={busy}
-          onToggle={async (enabled) => {
-            setError(null);
-            try {
-              await window.spark.orchestration.setPlanMode({
-                runId: run.id,
-                enabled,
-              });
-            } catch (err) {
-              setError((err as Error).message);
-            }
-          }}
-        />
         <textarea
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
@@ -270,9 +218,7 @@ export default function RunChatView({ run, events }: Props) {
               ? "Run is finished. Send a message and Spark will pick the work back up..."
               : openQuestion
                 ? "Type your answer to Spark's question..."
-                : run.planMode
-                  ? "Plan mode on — manager dispatches queue for review. Send a message, or type /auto to resume autopilot."
-                  : "Send a message, correction, or redirect. Type /plan to queue Spark's actions for review."
+                : "Send a message, correction, or redirect."
           }
           rows={3}
           disabled={busy}
@@ -597,125 +543,3 @@ function ChatButton({
   );
 }
 
-// Inline status chip rendered above the chat composer. When planMode is on,
-// shows an accent-tinted pill with a click-to-toggle target and the count of
-// queued mutations (pulsing if any exist). When off, renders a quiet hint
-// with a faint click target so the user can toggle without typing /plan.
-function PlanModeChip({
-  run,
-  busy,
-  onToggle,
-}: {
-  run: RunState;
-  busy: boolean;
-  onToggle: (enabled: boolean) => void;
-}) {
-  const enabled = Boolean(run.planMode);
-  const queued = run.pendingMutations?.length ?? 0;
-  const pulsing = enabled && queued > 0;
-
-  if (!enabled) {
-    return (
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "flex-end",
-          gap: 6,
-          fontSize: 10.5,
-          fontFamily: "var(--font-sans)",
-          color: "var(--muted)",
-          letterSpacing: "0.04em",
-        }}
-      >
-        <span>Autopilot — Spark executes its decisions immediately.</span>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => onToggle(true)}
-          title="Switch to plan mode (or type /plan)"
-          style={{
-            appearance: "none",
-            background: "transparent",
-            border: "1px solid var(--rule-soft)",
-            color: "var(--ink-dim)",
-            padding: "2px 8px",
-            borderRadius: 999,
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            cursor: busy ? "not-allowed" : "default",
-          }}
-        >
-          /plan
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        padding: "6px 10px",
-        borderRadius: 7,
-        background: "color-mix(in oklch, var(--accent) 10%, var(--panel))",
-        border: "1px solid var(--accent-edge)",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        color: "var(--ink)",
-      }}
-    >
-      <span
-        aria-hidden
-        style={{
-          width: 7,
-          height: 7,
-          borderRadius: 999,
-          background: "var(--accent)",
-          boxShadow: pulsing ? "0 0 0 0 var(--accent-glow)" : "none",
-          animation: pulsing
-            ? "spark-plan-pulse 1.6s var(--ease-out) infinite"
-            : undefined,
-        }}
-      />
-      <span style={{ fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", fontSize: 10 }}>
-        Plan mode
-      </span>
-      <span style={{ color: "var(--muted)", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {queued > 0
-          ? `${queued} pending change${queued === 1 ? "" : "s"} waiting for review`
-          : "Spark's mutating actions will queue for your review."}
-      </span>
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => onToggle(false)}
-        title="Resume autopilot (or type /auto)"
-        style={{
-          appearance: "none",
-          background: "transparent",
-          border: "1px solid var(--accent-edge)",
-          color: "var(--ink)",
-          padding: "2px 8px",
-          borderRadius: 999,
-          fontFamily: "var(--font-mono)",
-          fontSize: 10,
-          cursor: busy ? "not-allowed" : "default",
-        }}
-      >
-        /auto
-      </button>
-      {/* Inline keyframes — keeping the pulsing animation local so we don't
-          have to thread a global stylesheet for a one-off effect. */}
-      <style>
-        {`@keyframes spark-plan-pulse {
-          0% { box-shadow: 0 0 0 0 var(--accent-glow); }
-          70% { box-shadow: 0 0 0 6px transparent; }
-          100% { box-shadow: 0 0 0 0 transparent; }
-        }`}
-      </style>
-    </div>
-  );
-}

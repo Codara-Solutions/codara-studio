@@ -1,0 +1,12 @@
+{
+  "variantId": "spark_hybrid_parallel",
+  "label": "Spark hybrid parallel, Claude + Codex",
+  "workerPolicy": {
+    "manager": "spark",
+    "maxParallelWorkers": 4,
+    "implementationRuntimes": ["claude", "codex"],
+    "verification": "opposite_model_then_dual_on_complex",
+    "requireNonOverlappingScopes": true
+  }
+}
+

@@ -12,11 +12,11 @@ import { CloseIcon } from "../icons";
 import { basename } from "../../path-utils";
 
 // Project-wide find-in-files panel rendered as a centered overlay. Hits
-// stream in from the main process via `window.spark.search.start` and are
-// appended through a reducer so React only diffs the new tail rather than
-// re-virtualizing the whole list per match. Files are grouped under a
-// header row that the user can collapse, so the virtualized list mixes
-// header rows and hit rows in a single flat sequence.
+// stream in from the main process via `window.spark.search.start` in
+// batches and are appended through a reducer so React only diffs the new
+// tail once per batch rather than re-virtualizing the whole list per match.
+// Files are grouped under a header row that the user can collapse, so the
+// virtualized list mixes header rows and hit rows in a single flat sequence.
 
 interface Props {
   open: boolean;
@@ -41,24 +41,30 @@ interface ResultsState {
 
 type ResultsAction =
   | { kind: "reset" }
-  | { kind: "append"; hit: SearchHit };
+  | { kind: "append"; hits: SearchHit[] };
 
 function resultsReducer(state: ResultsState, action: ResultsAction): ResultsState {
   switch (action.kind) {
     case "reset":
       return { groups: [], pathToIndex: new Map(), totalHits: 0 };
     case "append": {
-      const existingIndex = state.pathToIndex.get(action.hit.path);
-      if (existingIndex !== undefined) {
-        const groups = state.groups.slice();
-        const target = groups[existingIndex];
-        groups[existingIndex] = { path: target.path, hits: [...target.hits, action.hit] };
-        return { ...state, groups, totalHits: state.totalHits + 1 };
-      }
-      const groups = [...state.groups, { path: action.hit.path, hits: [action.hit] }];
+      // Hits arrive in batches from the main process; fold the whole batch
+      // into the grouped state in one reducer pass so React diffs the tail
+      // once per batch rather than once per hit.
+      if (action.hits.length === 0) return state;
+      const groups = state.groups.slice();
       const pathToIndex = new Map(state.pathToIndex);
-      pathToIndex.set(action.hit.path, groups.length - 1);
-      return { groups, pathToIndex, totalHits: state.totalHits + 1 };
+      for (const hit of action.hits) {
+        const existingIndex = pathToIndex.get(hit.path);
+        if (existingIndex !== undefined) {
+          const target = groups[existingIndex];
+          groups[existingIndex] = { path: target.path, hits: [...target.hits, hit] };
+        } else {
+          groups.push({ path: hit.path, hits: [hit] });
+          pathToIndex.set(hit.path, groups.length - 1);
+        }
+      }
+      return { groups, pathToIndex, totalHits: state.totalHits + action.hits.length };
     }
     default:
       return state;
@@ -177,10 +183,11 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
       };
       try {
         const handle = await window.spark.search.start(options, {
-          onHit: (hit) => {
-            // The reducer handles ordering and grouping; setRunning stays
-            // true while hits keep arriving.
-            dispatch({ kind: "append", hit });
+          onHit: (hits) => {
+            // Hits arrive batched from main; the reducer folds the whole
+            // batch into the grouped state in one pass. setRunning stays
+            // true while batches keep arriving.
+            dispatch({ kind: "append", hits });
           },
           onDone: (s) => {
             // If a newer search has been kicked off between start and done

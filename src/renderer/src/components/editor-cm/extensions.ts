@@ -1,5 +1,4 @@
 import { indentUnit } from "@codemirror/language";
-import { lintGutter } from "@codemirror/lint";
 import { search } from "@codemirror/search";
 import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
@@ -20,7 +19,6 @@ export function buildSharedExtensions(): Extension[] {
     indentUnit.of("  "),
     EditorState.tabSize.of(2),
     search({ top: true }),
-    lintGutter(),
     EditorView.theme({
       "&, &.cm-editor, &.cm-editor.cm-focused": {
         backgroundColor: "transparent !important",
@@ -44,9 +42,6 @@ export function buildSharedExtensions(): Extension[] {
         backgroundColor: "transparent !important",
         color: "var(--muted-2)",
         border: "none",
-      },
-      ".cm-gutter-lint": {
-        width: "0px",
       },
       ".cm-gutter": { backgroundColor: "transparent !important" },
       ".cm-lineNumbers .cm-gutterElement": {

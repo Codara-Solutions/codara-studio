@@ -1,18 +1,14 @@
-import { shell } from "electron";
 import { promises as fs, createWriteStream } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
 import { dirname, join } from "node:path";
 import type {
   AddRunMessageInput,
   AgentRuntimeModel,
-  ApplyPendingMutationsInput,
-  DiscardPendingMutationsInput,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   PauseRunInput,
   CancelRunInput,
-  PendingMutation,
-  PendingWorkerTaskInput,
+  PlannedStepAgentTaskClass,
   ResumeRunInput,
   ReviewDecision,
   CreateStepInput,
@@ -22,7 +18,6 @@ import type {
   PrepareWorkerTaskInput,
   RunArtifactPaths,
   RunState,
-  SetPlanModeInput,
   SparkCall,
   SparkEvent,
   StartAutopilotInput,
@@ -39,6 +34,7 @@ import type {
   WorkerReport,
   WorkerTaskEnvelope,
 } from "@shared/types";
+import { makeId } from "@shared/ids";
 import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
 import { loadSettings } from "../storage";
 import {
@@ -90,6 +86,24 @@ const activeAutopilotPlans = new Map<string, Promise<void>>();
 const activeAutopilotReviews = new Map<string, Promise<void>>();
 const runWriteQueues = new Map<string, Promise<void>>();
 
+// In-memory authoritative cache of run state, keyed by run id. This module is
+// the SOLE writer of run.json (the orchestration loop lives in the single
+// main process), so once a run is loaded — or written — the in-memory copy is
+// canonical and we never need to touch the disk again to read it.
+//
+// Before this cache, the renderer's listRuns (which fans out to getRun per
+// run file) fired on every orchestration event, re-reading + JSON.parsing
+// every run.json from disk each time and stalling the main thread. getRun now
+// returns the cached RunState directly on a hit.
+//
+// The store's own mutating functions follow a `requireRun -> mutate the
+// returned object in place -> saveRun` pattern; because the cache holds that
+// same object identity, in-place mutation + re-save keeps the cache current
+// with no copy-on-read needed. External consumers (ipc.ts, headless-runner)
+// only read snapshots and the IPC bridge structured-clones results across to
+// the renderer, so no caller relies on getRun handing back a fresh deep copy.
+const runCache = new Map<string, RunState>();
+
 interface RuntimeReroute {
   [key: string]: unknown;
   from: WorkerTask["runtimePreference"];
@@ -119,8 +133,6 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
       status: "idle",
       updatedAt: now,
     },
-    planMode: false,
-    pendingMutations: [],
   };
   run.artifactDir = runDir(run.id);
 
@@ -142,9 +154,18 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
 }
 
 export async function getRun(runId: string): Promise<RunState | null> {
+  // Cache HIT: the in-memory copy is authoritative (this module is the sole
+  // writer of run.json), so skip the disk read + JSON.parse entirely. The
+  // cached object is already normalized and stays normalized across saveRun.
+  const cached = runCache.get(runId);
+  if (cached) return cached;
+
+  // Cache MISS: read + parse + normalize from disk, then populate the cache.
   try {
     const raw = await fs.readFile(runPath(runId), "utf8");
-    return normalizeRun(JSON.parse(raw) as RunState);
+    const run = normalizeRun(JSON.parse(raw) as RunState);
+    runCache.set(run.id, run);
+    return run;
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
@@ -281,15 +302,20 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   }
 
   run = await requireRun(run.id);
-  // Plan-mode short-circuit: if the manager queued worker dispatches into
-  // pendingMutations (instead of creating worker tasks), the autopilot has
-  // nothing to launch yet — but we DON'T want to fall into the
-  // "no ready task / ask user" branch below, because the run is intentionally
-  // waiting on the user's review. Idle until applyPendingMutations runs.
-  if (run.planMode && (run.pendingMutations?.length ?? 0) > 0) {
-    return run;
+  let tasks = pickAutopilotTasks(run);
+  // When a follow-up message causes the manager to append a new step (e.g. user
+  // says "make it scientific calculator instead"), the new step lands with
+  // plannedAgents but no materialized worker tasks. Mirror runAutopilotManagerReview's
+  // line ~595 fallback: run step_planning to turn plannedAgents into worker tasks
+  // before deciding there's nothing to do. Without this, startAutopilot falsely
+  // concludes "no ready task" and asks the user a clarifying question Spark
+  // already has the answer to.
+  if (tasks.length === 0 && needsStepPlanning(run)) {
+    const fastPathPlan = await tryTrivialFastPathStepPlanning(run);
+    run = fastPathPlan ?? ((await askOpenRouterManager(run, input.cwd, "step_planning")) ?? run);
+    if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return run;
+    tasks = pickAutopilotTasks(run);
   }
-  const tasks = pickAutopilotTasks(run);
   if (tasks.length === 0) {
     return askHumanQuestion(run.id, "I could not find a ready task to run. Please clarify the next goal.");
   }
@@ -317,6 +343,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
 
   run = await requireRun(run.id);
   const scheduledAttemptIds: string[] = [];
+  const parallelGroupId = launchQueue.length > 1 ? makeId("pgrp") : undefined;
   for (const item of launchQueue) {
     if (activeAutopilotCycles.has(autopilotCycleKey(run.id, item.attemptId))) continue;
     const latestTask = run.workerTasks.find((task) => task.id === item.task.id) ?? item.task;
@@ -330,6 +357,11 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       type: "autopilot.cycle_scheduled",
       message: "Autopilot worker cycle scheduled",
       payload: {
+        parallelGroupId,
+        parallelGroupSize: launchQueue.length,
+        canRunParallel: latestTask.canRunParallel,
+        allowedPaths: latestTask.allowedPaths,
+        conflictsWith: latestTask.conflictsWith,
         workerTasks: run.workerTasks.length,
         workerAttempts: run.workerAttempts.length,
       },
@@ -1859,7 +1891,7 @@ async function applySparkManagerDecision(
   const MAX_TASKS_PER_STEP = 9;
   const decisionsByStep = new Map<string, number>();
   for (const task of decision.tasks) {
-    const sid = resolveTaskStepId(latest, task.stepIndex, stepIds);
+    const sid = resolveTaskStepId(latest, task.stepIndex, stepIds, task.taskClass);
     if (!sid) continue;
     decisionsByStep.set(sid, (decisionsByStep.get(sid) ?? 0) + 1);
   }
@@ -1910,79 +1942,26 @@ async function applySparkManagerDecision(
     });
   }
 
-  // Plan-mode branch: when the user has flipped the run into plan mode, the
-  // manager's worker dispatches are mutating actions we want the user to
-  // review BEFORE Spark touches the workspace. Queue each task into
-  // pendingMutations and skip createWorkerTask. The autopilot loop will see
-  // no new tasks were created and naturally idle until the user applies via
-  // the PlanDiffReview overlay (which calls applyPendingMutations to flush
-  // them through createWorkerTask + scheduleAutopilotCycles).
-  const planModeOn = latest.planMode === true;
-  const queuedMutations: PendingMutation[] = [];
-  if (planModeOn && decision.tasks.length > 0) {
-    const proposedAt = new Date().toISOString();
-    for (const task of decision.tasks) {
-      const stepId = resolveTaskStepId(latest, task.stepIndex, stepIds);
-      if (skippedStepIds.has(stepId ?? "")) continue;
-      queuedMutations.push({
-        id: makeId("pmut"),
-        source: "manager_decision",
-        proposedAt,
-        description: task.title,
-        workerTaskInput: {
-          stepId,
-          title: task.title,
-          description: task.description,
-          runtimePreference: task.runtimePreference,
-          modelHint: task.modelHint,
-          effortHint: task.effortHint,
-          allowedPaths: task.allowedPaths,
-          forbiddenPaths: task.forbiddenPaths,
-          expectedOutputs: task.expectedOutputs,
-          verificationCommands: task.verificationCommands,
-          canRunParallel: task.canRunParallel,
-          conflictsWith: task.conflictsWith,
-          taskClass: task.taskClass,
-        },
-      });
-    }
-    if (queuedMutations.length > 0) {
-      latest = await commitRunChange(latest, {
-        type: "spark_manager.pending_mutations_added",
-        message: `Plan mode queued ${queuedMutations.length} worker task(s) for review`,
-        payload: {
-          count: queuedMutations.length,
-          ids: queuedMutations.map((m) => m.id),
-          titles: queuedMutations.map((m) => m.description),
-        },
-        mutate: (draft, timestamp) => {
-          draft.pendingMutations = [...(draft.pendingMutations ?? []), ...queuedMutations];
-          draft.updatedAt = timestamp;
-        },
-      });
-    }
-  } else {
-    for (const task of decision.tasks) {
-      const stepId = resolveTaskStepId(latest, task.stepIndex, stepIds);
-      if (skippedStepIds.has(stepId ?? "")) continue;
-      latest = await createWorkerTask({
-        runId: latest.id,
-        stepId,
-        title: task.title,
-        description: task.description,
-        runtimePreference: task.runtimePreference,
-        modelHint: task.modelHint,
-        effortHint: task.effortHint,
-        allowedPaths: task.allowedPaths,
-        forbiddenPaths: task.forbiddenPaths,
-        expectedOutputs: task.expectedOutputs,
-        verificationCommands: task.verificationCommands,
-        canRunParallel: task.canRunParallel,
-        conflictsWith: task.conflictsWith,
-        taskClass: task.taskClass,
-        createdBy: "spark",
-      });
-    }
+  for (const task of decision.tasks) {
+    const stepId = resolveTaskStepId(latest, task.stepIndex, stepIds, task.taskClass);
+    if (skippedStepIds.has(stepId ?? "")) continue;
+    latest = await createWorkerTask({
+      runId: latest.id,
+      stepId,
+      title: task.title,
+      description: task.description,
+      runtimePreference: task.runtimePreference,
+      modelHint: task.modelHint,
+      effortHint: task.effortHint,
+      allowedPaths: task.allowedPaths,
+      forbiddenPaths: task.forbiddenPaths,
+      expectedOutputs: task.expectedOutputs,
+      verificationCommands: task.verificationCommands,
+      canRunParallel: task.canRunParallel,
+      conflictsWith: task.conflictsWith,
+      taskClass: task.taskClass,
+      createdBy: "spark",
+    });
   }
 
   latest = await requireRun(latest.id);
@@ -1995,9 +1974,7 @@ async function applySparkManagerDecision(
       summary: decision.summary,
       status: decision.status,
       stepsCreated: steps.length,
-      tasksCreated: planModeOn ? 0 : decision.tasks.length,
-      tasksQueued: planModeOn ? queuedMutations.length : 0,
-      planMode: planModeOn,
+      tasksCreated: decision.tasks.length,
       runtimes: decision.tasks.map((task) => task.runtimePreference),
     },
   });
@@ -2034,6 +2011,44 @@ export async function pauseRun(input: PauseRunInput): Promise<RunState> {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
         status: "paused",
         lastAction: "paused_by_user",
+        stopReason: reason,
+        pausedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+export async function pauseRunAfterCurrentWorkers(input: PauseRunInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const reason = input.reason?.trim() || "Stop after current workers finish";
+  const recordPauseMessage = shouldRecordPauseReasonAsUserNote(reason);
+  return commitRunChange(run, {
+    type: "run.pause_after_workers",
+    message: reason,
+    payload: {
+      reason,
+      activeWorkerAttempts: activeWorkersForRun(run.id).map((worker) => worker.attemptId),
+      controlSignal: "none",
+      messageRecorded: recordPauseMessage,
+    },
+    mutate: (draft, timestamp) => {
+      if (recordPauseMessage) {
+        draft.humanMessages.push({
+          id: makeId("msg"),
+          runId: draft.id,
+          author: "user",
+          kind: "note",
+          message: reason,
+          createdAt: timestamp,
+        });
+      }
+      draft.status = "paused";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "paused",
+        lastAction: "pause_after_current_workers",
         stopReason: reason,
         pausedAt: timestamp,
         updatedAt: timestamp,
@@ -2472,9 +2487,23 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
       draft.workerTasks.push(nextTask);
       if (nextTask.stepId) {
         const step = draft.steps.find((item) => item.id === nextTask.stepId);
-        if (step && !step.workerTaskIds.includes(nextTask.id)) {
-          step.workerTaskIds.push(nextTask.id);
-          step.updatedAt = timestamp;
+        if (step) {
+          if (!step.workerTaskIds.includes(nextTask.id)) {
+            step.workerTaskIds.push(nextTask.id);
+            step.updatedAt = timestamp;
+          }
+          // A new queueable task on a terminal step un-completes it: most
+          // commonly a verifier follow-up landing on a step the impl's accept
+          // already promoted to "complete". The step isn't actually done while
+          // it has fresh work pending — surface that in the graph.
+          if (
+            ["complete", "failed", "skipped"].includes(step.status) &&
+            ["created", "queued", "retry_queued"].includes(nextTask.status)
+          ) {
+            step.status = "reviewing";
+            step.updatedAt = timestamp;
+            if (!draft.currentStepId) draft.currentStepId = step.id;
+          }
         }
       }
       draft.updatedAt = timestamp;
@@ -2780,6 +2809,7 @@ export async function deleteRun(runId: string): Promise<void> {
   const timestamp = new Date().toISOString();
   for (const worker of activeWorkersForRun(run.id)) {
     worker.kill();
+    pty.killImmediate(worker.attemptId);
     activeWorkerProcesses.delete(worker.attemptId);
   }
   for (const key of [...activeAutopilotCycles.keys()]) {
@@ -2799,165 +2829,149 @@ export async function deleteRun(runId: string): Promise<void> {
     },
   });
 
+  // shell.trashItem on Windows can prompt the user when the recycle bin is
+  // full, when a file is locked, or when sync providers (OneDrive) intercept
+  // the delete. We bypass it entirely and remove the directory directly.
+  // Workers were just killed; give the OS a beat to release ConPTY handles
+  // before the rm so EBUSY/EPERM doesn't bounce us.
+  await rmRunDirHard(runDir(run.id));
+
+  // Evict from the in-memory cache so a later getRun for this id falls
+  // through to disk (and correctly returns null now that the file is gone).
+  runCache.delete(run.id);
+}
+
+// Force-pause: hard-kill every active worker for the run, stop all autopilot
+// cycles, transition active attempts/tasks to cancelled, set status=paused.
+// This is the "pause everything NOW" button — the graceful pauseRun path
+// only sends ESC and waits for workers to wind down on their own, which on
+// Windows leaves ConPTY descendants alive long enough that a follow-up
+// deleteRun trips the OS file-in-use prompt. Use this before deleting.
+export async function forcePauseRun(runId: string): Promise<RunState> {
+  const run = await requireRun(runId);
+  const reason = "Force-paused by user";
+  const activeWorkers = activeWorkersForRun(run.id);
+
+  // 1. Kill every PTY immediately. No GRACE_MS, no taskkill race.
+  for (const worker of activeWorkers) {
+    try {
+      worker.kill();
+    } catch {
+      /* worker.kill is best-effort; continue with hard pty kill */
+    }
+    try {
+      pty.killImmediate(worker.attemptId);
+    } catch {
+      /* session may have already exited */
+    }
+    activeWorkerProcesses.delete(worker.attemptId);
+  }
+
+  // 2. Drop autopilot cycles so a queued review/plan doesn't relaunch.
+  for (const key of [...activeAutopilotCycles.keys()]) {
+    if (key.startsWith(`${run.id}:`)) activeAutopilotCycles.delete(key);
+  }
+  activeAutopilotPlans.delete(run.id);
+  activeAutopilotReviews.delete(run.id);
+
+  // 3. Commit the paused status and transition in-flight attempts/tasks to
+  //    cancelled (so the next resume doesn't think they're still alive).
+  const cancelledAttemptIds = new Set(activeWorkers.map((w) => w.attemptId));
+  const cancelledTaskIds = new Set(
+    activeWorkers.map((w) => w.workerTaskId).filter((id): id is string => Boolean(id)),
+  );
+  return commitRunChange(run, {
+    type: "run.force_paused",
+    message: reason,
+    payload: {
+      reason,
+      cancelledAttemptIds: [...cancelledAttemptIds],
+      cancelledTaskIds: [...cancelledTaskIds],
+    },
+    mutate: (draft, timestamp) => {
+      draft.status = "paused";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "paused",
+        lastAction: "force_paused",
+        stopReason: reason,
+        pausedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      for (const attempt of draft.workerAttempts) {
+        if (!cancelledAttemptIds.has(attempt.id)) continue;
+        if (
+          attempt.status === "preparing" ||
+          attempt.status === "prompt_ready" ||
+          attempt.status === "launching" ||
+          attempt.status === "running" ||
+          attempt.status === "finishing"
+        ) {
+          attempt.status = "cancelled";
+          attempt.finishedAt = attempt.finishedAt ?? timestamp;
+        }
+      }
+      for (const task of draft.workerTasks) {
+        if (!cancelledTaskIds.has(task.id)) continue;
+        if (
+          task.status === "created" ||
+          task.status === "queued" ||
+          task.status === "claimed" ||
+          task.status === "running" ||
+          task.status === "needs_review" ||
+          task.status === "retry_queued"
+        ) {
+          task.status = "cancelled";
+          task.updatedAt = timestamp;
+        }
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Recursively delete the run directory with retries. Windows will reject
+// the rm with EBUSY/EPERM if a process still has a handle open, or EACCES
+// if a file is read-only. We retry a handful of times with a short sleep
+// (giving ConPTY descendants time to exit) and chmod read-onlys in between.
+async function rmRunDirHard(dir: string): Promise<void> {
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  const attempts = [0, 100, 400, 1200];
+  let lastError: unknown = null;
+  for (const wait of attempts) {
+    if (wait > 0) await sleep(wait);
+    try {
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 4, retryDelay: 150 });
+      return;
+    } catch (err) {
+      lastError = err;
+      await chmodReadable(dir).catch(() => undefined);
+    }
+  }
+  // Last-ditch: log but don't throw; the user ran "delete" knowing the
+  // run was misbehaving, and we don't want to surface a half-success that
+  // looks worse than just leaving the directory in place.
+  console.error("[run-store] rmRunDirHard failed", { dir, lastError });
+}
+
+async function chmodReadable(dir: string): Promise<void> {
+  let entries: import("node:fs").Dirent[];
   try {
-    await shell.trashItem(runDir(run.id));
+    entries = await fs.readdir(dir, { withFileTypes: true });
   } catch {
-    await fs.rm(runDir(run.id), { recursive: true, force: true });
+    return;
   }
-}
-
-// ── AI plan mode ────────────────────────────────────────────────────────────
-// Plan mode is a per-run flag that intercepts mutating manager decisions
-// (worker dispatches that would touch the workspace) and queues them as
-// pendingMutations for the user to review in the PlanDiffReview overlay.
-//
-// setPlanMode flips the flag and emits a system message so the chat shows
-// the toggle. applyPendingMutations replays a queued worker_task_input
-// through createWorkerTask + scheduleAutopilotCycles (the same path the
-// autopilot uses post-decision); discardPendingMutations drops them
-// entirely. Both leave the manager prompts untouched — the manager doesn't
-// need to know about plan mode; the gating happens after its decision lands.
-
-export async function setPlanMode(input: SetPlanModeInput): Promise<RunState> {
-  const run = await requireRun(input.runId);
-  const enabled = Boolean(input.enabled);
-  if ((run.planMode ?? false) === enabled) return run;
-  return commitRunChange(run, {
-    type: enabled ? "run.plan_mode_enabled" : "run.plan_mode_disabled",
-    message: enabled
-      ? "Plan mode enabled — Spark will queue mutating actions for review"
-      : "Plan mode disabled — Spark will execute mutating actions automatically",
-    payload: { enabled, pending: run.pendingMutations?.length ?? 0 },
-    mutate: (draft, timestamp) => {
-      draft.planMode = enabled;
-      draft.humanMessages.push({
-        id: makeId("msg"),
-        runId: draft.id,
-        author: "system",
-        kind: "decision",
-        message: enabled
-          ? "Plan mode on. Spark will queue worker dispatches for your review before executing."
-          : "Plan mode off. Spark will resume executing worker dispatches automatically.",
-        createdAt: timestamp,
-      });
-      draft.updatedAt = timestamp;
-    },
-  });
-}
-
-export async function applyPendingMutations(
-  input: ApplyPendingMutationsInput,
-): Promise<RunState> {
-  let run = await requireRun(input.runId);
-  const queue = run.pendingMutations ?? [];
-  if (queue.length === 0) return run;
-
-  const idFilter = input.ids && input.ids.length > 0 ? new Set(input.ids) : null;
-  const toApply = idFilter ? queue.filter((m) => idFilter.has(m.id)) : queue.slice();
-  if (toApply.length === 0) return run;
-  const applyIds = new Set(toApply.map((m) => m.id));
-
-  // Pop from the queue first so a mid-loop failure doesn't leave a half-
-  // applied stripe of "still queued" entries. createWorkerTask is itself
-  // idempotent-by-id, so re-running apply on the same set is safe.
-  run = await commitRunChange(run, {
-    type: "run.pending_mutations_applying",
-    message: `Applying ${toApply.length} queued mutation(s)`,
-    payload: {
-      ids: toApply.map((m) => m.id),
-      titles: toApply.map((m) => m.description),
-    },
-    mutate: (draft, timestamp) => {
-      draft.pendingMutations = (draft.pendingMutations ?? []).filter(
-        (m) => !applyIds.has(m.id),
-      );
-      draft.updatedAt = timestamp;
-    },
-  });
-
-  for (const mutation of toApply) {
-    const w = mutation.workerTaskInput;
-    run = await createWorkerTask({
-      runId: run.id,
-      stepId: w.stepId,
-      title: w.title,
-      description: w.description,
-      runtimePreference: w.runtimePreference,
-      modelHint: w.modelHint,
-      effortHint: w.effortHint,
-      allowedPaths: w.allowedPaths,
-      forbiddenPaths: w.forbiddenPaths,
-      expectedOutputs: w.expectedOutputs,
-      verificationCommands: w.verificationCommands,
-      canRunParallel: w.canRunParallel,
-      conflictsWith: w.conflictsWith,
-      taskClass: w.taskClass,
-      createdBy: "spark",
-    });
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    try {
+      await fs.chmod(full, 0o666);
+    } catch {
+      /* not all FS support chmod; ignore */
+    }
+    if (entry.isDirectory()) {
+      await chmodReadable(full);
+    }
   }
-
-  await appendEvent({
-    workspaceId: run.workspaceId,
-    runId: run.id,
-    type: "run.pending_mutations_applied",
-    message: `Applied ${toApply.length} queued mutation(s)`,
-    payload: {
-      ids: toApply.map((m) => m.id),
-      titles: toApply.map((m) => m.description),
-      remaining: run.pendingMutations?.length ?? 0,
-    },
-  });
-
-  // Hand the new tasks to the autopilot so they actually launch. We re-run
-  // startAutopilot — it picks up unrun work via pickAutopilotTasks and
-  // schedules attempts the same way the post-decision path would.
-  if (run.status !== "paused" && run.status !== "cancelled") {
-    const autopilotInput = autopilotInputFromRun(run);
-    void startAutopilot(autopilotInput).catch(() => {
-      /* startAutopilot logs its own failures via appendEvent */
-    });
-  }
-
-  return run;
-}
-
-export async function discardPendingMutations(
-  input: DiscardPendingMutationsInput,
-): Promise<RunState> {
-  const run = await requireRun(input.runId);
-  const queue = run.pendingMutations ?? [];
-  if (queue.length === 0) return run;
-
-  const idFilter = input.ids && input.ids.length > 0 ? new Set(input.ids) : null;
-  const toDiscard = idFilter ? queue.filter((m) => idFilter.has(m.id)) : queue.slice();
-  if (toDiscard.length === 0) return run;
-  const discardIds = new Set(toDiscard.map((m) => m.id));
-
-  return commitRunChange(run, {
-    type: "run.pending_mutations_discarded",
-    message: `Discarded ${toDiscard.length} queued mutation(s)`,
-    payload: {
-      ids: toDiscard.map((m) => m.id),
-      titles: toDiscard.map((m) => m.description),
-    },
-    mutate: (draft, timestamp) => {
-      draft.pendingMutations = (draft.pendingMutations ?? []).filter(
-        (m) => !discardIds.has(m.id),
-      );
-      draft.humanMessages.push({
-        id: makeId("msg"),
-        runId: draft.id,
-        author: "system",
-        kind: "decision",
-        message:
-          toDiscard.length === 1
-            ? `Discarded queued mutation: ${toDiscard[0].description}`
-            : `Discarded ${toDiscard.length} queued mutations.`,
-        createdAt: timestamp,
-      });
-      draft.updatedAt = timestamp;
-    },
-  });
 }
 
 async function reviewWorkerReportArtifact({
@@ -3001,6 +3015,20 @@ async function reviewWorkerReportArtifact({
       finalReportJson: paths.finalReportJson,
     },
   });
+
+  // CLI launch failure auto-fallback: when the runtime binary couldn't even
+  // start (codex demanded an interactive update, claude not logged in, model id
+  // invalid, etc.) the failure is environmental, not behavioral. Don't waste an
+  // LLM manager round-trip — Spark already knows the answer is "try the same
+  // task with the other runtime." Queue that fallback deterministically here,
+  // before the manager review consumes the failed report.
+  const launchFallback = await maybeQueueCliLaunchFallback({
+    run,
+    task,
+    attempt,
+    report,
+  });
+  if (launchFallback) return launchFallback;
 
   const decision = decideWorkerReport(report);
   const latest = await requireRun(run.id);
@@ -3055,6 +3083,101 @@ async function reviewWorkerReportArtifact({
   return latest;
 }
 
+// Detects the synthetic report written by writeAutoFailureReport when the
+// agent CLI failed to launch, and if we haven't already exhausted runtimes,
+// queues a fresh task on the same step with the opposite runtime. Returns the
+// updated run when a fallback was queued (so the caller can short-circuit the
+// normal review path), or null when no fallback applies.
+async function maybeQueueCliLaunchFallback({
+  run,
+  task,
+  attempt,
+  report,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attempt: WorkerAttempt;
+  report: WorkerReport;
+}): Promise<RunState | null> {
+  if (report.status !== "failed") return null;
+  const isLaunchFailure = report.risks.some((risk) => /CLI failed to launch/i.test(risk));
+  if (!isLaunchFailure) return null;
+  const opposite: WorkerRuntime | null =
+    task.runtimePreference === "claude"
+      ? "codex"
+      : task.runtimePreference === "codex"
+        ? "claude"
+        : null;
+  if (!opposite) return null;
+  // Only fall back once per (step, title) lineage. If a sibling with the
+  // opposite runtime already exists (failed, cancelled, or pending), both
+  // runtimes have been tried — let the manager handle it.
+  const triedRuntimes = new Set(
+    run.workerTasks
+      .filter((t) => t.stepId === task.stepId && t.title === task.title)
+      .map((t) => t.runtimePreference),
+  );
+  if (triedRuntimes.has(opposite)) return null;
+
+  const fallbackId = makeId("task");
+  return commitRunChange(run, {
+    type: "autopilot.cli_launch_fallback",
+    message: `Auto-falling back from ${task.runtimePreference} to ${opposite} after CLI launch failure`,
+    stepId: task.stepId,
+    workerTaskId: fallbackId,
+    payload: {
+      previousTaskId: task.id,
+      previousAttemptId: attempt.id,
+      previousRuntime: task.runtimePreference,
+      nextRuntime: opposite,
+    },
+    mutate: (draft, timestamp) => {
+      // Cancel the failed task so pickAutopilotTasks won't re-launch it with
+      // the same runtime that just failed environmentally.
+      const failedTask = draft.workerTasks.find((t) => t.id === task.id);
+      if (failedTask) {
+        failedTask.status = "cancelled";
+        failedTask.updatedAt = timestamp;
+      }
+      const fallbackTask: WorkerTask = {
+        id: fallbackId,
+        runId: draft.id,
+        stepId: task.stepId,
+        title: task.title,
+        description: task.description,
+        runtimePreference: opposite,
+        modelHint: task.modelHint,
+        effortHint: task.effortHint,
+        status: "queued",
+        allowedPaths: task.allowedPaths,
+        forbiddenPaths: task.forbiddenPaths,
+        expectedOutputs: task.expectedOutputs,
+        verificationCommands: task.verificationCommands,
+        canRunParallel: task.canRunParallel,
+        conflictsWith: task.conflictsWith,
+        taskClass: task.taskClass,
+        createdBy: "system",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.workerTasks.push(fallbackTask);
+      if (fallbackTask.stepId) {
+        const step = draft.steps.find((s) => s.id === fallbackTask.stepId);
+        if (step) {
+          if (!step.workerTaskIds.includes(fallbackTask.id)) {
+            step.workerTaskIds.push(fallbackTask.id);
+          }
+          if (["complete", "failed", "skipped"].includes(step.status)) {
+            step.status = "queued";
+          }
+          step.updatedAt = timestamp;
+        }
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 async function collectWorkerReportContext(run: RunState): Promise<SparkManagerWorkerReportContext[]> {
   const contexts: SparkManagerWorkerReportContext[] = [];
   for (const attempt of run.workerAttempts.slice(-8)) {
@@ -3105,10 +3228,17 @@ async function saveRun(run: RunState): Promise<void> {
 }
 
 async function writeRunFile(run: RunState): Promise<void> {
+  // Keep the in-memory cache current. saveRun is the only caller and it
+  // always routes here, so setting the cache here covers every persist path
+  // (createRun, commitRunChange, and every ad-hoc saveRun in this module).
+  runCache.set(run.id, run);
   await fs.mkdir(runDir(run.id), { recursive: true });
   const path = runPath(run.id);
   const tmp = `${path}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(run, null, 2), "utf8");
+  // run.json is machine-read, never shown to a human, so persist it compact —
+  // no pretty-print whitespace. Human-facing artifacts (spark-call request/
+  // response files, final reports) stay pretty-printed elsewhere.
+  await fs.writeFile(tmp, JSON.stringify(run), "utf8");
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
@@ -3151,10 +3281,10 @@ function normalizeRun(run: RunState): RunState {
     status: run.status === "running" ? "running" : "idle",
     updatedAt: run.updatedAt,
   };
-  // Plan-mode fields are additive; older run.json files predate them and
-  // would otherwise read as undefined and break consumers that expect arrays.
-  run.planMode ??= false;
-  run.pendingMutations ??= [];
+  // Older run.json files may carry legacy plan-mode fields; strip them so
+  // consumers don't trip on stale state from the removed feature.
+  delete (run as unknown as Record<string, unknown>).planMode;
+  delete (run as unknown as Record<string, unknown>).pendingMutations;
   return run;
 }
 
@@ -3207,6 +3337,64 @@ function countWorkerAttempts(run: RunState, taskId: string): number {
   return run.workerAttempts.filter((attempt) => attempt.workerTaskId === taskId).length;
 }
 
+function normalizeTaskPath(path: string): string {
+  return path
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/\/\*\*?$/, "")
+    .replace(/\/+$/, "")
+    .toLowerCase();
+}
+
+function isBroadPathScope(path: string): boolean {
+  const normalized = normalizeTaskPath(path);
+  return (
+    normalized === "" ||
+    normalized === "." ||
+    normalized === "./" ||
+    normalized === "*" ||
+    normalized === "**" ||
+    normalized === "/"
+  );
+}
+
+function taskWritesWorkspace(task: WorkerTask): boolean {
+  return task.taskClass !== "verifier" && task.runtimePreference !== "manual";
+}
+
+function concreteAllowedPaths(task: WorkerTask): string[] {
+  return task.allowedPaths
+    .map(normalizeTaskPath)
+    .filter((path) => path.length > 0 && !isBroadPathScope(path));
+}
+
+function hasConcreteParallelScope(task: WorkerTask): boolean {
+  if (!taskWritesWorkspace(task)) return true;
+  return concreteAllowedPaths(task).length > 0;
+}
+
+function pathScopesOverlap(left: string, right: string): boolean {
+  if (left === right) return true;
+  return left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+}
+
+function taskPathScopesConflict(left: WorkerTask, right: WorkerTask): boolean {
+  if (!taskWritesWorkspace(left) || !taskWritesWorkspace(right)) return false;
+  const leftPaths = concreteAllowedPaths(left);
+  const rightPaths = concreteAllowedPaths(right);
+  if (leftPaths.length === 0 || rightPaths.length === 0) return true;
+  return leftPaths.some((leftPath) =>
+    rightPaths.some((rightPath) => pathScopesOverlap(leftPath, rightPath)),
+  );
+}
+
+function tasksConflictForParallelLaunch(left: WorkerTask, right: WorkerTask): boolean {
+  if (left.conflictsWith.includes(right.id) || right.conflictsWith.includes(left.id)) {
+    return true;
+  }
+  return taskPathScopesConflict(left, right);
+}
+
 function pickAutopilotTasks(run: RunState): WorkerTask[] {
   const activeStep = pickAutopilotStep(run);
   const terminalStepIds = new Set(
@@ -3231,11 +3419,13 @@ function pickAutopilotTasks(run: RunState): WorkerTask[] {
 
   const first = candidates[0];
   if (!first.canRunParallel) return [first];
+  if (!hasConcreteParallelScope(first)) return [first];
 
   const selected: WorkerTask[] = [];
   for (const task of candidates) {
     if (!task.canRunParallel) continue;
-    if (selected.some((other) => other.conflictsWith.includes(task.id) || task.conflictsWith.includes(other.id))) {
+    if (!hasConcreteParallelScope(task)) continue;
+    if (selected.some((other) => tasksConflictForParallelLaunch(other, task))) {
       continue;
     }
     selected.push(task);
@@ -3269,7 +3459,12 @@ function hasPlannedWorkAfterBrake(run: RunState): boolean {
   });
 }
 
-function resolveTaskStepId(run: RunState, requestedStepIndex: number | undefined, createdStepIds: string[]): string | undefined {
+function resolveTaskStepId(
+  run: RunState,
+  requestedStepIndex: number | undefined,
+  createdStepIds: string[],
+  taskClass?: PlannedStepAgentTaskClass,
+): string | undefined {
   if (run.steps.length === 0) return undefined;
 
   // Honor the manager's requested stepIndex when both interpretations
@@ -3282,6 +3477,16 @@ function resolveTaskStepId(run: RunState, requestedStepIndex: number | undefined
   if (typeof requestedStepIndex === "number" && Number.isFinite(requestedStepIndex)) {
     const oneBasedStep = run.steps.find((step) => step.index === requestedStepIndex);
     const zeroBasedStep = run.steps[requestedStepIndex];
+    // Verifier tasks are bound to the step they're verifying. The impl's
+    // accept will have promoted that step to "complete" by the time the
+    // manager queues the verifier follow-up — honor the requested stepIndex
+    // anyway so the verifier shows up under the right step in the graph and
+    // doesn't spill onto the next checkpoint. createWorkerTask will demote
+    // the step back to "reviewing" once the verifier task lands.
+    if (taskClass === "verifier") {
+      if (oneBasedStep) return oneBasedStep.id;
+      if (zeroBasedStep) return zeroBasedStep.id;
+    }
     if (oneBasedStep && !isTerminal(oneBasedStep)) return oneBasedStep.id;
     if (zeroBasedStep && !isTerminal(zeroBasedStep)) return zeroBasedStep.id;
     // Both interpretations land on terminal steps. Fall through to the
@@ -4422,8 +4627,4 @@ function renderVerifierWorkerPrompt({
 
 function runPath(runId: string): string {
   return join(runDir(runId), RUN_FILE);
-}
-
-function makeId(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }

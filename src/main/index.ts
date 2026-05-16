@@ -5,6 +5,8 @@ import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { ensureSparkHomeSync } from "./spark-home";
 import { flush } from "./storage";
+import { flushPreferences } from "./preferences-store";
+import { flushProjectStore } from "./project-store";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
 import {
   emitFinalSummary,
@@ -14,6 +16,16 @@ import {
 } from "./eval/headless-runner";
 
 app.setName("Spark App");
+
+// Surface any uncaught error in main so renderer-side "everything goes black"
+// crashes show up in the dev console instead of dying silently.
+process.on("uncaughtException", (err) => {
+  console.error("[main] uncaughtException", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[main] unhandledRejection", reason);
+});
+
 if (process.env.SPARK_USER_DATA_DIR) {
   app.setPath("userData", process.env.SPARK_USER_DATA_DIR);
 }
@@ -95,6 +107,19 @@ function createWindow(): void {
     fsWatcher.disposeForWebContents(mainWindow!.webContents);
   });
 
+  // Surface renderer process crashes (the "everything goes black" symptom).
+  // Without this, Chromium kills the renderer silently and the dev console
+  // appears empty because the page that owned it was killed.
+  mainWindow.webContents.on("render-process-gone", (_e, details) => {
+    console.error("[main] renderer process gone", details);
+  });
+  mainWindow.webContents.on("unresponsive", () => {
+    console.error("[main] renderer unresponsive");
+  });
+  mainWindow.webContents.on("preload-error", (_e, preloadPath, error) => {
+    console.error("[main] preload error", preloadPath, error);
+  });
+
   if (isDev && process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
@@ -152,6 +177,15 @@ app.whenReady().then(async () => {
   });
 });
 
+// Drain every on-disk store before the process goes away. storage.flush()
+// covers spark-state.json / spark-settings.json, but preferences-store and
+// project-store each keep their own independent async write-queue that
+// nothing else flushes — without these awaits a quit can drop the last
+// preference toggle or project-board mutation.
+async function flushAllStores(): Promise<void> {
+  await Promise.all([flush(), flushPreferences(), flushProjectStore()]);
+}
+
 app.on("window-all-closed", async () => {
   // In headless mode the app is already quitting via app.exit() in the
   // headless branch; this guard prevents a stray window-all-closed handler
@@ -159,11 +193,12 @@ app.on("window-all-closed", async () => {
   if (isHeadlessEval) return;
   pty.disposeAll();
   fsWatcher.disposeAll();
-  await flush();
+  await flushAllStores();
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", async () => {
   pty.disposeAll();
   fsWatcher.disposeAll();
+  await flushAllStores();
 });

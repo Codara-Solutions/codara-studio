@@ -1,0 +1,10 @@
+{
+  "variantId": "codex_single",
+  "label": "Pure Codex, one agent",
+  "workerPolicy": {
+    "manager": "none",
+    "workers": [{ "runtime": "codex", "maxParallel": 1 }],
+    "verification": "self"
+  }
+}
+

@@ -71,9 +71,22 @@ export interface SpawnOptions {
   // (headless eval mode — orchestration drives the worker via main-process
   // taps and writes only).
   webContents?: WebContents | null;
+  // Optional per-spawn env overrides layered on top of the inherited
+  // process env and the shell's own env block. Use this to flip per-pane
+  // flags like SPARK_NO_SHELL_INTEGRATION=1 for panes that auto-launch a
+  // TUI (claude / codex worker panes) — spark.ps1 reads that var and
+  // returns early, so its PSReadLine Enter hook can't echo the autorun
+  // command as an OSC 633;E marker that the TUI then reads as input.
+  env?: Record<string, string>;
+  // Optional command to run as the shell's first action. Used by manual
+  // Claude/Codex panes so they don't have to wait for the renderer to type a
+  // command after the prompt appears.
+  startupCommand?: string;
 }
 
-export async function spawn(opts: SpawnOptions): Promise<{ id: string; pid: number }> {
+export async function spawn(
+  opts: SpawnOptions,
+): Promise<{ id: string; pid: number; startupCommandHandled?: boolean }> {
   const pending = pendingKills.get(opts.id);
   if (pending) {
     clearTimeout(pending);
@@ -89,31 +102,85 @@ export async function spawn(opts: SpawnOptions): Promise<{ id: string; pid: numb
     } catch {
       /* may have exited */
     }
-    return { id: opts.id, pid: existing.pty.pid };
+    return { id: opts.id, pid: existing.pty.pid, startupCommandHandled: false };
   }
+
+  const launch = withStartupCommand(opts.shell, opts.startupCommand);
+  const spawnOpts: SpawnOptions = launch.shell === opts.shell ? opts : { ...opts, shell: launch.shell };
 
   // See FAMILIES_WITH_SHARED_PROFILE_WRITES — wait for the previous spawn of
   // this family to finish $PROFILE before starting the next one.
-  const family = opts.shell.family;
-  if (FAMILIES_WITH_SHARED_PROFILE_WRITES.has(family)) {
+  const family = spawnOpts.shell.family;
+  if (FAMILIES_WITH_SHARED_PROFILE_WRITES.has(family) && !launch.skipsProfile) {
     await repairProfileCachesOnce();
   }
-  const releaseLock = FAMILIES_WITH_SHARED_PROFILE_WRITES.has(family)
+  const releaseLock = FAMILIES_WITH_SHARED_PROFILE_WRITES.has(family) && !launch.skipsProfile
     ? await acquireSpawnLock(family)
     : null;
 
   try {
-    return doSpawn(opts, releaseLock);
+    return doSpawn(spawnOpts, releaseLock, launch.handled);
   } catch (err) {
     releaseLock?.();
     throw err;
   }
 }
 
+function withStartupCommand(
+  shell: ShellInfo,
+  command: string | undefined,
+): { shell: ShellInfo; handled: boolean; skipsProfile: boolean } {
+  const startup = command?.trim();
+  if (!startup) return { shell, handled: false, skipsProfile: false };
+
+  if (shell.family === "pwsh" || shell.family === "powershell") {
+    // We deliberately do NOT take over the shell args here. The default
+    // pwsh launch loads spark.ps1 (OSC 633 boundary markers), and our
+    // chip-detection signals (OSC 633;E for launch, OSC 633;A for exit)
+    // rely on that. The renderer's useTerminalSession types the startup
+    // command into the live shell after 1500ms instead — see the autorun
+    // block in src/renderer/src/components/Terminal/useTerminalSession.ts.
+    return { shell, handled: false, skipsProfile: false };
+  }
+
+  if (shell.family === "cmd") {
+    // /K = run then stay open (vs /C = run then exit), same reasoning as
+    // pwsh -NoExit above.
+    return {
+      shell: { ...shell, args: ["/K", startup] },
+      handled: true,
+      skipsProfile: false,
+    };
+  }
+
+  if (shell.family === "bash" || shell.family === "zsh") {
+    // `<cmd>; exec <shell> -i` runs the agent then replaces the spawned
+    // shell with a fresh interactive one so Ctrl+C from the TUI lands at
+    // a prompt instead of exiting the pane.
+    const exe = shell.family === "zsh" ? "zsh" : "bash";
+    return {
+      shell: { ...shell, args: ["-ic", `${startup}; exec ${exe} -i`] },
+      handled: true,
+      skipsProfile: false,
+    };
+  }
+
+  if (shell.family === "sh") {
+    return {
+      shell: { ...shell, args: ["-ic", `${startup}; exec sh -i`] },
+      handled: true,
+      skipsProfile: false,
+    };
+  }
+
+  return { shell, handled: false, skipsProfile: false };
+}
+
 function doSpawn(
   opts: SpawnOptions,
   releaseLock: (() => void) | null,
-): { id: string; pid: number } {
+  startupCommandHandled: boolean,
+): { id: string; pid: number; startupCommandHandled?: boolean } {
   const cols = Math.max(1, opts.cols | 0);
   const rows = Math.max(1, opts.rows | 0);
 
@@ -140,6 +207,14 @@ function doSpawn(
   // Spark pane). Kept after the base env so shell config wins.
   if (opts.shell.env) {
     for (const [k, v] of Object.entries(opts.shell.env)) {
+      if (typeof v === "string") env[k] = v;
+    }
+  }
+  // Per-spawn env overrides win over both inherited and shell-config env —
+  // they're the caller's explicit knob (e.g. SPARK_NO_SHELL_INTEGRATION=1
+  // on worker panes).
+  if (opts.env) {
+    for (const [k, v] of Object.entries(opts.env)) {
       if (typeof v === "string") env[k] = v;
     }
   }
@@ -223,7 +298,7 @@ function doSpawn(
     waitForPromptReady(opts.id, SPAWN_LOCK_TIMEOUT_MS).finally(releaseLock);
   }
 
-  return { id: opts.id, pid: pty.pid };
+  return { id: opts.id, pid: pty.pid, startupCommandHandled };
 }
 
 // Recover from the corruption mode described in FAMILIES_WITH_SHARED_PROFILE_WRITES:
@@ -455,6 +530,13 @@ export function dispose(id: string): void {
     killNow(id);
   }, GRACE_MS);
   pendingKills.set(id, timer);
+}
+
+// Hard, immediate kill — no GRACE_MS wait. Used by force-pause / delete-run
+// flows where lingering ConPTY descendants would hold file handles open
+// and cause Windows to refuse the directory delete with an "in use" prompt.
+export function killImmediate(id: string): void {
+  killNow(id);
 }
 
 export function disposeForWebContents(wc: WebContents): void {

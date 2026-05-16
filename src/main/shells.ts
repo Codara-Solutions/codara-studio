@@ -40,9 +40,14 @@ async function detectWindows(): Promise<ShellInfo[]> {
   // prompt. We disable PSReadLine predictions (matches a stock terminal) and
   // dot-source spark.ps1, which installs OSC 133 / 633 boundary markers so the
   // BlockStrip can group output into per-command blocks.
+  //
+  // PredictionSource didn't exist before PSReadLine 2.1; probing the cmdlet's
+  // parameter set keeps Windows PowerShell 5.1 (which still ships PSReadLine
+  // 2.0 on stock installs) from emitting a parameter-binding error every time
+  // a worker shell starts.
   const sparkPs1 = shellIntegrationPath("spark.ps1");
   const pwshStartup = [
-    "Set-PSReadLineOption -PredictionSource None -ErrorAction SilentlyContinue",
+    "$c = Get-Command Set-PSReadLineOption -ErrorAction SilentlyContinue; if ($c -and $c.Parameters.ContainsKey('PredictionSource')) { Set-PSReadLineOption -PredictionSource None -ErrorAction SilentlyContinue }",
     `if (Test-Path ${pwshSingleQuote(sparkPs1)}) { . ${pwshSingleQuote(sparkPs1)} }`,
   ].join("; ");
   const pwshArgs = ["-NoLogo", "-NoExit", "-Command", pwshStartup];

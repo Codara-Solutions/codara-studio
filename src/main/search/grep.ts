@@ -1,8 +1,11 @@
 // Streaming project-wide content search backed by a bundled ripgrep binary.
 //
 // We spawn `rg --json` and parse newline-delimited JSON records as they
-// arrive. Each `match` record is converted into a `SearchHit` and forwarded
-// to the caller's `onHit` synchronously. When we hit `maxHits` we kill the
+// arrive. Each `match` record is converted into a `SearchHit` and buffered;
+// the buffer is flushed to the caller's `onHit` as a batch once it reaches
+// `FLUSH_THRESHOLD` hits or a `FLUSH_INTERVAL_MS` timer fires. Batching keeps
+// a 2000-hit search down to a handful of `onHit` calls instead of flooding
+// the IPC channel with one message per hit. When we hit `maxHits` we kill the
 // child process so rg stops walking the workspace — this is what lets the
 // Search panel render incrementally without ever buffering the full result
 // set in memory.
@@ -17,24 +20,46 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import { rgPath as rgPathRaw } from "@vscode/ripgrep";
 import type { SearchHit, SearchOptions, SearchSummary } from "@shared/types";
 
 const DEFAULT_MAX_HITS = 2000;
 const DEFAULT_MAX_FILE_SIZE = 5 * 1024 * 1024;
 
+// Hit batching: flush whichever comes first — a full buffer or the timer.
+// The threshold bounds memory/latency for hit-dense searches; the interval
+// guarantees a steady trickle for sparse ones so the panel still renders
+// incrementally.
+const FLUSH_THRESHOLD = 100;
+const FLUSH_INTERVAL_MS = 24;
+
 /**
- * Resolve the bundled `rg` binary path, accounting for Electron's asar
- * packaging. In dev `rgPath` points at the unpacked module under
- * `node_modules`; in a packaged build it points inside `app.asar` and we
- * have to rewrite to `app.asar.unpacked` (asarUnpack handles the actual
- * extraction).
+ * Resolve the bundled `rg` binary path. We don't use `@vscode/ripgrep`'s
+ * `lib/index.js` because it's an ESM-only module and Electron's main
+ * process is CJS. Its index just calls `require.resolve` on the
+ * platform-specific optionalDependency — we do the same here directly.
+ *
+ * In dev this lands in `node_modules`. In a packaged Electron build the
+ * binary lives inside `app.asar.unpacked` because the renderer cannot exec
+ * a file inside the asar archive — see `asarUnpack` in `package.json`'s
+ * `build` block. The `app.asar/...` ↔ `app.asar.unpacked/...` rewrite below
+ * is what makes that work without per-platform special cases.
  */
 export function resolveRgPath(): string {
-  const candidates: string[] = [];
-  candidates.push(rgPathRaw);
-  if (rgPathRaw.includes(`${"app.asar"}${pathSep()}`)) {
-    candidates.push(rgPathRaw.replace(`${"app.asar"}${pathSep()}`, `app.asar.unpacked${pathSep()}`));
+  const arch = process.env.npm_config_arch || process.arch;
+  const binaryName = process.platform === "win32" ? "rg.exe" : "rg";
+  const platformPkg = `@vscode/ripgrep-${process.platform}-${arch}`;
+  let resolved: string;
+  try {
+    resolved = require.resolve(`${platformPkg}/bin/${binaryName}`);
+  } catch (err) {
+    throw new Error(
+      `Could not find ${platformPkg}. Ensure optionalDependencies are installed for ${process.platform}-${arch}. (${(err as Error).message})`,
+    );
+  }
+  const candidates: string[] = [resolved];
+  const sep = pathSep();
+  if (resolved.includes(`app.asar${sep}`)) {
+    candidates.push(resolved.replace(`app.asar${sep}`, `app.asar.unpacked${sep}`));
   }
   for (const candidate of candidates) {
     try {
@@ -43,7 +68,7 @@ export function resolveRgPath(): string {
       // ignore — fall through to the next candidate
     }
   }
-  return rgPathRaw;
+  return resolved;
 }
 
 function pathSep(): string {
@@ -145,7 +170,10 @@ export interface StreamGrepHandle {
 }
 
 export type StreamGrepDoneHandler = (summary: SearchSummary) => void;
-export type StreamGrepHitHandler = (hit: SearchHit) => void;
+// Hits are delivered in batches rather than one at a time so a single search
+// produces a handful of IPC messages instead of ~2000 — see the buffer/flush
+// logic in `streamGrep`. Callers append the batch to their result list.
+export type StreamGrepHitHandler = (hits: SearchHit[]) => void;
 
 export function streamGrep(
   opts: SearchOptions,
@@ -162,9 +190,33 @@ export function streamGrep(
   let error: string | undefined;
   let done = false;
 
+  // Hits accumulate here and are drained as a single `SearchHit[]` batch
+  // either when the buffer fills or when `flushTimer` fires.
+  let hitBuffer: SearchHit[] = [];
+  let flushTimer: NodeJS.Timeout | null = null;
+
+  const flush = (): void => {
+    if (flushTimer !== null) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+    if (hitBuffer.length === 0) return;
+    const batch = hitBuffer;
+    hitBuffer = [];
+    try {
+      onHit(batch);
+    } catch {
+      // Swallow renderer-side errors so a single bad listener cannot kill
+      // the search stream.
+    }
+  };
+
   const finish = (): void => {
     if (done) return;
     done = true;
+    // Drain any buffered hits before the summary so the panel never sees a
+    // `done` message ahead of its last batch.
+    flush();
     onDone({
       totalHits,
       filesSearched,
@@ -281,14 +333,15 @@ export function streamGrep(
       forwardHit(fallback);
       return;
     }
+    // rg's `start`/`end` are byte offsets into `lines.text`; for ASCII
+    // they're equal to char offsets. For non-ASCII we'd ideally translate,
+    // but the panel only uses pre/match/post for highlighting so a
+    // best-effort byte slice is fine — rg already returned UTF-8 text.
+    // Encode the line once per record rather than once per submatch.
+    const buffer = Buffer.from(lineText, "utf8");
     for (const submatch of submatches) {
       if (cancelled || hitCap) return;
       const matchText = decodeText(submatch.match);
-      // rg's `start`/`end` are byte offsets into `lines.text`; for ASCII
-      // they're equal to char offsets. For non-ASCII we'd ideally translate,
-      // but the panel only uses pre/match/post for highlighting so a
-      // best-effort byte slice is fine — rg already returned UTF-8 text.
-      const buffer = Buffer.from(lineText, "utf8");
       const preBuf = buffer.subarray(0, Math.min(submatch.start, buffer.length));
       const postBuf = buffer.subarray(Math.min(submatch.end, buffer.length));
       const preMatch = preBuf.toString("utf8");
@@ -308,11 +361,13 @@ export function streamGrep(
 
   function forwardHit(hit: SearchHit): void {
     totalHits += 1;
-    try {
-      onHit(hit);
-    } catch {
-      // Swallow renderer-side errors so a single bad listener cannot kill
-      // the search stream.
+    hitBuffer.push(hit);
+    if (hitBuffer.length >= FLUSH_THRESHOLD) {
+      flush();
+    } else if (flushTimer === null) {
+      // Arm a one-shot timer so a sparse stream still drains promptly. The
+      // timer is cleared inside `flush` whenever a batch goes out.
+      flushTimer = setTimeout(flush, FLUSH_INTERVAL_MS);
     }
     if (totalHits >= maxHits) {
       hitCap = true;
@@ -328,6 +383,12 @@ export function streamGrep(
     cancel: () => {
       if (cancelled || done) return;
       cancelled = true;
+      // Stop the pending flush; `finish` (via the child's `close` event)
+      // drains the last batch before the summary.
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
       try {
         child.kill();
       } catch {

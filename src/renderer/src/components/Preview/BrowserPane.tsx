@@ -82,18 +82,60 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   const [error, setError] = useState<string | null>(null);
   const [currentUrl, setCurrentUrl] = useState(url);
 
-  // We create the <webview> imperatively rather than declaring it in JSX
-  // so we can avoid React's "Unknown HTML tag" warnings and get tighter
-  // control over event listener lifetimes.
+  // `domReady` mirrored into a ref so the navigation effect below can gate
+  // on it without taking it as a dependency (which would re-run that effect
+  // every time readiness flips). Listeners read the ref; the state copy
+  // exists only to drive the loading-overlay render.
+  const domReadyRef = useRef(false);
+  // `onUrlChange` is a fresh closure on every parent render. We funnel it
+  // through a ref so the create-once effect doesn't list it as a dependency
+  // (and therefore doesn't tear down + rebuild the webview when the parent
+  // re-renders for unrelated reasons).
+  const onUrlChangeRef = useRef(onUrlChange);
+  useEffect(() => {
+    onUrlChangeRef.current = onUrlChange;
+  }, [onUrlChange]);
+
+  // The latest url prop, readable from the create-once listeners (which are
+  // attached before any navigation and would otherwise capture the initial
+  // url forever).
+  const urlRef = useRef(url);
+  useEffect(() => {
+    urlRef.current = url;
+  }, [url]);
+
+  // ── Create the <webview> (once) + attach listeners. The element itself
+  // is built imperatively rather than via JSX to dodge React's "Unknown
+  // HTML tag" warning, and is created at most once per host — it survives
+  // url-value changes and visibility toggles. Listeners, by contrast, are
+  // attached on each effect run and removed in cleanup so they never leak.
+  //
+  // The only dependency is `hasUrl` (url *presence*, not value): the effect
+  // must NOT re-run on every url change or unrelated parent re-render —
+  // navigation and readiness are handled by the separate effects below.
+  // Reacting to the empty -> non-empty flip lets a pane that mounted with
+  // no url still get its webview created when one finally arrives.
+  const hasUrl = Boolean(url);
   useEffect(() => {
     const host = containerRef.current;
     if (!host) return;
-    if (!url) return; // empty url -> empty state, do not create the element
+    const initialUrl = urlRef.current;
+    if (!initialUrl) return; // empty url -> empty state, do not create the element
 
-    // Reuse the existing element if we already have one for this BrowserPane;
-    // otherwise create a fresh <webview>. This lets us swap URLs through
-    // loadURL() instead of re-creating the embedder, which is much faster.
+    // Reuse the existing element if it's still attached to *this* host. If
+    // React unmounted+remounted us (StrictMode dev cycle, or tab close+
+    // reopen), the old webview is now an orphan node — calling methods on
+    // it throws "WebView must be attached to the DOM" before it has a
+    // chance to fire dom-ready. Detect that and recreate.
     let webview = webviewRef.current;
+    const orphaned = !!webview && !host.contains(webview);
+    if (orphaned) {
+      webviewRef.current = null;
+      webview = null;
+      domReadyRef.current = false;
+      setDomReady(false);
+    }
+
     if (!webview) {
       webview = document.createElement("webview") as WebviewElement;
       // Sandboxed safety: keep contextIsolation on for the embedded site.
@@ -103,72 +145,111 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       webview.style.height = "100%";
       webview.style.border = "0";
       webview.style.background = "white";
-      webview.src = url;
+      webview.src = initialUrl;
       host.appendChild(webview);
       webviewRef.current = webview;
-
-      const onDomReady = () => {
-        setDomReady(true);
-        setCanGoBack(webview!.canGoBack?.() ?? false);
-        setCanGoForward(webview!.canGoForward?.() ?? false);
-        setCurrentUrl(webview!.getURL?.() ?? url);
-        setError(null);
-      };
-      const onDidNavigate = (e: { url: string }) => {
-        setCurrentUrl(e.url);
-        setCanGoBack(webview!.canGoBack?.() ?? false);
-        setCanGoForward(webview!.canGoForward?.() ?? false);
-        setError(null);
-        if (e.url) onUrlChange(e.url);
-      };
-      const onDidNavigateInPage = (e: { url: string; isMainFrame: boolean }) => {
-        if (!e.isMainFrame) return;
-        setCurrentUrl(e.url);
-        setCanGoBack(webview!.canGoBack?.() ?? false);
-        setCanGoForward(webview!.canGoForward?.() ?? false);
-      };
-      const onDidFailLoad = (e: {
-        errorCode: number;
-        errorDescription: string;
-        validatedURL: string;
-        isMainFrame: boolean;
-      }) => {
-        if (!e.isMainFrame) return;
-        // -3 ABORTED is fired when the user navigates before the previous
-        // load finishes — not actually an error.
-        if (e.errorCode === -3) return;
-        setError(`${e.errorDescription} (${e.errorCode})`);
-      };
-
-      webview.addEventListener("dom-ready", onDomReady);
-      webview.addEventListener("did-navigate", onDidNavigate);
-      webview.addEventListener("did-navigate-in-page", onDidNavigateInPage);
-      webview.addEventListener("did-fail-load", onDidFailLoad);
     }
 
-    // If the parent's url prop changed for an already-mounted webview,
-    // navigate to the new URL.
-    if (webview.getURL && webview.getURL() && webview.getURL() !== url) {
+    const wv = webview;
+    const onDomReady = () => {
+      domReadyRef.current = true;
+      setDomReady(true);
+      setCanGoBack(wv.canGoBack?.() ?? false);
+      setCanGoForward(wv.canGoForward?.() ?? false);
       try {
-        webview.loadURL?.(url);
+        setCurrentUrl(wv.getURL?.() ?? urlRef.current);
       } catch {
-        webview.src = url;
+        setCurrentUrl(urlRef.current);
       }
-    }
+      setError(null);
+    };
+    const onDidNavigate = (e: { url: string }) => {
+      setCurrentUrl(e.url);
+      setCanGoBack(wv.canGoBack?.() ?? false);
+      setCanGoForward(wv.canGoForward?.() ?? false);
+      setError(null);
+      if (e.url) onUrlChangeRef.current(e.url);
+    };
+    const onDidNavigateInPage = (e: { url: string; isMainFrame: boolean }) => {
+      if (!e.isMainFrame) return;
+      setCurrentUrl(e.url);
+      setCanGoBack(wv.canGoBack?.() ?? false);
+      setCanGoForward(wv.canGoForward?.() ?? false);
+    };
+    const onDidFailLoad = (e: {
+      errorCode: number;
+      errorDescription: string;
+      validatedURL: string;
+      isMainFrame: boolean;
+    }) => {
+      if (!e.isMainFrame) return;
+      // -3 ABORTED is fired when the user navigates before the previous
+      // load finishes — not actually an error.
+      if (e.errorCode === -3) return;
+      setError(`${e.errorDescription} (${e.errorCode})`);
+    };
+
+    wv.addEventListener("dom-ready", onDomReady);
+    wv.addEventListener("did-navigate", onDidNavigate);
+    wv.addEventListener("did-navigate-in-page", onDidNavigateInPage);
+    wv.addEventListener("did-fail-load", onDidFailLoad);
 
     return () => {
-      // Intentional: do NOT remove the webview here. We want it to survive
-      // visibility toggles. Cleanup happens when the BrowserPane unmounts
-      // entirely (the host div drops, taking the child <webview> with it).
+      // Detach our listeners; intentionally do NOT remove the webview
+      // element itself. We want it to survive visibility toggles — the
+      // element is dropped when the host div unmounts with the component.
+      wv.removeEventListener("dom-ready", onDomReady);
+      wv.removeEventListener("did-navigate", onDidNavigate);
+      wv.removeEventListener("did-navigate-in-page", onDidNavigateInPage);
+      wv.removeEventListener("did-fail-load", onDidFailLoad);
     };
-  }, [url, onUrlChange]);
+  }, [hasUrl]);
+
+  // ── Navigate when the parent's `url` prop changes. Kept separate from
+  // the create-once effect so readiness (tracked via domReadyRef, not a
+  // dependency) doesn't retrigger element creation. Calling getURL /
+  // loadURL before dom-ready throws and crashes the renderer, so we bail
+  // until the ref says the webview is attached.
+  useEffect(() => {
+    if (!url) return;
+    const webview = webviewRef.current;
+    if (!webview) return; // not created yet — src attribute carries the initial url
+    if (!domReadyRef.current) return; // wait for dom-ready before touching methods
+    try {
+      const live = webview.getURL?.() ?? "";
+      if (live && live !== url) {
+        webview.loadURL?.(url);
+      }
+    } catch {
+      // Webview detached between checks (very rare); fall back to src.
+      webview.src = url;
+    }
+  }, [url, domReady]);
 
   useImperativeHandle(
     ref,
     (): BrowserPaneHandle => ({
-      reload: () => webviewRef.current?.reload?.(),
-      goBack: () => webviewRef.current?.goBack?.(),
-      goForward: () => webviewRef.current?.goForward?.(),
+      reload: () => {
+        try {
+          webviewRef.current?.reload?.();
+        } catch {
+          /* webview not yet dom-ready */
+        }
+      },
+      goBack: () => {
+        try {
+          webviewRef.current?.goBack?.();
+        } catch {
+          /* webview not yet dom-ready */
+        }
+      },
+      goForward: () => {
+        try {
+          webviewRef.current?.goForward?.();
+        } catch {
+          /* webview not yet dom-ready */
+        }
+      },
       loadURL: (next: string) => {
         try {
           webviewRef.current?.loadURL?.(next);
@@ -176,8 +257,20 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
           if (webviewRef.current) webviewRef.current.src = next;
         }
       },
-      getURL: () => webviewRef.current?.getURL?.() ?? currentUrl ?? url,
-      openDevTools: () => webviewRef.current?.openDevTools?.(),
+      getURL: () => {
+        try {
+          return webviewRef.current?.getURL?.() ?? currentUrl ?? url;
+        } catch {
+          return currentUrl ?? url;
+        }
+      },
+      openDevTools: () => {
+        try {
+          webviewRef.current?.openDevTools?.();
+        } catch {
+          /* webview not yet dom-ready */
+        }
+      },
       focusAddressBar: () => addressRef.current?.focus(),
     }),
     [currentUrl, url],
@@ -211,10 +304,18 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
           }
           onUrlChange(next);
         }}
-        onReload={() => webviewRef.current?.reload?.()}
-        onBack={() => webviewRef.current?.goBack?.()}
-        onForward={() => webviewRef.current?.goForward?.()}
-        onOpenDevTools={() => webviewRef.current?.openDevTools?.()}
+        onReload={() => {
+          try { webviewRef.current?.reload?.(); } catch { /* not dom-ready */ }
+        }}
+        onBack={() => {
+          try { webviewRef.current?.goBack?.(); } catch { /* not dom-ready */ }
+        }}
+        onForward={() => {
+          try { webviewRef.current?.goForward?.(); } catch { /* not dom-ready */ }
+        }}
+        onOpenDevTools={() => {
+          try { webviewRef.current?.openDevTools?.(); } catch { /* not dom-ready */ }
+        }}
         onOpenExternal={(target) => {
           if (target) void window.spark.openExternal?.(target);
         }}

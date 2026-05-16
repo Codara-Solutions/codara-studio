@@ -11,6 +11,7 @@ export default defineConfig({
       },
     },
     build: {
+      minify: "esbuild",
       rollupOptions: {
         input: { index: resolve(__dirname, "src/main/index.ts") },
       },
@@ -24,6 +25,7 @@ export default defineConfig({
       },
     },
     build: {
+      minify: "esbuild",
       rollupOptions: {
         input: { index: resolve(__dirname, "src/preload/index.ts") },
       },
@@ -39,10 +41,10 @@ export default defineConfig({
       },
     },
     build: {
+      minify: "esbuild",
       rollupOptions: {
         input: {
           index: resolve(__dirname, "src/renderer/index.html"),
-          settings: resolve(__dirname, "src/renderer/settings.html"),
         },
       },
     },

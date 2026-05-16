@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 import RunsView from "../components/RunsView";
 import type { RunState, Workspace } from "@shared/types";
 import type { RunsTab, Tab, TabId } from "./types";
@@ -17,7 +17,11 @@ interface Props {
   onSelectRun: (id: string | null) => void;
 }
 
-export default function RunsStack({
+// React.memo so RunsStack only re-renders when one of its real inputs
+// changes (tab list, active id, workspace, runs, selection). With the
+// useTabs API object memoized, an unrelated App state change no longer
+// drags RunsView through a re-render.
+function RunsStack({
   tabs,
   activeId,
   workspace,
@@ -25,10 +29,17 @@ export default function RunsStack({
   activeRunId,
   onSelectRun,
 }: Props) {
-  const runsTabs = tabs.filter((t): t is RunsTab => t.kind === "runs");
+  // Memoize the filtered list so it isn't reallocated on every render.
+  const runsTabs = useMemo(
+    () => tabs.filter((t): t is RunsTab => t.kind === "runs"),
+    [tabs],
+  );
   if (runsTabs.length === 0) return null;
   return (
-    <div style={{ position: "absolute", inset: 0 }}>
+    // pointer-events:none on the outer so this stack's empty space doesn't
+    // absorb clicks meant for whichever stack is paint-order below it. The
+    // active inner wrapper re-enables pointer-events:auto.
+    <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
       {runsTabs.map((t) => {
         const visible = t.id === activeId;
         // A runs tab with a pinned runId selects that run; the default
@@ -59,3 +70,5 @@ export default function RunsStack({
     </div>
   );
 }
+
+export default React.memo(RunsStack);

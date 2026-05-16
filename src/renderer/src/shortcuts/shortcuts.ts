@@ -13,6 +13,9 @@ export type ShortcutId =
   | "sidebar.toggle"
   | "search.open"
   | "terminal.toggle"
+  | "terminal.splitRight"
+  | "terminal.splitDown"
+  | "terminal.closePane"
   | "view.selectByIndex"
   | "tab.newTerminal"
   | "tab.newEditor"
@@ -22,7 +25,7 @@ export type ShortcutId =
   | "tab.cycleNext"
   | "tab.cyclePrev";
 
-export type ShortcutGroup = "General" | "Navigation" | "View" | "Tabs";
+export type ShortcutGroup = "General" | "Navigation" | "View" | "Tabs" | "Terminal";
 
 export type Shortcut = {
   id: ShortcutId;
@@ -76,6 +79,34 @@ export const SHORTCUTS: Shortcut[] = [
     keys: [MOD_KEY, "`"],
     group: "View",
     match: (e) => isMod(e) && (e.key === "`" || e.code === "Backquote"),
+  },
+  {
+    id: "terminal.splitRight",
+    label: "Split terminal pane right",
+    keys: [MOD_KEY, "\\"],
+    group: "Terminal",
+    // The chord is intentionally blocked from running outside terminal tabs;
+    // App.tsx checks the active tab kind before dispatching. We still
+    // intercept the keystroke so it doesn't fall through to xterm.
+    match: (e) => isMod(e) && !e.shiftKey && (e.key === "\\" || e.code === "Backslash"),
+  },
+  {
+    id: "terminal.splitDown",
+    label: "Split terminal pane down",
+    keys: [MOD_KEY, "Shift", "\\"],
+    group: "Terminal",
+    match: (e) => isMod(e) && e.shiftKey && (e.key === "\\" || e.code === "Backslash"),
+  },
+  {
+    id: "terminal.closePane",
+    label: "Close active terminal pane",
+    keys: [MOD_KEY, "Shift", "K"],
+    group: "Terminal",
+    // Mod+Shift+W is already taken by tab.closeOthers, and Mod+W closes the
+    // whole tab (which still works for closing the last pane). Mod+Shift+K
+    // mirrors VS Code's "kill terminal" chord and stays out of the way of
+    // shell readline (Ctrl+K).
+    match: (e) => isMod(e) && e.shiftKey && e.key.toLowerCase() === "k",
   },
   {
     id: "view.selectByIndex",
@@ -145,4 +176,5 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
   "Navigation",
   "View",
   "Tabs",
+  "Terminal",
 ];

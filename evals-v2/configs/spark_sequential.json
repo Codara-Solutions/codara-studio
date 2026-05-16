@@ -1,0 +1,10 @@
+{
+  "variantId": "spark_sequential",
+  "label": "Spark manager, sequential workers",
+  "workerPolicy": {
+    "manager": "spark",
+    "maxParallelWorkers": 1,
+    "verification": "cross_model_when_needed"
+  }
+}
+

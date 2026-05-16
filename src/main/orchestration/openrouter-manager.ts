@@ -250,12 +250,26 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
           runtimePreference: { type: "string", enum: ["claude", "codex", "manual", "shell"] },
           modelHint: { type: "string" },
           effortHint: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh"] },
-          allowedPaths: { type: "array", items: { type: "string" } },
+          allowedPaths: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Concrete write ownership for this worker. Implementation workers that can run in parallel MUST list non-overlapping files/directories here. Verifier tasks are read-only and should use [].",
+          },
           forbiddenPaths: { type: "array", items: { type: "string" } },
           expectedOutputs: { type: "array", items: { type: "string" } },
           verificationCommands: { type: "array", items: { type: "string" } },
-          canRunParallel: { type: "boolean" },
-          conflictsWith: { type: "array", items: { type: "string" } },
+          canRunParallel: {
+            type: "boolean",
+            description:
+              "true only when this task is safe to launch alongside another queued task. Implementation tasks require concrete non-overlapping allowedPaths. Use true for read-only verifier peers.",
+          },
+          conflictsWith: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Task ids or labels this task must not overlap with. Add conflicts whenever same-file writes, shared migrations, or order-sensitive edits could collide.",
+          },
           taskClass: {
             type: "string",
             enum: ["skeleton", "feature", "leaf", "verifier"],
@@ -453,6 +467,36 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
     truncate(activePlanText, 24000),
     "",
   );
+
+  // Surface user-authored notes/answers as a dedicated, hard-to-miss section
+  // labelled as binding additions to the plan. Without this, the manager
+  // tends to treat a follow-up like "make it scientific" as a small patch
+  // on already-completed work — emitting a thin corrective step and a
+  // weakly-framed worker prompt — instead of redesigning the next slice as
+  // if the amendment had been in the plan from the start. recentMessages
+  // is still embedded in RUN STATE for full context; this section gives
+  // emphasis and explicit framing.
+  const userAmendments = run.humanMessages.filter(
+    (m) => m.author === "user" && (m.kind === "note" || m.kind === "answer"),
+  );
+  if (userAmendments.length > 0) {
+    const lastPlanAnalysisAt = run.steps.length > 0 ? run.steps[0]?.createdAt : undefined;
+    const formattedAmendments = userAmendments
+      .map((m, idx) => {
+        const isAfterPlanning =
+          lastPlanAnalysisAt && m.createdAt && m.createdAt > lastPlanAnalysisAt;
+        const marker = isAfterPlanning ? " (post-plan amendment)" : "";
+        return `${idx + 1}.${marker} ${truncate(m.message, 2000)}`;
+      })
+      .join("\n");
+    lines.push(
+      "USER NOTES (binding additions to the project plan)",
+      "Treat each note below as part of the project plan. When designing new worker tasks, integrate these as if they had been in the original plan from the start — write the worker description at full design depth (objective, acceptance criteria, UI polish, behaviors), not as a thin patch on top of existing files. Existing artifacts may inform style/structure but must not constrain the new design's quality bar.",
+      "",
+      formattedAmendments,
+      "",
+    );
+  }
 
   // When a per-mode system prompt override is set we treat that as the
   // canonical instruction for the stage and skip the generic MODE-SPECIFIC

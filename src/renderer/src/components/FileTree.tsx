@@ -1,9 +1,89 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { FsEntry } from "@shared/types";
 import { ChevronIcon } from "./icons";
 import { FileNodeIcon } from "./file-icons/FileNodeIcon";
 import { InlineInput } from "./file-icons/InlineInput";
-import { basename } from "../path-utils";
+import { basename, dirname } from "../path-utils";
+
+// Tree row geometry. Hoisted to module scope so the values are shared by
+// `Row` and `PlaceholderRow` and never re-allocated per render.
+const INDENT_STEP = 8;
+const BASE_LEFT = 6;
+const ROW_HEIGHT = 22;
+
+// Static parts of the row container `style`. The per-row bits that actually
+// change (padding-left from depth, background/color from active|hover) are
+// spread on top of this in the component, so this object is allocated exactly
+// once for the whole module rather than once per row per render.
+const ROW_STYLE_BASE: React.CSSProperties = {
+  position: "relative",
+  display: "flex",
+  alignItems: "center",
+  gap: 4,
+  height: ROW_HEIGHT,
+  cursor: "default",
+};
+
+// Fixed-width chevron gutter shared by every row.
+const CHEVRON_CELL_STYLE: React.CSSProperties = {
+  width: 12,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  flex: "0 0 12px",
+  color: "var(--muted)",
+};
+
+// The name label style. `color` is the only dynamic property (active vs not),
+// so it is overridden inline; everything else is constant.
+const ROW_LABEL_STYLE: React.CSSProperties = {
+  fontFamily: "var(--font-sans)",
+  fontSize: 13,
+  fontWeight: 400,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  minWidth: 0,
+  flex: 1,
+};
+
+// Indent-guide vertical rule. `left` is computed per guide from its depth
+// index, so it is overridden inline; the rest is constant.
+const INDENT_GUIDE_STYLE: React.CSSProperties = {
+  position: "absolute",
+  top: 0,
+  bottom: 0,
+  width: 1,
+  background: "var(--rule-soft)",
+  opacity: 0.6,
+};
+
+// Loading "…" affordance shown on a directory row while its children load.
+const ROW_LOADING_STYLE: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  color: "var(--muted)",
+};
+
+// Virtuoso's inner list element. We give it the 2px-top / 8px-bottom padding
+// the plain `overflow: auto` scroll container used to have, so virtualizing
+// the list does not change the tree's vertical spacing. `forwardRef` is
+// required: Virtuoso attaches a ref to whatever component is passed here.
+// Defined once at module scope so the `components` prop identity is stable
+// (a fresh object there would otherwise remount the scroller every render).
+const VirtuosoList = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement>
+>(function VirtuosoList({ style, children, ...rest }, ref) {
+  return (
+    <div ref={ref} style={{ ...style, paddingTop: 2, paddingBottom: 8 }} {...rest}>
+      {children}
+    </div>
+  );
+});
+
+const LIST_COMPONENTS = { List: VirtuosoList };
 
 function normalizePath(path: string): string {
   // fs.watch on Windows can produce mixed separators; normalize for set lookups.
@@ -59,6 +139,10 @@ export default function FileTree({
   const [, force] = useState(0);
   const rootRef = useRef(root);
   rootRef.current = root;
+  // Imperative handle on the virtualized list. Used to scroll the active node
+  // back into view when `activePath` changes from outside the visible window
+  // (e.g. opening a file via search, or F2 rename on an off-screen node).
+  const virtuosoRef = useRef<VirtuosoHandle | null>(null);
 
   // Reload when cwd changes
   useEffect(() => {
@@ -269,12 +353,39 @@ export default function FileTree({
     [onDeleteFile, refreshDir],
   );
 
-  const flat = useMemo(() => {
-    // Re-flatten on every render. We mutate root.children in place and bump
-    // `force()`, so we deliberately use rootRef.current (not the captured
-    // `root` reference) to read the freshest tree.
+  // Stable per-row handlers --------------------------------------------------
+  // Every visible node renders one `<Row>`. `Row` is wrapped in `React.memo`,
+  // but memo only pays off if its props are referentially stable across
+  // renders. Previously each `Row` received fresh inline arrows
+  // (`onToggle`, `onCommitRename`, `onContextMenu`), so memo could never skip
+  // a render and an unrelated App state change (workspace color edit, run
+  // event) re-rendered the entire tree. These `useCallback`s take the node /
+  // path as an argument instead, so the function identities never change and
+  // `Row` invokes them itself with its own node.
+  const handleToggle = useCallback(
+    (node: Node) => {
+      if (node.kind === "dir") void toggleDir(node);
+    },
+    [toggleDir],
+  );
+
+  const handleContextMenu = useCallback((entry: FsEntry, x: number, y: number) => {
+    setContextMenu({ entry, x, y });
+  }, []);
+
+  const handleCommitRename = useCallback(
+    (path: string, value: string) => {
+      void commitRename(path, value);
+    },
+    [commitRename],
+  );
+
+  // Re-flatten on every render. We mutate root.children in place and bump
+  // `force()` to re-render — memoising would cache a stale row list because
+  // the `root` reference doesn't change across mutations. The traversal is
+  // a single linear walk over the open subtree, so the cost is negligible.
+  const flat: FlatRow[] = (() => {
     const rows = flatten(rootRef.current, 0);
-    // Insert a "pending create" placeholder under its parent dir (or at root).
     if (pendingCreate) {
       const insertIdx = rows.findIndex(
         (r) => r.kind === "node" && r.node.entry.path === pendingCreate.parentPath,
@@ -288,7 +399,6 @@ export default function FileTree({
           entryKind: pendingCreate.kind,
         });
       } else if (pendingCreate.parentPath === rootRef.current.entry.path) {
-        // Root not in the rows? Shouldn't happen, but fall through to a leading row.
         rows.unshift({
           kind: "placeholder",
           depth: 0,
@@ -298,7 +408,7 @@ export default function FileTree({
       }
     }
     return rows;
-  }, [root, pendingCreate]);
+  })();
 
   // Workspace-level actions
   const newFileAtRoot = useCallback(async () => {
@@ -325,6 +435,23 @@ export default function FileTree({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [activePath, beginRename]);
+
+  // Keep the active node scrolled into view. With the list virtualized the
+  // selected row may not be mounted at all (it scrolled off, or was opened
+  // from search), so we drive Virtuoso's imperative API. `scrollIntoView`
+  // is a no-op when the row is already on screen, so this stays cheap.
+  useEffect(() => {
+    if (!activePath) return;
+    const index = flat.findIndex(
+      (r) => r.kind === "node" && r.node.entry.path === activePath,
+    );
+    if (index === -1) return;
+    virtuosoRef.current?.scrollIntoView({ index, behavior: "auto" });
+    // `flat` is rebuilt every render; depending on `activePath` alone keeps
+    // this from firing on unrelated re-renders while still re-running when
+    // the selection changes (the only time we want to scroll).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePath]);
 
   return (
     <div
@@ -367,35 +494,53 @@ export default function FileTree({
           {error}
         </div>
       )}
-      <div style={{ padding: "2px 0 8px", overflow: "auto", flex: 1 }}>
-        {flat.map((row, i) => {
-          if (row.kind === "placeholder") {
+      {/*
+        The visible-row list is virtualized with `react-virtuoso` (same
+        pattern as SearchPanel.tsx), so only on-screen rows mount. Rows have
+        a fixed `ROW_HEIGHT`, so Virtuoso sizes the scroller without
+        measuring every item. `itemContent` closes over the freshly-rebuilt
+        `flat` array each render, so in-place tree mutations (expand /
+        collapse / fs-watch refresh) surface immediately. The per-row props
+        passed to `Row` are all referentially stable, so `Row`'s
+        `React.memo` skips re-rendering rows whose own data did not change.
+      */}
+      <div style={{ flex: 1, minHeight: 0 }}>
+        <Virtuoso
+          ref={virtuosoRef}
+          style={{ height: "100%", width: "100%" }}
+          totalCount={flat.length}
+          overscan={400}
+          // Preserve the original 2px top / 8px bottom breathing room the
+          // plain scroll container had via padding.
+          components={LIST_COMPONENTS}
+          itemContent={(i) => {
+            const row = flat[i];
+            if (!row) return null;
+            if (row.kind === "placeholder") {
+              return (
+                <PlaceholderRow
+                  depth={row.depth}
+                  kind={row.entryKind}
+                  onCommit={commitCreate}
+                  onCancel={cancelCreate}
+                />
+              );
+            }
             return (
-              <PlaceholderRow
-                key={`__pending__${i}`}
+              <Row
+                node={row.node}
                 depth={row.depth}
-                kind={row.entryKind}
-                onCommit={commitCreate}
-                onCancel={cancelCreate}
+                active={row.node.entry.path === activePath}
+                renaming={renamingPath === row.node.entry.path}
+                onToggle={handleToggle}
+                onOpenFile={onOpenFile}
+                onContextMenu={handleContextMenu}
+                onCommitRename={handleCommitRename}
+                onCancelRename={cancelRename}
               />
             );
-          }
-          const isRenaming = renamingPath === row.node.entry.path;
-          return (
-            <Row
-              key={row.node.entry.path + i}
-              node={row.node}
-              depth={row.depth}
-              active={row.node.entry.path === activePath}
-              renaming={isRenaming}
-              onToggle={() => toggleDir(row.node as DirNode & { kind: "dir" })}
-              onOpenFile={onOpenFile}
-              onContextMenu={(entry, x, y) => setContextMenu({ entry, x, y })}
-              onCommitRename={(value) => void commitRename(row.node.entry.path, value)}
-              onCancelRename={cancelRename}
-            />
-          );
-        })}
+          }}
+        />
       </div>
       {contextMenu && (
         <FileMenu
@@ -515,7 +660,10 @@ function collectMatchingDirs(
   for (const child of node.children) collectMatchingDirs(child, matches, out);
 }
 
-function PlaceholderRow({
+// `React.memo`: at most one placeholder row exists at a time, but memoising
+// keeps it from re-rendering (and re-mounting its self-focusing `InlineInput`)
+// when an unrelated tree re-render flows through Virtuoso's `itemContent`.
+const PlaceholderRow = React.memo(function PlaceholderRow({
   depth,
   kind,
   onCommit,
@@ -526,30 +674,15 @@ function PlaceholderRow({
   onCommit: (value: string) => void;
   onCancel: () => void;
 }) {
-  const indentStep = 8;
-  const baseLeft = 6;
-  const rowPaddingLeft = baseLeft + depth * indentStep;
+  const rowPaddingLeft = BASE_LEFT + depth * INDENT_STEP;
   return (
     <div
       style={{
-        position: "relative",
-        display: "flex",
-        alignItems: "center",
-        gap: 4,
-        height: 22,
+        ...ROW_STYLE_BASE,
         padding: `0 8px 0 ${rowPaddingLeft}px`,
       }}
     >
-      <span
-        aria-hidden
-        style={{
-          width: 12,
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flex: "0 0 12px",
-        }}
-      />
+      <span aria-hidden style={CHEVRON_CELL_STYLE} />
       <FileNodeIcon name={kind === "dir" ? "" : "untitled"} isDir={kind === "dir"} opacity={0.7} />
       <InlineInput
         initial=""
@@ -559,9 +692,64 @@ function PlaceholderRow({
       />
     </div>
   );
+});
+
+// Props for a single tree row. Declared as a named type so the custom
+// `React.memo` comparator below can be typed against it.
+interface RowProps {
+  node: Node;
+  depth: number;
+  active: boolean;
+  renaming: boolean;
+  onToggle: (node: Node) => void;
+  onOpenFile: (entry: FsEntry) => void;
+  onContextMenu: (entry: FsEntry, x: number, y: number) => void;
+  onCommitRename: (path: string, value: string) => void;
+  onCancelRename: () => void;
 }
 
-function Row({
+// Custom equality for `Row`'s `React.memo`.
+//
+// A plain shallow compare is NOT enough here: the tree mutates `DirNode`
+// objects *in place* (`open`, `loading`, `loaded`, `error` flip on the same
+// reference) and only bumps a `force()` counter to re-render. A shallow
+// `prevProps.node === nextProps.node` would therefore be `true` after a
+// folder is expanded and the row's own chevron / spinner would never update.
+// So we compare the mutable directory fields explicitly. Everything else
+// (callbacks, `onOpenFile`) is referentially stable by construction.
+function rowPropsEqual(prev: RowProps, next: RowProps): boolean {
+  if (
+    prev.node !== next.node ||
+    prev.depth !== next.depth ||
+    prev.active !== next.active ||
+    prev.renaming !== next.renaming ||
+    prev.onToggle !== next.onToggle ||
+    prev.onOpenFile !== next.onOpenFile ||
+    prev.onContextMenu !== next.onContextMenu ||
+    prev.onCommitRename !== next.onCommitRename ||
+    prev.onCancelRename !== next.onCancelRename
+  ) {
+    return false;
+  }
+  // Same node reference — re-check the fields that get mutated in place so an
+  // expand / collapse / load still re-renders this row.
+  if (next.node.kind === "dir") {
+    const p = prev.node as DirNode;
+    const n = next.node as DirNode;
+    if (p.open !== n.open || p.loading !== n.loading || p.loaded !== n.loaded || p.error !== n.error) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// `React.memo`: the tree renders one `Row` per visible node, so without
+// memoisation any App-level state change that re-renders the sidebar
+// (workspace color edit, run events) re-rendered every row. The callback
+// props below all take the node / path as an argument and are created with
+// `useCallback` in the parent, so their identities are stable and memo can
+// actually skip rows whose own `node` / `active` / `renaming` did not change.
+const Row = React.memo(function Row({
   node,
   depth,
   active,
@@ -571,55 +759,44 @@ function Row({
   onContextMenu,
   onCommitRename,
   onCancelRename,
-}: {
-  node: Node;
-  depth: number;
-  active: boolean;
-  renaming: boolean;
-  onToggle: () => void;
-  onOpenFile: (entry: FsEntry) => void;
-  onContextMenu: (entry: FsEntry, x: number, y: number) => void;
-  onCommitRename: (value: string) => void;
-  onCancelRename: () => void;
-}) {
+}: RowProps) {
   const isDir = node.kind === "dir";
   const [hover, setHover] = useState(false);
   const dirNode = isDir ? (node as DirNode & { kind: "dir" }) : null;
-  const indentStep = 8;
-  const baseLeft = 6;
-  const rowPaddingLeft = baseLeft + depth * indentStep;
+  const rowPaddingLeft = BASE_LEFT + depth * INDENT_STEP;
   const background = active
     ? "color-mix(in oklch, var(--ink) 9%, transparent)"
     : hover
       ? "color-mix(in oklch, var(--ink) 4%, transparent)"
       : "transparent";
 
+  // Stable wrappers so this row invokes the shared parent handlers with its
+  // own node / path. These close over `node` (and `onToggle` etc.), so they
+  // change only when this row's own data changes — which is also the only
+  // time `React.memo` lets the row re-render.
+  const handleClick = renaming
+    ? undefined
+    : isDir
+      ? () => onToggle(node)
+      : () => onOpenFile(node.entry);
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onContextMenu(node.entry, e.clientX, e.clientY);
+  };
+  const handleCommitRename = (value: string) => onCommitRename(node.entry.path, value);
+
   return (
     <div
-      onClick={
-        renaming
-          ? undefined
-          : isDir
-            ? onToggle
-            : () => onOpenFile(node.entry)
-      }
-      onContextMenu={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        onContextMenu(node.entry, e.clientX, e.clientY);
-      }}
+      onClick={handleClick}
+      onContextMenu={handleContextMenu}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
-        position: "relative",
-        display: "flex",
-        alignItems: "center",
-        gap: 4,
-        height: 22,
+        ...ROW_STYLE_BASE,
         padding: `0 8px 0 ${rowPaddingLeft}px`,
         background,
         color: active ? "var(--ink)" : "var(--ink-dim)",
-        cursor: "default",
       }}
     >
       {Array.from({ length: depth }, (_, i) => (
@@ -627,28 +804,13 @@ function Row({
           key={i}
           aria-hidden
           style={{
-            position: "absolute",
-            top: 0,
-            bottom: 0,
-            left: baseLeft + i * indentStep + 4,
-            width: 1,
-            background: "var(--rule-soft)",
-            opacity: 0.6,
+            ...INDENT_GUIDE_STYLE,
+            left: BASE_LEFT + i * INDENT_STEP + 4,
           }}
         />
       ))}
 
-      <span
-        aria-hidden
-        style={{
-          width: 12,
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flex: "0 0 12px",
-          color: "var(--muted)",
-        }}
-      >
+      <span aria-hidden style={CHEVRON_CELL_STYLE}>
         {isDir && <ChevronIcon open={Boolean(dirNode?.open)} />}
       </span>
 
@@ -657,33 +819,24 @@ function Row({
       {renaming ? (
         <InlineInput
           initial={node.entry.name}
-          onCommit={onCommitRename}
+          onCommit={handleCommitRename}
           onCancel={onCancelRename}
         />
       ) : (
         <span
           style={{
-            fontFamily: "var(--font-sans)",
-            fontSize: 13,
-            fontWeight: 400,
+            ...ROW_LABEL_STYLE,
             color: active ? "var(--ink)" : "var(--ink-dim)",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            minWidth: 0,
-            flex: 1,
           }}
           title={node.entry.path}
         >
           {node.entry.name}
         </span>
       )}
-      {isDir && dirNode?.loading && (
-        <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--muted)" }}>…</span>
-      )}
+      {isDir && dirNode?.loading && <span style={ROW_LOADING_STYLE}>…</span>}
     </div>
   );
-}
+}, rowPropsEqual);
 
 function FileMenu({
   menu,
@@ -841,9 +994,7 @@ function MenuButton({
 }
 
 function parentPath(path: string): string {
-  const idx = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
-  if (idx === 2 && path[1] === ":") return path.slice(0, 3);
-  return idx > 0 ? path.slice(0, idx) : path;
+  return dirname(path);
 }
 
 function PanelHeader({

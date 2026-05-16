@@ -1,0 +1,10 @@
+{
+  "variantId": "claude_single",
+  "label": "Pure Claude Code, one agent",
+  "workerPolicy": {
+    "manager": "none",
+    "workers": [{ "runtime": "claude", "maxParallel": 1 }],
+    "verification": "self"
+  }
+}
+

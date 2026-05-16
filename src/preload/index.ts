@@ -1,26 +1,27 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AddRunMessageInput,
-  ApplyPendingMutationsInput,
   AppPreferences,
   AppSettings,
   AppState,
   CreateEntryInput,
+  CreateProjectItemInput,
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
-  DiscardPendingMutationsInput,
   FsChangeEvent,
   FsEntry,
   FsFileContent,
   FsReadResult,
   GitGraph,
   InterruptRunWithMessageInput,
+  LinkProjectRunInput,
   LaunchWorkerAttemptInput,
   PauseRunInput,
   PlanFile,
   PrefKey,
   PreferencesChange,
+  ProjectItem,
   PrepareWorkerTaskInput,
   ResumeRunInput,
   RenameFileInput,
@@ -29,12 +30,12 @@ import type {
   SearchHit,
   SearchOptions,
   SearchSummary,
-  SetPlanModeInput,
   ShellInfo,
   SparkEvent,
   StartAutopilotInput,
   StartSearchResponse,
   UpdateRunStatusInput,
+  UpdateProjectItemInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
   WorkerReport,
@@ -47,7 +48,9 @@ type OrchestrationEventHandler = (event: SparkEvent) => void;
 type FsChangeHandler = (event: FsChangeEvent) => void;
 type WindowStateHandler = (state: { maximized: boolean }) => void;
 type PreferencesChangeHandler = (change: PreferencesChange) => void;
-type SearchHitHandler = (hit: SearchHit) => void;
+// Hits arrive batched (one IPC message per ~100 hits or per ~24ms) — see
+// `streamGrep` in the main process. The handler receives the whole batch.
+type SearchHitHandler = (hits: SearchHit[]) => void;
 type SearchDoneHandler = (summary: SearchSummary) => void;
 
 export interface SearchStartCallbacks {
@@ -69,9 +72,6 @@ const api = {
   settings: {
     load: (): Promise<AppSettings> => ipcRenderer.invoke("settings:load"),
     save: (settings: AppSettings): Promise<AppSettings> => ipcRenderer.invoke("settings:save", settings),
-    // Open the dedicated Settings BrowserWindow. Idempotent — focuses the
-    // existing window if one is already open.
-    open: (): Promise<void> => ipcRenderer.invoke("settings:open"),
   },
   preferences: {
     load: (): Promise<AppPreferences> => ipcRenderer.invoke("preferences:load"),
@@ -127,6 +127,18 @@ const api = {
   git: {
     graph: (cwd: string): Promise<GitGraph> => ipcRenderer.invoke("git:graph", cwd),
   },
+  project: {
+    listItems: (workspaceId: string): Promise<ProjectItem[]> =>
+      ipcRenderer.invoke("project:listItems", workspaceId),
+    createItem: (input: CreateProjectItemInput): Promise<ProjectItem> =>
+      ipcRenderer.invoke("project:createItem", input),
+    updateItem: (input: UpdateProjectItemInput): Promise<ProjectItem> =>
+      ipcRenderer.invoke("project:updateItem", input),
+    deleteItem: (workspaceId: string, itemId: string): Promise<void> =>
+      ipcRenderer.invoke("project:deleteItem", { workspaceId, itemId }),
+    linkRun: (input: LinkProjectRunInput): Promise<ProjectItem> =>
+      ipcRenderer.invoke("project:linkRun", input),
+  },
   orchestration: {
     createRun: (input: CreateRunInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:createRun", input),
@@ -144,6 +156,10 @@ const api = {
       ipcRenderer.invoke("orchestration:startAutopilot", input),
     pauseRun: (input: PauseRunInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:pauseRun", input),
+    pauseRunAfterCurrentWorkers: (input: PauseRunInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:pauseRunAfterCurrentWorkers", input),
+    forcePauseRun: (runId: string): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:forcePauseRun", runId),
     resumeRun: (input: ResumeRunInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:resumeRun", input),
     addRunMessage: (input: AddRunMessageInput): Promise<RunState> =>
@@ -168,15 +184,6 @@ const api = {
       ipcRenderer.invoke("orchestration:readWorkerReport", path),
     deleteRun: (runId: string): Promise<void> =>
       ipcRenderer.invoke("orchestration:deleteRun", runId),
-    // Plan-mode. setPlanMode toggles the per-run flag; apply/discard flush
-    // or drop entries from run.pendingMutations. apply hands the resulting
-    // worker tasks back to the autopilot so they actually launch.
-    setPlanMode: (input: SetPlanModeInput): Promise<RunState> =>
-      ipcRenderer.invoke("orchestration:setPlanMode", input),
-    applyPendingMutations: (input: ApplyPendingMutationsInput): Promise<RunState> =>
-      ipcRenderer.invoke("orchestration:applyPendingMutations", input),
-    discardPendingMutations: (input: DiscardPendingMutationsInput): Promise<RunState> =>
-      ipcRenderer.invoke("orchestration:discardPendingMutations", input),
     onEvent: (handler: OrchestrationEventHandler): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, event: SparkEvent) => handler(event);
       ipcRenderer.on("orchestration:event", listener);
@@ -190,7 +197,10 @@ const api = {
       cwd: string;
       cols: number;
       rows: number;
-    }): Promise<{ id: string; pid: number }> => ipcRenderer.invoke("pty:spawn", args),
+      env?: Record<string, string>;
+      startupCommand?: string;
+    }): Promise<{ id: string; pid: number; startupCommandHandled?: boolean }> =>
+      ipcRenderer.invoke("pty:spawn", args),
     write: (id: string, data: string): Promise<void> =>
       ipcRenderer.invoke("pty:write", { id, data }),
     resize: (id: string, cols: number, rows: number): Promise<void> =>
@@ -225,6 +235,19 @@ const api = {
     platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke("app:platform"),
     home: (): Promise<string> => ipcRenderer.invoke("app:home"),
   },
+  inlineAi: {
+    complete: (req: {
+      prefix: string;
+      suffix: string;
+      filename: string | null;
+      language: string | null;
+      modelId: string;
+      requestId: string;
+    }): Promise<{ text: string; error: string | null }> =>
+      ipcRenderer.invoke("inline-ai:complete", req),
+    abort: (requestId: string): Promise<void> =>
+      ipcRenderer.invoke("inline-ai:abort", requestId),
+  },
   search: {
     /**
      * Start a streaming search. The promise resolves to a handle exposing
@@ -243,8 +266,8 @@ const api = {
       )) as StartSearchResponse;
       const hitChannel = `search:hit:${searchId}`;
       const doneChannel = `search:done:${searchId}`;
-      const hitListener = (_e: Electron.IpcRendererEvent, hit: SearchHit) =>
-        callbacks.onHit(hit);
+      const hitListener = (_e: Electron.IpcRendererEvent, hits: SearchHit[]) =>
+        callbacks.onHit(hits);
       const doneListener = (
         _e: Electron.IpcRendererEvent,
         summary: SearchSummary,

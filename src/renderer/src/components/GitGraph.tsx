@@ -87,9 +87,19 @@ export default function GitGraph({ cwd }: Props) {
               <Message text={branch ? `${branch}: no commits yet` : "No commits yet."} />
             ) : (
               <div style={{ padding: "0 6px 0 0" }}>
-                {lines.map((line, index) => (
-                  <CommitRow key={`${index}-${line}`} line={line} />
-                ))}
+                {lines.map((line, index) => {
+                  // Key on the commit hash so a row's identity is stable
+                  // when the graph reorders (the array index is not).
+                  // Connector-only lines have no hash — fall back to the
+                  // index there so the keys stay unique.
+                  const hash = parseGraphLine(line).hash;
+                  return (
+                    <CommitRow
+                      key={hash ?? `connector-${index}`}
+                      line={line}
+                    />
+                  );
+                })}
               </div>
             )}
           </>
@@ -241,7 +251,10 @@ function GraphGroup({
   );
 }
 
-function CommitRow({ line }: { line: string }) {
+// Memoized: the graph re-renders whenever GitGraph's state changes, but a
+// row is a pure function of its `line` string. Shallow prop compare lets
+// untouched rows skip the parse + render entirely.
+const CommitRow = React.memo(function CommitRow({ line }: { line: string }) {
   const parsed = parseGraphLine(line);
   const refs = decorationRefs(parsed.decorate);
 
@@ -300,7 +313,7 @@ function CommitRow({ line }: { line: string }) {
       </span>
     </div>
   );
-}
+});
 
 function GraphLane({ graph, refs }: { graph: string; refs: string[] }) {
   const tokens = (graph.trimEnd() || "*").split("");

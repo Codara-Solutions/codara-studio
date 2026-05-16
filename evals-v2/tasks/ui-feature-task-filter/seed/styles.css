@@ -1,0 +1,17 @@
+body {
+  margin: 0;
+  font-family: system-ui, sans-serif;
+  background: #101214;
+  color: #f3f4f6;
+}
+
+main {
+  max-width: 720px;
+  margin: 40px auto;
+}
+
+li {
+  padding: 12px 0;
+  border-bottom: 1px solid #2b3036;
+}
+

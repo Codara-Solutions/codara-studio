@@ -5,10 +5,12 @@ import {
   useImperativeHandle,
   useMemo,
   useRef,
+  useState,
 } from "react";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { Prec } from "@codemirror/state";
 import { keymap } from "@codemirror/view";
+import { githubDark, githubLight } from "@uiw/codemirror-theme-github";
 import {
   findNext,
   findPrevious,
@@ -28,7 +30,10 @@ import { EDITOR_THEME_EXT } from "./editor-cm/themes";
 import { initVimGlobals, vimHandlersExtension } from "./editor-cm/vim";
 import { languageLabel, resolveLanguage } from "./editor-cm/languageResolver";
 import { useDocument } from "./editor-cm/useDocument";
-import { inlineCompletion } from "./editor-cm/autocomplete/inlineExtension";
+import {
+  inlineCompletion,
+  type InlineAutocompleteStatus,
+} from "./editor-cm/autocomplete/inlineExtension";
 import { useOpenRouterKey } from "./editor-cm/useOpenRouterKey";
 import { usePreferences } from "../preferences/usePreferences";
 
@@ -37,7 +42,7 @@ import { usePreferences } from "../preferences/usePreferences";
 initVimGlobals();
 
 // Imperative handle preserved for future consumers (search, reload). The
-// current parent (EditorWorkbench) doesn't grab a ref today, but exposing
+// current parent (EditorStack) doesn't grab a ref today, but exposing
 // it keeps the migration path open without breaking anyone.
 export interface EditorPaneHandle {
   setQuery: (q: string) => void;
@@ -77,8 +82,22 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const { preferences } = usePreferences();
   const apiKeyRef = useOpenRouterKey();
+  // The inline-AI plugin fires `onStatus` on every transition (~every 350ms
+  // while typing). We forward each status into <AIStatusFooter>, which owns
+  // the `aiStatus` useState itself, so an AI tick re-renders only the footer
+  // and never the <CodeMirror> host. The plugin captures `aiStatusRef.current`
+  // once at mount; <AIStatusFooter> installs its setter into the ref so the
+  // extensions array stays a stable identity (a new identity would make
+  // @uiw/react-codemirror reconfigure the whole state).
+  const aiStatusRef = useRef<(s: InlineAutocompleteStatus) => void>(() => undefined);
 
-  const themeExt = EDITOR_THEME_EXT[preferences.editorTheme] ?? EDITOR_THEME_EXT["github-dark"];
+  // Theme is resolved asynchronously in the theme useEffect below:
+  // EDITOR_THEME_EXT entries are now lazy loaders so the 6 non-active theme
+  // packages stay out of the eager bundle. github-dark/github-light back the
+  // default theme and are bundled eagerly, so the extensions useMemo can seed
+  // the theme compartment synchronously for them — avoiding an unthemed first
+  // paint. A non-default initial theme paints with the default for one frame
+  // until its loader resolves.
 
   // Stabilize save + onSaved + path via refs so the extensions array never
   // changes identity — a new identity would make @uiw/react-codemirror
@@ -115,7 +134,14 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         close: () => onCloseRef.current?.(pathRef.current),
       })),
       ...buildSharedExtensions(),
-      themeCompartment.of(EDITOR_THEME_EXT[prefsRef.current.editorTheme] ?? EDITOR_THEME_EXT["github-dark"]),
+      // Seed with the synchronously-available default-theme extension; the
+      // theme useEffect reconfigures to the real (possibly lazy-loaded)
+      // theme once its loader resolves.
+      themeCompartment.of(
+        prefsRef.current.editorTheme === "github-light"
+          ? githubLight
+          : githubDark,
+      ),
       languageCompartment.of([]),
       inlineCompletion({
         getPrefs: () => ({
@@ -125,6 +151,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         }),
         getPath: () => pathRef.current,
         getLanguage: () => languageLabelRef.current,
+        onStatus: (s) => aiStatusRef.current(s),
       }),
       keymap.of([
         {
@@ -157,14 +184,27 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     });
   }, [preferences.vimMode]);
 
-  // Theme swap.
+  // Theme swap — EDITOR_THEME_EXT entries are lazy loaders, so resolve the
+  // selected theme's promise and reconfigure once it lands. The eagerly
+  // bundled github-dark/github-light loaders resolve synchronously (no
+  // visible delay); the other 6 resolve after their chunk loads.
   useEffect(() => {
-    const view = cmRef.current?.view;
-    if (!view) return;
-    view.dispatch({
-      effects: themeCompartment.reconfigure(themeExt),
+    let cancelled = false;
+    const loadTheme =
+      EDITOR_THEME_EXT[preferences.editorTheme] ??
+      EDITOR_THEME_EXT["github-dark"];
+    void loadTheme().then((ext) => {
+      if (cancelled) return;
+      const view = cmRef.current?.view;
+      if (!view) return;
+      view.dispatch({
+        effects: themeCompartment.reconfigure(ext),
+      });
     });
-  }, [themeExt]);
+    return () => {
+      cancelled = true;
+    };
+  }, [preferences.editorTheme]);
 
   // Language pack — dynamic-import per file extension.
   useEffect(() => {
@@ -308,6 +348,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           <span style={{ fontFamily: "var(--font-mono)" }}>vim</span>
         )}
         <span style={{ flex: 1 }} />
+        <AIStatusFooter
+          statusRef={aiStatusRef}
+          enabled={preferences.inlineAutocompleteEnabled}
+        />
         {dirty && <span>Modified</span>}
       </div>
     </div>
@@ -332,6 +376,84 @@ function EditorMessage({ text, danger = false }: { text: string; danger?: boolea
     >
       {text}
     </div>
+  );
+}
+
+// Dedicated footer slot that OWNS the `aiStatus` state. The inline-AI plugin
+// pushes a new status on every transition (~every 350ms while typing); by
+// keeping the useState here — instead of in EditorPane — an AI tick re-renders
+// only this small component, never the <CodeMirror> host above it.
+//
+// `statusRef` is the same ref the inline-AI plugin's `onStatus` callback
+// forwards into; we install our setter into it on mount so EditorPane's
+// stable extensions array never has to change identity.
+function AIStatusFooter({
+  statusRef,
+  enabled,
+}: {
+  statusRef: React.MutableRefObject<(s: InlineAutocompleteStatus) => void>;
+  enabled: boolean;
+}) {
+  const [aiStatus, setAiStatus] = useState<InlineAutocompleteStatus | null>(
+    null,
+  );
+  // Point the plugin's status callback at our local setter. The plugin
+  // captured `statusRef.current` once at EditorPane mount, so reassigning
+  // `.current` here re-targets it without touching the extensions array.
+  useEffect(() => {
+    statusRef.current = (s) => setAiStatus(s);
+  }, [statusRef]);
+
+  return <AIStatusBadge status={aiStatus} enabled={enabled} />;
+}
+
+function AIStatusBadge({
+  status,
+  enabled,
+}: {
+  status: InlineAutocompleteStatus | null;
+  enabled: boolean;
+}) {
+  if (!enabled) return null;
+  if (!status) return null;
+  if (status.kind === "ok" || status.kind === "disabled") return null;
+
+  let color = "var(--muted)";
+  let text: string;
+  switch (status.kind) {
+    case "no-api-key":
+      color = "var(--danger, #e06c75)";
+      text = "AI: API key needed (Settings → API and model)";
+      break;
+    case "no-model":
+      color = "var(--danger, #e06c75)";
+      text = "AI: model needed (Settings → Editor)";
+      break;
+    case "requesting":
+      text = "AI: …";
+      break;
+    case "error": {
+      color = "var(--danger, #e06c75)";
+      const detail = status.detail.length > 80 ? status.detail.slice(0, 77) + "…" : status.detail;
+      text = `AI: ${detail}`;
+      break;
+    }
+  }
+  return (
+    <span
+      title={status.kind === "error" ? status.detail : undefined}
+      style={{
+        color,
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        maxWidth: 420,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {text}
+    </span>
   );
 }
 

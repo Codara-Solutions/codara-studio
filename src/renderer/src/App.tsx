@@ -2,29 +2,32 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type {
   AppSettings,
   AppState,
+  CreateProjectItemInput,
   FsEntry,
+  ProjectItem,
+  ProjectItemStatus,
   RunState,
   ShellInfo,
   SparkEvent,
-  Worker,
+  UpdateProjectItemInput,
   Workspace,
 } from "@shared/types";
+import { makeId } from "@shared/ids";
 import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import FileTree from "./components/FileTree";
 import OrchestrationSidebar from "./components/OrchestrationSidebar";
-import PlanDiffReview from "./components/PlanDiffReview/PlanDiffReview";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
 import SearchPanel from "./components/Search/SearchPanel";
-import TerminalGrid from "./components/TerminalGrid";
 import TabBar from "./tabs/TabBar";
 import EditorStack from "./tabs/EditorStack";
 import TerminalStack from "./tabs/TerminalStack";
 import PreviewStack from "./tabs/PreviewStack";
 import RunsStack from "./tabs/RunsStack";
+import ProjectStack from "./tabs/ProjectStack";
 import { useTabs } from "./tabs/useTabs";
-import type { ShellIntegration } from "./terminal/shell-integration";
+import type { PaneNode, Tab, TerminalLeaf } from "./tabs/types";
 import { basename } from "./path-utils";
 import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
@@ -41,24 +44,12 @@ const DEFAULT_SETTINGS: AppSettings = {
   langSmithEndpoint: "https://api.smith.langchain.com",
 };
 
-function uid(prefix = "id"): string {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-}
-
 function resolveDefaultShell(
   shells: ShellInfo[],
   settings: AppSettings,
   detectedDefault: ShellInfo | null,
 ): ShellInfo | null {
   return shells.find((shell) => shell.id === settings.defaultShellId) ?? detectedDefault ?? shells[0] ?? null;
-}
-
-function isReusableWorkerSlot(
-  worker: Worker,
-  integrations: Map<string, ShellIntegration>,
-): boolean {
-  if (worker.kind === "autofill") return false;
-  return integrations.get(worker.id)?.isReusablePrompt() === true;
 }
 
 function entryFromPath(path: string): FsEntry {
@@ -77,6 +68,97 @@ function sameOrigin(a: string, b: string): boolean {
   }
 }
 
+// Compare two filesystem paths case-insensitively (Windows is the target
+// platform; case-sensitive matching would split "C:\\Foo" and "c:\\foo").
+// Trailing slashes / mixed separators are normalised before comparison.
+function samePath(a: string, b: string): boolean {
+  const norm = (s: string): string => s.replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+  return norm(a) === norm(b);
+}
+
+// Walk a pane tree and return the first leaf that:
+//  - is currently idle (no PTY activity in the last `idleThresholdMs`);
+//  - has a cwd that matches the workspace (per `cwdMatches`); and
+//  - is free to reuse for an incoming worker on `incomingRunId`.
+// The runtime map is read-only here; callers that mutate it should
+// guard for the case where a leaf has no entry yet (e.g. a freshly-mounted
+// pane that hasn't received any PTY data — treated as activity at "now").
+function findIdleLeaf(
+  node: PaneNode,
+  runtime: Map<string, { cwd?: string; lastActivityAt: number }>,
+  now: number,
+  idleThresholdMs: number,
+  cwdMatches: (cwd: string | undefined) => boolean,
+  incomingRunId: string | undefined,
+): TerminalLeaf | null {
+  if (node.kind === "leaf") {
+    // Worker-pane reuse rules:
+    //  - state="running": always off-limits, the worker is mid-flight.
+    //  - state="done" on the SAME run as the incoming worker: off-limits, so
+    //    a verifier doesn't stomp the impl's output the user is still
+    //    reading from this run.
+    //  - state="done" on a DIFFERENT (or finished) run: reclaimable. Without
+    //    this clause every run leaks a pane per worker forever — six workers
+    //    in run A means six dead panes blocking run B from reusing any of
+    //    them, even after run A is complete.
+    if (node.worker) {
+      if (node.worker.state === "running") return null;
+      if (incomingRunId && node.worker.runId === incomingRunId) return null;
+    }
+    const entry = runtime.get(node.paneId);
+    const liveCwd = entry?.cwd ?? node.cwd;
+    if (!cwdMatches(liveCwd)) return null;
+    const lastActivityAt = entry?.lastActivityAt ?? now;
+    if (now - lastActivityAt < idleThresholdMs) return null;
+    return node;
+  }
+  return (
+    findIdleLeaf(node.a, runtime, now, idleThresholdMs, cwdMatches, incomingRunId) ??
+    findIdleLeaf(node.b, runtime, now, idleThresholdMs, cwdMatches, incomingRunId)
+  );
+}
+
+function anyLeafCwdMatches(
+  node: PaneNode,
+  runtime: Map<string, { cwd?: string; lastActivityAt: number }>,
+  cwdMatches: (cwd: string | undefined) => boolean,
+): boolean {
+  if (node.kind === "leaf") {
+    const entry = runtime.get(node.paneId);
+    return cwdMatches(entry?.cwd ?? node.cwd);
+  }
+  return anyLeafCwdMatches(node.a, runtime, cwdMatches) || anyLeafCwdMatches(node.b, runtime, cwdMatches);
+}
+
+function findLeafByPaneId(node: PaneNode, paneId: string): TerminalLeaf | null {
+  if (node.kind === "leaf") return node.paneId === paneId ? node : null;
+  return findLeafByPaneId(node.a, paneId) ?? findLeafByPaneId(node.b, paneId);
+}
+
+function countRunningWorkerLeaves(node: PaneNode): number {
+  if (node.kind === "leaf") return node.worker?.state === "running" ? 1 : 0;
+  return countRunningWorkerLeaves(node.a) + countRunningWorkerLeaves(node.b);
+}
+
+function countRunningTerminalWorkers(tabs: Tab[]): number {
+  return tabs.reduce(
+    (count, tab) => count + (tab.kind === "terminal" ? countRunningWorkerLeaves(tab.root) : 0),
+    0,
+  );
+}
+
+function projectStatusForRun(run: RunState): ProjectItemStatus {
+  if (run.status === "complete") return "done";
+  if (run.status === "failed" || run.status === "cancelled" || run.status === "blocked") return "blocked";
+  if (run.status === "reviewing") return "review";
+  if (run.status === "running" || run.status === "planning" || run.status === "paused") return "running";
+  return "ready";
+}
+
+function isUserCrmTask(item: ProjectItem): boolean {
+  return !item.labels.includes("run");
+}
+
 export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
@@ -93,6 +175,8 @@ export default function App() {
   // everywhere.
   const [runs, setRuns] = useState<RunState[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [projectItems, setProjectItems] = useState<ProjectItem[]>([]);
+  const [activeProjectItemId, setActiveProjectItemId] = useState<string | null>(null);
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [defaultShell, setDefaultShell] = useState<ShellInfo | null>(null);
   const [detectedDefaultShell, setDetectedDefaultShell] = useState<ShellInfo | null>(null);
@@ -107,24 +191,83 @@ export default function App() {
   const [platform, setPlatform] = useState<string>("");
   const [home, setHome] = useState<string>("");
   const saveTimer = useRef<number | null>(null);
-  // Per-pane shell integrations registered as orchestration worker panes
-  // mount. Spark's orchestration runner uses this to ask "is this terminal
-  // currently running a command or hosting a TUI?" before pasting prompts.
-  // Worker panes themselves are no longer rendered in the workspace tab
-  // strip — they live on the runs canvas only — but the orchestration
-  // event flow that creates them still runs, so the registry is wired up.
-  const workerIntegrationsRef = useRef<Map<string, ShellIntegration>>(new Map());
-  const registerWorkerIntegration = useCallback(
-    (workerId: string, integration: ShellIntegration | null) => {
-      if (integration) workerIntegrationsRef.current.set(workerId, integration);
-      else workerIntegrationsRef.current.delete(workerId);
+  // Trailing-debounce timer for the orchestration-event → listRuns refresh.
+  // A single run emits a burst of events (planning → running → many worker
+  // lifecycle events → reviewing → complete); refreshing on every one would
+  // fire dozens of IPC round-trips. We coalesce a burst into one refresh.
+  const runRefreshTimer = useRef<number | null>(null);
+  // Set of workspace ids that received an orchestration event since the last
+  // debounced flush — so the flush refreshes counts for exactly the affected
+  // workspaces (not a blanket re-list of everything).
+  const runRefreshPendingRef = useRef<Set<string>>(new Set());
+  // Live state per terminal-tab leaf: most recent OSC 7 cwd and the timestamp
+  // of the latest PTY activity. Used by the orchestration claim logic to
+  // decide whether a user pane is "doing nothing" and therefore safe to take
+  // over for a new worker. Held in a ref so per-byte activity callbacks
+  // don't trigger React re-renders.
+  const paneRuntimeRef = useRef<Map<string, { cwd?: string; lastActivityAt: number }>>(
+    new Map(),
+  );
+  const handlePaneCwd = useCallback(
+    (tabId: string, paneId: string, cwd: string) => {
+      const entry = paneRuntimeRef.current.get(paneId) ?? { lastActivityAt: 0 };
+      entry.cwd = cwd;
+      paneRuntimeRef.current.set(paneId, entry);
+      // Mirror into the persisted leaf state so a reload remembers the cwd
+      // and the smart-add picker can read it without a live OSC 7 round-trip.
+      tabsRef.current?.setLeafCwd(tabId, paneId, cwd);
     },
     [],
   );
+  const handlePaneActivity = useCallback((_tabId: string, paneId: string) => {
+    const entry = paneRuntimeRef.current.get(paneId) ?? { lastActivityAt: 0 };
+    entry.lastActivityAt = Date.now();
+    paneRuntimeRef.current.set(paneId, entry);
+  }, []);
 
   // Tabs are scoped per-workspace so each workspace remembers its own layout.
   // useTabs internally swaps tab lists when the workspaceId argument changes.
   const tabs = useTabs(activeId);
+
+  // useTabs returns a fresh object every render, which would force any
+  // useCallback/useEffect that depends on `tabs` to re-run on every render.
+  // We mirror it through a ref so the run-selection callbacks stay stable
+  // and the auto-reopen effect only fires when its real input (runs)
+  // actually changes.
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+
+  // Selecting a run must always be visible — if the user closed the Runs
+  // tab earlier, we transparently re-open it and route them to the picked
+  // run. Without this, picking a run row (or starting a new run) silently
+  // updates state and the user sees no UI change.
+  const handleSelectRun = useCallback((runId: string | null) => {
+    setActiveRunId(runId);
+    if (runId === null) return;
+    const t = tabsRef.current;
+    const existing = t.tabs.find((tab) => tab.kind === "runs");
+    if (existing) {
+      t.setActiveTab(existing.id);
+    } else {
+      t.newRunsTab(null);
+    }
+  }, []);
+
+  // Auto-reopen a runs tab whenever a run is in flight and no tab is
+  // currently showing it. Covers the "I closed Runs, then started a new
+  // run" case — selectRun is called from the orchestration sidebar, but
+  // the runs list itself drives this effect so even external triggers
+  // (autopilot resume, headless run) will surface a tab.
+  useEffect(() => {
+    if (runs.length === 0) return;
+    const live = runs.find((r) =>
+      ["planning", "running", "reviewing", "blocked", "paused"].includes(r.status),
+    );
+    if (!live) return;
+    const t = tabsRef.current;
+    const hasRunsTab = t.tabs.some((tab) => tab.kind === "runs");
+    if (!hasRunsTab) t.newRunsTab(null);
+  }, [runs]);
 
   // Initial load
   useEffect(() => {
@@ -206,6 +349,13 @@ export default function App() {
   );
   const workspaceIdsKey = useMemo(() => workspaces.map((w) => w.id).join("\0"), [workspaces]);
 
+  // Mirror the active workspace id through a ref so the orchestration event
+  // listener (below) can read the *current* active id without listing it as
+  // an effect dependency — depending on `activeId` would tear down and
+  // re-register the IPC listener on every workspace switch.
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+
   const refreshRunCount = useCallback(async (workspaceId: string) => {
     try {
       const runs = await window.spark.orchestration.listRuns(workspaceId);
@@ -234,11 +384,26 @@ export default function App() {
     }
   }, []);
 
+  const refreshProjectItemsFor = useCallback(async (workspaceId: string | null) => {
+    if (!workspaceId) {
+      setProjectItems([]);
+      setActiveProjectItemId(null);
+      return;
+    }
+    try {
+      const next = await window.spark.project.listItems(workspaceId);
+      setProjectItems(next);
+    } catch {
+      setProjectItems([]);
+    }
+  }, []);
+
   // Initial load + reload on workspace change.
   useEffect(() => {
     if (!booted) return;
     void refreshRunsFor(activeId);
-  }, [activeId, booted, refreshRunsFor]);
+    void refreshProjectItemsFor(activeId);
+  }, [activeId, booted, refreshRunsFor, refreshProjectItemsFor]);
 
   // When the runs list changes, reconcile the active selection: keep the
   // current pick if it's still present, otherwise jump to the most live one,
@@ -254,8 +419,42 @@ export default function App() {
   }, [runs]);
 
   useEffect(() => {
+    setActiveProjectItemId((current) => {
+      const visibleProjectItems = projectItems.filter((item) => item.status !== "archived");
+      if (current && visibleProjectItems.some((item) => item.id === current)) return current;
+      return visibleProjectItems[0]?.id ?? null;
+    });
+  }, [projectItems]);
+
+  useEffect(() => {
+    if (!booted || !activeId || runs.length === 0 || projectItems.length === 0) return;
+    for (const item of projectItems) {
+      if (item.status === "archived" || item.linkedRunIds.length === 0 || !isUserCrmTask(item)) continue;
+      const newestRun = runs.find((run) => item.linkedRunIds.includes(run.id));
+      if (!newestRun) continue;
+      const nextStatus = projectStatusForRun(newestRun);
+      if (item.status === nextStatus) continue;
+      void window.spark.project.updateItem({
+        workspaceId: activeId,
+        itemId: item.id,
+        patch: { status: nextStatus },
+      }).then((updated) => {
+        setProjectItems((current) =>
+          current.map((candidate) => (candidate.id === updated.id ? updated : candidate)),
+        );
+      }).catch(() => undefined);
+    }
+  }, [activeId, booted, projectItems, runs]);
+
+  useEffect(() => {
     if (!booted) return;
-    const ids = workspaces.map((workspace) => workspace.id);
+    // Derive the id list from `workspaceIdsKey` (the only input that actually
+    // matters here) rather than depending on the `workspaces` array itself —
+    // `workspaces` gets a new reference on every color edit / worker update,
+    // which would needlessly re-fire N listRuns IPC calls. The key changes
+    // only when a workspace is added/removed/reordered, which is exactly when
+    // the per-workspace run counts need a full refresh.
+    const ids = workspaceIdsKey ? workspaceIdsKey.split("\0") : [];
     if (ids.length === 0) {
       setRunCountsByWorkspace({});
       return;
@@ -272,24 +471,191 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [booted, workspaceIdsKey, workspaces]);
+  }, [booted, workspaceIdsKey]);
 
   useEffect(() => {
     if (!booted) return undefined;
+
+    // Trailing-debounce window. A burst of orchestration events (a run going
+    // planning → running → N worker events → complete) collapses into a
+    // single refresh once events stop arriving for this long.
+    const RUN_REFRESH_DEBOUNCE_MS = 250;
+
+    // Drain the pending-workspace set: refresh the run count for every
+    // workspace that saw an event, and the lifted runs list if the currently
+    // active workspace was among them. Reads activeId via the ref so this is
+    // always against the workspace on screen *now*, not whenever the listener
+    // was registered.
+    const flushRunRefresh = (): void => {
+      runRefreshTimer.current = null;
+      const pending = runRefreshPendingRef.current;
+      if (pending.size === 0) return;
+      const workspaceIds = Array.from(pending);
+      pending.clear();
+      const currentActiveId = activeIdRef.current;
+      for (const workspaceId of workspaceIds) {
+        void refreshRunCount(workspaceId);
+        if (workspaceId === currentActiveId) {
+          void refreshRunsFor(workspaceId);
+        }
+      }
+    };
+
     return window.spark.orchestration.onEvent((event) => {
       if (!event.workspaceId) return;
-      void refreshRunCount(event.workspaceId);
-      if (event.workspaceId === activeId) {
-        void refreshRunsFor(event.workspaceId);
+      // Record the affected workspace and (re)arm the trailing timer. The
+      // active workspace's runs/counts still update — just batched into one
+      // refresh per burst rather than one per event.
+      runRefreshPendingRef.current.add(event.workspaceId);
+      if (runRefreshTimer.current !== null) {
+        window.clearTimeout(runRefreshTimer.current);
       }
+      runRefreshTimer.current = window.setTimeout(flushRunRefresh, RUN_REFRESH_DEBOUNCE_MS);
+
+      // A deletion can race with the orchestration runner still flushing the
+      // run file; a delayed second pass picks up the settled state. We just
+      // re-mark the workspace ~500ms later so the regular debounced flush
+      // re-lists it once things have quiesced.
       if (event.type === "run.deleted") {
+        const deletedWorkspaceId = event.workspaceId;
         window.setTimeout(() => {
-          void refreshRunCount(event.workspaceId);
-          if (event.workspaceId === activeId) void refreshRunsFor(event.workspaceId);
+          runRefreshPendingRef.current.add(deletedWorkspaceId);
+          if (runRefreshTimer.current !== null) {
+            window.clearTimeout(runRefreshTimer.current);
+          }
+          runRefreshTimer.current = window.setTimeout(flushRunRefresh, RUN_REFRESH_DEBOUNCE_MS);
         }, 500);
       }
     });
-  }, [booted, refreshRunCount, refreshRunsFor, activeId]);
+  }, [booted, refreshRunCount, refreshRunsFor]);
+
+  // Clear the run-refresh debounce timer on unmount so a pending flush can't
+  // fire into an unmounted tree.
+  useEffect(() => {
+    return () => {
+      if (runRefreshTimer.current !== null) {
+        window.clearTimeout(runRefreshTimer.current);
+        runRefreshTimer.current = null;
+      }
+    };
+  }, []);
+
+  const handleSelectProjectItem = useCallback((itemId: string | null) => {
+    setActiveProjectItemId(itemId);
+  }, []);
+
+  const handleCreateProjectItem = useCallback(
+    async (input: CreateProjectItemInput): Promise<ProjectItem | null> => {
+      if (!activeId) return null;
+      try {
+        const item = await window.spark.project.createItem({
+          ...input,
+          workspaceId: input.workspaceId || activeId,
+        });
+        setProjectItems((current) => [item, ...current]);
+        setActiveProjectItemId(item.id);
+        return item;
+      } catch {
+        return null;
+      }
+    },
+    [activeId],
+  );
+
+  const handleUpdateProjectItem = useCallback(
+    async (itemId: string, patch: Partial<ProjectItem>): Promise<ProjectItem | null> => {
+      if (!activeId) return null;
+      try {
+        const updatePatch = patch as UpdateProjectItemInput["patch"];
+        const item = await window.spark.project.updateItem({
+          workspaceId: activeId,
+          itemId,
+          patch: updatePatch,
+        });
+        setProjectItems((current) =>
+          current.map((candidate) => (candidate.id === item.id ? item : candidate)),
+        );
+        return item;
+      } catch {
+        return null;
+      }
+    },
+    [activeId],
+  );
+
+  const handleDeleteProjectItem = useCallback(
+    async (itemId: string) => {
+      if (!activeId) return;
+      try {
+        await window.spark.project.deleteItem(activeId, itemId);
+        setProjectItems((current) => current.filter((item) => item.id !== itemId));
+        setActiveProjectItemId((current) => (current === itemId ? null : current));
+      } catch {
+        /* Project Ops delete errors are non-fatal to the running workspace. */
+      }
+    },
+    [activeId],
+  );
+
+  const handleStartProjectItem = useCallback(
+    async (item: ProjectItem) => {
+      if (!activeWorkspace) return;
+      const criteria =
+        item.acceptanceCriteria.length > 0
+          ? item.acceptanceCriteria.map((criterion) => `- ${criterion}`).join("\n")
+          : "- The requested project item is implemented and verified.";
+      const files =
+        item.linkedFiles.length > 0
+          ? item.linkedFiles.map((file) => `- ${file}`).join("\n")
+          : "- Discover the relevant files before editing.";
+      const planText = [
+        `# ${item.title}`,
+        "",
+        item.description || "Implement this Project Ops item.",
+        "",
+        "## Acceptance Criteria",
+        criteria,
+        "",
+        "## Linked Files",
+        files,
+      ].join("\n");
+      try {
+        const existingLiveRun = runs.find(
+          (run) =>
+            item.linkedRunIds.includes(run.id) &&
+            ["planning", "running", "reviewing", "blocked", "paused"].includes(run.status),
+        );
+        if (existingLiveRun) {
+          setActiveProjectItemId(item.id);
+          handleSelectRun(existingLiveRun.id);
+          return;
+        }
+        const run = await window.spark.orchestration.startAutopilot({
+          workspaceId: activeWorkspace.id,
+          workspaceName: activeWorkspace.name,
+          cwd: activeWorkspace.cwd,
+          planTitle: item.title,
+          planText,
+          initialUserNote: "Started from CRM task.",
+        });
+        setRuns((current) => [run, ...current.filter((candidate) => candidate.id !== run.id)]);
+        setActiveProjectItemId(item.id);
+        const linked = await window.spark.project.linkRun({
+          workspaceId: activeWorkspace.id,
+          itemId: item.id,
+          runId: run.id,
+          status: projectStatusForRun(run),
+        });
+        setProjectItems((current) =>
+          current.map((candidate) => (candidate.id === linked.id ? linked : candidate)),
+        );
+        handleSelectRun(run.id);
+      } catch {
+        /* Starting from CRM should not mutate the CRM task if the run fails to launch. */
+      }
+    },
+    [activeWorkspace, handleSelectRun, runs],
+  );
 
   // Theme the entire UI with the active workspace's color. Falls back to the
   // default yellow when nothing is active.
@@ -298,85 +664,213 @@ export default function App() {
     document.documentElement.style.setProperty("--accent", accent);
   }, [activeWorkspace?.color]);
 
-  // Open the dedicated Settings BrowserWindow when any part of the app
-  // dispatches the `spark:open-settings` window event. The keyboard
-  // shortcuts agent in this same wave dispatches it for Mod+,; this handler
-  // is the single subscriber so the binding stays decoupled.
+  // Open the unified in-app SettingsDialog when any part of the app
+  // dispatches the `spark:open-settings` window event. Previously this
+  // routed to a dedicated Settings BrowserWindow (still on disk under
+  // src/renderer/settings); we fold both surfaces into the polished old
+  // dialog so users only see one settings UI.
   useEffect(() => {
     const handler = () => {
-      void window.spark.settings.open();
+      setSettingsOpen(true);
     };
     window.addEventListener("spark:open-settings", handler);
     return () => window.removeEventListener("spark:open-settings", handler);
   }, []);
 
+  // Mirror the workspaces list through a ref so the orchestration listener
+  // doesn't re-subscribe on every workspace state change (which is often
+  // — runs trigger updates).
+  const workspacesRef = useRef(workspaces);
+  workspacesRef.current = workspaces;
+
+  // When the orchestration runner emits `envelope_prepared`, the worker is
+  // about to start and is waiting for a renderer-side PTY at sessionId =
+  // attemptId. We host that PTY inside the user's visible TerminalStack so
+  // the agent's xterm output is watchable. Claim policy:
+  //   1. Prefer reusing a leaf in a terminal tab that has the workspace
+  //      cwd and no PTY activity in the last IDLE_THRESHOLD_MS.
+  //   2. If none, smart-split a fresh leaf into the most appropriate
+  //      terminal tab (active one if its cwd matches, else any terminal
+  //      tab on the workspace, else create a new one).
+  // Claiming a leaf disposes its existing PTY and renames the leaf's
+  // paneId to attemptId; React re-mounts TerminalPane, which spawns a
+  // fresh PTY at the new id, and run-store's `pty.waitForSpawn(attemptId)`
+  // resolves.
   useEffect(() => {
     if (!booted) return;
-    const shellId = defaultShell?.id ?? shells[0]?.id;
-    if (!shellId) return;
 
-    const addSparkWorkerPane = async (event: SparkEvent) => {
+    const IDLE_THRESHOLD_MS = 1500;
+
+    const handleEnvelopePrepared = async (event: SparkEvent) => {
       if (event.type !== "worker_task.envelope_prepared") return;
       if (!event.runId || !event.workerTaskId || !event.attemptId) return;
+      if (!event.workspaceId) return;
 
-      let runtime: Worker["runtime"] = undefined;
+      const ws = workspacesRef.current.find((w) => w.id === event.workspaceId);
+      if (!ws) return;
+      const workspaceCwd = ws.cwd;
+
+      // Pull the runtime so the worker chip shows CLAUDE/CODEX. Best-effort —
+      // the chip is decoration; the PTY claim itself doesn't depend on it.
+      let runtime: "claude" | "codex" | undefined;
       try {
         const run = await window.spark.orchestration.getRun(event.runId);
         const task = run?.workerTasks.find((item) => item.id === event.workerTaskId);
-        if (task) {
+        if (task?.runtimePreference === "claude" || task?.runtimePreference === "codex") {
           runtime = task.runtimePreference;
         }
       } catch {
-        /* the event already has enough information to create a visible pane */
+        /* runtime is decorative */
       }
 
-      const pane: Worker = {
-        id: event.attemptId,
-        shellId,
-        kind: "orchestration",
+      const workerMeta = {
         runtime,
         runId: event.runId,
         workerTaskId: event.workerTaskId,
         attemptId: event.attemptId,
+        state: "running" as const,
       };
 
-      setWorkspaces((list) =>
-        list.map((workspace) => {
-          if (workspace.id !== event.workspaceId) return workspace;
-          if (workspace.workers.some((worker) => worker.id === pane.id)) return workspace;
-          // Sweep stale autofill panes from earlier versions of this code. We
-          // no longer pad: the grid auto-sizes around actual panes. Before
-          // appending, reuse a pane the user left at a fresh/cleared prompt.
-          const real = workspace.workers.filter((w) => w.kind !== "autofill");
-          for (const stale of workspace.workers) {
-            if (stale.kind === "autofill") void window.spark.pty.dispose(stale.id);
-          }
-          const reusable = real.find((worker) =>
-            isReusableWorkerSlot(worker, workerIntegrationsRef.current),
-          );
-          if (reusable) {
-            void window.spark.pty.dispose(reusable.id);
-            return {
-              ...workspace,
-              workers: real.map((worker) =>
-                worker.id === reusable.id
-                  ? { ...pane, shellId: reusable.shellId }
-                  : worker,
-              ),
-            };
-          }
-          return { ...workspace, workers: [...real, pane] };
-        }),
+      const t = tabsRef.current;
+      if (!t) return;
+      const now = Date.now();
+      const cwdMatches = (leafCwd: string | undefined): boolean => {
+        if (!leafCwd) return true; // unset cwd is treated as workspace root
+        return samePath(leafCwd, workspaceCwd);
+      };
+
+      // 1. Find an idle leaf in any terminal tab whose cwd matches.
+      let claimTabId: string | null = null;
+      let claimPaneId: string | null = null;
+      for (const tab of t.tabs) {
+        if (tab.kind !== "terminal") continue;
+        const idleLeaf = findIdleLeaf(tab.root, paneRuntimeRef.current, now, IDLE_THRESHOLD_MS, cwdMatches, event.runId ?? undefined);
+        if (idleLeaf) {
+          claimTabId = tab.id;
+          claimPaneId = idleLeaf.paneId;
+          break;
+        }
+      }
+
+      if (claimTabId && claimPaneId) {
+        // Reuse: dispose the user's PTY and rename the leaf to attemptId.
+        // React unmounts the old TerminalPane (which already has its own
+        // dispose-on-unmount path), then mounts a new one at the new id.
+        void window.spark.pty.dispose(claimPaneId).catch(() => undefined);
+        paneRuntimeRef.current.delete(claimPaneId);
+        const renamed = t.renameLeaf(claimTabId, claimPaneId, event.attemptId);
+        if (renamed) {
+          t.setLeafWorker(claimTabId, event.attemptId, workerMeta);
+          t.setLeafCwd(claimTabId, event.attemptId, workspaceCwd);
+          t.setActiveTab(claimTabId);
+          t.setActiveTerminalPane(claimTabId, event.attemptId);
+          return;
+        }
+      }
+
+      // 2. No idle leaf — find or create a terminal tab and smart-add a new
+      //    leaf with paneId=attemptId. Prefer the currently-active terminal
+      //    tab if it has the right cwd; otherwise the first terminal tab
+      //    that does; otherwise create a fresh one.
+      const activeTerminal = t.tabs.find(
+        (tab) => tab.id === t.activeId && tab.kind === "terminal",
       );
+      let targetTabId: string | null = null;
+      if (
+        activeTerminal &&
+        activeTerminal.kind === "terminal" &&
+        anyLeafCwdMatches(activeTerminal.root, paneRuntimeRef.current, cwdMatches)
+      ) {
+        targetTabId = activeTerminal.id;
+      } else {
+        const matching = t.tabs.find(
+          (tab) =>
+            tab.kind === "terminal" &&
+            anyLeafCwdMatches(tab.root, paneRuntimeRef.current, cwdMatches),
+        );
+        targetTabId = matching ? matching.id : t.newTerminalTab(workspaceCwd);
+      }
+
+      const ok = t.addPaneInTab(targetTabId, event.attemptId, {
+        cwd: workspaceCwd,
+        worker: workerMeta,
+      });
+      if (ok) {
+        t.setActiveTab(targetTabId);
+        t.setActiveTerminalPane(targetTabId, event.attemptId);
+      }
+    };
+
+    // Mark the worker pane "done" on attempt finish — keeps the xterm
+    // visible (so the user can read the report) but releases the leaf so
+    // the next worker can claim it.
+    const handleAttemptFinished = (event: SparkEvent) => {
+      if (event.type !== "worker_attempt.finished") return;
+      const attemptId = event.attemptId;
+      if (!attemptId) return;
+      const t = tabsRef.current;
+      if (!t) return;
+      for (const tab of t.tabs) {
+        if (tab.kind !== "terminal") continue;
+        const leaf = findLeafByPaneId(tab.root, attemptId);
+        if (leaf) {
+          const prior = leaf.worker;
+          t.setLeafWorker(tab.id, attemptId, {
+            runtime: prior?.runtime,
+            runId: event.runId ?? prior?.runId ?? "",
+            workerTaskId: event.workerTaskId ?? prior?.workerTaskId ?? "",
+            attemptId,
+            state: "done",
+          });
+          break;
+        }
+      }
     };
 
     return window.spark.orchestration.onEvent((event) => {
-      void addSparkWorkerPane(event);
+      void handleEnvelopePrepared(event);
+      handleAttemptFinished(event);
     });
-  }, [activeId, booted, defaultShell?.id, shells]);
+  }, [booted]);
+
+  // WorkspaceRail prop callbacks. `setActiveId` / `setEditingId` are stable
+  // React setters, so these can carry empty dep arrays and stay referentially
+  // stable for the lifetime of the component — which lets the React.memo on
+  // WorkspaceRail actually skip renders.
+  const handleActivateWorkspace = useCallback((id: string) => {
+    setActiveId(id);
+  }, []);
+
+  const handleEditWorkspace = useCallback((id: string) => {
+    setEditingId((prev) => (prev === id ? null : id));
+  }, []);
+
+  const handleCloseWorkspaceEditor = useCallback(() => {
+    setEditingId(null);
+  }, []);
+
+  // WindowChrome prop callbacks — hoisted to stable references so the
+  // React.memo on WindowChrome can skip re-renders triggered by unrelated
+  // App state churn (color edits, orchestration events, run polls).
+  const handleToggleLeft = useCallback(() => {
+    setShowLeft((v) => !v);
+  }, []);
+
+  const handleToggleRight = useCallback(() => {
+    setShowRight((v) => !v);
+  }, []);
+
+  const handleOpenSettings = useCallback(() => {
+    setSettingsOpen(true);
+  }, []);
 
   const updateWs = useCallback((id: string, patch: Partial<Workspace>) => {
     setWorkspaces((ws) => ws.map((w) => (w.id === id ? { ...w, ...patch } : w)));
+  }, []);
+
+  const previewWsColor = useCallback((id: string, color: string) => {
+    if (activeIdRef.current !== id) return;
+    document.documentElement.style.setProperty("--accent", color);
   }, []);
 
   const deleteWs = useCallback((id: string) => {
@@ -402,7 +896,7 @@ export default function App() {
     const usedColors = new Set(workspaces.map((w) => w.color.toLowerCase()));
     const color = WORKSPACE_COLORS.find((c) => !usedColors.has(c.toLowerCase())) ?? WORKSPACE_COLORS[0];
     const ws: Workspace = {
-      id: uid("ws"),
+      id: makeId("ws"),
       name: basename(path) || "workspace",
       cwd: path,
       color,
@@ -413,37 +907,28 @@ export default function App() {
     setEditingId(ws.id);
   }, [workspaces, activeWorkspace, home]);
 
-  const addWorker = useCallback(
-    (workspaceId: string, shellId: string) => {
-      const shell = shells.find((s) => s.id === shellId);
-      if (!shell) return;
-      setWorkspaces((list) =>
-        list.map((w) =>
-          w.id === workspaceId
-            ? { ...w, workers: [...w.workers, { id: uid("w"), shellId: shell.id }] }
-            : w,
-        ),
-      );
-    },
-    [shells],
-  );
-
-  const removeWorker = useCallback((workspaceId: string, workerId: string) => {
-    void window.spark.pty.dispose(workerId);
-    setWorkspaces((list) =>
-      list.map((w) =>
-        w.id === workspaceId
-          ? { ...w, workers: w.workers.filter((x) => x.id !== workerId) }
-          : w,
-      ),
-    );
-  }, []);
-
   // ── File / editor tab integration ──────────────────────────────────────────
 
   const openEditorFile = useCallback(
     (entry: FsEntry) => {
       tabs.openEditorTab(entry);
+    },
+    [tabs],
+  );
+
+  // RightPanel FileTree prop callbacks. Hoisted to stable references (keyed
+  // on the now-stable `tabs` object) so the React.memo on RightPanel can skip
+  // re-renders when only unrelated App state changed.
+  const handleDeleteFile = useCallback(
+    (path: string) => {
+      tabs.closeEditorByPath(path);
+    },
+    [tabs],
+  );
+
+  const handleRenameFile = useCallback(
+    (oldPath: string, entry: FsEntry) => {
+      tabs.setEditorEntry(oldPath, entry);
     },
     [tabs],
   );
@@ -474,13 +959,13 @@ export default function App() {
   const lastOpenedUrlByTerminalRef = useRef<Map<string, string>>(new Map());
 
   const handleDetectedUrl = useCallback(
-    (terminalId: string, url: string) => {
-      tabs.setDetectedUrl(terminalId, url);
+    (tabId: string, paneId: string, url: string) => {
+      tabs.setDetectedUrl(tabId, paneId, url);
       // Re-broadcast so other listeners (status bar, agent bridge) can
       // react without coupling directly to the terminal stack.
       window.dispatchEvent(
         new CustomEvent("spark:detected-url", {
-          detail: { url, sessionId: terminalId },
+          detail: { url, sessionId: paneId },
         }),
       );
 
@@ -493,10 +978,12 @@ export default function App() {
       }
       if (port === null || !AUTO_PREVIEW_PORTS.has(port)) return;
 
-      // Suppress repeats for this terminal pointing at the same origin.
-      const last = lastOpenedUrlByTerminalRef.current.get(terminalId);
+      // Suppress repeats for this pane pointing at the same origin — keyed
+      // by paneId, not tabId, so two split panes running different dev
+      // servers each get their own auto-preview.
+      const last = lastOpenedUrlByTerminalRef.current.get(paneId);
       if (last && sameOrigin(last, url)) return;
-      lastOpenedUrlByTerminalRef.current.set(terminalId, url);
+      lastOpenedUrlByTerminalRef.current.set(paneId, url);
 
       // If a preview tab already shows the same origin, focus it instead
       // of stacking a duplicate — multi-tab parity with how editors dedupe
@@ -526,12 +1013,17 @@ export default function App() {
   }, []);
 
   const handleNewPreviewTab = useCallback(() => {
-    const raw = window.prompt("URL to preview", "http://localhost:3000");
-    if (!raw) return;
-    const trimmed = raw.trim();
-    if (!trimmed) return;
-    const url = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
-    tabs.newPreviewTab(url);
+    // window.prompt is disabled in Electron renderers (returns null silently
+    // since Electron 4), which is why the previous prompt-based flow looked
+    // like "click does nothing." Open the tab empty instead — BrowserPane's
+    // EmptyState plus the address bar at the top of AddressBar (which
+    // auto-focuses on mount when the URL is empty) gives the user a place
+    // to type without any modal.
+    tabs.newPreviewTab("");
+  }, [tabs]);
+
+  const handleNewProjectTab = useCallback(() => {
+    tabs.newProjectTab();
   }, [tabs]);
 
   const handlePreviewUrlChange = useCallback(
@@ -609,22 +1101,110 @@ export default function App() {
       },
       "tab.cycleNext": () => tabs.cycleNext(),
       "tab.cyclePrev": () => tabs.cyclePrev(),
+      "terminal.splitRight": () => {
+        // The active workbench tab dictates which split happens — we only
+        // act on terminal tabs so this chord is a no-op anywhere else.
+        const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+        if (!active || active.kind !== "terminal") return;
+        tabs.splitTerminalPane(active.id, active.activePaneId, "horizontal");
+      },
+      "terminal.splitDown": () => {
+        const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+        if (!active || active.kind !== "terminal") return;
+        tabs.splitTerminalPane(active.id, active.activePaneId, "vertical");
+      },
+      "terminal.closePane": () => {
+        const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+        if (!active || active.kind !== "terminal") return;
+        tabs.closeTerminalPane(active.id, active.activePaneId);
+      },
     }),
     [handleNewEditorTab, handleNewPreviewTab, handleNewTerminalTab, tabs],
   );
 
   useGlobalShortcuts(shortcutHandlers);
 
-  // Dispose PTYs when terminal tabs close.
-  const onTerminalExit = useCallback(
-    (tabId: string) => {
-      void window.spark.pty.dispose(tabId);
-      // Reflect "exited" by closing the tab automatically would be too
-      // aggressive — many users want to read the final stdout. We just
-      // let it sit; closing the tab via the X disposes the pty.
-      void tabId;
+  // Dispose PTYs when terminal panes exit. The renderer-side TerminalPane
+  // already calls pty.dispose on unmount, so this handler is intentionally
+  // a no-op for unmount cases — but we keep the seam so future "exited
+  // pane → auto-close" UX can hook in here without touching every call site.
+  const onTerminalPaneExit = useCallback((tabId: string, paneId: string) => {
+    paneRuntimeRef.current.delete(paneId);
+    const t = tabsRef.current;
+    const tab = t.tabs.find((item) => item.id === tabId);
+    if (!tab || tab.kind !== "terminal") return;
+    const leaf = findLeafByPaneId(tab.root, paneId);
+    if (!leaf?.worker) return;
+    // Manual chips (user-typed claude/codex, or AddPane menu launches) have
+    // no lifecycle outside the pane. Clear them outright when the PTY dies
+    // so the pane doesn't keep displaying a stale "DONE" badge after the
+    // agent quits. Spark-owned workers (source="spark") stay visible as
+    // "done" so the run-bookkeeping / review flow can still surface them.
+    if (leaf.worker.source === "manual") {
+      t.setLeafWorker(tabId, paneId, null);
+      return;
+    }
+    if (leaf.worker.state !== "running") return;
+    t.setLeafWorker(tabId, paneId, { ...leaf.worker, state: "done" });
+  }, []);
+
+  // useTerminalSession sniffs the PTY byte stream for the alt-screen toggle
+  // every Ink TUI (claude / codex) emits and tells us when one enters or
+  // leaves. We use it to add a "manual" worker chip the moment the user
+  // types `codex`/`claude` in any shell pane, and to clear it again the
+  // moment they Ctrl+C out — the chip means "an agent is live in this
+  // pane" and nothing more, so once the agent quits the pane shows no chip
+  // at all (rather than a lingering "DONE" badge).
+  // Spark-orchestrated workers (source="spark") have their own lifecycle
+  // driven by IPC and must never be touched here — otherwise a Ctrl+C in a
+  // worker pane would silently break the run's bookkeeping.
+  const onTerminalPaneAgentState = useCallback(
+    (
+      tabId: string,
+      paneId: string,
+      state: { runtime: "claude" | "codex" | null; running: boolean },
+    ) => {
+      const t = tabsRef.current;
+      const tab = t.tabs.find((item) => item.id === tabId);
+      if (!tab || tab.kind !== "terminal") return;
+      const leaf = findLeafByPaneId(tab.root, paneId);
+      if (!leaf) return;
+      const existing = leaf.worker;
+      if (state.running) {
+        if (existing && existing.source !== "manual") return;
+        const runtime = state.runtime ?? existing?.runtime;
+        t.setLeafWorker(tabId, paneId, {
+          runtime,
+          runId: "manual",
+          workerTaskId: existing?.workerTaskId ?? `manual-${paneId}`,
+          attemptId: existing?.attemptId ?? paneId,
+          source: "manual",
+          state: "running",
+        });
+        return;
+      }
+      // running=false: the agent's TUI closed — the user Ctrl+C'd out (or
+      // the agent exited) and the shell prompt is back. Clear the manual
+      // chip outright so the pane shows nothing once no agent is live; a
+      // lingering "DONE" badge here is just noise. Only touch chips we own
+      // (manual) — Spark-orchestrated workers keep their IPC-driven "done"
+      // state for the run-bookkeeping / review flow.
+      if (!existing || existing.source !== "manual") return;
+      t.setLeafWorker(tabId, paneId, null);
     },
     [],
+  );
+
+  // Total live worker count for the status bar. `countRunningTerminalWorkers`
+  // is a recursive walk of every terminal tab's pane tree — memoize it so a
+  // status-bar repaint isn't triggered (and the walk isn't re-run) on every
+  // unrelated App re-render. `tabs.tabs` is referentially stable across
+  // renders, so it changes only when the tab layout actually does.
+  // Declared before the early returns below because hooks must run on every
+  // render in the same order.
+  const workerCount = useMemo(
+    () => (activeWorkspace?.workers.length ?? 0) + countRunningTerminalWorkers(tabs.tabs),
+    [tabs.tabs, activeWorkspace?.workers.length],
   );
 
   if (bootError) {
@@ -654,12 +1234,9 @@ export default function App() {
         platform={platform}
         leftOn={showLeft}
         rightOn={showRight}
-        onToggleLeft={() => setShowLeft((v) => !v)}
-        onToggleRight={() => setShowRight((v) => !v)}
-        onOpenSettings={() => setSettingsOpen(true)}
-        onOpenPreferences={() => {
-          void window.spark.settings.open();
-        }}
+        onToggleLeft={handleToggleLeft}
+        onToggleRight={handleToggleRight}
+        onOpenSettings={handleOpenSettings}
       />
 
       <div style={{ flex: 1, display: "flex", minHeight: 0, position: "relative" }}>
@@ -670,13 +1247,12 @@ export default function App() {
             activeWorkspace={activeWorkspace}
             editingId={editingId}
             width={RAIL_WIDTH}
-            onActivate={(id) => {
-              setActiveId(id);
-            }}
-            onEdit={(id) => setEditingId((prev) => (prev === id ? null : id))}
+            onActivate={handleActivateWorkspace}
+            onEdit={handleEditWorkspace}
             onChange={updateWs}
+            onPreviewColor={previewWsColor}
             onDelete={deleteWs}
-            onCloseEditor={() => setEditingId(null)}
+            onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
           />
         )}
@@ -697,25 +1273,27 @@ export default function App() {
               tabs={tabs}
               workspace={activeWorkspace}
               shell={terminalShell}
-              shells={shells}
-              defaultShell={defaultShell}
               runs={runs}
+              projectItems={projectItems}
+              activeProjectItemId={activeProjectItemId}
               activeRunId={activeRunId}
-              onSelectRun={setActiveRunId}
+              onSelectProjectItem={handleSelectProjectItem}
+              onSelectRun={handleSelectRun}
+              onCreateProjectItem={handleCreateProjectItem}
+              onUpdateProjectItem={handleUpdateProjectItem}
+              onDeleteProjectItem={handleDeleteProjectItem}
+              onStartProjectItem={handleStartProjectItem}
               onDetectedUrl={handleDetectedUrl}
               onSparkOpenFile={openFileByPath}
-              onTerminalExit={onTerminalExit}
+              onTerminalPaneExit={onTerminalPaneExit}
               onPreviewUrlChange={handlePreviewUrlChange}
-              onAddWorker={(shellId) =>
-                activeWorkspace && addWorker(activeWorkspace.id, shellId)
-              }
-              onRemoveWorker={(workerId) =>
-                activeWorkspace && removeWorker(activeWorkspace.id, workerId)
-              }
-              onWorkerIntegration={registerWorkerIntegration}
+              onPaneCwd={handlePaneCwd}
+              onPaneActivity={handlePaneActivity}
+              onTerminalPaneAgentState={onTerminalPaneAgentState}
               onNewTerminalTab={handleNewTerminalTab}
               onNewEditorTab={handleNewEditorTab}
               onNewPreviewTab={handleNewPreviewTab}
+              onNewProjectTab={handleNewProjectTab}
             />
           )}
         </main>
@@ -730,10 +1308,10 @@ export default function App() {
             }
             runs={runs}
             activeRunId={activeRunId}
-            onSelectRun={setActiveRunId}
+            onSelectRun={handleSelectRun}
             onOpenFile={openEditorFile}
-            onDeleteFile={(path) => tabs.closeEditorByPath(path)}
-            onRenameFile={(oldPath, entry) => tabs.setEditorEntry(oldPath, entry)}
+            onDeleteFile={handleDeleteFile}
+            onRenameFile={handleRenameFile}
           />
         )}
 
@@ -747,6 +1325,13 @@ export default function App() {
               const saved = await window.spark.settings.save(nextSettings);
               setSettings(saved);
               setDefaultShell(resolveDefaultShell(shells, saved, detectedDefaultShell));
+            }}
+            onOpenRun={(runId, workspaceId) => {
+              if (workspaces.some((w) => w.id === workspaceId)) {
+                setActiveId(workspaceId);
+              }
+              handleSelectRun(runId);
+              setSettingsOpen(false);
             }}
           />
         )}
@@ -771,17 +1356,7 @@ export default function App() {
         workspace={activeWorkspace}
         defaultShell={defaultShell}
         platform={platform}
-      />
-
-      {/* Plan-mode overlay. Renders only when the active run has queued
-          mutations; mounted at root level so its backdrop-blur sheet covers
-          the workbench (centre) and the SparkAgentPanel (right) without
-          fighting the absolute-positioned WindowChrome / StatusBar / search
-          panel for stacking-context ownership. The active-run lookup mirrors
-          OrchestrationSidebar so the overlay binds to whatever the user has
-          selected on the right pane. */}
-      <PlanDiffReview
-        run={runs.find((r) => r.id === activeRunId) ?? null}
+        workerCount={workerCount}
       />
     </div>
   );
@@ -793,42 +1368,62 @@ interface WorkspaceProps {
   tabs: ReturnType<typeof useTabs>;
   workspace: Workspace | null;
   shell: ShellInfo | null;
-  shells: ShellInfo[];
-  defaultShell: ShellInfo | null;
   runs: RunState[];
+  projectItems: ProjectItem[];
+  activeProjectItemId: string | null;
   activeRunId: string | null;
+  onSelectProjectItem: (id: string | null) => void;
   onSelectRun: (id: string | null) => void;
-  onDetectedUrl: (terminalId: string, url: string) => void;
+  onCreateProjectItem: (input: CreateProjectItemInput) => Promise<ProjectItem | null>;
+  onUpdateProjectItem: (itemId: string, patch: Partial<ProjectItem>) => Promise<ProjectItem | null>;
+  onDeleteProjectItem: (itemId: string) => void | Promise<void>;
+  onStartProjectItem: (item: ProjectItem) => void | Promise<void>;
+  onDetectedUrl: (tabId: string, paneId: string, url: string) => void;
   onSparkOpenFile: (path: string) => void;
-  onTerminalExit: (terminalId: string) => void;
+  onTerminalPaneExit: (tabId: string, paneId: string) => void;
   onPreviewUrlChange: (id: string, url: string) => void;
-  onAddWorker: (shellId: string) => void;
-  onRemoveWorker: (workerId: string) => void;
-  onWorkerIntegration: (id: string, integration: ShellIntegration | null) => void;
+  onPaneCwd: (tabId: string, paneId: string, cwd: string) => void;
+  onPaneActivity: (tabId: string, paneId: string) => void;
+  onTerminalPaneAgentState: (
+    tabId: string,
+    paneId: string,
+    state: { runtime: "claude" | "codex" | null; running: boolean },
+  ) => void;
   onNewTerminalTab: () => void;
   onNewEditorTab: () => void;
   onNewPreviewTab: () => void;
+  onNewProjectTab: () => void;
 }
 
-function Workspace({
+// Memoized: every prop is either referentially stable (the `tabs` object,
+// all the hoisted useCallback handlers) or a value that genuinely changes
+// (runs, projectItems, the active ids). So the memo skips re-renders driven
+// by unrelated App state — e.g. a live workspace-color drag.
+const Workspace = React.memo(function Workspace({
   tabs,
   workspace,
   shell,
-  shells,
-  defaultShell,
   runs,
+  projectItems,
+  activeProjectItemId,
   activeRunId,
+  onSelectProjectItem,
   onSelectRun,
+  onCreateProjectItem,
+  onUpdateProjectItem,
+  onDeleteProjectItem,
+  onStartProjectItem,
   onDetectedUrl,
   onSparkOpenFile,
-  onTerminalExit,
+  onTerminalPaneExit,
   onPreviewUrlChange,
-  onAddWorker,
-  onRemoveWorker,
-  onWorkerIntegration,
+  onPaneCwd,
+  onPaneActivity,
+  onTerminalPaneAgentState,
   onNewTerminalTab,
   onNewEditorTab,
   onNewPreviewTab,
+  onNewProjectTab,
 }: WorkspaceProps) {
   return (
     <div
@@ -848,6 +1443,7 @@ function Workspace({
         onNewTerminal={onNewTerminalTab}
         onNewEditor={onNewEditorTab}
         onNewPreview={onNewPreviewTab}
+        onNewProject={onNewProjectTab}
       />
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
         <EditorStack
@@ -862,7 +1458,18 @@ function Workspace({
           shell={shell}
           onDetectedUrl={onDetectedUrl}
           onSparkOpen={(input) => onSparkOpenFile(input.file)}
-          onExit={(id) => onTerminalExit(id)}
+          onPaneExit={(tabId, paneId) => onTerminalPaneExit(tabId, paneId)}
+          onActivatePane={(tabId, paneId) => tabs.setActiveTerminalPane(tabId, paneId)}
+          onSplitRatioChange={(tabId, path, ratio) =>
+            tabs.setTerminalSplitRatio(tabId, path, ratio)
+          }
+          onSplitPane={(tabId, paneId, direction, autorun) =>
+            tabs.splitTerminalPane(tabId, paneId, direction, autorun)
+          }
+          onClosePane={(tabId, paneId) => tabs.closeTerminalPane(tabId, paneId)}
+          onPaneCwd={onPaneCwd}
+          onPaneActivity={onPaneActivity}
+          onPaneAgentState={onTerminalPaneAgentState}
         />
         <PreviewStack
           tabs={tabs.tabs}
@@ -877,40 +1484,32 @@ function Workspace({
           activeRunId={activeRunId}
           onSelectRun={onSelectRun}
         />
-        {/* Orchestration worker grid is mounted hidden so worker PTYs stay
-            alive across tab switches and orchestration writes can target
-            the right session. The user-facing surface is the runs canvas;
-            the grid here is purely for keeping the underlying xterms
-            attached and reporting integration state. Without this mount,
-            the renderer would never call pty.spawn for orchestration
-            workers, breaking every run. */}
-        {workspace ? (
-          <div
-            aria-hidden
-            style={{
-              position: "absolute",
-              inset: 0,
-              visibility: "hidden",
-              pointerEvents: "none",
-              zIndex: 0,
-            }}
-          >
-            <TerminalGrid
-              workspace={workspace}
-              shells={shells}
-              defaultShell={defaultShell}
-              onAddWorker={onAddWorker}
-              onRemoveWorker={onRemoveWorker}
-              onWorkerIntegration={onWorkerIntegration}
-            />
-          </div>
-        ) : null}
+        <ProjectStack
+          tabs={tabs.tabs}
+          activeId={tabs.activeId}
+          workspace={workspace}
+          projectItems={projectItems}
+          activeProjectItemId={activeProjectItemId}
+          onSelectProjectItem={onSelectProjectItem}
+          onCreateProjectItem={onCreateProjectItem}
+          onUpdateProjectItem={onUpdateProjectItem}
+          onDeleteProjectItem={onDeleteProjectItem}
+          onStartProjectItem={onStartProjectItem}
+        />
+        {/* The legacy hidden orchestration TerminalGrid was removed: worker
+            PTYs now spawn inside the user-visible TerminalStack via the
+            envelope_prepared claim flow in App.tsx. This means worker
+            output is watchable, and one PTY surface (TerminalStack) carries
+            both user shells and worker shells. */}
       </div>
     </div>
   );
-}
+});
 
-function RightPanel({
+// Memoized: `workspace` is the memoized activeWorkspace, `activePath` is a
+// derived primitive, and every callback is a hoisted stable reference — so
+// the memo skips re-renders from unrelated App state churn.
+const RightPanel = React.memo(function RightPanel({
   workspace,
   activePath,
   runs,
@@ -964,9 +1563,11 @@ function RightPanel({
       )}
     </aside>
   );
-}
+});
 
-function NoWorkspace({ onCreate }: { onCreate: () => void }) {
+// Memoized: its sole prop `onCreate` is a stable useCallback, so this static
+// empty-state view never re-renders once mounted.
+const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: () => void }) {
   return (
     <div
       style={{
@@ -1048,4 +1649,4 @@ function NoWorkspace({ onCreate }: { onCreate: () => void }) {
       </div>
     </div>
   );
-}
+});

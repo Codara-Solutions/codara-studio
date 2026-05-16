@@ -187,7 +187,3 @@ export async function detectAgentRuntimes(force = false): Promise<AgentRuntimeDi
   cache = { value, expires: now + CACHE_MS };
   return value;
 }
-
-export function listKnownRuntimes(): RuntimeSpec[] {
-  return RUNTIMES;
-}

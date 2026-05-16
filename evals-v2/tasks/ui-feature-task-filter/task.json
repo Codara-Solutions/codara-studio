@@ -1,0 +1,19 @@
+{
+  "id": "ui-feature-task-filter",
+  "category": "ui_feature",
+  "seed": "seed",
+  "budgetSeconds": 900,
+  "publicGates": [
+    {
+      "id": "public-filter-export",
+      "command": "node -e \"const { filterTasks } = require('./app'); const out = filterTasks([{title:'Ship',status:'done'},{title:'Fix',status:'open'}], 'open'); if (out.length !== 1 || out[0].title !== 'Fix') throw new Error('filter failed');\""
+    }
+  ],
+  "hiddenGates": [
+    {
+      "id": "hidden-all-and-empty-behavior",
+      "command": "node -e \"const { filterTasks } = require('./app'); const tasks=[{title:'A',status:'open'}]; if (filterTasks(tasks,'all').length !== 1) throw new Error('all failed'); if (filterTasks(tasks,'missing').length !== 0) throw new Error('missing failed');\""
+    }
+  ]
+}
+

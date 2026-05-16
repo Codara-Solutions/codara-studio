@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
 import EditorPane from "../components/EditorPane";
 import type { EditorTab, Tab, TabId } from "./types";
 
@@ -18,13 +18,17 @@ interface Props {
   onClose: (id: TabId) => void;
 }
 
-export default function EditorStack({
-  tabs,
-  activeId,
-  onDirtyChange,
-  onClose,
-}: Props) {
-  const editors = tabs.filter((t): t is EditorTab => t.kind === "editor");
+// React.memo: with the useTabs API object now memoized, EditorStack's props
+// only change when the tab list / active id / callbacks genuinely change,
+// so an unrelated App re-render no longer walks this whole stack.
+function EditorStack({ tabs, activeId, onDirtyChange, onClose }: Props) {
+  // Memoize the filtered list so it keeps a stable identity when an
+  // unrelated tab kind mutates — and so the GC effect below (keyed on
+  // `editors`) only fires when the editor set actually changes.
+  const editors = useMemo(
+    () => tabs.filter((t): t is EditorTab => t.kind === "editor"),
+    [tabs],
+  );
 
   const dirtyRef = useRef(onDirtyChange);
   const closeRef = useRef(onClose);
@@ -62,7 +66,10 @@ export default function EditorStack({
 
   if (editors.length === 0) return null;
   return (
-    <div style={{ position: "absolute", inset: 0 }}>
+    // pointer-events:none on the outer so this stack's empty space doesn't
+    // absorb clicks meant for whichever stack is paint-order below it. The
+    // active inner wrapper re-enables pointer-events:auto for its own panes.
+    <div style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
       {editors.map((t) => {
         const visible = t.id === activeId;
         const bundle = getBundle(t.id);
@@ -90,3 +97,5 @@ export default function EditorStack({
     </div>
   );
 }
+
+export default React.memo(EditorStack);

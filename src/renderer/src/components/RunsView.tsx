@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   PlannedStepAgent,
   RunState,
@@ -7,11 +7,26 @@ import type {
   WorkerTask,
   Workspace,
 } from "@shared/types";
+import {
+  isRunningStatus as isRunningRunStatus,
+  runStatusColor,
+} from "../lib/run-status";
 const MIN_RUN_CANVAS_ZOOM = 0.3;
 const MAX_RUN_CANVAS_ZOOM = 2.5;
 const DEFAULT_RUN_CANVAS_ZOOM = 1;
 const WHEEL_ZOOM_SENSITIVITY = 0.0014;
 const ZOOM_EASE = 0.32;
+const RUN_START_NODE_WIDTH = 86;
+const RUN_CONNECTOR_WIDTH = 104;
+const RUN_STEP_NODE_WIDTH = 286;
+const RUN_END_NODE_WIDTH = 112;
+const STEP_NODE_HEIGHT = 174;
+const WORKER_GRAPH_LANE_GAP = 28;
+const WORKER_GRAPH_NODE_WIDTH = Math.floor((RUN_STEP_NODE_WIDTH - WORKER_GRAPH_LANE_GAP) / 2);
+const WORKER_GRAPH_CENTER_NODE_WIDTH = 204;
+const WORKER_GRAPH_NODE_HEIGHT = 40;
+const WORKER_GRAPH_ROW_GAP = 12;
+const WORKER_GRAPH_TOP = 26;
 
 interface Props {
   workspace: Workspace | null;
@@ -27,6 +42,11 @@ interface AgentRow {
   task?: WorkerTask;
   attempt?: WorkerAttempt;
 }
+
+// Shared, frozen empty rows array. Steps with no planned agents / tasks all
+// point at this same reference so a memoized StepColumn / WorkerStack isn't
+// torn down just because `?? []` minted a fresh empty array each render.
+const EMPTY_AGENT_ROWS: readonly AgentRow[] = Object.freeze([]);
 
 export default function RunsView({ workspace, runs, activeRunId }: Props) {
   // Canvas-local state — events, the chosen event, and resolved artifact
@@ -221,7 +241,7 @@ function RunIdChip({ runId }: { runId: string }) {
   );
 }
 
-function Metric({
+const Metric = React.memo(function Metric({
   label,
   value,
   separated,
@@ -270,9 +290,15 @@ function Metric({
       </b>
     </span>
   );
-}
+});
 
 function RunCanvas({ run }: { run: RunState }) {
+  // The "00:00:45"-style elapsed timers compute their value off Date.now()
+  // at render time, so they need a periodic re-render to keep counting. That
+  // 1Hz tick lives inside the tiny <ElapsedTime> leaves (one per visible
+  // timer) rather than here — ticking the whole canvas would re-render every
+  // StepColumn / StepNode / WorkerStack once a second for nothing.
+
   const [zoomLabel, setZoomLabel] = useState(`${Math.round(DEFAULT_RUN_CANVAS_ZOOM * 100)}%`);
   const [isPanning, setIsPanning] = useState(false);
   // Selecting a step card surfaces its tasks/attempts in a strip below the
@@ -313,9 +339,23 @@ function RunCanvas({ run }: { run: RunState }) {
 
   const maps = useMemo(() => buildRunMaps(run), [run]);
   const orderedSteps = useMemo(() => sortSteps(run.steps), [run.steps]);
+  // agentRowsForStep walks the planned-agents / task / attempt maps for a
+  // step; it used to be re-derived inside every StepColumn AND every StepNode
+  // on each render. Compute the rows for every step once here, keyed by step
+  // id, so the memoized node components below receive a stable array.
+  const agentRowsByStep = useMemo(() => {
+    const byStep = new Map<string, AgentRow[]>();
+    orderedSteps.forEach((step, index) => {
+      byStep.set(step.id, agentRowsForStep(step, maps.taskById, maps.attemptByTask, index + 1));
+    });
+    return byStep;
+  }, [orderedSteps, maps]);
   const graphWidth = orderedSteps.length === 0
-    ? 784
-    : 110 + (orderedSteps.length * 320) + 208;
+    ? RUN_START_NODE_WIDTH + (RUN_CONNECTOR_WIDTH * 2) + RUN_STEP_NODE_WIDTH + 248
+    : RUN_START_NODE_WIDTH
+      + (orderedSteps.length * (RUN_CONNECTOR_WIDTH + RUN_STEP_NODE_WIDTH))
+      + RUN_CONNECTOR_WIDTH
+      + RUN_END_NODE_WIDTH;
   const contentWidth = Math.max(920, graphWidth);
 
   const applyTransform = () => {
@@ -499,6 +539,18 @@ function RunCanvas({ run }: { run: RunState }) {
     setIsPanning(false);
   };
 
+  // Stable selection handlers — the memoized StepNode / WorkerNode tree only
+  // skips re-rendering if the onClick props it receives keep their identity.
+  // Both are pure setState updaters, so an empty dep list is correct.
+  const handleSelectStep = useCallback((id: string) => {
+    setSelectedWorkerTaskId(null);
+    setSelectedStepId((current) => (current === id ? null : id));
+  }, []);
+  const handleSelectWorker = useCallback((id: string) => {
+    setSelectedStepId(null);
+    setSelectedWorkerTaskId((current) => (current === id ? null : id));
+  }, []);
+
   const selectedStep = selectedStepId
     ? orderedSteps.find((step) => step.id === selectedStepId) ?? null
     : null;
@@ -521,8 +573,9 @@ function RunCanvas({ run }: { run: RunState }) {
         flexDirection: "column",
         backgroundColor: "var(--bg)",
         backgroundImage:
-          "radial-gradient(circle, color-mix(in oklch, var(--muted) 32%, transparent) 1px, transparent 1px)",
-        backgroundSize: "24px 24px",
+          "linear-gradient(90deg, color-mix(in oklch, var(--accent) 5%, transparent) 1px, transparent 1px), linear-gradient(0deg, color-mix(in oklch, var(--accent) 5%, transparent) 1px, transparent 1px), radial-gradient(circle, color-mix(in oklch, var(--muted) 26%, transparent) 1px, transparent 1px)",
+        backgroundSize: "96px 96px, 96px 96px, 24px 24px",
+        backgroundPosition: "0 0, 0 0, 0 0",
       }}
     >
       <div
@@ -606,18 +659,11 @@ function RunCanvas({ run }: { run: RunState }) {
                 <StepsGraph
                   run={run}
                   steps={orderedSteps}
-                  taskById={maps.taskById}
-                  attemptByTask={maps.attemptByTask}
+                  agentRowsByStep={agentRowsByStep}
                   selectedStepId={selectedStepId}
                   selectedWorkerTaskId={selectedWorkerTaskId}
-                  onSelectStep={(id) => {
-                    setSelectedWorkerTaskId(null);
-                    setSelectedStepId((current) => (current === id ? null : id));
-                  }}
-                  onSelectWorker={(id) => {
-                    setSelectedStepId(null);
-                    setSelectedWorkerTaskId((current) => (current === id ? null : id));
-                  }}
+                  onSelectStep={handleSelectStep}
+                  onSelectWorker={handleSelectWorker}
                 />
               )}
               <RunDetails
@@ -670,7 +716,7 @@ function StepDetailsStrip({
     <div
       style={{
         flex: "0 0 auto",
-        maxHeight: "44%",
+        maxHeight: "32%",
         overflow: "auto",
         background: "var(--panel)",
         borderTop: "1px solid var(--rule-soft)",
@@ -948,7 +994,7 @@ function WorkerDetailsStrip({
     <div
       style={{
         flex: "0 0 auto",
-        maxHeight: "44%",
+        maxHeight: "32%",
         overflow: "auto",
         background: "var(--panel)",
         borderTop: "1px solid var(--rule-soft)",
@@ -1167,7 +1213,7 @@ function PlanningGraph({ run }: { run: RunState }) {
       style={{
         minHeight: 260,
         display: "grid",
-        gridTemplateColumns: "110px 86px 260px 86px 240px",
+        gridTemplateColumns: `${RUN_START_NODE_WIDTH}px ${RUN_CONNECTOR_WIDTH}px ${RUN_STEP_NODE_WIDTH}px ${RUN_CONNECTOR_WIDTH}px 248px`,
         alignItems: "center",
       }}
     >
@@ -1188,8 +1234,7 @@ function PlanningGraph({ run }: { run: RunState }) {
 function StepsGraph({
   run,
   steps,
-  taskById,
-  attemptByTask,
+  agentRowsByStep,
   selectedStepId,
   selectedWorkerTaskId,
   onSelectStep,
@@ -1197,8 +1242,7 @@ function StepsGraph({
 }: {
   run: RunState;
   steps: StepState[];
-  taskById: Map<string, WorkerTask>;
-  attemptByTask: Map<string, WorkerAttempt>;
+  agentRowsByStep: Map<string, AgentRow[]>;
   selectedStepId: string | null;
   selectedWorkerTaskId: string | null;
   onSelectStep: (id: string) => void;
@@ -1213,17 +1257,17 @@ function StepsGraph({
       style={{
         minHeight: 280,
         display: "grid",
-        gridTemplateColumns: `110px ${steps.map(() => "82px 258px").join(" ")} 82px 126px`,
+        gridTemplateColumns: `${RUN_START_NODE_WIDTH}px ${steps.map(() => `${RUN_CONNECTOR_WIDTH}px ${RUN_STEP_NODE_WIDTH}px`).join(" ")} ${RUN_CONNECTOR_WIDTH}px ${RUN_END_NODE_WIDTH}px`,
         alignItems: "start",
       }}
     >
-      <RowAlign anchor="step"><StartBlock label="SPARK" subtitle={run.status} /></RowAlign>
+      <RowAlign><StartBlock label="SPARK" subtitle={run.status} /></RowAlign>
       {steps.map((step, index) => {
         const prev = index === 0 ? null : steps[index - 1];
         const generatingPrompt = step.id === promptGenerationTargetStepId;
         return (
           <React.Fragment key={step.id}>
-            <RowAlign anchor="step">
+            <RowAlign>
               <Connector
                 label={generatingPrompt ? "prompt" : index === 0 ? "planned" : connectorLabel(prev!, step)}
                 flowing={generatingPrompt}
@@ -1232,9 +1276,8 @@ function StepsGraph({
             <StepColumn
               step={step}
               displayIndex={index + 1}
-              taskById={taskById}
-              attemptByTask={attemptByTask}
-              run={run}
+              rows={agentRowsByStep.get(step.id) ?? EMPTY_AGENT_ROWS}
+              currentStepId={run.currentStepId}
               selectedStepId={selectedStepId}
               selectedWorkerTaskId={selectedWorkerTaskId}
               onSelectStep={onSelectStep}
@@ -1243,12 +1286,12 @@ function StepsGraph({
           </React.Fragment>
         );
       })}
-      <RowAlign anchor="step">
+      <RowAlign>
         <Connector
           label={run.status === "complete" ? "done" : "finish"}
         />
       </RowAlign>
-      <RowAlign anchor="step"><EndBlock status={run.status} /></RowAlign>
+      <RowAlign><EndBlock status={run.status} /></RowAlign>
     </div>
   );
 }
@@ -1256,8 +1299,7 @@ function StepsGraph({
 // Centers a piece of step-row content (start/end block, connector) on the
 // vertical mid-line of a StepNode so adjacent step columns line up cleanly
 // even when their worker child nodes extend the column downward.
-const STEP_NODE_HEIGHT = 166;
-function RowAlign({ anchor: _anchor, children }: { anchor: "step"; children: React.ReactNode }) {
+function RowAlign({ children }: { children: React.ReactNode }) {
   return (
     <div
       style={{
@@ -1272,12 +1314,11 @@ function RowAlign({ anchor: _anchor, children }: { anchor: "step"; children: Rea
   );
 }
 
-function StepColumn({
+const StepColumn = React.memo(function StepColumn({
   step,
   displayIndex,
-  taskById,
-  attemptByTask,
-  run,
+  rows,
+  currentStepId,
   selectedStepId,
   selectedWorkerTaskId,
   onSelectStep,
@@ -1285,25 +1326,26 @@ function StepColumn({
 }: {
   step: StepState;
   displayIndex: number;
-  taskById: Map<string, WorkerTask>;
-  attemptByTask: Map<string, WorkerAttempt>;
-  run: RunState;
+  // Pre-derived once in RunCanvas (agentRowsByStep) — see note there.
+  rows: readonly AgentRow[];
+  currentStepId: string | undefined;
   selectedStepId: string | null;
   selectedWorkerTaskId: string | null;
   onSelectStep: (id: string) => void;
   onSelectWorker: (id: string) => void;
 }) {
-  const rows = agentRowsForStep(step, taskById, attemptByTask, displayIndex);
+  // Per-column stable click handler so the memoized StepNode underneath only
+  // re-renders when this step's own data changes.
+  const handleClick = useCallback(() => onSelectStep(step.id), [onSelectStep, step.id]);
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 0 }}>
       <StepNode
         step={step}
         displayIndex={displayIndex}
-        taskById={taskById}
-        attemptByTask={attemptByTask}
-        active={step.id === run.currentStepId}
+        rows={rows}
+        active={step.id === currentStepId}
         selected={step.id === selectedStepId}
-        onClick={() => onSelectStep(step.id)}
+        onClick={handleClick}
       />
       {rows.length > 0 && (
         <WorkerStack
@@ -1315,82 +1357,197 @@ function StepColumn({
       )}
     </div>
   );
-}
+});
 
-function WorkerStack({
+const WorkerStack = React.memo(function WorkerStack({
   rows,
   stepStatus,
   selectedWorkerTaskId,
   onSelectWorker,
 }: {
-  rows: AgentRow[];
+  rows: readonly AgentRow[];
   stepStatus: StepState["status"];
   selectedWorkerTaskId: string | null;
   onSelectWorker: (id: string) => void;
 }) {
+  // Layout depends only on the worker count — memoize it so the array handed
+  // to the memoized WorkerGraphWires keeps its identity between renders.
+  const layout = useMemo(() => workerGraphLayout(rows.length), [rows.length]);
+  const levels = rows.length <= 1 ? rows.length : Math.ceil(rows.length / 2);
+  const graphHeight = WORKER_GRAPH_TOP
+    + Math.max(1, levels) * WORKER_GRAPH_NODE_HEIGHT
+    + Math.max(0, levels - 1) * WORKER_GRAPH_ROW_GAP
+    + 10;
+
   return (
     <div
       style={{
-        display: "flex",
-        flexDirection: "column",
+        position: "relative",
+        width: RUN_STEP_NODE_WIDTH,
+        height: graphHeight,
+        marginTop: 0,
+        paddingTop: WORKER_GRAPH_TOP,
+        display: "grid",
+        gridTemplateColumns: `${WORKER_GRAPH_NODE_WIDTH}px ${WORKER_GRAPH_LANE_GAP}px ${WORKER_GRAPH_NODE_WIDTH}px`,
+        gridAutoRows: `${WORKER_GRAPH_NODE_HEIGHT}px`,
+        rowGap: WORKER_GRAPH_ROW_GAP,
+        justifyContent: "center",
         alignItems: "center",
-        gap: 6,
-        marginTop: 10,
       }}
     >
-      {/* Drop-down line from step → first worker */}
-      <span
-        aria-hidden
-        style={{
-          width: 1,
-          height: 14,
-          background: "var(--rule-strong)",
-          opacity: 0.7,
-        }}
-      />
-      {rows.map((row, index) => (
-        <React.Fragment key={row.task?.id ?? `${row.agent.label}-${index}`}>
-          <WorkerNode
-            row={row}
-            stepStatus={stepStatus}
-            selected={Boolean(row.task && row.task.id === selectedWorkerTaskId)}
-            onClick={() => {
-              if (row.task) onSelectWorker(row.task.id);
+      <WorkerGraphWires layout={layout} height={graphHeight} />
+      {rows.map((row, index) => {
+        const node = layout[index];
+        return (
+          <div
+            key={row.task?.id ?? `${row.agent.label}-${index}`}
+            style={{
+              gridColumn: node.lane === "center" ? "1 / 4" : node.lane === "left" ? "1" : "3",
+              gridRow: node.level + 1,
+              justifySelf: node.lane === "center" ? "center" : node.lane === "left" ? "end" : "start",
+              zIndex: 1,
             }}
-            disabled={!row.task}
-          />
-          {index < rows.length - 1 && (
-            <span
-              aria-hidden
-              style={{
-                width: 1,
-                height: 8,
-                background: "var(--rule-soft)",
-              }}
+          >
+            <WorkerNode
+              row={row}
+              stepStatus={stepStatus}
+              wide={node.lane === "center"}
+              selected={Boolean(row.task && row.task.id === selectedWorkerTaskId)}
+              onSelectWorker={onSelectWorker}
+              disabled={!row.task}
             />
-          )}
-        </React.Fragment>
-      ))}
+          </div>
+        );
+      })}
     </div>
   );
+});
+
+type WorkerGraphLane = "left" | "right" | "center";
+
+interface WorkerGraphNodeLayout {
+  lane: WorkerGraphLane;
+  level: number;
 }
 
-function WorkerNode({
+function workerGraphLayout(count: number): WorkerGraphNodeLayout[] {
+  if (count <= 1) return [{ lane: "center", level: 0 }];
+  return Array.from({ length: count }, (_, index) => ({
+    lane: index % 2 === 0 ? "left" : "right",
+    level: Math.floor(index / 2),
+  }));
+}
+
+const WorkerGraphWires = React.memo(function WorkerGraphWires({
+  layout,
+  height,
+}: {
+  layout: WorkerGraphNodeLayout[];
+  height: number;
+}) {
+  const gradientId = React.useId();
+  const centerX = RUN_STEP_NODE_WIDTH / 2;
+  const laneGapHalf = WORKER_GRAPH_LANE_GAP / 2;
+  const lastLevel = layout.reduce((max, node) => Math.max(max, node.level), 0);
+  const lastCenterY = WORKER_GRAPH_TOP
+    + lastLevel * (WORKER_GRAPH_NODE_HEIGHT + WORKER_GRAPH_ROW_GAP)
+    + WORKER_GRAPH_NODE_HEIGHT / 2;
+
+  return (
+    <svg
+      aria-hidden
+      viewBox={`0 0 ${RUN_STEP_NODE_WIDTH} ${height}`}
+      preserveAspectRatio="none"
+      style={{
+        position: "absolute",
+        inset: 0,
+        width: "100%",
+        height: "100%",
+        pointerEvents: "none",
+        overflow: "visible",
+      }}
+    >
+      <defs>
+        <linearGradient id={gradientId} x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stopColor="var(--accent)" stopOpacity="0.58" />
+          <stop offset="1" stopColor="var(--rule-strong)" stopOpacity="0.72" />
+        </linearGradient>
+      </defs>
+      <path
+        d={`M ${centerX} 0 V ${lastCenterY}`}
+        fill="none"
+        stroke={`url(#${gradientId})`}
+        strokeWidth="1"
+        strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
+      />
+      <circle cx={centerX} cy="1.5" r="2.4" fill="var(--accent)" opacity="0.9" />
+      {layout.map((node, index) => {
+        const y = WORKER_GRAPH_TOP
+          + node.level * (WORKER_GRAPH_NODE_HEIGHT + WORKER_GRAPH_ROW_GAP)
+          + WORKER_GRAPH_NODE_HEIGHT / 2;
+        if (node.lane === "center") {
+          return (
+            <path
+              key={index}
+              d={`M ${centerX} ${Math.max(2, y - 18)} V ${y - 4}`}
+              fill="none"
+              stroke="var(--rule-strong)"
+              strokeWidth="1"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          );
+        }
+        const endX = node.lane === "left" ? centerX - laneGapHalf : centerX + laneGapHalf;
+        const portX = node.lane === "left" ? endX - 1 : endX + 1;
+        return (
+          <g key={index}>
+            <path
+              d={`M ${centerX} ${y} H ${endX}`}
+              fill="none"
+              stroke="var(--rule-strong)"
+              strokeWidth="1"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+            />
+            <circle
+              cx={portX}
+              cy={y}
+              r="2.1"
+              fill="var(--bg)"
+              stroke="var(--rule-strong)"
+              strokeWidth="1"
+              vectorEffect="non-scaling-stroke"
+            />
+          </g>
+        );
+      })}
+    </svg>
+  );
+});
+
+const WorkerNode = React.memo(function WorkerNode({
   row,
   stepStatus,
+  wide,
   selected,
-  onClick,
+  onSelectWorker,
   disabled,
 }: {
   row: AgentRow;
   stepStatus: StepState["status"];
+  wide?: boolean;
   selected: boolean;
-  onClick: () => void;
+  // The stable selector from RunCanvas — passing it straight through (rather
+  // than a per-row closure) is what lets this memoized node skip re-renders.
+  onSelectWorker: (id: string) => void;
   disabled: boolean;
 }) {
   const status = deriveAgentStatus(row.task, row.attempt, stepStatus);
   const tone = runtimeTone(row.agent.runtimePreference);
   const label = row.agent.label || row.task?.title || row.agent.runtimePreference;
+  const stateLabel = row.attempt?.status ?? row.task?.status ?? status;
   const titleAttr = disabled
     ? "Worker not yet queued"
     : `${row.task?.title ?? label}\n\nClick to view the prompt sent to this worker.`;
@@ -1400,7 +1557,7 @@ function WorkerNode({
       title={titleAttr}
       onClick={(e) => {
         e.stopPropagation();
-        if (!disabled) onClick();
+        if (!disabled && row.task) onSelectWorker(row.task.id);
       }}
       onPointerDown={(e) => e.stopPropagation()}
       disabled={disabled}
@@ -1408,74 +1565,98 @@ function WorkerNode({
         appearance: "none",
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.55 : 1,
-        maxWidth: 220,
-        display: "inline-flex",
+        width: wide ? WORKER_GRAPH_CENTER_NODE_WIDTH : WORKER_GRAPH_NODE_WIDTH,
+        height: WORKER_GRAPH_NODE_HEIGHT,
+        display: "grid",
+        gridTemplateColumns: "12px minmax(0, 1fr)",
         alignItems: "center",
-        gap: 8,
-        border: `1px solid ${selected ? "var(--accent)" : tone.border}`,
+        gap: 7,
+        border: `1px solid ${selected ? "var(--accent)" : "color-mix(in oklch, var(--rule-strong) 72%, transparent)"}`,
         background: selected
-          ? "color-mix(in oklch, var(--accent) 12%, var(--panel))"
-          : tone.bg,
+          ? "linear-gradient(135deg, color-mix(in oklch, var(--panel-2) 82%, var(--accent) 18%), color-mix(in oklch, var(--panel) 90%, transparent))"
+          : "linear-gradient(135deg, color-mix(in oklch, var(--panel) 88%, white 3%), color-mix(in oklch, var(--bg) 74%, transparent))",
         color: "var(--ink-dim)",
-        padding: "5px 10px",
-        borderRadius: 6,
+        padding: "6px 8px",
+        borderRadius: 5,
         fontFamily: "var(--font-sans)",
         fontSize: 11,
-        lineHeight: 1.2,
+        lineHeight: 1.1,
         boxShadow: selected
-          ? "0 0 0 2px color-mix(in oklch, var(--accent) 28%, transparent), var(--shadow-1)"
-          : "var(--shadow-1)",
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 48%, transparent), 0 0 20px var(--accent-glow), var(--shadow-1)"
+          : `inset 2px 0 0 ${tone.border}, 0 8px 22px rgba(0,0,0,0.24)`,
         transition:
-          "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       <StatusDot status={status} small />
-      <b
-        style={{
-          color: tone.label,
-          fontFamily: "var(--font-mono)",
-          fontSize: 9,
-          fontWeight: 700,
-          fontVariantNumeric: "tabular-nums",
-          textTransform: "uppercase",
-          letterSpacing: "0.04em",
-        }}
-      >
-        {row.agent.runtimePreference}
-      </b>
-      <span
-        style={{
-          minWidth: 0,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {label}
+      <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+          <b
+            style={{
+              color: tone.label,
+              fontFamily: "var(--font-mono)",
+              fontSize: 8,
+              fontWeight: 800,
+              fontVariantNumeric: "tabular-nums",
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              flex: "0 0 auto",
+            }}
+          >
+            {row.agent.runtimePreference}
+          </b>
+          <span
+            style={{
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              color: statusColor(status),
+              fontFamily: "var(--font-mono)",
+              fontSize: 8,
+              textTransform: "uppercase",
+              letterSpacing: "0.04em",
+            }}
+          >
+            {stateLabel}
+          </span>
+        </span>
+        <span
+          style={{
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            color: "var(--ink-dim)",
+            fontSize: 10,
+          }}
+        >
+          {label}
+        </span>
       </span>
     </button>
   );
-}
+});
 
 function StartBlock({ label, subtitle }: { label: string; subtitle: string }) {
   return (
     <div
       style={{
-        width: 82,
+        width: RUN_START_NODE_WIDTH,
         minHeight: 66,
-        background: "oklch(0.13 0 0)",
-        border: "1px solid var(--rule-strong)",
-        borderRadius: 6,
+        background: "linear-gradient(135deg, color-mix(in oklch, var(--panel) 70%, black 28%), color-mix(in oklch, var(--bg) 92%, transparent))",
+        border: "1px solid color-mix(in oklch, var(--rule-strong) 80%, var(--accent) 10%)",
+        borderRadius: 5,
         display: "flex",
         flexDirection: "column",
         justifyContent: "center",
         alignItems: "center",
         gap: 6,
         color: "var(--ink)",
-        boxShadow: "var(--shadow-1)",
+        boxShadow: "inset 0 1px 0 color-mix(in oklch, white 7%, transparent), var(--shadow-1)",
       }}
     >
-      <span style={{ width: 8, height: 8, background: "var(--accent)", borderRadius: 2 }} />
+      <span style={{ width: 8, height: 8, background: "var(--accent)", borderRadius: 2, boxShadow: "0 0 10px var(--accent-glow)" }} />
       <span
         style={{
           fontFamily: "var(--font-sans)",
@@ -1504,9 +1685,10 @@ function EndBlock({ status }: { status: RunState["status"] }) {
   return (
     <div
       style={{
+        width: RUN_END_NODE_WIDTH,
         minHeight: 54,
         border: `1px solid ${complete ? "var(--ok)" : "var(--rule)"}`,
-        borderRadius: 6,
+        borderRadius: 5,
         background: complete
           ? "var(--ok-soft)"
           : "color-mix(in oklch, var(--panel) 86%, transparent)",
@@ -1527,99 +1709,92 @@ function EndBlock({ status }: { status: RunState["status"] }) {
   );
 }
 
-function Connector({ label, flowing = false }: { label: string; flowing?: boolean }) {
-  const strokeColor = flowing ? "var(--accent, #f0c419)" : "var(--rule)";
-  const strokeStyle = flowing ? "solid" : "dashed";
-
+const Connector = React.memo(function Connector({ label, flowing = false }: { label: string; flowing?: boolean }) {
+  const strokeColor = flowing ? "var(--accent)" : "var(--rule-strong)";
+  const midY = 28;
+  const x1 = 6;
+  const x2 = RUN_CONNECTOR_WIDTH - 10;
+  const tip = RUN_CONNECTOR_WIDTH - 4;
   return (
     <div
       style={{
         position: "relative",
-        minWidth: 82,
+        width: "100%",
         height: 54,
         display: "flex",
         alignItems: "center",
-        overflow: "hidden",
       }}
     >
-      <span
+      <svg
         aria-hidden
-        style={{
-          position: "absolute",
-          top: "50%",
-          left: 0,
-          right: 9,
-          borderTop: `1px ${strokeStyle} ${strokeColor}`,
-          opacity: flowing ? 0.55 : 1,
-          transition: "opacity 200ms ease-out",
-        }}
-      />
-      <span
-        aria-hidden
-        style={{
-          position: "absolute",
-          top: "50%",
-          right: 2,
-          width: 8,
-          height: 8,
-          borderTop: `1px solid ${strokeColor}`,
-          borderRight: `1px solid ${strokeColor}`,
-          opacity: flowing ? 0.9 : 0.72,
-          transform: "translateY(-50%) rotate(45deg)",
-          filter: flowing ? "drop-shadow(0 0 4px var(--accent, #f0c419))" : "none",
-          transition: "opacity 200ms ease-out, filter 200ms ease-out",
-        }}
-      />
-      {flowing && (
-        <>
-          {/* Travelling spark — a small bright dot riding the line. */}
-          <span
-            aria-hidden
-            style={{
-              position: "absolute",
-              top: "50%",
-              left: 0,
-              width: 36,
-              height: 2,
-              transform: "translateY(-50%)",
-              background:
-                "linear-gradient(90deg, rgba(240,196,25,0) 0%, rgba(240,196,25,0.95) 50%, rgba(240,196,25,0) 100%)",
-              filter: "blur(0.4px) drop-shadow(0 0 4px var(--accent, #f0c419))",
-              animation: "spark-connector-flow 1.6s cubic-bezier(.55,.05,.55,.95) infinite",
-              pointerEvents: "none",
-            }}
-          />
-          {/* Soft halo behind the line so the whole connector feels alive. */}
-          <span
-            aria-hidden
-            style={{
-              position: "absolute",
-              top: "50%",
-              left: 0,
-              right: 0,
-              height: 8,
-              transform: "translateY(-50%)",
-              background:
-                "radial-gradient(ellipse at center, rgba(240,196,25,0.18) 0%, rgba(240,196,25,0) 70%)",
-              animation: "spark-connector-halo 1.6s ease-in-out infinite",
-              pointerEvents: "none",
-            }}
-          />
-        </>
-      )}
+        viewBox={`0 0 ${RUN_CONNECTOR_WIDTH} 56`}
+        preserveAspectRatio="none"
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }}
+      >
+        <line
+          x1={x1} y1={midY + 7} x2={x2 - 14} y2={midY + 7}
+          stroke="color-mix(in oklch, var(--rule-soft) 70%, transparent)"
+          strokeWidth="1"
+          strokeOpacity="0.7"
+          vectorEffect="non-scaling-stroke"
+        />
+        <line
+          x1={x1} y1={midY} x2={x2} y2={midY}
+          stroke={strokeColor}
+          strokeWidth="1"
+          strokeOpacity={flowing ? 1 : 0.85}
+          vectorEffect="non-scaling-stroke"
+        />
+        <path
+          d={`M ${x2 - 2} ${midY - 4} L ${tip} ${midY} L ${x2 - 2} ${midY + 4}`}
+          fill="none"
+          stroke={strokeColor}
+          strokeWidth="1"
+          strokeOpacity={flowing ? 1 : 0.85}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          vectorEffect="non-scaling-stroke"
+          style={flowing ? { filter: "drop-shadow(0 0 3px var(--accent))" } : undefined}
+        />
+        {flowing && (
+          <line
+            x1={x1} y1={midY} x2={x2} y2={midY}
+            stroke="var(--accent)"
+            strokeWidth="1.5"
+            strokeDasharray="12 60"
+            strokeLinecap="round"
+            vectorEffect="non-scaling-stroke"
+            style={{ filter: "drop-shadow(0 0 4px var(--accent))" }}
+          >
+            <animate
+              attributeName="stroke-dashoffset"
+              values="72;0"
+              dur="1.4s"
+              repeatCount="indefinite"
+              calcMode="linear"
+            />
+          </line>
+        )}
+      </svg>
       <span
         style={{
           position: "absolute",
-          top: 0,
+          top: 5,
           left: "50%",
           transform: "translateX(-50%)",
-          color: flowing ? "var(--accent, #f0c419)" : "var(--muted)",
+          color: flowing ? "var(--accent)" : "var(--muted)",
+          background: "color-mix(in oklch, var(--bg) 92%, transparent)",
+          border: "1px solid color-mix(in oklch, var(--rule-soft) 78%, transparent)",
+          borderRadius: 4,
           fontFamily: "var(--font-sans)",
           fontSize: 9,
-          letterSpacing: "0.06em",
+          fontWeight: 600,
+          letterSpacing: "0.08em",
+          lineHeight: "14px",
+          minWidth: 48,
+          textAlign: "center",
           whiteSpace: "nowrap",
-          background: "var(--bg)",
-          padding: "0 6px",
+          padding: "0 7px",
           textShadow: flowing ? "0 0 8px rgba(240,196,25,0.45)" : "none",
         }}
       >
@@ -1627,7 +1802,7 @@ function Connector({ label, flowing = false }: { label: string; flowing?: boolea
       </span>
     </div>
   );
-}
+});
 
 // The connector glow represents Spark generating worker prompts for the step
 // it is about to run. Worker execution itself should light the step card, not
@@ -1650,19 +1825,18 @@ function promptGenerationTargetStep(run: RunState): StepState | undefined {
   });
 }
 
-function StepNode({
+const StepNode = React.memo(function StepNode({
   step,
   displayIndex,
-  taskById,
-  attemptByTask,
+  rows,
   active,
   selected,
   onClick,
 }: {
   step: StepState;
   displayIndex: number;
-  taskById: Map<string, WorkerTask>;
-  attemptByTask: Map<string, WorkerAttempt>;
+  // Pre-derived once in RunCanvas (agentRowsByStep) — see note there.
+  rows: readonly AgentRow[];
   active: boolean;
   selected: boolean;
   onClick: () => void;
@@ -1671,7 +1845,6 @@ function StepNode({
     return <BrakeStepNode step={step} displayIndex={displayIndex} active={active} selected={selected} onClick={onClick} />;
   }
 
-  const rows = agentRowsForStep(step, taskById, attemptByTask, displayIndex);
   const tone = stepStatusColor(step.status);
   const nodeActive = active || step.status === "running" || step.status === "reviewing";
   const primaryRow = rows[0];
@@ -1685,19 +1858,19 @@ function StepNode({
       onPointerDown={(e) => e.stopPropagation()}
       title={`${step.goal || step.title}\n\nClick to ${selected ? "collapse" : "see tasks for this step"}.`}
       style={{
-        width: 258,
-        minHeight: 166,
+        width: RUN_STEP_NODE_WIDTH,
+        minHeight: STEP_NODE_HEIGHT,
         background: nodeActive
-          ? "linear-gradient(135deg, color-mix(in oklch, var(--panel-2) 86%, var(--accent) 14%), color-mix(in oklch, var(--panel) 94%, transparent))"
-          : "linear-gradient(135deg, color-mix(in oklch, var(--panel) 92%, white 2%), color-mix(in oklch, var(--panel) 92%, transparent))",
+          ? "linear-gradient(135deg, color-mix(in oklch, var(--panel-2) 82%, var(--accent) 16%), color-mix(in oklch, var(--panel) 92%, transparent))"
+          : "linear-gradient(135deg, color-mix(in oklch, var(--panel) 88%, white 3%), color-mix(in oklch, var(--bg) 76%, transparent))",
         border: `1px solid ${selected ? "var(--accent)" : nodeActive ? "var(--accent-edge)" : "var(--rule-strong)"}`,
-        borderRadius: 8,
+        borderRadius: 6,
         boxShadow: selected
-          ? "0 0 0 2px var(--accent), 0 0 0 4px color-mix(in oklch, var(--accent) 24%, transparent), 0 14px 32px rgba(0,0,0,0.32)"
+          ? "0 0 0 1px var(--accent), 0 0 30px var(--accent-glow), 0 14px 32px rgba(0,0,0,0.32)"
           : nodeActive
-            ? "0 0 0 1px var(--accent-edge), 0 0 24px var(--accent-glow), 0 18px 44px rgba(0,0,0,0.34)"
-            : "var(--shadow-2)",
-        padding: "12px 14px",
+            ? "0 0 0 1px var(--accent-edge), 0 0 22px var(--accent-glow), 0 18px 44px rgba(0,0,0,0.34)"
+            : "inset 0 1px 0 color-mix(in oklch, white 6%, transparent), var(--shadow-2)",
+        padding: "13px 15px",
         display: "flex",
         flexDirection: "column",
         gap: 10,
@@ -1728,10 +1901,12 @@ function StepNode({
               fontFamily: "var(--font-sans)",
               fontSize: 14,
               fontWeight: 600,
-              lineHeight: 1.2,
+              lineHeight: 1.25,
               overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              wordBreak: "break-word",
             }}
           >
             {step.title}
@@ -1800,9 +1975,9 @@ function StepNode({
       </div>
     </article>
   );
-}
+});
 
-function BrakeStepNode({
+const BrakeStepNode = React.memo(function BrakeStepNode({
   step,
   displayIndex,
   active,
@@ -1827,20 +2002,20 @@ function BrakeStepNode({
       onPointerDown={(e) => e.stopPropagation()}
       title={`${step.goal || step.title}\n\nClick to ${selected ? "collapse" : "see details"}.`}
       style={{
-        width: 198,
-        minHeight: 126,
+        width: RUN_STEP_NODE_WIDTH,
+        minHeight: STEP_NODE_HEIGHT,
         justifySelf: "center",
         background: nodeActive
           ? "linear-gradient(135deg, color-mix(in oklch, var(--panel-2) 88%, var(--accent) 12%), color-mix(in oklch, var(--panel) 92%, transparent))"
-          : "color-mix(in oklch, var(--panel) 82%, transparent)",
+          : "linear-gradient(135deg, color-mix(in oklch, var(--panel) 82%, white 2%), color-mix(in oklch, var(--bg) 78%, transparent))",
         border: `1px ${selected ? "solid" : "dashed"} ${selected ? "var(--accent)" : nodeActive ? "var(--accent-edge)" : "var(--rule-strong)"}`,
-        borderRadius: 8,
+        borderRadius: 6,
         boxShadow: selected
-          ? "0 0 0 2px var(--accent), 0 0 0 4px color-mix(in oklch, var(--accent) 24%, transparent), 0 14px 28px rgba(0,0,0,0.3)"
+          ? "0 0 0 1px var(--accent), 0 0 30px var(--accent-glow), 0 14px 28px rgba(0,0,0,0.3)"
           : nodeActive
             ? "0 0 18px var(--accent-glow), var(--shadow-2)"
-            : "var(--shadow-1)",
-        padding: "12px 14px",
+            : "inset 0 1px 0 color-mix(in oklch, white 6%, transparent), var(--shadow-1)",
+        padding: "13px 15px",
         display: "flex",
         flexDirection: "column",
         gap: 10,
@@ -1871,10 +2046,12 @@ function BrakeStepNode({
               fontFamily: "var(--font-sans)",
               fontSize: 13,
               fontWeight: 600,
-              lineHeight: 1.2,
+              lineHeight: 1.25,
               overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              wordBreak: "break-word",
             }}
           >
             {step.title}
@@ -1926,7 +2103,7 @@ function BrakeStepNode({
       </div>
     </article>
   );
-}
+});
 
 function ProcessCard({
   title,
@@ -1942,11 +2119,11 @@ function ProcessCard({
   return (
     <article
       style={{
-        width: 260,
+        width: RUN_STEP_NODE_WIDTH,
         minHeight: 132,
         background: "color-mix(in oklch, var(--panel-2) 88%, var(--accent) 8%)",
         border: "1px solid var(--accent-edge)",
-        borderRadius: 8,
+        borderRadius: 6,
         padding: "14px",
         boxShadow: "var(--shadow-2)",
         display: "flex",
@@ -1999,10 +2176,10 @@ function GhostCard({ title, subtitle }: { title: string; subtitle: string }) {
   return (
     <div
       style={{
-        width: 240,
+        width: 248,
         minHeight: 112,
         border: "1px dashed var(--rule)",
-        borderRadius: 8,
+        borderRadius: 6,
         background: "color-mix(in oklch, var(--panel) 62%, transparent)",
         display: "flex",
         flexDirection: "column",
@@ -2133,75 +2310,6 @@ function CheckpointIcon({ status }: { status: StepState["status"] }) {
   );
 }
 
-function AgentTag({ row, stepStatus }: { row: AgentRow; stepStatus: StepState["status"] }) {
-  const status = deriveAgentStatus(row.task, row.attempt, stepStatus);
-  const tone = runtimeTone(row.agent.runtimePreference);
-  const label = row.agent.label || row.task?.title || row.agent.runtimePreference;
-  return (
-    <span
-      title={row.task?.title || row.agent.summary || label}
-      style={{
-        maxWidth: "100%",
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        border: `1px solid ${tone.border}`,
-        background: tone.bg,
-        color: "var(--ink-dim)",
-        padding: "3px 7px",
-        borderRadius: 3,
-        fontFamily: "var(--font-sans)",
-        fontSize: 10,
-        lineHeight: 1.2,
-      }}
-    >
-      <StatusDot status={status} small />
-      <b
-        style={{
-          color: tone.label,
-          fontFamily: "var(--font-mono)",
-          fontSize: 9,
-          fontWeight: 700,
-          fontVariantNumeric: "tabular-nums",
-          textTransform: "uppercase",
-          letterSpacing: "0.04em",
-        }}
-      >
-        {row.agent.runtimePreference}
-      </b>
-      <span
-        style={{
-          minWidth: 0,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {label}
-      </span>
-    </span>
-  );
-}
-
-function Tag({ children, muted }: { children: React.ReactNode; muted?: boolean }) {
-  return (
-    <span
-      style={{
-        border: "1px solid var(--rule)",
-        borderRadius: 3,
-        background: "var(--bg)",
-        color: muted ? "var(--muted)" : "var(--ink-dim)",
-        padding: "3px 7px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 10,
-        fontWeight: 500,
-      }}
-    >
-      {children}
-    </span>
-  );
-}
-
 function RunDetails({
   run,
   steps,
@@ -2224,7 +2332,17 @@ function RunDetails({
     .map((task) => attemptByTask.get(task.id))
     .filter((attempt): attempt is WorkerAttempt => Boolean(attempt));
   const activeAttempt = activeAttempts.find((attempt) => isActiveAttemptStatus(attempt.status)) ?? activeAttempts[0];
-  const workItems = activeStep ? buildStepWorkItems(activeStep, activeTasks, attemptByTask) : [];
+  // Memoize the work-item rows so the memoized <WorkItemRow> children keep a
+  // stable `item` reference. The active step's tasks are fully determined by
+  // `activeStep` + `taskById`, so those plus `attemptByTask` are the real
+  // inputs — all stable while the run object is unchanged.
+  const workItems = useMemo(() => {
+    if (!activeStep) return EMPTY_WORK_ITEMS;
+    const stepTasks = activeStep.workerTaskIds
+      .map((id) => taskById.get(id))
+      .filter((task): task is WorkerTask => Boolean(task));
+    return buildStepWorkItems(activeStep, stepTasks, attemptByTask);
+  }, [activeStep, taskById, attemptByTask]);
   const completeTasks = activeTasks.filter(isCompletedTask).length;
   const taskProgress = activeTasks.length === 0 ? null : Math.round((completeTasks / activeTasks.length) * 100);
   const recentAttempts = run.workerAttempts.slice(-5).reverse();
@@ -2686,9 +2804,15 @@ interface StepWorkItem {
   statusLabel: string;
   monospace?: boolean;
   meta?: string;
+  // When set, the trailing cell shows a live elapsed timer (via <ElapsedTime>)
+  // instead of the static `meta` string — keeps the clock isolated to a leaf.
+  elapsed?: { startedAt?: string; finishedAt?: string };
 }
 
-function WorkItemRow({ item }: { item: StepWorkItem }) {
+// Stable empty array for the no-active-step case — see EMPTY_AGENT_ROWS.
+const EMPTY_WORK_ITEMS: readonly StepWorkItem[] = Object.freeze([]);
+
+const WorkItemRow = React.memo(function WorkItemRow({ item }: { item: StepWorkItem }) {
   return (
     <div
       style={{
@@ -2738,13 +2862,17 @@ function WorkItemRow({ item }: { item: StepWorkItem }) {
           whiteSpace: "nowrap",
         }}
       >
-        {item.meta ?? item.statusLabel}
+        {item.elapsed ? (
+          <ElapsedTime startedAt={item.elapsed.startedAt} finishedAt={item.elapsed.finishedAt} />
+        ) : (
+          item.meta ?? item.statusLabel
+        )}
       </span>
     </div>
   );
-}
+});
 
-function WorkerLine({ task, attempt }: { task: WorkerTask; attempt?: WorkerAttempt }) {
+const WorkerLine = React.memo(function WorkerLine({ task, attempt }: { task: WorkerTask; attempt?: WorkerAttempt }) {
   const status = deriveAgentStatus(task, attempt, "running");
   const tone = runtimeTone(task.runtimePreference);
   return (
@@ -2812,13 +2940,17 @@ function WorkerLine({ task, attempt }: { task: WorkerTask; attempt?: WorkerAttem
           fontVariantNumeric: "tabular-nums",
         }}
       >
-        {attempt ? formatDuration(attempt.startedAt, attempt.finishedAt) : "--:--"}
+        {attempt ? (
+          <ElapsedTime startedAt={attempt.startedAt} finishedAt={attempt.finishedAt} />
+        ) : (
+          "--:--"
+        )}
       </span>
     </div>
   );
-}
+});
 
-function AttemptLine({ attempt }: { attempt: WorkerAttempt }) {
+const AttemptLine = React.memo(function AttemptLine({ attempt }: { attempt: WorkerAttempt }) {
   return (
     <div
       style={{
@@ -2869,9 +3001,9 @@ function AttemptLine({ attempt }: { attempt: WorkerAttempt }) {
       </span>
     </div>
   );
-}
+});
 
-function ActivityLine({ attempt }: { attempt: WorkerAttempt }) {
+const ActivityLine = React.memo(function ActivityLine({ attempt }: { attempt: WorkerAttempt }) {
   const time = attempt.startedAt ?? attempt.finishedAt ?? "";
   const text = attempt.error
     ? attempt.error
@@ -2927,7 +3059,7 @@ function ActivityLine({ attempt }: { attempt: WorkerAttempt }) {
       </span>
     </div>
   );
-}
+});
 
 function ProgressBar({ value, active }: { value: number; active: boolean }) {
   return (
@@ -3010,6 +3142,36 @@ function WorkStatusIcon({ status }: { status?: AgentStatusKind }) {
   );
 }
 
+// The single home of the per-second clock. Every live "00:00:45"-style timer
+// in the run canvas renders through one of these leaves; each one ticks
+// itself once a second (only while it is actually counting) so the rest of
+// the graph — StepColumn, StepNode, WorkerStack, RunDetails — never has to
+// re-render just to advance a duration string.
+//
+// Usage mirrors the old call sites exactly:
+//   - duration mode  : pass startedAt (+ optional finishedAt)
+//   - "since" mode   : pass `since` (a timestamp) with no startedAt
+//   - placeholder    : pass neither — renders the static placeholder
+function ElapsedTime({
+  startedAt,
+  finishedAt,
+  since,
+  placeholder = "--:--:--",
+}: {
+  startedAt?: string;
+  finishedAt?: string;
+  since?: string;
+  placeholder?: string;
+}) {
+  // Only tick while the value is genuinely moving: a started-but-unfinished
+  // attempt, or a "since" anchor. A finished duration is frozen — no tick.
+  const live = startedAt ? !finishedAt : Boolean(since);
+  useNowTick(1000, live);
+  if (startedAt) return <>{formatDuration(startedAt, finishedAt)}</>;
+  if (since) return <>{formatSince(since)}</>;
+  return <>{placeholder}</>;
+}
+
 function ElapsedChip({
   attempt,
   fallback,
@@ -3037,7 +3199,13 @@ function ElapsedChip({
           border: "1px solid var(--muted)",
         }}
       />
-      {attempt ? formatDuration(attempt.startedAt, attempt.finishedAt) : fallback ? formatSince(fallback) : "--:--:--"}
+      {attempt ? (
+        <ElapsedTime startedAt={attempt.startedAt} finishedAt={attempt.finishedAt} />
+      ) : fallback ? (
+        <ElapsedTime since={fallback} />
+      ) : (
+        "--:--:--"
+      )}
     </span>
   );
 }
@@ -3063,7 +3231,7 @@ function StatusPill({ status }: { status: RunState["status"] }) {
   );
 }
 
-function StatusDot({
+const StatusDot = React.memo(function StatusDot({
   status,
   small,
 }: {
@@ -3083,7 +3251,7 @@ function StatusDot({
       }}
     />
   );
-}
+});
 
 function EmptyState({
   text,
@@ -3165,7 +3333,7 @@ function agentRowsForStep(
   const planned = step.plannedAgents ?? [];
 
   if (planned.length > 0) {
-    return planned.map((agent, index) => {
+    const rows: AgentRow[] = planned.map((agent, index) => {
       const task = tasks[index];
       return {
         agent: {
@@ -3176,11 +3344,31 @@ function agentRowsForStep(
         attempt: task ? attemptByTask.get(task.id) : undefined,
       };
     });
+    // Tasks queued AFTER initial planning (e.g. a verifier follow-up
+    // appended by worker_result_review) outnumber the planned agents.
+    // Surface them as their own rows so the canvas reflects every worker
+    // the manager spawned, not just the ones that were on the original
+    // plan.
+    for (let index = planned.length; index < tasks.length; index++) {
+      const task = tasks[index];
+      rows.push({
+        agent: {
+          label: displayAgentLabel(undefined, displayIndex, index + 1),
+          summary: task.description,
+          runtimePreference: task.runtimePreference,
+          modelHint: task.modelHint,
+          effortHint: task.effortHint,
+        },
+        task,
+        attempt: attemptByTask.get(task.id),
+      });
+    }
+    return rows;
   }
 
-  return tasks.map((task) => ({
+  return tasks.map((task, index) => ({
     agent: {
-      label: task.title,
+      label: displayAgentLabel(task.title, displayIndex, index + 1),
       summary: task.description,
       runtimePreference: task.runtimePreference,
       modelHint: task.modelHint,
@@ -3197,21 +3385,6 @@ function displayAgentLabel(label: string | undefined, stepIndex: number, agentIn
   if (workerStepLabel) return `worker ${stepIndex}.${workerStepLabel[1]}`;
   if (/^worker\s+\d+$/i.test(trimmed)) return `worker ${stepIndex}.${agentIndex}`;
   return trimmed || `worker ${stepIndex}.${agentIndex}`;
-}
-
-function replaceRun(runs: RunState[], run: RunState): RunState[] {
-  const byId = new Map<string, RunState>();
-  for (const item of runs) byId.set(item.id, item.id === run.id ? run : item);
-  byId.set(run.id, run);
-  return Array.from(byId.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-}
-
-function findBestRun(runs: RunState[]): RunState | null {
-  return runs.find(isLiveRun) ?? runs[0] ?? null;
-}
-
-function isLiveRun(run: RunState): boolean {
-  return ["planning", "running", "reviewing", "blocked", "paused"].includes(run.status);
 }
 
 function clampZoom(value: number): number {
@@ -3317,7 +3490,12 @@ function buildStepWorkItems(
       text: task.description || task.title,
       status,
       statusLabel: attempt?.status ?? task.status,
-      meta: attempt ? formatDuration(attempt.startedAt, attempt.finishedAt) : formatTime(task.updatedAt),
+      // With an attempt the trailing cell counts elapsed time live; carry the
+      // raw timestamps so <ElapsedTime> owns the ticking. Without one it's a
+      // static "last updated" clock.
+      ...(attempt
+        ? { elapsed: { startedAt: attempt.startedAt, finishedAt: attempt.finishedAt } }
+        : { meta: formatTime(task.updatedAt) }),
     };
   });
 }
@@ -3350,11 +3528,16 @@ function runtimeTone(runtime: PlannedStepAgent["runtimePreference"]): { label: s
   }
 }
 
+// statusColor is polymorphic over the three status flavours RunsView paints:
+// run statuses, step statuses and the AgentStatusKind used by the work graph.
+// The run-status subset is delegated to the shared runStatusColor so the
+// mapping (including the `paused` -> info tone) stays in sync everywhere; the
+// step/agent-only members that the shared helper doesn't model are handled
+// here first so the remainder narrows cleanly to RunStatus.
 function statusColor(status: RunState["status"] | StepState["status"] | AgentStatusKind): string {
-  if (status === "running" || status === "reviewing" || status === "planning") return "var(--accent)";
-  if (status === "complete" || status === "done") return "var(--ok)";
-  if (status === "blocked" || status === "failed") return "var(--danger)";
-  return "var(--muted)";
+  if (status === "done") return "var(--ok)";
+  if (status === "queued" || status === "ready" || status === "skipped") return "var(--muted)";
+  return runStatusColor(status);
 }
 
 function stepStatusLabel(status: StepState["status"]): string {
@@ -3389,22 +3572,18 @@ function stepStatusColor(status: StepState["status"]): string {
   return statusColor(status);
 }
 
-function runStatusColor(status: RunState["status"]): string {
-  return statusColor(status);
-}
-
+// Polymorphic "is this status live?" over the same three status flavours as
+// statusColor. step/agent-only members can never be live, so they short out
+// to false before delegating the RunStatus subset to the shared helper.
 function isRunningStatus(status: RunState["status"] | StepState["status"] | AgentStatusKind): boolean {
-  return status === "running" || status === "reviewing" || status === "planning";
+  if (status === "done" || status === "queued" || status === "ready" || status === "skipped") return false;
+  return isRunningRunStatus(status);
 }
 
 function formatTime(value: string): string {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "";
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function formatRunIndex(value: number): string {
-  return value.toString().padStart(2, "0");
 }
 
 function formatClock(value: string): string {
@@ -3433,4 +3612,39 @@ function formatDurationMs(ms: number): string {
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+// Forces a re-render every `intervalMs` while `enabled` is true. Used to
+// keep elapsed-time labels (formatDuration / formatSince) advancing on the
+// wall clock without piping a "now" prop through the whole tree. Bumps a
+// dummy state; the actual time read happens inside the duration formatters
+// the next render.
+function useNowTick(intervalMs: number, enabled: boolean): void {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const id = window.setInterval(() => setTick((n) => (n + 1) | 0), intervalMs);
+    return () => window.clearInterval(id);
+  }, [enabled, intervalMs]);
+}
+
+// True while the run still has any moving piece — open attempts, live
+// steps, or autopilot work in flight. We gate the 1Hz canvas tick on this
+// so a finished run doesn't spend a re-render every second forever.
+function isRunStillTicking(run: RunState): boolean {
+  if (run.status === "running" || run.status === "planning" || run.status === "reviewing") {
+    return true;
+  }
+  for (const attempt of run.workerAttempts) {
+    if (
+      attempt.status === "preparing" ||
+      attempt.status === "prompt_ready" ||
+      attempt.status === "launching" ||
+      attempt.status === "running" ||
+      attempt.status === "finishing"
+    ) {
+      return true;
+    }
+  }
+  return false;
 }

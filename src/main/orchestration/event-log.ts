@@ -2,6 +2,7 @@ import { BrowserWindow } from "electron";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type { SparkEvent } from "@shared/types";
+import { makeId } from "@shared/ids";
 import { sparkHome } from "../spark-home";
 
 const RUNS_DIR = "runs";
@@ -90,8 +91,4 @@ function broadcast(event: SparkEvent): void {
       win.webContents.send("orchestration:event", event);
     }
   }
-}
-
-function makeId(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }

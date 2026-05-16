@@ -5,29 +5,40 @@ import { createFile, createFolder, deleteFile, listDir, listMarkdownFiles, readF
 import { getGitGraph } from "./git-graph";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { loadPreferences, setPreference } from "./preferences-store";
-import { openSettingsWindow } from "./settings-window";
+import {
+  abortInlineAiCompletion,
+  runInlineAiCompletion,
+  type InlineAiCompletionRequest,
+  type InlineAiCompletionResponse,
+} from "./inline-ai";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import {
+  createProjectItem,
+  deleteProjectItem,
+  linkProjectRun,
+  listProjectItems,
+  updateProjectItem,
+} from "./project-store";
+import {
   addRunMessage,
   appendTestEvent,
-  applyPendingMutations,
   createStep,
   createRun,
   createWorkerTask,
   deleteRun,
-  discardPendingMutations,
+  forcePauseRun,
   getRunArtifactPaths,
   getRun,
   interruptRunWithMessage,
   launchWorkerAttempt,
   listRuns,
+  pauseRunAfterCurrentWorkers,
   pauseRun,
   prepareWorkerTask,
   readWorkerReport,
   resumeRun,
-  setPlanMode,
   startAutopilot,
   updateRunStatus,
   updateStep,
@@ -36,24 +47,25 @@ import {
 import { listEvents } from "./orchestration/event-log";
 import type {
   AddRunMessageInput,
-  ApplyPendingMutationsInput,
   AppPreferences,
   AppSettings,
   AppState,
   CreateEntryInput,
+  CreateProjectItemInput,
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
-  DiscardPendingMutationsInput,
   FsEntry,
   FsFileContent,
   FsReadResult,
   GitGraph,
   InterruptRunWithMessageInput,
+  LinkProjectRunInput,
   LaunchWorkerAttemptInput,
   PauseRunInput,
   PrefKey,
   PreferencesChange,
+  ProjectItem,
   PrepareWorkerTaskInput,
   ResumeRunInput,
   RenameFileInput,
@@ -63,11 +75,11 @@ import type {
   SearchHit,
   SearchOptions,
   SearchSummary,
-  SetPlanModeInput,
   ShellInfo,
   SparkEvent,
   StartAutopilotInput,
   StartSearchResponse,
+  UpdateProjectItemInput,
   UpdateRunStatusInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
@@ -118,9 +130,16 @@ export function registerIpc(): void {
     },
   );
 
-  ipcMain.handle("settings:open", async (e): Promise<void> => {
-    const parent = BrowserWindow.fromWebContents(e.sender);
-    openSettingsWindow(parent);
+  // Inline-AI editor autocomplete proxy. Renderer-side fetch to OpenRouter
+  // hits CORS in dev; routing through main bypasses that.
+  ipcMain.handle(
+    "inline-ai:complete",
+    async (_e, req: InlineAiCompletionRequest): Promise<InlineAiCompletionResponse> => {
+      return runInlineAiCompletion(req);
+    },
+  );
+  ipcMain.handle("inline-ai:abort", async (_e, requestId: string): Promise<void> => {
+    abortInlineAiCompletion(requestId);
   });
 
   ipcMain.handle("shells:list", async (): Promise<ShellInfo[]> => {
@@ -207,6 +226,29 @@ export function registerIpc(): void {
     return getGitGraph(cwd);
   });
 
+  ipcMain.handle("project:listItems", async (_e, workspaceId: string): Promise<ProjectItem[]> => {
+    return listProjectItems(workspaceId);
+  });
+
+  ipcMain.handle("project:createItem", async (_e, input: CreateProjectItemInput): Promise<ProjectItem> => {
+    return createProjectItem(input);
+  });
+
+  ipcMain.handle("project:updateItem", async (_e, input: UpdateProjectItemInput): Promise<ProjectItem> => {
+    return updateProjectItem(input);
+  });
+
+  ipcMain.handle(
+    "project:deleteItem",
+    async (_e, input: { workspaceId: string; itemId: string }): Promise<void> => {
+      await deleteProjectItem(input.workspaceId, input.itemId);
+    },
+  );
+
+  ipcMain.handle("project:linkRun", async (_e, input: LinkProjectRunInput): Promise<ProjectItem> => {
+    return linkProjectRun(input);
+  });
+
   ipcMain.handle("orchestration:createRun", async (_e, input: CreateRunInput): Promise<RunState> => {
     return createRun(input);
   });
@@ -237,6 +279,14 @@ export function registerIpc(): void {
 
   ipcMain.handle("orchestration:pauseRun", async (_e, input: PauseRunInput): Promise<RunState> => {
     return pauseRun(input);
+  });
+
+  ipcMain.handle("orchestration:pauseRunAfterCurrentWorkers", async (_e, input: PauseRunInput): Promise<RunState> => {
+    return pauseRunAfterCurrentWorkers(input);
+  });
+
+  ipcMain.handle("orchestration:forcePauseRun", async (_e, runId: string): Promise<RunState> => {
+    return forcePauseRun(runId);
   });
 
   ipcMain.handle("orchestration:resumeRun", async (_e, input: ResumeRunInput): Promise<RunState> => {
@@ -290,39 +340,28 @@ export function registerIpc(): void {
     await deleteRun(runId);
   });
 
-  // Plan-mode IPC. setPlanMode toggles the per-run flag; apply/discard
-  // operate on the pendingMutations queue so the renderer can flush or drop
-  // the entire queue (or a specific subset) atomically.
-  ipcMain.handle(
-    "orchestration:setPlanMode",
-    async (_e, input: SetPlanModeInput): Promise<RunState> => {
-      return setPlanMode(input);
-    },
-  );
-
-  ipcMain.handle(
-    "orchestration:applyPendingMutations",
-    async (_e, input: ApplyPendingMutationsInput): Promise<RunState> => {
-      return applyPendingMutations(input);
-    },
-  );
-
-  ipcMain.handle(
-    "orchestration:discardPendingMutations",
-    async (_e, input: DiscardPendingMutationsInput): Promise<RunState> => {
-      return discardPendingMutations(input);
-    },
-  );
-
   ipcMain.handle(
     "pty:spawn",
-    async (e, args: { id: string; shell: ShellInfo; cwd: string; cols: number; rows: number }) => {
+    async (
+      e,
+      args: {
+        id: string;
+        shell: ShellInfo;
+        cwd: string;
+        cols: number;
+        rows: number;
+        env?: Record<string, string>;
+        startupCommand?: string;
+      },
+    ) => {
       return pty.spawn({
         id: args.id,
         shell: args.shell,
         cwd: args.cwd,
         cols: args.cols,
         rows: args.rows,
+        env: args.env,
+        startupCommand: args.startupCommand,
         webContents: e.sender,
       });
     },
@@ -381,9 +420,11 @@ export function registerIpc(): void {
       const doneChannel = `search:done:${searchId}`;
       const handle = streamGrep(
         opts,
-        (hit: SearchHit) => {
+        // streamGrep batches hits, so each message carries an array — keeps
+        // a 2000-hit search to a handful of IPC sends.
+        (hits: SearchHit[]) => {
           if (sender.isDestroyed()) return;
-          sender.send(hitChannel, hit);
+          sender.send(hitChannel, hits);
         },
         (summary: SearchSummary) => {
           activeSearches.delete(searchId);

@@ -26,10 +26,23 @@ export interface InlineAutocompletePrefs {
   modelId: string;
 }
 
+// Status emitted to the host (EditorPane) so the editor footer can surface
+// the actual reason for a missing suggestion. Without this, "no ghost
+// text" is indistinguishable from "model not configured" — the user has
+// no way to debug short of opening DevTools.
+export type InlineAutocompleteStatus =
+  | { kind: "ok" }
+  | { kind: "disabled" }
+  | { kind: "no-api-key" }
+  | { kind: "no-model" }
+  | { kind: "requesting" }
+  | { kind: "error"; detail: string };
+
 export interface InlineAutocompleteContext {
   getPrefs: () => InlineAutocompletePrefs;
   getPath: () => string | null;
   getLanguage: () => string | null;
+  onStatus?: (status: InlineAutocompleteStatus) => void;
 }
 
 interface Suggestion {
@@ -195,6 +208,11 @@ class CompletionDriver implements PluginValue {
   private controller: AbortController | null = null;
   private inflightKey: string | null = null;
   private cache = new LRU<string, string>(CACHE_SIZE);
+  // Logged-once flags so a missing API key / model id surfaces in DevTools
+  // exactly once instead of on every keystroke. The flags reset when the
+  // editor remounts, which is the right cadence for "did I fix this?"
+  private warnedNoKey = false;
+  private warnedNoModel = false;
 
   constructor(
     private readonly view: EditorView,
@@ -278,10 +296,35 @@ class CompletionDriver implements PluginValue {
     this.cancelTimer();
   }
 
+  private emit(status: InlineAutocompleteStatus): void {
+    this.ctx.onStatus?.(status);
+  }
+
   private async fire(isManual: boolean) {
     const prefs = this.ctx.getPrefs();
     const state = this.view.state;
-    if (!shouldTrigger(state, prefs, isManual)) return;
+    if (!shouldTrigger(state, prefs, isManual)) {
+      if (!prefs.enabled) {
+        this.emit({ kind: "disabled" });
+      } else if (!prefs.apiKey) {
+        this.emit({ kind: "no-api-key" });
+        if (!this.warnedNoKey) {
+          console.warn(
+            "[inline-ai] enabled but no OpenRouter API key set. Open Settings → API and model.",
+          );
+          this.warnedNoKey = true;
+        }
+      } else if (!prefs.modelId) {
+        this.emit({ kind: "no-model" });
+        if (!this.warnedNoModel) {
+          console.warn(
+            "[inline-ai] enabled but no model id set. Open Settings → Editor.",
+          );
+          this.warnedNoModel = true;
+        }
+      }
+      return;
+    }
 
     const cursor = state.selection.main.from;
     const doc = state.doc;
@@ -303,6 +346,7 @@ class CompletionDriver implements PluginValue {
     this.controller = controller;
     this.inflightKey = key;
     const signal = controller.signal;
+    this.emit({ kind: "requesting" });
 
     let raw = "";
     try {
@@ -316,8 +360,17 @@ class CompletionDriver implements PluginValue {
         { apiKey: prefs.apiKey, modelId: prefs.modelId },
         signal,
       );
-    } catch {
+    } catch (err) {
       if (signal.aborted) return;
+      // Surface the failure to DevTools and the editor footer so users can
+      // diagnose silent no-suggestion problems (wrong model id, missing
+      // API key, 401, etc). Aborts (which happen on every keystroke) are
+      // filtered above so this only logs real errors.
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[inline-ai] completion request failed (model=${prefs.modelId}): ${message}`,
+      );
+      this.emit({ kind: "error", detail: message });
       if (this.controller === controller) {
         this.controller = null;
         this.inflightKey = null;
@@ -336,6 +389,7 @@ class CompletionDriver implements PluginValue {
     // time is cheaper than persistently showing nothing.
     if (trimmed) this.cache.set(key, trimmed);
     this.applyResult(trimmed, cursor);
+    this.emit({ kind: "ok" });
   }
 
   private applyResult(text: string, cursor: number) {

@@ -1,0 +1,19 @@
+{
+  "id": "regression-test-slugify",
+  "category": "regression_test",
+  "seed": "seed",
+  "budgetSeconds": 600,
+  "publicGates": [
+    {
+      "id": "public-test-command",
+      "command": "node test/slug.test.cjs"
+    }
+  ],
+  "hiddenGates": [
+    {
+      "id": "hidden-behavior-multiple-dashes",
+      "command": "node -e \"const { slugify } = require('./src/slug'); const got = slugify('  Spark---Agent   CRM  '); if (got !== 'spark-agent-crm') throw new Error(got);\""
+    }
+  ]
+}
+

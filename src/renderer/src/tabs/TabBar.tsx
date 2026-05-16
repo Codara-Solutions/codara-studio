@@ -24,9 +24,14 @@ interface Props {
   onNewTerminal: () => void;
   onNewPreview: () => void;
   onNewEditor: () => void;
+  onNewProject: () => void;
 }
 
-export default function TabBar({
+// React.memo: TabBar's props from App.tsx are referentially stable (the
+// callbacks are useCallback-backed and, since the useTabs API object is now
+// memoized, `tabs`/`activeId` only change when the tab list actually does).
+// So an unrelated App re-render no longer repaints the whole tab strip.
+function TabBar({
   tabs,
   activeId,
   onSelect,
@@ -34,6 +39,7 @@ export default function TabBar({
   onNewTerminal,
   onNewPreview,
   onNewEditor,
+  onNewProject,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -115,13 +121,17 @@ export default function TabBar({
         className="spark-tabbar-scroll"
       >
         {tabs.map((t) => (
+          // onSelect/onClose are passed straight through (no per-tab inline
+          // closure) so each TabItem's props stay referentially stable and
+          // React.memo can skip the siblings of the one tab that changed.
+          // TabItem calls onSelect(tab.id) itself.
           <TabItem
             key={t.id}
             tab={t}
             active={t.id === activeId}
             canClose={tabs.length > 1}
-            onSelect={() => onSelect(t.id)}
-            onClose={() => onClose(t.id)}
+            onSelect={onSelect}
+            onClose={onClose}
           />
         ))}
       </div>
@@ -173,6 +183,14 @@ export default function TabBar({
             }}
           >
             <PickerItem
+              label="CRM"
+              hint="Tasks"
+              onClick={() => {
+                setPickerOpen(false);
+                onNewProject();
+              }}
+            />
+            <PickerItem
               label="Terminal"
               hint="⌘T"
               onClick={() => {
@@ -207,11 +225,23 @@ interface TabItemProps {
   tab: Tab;
   active: boolean;
   canClose: boolean;
-  onSelect: () => void;
-  onClose: () => void;
+  // Take the tab id rather than a pre-bound closure: the parent can hand
+  // down ONE stable callback for every row, which (together with React.memo
+  // below) lets a single tab's change skip re-rendering its siblings.
+  onSelect: (id: TabId) => void;
+  onClose: (id: TabId) => void;
 }
 
-function TabItem({ tab, active, canClose, onSelect, onClose }: TabItemProps) {
+// React.memo so only the tab whose props actually changed (active flag
+// flipping, dirty dot, title) re-renders — selecting tab B no longer
+// repaints tabs A, C, D. Relies on the stable callbacks passed above.
+const TabItem = React.memo(function TabItem({
+  tab,
+  active,
+  canClose,
+  onSelect,
+  onClose,
+}: TabItemProps) {
   const [hover, setHover] = useState(false);
   const [closeHover, setCloseHover] = useState(false);
 
@@ -230,13 +260,13 @@ function TabItem({ tab, active, canClose, onSelect, onClose }: TabItemProps) {
       onMouseLeave={() => setHover(false)}
       onClick={(e) => {
         e.stopPropagation();
-        onSelect();
+        onSelect(tab.id);
       }}
       onAuxClick={(e) => {
         if (e.button === 1 && canClose) {
           e.preventDefault();
           e.stopPropagation();
-          onClose();
+          onClose(tab.id);
         }
       }}
       title={titleFor(tab)}
@@ -300,7 +330,7 @@ function TabItem({ tab, active, canClose, onSelect, onClose }: TabItemProps) {
           onMouseLeave={() => setCloseHover(false)}
           onClick={(e) => {
             e.stopPropagation();
-            onClose();
+            onClose(tab.id);
           }}
           title="Close"
           aria-label="Close tab"
@@ -326,7 +356,7 @@ function TabItem({ tab, active, canClose, onSelect, onClose }: TabItemProps) {
       )}
     </div>
   );
-}
+});
 
 function KindIcon({ tab }: { tab: Tab }) {
   if (tab.kind === "editor") {
@@ -338,6 +368,7 @@ function KindIcon({ tab }: { tab: Tab }) {
   }
   if (tab.kind === "terminal") return <GlyphIcon glyph="❯" color="var(--accent)" />;
   if (tab.kind === "preview") return <GlyphIcon glyph="◉" color="var(--accent)" />;
+  if (tab.kind === "project") return <GlyphIcon glyph="▦" color="var(--accent)" />;
   return <GlyphIcon glyph="◆" color="var(--accent)" />;
 }
 
@@ -362,18 +393,29 @@ function GlyphIcon({ glyph, color }: { glyph: string; color: string }) {
 }
 
 function labelFor(t: Tab): string {
-  if (t.kind === "terminal" && t.cwd) {
-    const parts = t.cwd.split(/[\\/]/).filter(Boolean);
-    return parts.length ? parts[parts.length - 1] : t.title;
-  }
+  if (t.kind === "terminal") return "terminals";
   return t.title;
 }
 
 function titleFor(t: Tab): string {
   if (t.kind === "editor") return t.path;
   if (t.kind === "preview") return t.url;
-  if (t.kind === "terminal") return t.cwd ?? t.title;
+  if (t.kind === "terminal") return activeLeafCwd(t) ?? t.title;
   return t.title;
+}
+
+function activeLeafCwd(t: Tab): string | undefined {
+  if (t.kind !== "terminal") return undefined;
+  const stack: Array<typeof t.root> = [t.root];
+  while (stack.length) {
+    const node = stack.pop()!;
+    if (node.kind === "leaf") {
+      if (node.paneId === t.activePaneId) return node.cwd;
+    } else {
+      stack.push(node.a, node.b);
+    }
+  }
+  return undefined;
 }
 
 function cssEscape(value: string): string {
@@ -424,3 +466,9 @@ function PickerItem({
     </button>
   );
 }
+
+// Memoized default export — see the comment on the inner TabBar function.
+// Wrapping the export (rather than the declaration) keeps the named inner
+// function readable in React DevTools while still gating re-renders on a
+// shallow prop comparison.
+export default React.memo(TabBar);

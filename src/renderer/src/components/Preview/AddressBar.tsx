@@ -79,6 +79,15 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
     setDraft(url);
   }, [url]);
 
+  // Auto-focus the URL input on first mount when no URL is set, so the
+  // "+ preview" button drops the user straight into a typing-ready state.
+  // We do not refocus on subsequent renders — that would steal focus when
+  // the user navigates back to an empty tab while working elsewhere.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!url) inputRef.current?.focus();
+  }, []);
+
   useImperativeHandle(
     ref,
     () => ({

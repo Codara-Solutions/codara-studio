@@ -5,9 +5,14 @@ interface Props {
   workspace: Workspace | null;
   defaultShell: ShellInfo | null;
   platform: string;
+  workerCount: number;
 }
 
-export default function StatusBar({ workspace, defaultShell, platform }: Props) {
+// Memoized: App passes a memoized `workspace`, the `defaultShell`/`platform`
+// state values, and a memoized `workerCount`. So the status bar only
+// re-renders when one of those genuinely changes — not on every App re-render
+// driven by unrelated state (run polls, color drags, orchestration events).
+function StatusBar({ workspace, defaultShell, platform, workerCount }: Props) {
   const items = [
     { l: "WORKSPACE", v: workspace?.name ?? "—", mono: false },
     { l: "PATH", v: workspace?.cwd ?? "—", mono: true },
@@ -15,7 +20,7 @@ export default function StatusBar({ workspace, defaultShell, platform }: Props) 
     { l: "OS", v: platform || "—", mono: true },
   ];
   const right = [
-    { l: "WORKERS", v: String((workspace?.workers.length ?? 0)).padStart(2, "0") },
+    { l: "WORKERS", v: String(workerCount).padStart(2, "0") },
   ];
   return (
     <div
@@ -109,3 +114,5 @@ export default function StatusBar({ workspace, defaultShell, platform }: Props) 
     </div>
   );
 }
+
+export default React.memo(StatusBar);

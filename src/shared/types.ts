@@ -87,7 +87,23 @@ export interface AppPreferences {
   inlineAutocompleteModelId: string;
 }
 
-export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "x-ai/grok-code-fast-1";
+export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "google/gemini-3.1-flash-lite";
+
+// Curated picks for the inline-AI model selector in Settings. Free text
+// still works for any other OpenRouter model id; this list is just the
+// one-click affordance for the models we've validated against the
+// completion prompt.
+export const INLINE_AI_MODEL_PRESETS: ReadonlyArray<{
+  id: string;
+  label: string;
+  hint: string;
+}> = [
+  {
+    id: "google/gemini-3.1-flash-lite",
+    label: "Gemini 3.1 Flash Lite",
+    hint: "Google's fastest tier, low-latency.",
+  },
+];
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
   theme: "system",
@@ -290,97 +306,112 @@ export interface RunState {
    * read the classification regardless of when in the run it fires.
    */
   taskComplexity?: TaskComplexity;
-  /**
-   * AI plan mode flag — when true, mutating manager decisions (worker task
-   * launches that would touch the workspace) are queued into
-   * `pendingMutations` instead of being dispatched. The user reviews them in
-   * the PlanDiffReview overlay and applies/discards atomically. Per-run
-   * (no global setting); toggled by the `/plan` and `/auto` slash commands
-   * in the chat composer.
-   */
-  planMode?: boolean;
-  /**
-   * Mutations queued by the manager while `planMode === true`. Each entry is
-   * a worker-task launch that the user has not yet approved. Apply pops the
-   * entry, creates the worker task, and lets the autopilot pick it up;
-   * discard pops without dispatching.
-   */
-  pendingMutations?: PendingMutation[];
 }
 
-export type PendingMutationSource = "manager_decision";
+export type ProjectItemStatus =
+  | "inbox"
+  | "ready"
+  | "running"
+  | "review"
+  | "blocked"
+  | "done"
+  | "archived";
 
-export interface PendingMutation {
-  /** uuid for the mutation; stable across apply/discard. */
+export type ProjectItemPriority = "low" | "normal" | "high" | "urgent";
+
+export interface ProjectItem {
   id: string;
-  /** Origin of the queued action; "manager_decision" today, "worker_output" later. */
-  source: PendingMutationSource;
-  /** ISO timestamp when this mutation was proposed. */
-  proposedAt: string;
-  /** Human-readable summary surfaced in the review card. */
-  description: string;
-  /**
-   * The worker task the manager wanted to launch. We persist the full input
-   * (not a partial WorkerTask) so apply can call createWorkerTask verbatim.
-   */
-  workerTaskInput: PendingWorkerTaskInput;
-  /**
-   * Optional pre-execution diff preview. Empty for the MVP since worker output
-   * isn't known until execution. Reserved for future "worker_output" sources
-   * where individual edits ARE inspectable before commit.
-   */
-  diffPreview?: PendingDiffPreview;
-}
-
-export interface PendingWorkerTaskInput {
-  stepId?: string;
+  workspaceId: string;
   title: string;
   description: string;
-  runtimePreference: WorkerRuntime;
-  modelHint?: string;
-  effortHint?: WorkerTask["effortHint"];
-  allowedPaths: string[];
-  forbiddenPaths: string[];
-  expectedOutputs: string[];
-  verificationCommands: string[];
-  canRunParallel: boolean;
-  conflictsWith: string[];
-  taskClass?: PlannedStepAgentTaskClass;
+  status: ProjectItemStatus;
+  priority: ProjectItemPriority;
+  labels: string[];
+  linkedRunIds: string[];
+  linkedFiles: string[];
+  acceptanceCriteria: string[];
+  followUps: string[];
+  createdAt: string;
+  updatedAt: string;
 }
 
-export interface PendingDiffPreview {
-  files: PendingFileDiff[];
-  totals: {
-    addedLines: number;
-    removedLines: number;
-    filesChanged: number;
-  };
+export interface ProjectBoardState {
+  workspaceId: string;
+  items: ProjectItem[];
+  updatedAt: string;
 }
 
-export interface PendingFileDiff {
-  path: string;
-  before?: string;
-  after?: string;
-  unifiedDiff: string;
-  added: number;
-  removed: number;
+export interface CreateProjectItemInput {
+  workspaceId: string;
+  title: string;
+  description?: string;
+  status?: ProjectItemStatus;
+  priority?: ProjectItemPriority;
+  labels?: string[];
+  linkedRunIds?: string[];
+  linkedFiles?: string[];
+  acceptanceCriteria?: string[];
+  followUps?: string[];
 }
 
-export interface SetPlanModeInput {
+export interface UpdateProjectItemInput {
+  workspaceId: string;
+  itemId: string;
+  patch: Partial<
+    Pick<
+      ProjectItem,
+      | "title"
+      | "description"
+      | "status"
+      | "priority"
+      | "labels"
+      | "linkedRunIds"
+      | "linkedFiles"
+      | "acceptanceCriteria"
+      | "followUps"
+    >
+  >;
+}
+
+export interface LinkProjectRunInput {
+  workspaceId: string;
+  itemId: string;
   runId: string;
-  enabled: boolean;
+  status?: ProjectItemStatus;
 }
 
-export interface ApplyPendingMutationsInput {
-  runId: string;
-  /** When undefined, applies every queued mutation. */
-  ids?: string[];
+export interface RunWorkerGroupStats {
+  id: string;
+  stepId?: string;
+  title: string;
+  workerTaskIds: string[];
+  attemptIds: string[];
+  runtimes: WorkerRuntime[];
+  startedAt?: string;
+  finishedAt?: string;
+  durationSeconds: number;
+  totalWorkerRuntimeSeconds: number;
+  verifierCount: number;
+  outcome: "idle" | "running" | "succeeded" | "failed" | "mixed";
 }
 
-export interface DiscardPendingMutationsInput {
+export interface RunStats {
   runId: string;
-  /** When undefined, discards every queued mutation. */
-  ids?: string[];
+  workspaceId: string;
+  status: RunStatus;
+  startedAt?: string;
+  finishedAt?: string;
+  durationSeconds: number;
+  retryCount: number;
+  workerCount: number;
+  attemptCount: number;
+  managerCallCount: number;
+  humanInterventions: number;
+  timeToFirstWorkerSeconds: number | null;
+  totalWorkerRuntimeSeconds: number;
+  estimatedCriticalPathSeconds: number;
+  parallelEfficiency: number;
+  workerGroups: RunWorkerGroupStats[];
 }
 
 export type AutopilotStatus = "idle" | "running" | "paused" | "blocked" | "complete" | "failed" | "cancelled";

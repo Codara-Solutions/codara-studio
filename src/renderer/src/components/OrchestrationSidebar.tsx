@@ -7,7 +7,7 @@ import type {
   SparkEvent,
   Workspace,
 } from "@shared/types";
-import SparkAgentPanel from "./SparkAgentPanel";
+import SparkAgentPanel, { type PlanMode } from "./SparkAgentPanel";
 
 interface Props {
   workspace: Workspace | null;
@@ -16,7 +16,13 @@ interface Props {
   onSelectRun: (id: string | null) => void;
 }
 
-type PlanMode = "file" | "typed";
+// Upper bound on the live-tailed event buffer. The chat timeline only ever
+// surfaces a small allowlist of recent narrative beats (run.started /
+// step completions / pause+resume), so retaining every event for the
+// lifetime of a long run is pure memory + re-sort cost with no visible
+// payoff. 500 comfortably covers any normal run's worth of events; trimming
+// to the most recent N keeps the displayed timeline identical in practice.
+const MAX_RETAINED_EVENTS = 500;
 
 export default function OrchestrationSidebar({
   workspace,
@@ -70,7 +76,13 @@ export default function OrchestrationSidebar({
     let cancelled = false;
     void window.spark.orchestration.listEvents(activeRunId).then((next) => {
       if (cancelled) return;
-      setEvents(next);
+      // Same cap as the live-tail path: keep only the most recent events so
+      // a run with a long history doesn't seed the buffer over the bound.
+      setEvents(
+        next.length > MAX_RETAINED_EVENTS
+          ? next.slice(next.length - MAX_RETAINED_EVENTS)
+          : next,
+      );
     }).catch(() => {
       /* the chat falls back to humanMessages-only if event loading fails */
     });
@@ -78,7 +90,12 @@ export default function OrchestrationSidebar({
       if (event.runId !== activeRunId) return;
       setEvents((current) => {
         if (current.some((item) => item.id === event.id)) return current;
-        return [...current, event];
+        const next = [...current, event];
+        // Cap the buffer so a long-lived run can't grow it unbounded and
+        // make buildTimeline re-sort an ever-larger array each render.
+        return next.length > MAX_RETAINED_EVENTS
+          ? next.slice(next.length - MAX_RETAINED_EVENTS)
+          : next;
       });
     });
     return () => {
@@ -192,6 +209,31 @@ export default function OrchestrationSidebar({
     } catch (err) {
       setError((err as Error).message);
     }
+  };
+
+  const pauseActiveRunAfterWorkers = async () => {
+    if (!activeRun || busy) return;
+    const pauseAfterWorkers = window.spark.orchestration.pauseRunAfterCurrentWorkers;
+    if (typeof pauseAfterWorkers !== "function") {
+      setError("Stop-after-workers API is unavailable. Restart Spark Agent to reload the preload bridge.");
+      return;
+    }
+    await mutateActiveRun(() =>
+      pauseAfterWorkers({
+        runId: activeRun.id,
+        reason: "Stop after current workers finish",
+      }),
+    );
+  };
+
+  const forcePauseActiveRun = async () => {
+    if (!activeRun) return;
+    const force = window.spark.orchestration.forcePauseRun;
+    if (typeof force !== "function") {
+      setError("Force-pause API is unavailable. Restart Spark Agent to reload the preload bridge.");
+      return;
+    }
+    await mutateActiveRun(() => force(activeRun.id));
   };
 
   const resumeActiveRun = async () => {
@@ -322,6 +364,8 @@ export default function OrchestrationSidebar({
         error={error}
         onStartAutopilot={startAutopilot}
         onPauseRun={pauseActiveRun}
+        onPauseAfterWorkers={pauseActiveRunAfterWorkers}
+        onForcePauseRun={forcePauseActiveRun}
         onResumeRun={resumeActiveRun}
         onAddUserMessage={addUserMessage}
         onAnswerQuestion={answerActiveQuestion}

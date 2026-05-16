@@ -89,10 +89,56 @@ export function readAppTokens(): AppTokens {
 }
 
 /**
+ * Shared subscription machinery.
+ *
+ * WHY a single observer: every live terminal pane (plus Monaco/CodeMirror)
+ * subscribes to token changes. A naive design gives each subscriber its own
+ * MutationObserver + its own readAppTokens() (22 getComputedStyle calls =
+ * 22 forced style recalcs). The accent-color effect writes `--accent` onto
+ * <html>'s inline style — which our `style` attributeFilter watches — so one
+ * color tick used to cost O(N_subscribers × 22) synchronous reflows.
+ *
+ * Instead we keep ONE module-level observer and ONE subscriber Set. Mutations
+ * within a single frame are coalesced via requestAnimationFrame, so a burst of
+ * `--accent` writes triggers exactly one readAppTokens() per frame; the cached
+ * result is then fanned out to every callback. Cost is now O(22) per frame,
+ * shared across all subscribers, regardless of how many terminals are open.
+ */
+const subscribers = new Set<(tokens: AppTokens) => void>();
+let sharedObserver: MutationObserver | null = null;
+let rafHandle = 0;
+
+/** Re-read tokens once, then fan the cached result out to every subscriber. */
+function flushTokens(): void {
+  rafHandle = 0;
+  const tokens = readAppTokens();
+  // Iterate a snapshot: a callback may unsubscribe (or subscribe) mid-flush.
+  for (const cb of [...subscribers]) {
+    try {
+      cb(tokens);
+    } catch {
+      // A misbehaving subscriber must not starve the others.
+    }
+  }
+}
+
+/** Coalesce any number of mutations in one frame into a single token read. */
+function handleMutations(): void {
+  if (rafHandle !== 0) return;
+  rafHandle = requestAnimationFrame(flushTokens);
+}
+
+/**
  * Subscribes to theme-token changes. Re-reads tokens whenever the
- * `class` or `data-theme` attribute changes on <html> (covers dark/light
- * toggles and custom theme switches). Fires once synchronously with the
- * current tokens, then on every relevant mutation.
+ * `class`, `data-theme`, or inline `style` attribute changes on <html>
+ * (covers dark/light toggles, custom theme switches, and live `--accent`
+ * writes). Fires once synchronously with the current tokens, then once per
+ * animation frame in which a relevant mutation occurred.
+ *
+ * All subscribers share a single MutationObserver and a single per-frame
+ * token read — see the block comment above — so cost stays O(1) in the
+ * number of subscribers. The observer is lazily created on the first
+ * subscribe and disconnected when the last subscriber unsubscribes.
  *
  * Returns an unsubscribe function.
  */
@@ -106,14 +152,28 @@ export function subscribeAppTokens(
     // DOM may not be ready in tests / SSR; ignore — observer still attaches.
   }
 
-  const observer = new MutationObserver(() => {
-    callback(readAppTokens());
-  });
+  subscribers.add(callback);
 
-  observer.observe(document.documentElement, {
-    attributes: true,
-    attributeFilter: ["class", "data-theme", "style"],
-  });
+  // Lazily create + connect the shared observer on the first subscriber.
+  if (!sharedObserver) {
+    sharedObserver = new MutationObserver(handleMutations);
+    sharedObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class", "data-theme", "style"],
+    });
+  }
 
-  return () => observer.disconnect();
+  return () => {
+    subscribers.delete(callback);
+    // Tear everything down once nobody is listening, so the observer doesn't
+    // keep running (and a queued frame doesn't fire into an empty Set).
+    if (subscribers.size === 0) {
+      sharedObserver?.disconnect();
+      sharedObserver = null;
+      if (rafHandle !== 0) {
+        cancelAnimationFrame(rafHandle);
+        rafHandle = 0;
+      }
+    }
+  };
 }

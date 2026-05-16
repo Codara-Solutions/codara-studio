@@ -18,20 +18,6 @@ const wrap = (children: React.ReactNode, color = "currentColor", size = 14) => (
   </span>
 );
 
-export function FolderIcon({ open = false }: { open?: boolean }) {
-  return wrap(
-    open ? (
-      <>
-        <path d="M1 4 H6 L7.5 5.5 H13 V12 H1 Z" stroke="currentColor" strokeWidth="1" />
-        <path d="M1 5.5 H13" stroke="currentColor" strokeWidth="1" />
-      </>
-    ) : (
-      <path d="M1 4 H5.5 L7 5.5 H13 V12 H1 Z" stroke="currentColor" strokeWidth="1" />
-    ),
-    "currentColor",
-  );
-}
-
 const docFrame = (
   <path d="M3 1.5 H9 L11 3.5 V12.5 H3 Z M9 1.5 V3.5 H11" stroke="currentColor" strokeWidth="1" />
 );
@@ -171,20 +157,42 @@ export function CloseIcon({ size = 14 }: { size?: number }) {
   );
 }
 
-export function SparkIcon({ size = 14 }: { size?: number }) {
-  // Lightning bolt — Spark's primary mark. Uses currentColor so the parent
-  // controls tint (typically var(--accent) at the rail header).
+export function SplitRightIcon({ size = 14 }: { size?: number }) {
+  // A rectangle with a centered vertical divider — reads as "two side-by-side
+  // panes". Used for "split right" (Mod+\) on the terminal pane toolbar.
   return (
     <svg
       width={size}
       height={size}
       viewBox="0 0 14 14"
-      fill="currentColor"
+      fill="none"
       stroke="currentColor"
-      strokeWidth="1.6"
+      strokeWidth="1.2"
+      strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <path d="M8 1 L2.5 8 H6.5 L5.5 13 L11.5 6 H7.5 L8 1 Z" />
+      <rect x="2" y="3" width="10" height="8" rx="1" />
+      <line x1="7" y1="3.5" x2="7" y2="10.5" />
+    </svg>
+  );
+}
+
+export function SplitDownIcon({ size = 14 }: { size?: number }) {
+  // Same rectangle, divider runs horizontally — "stacked panes". Used for
+  // "split down" (Mod+Shift+\) on the terminal pane toolbar.
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="2" y="3" width="10" height="8" rx="1" />
+      <line x1="2.5" y1="7" x2="11.5" y2="7" />
     </svg>
   );
 }
