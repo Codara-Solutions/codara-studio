@@ -199,3 +199,17 @@ a { color: inherit; }
   color: var(--muted);
 }
 .spark-fade-in { animation: spark-fade-in var(--motion) var(--ease-out) both; }
+
+/* ── Reduced motion ─────────────────────────────────────────────────────────
+   Honor the OS "reduce motion" setting: keyframe animations (pulsing status
+   dots, the connector spark, shimmer, spinners) collapse to their final
+   frame. Hover / focus transitions are left intact on purpose — they are
+   immediate interface feedback, not decoration. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

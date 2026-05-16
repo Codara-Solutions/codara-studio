@@ -8,6 +8,7 @@ import type {
 } from "@shared/types";
 import { isRunningStatus, runStatusColor } from "../lib/run-status";
 import RunChatView from "./RunChatView";
+import SectionHeader from "../panels/SectionHeader";
 
 export type PlanMode = "file" | "typed";
 
@@ -23,6 +24,8 @@ interface Props {
   humanInput: string;
   busy: boolean;
   error: string | null;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
   onStartAutopilot: () => void;
   onPauseRun: (reason: string) => void;
   onPauseAfterWorkers: () => void | Promise<void>;
@@ -50,6 +53,8 @@ export default function SparkAgentPanel({
   humanInput,
   busy,
   error,
+  collapsed,
+  onToggleCollapse,
   onStartAutopilot,
   onPauseRun,
   onPauseAfterWorkers,
@@ -101,48 +106,19 @@ export default function SparkAgentPanel({
       style={{
         display: "flex",
         flexDirection: "column",
-        flex: "4 1 0",
+        height: "100%",
         minHeight: 0,
         overflow: "hidden",
-        borderBottom: "1px solid var(--rule-soft)",
         background: "var(--panel)",
         fontFamily: "var(--font-sans)",
       }}
     >
-      {/* Hero header */}
-      <div
-        style={{
-          flex: "0 0 auto",
-          padding: "10px 14px",
-          borderBottom: "1px solid var(--rule-soft)",
-          display: "flex",
-          alignItems: "center",
-          gap: 9,
-        }}
-      >
-        <SparkGlyph />
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            lineHeight: 1.2,
-            minWidth: 0,
-            gap: 3,
-            flex: 1,
-          }}
-        >
-          <span
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontWeight: 700,
-              fontSize: 10,
-              letterSpacing: "0.16em",
-              textTransform: "uppercase",
-              color: "var(--ink-dim)",
-            }}
-          >
-            Spark
-          </span>
+      <SectionHeader
+        label="Spark"
+        glyph={<SparkGlyph />}
+        collapsed={collapsed}
+        onToggleCollapse={onToggleCollapse}
+        meta={
           <span
             style={{
               fontFamily: "var(--font-mono)",
@@ -151,14 +127,17 @@ export default function SparkAgentPanel({
               display: "inline-flex",
               alignItems: "center",
               gap: 6,
+              whiteSpace: "nowrap",
             }}
           >
             <PulseDot live={runIsActive} />
             {runStatus}
           </span>
-        </div>
-      </div>
+        }
+      />
 
+      {!collapsed && (
+        <>
       {/* Runs list — always visible, with an internal cap so it never crowds
           out the chat / plan UI below. */}
       <div
@@ -204,6 +183,8 @@ export default function SparkAgentPanel({
           onTypedPlanTextChange={onTypedPlanTextChange}
           onHumanInputChange={onHumanInputChange}
         />
+      )}
+        </>
       )}
     </section>
   );

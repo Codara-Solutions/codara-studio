@@ -189,22 +189,86 @@ export interface FsChangeEvent {
   dirs: string[];
 }
 
-export interface GitGraph {
-  isRepo: boolean;
-  branch?: string;
-  branches: GitBranch[];
-  remoteBranches: string[];
-  lines: string[];
-  error?: string;
+// ── Git / Source Control ─────────────────────────────────────────────────────
+
+export type GitFileStatus =
+  | "modified"
+  | "added"
+  | "deleted"
+  | "renamed"
+  | "untracked"
+  | "conflicted"
+  | "typechange";
+
+export interface GitFileChange {
+  /** Repo-relative path, forward-slash separated. */
+  path: string;
+  /** Original path for renames / copies. */
+  oldPath?: string;
+  status: GitFileStatus;
+  /** True when this entry is the staged (index) side of the change. */
+  staged: boolean;
+  /** True for files git is not yet tracking. */
+  untracked: boolean;
 }
 
-export interface GitBranch {
-  name: string;
-  current: boolean;
+export interface GitStatus {
+  isRepo: boolean;
+  /** Branch name, or the short hash when HEAD is detached. */
+  branch?: string;
+  detached: boolean;
   upstream?: string;
   ahead: number;
   behind: number;
+  staged: GitFileChange[];
+  /** Unstaged working-tree changes, with untracked files merged in. */
+  unstaged: GitFileChange[];
+  hasConflicts: boolean;
+  error?: string;
 }
+
+/**
+ * One row of `git log --graph` output. Rows that carry a commit have the
+ * hash / subject / etc. fields populated; pure connector rows have only
+ * `graph` (the ASCII lanes git draws between commits).
+ */
+export interface GitLogRow {
+  /** ASCII lane prefix from `git log --graph` (e.g. "* | "). */
+  graph: string;
+  hash?: string;
+  shortHash?: string;
+  subject?: string;
+  author?: string;
+  /** Human relative date, e.g. "3 hours ago". */
+  relativeDate?: string;
+  /** Branch / tag ref names decorating this commit. */
+  refs?: string[];
+  /** True when this commit is the current HEAD. */
+  isHead?: boolean;
+}
+
+export interface GitLog {
+  isRepo: boolean;
+  rows: GitLogRow[];
+  error?: string;
+}
+
+export type GitDiffLineKind = "add" | "del" | "context" | "hunk" | "meta";
+
+export interface GitDiffLine {
+  kind: GitDiffLineKind;
+  text: string;
+}
+
+export interface GitDiff {
+  path: string;
+  binary: boolean;
+  lines: GitDiffLine[];
+  error?: string;
+}
+
+/** Result of a git mutation — stderr is surfaced verbatim on failure. */
+export type GitOpResult = { ok: true } | { ok: false; error: string };
 
 export type RunStatus =
   | "idle"

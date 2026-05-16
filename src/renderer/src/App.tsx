@@ -31,9 +31,9 @@ import type { PaneNode, Tab, TerminalLeaf } from "./tabs/types";
 import { basename } from "./path-utils";
 import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
-
-const RAIL_WIDTH = 240;
-const RIGHT_WIDTH = 360;
+import { usePanelLayout, sectionSlotStyles } from "./panels/usePanelLayout";
+import ResizeHandle from "./panels/ResizeHandle";
+import SectionHeader from "./panels/SectionHeader";
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
@@ -190,6 +190,12 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [platform, setPlatform] = useState<string>("");
   const [home, setHome] = useState<string>("");
+  // Side-panel layout: outer widths, internal split ratios, per-section
+  // collapse. Persisted globally. Mirrored through a ref so the resize-drag
+  // callbacks can read the latest widths at drag start with a stable identity.
+  const panels = usePanelLayout();
+  const panelsRef = useRef(panels);
+  panelsRef.current = panels;
   const saveTimer = useRef<number | null>(null);
   // Trailing-debounce timer for the orchestration-event → listRuns refresh.
   // A single run emits a burst of events (planning → running → many worker
@@ -860,6 +866,30 @@ export default function App() {
     setShowRight((v) => !v);
   }, []);
 
+  // Panel resize: snapshot the panel's current width when a drag starts, then
+  // translate the pointer delta the ResizeHandle reports into a new width.
+  // usePanelLayout clamps, so an over-drag is harmless.
+  const leftWidthAtDragStart = useRef(0);
+  const rightWidthAtDragStart = useRef(0);
+  const handleLeftWidthStart = useCallback(() => {
+    leftWidthAtDragStart.current = panelsRef.current.leftWidth;
+  }, []);
+  const handleLeftWidthResize = useCallback((delta: number) => {
+    panelsRef.current.setLeftWidth(leftWidthAtDragStart.current + delta);
+  }, []);
+  const handleRightWidthStart = useCallback(() => {
+    rightWidthAtDragStart.current = panelsRef.current.rightWidth;
+  }, []);
+  const handleRightWidthResize = useCallback((delta: number) => {
+    // The right handle sits on the panel's inner edge, so dragging left (a
+    // negative delta) widens the panel.
+    panelsRef.current.setRightWidth(rightWidthAtDragStart.current - delta);
+  }, []);
+  const toggleWorkspacesSection = useCallback(() => panelsRef.current.toggleCollapse("workspaces"), []);
+  const toggleGraphSection = useCallback(() => panelsRef.current.toggleCollapse("graph"), []);
+  const toggleAgentSection = useCallback(() => panelsRef.current.toggleCollapse("agent"), []);
+  const toggleExplorerSection = useCallback(() => panelsRef.current.toggleCollapse("explorer"), []);
+
   const handleOpenSettings = useCallback(() => {
     setSettingsOpen(true);
   }, []);
@@ -934,15 +964,13 @@ export default function App() {
   );
 
   // Open a file by absolute path. Used by the terminal's OSC 8888 handler
-  // (`tp <file>` / `spark_open <file>` from a shell). Falls back to a
-  // synthesized FsEntry — opening a file is best-effort UX.
-  const openFileByPath = useCallback(
-    (path: string) => {
-      if (!path) return;
-      tabs.openEditorTab(entryFromPath(path));
-    },
-    [tabs],
-  );
+  // (`tp <file>` / `spark_open <file>` from a shell) and the Source Control
+  // panel's "open file" action. Reads `tabs` via the ref so the callback stays
+  // referentially stable — WorkspaceRail's React.memo depends on it.
+  const openFileByPath = useCallback((path: string) => {
+    if (!path) return;
+    tabsRef.current.openEditorTab(entryFromPath(path));
+  }, []);
 
   // ── Detected URL → preview tab ─────────────────────────────────────────────
 
@@ -1246,7 +1274,10 @@ export default function App() {
             activeId={activeId}
             activeWorkspace={activeWorkspace}
             editingId={editingId}
-            width={RAIL_WIDTH}
+            width={panels.leftWidth}
+            split={panels.leftSplit}
+            workspacesCollapsed={panels.collapsed.workspaces}
+            graphCollapsed={panels.collapsed.graph}
             onActivate={handleActivateWorkspace}
             onEdit={handleEditWorkspace}
             onChange={updateWs}
@@ -1254,6 +1285,19 @@ export default function App() {
             onDelete={deleteWs}
             onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
+            onSplitChange={panels.setLeftSplit}
+            onToggleWorkspaces={toggleWorkspacesSection}
+            onToggleGraph={toggleGraphSection}
+            onOpenFile={openFileByPath}
+          />
+        )}
+        {showLeft && (
+          <ResizeHandle
+            orientation="col"
+            accent={activeWorkspace?.color}
+            ariaLabel="Resize the workspaces panel"
+            onResizeStart={handleLeftWidthStart}
+            onResize={handleLeftWidthResize}
           />
         )}
 
@@ -1299,6 +1343,15 @@ export default function App() {
         </main>
 
         {showRight && (
+          <ResizeHandle
+            orientation="col"
+            accent={activeWorkspace?.color}
+            ariaLabel="Resize the right panel"
+            onResizeStart={handleRightWidthStart}
+            onResize={handleRightWidthResize}
+          />
+        )}
+        {showRight && (
           <RightPanel
             workspace={activeWorkspace}
             activePath={
@@ -1308,10 +1361,17 @@ export default function App() {
             }
             runs={runs}
             activeRunId={activeRunId}
+            width={panels.rightWidth}
+            split={panels.rightSplit}
+            agentCollapsed={panels.collapsed.agent}
+            explorerCollapsed={panels.collapsed.explorer}
             onSelectRun={handleSelectRun}
             onOpenFile={openEditorFile}
             onDeleteFile={handleDeleteFile}
             onRenameFile={handleRenameFile}
+            onSplitChange={panels.setRightSplit}
+            onToggleAgent={toggleAgentSection}
+            onToggleExplorer={toggleExplorerSection}
           />
         )}
 
@@ -1514,53 +1574,128 @@ const RightPanel = React.memo(function RightPanel({
   activePath,
   runs,
   activeRunId,
+  width,
+  split,
+  agentCollapsed,
+  explorerCollapsed,
   onSelectRun,
   onOpenFile,
   onDeleteFile,
   onRenameFile,
+  onSplitChange,
+  onToggleAgent,
+  onToggleExplorer,
 }: {
   workspace: Workspace | null;
   activePath: string | null;
   runs: RunState[];
   activeRunId: string | null;
+  width: number;
+  split: number;
+  agentCollapsed: boolean;
+  explorerCollapsed: boolean;
   onSelectRun: (id: string | null) => void;
   onOpenFile: (entry: FsEntry) => void;
   onDeleteFile: (path: string) => void;
   onRenameFile: (oldPath: string, entry: FsEntry) => void;
+  onSplitChange: (ratio: number) => void;
+  onToggleAgent: () => void;
+  onToggleExplorer: () => void;
 }) {
   const cwd = workspace?.cwd ?? null;
+  const accent = workspace?.color || "var(--accent)";
+
+  // Section-divider drag: snapshot the split ratio and body height at drag
+  // start, then translate a pointer delta into a ratio delta (same pattern
+  // as WorkspaceRail).
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const splitAtDragStart = useRef(split);
+  const bodyHeightAtDragStart = useRef(1);
+
+  const [agentSlot, explorerSlot] = sectionSlotStyles(split, agentCollapsed, explorerCollapsed);
+
   return (
     <aside
       style={{
-        width: RIGHT_WIDTH,
-        flex: `0 0 ${RIGHT_WIDTH}px`,
-        borderLeft: "1px solid var(--rule-soft)",
-        background: "var(--bg)",
+        width,
+        flex: `0 0 ${width}px`,
+        background: "var(--panel)",
         display: "flex",
         flexDirection: "column",
         minHeight: 0,
         overflow: "hidden",
       }}
     >
-      <OrchestrationSidebar
-        workspace={workspace}
-        runs={runs}
-        activeRunId={activeRunId}
-        onSelectRun={onSelectRun}
-      />
-      {cwd ? (
-        <FileTree
-          cwd={cwd}
-          activePath={activePath}
-          onOpenFile={onOpenFile}
-          onDeleteFile={onDeleteFile}
-          onRenameFile={onRenameFile}
+      <div
+        ref={bodyRef}
+        style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}
+      >
+        <section
+          style={{
+            ...agentSlot,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          }}
+        >
+          <OrchestrationSidebar
+            workspace={workspace}
+            runs={runs}
+            activeRunId={activeRunId}
+            onSelectRun={onSelectRun}
+            collapsed={agentCollapsed}
+            onToggleCollapse={onToggleAgent}
+          />
+        </section>
+
+        <ResizeHandle
+          orientation="row"
+          disabled={agentCollapsed || explorerCollapsed}
+          accent={accent}
+          ariaLabel="Resize Spark and Explorer"
+          onResizeStart={() => {
+            splitAtDragStart.current = split;
+            bodyHeightAtDragStart.current = bodyRef.current?.clientHeight ?? 1;
+          }}
+          onResize={(delta) => {
+            onSplitChange(splitAtDragStart.current + delta / bodyHeightAtDragStart.current);
+          }}
         />
-      ) : (
-        <div style={{ padding: "12px 14px", color: "var(--muted)", fontSize: 11 }}>
-          No active workspace.
-        </div>
-      )}
+
+        <section
+          style={{
+            ...explorerSlot,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          }}
+        >
+          {cwd ? (
+            <FileTree
+              cwd={cwd}
+              activePath={activePath}
+              onOpenFile={onOpenFile}
+              onDeleteFile={onDeleteFile}
+              onRenameFile={onRenameFile}
+              collapsed={explorerCollapsed}
+              onToggleCollapse={onToggleExplorer}
+            />
+          ) : (
+            <>
+              <SectionHeader
+                label="Explorer"
+                collapsed={explorerCollapsed}
+                onToggleCollapse={onToggleExplorer}
+              />
+              {!explorerCollapsed && (
+                <div style={{ padding: "12px 14px", color: "var(--muted)", fontSize: 11 }}>
+                  No active workspace.
+                </div>
+              )}
+            </>
+          )}
+        </section>
+      </div>
     </aside>
   );
 });

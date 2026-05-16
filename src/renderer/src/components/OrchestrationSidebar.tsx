@@ -14,6 +14,8 @@ interface Props {
   runs: RunState[];
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
 }
 
 // Upper bound on the live-tailed event buffer. The chat timeline only ever
@@ -29,6 +31,8 @@ export default function OrchestrationSidebar({
   runs,
   activeRunId,
   onSelectRun,
+  collapsed,
+  onToggleCollapse,
 }: Props) {
   const [planFiles, setPlanFiles] = useState<PlanFile[]>([]);
   const [selectedPlanPath, setSelectedPlanPath] = useState<string>("");
@@ -345,7 +349,7 @@ export default function OrchestrationSidebar({
       style={{
         display: "flex",
         flexDirection: "column",
-        flex: "0 0 70%",
+        height: "100%",
         minHeight: 0,
         overflow: "hidden",
       }}
@@ -362,6 +366,8 @@ export default function OrchestrationSidebar({
         humanInput={humanInput}
         busy={busy}
         error={error}
+        collapsed={collapsed}
+        onToggleCollapse={onToggleCollapse}
         onStartAutopilot={startAutopilot}
         onPauseRun={pauseActiveRun}
         onPauseAfterWorkers={pauseActiveRunAfterWorkers}

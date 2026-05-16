@@ -1,7 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { Workspace } from "@shared/types";
 import { MinusIcon, PlusIcon } from "./icons";
-import GitGraph from "./GitGraph";
+import GitPanel from "./git/GitPanel";
+import { sectionSlotStyles } from "../panels/usePanelLayout";
+import ResizeHandle from "../panels/ResizeHandle";
+import SectionHeader from "../panels/SectionHeader";
 
 const WORKSPACE_COLORS = [
   "#F0C419",
@@ -20,6 +23,10 @@ interface RailProps {
   editingId: string | null;
   width: number;
   activeWorkspace: Workspace | null;
+  // Workspaces' share of the panel body (0..1), and per-section collapse.
+  split: number;
+  workspacesCollapsed: boolean;
+  graphCollapsed: boolean;
   onActivate: (id: string) => void;
   onEdit: (id: string) => void;
   onChange: (id: string, patch: Partial<Workspace>) => void;
@@ -27,6 +34,10 @@ interface RailProps {
   onDelete: (id: string) => void;
   onCloseEditor: () => void;
   onCreate: () => void;
+  onSplitChange: (ratio: number) => void;
+  onToggleWorkspaces: () => void;
+  onToggleGraph: () => void;
+  onOpenFile: (absolutePath: string) => void;
 }
 
 // Memoized: App hoists every prop to a stable reference (the `workspaces`
@@ -35,112 +46,141 @@ interface RailProps {
 // the rail skips re-renders driven by unrelated App state — most importantly
 // the live `--accent` color drag, which previously repainted the whole rail.
 function WorkspaceRail(props: RailProps) {
-  const { workspaces, width, onCreate } = props;
+  const {
+    workspaces,
+    width,
+    onCreate,
+    split,
+    workspacesCollapsed,
+    graphCollapsed,
+    onSplitChange,
+    onToggleWorkspaces,
+    onToggleGraph,
+  } = props;
   const deleteActiveWorkspace = () => {
     if (!props.activeId) return;
     props.onCloseEditor();
     props.onDelete(props.activeId);
   };
+
+  // Section-divider drag: snapshot the split ratio and the body height at
+  // drag start, then translate a pointer delta into a ratio delta. The hook's
+  // setter clamps, so an over-drag is harmless.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const splitAtDragStart = useRef(split);
+  const bodyHeightAtDragStart = useRef(1);
+
+  const accent = props.activeWorkspace?.color || "var(--accent)";
+  const [workspacesSlot, graphSlot] = sectionSlotStyles(
+    split,
+    workspacesCollapsed,
+    graphCollapsed,
+  );
+
   return (
     <aside
       style={{
         width,
         flex: `0 0 ${width}px`,
         background: "var(--panel)",
-        borderRight: "1px solid var(--rule)",
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
         position: "relative",
       }}
     >
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-        <div style={{ flex: "1 1 50%", overflow: "auto", minHeight: 0 }}>
-          <RailSectionHeader
-            label="WORKSPACES"
+      <div
+        ref={bodyRef}
+        style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}
+      >
+        <section
+          style={{
+            ...workspacesSlot,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          }}
+        >
+          <SectionHeader
+            label="Workspaces"
             count={workspaces.length}
-            onCreate={onCreate}
-            onDelete={deleteActiveWorkspace}
-            deleteDisabled={!props.activeId}
+            collapsed={workspacesCollapsed}
+            onToggleCollapse={onToggleWorkspaces}
+            actions={
+              <>
+                <RailIconButton title="New workspace" onClick={onCreate}>
+                  <PlusIcon size={11} />
+                </RailIconButton>
+                <RailIconButton
+                  title={
+                    props.activeId
+                      ? "Delete selected workspace"
+                      : "Select a workspace to delete"
+                  }
+                  onClick={deleteActiveWorkspace}
+                  disabled={!props.activeId}
+                  danger
+                >
+                  <MinusIcon size={11} />
+                </RailIconButton>
+              </>
+            }
           />
-          <div style={{ padding: "2px 8px 10px" }}>
-            {workspaces.length === 0 && <EmptyState onCreate={onCreate} />}
-            {workspaces.map((w) => (
-              <WorkspaceRow
-                key={w.id}
-                ws={w}
-                active={w.id === props.activeId}
-                editing={w.id === props.editingId}
-                onActivate={() => props.onActivate(w.id)}
-                onEdit={() => props.onEdit(w.id)}
-                onChange={(patch) => props.onChange(w.id, patch)}
-                onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
-                onCloseEditor={props.onCloseEditor}
-              />
-            ))}
-          </div>
-        </div>
-        <GitGraph cwd={props.activeWorkspace?.cwd ?? null} />
+          {!workspacesCollapsed && (
+            <div style={{ flex: 1, overflow: "auto", minHeight: 0, padding: "6px 8px 10px" }}>
+              {workspaces.length === 0 && <EmptyState onCreate={onCreate} />}
+              {workspaces.map((w) => (
+                <WorkspaceRow
+                  key={w.id}
+                  ws={w}
+                  active={w.id === props.activeId}
+                  editing={w.id === props.editingId}
+                  onActivate={() => props.onActivate(w.id)}
+                  onEdit={() => props.onEdit(w.id)}
+                  onChange={(patch) => props.onChange(w.id, patch)}
+                  onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
+                  onCloseEditor={props.onCloseEditor}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+
+        <ResizeHandle
+          orientation="row"
+          disabled={workspacesCollapsed || graphCollapsed}
+          accent={accent}
+          ariaLabel="Resize Workspaces and Graph"
+          onResizeStart={() => {
+            splitAtDragStart.current = split;
+            bodyHeightAtDragStart.current = bodyRef.current?.clientHeight ?? 1;
+          }}
+          onResize={(delta) => {
+            onSplitChange(splitAtDragStart.current + delta / bodyHeightAtDragStart.current);
+          }}
+        />
+
+        <section
+          style={{
+            ...graphSlot,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          }}
+        >
+          <GitPanel
+            cwd={props.activeWorkspace?.cwd ?? null}
+            collapsed={graphCollapsed}
+            onToggleCollapse={onToggleGraph}
+            onOpenFile={props.onOpenFile}
+          />
+        </section>
       </div>
     </aside>
   );
 }
 
 export default React.memo(WorkspaceRail);
-
-function RailSectionHeader({
-  label,
-  count,
-  onCreate,
-  onDelete,
-  deleteDisabled = false,
-}: {
-  label: string;
-  count: number;
-  onCreate?: () => void;
-  onDelete?: () => void;
-  deleteDisabled?: boolean;
-}) {
-  return (
-    <div
-      style={{
-        padding: "14px 10px 9px 14px",
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        fontSize: 9,
-        letterSpacing: "0.18em",
-        fontWeight: 700,
-        color: "var(--muted)",
-        textTransform: "uppercase",
-      }}
-    >
-      <span>{label}</span>
-      <span style={{ flex: 1, height: 1, background: "var(--rule-soft)" }} />
-      <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
-        {String(count).padStart(2, "0")}
-      </span>
-      {onCreate && (
-        <RailIconButton
-          title="New workspace"
-          onClick={onCreate}
-        >
-          <PlusIcon size={11} />
-        </RailIconButton>
-      )}
-      {onDelete && (
-        <RailIconButton
-          title={deleteDisabled ? "Select a workspace to delete" : "Delete selected workspace"}
-          onClick={onDelete}
-          disabled={deleteDisabled}
-          danger
-        >
-          <MinusIcon size={11} />
-        </RailIconButton>
-      )}
-    </div>
-  );
-}
 
 function RailIconButton({
   title,

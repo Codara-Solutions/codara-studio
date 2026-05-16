@@ -2,7 +2,24 @@ import { ipcMain, dialog, BrowserWindow, app, shell, webContents } from "electro
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, listDir, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
-import { getGitGraph } from "./git-graph";
+import {
+  checkoutRef,
+  commitChanges,
+  discardChanges,
+  fetchRemote,
+  getGitDiff,
+  getGitLog,
+  getGitStatus,
+  initRepo,
+  pull,
+  push,
+  revertCommit,
+  stageAll,
+  stageFiles,
+  undoLastCommit,
+  unstageAll,
+  unstageFiles,
+} from "./git-ops";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { loadPreferences, setPreference } from "./preferences-store";
 import {
@@ -58,7 +75,11 @@ import type {
   FsEntry,
   FsFileContent,
   FsReadResult,
-  GitGraph,
+  GitDiff,
+  GitFileChange,
+  GitLog,
+  GitOpResult,
+  GitStatus,
   InterruptRunWithMessageInput,
   LinkProjectRunInput,
   LaunchWorkerAttemptInput,
@@ -222,8 +243,95 @@ export function registerIpc(): void {
     if (err) throw new Error(err);
   });
 
-  ipcMain.handle("git:graph", async (_e, cwd: string): Promise<GitGraph> => {
-    return getGitGraph(cwd);
+  ipcMain.handle("git:status", async (_e, cwd: string): Promise<GitStatus> => {
+    return getGitStatus(cwd);
+  });
+
+  ipcMain.handle("git:log", async (_e, cwd: string): Promise<GitLog> => {
+    return getGitLog(cwd);
+  });
+
+  ipcMain.handle(
+    "git:diff",
+    async (
+      _e,
+      input: { cwd: string; path: string; staged: boolean; untracked: boolean },
+    ): Promise<GitDiff> => {
+      return getGitDiff(input.cwd, input.path, {
+        staged: input.staged,
+        untracked: input.untracked,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    "git:stage",
+    async (_e, input: { cwd: string; paths: string[] }): Promise<GitOpResult> => {
+      return stageFiles(input.cwd, input.paths);
+    },
+  );
+
+  ipcMain.handle(
+    "git:unstage",
+    async (_e, input: { cwd: string; paths: string[] }): Promise<GitOpResult> => {
+      return unstageFiles(input.cwd, input.paths);
+    },
+  );
+
+  ipcMain.handle("git:stageAll", async (_e, cwd: string): Promise<GitOpResult> => {
+    return stageAll(cwd);
+  });
+
+  ipcMain.handle("git:unstageAll", async (_e, cwd: string): Promise<GitOpResult> => {
+    return unstageAll(cwd);
+  });
+
+  ipcMain.handle(
+    "git:discard",
+    async (_e, input: { cwd: string; files: GitFileChange[] }): Promise<GitOpResult> => {
+      return discardChanges(input.cwd, input.files);
+    },
+  );
+
+  ipcMain.handle(
+    "git:commit",
+    async (_e, input: { cwd: string; message: string }): Promise<GitOpResult> => {
+      return commitChanges(input.cwd, input.message);
+    },
+  );
+
+  ipcMain.handle("git:push", async (_e, cwd: string): Promise<GitOpResult> => {
+    return push(cwd);
+  });
+
+  ipcMain.handle("git:pull", async (_e, cwd: string): Promise<GitOpResult> => {
+    return pull(cwd);
+  });
+
+  ipcMain.handle("git:fetch", async (_e, cwd: string): Promise<GitOpResult> => {
+    return fetchRemote(cwd);
+  });
+
+  ipcMain.handle("git:undoLastCommit", async (_e, cwd: string): Promise<GitOpResult> => {
+    return undoLastCommit(cwd);
+  });
+
+  ipcMain.handle(
+    "git:checkout",
+    async (_e, input: { cwd: string; ref: string }): Promise<GitOpResult> => {
+      return checkoutRef(input.cwd, input.ref);
+    },
+  );
+
+  ipcMain.handle(
+    "git:revert",
+    async (_e, input: { cwd: string; hash: string }): Promise<GitOpResult> => {
+      return revertCommit(input.cwd, input.hash);
+    },
+  );
+
+  ipcMain.handle("git:init", async (_e, cwd: string): Promise<GitOpResult> => {
+    return initRepo(cwd);
   });
 
   ipcMain.handle("project:listItems", async (_e, workspaceId: string): Promise<ProjectItem[]> => {

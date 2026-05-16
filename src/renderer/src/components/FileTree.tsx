@@ -5,6 +5,7 @@ import { ChevronIcon } from "./icons";
 import { FileNodeIcon } from "./file-icons/FileNodeIcon";
 import { InlineInput } from "./file-icons/InlineInput";
 import { basename, dirname } from "../path-utils";
+import SectionHeader from "../panels/SectionHeader";
 
 // Tree row geometry. Hoisted to module scope so the values are shared by
 // `Row` and `PlaceholderRow` and never re-allocated per render.
@@ -111,6 +112,8 @@ interface Props {
   onOpenFile: (entry: FsEntry) => void;
   onDeleteFile?: (path: string) => void;
   onRenameFile?: (oldPath: string, entry: FsEntry) => void;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
 }
 
 interface FileContextMenu {
@@ -130,6 +133,8 @@ export default function FileTree({
   onOpenFile,
   onDeleteFile,
   onRenameFile,
+  collapsed,
+  onToggleCollapse,
 }: Props) {
   const [root, setRoot] = useState<DirNode & { kind: "dir" }>(() => makeDir({ name: basename(cwd), path: cwd, isDir: true }, true));
   const [contextMenu, setContextMenu] = useState<FileContextMenu | null>(null);
@@ -459,12 +464,30 @@ export default function FileTree({
         display: "flex",
         flexDirection: "column",
         minHeight: 0,
-        flex: "0 0 30%",
+        height: "100%",
+        overflow: "hidden",
       }}
     >
-      <PanelHeader
-        title="Explorer"
-        right={<span style={{ color: "var(--muted)" }}>{basename(cwd)}</span>}
+      <SectionHeader
+        label="Explorer"
+        collapsed={collapsed}
+        onToggleCollapse={onToggleCollapse}
+        meta={
+          <span
+            title={cwd}
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              color: "var(--muted)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              maxWidth: 132,
+            }}
+          >
+            {basename(cwd)}
+          </span>
+        }
         actions={
           <>
             <HeaderIconButton title="New file" onClick={() => void newFileAtRoot()}>
@@ -489,6 +512,8 @@ export default function FileTree({
           </>
         }
       />
+      {!collapsed && (
+        <>
       {error && (
         <div style={{ padding: "6px 16px", color: "var(--danger)", fontSize: 11 }}>
           {error}
@@ -542,6 +567,8 @@ export default function FileTree({
           }}
         />
       </div>
+        </>
+      )}
       {contextMenu && (
         <FileMenu
           menu={contextMenu}
@@ -995,60 +1022,6 @@ function MenuButton({
 
 function parentPath(path: string): string {
   return dirname(path);
-}
-
-function PanelHeader({
-  title,
-  right,
-  actions,
-}: {
-  title: string;
-  right?: React.ReactNode;
-  actions?: React.ReactNode;
-}) {
-  return (
-    <div
-      style={{
-        height: 22,
-        padding: "0 6px 0 14px",
-        background: "transparent",
-        display: "flex",
-        alignItems: "center",
-        gap: 4,
-        flex: "0 0 22px",
-        color: "var(--muted)",
-      }}
-    >
-      <span
-        style={{
-          fontFamily: "var(--font-sans)",
-          fontSize: 11,
-          letterSpacing: "0.04em",
-          textTransform: "uppercase",
-          fontWeight: 600,
-          color: "var(--ink-dim)",
-        }}
-      >
-        {title}
-      </span>
-      <span style={{ flex: 1 }} />
-      <span
-        style={{
-          maxWidth: 128,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-          fontFamily: "var(--font-sans)",
-          fontSize: 11,
-          fontWeight: 400,
-          color: "var(--muted)",
-        }}
-      >
-        {right}
-      </span>
-      {actions}
-    </div>
-  );
 }
 
 function HeaderIconButton({

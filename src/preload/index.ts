@@ -13,7 +13,11 @@ import type {
   FsEntry,
   FsFileContent,
   FsReadResult,
-  GitGraph,
+  GitDiff,
+  GitFileChange,
+  GitLog,
+  GitOpResult,
+  GitStatus,
   InterruptRunWithMessageInput,
   LinkProjectRunInput,
   LaunchWorkerAttemptInput,
@@ -125,7 +129,37 @@ const api = {
     },
   },
   git: {
-    graph: (cwd: string): Promise<GitGraph> => ipcRenderer.invoke("git:graph", cwd),
+    status: (cwd: string): Promise<GitStatus> => ipcRenderer.invoke("git:status", cwd),
+    log: (cwd: string): Promise<GitLog> => ipcRenderer.invoke("git:log", cwd),
+    diff: (
+      cwd: string,
+      path: string,
+      staged: boolean,
+      untracked: boolean,
+    ): Promise<GitDiff> =>
+      ipcRenderer.invoke("git:diff", { cwd, path, staged, untracked }),
+    stage: (cwd: string, paths: string[]): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:stage", { cwd, paths }),
+    unstage: (cwd: string, paths: string[]): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:unstage", { cwd, paths }),
+    stageAll: (cwd: string): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:stageAll", cwd),
+    unstageAll: (cwd: string): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:unstageAll", cwd),
+    discard: (cwd: string, files: GitFileChange[]): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:discard", { cwd, files }),
+    commit: (cwd: string, message: string): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:commit", { cwd, message }),
+    push: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:push", cwd),
+    pull: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:pull", cwd),
+    fetch: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:fetch", cwd),
+    undoLastCommit: (cwd: string): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:undoLastCommit", cwd),
+    checkout: (cwd: string, ref: string): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:checkout", { cwd, ref }),
+    revert: (cwd: string, hash: string): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:revert", { cwd, hash }),
+    init: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:init", cwd),
   },
   project: {
     listItems: (workspaceId: string): Promise<ProjectItem[]> =>
