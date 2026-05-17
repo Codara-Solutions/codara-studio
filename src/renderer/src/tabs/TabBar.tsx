@@ -24,7 +24,6 @@ interface Props {
   onNewTerminal: () => void;
   onNewPreview: () => void;
   onNewEditor: () => void;
-  onNewProject: () => void;
 }
 
 // React.memo: TabBar's props from App.tsx are referentially stable (the
@@ -39,7 +38,6 @@ function TabBar({
   onNewTerminal,
   onNewPreview,
   onNewEditor,
-  onNewProject,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -182,14 +180,6 @@ function TabBar({
               overflow: "hidden",
             }}
           >
-            <PickerItem
-              label="CRM"
-              hint="Tasks"
-              onClick={() => {
-                setPickerOpen(false);
-                onNewProject();
-              }}
-            />
             <PickerItem
               label="Terminal"
               hint="⌘T"
@@ -368,7 +358,6 @@ function KindIcon({ tab }: { tab: Tab }) {
   }
   if (tab.kind === "terminal") return <GlyphIcon glyph="❯" color="var(--accent)" />;
   if (tab.kind === "preview") return <GlyphIcon glyph="◉" color="var(--accent)" />;
-  if (tab.kind === "project") return <GlyphIcon glyph="▦" color="var(--accent)" />;
   return <GlyphIcon glyph="◆" color="var(--accent)" />;
 }
 

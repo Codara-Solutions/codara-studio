@@ -96,10 +96,6 @@ export interface RunsTab extends BaseTab {
   runId: string | null;
 }
 
-export interface ProjectTab extends BaseTab {
-  kind: "project";
-}
-
-export type Tab = EditorTab | TerminalTab | PreviewTab | RunsTab | ProjectTab;
+export type Tab = EditorTab | TerminalTab | PreviewTab | RunsTab;
 
 export type TabKind = Tab["kind"];

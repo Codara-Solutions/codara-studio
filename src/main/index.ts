@@ -6,7 +6,6 @@ import * as fsWatcher from "./fs-watcher";
 import { ensureSparkHomeSync } from "./spark-home";
 import { flush } from "./storage";
 import { flushPreferences } from "./preferences-store";
-import { flushProjectStore } from "./project-store";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
 import {
   emitFinalSummary,
@@ -178,12 +177,11 @@ app.whenReady().then(async () => {
 });
 
 // Drain every on-disk store before the process goes away. storage.flush()
-// covers spark-state.json / spark-settings.json, but preferences-store and
-// project-store each keep their own independent async write-queue that
-// nothing else flushes — without these awaits a quit can drop the last
-// preference toggle or project-board mutation.
+// covers spark-state.json / spark-settings.json, but preferences-store keeps
+// its own independent async write-queue that nothing else flushes — without
+// this await a quit can drop the last preference toggle.
 async function flushAllStores(): Promise<void> {
-  await Promise.all([flush(), flushPreferences(), flushProjectStore()]);
+  await Promise.all([flush(), flushPreferences()]);
 }
 
 app.on("window-all-closed", async () => {

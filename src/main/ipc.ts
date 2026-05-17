@@ -32,13 +32,6 @@ import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import {
-  createProjectItem,
-  deleteProjectItem,
-  linkProjectRun,
-  listProjectItems,
-  updateProjectItem,
-} from "./project-store";
-import {
   addRunMessage,
   appendTestEvent,
   createStep,
@@ -68,7 +61,6 @@ import type {
   AppSettings,
   AppState,
   CreateEntryInput,
-  CreateProjectItemInput,
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
@@ -81,12 +73,10 @@ import type {
   GitOpResult,
   GitStatus,
   InterruptRunWithMessageInput,
-  LinkProjectRunInput,
   LaunchWorkerAttemptInput,
   PauseRunInput,
   PrefKey,
   PreferencesChange,
-  ProjectItem,
   PrepareWorkerTaskInput,
   ResumeRunInput,
   RenameFileInput,
@@ -100,7 +90,6 @@ import type {
   SparkEvent,
   StartAutopilotInput,
   StartSearchResponse,
-  UpdateProjectItemInput,
   UpdateRunStatusInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
@@ -332,29 +321,6 @@ export function registerIpc(): void {
 
   ipcMain.handle("git:init", async (_e, cwd: string): Promise<GitOpResult> => {
     return initRepo(cwd);
-  });
-
-  ipcMain.handle("project:listItems", async (_e, workspaceId: string): Promise<ProjectItem[]> => {
-    return listProjectItems(workspaceId);
-  });
-
-  ipcMain.handle("project:createItem", async (_e, input: CreateProjectItemInput): Promise<ProjectItem> => {
-    return createProjectItem(input);
-  });
-
-  ipcMain.handle("project:updateItem", async (_e, input: UpdateProjectItemInput): Promise<ProjectItem> => {
-    return updateProjectItem(input);
-  });
-
-  ipcMain.handle(
-    "project:deleteItem",
-    async (_e, input: { workspaceId: string; itemId: string }): Promise<void> => {
-      await deleteProjectItem(input.workspaceId, input.itemId);
-    },
-  );
-
-  ipcMain.handle("project:linkRun", async (_e, input: LinkProjectRunInput): Promise<ProjectItem> => {
-    return linkProjectRun(input);
   });
 
   ipcMain.handle("orchestration:createRun", async (_e, input: CreateRunInput): Promise<RunState> => {

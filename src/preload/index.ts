@@ -5,7 +5,6 @@ import type {
   AppSettings,
   AppState,
   CreateEntryInput,
-  CreateProjectItemInput,
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
@@ -19,13 +18,11 @@ import type {
   GitOpResult,
   GitStatus,
   InterruptRunWithMessageInput,
-  LinkProjectRunInput,
   LaunchWorkerAttemptInput,
   PauseRunInput,
   PlanFile,
   PrefKey,
   PreferencesChange,
-  ProjectItem,
   PrepareWorkerTaskInput,
   ResumeRunInput,
   RenameFileInput,
@@ -39,7 +36,6 @@ import type {
   StartAutopilotInput,
   StartSearchResponse,
   UpdateRunStatusInput,
-  UpdateProjectItemInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
   WorkerReport,
@@ -160,18 +156,6 @@ const api = {
     revert: (cwd: string, hash: string): Promise<GitOpResult> =>
       ipcRenderer.invoke("git:revert", { cwd, hash }),
     init: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:init", cwd),
-  },
-  project: {
-    listItems: (workspaceId: string): Promise<ProjectItem[]> =>
-      ipcRenderer.invoke("project:listItems", workspaceId),
-    createItem: (input: CreateProjectItemInput): Promise<ProjectItem> =>
-      ipcRenderer.invoke("project:createItem", input),
-    updateItem: (input: UpdateProjectItemInput): Promise<ProjectItem> =>
-      ipcRenderer.invoke("project:updateItem", input),
-    deleteItem: (workspaceId: string, itemId: string): Promise<void> =>
-      ipcRenderer.invoke("project:deleteItem", { workspaceId, itemId }),
-    linkRun: (input: LinkProjectRunInput): Promise<ProjectItem> =>
-      ipcRenderer.invoke("project:linkRun", input),
   },
   orchestration: {
     createRun: (input: CreateRunInput): Promise<RunState> =>

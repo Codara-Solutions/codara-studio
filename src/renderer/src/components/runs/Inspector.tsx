@@ -1,0 +1,1594 @@
+import React, { useEffect, useMemo, useState } from "react";
+import type {
+  RunState,
+  StepState,
+  WorkerAttempt,
+  WorkerReport,
+  WorkerTask,
+} from "@shared/types";
+import {
+  attemptStatusColor,
+  deriveAgentStatus,
+  formatClock,
+  isRunStillTicking,
+  type RunMaps,
+  runtimeTone,
+  sortSteps,
+  statusColor,
+  stepStatusColor,
+  stepStatusLabel,
+} from "./run-format";
+import { ElapsedChip, ElapsedTime } from "./elapsed";
+import { StatusDot } from "./GraphNodes";
+
+// The docked inspector. One panel, selection-driven: the run summary when
+// nothing is picked, a step's full detail when a step node is clicked, a
+// worker's prompt + report when a worker node is clicked. It replaces the old
+// always-on STEP / WORKERS panels and the slide-up detail strips both.
+
+interface Props {
+  run: RunState;
+  maps: RunMaps;
+  reportByAttempt: ReadonlyMap<string, WorkerReport>;
+  selectedStepId: string | null;
+  selectedWorkerTaskId: string | null;
+  onSelectStep: (id: string) => void;
+  onSelectWorker: (id: string) => void;
+  onClear: () => void;
+}
+
+export default function Inspector({
+  run,
+  maps,
+  reportByAttempt,
+  selectedStepId,
+  selectedWorkerTaskId,
+  onSelectStep,
+  onSelectWorker,
+  onClear,
+}: Props) {
+  const orderedSteps = useMemo(() => sortSteps(run.steps), [run.steps]);
+  const stepIndex = useMemo(() => {
+    const map = new Map<string, number>();
+    orderedSteps.forEach((step, i) => map.set(step.id, i + 1));
+    return map;
+  }, [orderedSteps]);
+
+  const selectedTask = selectedWorkerTaskId ? maps.taskById.get(selectedWorkerTaskId) ?? null : null;
+  const selectedStep = selectedTask?.stepId
+    ? run.steps.find((step) => step.id === selectedTask.stepId) ?? null
+    : selectedStepId
+      ? run.steps.find((step) => step.id === selectedStepId) ?? null
+      : null;
+
+  const mode: "run" | "step" | "worker" = selectedTask ? "worker" : selectedStepId ? "step" : "run";
+
+  return (
+    <aside
+      style={{
+        height: "100%",
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        background: "var(--panel)",
+        borderLeft: "1px solid var(--rule)",
+      }}
+    >
+      <Header
+        mode={mode}
+        stepLabel={selectedStep ? `Step ${pad(stepIndex.get(selectedStep.id) ?? 0)}` : "Step"}
+        onStepCrumb={selectedStep ? () => onSelectStep(selectedStep.id) : undefined}
+        workerLabel={selectedTask ? workerShortLabel(selectedTask, selectedStep, stepIndex) : ""}
+        onClear={onClear}
+      />
+      <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+        {mode === "worker" && selectedTask ? (
+          <WorkerDetail
+            task={selectedTask}
+            attempt={maps.attemptByTask.get(selectedTask.id) ?? null}
+            step={selectedStep}
+            reportByAttempt={reportByAttempt}
+          />
+        ) : mode === "step" && selectedStep ? (
+          <StepDetail
+            step={selectedStep}
+            index={stepIndex.get(selectedStep.id) ?? 0}
+            maps={maps}
+            reportByAttempt={reportByAttempt}
+            onSelectWorker={onSelectWorker}
+          />
+        ) : (
+          <RunSummary run={run} steps={orderedSteps} onSelectStep={onSelectStep} />
+        )}
+      </div>
+    </aside>
+  );
+}
+
+// ── Header ───────────────────────────────────────────────────────────────────
+
+function Header({
+  mode,
+  stepLabel,
+  onStepCrumb,
+  workerLabel,
+  onClear,
+}: {
+  mode: "run" | "step" | "worker";
+  stepLabel: string;
+  onStepCrumb?: () => void;
+  workerLabel: string;
+  onClear: () => void;
+}) {
+  return (
+    <div
+      style={{
+        flex: "0 0 auto",
+        height: 42,
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "0 10px 0 14px",
+        minWidth: 0,
+        borderBottom: "1px solid var(--rule-soft)",
+        background: "var(--panel)",
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
+      }}
+    >
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          fontWeight: 700,
+          letterSpacing: "0.15em",
+          textTransform: "uppercase",
+        }}
+      >
+        Inspector
+      </span>
+      {mode !== "run" && <Caret />}
+      {mode === "step" && <Crumb label={stepLabel} current />}
+      {mode === "worker" && (
+        <>
+          <Crumb label={stepLabel} onClick={onStepCrumb} />
+          <Caret />
+          <Crumb label={workerLabel} current />
+        </>
+      )}
+      <span style={{ flex: 1 }} />
+      {mode !== "run" && (
+        <button
+          type="button"
+          onClick={onClear}
+          title="Clear selection"
+          style={{
+            appearance: "none",
+            width: 24,
+            height: 24,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            border: "1px solid var(--rule-soft)",
+            borderRadius: 6,
+            background: "transparent",
+            color: "var(--muted)",
+            cursor: "pointer",
+          }}
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden>
+            <path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Caret() {
+  return (
+    <svg width="7" height="7" viewBox="0 0 8 8" fill="none" aria-hidden style={{ color: "var(--muted-2)" }}>
+      <path d="M3 1.5 L5.5 4 L3 6.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function Crumb({ label, current, onClick }: { label: string; current?: boolean; onClick?: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={!onClick}
+      style={{
+        appearance: "none",
+        border: "none",
+        background: "transparent",
+        padding: 0,
+        color: current ? "var(--ink)" : "var(--ink-dim)",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11.5,
+        fontWeight: current ? 700 : 500,
+        cursor: onClick ? "pointer" : "default",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        minWidth: 0,
+        maxWidth: current ? 140 : 84,
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+// ── Shared layout atoms ──────────────────────────────────────────────────────
+
+function Section({
+  title,
+  meta,
+  first,
+  children,
+}: {
+  title: string;
+  meta?: React.ReactNode;
+  first?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <section
+      style={{
+        padding: "14px 16px",
+        borderTop: first ? "none" : "1px solid var(--rule-soft)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+          }}
+        >
+          {title}
+        </span>
+        <span style={{ flex: 1 }} />
+        {meta}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function SnapshotCard({
+  title,
+  subtitle,
+  tone,
+  children,
+}: {
+  title: string;
+  subtitle?: React.ReactNode;
+  tone: string;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        border: `1px solid color-mix(in oklch, ${tone} 42%, var(--rule))`,
+        borderRadius: 9,
+        background: `linear-gradient(150deg, color-mix(in oklch, ${tone} 9%, var(--panel-2)), color-mix(in oklch, var(--panel) 88%, transparent))`,
+        boxShadow: `inset 0 1px 0 color-mix(in oklch, white 5%, transparent), 0 10px 24px color-mix(in oklch, ${tone} 8%, transparent)`,
+        padding: "12px 13px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        minWidth: 0,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, minWidth: 0 }}>
+        <span
+          style={{
+            width: 9,
+            height: 9,
+            marginTop: 4,
+            flex: "0 0 auto",
+            borderRadius: 999,
+            background: tone,
+            boxShadow: `0 0 12px color-mix(in oklch, ${tone} 40%, transparent)`,
+          }}
+        />
+        <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+          <div style={{ color: "var(--ink)", fontSize: 13, fontWeight: 700, lineHeight: 1.3 }}>
+            {title}
+          </div>
+          {subtitle && (
+            <div style={{ color: "var(--ink-dim)", fontSize: 11.5, lineHeight: 1.45 }}>
+              {subtitle}
+            </div>
+          )}
+        </div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function QuickStats({ items }: { items: Array<{ label: string; value: React.ReactNode; tone?: string }> }) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: `repeat(${Math.min(3, Math.max(1, items.length))}, minmax(0, 1fr))`,
+        gap: 1,
+        background: "var(--rule-soft)",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 8,
+        overflow: "hidden",
+      }}
+    >
+      {items.map((item) => (
+        <MetricCell key={item.label} label={item.label} value={item.value} tone={item.tone} compact />
+      ))}
+    </div>
+  );
+}
+
+function MetaCount({ value }: { value: number | string }) {
+  return (
+    <span
+      style={{
+        color: "var(--muted)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        fontVariantNumeric: "tabular-nums",
+      }}
+    >
+      {typeof value === "number" ? pad(value) : value}
+    </span>
+  );
+}
+
+function MutedNote({ children }: { children: React.ReactNode }) {
+  return (
+    <p
+      style={{
+        margin: 0,
+        color: "var(--muted)",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11.5,
+        lineHeight: 1.5,
+      }}
+    >
+      {children}
+    </p>
+  );
+}
+
+function Bar({ value, tone }: { value: number; tone: string }) {
+  return (
+    <div style={{ height: 5, borderRadius: 999, background: "var(--rule-soft)", overflow: "hidden" }}>
+      <div
+        style={{
+          width: `${Math.max(0, Math.min(100, value))}%`,
+          height: "100%",
+          borderRadius: 999,
+          background: tone,
+          transition: "width var(--motion) var(--ease-out)",
+        }}
+      />
+    </div>
+  );
+}
+
+// A small status mark — check / cross / live dot / hollow ring.
+function Mark({ kind }: { kind: "done" | "failed" | "running" | "pending" }) {
+  const color =
+    kind === "done"
+      ? "var(--ok)"
+      : kind === "failed"
+        ? "var(--danger)"
+        : kind === "running"
+          ? "var(--accent)"
+          : "var(--muted)";
+  return (
+    <span
+      style={{
+        width: 15,
+        height: 15,
+        flex: "0 0 auto",
+        borderRadius: 999,
+        border: `1.4px solid ${color}`,
+        background: kind === "done" ? "var(--ok-soft)" : kind === "failed" ? "var(--danger-soft)" : "transparent",
+        color,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      {kind === "done" && (
+        <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden>
+          <path d="M2 5.2 4 7.2 8 2.8" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )}
+      {kind === "failed" && (
+        <svg width="7" height="7" viewBox="0 0 8 8" fill="none" aria-hidden>
+          <path d="M2 2l4 4M6 2l-4 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+        </svg>
+      )}
+      {kind === "running" && (
+        <span
+          style={{
+            width: 5,
+            height: 5,
+            borderRadius: 999,
+            background: color,
+            animation: "spark-pulse 1.4s ease-in-out infinite",
+          }}
+        />
+      )}
+    </span>
+  );
+}
+
+function RuntimeTag({ runtime }: { runtime: WorkerTask["runtimePreference"] }) {
+  const tone = runtimeTone(runtime);
+  return (
+    <span
+      style={{
+        flex: "0 0 auto",
+        color: tone.label,
+        background: tone.bg,
+        border: `1px solid ${tone.border}`,
+        borderRadius: 4,
+        padding: "2px 6px",
+        fontFamily: "var(--font-mono)",
+        fontSize: 8.5,
+        fontWeight: 800,
+        letterSpacing: "0.06em",
+        textTransform: "uppercase",
+      }}
+    >
+      {runtime}
+    </span>
+  );
+}
+
+function ListItem({ children, tone }: { children: React.ReactNode; tone?: string }) {
+  return (
+    <div
+      style={{
+        color: tone ?? "var(--ink-dim)",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11.5,
+        lineHeight: 1.5,
+        display: "flex",
+        gap: 8,
+      }}
+    >
+      <span style={{ color: "var(--muted-2)", flex: "0 0 auto" }}>—</span>
+      <span style={{ minWidth: 0 }}>{children}</span>
+    </div>
+  );
+}
+
+// ── Run summary ──────────────────────────────────────────────────────────────
+
+function RunSummary({
+  run,
+  steps,
+  onSelectStep,
+}: {
+  run: RunState;
+  steps: StepState[];
+  onSelectStep: (id: string) => void;
+}) {
+  const liveStep =
+    steps.find((step) => step.id === run.currentStepId) ??
+    steps.find((step) => step.status === "running" || step.status === "reviewing");
+  const completeCount = steps.filter((s) => s.status === "complete" || s.status === "skipped").length;
+  const attention = collectAttention(run, steps, onSelectStep);
+  const activity = recentActivity(run);
+  const progress = steps.length > 0 ? Math.round((completeCount / steps.length) * 100) : 0;
+  const runningWorkers = run.workerTasks.filter((task) => task.status === "running" || task.status === "claimed").length;
+  const blockedWorkers = run.workerTasks.filter((task) => task.status === "blocked" || task.status === "failed").length;
+  const runTone = statusColor(run.status);
+
+  return (
+    <>
+      <Section title="Overview" first>
+        <SnapshotCard
+          title={run.title || "Untitled run"}
+          subtitle={friendlyRunLine(run, liveStep, attention.length)}
+          tone={runTone}
+        >
+          <Bar value={progress} tone={run.status === "complete" ? "var(--ok)" : runTone} />
+          <QuickStats
+            items={[
+              { label: "Done", value: `${completeCount}/${steps.length || 0}`, tone: run.status === "complete" ? "var(--ok)" : undefined },
+              {
+                label: "Elapsed",
+                value: (
+                  <ElapsedTime
+                    startedAt={run.createdAt}
+                    finishedAt={isRunStillTicking(run) ? undefined : run.updatedAt}
+                  />
+                ),
+              },
+              {
+                label: blockedWorkers > 0 ? "Blocked" : "Active",
+                value: blockedWorkers > 0 ? String(blockedWorkers) : String(runningWorkers),
+                tone: blockedWorkers > 0 ? "var(--danger)" : runningWorkers > 0 ? "var(--accent)" : "var(--ink)",
+              },
+            ]}
+          />
+        </SnapshotCard>
+      </Section>
+
+      <Section title="Now">
+        {liveStep ? (
+          <button
+            type="button"
+            onClick={() => onSelectStep(liveStep.id)}
+            style={{
+              appearance: "none",
+              textAlign: "left",
+              border: "1px solid var(--accent-edge)",
+              borderRadius: 8,
+              background: "color-mix(in oklch, var(--accent) 7%, var(--panel-2))",
+              boxShadow: "0 0 16px var(--accent-glow)",
+              padding: "11px 12px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+              cursor: "pointer",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+              <StatusDot status={liveStep.status} size={6} />
+              <span
+                style={{
+                  color: "var(--accent)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 9.5,
+                  fontWeight: 700,
+                  letterSpacing: "0.1em",
+                  textTransform: "uppercase",
+                }}
+              >
+                Step {pad(steps.indexOf(liveStep) + 1)} · {stepStatusLabel(liveStep.status)}
+              </span>
+            </div>
+            <span style={{ color: "var(--ink)", fontSize: 12.5, fontWeight: 600, lineHeight: 1.35 }}>
+              {liveStep.title}
+            </span>
+          </button>
+        ) : (
+          <MutedNote>
+            {run.status === "complete"
+              ? "Run complete. Every step finished."
+              : run.status === "planning"
+                ? "Spark is reading the plan and shaping the first steps."
+                : run.status === "failed" || run.status === "blocked"
+                  ? "Run stopped. See what needs you below."
+                  : "No step is running right now."}
+          </MutedNote>
+        )}
+      </Section>
+
+      <Section title="Progress" meta={<MetaCount value={`${completeCount}/${steps.length || 0}`} />}>
+        {steps.length === 0 ? (
+          <MutedNote>Steps appear here once Spark plans them.</MutedNote>
+        ) : (
+          <div style={{ display: "flex", gap: 3 }}>
+            {steps.map((step, i) => (
+              <button
+                type="button"
+                key={step.id}
+                title={`Step ${pad(i + 1)} · ${step.title}`}
+                onClick={() => onSelectStep(step.id)}
+                style={{
+                  appearance: "none",
+                  border: "none",
+                  flex: 1,
+                  height: 6,
+                  borderRadius: 2,
+                  cursor: "pointer",
+                  padding: 0,
+                  background:
+                    step.status === "running" || step.status === "reviewing"
+                      ? "var(--accent)"
+                      : stepStatusColor(step.status),
+                  boxShadow:
+                    step.status === "running" || step.status === "reviewing"
+                      ? "0 0 8px var(--accent-glow)"
+                      : "none",
+                }}
+              />
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Needs you" meta={attention.length > 0 ? <MetaCount value={attention.length} /> : undefined}>
+        {attention.length === 0 ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <Mark kind="done" />
+            <span style={{ color: "var(--ink-dim)", fontSize: 11.5 }}>Nothing needs you right now.</span>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            {attention.map((item, i) => (
+              <div
+                key={i}
+                onClick={item.onClick}
+                style={{
+                  display: "flex",
+                  gap: 9,
+                  alignItems: "flex-start",
+                  padding: "8px 10px",
+                  borderRadius: 7,
+                  border: `1px solid ${item.tone}`,
+                  background: `color-mix(in oklch, ${item.tone} 9%, transparent)`,
+                  cursor: item.onClick ? "pointer" : "default",
+                }}
+              >
+                <span style={{ marginTop: 1 }}>
+                  <Mark kind={item.mark} />
+                </span>
+                <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                  <span style={{ color: "var(--ink)", fontSize: 11.5, fontWeight: 600 }}>{item.title}</span>
+                  {item.detail && (
+                    <span style={{ color: "var(--ink-dim)", fontSize: 11, lineHeight: 1.45 }}>{item.detail}</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Recent activity">
+        {activity.length === 0 ? (
+          <MutedNote>No worker or manager activity yet.</MutedNote>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {activity.map((item, i) => (
+              <div
+                key={i}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "62px minmax(0,1fr) auto",
+                  gap: 9,
+                  alignItems: "baseline",
+                }}
+              >
+                <span
+                  style={{
+                    color: "var(--muted)",
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 10,
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {item.when}
+                </span>
+                <span
+                  style={{
+                    color: "var(--ink-dim)",
+                    fontFamily: "var(--font-sans)",
+                    fontSize: 11,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                  title={item.label}
+                >
+                  {item.label}
+                </span>
+                <span
+                  style={{
+                    color: item.tone,
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 9,
+                    fontWeight: 700,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  {item.state}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Run">
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 1, background: "var(--rule-soft)", border: "1px solid var(--rule-soft)", borderRadius: 7, overflow: "hidden" }}>
+          <MetricCell label="Steps" value={String(run.steps.length)} />
+          <MetricCell label="Workers" value={String(run.workerTasks.length)} />
+          <MetricCell label="Attempts" value={String(run.workerAttempts.length)} />
+          <MetricCell label="Autopilot" value={run.autopilot?.status ?? "idle"} />
+          <MetricCell label="Complexity" value={run.taskComplexity ?? "—"} />
+          <MetricCell
+            label="Elapsed"
+            value={
+              <ElapsedTime
+                startedAt={run.createdAt}
+                finishedAt={isRunStillTicking(run) ? undefined : run.updatedAt}
+              />
+            }
+          />
+        </div>
+      </Section>
+    </>
+  );
+}
+
+function MetricCell({
+  label,
+  value,
+  tone,
+  compact,
+}: {
+  label: string;
+  value: React.ReactNode;
+  tone?: string;
+  compact?: boolean;
+}) {
+  return (
+    <div
+      style={{
+        background: "var(--panel)",
+        padding: compact ? "8px 9px" : "9px 10px",
+        display: "flex",
+        flexDirection: "column",
+        gap: compact ? 3 : 4,
+        minWidth: 0,
+      }}
+    >
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 8.5,
+          fontWeight: 600,
+          letterSpacing: "0.1em",
+          textTransform: "uppercase",
+        }}
+      >
+        {label}
+      </span>
+      <span
+        style={{
+          color: tone ?? "var(--ink)",
+          fontFamily: "var(--font-mono)",
+          fontSize: compact ? 11.5 : 12.5,
+          fontWeight: 600,
+          fontVariantNumeric: "tabular-nums",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+// ── Step detail ──────────────────────────────────────────────────────────────
+
+function StepDetail({
+  step,
+  index,
+  maps,
+  reportByAttempt,
+  onSelectWorker,
+}: {
+  step: StepState;
+  index: number;
+  maps: RunMaps;
+  reportByAttempt: ReadonlyMap<string, WorkerReport>;
+  onSelectWorker: (id: string) => void;
+}) {
+  const tone = stepStatusColor(step.status);
+  const tasks = step.workerTaskIds
+    .map((id) => maps.taskById.get(id))
+    .filter((task): task is WorkerTask => Boolean(task));
+  const done = tasks.filter(
+    (task) => deriveAgentStatus(task, maps.attemptByTask.get(task.id), step.status) === "done",
+  ).length;
+  const progress = tasks.length > 0 ? (done / tasks.length) * 100 : step.status === "complete" ? 100 : 0;
+  const markKind = stepMark(step.status);
+  const activeWorkers = tasks.filter((task) => {
+    const attempt = maps.attemptByTask.get(task.id);
+    return deriveAgentStatus(task, attempt, step.status) === "running";
+  }).length;
+
+  const latestReport = pickLatestReport(tasks, maps.attemptByTask, reportByAttempt);
+
+  return (
+    <>
+      <Section title={`Step ${pad(index)}`} meta={<StatusWord label={stepStatusLabel(step.status)} tone={tone} />} first>
+        <SnapshotCard title={step.title} subtitle={friendlyStepLine(step, tasks.length, done)} tone={tone}>
+          <Bar value={progress} tone={step.status === "complete" ? "var(--ok)" : tone} />
+          <QuickStats
+            items={[
+              { label: "Workers", value: tasks.length > 0 ? `${done}/${tasks.length}` : "none" },
+              { label: "Active", value: String(activeWorkers), tone: activeWorkers > 0 ? "var(--accent)" : undefined },
+              { label: "Risk", value: step.riskLevel ?? "normal", tone: step.riskLevel === "high" ? "var(--danger)" : step.riskLevel === "medium" ? "var(--warn)" : undefined },
+            ]}
+          />
+        </SnapshotCard>
+      </Section>
+
+      <Section title="Goal">
+        <MutedNote>{step.goal || "No goal recorded for this step yet."}</MutedNote>
+      </Section>
+
+      {tasks.length > 0 && (
+        <Section title="Worker progress" meta={<MetaCount value={`${done}/${tasks.length}`} />}>
+          <Bar value={progress} tone={step.status === "complete" ? "var(--ok)" : "var(--accent)"} />
+        </Section>
+      )}
+
+      {step.acceptanceCriteria.length > 0 && (
+        <Section title="Acceptance" meta={<MetaCount value={step.acceptanceCriteria.length} />}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {step.acceptanceCriteria.map((text, i) => (
+              <div key={i} style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
+                <span style={{ marginTop: 1 }}>
+                  <Mark kind={markKind} />
+                </span>
+                <span style={{ color: "var(--ink-dim)", fontSize: 11.5, lineHeight: 1.5 }}>{text}</span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      {step.verificationCommands.length > 0 && (
+        <Section title="Verification" meta={<MetaCount value={step.verificationCommands.length} />}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {step.verificationCommands.map((cmd, i) => (
+              <code
+                key={i}
+                style={{
+                  display: "block",
+                  padding: "7px 9px",
+                  background: "color-mix(in oklch, var(--bg) 70%, transparent)",
+                  border: "1px solid var(--rule-soft)",
+                  borderRadius: 6,
+                  color: "var(--ink-dim)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 10.5,
+                  lineHeight: 1.5,
+                  wordBreak: "break-word",
+                }}
+              >
+                {cmd}
+              </code>
+            ))}
+          </div>
+        </Section>
+      )}
+
+      <Section title="Workers" meta={<MetaCount value={tasks.length} />}>
+        {tasks.length === 0 ? (
+          <MutedNote>No worker tasks yet. Spark queues them as the step runs.</MutedNote>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            {tasks.map((task) => {
+              const attempt = maps.attemptByTask.get(task.id);
+              const status = deriveAgentStatus(task, attempt, step.status);
+              return (
+                <button
+                  type="button"
+                  key={task.id}
+                  onClick={() => onSelectWorker(task.id)}
+                  style={{
+                    appearance: "none",
+                    textAlign: "left",
+                    border: "1px solid var(--rule-soft)",
+                    borderRadius: 7,
+                    background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+                    padding: "8px 10px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 5,
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+                    <RuntimeTag runtime={task.runtimePreference} />
+                    <span
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        color: "var(--ink)",
+                        fontSize: 11.5,
+                        fontWeight: 600,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {task.title}
+                    </span>
+                    <StatusDot status={status === "done" ? "complete" : status === "blocked" ? "failed" : status === "running" ? "running" : "queued"} size={6} />
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                    <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 9.5 }}>
+                      {attempt?.status ?? task.status}
+                    </span>
+                    <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 9.5 }}>
+                      {attempt ? (
+                        <ElapsedTime startedAt={attempt.startedAt} finishedAt={attempt.finishedAt} placeholder="--:--" />
+                      ) : (
+                        "--:--"
+                      )}
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </Section>
+
+      {latestReport && (
+        <Section title="Latest report">
+          <ReportView report={latestReport} compact />
+        </Section>
+      )}
+
+      {step.reviewSummary && (
+        <Section title="Review">
+          <MutedNote>{step.reviewSummary}</MutedNote>
+        </Section>
+      )}
+    </>
+  );
+}
+
+function StatusWord({ label, tone }: { label: string; tone: string }) {
+  return (
+    <span
+      style={{
+        color: tone,
+        fontFamily: "var(--font-sans)",
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: "0.1em",
+        textTransform: "uppercase",
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
+// ── Worker detail ────────────────────────────────────────────────────────────
+
+function WorkerDetail({
+  task,
+  attempt,
+  step,
+  reportByAttempt,
+}: {
+  task: WorkerTask;
+  attempt: WorkerAttempt | null;
+  step: StepState | null;
+  reportByAttempt: ReadonlyMap<string, WorkerReport>;
+}) {
+  const status = deriveAgentStatus(task, attempt ?? undefined, step?.status ?? "running");
+  const report = attempt ? reportByAttempt.get(attempt.id) : undefined;
+  const meta = [task.modelHint, task.effortHint, task.taskClass, attempt ? `attempt ${attempt.attemptNumber}` : null]
+    .filter(Boolean)
+    .join(" · ");
+  const tone = statusColor(status);
+
+  return (
+    <>
+      <Section title="Worker" first meta={<StatusWord label={attempt?.status ?? task.status} tone={tone} />}>
+        <SnapshotCard title={task.title} subtitle={friendlyWorkerLine(task, attempt, status, report)} tone={tone}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <RuntimeTag runtime={task.runtimePreference} />
+            <ElapsedChip
+              startedAt={attempt?.startedAt}
+              finishedAt={attempt?.finishedAt}
+              tone={status === "running" ? "var(--accent)" : "var(--ink-dim)"}
+            />
+          </div>
+          <QuickStats
+            items={[
+              { label: "Status", value: status, tone },
+              { label: "Attempt", value: attempt ? String(attempt.attemptNumber) : "none" },
+              { label: "Report", value: report?.status ?? (attempt?.finalReportPath ? "loading" : "none"), tone: report ? tone : undefined },
+            ]}
+          />
+          {meta && (
+            <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: "0.03em" }}>
+              {meta}
+            </span>
+          )}
+        </SnapshotCard>
+      </Section>
+
+      {task.description && (
+        <Section title="Task">
+          <MutedNote>{task.description}</MutedNote>
+        </Section>
+      )}
+
+      {(task.allowedPaths.length > 0 || task.forbiddenPaths.length > 0 || task.expectedOutputs.length > 0) && (
+        <Section title="Scope">
+          {task.allowedPaths.length > 0 && (
+            <PathList label="allowed" tone="var(--ok)" paths={task.allowedPaths} />
+          )}
+          {task.forbiddenPaths.length > 0 && (
+            <PathList label="forbidden" tone="var(--danger)" paths={task.forbiddenPaths} />
+          )}
+          {task.expectedOutputs.length > 0 && (
+            <PathList label="expected" tone="var(--info)" paths={task.expectedOutputs} />
+          )}
+        </Section>
+      )}
+
+      {attempt && (attempt.command || attempt.error || typeof attempt.exitCode === "number") && (
+        <Section title="Attempt">
+          {attempt.command && (
+            <code
+              style={{
+                display: "block",
+                padding: "8px 10px",
+                background: "color-mix(in oklch, var(--bg) 70%, transparent)",
+                border: "1px solid var(--rule-soft)",
+                borderRadius: 6,
+                color: "var(--ink-dim)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10.5,
+                lineHeight: 1.5,
+                wordBreak: "break-word",
+              }}
+            >
+              {attempt.command}
+            </code>
+          )}
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            {typeof attempt.exitCode === "number" && (
+              <KeyVal label="exit code" value={String(attempt.exitCode)} tone={attempt.exitCode === 0 ? "var(--ok)" : "var(--danger)"} />
+            )}
+            {attempt.startedAt && <KeyVal label="started" value={formatClock(attempt.startedAt)} />}
+            {attempt.finishedAt && <KeyVal label="finished" value={formatClock(attempt.finishedAt)} />}
+          </div>
+          {attempt.error && (
+            <div
+              style={{
+                padding: "8px 10px",
+                borderRadius: 6,
+                border: "1px solid color-mix(in oklch, var(--danger) 45%, transparent)",
+                background: "var(--danger-soft)",
+                color: "var(--danger)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10.5,
+                lineHeight: 1.5,
+                wordBreak: "break-word",
+              }}
+            >
+              {attempt.error}
+            </div>
+          )}
+        </Section>
+      )}
+
+      <Section title="Report">
+        {report ? (
+          <ReportView report={report} />
+        ) : attempt?.finalReportPath ? (
+          <ReportSkeleton />
+        ) : (
+          <MutedNote>
+            {status === "running"
+              ? "Worker is still running. Its report lands here when it finishes."
+              : "This worker has not filed a structured report."}
+          </MutedNote>
+        )}
+      </Section>
+
+      {attempt?.promptPath && (
+        <Section title="Prompt">
+          <PromptBlock path={attempt.promptPath} />
+        </Section>
+      )}
+    </>
+  );
+}
+
+function KeyVal({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return (
+    <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+      <span style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 8.5, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+        {label}
+      </span>
+      <span style={{ color: tone ?? "var(--ink-dim)", fontFamily: "var(--font-mono)", fontSize: 11.5, fontVariantNumeric: "tabular-nums" }}>
+        {value}
+      </span>
+    </span>
+  );
+}
+
+function PathList({ label, tone, paths }: { label: string; tone: string; paths: string[] }) {
+  const shown = paths.slice(0, 8);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <span style={{ color: tone, fontFamily: "var(--font-mono)", fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+        {label}
+      </span>
+      {shown.map((path, i) => (
+        <span key={i} style={{ color: "var(--ink-dim)", fontFamily: "var(--font-mono)", fontSize: 10.5, wordBreak: "break-word" }}>
+          {path}
+        </span>
+      ))}
+      {paths.length > shown.length && (
+        <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
+          +{paths.length - shown.length} more
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ── Worker report ────────────────────────────────────────────────────────────
+
+function ReportView({ report, compact }: { report: WorkerReport; compact?: boolean }) {
+  const tone =
+    report.status === "complete"
+      ? "var(--ok)"
+      : report.status === "partial"
+        ? "var(--warn)"
+        : "var(--danger)";
+  const fileCap = compact ? 5 : 16;
+  const lineCap = compact ? 3 : 10;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span
+          style={{
+            color: tone,
+            border: `1px solid ${tone}`,
+            borderRadius: 4,
+            padding: "1px 6px",
+            fontFamily: "var(--font-mono)",
+            fontSize: 9,
+            fontWeight: 700,
+            textTransform: "uppercase",
+            letterSpacing: "0.06em",
+          }}
+        >
+          {report.status}
+        </span>
+        {report.verifier && (
+          <span style={{ color: "var(--info)", fontFamily: "var(--font-mono)", fontSize: 9.5, fontWeight: 700 }}>
+            verifier · {report.verifier.confidence}
+          </span>
+        )}
+      </div>
+      {report.summary && (
+        <p style={{ margin: 0, color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 11.5, lineHeight: 1.55 }}>
+          {report.summary}
+        </p>
+      )}
+      {report.filesChanged.length > 0 && (
+        <ReportGroup label={`Files changed · ${report.filesChanged.length}`}>
+          {report.filesChanged.slice(0, fileCap).map((file, i) => (
+            <div key={i} style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, lineHeight: 1.5, wordBreak: "break-word" }}>
+              <span style={{ color: "var(--accent)" }}>{file.path}</span>
+              {file.reason && <span style={{ color: "var(--muted)" }}> — {file.reason}</span>}
+            </div>
+          ))}
+          {report.filesChanged.length > fileCap && (
+            <span style={{ color: "var(--muted)", fontSize: 10 }}>+{report.filesChanged.length - fileCap} more</span>
+          )}
+        </ReportGroup>
+      )}
+      {!compact && report.tests.length > 0 && (
+        <ReportGroup label="Tests">
+          {report.tests.map((test, i) => (
+            <div key={i} style={{ display: "flex", gap: 7, alignItems: "baseline" }}>
+              <span
+                style={{
+                  color:
+                    test.result === "passed" ? "var(--ok)" : test.result === "failed" ? "var(--danger)" : "var(--muted)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 9,
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  flex: "0 0 auto",
+                }}
+              >
+                {test.result}
+              </span>
+              <span style={{ color: "var(--ink-dim)", fontFamily: "var(--font-mono)", fontSize: 10.5, wordBreak: "break-word" }}>
+                {test.command}
+              </span>
+            </div>
+          ))}
+        </ReportGroup>
+      )}
+      {!compact && report.commandsRun.length > 0 && (
+        <ReportGroup label="Commands">
+          {report.commandsRun.map((command, i) => (
+            <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <code
+                style={{
+                  color: "var(--ink-dim)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 10.5,
+                  lineHeight: 1.45,
+                  wordBreak: "break-word",
+                }}
+              >
+                {command.command}
+              </code>
+              {command.summary && (
+                <span style={{ color: "var(--muted)", fontSize: 10.5, lineHeight: 1.45 }}>
+                  {command.summary}
+                </span>
+              )}
+            </div>
+          ))}
+        </ReportGroup>
+      )}
+      {report.proof.length > 0 && (
+        <ReportGroup label="Proof">
+          {report.proof.slice(0, lineCap).map((line, i) => (
+            <ListItem key={i}>{line}</ListItem>
+          ))}
+        </ReportGroup>
+      )}
+      {(report.risks.length > 0 || report.followups.length > 0) && (
+        <ReportGroup label="Risks & follow-ups">
+          {report.risks.slice(0, lineCap).map((line, i) => (
+            <ListItem key={`r${i}`} tone="var(--warn)">
+              {line}
+            </ListItem>
+          ))}
+          {report.followups.slice(0, lineCap).map((line, i) => (
+            <ListItem key={`f${i}`}>{line}</ListItem>
+          ))}
+        </ReportGroup>
+      )}
+    </div>
+  );
+}
+
+function ReportGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: "0.12em",
+          textTransform: "uppercase",
+        }}
+      >
+        {label}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+function ReportSkeleton() {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+      {[88, 66, 74].map((w, i) => (
+        <span
+          key={i}
+          style={{
+            display: "block",
+            width: `${w}%`,
+            height: 9,
+            borderRadius: 999,
+            background:
+              "linear-gradient(90deg, color-mix(in oklch, var(--ink) 5%, transparent), color-mix(in oklch, var(--ink) 12%, transparent), color-mix(in oklch, var(--ink) 5%, transparent))",
+            backgroundSize: "220% 100%",
+            animation: "spark-shimmer 2.1s ease-in-out infinite",
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+// ── Prompt block ─────────────────────────────────────────────────────────────
+
+function PromptBlock({ path }: { path: string }) {
+  const [open, setOpen] = useState(false);
+  const [content, setContent] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open || content !== null || loading) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    void window.spark.fs
+      .readText(path)
+      .then((file) => {
+        if (!cancelled) setContent(file.content);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, path, content, loading]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          appearance: "none",
+          alignSelf: "flex-start",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 6,
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 6,
+          background: "transparent",
+          color: "var(--ink-dim)",
+          padding: "5px 9px",
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+          fontWeight: 600,
+          cursor: "pointer",
+        }}
+      >
+        <svg
+          width="9"
+          height="9"
+          viewBox="0 0 10 10"
+          fill="none"
+          aria-hidden
+          style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform var(--motion-fast) var(--ease-out)" }}
+        >
+          <path d="M3 1.5 L7 5 L3 8.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        {open ? "Hide prompt" : "Show prompt sent to worker"}
+      </button>
+      {open && (
+        <pre
+          style={{
+            margin: 0,
+            padding: "11px 12px",
+            background: "color-mix(in oklch, var(--bg) 72%, transparent)",
+            border: "1px solid var(--rule-soft)",
+            borderRadius: 7,
+            color: "var(--ink-dim)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10.5,
+            lineHeight: 1.55,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            maxHeight: 320,
+            overflow: "auto",
+          }}
+        >
+          {loading ? "Loading prompt…" : error ? `Failed to read prompt: ${error}` : content ?? ""}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+type FriendlyWorkerStatus = "queued" | "running" | "done" | "blocked";
+
+function friendlyRunLine(run: RunState, liveStep: StepState | undefined, attentionCount: number): string {
+  if (attentionCount > 0) {
+    return attentionCount === 1
+      ? "One item needs attention before the run can move cleanly."
+      : `${attentionCount} items need attention before the run can move cleanly.`;
+  }
+  if (liveStep) {
+    return `Working on ${liveStep.title}.`;
+  }
+  if (run.status === "complete") return "Everything finished. The reports below show what changed.";
+  if (run.status === "planning") return "Spark is planning the next useful step.";
+  if (run.status === "paused") return run.autopilot?.stopReason || "Paused until you resume it.";
+  if (run.status === "cancelled") return "This run was cancelled.";
+  if (run.status === "failed" || run.status === "blocked") return "The run stopped before completion.";
+  return "No active step right now.";
+}
+
+function friendlyStepLine(step: StepState, totalWorkers: number, doneWorkers: number): string {
+  if (step.status === "complete" || step.status === "skipped") {
+    return totalWorkers > 0
+      ? `Finished with ${doneWorkers} of ${totalWorkers} workers accepted.`
+      : "Finished without worker tasks.";
+  }
+  if (step.status === "running" || step.status === "reviewing") {
+    return totalWorkers > 0
+      ? `${doneWorkers} of ${totalWorkers} workers are done; the rest are still moving.`
+      : "Spark is preparing workers for this step.";
+  }
+  if (step.status === "blocked" || step.status === "failed") return "This step needs attention before the run continues.";
+  if (step.status === "planning") return "Spark is shaping the worker tasks for this step.";
+  return totalWorkers > 0 ? "Ready for workers to run." : "No workers have been queued yet.";
+}
+
+function friendlyWorkerLine(
+  task: WorkerTask,
+  attempt: WorkerAttempt | null,
+  status: FriendlyWorkerStatus,
+  report?: WorkerReport,
+): string {
+  if (status === "running") return "Currently running. The final report will appear when it finishes.";
+  if (status === "blocked") return attempt?.error || "This worker hit a problem and may need a retry or review.";
+  if (status === "done") {
+    if (report?.summary) return report.summary;
+    return "Finished. Review the report and proof below for details.";
+  }
+  if (task.status === "retry_queued") return "Queued for another attempt.";
+  return "Queued and waiting for Spark to launch it.";
+}
+
+function pad(value: number): string {
+  return String(Math.max(0, value)).padStart(2, "0");
+}
+
+function stepMark(status: StepState["status"]): "done" | "failed" | "running" | "pending" {
+  if (status === "complete" || status === "skipped") return "done";
+  if (status === "failed" || status === "blocked") return "failed";
+  if (status === "running" || status === "reviewing") return "running";
+  return "pending";
+}
+
+function workerShortLabel(
+  task: WorkerTask,
+  step: StepState | null,
+  stepIndex: Map<string, number>,
+): string {
+  const stepNo = step ? stepIndex.get(step.id) ?? 0 : 0;
+  // Worker tasks within a step are not numbered on the record, so derive a
+  // "<step>.<n>" handle from the task's slot in its step.
+  if (step) {
+    const slot = step.workerTaskIds.indexOf(task.id);
+    if (slot >= 0) return `worker ${stepNo}.${slot + 1}`;
+  }
+  return task.title;
+}
+
+interface AttentionItem {
+  title: string;
+  detail?: string;
+  tone: string;
+  mark: "done" | "failed" | "running" | "pending";
+  onClick?: () => void;
+}
+
+function collectAttention(
+  run: RunState,
+  steps: StepState[],
+  onSelectStep?: (id: string) => void,
+): AttentionItem[] {
+  const items: AttentionItem[] = [];
+  if (run.status === "paused") {
+    items.push({
+      title: "Run paused",
+      detail: run.autopilot?.stopReason || "Resume it from the Spark panel.",
+      tone: "var(--info)",
+      mark: "pending",
+    });
+  }
+  steps.forEach((step, i) => {
+    if (step.status === "blocked" || step.status === "failed") {
+      items.push({
+        title: `Step ${pad(i + 1)} ${step.status}`,
+        detail: step.title,
+        tone: "var(--danger)",
+        mark: "failed",
+        onClick: onSelectStep ? () => onSelectStep(step.id) : undefined,
+      });
+    }
+  });
+  for (const task of run.workerTasks) {
+    if (task.status === "blocked" || task.status === "failed") {
+      items.push({
+        title: `Worker ${task.status}`,
+        detail: task.title,
+        tone: "var(--danger)",
+        mark: "failed",
+      });
+    }
+  }
+  const lastMessage = run.humanMessages[run.humanMessages.length - 1];
+  if (lastMessage && lastMessage.author === "spark" && lastMessage.kind === "question") {
+    items.push({
+      title: "Spark asked a question",
+      detail: lastMessage.message,
+      tone: "var(--accent)",
+      mark: "running",
+    });
+  }
+  return items.slice(0, 6);
+}
+
+interface ActivityItem {
+  when: string;
+  label: string;
+  state: string;
+  tone: string;
+}
+
+function recentActivity(run: RunState): ActivityItem[] {
+  // One merged timeline of worker attempts + manager calls. The array is typed
+  // up front so each status enum widens cleanly to ActivityItem's string field.
+  const items: Array<ActivityItem & { sort: number }> = [];
+  for (const attempt of run.workerAttempts) {
+    const stamp = attempt.finishedAt ?? attempt.startedAt;
+    if (!stamp) continue;
+    items.push({
+      when: formatClock(stamp),
+      label: `${attempt.runtime} · attempt ${attempt.attemptNumber}`,
+      state: attempt.status,
+      tone: attemptStatusColor(attempt.status),
+      sort: new Date(stamp).getTime(),
+    });
+  }
+  for (const call of run.sparkCalls) {
+    const stamp = call.completedAt ?? call.createdAt;
+    items.push({
+      when: formatClock(stamp),
+      label: `Spark · ${call.mode.replace(/_/g, " ")}`,
+      state: call.status,
+      tone:
+        call.status === "failed"
+          ? "var(--danger)"
+          : call.status === "completed"
+            ? "var(--ok)"
+            : "var(--accent)",
+      sort: new Date(stamp).getTime(),
+    });
+  }
+  return items
+    .sort((a, b) => b.sort - a.sort)
+    .slice(0, 8)
+    .map(({ sort, ...item }) => item);
+}
+
+function pickLatestReport(
+  tasks: WorkerTask[],
+  attemptByTask: Map<string, WorkerAttempt>,
+  reportByAttempt: ReadonlyMap<string, WorkerReport>,
+): WorkerReport | null {
+  let latest: { report: WorkerReport; at: number } | null = null;
+  for (const task of tasks) {
+    const attempt = attemptByTask.get(task.id);
+    if (!attempt) continue;
+    const report = reportByAttempt.get(attempt.id);
+    if (!report) continue;
+    const at = new Date(attempt.finishedAt ?? attempt.startedAt ?? 0).getTime();
+    if (!latest || at >= latest.at) latest = { report, at };
+  }
+  return latest?.report ?? null;
+}

@@ -172,6 +172,13 @@ a { color: inherit; }
   50%      { opacity: 1; }
 }
 
+/* Run-graph wire flow: a dashed accent stroke that travels along a live wire
+   (spine segment or worker rib). The dash geometry lives in the
+   .spark-wire-flow utility below; the reduced-motion block collapses it. */
+@keyframes spark-wire-flow {
+  to { stroke-dashoffset: 0; }
+}
+
 /* ── xterm.js host ──────────────────────────────────────────────────────── */
 .xterm-host {
   box-sizing: border-box;
@@ -199,6 +206,13 @@ a { color: inherit; }
   color: var(--muted);
 }
 .spark-fade-in { animation: spark-fade-in var(--motion) var(--ease-out) both; }
+
+/* Travelling dash on a live run-graph wire — see GraphWires.tsx. */
+.spark-wire-flow {
+  stroke-dasharray: 18 220;
+  stroke-dashoffset: 238;
+  animation: spark-wire-flow 1.5s linear infinite;
+}
 
 /* ── Reduced motion ─────────────────────────────────────────────────────────
    Honor the OS "reduce motion" setting: keyframe animations (pulsing status

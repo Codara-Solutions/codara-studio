@@ -16,7 +16,6 @@ import {
 import type {
   EditorTab,
   PreviewTab,
-  ProjectTab,
   RunsTab,
   Tab,
   TabId,
@@ -40,10 +39,10 @@ import type {
 // store's open + close pair.
 
 const STORAGE_KEY_PREFIX = "spark.tabs:";
-// v2 introduces the recursive PaneNode tree on TerminalTab. Older v1 layouts
-// stored a single `cwd` per terminal — we drop them on load (the user just
-// loses their tab strip, not any code).
-const TAB_VERSION = 2;
+// v3 drops the removed "project"/CRM tab kind. v2 introduced the recursive
+// PaneNode tree on TerminalTab. Bumping the version discards older layouts
+// on load — the user just loses their tab strip, not any code.
+const TAB_VERSION = 3;
 
 interface PersistedShape {
   v: number;
@@ -95,16 +94,8 @@ function defaultRunsTab(): RunsTab {
   };
 }
 
-function defaultProjectTab(): ProjectTab {
-  return {
-    id: makeId("crm"),
-    kind: "project",
-    title: "CRM",
-  };
-}
-
 function defaultTabs(): Tab[] {
-  return [defaultRunsTab(), defaultProjectTab()];
+  return [defaultRunsTab()];
 }
 
 function loadPersisted(workspaceId: string | null): PersistedShape | null {
@@ -124,9 +115,6 @@ function loadPersisted(workspaceId: string | null): PersistedShape | null {
     for (const tab of parsed.tabs) {
       if (tab.kind === "terminal") cleanupStaleWorkers(tab.root);
       if (tab.kind === "runs" && (tab.title === "Runs" || tab.title === "Ops")) tab.title = "Runs";
-    }
-    if (!parsed.tabs.some((tab) => tab.kind === "project")) {
-      parsed.tabs.push(defaultProjectTab());
     }
     return parsed;
   } catch {
@@ -235,7 +223,6 @@ export interface UseTabsApi {
   ) => boolean;
   newPreviewTab: (url: string) => TabId;
   newRunsTab: (runId: string | null) => TabId;
-  newProjectTab: () => TabId;
   openEditorTab: (entry: FsEntry) => TabId;
   setEditorEntry: (oldPath: string, entry: FsEntry) => void;
   closeEditorByPath: (path: string) => void;
@@ -670,23 +657,6 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
     return id;
   }, []);
 
-  const newProjectTab = useCallback((): TabId => {
-    const existing = tabsRef.current.find((t) => t.kind === "project");
-    if (existing) {
-      setActiveId(existing.id);
-      return existing.id;
-    }
-    const id = makeId("crm");
-    const tab: ProjectTab = {
-      id,
-      kind: "project",
-      title: "CRM",
-    };
-    setTabs((curr) => [...curr, tab]);
-    setActiveId(id);
-    return id;
-  }, []);
-
   const openEditorTab = useCallback((entry: FsEntry): TabId => {
     // The setter is invoked synchronously by React, so reading `outId`
     // back after `setTabs` returns is safe. TypeScript can't see through
@@ -809,7 +779,6 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
       addPaneInTab,
       newPreviewTab,
       newRunsTab,
-      newProjectTab,
       openEditorTab,
       setEditorEntry,
       closeEditorByPath,

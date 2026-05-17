@@ -4,6 +4,7 @@ import type {
   RunState,
   SparkEvent,
 } from "@shared/types";
+import { runStatusColor } from "../lib/run-status";
 
 interface Props {
   run: RunState;
@@ -32,7 +33,8 @@ export default function RunChatView({ run, events }: Props) {
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const items = useMemo(() => buildTimeline(run, events), [run, events]);
+  const items = useMemo(() => buildTimeline(run), [run]);
+  const pulse = useMemo(() => buildRunPulse(run, events), [run, events]);
 
   // Auto-scroll to bottom when new items arrive.
   useEffect(() => {
@@ -137,9 +139,10 @@ export default function RunChatView({ run, events }: Props) {
           gap: 12,
         }}
       >
+        <RunPulseCard pulse={pulse} />
         {items.length === 0 ? (
           <EmptyState>
-            No messages yet. Spark is starting the run; ask, correct, or redirect anytime.
+            Conversation will appear here. Run details stay in the Runs tab.
           </EmptyState>
         ) : (
           items.map((item) => <Bubble key={item.id} item={item} />)
@@ -302,7 +305,7 @@ interface TimelineItem {
   createdAt: string;
 }
 
-function buildTimeline(run: RunState, events: SparkEvent[]): TimelineItem[] {
+function buildTimeline(run: RunState): TimelineItem[] {
   const items: TimelineItem[] = [];
 
   for (const message of run.humanMessages) {
@@ -312,38 +315,6 @@ function buildTimeline(run: RunState, events: SparkEvent[]): TimelineItem[] {
       kind: message.kind,
       text: message.message,
       createdAt: message.createdAt,
-    });
-  }
-
-  // A small allowlist of high-signal events we surface as system bubbles. The
-  // full event log lives in the DevInspector tab; here we want only the
-  // narrative beats — runs starting / steps completing / pause+resume — so the
-  // chat reads naturally instead of scrolling through dozens of internal events.
-  const SHOWN_EVENT_TYPES = new Set([
-    "run.started",
-    "run.paused",
-    "run.resumed",
-    "run.cancelled",
-    "run.interrupted_hard",
-    "spark_manager.decision_applied",
-    "spark_manager.completed_run",
-    "step.updated",
-    "worker_attempt.finished",
-    "autopilot.retry_cap_reached",
-  ]);
-
-  for (const event of events) {
-    if (!SHOWN_EVENT_TYPES.has(event.type)) continue;
-    if (event.type === "step.updated") {
-      const status = (event.payload as { status?: string } | undefined)?.status;
-      if (status !== "complete") continue;
-    }
-    items.push({
-      id: event.id,
-      author: "system",
-      kind: event.type,
-      text: event.message ?? event.type,
-      createdAt: event.timestamp,
     });
   }
 
@@ -390,29 +361,246 @@ function hintForStatus(status: RunState["status"]): string {
   }
 }
 
+interface RunPulse {
+  title: string;
+  detail: string;
+  status: RunState["status"];
+  latest?: string;
+  completedSteps: number;
+  totalSteps: number;
+  finishedWorkers: number;
+  totalWorkers: number;
+}
+
+function buildRunPulse(run: RunState, events: SparkEvent[]): RunPulse {
+  const orderedSteps = [...run.steps].sort((a, b) => a.index - b.index);
+  const activeStep =
+    orderedSteps.find((step) => step.id === run.currentStepId) ??
+    orderedSteps.find((step) => ["planning", "running", "reviewing", "blocked"].includes(step.status)) ??
+    orderedSteps.find((step) => !["complete", "skipped", "failed"].includes(step.status));
+  const completedSteps = orderedSteps.filter((step) => step.status === "complete" || step.status === "skipped").length;
+  const finishedWorkers = run.workerTasks.filter((task) =>
+    ["accepted", "blocked", "failed", "cancelled"].includes(task.status),
+  ).length;
+  const latest = latestFriendlyEvent(events);
+
+  if (run.status === "complete") {
+    return {
+      title: "Run complete",
+      detail: "Spark finished the work. Send a follow-up if you want another pass.",
+      status: run.status,
+      latest,
+      completedSteps,
+      totalSteps: orderedSteps.length,
+      finishedWorkers,
+      totalWorkers: run.workerTasks.length,
+    };
+  }
+  if (run.status === "blocked") {
+    return {
+      title: "Spark needs your input",
+      detail: activeStep ? `Blocked while working on ${activeStep.title}.` : "Answer the question below to continue.",
+      status: run.status,
+      latest,
+      completedSteps,
+      totalSteps: orderedSteps.length,
+      finishedWorkers,
+      totalWorkers: run.workerTasks.length,
+    };
+  }
+  if (run.status === "paused") {
+    return {
+      title: "Run paused",
+      detail: activeStep ? `Ready to resume at ${activeStep.title}.` : "Resume when you are ready.",
+      status: run.status,
+      latest,
+      completedSteps,
+      totalSteps: orderedSteps.length,
+      finishedWorkers,
+      totalWorkers: run.workerTasks.length,
+    };
+  }
+  if (run.status === "failed" || run.status === "cancelled") {
+    return {
+      title: run.status === "failed" ? "Run failed" : "Run cancelled",
+      detail: "Send a message and Spark can replan from here.",
+      status: run.status,
+      latest,
+      completedSteps,
+      totalSteps: orderedSteps.length,
+      finishedWorkers,
+      totalWorkers: run.workerTasks.length,
+    };
+  }
+
+  const title =
+    run.status === "planning"
+      ? "Spark is planning"
+      : run.status === "reviewing"
+        ? "Spark is reviewing"
+        : "Spark is working";
+  const detail = activeStep
+    ? `Step ${String(orderedSteps.indexOf(activeStep) + 1).padStart(2, "0")}: ${activeStep.title}`
+    : "Waiting for the first step to land.";
+
+  return {
+    title,
+    detail,
+    status: run.status,
+    latest,
+    completedSteps,
+    totalSteps: orderedSteps.length,
+    finishedWorkers,
+    totalWorkers: run.workerTasks.length,
+  };
+}
+
+function latestFriendlyEvent(events: SparkEvent[]): string | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.type === "step.updated") {
+      const payload = event.payload as { status?: string; title?: string } | undefined;
+      if (payload?.status === "complete") return payload.title ? `Finished ${payload.title}.` : "Finished a step.";
+      continue;
+    }
+    if (event.type === "run.resumed") return "Run resumed.";
+    if (event.type === "run.paused") return "Run paused.";
+    if (event.type === "run.interrupted_hard") return "Queued your update and stopped the active worker.";
+    if (event.type === "autopilot.retry_cap_reached") return "Spark hit its retry cap and paused.";
+    if (event.type === "spark_manager.completed_run") return "Spark marked the run complete.";
+  }
+  return undefined;
+}
+
+function RunPulseCard({ pulse }: { pulse: RunPulse }) {
+  const color = runStatusColor(pulse.status);
+  const stepMeta =
+    pulse.totalSteps > 0
+      ? `${pulse.completedSteps}/${pulse.totalSteps} steps`
+      : "Planning steps";
+  const workerMeta =
+    pulse.totalWorkers > 0
+      ? `${pulse.finishedWorkers}/${pulse.totalWorkers} workers`
+      : "No workers yet";
+
+  return (
+    <section
+      aria-label="Run progress"
+      style={{
+        flex: "0 0 auto",
+        display: "grid",
+        gap: 10,
+        padding: "12px 14px",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 8,
+        background: "linear-gradient(180deg, color-mix(in oklch, var(--panel) 96%, var(--accent) 4%), var(--panel))",
+        boxShadow: "0 8px 24px rgba(0, 0, 0, 0.16)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, minWidth: 0 }}>
+        <span
+          aria-hidden
+          style={{
+            width: 8,
+            height: 8,
+            marginTop: 6,
+            borderRadius: 999,
+            background: color,
+            boxShadow: `0 0 12px ${color}`,
+            flex: "0 0 auto",
+          }}
+        />
+        <div style={{ minWidth: 0, flex: 1, display: "grid", gap: 3 }}>
+          <div
+            style={{
+              color: "var(--ink)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 13,
+              fontWeight: 700,
+              lineHeight: 1.25,
+            }}
+          >
+            {pulse.title}
+          </div>
+          <div
+            title={pulse.detail}
+            style={{
+              color: "var(--ink-dim)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 12,
+              lineHeight: 1.4,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {pulse.detail}
+          </div>
+        </div>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          flexWrap: "wrap",
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+        }}
+      >
+        <ProgressChip label={stepMeta} />
+        <ProgressChip label={workerMeta} />
+        {pulse.latest && <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pulse.latest}</span>}
+      </div>
+    </section>
+  );
+}
+
+function ProgressChip({ label }: { label: string }) {
+  return (
+    <span
+      style={{
+        flex: "0 0 auto",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 999,
+        padding: "3px 7px",
+        background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+        color: "var(--ink-dim)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+      }}
+    >
+      {label}
+    </span>
+  );
+}
+
 function Bubble({ item }: { item: TimelineItem }) {
   if (item.author === "system") {
     return (
       <div
         style={{
-          alignSelf: "stretch",
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          color: "var(--muted)",
-          fontFamily: "var(--font-mono)",
+          alignSelf: "center",
+          maxWidth: "82%",
+          color: "var(--ink-dim)",
+          background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 999,
+          padding: "5px 9px",
+          fontFamily: "var(--font-sans)",
           fontSize: 11,
+          lineHeight: 1.35,
+          textAlign: "center",
         }}
+        title={item.text}
       >
-        <span style={{ flex: 1, height: 1, background: "var(--rule-soft)" }} />
-        <span style={{ whiteSpace: "nowrap", maxWidth: "70%", overflow: "hidden", textOverflow: "ellipsis" }} title={item.text}>
-          {item.text}
-        </span>
-        <span style={{ flex: 1, height: 1, background: "var(--rule-soft)" }} />
+        {item.text}
       </div>
     );
   }
   const isUser = item.author === "user";
+  const kindLabel = labelForMessageKind(item.kind);
   return (
     <div
       style={{
@@ -427,10 +615,10 @@ function Bubble({ item }: { item: TimelineItem }) {
             ? "color-mix(in oklch, var(--accent) 18%, var(--panel))"
             : "var(--panel)",
           border: `1px solid ${isUser ? "var(--accent-edge)" : "var(--rule-soft)"}`,
-          borderRadius: 12,
-          borderTopRightRadius: isUser ? 4 : 12,
-          borderTopLeftRadius: isUser ? 12 : 4,
-          padding: "10px 12px",
+          borderRadius: 8,
+          borderTopRightRadius: isUser ? 3 : 8,
+          borderTopLeftRadius: isUser ? 8 : 3,
+          padding: "11px 12px",
           color: "var(--ink)",
           fontFamily: "var(--font-sans)",
           fontSize: 13,
@@ -454,15 +642,24 @@ function Bubble({ item }: { item: TimelineItem }) {
             color: isUser ? "var(--accent)" : "var(--muted)",
           }}
         >
-          <span>{isUser ? "you" : "spark"}</span>
-          <span style={{ color: "var(--muted)", fontWeight: 500, letterSpacing: 0, textTransform: "none" }}>
-            · {item.kind}
-          </span>
+          <span>{isUser ? "You" : "Spark"}</span>
+          {kindLabel && (
+            <span style={{ color: "var(--muted)", fontWeight: 500, letterSpacing: 0, textTransform: "none" }}>
+              {kindLabel}
+            </span>
+          )}
         </div>
         {item.text}
       </div>
     </div>
   );
+}
+
+function labelForMessageKind(kind: string): string {
+  if (kind === "question") return "needs input";
+  if (kind === "answer") return "answer";
+  if (kind === "decision") return "decision";
+  return "";
 }
 
 function EmptyState({ children }: { children: React.ReactNode }) {

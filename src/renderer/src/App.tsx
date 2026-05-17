@@ -2,14 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type {
   AppSettings,
   AppState,
-  CreateProjectItemInput,
   FsEntry,
-  ProjectItem,
-  ProjectItemStatus,
   RunState,
   ShellInfo,
   SparkEvent,
-  UpdateProjectItemInput,
   Workspace,
 } from "@shared/types";
 import { makeId } from "@shared/ids";
@@ -25,7 +21,6 @@ import EditorStack from "./tabs/EditorStack";
 import TerminalStack from "./tabs/TerminalStack";
 import PreviewStack from "./tabs/PreviewStack";
 import RunsStack from "./tabs/RunsStack";
-import ProjectStack from "./tabs/ProjectStack";
 import { useTabs } from "./tabs/useTabs";
 import type { PaneNode, Tab, TerminalLeaf } from "./tabs/types";
 import { basename } from "./path-utils";
@@ -147,18 +142,6 @@ function countRunningTerminalWorkers(tabs: Tab[]): number {
   );
 }
 
-function projectStatusForRun(run: RunState): ProjectItemStatus {
-  if (run.status === "complete") return "done";
-  if (run.status === "failed" || run.status === "cancelled" || run.status === "blocked") return "blocked";
-  if (run.status === "reviewing") return "review";
-  if (run.status === "running" || run.status === "planning" || run.status === "paused") return "running";
-  return "ready";
-}
-
-function isUserCrmTask(item: ProjectItem): boolean {
-  return !item.labels.includes("run");
-}
-
 export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
@@ -175,8 +158,6 @@ export default function App() {
   // everywhere.
   const [runs, setRuns] = useState<RunState[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  const [projectItems, setProjectItems] = useState<ProjectItem[]>([]);
-  const [activeProjectItemId, setActiveProjectItemId] = useState<string | null>(null);
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [defaultShell, setDefaultShell] = useState<ShellInfo | null>(null);
   const [detectedDefaultShell, setDetectedDefaultShell] = useState<ShellInfo | null>(null);
@@ -390,26 +371,11 @@ export default function App() {
     }
   }, []);
 
-  const refreshProjectItemsFor = useCallback(async (workspaceId: string | null) => {
-    if (!workspaceId) {
-      setProjectItems([]);
-      setActiveProjectItemId(null);
-      return;
-    }
-    try {
-      const next = await window.spark.project.listItems(workspaceId);
-      setProjectItems(next);
-    } catch {
-      setProjectItems([]);
-    }
-  }, []);
-
   // Initial load + reload on workspace change.
   useEffect(() => {
     if (!booted) return;
     void refreshRunsFor(activeId);
-    void refreshProjectItemsFor(activeId);
-  }, [activeId, booted, refreshRunsFor, refreshProjectItemsFor]);
+  }, [activeId, booted, refreshRunsFor]);
 
   // When the runs list changes, reconcile the active selection: keep the
   // current pick if it's still present, otherwise jump to the most live one,
@@ -423,34 +389,6 @@ export default function App() {
       return live?.id ?? runs[0]?.id ?? null;
     });
   }, [runs]);
-
-  useEffect(() => {
-    setActiveProjectItemId((current) => {
-      const visibleProjectItems = projectItems.filter((item) => item.status !== "archived");
-      if (current && visibleProjectItems.some((item) => item.id === current)) return current;
-      return visibleProjectItems[0]?.id ?? null;
-    });
-  }, [projectItems]);
-
-  useEffect(() => {
-    if (!booted || !activeId || runs.length === 0 || projectItems.length === 0) return;
-    for (const item of projectItems) {
-      if (item.status === "archived" || item.linkedRunIds.length === 0 || !isUserCrmTask(item)) continue;
-      const newestRun = runs.find((run) => item.linkedRunIds.includes(run.id));
-      if (!newestRun) continue;
-      const nextStatus = projectStatusForRun(newestRun);
-      if (item.status === nextStatus) continue;
-      void window.spark.project.updateItem({
-        workspaceId: activeId,
-        itemId: item.id,
-        patch: { status: nextStatus },
-      }).then((updated) => {
-        setProjectItems((current) =>
-          current.map((candidate) => (candidate.id === updated.id ? updated : candidate)),
-        );
-      }).catch(() => undefined);
-    }
-  }, [activeId, booted, projectItems, runs]);
 
   useEffect(() => {
     if (!booted) return;
@@ -545,123 +483,6 @@ export default function App() {
       }
     };
   }, []);
-
-  const handleSelectProjectItem = useCallback((itemId: string | null) => {
-    setActiveProjectItemId(itemId);
-  }, []);
-
-  const handleCreateProjectItem = useCallback(
-    async (input: CreateProjectItemInput): Promise<ProjectItem | null> => {
-      if (!activeId) return null;
-      try {
-        const item = await window.spark.project.createItem({
-          ...input,
-          workspaceId: input.workspaceId || activeId,
-        });
-        setProjectItems((current) => [item, ...current]);
-        setActiveProjectItemId(item.id);
-        return item;
-      } catch {
-        return null;
-      }
-    },
-    [activeId],
-  );
-
-  const handleUpdateProjectItem = useCallback(
-    async (itemId: string, patch: Partial<ProjectItem>): Promise<ProjectItem | null> => {
-      if (!activeId) return null;
-      try {
-        const updatePatch = patch as UpdateProjectItemInput["patch"];
-        const item = await window.spark.project.updateItem({
-          workspaceId: activeId,
-          itemId,
-          patch: updatePatch,
-        });
-        setProjectItems((current) =>
-          current.map((candidate) => (candidate.id === item.id ? item : candidate)),
-        );
-        return item;
-      } catch {
-        return null;
-      }
-    },
-    [activeId],
-  );
-
-  const handleDeleteProjectItem = useCallback(
-    async (itemId: string) => {
-      if (!activeId) return;
-      try {
-        await window.spark.project.deleteItem(activeId, itemId);
-        setProjectItems((current) => current.filter((item) => item.id !== itemId));
-        setActiveProjectItemId((current) => (current === itemId ? null : current));
-      } catch {
-        /* Project Ops delete errors are non-fatal to the running workspace. */
-      }
-    },
-    [activeId],
-  );
-
-  const handleStartProjectItem = useCallback(
-    async (item: ProjectItem) => {
-      if (!activeWorkspace) return;
-      const criteria =
-        item.acceptanceCriteria.length > 0
-          ? item.acceptanceCriteria.map((criterion) => `- ${criterion}`).join("\n")
-          : "- The requested project item is implemented and verified.";
-      const files =
-        item.linkedFiles.length > 0
-          ? item.linkedFiles.map((file) => `- ${file}`).join("\n")
-          : "- Discover the relevant files before editing.";
-      const planText = [
-        `# ${item.title}`,
-        "",
-        item.description || "Implement this Project Ops item.",
-        "",
-        "## Acceptance Criteria",
-        criteria,
-        "",
-        "## Linked Files",
-        files,
-      ].join("\n");
-      try {
-        const existingLiveRun = runs.find(
-          (run) =>
-            item.linkedRunIds.includes(run.id) &&
-            ["planning", "running", "reviewing", "blocked", "paused"].includes(run.status),
-        );
-        if (existingLiveRun) {
-          setActiveProjectItemId(item.id);
-          handleSelectRun(existingLiveRun.id);
-          return;
-        }
-        const run = await window.spark.orchestration.startAutopilot({
-          workspaceId: activeWorkspace.id,
-          workspaceName: activeWorkspace.name,
-          cwd: activeWorkspace.cwd,
-          planTitle: item.title,
-          planText,
-          initialUserNote: "Started from CRM task.",
-        });
-        setRuns((current) => [run, ...current.filter((candidate) => candidate.id !== run.id)]);
-        setActiveProjectItemId(item.id);
-        const linked = await window.spark.project.linkRun({
-          workspaceId: activeWorkspace.id,
-          itemId: item.id,
-          runId: run.id,
-          status: projectStatusForRun(run),
-        });
-        setProjectItems((current) =>
-          current.map((candidate) => (candidate.id === linked.id ? linked : candidate)),
-        );
-        handleSelectRun(run.id);
-      } catch {
-        /* Starting from CRM should not mutate the CRM task if the run fails to launch. */
-      }
-    },
-    [activeWorkspace, handleSelectRun, runs],
-  );
 
   // Theme the entire UI with the active workspace's color. Falls back to the
   // default yellow when nothing is active.
@@ -1050,10 +871,6 @@ export default function App() {
     tabs.newPreviewTab("");
   }, [tabs]);
 
-  const handleNewProjectTab = useCallback(() => {
-    tabs.newProjectTab();
-  }, [tabs]);
-
   const handlePreviewUrlChange = useCallback(
     (id: string, url: string) => {
       // Reflect navigation back into the persisted tab state so a reload
@@ -1318,15 +1135,8 @@ export default function App() {
               workspace={activeWorkspace}
               shell={terminalShell}
               runs={runs}
-              projectItems={projectItems}
-              activeProjectItemId={activeProjectItemId}
               activeRunId={activeRunId}
-              onSelectProjectItem={handleSelectProjectItem}
               onSelectRun={handleSelectRun}
-              onCreateProjectItem={handleCreateProjectItem}
-              onUpdateProjectItem={handleUpdateProjectItem}
-              onDeleteProjectItem={handleDeleteProjectItem}
-              onStartProjectItem={handleStartProjectItem}
               onDetectedUrl={handleDetectedUrl}
               onSparkOpenFile={openFileByPath}
               onTerminalPaneExit={onTerminalPaneExit}
@@ -1337,7 +1147,6 @@ export default function App() {
               onNewTerminalTab={handleNewTerminalTab}
               onNewEditorTab={handleNewEditorTab}
               onNewPreviewTab={handleNewPreviewTab}
-              onNewProjectTab={handleNewProjectTab}
             />
           )}
         </main>
@@ -1429,15 +1238,8 @@ interface WorkspaceProps {
   workspace: Workspace | null;
   shell: ShellInfo | null;
   runs: RunState[];
-  projectItems: ProjectItem[];
-  activeProjectItemId: string | null;
   activeRunId: string | null;
-  onSelectProjectItem: (id: string | null) => void;
   onSelectRun: (id: string | null) => void;
-  onCreateProjectItem: (input: CreateProjectItemInput) => Promise<ProjectItem | null>;
-  onUpdateProjectItem: (itemId: string, patch: Partial<ProjectItem>) => Promise<ProjectItem | null>;
-  onDeleteProjectItem: (itemId: string) => void | Promise<void>;
-  onStartProjectItem: (item: ProjectItem) => void | Promise<void>;
   onDetectedUrl: (tabId: string, paneId: string, url: string) => void;
   onSparkOpenFile: (path: string) => void;
   onTerminalPaneExit: (tabId: string, paneId: string) => void;
@@ -1452,27 +1254,19 @@ interface WorkspaceProps {
   onNewTerminalTab: () => void;
   onNewEditorTab: () => void;
   onNewPreviewTab: () => void;
-  onNewProjectTab: () => void;
 }
 
 // Memoized: every prop is either referentially stable (the `tabs` object,
 // all the hoisted useCallback handlers) or a value that genuinely changes
-// (runs, projectItems, the active ids). So the memo skips re-renders driven
+// (runs, the active run id). So the memo skips re-renders driven
 // by unrelated App state — e.g. a live workspace-color drag.
 const Workspace = React.memo(function Workspace({
   tabs,
   workspace,
   shell,
   runs,
-  projectItems,
-  activeProjectItemId,
   activeRunId,
-  onSelectProjectItem,
   onSelectRun,
-  onCreateProjectItem,
-  onUpdateProjectItem,
-  onDeleteProjectItem,
-  onStartProjectItem,
   onDetectedUrl,
   onSparkOpenFile,
   onTerminalPaneExit,
@@ -1483,7 +1277,6 @@ const Workspace = React.memo(function Workspace({
   onNewTerminalTab,
   onNewEditorTab,
   onNewPreviewTab,
-  onNewProjectTab,
 }: WorkspaceProps) {
   return (
     <div
@@ -1503,7 +1296,6 @@ const Workspace = React.memo(function Workspace({
         onNewTerminal={onNewTerminalTab}
         onNewEditor={onNewEditorTab}
         onNewPreview={onNewPreviewTab}
-        onNewProject={onNewProjectTab}
       />
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
         <EditorStack
@@ -1543,18 +1335,6 @@ const Workspace = React.memo(function Workspace({
           runs={runs}
           activeRunId={activeRunId}
           onSelectRun={onSelectRun}
-        />
-        <ProjectStack
-          tabs={tabs.tabs}
-          activeId={tabs.activeId}
-          workspace={workspace}
-          projectItems={projectItems}
-          activeProjectItemId={activeProjectItemId}
-          onSelectProjectItem={onSelectProjectItem}
-          onCreateProjectItem={onCreateProjectItem}
-          onUpdateProjectItem={onUpdateProjectItem}
-          onDeleteProjectItem={onDeleteProjectItem}
-          onStartProjectItem={onStartProjectItem}
         />
         {/* The legacy hidden orchestration TerminalGrid was removed: worker
             PTYs now spawn inside the user-visible TerminalStack via the
