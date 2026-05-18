@@ -30,6 +30,10 @@ function disabledResult(adapterId) {
     totalWorkerRuntimeSeconds: 0,
     estimatedCriticalPathSeconds: 0,
     parallelEfficiency: 0,
+    maxConcurrentWorkers: 0,
+    parallelLaunchGroups: 0,
+    peerMessageCount: 0,
+    peerAgentCount: 0,
     finalStatus: "disabled",
     errorMessage:
       `${adapterId} is a live adapter. Set SPARK_EVAL_V2_ALLOW_LIVE=1 and wire the CLI credentials before running it.`,
@@ -41,22 +45,33 @@ async function runLiveAdapter(adapterId, input) {
   if (process.env.SPARK_EVAL_V2_ALLOW_LIVE !== "1") return disabledResult(adapterId);
   const adapterPath = OLD_ADAPTERS[adapterId];
   if (!adapterPath) throw new Error(`No live adapter is registered for ${adapterId}`);
+  const config = loadVariantConfig(input, adapterId);
   const adapterModule = require(adapterPath);
   const runner = adapterModule.createRunner();
   const workRoot = fs.mkdtempSync(path.join(os.tmpdir(), `spark-eval-v2-${adapterId}-`));
   const seedSource = path.join(input.task.dir, input.task.seed || "seed");
   const seedRepoPath = path.join(workRoot, "repo");
-  fs.cpSync(seedSource, seedRepoPath, { recursive: true });
+  if (fs.existsSync(seedSource)) {
+    fs.cpSync(seedSource, seedRepoPath, { recursive: true });
+  } else {
+    fs.mkdirSync(seedRepoPath, { recursive: true });
+  }
   initGit(seedRepoPath);
+
+  const env = { ...process.env };
+  const maxParallelWorkers = config?.workerPolicy?.maxParallelWorkers;
+  if (Number.isFinite(maxParallelWorkers) && maxParallelWorkers > 0) {
+    env.SPARK_EVAL_MAX_PARALLEL_WORKERS = String(Math.floor(maxParallelWorkers));
+  }
 
   const runnerResult = await runner.run({
     seedRepoPath,
     planFile: path.join(input.task.dir, "prompt.md"),
-    env: process.env,
+    env,
     budgetSeconds: input.task.budgetSeconds || 900,
     taskId: input.task.id,
     runId: input.runId,
-    config: null,
+    config,
   });
 
   const publicGates = runGates(input.task.publicGates, runnerResult.finalRepoPath);
@@ -75,7 +90,7 @@ async function runLiveAdapter(adapterId, input) {
     hiddenGates,
     durationSeconds: runnerResult.durationSeconds,
     changedFiles,
-    retryCount: Math.max(0, (runnerResult.attemptCount || 1) - (isSpark ? sparkTelemetry.workerCount : 1)),
+    retryCount: isSpark ? sparkTelemetry.retryCount : Math.max(0, (runnerResult.attemptCount || 1) - 1),
     workerCount: isSpark ? sparkTelemetry.workerCount : 1,
     managerCallCount: isSpark ? sparkTelemetry.managerCallCount : 0,
     humanInterventions: runnerResult.humanInterventions || 0,
@@ -83,14 +98,27 @@ async function runLiveAdapter(adapterId, input) {
     totalWorkerRuntimeSeconds: isSpark ? sparkTelemetry.totalWorkerRuntimeSeconds : runnerResult.durationSeconds,
     estimatedCriticalPathSeconds: isSpark ? sparkTelemetry.estimatedCriticalPathSeconds : runnerResult.durationSeconds,
     parallelEfficiency: isSpark ? sparkTelemetry.parallelEfficiency : 1,
+    maxConcurrentWorkers: isSpark ? sparkTelemetry.maxConcurrentWorkers : 1,
+    parallelLaunchGroups: isSpark ? sparkTelemetry.parallelLaunchGroups : 0,
+    peerMessageCount: isSpark ? sparkTelemetry.peerMessageCount : 0,
+    peerAgentCount: isSpark ? sparkTelemetry.peerAgentCount : 0,
     finalStatus: runnerResult.exitReason,
     errorMessage: runnerResult.errorMessage || null,
     artifacts: {
       runner: runnerResult.artifacts,
       transcriptHead: (runnerResult.transcript || []).slice(0, 40),
       workRoot,
+      variantConfig: config?._sourcePath || null,
+      telemetry: isSpark ? sparkTelemetry : null,
     },
   };
+}
+
+function loadVariantConfig(input, adapterId) {
+  const configPath = path.join(input.root, "configs", `${adapterId}.json`);
+  if (!fs.existsSync(configPath)) return null;
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  return { ...config, _sourcePath: configPath };
 }
 
 function initGit(cwd) {
@@ -98,7 +126,7 @@ function initGit(cwd) {
   run("git", ["config", "user.email", "spark-eval@example.local"], cwd);
   run("git", ["config", "user.name", "Spark Eval"], cwd);
   run("git", ["add", "-A"], cwd);
-  run("git", ["commit", "-m", "seed"], cwd);
+  run("git", ["commit", "--allow-empty", "-m", "seed"], cwd);
 }
 
 function run(command, args, cwd) {
@@ -138,6 +166,10 @@ function telemetryFromSparkArtifact(artifacts) {
     totalWorkerRuntimeSeconds: 0,
     estimatedCriticalPathSeconds: 0,
     parallelEfficiency: 0,
+    maxConcurrentWorkers: 0,
+    parallelLaunchGroups: 0,
+    peerMessageCount: 0,
+    peerAgentCount: 0,
   };
   const runArtifact = (artifacts || []).find((artifact) => artifact.name === "run.json");
   if (!runArtifact || !fs.existsSync(runArtifact.path)) return base;
@@ -147,6 +179,13 @@ function telemetryFromSparkArtifact(artifacts) {
     const startedAt = Date.parse(run.autopilot?.startedAt || run.createdAt || "") || 0;
     const starts = attempts.map((attempt) => Date.parse(attempt.startedAt || "")).filter(Boolean);
     const ends = attempts.map((attempt) => Date.parse(attempt.finishedAt || "") || Date.now()).filter(Boolean);
+    const intervals = attempts
+      .map((attempt) => {
+        const started = Date.parse(attempt.startedAt || "");
+        const finished = Date.parse(attempt.finishedAt || "") || Date.now();
+        return started && finished >= started ? { started, finished } : null;
+      })
+      .filter(Boolean);
     const first = starts.length ? Math.min(...starts) : 0;
     const last = ends.length ? Math.max(...ends) : 0;
     const totalRuntime = attempts.reduce((sum, attempt) => {
@@ -163,10 +202,72 @@ function telemetryFromSparkArtifact(artifacts) {
       totalWorkerRuntimeSeconds: Math.round(totalRuntime),
       estimatedCriticalPathSeconds: Math.round(critical),
       parallelEfficiency: totalRuntime > 0 && critical > 0 ? Math.min(1, totalRuntime / (critical * Math.max(1, attempts.length))) : 0,
+      maxConcurrentWorkers: maxConcurrentIntervals(intervals),
+      parallelLaunchGroups: countParallelLaunchGroups(artifacts),
+      ...peerCommsTelemetry(path.dirname(runArtifact.path)),
     };
   } catch {
     return base;
   }
+}
+
+function maxConcurrentIntervals(intervals) {
+  const points = [];
+  for (const interval of intervals) {
+    points.push({ t: interval.started, delta: 1 });
+    points.push({ t: interval.finished, delta: -1 });
+  }
+  points.sort((a, b) => (a.t - b.t) || (a.delta - b.delta));
+  let current = 0;
+  let max = 0;
+  for (const point of points) {
+    current += point.delta;
+    if (current > max) max = current;
+  }
+  return max;
+}
+
+function countParallelLaunchGroups(artifacts) {
+  const eventsArtifact = (artifacts || []).find((artifact) => artifact.name === "events.jsonl");
+  if (!eventsArtifact || !fs.existsSync(eventsArtifact.path)) return 0;
+  const groups = new Set();
+  const lines = fs.readFileSync(eventsArtifact.path, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      const groupId = event?.payload?.parallelGroupId;
+      const groupSize = Number(event?.payload?.parallelGroupSize || 0);
+      if (groupId && groupSize > 1) groups.add(groupId);
+    } catch {
+      /* ignore malformed event line */
+    }
+  }
+  return groups.size;
+}
+
+function peerCommsTelemetry(runDir) {
+  const peerDir = path.join(runDir, "peer-comms");
+  const messagesDir = path.join(peerDir, "messages");
+  let peerMessageCount = 0;
+  if (fs.existsSync(messagesDir)) {
+    peerMessageCount = fs
+      .readdirSync(messagesDir)
+      .filter((name) => name.endsWith(".json"))
+      .length;
+  }
+
+  let peerAgentCount = 0;
+  const agentsPath = path.join(peerDir, "agents.json");
+  if (fs.existsSync(agentsPath)) {
+    try {
+      const registry = JSON.parse(fs.readFileSync(agentsPath, "utf8"));
+      peerAgentCount = Array.isArray(registry.agents) ? registry.agents.length : 0;
+    } catch {
+      peerAgentCount = 0;
+    }
+  }
+  return { peerMessageCount, peerAgentCount };
 }
 
 module.exports = { runLiveAdapter };

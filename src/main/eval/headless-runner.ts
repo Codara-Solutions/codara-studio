@@ -50,6 +50,9 @@ interface VariantConfig {
     effort?: string;
     profilePath?: string;
   };
+  workerPolicy?: {
+    maxParallelWorkers?: number;
+  };
   pool?: Array<{ runtime?: string; model?: string; effort?: string }>;
   perRoleOverrides?: Record<string, unknown>;
 }
@@ -447,6 +450,14 @@ async function applyVariantConfig(config: VariantConfig, configPath: string): Pr
         candidates,
       });
     }
+  }
+
+  const maxParallelWorkers = config.workerPolicy?.maxParallelWorkers;
+  if (typeof maxParallelWorkers === "number" && Number.isFinite(maxParallelWorkers) && maxParallelWorkers > 0) {
+    process.env.SPARK_EVAL_MAX_PARALLEL_WORKERS = String(Math.floor(maxParallelWorkers));
+    emitEvent("eval.max_parallel_workers_pinned", {
+      maxParallelWorkers: Math.floor(maxParallelWorkers),
+    });
   }
 
   // Pool + perRoleOverrides aren't enforced inside Spark today: the manager

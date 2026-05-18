@@ -1,33 +1,34 @@
 /* ──────────────────────────────────────────────────────────────────────────
    Spark Agent — design tokens
-   Dark, terminal-native, warm-tinted (chroma drifts toward the brand yellow's
-   hue ≈ 85). Two type families: a humanist sans for chrome and a monospace
-   for code, data, timestamps. Tokens are append-only — every name that
-   existed before still exists with the same semantics.
+   Terminal-native workbench themes. Two type families: a humanist sans for
+   chrome and a monospace for code, data, timestamps. Tokens are append-only:
+   every name that existed before still exists with the same semantics.
    ──────────────────────────────────────────────────────────────────────── */
 
 :root {
+  color-scheme: dark;
+
   /* Surfaces — warm-tinted neutrals (h ≈ 85, very low chroma) */
-  --bg: oklch(0.158 0.004 85);
-  --panel: oklch(0.198 0.005 85);
-  --panel-2: oklch(0.236 0.006 85);
-  --panel-3: oklch(0.275 0.006 85);
+  --bg: #0e0d0b;
+  --panel: #171513;
+  --panel-2: #201e1b;
+  --panel-3: #292724;
 
   /* Ink */
-  --ink: oklch(0.965 0.003 85);
-  --ink-dim: oklch(0.795 0.005 85);
-  --muted: oklch(0.58 0.008 85);
-  --muted-2: oklch(0.46 0.008 85);
+  --ink: #f4f3f1;
+  --ink-dim: #bdbcb8;
+  --muted: #7c7a75;
+  --muted-2: #5a5853;
 
   /* Rules */
-  --rule: oklch(0.32 0.006 85);
-  --rule-strong: oklch(0.46 0.008 85);
-  --rule-soft: oklch(0.255 0.006 85);
+  --rule: #34332f;
+  --rule-strong: #5a5853;
+  --rule-soft: #242320;
 
   /* Brand accent — overwritten at runtime to the active workspace color.
      Soft variants are low-chroma derivatives for backgrounds and tints. */
   --accent: #F0C419;
-  --accent-ink: oklch(0.18 0.01 85);
+  --accent-ink: #14110d;
   --accent-soft: color-mix(in oklch, var(--accent) 18%, transparent);
   --accent-edge: color-mix(in oklch, var(--accent) 40%, transparent);
   --accent-glow: color-mix(in oklch, var(--accent) 28%, transparent);
@@ -76,12 +77,228 @@
                  0 0 28px var(--accent-glow);
 }
 
+:root[data-theme="spark-classic"] {
+  color-scheme: dark;
+}
+
+:root[data-theme="catppuccin-mocha"] {
+  color-scheme: dark;
+
+  --bg: #1e1e2e;
+  --panel: #242437;
+  --panel-2: #313244;
+  --panel-3: #45475a;
+
+  --ink: #cdd6f4;
+  --ink-dim: #bac2de;
+  --muted: #9399b2;
+  --muted-2: #6c7086;
+
+  --rule: #45475a;
+  --rule-strong: #585b70;
+  --rule-soft: #313244;
+
+  --danger: #f38ba8;
+  --ok: #a6e3a1;
+  --info: #89b4fa;
+  --warn: #f9e2af;
+}
+
+:root[data-theme="catppuccin-latte"] {
+  color-scheme: light;
+
+  --bg: #eff1f5;
+  --panel: #e6e9ef;
+  --panel-2: #dce0e8;
+  --panel-3: #ccd0da;
+
+  --ink: #4c4f69;
+  --ink-dim: #5c5f77;
+  --muted: #6c6f85;
+  --muted-2: #7c7f93;
+
+  --rule: #bcc0cc;
+  --rule-strong: #9ca0b0;
+  --rule-soft: #dce0e8;
+
+  --danger: #d20f39;
+  --ok: #40a02b;
+  --info: #1e66f5;
+  --warn: #df8e1d;
+
+  --hover: color-mix(in oklch, var(--ink) 6%, transparent);
+  --hover-strong: color-mix(in oklch, var(--ink) 10%, transparent);
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.78), 0 8px 24px rgba(76, 79, 105, 0.12);
+  --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.88), 0 18px 48px rgba(76, 79, 105, 0.18);
+}
+
+:root[data-theme="gruvbox-dark"] {
+  color-scheme: dark;
+
+  --bg: #282828;
+  --panel: #32302f;
+  --panel-2: #3c3836;
+  --panel-3: #504945;
+
+  --ink: #ebdbb2;
+  --ink-dim: #d5c4a1;
+  --muted: #a89984;
+  --muted-2: #928374;
+
+  --rule: #665c54;
+  --rule-strong: #7c6f64;
+  --rule-soft: #3c3836;
+
+  --danger: #fb4934;
+  --ok: #b8bb26;
+  --info: #83a598;
+  --warn: #fabd2f;
+}
+
+:root[data-theme="solarized-dark"] {
+  color-scheme: dark;
+
+  --bg: #002b36;
+  --panel: #073642;
+  --panel-2: #0a3a44;
+  --panel-3: #134b5a;
+
+  --ink: #eee8d5;
+  --ink-dim: #d6cfb8;
+  --muted: #93a1a1;
+  --muted-2: #839496;
+
+  --rule: #164956;
+  --rule-strong: #2aa198;
+  --rule-soft: #073642;
+
+  --danger: #dc322f;
+  --ok: #859900;
+  --info: #268bd2;
+  --warn: #b58900;
+}
+
+:root[data-theme="dracula"] {
+  color-scheme: dark;
+
+  --bg: #282a36;
+  --panel: #21222c;
+  --panel-2: #343746;
+  --panel-3: #44475a;
+
+  --ink: #f8f8f2;
+  --ink-dim: #dfe0dc;
+  --muted: #a5adce;
+  --muted-2: #6272a4;
+
+  --rule: #44475a;
+  --rule-strong: #6272a4;
+  --rule-soft: #343746;
+
+  --danger: #ff5555;
+  --ok: #50fa7b;
+  --info: #8be9fd;
+  --warn: #f1fa8c;
+}
+
+:root[data-theme="one-dark"] {
+  color-scheme: dark;
+
+  --bg: #282c34;
+  --panel: #21252b;
+  --panel-2: #2c313a;
+  --panel-3: #353b45;
+
+  --ink: #abb2bf;
+  --ink-dim: #9da5b4;
+  --muted: #7f848e;
+  --muted-2: #5c6370;
+
+  --rule: #3e4451;
+  --rule-strong: #5c6370;
+  --rule-soft: #2c313a;
+
+  --danger: #e06c75;
+  --ok: #98c379;
+  --info: #61afef;
+  --warn: #e5c07b;
+}
+
+:root[data-theme="rose-pine"] {
+  color-scheme: dark;
+
+  --bg: #191724;
+  --panel: #1f1d2e;
+  --panel-2: #26233a;
+  --panel-3: #403d52;
+
+  --ink: #e0def4;
+  --ink-dim: #c4a7e7;
+  --muted: #908caa;
+  --muted-2: #6e6a86;
+
+  --rule: #403d52;
+  --rule-strong: #524f67;
+  --rule-soft: #26233a;
+
+  --danger: #eb6f92;
+  --ok: #9ccfd8;
+  --info: #31748f;
+  --warn: #f6c177;
+}
+
+:root[data-theme="everforest"] {
+  color-scheme: dark;
+
+  --bg: #2d353b;
+  --panel: #343f44;
+  --panel-2: #3d484d;
+  --panel-3: #475258;
+
+  --ink: #d3c6aa;
+  --ink-dim: #c6b99d;
+  --muted: #9da9a0;
+  --muted-2: #7a8478;
+
+  --rule: #4f5b58;
+  --rule-strong: #66736d;
+  --rule-soft: #3d484d;
+
+  --danger: #e67e80;
+  --ok: #a7c080;
+  --info: #7fbbb3;
+  --warn: #dbbc7f;
+}
+
+:root[data-theme="kanagawa-wave"] {
+  color-scheme: dark;
+
+  --bg: #1f1f28;
+  --panel: #252535;
+  --panel-2: #2a2a37;
+  --panel-3: #363646;
+
+  --ink: #dcd7ba;
+  --ink-dim: #c8c093;
+  --muted: #938aa9;
+  --muted-2: #727169;
+
+  --rule: #54546d;
+  --rule-strong: #6f6f93;
+  --rule-soft: #2a2a37;
+
+  --danger: #c34043;
+  --ok: #76946a;
+  --info: #7e9cd8;
+  --warn: #c0a36e;
+}
+
 * { box-sizing: border-box; }
 
 html, body, #root {
   margin: 0;
   padding: 0;
-  background: oklch(0.10 0.003 85);
+  background: var(--bg);
   color: var(--ink);
   font-family: var(--font-sans);
   font-size: var(--font-size);

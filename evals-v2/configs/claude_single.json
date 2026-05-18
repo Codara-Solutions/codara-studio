@@ -1,10 +1,12 @@
 {
   "variantId": "claude_single",
   "label": "Pure Claude Code, one agent",
+  "agent": "claude_code",
+  "model": "claude-opus-4-7",
+  "effort": "max",
   "workerPolicy": {
     "manager": "none",
     "workers": [{ "runtime": "claude", "maxParallel": 1 }],
     "verification": "self"
   }
 }
-

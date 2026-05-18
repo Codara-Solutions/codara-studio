@@ -1,0 +1,554 @@
+{
+  "schemaVersion": 2,
+  "task": {
+    "id": "peer-mailbox-analytics-contract",
+    "category": "parallel_contract",
+    "prompt": "Implement a coordinated analytics summary. This task is intentionally split-friendly: one worker can own metrics and another can own report rendering, but they must agree on the shared metric object shape before editing.\n\nIn `src/metrics.js`, export `normalizeRecords` and `summarizeByTeam`. In `src/report.js`, export `renderSummary`. Keep CommonJS exports stable. Money is stored in cents and rendered as dollars. The report should show one line per team sorted by descending profit.\n"
+  },
+  "variant": {
+    "id": "spark_sequential",
+    "label": "spark_sequential"
+  },
+  "run": {
+    "id": "spark_sequential-peer-mailbox-analytics-contract-mpbgq8ls-1",
+    "repetition": 1,
+    "startedAt": "2026-05-18T17:13:14.511Z",
+    "finishedAt": "2026-05-18T17:16:56.287Z",
+    "durationSeconds": 221.403,
+    "finalStatus": "completed",
+    "errorMessage": null
+  },
+  "gates": {
+    "public": {
+      "total": 2,
+      "passed": 0,
+      "failed": 2,
+      "failedIds": [
+        "public-team-summary-contract",
+        "public-report-profit-order"
+      ],
+      "results": [
+        {
+          "id": "public-team-summary-contract",
+          "description": "node -e \"const { summarizeByTeam } = require('./src/metrics'); const rows = summarizeByTeam([{ team:'A', revenueCents:1500, costCents:500 }, { team:'A', revenueCents:700, costCents:200 }, { team:'B', revenueCents:900, costCents:100 }]); const a = rows.find(r => r.team === 'A'); if (!a || a.revenueCents !== 2200 || a.costCents !== 700 || a.profitCents !== 1500) throw new Error(JSON.stringify(rows));\"",
+          "ok": false,
+          "durationMs": 50,
+          "message": "[eval]:1\r\nconst { summarizeByTeam } = require('./src/metrics'); const rows = summarizeByTeam([{ team:'A', revenueCents:1500, costCents:500 }, { team:'A', revenueCents:700, costCents:200 }, { team:'B', revenueCents:900, costCents:100 }]); const a = rows.find(r => r.team === 'A'); if (!a || a.revenueCents !== 2200 || a.costCents !== 700 || a.profitCents !== 1500) throw new Error(JSON.stringify(rows));\r\n                                                                                                                                                                                                                                                   ^\r\n\r\nTypeError: rows.find is not a function\r\n    at [eval]:1:244\r\n    at runScriptInThisContext (node:internal/vm:209:10)\r\n    at node:internal/process/execution:449:12\r\n    at [eval]-wrapper:6:24\r\n    at runScriptInContext (node:internal/process/execution:447:60)\r\n    at evalFunction (node:internal/process/execution:87:30)\r\n    at evalScript (node:internal/process/execution:99:3)\r\n    at node:internal/main/eval_string:74:3\r\n\r\nNode.js v22.16.0\r\n"
+        },
+        {
+          "id": "public-report-profit-order",
+          "description": "node -e \"const { renderSummary } = require('./src/report'); const out = renderSummary([{ team:'Blue', revenueCents:1000, costCents:200 }, { team:'Red', revenueCents:1500, costCents:1000 }]); const lines = out.trim().split(/\\\\n/); if (!/^Blue /.test(lines[0]) || !out.includes('profit $8.00') || !out.includes('margin 80.0%')) throw new Error(out);\"",
+          "ok": false,
+          "durationMs": 48,
+          "message": "[eval]:1\r\nconst { renderSummary } = require('./src/report'); const out = renderSummary([{ team:'Blue', revenueCents:1000, costCents:200 }, { team:'Red', revenueCents:1500, costCents:1000 }]); const lines = out.trim().split(/\\\\n/); if (!/^Blue /.test(lines[0]) || !out.includes('profit $8.00') || !out.includes('margin 80.0%')) throw new Error(out);\r\n                                                                                                                                                                                                                                                                                                                             ^\r\n\r\nError: Blue: revenue=$10.00 cost=$2.00 profit=$NaN\r\nRed: revenue=$15.00 cost=$10.00 profit=$NaN\r\n    at [eval]:1:324\r\n    at runScriptInThisContext (node:internal/vm:209:10)\r\n    at node:internal/process/execution:449:12\r\n    at [eval]-wrapper:6:24\r\n    at runScriptInContext (node:internal/process/execution:447:60)\r\n    at evalFunction (node:internal/process/execution:87:30)\r\n    at evalScript (node:internal/process/execution:99:3)\r\n    at node:internal/main/eval_string:74:3\r\n\r\nNode.js v22.16.0\r\n"
+        }
+      ]
+    },
+    "hidden": {
+      "total": 1,
+      "passed": 0,
+      "failed": 1,
+      "failedIds": [
+        "hidden-normalize-defaults-and-margin"
+      ],
+      "results": [
+        {
+          "id": "hidden-normalize-defaults-and-margin",
+          "description": "node -e \"const { normalizeRecords, summarizeByTeam } = require('./src/metrics'); const normalized = normalizeRecords([{ team:'Ops', revenueCents:'2500' }, { team:'Ops', costCents:500 }]); if (normalized[0].costCents !== 0 || normalized[1].revenueCents !== 0) throw new Error(JSON.stringify(normalized)); const [row] = summarizeByTeam(normalized); if (row.marginPct !== 80) throw new Error(JSON.stringify(row));\"",
+          "ok": false,
+          "durationMs": 55,
+          "message": "[eval]:1\r\nconst { normalizeRecords, summarizeByTeam } = require('./src/metrics'); const normalized = normalizeRecords([{ team:'Ops', revenueCents:'2500' }, { team:'Ops', costCents:500 }]); if (normalized[0].costCents !== 0 || normalized[1].revenueCents !== 0) throw new Error(JSON.stringify(normalized)); const [row] = summarizeByTeam(normalized); if (row.marginPct !== 80) throw new Error(JSON.stringify(row));\r\n                                                                                                                                                                                                                                                                                                                     ^\r\n\r\nTypeError: summarizeByTeam is not a function or its return value is not iterable\r\n    at [eval]:1:310\r\n    at runScriptInThisContext (node:internal/vm:209:10)\r\n    at node:internal/process/execution:449:12\r\n    at [eval]-wrapper:6:24\r\n    at runScriptInContext (node:internal/process/execution:447:60)\r\n    at evalFunction (node:internal/process/execution:87:30)\r\n    at evalScript (node:internal/process/execution:99:3)\r\n    at node:internal/main/eval_string:74:3\r\n\r\nNode."
+        }
+      ]
+    }
+  },
+  "quality": {
+    "score": 0,
+    "hiddenGateRatio": 0,
+    "publicGatesGreen": false,
+    "passed": false
+  },
+  "changes": {
+    "changedFiles": []
+  },
+  "telemetry": {
+    "retryCount": 0,
+    "workerCount": 2,
+    "managerCallCount": 4,
+    "humanInterventions": 0,
+    "timeToFirstWorkerSeconds": 19.119,
+    "totalWorkerRuntimeSeconds": 177,
+    "estimatedCriticalPathSeconds": 201,
+    "parallelEfficiency": 0.4387253806224077,
+    "maxConcurrentWorkers": 1,
+    "parallelLaunchGroups": 0,
+    "peerMessageCount": 1,
+    "peerAgentCount": 1
+  },
+  "artifacts": {
+    "runner": [
+      {
+        "name": "spark.stdout.log",
+        "path": "C:\\Users\\Etienne\\AppData\\Local\\Temp\\spark-eval-v2-spark_sequential-3rV2kD\\spark_sequential-peer-mailbox-analytics-contract-mpbgq8ls-1-artifacts\\spark.stdout.log",
+        "kind": "agent-log"
+      },
+      {
+        "name": "spark.stderr.log",
+        "path": "C:\\Users\\Etienne\\AppData\\Local\\Temp\\spark-eval-v2-spark_sequential-3rV2kD\\spark_sequential-peer-mailbox-analytics-contract-mpbgq8ls-1-artifacts\\spark.stderr.log",
+        "kind": "agent-log"
+      },
+      {
+        "name": "run.json",
+        "path": "C:\\Users\\Etienne\\AppData\\Local\\Temp\\spark-eval-v2-spark_sequential-3rV2kD\\spark_sequential-peer-mailbox-analytics-contract-mpbgq8ls-1-artifacts\\spark-run\\run.json",
+        "kind": "spark-state"
+      },
+      {
+        "name": "events.jsonl",
+        "path": "C:\\Users\\Etienne\\AppData\\Local\\Temp\\spark-eval-v2-spark_sequential-3rV2kD\\spark_sequential-peer-mailbox-analytics-contract-mpbgq8ls-1-artifacts\\spark-run\\events.jsonl",
+        "kind": "spark-events"
+      },
+      {
+        "name": "config-resolved.json",
+        "path": "C:\\Users\\Etienne\\AppData\\Local\\Temp\\spark-eval-v2-spark_sequential-3rV2kD\\spark_sequential-peer-mailbox-analytics-contract-mpbgq8ls-1-artifacts\\config-resolved.json",
+        "kind": "variant-config"
+      }
+    ],
+    "transcriptHead": [
+      {
+        "ts": "2026-05-18T17:13:14.690Z",
+        "kind": "adapter:start",
+        "message": "Spark Agent (full orchestration, headless)"
+      },
+      {
+        "ts": "2026-05-18T17:13:14.690Z",
+        "kind": "config",
+        "message": "variantId=spark_sequential"
+      },
+      {
+        "ts": "2026-05-18T17:13:14.691Z",
+        "kind": "config:resolved",
+        "message": "profileHash=sha256:0fe32d3feec435c7b79ecbf9a456e8ec2f23b60cc6b17d4a9ef3278a0b2d1cbc"
+      },
+      {
+        "ts": "2026-05-18T17:13:14.693Z",
+        "kind": "spawn",
+        "message": "C:\\Users\\Etienne\\Documents\\Project\\Spark-Agent\\node_modules\\electron\\dist\\electron.exe C:\\Users\\Etienne\\Documents\\Project\\Spark-Agent\\out\\main\\index.js --eval-plan C:\\Users\\Etienne\\AppData\\Local\\Temp\\spark-eval-v2-spark_sequential-3rV2kD\\repo\\spark-eval-plan.md --eval-budget 900 --eval-config C:\\Users\\Etienne\\Documents\\Project\\Spark-Agent\\evals-v2\\configs\\spark_sequential.json --eval-output-dir C:\\Users\\Etienne\\AppData\\Local\\Temp\\spark-eval-v2-spark_sequential-3rV2kD\\spark_sequential-peer-mailbox-analytics-contract-mpbgq8ls-1-artifacts\\spark-run"
+      },
+      {
+        "ts": "2026-05-18T17:13:14.817Z",
+        "kind": "spark:eval.manager_profile_loaded",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:14.816Z",
+          "type": "eval.manager_profile_loaded",
+          "path": "C:\\Users\\Etienne\\Documents\\Project\\Spark-Agent\\resources\\orchestration\\manager-profile-sequential-eval.json"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:14.817Z",
+        "kind": "spark:eval.max_parallel_workers_pinned",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:14.817Z",
+          "type": "eval.max_parallel_workers_pinned",
+          "maxParallelWorkers": 1
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:14.941Z",
+        "kind": "spark:eval.headless_starting",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:14.941Z",
+          "type": "eval.headless_starting",
+          "planPath": "C:\\Users\\Etienne\\AppData\\Local\\Temp\\spark-eval-v2-spark_sequential-3rV2kD\\repo\\spark-eval-plan.md",
+          "cwd": "C:\\Users\\Etienne\\AppData\\Local\\Temp\\spark-eval-v2-spark_sequential-3rV2kD\\repo",
+          "configPath": "C:\\Users\\Etienne\\Documents\\Project\\Spark-Agent\\evals-v2\\configs\\spark_sequential.json",
+          "variantId": "spark_sequential",
+          "budgetSeconds": 900
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:14.944Z",
+        "kind": "spark:run.created",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:14.944Z",
+          "type": "run.created",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Run created"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:14.946Z",
+        "kind": "spark:autopilot.started",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:14.946Z",
+          "type": "autopilot.started",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Autopilot started"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:14.946Z",
+        "kind": "spark:run_started",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:14.946Z",
+          "type": "run_started",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "runDir": "C:\\Users\\Etienne\\AppData\\Local\\Temp\\spark-eval-v2-spark_sequential-3rV2kD\\spark_sequential-peer-mailbox-analytics-contract-mpbgq8ls-1-artifacts\\.SparkAgent\\runs\\run-mpbgq8xp-av8tnx"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:14.946Z",
+        "kind": "spark:run_status",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:14.946Z",
+          "type": "run_status",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "status": "running"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:14.956Z",
+        "kind": "spark:spark_call.started",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:14.956Z",
+          "type": "spark_call.started",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Spark manager call started: x-ai/grok-4.3"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:27.560Z",
+        "kind": "spark:spark_call.completed",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:27.560Z",
+          "type": "spark_call.completed",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Spark manager call completed: run_workers"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:27.564Z",
+        "kind": "spark:step.created",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:27.564Z",
+          "type": "step.created",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Step created: Define shared metric shape and implement metrics"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:27.567Z",
+        "kind": "spark:step.created",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:27.568Z",
+          "type": "step.created",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Step created: Verify foundation"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:27.570Z",
+        "kind": "spark:spark_manager.task_complexity_classified",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:27.570Z",
+          "type": "spark_manager.task_complexity_classified",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Manager classified the run as taskComplexity=standard"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:27.570Z",
+        "kind": "spark:spark_manager.decision_applied",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:27.571Z",
+          "type": "spark_manager.decision_applied",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Spark manager decision applied"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:27.575Z",
+        "kind": "spark:spark_call.started",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:27.575Z",
+          "type": "spark_call.started",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Spark manager call started: x-ai/grok-4.3"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:34.038Z",
+        "kind": "spark:spark_call.completed",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:34.038Z",
+          "type": "spark_call.completed",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Spark manager call completed: run_workers"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:34.040Z",
+        "kind": "spark:worker_task.created",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:34.040Z",
+          "type": "worker_task.created",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Worker task created: Define shared metric shape and implement metrics"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:34.041Z",
+        "kind": "spark:spark_manager.decision_applied",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:34.041Z",
+          "type": "spark_manager.decision_applied",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Spark manager decision applied"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:34.043Z",
+        "kind": "spark:autopilot.started",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:34.043Z",
+          "type": "autopilot.started",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Autopilot started"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:34.054Z",
+        "kind": "spark:worker_envelope_prepared",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:34.054Z",
+          "type": "worker_envelope_prepared",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "workerTaskId": "task-mpbgqno6-qaxef9",
+          "attemptId": "attempt-mpbgqnob-dspr2b"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:34.054Z",
+        "kind": "spark:worker_task.envelope_prepared",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:34.054Z",
+          "type": "worker_task.envelope_prepared",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Worker task envelope prepared: Define shared metric shape and implement metrics"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:34.059Z",
+        "kind": "spark:autopilot.cycle_scheduled",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:34.059Z",
+          "type": "autopilot.cycle_scheduled",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Autopilot worker cycle scheduled"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:34.065Z",
+        "kind": "spark:worker_attempt.launch_requested",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:34.065Z",
+          "type": "worker_attempt.launch_requested",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Worker attempt launch requested: Define shared metric shape and implement metrics"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:34.105Z",
+        "kind": "spark:eval.worker_pty_spawned",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:34.105Z",
+          "type": "eval.worker_pty_spawned",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "attemptId": "attempt-mpbgqnob-dspr2b",
+          "cwd": "C:\\Users\\Etienne\\AppData\\Local\\Temp\\spark-eval-v2-spark_sequential-3rV2kD\\repo"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:13:39.218Z",
+        "kind": "spark:worker_attempt.running",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:13:39.218Z",
+          "type": "worker_attempt.running",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Worker attempt running: Define shared metric shape and implement metrics"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:15:19.842Z",
+        "kind": "spark:worker_completed",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:15:19.842Z",
+          "type": "worker_completed",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "attemptId": "attempt-mpbgqnob-dspr2b",
+          "exitCode": 0
+        }
+      },
+      {
+        "ts": "2026-05-18T17:15:19.842Z",
+        "kind": "spark:worker_attempt.finished",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:15:19.842Z",
+          "type": "worker_attempt.finished",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Worker attempt finished with exit code 0"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:15:19.851Z",
+        "kind": "spark:worker_report.parsed",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:15:19.851Z",
+          "type": "worker_report.parsed",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Worker report parsed: complete"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:15:19.854Z",
+        "kind": "spark:worker_report.reviewed",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:15:19.854Z",
+          "type": "worker_report.reviewed",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Worker report review decision: accept"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:15:19.856Z",
+        "kind": "spark:autopilot.cycle_completed",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:15:19.856Z",
+          "type": "autopilot.cycle_completed",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Autopilot completed one execution cycle"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:15:19.872Z",
+        "kind": "spark:spark_manager.standard_clean_impl_check_started",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:15:19.871Z",
+          "type": "spark_manager.standard_clean_impl_check_started",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Re-running 2 verificationCommand(s) deterministically to decide whether the verifier is needed"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:15:19.933Z",
+        "kind": "spark:run_status",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:15:19.933Z",
+          "type": "run_status",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "status": "reviewing"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:15:19.963Z",
+        "kind": "spark:spark_manager.standard_clean_impl_check_passed",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:15:19.963Z",
+          "type": "spark_manager.standard_clean_impl_check_passed",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Deterministic re-run of verificationCommands all green; skipping verifier follow-up"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:15:19.966Z",
+        "kind": "spark:spark_manager.standard_fast_path_review",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:15:19.966Z",
+          "type": "spark_manager.standard_fast_path_review",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Skipped manager worker_result_review + verifier: standard run with clean impl + green verificationCommands"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:15:19.968Z",
+        "kind": "spark:step_completed",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:15:19.968Z",
+          "type": "step_completed",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "stepId": "step-mpbgqioc-777b9i"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:15:19.968Z",
+        "kind": "spark:step.updated",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:15:19.968Z",
+          "type": "step.updated",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Step updated: Verify foundation"
+        }
+      },
+      {
+        "ts": "2026-05-18T17:15:19.969Z",
+        "kind": "spark:autopilot.brake_resolved",
+        "message": "",
+        "data": {
+          "ts": "2026-05-18T17:15:19.969Z",
+          "type": "autopilot.brake_resolved",
+          "runId": "run-mpbgq8xp-av8tnx",
+          "message": "Brake step \"Verify foundation\" resolved; replanning with worker evidence"
+        }
+      }
+    ],
+    "workRoot": "C:\\Users\\Etienne\\AppData\\Local\\Temp\\spark-eval-v2-spark_sequential-3rV2kD",
+    "variantConfig": "C:\\Users\\Etienne\\Documents\\Project\\Spark-Agent\\evals-v2\\configs\\spark_sequential.json",
+    "telemetry": {
+      "retryCount": 0,
+      "workerCount": 2,
+      "managerCallCount": 4,
+      "timeToFirstWorkerSeconds": 19.119,
+      "totalWorkerRuntimeSeconds": 177,
+      "estimatedCriticalPathSeconds": 201,
+      "parallelEfficiency": 0.4387253806224077,
+      "maxConcurrentWorkers": 1,
+      "parallelLaunchGroups": 0,
+      "peerMessageCount": 1,
+      "peerAgentCount": 1
+    }
+  }
+}

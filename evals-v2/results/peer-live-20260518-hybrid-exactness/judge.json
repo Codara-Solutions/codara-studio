@@ -1,0 +1,53 @@
+{
+  "judge": "spark_best_fastest_judge_v1",
+  "generatedAt": "2026-05-18T17:38:31.089Z",
+  "options": {
+    "baseline": "spark_sequential",
+    "challenger": "spark_hybrid_parallel",
+    "minSpeedupPct": 0.1,
+    "minSpeedupSeconds": 20,
+    "qualityTolerance": 0.05,
+    "requirePeerMessages": true
+  },
+  "verdict": {
+    "status": "insufficient_data",
+    "winner": null,
+    "reason": "No comparable baseline/challenger result pairs were found.",
+    "promoteHybrid": false
+  },
+  "summary": {
+    "comparablePairs": 0,
+    "baseline": {
+      "variantId": "spark_sequential",
+      "runs": 0,
+      "passRate": 0,
+      "qualityScore": 0,
+      "medianDurationSeconds": 0,
+      "medianMaxConcurrentWorkers": 0,
+      "meanPeerMessages": 0
+    },
+    "challenger": {
+      "variantId": "spark_hybrid_parallel",
+      "runs": 1,
+      "passRate": 0,
+      "qualityScore": 3.33,
+      "medianDurationSeconds": 331.858,
+      "medianMaxConcurrentWorkers": 2,
+      "meanPeerMessages": 2
+    },
+    "wins": {},
+    "reasons": {},
+    "collaboration": {
+      "expectedRuns": 0,
+      "okRuns": 0,
+      "requiredPeerMessages": true,
+      "allExpectedRunsOk": true,
+      "totalPeerMessages": 0,
+      "maxConcurrentWorkers": 0
+    }
+  },
+  "comparisons": [],
+  "recommendations": [
+    "Run both spark_sequential and spark_hybrid_parallel on the same task/repetition before judging."
+  ]
+}

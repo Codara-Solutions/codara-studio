@@ -530,6 +530,13 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
     );
   }
 
+  lines.push(
+    "RUN ARTIFACT STAGING",
+    join(run.artifactDir, "staging"),
+    "Use this directory for temporary multi-agent staging artifacts. Do not create .spark-parts or other staging folders inside the user workspace.",
+    "",
+  );
+
   const unresolvedFreshNote = findUnresolvedFreshUserNote(run);
   if (unresolvedFreshNote) {
     lines.push(
@@ -584,6 +591,8 @@ function formatCompactRunState(
     id: run.id,
     title: run.title,
     status: run.status,
+    artifactDir: run.artifactDir,
+    stagingDir: join(run.artifactDir, "staging"),
     taskComplexity: run.taskComplexity,
     counts: {
       steps: run.steps.length,

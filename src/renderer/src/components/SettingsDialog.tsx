@@ -6,7 +6,11 @@ import type {
   ShellInfo,
   ThemePref,
 } from "@shared/types";
-import { EDITOR_THEME_IDS, INLINE_AI_MODEL_PRESETS } from "@shared/types";
+import {
+  APP_THEME_IDS,
+  EDITOR_THEME_IDS,
+  INLINE_AI_MODEL_PRESETS,
+} from "@shared/types";
 import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/ThemeProvider";
 import { usePreferences } from "../preferences/usePreferences";
@@ -640,21 +644,71 @@ function FooterButton({
 
 // ── Setting panes, all rendered inline in this dialog's chrome.
 
-const APPEARANCE: ReadonlyArray<{ id: ThemePref; label: string; glyph: string }> = [
-  { id: "system", label: "System", glyph: "◐" },
-  { id: "light", label: "Light", glyph: "☼" },
-  { id: "dark", label: "Dark", glyph: "☾" },
-];
+const APP_THEME_META: Readonly<
+  Record<
+    ThemePref,
+    {
+      label: string;
+      swatches: readonly [string, string, string, string];
+    }
+  >
+> = {
+  "spark-classic": {
+    label: "Spark Classic",
+    swatches: ["#191914", "#25241f", "#f0c419", "#f5f2e9"],
+  },
+  "catppuccin-mocha": {
+    label: "Catppuccin Mocha",
+    swatches: ["#1e1e2e", "#313244", "#89b4fa", "#cdd6f4"],
+  },
+  "catppuccin-latte": {
+    label: "Catppuccin Latte",
+    swatches: ["#eff1f5", "#dce0e8", "#1e66f5", "#4c4f69"],
+  },
+  "gruvbox-dark": {
+    label: "Gruvbox Dark",
+    swatches: ["#282828", "#3c3836", "#fabd2f", "#ebdbb2"],
+  },
+  "solarized-dark": {
+    label: "Solarized Dark",
+    swatches: ["#002b36", "#073642", "#268bd2", "#eee8d5"],
+  },
+  dracula: {
+    label: "Dracula",
+    swatches: ["#282a36", "#44475a", "#bd93f9", "#f8f8f2"],
+  },
+  "one-dark": {
+    label: "One Dark",
+    swatches: ["#282c34", "#2c313a", "#61afef", "#abb2bf"],
+  },
+  "rose-pine": {
+    label: "Rose Pine",
+    swatches: ["#191724", "#26233a", "#ebbcba", "#e0def4"],
+  },
+  everforest: {
+    label: "Everforest",
+    swatches: ["#2d353b", "#3d484d", "#a7c080", "#d3c6aa"],
+  },
+  "kanagawa-wave": {
+    label: "Kanagawa Wave",
+    swatches: ["#1f1f28", "#2a2a37", "#7e9cd8", "#dcd7ba"],
+  },
+};
+
+const APPEARANCE = APP_THEME_IDS.map((id) => ({
+  id,
+  ...APP_THEME_META[id],
+}));
 
 function GeneralSettings() {
   const { theme, setTheme } = useTheme();
   return (
     <div style={{ display: "grid", gap: 14 }}>
-      <SectionTitle title="Appearance" detail="Light, dark, or follow the OS." />
+      <SectionTitle title="Appearance" detail="Comfortable palettes people actually keep using." />
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+          gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))",
           gap: 8,
         }}
       >
@@ -662,7 +716,7 @@ function GeneralSettings() {
           <ThemeCard
             key={opt.id}
             label={opt.label}
-            glyph={opt.glyph}
+            swatches={opt.swatches}
             active={theme === opt.id}
             onClick={() => setTheme(opt.id)}
           />
@@ -1243,12 +1297,12 @@ function MetaRow({ label, value, mono }: { label: string; value: string; mono?: 
 
 function ThemeCard({
   label,
-  glyph,
+  swatches,
   active,
   onClick,
 }: {
   label: string;
-  glyph: string;
+  swatches: readonly [string, string, string, string];
   active: boolean;
   onClick: () => void;
 }) {
@@ -1256,41 +1310,125 @@ function ThemeCard({
   return (
     <button
       type="button"
+      aria-label={`Use ${label} theme`}
       aria-pressed={active}
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
         appearance: "none",
+        position: "relative",
+        overflow: "hidden",
         border: active
-          ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
+          ? "1px solid color-mix(in oklch, var(--accent) 62%, var(--rule-strong))"
           : hover
-            ? "1px solid var(--rule-soft)"
-            : "1px solid transparent",
+            ? "1px solid color-mix(in oklch, var(--ink) 16%, var(--rule-soft))"
+            : "1px solid var(--rule-soft)",
         background: active
-          ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
+          ? "color-mix(in oklch, var(--accent) 7%, var(--panel))"
           : hover
             ? "color-mix(in oklch, var(--ink) 5%, transparent)"
-            : "color-mix(in oklch, var(--ink) 2%, transparent)",
-        borderRadius: 10,
-        padding: "14px 10px",
+            : "color-mix(in oklch, var(--panel) 70%, transparent)",
+        borderRadius: 8,
+        padding: 8,
         display: "flex",
         flexDirection: "column",
-        alignItems: "center",
-        gap: 6,
+        alignItems: "stretch",
+        gap: 8,
         color: "var(--ink)",
-        cursor: "default",
+        cursor: "pointer",
+        minHeight: 104,
+        minWidth: 0,
+        textAlign: "left",
         boxShadow: active
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent), 0 8px 18px rgba(0, 0, 0, 0.18)"
-          : "none",
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 18%, transparent), var(--shadow-1)"
+          : hover
+            ? "var(--shadow-1)"
+            : "none",
         transition:
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
-      <span aria-hidden style={{ fontSize: 20, color: active ? "var(--accent)" : "var(--ink-dim)" }}>
-        {glyph}
+      {active ? (
+        <span
+          aria-hidden
+          style={{
+            position: "absolute",
+            top: 9,
+            right: 9,
+            width: 7,
+            height: 7,
+            borderRadius: 2,
+            background: "var(--accent)",
+            boxShadow: "0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent)",
+          }}
+        />
+      ) : null}
+      <span
+        aria-hidden
+        style={{
+          display: "grid",
+          gridTemplateRows: "12px 1fr",
+          gap: 6,
+          height: 58,
+          borderRadius: 6,
+          border: `1px solid color-mix(in srgb, ${swatches[1]} 72%, ${swatches[3]} 28%)`,
+          background: swatches[0],
+          padding: 7,
+        }}
+      >
+        <span
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 18px 10px",
+            gap: 5,
+          }}
+        >
+          <span style={{ borderRadius: 3, background: swatches[1] }} />
+          <span style={{ borderRadius: 3, background: swatches[2] }} />
+          <span style={{ borderRadius: 3, background: swatches[3], opacity: 0.72 }} />
+        </span>
+        <span
+          style={{
+            display: "grid",
+            gridTemplateColumns: "18px 1fr",
+            gap: 6,
+            minHeight: 0,
+          }}
+        >
+          <span style={{ borderRadius: 4, background: swatches[2] }} />
+          <span style={{ display: "grid", alignContent: "center", gap: 5 }}>
+            <span
+              style={{
+                width: "84%",
+                height: 7,
+                borderRadius: 3,
+                background: swatches[3],
+                opacity: 0.86,
+              }}
+            />
+            <span
+              style={{
+                width: "58%",
+                height: 7,
+                borderRadius: 3,
+                background: swatches[3],
+                opacity: 0.42,
+              }}
+            />
+          </span>
+        </span>
       </span>
-      <span style={{ fontFamily: "var(--font-sans)", fontSize: 12, fontWeight: 600 }}>
+      <span
+        style={{
+          color: active ? "var(--ink)" : "var(--ink-dim)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12,
+          fontWeight: 600,
+          lineHeight: 1.25,
+          overflowWrap: "anywhere",
+        }}
+      >
         {label}
       </span>
     </button>

@@ -265,6 +265,13 @@ export default function FileTree({
       const changed = new Set(event.dirs.map(normalizePath));
       const matches: (DirNode & { kind: "dir" })[] = [];
       collectMatchingDirs(rootRef.current, changed, matches);
+      if (matches.length === 0) {
+        const normalizedRoot = normalizePath(cwd);
+        const relevant = Array.from(changed).some(
+          (dir) => dir === normalizedRoot || dir.startsWith(`${normalizedRoot}/`),
+        );
+        if (relevant) matches.push(rootRef.current);
+      }
       if (matches.length === 0) return;
       void Promise.all(matches.map((d) => reloadDirInPlace(d))).then(() => {
         if (!cancelled) force((n) => n + 1);
@@ -456,6 +463,9 @@ export default function FileTree({
     setRenamingPath(null);
     setPendingCreate({ parentPath: cwd, kind: "dir" });
   }, [cwd]);
+  const refreshWorkspace = useCallback(async () => {
+    await refreshDir(cwd);
+  }, [cwd, refreshDir]);
 
   // Handle F2 (rename) when an entry is "active"
   useEffect(() => {
@@ -528,6 +538,19 @@ export default function FileTree({
             </HeaderIconButton>
             <HeaderIconButton title="New folder" onClick={() => void newFolderAtRoot()}>
               <NewFolderIcon />
+            </HeaderIconButton>
+            <HeaderIconButton
+              title="Refresh Explorer"
+              onClick={async () => {
+                try {
+                  await refreshWorkspace();
+                  setError(null);
+                } catch (err) {
+                  setError((err as Error).message);
+                }
+              }}
+            >
+              <RefreshIcon />
             </HeaderIconButton>
             <HeaderIconButton
               title="Reveal in File Explorer"
@@ -1157,6 +1180,29 @@ function RevealIcon() {
         strokeLinejoin="round"
         fill="none"
       />
+    </svg>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+      <path
+        d="M11.5 5.25 A4.25 4.25 0 0 0 3.55 3.2 L2.25 4.5"
+        stroke="currentColor"
+        strokeWidth="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M2.5 8.75 A4.25 4.25 0 0 0 10.45 10.8 L11.75 9.5"
+        stroke="currentColor"
+        strokeWidth="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M2.25 2.25 V4.5 H4.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+      <path d="M11.75 11.75 V9.5 H9.5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
     </svg>
   );
 }

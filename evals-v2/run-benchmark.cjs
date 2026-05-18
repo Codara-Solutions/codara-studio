@@ -10,12 +10,13 @@ const TASKS_DIR = path.join(ROOT, "tasks");
 const RESULTS_DIR = path.join(ROOT, "results");
 
 function parseArgs(argv) {
-  const out = { repetitions: 3, adapter: null, variants: VARIANTS, resultsDir: RESULTS_DIR };
+  const out = { repetitions: 3, adapter: null, variants: VARIANTS, tasks: null, resultsDir: RESULTS_DIR };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--repetitions") out.repetitions = Number(argv[++i] || 3);
     else if (arg === "--adapter") out.adapter = argv[++i] || null;
     else if (arg === "--variants") out.variants = (argv[++i] || "").split(",").filter(Boolean);
+    else if (arg === "--tasks") out.tasks = (argv[++i] || "").split(",").filter(Boolean);
     else if (arg === "--results-dir") out.resultsDir = path.resolve(argv[++i] || RESULTS_DIR);
     else if (!arg.startsWith("-")) out.resultsDir = path.resolve(arg);
   }
@@ -42,7 +43,15 @@ function loadAdapter(variantId, forcedAdapter) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   fs.mkdirSync(args.resultsDir, { recursive: true });
-  const tasks = loadTasks();
+  const allTasks = loadTasks();
+  const tasks = args.tasks
+    ? allTasks.filter((task) => args.tasks.includes(task.id))
+    : allTasks;
+  if (args.tasks && tasks.length !== args.tasks.length) {
+    const found = new Set(tasks.map((task) => task.id));
+    const missing = args.tasks.filter((id) => !found.has(id));
+    throw new Error(`unknown task id(s): ${missing.join(", ")}`);
+  }
   const written = [];
   for (const task of tasks) {
     for (const variantId of args.variants) {

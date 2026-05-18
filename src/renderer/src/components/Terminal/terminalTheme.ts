@@ -7,14 +7,14 @@ import { readAppTokens } from "../../lib/theme-tokens";
 //   - chrome (background/foreground/cursor/selection) is read from Spark's
 //     CSS-variable design tokens via theme-tokens.ts. This guarantees the
 //     terminal visually fuses with the surrounding panel chrome and tracks
-//     light/dark mode flips and accent color changes.
+//     named theme changes and accent color changes.
 //
-//   - the 16 ANSI slots are a curated palette tuned for a dark surface. The
+//   - the 16 ANSI slots switch between dark and light terminal palettes. The
 //     design tokens are intentionally grayscale, so we keep the semantic
-//     palette here. (The exact values are ported verbatim from terax to
-//     preserve visual continuity for users coming over.)
+//     colors here and choose the variant that has readable contrast against
+//     the active workbench theme.
 
-const ansi = {
+const darkAnsi = {
   black: "#18181b",
   red: "#ef4444",
   green: "#22c55e",
@@ -34,8 +34,29 @@ const ansi = {
   brightWhite: "#fafafa",
 } as const;
 
+const lightAnsi = {
+  black: "#24292f",
+  red: "#cf222e",
+  green: "#1a7f37",
+  yellow: "#9a6700",
+  blue: "#0969da",
+  magenta: "#8250df",
+  cyan: "#1b7c83",
+  white: "#6e7781",
+
+  brightBlack: "#57606a",
+  brightRed: "#a40e26",
+  brightGreen: "#116329",
+  brightYellow: "#7d4e00",
+  brightBlue: "#0550ae",
+  brightMagenta: "#6639ba",
+  brightCyan: "#0f6b73",
+  brightWhite: "#24292f",
+} as const;
+
 export function buildTerminalTheme(): ITheme {
   const t = readAppTokens();
+  const ansi = document.documentElement.dataset.themeMode === "light" ? lightAnsi : darkAnsi;
   return {
     background: t.background,
     foreground: t.foreground,

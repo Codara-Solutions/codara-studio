@@ -1,6 +1,16 @@
 {
   "variantId": "spark_hybrid_parallel",
   "label": "Spark hybrid parallel, Claude + Codex",
+  "agent": "spark",
+  "manager": {
+    "model": "x-ai/grok-4.3",
+    "effort": "max",
+    "profilePath": "resources/orchestration/manager-profile.json"
+  },
+  "pool": [
+    { "runtime": "claude_code", "model": "claude-opus-4-7", "effort": "max" },
+    { "runtime": "codex", "model": "gpt-5.5", "effort": "xhigh" }
+  ],
   "workerPolicy": {
     "manager": "spark",
     "maxParallelWorkers": 4,
@@ -9,4 +19,3 @@
     "requireNonOverlappingScopes": true
   }
 }
-

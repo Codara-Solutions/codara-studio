@@ -1,10 +1,12 @@
 {
   "variantId": "codex_single",
   "label": "Pure Codex, one agent",
+  "agent": "codex",
+  "model": "gpt-5.5",
+  "effort": "xhigh",
   "workerPolicy": {
     "manager": "none",
     "workers": [{ "runtime": "codex", "maxParallel": 1 }],
     "verification": "self"
   }
 }
-

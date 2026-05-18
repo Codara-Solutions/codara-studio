@@ -9,8 +9,21 @@ function readResults(dir) {
   return fs
     .readdirSync(dir)
     .filter((name) => name.endsWith(".json"))
+    .filter((name) => !["scorecard.json", "judge.json"].includes(name))
     .map((name) => path.join(dir, name))
-    .map((file) => JSON.parse(fs.readFileSync(file, "utf8")));
+    .map((file) => {
+      const text = fs.readFileSync(file, "utf8").trim();
+      if (!text) return null;
+      try {
+        const parsed = JSON.parse(text);
+        return parsed?.schemaVersion && parsed?.task?.id && parsed?.variant?.id && parsed?.run?.id
+          ? parsed
+          : null;
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
 }
 
 function median(values) {
@@ -42,6 +55,10 @@ function buildScorecard(results) {
     hiddenGateRatio: round(mean(list.map((r) => r.quality.hiddenGateRatio))),
     qualityScore: round(mean(list.map((r) => r.quality.score))),
     parallelEfficiency: round(mean(list.map((r) => r.telemetry.parallelEfficiency))),
+    medianMaxConcurrentWorkers: round(median(list.map((r) => r.telemetry.maxConcurrentWorkers))),
+    meanParallelLaunchGroups: round(mean(list.map((r) => r.telemetry.parallelLaunchGroups))),
+    meanPeerMessages: round(mean(list.map((r) => r.telemetry.peerMessageCount))),
+    meanPeerAgents: round(mean(list.map((r) => r.telemetry.peerAgentCount))),
     medianTimeToFirstWorker: round(
       median(list.map((r) => r.telemetry.timeToFirstWorkerSeconds).filter((v) => v !== null)),
     ),
@@ -59,4 +76,3 @@ if (require.main === module) {
 }
 
 module.exports = { buildScorecard, readResults };
-

@@ -42,6 +42,7 @@ import {
   estimateTokensFromText,
 } from "@shared/context-window";
 import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
+import { writeFileAtomic } from "../fs-atomic";
 import { loadSettings } from "../storage";
 import {
   buildOpenRouterManagerRequest,
@@ -1161,6 +1162,520 @@ function promoteTaskForTrivial(task: SparkManagerTaskDecision): SparkManagerTask
   };
 }
 
+function textLooksLikeCalculator(text: string): boolean {
+  return /\b(calculator|calc\b|arithmetic|keypad|numeric\s+(?:tool|input|ui)|four\s+basic\s+operators)\b/i.test(text);
+}
+
+function textLooksLikeCalculatorStateWork(text: string): boolean {
+  if (!textLooksLikeCalculator(text)) return false;
+  return /\b(keyboard|focus|enter|escape|key(?:down|up)?|handler|event|logic|javascript|js|state|operator|decimal|equals|backspace|clear|divide|division|repeated|input|click|button|interactive|aria|accessible|self-contained|html)\b/i.test(text);
+}
+
+function managerStepText(step: SparkManagerStepDecision): string {
+  return [
+    step.title,
+    step.goal,
+    ...(step.acceptanceCriteria ?? []),
+    ...(step.plannedAgents ?? []).map((agent) => agent.summary),
+  ].join(" ");
+}
+
+function managerTaskText(task: SparkManagerTaskDecision): string {
+  return [
+    task.title,
+    task.description,
+    ...(task.expectedOutputs ?? []),
+    ...(task.verificationCommands ?? []),
+  ].join(" ");
+}
+
+function shouldCodexOwnCalculatorAgent(step: SparkManagerStepDecision, agent: PlannedStepAgent): boolean {
+  if (agent.runtimePreference === "codex") return false;
+  if (agent.taskClass === "verifier") return false;
+  const combined = [managerStepText(step), agent.summary].join(" ");
+  return textLooksLikeCalculatorStateWork(combined);
+}
+
+function shouldCodexOwnCalculatorTask(task: SparkManagerTaskDecision): boolean {
+  if (task.runtimePreference === "codex") return false;
+  const text = managerTaskText(task);
+  if (!textLooksLikeCalculatorStateWork(text)) return false;
+  if (task.taskClass === "verifier") return true;
+  return true;
+}
+
+async function maybeRouteCalculatorStateWorkToCodex(
+  run: RunState,
+  decision: SparkManagerDecision,
+  mode: SparkCall["mode"],
+): Promise<{ decision: SparkManagerDecision; routedAgents: number; routedTasks: number }> {
+  const hasCandidate =
+    decision.steps.some((step) =>
+      step.plannedAgents.some((agent) => shouldCodexOwnCalculatorAgent(step, agent)),
+    ) ||
+    decision.tasks.some(shouldCodexOwnCalculatorTask);
+  if (!hasCandidate) return { decision, routedAgents: 0, routedTasks: 0 };
+
+  const runtimes = await detectAgentRuntimes().catch(() => []);
+  const codexInstalled = runtimes.some((runtime) => runtime.kind === "codex" && runtime.installed);
+  if (!codexInstalled) return { decision, routedAgents: 0, routedTasks: 0 };
+
+  let routedAgents = 0;
+  let routedTasks = 0;
+  const steps = decision.steps.map((step) => {
+    const plannedAgents = step.plannedAgents.map((agent) => {
+      if (!shouldCodexOwnCalculatorAgent(step, agent)) return agent;
+      routedAgents += 1;
+      return {
+        ...agent,
+        runtimePreference: "codex" as WorkerRuntime,
+        modelHint: "gpt-5.5",
+        effortHint: "high" as WorkerTask["effortHint"],
+      };
+    });
+    return plannedAgents === step.plannedAgents ? step : { ...step, plannedAgents };
+  });
+
+  const tasks = decision.tasks.map((task) => {
+    if (!shouldCodexOwnCalculatorTask(task)) return task;
+    routedTasks += 1;
+    const effortHint: WorkerTask["effortHint"] = task.taskClass === "verifier" ? "medium" : "high";
+    return {
+      ...task,
+      runtimePreference: "codex" as WorkerRuntime,
+      modelHint: "gpt-5.5",
+      effortHint,
+    };
+  });
+
+  if (routedAgents === 0 && routedTasks === 0) {
+    return { decision, routedAgents, routedTasks };
+  }
+
+  await appendEvent({
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    type: "spark_manager.calculator_state_work_routed_to_codex",
+    message: `Routed calculator keyboard/state work to Codex (${routedAgents} planned agent(s), ${routedTasks} task(s))`,
+    payload: {
+      mode,
+      routedAgents,
+      routedTasks,
+    },
+  });
+
+  return {
+    decision: {
+      ...decision,
+      steps,
+      tasks,
+    },
+    routedAgents,
+    routedTasks,
+  };
+}
+
+async function maybeEnforceExplicitParallelStagingPlan(
+  run: RunState,
+  decision: SparkManagerDecision,
+  mode: SparkCall["mode"],
+): Promise<{ decision: SparkManagerDecision; reason: string; stagedFiles: string[] } | null> {
+  if (mode !== "plan_analysis") return null;
+  if (decision.status !== "run_workers") return null;
+  if (decision.steps.length === 0) return null;
+
+  const intent = planIntentTextForRun(run);
+  if (!hasExplicitParallelAgentIntent(intent) || !hasUiLogicSplitIntent(intent)) return null;
+
+  const finalFile = inferFinalHtmlFile(intent);
+  const runtimes = await chooseUiLogicRuntimes();
+  const parts = explicitParallelPartPaths(run, finalFile);
+  const hasParallelPartsStep = decision.steps.some((step) => isExplicitParallelPartsStep(step));
+  const hasIntegratorStep = decision.steps.some((step) => isExplicitIntegratorStep(step, finalFile));
+  const shouldUseHybridRuntimes = shouldEnforceHybridParallelRuntimes(intent, decision, runtimes);
+  const decisionText = decision.steps
+    .map((step) =>
+      [
+        step.title,
+        step.goal,
+        ...step.acceptanceCriteria,
+        ...step.plannedAgents.map((agent) => agent.summary),
+      ].join(" "),
+    )
+    .join("\n");
+  const usesWorkspaceSparkParts = /\.spark-parts\b/i.test(decisionText);
+  if (hasParallelPartsStep && hasIntegratorStep && !usesWorkspaceSparkParts && !shouldUseHybridRuntimes) {
+    return null;
+  }
+
+  const integratorStep = makeExplicitIntegratorStep({
+    finalFile,
+    uiFile: parts.uiFile,
+    logicFile: parts.logicFile,
+    runtime: runtimes.integrator,
+    stepLabel: hasParallelPartsStep ? decision.steps.length + 1 : 2,
+    oneFileRequired: explicitOneFileRequired(intent),
+  });
+
+  return {
+    reason:
+      usesWorkspaceSparkParts
+        ? "The human does not want a .spark-parts workspace folder; moving staged parallel artifacts into the Spark run artifact directory."
+        : shouldUseHybridRuntimes
+          ? "The explicit parallel UI/logic split should use the available Claude+Codex hybrid instead of one runtime for every worker."
+        : hasParallelPartsStep
+        ? "The human explicitly requested a final combine step; the manager planned the parallel workers but omitted the integrator."
+        : "The human explicitly requested simultaneous/different agents for UI/structure and logic, followed by a combine step.",
+    stagedFiles: [parts.uiFile, parts.logicFile, finalFile],
+    decision: {
+      ...decision,
+      summary: usesWorkspaceSparkParts
+        ? "Explicit multi-agent plan repaired: staging moves to the Spark run artifact directory, followed by a single integration worker."
+        : shouldUseHybridRuntimes
+          ? "Explicit multi-agent plan repaired: parallel UI/logic staging uses the available Claude+Codex hybrid, followed by a single integration worker."
+        : hasParallelPartsStep
+          ? "Explicit multi-agent plan repaired: parallel staging workers are followed by a single integration worker."
+          : "Explicit multi-agent plan enforced: parallel UI/structure and logic staging workers, followed by a single integration worker.",
+      steps: hasParallelPartsStep && !usesWorkspaceSparkParts && !shouldUseHybridRuntimes
+        ? [...decision.steps, integratorStep]
+        : [
+            makeExplicitParallelPartsStep({
+              finalFile,
+              uiFile: parts.uiFile,
+              logicFile: parts.logicFile,
+              runtimes,
+            }),
+            integratorStep,
+          ],
+      taskComplexity: decision.taskComplexity ?? "standard",
+    },
+  };
+}
+
+async function maybeAppendMissingExplicitParallelIntegratorStep(run: RunState): Promise<RunState | null> {
+  const intent = planIntentTextForRun(run);
+  if (!hasExplicitParallelAgentIntent(intent) || !hasUiLogicSplitIntent(intent)) return null;
+  if (!run.steps.some((step) => isExplicitParallelPartsStep(step))) return null;
+  const finalFile = inferFinalHtmlFile(intent);
+  if (run.steps.some((step) => isExplicitIntegratorStep(step, finalFile))) return null;
+  const parts = explicitParallelPartPaths(run, finalFile);
+  const runtimes = await chooseUiLogicRuntimes();
+  const integratorStep = makeExplicitIntegratorStep({
+    finalFile,
+    uiFile: parts.uiFile,
+    logicFile: parts.logicFile,
+    runtime: runtimes.integrator,
+    stepLabel: run.steps.length + 1,
+    oneFileRequired: explicitOneFileRequired(intent),
+  });
+  const updated = await createStep({
+    runId: run.id,
+    title: integratorStep.title,
+    goal: integratorStep.goal,
+    kind: integratorStep.kind,
+    plannedAgents: integratorStep.plannedAgents,
+    riskLevel: integratorStep.riskLevel,
+    acceptanceCriteria: integratorStep.acceptanceCriteria,
+  });
+  await appendEvent({
+    workspaceId: updated.workspaceId,
+    runId: updated.id,
+    type: "spark_manager.missing_explicit_integrator_appended",
+    message: "Added missing final integration step before accepting explicit multi-agent run",
+    payload: {
+      finalFile,
+      stagedFiles: [parts.uiFile, parts.logicFile],
+    },
+  });
+  return updated;
+}
+
+function explicitParallelPartPaths(run: RunState, finalFile: string): { uiFile: string; logicFile: string } {
+  const stem = finalFile.replace(/\.html$/i, "") || "app";
+  const stagingDir = join(run.artifactDir, "staging");
+  return {
+    uiFile: join(stagingDir, `${stem}-ui.html`),
+    logicFile: join(stagingDir, `${stem}-logic.js`),
+  };
+}
+
+function explicitOneFileRequired(text: string): boolean {
+  return /\b(one|single)\s+file\b/i.test(text) || /only\s+one\s+html/i.test(text);
+}
+
+function makeExplicitParallelPartsStep(input: {
+  finalFile: string;
+  uiFile: string;
+  logicFile: string;
+  runtimes: { ui: WorkerRuntime; logic: WorkerRuntime; integrator: WorkerRuntime };
+}): SparkManagerStepDecision {
+  const uiAgent = makeExplicitParallelAgent(
+    "worker 1.1",
+    `Create the retro HTML/CSS structure in ${input.uiFile}; own only the staged UI artifact and define clear DOM hooks for the logic worker.`,
+    input.runtimes.ui,
+  );
+  const logicAgent = makeExplicitParallelAgent(
+    "worker 1.2",
+    `Create the calculator JavaScript logic in ${input.logicFile}; own only the staged logic artifact and target the UI worker's DOM hooks.`,
+    input.runtimes.logic,
+  );
+  return {
+    kind: "worker_batch",
+    title: "Build calculator parts in parallel",
+    goal:
+      `Honor the explicit simultaneous-agent request without write collisions. ` +
+      `The UI worker owns ${input.uiFile}; the logic worker owns ${input.logicFile}; neither edits ${input.finalFile} in this step.`,
+    plannedAgents: [uiAgent, logicAgent],
+    acceptanceCriteria: [
+      `${input.uiFile} contains the retro calculator HTML/CSS structure with display, controls, semantic landmarks, responsive polish, and stable DOM hooks.`,
+      `${input.logicFile} contains calculator behavior for digits, decimal input, clear, operators, equals, error handling, and keyboard or click-friendly event wiring without eval/new Function.`,
+      "The two staged artifacts agree on the DOM hook contract and do not overwrite each other's files.",
+    ],
+    riskLevel: "low",
+  };
+}
+
+function makeExplicitIntegratorStep(input: {
+  finalFile: string;
+  uiFile: string;
+  logicFile: string;
+  runtime: WorkerRuntime;
+  stepLabel: number;
+  oneFileRequired: boolean;
+}): SparkManagerStepDecision {
+  const integrator = makeExplicitParallelAgent(
+    `worker ${input.stepLabel}.1`,
+    `Combine ${input.uiFile} and ${input.logicFile} into the final ${input.finalFile}, verify behavior, and remove staging artifacts.`,
+    input.runtime,
+  );
+  const cleanupCriterion = input.oneFileRequired
+    ? `Final workspace contains ${input.finalFile} plus the plan file only; do not leave staging folders or temporary artifacts in the workspace.`
+    : `Do not leave staging folders or temporary artifacts in the workspace after ${input.finalFile} is integrated.`;
+  return {
+    kind: "worker_batch",
+    title: "Combine staged calculator",
+    goal:
+      `Integrate the staged UI and logic into ${input.finalFile}, inline everything needed to run locally, ` +
+      "verify the calculator, and clean up staging artifacts.",
+    plannedAgents: [integrator],
+    acceptanceCriteria: [
+      `${input.finalFile} is a polished retro calculator with HTML, CSS, and JavaScript integrated.`,
+      "Calculator supports basic arithmetic, clear/reset, equals, decimal input, divide-by-zero handling, and usable click/keyboard interaction.",
+      cleanupCriterion,
+    ],
+    riskLevel: "low",
+  };
+}
+
+function isExplicitParallelPartsStep(step: Pick<StepState, "title" | "goal" | "acceptanceCriteria" | "plannedAgents">): boolean {
+  const text = [
+    step.title,
+    step.goal,
+    ...(step.acceptanceCriteria ?? []),
+    ...(step.plannedAgents ?? []).map((agent) => agent.summary),
+  ].join(" ");
+  return (step.plannedAgents?.length ?? 0) >= 2 && hasStagingArtifactReference(text) && hasUiLogicSplitIntent(text);
+}
+
+function isExplicitIntegratorStep(
+  step: Pick<StepState, "title" | "goal" | "acceptanceCriteria" | "plannedAgents">,
+  finalFile: string,
+): boolean {
+  const text = [
+    step.title,
+    step.goal,
+    ...(step.acceptanceCriteria ?? []),
+    ...(step.plannedAgents ?? []).map((agent) => agent.summary),
+  ].join(" ");
+  return (
+    /\b(combine|integrate|merge|assemble)\b/i.test(text) &&
+    (text.includes(finalFile) || hasStagingArtifactReference(text))
+  );
+}
+
+function shouldEnforceHybridParallelRuntimes(
+  intent: string,
+  decision: SparkManagerDecision,
+  runtimes: { ui: WorkerRuntime; logic: WorkerRuntime; integrator: WorkerRuntime },
+): boolean {
+  if (runtimes.ui === runtimes.logic) return false;
+  if (!/\b(different agents?|claude|codex|hybrid)\b/i.test(intent)) return false;
+  const parallelStep = decision.steps.find((step) => {
+    const text = [
+      step.title,
+      step.goal,
+      ...step.acceptanceCriteria,
+      ...step.plannedAgents.map((agent) => agent.summary),
+    ].join(" ");
+    return (step.plannedAgents?.length ?? 0) >= 2 && hasUiLogicSplitIntent(text);
+  });
+  if (!parallelStep) return false;
+  const assigned = new Set(parallelStep.plannedAgents.map((agent) => agent.runtimePreference));
+  return !(assigned.has(runtimes.ui) && assigned.has(runtimes.logic));
+}
+
+function hasStagingArtifactReference(text: string): boolean {
+  return /\.spark-parts\b|[\\/]staging[\\/]|run artifact|artifact directory/i.test(text);
+}
+
+function planIntentTextForRun(run: RunState): string {
+  const plan = run.planId
+    ? run.plans.find((item) => item.id === run.planId)
+    : run.plans.at(-1);
+  const notes = run.humanMessages
+    .filter((message) => message.author === "user" && (message.kind === "note" || message.kind === "answer"))
+    .map((message) => message.message);
+  return [plan?.rawContent ?? "", ...notes].join("\n");
+}
+
+function hasExplicitParallelAgentIntent(text: string): boolean {
+  const lower = text.toLowerCase();
+  const asksForAgents =
+    /\bspawn\b[\s\S]{0,80}\b(agent|worker|codex|claude)s?\b/.test(lower) ||
+    /\b(agent|worker|codex|claude)s?\b[\s\S]{0,80}\b(simultaneous|parallel|at the same time)\b/.test(lower) ||
+    /\bdifferent agent\b/.test(lower);
+  const asksForParallel = /\b(simultaneous|parallel|at the same time)\b/.test(lower);
+  const asksForCombine = /\b(combine|integrate|merge|assemble)\b/.test(lower);
+  return asksForAgents && (asksForParallel || asksForCombine);
+}
+
+function hasUiLogicSplitIntent(text: string): boolean {
+  const lower = text.toLowerCase();
+  const ui = /\b(html|css|ui|structure|layout|visual|design)\b/.test(lower);
+  const logic = /\b(javascript|js|logic|functionality|behavior|behaviour)\b/.test(lower);
+  return ui && logic;
+}
+
+function inferFinalHtmlFile(text: string): string {
+  const explicit = text.match(/(?:^|[\s`'"])([A-Za-z0-9._-]+\.html)(?=$|[\s`'",.)])/i)?.[1];
+  if (explicit && explicit.toLowerCase() !== "plan.html") return explicit;
+  if (/\bcalculator\b/i.test(text)) return "calculator.html";
+  return "index.html";
+}
+
+async function chooseUiLogicRuntimes(): Promise<{
+  ui: WorkerRuntime;
+  logic: WorkerRuntime;
+  integrator: WorkerRuntime;
+}> {
+  const diagnostics = await detectAgentRuntimes().catch(() => []);
+  const installed = new Set(
+    diagnostics
+      .filter((runtime) => runtime.installed)
+      .map((runtime) => runtime.kind),
+  );
+  const hasClaude = installed.has("claude");
+  const hasCodex = installed.has("codex");
+  const ui: WorkerRuntime = hasClaude ? "claude" : hasCodex ? "codex" : "manual";
+  const logic: WorkerRuntime = hasCodex ? "codex" : ui;
+  const integrator: WorkerRuntime = hasClaude ? "claude" : logic;
+  return { ui, logic, integrator };
+}
+
+function makeExplicitParallelAgent(
+  label: string,
+  summary: string,
+  runtimePreference: WorkerRuntime,
+): PlannedStepAgent {
+  const floor = TRIVIAL_TOP_TIER_BY_RUNTIME[runtimePreference];
+  return {
+    label,
+    summary,
+    runtimePreference,
+    modelHint: floor?.modelHint,
+    effortHint: floor?.effortHint,
+    taskClass: "feature",
+  };
+}
+
+function strengthenParallelTaskScopes(
+  run: RunState,
+  decision: SparkManagerDecision,
+  stepIds: string[],
+): { decision: SparkManagerDecision; repairedCount: number } {
+  if (decision.tasks.length < 2) return { decision, repairedCount: 0 };
+  let repairedCount = 0;
+  const tasks = decision.tasks.map((task) => ({
+    ...task,
+    allowedPaths: [...task.allowedPaths],
+    forbiddenPaths: [...task.forbiddenPaths],
+    expectedOutputs: [...task.expectedOutputs],
+    verificationCommands: [...task.verificationCommands],
+    conflictsWith: [...task.conflictsWith],
+  }));
+
+  const tasksByStep = new Map<string, SparkManagerTaskDecision[]>();
+  for (const task of tasks) {
+    const stepId = resolveTaskStepId(run, task.stepIndex, stepIds);
+    if (!stepId) continue;
+    const step = run.steps.find((item) => item.id === stepId);
+    if ((step?.plannedAgents?.length ?? 0) <= 1) continue;
+    const list = tasksByStep.get(stepId) ?? [];
+    list.push(task);
+    tasksByStep.set(stepId, list);
+  }
+
+  for (const group of tasksByStep.values()) {
+    for (const task of group) {
+      if (task.taskClass === "verifier") continue;
+      if (task.allowedPaths.length > 0) continue;
+      const inferred = inferStagingAllowedPaths(task);
+      if (inferred.length === 0) continue;
+      task.allowedPaths = inferred;
+      repairedCount += 1;
+    }
+
+    const implementationTasks = group.filter((task) => task.taskClass !== "verifier");
+    if (implementationTasks.length <= 1) continue;
+    const allHaveConcreteScopes = implementationTasks.every(
+      (task) => concreteDecisionAllowedPaths(task).length > 0,
+    );
+    const scopesOverlap = implementationTasks.some((task, index) =>
+      implementationTasks.slice(index + 1).some((other) =>
+        decisionTaskScopesOverlap(task, other),
+      ),
+    );
+    if (!allHaveConcreteScopes || scopesOverlap) continue;
+    for (const task of implementationTasks) {
+      if (!task.canRunParallel) {
+        task.canRunParallel = true;
+        repairedCount += 1;
+      }
+    }
+  }
+
+  return repairedCount > 0 ? { decision: { ...decision, tasks }, repairedCount } : { decision, repairedCount };
+}
+
+function inferStagingAllowedPaths(task: SparkManagerTaskDecision): string[] {
+  const text = [task.title, task.description, ...task.expectedOutputs].join("\n");
+  const paths = new Set<string>();
+  for (const match of text.matchAll(/(?:^|[\s`'"])(\.spark-parts\/[A-Za-z0-9._/-]+\.[A-Za-z0-9]+)(?=$|[\s`'",.)])/gi)) {
+    const normalized = normalizeTaskPath(match[1]);
+    if (normalized && !isBroadPathScope(normalized)) paths.add(normalized);
+  }
+  for (const match of text.matchAll(/([A-Za-z]:[\\/][^\n`'"]*?[\\/]staging[\\/][^\s`'",)]+?\.[A-Za-z0-9]+)/gi)) {
+    const normalized = normalizeTaskPath(match[1]);
+    if (normalized && !isBroadPathScope(normalized)) paths.add(normalized);
+  }
+  return Array.from(paths);
+}
+
+function concreteDecisionAllowedPaths(task: SparkManagerTaskDecision): string[] {
+  return task.allowedPaths
+    .map(normalizeTaskPath)
+    .filter((path) => path.length > 0 && !isBroadPathScope(path));
+}
+
+function decisionTaskScopesOverlap(left: SparkManagerTaskDecision, right: SparkManagerTaskDecision): boolean {
+  const leftPaths = concreteDecisionAllowedPaths(left);
+  const rightPaths = concreteDecisionAllowedPaths(right);
+  if (leftPaths.length === 0 || rightPaths.length === 0) return true;
+  return leftPaths.some((leftPath) =>
+    rightPaths.some((rightPath) => pathScopesOverlap(leftPath, rightPath)),
+  );
+}
+
 // Trivial fast-path: synthesize the worker task locally instead of round-tripping
 // through manager call 2 (step_planning). The manager has zero filesystem access,
 // so its task description guesses file paths — verified on bjgp3uso7, where the
@@ -1204,8 +1719,8 @@ async function tryTrivialFastPathStepPlanning(run: RunState): Promise<RunState |
     "",
     "WORKING METHOD",
     "Spark Agent (the orchestrator that dispatched you) has no filesystem access and knows nothing concrete about this codebase. It's just relaying intent. You have full access — explore the repo yourself.",
-    "Use Glob/Grep/Read to find the actual files involved. Do not assume any file paths from this brief.",
-    "Identify the real bugs from the codebase, not from the brief. Fix them. Keep changes scoped.",
+    "First inspect the workspace. If files already exist, discover the real files involved with Glob/Grep/Read before editing. If the workspace is blank or only contains the plan, create exactly the artifact(s) required by the goal.",
+    "Do not assume file paths beyond names explicitly stated in the goal/acceptance criteria. Keep the change scoped to this task.",
     "",
     "VERIFICATION",
     "Discover whatever existing tests, lints, or build commands the repo provides for the modules you change, and run them yourself before reporting complete. Capture their literal stdout (truncated to 600 chars) in proof[] — one entry per command — so the orchestrator can confirm without re-running.",
@@ -1382,6 +1897,11 @@ async function tryStandardCleanImplFastPathReview(
   const step = run.steps.find((s) => s.id === impl.stepId);
   if (!step) return null;
   if (["complete", "failed", "skipped"].includes(step.status)) return null;
+  // Product-facing UI work needs an adversarial verifier even when the
+  // implementation supplied green smoke commands. The quality failures we care
+  // about here are often "dead affordance" or "looks unfinished" gaps that a
+  // narrow command cannot see.
+  if (taskLooksLikeVisibleUi(step, impl)) return null;
   // Skip when there are still active sibling tasks on the same step — wait for
   // them to settle before we decide whether the step is clean.
   const siblingActive = run.workerTasks.some(
@@ -1685,6 +2205,9 @@ async function applySparkManagerDecision(
   }
 
   if (decision.status === "complete") {
+    const repaired = await maybeAppendMissingExplicitParallelIntegratorStep(run);
+    if (repaired) return repaired;
+
     // Refuse premature completion: the manager occasionally returns "complete"
     // after a single worker review even when the planned step division still
     // has queued/in-progress steps, or when verifier follow-ups are queued but
@@ -1855,6 +2378,24 @@ async function applySparkManagerDecision(
       },
     });
   }
+
+  const explicitParallelPlan = await maybeEnforceExplicitParallelStagingPlan(run, decision, mode);
+  if (explicitParallelPlan) {
+    decision = explicitParallelPlan.decision;
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      type: "spark_manager.explicit_parallel_staging_enforced",
+      message: "Normalized explicit parallel staging plan",
+      payload: {
+        reason: explicitParallelPlan.reason,
+        stagedFiles: explicitParallelPlan.stagedFiles,
+      },
+    });
+  }
+
+  const calculatorRouting = await maybeRouteCalculatorStateWorkToCodex(run, decision, mode);
+  decision = calculatorRouting.decision;
 
   // The manager returned run_workers (or equivalent forward progress); the
   // run is moving again, so clear any prior consecutive-completion-refusal
@@ -2112,6 +2653,21 @@ async function applySparkManagerDecision(
     }
   }
 
+  const parallelScopeRepair = strengthenParallelTaskScopes(latest, decision, stepIds);
+  if (parallelScopeRepair.repairedCount > 0) {
+    decision = parallelScopeRepair.decision;
+    await appendEvent({
+      workspaceId: latest.workspaceId,
+      runId: latest.id,
+      type: "spark_manager.parallel_task_scopes_repaired",
+      message: `Repaired ${parallelScopeRepair.repairedCount} parallel task scope hint(s)`,
+      payload: {
+        repairedCount: parallelScopeRepair.repairedCount,
+        taskTitles: decision.tasks.map((task) => task.title),
+      },
+    });
+  }
+
   // Corrective-rounds guard: count how many tasks each step already has, and
   // refuse to queue more once we exceed MAX_TASKS_PER_STEP. The verifier loop
   // can in principle ping-pong forever. With dual-verifier peer pressure each
@@ -2178,9 +2734,19 @@ async function applySparkManagerDecision(
     latest = await completeAcceptedReviewingSteps(latest, decision.summary);
   }
 
+  let createdTaskCount = 0;
+  let droppedTaskCount = 0;
   for (const task of decision.tasks) {
-    const stepId = resolveTaskStepId(latest, task.stepIndex, stepIds);
+    let stepId = resolveTaskStepId(latest, task.stepIndex, stepIds);
+    if (!stepId && mode === "worker_result_review") {
+      const reopened = await maybeReopenCompletedStepForFollowUpTask(latest, task);
+      if (reopened) {
+        latest = reopened.run;
+        stepId = reopened.stepId;
+      }
+    }
     if (!stepId) {
+      droppedTaskCount += 1;
       await appendEvent({
         workspaceId: latest.workspaceId,
         runId: latest.id,
@@ -2194,7 +2760,10 @@ async function applySparkManagerDecision(
       });
       continue;
     }
-    if (skippedStepIds.has(stepId ?? "")) continue;
+    if (skippedStepIds.has(stepId ?? "")) {
+      droppedTaskCount += 1;
+      continue;
+    }
     latest = await createWorkerTask({
       runId: latest.id,
       stepId,
@@ -2212,6 +2781,7 @@ async function applySparkManagerDecision(
       taskClass: task.taskClass,
       createdBy: "spark",
     });
+    createdTaskCount += 1;
   }
 
   latest = await requireRun(latest.id);
@@ -2224,7 +2794,9 @@ async function applySparkManagerDecision(
       summary: decision.summary,
       status: decision.status,
       stepsCreated: steps.length,
-      tasksCreated: decision.tasks.length,
+      tasksRequested: decision.tasks.length,
+      tasksCreated: createdTaskCount,
+      tasksDropped: droppedTaskCount,
       runtimes: decision.tasks.map((task) => task.runtimePreference),
     },
   });
@@ -2962,6 +3534,7 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
     paths,
     createdAt: timestamp,
   };
+  await ensurePeerCommsArtifacts(run, step, task, attempt.id, paths, "prompt_ready").catch(() => undefined);
   const prompt = renderWorkerPrompt({ cwd: input.cwd, run, step, task, paths });
 
   await fs.mkdir(paths.attemptDir, { recursive: true });
@@ -3118,6 +3691,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
       paths,
     },
   });
+  await updatePeerCommsRegistry(run, launchStep, task, attempt.id, paths, "launching").catch(() => undefined);
 
   const result = await runWorkerSession({
     run,
@@ -3175,6 +3749,8 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
       paths,
     },
   });
+  await updatePeerCommsRegistry(run, finishedStep, finishedTask, finishedAttempt.id, paths, finishedAttempt.status)
+    .catch(() => undefined);
 
   run = await reviewWorkerReportArtifact({
     run,
@@ -3533,10 +4109,11 @@ async function completeAcceptedReviewingSteps(
 }
 
 // Detects the synthetic report written by writeAutoFailureReport when the
-// agent CLI failed to launch, and if we haven't already exhausted runtimes,
-// queues a fresh task on the same step with the opposite runtime. Returns the
-// updated run when a fallback was queued (so the caller can short-circuit the
-// normal review path), or null when no fallback applies.
+// agent CLI failed environmentally (launch failure, auth/API/socket failure),
+// and if we haven't already exhausted runtimes, queues a fresh task on the
+// same step with the opposite runtime. Returns the updated run when a fallback
+// was queued (so the caller can short-circuit the normal review path), or null
+// when no fallback applies.
 async function maybeQueueCliLaunchFallback({
   run,
   task,
@@ -3549,7 +4126,9 @@ async function maybeQueueCliLaunchFallback({
   report: WorkerReport;
 }): Promise<RunState | null> {
   if (report.status !== "failed") return null;
-  const isLaunchFailure = report.risks.some((risk) => /CLI failed to launch/i.test(risk));
+  const isLaunchFailure = report.risks.some((risk) =>
+    /CLI failed (?:to launch|before producing a final report)|runtime API error|socket connection/i.test(risk),
+  );
   if (!isLaunchFailure) return null;
   const opposite: WorkerRuntime | null =
     task.runtimePreference === "claude"
@@ -3571,7 +4150,7 @@ async function maybeQueueCliLaunchFallback({
   const fallbackId = makeId("task");
   return commitRunChange(run, {
     type: "autopilot.cli_launch_fallback",
-    message: `Auto-falling back from ${task.runtimePreference} to ${opposite} after CLI launch failure`,
+    message: `Auto-falling back from ${task.runtimePreference} to ${opposite} after CLI/runtime failure`,
     stepId: task.stepId,
     workerTaskId: fallbackId,
     payload: {
@@ -3595,8 +4174,8 @@ async function maybeQueueCliLaunchFallback({
         title: task.title,
         description: task.description,
         runtimePreference: opposite,
-        modelHint: task.modelHint,
-        effortHint: task.effortHint,
+        modelHint: fallbackModelHintForRuntime(opposite),
+        effortHint: fallbackEffortHintForRuntime(opposite, task.effortHint),
         status: "queued",
         allowedPaths: task.allowedPaths,
         forbiddenPaths: task.forbiddenPaths,
@@ -3711,6 +4290,27 @@ function estimateTextSections(
       tokenEstimate: estimateTokensFromText(text.slice(start, end)),
     };
   });
+}
+
+function fallbackModelHintForRuntime(runtime: WorkerRuntime): string | undefined {
+  if (runtime === "claude") return "claude-opus-4-7";
+  if (runtime === "codex") return "gpt-5.5";
+  return undefined;
+}
+
+function fallbackEffortHintForRuntime(
+  runtime: WorkerRuntime,
+  prior: WorkerTask["effortHint"],
+): WorkerTask["effortHint"] {
+  if (runtime === "codex") {
+    if (prior === "low" || prior === "medium" || prior === "high") return prior;
+    return "xhigh";
+  }
+  if (runtime === "claude") {
+    if (prior === "low" || prior === "medium" || prior === "high" || prior === "max") return prior;
+    return "high";
+  }
+  return prior;
 }
 
 function redactRequestBodyForArtifact(requestBody: OpenRouterManagerRequest): OpenRouterManagerRequest {
@@ -3862,6 +4462,11 @@ function normalizeRun(run: RunState): RunState {
   // consumers don't trip on stale state from the removed feature.
   delete (run as unknown as Record<string, unknown>).planMode;
   delete (run as unknown as Record<string, unknown>).pendingMutations;
+  if (isTerminalRunStatus(run.status)) {
+    run.completedAt ??= run.updatedAt;
+  } else {
+    delete run.completedAt;
+  }
   return run;
 }
 
@@ -3928,6 +4533,11 @@ async function commitRunChange(
       const changed = change.mutate(latest, timestamp);
       result = latest;
       if (changed === false) return;
+      if (isTerminalRunStatus(latest.status)) {
+        latest.completedAt ??= timestamp;
+      } else {
+        delete latest.completedAt;
+      }
       await saveRun(latest);
       await appendEvent({
         timestamp,
@@ -3956,6 +4566,10 @@ function changedFields(input: object, excluded: string[]): string[] {
 
 function isTerminalStepStatus(status: StepState["status"]): boolean {
   return status === "complete" || status === "failed" || status === "skipped";
+}
+
+function isTerminalRunStatus(status: RunState["status"]): boolean {
+  return status === "complete" || status === "failed" || status === "cancelled";
 }
 
 function isImmutableStepStatus(status: StepState["status"]): boolean {
@@ -4052,6 +4666,7 @@ function pickAutopilotTasks(run: RunState): WorkerTask[] {
   });
   if (candidates.length === 0) return [];
 
+  const cap = evalMaxParallelWorkers();
   const first = candidates[0];
   if (!first.canRunParallel) return [first];
   if (!hasConcreteParallelScope(first)) return [first];
@@ -4064,8 +4679,17 @@ function pickAutopilotTasks(run: RunState): WorkerTask[] {
       continue;
     }
     selected.push(task);
+    if (cap && selected.length >= cap) break;
   }
   return selected.length > 0 ? selected : [first];
+}
+
+function evalMaxParallelWorkers(): number | null {
+  const raw = process.env.SPARK_EVAL_MAX_PARALLEL_WORKERS;
+  if (!raw) return null;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
 }
 
 // True when the next active step is a worker_batch with plannedAgents but no
@@ -4125,6 +4749,66 @@ function resolveTaskStepId(
       .filter((step) => !isTerminalStepStatus(step.status))
       .map((step) => step.id);
   return availableStepIds[0];
+}
+
+async function maybeReopenCompletedStepForFollowUpTask(
+  run: RunState,
+  task: SparkManagerTaskDecision,
+): Promise<{ run: RunState; stepId: string } | null> {
+  const step = resolveRequestedStepIncludingTerminal(run, task.stepIndex);
+  if (!step || step.status !== "complete") return null;
+  if (!isCorrectiveFollowUpTask(task)) return null;
+
+  const updated = await commitRunChange(run, {
+    type: "spark_manager.completed_step_reopened_for_followup",
+    message: `Reopened completed step for verifier follow-up: ${step.title}`,
+    stepId: step.id,
+    payload: {
+      stepId: step.id,
+      stepIndex: step.index,
+      taskTitle: task.title,
+      requestedStepIndex: task.stepIndex,
+    },
+    mutate: (draft, timestamp) => {
+      const target = draft.steps.find((item) => item.id === step.id);
+      if (!target) return;
+      target.status = "reviewing";
+      target.updatedAt = timestamp;
+      draft.status = "running";
+      draft.currentStepId = target.id;
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "reopened_completed_step_for_followup",
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+
+  return { run: updated, stepId: step.id };
+}
+
+function resolveRequestedStepIncludingTerminal(
+  run: RunState,
+  requestedStepIndex: number | undefined,
+): StepState | undefined {
+  if (typeof requestedStepIndex !== "number" || !Number.isFinite(requestedStepIndex)) {
+    return undefined;
+  }
+
+  const candidates: StepState[] = [];
+  const oneBasedStep = run.steps.find((step) => step.index === requestedStepIndex);
+  const zeroBasedStep = run.steps[requestedStepIndex];
+  if (oneBasedStep) candidates.push(oneBasedStep);
+  if (zeroBasedStep && zeroBasedStep.id !== oneBasedStep?.id) candidates.push(zeroBasedStep);
+  return candidates.find((step) => step.status === "complete") ?? candidates[0];
+}
+
+function isCorrectiveFollowUpTask(task: SparkManagerTaskDecision): boolean {
+  if (task.taskClass === "verifier") return false;
+  const text = [task.title, task.description, ...task.expectedOutputs].join(" ");
+  return /\b(corrective|follow[- ]?up|fix|repair|retry|merge|integrate|combine|complete|produce|missing|failed|feedback)\b/i.test(text);
 }
 
 function hasActiveStepWorkers(run: RunState, stepId: string, excludingTaskId?: string): boolean {
@@ -4488,11 +5172,15 @@ function workerArtifactPaths(
   attemptId: string,
 ): WorkerArtifactPaths {
   const stepSegment = stepId ?? "no-step";
+  const peerCommsDir = join(runDir(runId), "peer-comms");
   const attemptDir = join(runDir(runId), "steps", stepSegment, "workers", workerTaskId, "attempts", attemptId);
   return {
     workerTaskId,
     attemptId,
     attemptDir,
+    peerCommsDir,
+    peerCommsScript: join(peerCommsDir, "spark-peer-comms.cjs"),
+    peerCommsAgents: join(peerCommsDir, "agents.json"),
     taskJson: join(attemptDir, "task.json"),
     promptMd: join(attemptDir, "prompt.md"),
     workpadMd: join(attemptDir, "workpad.md"),
@@ -4501,6 +5189,331 @@ function workerArtifactPaths(
     rawLog: join(attemptDir, "raw.log"),
     finalReportJson: join(attemptDir, "final-report.json"),
   };
+}
+
+const PEER_COMMS_HELPER_SCRIPT = String.raw`#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const crypto = require("node:crypto");
+
+function parseArgs(tokens) {
+  const out = { _: [] };
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (!token.startsWith("--")) {
+      out._.push(token);
+      continue;
+    }
+    const key = token.slice(2);
+    const next = tokens[i + 1];
+    if (!next || next.startsWith("--")) {
+      out[key] = true;
+      continue;
+    }
+    out[key] = next;
+    i += 1;
+  }
+  return out;
+}
+
+function usage() {
+  return [
+    "Spark peer comms",
+    "",
+    "Commands:",
+    "  list  --dir <peer-comms-dir>",
+    "  inbox --dir <peer-comms-dir> --self <workerTaskId> [--limit 20] [--unread] [--mark-read]",
+    "  send  --dir <peer-comms-dir> --from <workerTaskId> --to <workerTaskId|all> --subject <text> --body <text>",
+    "  send  --dir <peer-comms-dir> --from <workerTaskId> --to <workerTaskId|all> --subject <text> --stdin",
+    "  reply --dir <peer-comms-dir> --from <workerTaskId> --to <workerTaskId> --reply-to <msgId> --subject <text> --stdin",
+    "  await --dir <peer-comms-dir> --self <workerTaskId> [--from <workerTaskId>] [--reply-to <msgId>] [--timeout 120]",
+  ].join("\n");
+}
+
+function required(args, name) {
+  const value = args[name] || process.env["SPARK_" + name.toUpperCase().replace(/-/g, "_")];
+  if (!value || value === true) {
+    throw new Error("missing --" + name);
+  }
+  return String(value);
+}
+
+function resolveDir(args) {
+  const dir = args.dir || process.env.SPARK_PEER_COMMS_DIR || path.dirname(__filename);
+  return path.resolve(String(dir));
+}
+
+function ensureDir(dir) {
+  fs.mkdirSync(path.join(dir, "messages"), { recursive: true });
+}
+
+function readJson(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonAtomic(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + "." + process.pid + "." + Date.now() + "." + crypto.randomBytes(4).toString("hex") + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
+  fs.renameSync(tmp, file);
+}
+
+function readStdin() {
+  return new Promise((resolve) => {
+    let body = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => { body += chunk; });
+    process.stdin.on("end", () => resolve(body.trim()));
+    if (process.stdin.isTTY) resolve("");
+  });
+}
+
+function messageId() {
+  return "msg-" + Date.now().toString(36) + "-" + crypto.randomBytes(4).toString("hex");
+}
+
+function readMessages(dir) {
+  const messagesDir = path.join(dir, "messages");
+  let names = [];
+  try {
+    names = fs.readdirSync(messagesDir).filter((name) => name.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  return names
+    .map((name) => readJson(path.join(messagesDir, name), null))
+    .filter(Boolean)
+    .sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+}
+
+function targetMatches(message, self) {
+  const to = message.to;
+  if (to === "all" || to === self) return true;
+  return Array.isArray(to) && to.includes(self);
+}
+
+function renderMessage(message) {
+  const head = [
+    "[" + message.id + "]",
+    String(message.createdAt || ""),
+    String(message.from || "?") + " -> " + String(message.to || "?"),
+    message.replyTo ? "replyTo=" + message.replyTo : "",
+  ].filter(Boolean).join(" ");
+  const subject = message.subject ? "Subject: " + message.subject + "\n" : "";
+  return head + "\n" + subject + String(message.body || "").trim();
+}
+
+async function bodyFromArgs(args) {
+  if (args.stdin) return await readStdin();
+  if (args.body && args.body !== true) return String(args.body);
+  if (args._ && args._.length > 0) return args._.join(" ");
+  return "";
+}
+
+function commandList(dir, args) {
+  const registry = readJson(path.join(dir, "agents.json"), { agents: [] });
+  const agents = Array.isArray(registry.agents) ? registry.agents : [];
+  if (args.json) {
+    console.log(JSON.stringify(registry, null, 2));
+    return;
+  }
+  if (agents.length === 0) {
+    console.log("No peer agents registered.");
+    return;
+  }
+  for (const agent of agents) {
+    const paths = Array.isArray(agent.allowedPaths) && agent.allowedPaths.length
+      ? " paths=" + agent.allowedPaths.join(",")
+      : "";
+    console.log(
+      agent.workerTaskId + " | " +
+      (agent.runtime || "?") + " | " +
+      (agent.status || "?") + " | " +
+      (agent.title || agent.label || "untitled") +
+      paths
+    );
+  }
+}
+
+function commandInbox(dir, args) {
+  const self = required(args, "self");
+  const limit = Math.max(1, Number(args.limit || 20));
+  const messages = readMessages(dir).filter((message) => targetMatches(message, self));
+  const filtered = args.unread
+    ? messages.filter((message) => !Array.isArray(message.readBy) || !message.readBy.includes(self))
+    : messages;
+  const selected = filtered.slice(-limit);
+  if (args.json) {
+    console.log(JSON.stringify(selected, null, 2));
+  } else if (selected.length === 0) {
+    console.log("No messages for " + self + ".");
+  } else {
+    console.log(selected.map(renderMessage).join("\n\n---\n\n"));
+  }
+  if (args["mark-read"]) {
+    for (const message of selected) markRead(dir, message, self);
+  }
+}
+
+function markRead(dir, message, self) {
+  const readBy = Array.isArray(message.readBy) ? message.readBy : [];
+  if (readBy.includes(self)) return;
+  message.readBy = [...readBy, self];
+  writeJsonAtomic(path.join(dir, "messages", message.id + ".json"), message);
+}
+
+async function commandSend(dir, args, replyTo) {
+  const from = required(args, "from");
+  const to = required(args, "to");
+  const subject = args.subject && args.subject !== true ? String(args.subject) : "";
+  const body = await bodyFromArgs(args);
+  if (!body.trim()) throw new Error("message body is empty; pass --body or --stdin");
+  const message = {
+    id: messageId(),
+    createdAt: new Date().toISOString(),
+    from,
+    to,
+    subject,
+    body,
+    replyTo: replyTo || null,
+    readBy: [],
+  };
+  writeJsonAtomic(path.join(dir, "messages", message.id + ".json"), message);
+  console.log(message.id);
+}
+
+async function commandAwait(dir, args) {
+  const self = required(args, "self");
+  const from = args.from && args.from !== true ? String(args.from) : null;
+  const replyTo = args["reply-to"] && args["reply-to"] !== true ? String(args["reply-to"]) : null;
+  const timeoutSeconds = Math.max(1, Number(args.timeout || 120));
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  while (Date.now() <= deadline) {
+    const messages = readMessages(dir).filter((message) => targetMatches(message, self));
+    const match = messages.find((message) => {
+      if (from && message.from !== from) return false;
+      if (replyTo && message.replyTo !== replyTo) return false;
+      if (Array.isArray(message.readBy) && message.readBy.includes(self)) return false;
+      return true;
+    });
+    if (match) {
+      console.log(args.json ? JSON.stringify(match, null, 2) : renderMessage(match));
+      markRead(dir, match, self);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  console.error("Timed out waiting for peer message.");
+  process.exitCode = 2;
+}
+
+async function main() {
+  const command = process.argv[2];
+  const args = parseArgs(process.argv.slice(3));
+  if (!command || command === "help" || command === "--help" || command === "-h") {
+    console.log(usage());
+    return;
+  }
+  const dir = resolveDir(args);
+  ensureDir(dir);
+  if (command === "list") return commandList(dir, args);
+  if (command === "inbox") return commandInbox(dir, args);
+  if (command === "send") return await commandSend(dir, args, null);
+  if (command === "reply") return await commandSend(dir, args, required(args, "reply-to"));
+  if (command === "await") return await commandAwait(dir, args);
+  throw new Error("unknown command: " + command + "\n\n" + usage());
+}
+
+main().catch((err) => {
+  console.error(err && err.message ? err.message : String(err));
+  process.exit(1);
+});
+`;
+
+interface PeerCommsAgentCard {
+  workerTaskId: string;
+  attemptId?: string;
+  label?: string;
+  title: string;
+  runtime: WorkerRuntime;
+  taskClass?: WorkerTask["taskClass"];
+  status: string;
+  canRunParallel: boolean;
+  allowedPaths: string[];
+  forbiddenPaths: string[];
+  expectedOutputs: string[];
+  updatedAt: string;
+}
+
+async function ensurePeerCommsArtifacts(
+  run: RunState,
+  step: StepState | undefined,
+  task: WorkerTask,
+  attemptId: string,
+  paths: WorkerArtifactPaths,
+  status: string,
+): Promise<void> {
+  if (!paths.peerCommsDir || !paths.peerCommsScript || !paths.peerCommsAgents) return;
+  await fs.mkdir(join(paths.peerCommsDir, "messages"), { recursive: true });
+  await writeFileAtomic(paths.peerCommsScript, PEER_COMMS_HELPER_SCRIPT);
+  await updatePeerCommsRegistry(run, step, task, attemptId, paths, status);
+}
+
+async function updatePeerCommsRegistry(
+  run: RunState,
+  step: StepState | undefined,
+  currentTask: WorkerTask,
+  attemptId: string,
+  paths: WorkerArtifactPaths,
+  status: string,
+): Promise<void> {
+  if (!paths.peerCommsAgents) return;
+  const timestamp = new Date().toISOString();
+  const stepTaskIds = new Set(step?.workerTaskIds ?? []);
+  const peers = run.workerTasks.filter((task) => {
+    if (currentTask.stepId && task.stepId === currentTask.stepId) return true;
+    if (stepTaskIds.has(task.id)) return true;
+    return task.id === currentTask.id;
+  });
+  const cards: PeerCommsAgentCard[] = peers.map((peer) => {
+    const latestAttempt = run.workerAttempts
+      .slice()
+      .reverse()
+      .find((attempt) => attempt.workerTaskId === peer.id);
+    const planned = step?.plannedAgents?.find(
+      (agent) =>
+        agent.summary === peer.description ||
+        agent.label === peer.title ||
+        agent.label?.toLowerCase() === peer.title.toLowerCase(),
+    );
+    return {
+      workerTaskId: peer.id,
+      attemptId: peer.id === currentTask.id ? attemptId : latestAttempt?.id,
+      label: planned?.label,
+      title: peer.title,
+      runtime: peer.runtimePreference,
+      taskClass: peer.taskClass,
+      status: peer.id === currentTask.id ? status : latestAttempt?.status ?? peer.status,
+      canRunParallel: peer.canRunParallel,
+      allowedPaths: peer.allowedPaths,
+      forbiddenPaths: peer.forbiddenPaths,
+      expectedOutputs: peer.expectedOutputs,
+      updatedAt: peer.id === currentTask.id ? timestamp : peer.updatedAt,
+    };
+  });
+  const registry = {
+    version: 1,
+    runId: run.id,
+    stepId: currentTask.stepId,
+    stepTitle: step?.title,
+    updatedAt: timestamp,
+    agents: cards,
+  };
+  await writeFileAtomic(paths.peerCommsAgents, JSON.stringify(registry, null, 2));
 }
 
 // The orchestration worker now uses the EXACT same pty path as a user-opened
@@ -4544,11 +5557,32 @@ async function runWorkerSession({
   // which doesn't exist in headless eval mode and is wiped when an
   // interactive pane is closed.
   const rawStream = createWriteStream(paths.rawLog, { flags: "a" });
+  let fatalErrorTimer: NodeJS.Timeout | undefined;
+  let fatalErrorBuffer = "";
   const offRawTap = pty.tap(attemptId, (chunk) => {
     try {
       rawStream.write(chunk);
     } catch {
       /* best-effort; never let logging break the run loop */
+    }
+    fatalErrorBuffer = (fatalErrorBuffer + chunk.toString("utf8")).slice(-8192);
+    const fatalReason = detectFatalWorkerRuntimeError(fatalErrorBuffer, task.runtimePreference);
+    if (fatalReason && !fatalErrorTimer) {
+      fatalErrorTimer = setTimeout(() => {
+        void (async () => {
+          await recordWorkerOutput(
+            run,
+            task,
+            attemptId,
+            paths,
+            "stderr",
+            `\n[spark] detected worker runtime failure: ${fatalReason}\n`,
+          );
+          await writeAutoFailureReport(paths, task, fatalReason);
+          pty.dispose(attemptId);
+          failFast(fatalReason);
+        })();
+      }, 2500);
     }
   });
 
@@ -4574,6 +5608,8 @@ async function runWorkerSession({
       session: "pty",
     },
   });
+  await updatePeerCommsRegistry(run, run.steps.find((item) => item.id === task.stepId), task, attemptId, paths, "running")
+    .catch(() => undefined);
 
   activeWorkerProcesses.set(attemptId, {
     runId: run.id,
@@ -4601,6 +5637,7 @@ async function runWorkerSession({
       rawStream.end();
       clearInterval(reportPoll);
       clearTimeout(hardTimeout);
+      if (fatalErrorTimer) clearTimeout(fatalErrorTimer);
       resolve(value);
     };
     const offExit = pty.onExit(attemptId, (info) => {
@@ -4649,6 +5686,9 @@ async function runWorkerSession({
           await writeAutoFailureReport(paths, task, launched.reason);
           failFast(`${task.runtimePreference} CLI failed to launch: ${launched.reason}`);
           return;
+        }
+        if (task.runtimePreference === "codex") {
+          await waitForCodexInputReady(attemptId);
         }
       }
       await pasteAndSubmit(handle, promptText, task.runtimePreference);
@@ -4773,6 +5813,63 @@ async function waitForAgentTui(
   });
 }
 
+async function waitForCodexInputReady(attemptId: string): Promise<void> {
+  // Codex paints its model banner before it finishes MCP-server startup. If
+  // Spark bracket-pastes the worker prompt during that startup window, some
+  // Codex TUI builds drop the paste and sit forever at the empty prompt. Wait
+  // for the actual input placeholder/suggestion to appear before submitting.
+  const readyMarkers = [
+    "Run /review on my current changes",
+    "Summarize recent commits",
+    "Ask about this codebase",
+    "What should I work on",
+  ];
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    let buffer = "";
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      offTap();
+      clearTimeout(timer);
+      resolve();
+    };
+    const offTap = pty.tap(attemptId, (chunk) => {
+      buffer = (buffer + chunk.toString("utf8")).slice(-8192);
+      const visible = buffer
+        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+        .replace(/\x1b\][^\x07]*\x07/g, "");
+      if (readyMarkers.some((marker) => visible.includes(marker))) {
+        finish();
+      }
+    });
+    const timer = setTimeout(finish, 18_000);
+  });
+  await delay(250);
+}
+
+function detectFatalWorkerRuntimeError(
+  buffer: string,
+  runtime: WorkerTask["runtimePreference"],
+): string | null {
+  if (runtime !== "claude" && runtime !== "codex") return null;
+  const visible = buffer
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b\][^\x07]*\x07/g, "");
+  const checks: Array<[RegExp, string]> = [
+    [/API Error:.*socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
+    [/API Error:/i, "runtime API error before final report"],
+    [/socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
+    [/fetch\(\)/i, "runtime network fetch failure before final report"],
+    [/rate limit/i, "runtime rate limit before final report"],
+    [/overloaded|temporarily unavailable/i, "runtime temporarily unavailable before final report"],
+  ];
+  for (const [pattern, reason] of checks) {
+    if (pattern.test(visible)) return reason;
+  }
+  return null;
+}
+
 // Write a synthetic final-report so the autopilot review loop can consume the
 // failure as worker evidence (the manager will see status=failed and decide
 // whether to retry, route to a different runtime, or ask the user).
@@ -4783,13 +5880,13 @@ async function writeAutoFailureReport(
 ): Promise<void> {
   const report: WorkerReport = {
     status: "failed",
-    summary: `Spark could not start the ${task.runtimePreference} CLI for this task: ${reason}.`,
+    summary: `Spark could not complete the ${task.runtimePreference} CLI worker for this task: ${reason}.`,
     filesChanged: [],
     commandsRun: [],
     tests: [],
     proof: [],
     risks: [
-      `${task.runtimePreference} CLI failed to launch — verify it is installed, logged in, and the model id is valid.`,
+      `${task.runtimePreference} CLI failed before producing a final report: ${reason}. Verify it is installed, logged in, reachable, and the model id is valid.`,
     ],
     followups: [
       "Verify the CLI is installed, on PATH, and logged in, then re-run.",
@@ -4917,7 +6014,11 @@ function buildLaunchCommandLine(task: WorkerTask, cwd: string): string | null {
     // backslash). We write that entry from launchWorkerAttempt before
     // spawning, so by the time codex --yolo starts, the directory is already
     // trusted and the prompt is skipped silently.
-    return "codex --yolo";
+    const args = ["codex", "--yolo"];
+    if (task.modelHint?.trim()) args.push("-m", quoteShellArg(task.modelHint.trim()));
+    const codexEffort = mapCodexEffort(task.effortHint);
+    if (codexEffort) args.push("-c", quoteShellArg(`model_reasoning_effort=${codexEffort}`));
+    return args.join(" ");
   }
   return null;
 }
@@ -4985,9 +6086,20 @@ function mapClaudeEffort(effort: WorkerTask["effortHint"] | undefined): string |
   return "low";
 }
 
+function mapCodexEffort(effort: WorkerTask["effortHint"] | undefined): string | null {
+  if (!effort) return null;
+  if (effort === "minimal" || effort === "max") return effort === "minimal" ? "low" : "xhigh";
+  if (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh") return effort;
+  return "medium";
+}
+
 function quoteShellArg(value: string): string {
   if (/^[A-Za-z0-9_./:@+=,-]+$/.test(value)) return value;
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function quotePwshString(value: string): string {
+  return `"${value.replace(/`/g, "``").replace(/"/g, '`"')}"`;
 }
 
 async function readWorkerPromptForLaunch(paths: WorkerArtifactPaths): Promise<string> {
@@ -5061,6 +6173,112 @@ function renderRuntimeDelegationGuidance(task: WorkerTask): string[] {
   return [];
 }
 
+function renderPeerCommsGuidance(task: WorkerTask, paths: WorkerArtifactPaths): string[] {
+  if (!paths.peerCommsDir || !paths.peerCommsScript) return [];
+  const script = quotePwshString(paths.peerCommsScript);
+  const dir = quotePwshString(paths.peerCommsDir);
+  const self = quotePwshString(task.id);
+  return [
+    "Spark may be running several Claude/Codex workers for this same step. Use this mailbox when direct peer coordination would prevent duplicated work, clarify an interface, share a narrow finding, or ask for a second opinion.",
+    "This is a run artifact mailbox, not the project source tree; using it is allowed even for read-only verifier tasks.",
+    "If your task defines or consumes a shared interface/contract that another peer may depend on, send one short contract note to `all` before editing and check your inbox once before finalizing.",
+    `List peers: node ${script} list --dir ${dir}`,
+    `Read your inbox: node ${script} inbox --dir ${dir} --self ${self} --limit 10 --mark-read`,
+    "Send a peer message from PowerShell:",
+    "```powershell",
+    "@'",
+    "Short question or finding. Keep it under 300 words. Include exact files/commands when useful.",
+    "'@ | node " + script + " send --dir " + dir + " --from " + self + " --to \"<peer_worker_task_id|all>\" --subject \"<topic>\" --stdin",
+    "```",
+    "Reply to a peer message:",
+    "```powershell",
+    "@'",
+    "Short answer with evidence or uncertainty.",
+    "'@ | node " + script + " reply --dir " + dir + " --from " + self + " --to \"<sender_worker_task_id>\" --reply-to \"<msg_id>\" --subject \"Re: <topic>\" --stdin",
+    "```",
+    `Wait briefly for a reply: node ${script} await --dir ${dir} --self ${self} --reply-to "<msg_id>" --timeout 120`,
+    "- Shared contracts must come from the task spec, not from invention. If your contract note conflicts with a peer's note, reconcile the conflict before finalizing or report `partial` with the exact conflict in `risks[]`.",
+    "- Before your final report on any shared-interface task, read your inbox with `--mark-read` and include a short `proof[]` entry naming the mailbox command and the contract you accepted.",
+    "- If your slice consumes another worker's output, run a small integration probe when possible. If the peer file is not ready yet, wait briefly once; if still unavailable, state that risk instead of claiming the cross-file contract is proven.",
+    "- Do not wait indefinitely. If no peer replies within about 2 minutes, continue with the safest explicit assumption and mention it in `risks[]`.",
+    "- Summarize any material peer input in `proof[]`, `risks[]`, or `followups[]`; do not paste long mailbox transcripts into the final report.",
+  ];
+}
+
+function taskLooksLikeVisibleUi(step: StepState | undefined, task: WorkerTask): boolean {
+  const text = [
+    task.title,
+    task.description,
+    step?.title ?? "",
+    step?.goal ?? "",
+    ...(step?.acceptanceCriteria ?? []),
+    ...(task.expectedOutputs ?? []),
+  ].join(" ");
+  return /\b(ui|ux|frontend|front-end|html|css|page|screen|component|layout|form|button|modal|view|visual|design|calculator|dashboard|professional\s+ui|polished)\b/i.test(
+    text,
+  );
+}
+
+function taskLooksLikeCalculator(step: StepState | undefined, task: WorkerTask): boolean {
+  const text = [
+    task.title,
+    task.description,
+    step?.title ?? "",
+    step?.goal ?? "",
+    ...(step?.acceptanceCriteria ?? []),
+    ...(task.expectedOutputs ?? []),
+  ].join(" ");
+  return /\b(calculator|calculate|arithmetic|keypad|numeric input)\b/i.test(text);
+}
+
+function renderUiQualityGuidance(step: StepState | undefined, task: WorkerTask): string[] {
+  if (!taskLooksLikeVisibleUi(step, task)) {
+    return [];
+  }
+  const lines = [
+    "- Treat words like `nice`, `polished`, and `professional` as concrete UI requirements: semantic structure, accessible names or live regions for dynamic values, keyboard/focus states, hover/active states, responsive sizing, and no text/layout overlap at mobile or desktop widths.",
+    "- For a standalone HTML deliverable, include a viewport meta tag, a `<main>` landmark, self-contained CSS/JS when the task asks for one file, and no external assets unless the task explicitly allows them.",
+    "- For calculators or expression-like inputs, use explicit state/event handling. Do not use `eval()` or `new Function()`.",
+    "- Do not leave decorative-but-dead UI: every visible control, display region, history strip, tab, toggle, badge, and data-* hook must be wired to real behavior or removed.",
+    "- Avoid visible instructional copy that explains basic usage or keyboard shortcuts inside the app; make the interface self-evident through controls, labels, focus, and affordances.",
+    "- Include a deliberate empty/loading/error/success state only when it can actually occur; otherwise do not style unreachable states as if they were product features.",
+    "- Before reporting `complete`, run or construct a UI smoke probe. At minimum, prove the final file has the expected controls, no accidental external refs, no `eval`/`new Function`, and that the primary user flow updates the visible DOM/state.",
+    "- Include file:line evidence for the main markup, core styles, event wiring, and any dynamic display updates in `proof[]`.",
+  ];
+  if (taskLooksLikeCalculator(step, task)) {
+    lines.push(
+      "- Calculator quality floor: include visible controls for clear, decimal, the four basic operators, equals, and a correction path such as backspace or CE. For a `professional` calculator, consider percent and sign toggle unless the plan explicitly rules them out.",
+      "- Calculator operator labels must be unambiguous and probe-friendly: use `+`, `-`, `×` or `*`, `÷` or `/`, and `=` visibly on the buttons. Do not use a plain `x` as the only multiplication signal.",
+      "- Calculator probes must cover: basic arithmetic, decimal arithmetic (`0.1 + 0.2` display), divide-by-zero handling and recovery, repeated equals, chained operations, keyboard input, correction/backspace behavior, and focus double-activation guards.",
+      "- Calculator focus probes must include: after pointer-clicking clear, pressing keys `7`, `/`, `2`, `Enter` displays `3.5`; after clicking `2`, `+`, `3`, focusing equals and pressing `Enter` executes exactly once and stays `5`; focusing clear and pressing `Enter` clears to `0`; any focused button activated by `Enter`/Space must run that button's action exactly once instead of the global shortcut; null/undefined/empty key values are ignored.",
+      "- A history or expression line is good only if it is updated by the logic; an empty static history strip is a quality failure.",
+    );
+  }
+  return lines;
+}
+
+function renderUiVerifierGuidance(step: StepState | undefined, task: WorkerTask): string[] {
+  if (!taskLooksLikeVisibleUi(step, task)) return [];
+  const lines = [
+    "## UI / FRONTEND 10/10 VERIFICATION",
+    "- Judge the finished artifact as a product, not as a code sample. A pass requires behavior, accessibility, responsive layout, and visual/interaction polish.",
+    "- Inspect the final user-facing files directly. Verify there are no leftover staging directories/files in the user workspace unless the plan explicitly asked for them.",
+    "- Verify there are no dead UI affordances: if a control, display region, history line, badge, tab, toggle, or data-* hook exists, prove it is wired to real behavior. If it is not wired, verdict=failed or FEEDBACK.",
+    "- Check keyboard reachability, focus-visible states, accessible names/live regions for dynamic values, hover/active/disabled states where relevant, and no text overlap at small and desktop viewport sizes.",
+    "- For standalone HTML/CSS/JS, verify viewport meta, semantic landmarks, self-contained assets when required, no accidental external src/href, and no `eval()` or `new Function()`.",
+    "- Run deterministic DOM/static probes and behavioral probes. Browser screenshots are ideal when available; if browser/file access is unavailable, state that limitation and compensate with static + runtime probes rather than guessing.",
+  ];
+  if (taskLooksLikeCalculator(step, task)) {
+    lines.push(
+      "- Calculator probes must include: `2 + 3 = 5`, `7 / 2 = 3.5`, `0.1 + 0.2` displays as `0.3`, divide-by-zero shows an error and recovers on next digit, repeated equals continues the prior operation, correction/backspace works, and keyboard Enter/Escape/operator input works.",
+      "- Calculator operator labels must be visible as `+`, `-`, `×` or `*`, `÷` or `/`, and `=`. A plain `x` multiplication label is not enough.",
+      "- Calculator focus probes must include: after pointer-clicking clear, pressing keys `7`, `/`, `2`, `Enter` displays `3.5`; after clicking `2`, `+`, `3`, focusing equals and pressing `Enter` executes exactly once and stays `5`; focusing clear and pressing `Enter` clears to `0`; any focused button activated by `Enter`/Space must run that button's action exactly once instead of the global shortcut; null/undefined/empty key values are ignored.",
+      "- Fail any calculator that contains an expression/history display that never updates, silently accepts impossible operators, or has no visible correction path.",
+    );
+  }
+  return lines;
+}
+
 function renderImplementationWorkerPrompt({
   cwd,
   step,
@@ -5098,6 +6316,18 @@ function renderImplementationWorkerPrompt({
     lines.push("", "## ACCEPTANCE", ...step.acceptanceCriteria.map((c) => `- ${c}`));
   }
 
+  lines.push(
+    "",
+    "## SPEC EXACTNESS",
+    "- Treat exact names, exported function shapes, JSON keys, sample output, punctuation, and decimal precision in the task as tests. If the prompt gives an example like `margin 80.0%`, match that formatting exactly unless the task explicitly says the example is illustrative.",
+    "- Before reporting `complete`, run or construct a small probe that checks the exact public contract you implemented, and include the command/output in `proof[]`.",
+  );
+
+  const uiQualityGuidance = renderUiQualityGuidance(step, task);
+  if (uiQualityGuidance.length) {
+    lines.push("", "## UI QUALITY BAR", ...uiQualityGuidance);
+  }
+
   if (task.allowedPaths.length || task.forbiddenPaths.length || task.conflictsWith.length || task.canRunParallel) {
     lines.push("", "## BOUNDARIES");
     if (task.allowedPaths.length) {
@@ -5121,6 +6351,11 @@ function renderImplementationWorkerPrompt({
   const delegationGuidance = renderRuntimeDelegationGuidance(task);
   if (delegationGuidance.length) {
     lines.push("", "## RUNTIME-NATIVE DELEGATION", ...delegationGuidance);
+  }
+
+  const peerCommsGuidance = renderPeerCommsGuidance(task, paths);
+  if (peerCommsGuidance.length) {
+    lines.push("", "## PEER WORKER COMMUNICATION", ...peerCommsGuidance);
   }
 
   if (task.verificationCommands?.length) {
@@ -5237,9 +6472,19 @@ function renderVerifierWorkerPrompt({
     );
   }
 
+  const uiVerifierGuidance = renderUiVerifierGuidance(step, task);
+  if (uiVerifierGuidance.length) {
+    lines.push("", ...uiVerifierGuidance);
+  }
+
   const delegationGuidance = renderRuntimeDelegationGuidance(task);
   if (delegationGuidance.length) {
     lines.push("", "## RUNTIME-NATIVE DELEGATION", ...delegationGuidance);
+  }
+
+  const peerCommsGuidance = renderPeerCommsGuidance(task, paths);
+  if (peerCommsGuidance.length) {
+    lines.push("", "## PEER WORKER COMMUNICATION", ...peerCommsGuidance);
   }
 
   lines.push(
@@ -5249,7 +6494,7 @@ function renderVerifierWorkerPrompt({
     "Read files directly from this path. Do NOT use the prior worker's narrative as your source of truth.",
     "",
     "## TOOL DISCIPLINE",
-    "Read-only tools only. Do not Write, Edit, or run any command that mutates state (>, >>, tee, rm, mv, chmod, npm install, git commit, git push, destructive SQL).",
+    "Read-only tools only. Do not Write, Edit, or run any command that mutates project state (>, >>, tee, rm, mv, chmod, npm install, git commit, git push, destructive SQL). The Spark peer mailbox commands above are the only allowed write outside the project tree.",
     "If you cannot verify a claim because the verification harness or fixture is missing, set verdict=unsure for that claim and explain WHAT is missing in `missing_oracle`. Do NOT create the fixture yourself.",
     "",
     "## FINAL REPORT",

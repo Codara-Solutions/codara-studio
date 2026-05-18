@@ -1,11 +1,13 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import {
+  APP_THEME_IDS,
   DEFAULT_PREFERENCES,
   EDITOR_THEME_IDS,
   type AppPreferences,
   type EditorThemeId,
   type PrefKey,
+  type ThemePref,
 } from "@shared/types";
 import { sparkHome } from "./spark-home";
 
@@ -25,6 +27,41 @@ function isEditorThemeId(value: unknown): value is EditorThemeId {
   return typeof value === "string" && (EDITOR_THEME_IDS as readonly string[]).includes(value);
 }
 
+function normalizeTheme(value: unknown): ThemePref {
+  if (typeof value !== "string") return DEFAULT_PREFERENCES.theme;
+  if ((APP_THEME_IDS as readonly string[]).includes(value)) return value as ThemePref;
+  if (
+    value === "light" ||
+    value === "spark-light" ||
+    value === "github-light" ||
+    value === "catppuccin-latte" ||
+    value === "paper-lantern" ||
+    value === "frosted-glass" ||
+    value === "sage-terminal" ||
+    value === "solar-flare"
+  ) {
+    return "catppuccin-latte";
+  }
+  if (
+    value === "dark" ||
+    value === "system" ||
+    value === "spark-dark" ||
+    value === "github-dark" ||
+    value === "tokyo-night" ||
+    value === "nord" ||
+    value === "monokai" ||
+    value === "ember-forge" ||
+    value === "midnight-bloom" ||
+    value === "aurora-circuit" ||
+    value === "cobalt-harbor" ||
+    value === "neon-orchard" ||
+    value === "velvet-dusk"
+  ) {
+    return "spark-classic";
+  }
+  return DEFAULT_PREFERENCES.theme;
+}
+
 function normalize(input: Partial<AppPreferences> | null | undefined): AppPreferences {
   const src = input && typeof input === "object" ? input : {};
   const inlineModel =
@@ -32,10 +69,7 @@ function normalize(input: Partial<AppPreferences> | null | undefined): AppPrefer
       ? src.inlineAutocompleteModelId.trim()
       : DEFAULT_PREFERENCES.inlineAutocompleteModelId;
   return {
-    theme:
-      src.theme === "light" || src.theme === "dark" || src.theme === "system"
-        ? src.theme
-        : DEFAULT_PREFERENCES.theme,
+    theme: normalizeTheme(src.theme),
     vimMode: typeof src.vimMode === "boolean" ? src.vimMode : DEFAULT_PREFERENCES.vimMode,
     editorTheme: isEditorThemeId(src.editorTheme)
       ? src.editorTheme

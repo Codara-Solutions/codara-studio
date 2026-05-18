@@ -1,0 +1,103 @@
+{
+  "judge": "spark_best_fastest_judge_v1",
+  "generatedAt": "2026-05-18T17:31:50.119Z",
+  "options": {
+    "baseline": "spark_sequential",
+    "challenger": "spark_hybrid_parallel",
+    "minSpeedupPct": 0.1,
+    "minSpeedupSeconds": 20,
+    "qualityTolerance": 0.05,
+    "requirePeerMessages": true
+  },
+  "verdict": {
+    "status": "fix_quality",
+    "winner": null,
+    "reason": "Both baseline and hybrid failed gates; speed is not promotable until correctness passes.",
+    "promoteHybrid": false
+  },
+  "summary": {
+    "comparablePairs": 1,
+    "baseline": {
+      "variantId": "spark_sequential",
+      "runs": 1,
+      "passRate": 0,
+      "qualityScore": 3.33,
+      "medianDurationSeconds": 272.729,
+      "medianMaxConcurrentWorkers": 1,
+      "meanPeerMessages": 0
+    },
+    "challenger": {
+      "variantId": "spark_hybrid_parallel",
+      "runs": 1,
+      "passRate": 0,
+      "qualityScore": 3.33,
+      "medianDurationSeconds": 375.214,
+      "medianMaxConcurrentWorkers": 2,
+      "meanPeerMessages": 2
+    },
+    "wins": {
+      "tie": 1
+    },
+    "reasons": {
+      "both_failed_gates": 1
+    },
+    "collaboration": {
+      "expectedRuns": 1,
+      "okRuns": 1,
+      "requiredPeerMessages": true,
+      "allExpectedRunsOk": true,
+      "totalPeerMessages": 2,
+      "maxConcurrentWorkers": 2
+    }
+  },
+  "comparisons": [
+    {
+      "taskId": "peer-mailbox-analytics-contract",
+      "taskCategory": "parallel_contract",
+      "repetition": 1,
+      "winner": "tie",
+      "reason": "both_failed_gates",
+      "baseline": {
+        "variantId": "spark_sequential",
+        "passed": false,
+        "qualityScore": 3.33,
+        "hiddenGateRatio": 1,
+        "durationSeconds": 272.729,
+        "finalStatus": "completed",
+        "workerCount": 3,
+        "maxConcurrentWorkers": 1,
+        "parallelLaunchGroups": 0,
+        "peerMessages": 0
+      },
+      "challenger": {
+        "variantId": "spark_hybrid_parallel",
+        "passed": false,
+        "qualityScore": 3.33,
+        "hiddenGateRatio": 1,
+        "durationSeconds": 375.214,
+        "finalStatus": "completed",
+        "workerCount": 2,
+        "maxConcurrentWorkers": 2,
+        "parallelLaunchGroups": 1,
+        "peerMessages": 2
+      },
+      "deltas": {
+        "qualityScore": 0,
+        "durationSeconds": -102.485,
+        "speedupPct": -0.376
+      },
+      "collaboration": {
+        "expected": true,
+        "ok": true,
+        "maxConcurrentWorkers": 2,
+        "parallelLaunchGroups": 1,
+        "peerAgents": 2,
+        "peerMessages": 2
+      }
+    }
+  ],
+  "recommendations": [
+    "Both variants failed at least one comparable task; fix the task contract or worker prompting before using speed as a decision signal.",
+    "Hybrid quality is acceptable, but speed is not proven; profile manager-call count and worker critical path before adding more workers."
+  ]
+}

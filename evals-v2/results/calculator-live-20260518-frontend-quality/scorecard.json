@@ -1,0 +1,33 @@
+{
+  "generatedAt": "2026-05-18T17:12:50.036Z",
+  "scorecard": [
+    {
+      "variantId": "spark_hybrid_parallel",
+      "runs": 1,
+      "medianDurationSeconds": 125.614,
+      "passRate": 1,
+      "hiddenGateRatio": 1,
+      "qualityScore": 5,
+      "parallelEfficiency": 1,
+      "medianMaxConcurrentWorkers": 1,
+      "meanParallelLaunchGroups": 0,
+      "meanPeerMessages": 0,
+      "meanPeerAgents": 1,
+      "medianTimeToFirstWorker": 10.797
+    },
+    {
+      "variantId": "spark_sequential",
+      "runs": 1,
+      "medianDurationSeconds": 103.533,
+      "passRate": 1,
+      "hiddenGateRatio": 1,
+      "qualityScore": 5,
+      "parallelEfficiency": 1,
+      "medianMaxConcurrentWorkers": 1,
+      "meanParallelLaunchGroups": 0,
+      "meanPeerMessages": 0,
+      "meanPeerAgents": 1,
+      "medianTimeToFirstWorker": 12.941
+    }
+  ]
+}

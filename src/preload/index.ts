@@ -248,6 +248,8 @@ const api = {
     toggleMaximize: (): Promise<boolean> => ipcRenderer.invoke("window:toggleMaximize"),
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke("window:isMaximized"),
     close: (): Promise<void> => ipcRenderer.invoke("window:close"),
+    setTitleBarTheme: (theme: { color: string; symbolColor: string }): Promise<void> =>
+      ipcRenderer.invoke("window:setTitleBarTheme", theme),
     onStateChanged: (handler: WindowStateHandler): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, state: { maximized: boolean }) => handler(state);
       ipcRenderer.on("window:state-changed", listener);

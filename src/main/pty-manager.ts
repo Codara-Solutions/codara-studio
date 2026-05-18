@@ -545,6 +545,15 @@ export function disposeForWebContents(wc: WebContents): void {
   }
 }
 
+export function detachForWebContents(wc: WebContents): void {
+  for (const s of sessions.values()) {
+    if (s.webContents !== wc) continue;
+    s.webContents = null;
+    s.pendingChunks = [];
+    s.pendingBytes = 0;
+  }
+}
+
 export function disposeAll(): void {
   for (const t of pendingKills.values()) clearTimeout(t);
   pendingKills.clear();

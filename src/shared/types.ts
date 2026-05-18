@@ -50,7 +50,45 @@ export interface AppSettings {
 // JSON file from AppSettings so the per-window settings UI can read/write
 // them without needing access to the integration credentials. Future agents
 // extend this interface — additive only, every key has a default.
-export type ThemePref = "system" | "light" | "dark";
+export type ThemeMode = "dark" | "light";
+
+export type ThemePref =
+  | "spark-classic"
+  | "catppuccin-mocha"
+  | "catppuccin-latte"
+  | "gruvbox-dark"
+  | "solarized-dark"
+  | "dracula"
+  | "one-dark"
+  | "rose-pine"
+  | "everforest"
+  | "kanagawa-wave";
+
+export const APP_THEME_IDS: readonly ThemePref[] = [
+  "spark-classic",
+  "catppuccin-mocha",
+  "catppuccin-latte",
+  "gruvbox-dark",
+  "solarized-dark",
+  "dracula",
+  "one-dark",
+  "rose-pine",
+  "everforest",
+  "kanagawa-wave",
+] as const;
+
+export const APP_THEME_MODE: Readonly<Record<ThemePref, ThemeMode>> = {
+  "spark-classic": "dark",
+  "catppuccin-mocha": "dark",
+  "catppuccin-latte": "light",
+  "gruvbox-dark": "dark",
+  "solarized-dark": "dark",
+  dracula: "dark",
+  "one-dark": "dark",
+  "rose-pine": "dark",
+  everforest: "dark",
+  "kanagawa-wave": "dark",
+};
 
 // CodeMirror 6 editor theme ids exposed in the editor settings dropdown.
 // Each id maps to an Extension in src/renderer/src/components/editor-cm/themes.ts.
@@ -106,7 +144,7 @@ export const INLINE_AI_MODEL_PRESETS: ReadonlyArray<{
 ];
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
-  theme: "system",
+  theme: "spark-classic",
   vimMode: false,
   editorTheme: "github-dark",
   inlineAutocompleteEnabled: true,
@@ -361,6 +399,12 @@ export interface RunState {
   artifactDir: string;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Timestamp captured when the run first reaches a terminal status. Unlike
+   * updatedAt, this does not move when later events/messages are appended, so
+   * elapsed-time UI can freeze at the real finish time.
+   */
+  completedAt?: string;
   plans: PlanState[];
   steps: StepState[];
   workerTasks: WorkerTask[];
@@ -467,6 +511,9 @@ export interface WorkerArtifactPaths {
   workerTaskId: string;
   attemptId: string;
   attemptDir: string;
+  peerCommsDir?: string;
+  peerCommsScript?: string;
+  peerCommsAgents?: string;
   taskJson: string;
   promptMd: string;
   workpadMd: string;

@@ -518,7 +518,7 @@ function RunSummary({
                 value: (
                   <ElapsedTime
                     startedAt={run.createdAt}
-                    finishedAt={isRunStillTicking(run) ? undefined : run.updatedAt}
+                    finishedAt={isRunStillTicking(run) ? undefined : (run.completedAt ?? run.updatedAt)}
                   />
                 ),
               },
@@ -744,7 +744,7 @@ function RunSummary({
             value={
               <ElapsedTime
                 startedAt={run.createdAt}
-                finishedAt={isRunStillTicking(run) ? undefined : run.updatedAt}
+                finishedAt={isRunStillTicking(run) ? undefined : (run.completedAt ?? run.updatedAt)}
               />
             }
           />

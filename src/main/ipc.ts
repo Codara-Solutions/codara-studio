@@ -1,4 +1,5 @@
 import { ipcMain, dialog, BrowserWindow, app, shell, webContents } from "electron";
+import { promises as fs } from "node:fs";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, listDir, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
@@ -246,6 +247,16 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("fs:revealInOS", async (_e, path: string): Promise<void> => {
+    try {
+      const stat = await fs.stat(path);
+      if (stat.isDirectory()) {
+        await shell.openPath(path);
+        return;
+      }
+    } catch {
+      // Fall through to showItemInFolder so callers still get the OS-level
+      // behavior for missing paths or paths that disappeared between clicks.
+    }
     shell.showItemInFolder(path);
   });
 
@@ -496,6 +507,26 @@ export function registerIpc(): void {
   ipcMain.handle("window:close", async (e): Promise<void> => {
     BrowserWindow.fromWebContents(e.sender)?.close();
   });
+
+  ipcMain.handle(
+    "window:setTitleBarTheme",
+    async (e, theme: { color?: unknown; symbolColor?: unknown }): Promise<void> => {
+      if (process.platform !== "win32") return;
+      const win = BrowserWindow.fromWebContents(e.sender);
+      if (!win) return;
+      const color = typeof theme?.color === "string" && theme.color ? theme.color : "#171513";
+      const symbolColor =
+        typeof theme?.symbolColor === "string" && theme.symbolColor
+          ? theme.symbolColor
+          : "#bdbcb8";
+      try {
+        win.setBackgroundColor(color);
+        win.setTitleBarOverlay({ color, symbolColor, height: 30 });
+      } catch {
+        /* Unsupported color strings or platform quirks should not break theme switches. */
+      }
+    },
+  );
 
   ipcMain.handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);
   ipcMain.handle("app:home", async (): Promise<string> => app.getPath("home"));

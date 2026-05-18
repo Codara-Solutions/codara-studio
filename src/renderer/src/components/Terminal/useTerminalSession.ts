@@ -116,7 +116,7 @@ export function useTerminalSession({
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   // Holds the unsubscribe for the theme-token observer so we can refresh the
-  // xterm color palette synchronously when the user toggles dark/light or
+  // xterm color palette synchronously when the user switches themes or
   // changes accent color.
   const themeUnsubRef = useRef<(() => void) | null>(null);
 
@@ -190,8 +190,8 @@ export function useTerminalSession({
       );
       onSearchReadyRef.current?.(search);
 
-      // Keep the xterm theme in sync with Spark design tokens so dark/light
-      // toggles (and accent color changes) repaint the terminal chrome live.
+      // Keep the xterm theme in sync with Spark design tokens so theme switches
+      // and accent color changes repaint the terminal chrome live.
       themeUnsubRef.current = subscribeAppTokens(() => {
         if (termRef.current) termRef.current.options.theme = buildTerminalTheme();
       });

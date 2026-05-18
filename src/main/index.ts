@@ -60,14 +60,14 @@ function createWindow(): void {
     minHeight: 480,
     show: false,
     autoHideMenuBar: true,
-    backgroundColor: "#1a1a1a",
+    backgroundColor: "#0e0d0b",
     title: "Spark App",
     icon: windowIcon,
     titleBarStyle: process.platform === "win32" ? "hidden" : undefined,
     titleBarOverlay: process.platform === "win32"
       ? {
-          color: "#20211f",
-          symbolColor: "#c7c9c3",
+          color: "#171513",
+          symbolColor: "#bdbcb8",
           height: 30,
         }
       : undefined,
@@ -106,8 +106,11 @@ function createWindow(): void {
   });
 
   mainWindow.webContents.on("destroyed", () => {
-    pty.disposeForWebContents(mainWindow!.webContents);
-    fsWatcher.disposeForWebContents(mainWindow!.webContents);
+    // Renderer destruction can happen during workspace switches, reloads, or
+    // crashes. Keep PTY processes alive so TerminalView can reattach when the
+    // pane remounts; explicit pane close / app quit still kills them.
+    pty.detachForWebContents(windowForEvents.webContents);
+    fsWatcher.disposeForWebContents(windowForEvents.webContents);
   });
 
   // Surface renderer process crashes (the "everything goes black" symptom).

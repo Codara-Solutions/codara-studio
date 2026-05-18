@@ -366,16 +366,32 @@ export function useNowTick(intervalMs: number, enabled: boolean): void {
 // or autopilot work in flight. Canvas timers gate their tick on this so a
 // finished run does not burn a re-render every second forever.
 export function isRunStillTicking(run: RunState): boolean {
-  if (run.status === "running" || run.status === "planning" || run.status === "reviewing") {
+  if (run.status === "complete" || run.status === "failed" || run.status === "cancelled") {
+    return false;
+  }
+  if (run.sparkCalls.some((call) => call.status === "started")) {
     return true;
   }
-  return run.workerAttempts.some(
-    (attempt) =>
-      attempt.status === "preparing" ||
-      attempt.status === "prompt_ready" ||
-      attempt.status === "launching" ||
-      attempt.status === "running" ||
-      attempt.status === "finishing",
+  if (
+    run.workerAttempts.some(
+      (attempt) =>
+        attempt.status === "preparing" ||
+        attempt.status === "prompt_ready" ||
+        attempt.status === "launching" ||
+        attempt.status === "running" ||
+        attempt.status === "finishing",
+    )
+  ) {
+    return true;
+  }
+  return run.workerTasks.some(
+    (task) =>
+      task.status === "created" ||
+      task.status === "queued" ||
+      task.status === "claimed" ||
+      task.status === "running" ||
+      task.status === "needs_review" ||
+      task.status === "retry_queued",
   );
 }
 

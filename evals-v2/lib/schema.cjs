@@ -74,6 +74,10 @@ function buildResult(input) {
       totalWorkerRuntimeSeconds: number(input.totalWorkerRuntimeSeconds),
       estimatedCriticalPathSeconds: number(input.estimatedCriticalPathSeconds),
       parallelEfficiency: number(input.parallelEfficiency),
+      maxConcurrentWorkers: number(input.maxConcurrentWorkers),
+      parallelLaunchGroups: number(input.parallelLaunchGroups),
+      peerMessageCount: number(input.peerMessageCount),
+      peerAgentCount: number(input.peerAgentCount),
     },
     artifacts: input.artifacts || {},
   };
@@ -105,4 +109,3 @@ module.exports = {
   summarizeGates,
   validateResult,
 };
-

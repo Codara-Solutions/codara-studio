@@ -11,7 +11,7 @@
  * colors, so it keeps working if the design system migrates off oklch.
  *
  * Tokens are read once per call. Use `subscribeAppTokens` to react to theme
- * changes (e.g. dark/light class toggles on <html>).
+ * changes (e.g. named theme class toggles on <html>).
  */
 
 /** Mapping from a logical key to the underlying CSS variable name. */
@@ -131,7 +131,7 @@ function handleMutations(): void {
 /**
  * Subscribes to theme-token changes. Re-reads tokens whenever the
  * `class`, `data-theme`, or inline `style` attribute changes on <html>
- * (covers dark/light toggles, custom theme switches, and live `--accent`
+ * (covers named theme switches and live `--accent`
  * writes). Fires once synchronously with the current tokens, then once per
  * animation frame in which a relevant mutation occurred.
  *
