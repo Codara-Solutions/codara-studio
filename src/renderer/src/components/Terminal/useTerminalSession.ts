@@ -36,6 +36,7 @@ interface Options {
   sessionId: string;
   shell: ShellInfo;
   initialCwd?: string;
+  initialScrollback?: string;
   // One-shot shell command auto-typed into the PTY once the shell prompt has
   // settled (rough heuristic: after spawn + ~1500ms). Used by the worker
   // entries in the in-pane add-pane menu to launch claude/codex without the
@@ -81,6 +82,7 @@ export function useTerminalSession({
   sessionId,
   shell,
   initialCwd,
+  initialScrollback,
   initialCommand,
   extraEnv,
   onSearchReady,
@@ -168,6 +170,12 @@ export function useTerminalSession({
       );
 
       term.open(container.current);
+      const restoredScrollback = initialScrollback?.trimEnd();
+      if (restoredScrollback) {
+        term.write(
+          `${restoredScrollback}\r\n\x1b[2m[restored from last Spark session]\x1b[0m\r\n`,
+        );
+      }
       try {
         fit.fit();
       } catch {

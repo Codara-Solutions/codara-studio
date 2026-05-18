@@ -4,6 +4,7 @@ import {
   CommitIcon,
   PullIcon,
   PushIcon,
+  SparkleIcon,
   Spinner,
   SyncIcon,
 } from "./git-ui";
@@ -12,7 +13,9 @@ interface Props {
   message: string;
   onMessageChange: (value: string) => void;
   onCommit: () => void;
+  onGenerateMessage: () => void;
   canCommit: boolean;
+  canGenerateMessage: boolean;
   commitLabel: string;
   stagedCount: number;
   busy: string | null;
@@ -31,7 +34,9 @@ export default function CommitComposer({
   message,
   onMessageChange,
   onCommit,
+  onGenerateMessage,
   canCommit,
+  canGenerateMessage,
   commitLabel,
   stagedCount,
   busy,
@@ -46,6 +51,7 @@ export default function CommitComposer({
   const taRef = useRef<HTMLTextAreaElement>(null);
   const anyBusy = busy !== null;
   const committing = busy === "commit";
+  const generatingMessage = busy === "generateMessage";
 
   // Grow the textarea with its content, between two and roughly six lines.
   useEffect(() => {
@@ -154,6 +160,43 @@ export default function CommitComposer({
           outline: "none",
         }}
       />
+
+      <button
+        type="button"
+        disabled={!canGenerateMessage || anyBusy}
+        onClick={onGenerateMessage}
+        title="Generate commit message with Inline AI"
+        style={{
+          appearance: "none",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 7,
+          height: 28,
+          width: "100%",
+          padding: "0 10px",
+          borderRadius: 7,
+          cursor: "default",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12,
+          fontWeight: 650,
+          border: "1px solid var(--rule)",
+          background:
+            canGenerateMessage && !anyBusy
+              ? "color-mix(in oklch, var(--accent) 10%, transparent)"
+              : "transparent",
+          color:
+            canGenerateMessage && !anyBusy
+              ? "var(--ink-dim)"
+              : generatingMessage
+                ? "var(--ink-dim)"
+                : "var(--muted-2)",
+          opacity: !canGenerateMessage && !generatingMessage ? 0.65 : 1,
+        }}
+      >
+        {generatingMessage ? <Spinner size={11} /> : <SparkleIcon />}
+        <span>{generatingMessage ? "Generating message" : "Generate Message"}</span>
+      </button>
 
       <button
         type="button"

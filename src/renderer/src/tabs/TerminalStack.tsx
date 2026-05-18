@@ -12,7 +12,8 @@ import type {
   TerminalSplit,
   TerminalTab,
 } from "./types";
-import { CloseIcon, PlusIcon, SplitDownIcon, SplitRightIcon } from "../components/icons";
+import { CloseIcon, DragHandleIcon, PlusIcon, SplitDownIcon, SplitRightIcon } from "../components/icons";
+import { TERMINAL_PANE_DRAG_MIME, parseTerminalPaneDrag, type TerminalPaneDragPayload } from "./terminalDrag";
 
 // TerminalStack hosts every terminal tab in the workspace. Each tab carries a
 // recursive PaneNode tree — leaves are PTY-backed panes, splits are
@@ -47,9 +48,19 @@ interface Props {
     direction: TerminalSplit["direction"],
     autorun?: string,
   ) => void;
+  onMovePane: (
+    payload: TerminalPaneDragPayload,
+    targetTabId: TabId,
+    target: {
+      paneId: string;
+      direction: TerminalSplit["direction"];
+      position: "before" | "after";
+    },
+  ) => void;
   onClosePane: (tabId: TabId, paneId: string) => void;
   onPaneCwd: (tabId: TabId, paneId: string, cwd: string) => void;
   onPaneActivity: (tabId: TabId, paneId: string) => void;
+  onPaneScrollback: (tabId: TabId, paneId: string, scrollback: string) => void;
   onPaneAgentState: (
     tabId: TabId,
     paneId: string,
@@ -89,9 +100,11 @@ function TerminalStack({
   onActivatePane,
   onSplitRatioChange,
   onSplitPane,
+  onMovePane,
   onClosePane,
   onPaneCwd,
   onPaneActivity,
+  onPaneScrollback,
   onPaneAgentState,
 }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
@@ -111,9 +124,11 @@ function TerminalStack({
   const activateRef = useRef(onActivatePane);
   const ratioRef = useRef(onSplitRatioChange);
   const splitRef = useRef(onSplitPane);
+  const moveRef = useRef(onMovePane);
   const closeRef = useRef(onClosePane);
   const cwdRef = useRef(onPaneCwd);
   const activityRef = useRef(onPaneActivity);
+  const scrollbackRef = useRef(onPaneScrollback);
   const agentStateRef = useRef(onPaneAgentState);
   useEffect(() => {
     detectedRef.current = onDetectedUrl;
@@ -122,11 +137,13 @@ function TerminalStack({
     activateRef.current = onActivatePane;
     ratioRef.current = onSplitRatioChange;
     splitRef.current = onSplitPane;
+    moveRef.current = onMovePane;
     closeRef.current = onClosePane;
     cwdRef.current = onPaneCwd;
     activityRef.current = onPaneActivity;
+    scrollbackRef.current = onPaneScrollback;
     agentStateRef.current = onPaneAgentState;
-  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onClosePane, onPaneCwd, onPaneActivity, onPaneAgentState]);
+  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onPaneCwd, onPaneActivity, onPaneScrollback, onPaneAgentState]);
 
   // Latest tab roots so the + smart-add button can read whichever PaneNode
   // tree is current at click time (a stale capture would split a tree that
@@ -166,6 +183,15 @@ function TerminalStack({
     splitRef.current(tabId, target.paneId, target.direction, autorun);
   }, []);
 
+  const handlesRef = useRef<Map<string, TerminalPaneHandle | null>>(new Map());
+  const lastScrollbackSnapshotRef = useRef<Map<string, number>>(new Map());
+  const snapshotScrollback = useCallback((tabId: TabId, paneId: string) => {
+    const buffer = handlesRef.current.get(paneId)?.getBuffer(500);
+    if (buffer && buffer.trim().length > 0) {
+      scrollbackRef.current(tabId, paneId, buffer);
+    }
+  }, []);
+
   const bundles = useRef(new Map<string, Bundle>());
   // useCallback so the memoized TerminalTabPane gets a stable `getBundle`
   // prop. The bundles themselves are already cached per `tabId:paneId` and
@@ -185,14 +211,22 @@ function TerminalStack({
           onSmartAdd: (autorun?: string) => smartAddInTab(tabId, autorun),
           onClose: () => closeRef.current(tabId, paneId),
           onCwd: (cwd: string) => cwdRef.current(tabId, paneId, cwd),
-          onActivity: () => activityRef.current(tabId, paneId),
+          onActivity: () => {
+            activityRef.current(tabId, paneId);
+            const now = Date.now();
+            const last = lastScrollbackSnapshotRef.current.get(paneId) ?? 0;
+            if (now - last >= 2_000) {
+              lastScrollbackSnapshotRef.current.set(paneId, now);
+              snapshotScrollback(tabId, paneId);
+            }
+          },
           onAgentState: (state) => agentStateRef.current(tabId, paneId, state),
         };
         bundles.current.set(key, b);
       }
       return b;
     },
-    [smartAddInTab],
+    [smartAddInTab, snapshotScrollback],
   );
 
   // Garbage-collect bundles for panes that no longer exist anywhere.
@@ -206,13 +240,27 @@ function TerminalStack({
     }
   }, [terminals]);
 
-  const handlesRef = useRef<Map<string, TerminalPaneHandle | null>>(new Map());
   // useCallback so the per-pane `ref` callback identity is stable across
   // renders (and so the memoized TerminalTabPane gets a stable prop).
   const setHandle = useCallback((paneId: string, h: TerminalPaneHandle | null) => {
     if (h) handlesRef.current.set(paneId, h);
     else handlesRef.current.delete(paneId);
   }, []);
+
+  useEffect(() => {
+    const flushAllScrollback = () => {
+      for (const t of tabsRef.current) {
+        forEachLeaf(t.root, (leaf) => snapshotScrollback(t.id, leaf.paneId));
+      }
+    };
+    window.addEventListener("pagehide", flushAllScrollback);
+    window.addEventListener("beforeunload", flushAllScrollback);
+    return () => {
+      flushAllScrollback();
+      window.removeEventListener("pagehide", flushAllScrollback);
+      window.removeEventListener("beforeunload", flushAllScrollback);
+    };
+  }, [snapshotScrollback]);
 
   // Stable split-ratio callback (routes through the latest-callback ref) so
   // TerminalTabPane can be memoized — it builds its own per-handle closures
@@ -221,6 +269,21 @@ function TerminalStack({
   const onPaneRatioChange = useCallback(
     (tabId: TabId, path: PanePath, ratio: number) => {
       ratioRef.current(tabId, path, ratio);
+    },
+    [],
+  );
+
+  const onPaneDrop = useCallback(
+    (
+      payload: TerminalPaneDragPayload,
+      targetTabId: TabId,
+      target: {
+        paneId: string;
+        direction: TerminalSplit["direction"];
+        position: "before" | "after";
+      },
+    ) => {
+      moveRef.current(payload, targetTabId, target);
     },
     [],
   );
@@ -272,6 +335,7 @@ function TerminalStack({
           setHandle={setHandle}
           getTabRoot={getTabRoot}
           onRatioChange={onPaneRatioChange}
+          onPaneDrop={onPaneDrop}
         />
       ))}
     </div>
@@ -289,6 +353,15 @@ interface TerminalTabPaneProps {
   setHandle: (paneId: string, h: TerminalPaneHandle | null) => void;
   getTabRoot: (tabId: TabId) => HTMLDivElement | null;
   onRatioChange: (tabId: TabId, path: PanePath, ratio: number) => void;
+  onPaneDrop: (
+    payload: TerminalPaneDragPayload,
+    targetTabId: TabId,
+    target: {
+      paneId: string;
+      direction: TerminalSplit["direction"];
+      position: "before" | "after";
+    },
+  ) => void;
 }
 
 // One terminal tab's flattened pane area. Extracted from TerminalStack and
@@ -305,7 +378,9 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   setHandle,
   getTabRoot,
   onRatioChange,
+  onPaneDrop,
 }: TerminalTabPaneProps) {
+  const [dropIntent, setDropIntent] = useState<DropIntent | null>(null);
   // Flatten the pane tree into a positioned leaf list + resize handles.
   // Every leaf is rendered as a sibling keyed by paneId, so splitting or
   // closing a pane only adds/removes keys — the panes that stay put keep
@@ -339,10 +414,45 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
       {leaves.map(({ leaf, rect }) => {
         const bundle = getBundle(tab.id, leaf.paneId);
         const isActive = tab.activePaneId === leaf.paneId;
+        const activeDrop =
+          dropIntent && dropIntent.paneId === leaf.paneId ? dropIntent : null;
         return (
           <div
             key={leaf.paneId}
             onMouseDown={bundle.onActivate}
+            onDragEnter={(event) => {
+              if (!acceptsTerminalPane(event)) return;
+              event.preventDefault();
+              event.stopPropagation();
+              setDropIntent(dropIntentFromEvent(event, leaf.paneId));
+            }}
+            onDragOver={(event) => {
+              if (!acceptsTerminalPane(event)) return;
+              event.preventDefault();
+              event.stopPropagation();
+              event.dataTransfer.dropEffect = "move";
+              setDropIntent(dropIntentFromEvent(event, leaf.paneId));
+            }}
+            onDragLeave={(event) => {
+              if (
+                event.relatedTarget instanceof Node &&
+                event.currentTarget.contains(event.relatedTarget)
+              ) {
+                return;
+              }
+              setDropIntent((current) =>
+                current?.paneId === leaf.paneId ? null : current,
+              );
+            }}
+            onDrop={(event) => {
+              const payload = parseTerminalPaneDrag(event.dataTransfer);
+              if (!payload) return;
+              event.preventDefault();
+              event.stopPropagation();
+              const intent = dropIntentFromEvent(event, leaf.paneId);
+              setDropIntent(null);
+              onPaneDrop(payload, tab.id, intent);
+            }}
             style={{
               position: "absolute",
               left: pct(rect.left),
@@ -355,15 +465,19 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               boxShadow: isActive
                 ? "inset 0 0 0 1px var(--accent)"
                 : "inset 0 0 0 1px transparent",
+              outline: activeDrop ? "1px solid var(--accent)" : "none",
+              outlineOffset: -2,
               transition:
                 "box-shadow var(--motion-fast, 120ms) var(--ease-out, ease-out)",
             }}
           >
+            {activeDrop ? <PaneDropMarker intent={activeDrop} /> : null}
             <TerminalPane
               ref={(h) => setHandle(leaf.paneId, h)}
               sessionId={leaf.paneId}
               shell={shell}
               initialCwd={leaf.cwd}
+              initialScrollback={leaf.scrollback}
               initialCommand={leaf.autorun}
               // A non-active TAB still mounts every pane (so PTYs
               // survive switches); only the active tab's panes take
@@ -379,6 +493,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
             />
             {leaf.worker ? <WorkerChip worker={leaf.worker} /> : null}
             <PaneToolbar
+              dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
               onSmartAdd={bundle.onSmartAdd}
               onSplitRight={bundle.onSplitRight}
               onSplitDown={bundle.onSplitDown}
@@ -426,6 +541,12 @@ interface HandleBox {
   rect: FracRect;
 }
 
+interface DropIntent {
+  paneId: string;
+  direction: TerminalSplit["direction"];
+  position: "before" | "after";
+}
+
 // Visible divider thickness; the grab target is wider so the handle stays
 // easy to hit without a chunky-looking rule.
 const HANDLE_THICKNESS = 4;
@@ -435,6 +556,72 @@ const MAX_RATIO = 0.95;
 
 function pct(fraction: number): string {
   return `${fraction * 100}%`;
+}
+
+function acceptsTerminalPane(event: React.DragEvent): boolean {
+  return Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
+}
+
+function dropIntentFromEvent(
+  event: React.DragEvent<HTMLElement>,
+  paneId: string,
+): DropIntent {
+  const rect = event.currentTarget.getBoundingClientRect();
+  const x = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0.5;
+  const y = rect.height > 0 ? (event.clientY - rect.top) / rect.height : 0.5;
+  const distances = [
+    { edge: "left", value: x },
+    { edge: "right", value: 1 - x },
+    { edge: "top", value: y },
+    { edge: "bottom", value: 1 - y },
+  ].sort((a, b) => a.value - b.value);
+  const edge = distances[0]?.edge ?? "right";
+  if (edge === "left") {
+    return { paneId, direction: "horizontal", position: "before" };
+  }
+  if (edge === "right") {
+    return { paneId, direction: "horizontal", position: "after" };
+  }
+  if (edge === "top") {
+    return { paneId, direction: "vertical", position: "before" };
+  }
+  return { paneId, direction: "vertical", position: "after" };
+}
+
+function PaneDropMarker({ intent }: { intent: DropIntent }) {
+  const horizontal = intent.direction === "horizontal";
+  const before = intent.position === "before";
+  const previewStyle = horizontal
+    ? {
+        top: 0,
+        bottom: 0,
+        width: "50%",
+        left: before ? 0 : undefined,
+        right: before ? undefined : 0,
+      }
+    : {
+        left: 0,
+        right: 0,
+        height: "50%",
+        top: before ? 0 : undefined,
+        bottom: before ? undefined : 0,
+      };
+  return (
+    <div
+      aria-hidden
+      style={{
+        position: "absolute",
+        zIndex: 7,
+        pointerEvents: "none",
+        border: "1px solid color-mix(in oklch, var(--accent) 42%, transparent)",
+        background:
+          "color-mix(in oklch, var(--accent) 10%, transparent)",
+        boxShadow:
+          "inset 0 0 0 1px color-mix(in oklch, var(--accent) 20%, transparent), inset 0 0 30px color-mix(in oklch, var(--accent) 13%, transparent), 0 0 20px color-mix(in oklch, var(--accent) 16%, transparent)",
+        ...previewStyle,
+      }}
+    />
+  );
 }
 
 // Walk the pane tree once, appending a LeafBox for every leaf and a HandleBox
@@ -571,6 +758,7 @@ function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps
 }
 
 interface PaneToolbarProps {
+  dragPayload: TerminalPaneDragPayload;
   onSmartAdd: (autorun?: string) => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
@@ -580,7 +768,7 @@ interface PaneToolbarProps {
 const CLAUDE_LAUNCH_COMMAND = "claude --dangerously-skip-permissions";
 const CODEX_LAUNCH_COMMAND = "codex --yolo";
 
-function PaneToolbar({ onSmartAdd, onSplitRight, onSplitDown, onClose }: PaneToolbarProps) {
+function PaneToolbar({ dragPayload, onSmartAdd, onSplitRight, onSplitDown, onClose }: PaneToolbarProps) {
   const stop = (e: React.MouseEvent | React.PointerEvent) => e.stopPropagation();
   const [menuOpen, setMenuOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -643,6 +831,16 @@ function PaneToolbar({ onSmartAdd, onSplitRight, onSplitDown, onClose }: PaneToo
         if (!menuOpen) e.currentTarget.style.opacity = "0.55";
       }}
     >
+      <PaneDragHandle payload={dragPayload} />
+      <span
+        aria-hidden
+        style={{
+          width: 1,
+          alignSelf: "stretch",
+          margin: "2px 1px",
+          background: "color-mix(in oklch, var(--rule-soft) 70%, transparent)",
+        }}
+      />
       <ToolbarButton
         ref={plusRef}
         title="Add pane…"
@@ -680,6 +878,45 @@ function PaneToolbar({ onSmartAdd, onSplitRight, onSplitDown, onClose }: PaneToo
         />
       )}
     </div>
+  );
+}
+
+function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }) {
+  const [dragging, setDragging] = useState(false);
+  return (
+    <span
+      role="button"
+      tabIndex={-1}
+      draggable
+      title="Drag pane to tab bar"
+      aria-label="Drag pane to tab bar"
+      onMouseDown={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onDragStart={(event) => {
+        event.stopPropagation();
+        setDragging(true);
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData(TERMINAL_PANE_DRAG_MIME, JSON.stringify(payload));
+        event.dataTransfer.setData("text/plain", "Spark terminal pane");
+      }}
+      onDragEnd={(event) => {
+        event.stopPropagation();
+        setDragging(false);
+      }}
+      style={{
+        width: 20,
+        height: 20,
+        borderRadius: 5,
+        color: dragging ? "var(--accent)" : "var(--ink-dim)",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        cursor: dragging ? "grabbing" : "grab",
+        background: dragging ? "color-mix(in oklch, var(--accent) 18%, transparent)" : "transparent",
+      }}
+    >
+      <DragHandleIcon size={12} />
+    </span>
   );
 }
 

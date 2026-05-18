@@ -12,6 +12,7 @@ import type {
   FsEntry,
   FsFileContent,
   FsReadResult,
+  GitCommitMessageResult,
   GitDiff,
   GitFileChange,
   GitLog,
@@ -146,6 +147,8 @@ const api = {
       ipcRenderer.invoke("git:discard", { cwd, files }),
     commit: (cwd: string, message: string): Promise<GitOpResult> =>
       ipcRenderer.invoke("git:commit", { cwd, message }),
+    generateCommitMessage: (cwd: string): Promise<GitCommitMessageResult> =>
+      ipcRenderer.invoke("git:generateCommitMessage", cwd),
     push: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:push", cwd),
     pull: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:pull", cwd),
     fetch: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:fetch", cwd),

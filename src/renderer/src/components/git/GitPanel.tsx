@@ -233,6 +233,22 @@ export default function GitPanel({
     void runAction("undo", () => window.spark.git.undoLastCommit(cwd));
   }, [cwd, runAction]);
 
+  const handleGenerateMessage = useCallback(async (): Promise<void> => {
+    if (!cwd || busyRef.current) return;
+    setBusy("generateMessage");
+    setOpError(null);
+    try {
+      const result = await window.spark.git.generateCommitMessage(cwd);
+      if (result.ok) setMessage(result.message);
+      else setOpError(result.error);
+    } catch (err) {
+      setOpError((err as Error).message);
+    } finally {
+      setBusy(null);
+      void refresh(true);
+    }
+  }, [cwd, refresh]);
+
   // Commit. With nothing staged, stage everything first so the button can
   // double as "Commit All" — matching VS Code's behaviour.
   const handleCommit = useCallback(async (): Promise<void> => {
@@ -280,6 +296,7 @@ export default function GitPanel({
   const unstagedCount = unstaged.length;
   const changeCount = stagedCount + unstagedCount;
   const canCommit = message.trim().length > 0 && changeCount > 0;
+  const canGenerateMessage = changeCount > 0;
   const commitLabel = stagedCount === 0 && unstagedCount > 0 ? "Commit All" : "Commit";
 
   return (
@@ -349,7 +366,9 @@ export default function GitPanel({
                 message={message}
                 onMessageChange={setMessage}
                 onCommit={() => void handleCommit()}
+                onGenerateMessage={() => void handleGenerateMessage()}
                 canCommit={canCommit}
+                canGenerateMessage={canGenerateMessage}
                 commitLabel={commitLabel}
                 stagedCount={stagedCount}
                 busy={busy}

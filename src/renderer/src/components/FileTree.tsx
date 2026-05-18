@@ -91,6 +91,15 @@ function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
+// File extensions Spark can run as a plan via the explorer's right-click
+// "Run plan" action. A plan is just text handed to the manager, so markdown
+// and rendered HTML docs both qualify.
+const PLAN_FILE_EXTS = new Set(["md", "markdown", "html", "htm"]);
+
+function isRunnablePlan(entry: FsEntry): boolean {
+  return !entry.isDir && PLAN_FILE_EXTS.has((entry.ext ?? "").toLowerCase());
+}
+
 interface DirNode {
   entry: FsEntry;
   open: boolean;
@@ -112,6 +121,8 @@ interface Props {
   onOpenFile: (entry: FsEntry) => void;
   onDeleteFile?: (path: string) => void;
   onRenameFile?: (oldPath: string, entry: FsEntry) => void;
+  // Right-click a .md/.html file to hand it to the orchestrator as a plan.
+  onRunPlan?: (entry: FsEntry) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
 }
@@ -133,6 +144,7 @@ export default function FileTree({
   onOpenFile,
   onDeleteFile,
   onRenameFile,
+  onRunPlan,
   collapsed,
   onToggleCollapse,
 }: Props) {
@@ -572,6 +584,15 @@ export default function FileTree({
       {contextMenu && (
         <FileMenu
           menu={contextMenu}
+          onRunPlan={
+            onRunPlan && isRunnablePlan(contextMenu.entry)
+              ? () => {
+                  const entry = contextMenu.entry;
+                  setContextMenu(null);
+                  onRunPlan(entry);
+                }
+              : null
+          }
           onOpen={
             contextMenu.entry.isDir
               ? null
@@ -867,6 +888,7 @@ const Row = React.memo(function Row({
 
 function FileMenu({
   menu,
+  onRunPlan,
   onOpen,
   onNewFile,
   onNewFolder,
@@ -875,6 +897,7 @@ function FileMenu({
   onDelete,
 }: {
   menu: FileContextMenu;
+  onRunPlan: (() => void) | null;
   onOpen: (() => void) | null;
   onNewFile: () => void;
   onNewFolder: () => void;
@@ -938,6 +961,14 @@ function FileMenu({
           </span>
         </div>
       </div>
+      {onRunPlan && (
+        <>
+          <MenuButton icon="▶" accent onClick={onRunPlan}>
+            Run plan
+          </MenuButton>
+          <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
+        </>
+      )}
       {onOpen && <MenuButton icon="O" onClick={onOpen} hint="Enter">Open</MenuButton>}
       <MenuButton icon="N" onClick={onNewFile}>New File</MenuButton>
       <MenuButton icon="F" onClick={onNewFolder}>New Folder</MenuButton>
@@ -964,12 +995,14 @@ function MenuButton({
   icon,
   hint,
   danger,
+  accent,
   onClick,
 }: {
   children: React.ReactNode;
   icon: string;
   hint?: string;
   danger?: boolean;
+  accent?: boolean;
   onClick: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -982,7 +1015,13 @@ function MenuButton({
         width: "100%",
         border: "none",
         background: hovered ? "var(--panel)" : "transparent",
-        color: danger ? "var(--danger)" : hovered ? "var(--ink)" : "var(--ink-dim)",
+        color: danger
+          ? "var(--danger)"
+          : accent
+            ? "var(--accent)"
+            : hovered
+              ? "var(--ink)"
+              : "var(--ink-dim)",
         borderRadius: 6,
         padding: "7px 8px",
         textAlign: "left",
@@ -1004,7 +1043,7 @@ function MenuButton({
           height: 18,
           border: "1px solid transparent",
           borderRadius: 999,
-          color: danger ? "var(--danger)" : "var(--muted)",
+          color: danger ? "var(--danger)" : accent ? "var(--accent)" : "var(--muted)",
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",

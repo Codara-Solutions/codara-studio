@@ -22,6 +22,7 @@ import TerminalStack from "./tabs/TerminalStack";
 import PreviewStack from "./tabs/PreviewStack";
 import RunsStack from "./tabs/RunsStack";
 import { useTabs } from "./tabs/useTabs";
+import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
 import type { PaneNode, Tab, TerminalLeaf } from "./tabs/types";
 import { basename } from "./path-utils";
 import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
@@ -152,7 +153,7 @@ export default function App() {
   const [showRight, setShowRight] = useState(true);
   const [runCountsByWorkspace, setRunCountsByWorkspace] = useState<Record<string, number>>({});
   // Runs for the currently active workspace, plus the user's selection. Lifted
-  // here so the workbench RunsView and the right-panel SparkAgentPanel both
+  // here so the workbench RunsView and the right-panel chat panel both
   // read from the same source of truth — picking a run on the right updates
   // the canvas in the centre, deleting a run on the right removes it
   // everywhere.
@@ -183,6 +184,7 @@ export default function App() {
   // lifecycle events → reviewing → complete); refreshing on every one would
   // fire dozens of IPC round-trips. We coalesce a burst into one refresh.
   const runRefreshTimer = useRef<number | null>(null);
+  const processedSpawnTerminalEventsRef = useRef<Set<string>>(new Set());
   // Set of workspace ids that received an orchestration event since the last
   // debounced flush — so the flush refreshes counts for exactly the affected
   // workspaces (not a blanket re-list of everything).
@@ -212,9 +214,21 @@ export default function App() {
     paneRuntimeRef.current.set(paneId, entry);
   }, []);
 
+  const handlePaneScrollback = useCallback(
+    (tabId: string, paneId: string, scrollback: string) => {
+      tabsRef.current?.setLeafScrollback(tabId, paneId, scrollback);
+    },
+    [],
+  );
+
+  const activeWorkspace = useMemo(
+    () => workspaces.find((w) => w.id === activeId) ?? null,
+    [workspaces, activeId],
+  );
+
   // Tabs are scoped per-workspace so each workspace remembers its own layout.
   // useTabs internally swaps tab lists when the workspaceId argument changes.
-  const tabs = useTabs(activeId);
+  const tabs = useTabs(activeId, activeWorkspace?.cwd);
 
   // useTabs returns a fresh object every render, which would force any
   // useCallback/useEffect that depends on `tabs` to re-run on every render.
@@ -224,37 +238,49 @@ export default function App() {
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
 
+  // Mirror the runs list through a ref so run-selection callbacks can read
+  // the latest chat titles without taking `runs` as a dependency.
+  const runsRef = useRef(runs);
+  runsRef.current = runs;
+
   // Selecting a run must always be visible — if the user closed the Runs
   // tab earlier, we transparently re-open it and route them to the picked
   // run. Without this, picking a run row (or starting a new run) silently
   // updates state and the user sees no UI change.
   const handleSelectRun = useCallback((runId: string | null) => {
     setActiveRunId(runId);
-    if (runId === null) return;
-    const t = tabsRef.current;
-    const existing = t.tabs.find((tab) => tab.kind === "runs");
-    if (existing) {
-      t.setActiveTab(existing.id);
-    } else {
-      t.newRunsTab(null);
+    if (runId === null) {
+      tabsRef.current.hideRunsTabs();
+      return;
     }
+    // Selecting a chat focuses its node-graph tab in the workbench. The
+    // background effect below keeps the tab in existence; this is the
+    // explicit-navigation path, so it focuses.
+    tabsRef.current.openRunsTab(runId, "Runs", true);
   }, []);
 
-  // Auto-reopen a runs tab whenever a run is in flight and no tab is
-  // currently showing it. Covers the "I closed Runs, then started a new
-  // run" case — selectRun is called from the orchestration sidebar, but
-  // the runs list itself drives this effect so even external triggers
-  // (autopilot resume, headless run) will surface a tab.
+  // Keep the active chat's node-graph tab in existence without stealing
+  // focus — handleSelectRun focuses it on explicit navigation; this only
+  // guarantees the tab survives a reload and keeps its label synced to the
+  // run title. A live run emitting events therefore can't yank the user off
+  // an editor tab.
   useEffect(() => {
-    if (runs.length === 0) return;
-    const live = runs.find((r) =>
-      ["planning", "running", "reviewing", "blocked", "paused"].includes(r.status),
-    );
-    if (!live) return;
-    const t = tabsRef.current;
-    const hasRunsTab = t.tabs.some((tab) => tab.kind === "runs");
-    if (!hasRunsTab) t.newRunsTab(null);
-  }, [runs]);
+    if (!activeRunId) {
+      tabsRef.current.hideRunsTabs();
+      return;
+    }
+    tabsRef.current.openRunsTab(activeRunId, "Runs", false);
+  }, [activeRunId, runs]);
+
+  // Mirror the workbench selection back into the active chat: clicking a
+  // chat's node-graph tab makes the right-side chat panel follow along.
+  useEffect(() => {
+    const tab = tabs.activeTab;
+    if (tab && tab.kind === "runs" && tab.runId) {
+      const runId = tab.runId;
+      setActiveRunId((current) => (current === runId ? current : runId));
+    }
+  }, [tabs.activeTab]);
 
   // Initial load
   useEffect(() => {
@@ -330,10 +356,6 @@ export default function App() {
     if (!showLeft) setEditingId(null);
   }, [showLeft]);
 
-  const activeWorkspace = useMemo(
-    () => workspaces.find((w) => w.id === activeId) ?? null,
-    [workspaces, activeId],
-  );
   const workspaceIdsKey = useMemo(() => workspaces.map((w) => w.id).join("\0"), [workspaces]);
 
   // Mirror the active workspace id through a ref so the orchestration event
@@ -377,11 +399,13 @@ export default function App() {
     void refreshRunsFor(activeId);
   }, [activeId, booted, refreshRunsFor]);
 
-  // When the runs list changes, reconcile the active selection: keep the
-  // current pick if it's still present, otherwise jump to the most live one,
-  // otherwise the most recent, otherwise nothing.
+  // When the runs list changes, reconcile the active selection. A null
+  // selection is intentional now (the draft/new-chat state), so don't jump
+  // into the latest run unless the user actually had a selected chat that
+  // disappeared.
   useEffect(() => {
     setActiveRunId((current) => {
+      if (!current) return null;
       if (current && runs.some((run) => run.id === current)) return current;
       const live = runs.find((run) =>
         ["planning", "running", "reviewing", "blocked", "paused"].includes(run.status),
@@ -461,6 +485,7 @@ export default function App() {
       // re-mark the workspace ~500ms later so the regular debounced flush
       // re-lists it once things have quiesced.
       if (event.type === "run.deleted") {
+        if (event.runId) tabsRef.current.closeRunsTabFor(event.runId);
         const deletedWorkspaceId = event.workspaceId;
         window.setTimeout(() => {
           runRefreshPendingRef.current.add(deletedWorkspaceId);
@@ -469,6 +494,33 @@ export default function App() {
           }
           runRefreshTimer.current = window.setTimeout(flushRunRefresh, RUN_REFRESH_DEBOUNCE_MS);
         }, 500);
+      }
+
+      // A spawn_terminals decision: Spark opened interactive terminals for
+      // the user to drive. Each request gets a fresh numbered terminal tab
+      // so it doesn't disturb whatever terminal layout the user already has.
+      if (event.type === "spark.spawn_terminals") {
+        if (processedSpawnTerminalEventsRef.current.has(event.id)) return;
+        processedSpawnTerminalEventsRef.current.add(event.id);
+        const payload = event.payload as
+          | { terminals?: Array<{ command?: unknown; runtime?: unknown }> }
+          | undefined;
+        const cwd = workspacesRef.current.find(
+          (w) => w.id === event.workspaceId,
+        )?.cwd;
+        const specs = (payload?.terminals ?? [])
+          .map((spec) => ({
+            command: typeof spec.command === "string" ? spec.command : "",
+            runtime: typeof spec.runtime === "string" ? spec.runtime : "",
+          }))
+          .filter((spec) => spec.command.length > 0);
+        if (specs.length > 0) {
+          window.setTimeout(() => {
+            window.requestAnimationFrame(() => {
+              tabsRef.current.newTerminalGrid(cwd, specs);
+            });
+          }, 0);
+        }
       }
     });
   }, [booted, refreshRunCount, refreshRunsFor]);
@@ -784,6 +836,35 @@ export default function App() {
     [tabs],
   );
 
+  // Right-click "Run plan" in the explorer: read the file and hand it to the
+  // orchestrator as the plan for a brand-new chat, then select that chat so
+  // its conversation and node-graph tab come forward.
+  const handleRunPlan = useCallback(
+    async (entry: FsEntry) => {
+      const ws = activeWorkspace;
+      if (!ws) return;
+      try {
+        const file = await window.spark.fs.readText(entry.path);
+        const run = await window.spark.orchestration.startAutopilot({
+          workspaceId: ws.id,
+          workspaceName: ws.name,
+          cwd: ws.cwd,
+          planPath: entry.path,
+          planTitle: entry.name,
+          planText: file.content,
+        });
+        handleSelectRun(run.id);
+        void refreshRunsFor(ws.id);
+      } catch (err) {
+        // A pre-run failure here is rare (the file vanished between the
+        // right-click and the read); planning failures instead surface on
+        // the run itself as a failed status with events in the chat.
+        console.error("Run plan failed:", err);
+      }
+    },
+    [activeWorkspace, refreshRunsFor, handleSelectRun],
+  );
+
   // Open a file by absolute path. Used by the terminal's OSC 8888 handler
   // (`tp <file>` / `spark_open <file>` from a shell) and the Source Control
   // panel's "open file" action. Reads `tabs` via the ref so the callback stays
@@ -870,6 +951,17 @@ export default function App() {
     // to type without any modal.
     tabs.newPreviewTab("");
   }, [tabs]);
+
+  const handleTerminalPaneDropToTab = useCallback(
+    (payload: TerminalPaneDragPayload, targetTabId?: string) => {
+      if (targetTabId) {
+        tabs.moveTerminalPane(payload.tabId, payload.paneId, targetTabId);
+        return;
+      }
+      tabs.detachTerminalPaneToNewTab(payload.tabId, payload.paneId);
+    },
+    [tabs],
+  );
 
   const handlePreviewUrlChange = useCallback(
     (id: string, url: string) => {
@@ -1143,10 +1235,12 @@ export default function App() {
               onPreviewUrlChange={handlePreviewUrlChange}
               onPaneCwd={handlePaneCwd}
               onPaneActivity={handlePaneActivity}
+              onPaneScrollback={handlePaneScrollback}
               onTerminalPaneAgentState={onTerminalPaneAgentState}
               onNewTerminalTab={handleNewTerminalTab}
               onNewEditorTab={handleNewEditorTab}
               onNewPreviewTab={handleNewPreviewTab}
+              onTerminalPaneDrop={handleTerminalPaneDropToTab}
             />
           )}
         </main>
@@ -1178,6 +1272,7 @@ export default function App() {
             onOpenFile={openEditorFile}
             onDeleteFile={handleDeleteFile}
             onRenameFile={handleRenameFile}
+            onRunPlan={handleRunPlan}
             onSplitChange={panels.setRightSplit}
             onToggleAgent={toggleAgentSection}
             onToggleExplorer={toggleExplorerSection}
@@ -1246,6 +1341,7 @@ interface WorkspaceProps {
   onPreviewUrlChange: (id: string, url: string) => void;
   onPaneCwd: (tabId: string, paneId: string, cwd: string) => void;
   onPaneActivity: (tabId: string, paneId: string) => void;
+  onPaneScrollback: (tabId: string, paneId: string, scrollback: string) => void;
   onTerminalPaneAgentState: (
     tabId: string,
     paneId: string,
@@ -1254,6 +1350,7 @@ interface WorkspaceProps {
   onNewTerminalTab: () => void;
   onNewEditorTab: () => void;
   onNewPreviewTab: () => void;
+  onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: string) => void;
 }
 
 // Memoized: every prop is either referentially stable (the `tabs` object,
@@ -1273,10 +1370,12 @@ const Workspace = React.memo(function Workspace({
   onPreviewUrlChange,
   onPaneCwd,
   onPaneActivity,
+  onPaneScrollback,
   onTerminalPaneAgentState,
   onNewTerminalTab,
   onNewEditorTab,
   onNewPreviewTab,
+  onTerminalPaneDrop,
 }: WorkspaceProps) {
   return (
     <div
@@ -1296,6 +1395,7 @@ const Workspace = React.memo(function Workspace({
         onNewTerminal={onNewTerminalTab}
         onNewEditor={onNewEditorTab}
         onNewPreview={onNewPreviewTab}
+        onTerminalPaneDrop={onTerminalPaneDrop}
       />
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
         <EditorStack
@@ -1318,9 +1418,13 @@ const Workspace = React.memo(function Workspace({
           onSplitPane={(tabId, paneId, direction, autorun) =>
             tabs.splitTerminalPane(tabId, paneId, direction, autorun)
           }
+          onMovePane={(payload, targetTabId, target) =>
+            tabs.moveTerminalPane(payload.tabId, payload.paneId, targetTabId, target)
+          }
           onClosePane={(tabId, paneId) => tabs.closeTerminalPane(tabId, paneId)}
           onPaneCwd={onPaneCwd}
           onPaneActivity={onPaneActivity}
+          onPaneScrollback={onPaneScrollback}
           onPaneAgentState={onTerminalPaneAgentState}
         />
         <PreviewStack
@@ -1362,6 +1466,7 @@ const RightPanel = React.memo(function RightPanel({
   onOpenFile,
   onDeleteFile,
   onRenameFile,
+  onRunPlan,
   onSplitChange,
   onToggleAgent,
   onToggleExplorer,
@@ -1378,6 +1483,7 @@ const RightPanel = React.memo(function RightPanel({
   onOpenFile: (entry: FsEntry) => void;
   onDeleteFile: (path: string) => void;
   onRenameFile: (oldPath: string, entry: FsEntry) => void;
+  onRunPlan: (entry: FsEntry) => void;
   onSplitChange: (ratio: number) => void;
   onToggleAgent: () => void;
   onToggleExplorer: () => void;
@@ -1457,6 +1563,7 @@ const RightPanel = React.memo(function RightPanel({
               onOpenFile={onOpenFile}
               onDeleteFile={onDeleteFile}
               onRenameFile={onRenameFile}
+              onRunPlan={onRunPlan}
               collapsed={explorerCollapsed}
               onToggleCollapse={onToggleExplorer}
             />

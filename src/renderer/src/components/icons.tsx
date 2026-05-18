@@ -197,6 +197,27 @@ export function SplitDownIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+export function DragHandleIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+    >
+      <circle cx="5" cy="4" r="0.65" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="4" r="0.65" fill="currentColor" stroke="none" />
+      <circle cx="5" cy="7" r="0.65" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="7" r="0.65" fill="currentColor" stroke="none" />
+      <circle cx="5" cy="10" r="0.65" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="10" r="0.65" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
 export function ChevronIcon({ open }: { open: boolean }) {
   return (
     <span

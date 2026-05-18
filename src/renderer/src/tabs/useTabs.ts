@@ -3,7 +3,9 @@ import type { FsEntry } from "@shared/types";
 import { makeId } from "@shared/ids";
 import { basename } from "../path-utils";
 import {
+  collectLeaves,
   findLeaf,
+  insertLeafAtLeaf,
   leaf,
   nextLeafAfter,
   removeLeaf,
@@ -15,10 +17,12 @@ import {
 } from "./paneTree";
 import type {
   EditorTab,
+  PaneNode,
   PreviewTab,
   RunsTab,
   Tab,
   TabId,
+  TerminalLeaf,
   TerminalLeafWorker,
   TerminalSplit,
   TerminalTab,
@@ -39,10 +43,13 @@ import type {
 // store's open + close pair.
 
 const STORAGE_KEY_PREFIX = "spark.tabs:";
-// v3 drops the removed "project"/CRM tab kind. v2 introduced the recursive
-// PaneNode tree on TerminalTab. Bumping the version discards older layouts
-// on load — the user just loses their tab strip, not any code.
-const TAB_VERSION = 3;
+// v4: chat-scoped Runs tabs. Empty/global Runs placeholders are migrated out
+// on load so existing editor/terminal tabs survive this UX cleanup. v3 dropped the
+// removed "project"/CRM tab kind. v2 introduced the recursive PaneNode tree on
+// TerminalTab. Bumping the version discards older layouts on load — the user
+// just loses their tab strip, not any code.
+const TAB_VERSION = 4;
+const MAX_TERMINAL_SCROLLBACK_CHARS = 40_000;
 
 interface PersistedShape {
   v: number;
@@ -64,38 +71,60 @@ function titleFromUrl(url: string): string {
   }
 }
 
-function manualWorkerForCommand(command: string | undefined, paneId: string): TerminalLeafWorker | null {
-  const executable = command?.trim().split(/\s+/)[0]?.toLowerCase();
-  const runtime =
-    executable === "claude" || executable?.endsWith("/claude") || executable?.endsWith("\\claude")
-      ? "claude"
-      : executable === "codex" || executable?.endsWith("/codex") || executable?.endsWith("\\codex")
-        ? "codex"
-        : executable === "opencode" || executable?.endsWith("/opencode") || executable?.endsWith("\\opencode")
-          ? "opencode"
-          : undefined;
-  if (!runtime) return null;
+// Build a balanced split tree from N leaves so a batch of spawned agent
+// terminals lands as a grid (2 -> side by side, 4 -> 2x2, ...) with every
+// pane visible at once. Halves the list at each level alternating split
+// direction; the ratio follows the leaf-count split so panes come out
+// roughly equal-area. Callers must pass at least one leaf.
+function buildPaneGrid(
+  leaves: TerminalLeaf[],
+  direction: TerminalSplit["direction"],
+): PaneNode {
+  if (leaves.length <= 1) return leaves[0];
+  const head = Math.ceil(leaves.length / 2);
+  const flip = direction === "horizontal" ? "vertical" : "horizontal";
   return {
-    runtime,
-    runId: "manual",
-    workerTaskId: `manual-${paneId}`,
-    attemptId: paneId,
-    source: "manual",
-    state: "running",
+    kind: "split",
+    direction,
+    ratio: head / leaves.length,
+    a: buildPaneGrid(leaves.slice(0, head), flip),
+    b: buildPaneGrid(leaves.slice(head), flip),
   };
 }
 
-function defaultRunsTab(): RunsTab {
+function terminalTitleForIndex(index: number): string {
+  return index === 0 ? "terminals" : `terminals ${index + 1}`;
+}
+
+function normalizeTerminalTitles(tabs: Tab[]): Tab[] {
+  let terminalIndex = 0;
+  let changed = false;
+  const next = tabs.map((tab) => {
+    if (tab.kind !== "terminal") return tab;
+    const title = terminalTitleForIndex(terminalIndex);
+    terminalIndex += 1;
+    if (tab.title === title) return tab;
+    changed = true;
+    return { ...tab, title };
+  });
+  return changed ? next : tabs;
+}
+
+function createTerminalTab(cwd?: string, autorun?: string, title = "terminals"): TerminalTab {
+  const id = makeId("term");
+  const paneId = makeId("pane");
+  const root = leaf(paneId, cwd, autorun);
   return {
-    id: makeId("runs"),
-    kind: "runs",
-    title: "Runs",
-    runId: null,
+    id,
+    kind: "terminal",
+    title,
+    root,
+    activePaneId: paneId,
   };
 }
 
-function defaultTabs(): Tab[] {
-  return [defaultRunsTab()];
+function defaultTabs(cwd?: string): Tab[] {
+  return [createTerminalTab(cwd)];
 }
 
 function loadPersisted(workspaceId: string | null): PersistedShape | null {
@@ -112,6 +141,10 @@ function loadPersisted(workspaceId: string | null): PersistedShape | null {
     // pointed at died when the app closed, so the leaf is actually idle.
     // Without this, a leaf that hosted a worker at shutdown would be stuck
     // visually showing a running chip and would never be claimed again.
+    // Runs tabs are derived from the selected chat, not durable workspace
+    // layout. Keep persisted editor/terminal/preview tabs, then recreate the
+    // Runs tab only when App selects a chat.
+    parsed.tabs = normalizeTerminalTitles(parsed.tabs.filter((tab) => tab.kind !== "runs"));
     for (const tab of parsed.tabs) {
       if (tab.kind === "terminal") cleanupStaleWorkers(tab.root);
       if (tab.kind === "runs" && (tab.title === "Runs" || tab.title === "Ops")) tab.title = "Runs";
@@ -124,21 +157,15 @@ function loadPersisted(workspaceId: string | null): PersistedShape | null {
 
 function cleanupStaleWorkers(node: import("./types").PaneNode): void {
   if (node.kind === "leaf") {
-    // Autorun panes (Claude/Codex worker entries from the AddPane menu)
-    // re-launch on mount, so set the manual worker fresh — useTerminalSession
-    // will re-fire running=true once the banner is detected anyway, but this
-    // keeps the chip visible during the 1500ms autorun delay.
-    const manualWorker = manualWorkerForCommand(node.autorun, node.paneId);
-    if (manualWorker) {
-      node.worker = manualWorker;
-      return;
-    }
     if (!node.worker) return;
-    // Manual workers (user-typed agent) have no lifecycle outside the live
-    // PTY, so a manual worker persisted from a previous session is by
-    // definition stale — wipe it. The sniffer will re-add a chip if the
-    // pane has the agent's banner still on screen after re-mount.
-    if (node.worker.source === "manual") {
+    // Manual/autorun workers have no durable lifecycle outside the live PTY.
+    // A restored pane is idle until useTerminalSession sees a fresh Claude or
+    // Codex start signal, so remove both current and legacy manual markers.
+    if (
+      node.worker.source === "manual" ||
+      node.worker.runId === "manual" ||
+      node.worker.workerTaskId.startsWith("manual-")
+    ) {
       node.worker = null;
       return;
     }
@@ -155,7 +182,7 @@ function persist(workspaceId: string | null, tabs: Tab[], activeId: TabId | null
   const key = storageKey(workspaceId);
   if (!key) return;
   try {
-    const payload: PersistedShape = { v: TAB_VERSION, tabs, activeId };
+    const payload: PersistedShape = { v: TAB_VERSION, tabs: normalizeTerminalTitles(tabs), activeId };
     window.localStorage.setItem(key, JSON.stringify(payload));
   } catch {
     // Quota exceeded or storage unavailable; persistence is best-effort.
@@ -168,7 +195,7 @@ function persist(workspaceId: string | null, tabs: Tab[], activeId: TabId | null
 // JSON.parse + a recursive cleanupStaleWorkers walk) only runs once per
 // mount/switch instead of three times. Falls back to the default tab set
 // when nothing is persisted (or the persisted blob is a stale version).
-function initialTabsState(workspaceId: string | null): {
+function initialTabsState(workspaceId: string | null, defaultCwd?: string): {
   tabs: Tab[];
   activeId: TabId | null;
 } {
@@ -180,7 +207,7 @@ function initialTabsState(workspaceId: string | null): {
         : loaded.tabs[0].id;
     return { tabs: loaded.tabs, activeId };
   }
-  const seed = defaultTabs();
+  const seed = defaultTabs(defaultCwd);
   return { tabs: seed, activeId: seed[0].id };
 }
 
@@ -196,7 +223,33 @@ export interface UseTabsApi {
   selectByIndex: (idx: number) => void;
   setDirty: (id: TabId, dirty: boolean) => void;
   setDetectedUrl: (tabId: TabId, paneId: string, url: string) => void;
-  newTerminalTab: (cwd?: string, autorun?: string, title?: string) => TabId;
+  newTerminalTab: (cwd?: string, autorun?: string) => TabId;
+  // Open ONE terminal tab whose panes are split into a grid — used when Spark
+  // spawns a batch of standing agent terminals, so the user sees them all at
+  // once. One pane per spec, each autorunning its agent command.
+  newTerminalGrid: (
+    cwd: string | undefined,
+    specs: Array<{ command: string; runtime?: string }>,
+  ) => TabId;
+  // Add a batch of agent panes into an EXISTING terminal tab as a grid,
+  // alongside whatever panes that tab already holds. Used when Spark spawns
+  // standing terminals and the user already has a terminal tab open.
+  addAgentGridToTab: (
+    tabId: TabId,
+    cwd: string | undefined,
+    specs: Array<{ command: string; runtime?: string }>,
+  ) => void;
+  detachTerminalPaneToNewTab: (tabId: TabId, paneId: string) => TabId | null;
+  moveTerminalPane: (
+    sourceTabId: TabId,
+    paneId: string,
+    targetTabId: TabId,
+    target?: {
+      paneId: string;
+      direction: TerminalSplit["direction"];
+      position: "before" | "after";
+    },
+  ) => boolean;
   splitTerminalPane: (
     tabId: TabId,
     paneId: string,
@@ -207,6 +260,7 @@ export interface UseTabsApi {
   setActiveTerminalPane: (tabId: TabId, paneId: string) => void;
   setTerminalSplitRatio: (tabId: TabId, path: PanePath, ratio: number) => void;
   setLeafCwd: (tabId: TabId, paneId: string, cwd: string) => void;
+  setLeafScrollback: (tabId: TabId, paneId: string, scrollback: string) => void;
   setLeafWorker: (tabId: TabId, paneId: string, worker: TerminalLeafWorker | null) => void;
   // Rename a leaf's paneId. The old TerminalPane unmounts (which dispose()s
   // the old PTY); a new one mounts at the new id and spawns at it. Used by
@@ -222,7 +276,13 @@ export interface UseTabsApi {
     options?: { rootWidth?: number; rootHeight?: number; cwd?: string; worker?: TerminalLeafWorker | null },
   ) => boolean;
   newPreviewTab: (url: string) => TabId;
-  newRunsTab: (runId: string | null) => TabId;
+  // Open (or relabel) the runs tab bound to a chat. Each chat owns exactly
+  // one runs tab. `focus` selects it too — true for explicit navigation,
+  // false for the background "ensure the active chat has a tab" effect.
+  openRunsTab: (runId: string, title: string, focus: boolean) => TabId;
+  hideRunsTabs: () => void;
+  // Close the runs tab bound to a chat (used when the chat is deleted).
+  closeRunsTabFor: (runId: string) => void;
   openEditorTab: (entry: FsEntry) => TabId;
   setEditorEntry: (oldPath: string, entry: FsEntry) => void;
   closeEditorByPath: (path: string) => void;
@@ -232,7 +292,7 @@ export interface UseTabsApi {
   registerDispose: (id: TabId, fn: () => void) => void;
 }
 
-export function useTabs(workspaceId: string | null): UseTabsApi {
+export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTabsApi {
   // Parse the persisted layout ONCE for the initial mount. The previous
   // implementation called loadPersisted from both useState initializers,
   // re-doing the JSON.parse + recursive cleanupStaleWorkers walk twice; a
@@ -240,9 +300,15 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
   // that to one parse. We keep `tabs` and `activeId` as separate useState
   // cells (so the many mutating callbacks below stay untouched) and just
   // seed both from one computed snapshot.
-  const initial = useState(() => initialTabsState(workspaceId))[0];
+  const initial = useState(() => initialTabsState(workspaceId, defaultCwd))[0];
   const [tabs, setTabs] = useState<Tab[]>(initial.tabs);
   const [activeId, setActiveId] = useState<TabId | null>(initial.activeId);
+  const defaultCwdRef = useRef(defaultCwd);
+  defaultCwdRef.current = defaultCwd;
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
 
   // When the workspace switches, swap tabs to the new workspace's persisted
   // set (or seed a default Runs tab). We deliberately reset rather than
@@ -258,9 +324,13 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
       firstRunRef.current = false;
       return;
     }
-    const next = initialTabsState(workspaceId);
+    const next = initialTabsState(workspaceId, defaultCwdRef.current);
     setTabs(next.tabs);
     setActiveId(next.activeId);
+  }, [workspaceId]);
+
+  useEffect(() => {
+    setTabs((curr) => normalizeTerminalTitles(curr));
   }, [workspaceId]);
 
   // Persist on every change, but DEBOUNCED. A synchronous JSON.stringify +
@@ -348,7 +418,7 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
           return next[Math.max(0, idx - 1)]?.id ?? next[0]?.id ?? null;
         });
         fireDispose(id);
-        return next;
+        return normalizeTerminalTitles(next);
       });
     },
     [fireDispose],
@@ -362,7 +432,7 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
         const removed = curr.filter((t) => t.id !== keepId);
         for (const t of removed) fireDispose(t.id);
         setActiveId(keepId);
-        return [target];
+        return normalizeTerminalTitles([target]);
       });
     },
     [fireDispose],
@@ -414,22 +484,220 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
   );
 
   const newTerminalTab = useCallback(
-    (cwd?: string, autorun?: string, title?: string): TabId => {
+    (cwd?: string, autorun?: string): TabId => {
       const id = makeId("term");
       const paneId = makeId("pane");
       const root = leaf(paneId, cwd, autorun);
-      const worker = manualWorkerForCommand(autorun, paneId);
-      if (worker) root.worker = worker;
-      const tab: TerminalTab = {
-        id,
-        kind: "terminal",
-        title: title ?? "terminals",
-        root,
-        activePaneId: paneId,
-      };
-      setTabs((curr) => [...curr, tab]);
+      setTabs((curr) => {
+        const tab: TerminalTab = {
+          id,
+          kind: "terminal",
+          title: "terminals",
+          root,
+          activePaneId: paneId,
+        };
+        return normalizeTerminalTitles([...curr, tab]);
+      });
       setActiveId(id);
       return id;
+    },
+    [],
+  );
+
+  const newTerminalGrid = useCallback(
+    (
+      cwd: string | undefined,
+      specs: Array<{ command: string; runtime?: string }>,
+    ): TabId => {
+      const id = makeId("term");
+      const entries = specs.length > 0 ? specs : [{ command: "", runtime: "" }];
+      const leaves: TerminalLeaf[] = entries.map((spec) => {
+        const paneId = makeId("pane");
+        return leaf(paneId, cwd, spec.command || undefined);
+      });
+      setTabs((curr) => {
+        const tab: TerminalTab = {
+          id,
+          kind: "terminal",
+          title: "terminals",
+          root: buildPaneGrid(leaves, "horizontal"),
+          activePaneId: leaves[0].paneId,
+        };
+        return normalizeTerminalTitles([...curr, tab]);
+      });
+      setActiveId(id);
+      return id;
+    },
+    [],
+  );
+
+  const addAgentGridToTab = useCallback(
+    (
+      tabId: TabId,
+      cwd: string | undefined,
+      specs: Array<{ command: string; runtime?: string }>,
+    ): void => {
+      if (specs.length === 0) return;
+      const newLeaves: TerminalLeaf[] = specs.map((spec) => {
+        const paneId = makeId("pane");
+        return leaf(paneId, cwd, spec.command || undefined);
+      });
+      const newGrid = buildPaneGrid(newLeaves, "horizontal");
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          // Combine the tab's current panes and the new agent grid side by
+          // side; ratio by leaf count so every pane stays roughly equal-area.
+          const existingCount = collectLeaves(t.root).length;
+          const total = existingCount + newLeaves.length;
+          const root: PaneNode = {
+            kind: "split",
+            direction: "horizontal",
+            ratio: existingCount / total,
+            a: t.root,
+            b: newGrid,
+          };
+          return { ...t, root, activePaneId: newLeaves[0].paneId };
+        }),
+      );
+      setActiveId(tabId);
+    },
+    [],
+  );
+
+  const detachTerminalPaneToNewTab = useCallback(
+    (tabId: TabId, paneId: string): TabId | null => {
+      const currentSource = tabsRef.current.find(
+        (t): t is TerminalTab => t.id === tabId && t.kind === "terminal",
+      );
+      if (!currentSource) return null;
+      const currentLeaves = collectLeaves(currentSource.root);
+      if (currentLeaves.length <= 1 || !currentLeaves.some((item) => item.paneId === paneId)) {
+        return null;
+      }
+      const newTabId = makeId("term");
+      setTabs((curr) => {
+        const source = curr.find((t): t is TerminalTab => t.id === tabId && t.kind === "terminal");
+        if (!source) return curr;
+        const sourceLeaves = collectLeaves(source.root);
+        if (sourceLeaves.length <= 1) return curr;
+        const movingLeaf = sourceLeaves.find((item) => item.paneId === paneId);
+        if (!movingLeaf) return curr;
+        const nextRoot = removeLeaf(source.root, paneId);
+        if (!nextRoot) return curr;
+        const remainingLeaves = collectLeaves(nextRoot);
+        const newTab: TerminalTab = {
+          id: newTabId,
+          kind: "terminal",
+          title: "terminals",
+          root: movingLeaf,
+          activePaneId: movingLeaf.paneId,
+        };
+        return normalizeTerminalTitles([
+          ...curr.map((t) => {
+            if (t.id !== tabId || t.kind !== "terminal") return t;
+            const activePaneId =
+              t.activePaneId === paneId
+                ? remainingLeaves[0]?.paneId ?? t.activePaneId
+                : t.activePaneId;
+            return { ...t, root: nextRoot, activePaneId };
+          }),
+          newTab,
+        ]);
+      });
+      setActiveId(newTabId);
+      return newTabId;
+    },
+    [],
+  );
+
+  const moveTerminalPane = useCallback(
+    (
+      sourceTabId: TabId,
+      paneId: string,
+      targetTabId: TabId,
+      target?: {
+        paneId: string;
+        direction: TerminalSplit["direction"];
+        position: "before" | "after";
+      },
+    ): boolean => {
+      if (sourceTabId === targetTabId && target?.paneId === paneId) return false;
+      if (sourceTabId === targetTabId && !target) return false;
+      const sourceSnapshot = tabsRef.current.find(
+        (t): t is TerminalTab => t.id === sourceTabId && t.kind === "terminal",
+      );
+      const targetSnapshot = tabsRef.current.find(
+        (t): t is TerminalTab => t.id === targetTabId && t.kind === "terminal",
+      );
+      if (!sourceSnapshot || !targetSnapshot) return false;
+      const sourceLeaves = collectLeaves(sourceSnapshot.root);
+      const movingLeaf = sourceLeaves.find((item) => item.paneId === paneId);
+      if (!movingLeaf) return false;
+      if (sourceTabId === targetTabId && sourceLeaves.length <= 1) return false;
+      if (target && !findLeaf(targetSnapshot.root, target.paneId)) return false;
+
+      setTabs((curr) => {
+        const source = curr.find(
+          (t): t is TerminalTab => t.id === sourceTabId && t.kind === "terminal",
+        );
+        const destination = curr.find(
+          (t): t is TerminalTab => t.id === targetTabId && t.kind === "terminal",
+        );
+        if (!source || !destination) return curr;
+        const liveSourceLeaves = collectLeaves(source.root);
+        const liveMovingLeaf = liveSourceLeaves.find((item) => item.paneId === paneId);
+        if (!liveMovingLeaf) return curr;
+        if (sourceTabId === targetTabId && target?.paneId === paneId) return curr;
+        if (sourceTabId === targetTabId && !target) return curr;
+        if (sourceTabId === targetTabId && liveSourceLeaves.length <= 1) return curr;
+        if (target && !findLeaf(destination.root, target.paneId)) return curr;
+
+        const sourceRoot = removeLeaf(source.root, paneId);
+        if (!sourceRoot && sourceTabId === targetTabId) return curr;
+        let destinationRoot: PaneNode;
+        if (target) {
+          const insertBase = sourceTabId === targetTabId ? sourceRoot : destination.root;
+          if (!insertBase) return curr;
+          destinationRoot = insertLeafAtLeaf(
+            insertBase,
+            target.paneId,
+            target.direction,
+            liveMovingLeaf,
+            target.position,
+          );
+          if (destinationRoot === insertBase) return curr;
+        } else {
+          const existingCount = collectLeaves(destination.root).length;
+          destinationRoot = {
+            kind: "split",
+            direction: "horizontal",
+            ratio: existingCount / (existingCount + 1),
+            a: destination.root,
+            b: liveMovingLeaf,
+          };
+        }
+
+        const next = curr.flatMap((tab): Tab[] => {
+          if (tab.id === sourceTabId && tab.kind === "terminal") {
+            if (!sourceRoot) return [];
+            const remainingLeaves = collectLeaves(sourceRoot);
+            const activePaneId =
+              tab.activePaneId === paneId
+                ? remainingLeaves[0]?.paneId ?? tab.activePaneId
+                : tab.activePaneId;
+            const root = sourceTabId === targetTabId ? destinationRoot : sourceRoot;
+            return [{ ...tab, root, activePaneId: sourceTabId === targetTabId ? paneId : activePaneId }];
+          }
+          if (tab.id === targetTabId && tab.kind === "terminal") {
+            return [{ ...tab, root: destinationRoot, activePaneId: paneId }];
+          }
+          return [tab];
+        });
+        return normalizeTerminalTitles(next);
+      });
+      setActiveId(targetTabId);
+      return true;
     },
     [],
   );
@@ -450,8 +718,6 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
           const fresh = makeId("pane");
           newPaneId = fresh;
           const newLeaf = leaf(fresh, target.cwd, autorun);
-          const worker = manualWorkerForCommand(autorun, fresh);
-          if (worker) newLeaf.worker = worker;
           const root = splitAtLeaf(
             t.root,
             paneId,
@@ -501,7 +767,7 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
         if (next.length === 0) {
           // Restoring the seed tab keeps the workbench from rendering an
           // empty stack; matches closeTab's invariant.
-          const seed = defaultTabs();
+          const seed = defaultTabs(defaultCwdRef.current);
           setActiveId(seed[0].id);
           return seed;
         }
@@ -511,7 +777,7 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
             return next[next.length - 1]?.id ?? null;
           });
         }
-        return next;
+        return normalizeTerminalTitles(next);
       });
     },
     [],
@@ -644,18 +910,109 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
     return id;
   }, []);
 
-  const newRunsTab = useCallback((runId: string | null): TabId => {
-    const id = makeId("runs");
-    const tab: RunsTab = {
-      id,
-      kind: "runs",
-      title: runId ? `Run ${runId.slice(-6)}` : "Runs",
-      runId,
-    };
-    setTabs((curr) => [...curr, tab]);
-    setActiveId(id);
-    return id;
+  // Open (or relabel) the Runs tab for the selected chat. Runs tabs are
+  // chat-scoped and ephemeral in the workbench: switching chats removes the
+  // previous chat's Runs tab from the visible tab strip.
+  const openRunsTab = useCallback(
+    (runId: string, title: string, focus: boolean): TabId => {
+      const existingId = tabsRef.current.find(
+        (t): t is RunsTab => t.kind === "runs" && t.runId === runId,
+      )?.id;
+      const resultId = existingId ?? makeId("runs");
+      setTabs((curr) => {
+        const scoped = curr.filter((t) => t.kind !== "runs" || t.runId === runId);
+        const existing = scoped.find(
+          (t): t is RunsTab => t.kind === "runs" && t.runId === runId,
+        );
+        if (existing) {
+          if (existing.title === title && scoped.length === curr.length) return curr;
+          const next = scoped.map((t) => (t.id === existing.id ? { ...t, title } : t));
+          setActiveId((active) =>
+            focus || !active || !next.some((tab) => tab.id === active) ? resultId : active,
+          );
+          return next;
+        }
+        const tab: RunsTab = { id: resultId, kind: "runs", title, runId };
+        const next = [...scoped, tab];
+        setActiveId((active) =>
+          focus || !active || !next.some((item) => item.id === active) ? resultId : active,
+        );
+        return next;
+      });
+      return resultId;
+    },
+    [],
+  );
+
+  const setLeafScrollback = useCallback(
+    (tabId: TabId, paneId: string, scrollback: string) => {
+      const trimmed =
+        scrollback.length > MAX_TERMINAL_SCROLLBACK_CHARS
+          ? scrollback.slice(scrollback.length - MAX_TERMINAL_SCROLLBACK_CHARS)
+          : scrollback;
+      setTabs((curr) => {
+        let changed = false;
+        const next = curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          const existing = findLeaf(t.root, paneId);
+          if (!existing || existing.scrollback === trimmed) return t;
+          const root = setLeafField(t.root, paneId, "scrollback", trimmed);
+          if (root === t.root) return t;
+          changed = true;
+          return { ...t, root };
+        });
+        if (changed) persist(workspaceIdRef.current, next, activeIdRef.current);
+        return changed ? next : curr;
+      });
+    },
+    [],
+  );
+
+  const hideRunsTabs = useCallback(() => {
+    setTabs((curr) => {
+      const next = curr.filter((t) => t.kind !== "runs");
+      if (next.length === curr.length) return curr;
+      if (next.length === 0) {
+        const seed = defaultTabs(defaultCwdRef.current);
+        setActiveId(seed[0].id);
+        return seed;
+      }
+      setActiveId((active) =>
+        active && next.some((tab) => tab.id === active) ? active : next[0]?.id ?? null,
+      );
+      return next;
+    });
   }, []);
+
+  // Close the runs tab bound to `runId` (called when a chat is deleted). If
+  // it is the only tab, seed a terminal tab instead — the workbench never
+  // shows an empty global Runs placeholder.
+  const closeRunsTabFor = useCallback(
+    (runId: string) => {
+      setTabs((curr) => {
+        const idx = curr.findIndex(
+          (t) => t.kind === "runs" && t.runId === runId,
+        );
+        if (idx === -1) return curr;
+        const tabId = curr[idx].id;
+        if (curr.length <= 1) {
+          const seed = defaultTabs(defaultCwdRef.current);
+          setActiveId(seed[0].id);
+          fireDispose(tabId);
+          return seed;
+        }
+        const next = curr.filter((_, i) => i !== idx);
+        setActiveId((active) =>
+          active === tabId
+            ? next[Math.max(0, idx - 1)]?.id ?? next[0]?.id ?? null
+            : active,
+        );
+        fireDispose(tabId);
+        return next;
+      });
+    },
+    [fireDispose],
+  );
 
   const openEditorTab = useCallback((entry: FsEntry): TabId => {
     // The setter is invoked synchronously by React, so reading `outId`
@@ -724,21 +1081,15 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
     );
   }, []);
 
-  // Update the first runs tab's pinned runId so the RunsStack re-renders
-  // the correct canvas. Most workspaces have exactly one runs tab; if the
-  // user pinned several, we leave the others alone so each pin sticks.
+  // Compatibility helper for older callers: null hides Runs entirely; an id
+  // shows the one chat-scoped Runs tab.
   const setActiveRunId = useCallback((runId: string | null) => {
-    setTabs((curr) => {
-      const idx = curr.findIndex((t) => t.kind === "runs");
-      if (idx === -1) return curr;
-      const target = curr[idx];
-      if (target.kind !== "runs") return curr;
-      if (target.runId === runId) return curr;
-      const next = [...curr];
-      next[idx] = { ...target, runId };
-      return next;
-    });
-  }, []);
+    if (!runId) {
+      hideRunsTabs();
+      return;
+    }
+    openRunsTab(runId, "Runs", false);
+  }, [hideRunsTabs, openRunsTab]);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
 
@@ -769,16 +1120,23 @@ export function useTabs(workspaceId: string | null): UseTabsApi {
       setDirty,
       setDetectedUrl,
       newTerminalTab,
+      newTerminalGrid,
+      addAgentGridToTab,
+      detachTerminalPaneToNewTab,
+      moveTerminalPane,
       splitTerminalPane,
       closeTerminalPane,
       setActiveTerminalPane,
       setTerminalSplitRatio,
       setLeafCwd,
+      setLeafScrollback,
       setLeafWorker,
       renameLeaf,
       addPaneInTab,
       newPreviewTab,
-      newRunsTab,
+      openRunsTab,
+      hideRunsTabs,
+      closeRunsTabFor,
       openEditorTab,
       setEditorEntry,
       closeEditorByPath,

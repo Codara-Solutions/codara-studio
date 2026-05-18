@@ -27,6 +27,7 @@ interface Props {
   shell: ShellInfo;
   visible: boolean;
   initialCwd?: string;
+  initialScrollback?: string;
   initialCommand?: string;
   extraEnv?: Record<string, string>;
   onSearchReady?: (addon: SearchAddon) => void;
@@ -45,6 +46,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       shell,
       visible,
       initialCwd,
+      initialScrollback,
       initialCommand,
       extraEnv,
       onSearchReady,
@@ -65,6 +67,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       sessionId,
       shell,
       initialCwd,
+      initialScrollback,
       initialCommand,
       extraEnv,
       onSearchReady,

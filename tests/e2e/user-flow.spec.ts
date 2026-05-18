@@ -31,8 +31,7 @@ test("user flow launches real manager-selected worker terminals from the test wo
     await expect(page.getByText("SPARK AGENT")).toBeVisible();
     await expect(page.getByText("test").first()).toBeVisible();
 
-    const planSelect = page.locator("select").first();
-    await selectPlanByName(planSelect, USER_FLOW_PLAN);
+    await selectPlanByName(page, USER_FLOW_PLAN);
     await clickButton(page, "RUN");
 
     await expectEvent(page, "spark_call.started", 20_000);
@@ -192,16 +191,11 @@ function realUserFlowEnv(userDataDir: string): NodeJS.ProcessEnv {
   return env;
 }
 
-async function selectPlanByName(select: ReturnType<Page["locator"]>, fileName: string): Promise<void> {
-  const optionValues = await select.locator("option").evaluateAll((options) =>
-    options.map((option) => ({
-      value: (option as HTMLOptionElement).value,
-      label: (option as HTMLOptionElement).label || option.textContent || "",
-    })),
-  );
-  const match = optionValues.find((option) => option.label.toLowerCase() === fileName.toLowerCase());
-  expect(match, `Expected ${fileName} to be available in the workspace plan selector`).toBeTruthy();
-  await select.selectOption(match!.value);
+async function selectPlanByName(page: Page, fileName: string): Promise<void> {
+  await page.getByRole("button", { name: "Selected plan file" }).click();
+  const option = page.getByRole("option", { name: fileName, exact: true });
+  await expect(option, `Expected ${fileName} to be available in the workspace plan selector`).toBeVisible();
+  await option.click();
 }
 
 async function clickButton(page: Page, name: string): Promise<void> {

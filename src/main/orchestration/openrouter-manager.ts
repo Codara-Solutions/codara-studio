@@ -50,7 +50,7 @@ export interface SparkManagerTaskDecision {
 }
 
 export interface SparkManagerDecision {
-  status: "run_workers" | "ask_user" | "complete";
+  status: "run_workers" | "ask_user" | "complete" | "spawn_terminals";
   summary: string;
   question?: string;
   steps: SparkManagerStepDecision[];
@@ -68,6 +68,19 @@ export interface SparkManagerDecision {
    * bubble in the run chat — keep it 1-3 sentences, plain English, no JSON.
    */
   chatReply?: string;
+  /**
+   * Standing interactive terminals to open for the user, who prompts and
+   * drives them personally. Populated only when status is spawn_terminals;
+   * these are not Spark workers.
+   */
+  terminals?: SparkManagerTerminalRequest[];
+}
+
+export interface SparkManagerTerminalRequest {
+  runtime: "claude" | "codex";
+  count: number;
+  model?: string;
+  effort?: string;
 }
 
 export interface SparkManagerWorkerReportContext {
@@ -153,12 +166,13 @@ const DEFAULT_STRUCTURED_OUTPUT_FALLBACK_MODEL = "openai/gpt-4o-mini";
 const SPARK_MANAGER_DECISION_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["status", "summary", "question", "chatReply", "steps", "tasks", "taskComplexity"],
+  required: ["status", "summary", "question", "chatReply", "steps", "tasks", "taskComplexity", "terminals"],
   properties: {
     status: {
       type: "string",
-      enum: ["run_workers", "ask_user", "complete"],
-      description: "The next manager action.",
+      enum: ["run_workers", "ask_user", "complete", "spawn_terminals"],
+      description:
+        "The next manager action. spawn_terminals: open standing interactive terminals the user will drive themselves (fill the terminals array); use only when the user explicitly asks to open terminals/agents for their own use.",
     },
     summary: {
       type: "string",
@@ -178,6 +192,38 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
       enum: ["trivial", "standard", "complex", ""],
       description:
         "Required during plan_analysis: classify the WHOLE RUN's complexity. Drives verifier depth (trivial=0, standard=1, complex=2 peer verifiers) and the step cap. trivial: single-module fix, ≤3 atomic acceptance criteria, no public API touch (max 2 worker_batch steps, no recon, no skeleton). standard: multi-file change OR public API touch with clear scope (max 3-4 steps). complex: subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics (no step cap). Bias toward standard on uncertainty — false-trivial costs one redo via cascade, false-complex burns 9 workers. Empty string \"\" allowed only on step_planning / worker_result_review modes (those propagate the persisted classification).",
+    },
+    terminals: {
+      type: "array",
+      description:
+        "Standing interactive terminals to open for the user, who prompts and orchestrates them personally. Non-empty ONLY when status is spawn_terminals; [] otherwise. One entry per distinct runtime+model+effort combination.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["runtime", "count", "model", "effort"],
+        properties: {
+          runtime: {
+            type: "string",
+            enum: ["claude", "codex"],
+            description: "Which agent CLI runs in the terminal.",
+          },
+          count: {
+            type: "integer",
+            description: "How many terminals of this exact configuration to open (1 or more).",
+          },
+          model: {
+            type: "string",
+            description:
+              "Model id the user named (e.g. 'opus', 'sonnet', 'gpt-5.5'); empty string when unspecified.",
+          },
+          effort: {
+            type: "string",
+            enum: ["low", "medium", "high", "xhigh", ""],
+            description:
+              "Thinking/effort level the user named; empty string when unspecified. Applied to claude terminals only.",
+          },
+        },
+      },
     },
     steps: {
       type: "array",
@@ -704,6 +750,24 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
     };
   }
 
+  if (status === "spawn_terminals") {
+    const terminals = normalizeTerminals(raw.terminals);
+    // Only commit to the terminal-spawn path when at least one valid terminal
+    // was parsed. Otherwise fall through so the request is still handled as
+    // ordinary orchestrator work rather than silently dropped.
+    if (terminals.length > 0) {
+      return {
+        status: "spawn_terminals",
+        summary: normalizeText(raw.summary, "Spark is opening terminals."),
+        chatReply,
+        terminals,
+        steps: [],
+        tasks: [],
+        taskComplexity,
+      };
+    }
+  }
+
   if (status === "complete") {
     return {
       status,
@@ -781,8 +845,33 @@ function normalizeTaskComplexity(value: unknown): TaskComplexity | undefined {
 }
 
 function normalizeStatus(value: unknown): SparkManagerDecision["status"] {
-  if (value === "run_workers" || value === "ask_user" || value === "complete") return value;
+  if (
+    value === "run_workers" ||
+    value === "ask_user" ||
+    value === "complete" ||
+    value === "spawn_terminals"
+  ) {
+    return value;
+  }
   return "run_workers";
+}
+
+function normalizeTerminals(value: unknown): SparkManagerTerminalRequest[] {
+  if (!Array.isArray(value)) return [];
+  const out: SparkManagerTerminalRequest[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    const runtime =
+      rec.runtime === "codex" ? "codex" : rec.runtime === "claude" ? "claude" : null;
+    if (!runtime) continue;
+    const rawCount = typeof rec.count === "number" ? Math.floor(rec.count) : 1;
+    const count = Math.min(Math.max(rawCount, 1), 8);
+    const model = typeof rec.model === "string" ? rec.model.trim() : "";
+    const effort = typeof rec.effort === "string" ? rec.effort.trim() : "";
+    out.push({ runtime, count, model: model || undefined, effort: effort || undefined });
+  }
+  return out;
 }
 
 function normalizeSteps(value: unknown): SparkManagerStepDecision[] {

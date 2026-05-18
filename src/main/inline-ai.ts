@@ -72,6 +72,19 @@ interface OpenRouterChatResponse {
   error?: { message?: string };
 }
 
+interface OpenRouterChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export interface InlineAiChatCompletionRequest {
+  modelId: string;
+  requestId: string;
+  messages: OpenRouterChatMessage[];
+  maxTokens?: number;
+  temperature?: number;
+}
+
 // Track in-flight requests so the renderer can abort them by id when the
 // user keeps typing. AbortController is per-request; the map stays small
 // because we drop entries on completion.
@@ -123,6 +136,21 @@ function extractContent(response: OpenRouterChatResponse): string {
 export async function runInlineAiCompletion(
   req: InlineAiCompletionRequest,
 ): Promise<InlineAiCompletionResponse> {
+  return runInlineAiChatCompletion({
+    modelId: req.modelId,
+    requestId: req.requestId,
+    maxTokens: MAX_OUTPUT_TOKENS,
+    temperature: 0.2,
+    messages: [
+      { role: "system", content: COMPLETION_SYSTEM_PROMPT },
+      { role: "user", content: buildUserPrompt(req) },
+    ],
+  });
+}
+
+export async function runInlineAiChatCompletion(
+  req: InlineAiChatCompletionRequest,
+): Promise<InlineAiCompletionResponse> {
   const settings = await loadSettings();
   const apiKey = (settings.openRouterApiKey || "").trim();
   if (!apiKey) {
@@ -137,12 +165,9 @@ export async function runInlineAiCompletion(
 
   const body = {
     model: req.modelId,
-    temperature: 0.2,
-    max_tokens: MAX_OUTPUT_TOKENS,
-    messages: [
-      { role: "system" as const, content: COMPLETION_SYSTEM_PROMPT },
-      { role: "user" as const, content: buildUserPrompt(req) },
-    ],
+    temperature: req.temperature ?? 0.2,
+    max_tokens: req.maxTokens ?? MAX_OUTPUT_TOKENS,
+    messages: req.messages,
   };
 
   try {

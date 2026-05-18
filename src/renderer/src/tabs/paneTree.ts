@@ -49,6 +49,31 @@ export function splitAtLeaf(
   return { ...node, a, b };
 }
 
+// Insert an existing leaf next to `paneId`. `position` controls whether the
+// moving pane lands before/above (`a`) or after/below (`b`) the target.
+export function insertLeafAtLeaf(
+  node: PaneNode,
+  paneId: string,
+  direction: TerminalSplit["direction"],
+  movingPane: TerminalLeaf,
+  position: "before" | "after",
+): PaneNode {
+  if (node.kind === "leaf") {
+    if (node.paneId !== paneId) return node;
+    return {
+      kind: "split",
+      direction,
+      ratio: 0.5,
+      a: position === "before" ? movingPane : node,
+      b: position === "before" ? node : movingPane,
+    };
+  }
+  const a = insertLeafAtLeaf(node.a, paneId, direction, movingPane, position);
+  const b = insertLeafAtLeaf(node.b, paneId, direction, movingPane, position);
+  if (a === node.a && b === node.b) return node;
+  return { ...node, a, b };
+}
+
 // Drop the leaf carrying `paneId`. If it was one half of a split, the split
 // is replaced by the surviving sibling (collapsing the tree upward). Returns
 // `null` if the entire tree was the removed leaf, signalling the caller to

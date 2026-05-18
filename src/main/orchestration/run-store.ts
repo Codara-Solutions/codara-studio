@@ -84,6 +84,7 @@ const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
 const activeAutopilotCycles = new Map<string, Promise<void>>();
 const activeAutopilotPlans = new Map<string, Promise<void>>();
 const activeAutopilotReviews = new Map<string, Promise<void>>();
+const runMutationQueues = new Map<string, Promise<void>>();
 const runWriteQueues = new Map<string, Promise<void>>();
 
 // In-memory authoritative cache of run state, keyed by run id. This module is
@@ -158,7 +159,7 @@ export async function getRun(runId: string): Promise<RunState | null> {
   // writer of run.json), so skip the disk read + JSON.parse entirely. The
   // cached object is already normalized and stays normalized across saveRun.
   const cached = runCache.get(runId);
-  if (cached) return cached;
+  if (cached) return normalizeRun(cached);
 
   // Cache MISS: read + parse + normalize from disk, then populate the cache.
   try {
@@ -222,6 +223,25 @@ export async function appendTestEvent(runId: string, message?: string): Promise<
   return event;
 }
 
+// A run is a chat in the panel, so it needs a title the user can tell apart
+// from its siblings. A plan run is named after the plan; a conversational
+// chat (no plan, just an opening message) is named after that message, the
+// way a chat app titles a thread by its first line. "Autopilot - <workspace>"
+// is the last resort — without this, every chat in one workspace collided on
+// that single name and the switcher / tabs looked duplicated.
+function chatTitleFromInput(input: StartAutopilotInput): string {
+  const planTitle = input.planTitle?.trim();
+  if (planTitle) return `Autopilot - ${planTitle}`;
+  const note = input.initialUserNote?.trim().replace(/\s+/g, " ");
+  if (note) {
+    if (note.length <= 52) return note;
+    const cut = note.slice(0, 49);
+    const lastSpace = cut.lastIndexOf(" ");
+    return `${(lastSpace > 24 ? cut.slice(0, lastSpace) : cut).trimEnd()}...`;
+  }
+  return `Autopilot - ${input.workspaceName}`;
+}
+
 export async function startAutopilot(input: StartAutopilotInput): Promise<RunState> {
   let run = input.runId ? await requireRun(input.runId) : null;
   if (!run) {
@@ -229,7 +249,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       workspaceId: input.workspaceId,
       workspaceName: input.workspaceName,
       cwd: input.cwd,
-      title: input.planTitle ? `Autopilot - ${input.planTitle}` : `Autopilot - ${input.workspaceName}`,
+      title: chatTitleFromInput(input),
     });
   }
 
@@ -290,6 +310,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   if (!input.runId && initialNote) {
     run = await addRunMessage({
       runId: run.id,
+      clientMessageId: input.initialUserNoteClientMessageId,
       author: "user",
       kind: "note",
       message: initialNote,
@@ -435,7 +456,16 @@ async function runInitialAutopilotPlanning(runId: string, input: StartAutopilotI
   }
 
   run = managerPlannedRun ?? (await createFallbackAutopilotTask(run, input));
-  if (run.status === "paused" || run.status === "cancelled") return;
+  // A spawn_terminals decision lands the run as `complete` straight out of
+  // plan_analysis — there is nothing to orchestrate, so don't fall through
+  // into startAutopilot (which would flip it back to running and re-plan).
+  if (
+    run.status === "paused" ||
+    run.status === "cancelled" ||
+    run.status === "complete"
+  ) {
+    return;
+  }
   await startAutopilot({ ...input, runId: run.id });
 }
 
@@ -1400,6 +1430,131 @@ async function tryStandardCleanImplFastPathReview(
   });
 }
 
+const STANDING_TERMINAL_CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
+
+// Build the launch command for a standing interactive terminal: a plain
+// claude/codex session the user drives. Like buildLaunchCommandLine, but
+// without the worker-task wiring — these are not Spark workers.
+function buildStandingTerminalCommand(
+  runtime: "claude" | "codex",
+  model?: string,
+  effort?: string,
+): string {
+  if (runtime === "codex") {
+    const args = ["codex", "--yolo"];
+    if (model) args.push("-m", quoteShellArg(model));
+    return args.join(" ");
+  }
+  const args = ["claude", "--dangerously-skip-permissions"];
+  if (model) args.push("--model", quoteShellArg(model));
+  if (effort && STANDING_TERMINAL_CLAUDE_EFFORTS.has(effort)) {
+    args.push("--effort", effort);
+  }
+  return args.join(" ");
+}
+
+function standingTerminalTitle(runtime: "claude" | "codex", model?: string): string {
+  const base = runtime === "codex" ? "Codex" : "Claude";
+  return model ? `${base} ${model}` : base;
+}
+
+// One-line chat confirmation for a spawn_terminals decision, e.g. "Opened 2
+// Claude and 1 Codex standing terminals ...". Counts by runtime so the user
+// gets concrete acknowledgement that the request landed.
+function describeSpawnedTerminals(terminals: Array<{ runtime: string }>): string {
+  const counts = new Map<string, number>();
+  for (const terminal of terminals) {
+    const label = terminal.runtime === "codex" ? "Codex" : "Claude";
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const parts = [...counts].map(([label, n]) => `${n} ${label}`);
+  const list =
+    parts.length <= 1
+      ? parts.join("")
+      : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+  const noun = terminals.length === 1 ? "terminal" : "terminals";
+  return `Opened ${list} standing ${noun} in the workbench, yours to prompt and drive directly.`;
+}
+
+function spawnedTerminalsTitle(terminals: Array<{ runtime: string }>): string {
+  const counts = new Map<string, number>();
+  for (const terminal of terminals) {
+    const label = terminal.runtime === "codex" ? "Codex" : "Claude";
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const parts = [...counts].map(([label, n]) => `${label} x${n}`);
+  if (parts.length === 0) return "Agent terminals";
+  return `${parts.join(" + ")} terminals`;
+}
+
+// Handle a spawn_terminals manager decision: the user asked Spark to open
+// standing interactive terminals they will drive themselves. Spark emits one
+// spark.spawn_terminals event carrying ready-to-run terminal specs (the
+// renderer opens a grid tab with a pane per spec) and marks the run
+// complete. A later chat message re-engages the manager via addRunMessage's
+// terminal-run replanning path; the terminals are user-driven and are not
+// tracked as Spark workers.
+async function applySpawnTerminalsDecision(
+  run: RunState,
+  decision: SparkManagerDecision,
+): Promise<RunState> {
+  const terminals: Array<{ runtime: string; title: string; command: string }> = [];
+  for (const req of decision.terminals ?? []) {
+    for (let i = 0; i < req.count; i++) {
+      terminals.push({
+        runtime: req.runtime,
+        title: standingTerminalTitle(req.runtime, req.model),
+        command: buildStandingTerminalCommand(req.runtime, req.model, req.effort),
+      });
+    }
+  }
+
+  // Confirm in the chat so the user sees the terminals landed and does not
+  // resend. Skip when the manager already posted its own reply this turn
+  // (applySparkManagerDecision emits decision.chatReply before calling us).
+  const lastMessage = run.humanMessages[run.humanMessages.length - 1];
+  const managerAlreadyReplied = Boolean(
+    lastMessage && lastMessage.author === "spark" && lastMessage.kind === "note",
+  );
+  if (!managerAlreadyReplied && terminals.length > 0) {
+    run = await addRunMessage({
+      runId: run.id,
+      author: "spark",
+      kind: "note",
+      message: describeSpawnedTerminals(terminals),
+    });
+  }
+
+  await appendEvent({
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    type: "spark.spawn_terminals",
+    message: `Opening ${terminals.length} standing terminal(s)`,
+    payload: { terminals },
+  });
+
+  return commitRunChange(run, {
+    type: "autopilot.spawned_terminals",
+    message: `Opened ${terminals.length} standing terminal(s) for the user to drive`,
+    payload: { count: terminals.length, runtimes: terminals.map((t) => t.runtime) },
+    mutate: (draft, timestamp) => {
+      // The run did its one job — open the terminals. Mark it complete so a
+      // later chat message re-engages the manager (addRunMessage replans a
+      // terminal/complete run).
+      draft.title = spawnedTerminalsTitle(terminals);
+      draft.status = "complete";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "complete",
+        lastAction: "spawned_terminals",
+        spawnedTerminals: terminals.length,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 async function applySparkManagerDecision(
   run: RunState,
   decision: SparkManagerDecision,
@@ -1425,6 +1580,10 @@ async function applySparkManagerDecision(
         message: reply,
       });
     }
+  }
+
+  if (decision.status === "spawn_terminals") {
+    return applySpawnTerminalsDecision(run, decision);
   }
 
   if (decision.status === "ask_user") {
@@ -2148,8 +2307,34 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
   const run = await requireRun(input.runId);
   const message = input.message.trim();
   if (!message) throw new Error("Message is required.");
+  const clientMessageId = input.clientMessageId?.trim();
+
+  if (
+    clientMessageId &&
+    run.humanMessages.some((entry) => entry.clientMessageId === clientMessageId)
+  ) {
+    return run;
+  }
+
+  // Swallow a repeated message: the same author re-sending identical text
+  // shortly after their last one is a double-click, an Enter-key repeat, or a
+  // frustrated re-send while waiting — never intent. Look back past any Spark
+  // replies in between, since the immediately-previous message is often
+  // Spark's own confirmation, which would otherwise mask the repeat.
+  const priorSameAuthor = [...run.humanMessages]
+    .reverse()
+    .find((entry) => entry.author === input.author);
+  if (
+    priorSameAuthor &&
+    priorSameAuthor.message === message &&
+    Date.now() - new Date(priorSameAuthor.createdAt).getTime() < 20000
+  ) {
+    return run;
+  }
+
   const humanMessage = {
     id: makeId("msg"),
+    clientMessageId,
     runId: run.id,
     author: input.author,
     kind: input.kind,
@@ -2158,11 +2343,29 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
   };
 
   const wasTerminal = run.status === "complete" || run.status === "failed" || run.status === "cancelled";
+  let messageRecorded = false;
   const updated = await commitRunChange(run, {
     type: `human.${input.kind}`,
     message: `${input.author}: ${message.slice(0, 160)}`,
     payload: { message: humanMessage },
     mutate: (draft, timestamp) => {
+      if (
+        clientMessageId &&
+        draft.humanMessages.some((entry) => entry.clientMessageId === clientMessageId)
+      ) {
+        return false;
+      }
+      const latestSameAuthor = [...draft.humanMessages]
+        .reverse()
+        .find((entry) => entry.author === input.author);
+      if (
+        latestSameAuthor &&
+        latestSameAuthor.message === message &&
+        Date.now() - new Date(latestSameAuthor.createdAt).getTime() < 20000
+      ) {
+        return false;
+      }
+      messageRecorded = true;
       draft.humanMessages.push({ ...humanMessage, createdAt: timestamp });
       // When the user chats into a finished run, transition it back into a
       // planning state so the autopilot loop wakes up and the run badge shifts
@@ -2182,6 +2385,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
       draft.updatedAt = timestamp;
     },
   });
+  if (!messageRecorded) return updated;
 
   // Re-engage the manager when the user chatted into a terminal run. We hand
   // off via scheduleInitialAutopilotPlanning because plan_analysis already
@@ -2225,6 +2429,7 @@ export async function interruptRunWithMessage(
   // most recent humanMessage.
   let run = await addRunMessage({
     runId: input.runId,
+    clientMessageId: input.clientMessageId,
     author: "user",
     kind,
     message,
@@ -3228,6 +3433,7 @@ async function saveRun(run: RunState): Promise<void> {
 }
 
 async function writeRunFile(run: RunState): Promise<void> {
+  normalizeRun(run);
   // Keep the in-memory cache current. saveRun is the only caller and it
   // always routes here, so setting the cache here covers every persist path
   // (createRun, commitRunChange, and every ad-hoc saveRun in this module).
@@ -3274,6 +3480,7 @@ async function requireRun(runId: string): Promise<RunState> {
 
 function normalizeRun(run: RunState): RunState {
   run.humanMessages ??= [];
+  run.humanMessages = dedupeHumanMessages(run.humanMessages);
   for (const step of run.steps ?? []) {
     step.plannedAgents ??= [];
   }
@@ -3288,6 +3495,45 @@ function normalizeRun(run: RunState): RunState {
   return run;
 }
 
+const NORMALIZE_DUPLICATE_MESSAGE_WINDOW_MS = 120_000;
+
+function dedupeHumanMessages(messages: RunState["humanMessages"]): RunState["humanMessages"] {
+  const deduped: RunState["humanMessages"] = [];
+  const byClientId = new Set<string>();
+  const recentByText = new Map<string, { at: number }>();
+
+  for (const message of messages) {
+    const clientMessageId = message.clientMessageId?.trim();
+    if (clientMessageId) {
+      if (byClientId.has(clientMessageId)) continue;
+      byClientId.add(clientMessageId);
+    }
+
+    const at = Date.parse(message.createdAt);
+    const signature = [
+      message.author,
+      message.kind,
+      message.message.replace(/\s+/g, " ").trim().toLowerCase(),
+    ].join("\u0000");
+    const recent = recentByText.get(signature);
+    if (
+      recent &&
+      Number.isFinite(at) &&
+      Number.isFinite(recent.at) &&
+      at - recent.at >= 0 &&
+      at - recent.at <= NORMALIZE_DUPLICATE_MESSAGE_WINDOW_MS
+    ) {
+      recent.at = at;
+      continue;
+    }
+
+    deduped.push(message);
+    recentByText.set(signature, { at });
+  }
+
+  return deduped;
+}
+
 async function commitRunChange(
   run: RunState,
   change: {
@@ -3296,23 +3542,40 @@ async function commitRunChange(
     stepId?: string;
     workerTaskId?: string;
     payload?: Record<string, unknown>;
-    mutate: (draft: RunState, timestamp: string) => void;
+    mutate: (draft: RunState, timestamp: string) => void | false;
   },
 ): Promise<RunState> {
-  const timestamp = new Date().toISOString();
-  change.mutate(run, timestamp);
-  await saveRun(run);
-  await appendEvent({
-    timestamp,
-    workspaceId: run.workspaceId,
-    runId: run.id,
-    stepId: change.stepId,
-    workerTaskId: change.workerTaskId,
-    type: change.type,
-    message: change.message,
-    payload: change.payload,
-  });
-  return run;
+  let result: RunState | null = null;
+  const previous = runMutationQueues.get(run.id) ?? Promise.resolve();
+  const next = previous
+    .catch(() => {
+      /* keep later mutations moving after an earlier failure */
+    })
+    .then(async () => {
+      const latest = await requireRun(run.id);
+      const timestamp = new Date().toISOString();
+      const changed = change.mutate(latest, timestamp);
+      result = latest;
+      if (changed === false) return;
+      await saveRun(latest);
+      await appendEvent({
+        timestamp,
+        workspaceId: latest.workspaceId,
+        runId: latest.id,
+        stepId: change.stepId,
+        workerTaskId: change.workerTaskId,
+        type: change.type,
+        message: change.message,
+        payload: change.payload,
+      });
+    });
+  runMutationQueues.set(run.id, next);
+  try {
+    await next;
+  } finally {
+    if (runMutationQueues.get(run.id) === next) runMutationQueues.delete(run.id);
+  }
+  return result ?? (await requireRun(run.id));
 }
 
 function changedFields(input: object, excluded: string[]): string[] {

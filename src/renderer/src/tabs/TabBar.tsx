@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { Tab, TabId } from "./types";
 import { CloseIcon, FileIcon, PlusIcon } from "../components/icons";
+import { TERMINAL_PANE_DRAG_MIME, parseTerminalPaneDrag, type TerminalPaneDragPayload } from "./terminalDrag";
 
 // TabBar is the strip at the top of the workspace pane. Visually similar
 // to a code editor's tab strip but with a kind-icon-prefixed label so it's
@@ -24,6 +25,7 @@ interface Props {
   onNewTerminal: () => void;
   onNewPreview: () => void;
   onNewEditor: () => void;
+  onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: TabId) => void;
 }
 
 // React.memo: TabBar's props from App.tsx are referentially stable (the
@@ -38,10 +40,15 @@ function TabBar({
   onNewTerminal,
   onNewPreview,
   onNewEditor,
+  onTerminalPaneDrop,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [terminalDropActive, setTerminalDropActive] = useState(false);
   const pickerRef = useRef<HTMLDivElement | null>(null);
+
+  const acceptsTerminalPane = (event: React.DragEvent): boolean =>
+    Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
 
   // Convert vertical wheel deltas to horizontal scroll on the tab strip,
   // but only when there's actually overflow to scroll. We register with
@@ -92,6 +99,33 @@ function TabBar({
 
   return (
     <div
+      onDragEnter={(event) => {
+        if (!acceptsTerminalPane(event)) return;
+        event.preventDefault();
+        setTerminalDropActive(true);
+      }}
+      onDragOver={(event) => {
+        if (!acceptsTerminalPane(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        setTerminalDropActive(true);
+      }}
+      onDragLeave={(event) => {
+        if (
+          event.relatedTarget instanceof Node &&
+          event.currentTarget.contains(event.relatedTarget)
+        ) {
+          return;
+        }
+        setTerminalDropActive(false);
+      }}
+      onDrop={(event) => {
+        const payload = parseTerminalPaneDrag(event.dataTransfer);
+        if (!payload) return;
+        event.preventDefault();
+        setTerminalDropActive(false);
+        onTerminalPaneDrop(payload);
+      }}
       style={{
         flex: "0 0 32px",
         height: 32,
@@ -99,9 +133,12 @@ function TabBar({
         alignItems: "stretch",
         gap: 4,
         background: "var(--panel)",
-        borderBottom: "1px solid var(--rule-soft)",
+        borderBottom: terminalDropActive
+          ? "1px solid var(--accent)"
+          : "1px solid var(--rule-soft)",
         padding: "0 8px",
         position: "relative",
+        boxShadow: terminalDropActive ? "inset 0 -1px 0 var(--accent)" : "none",
       }}
     >
       <div
@@ -130,6 +167,7 @@ function TabBar({
             canClose={tabs.length > 1}
             onSelect={onSelect}
             onClose={onClose}
+            onTerminalPaneDrop={onTerminalPaneDrop}
           />
         ))}
       </div>
@@ -220,6 +258,7 @@ interface TabItemProps {
   // below) lets a single tab's change skip re-rendering its siblings.
   onSelect: (id: TabId) => void;
   onClose: (id: TabId) => void;
+  onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId: TabId) => void;
 }
 
 // React.memo so only the tab whose props actually changed (active flag
@@ -231,9 +270,14 @@ const TabItem = React.memo(function TabItem({
   canClose,
   onSelect,
   onClose,
+  onTerminalPaneDrop,
 }: TabItemProps) {
   const [hover, setHover] = useState(false);
   const [closeHover, setCloseHover] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
+  const acceptsPaneDrop = (event: React.DragEvent): boolean =>
+    tab.kind === "terminal" &&
+    Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
 
   const background = active
     ? "var(--bg)"
@@ -248,6 +292,36 @@ const TabItem = React.memo(function TabItem({
       data-tab-id={tab.id}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      onDragEnter={(event) => {
+        if (!acceptsPaneDrop(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setDropActive(true);
+      }}
+      onDragOver={(event) => {
+        if (!acceptsPaneDrop(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = "move";
+        setDropActive(true);
+      }}
+      onDragLeave={(event) => {
+        if (
+          event.relatedTarget instanceof Node &&
+          event.currentTarget.contains(event.relatedTarget)
+        ) {
+          return;
+        }
+        setDropActive(false);
+      }}
+      onDrop={(event) => {
+        const payload = parseTerminalPaneDrag(event.dataTransfer);
+        if (!payload || tab.kind !== "terminal") return;
+        event.preventDefault();
+        event.stopPropagation();
+        setDropActive(false);
+        onTerminalPaneDrop(payload, tab.id);
+      }}
       onClick={(e) => {
         e.stopPropagation();
         onSelect(tab.id);
@@ -268,6 +342,8 @@ const TabItem = React.memo(function TabItem({
         padding: "0 8px 0 10px",
         background,
         color: active ? "var(--ink)" : "var(--ink-dim)",
+        outline: dropActive ? "1px solid var(--accent)" : "none",
+        outlineOffset: -1,
         fontFamily: "var(--font-sans)",
         fontSize: 12,
         cursor: "default",
@@ -382,29 +458,15 @@ function GlyphIcon({ glyph, color }: { glyph: string; color: string }) {
 }
 
 function labelFor(t: Tab): string {
-  if (t.kind === "terminal") return "terminals";
+  if (t.kind === "terminal") return t.title || "terminals";
   return t.title;
 }
 
 function titleFor(t: Tab): string {
   if (t.kind === "editor") return t.path;
   if (t.kind === "preview") return t.url;
-  if (t.kind === "terminal") return activeLeafCwd(t) ?? t.title;
+  if (t.kind === "terminal") return t.title;
   return t.title;
-}
-
-function activeLeafCwd(t: Tab): string | undefined {
-  if (t.kind !== "terminal") return undefined;
-  const stack: Array<typeof t.root> = [t.root];
-  while (stack.length) {
-    const node = stack.pop()!;
-    if (node.kind === "leaf") {
-      if (node.paneId === t.activePaneId) return node.cwd;
-    } else {
-      stack.push(node.a, node.b);
-    }
-  }
-  return undefined;
 }
 
 function cssEscape(value: string): string {

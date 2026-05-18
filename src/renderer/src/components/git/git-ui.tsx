@@ -253,6 +253,17 @@ export function CommitIcon(): React.ReactElement {
   return svg(<path d="M3 7.4 6 10.4 11.2 4" />, 1.6);
 }
 
+export function SparkleIcon(): React.ReactElement {
+  return svg(
+    <>
+      <path d="M7.2 2.4 8 5.2l2.8.8L8 6.8l-.8 2.8-.8-2.8L3.6 6l2.8-.8.8-2.8Z" />
+      <path d="M11 9.2l.4 1.2 1.2.4-1.2.4-.4 1.2-.4-1.2-1.2-.4 1.2-.4.4-1.2Z" />
+      <path d="M3 9.8l.3.9.9.3-.9.3-.3.9-.3-.9-.9-.3.9-.3.3-.9Z" />
+    </>,
+    1.15,
+  );
+}
+
 export function UndoIcon(): React.ReactElement {
   return svg(
     <>

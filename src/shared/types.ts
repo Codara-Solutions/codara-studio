@@ -270,6 +270,11 @@ export interface GitDiff {
 /** Result of a git mutation — stderr is surfaced verbatim on failure. */
 export type GitOpResult = { ok: true } | { ok: false; error: string };
 
+/** Result of asking Inline AI to draft an editable commit message. */
+export type GitCommitMessageResult =
+  | { ok: true; message: string }
+  | { ok: false; error: string };
+
 export type RunStatus =
   | "idle"
   | "planning"
@@ -417,6 +422,12 @@ export interface AutopilotState {
   resumedAt?: string;
   updatedAt: string;
   consecutiveCompletionRefusals?: number;
+  /**
+   * How many standing interactive terminals the last spawn_terminals decision
+   * opened. Lets the run graph name the outcome ("opened 2 terminals") for a
+   * run that finished without orchestration steps.
+   */
+  spawnedTerminals?: number;
 }
 
 export type HumanRunMessageAuthor = "user" | "spark" | "system";
@@ -424,6 +435,7 @@ export type HumanRunMessageKind = "note" | "question" | "answer" | "decision";
 
 export interface HumanRunMessage {
   id: string;
+  clientMessageId?: string;
   runId: string;
   author: HumanRunMessageAuthor;
   kind: HumanRunMessageKind;
@@ -745,6 +757,7 @@ export interface StartAutopilotInput {
   // Pre-run note written by the user in the plan composer. Appended as the
   // first human message on the run so the manager sees it during plan_analysis.
   initialUserNote?: string;
+  initialUserNoteClientMessageId?: string;
 }
 
 export interface PauseRunInput {
@@ -763,6 +776,7 @@ export interface CancelRunInput {
 
 export interface AddRunMessageInput {
   runId: string;
+  clientMessageId?: string;
   author: HumanRunMessageAuthor;
   kind: HumanRunMessageKind;
   message: string;
@@ -781,6 +795,7 @@ export type RunInterruptMode = "graceful" | "hard";
 
 export interface InterruptRunWithMessageInput {
   runId: string;
+  clientMessageId?: string;
   message: string;
   kind?: HumanRunMessageKind;
   mode: RunInterruptMode;

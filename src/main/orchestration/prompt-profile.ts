@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { OpenRouterManagerMode } from "./openrouter-manager";
 
@@ -247,15 +247,33 @@ export const DEFAULT_MANAGER_PROMPT_PROFILE: ManagerPromptProfile = {
 };
 
 let cachedProfile: ManagerPromptProfile | null = null;
+// `${path}:${mtimeMs}` of the on-disk profile the cache was parsed from. When
+// the file is edited the key changes, so loadManagerPromptProfile re-parses
+// it: prompt edits take effect on the next planning pass with no app restart.
+let cachedProfileKey: string | null = null;
+// A headless eval pinned an explicit profile via loadManagerPromptProfileFromPath;
+// while pinned, never auto-reload from the default disk candidates.
+let profilePinned = false;
 
 export function loadManagerPromptProfile(): ManagerPromptProfile {
-  if (cachedProfile) return cachedProfile;
-  cachedProfile = loadProfileFromDisk() ?? DEFAULT_MANAGER_PROMPT_PROFILE;
+  if (profilePinned && cachedProfile) return cachedProfile;
+  const disk = loadProfileFromDisk();
+  if (disk) {
+    cachedProfile = disk.profile;
+    cachedProfileKey = disk.key;
+    return cachedProfile;
+  }
+  if (!cachedProfile) {
+    cachedProfile = DEFAULT_MANAGER_PROMPT_PROFILE;
+    cachedProfileKey = null;
+  }
   return cachedProfile;
 }
 
 export function resetManagerPromptProfileCache(): void {
   cachedProfile = null;
+  cachedProfileKey = null;
+  profilePinned = false;
 }
 
 // Headless eval: load a manager profile from an explicit absolute path and
@@ -270,6 +288,8 @@ export function loadManagerPromptProfileFromPath(
     const parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
     const profile = normalizeManagerPromptProfile(parsed);
     cachedProfile = profile;
+    cachedProfileKey = `pinned:${filePath}`;
+    profilePinned = true;
     return profile;
   } catch (err) {
     console.warn(`[spark] failed to load manager prompt profile at ${filePath}:`, err);
@@ -307,12 +327,24 @@ export function formatManagerModeRules(
   return (profile.modeRules[mode] ?? DEFAULT_MANAGER_PROMPT_PROFILE.modeRules[mode]).join("\n");
 }
 
-function loadProfileFromDisk(): ManagerPromptProfile | null {
+function loadProfileFromDisk(): { profile: ManagerPromptProfile; key: string } | null {
   for (const path of profilePathCandidates()) {
-    if (!path || !existsSync(path)) continue;
+    if (!path) continue;
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(path).mtimeMs;
+    } catch {
+      continue; // not found or unreadable — try the next candidate
+    }
+    const key = `${path}:${mtimeMs}`;
+    // Same file, unchanged since the cached parse — reuse it. statSync is
+    // cheap; the readFile + JSON.parse only runs when the profile changed.
+    if (key === cachedProfileKey && cachedProfile) {
+      return { profile: cachedProfile, key };
+    }
     try {
       const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-      return normalizeManagerPromptProfile(parsed);
+      return { profile: normalizeManagerPromptProfile(parsed), key };
     } catch (err) {
       console.warn(`[spark] failed to load manager prompt profile at ${path}:`, err);
     }

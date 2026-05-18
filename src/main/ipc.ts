@@ -7,6 +7,7 @@ import {
   commitChanges,
   discardChanges,
   fetchRemote,
+  generateCommitMessage,
   getGitDiff,
   getGitLog,
   getGitStatus,
@@ -67,6 +68,7 @@ import type {
   FsEntry,
   FsFileContent,
   FsReadResult,
+  GitCommitMessageResult,
   GitDiff,
   GitFileChange,
   GitLog,
@@ -288,6 +290,10 @@ export function registerIpc(): void {
       return commitChanges(input.cwd, input.message);
     },
   );
+
+  ipcMain.handle("git:generateCommitMessage", async (_e, cwd: string): Promise<GitCommitMessageResult> => {
+    return generateCommitMessage(cwd);
+  });
 
   ipcMain.handle("git:push", async (_e, cwd: string): Promise<GitOpResult> => {
     return push(cwd);

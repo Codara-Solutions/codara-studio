@@ -35,6 +35,10 @@ export interface TerminalLeaf {
   kind: "leaf";
   paneId: string;
   cwd?: string;
+  // Last visible scrollback captured before/while the app was running. PTY
+  // processes cannot survive a full app quit, but replaying this snapshot
+  // gives restored panes their previous context before the fresh prompt.
+  scrollback?: string;
   // Locally remembered URL sniffed on this leaf's stdout. Used to suppress
   // repeat preview-tab spawns from the same pane.
   detectedUrl?: string;
@@ -88,9 +92,9 @@ export interface PreviewTab extends BaseTab {
   url: string;
 }
 
-// `runId === null` shows the "all runs" placeholder; concrete ids open one
-// canvas per run. The runs stack keeps RunsView mounted so the user keeps
-// their pan/zoom across tab switches.
+// Runs tabs are derived from the selected chat. `runId === null` is kept only
+// for backward-compatible persisted shapes; new visible Runs tabs point at a
+// concrete chat/run.
 export interface RunsTab extends BaseTab {
   kind: "runs";
   runId: string | null;

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type {
+  GitCommitMessageResult,
   GitDiff,
   GitDiffLine,
   GitFileChange,
@@ -12,6 +13,8 @@ import type {
   GitOpResult,
   GitStatus,
 } from "@shared/types";
+import { runInlineAiChatCompletion } from "./inline-ai";
+import { loadPreferences } from "./preferences-store";
 
 // The git backend for the Source Control panel: cached status / log reads
 // plus the mutating operations (stage, commit, push, …). Every git call goes
@@ -31,6 +34,10 @@ const MAX_BUFFER = 8 * 1024 * 1024;
 // Upper bound on rendered diff / untracked-file lines so a monster file can
 // neither blow the IPC payload nor lock up the renderer.
 const MAX_DIFF_LINES = 4000;
+const MAX_COMMIT_PROMPT_CHARS = 28_000;
+const MAX_COMMIT_DIFF_CHARS = 10_000;
+const MAX_UNTRACKED_COMMIT_FILES = 10;
+const COMMIT_MESSAGE_MAX_TOKENS = 180;
 
 // `git log` field layout — a leading 0x1f marks where the `--graph` ASCII
 // ends, then one 0x1f-separated field per commit datum. 0x1f never appears in
@@ -420,6 +427,169 @@ export function stageAll(cwd: string): Promise<GitOpResult> {
 
 export function unstageAll(cwd: string): Promise<GitOpResult> {
   return mutate(cwd, ["reset", "-q", "HEAD"]);
+}
+
+const COMMIT_MESSAGE_SYSTEM_PROMPT = `You write concise Git commit messages.
+
+Use the repository's recent commit subjects as the style guide. Prefer the same convention if there is one. Write in imperative present tense unless the recent subjects clearly use another style.
+
+Return only the commit message text. No markdown, no quotes, no label. Use a single subject line when that is enough; add a blank line and a short body only when the change is too broad for a clear subject.`;
+
+function truncateForPrompt(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const omitted = text.length - maxChars;
+  return `${text.slice(0, maxChars)}\n[truncated ${omitted} chars]`;
+}
+
+async function readGitText(cwd: string, args: string[]): Promise<string> {
+  try {
+    return (await runGit(cwd, args)).stdout.trim();
+  } catch {
+    return "";
+  }
+}
+
+function formatChangeList(status: GitStatus): string {
+  const lines: string[] = [];
+  for (const file of status.staged) {
+    const path = file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path;
+    lines.push(`staged ${file.status}: ${path}`);
+  }
+  for (const file of status.unstaged) {
+    const path = file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path;
+    lines.push(`working ${file.status}: ${path}`);
+  }
+  return lines.join("\n");
+}
+
+async function collectUntrackedDiffForPrompt(cwd: string, status: GitStatus): Promise<string> {
+  const untracked = status.unstaged.filter((file) => file.untracked);
+  if (untracked.length === 0) return "";
+  const chunks: string[] = [];
+  for (const file of untracked.slice(0, MAX_UNTRACKED_COMMIT_FILES)) {
+    const diff = await readUntrackedAsDiff(cwd, file.path);
+    if (diff.binary) {
+      chunks.push(`diff --git a/${file.path} b/${file.path}\nBinary file`);
+      continue;
+    }
+    if (diff.error) {
+      chunks.push(`diff --git a/${file.path} b/${file.path}\n[error: ${diff.error}]`);
+      continue;
+    }
+    chunks.push(`diff --git a/${file.path} b/${file.path}\n${diff.lines.map((line) => line.text).join("\n")}`);
+  }
+  if (untracked.length > MAX_UNTRACKED_COMMIT_FILES) {
+    chunks.push(`[${untracked.length - MAX_UNTRACKED_COMMIT_FILES} untracked files omitted]`);
+  }
+  return chunks.join("\n\n");
+}
+
+function buildCommitMessagePrompt(input: {
+  recentSubjects: string;
+  statusShort: string;
+  changeList: string;
+  stagedDiff: string;
+  unstagedDiff: string;
+  untrackedDiff: string;
+}): string {
+  const recent = input.recentSubjects || "(no previous commits found)";
+  const stagedDiff = truncateForPrompt(input.stagedDiff || "(none)", MAX_COMMIT_DIFF_CHARS);
+  const unstagedDiff = truncateForPrompt(input.unstagedDiff || "(none)", MAX_COMMIT_DIFF_CHARS);
+  const untrackedDiff = truncateForPrompt(input.untrackedDiff || "(none)", MAX_COMMIT_DIFF_CHARS / 2);
+  const body = `RECENT COMMIT SUBJECTS:
+${recent}
+
+CURRENT GIT STATUS:
+${input.statusShort || "(none)"}
+
+CHANGED FILES:
+${input.changeList || "(none)"}
+
+STAGED DIFF:
+${stagedDiff}
+
+UNSTAGED TRACKED DIFF:
+${unstagedDiff}
+
+UNTRACKED FILE PREVIEW:
+${untrackedDiff}
+
+Draft an editable commit message for all current source-control changes. Keep the subject specific and under about 72 characters.`;
+  return truncateForPrompt(body, MAX_COMMIT_PROMPT_CHARS);
+}
+
+function sanitizeGeneratedCommitMessage(raw: string): string {
+  let text = raw.replace(/\r\n/g, "\n").trim();
+  text = text.replace(/^```[a-zA-Z0-9_-]*\s*/, "").replace(/```$/, "").trim();
+  text = text.replace(/^commit message:\s*/i, "").trim();
+  if (
+    (text.startsWith('"') && text.endsWith('"')) ||
+    (text.startsWith("'") && text.endsWith("'"))
+  ) {
+    text = text.slice(1, -1).trim();
+  }
+  return text
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+export async function generateCommitMessage(cwd: string): Promise<GitCommitMessageResult> {
+  try {
+    const status = await computeGitStatus(cwd);
+    if (!status.isRepo) {
+      return { ok: false, error: status.error ?? "Not a git repository." };
+    }
+    const changeCount = status.staged.length + status.unstaged.length;
+    if (changeCount === 0) {
+      return { ok: false, error: "No changes to summarize." };
+    }
+
+    const preferences = await loadPreferences();
+    const modelId = preferences.inlineAutocompleteModelId.trim();
+    if (!modelId) {
+      return { ok: false, error: "No inline-AI model configured." };
+    }
+
+    const [recentSubjects, statusShort, stagedDiff, unstagedDiff, untrackedDiff] =
+      await Promise.all([
+        readGitText(cwd, ["log", "--max-count=12", "--pretty=format:%s"]),
+        readGitText(cwd, ["status", "--short"]),
+        readGitText(cwd, ["diff", "--cached", "--no-color", "--no-ext-diff", "--unified=3"]),
+        readGitText(cwd, ["diff", "--no-color", "--no-ext-diff", "--unified=3"]),
+        collectUntrackedDiffForPrompt(cwd, status),
+      ]);
+
+    const response = await runInlineAiChatCompletion({
+      modelId,
+      requestId: `git-commit-message-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      maxTokens: COMMIT_MESSAGE_MAX_TOKENS,
+      temperature: 0.25,
+      messages: [
+        { role: "system", content: COMMIT_MESSAGE_SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: buildCommitMessagePrompt({
+            recentSubjects,
+            statusShort,
+            changeList: formatChangeList(status),
+            stagedDiff,
+            unstagedDiff,
+            untrackedDiff,
+          }),
+        },
+      ],
+    });
+
+    if (response.error) return { ok: false, error: response.error };
+    const message = sanitizeGeneratedCommitMessage(response.text);
+    if (!message) return { ok: false, error: "Inline AI returned an empty commit message." };
+    return { ok: true, message };
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
 }
 
 // Discard working-tree changes. Tracked files are restored from the index;

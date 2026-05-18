@@ -26,7 +26,7 @@ test("autopilot runs from a selected markdown plan", async () => {
     await expect(page.getByText("SPARK AGENT")).toBeVisible();
     await expect(page.getByText("workspace").first()).toBeVisible();
 
-    await expect(page.locator("select")).toHaveValue(/PLAN\.md$/);
+    await expectSelectedPlan(page, /PLAN\.md$/);
     await clickButton(page, "RUN");
     await expect(page.locator(".xterm-host")).toHaveCount(1, { timeout: 10_000 });
 
@@ -155,7 +155,7 @@ test("runs can be deleted from the run list inline", async () => {
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
 
-    await expect(page.locator("select")).toHaveValue(/PLAN\.md$/);
+    await expectSelectedPlan(page, /PLAN\.md$/);
     await clickButton(page, "RUN");
     await expect(page.getByRole("button", { name: "DELETE RUN", exact: true })).toBeEnabled({ timeout: 10_000 });
 
@@ -188,7 +188,7 @@ test("run uses the latest selected plan text instead of reusing old worker tasks
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
 
-    await expect(page.locator("select")).toHaveValue(/PLAN\.md$/);
+    await expectSelectedPlan(page, /PLAN\.md$/);
     await clickButton(page, "RUN");
     await waitForRunCount(userDataDir, 1);
 
@@ -240,7 +240,7 @@ test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
 
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
-    await expect(page.locator("select")).toHaveValue(/PLAN\.md$/);
+    await expectSelectedPlan(page, /PLAN\.md$/);
     await clickButton(page, "RUN");
 
     await waitForOnlyRun(userDataDir, (candidate) =>
@@ -319,6 +319,10 @@ async function clickButton(page: Page, name: string): Promise<void> {
   const button = page.getByRole("button", { name, exact: true });
   await expect(button).toBeEnabled();
   await button.click();
+}
+
+async function expectSelectedPlan(page: Page, fileName: RegExp): Promise<void> {
+  await expect(page.getByRole("button", { name: "Selected plan file" })).toContainText(fileName);
 }
 
 async function expectEvent(page: Page, type: string, timeout = 5_000): Promise<void> {

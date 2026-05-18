@@ -12,7 +12,7 @@ import RunCanvas from "./runs/RunCanvas";
 interface Props {
   workspace: Workspace | null;
   // Lifted state from App — the runs list and selection are owned upstream so
-  // this canvas and the right-panel SparkAgentPanel always agree.
+  // this canvas and the right-panel chat panel always agree.
   runs: RunState[];
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
@@ -31,12 +31,31 @@ export default function RunsView({ workspace, runs, activeRunId }: Props) {
     return (
       <EmptyState
         heading="No runs yet"
-        text="Pick a plan in the Spark panel and press Run to start one."
+        text="Start a chat in the Spark panel, or right-click a plan file in the explorer."
       />
     );
   }
   if (!activeRun) {
-    return <EmptyState heading="No run selected" text="Choose a run from the Spark panel." />;
+    return <EmptyState heading="No run selected" text="Pick a chat from the Spark panel." />;
+  }
+  if (isTerminalSpawnRun(activeRun)) {
+    return (
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          minWidth: 0,
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+          background: "var(--bg)",
+          color: "var(--ink)",
+        }}
+      >
+        <RunHeader run={activeRun} />
+        <TerminalSpawnState run={activeRun} />
+      </div>
+    );
   }
 
   return (
@@ -55,6 +74,15 @@ export default function RunsView({ workspace, runs, activeRunId }: Props) {
       <RunHeader run={activeRun} />
       <RunCanvas run={activeRun} />
     </div>
+  );
+}
+
+function isTerminalSpawnRun(run: RunState): boolean {
+  return (
+    run.steps.length === 0 &&
+    run.workerTasks.length === 0 &&
+    (run.autopilot?.lastAction === "spawned_terminals" ||
+      (run.autopilot?.spawnedTerminals ?? 0) > 0)
   );
 }
 
@@ -92,7 +120,7 @@ function RunHeader({ run }: { run: RunState }) {
         <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
           <StatusDot status={run.status} size={8} />
           <span
-            title={run.title}
+            title={isTerminalSpawnRun(run) ? "Spark terminals" : run.title}
             style={{
               minWidth: 0,
               overflow: "hidden",
@@ -105,7 +133,7 @@ function RunHeader({ run }: { run: RunState }) {
               letterSpacing: "-0.006em",
             }}
           >
-            {run.title}
+            {isTerminalSpawnRun(run) ? "Spark terminals" : run.title}
           </span>
           <StatusPill status={run.status} />
           <RunIdChip runId={run.id} />
@@ -156,6 +184,76 @@ function RunHeader({ run }: { run: RunState }) {
         <Metric label="Autopilot" value={run.autopilot?.status ?? "idle"} separated text />
       </div>
     </header>
+  );
+}
+
+function TerminalSpawnState({ run }: { run: RunState }) {
+  const count = run.autopilot?.spawnedTerminals ?? 0;
+  const terminalText =
+    count === 1 ? "1 terminal is open" : `${count || "The requested"} terminals are open`;
+  return (
+    <div
+      style={{
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 32,
+        backgroundImage:
+          "radial-gradient(circle, color-mix(in oklch, var(--ink) 10%, transparent) 1px, transparent 1px)",
+        backgroundSize: "24px 24px",
+      }}
+    >
+      <div
+        style={{
+          width: "min(440px, 100%)",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 10,
+          textAlign: "center",
+        }}
+      >
+        <span
+          style={{
+            width: 38,
+            height: 38,
+            borderRadius: 9,
+            border: "1px solid var(--ok)",
+            background: "var(--ok-soft)",
+            color: "var(--ok)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <TerminalGlyph />
+        </span>
+        <div style={{ color: "var(--ink)", fontSize: 15, fontWeight: 700 }}>
+          {terminalText}
+        </div>
+        <div style={{ color: "var(--muted)", fontSize: 12.5, lineHeight: 1.5 }}>
+          Use the terminal tab to drive them directly.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TerminalGlyph({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" fill="none" aria-hidden>
+      <rect x="1.6" y="3" width="14.8" height="12" rx="2.2" stroke="currentColor" strokeWidth="1.5" />
+      <path
+        d="M4.8 7.3 7 9.4 4.8 11.5"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M8.8 11.7h4.2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
   );
 }
 
