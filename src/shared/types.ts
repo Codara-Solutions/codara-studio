@@ -433,6 +433,18 @@ export interface AutopilotState {
 export type HumanRunMessageAuthor = "user" | "spark" | "system";
 export type HumanRunMessageKind = "note" | "question" | "answer" | "decision";
 
+export type RunMessageAttachmentKind = "image";
+
+export interface RunMessageAttachment {
+  id: string;
+  kind: RunMessageAttachmentKind;
+  name: string;
+  path: string;
+  mimeType: string;
+  size: number;
+  createdAt: string;
+}
+
 export interface HumanRunMessage {
   id: string;
   clientMessageId?: string;
@@ -440,6 +452,7 @@ export interface HumanRunMessage {
   author: HumanRunMessageAuthor;
   kind: HumanRunMessageKind;
   message: string;
+  attachments?: RunMessageAttachment[];
   createdAt: string;
 }
 
@@ -629,6 +642,9 @@ export interface SparkCall {
   durationMs?: number;
   promptTokens?: number;
   completionTokens?: number;
+  promptTokenEstimate?: number;
+  contextWindowTokens?: number;
+  contextWindowSource?: "known" | "default";
   error?: string;
   createdAt: string;
   completedAt?: string;
@@ -758,6 +774,7 @@ export interface StartAutopilotInput {
   // first human message on the run so the manager sees it during plan_analysis.
   initialUserNote?: string;
   initialUserNoteClientMessageId?: string;
+  initialAttachments?: AddRunMessageAttachmentInput[];
 }
 
 export interface PauseRunInput {
@@ -780,6 +797,12 @@ export interface AddRunMessageInput {
   author: HumanRunMessageAuthor;
   kind: HumanRunMessageKind;
   message: string;
+  attachments?: AddRunMessageAttachmentInput[];
+}
+
+export interface AddRunMessageAttachmentInput {
+  sourcePath: string;
+  name?: string;
 }
 
 // Interrupt mode for an in-flight run when the user wants their message to
@@ -800,6 +823,7 @@ export interface InterruptRunWithMessageInput {
   kind?: HumanRunMessageKind;
   mode: RunInterruptMode;
   reason?: string;
+  attachments?: AddRunMessageAttachmentInput[];
 }
 
 // ── Project-wide content search ─────────────────────────────────────────────

@@ -369,7 +369,6 @@ export function useTerminalSession({
           startupCommand: initialCommand?.trim() || undefined,
         });
         if (disposed) {
-          void window.spark.pty.dispose(sessionId);
           return;
         }
         spawned = true;
@@ -463,12 +462,9 @@ export function useTerminalSession({
       // permanently so no later remount can resurrect the timer.
       const cmd = initialCommand?.trim();
       if (cmd && cmd.length > 0 && !startupCommandHandled && !autorunFiredSessions.has(sessionId)) {
-        autorunFiredSessions.add(sessionId);
         const autorunTimer = window.setTimeout(() => {
-          if (disposed) {
-            autorunFiredSessions.delete(sessionId);
-            return;
-          }
+          if (disposed) return;
+          autorunFiredSessions.add(sessionId);
           void window.spark.pty.write(sessionId, `${cmd}\r`);
         }, 1500);
         cleanups.push(() => window.clearTimeout(autorunTimer));
@@ -493,9 +489,10 @@ export function useTerminalSession({
         }
         themeUnsubRef.current = null;
       }
-      if (spawned) {
-        void window.spark.pty.dispose(sessionId);
-      }
+      // Detach the renderer-side xterm from the PTY, but do not kill the
+      // process. Terminal panes unmount during workspace switches and hidden
+      // tab restoration; those are view lifecycle events, not user intent to
+      // close the shell. Explicit close actions dispose the PTY in useTabs.
       try {
         termRef.current?.dispose();
       } catch {

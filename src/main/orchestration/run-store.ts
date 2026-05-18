@@ -1,6 +1,6 @@
 import { promises as fs, createWriteStream } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
-import { dirname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import type {
   AddRunMessageInput,
   AgentRuntimeModel,
@@ -8,7 +8,7 @@ import type {
   LaunchWorkerAttemptInput,
   PauseRunInput,
   CancelRunInput,
-  PlannedStepAgentTaskClass,
+  ContextPacket,
   ResumeRunInput,
   ReviewDecision,
   CreateStepInput,
@@ -17,6 +17,7 @@ import type {
   PlannedStepAgent,
   PrepareWorkerTaskInput,
   RunArtifactPaths,
+  RunMessageAttachment,
   RunState,
   SparkCall,
   SparkEvent,
@@ -35,6 +36,11 @@ import type {
   WorkerTaskEnvelope,
 } from "@shared/types";
 import { makeId } from "@shared/ids";
+import {
+  contextWindowForModel,
+  estimateImageTokens,
+  estimateTokensFromText,
+} from "@shared/context-window";
 import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
 import { loadSettings } from "../storage";
 import {
@@ -86,6 +92,8 @@ const activeAutopilotPlans = new Map<string, Promise<void>>();
 const activeAutopilotReviews = new Map<string, Promise<void>>();
 const runMutationQueues = new Map<string, Promise<void>>();
 const runWriteQueues = new Map<string, Promise<void>>();
+const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 4;
+const MAX_IMAGE_ATTACHMENT_BYTES = 12 * 1024 * 1024;
 
 // In-memory authoritative cache of run state, keyed by run id. This module is
 // the SOLE writer of run.json (the orchestration loop lives in the single
@@ -314,6 +322,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       author: "user",
       kind: "note",
       message: initialNote,
+      attachments: input.initialAttachments,
     });
   }
 
@@ -811,7 +820,7 @@ async function askOpenRouterManagerForInitialTasks(run: RunState, cwd: string): 
 // pickAutopilotStep advances and we call ourselves only once per autopilot
 // hop (initial planning + each worker_result_review).
 async function resolveActiveBrakeAndReplan(run: RunState, cwd: string): Promise<RunState> {
-  const next = pickAutopilotStep(run);
+  const next = pickPendingAutopilotStep(run);
   if (!next || (next.kind ?? "worker_batch") !== "brake") return run;
 
   const updated = await updateStep({
@@ -883,8 +892,9 @@ async function askOpenRouterManager(
   const requestPath = join(callDir, "request.json");
   const responsePath = join(callDir, "response.json");
   const parsedJsonPath = join(callDir, "parsed-decision.json");
-  const workerReports = await collectWorkerReportContext(run);
+  const contextPacketPath = join(callDir, "context-packet.json");
   const managerMode = normalizeOpenRouterManagerMode(mode);
+  const workerReports = await collectWorkerReportContext(run, managerMode);
   const availableRuntimes = await detectAgentRuntimes().catch(() => []);
   const requestBody = buildOpenRouterManagerRequest({
     run,
@@ -894,8 +904,19 @@ async function askOpenRouterManager(
     workerReports,
     availableRuntimes,
   });
+  const contextWindow = contextWindowForModel(config.model);
+  const contextPacket = buildContextPacket({
+    runId: run.id,
+    callId,
+    mode,
+    requestBody,
+    tokenBudget: contextWindow.tokens,
+  });
   await fs.mkdir(callDir, { recursive: true });
-  await fs.writeFile(requestPath, JSON.stringify(requestBody, null, 2), "utf8");
+  await Promise.all([
+    fs.writeFile(requestPath, JSON.stringify(redactRequestBodyForArtifact(requestBody), null, 2), "utf8"),
+    fs.writeFile(contextPacketPath, JSON.stringify(contextPacket, null, 2), "utf8"),
+  ]);
 
   const startedAt = new Date().toISOString();
   const sparkCall: SparkCall = {
@@ -904,9 +925,13 @@ async function askOpenRouterManager(
     mode,
     model: config.model,
     status: "started",
+    contextPacketId: contextPacket.id,
     requestPath,
     responsePath,
     parsedJsonPath,
+    promptTokenEstimate: contextPacket.tokenEstimate,
+    contextWindowTokens: contextWindow.tokens,
+    contextWindowSource: contextWindow.source,
     createdAt: startedAt,
   };
   run.sparkCalls.push(sparkCall);
@@ -931,6 +956,9 @@ async function askOpenRouterManager(
       mode,
       model: config.model,
       requestPath,
+      contextPacketPath,
+      promptTokenEstimate: contextPacket.tokenEstimate,
+      contextWindowTokens: contextWindow.tokens,
     },
   });
 
@@ -973,12 +1001,16 @@ async function askOpenRouterManager(
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     const completedAt = new Date().toISOString();
+    const completedContextWindow = contextWindowForModel(result.model);
     if (targetCall) {
       targetCall.status = "completed";
       targetCall.model = result.model;
       targetCall.durationMs = result.durationMs;
       targetCall.promptTokens = result.promptTokens;
       targetCall.completionTokens = result.completionTokens;
+      targetCall.promptTokenEstimate = contextPacket.tokenEstimate;
+      targetCall.contextWindowTokens = completedContextWindow.tokens;
+      targetCall.contextWindowSource = completedContextWindow.source;
       targetCall.completedAt = completedAt;
     }
     latest.updatedAt = completedAt;
@@ -1014,6 +1046,9 @@ async function askOpenRouterManager(
         durationMs: result.durationMs,
         promptTokens: result.promptTokens,
         completionTokens: result.completionTokens,
+        promptTokenEstimate: contextPacket.tokenEstimate,
+        contextWindowTokens: completedContextWindow.tokens,
+        contextWindowSource: completedContextWindow.source,
         parsedJsonPath,
         decision: result.decision,
       },
@@ -1035,6 +1070,9 @@ async function askOpenRouterManager(
       targetCall.error = error;
       targetCall.completedAt = completedAt;
       targetCall.durationMs = Date.now() - Date.parse(startedAt);
+      targetCall.promptTokenEstimate = contextPacket.tokenEstimate;
+      targetCall.contextWindowTokens = contextWindow.tokens;
+      targetCall.contextWindowSource = contextWindow.source;
     }
     latest.updatedAt = completedAt;
     await saveRun(latest);
@@ -1140,7 +1178,7 @@ function promoteTaskForTrivial(task: SparkManagerTaskDecision): SparkManagerTask
 // bjgp3uso7).
 async function tryTrivialFastPathStepPlanning(run: RunState): Promise<RunState | null> {
   if (run.taskComplexity !== "trivial") return null;
-  const activeStep = pickAutopilotStep(run);
+  const activeStep = pickPendingAutopilotStep(run);
   if (!activeStep) return null;
   if ((activeStep.kind ?? "worker_batch") !== "worker_batch") return null;
   const agents = activeStep.plannedAgents ?? [];
@@ -1666,6 +1704,41 @@ async function applySparkManagerDecision(
     ]);
     const pendingTasks = run.workerTasks.filter((task) => activeTaskStatuses.has(task.status));
     if (pendingSteps.length > 0 || pendingTasks.length > 0) {
+      const pendingStepsCanComplete =
+        pendingTasks.length === 0 &&
+        pendingSteps.length > 0 &&
+        pendingSteps.every((step) => {
+          const tasks = run.workerTasks.filter((task) => task.stepId === step.id);
+          return tasks.length > 0 && tasks.every((task) => task.status === "accepted" || task.status === "cancelled");
+        });
+      if (pendingStepsCanComplete) {
+        return commitRunChange(run, {
+          type: "spark_manager.completed_run",
+          message: "Spark manager marked the run complete after accepting reviewed steps",
+          payload: {
+            summary: decision.summary,
+            completedStepIds: pendingSteps.map((step) => step.id),
+          },
+          mutate: (draft, timestamp) => {
+            const ids = new Set(pendingSteps.map((step) => step.id));
+            for (const step of draft.steps) {
+              if (!ids.has(step.id)) continue;
+              step.status = "complete";
+              step.reviewSummary = decision.summary || step.reviewSummary;
+              step.updatedAt = timestamp;
+              if (draft.currentStepId === step.id) draft.currentStepId = undefined;
+            }
+            draft.status = "complete";
+            draft.autopilot = {
+              ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+              status: "complete",
+              lastAction: "manager_marked_complete",
+              updatedAt: timestamp,
+            };
+            draft.updatedAt = timestamp;
+          },
+        });
+      }
       const priorRefusals = run.autopilot?.consecutiveCompletionRefusals ?? 0;
       const nextRefusals = priorRefusals + 1;
       // Failsafe: if the manager keeps returning complete despite the guard
@@ -2050,7 +2123,7 @@ async function applySparkManagerDecision(
   const MAX_TASKS_PER_STEP = 9;
   const decisionsByStep = new Map<string, number>();
   for (const task of decision.tasks) {
-    const sid = resolveTaskStepId(latest, task.stepIndex, stepIds, task.taskClass);
+    const sid = resolveTaskStepId(latest, task.stepIndex, stepIds);
     if (!sid) continue;
     decisionsByStep.set(sid, (decisionsByStep.get(sid) ?? 0) + 1);
   }
@@ -2101,8 +2174,26 @@ async function applySparkManagerDecision(
     });
   }
 
+  if (mode === "worker_result_review" && decision.tasks.length === 0) {
+    latest = await completeAcceptedReviewingSteps(latest, decision.summary);
+  }
+
   for (const task of decision.tasks) {
-    const stepId = resolveTaskStepId(latest, task.stepIndex, stepIds, task.taskClass);
+    const stepId = resolveTaskStepId(latest, task.stepIndex, stepIds);
+    if (!stepId) {
+      await appendEvent({
+        workspaceId: latest.workspaceId,
+        runId: latest.id,
+        type: "spark_manager.task_without_active_step_dropped",
+        message: `Dropped manager task because no mutable step is active: ${task.title}`,
+        payload: {
+          title: task.title,
+          requestedStepIndex: task.stepIndex,
+          completedStepCount: latest.steps.filter((step) => isTerminalStepStatus(step.status)).length,
+        },
+      });
+      continue;
+    }
     if (skippedStepIds.has(stepId ?? "")) continue;
     latest = await createWorkerTask({
       runId: latest.id,
@@ -2305,7 +2396,12 @@ export async function cancelRun(input: CancelRunInput): Promise<RunState> {
 
 export async function addRunMessage(input: AddRunMessageInput): Promise<RunState> {
   const run = await requireRun(input.runId);
-  const message = input.message.trim();
+  const attachmentInputs = input.attachments ?? [];
+  const message = input.message.trim() || (
+    attachmentInputs.length > 0
+      ? `Use the attached image${attachmentInputs.length === 1 ? "" : "s"} as context.`
+      : ""
+  );
   if (!message) throw new Error("Message is required.");
   const clientMessageId = input.clientMessageId?.trim();
 
@@ -2325,6 +2421,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     .reverse()
     .find((entry) => entry.author === input.author);
   if (
+    attachmentInputs.length === 0 &&
     priorSameAuthor &&
     priorSameAuthor.message === message &&
     Date.now() - new Date(priorSameAuthor.createdAt).getTime() < 20000
@@ -2332,13 +2429,16 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     return run;
   }
 
+  const messageId = makeId("msg");
+  const attachments = await persistRunMessageAttachments(run.id, messageId, attachmentInputs);
   const humanMessage = {
-    id: makeId("msg"),
+    id: messageId,
     clientMessageId,
     runId: run.id,
     author: input.author,
     kind: input.kind,
     message,
+    attachments,
     createdAt: new Date().toISOString(),
   };
 
@@ -2359,6 +2459,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
         .reverse()
         .find((entry) => entry.author === input.author);
       if (
+        attachmentInputs.length === 0 &&
         latestSameAuthor &&
         latestSameAuthor.message === message &&
         Date.now() - new Date(latestSameAuthor.createdAt).getTime() < 20000
@@ -2400,6 +2501,75 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
   return updated;
 }
 
+async function persistRunMessageAttachments(
+  runId: string,
+  messageId: string,
+  inputs: AddRunMessageInput["attachments"],
+): Promise<RunMessageAttachment[]> {
+  const selected = (inputs ?? [])
+    .filter((input) => input?.sourcePath?.trim())
+    .slice(0, MAX_IMAGE_ATTACHMENTS_PER_MESSAGE);
+  if (selected.length === 0) return [];
+
+  const attachmentDir = join(runDir(runId), "attachments");
+  await fs.mkdir(attachmentDir, { recursive: true });
+  const createdAt = new Date().toISOString();
+  const attachments: RunMessageAttachment[] = [];
+
+  for (const input of selected) {
+    const sourcePath = input.sourcePath.trim();
+    const mimeType = imageMimeTypeForPath(sourcePath);
+    if (!mimeType) {
+      throw new Error(`Unsupported image attachment type: ${basename(sourcePath)}`);
+    }
+    const stat = await fs.stat(sourcePath);
+    if (!stat.isFile()) throw new Error(`Image attachment is not a file: ${sourcePath}`);
+    if (stat.size > MAX_IMAGE_ATTACHMENT_BYTES) {
+      throw new Error(`Image attachment is too large: ${basename(sourcePath)}`);
+    }
+
+    const id = makeId("att");
+    const ext = normalizedImageExtension(sourcePath);
+    const safeName = basename(input.name?.trim() || sourcePath);
+    const storedPath = join(attachmentDir, `${messageId}-${id}${ext}`);
+    await fs.copyFile(sourcePath, storedPath);
+    attachments.push({
+      id,
+      kind: "image",
+      name: safeName,
+      path: storedPath,
+      mimeType,
+      size: stat.size,
+      createdAt,
+    });
+  }
+
+  return attachments;
+}
+
+function imageMimeTypeForPath(path: string): string | null {
+  switch (extname(path).toLowerCase()) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    case ".gif":
+      return "image/gif";
+    case ".bmp":
+      return "image/bmp";
+    default:
+      return null;
+  }
+}
+
+function normalizedImageExtension(path: string): string {
+  const ext = extname(path).toLowerCase();
+  return ext === ".jpeg" ? ".jpg" : ext;
+}
+
 // Append a user message AND interrupt the in-flight run so the manager picks
 // the message up on its next decision. Two interrupt modes:
 //
@@ -2433,6 +2603,7 @@ export async function interruptRunWithMessage(
     author: "user",
     kind,
     message,
+    attachments: input.attachments,
   });
 
   // 2. Send ESC + record the pause. This mirrors pauseRun without re-emitting
@@ -2652,8 +2823,14 @@ async function pruneQueuedTailSteps(run: RunState, stepIds: string[]): Promise<R
 
 export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<RunState> {
   const run = await requireRun(input.runId);
-  if (input.stepId && !run.steps.some((step) => step.id === input.stepId)) {
-    throw new Error(`Step not found: ${input.stepId}`);
+  if (input.stepId) {
+    const step = run.steps.find((item) => item.id === input.stepId);
+    if (!step) {
+      throw new Error(`Step not found: ${input.stepId}`);
+    }
+    if (isImmutableStepStatus(step.status)) {
+      throw new Error(`Cannot add a worker task to ${step.status} step: ${step.title}`);
+    }
   }
   const title = input.title.trim();
   if (!title) throw new Error("Worker task title is required.");
@@ -2689,25 +2866,18 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     payload: { workerTask: task },
     mutate: (draft, timestamp) => {
       const nextTask = { ...task, createdAt: timestamp, updatedAt: timestamp };
+      const step = nextTask.stepId
+        ? draft.steps.find((item) => item.id === nextTask.stepId)
+        : undefined;
+      if (step && isImmutableStepStatus(step.status)) {
+        throw new Error(`Cannot add a worker task to ${step.status} step: ${step.title}`);
+      }
       draft.workerTasks.push(nextTask);
       if (nextTask.stepId) {
-        const step = draft.steps.find((item) => item.id === nextTask.stepId);
         if (step) {
           if (!step.workerTaskIds.includes(nextTask.id)) {
             step.workerTaskIds.push(nextTask.id);
             step.updatedAt = timestamp;
-          }
-          // A new queueable task on a terminal step un-completes it: most
-          // commonly a verifier follow-up landing on a step the impl's accept
-          // already promoted to "complete". The step isn't actually done while
-          // it has fresh work pending — surface that in the graph.
-          if (
-            ["complete", "failed", "skipped"].includes(step.status) &&
-            ["created", "queued", "retry_queued"].includes(nextTask.status)
-          ) {
-            step.status = "reviewing";
-            step.updatedAt = timestamp;
-            if (!draft.currentStepId) draft.currentStepId = step.id;
           }
         }
       }
@@ -2757,6 +2927,9 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   const task = run.workerTasks.find((item) => item.id === input.workerTaskId);
   if (!task) throw new Error(`Worker task not found: ${input.workerTaskId}`);
   const step = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
+  if (step && isImmutableStepStatus(step.status)) {
+    throw new Error(`Cannot prepare worker task for ${step.status} step: ${step.title}`);
+  }
   const timestamp = new Date().toISOString();
   const runtimeReroute = await rerouteSparkShellTaskToAgent(task);
   const attemptNumber =
@@ -2883,6 +3056,10 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   }
   const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
   if (!task) throw new Error(`Worker task not found: ${attempt.workerTaskId}`);
+  const taskStep = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
+  if (taskStep && isImmutableStepStatus(taskStep.status)) {
+    throw new Error(`Cannot launch worker task for ${taskStep.status} step: ${taskStep.title}`);
+  }
 
   const paths = workerArtifactPaths(run.id, task.stepId, task.id, attempt.id);
   await fs.mkdir(paths.attemptDir, { recursive: true });
@@ -3245,19 +3422,18 @@ async function reviewWorkerReportArtifact({
   if (decision.decision === "accept") {
     reviewedTask.status = "accepted";
     if (reviewedStep) {
-      // Promote step to "complete" once every task in it is accepted. Without
-      // this the step sits at "reviewing" forever and the user sees workers
-      // finish with no green check on the plan-step view.
       const stepTasks = latest.workerTasks.filter((t) => t.stepId === reviewedStep.id);
       const allAccepted =
         stepTasks.length > 0 &&
         stepTasks.every((t) => (t.id === reviewedTask.id ? true : t.status === "accepted"));
-      reviewedStep.status = allAccepted
+      const canCompleteLocally =
+        allAccepted && canCompleteStepImmediatelyAfterLocalReview(latest, reviewedTask);
+      reviewedStep.status = canCompleteLocally
         ? "complete"
         : hasActiveStepWorkers(latest, reviewedStep.id, reviewedTask.id)
           ? "running"
           : "reviewing";
-      if (allAccepted && latest.currentStepId === reviewedStep.id) latest.currentStepId = undefined;
+      if (canCompleteLocally && latest.currentStepId === reviewedStep.id) latest.currentStepId = undefined;
     }
   } else {
     reviewedTask.status = "needs_review";
@@ -3286,6 +3462,74 @@ async function reviewWorkerReportArtifact({
   });
 
   return latest;
+}
+
+function canCompleteStepImmediatelyAfterLocalReview(
+  run: RunState,
+  task: WorkerTask,
+): boolean {
+  // For standard/complex runs, an implementation worker's local "complete"
+  // report is not the end of the step. The manager still has to accept,
+  // queue verifier work, or produce a corrective task. Keeping the step in
+  // reviewing until that decision means a later verifier lands before the
+  // step ever shows as done in the chat timeline.
+  if (
+    (run.taskComplexity === "standard" || run.taskComplexity === "complex") &&
+    task.taskClass !== "verifier"
+  ) {
+    return false;
+  }
+  return true;
+}
+
+async function completeAcceptedReviewingSteps(
+  run: RunState,
+  summary: string,
+): Promise<RunState> {
+  const eligibleStepIds = run.steps
+    .filter((step) => !isTerminalStepStatus(step.status))
+    .filter((step) => {
+      const tasks = run.workerTasks.filter((task) => task.stepId === step.id);
+      return tasks.length > 0 && tasks.every((task) => task.status === "accepted" || task.status === "cancelled");
+    })
+    .map((step) => step.id);
+
+  if (eligibleStepIds.length === 0) return run;
+
+  return commitRunChange(run, {
+    type: "spark_manager.accepted_reviewed_steps",
+    message: `Manager accepted ${eligibleStepIds.length} reviewing step(s) with no follow-up tasks`,
+    payload: {
+      stepIds: eligibleStepIds,
+      summary,
+    },
+    mutate: (draft, timestamp) => {
+      const ids = new Set(eligibleStepIds);
+      for (const step of draft.steps) {
+        if (!ids.has(step.id)) continue;
+        step.status = "complete";
+        step.reviewSummary = summary || step.reviewSummary;
+        step.updatedAt = timestamp;
+        if (draft.currentStepId === step.id) draft.currentStepId = undefined;
+      }
+
+      const allStepsTerminal =
+        draft.steps.length > 0 &&
+        draft.steps.every((step) => isTerminalStepStatus(step.status));
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        lastAction: allStepsTerminal
+          ? "accepted_reviewed_steps_completed_run"
+          : "accepted_reviewed_steps",
+        updatedAt: timestamp,
+      };
+      if (allStepsTerminal) {
+        draft.status = "complete";
+        draft.autopilot.status = "complete";
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
 }
 
 // Detects the synthetic report written by writeAutoFailureReport when the
@@ -3383,9 +3627,109 @@ async function maybeQueueCliLaunchFallback({
   });
 }
 
-async function collectWorkerReportContext(run: RunState): Promise<SparkManagerWorkerReportContext[]> {
+function buildContextPacket(input: {
+  runId: string;
+  callId: string;
+  mode: SparkCall["mode"];
+  requestBody: OpenRouterManagerRequest;
+  tokenBudget: number;
+}): ContextPacket {
+  const included = describeRequestContext(input.requestBody);
+  return {
+    id: `ctx-${input.callId}`,
+    runId: input.runId,
+    decisionType: input.mode,
+    included,
+    excluded: [
+      {
+        label: "older worker report detail",
+        reason: "kept as compact step review summaries and recent report excerpts",
+      },
+      {
+        label: "older image pixels",
+        reason: "stored as attachment artifacts; only the newest image turn is sent to planning/task-writing calls",
+      },
+    ],
+    tokenBudget: input.tokenBudget,
+    tokenEstimate: included.reduce((sum, item) => sum + (item.tokenEstimate ?? 0), 0),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function describeRequestContext(
+  requestBody: OpenRouterManagerRequest,
+): ContextPacket["included"] {
+  const items: ContextPacket["included"] = [];
+  for (const message of requestBody.messages) {
+    if (typeof message.content === "string") {
+      items.push(...estimateTextSections(message.content, message.role));
+      continue;
+    }
+
+    for (const part of message.content) {
+      if (part.type === "text") {
+        for (const section of estimateTextSections(part.text, message.role)) {
+          items.push(section);
+        }
+      } else {
+        items.push({
+          label: "attached image",
+          reason: "latest user-provided visual context",
+          tokenEstimate: estimateImageTokens(),
+        });
+      }
+    }
+  }
+  return items;
+}
+
+function estimateTextSections(
+  text: string,
+  role: string,
+): ContextPacket["included"] {
+  if (role !== "user") {
+    return [{
+      label: `${role} message`,
+      reason: "manager instruction/context text",
+      tokenEstimate: estimateTokensFromText(text),
+    }];
+  }
+  const matches = [...text.matchAll(/^([A-Z][A-Z0-9 -]+)$/gm)];
+  if (matches.length === 0) {
+    return [{
+      label: "user message",
+      reason: "manager run context",
+      tokenEstimate: estimateTokensFromText(text),
+    }];
+  }
+  return matches.map((match, index) => {
+    const start = match.index ?? 0;
+    const end = matches[index + 1]?.index ?? text.length;
+    return {
+      label: match[1].toLowerCase(),
+      reason: "manager run context section",
+      tokenEstimate: estimateTokensFromText(text.slice(start, end)),
+    };
+  });
+}
+
+function redactRequestBodyForArtifact(requestBody: OpenRouterManagerRequest): OpenRouterManagerRequest {
+  return JSON.parse(JSON.stringify(requestBody, (_key, value) => {
+    if (typeof value === "string" && value.startsWith("data:image/")) {
+      const prefix = value.slice(0, Math.min(value.indexOf(";base64,"), 64));
+      return `${prefix};base64,[redacted image bytes]`;
+    }
+    return value;
+  })) as OpenRouterManagerRequest;
+}
+
+async function collectWorkerReportContext(
+  run: RunState,
+  mode: OpenRouterManagerMode,
+): Promise<SparkManagerWorkerReportContext[]> {
   const contexts: SparkManagerWorkerReportContext[] = [];
-  for (const attempt of run.workerAttempts.slice(-8)) {
+  const attemptLimit = mode === "worker_result_review" ? 6 : 4;
+  for (const attempt of run.workerAttempts.slice(-attemptLimit)) {
     const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
     if (!task) continue;
     const reportPath =
@@ -3398,23 +3742,46 @@ async function collectWorkerReportContext(run: RunState): Promise<SparkManagerWo
       taskStatus: task.status,
       attemptStatus: attempt.status,
       reportStatus: report?.status,
-      summary: report?.summary,
-      proof: report?.proof ?? [],
-      risks: report?.risks ?? [],
-      followups: report?.followups ?? [],
+      summary: truncateText(report?.summary, 700),
+      proof: compactStringList(report?.proof, 5, 280),
+      risks: compactStringList(report?.risks, 4, 260),
+      followups: compactStringList(report?.followups, 4, 260),
       verifier: report?.verifier
         ? {
             status: report.verifier.status,
             confidence: report.verifier.confidence,
-            atomicClaims: report.verifier.atomicClaims,
-            correctivePrompt: report.verifier.correctivePrompt,
-            missingOracle: report.verifier.missingOracle,
+            atomicClaims: report.verifier.atomicClaims.map((claim) => ({
+              claim: truncateText(claim.claim, 260) ?? "",
+              verdict: claim.verdict,
+              evidence: truncateText(claim.evidence, 320) ?? "",
+            })),
+            correctivePrompt: truncateText(report.verifier.correctivePrompt, 1800),
+            missingOracle: truncateText(report.verifier.missingOracle, 600),
           }
         : undefined,
       taskClass: task.taskClass,
     });
   }
   return contexts;
+}
+
+function compactStringList(
+  value: string[] | undefined,
+  maxItems: number,
+  maxLength: number,
+): string[] {
+  const source = value ?? [];
+  const shown = source.slice(0, maxItems).map((item) => truncateText(item, maxLength) ?? "");
+  if (source.length > shown.length) {
+    shown.push(`[${source.length - shown.length} more item(s) omitted]`);
+  }
+  return shown.filter(Boolean);
+}
+
+function truncateText(value: string | undefined, maxLength: number): string | undefined {
+  if (!value) return value;
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength).trimEnd()}\n[truncated]`;
 }
 
 async function saveRun(run: RunState): Promise<void> {
@@ -3481,6 +3848,9 @@ async function requireRun(runId: string): Promise<RunState> {
 function normalizeRun(run: RunState): RunState {
   run.humanMessages ??= [];
   run.humanMessages = dedupeHumanMessages(run.humanMessages);
+  for (const message of run.humanMessages) {
+    message.attachments ??= [];
+  }
   for (const step of run.steps ?? []) {
     step.plannedAgents ??= [];
   }
@@ -3514,6 +3884,7 @@ function dedupeHumanMessages(messages: RunState["humanMessages"]): RunState["hum
       message.author,
       message.kind,
       message.message.replace(/\s+/g, " ").trim().toLowerCase(),
+      (message.attachments ?? []).map((attachment) => attachment.id || attachment.path).join("|"),
     ].join("\u0000");
     const recent = recentByText.get(signature);
     if (
@@ -3583,11 +3954,20 @@ function changedFields(input: object, excluded: string[]): string[] {
   return Object.keys(values).filter((key) => !excluded.includes(key) && values[key] !== undefined);
 }
 
+function isTerminalStepStatus(status: StepState["status"]): boolean {
+  return status === "complete" || status === "failed" || status === "skipped";
+}
+
+function isImmutableStepStatus(status: StepState["status"]): boolean {
+  return status === "complete" || status === "skipped";
+}
+
+function pickPendingAutopilotStep(run: RunState): StepState | undefined {
+  return run.steps.find((step) => !isTerminalStepStatus(step.status));
+}
+
 function pickAutopilotStep(run: RunState): StepState | undefined {
-  return (
-    run.steps.find((step) => !["complete", "failed", "skipped"].includes(step.status)) ??
-    run.steps[0]
-  );
+  return pickPendingAutopilotStep(run) ?? run.steps[0];
 }
 
 // Hard cap on attempts per worker task. The manager is allowed to retry, but
@@ -3660,22 +4040,14 @@ function tasksConflictForParallelLaunch(left: WorkerTask, right: WorkerTask): bo
 
 function pickAutopilotTasks(run: RunState): WorkerTask[] {
   const activeStep = pickAutopilotStep(run);
-  const terminalStepIds = new Set(
-    run.steps
-      .filter((step) => ["complete", "failed", "skipped"].includes(step.status))
-      .map((step) => step.id),
-  );
   const candidates = run.workerTasks.filter((task) => {
     if (!["created", "queued", "failed", "retry_queued"].includes(task.status)) return false;
     if (task.status === "failed" && countWorkerAttempts(run, task.id) >= MAX_WORKER_ATTEMPTS) {
       return false;
     }
     if (!activeStep) return true;
+    if (isTerminalStepStatus(activeStep.status)) return false;
     if (task.stepId === activeStep.id) return true;
-    // Orphaned task: stepId points to a terminal step (manager queued late, or
-    // step.index resolution attached it to the wrong step). Surface it on the
-    // active step so the autopilot launches it instead of stalling.
-    if (task.stepId && terminalStepIds.has(task.stepId)) return true;
     return false;
   });
   if (candidates.length === 0) return [];
@@ -3700,7 +4072,7 @@ function pickAutopilotTasks(run: RunState): WorkerTask[] {
 // queueable worker tasks. Used by the autopilot review loop to decide whether
 // to invoke step_planning before declaring "nothing to do".
 function needsStepPlanning(run: RunState): boolean {
-  const active = pickAutopilotStep(run);
+  const active = pickPendingAutopilotStep(run);
   if (!active) return false;
   if ((active.kind ?? "worker_batch") !== "worker_batch") return false;
   if ((active.plannedAgents?.length ?? 0) === 0) return false;
@@ -3712,7 +4084,7 @@ function needsStepPlanning(run: RunState): boolean {
 }
 
 function hasPlannedWorkAfterBrake(run: RunState): boolean {
-  const active = pickAutopilotStep(run);
+  const active = pickPendingAutopilotStep(run);
   if (!active) return false;
   if ((active.kind ?? "worker_batch") !== "worker_batch") return false;
   if ((active.plannedAgents?.length ?? 0) > 0) return true;
@@ -3726,7 +4098,6 @@ function resolveTaskStepId(
   run: RunState,
   requestedStepIndex: number | undefined,
   createdStepIds: string[],
-  taskClass?: PlannedStepAgentTaskClass,
 ): string | undefined {
   if (run.steps.length === 0) return undefined;
 
@@ -3735,32 +4106,24 @@ function resolveTaskStepId(
   // the autopilot will actually run. Empirically grok-4.3 has shipped both
   // conventions across versions; if we lock to one, the other interpretation
   // orphans tasks on terminal steps and the autopilot stalls.
-  const isTerminal = (step: StepState) =>
-    ["complete", "failed", "skipped"].includes(step.status);
   if (typeof requestedStepIndex === "number" && Number.isFinite(requestedStepIndex)) {
     const oneBasedStep = run.steps.find((step) => step.index === requestedStepIndex);
     const zeroBasedStep = run.steps[requestedStepIndex];
-    // Verifier tasks are bound to the step they're verifying. The impl's
-    // accept will have promoted that step to "complete" by the time the
-    // manager queues the verifier follow-up — honor the requested stepIndex
-    // anyway so the verifier shows up under the right step in the graph and
-    // doesn't spill onto the next checkpoint. createWorkerTask will demote
-    // the step back to "reviewing" once the verifier task lands.
-    if (taskClass === "verifier") {
-      if (oneBasedStep) return oneBasedStep.id;
-      if (zeroBasedStep) return zeroBasedStep.id;
-    }
-    if (oneBasedStep && !isTerminal(oneBasedStep)) return oneBasedStep.id;
-    if (zeroBasedStep && !isTerminal(zeroBasedStep)) return zeroBasedStep.id;
+    if (oneBasedStep && !isTerminalStepStatus(oneBasedStep.status)) return oneBasedStep.id;
+    if (zeroBasedStep && !isTerminalStepStatus(zeroBasedStep.status)) return zeroBasedStep.id;
     // Both interpretations land on terminal steps. Fall through to the
-    // active step — orphaning the task on a complete step deadlocks
-    // pickAutopilotTasks, which only launches tasks for the active step.
+    // pending active step. Completed/skipped steps are immutable: a later
+    // chat turn must append a new step, not mutate visible history.
   }
 
-  const activeStep = pickAutopilotStep(run);
+  const activeStep = pickPendingAutopilotStep(run);
   if (activeStep) return activeStep.id;
 
-  const availableStepIds = createdStepIds.length > 0 ? createdStepIds : run.steps.map((step) => step.id);
+  const availableStepIds = createdStepIds.length > 0
+    ? createdStepIds
+    : run.steps
+      .filter((step) => !isTerminalStepStatus(step.status))
+      .map((step) => step.id);
   return availableStepIds[0];
 }
 
@@ -4657,6 +5020,47 @@ function renderWorkerPrompt({
   return renderImplementationWorkerPrompt({ cwd, step, task, paths });
 }
 
+function renderRuntimeDelegationGuidance(task: WorkerTask): string[] {
+  const isVerifier = task.taskClass === "verifier";
+
+  if (task.runtimePreference === "claude") {
+    const lines = [
+      "Spark is the top-level orchestrator. You may use Claude Code native subagents, agent teams, or worktrees only when they materially reduce your context load or improve independent checking.",
+      "- Good uses: bounded read-heavy exploration, test/log triage, summarizing large files, or independent review probes with a clear return format.",
+      "- Do not create a nested implementation team for ordinary write work. Spark owns cross-worker coordination and parallel write planning.",
+      "- Keep delegated results compact: ask for distilled findings, file/line references, commands run, and uncertainties. Do not paste raw logs back into your own context.",
+      "- If you use subagents, agent teams, or worktrees, your final report must list each one's purpose, scope, and distilled findings.",
+    ];
+    if (isVerifier) {
+      lines.push(
+        "- This is a verifier task: every delegated probe must be read-only, and any worktree usage must not edit, commit, merge, or push.",
+      );
+    } else {
+      lines.push(
+        "- Use worktrees only for explicitly isolated experiments or disjoint write scopes. Do not merge, commit, push, or overwrite another worker's changes unless this task explicitly requires it.",
+      );
+    }
+    return lines;
+  }
+
+  if (task.runtimePreference === "codex") {
+    const lines = [
+      "Spark explicitly permits Codex subagents for this task when they are bounded, useful, and mostly read-only.",
+      "- Good uses: codebase exploration, tests/log triage, independent review, summarizing large files, or checking a narrow hypothesis.",
+      "- Give each subagent a concrete job, clear limits, and the exact return format you need. Wait for the result and synthesize disagreements yourself.",
+      "- Do not spawn subagents for every small task. Keep the main path local when the next action depends on the answer.",
+      "- Avoid write-heavy parallel subagents unless scopes are isolated and disjoint. Spark owns top-level parallelism and cross-worker coordination.",
+      "- If you use subagents, your final report must list each subagent's purpose, scope, and distilled findings.",
+    ];
+    if (isVerifier) {
+      lines.push("- This is a verifier task: subagents must be read-only and must not edit files or mutate repository state.");
+    }
+    return lines;
+  }
+
+  return [];
+}
+
 function renderImplementationWorkerPrompt({
   cwd,
   step,
@@ -4712,6 +5116,11 @@ function renderImplementationWorkerPrompt({
 
   if (task.expectedOutputs.length) {
     lines.push("", "## EXPECTED OUTPUTS", ...task.expectedOutputs.map((output) => `- ${output}`));
+  }
+
+  const delegationGuidance = renderRuntimeDelegationGuidance(task);
+  if (delegationGuidance.length) {
+    lines.push("", "## RUNTIME-NATIVE DELEGATION", ...delegationGuidance);
   }
 
   if (task.verificationCommands?.length) {
@@ -4826,6 +5235,11 @@ function renderVerifierWorkerPrompt({
       "Capture exit code + first 600 chars of stdout for each. These are the same commands the implementation worker was supposed to run; you re-run them with no caching, no shortcuts.",
       ...task.verificationCommands.map((c) => `- ${c}`),
     );
+  }
+
+  const delegationGuidance = renderRuntimeDelegationGuidance(task);
+  if (delegationGuidance.length) {
+    lines.push("", "## RUNTIME-NATIVE DELEGATION", ...delegationGuidance);
   }
 
   lines.push(

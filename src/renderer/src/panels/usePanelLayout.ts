@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
-// Panel layout — outer widths, internal split ratios, and per-section collapse
-// state for the left (Workspaces / Graph) and right (Spark / Explorer) side
-// panels.
+// Panel layout — outer widths, internal split ratios, per-section collapse,
+// and the saved side/order for every movable section.
 //
 // Persisted GLOBALLY, not per-workspace: panel chrome is an app-level
 // preference, the same shape across every project. Persistence mirrors the
@@ -32,13 +31,27 @@ export const RIGHT_WIDTH_RANGE = { min: 300, max: 640 } as const;
 const SPLIT_RANGE = { min: 0.2, max: 0.8 } as const;
 
 export type PanelSectionKey = "workspaces" | "graph" | "agent" | "explorer";
+export type PanelSide = "left" | "right";
+
+export const PANEL_SECTION_KEYS: readonly PanelSectionKey[] = [
+  "workspaces",
+  "graph",
+  "agent",
+  "explorer",
+] as const;
+
+export interface PanelSectionPlacement {
+  left: PanelSectionKey[];
+  right: PanelSectionKey[];
+}
 
 export interface PanelLayout {
   leftWidth: number;
   rightWidth: number;
-  leftSplit: number; // Workspaces' share of the left panel body (0..1)
-  rightSplit: number; // Spark's share of the right panel body (0..1)
+  leftSplit: number; // First section's share of the left panel body (0..1)
+  rightSplit: number; // First section's share of the right panel body (0..1)
   collapsed: Record<PanelSectionKey, boolean>;
+  sections: PanelSectionPlacement;
 }
 
 const DEFAULT_LAYOUT: PanelLayout = {
@@ -47,11 +60,51 @@ const DEFAULT_LAYOUT: PanelLayout = {
   leftSplit: 0.52,
   rightSplit: 0.64,
   collapsed: { workspaces: false, graph: false, agent: false, explorer: false },
+  sections: {
+    left: ["workspaces", "graph"],
+    right: ["agent", "explorer"],
+  },
 };
 
 function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
   return Math.min(max, Math.max(min, value));
+}
+
+function isPanelSectionKey(value: unknown): value is PanelSectionKey {
+  return typeof value === "string" && PANEL_SECTION_KEYS.includes(value as PanelSectionKey);
+}
+
+function sanitizeSections(raw: unknown): PanelSectionPlacement {
+  if (!raw || typeof raw !== "object") {
+    return {
+      left: [...DEFAULT_LAYOUT.sections.left],
+      right: [...DEFAULT_LAYOUT.sections.right],
+    };
+  }
+  const maybe = raw as Partial<Record<PanelSide, unknown>>;
+  const seen = new Set<PanelSectionKey>();
+  const readSide = (side: PanelSide): PanelSectionKey[] => {
+    const value = maybe[side];
+    if (!Array.isArray(value)) return [];
+    const next: PanelSectionKey[] = [];
+    for (const item of value) {
+      if (!isPanelSectionKey(item) || seen.has(item)) continue;
+      seen.add(item);
+      next.push(item);
+    }
+    return next;
+  };
+  const sections: PanelSectionPlacement = {
+    left: readSide("left"),
+    right: readSide("right"),
+  };
+  for (const key of PANEL_SECTION_KEYS) {
+    if (seen.has(key)) continue;
+    const defaultSide = DEFAULT_LAYOUT.sections.left.includes(key) ? "left" : "right";
+    sections[defaultSide].push(key);
+  }
+  return sections;
 }
 
 // Coerce an arbitrary parsed blob into a valid layout. Every field is range-
@@ -70,6 +123,7 @@ function sanitize(raw: Partial<PanelLayout> | null | undefined): PanelLayout {
       agent: Boolean(c.agent),
       explorer: Boolean(c.explorer),
     },
+    sections: sanitizeSections((raw as { sections?: unknown }).sections),
   };
 }
 
@@ -89,6 +143,7 @@ export interface UsePanelLayoutApi extends PanelLayout {
   setLeftSplit: (ratio: number) => void;
   setRightSplit: (ratio: number) => void;
   toggleCollapse: (key: PanelSectionKey) => void;
+  moveSection: (key: PanelSectionKey, side: PanelSide, index: number) => void;
 }
 
 export function usePanelLayout(): UsePanelLayoutApi {
@@ -129,13 +184,54 @@ export function usePanelLayout(): UsePanelLayoutApi {
   const toggleCollapse = useCallback((key: PanelSectionKey) => {
     setLayout((l) => ({ ...l, collapsed: { ...l.collapsed, [key]: !l.collapsed[key] } }));
   }, []);
+  const moveSection = useCallback((key: PanelSectionKey, side: PanelSide, index: number) => {
+    setLayout((layout) => {
+      const sourceSide: PanelSide | null = layout.sections.left.includes(key)
+        ? "left"
+        : layout.sections.right.includes(key)
+          ? "right"
+          : null;
+      const sourceIndex = sourceSide ? layout.sections[sourceSide].indexOf(key) : -1;
+      const next: PanelSectionPlacement = {
+        left: layout.sections.left.filter((item) => item !== key),
+        right: layout.sections.right.filter((item) => item !== key),
+      };
+      let insertIndex = index;
+      if (sourceSide === side && sourceIndex >= 0 && sourceIndex < insertIndex) {
+        insertIndex -= 1;
+      }
+      insertIndex = Math.trunc(clamp(insertIndex, 0, next[side].length));
+      next[side] = [
+        ...next[side].slice(0, insertIndex),
+        key,
+        ...next[side].slice(insertIndex),
+      ];
+      return { ...layout, sections: next };
+    });
+  }, []);
 
   // Memoized API object: identity changes only when `layout` does, so the
   // memoized panels downstream re-render on a real layout change and nothing
   // else. The callbacks are all stable for the hook's lifetime.
   return useMemo<UsePanelLayoutApi>(
-    () => ({ ...layout, setLeftWidth, setRightWidth, setLeftSplit, setRightSplit, toggleCollapse }),
-    [layout, setLeftWidth, setRightWidth, setLeftSplit, setRightSplit, toggleCollapse],
+    () => ({
+      ...layout,
+      setLeftWidth,
+      setRightWidth,
+      setLeftSplit,
+      setRightSplit,
+      toggleCollapse,
+      moveSection,
+    }),
+    [
+      layout,
+      setLeftWidth,
+      setRightWidth,
+      setLeftSplit,
+      setRightSplit,
+      toggleCollapse,
+      moveSection,
+    ],
   );
 }
 

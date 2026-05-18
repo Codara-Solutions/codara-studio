@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { GitDiff, GitFileChange, GitLog, GitOpResult, GitStatus } from "@shared/types";
-import SectionHeader from "../../panels/SectionHeader";
+import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import ChangeRow from "./ChangeRow";
 import ChangeSection from "./ChangeSection";
 import CommitComposer from "./CommitComposer";
@@ -21,6 +21,7 @@ interface Props {
   /** Panel-level collapse, driven by the rail's section layout. */
   collapsed: boolean;
   onToggleCollapse: () => void;
+  headerDrag?: SectionHeaderDragProps;
   /** Opens an absolute path as an editor tab (threaded from App). */
   onOpenFile: (absolutePath: string) => void;
 }
@@ -42,6 +43,7 @@ export default function GitPanel({
   cwd,
   collapsed,
   onToggleCollapse,
+  headerDrag,
   onOpenFile,
 }: Props): React.ReactElement {
   const [status, setStatus] = useState<GitStatus | null>(null);
@@ -313,6 +315,7 @@ export default function GitPanel({
         label="Source Control"
         collapsed={collapsed}
         onToggleCollapse={onToggleCollapse}
+        {...headerDrag}
         count={changeCount > 0 ? changeCount : undefined}
         meta={
           loading || busy ? (

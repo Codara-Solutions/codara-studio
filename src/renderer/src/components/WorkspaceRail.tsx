@@ -1,8 +1,17 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { Workspace } from "@shared/types";
+import type { CSSProperties } from "react";
+import type { FsEntry, RunState, Workspace } from "@shared/types";
 import { MinusIcon, PlusIcon } from "./icons";
+import FileTree from "./FileTree";
 import GitPanel from "./git/GitPanel";
-import { sectionSlotStyles } from "../panels/usePanelLayout";
+import OrchestrationSidebar from "./OrchestrationSidebar";
+import {
+  PANEL_HEADER_H,
+  PANEL_SECTION_KEYS,
+  sectionSlotStyles,
+  type PanelSectionKey,
+  type PanelSide,
+} from "../panels/usePanelLayout";
 import ResizeHandle from "../panels/ResizeHandle";
 import SectionHeader from "../panels/SectionHeader";
 
@@ -17,16 +26,30 @@ const WORKSPACE_COLORS = [
   "#5DD6D6",
 ];
 
+const PANEL_SECTION_MIME = "application/x-spark-panel-section";
+
+const SECTION_LABELS: Record<PanelSectionKey, string> = {
+  workspaces: "Workspaces",
+  graph: "Source Control",
+  agent: "Spark",
+  explorer: "Explorer",
+};
+
 interface RailProps {
+  side: PanelSide;
+  sections: PanelSectionKey[];
+  draggingSection: PanelSectionKey | null;
   workspaces: Workspace[];
   activeId: string | null;
   editingId: string | null;
   width: number;
   activeWorkspace: Workspace | null;
-  // Workspaces' share of the panel body (0..1), and per-section collapse.
+  // The first section's share when exactly two sections are stacked here.
   split: number;
-  workspacesCollapsed: boolean;
-  graphCollapsed: boolean;
+  collapsed: Record<PanelSectionKey, boolean>;
+  activePath: string | null;
+  runs: RunState[];
+  activeRunId: string | null;
   onActivate: (id: string) => void;
   onEdit: (id: string) => void;
   onChange: (id: string, patch: Partial<Workspace>) => void;
@@ -35,9 +58,16 @@ interface RailProps {
   onCloseEditor: () => void;
   onCreate: () => void;
   onSplitChange: (ratio: number) => void;
-  onToggleWorkspaces: () => void;
-  onToggleGraph: () => void;
+  onToggleSection: (section: PanelSectionKey) => void;
+  onMoveSection: (section: PanelSectionKey, side: PanelSide, index: number) => void;
+  onSectionDragStart: (section: PanelSectionKey) => void;
+  onSectionDragEnd: () => void;
+  onSelectRun: (id: string | null) => void;
   onOpenFile: (absolutePath: string) => void;
+  onOpenFileEntry: (entry: FsEntry) => void;
+  onDeleteFile: (path: string) => void;
+  onRenameFile: (oldPath: string, entry: FsEntry) => void;
+  onRunPlan: (entry: FsEntry) => void;
 }
 
 // Memoized: App hoists every prop to a stable reference (the `workspaces`
@@ -47,16 +77,21 @@ interface RailProps {
 // the live `--accent` color drag, which previously repainted the whole rail.
 function WorkspaceRail(props: RailProps) {
   const {
+    side,
+    sections,
+    draggingSection,
     workspaces,
     width,
     onCreate,
     split,
-    workspacesCollapsed,
-    graphCollapsed,
+    collapsed,
     onSplitChange,
-    onToggleWorkspaces,
-    onToggleGraph,
+    onToggleSection,
+    onMoveSection,
+    onSectionDragStart,
+    onSectionDragEnd,
   } = props;
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
   const deleteActiveWorkspace = () => {
     if (!props.activeId) return;
     props.onCloseEditor();
@@ -71,14 +106,174 @@ function WorkspaceRail(props: RailProps) {
   const bodyHeightAtDragStart = useRef(1);
 
   const accent = props.activeWorkspace?.color || "var(--accent)";
-  const [workspacesSlot, graphSlot] = sectionSlotStyles(
-    split,
-    workspacesCollapsed,
-    graphCollapsed,
-  );
+  const slots = sectionStackStyles(sections, split, collapsed);
+  const canResizePair = sections.length === 2;
+
+  const canAcceptPanelSection = (event: React.DragEvent): boolean => {
+    if (draggingSection) return true;
+    return Array.from(event.dataTransfer.types).includes(PANEL_SECTION_MIME);
+  };
+
+  const sectionFromEvent = (event: React.DragEvent): PanelSectionKey | null => {
+    const raw = event.dataTransfer.getData(PANEL_SECTION_MIME) || draggingSection || "";
+    return isPanelSectionKey(raw) ? raw : null;
+  };
+
+  const markDropAt = (event: React.DragEvent, index: number) => {
+    if (!canAcceptPanelSection(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    setDropIndex(index);
+  };
+
+  const dropAt = (event: React.DragEvent, index: number) => {
+    if (!canAcceptPanelSection(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const section = sectionFromEvent(event);
+    if (section) onMoveSection(section, side, index);
+    setDropIndex(null);
+    onSectionDragEnd();
+  };
+
+  const headerDrag = (section: PanelSectionKey) => ({
+    draggable: true,
+    dragging: draggingSection === section,
+    onDragStart: (event: React.DragEvent<HTMLButtonElement>) => {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData(PANEL_SECTION_MIME, section);
+      event.dataTransfer.setData("text/plain", SECTION_LABELS[section]);
+      onSectionDragStart(section);
+    },
+    onDragEnd: () => {
+      setDropIndex(null);
+      onSectionDragEnd();
+    },
+  });
+
+  const renderSection = (section: PanelSectionKey): React.ReactNode => {
+    switch (section) {
+      case "workspaces":
+        return (
+          <>
+            <SectionHeader
+              label="Workspaces"
+              count={workspaces.length}
+              collapsed={collapsed.workspaces}
+              onToggleCollapse={() => onToggleSection("workspaces")}
+              {...headerDrag("workspaces")}
+              actions={
+                <>
+                  <RailIconButton title="New workspace" onClick={onCreate}>
+                    <PlusIcon size={11} />
+                  </RailIconButton>
+                  <RailIconButton
+                    title={
+                      props.activeId
+                        ? "Delete selected workspace"
+                        : "Select a workspace to delete"
+                    }
+                    onClick={deleteActiveWorkspace}
+                    disabled={!props.activeId}
+                    danger
+                  >
+                    <MinusIcon size={11} />
+                  </RailIconButton>
+                </>
+              }
+            />
+            {!collapsed.workspaces && (
+              <div style={{ flex: 1, overflow: "auto", minHeight: 0, padding: "6px 8px 10px" }}>
+                {workspaces.length === 0 && <EmptyState onCreate={onCreate} />}
+                {workspaces.map((w) => (
+                  <WorkspaceRow
+                    key={w.id}
+                    ws={w}
+                    active={w.id === props.activeId}
+                    editing={w.id === props.editingId}
+                    onActivate={() => props.onActivate(w.id)}
+                    onEdit={() => props.onEdit(w.id)}
+                    onChange={(patch) => props.onChange(w.id, patch)}
+                    onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
+                    onCloseEditor={props.onCloseEditor}
+                  />
+                ))}
+              </div>
+            )}
+          </>
+        );
+      case "graph":
+        return (
+          <GitPanel
+            cwd={props.activeWorkspace?.cwd ?? null}
+            collapsed={collapsed.graph}
+            onToggleCollapse={() => onToggleSection("graph")}
+            headerDrag={headerDrag("graph")}
+            onOpenFile={props.onOpenFile}
+          />
+        );
+      case "agent":
+        return (
+          <OrchestrationSidebar
+            workspace={props.activeWorkspace}
+            runs={props.runs}
+            activeRunId={props.activeRunId}
+            onSelectRun={props.onSelectRun}
+            collapsed={collapsed.agent}
+            onToggleCollapse={() => onToggleSection("agent")}
+            headerDrag={headerDrag("agent")}
+          />
+        );
+      case "explorer": {
+        const cwd = props.activeWorkspace?.cwd ?? null;
+        if (!cwd) {
+          return (
+            <>
+              <SectionHeader
+                label="Explorer"
+                collapsed={collapsed.explorer}
+                onToggleCollapse={() => onToggleSection("explorer")}
+                {...headerDrag("explorer")}
+              />
+              {!collapsed.explorer && (
+                <div style={{ padding: "12px 14px", color: "var(--muted)", fontSize: 11 }}>
+                  No active workspace.
+                </div>
+              )}
+            </>
+          );
+        }
+        return (
+          <FileTree
+            cwd={cwd}
+            activePath={props.activePath}
+            onOpenFile={props.onOpenFileEntry}
+            onDeleteFile={props.onDeleteFile}
+            onRenameFile={props.onRenameFile}
+            onRunPlan={props.onRunPlan}
+            collapsed={collapsed.explorer}
+            onToggleCollapse={() => onToggleSection("explorer")}
+            headerDrag={headerDrag("explorer")}
+          />
+        );
+      }
+    }
+  };
 
   return (
     <aside
+      onDragOver={(event) => {
+        if (sections.length === 0 || event.currentTarget === event.target) {
+          markDropAt(event, sections.length);
+        }
+      }}
+      onDrop={(event) => dropAt(event, sections.length)}
+      onDragLeave={(event) => {
+        const next = event.relatedTarget;
+        if (next instanceof Node && event.currentTarget.contains(next)) return;
+        setDropIndex(null);
+      }}
       style={{
         width,
         flex: `0 0 ${width}px`,
@@ -93,94 +288,118 @@ function WorkspaceRail(props: RailProps) {
         ref={bodyRef}
         style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}
       >
-        <section
-          style={{
-            ...workspacesSlot,
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-          }}
-        >
-          <SectionHeader
-            label="Workspaces"
-            count={workspaces.length}
-            collapsed={workspacesCollapsed}
-            onToggleCollapse={onToggleWorkspaces}
-            actions={
-              <>
-                <RailIconButton title="New workspace" onClick={onCreate}>
-                  <PlusIcon size={11} />
-                </RailIconButton>
-                <RailIconButton
-                  title={
-                    props.activeId
-                      ? "Delete selected workspace"
-                      : "Select a workspace to delete"
-                  }
-                  onClick={deleteActiveWorkspace}
-                  disabled={!props.activeId}
-                  danger
-                >
-                  <MinusIcon size={11} />
-                </RailIconButton>
-              </>
-            }
-          />
-          {!workspacesCollapsed && (
-            <div style={{ flex: 1, overflow: "auto", minHeight: 0, padding: "6px 8px 10px" }}>
-              {workspaces.length === 0 && <EmptyState onCreate={onCreate} />}
-              {workspaces.map((w) => (
-                <WorkspaceRow
-                  key={w.id}
-                  ws={w}
-                  active={w.id === props.activeId}
-                  editing={w.id === props.editingId}
-                  onActivate={() => props.onActivate(w.id)}
-                  onEdit={() => props.onEdit(w.id)}
-                  onChange={(patch) => props.onChange(w.id, patch)}
-                  onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
-                  onCloseEditor={props.onCloseEditor}
-                />
-              ))}
-            </div>
-          )}
-        </section>
+        {sections.length === 0 && (
+          <EmptyPanelDropTarget active={draggingSection !== null} accent={accent} />
+        )}
 
-        <ResizeHandle
-          orientation="row"
-          disabled={workspacesCollapsed || graphCollapsed}
-          accent={accent}
-          ariaLabel="Resize Workspaces and Graph"
-          onResizeStart={() => {
-            splitAtDragStart.current = split;
-            bodyHeightAtDragStart.current = bodyRef.current?.clientHeight ?? 1;
-          }}
-          onResize={(delta) => {
-            onSplitChange(splitAtDragStart.current + delta / bodyHeightAtDragStart.current);
-          }}
-        />
+        {sections.map((section, index) => (
+          <React.Fragment key={section}>
+            {dropIndex === index && <PanelDropIndicator accent={accent} />}
+            <section
+              onDragOver={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                const insertIndex = event.clientY < rect.top + rect.height / 2 ? index : index + 1;
+                markDropAt(event, insertIndex);
+              }}
+              onDrop={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                const insertIndex = event.clientY < rect.top + rect.height / 2 ? index : index + 1;
+                dropAt(event, insertIndex);
+              }}
+              style={{
+                ...slots[index],
+                display: "flex",
+                flexDirection: "column",
+                overflow: "hidden",
+              }}
+            >
+              {renderSection(section)}
+            </section>
 
-        <section
-          style={{
-            ...graphSlot,
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-          }}
-        >
-          <GitPanel
-            cwd={props.activeWorkspace?.cwd ?? null}
-            collapsed={graphCollapsed}
-            onToggleCollapse={onToggleGraph}
-            onOpenFile={props.onOpenFile}
-          />
-        </section>
+            {index < sections.length - 1 && (
+              <ResizeHandle
+                orientation="row"
+                disabled={
+                  !canResizePair ||
+                  collapsed[sections[0]] ||
+                  collapsed[sections[1]]
+                }
+                accent={accent}
+                ariaLabel={`Resize ${SECTION_LABELS[sections[0]]} and ${SECTION_LABELS[sections[1]]}`}
+                onResizeStart={() => {
+                  splitAtDragStart.current = split;
+                  bodyHeightAtDragStart.current = bodyRef.current?.clientHeight ?? 1;
+                }}
+                onResize={(delta) => {
+                  onSplitChange(splitAtDragStart.current + delta / bodyHeightAtDragStart.current);
+                }}
+              />
+            )}
+          </React.Fragment>
+        ))}
+        {dropIndex === sections.length && <PanelDropIndicator accent={accent} />}
       </div>
     </aside>
   );
 }
 
 export default React.memo(WorkspaceRail);
+
+function isPanelSectionKey(value: string): value is PanelSectionKey {
+  return PANEL_SECTION_KEYS.includes(value as PanelSectionKey);
+}
+
+function sectionStackStyles(
+  sections: PanelSectionKey[],
+  split: number,
+  collapsed: Record<PanelSectionKey, boolean>,
+): CSSProperties[] {
+  const collapsedSlot: CSSProperties = { flex: `0 0 ${PANEL_HEADER_H}px`, minHeight: 0 };
+  const fillSlot: CSSProperties = { flex: "1 1 0", minHeight: 0 };
+  if (sections.length === 0) return [];
+  if (sections.length === 1) return [collapsed[sections[0]] ? collapsedSlot : fillSlot];
+  if (sections.length === 2) {
+    return sectionSlotStyles(split, collapsed[sections[0]], collapsed[sections[1]]);
+  }
+  return sections.map((section) => (collapsed[section] ? collapsedSlot : fillSlot));
+}
+
+function PanelDropIndicator({ accent }: { accent: string }) {
+  return (
+    <div aria-hidden style={{ flex: "0 0 0px", position: "relative", zIndex: 8 }}>
+      <div
+        style={{
+          position: "absolute",
+          left: 8,
+          right: 8,
+          top: -1,
+          height: 2,
+          borderRadius: 999,
+          background: accent,
+          boxShadow: `0 0 12px ${accent}`,
+          pointerEvents: "none",
+        }}
+      />
+    </div>
+  );
+}
+
+function EmptyPanelDropTarget({ active, accent }: { active: boolean; accent: string }) {
+  return (
+    <div
+      aria-hidden
+      style={{
+        flex: 1,
+        minHeight: 0,
+        margin: 8,
+        border: active ? `1px dashed ${accent}` : "1px dashed transparent",
+        background: active ? `color-mix(in oklch, ${accent} 8%, transparent)` : "transparent",
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+      }}
+    />
+  );
+}
 
 function RailIconButton({
   title,

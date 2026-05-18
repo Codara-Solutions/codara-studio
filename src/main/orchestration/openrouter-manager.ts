@@ -1,10 +1,12 @@
-import { readdirSync, statSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type {
   AgentRuntimeDiagnostic,
   AppSettings,
+  HumanRunMessage,
   PlannedStepAgent,
   RunState,
+  RunMessageAttachment,
   StepKind,
   TaskComplexity,
   WorkerRuntime,
@@ -108,9 +110,13 @@ export interface SparkManagerWorkerReportContext {
   taskClass?: "skeleton" | "feature" | "leaf" | "verifier";
 }
 
+export type OpenRouterContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
+
 export interface OpenRouterMessage {
   role: "system" | "user";
-  content: string;
+  content: string | OpenRouterContentPart[];
 }
 
 export type OpenRouterManagerMode = "plan_analysis" | "step_planning" | "worker_result_review";
@@ -361,12 +367,23 @@ export function buildOpenRouterManagerRequest(input: {
   const activePlan = input.run.planId
     ? input.run.plans.find((plan) => plan.id === input.run.planId)
     : input.run.plans.at(-1);
-  const recentMessages = input.run.humanMessages.slice(-8).map((message) => ({
+  const recentMessages = input.run.humanMessages.slice(-6).map((message) => ({
     author: message.author,
     kind: message.kind,
-    message: message.message,
+    message: truncate(message.message, 1600),
+    attachments: formatMessageAttachments(message),
   }));
   const promptProfile = input.promptProfile ?? loadManagerPromptProfile();
+  const userText = buildManagerUserMessage({
+    mode,
+    cwd: input.cwd,
+    run: input.run,
+    recentMessages,
+    workerReports: input.workerReports,
+    availableRuntimes: input.availableRuntimes,
+    promptProfile,
+    activePlanText: activePlan?.rawContent || activePlan?.summary || "No plan content was provided.",
+  });
 
   return {
     model: input.model,
@@ -387,15 +404,10 @@ export function buildOpenRouterManagerRequest(input: {
       },
       {
         role: "user",
-        content: buildManagerUserMessage({
-          mode,
-          cwd: input.cwd,
+        content: buildManagerUserContent({
           run: input.run,
-          recentMessages,
-          workerReports: input.workerReports,
-          availableRuntimes: input.availableRuntimes,
-          promptProfile,
-          activePlanText: activePlan?.rawContent || activePlan?.summary || "No plan content was provided.",
+          mode,
+          text: userText,
         }),
       },
     ],
@@ -423,7 +435,7 @@ interface ManagerUserMessageInput {
   mode: OpenRouterManagerMode;
   cwd: string;
   run: RunState;
-  recentMessages: Array<{ author: string; kind: string; message: string }>;
+  recentMessages: Array<{ author: string; kind: string; message: string; attachments: string[] }>;
   workerReports: SparkManagerWorkerReportContext[] | undefined;
   availableRuntimes: AgentRuntimeDiagnostic[] | undefined;
   promptProfile: ManagerPromptProfile;
@@ -470,38 +482,7 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
     formatAvailableRuntimes(availableRuntimes),
     "",
     "RUN STATE",
-    JSON.stringify(
-      {
-        id: run.id,
-        title: run.title,
-        status: run.status,
-        existingSteps: run.steps.map((step) => ({
-          id: step.id,
-          index: step.index,
-          title: step.title,
-          kind: step.kind ?? "worker_batch",
-          status: step.status,
-          reviewSummary: step.reviewSummary,
-        })),
-        existingTasks: run.workerTasks.map((task) => ({
-          id: task.id,
-          title: task.title,
-          runtimePreference: task.runtimePreference,
-          status: task.status,
-          expectedOutputs: task.expectedOutputs,
-        })),
-        workerAttempts: run.workerAttempts.map((attempt) => ({
-          workerTaskId: attempt.workerTaskId,
-          runtime: attempt.runtime,
-          status: attempt.status,
-          exitCode: attempt.exitCode,
-          finalReportPath: attempt.finalReportPath,
-        })),
-        recentMessages,
-      },
-      null,
-      2,
-    ),
+    JSON.stringify(formatCompactRunState(run, recentMessages), null, 2),
     "",
     "STEP-BY-STEP DIVISION",
     formatStepDivision(run),
@@ -527,19 +508,46 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
   );
   if (userAmendments.length > 0) {
     const lastPlanAnalysisAt = run.steps.length > 0 ? run.steps[0]?.createdAt : undefined;
-    const formattedAmendments = userAmendments
+    const recentAmendments = userAmendments.slice(-6);
+    const olderCount = Math.max(0, userAmendments.length - recentAmendments.length);
+    const formattedAmendments = recentAmendments
       .map((m, idx) => {
         const isAfterPlanning =
           lastPlanAnalysisAt && m.createdAt && m.createdAt > lastPlanAnalysisAt;
         const marker = isAfterPlanning ? " (post-plan amendment)" : "";
-        return `${idx + 1}.${marker} ${truncate(m.message, 2000)}`;
+        const attachments = formatMessageAttachments(m);
+        const attachmentLine = attachments.length > 0 ? `\n   Attachments: ${attachments.join("; ")}` : "";
+        return `${idx + 1}.${marker} ${truncate(m.message, 1200)}${attachmentLine}`;
       })
       .join("\n");
     lines.push(
       "USER NOTES (binding additions to the project plan)",
       "Treat each note below as part of the project plan. When designing new worker tasks, integrate these as if they had been in the original plan from the start — write the worker description at full design depth (objective, acceptance criteria, UI polish, behaviors), not as a thin patch on top of existing files. Existing artifacts may inform style/structure but must not constrain the new design's quality bar.",
       "",
+      olderCount > 0 ? `Older user notes already reflected in the saved steps/reviews: ${olderCount}` : "",
       formattedAmendments,
+      "",
+    );
+  }
+
+  const unresolvedFreshNote = findUnresolvedFreshUserNote(run);
+  if (unresolvedFreshNote) {
+    lines.push(
+      "FRESH USER NOTE GUARD",
+      "The latest user note below is newer than every worker report/attempt currently in RUN STATE and appears to request a change or report a defect. Do not return status=complete until you have planned worker work for this note, asked a genuine blocking question, or the RUN STATE contains worker evidence produced after this note.",
+      "",
+      `${unresolvedFreshNote.createdAt}: ${truncate(unresolvedFreshNote.message, 1200)}`,
+      "",
+    );
+  }
+
+  const attachmentSummary = formatRunAttachmentSummary(run);
+  if (attachmentSummary.length > 0) {
+    lines.push(
+      "ATTACHMENTS",
+      "Images are stored as run artifacts. Pixel data is supplied only for the most recent user image turn during planning/task-writing calls; older image turns stay as compact artifact references so the run context remains small. If a worker needs an image, include the artifact path in its task.",
+      "",
+      ...attachmentSummary,
       "",
     );
   }
@@ -562,6 +570,145 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
     "Use the structured output schema supplied in the API request. Do not restate or explain the schema in your answer.",
   );
   return lines.join("\n");
+}
+
+function formatCompactRunState(
+  run: RunState,
+  recentMessages: ManagerUserMessageInput["recentMessages"],
+): Record<string, unknown> {
+  const taskCap = 16;
+  const attemptCap = 12;
+  const visibleTasks = run.workerTasks.slice(-taskCap);
+  const visibleAttempts = run.workerAttempts.slice(-attemptCap);
+  return {
+    id: run.id,
+    title: run.title,
+    status: run.status,
+    taskComplexity: run.taskComplexity,
+    counts: {
+      steps: run.steps.length,
+      tasks: run.workerTasks.length,
+      attempts: run.workerAttempts.length,
+      managerCalls: run.sparkCalls.length,
+      omittedOlderTasks: Math.max(0, run.workerTasks.length - visibleTasks.length),
+      omittedOlderAttempts: Math.max(0, run.workerAttempts.length - visibleAttempts.length),
+    },
+    existingSteps: run.steps.map((step) => ({
+      id: step.id,
+      index: step.index,
+      title: truncate(step.title, 180),
+      kind: step.kind ?? "worker_batch",
+      status: step.status,
+      reviewSummary: step.reviewSummary ? truncate(step.reviewSummary, 500) : undefined,
+    })),
+    recentTasks: visibleTasks.map((task) => ({
+      id: task.id,
+      stepId: task.stepId,
+      title: truncate(task.title, 220),
+      runtimePreference: task.runtimePreference,
+      modelHint: task.modelHint,
+      effortHint: task.effortHint,
+      status: task.status,
+      taskClass: task.taskClass,
+      expectedOutputs: task.expectedOutputs.slice(0, 6),
+    })),
+    recentAttempts: visibleAttempts.map((attempt) => ({
+      workerTaskId: attempt.workerTaskId,
+      runtime: attempt.runtime,
+      status: attempt.status,
+      exitCode: attempt.exitCode,
+      startedAt: attempt.startedAt,
+      finishedAt: attempt.finishedAt,
+      hasFinalReport: Boolean(attempt.finalReportPath),
+    })),
+    recentMessages,
+  };
+}
+
+function buildManagerUserContent(input: {
+  run: RunState;
+  mode: OpenRouterManagerMode;
+  text: string;
+}): string | OpenRouterContentPart[] {
+  const imageParts = selectImageAttachmentsForManager(input.run, input.mode)
+    .map((attachment) => attachmentToImagePart(attachment))
+    .filter((part): part is OpenRouterContentPart => Boolean(part));
+  if (imageParts.length === 0) return input.text;
+  return [{ type: "text", text: input.text }, ...imageParts];
+}
+
+const MAX_IMAGE_PARTS_PER_MANAGER_CALL = 4;
+const MAX_MANAGER_IMAGE_BYTES = 12 * 1024 * 1024;
+
+function selectImageAttachmentsForManager(
+  run: RunState,
+  mode: OpenRouterManagerMode,
+): RunMessageAttachment[] {
+  if (mode === "worker_result_review") return [];
+  for (let index = run.humanMessages.length - 1; index >= 0; index -= 1) {
+    const message = run.humanMessages[index];
+    if (message.author !== "user") continue;
+    const images = (message.attachments ?? []).filter((attachment) => attachment.kind === "image");
+    if (images.length > 0) return images.slice(0, MAX_IMAGE_PARTS_PER_MANAGER_CALL);
+  }
+  return [];
+}
+
+function attachmentToImagePart(attachment: RunMessageAttachment): OpenRouterContentPart | null {
+  try {
+    const stat = statSync(attachment.path);
+    if (!stat.isFile() || stat.size > MAX_MANAGER_IMAGE_BYTES) return null;
+    const base64 = readFileSync(attachment.path).toString("base64");
+    return {
+      type: "image_url",
+      image_url: {
+        url: `data:${attachment.mimeType};base64,${base64}`,
+        detail: "auto",
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatMessageAttachments(message: HumanRunMessage): string[] {
+  return (message.attachments ?? []).map(
+    (attachment) => `${attachment.kind}:${attachment.name} (${attachment.path})`,
+  );
+}
+
+function formatRunAttachmentSummary(run: RunState): string[] {
+  const lines: string[] = [];
+  for (const message of run.humanMessages) {
+    const attachments = formatMessageAttachments(message);
+    if (attachments.length === 0) continue;
+    lines.push(`${message.createdAt} ${message.author}/${message.kind}: ${attachments.join("; ")}`);
+  }
+  if (lines.length <= 8) return lines;
+  return [`... ${lines.length - 8} older attachment turn(s) omitted`, ...lines.slice(-8)];
+}
+
+function findUnresolvedFreshUserNote(run: RunState): HumanRunMessage | null {
+  const latest = [...run.humanMessages]
+    .reverse()
+    .find((message) => message.author === "user" && (message.kind === "note" || message.kind === "answer"));
+  if (!latest || !looksLikeWorkRequest(latest.message)) return null;
+  const latestEvidenceAt = Math.max(
+    0,
+    ...run.workerAttempts
+      .map((attempt) => Date.parse(attempt.finishedAt ?? attempt.startedAt ?? ""))
+      .filter(Number.isFinite),
+    ...run.steps
+      .map((step) => Date.parse(step.updatedAt ?? step.createdAt ?? ""))
+      .filter(Number.isFinite),
+  );
+  const noteAt = Date.parse(latest.createdAt);
+  if (!Number.isFinite(noteAt)) return null;
+  return noteAt > latestEvidenceAt ? latest : null;
+}
+
+function looksLikeWorkRequest(message: string): boolean {
+  return /\b(still|bad|broken|wrong|fix|change|make|add|remove|improve|look|looks|grow|grows|overflow|issue|problem|error|fail|failed|doesn'?t|not)\b/i.test(message);
 }
 
 // Top-level workspace listing fed to plan_analysis so the model doesn't invent
@@ -624,6 +771,15 @@ export async function requestOpenRouterManagerDecision(
     });
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
+    if (isImageInputUnsupportedError(error) && requestHasImageParts(requestBody)) {
+      return performOpenRouterManagerRequest({
+        config,
+        requestBody: stripImageParts(requestBody),
+        mode,
+        started,
+        model: requestBody.model,
+      });
+    }
     const fallbackModel = config.structuredOutputFallbackModel.trim();
     if (
       !isStructuredOutputUnsupportedError(error) ||
@@ -1114,19 +1270,63 @@ function formatTaskComplexity(complexity: TaskComplexity): string {
 
 function formatStepDivision(run: RunState): string {
   if (run.steps.length === 0) return "No step-by-step division exists yet.";
-  return run.steps
+  const maxSteps = 10;
+  const omitted = Math.max(0, run.steps.length - maxSteps);
+  const visibleSteps = omitted > 0 ? run.steps.slice(-maxSteps) : run.steps;
+  const prefix = omitted > 0
+    ? [`${omitted} older completed step(s) omitted; use RUN STATE review summaries for durable history.`]
+    : [];
+  return [
+    ...prefix,
+    ...visibleSteps
     .map((step) => {
       const kind = step.kind ?? "worker_batch";
       const head = kind === "brake" ? `${step.index}. [BRAKE] ${step.title}` : `${step.index}. ${step.title}`;
-      const lines = [head, `Goal: ${step.goal}`];
+      const lines = [truncate(head, 240), `Goal: ${truncate(step.goal, 500)}`];
       if (kind !== "brake") {
         lines.push(`Agents: ${formatPlannedAgents(step.plannedAgents)}`);
       }
       lines.push(`Status: ${step.status}`);
-      lines.push(`Acceptance: ${step.acceptanceCriteria.length ? step.acceptanceCriteria.join("; ") : "not specified"}`);
+      lines.push(`Acceptance: ${step.acceptanceCriteria.length ? truncate(step.acceptanceCriteria.join("; "), 800) : "not specified"}`);
       return lines.join("\n");
-    })
-    .join("\n\n");
+    }),
+  ].join("\n\n");
+}
+
+function isImageInputUnsupportedError(error: string): boolean {
+  const normalized = error.toLowerCase();
+  return (
+    normalized.includes("image") &&
+    (
+      normalized.includes("not support") ||
+      normalized.includes("unsupported") ||
+      normalized.includes("invalid content") ||
+      normalized.includes("multimodal")
+    )
+  );
+}
+
+function requestHasImageParts(requestBody: OpenRouterManagerRequest): boolean {
+  return requestBody.messages.some(
+    (message) => Array.isArray(message.content) && message.content.some((part) => part.type === "image_url"),
+  );
+}
+
+function stripImageParts(requestBody: OpenRouterManagerRequest): OpenRouterManagerRequest {
+  return {
+    ...requestBody,
+    messages: requestBody.messages.map((message) => {
+      if (!Array.isArray(message.content)) return message;
+      const text = message.content
+        .filter((part): part is Extract<OpenRouterContentPart, { type: "text" }> => part.type === "text")
+        .map((part) => part.text)
+        .join("\n\n");
+      return {
+        ...message,
+        content: `${text}\n\n[Image pixels were omitted because the selected manager model rejected image inputs. Use the ATTACHMENTS artifact paths if workers need the files.]`,
+      };
+    }),
+  };
 }
 
 function formatPlannedAgents(agents: PlannedStepAgent[] | undefined): string {
@@ -1135,7 +1335,7 @@ function formatPlannedAgents(agents: PlannedStepAgent[] | undefined): string {
     .map((agent, index) => {
       const model = agent.modelHint?.trim() || agent.runtimePreference;
       const effort = agent.effortHint ? `thinking level ${agent.effortHint}` : "thinking level not specified";
-      return `${agent.label || `agent ${index + 1}`} -> ${agent.summary} -> ${model} (${effort})`;
+      return `${agent.label || `agent ${index + 1}`} -> ${truncate(agent.summary, 300)} -> ${model} (${effort})`;
     })
     .join("; ");
 }

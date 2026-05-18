@@ -100,6 +100,8 @@ const api = {
   dialog: {
     openDirectory: (defaultPath?: string): Promise<string | null> =>
       ipcRenderer.invoke("dialog:openDirectory", defaultPath),
+    openImages: (defaultPath?: string): Promise<string[]> =>
+      ipcRenderer.invoke("dialog:openImages", defaultPath),
   },
   fs: {
     list: (dir: string): Promise<FsEntry[]> => ipcRenderer.invoke("fs:list", dir),
@@ -311,13 +313,39 @@ const api = {
     cancel: (searchId: string): Promise<void> =>
       ipcRenderer.invoke("search:cancel", searchId),
   },
-  // Convenience shortcut for the terminal pane's URL chip and the WebLinks
-  // addon. Routes through Electron's shell.openExternal in the main process,
-  // which is the only handler that survives Chrome's external-navigation
-  // block in BrowserWindow.
-  openExternal: (url: string): Promise<void> =>
+  // Browser-ish URLs should stay inside Spark by default. Non-browser
+  // schemes still route through Electron so mailto: and friends work.
+  openExternal: async (url: string): Promise<void> => {
+    if (isBrowserUrl(url)) {
+      dispatchOpenInSparkBrowser(url);
+      return;
+    }
+    await ipcRenderer.invoke("app:openExternal", url);
+  },
+  openInSystemBrowser: (url: string): Promise<void> =>
     ipcRenderer.invoke("app:openExternal", url),
 };
+
+function isBrowserUrl(url: string): boolean {
+  return /^(https?:|file:)/i.test(url);
+}
+
+function dispatchOpenInSparkBrowser(url: string): void {
+  const rendererWindow = globalThis as unknown as {
+    dispatchEvent: (event: CustomEvent) => boolean;
+  };
+  rendererWindow.dispatchEvent(
+    new CustomEvent("spark:open-browser-url", {
+      detail: { url },
+    }),
+  );
+}
+
+ipcRenderer.on("app:open-browser-url", (_event, url: string) => {
+  if (typeof url === "string" && isBrowserUrl(url)) {
+    dispatchOpenInSparkBrowser(url);
+  }
+});
 
 contextBridge.exposeInMainWorld("spark", api);
 

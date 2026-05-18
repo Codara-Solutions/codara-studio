@@ -189,6 +189,22 @@ export function registerIpc(): void {
     return result.filePaths[0];
   });
 
+  ipcMain.handle("dialog:openImages", async (e, defaultPath?: string): Promise<string[]> => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const result = await dialog.showOpenDialog(win!, {
+      properties: ["openFile", "multiSelections"],
+      defaultPath: defaultPath || app.getPath("pictures") || app.getPath("home"),
+      filters: [
+        {
+          name: "Images",
+          extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"],
+        },
+      ],
+    });
+    if (result.canceled) return [];
+    return result.filePaths;
+  });
+
   ipcMain.handle("fs:list", async (_e, dir: string) => {
     return listDir(dir);
   });
@@ -230,8 +246,7 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("fs:revealInOS", async (_e, path: string): Promise<void> => {
-    const err = await shell.openPath(path);
-    if (err) throw new Error(err);
+    shell.showItemInFolder(path);
   });
 
   ipcMain.handle("git:status", async (_e, cwd: string): Promise<GitStatus> => {

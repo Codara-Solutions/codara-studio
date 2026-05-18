@@ -1,7 +1,15 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
+import { DragHandleIcon } from "../components/icons";
 import { PANEL_HEADER_H } from "./usePanelLayout";
 
-interface SectionHeaderProps {
+export interface SectionHeaderDragProps {
+  draggable?: boolean;
+  dragging?: boolean;
+  onDragStart?: (event: React.DragEvent<HTMLButtonElement>) => void;
+  onDragEnd?: (event: React.DragEvent<HTMLButtonElement>) => void;
+}
+
+export interface SectionHeaderProps extends SectionHeaderDragProps {
   label: string;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -28,8 +36,13 @@ export function SectionHeader({
   count,
   meta,
   actions,
+  draggable = false,
+  dragging = false,
+  onDragStart,
+  onDragEnd,
 }: SectionHeaderProps) {
   const [hover, setHover] = useState(false);
+  const suppressClick = useRef(false);
   return (
     <div
       style={{
@@ -59,7 +72,6 @@ export function SectionHeader({
     >
       <button
         type="button"
-        onClick={onToggleCollapse}
         aria-expanded={!collapsed}
         title={collapsed ? `Expand ${label}` : `Collapse ${label}`}
         style={{
@@ -76,8 +88,49 @@ export function SectionHeader({
           gap: 7,
           cursor: "default",
           color: "inherit",
+          opacity: dragging ? 0.55 : 1,
+          transition:
+            "opacity var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        }}
+        draggable={draggable}
+        aria-grabbed={draggable ? dragging : undefined}
+        onDragStart={(event) => {
+          suppressClick.current = true;
+          onDragStart?.(event);
+        }}
+        onDragEnd={(event) => {
+          onDragEnd?.(event);
+          window.setTimeout(() => {
+            suppressClick.current = false;
+          }, 0);
+        }}
+        onClick={(event) => {
+          if (suppressClick.current) {
+            event.preventDefault();
+            suppressClick.current = false;
+            return;
+          }
+          onToggleCollapse();
         }}
       >
+        {draggable && (
+          <span
+            title={`Move ${label}`}
+            aria-hidden
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 14,
+              height: 16,
+              flex: "0 0 14px",
+              color: hover ? "var(--ink-dim)" : "var(--muted-2)",
+              cursor: "grab",
+            }}
+          >
+            <DragHandleIcon size={13} />
+          </span>
+        )}
         <Chevron collapsed={collapsed} hover={hover} />
         {glyph != null && (
           <span style={{ display: "inline-flex", alignItems: "center", flex: "0 0 auto" }}>

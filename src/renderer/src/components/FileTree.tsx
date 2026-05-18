@@ -5,7 +5,7 @@ import { ChevronIcon } from "./icons";
 import { FileNodeIcon } from "./file-icons/FileNodeIcon";
 import { InlineInput } from "./file-icons/InlineInput";
 import { basename, dirname } from "../path-utils";
-import SectionHeader from "../panels/SectionHeader";
+import SectionHeader, { type SectionHeaderDragProps } from "../panels/SectionHeader";
 
 // Tree row geometry. Hoisted to module scope so the values are shared by
 // `Row` and `PlaceholderRow` and never re-allocated per render.
@@ -95,9 +95,27 @@ function normalizePath(path: string): string {
 // "Run plan" action. A plan is just text handed to the manager, so markdown
 // and rendered HTML docs both qualify.
 const PLAN_FILE_EXTS = new Set(["md", "markdown", "html", "htm"]);
+const PREVIEW_FILE_EXTS = new Set(["html", "htm"]);
 
 function isRunnablePlan(entry: FsEntry): boolean {
   return !entry.isDir && PLAN_FILE_EXTS.has((entry.ext ?? "").toLowerCase());
+}
+
+function isPreviewFile(entry: FsEntry): boolean {
+  return !entry.isDir && PREVIEW_FILE_EXTS.has((entry.ext ?? "").toLowerCase());
+}
+
+function filePathToBrowserUrl(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const absolute = normalized.startsWith("/") ? normalized : `/${normalized}`;
+  const encoded = absolute
+    .split("/")
+    .map((segment, index) => {
+      if (index === 1 && /^[A-Za-z]:$/.test(segment)) return segment;
+      return encodeURIComponent(segment);
+    })
+    .join("/");
+  return `file://${encoded}`;
 }
 
 interface DirNode {
@@ -125,6 +143,7 @@ interface Props {
   onRunPlan?: (entry: FsEntry) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  headerDrag?: SectionHeaderDragProps;
 }
 
 interface FileContextMenu {
@@ -147,6 +166,7 @@ export default function FileTree({
   onRunPlan,
   collapsed,
   onToggleCollapse,
+  headerDrag,
 }: Props) {
   const [root, setRoot] = useState<DirNode & { kind: "dir" }>(() => makeDir({ name: basename(cwd), path: cwd, isDir: true }, true));
   const [contextMenu, setContextMenu] = useState<FileContextMenu | null>(null);
@@ -484,6 +504,7 @@ export default function FileTree({
         label="Explorer"
         collapsed={collapsed}
         onToggleCollapse={onToggleCollapse}
+        {...headerDrag}
         meta={
           <span
             title={cwd}
@@ -613,14 +634,17 @@ export default function FileTree({
           }}
           onRename={() => beginRename(contextMenu.entry)}
           onReveal={async () => {
-            const path = contextMenu.entry.path;
+            const entry = contextMenu.entry;
+            const path = entry.path;
             setContextMenu(null);
             try {
-              await window.spark.fs.revealInOS(path);
+              if (isPreviewFile(entry)) await window.spark.openExternal(filePathToBrowserUrl(path));
+              else await window.spark.fs.revealInOS(path);
             } catch (err) {
               setError((err as Error).message);
             }
           }}
+          revealLabel={isPreviewFile(contextMenu.entry) ? "Open in Preview" : "Reveal in OS"}
           onDelete={() => void deleteEntry(contextMenu.entry)}
         />
       )}
@@ -894,6 +918,7 @@ function FileMenu({
   onNewFolder,
   onRename,
   onReveal,
+  revealLabel,
   onDelete,
 }: {
   menu: FileContextMenu;
@@ -903,6 +928,7 @@ function FileMenu({
   onNewFolder: () => void;
   onRename: () => void;
   onReveal: () => void;
+  revealLabel: string;
   onDelete: () => void;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -974,7 +1000,7 @@ function FileMenu({
       <MenuButton icon="F" onClick={onNewFolder}>New Folder</MenuButton>
       <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
       <MenuButton icon="R" onClick={onRename}>Rename</MenuButton>
-      <MenuButton icon="V" onClick={onReveal}>Reveal in OS</MenuButton>
+      <MenuButton icon="V" onClick={onReveal}>{revealLabel}</MenuButton>
       <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
       <MenuButton
         icon="D"

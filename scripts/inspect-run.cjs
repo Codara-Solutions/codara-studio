@@ -180,6 +180,7 @@ function candidateRunRoots(explicitRoots) {
   const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
   const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
   const names = ["Spark Agent", "spark-agent", "Electron"];
+  roots.push(path.join(os.homedir(), ".SparkAgent", "runs"));
   for (const base of [appData, localAppData]) {
     for (const name of names) roots.push(path.join(base, name, "runs"));
   }
@@ -194,6 +195,7 @@ function candidateSearchParents(explicitRoots) {
   for (const root of explicitRoots) parents.push(root);
   if (process.env.SPARK_RUNS_DIR) parents.push(process.env.SPARK_RUNS_DIR);
   if (process.env.SPARK_USER_DATA_DIR) parents.push(process.env.SPARK_USER_DATA_DIR);
+  parents.push(path.join(os.homedir(), ".SparkAgent"));
   if (process.env.APPDATA) parents.push(process.env.APPDATA);
   if (process.env.LOCALAPPDATA) parents.push(process.env.LOCALAPPDATA);
   parents.push(os.tmpdir());

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { RunState } from "@shared/types";
+import type { AddRunMessageAttachmentInput, RunState } from "@shared/types";
 import { makeId } from "@shared/ids";
 import { findOpenQuestion } from "./timeline";
 
@@ -15,13 +15,18 @@ import { findOpenQuestion } from "./timeline";
 interface Props {
   run: RunState | null;
   disabled?: boolean;
-  onStartChat: (message: string, clientMessageId: string) => void | Promise<void>;
+  onStartChat: (
+    message: string,
+    clientMessageId: string,
+    attachments?: AddRunMessageAttachmentInput[],
+  ) => void | Promise<void>;
 }
 
 const MAX_TEXTAREA_H = 168;
 
 export default function ChatComposer({ run, disabled, onStartChat }: Props) {
   const [draft, setDraft] = useState("");
+  const [images, setImages] = useState<AddRunMessageAttachmentInput[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -52,20 +57,21 @@ export default function ChatComposer({ run, disabled, onStartChat }: Props) {
   const isPaused = status === "paused" || status === "blocked";
   const isTerminal =
     status === "complete" || status === "failed" || status === "cancelled";
-  const canSend = !busy && !disabled && draft.trim().length > 0;
+  const canSend = !busy && !disabled && (draft.trim().length > 0 || images.length > 0);
 
   const run_ = run; // local alias so the async helpers narrow cleanly
 
   const send = async () => {
-    const message = draft.trim();
+    const message = messageForSend(draft, images.length);
     if (!message || inFlight.current || disabled) return;
     const clientMessageId = makeId("client-msg");
+    const attachments = images;
     inFlight.current = true;
     setBusy(true);
     setError(null);
     try {
       if (!run_) {
-        await onStartChat(message, clientMessageId);
+        await onStartChat(message, clientMessageId, attachments);
       } else {
         await window.spark.orchestration.addRunMessage({
           runId: run_.id,
@@ -73,12 +79,14 @@ export default function ChatComposer({ run, disabled, onStartChat }: Props) {
           author: "user",
           kind: openQuestion ? "answer" : "note",
           message,
+          attachments,
         });
         if (openQuestion) {
           await window.spark.orchestration.resumeRun({ runId: run_.id });
         }
       }
       setDraft("");
+      setImages([]);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -88,9 +96,10 @@ export default function ChatComposer({ run, disabled, onStartChat }: Props) {
   };
 
   const sendNow = async () => {
-    const message = draft.trim();
+    const message = messageForSend(draft, images.length);
     if (!message || inFlight.current || !run_) return;
     const clientMessageId = makeId("client-msg");
+    const attachments = images;
     inFlight.current = true;
     setBusy(true);
     setError(null);
@@ -102,8 +111,10 @@ export default function ChatComposer({ run, disabled, onStartChat }: Props) {
         kind: "note",
         mode: "hard",
         reason: "Hard-cancelled by user message",
+        attachments,
       });
       setDraft("");
+      setImages([]);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -132,6 +143,31 @@ export default function ChatComposer({ run, disabled, onStartChat }: Props) {
       event.preventDefault();
       void send();
     }
+  };
+
+  const attachImages = async () => {
+    if (busy || disabled) return;
+    try {
+      const paths = await window.spark.dialog.openImages();
+      if (paths.length === 0) return;
+      setImages((current) => {
+        const seen = new Set(current.map((image) => image.sourcePath));
+        const next = [...current];
+        for (const path of paths) {
+          if (seen.has(path)) continue;
+          seen.add(path);
+          next.push({ sourcePath: path, name: basename(path) });
+          if (next.length >= 4) break;
+        }
+        return next;
+      });
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  const removeImage = (sourcePath: string) => {
+    setImages((current) => current.filter((image) => image.sourcePath !== sourcePath));
   };
 
   const placeholder = !run_
@@ -179,6 +215,24 @@ export default function ChatComposer({ run, disabled, onStartChat }: Props) {
             "border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
         }}
       >
+        {images.length > 0 && (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 6,
+              marginBottom: 7,
+            }}
+          >
+            {images.map((image) => (
+              <ImageChip
+                key={image.sourcePath}
+                name={image.name || basename(image.sourcePath)}
+                onRemove={() => removeImage(image.sourcePath)}
+              />
+            ))}
+          </div>
+        )}
         <textarea
           ref={textareaRef}
           value={draft}
@@ -228,6 +282,11 @@ export default function ChatComposer({ run, disabled, onStartChat }: Props) {
                 ? "Send queues for the next decision"
                 : "Enter to send, Shift+Enter for a new line"}
           </span>
+          <IconButton
+            title="Attach image"
+            disabled={busy || disabled || images.length >= 4}
+            onClick={attachImages}
+          />
           {isPaused && (
             <TextButton onClick={resume} disabled={busy} tone="accent">
               Resume
@@ -242,6 +301,120 @@ export default function ChatComposer({ run, disabled, onStartChat }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+function messageForSend(draft: string, imageCount: number): string {
+  const text = draft.trim();
+  if (text) return text;
+  return imageCount > 0 ? `Use the attached image${imageCount === 1 ? "" : "s"} as context.` : "";
+}
+
+function basename(path: string): string {
+  return path.replace(/\\/g, "/").split("/").filter(Boolean).pop() || path;
+}
+
+function ImageChip({ name, onRemove }: { name: string; onRemove: () => void }) {
+  return (
+    <span
+      title={name}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        minWidth: 0,
+        maxWidth: "100%",
+        height: 24,
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 6,
+        background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+        padding: "0 4px 0 7px",
+        color: "var(--ink-dim)",
+        fontSize: 11,
+      }}
+    >
+      <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex" }}>
+        <ImageGlyph />
+      </span>
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {name}
+      </span>
+      <button
+        type="button"
+        onClick={onRemove}
+        title="Remove image"
+        aria-label="Remove image"
+        style={{
+          appearance: "none",
+          width: 18,
+          height: 18,
+          border: "none",
+          borderRadius: 4,
+          background: "transparent",
+          color: "var(--muted)",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 0,
+          cursor: "default",
+          flex: "0 0 auto",
+        }}
+      >
+        <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden>
+          <path d="M2 2l4 4M6 2 2 6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+        </svg>
+      </button>
+    </span>
+  );
+}
+
+function IconButton({
+  title,
+  disabled,
+  onClick,
+}: {
+  title: string;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      aria-label={title}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        width: 28,
+        height: 28,
+        flex: "0 0 28px",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 7,
+        background: hover && !disabled ? "var(--hover)" : "transparent",
+        color: disabled ? "var(--muted-2)" : "var(--ink-dim)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 0,
+        cursor: "default",
+      }}
+    >
+      <ImageGlyph />
+    </button>
+  );
+}
+
+function ImageGlyph() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+      <rect x="2" y="2.5" width="10" height="9" rx="1.6" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M3.5 9.7 5.8 7.4l1.6 1.5 1.5-1.9 1.8 2.7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="9.8" cy="4.9" r="0.8" fill="currentColor" />
+    </svg>
   );
 }
 

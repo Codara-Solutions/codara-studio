@@ -414,6 +414,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
       {leaves.map(({ leaf, rect }) => {
         const bundle = getBundle(tab.id, leaf.paneId);
         const isActive = tab.activePaneId === leaf.paneId;
+        const workerChip = visibleWorkerChip(leaf.worker);
         const activeDrop =
           dropIntent && dropIntent.paneId === leaf.paneId ? dropIntent : null;
         return (
@@ -491,7 +492,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               onActivity={bundle.onActivity}
               onAgentState={bundle.onAgentState}
             />
-            {leaf.worker ? <WorkerChip worker={leaf.worker} /> : null}
+            {workerChip ? <WorkerChip worker={workerChip} /> : null}
             <PaneToolbar
               dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
               onSmartAdd={bundle.onSmartAdd}
@@ -1233,13 +1234,26 @@ function forEachLeaf(node: PaneNode, fn: (l: TerminalLeaf) => void): void {
   forEachLeaf(node.b, fn);
 }
 
-// Small overlay chip rendered on a pane that's hosting an orchestration
-// worker. Sits in the top-left so it doesn't collide with the toolbar in
-// the top-right. Pulses while the worker is running; goes static once the
-// pane is "done" (still readable, but no longer claimed).
+function visibleWorkerChip(worker: TerminalLeafWorker | null | undefined): TerminalLeafWorker | null {
+  if (!worker) return null;
+  if (worker.source === "spark") {
+    if (worker.agentRunning === false) return null;
+    if (worker.state === "done" && worker.agentRunning !== true) return null;
+    return worker;
+  }
+  if (worker.source === "manual") return worker.state === "running" ? worker : null;
+  return null;
+}
+
+// Small overlay chip rendered on a pane that's hosting a live manual agent or
+// a Spark-owned worker attempt. Manual chips are visible only while running;
+// Spark chips can go static as "done" after the attempt-finished event, then
+// disappear once the foreground agent has returned to the shell prompt.
 function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
   const label = worker.runtime ? worker.runtime.toUpperCase() : "WORKER";
   const running = worker.state === "running";
+  const chipAccent = "color-mix(in oklch, var(--accent) 48%, white)";
+  const chipAccentSoft = "color-mix(in oklch, var(--accent) 32%, white)";
   return (
     <div
       style={{
@@ -1251,16 +1265,18 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
         gap: 6,
         padding: "2px 8px",
         borderRadius: 999,
-        background: "color-mix(in oklch, var(--panel) 78%, transparent)",
-        border: "1px solid color-mix(in oklch, var(--accent) 38%, var(--rule-soft))",
+        background: "color-mix(in oklch, var(--panel) 90%, black)",
+        border: `1px solid ${chipAccent}`,
         backdropFilter: "blur(6px)",
         WebkitBackdropFilter: "blur(6px)",
-        color: "var(--accent)",
+        color: chipAccent,
         fontFamily: "var(--font-mono)",
         fontSize: 10,
         fontWeight: 600,
         letterSpacing: "0.08em",
         textTransform: "uppercase",
+        textShadow: "0 1px 2px rgba(0, 0, 0, 0.72)",
+        boxShadow: `0 0 0 1px rgba(0, 0, 0, 0.38), 0 0 14px color-mix(in oklch, var(--accent) 24%, transparent)`,
         pointerEvents: "none",
         zIndex: 5,
       }}
@@ -1271,12 +1287,12 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
           width: 6,
           height: 6,
           borderRadius: "50%",
-          background: running ? "var(--accent)" : "color-mix(in oklch, var(--accent) 40%, transparent)",
-          boxShadow: running ? "0 0 8px var(--accent)" : "none",
+          background: running ? chipAccent : chipAccentSoft,
+          boxShadow: running ? `0 0 9px ${chipAccent}` : "none",
         }}
       />
       <span>{label}</span>
-      <span style={{ opacity: 0.55, fontWeight: 500 }}>
+      <span style={{ opacity: 0.78, fontWeight: 500 }}>
         {running ? "running" : "done"}
       </span>
     </div>

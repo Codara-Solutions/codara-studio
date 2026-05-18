@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import type { RunState, Workspace } from "@shared/types";
+import type { AddRunMessageAttachmentInput, RunState, Workspace } from "@shared/types";
+import type { SectionHeaderDragProps } from "../panels/SectionHeader";
 import ChatPanel from "./chat/ChatPanel";
 
 interface Props {
@@ -9,6 +10,7 @@ interface Props {
   onSelectRun: (id: string | null) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  headerDrag?: SectionHeaderDragProps;
 }
 
 // Controller for the Spark chat panel. A "chat" is a RunState — its
@@ -23,6 +25,7 @@ export default function OrchestrationSidebar({
   onSelectRun,
   collapsed,
   onToggleCollapse,
+  headerDrag,
 }: Props) {
   const [creatingNewRun, setCreatingNewRun] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -61,7 +64,11 @@ export default function OrchestrationSidebar({
   // composer awaits this and keeps the draft + surfaces the error if it
   // throws.
   const startChat = useCallback(
-    async (message: string, clientMessageId: string) => {
+    async (
+      message: string,
+      clientMessageId: string,
+      attachments?: AddRunMessageAttachmentInput[],
+    ) => {
       if (!workspace) return;
       const run = await window.spark.orchestration.startAutopilot({
         workspaceId: workspace.id,
@@ -69,6 +76,7 @@ export default function OrchestrationSidebar({
         cwd: workspace.cwd,
         initialUserNote: message,
         initialUserNoteClientMessageId: clientMessageId,
+        initialAttachments: attachments,
       });
       setCreatingNewRun(false);
       onSelectRun(run.id);
@@ -131,6 +139,7 @@ export default function OrchestrationSidebar({
       error={error}
       collapsed={collapsed}
       onToggleCollapse={onToggleCollapse}
+      headerDrag={headerDrag}
       onSelectRun={handleSelectRun}
       onDeleteRun={handleDeleteRun}
       onStartChat={startChat}

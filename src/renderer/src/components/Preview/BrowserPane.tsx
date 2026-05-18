@@ -317,7 +317,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
           try { webviewRef.current?.openDevTools?.(); } catch { /* not dom-ready */ }
         }}
         onOpenExternal={(target) => {
-          if (target) void window.spark.openExternal?.(target);
+          if (target) void window.spark.openInSystemBrowser?.(target);
         }}
       />
       {error ? (

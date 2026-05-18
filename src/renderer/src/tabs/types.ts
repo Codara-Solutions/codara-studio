@@ -61,11 +61,15 @@ export interface TerminalLeafWorker {
   runId: string;
   workerTaskId: string;
   attemptId: string;
-  source?: "spark" | "manual";
-  // Lifecycle of the worker pane. While "running" the chip pulses; on
-  // "done" the pane sticks around so the user can read the output, but
-  // the next worker can claim it (it's idle again).
+  source: "spark" | "manual";
+  // Lifecycle of the worker attempt. While "running" the chip pulses; on
+  // "done" the pane may show a static completion chip until the foreground
+  // agent exits and the shell prompt is back.
   state: "running" | "done";
+  // Foreground Claude/Codex process state as sniffed from the terminal
+  // stream. Spark can finish the attempt before the user exits the TUI; once
+  // the shell prompt is back, the pane should stop showing an agent chip.
+  agentRunning?: boolean;
 }
 
 export interface TerminalSplit {

@@ -1,11 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type {
   RunState,
+  SparkCall,
   StepState,
   WorkerAttempt,
   WorkerReport,
   WorkerTask,
 } from "@shared/types";
+import { contextWindowForModel } from "@shared/context-window";
 import {
   attemptStatusColor,
   deriveAgentStatus,
@@ -497,6 +499,7 @@ function RunSummary({
   const runningWorkers = run.workerTasks.filter((task) => task.status === "running" || task.status === "claimed").length;
   const blockedWorkers = run.workerTasks.filter((task) => task.status === "blocked" || task.status === "failed").length;
   const runTone = statusColor(run.status);
+  const context = latestContextSnapshot(run);
 
   return (
     <>
@@ -527,6 +530,27 @@ function RunSummary({
             ]}
           />
         </SnapshotCard>
+      </Section>
+
+      <Section title="Context" meta={context ? <MetaCount value={`${context.percent}%`} /> : undefined}>
+        {context ? (
+          <SnapshotCard
+            title={`${formatTokens(context.used)} / ${formatTokens(context.total)}`}
+            subtitle={`${context.mode.replace(/_/g, " ")} · ${context.model}${context.estimated ? " · est." : ""}`}
+            tone={context.tone}
+          >
+            <Bar value={context.percent} tone={context.tone} />
+            <QuickStats
+              items={[
+                { label: "Used", value: formatTokens(context.used), tone: context.tone },
+                { label: "Window", value: formatTokens(context.total) },
+                { label: "Calls", value: String(run.sparkCalls.length) },
+              ]}
+            />
+          </SnapshotCard>
+        ) : (
+          <MutedNote>No manager calls yet.</MutedNote>
+        )}
       </Section>
 
       <Section title="Now">
@@ -1538,6 +1562,55 @@ interface ActivityItem {
   label: string;
   state: string;
   tone: string;
+}
+
+interface ContextSnapshot {
+  used: number;
+  total: number;
+  percent: number;
+  model: string;
+  mode: SparkCall["mode"];
+  estimated: boolean;
+  tone: string;
+}
+
+function latestContextSnapshot(run: RunState): ContextSnapshot | null {
+  const call = [...run.sparkCalls]
+    .reverse()
+    .find((item) => item.promptTokens || item.promptTokenEstimate || item.status === "started");
+  if (!call) return null;
+  const fallback = contextWindowForModel(call.model);
+  const total = call.contextWindowTokens ?? fallback.tokens;
+  const used = call.promptTokens ?? call.promptTokenEstimate ?? 0;
+  if (!total || used <= 0) return null;
+  const percent = Math.max(0, Math.min(100, Math.round((used / total) * 100)));
+  const tone =
+    percent >= 85
+      ? "var(--danger)"
+      : percent >= 65
+        ? "var(--warn)"
+        : percent >= 35
+          ? "var(--accent)"
+          : "var(--ok)";
+  return {
+    used,
+    total,
+    percent,
+    model: call.model || "manager",
+    mode: call.mode,
+    estimated: !call.promptTokens || !call.contextWindowTokens || call.contextWindowSource === "default",
+    tone,
+  };
+}
+
+function formatTokens(value: number): string {
+  if (value >= 1_000_000) return `${trimNumber(value / 1_000_000)}M`;
+  if (value >= 1_000) return `${trimNumber(value / 1_000)}k`;
+  return String(value);
+}
+
+function trimNumber(value: number): string {
+  return value >= 10 ? value.toFixed(0) : value.toFixed(1).replace(/\.0$/, "");
 }
 
 function recentActivity(run: RunState): ActivityItem[] {

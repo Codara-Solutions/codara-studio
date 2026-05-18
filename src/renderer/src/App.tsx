@@ -11,8 +11,6 @@ import type {
 import { makeId } from "@shared/ids";
 import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
-import FileTree from "./components/FileTree";
-import OrchestrationSidebar from "./components/OrchestrationSidebar";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
 import SearchPanel from "./components/Search/SearchPanel";
@@ -27,9 +25,8 @@ import type { PaneNode, Tab, TerminalLeaf } from "./tabs/types";
 import { basename } from "./path-utils";
 import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
-import { usePanelLayout, sectionSlotStyles } from "./panels/usePanelLayout";
+import { usePanelLayout, type PanelSectionKey, type PanelSide } from "./panels/usePanelLayout";
 import ResizeHandle from "./panels/ResizeHandle";
-import SectionHeader from "./panels/SectionHeader";
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
@@ -64,12 +61,46 @@ function sameOrigin(a: string, b: string): boolean {
   }
 }
 
+function isBrowserUrl(url: string): boolean {
+  return /^(https?:|file:)/i.test(url);
+}
+
 // Compare two filesystem paths case-insensitively (Windows is the target
 // platform; case-sensitive matching would split "C:\\Foo" and "c:\\foo").
 // Trailing slashes / mixed separators are normalised before comparison.
 function samePath(a: string, b: string): boolean {
   const norm = (s: string): string => s.replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
   return norm(a) === norm(b);
+}
+
+function collectTerminalPaneIds(node: PaneNode, ids: Set<string>): void {
+  if (node.kind === "leaf") {
+    ids.add(node.paneId);
+    return;
+  }
+  collectTerminalPaneIds(node.a, ids);
+  collectTerminalPaneIds(node.b, ids);
+}
+
+function disposeTerminalPanesInTabs(tabs: Tab[]): void {
+  const paneIds = new Set<string>();
+  for (const tab of tabs) {
+    if (tab.kind === "terminal") collectTerminalPaneIds(tab.root, paneIds);
+  }
+  for (const paneId of paneIds) {
+    void window.spark.pty.dispose(paneId).catch(() => undefined);
+  }
+}
+
+function disposePersistedWorkspaceTerminalPanes(workspaceId: string): void {
+  try {
+    const raw = window.localStorage.getItem(`spark.tabs:${workspaceId}`);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as { tabs?: Tab[] };
+    if (Array.isArray(parsed.tabs)) disposeTerminalPanesInTabs(parsed.tabs);
+  } catch {
+    /* best-effort cleanup only */
+  }
 }
 
 // Walk a pane tree and return the first leaf that:
@@ -132,7 +163,9 @@ function findLeafByPaneId(node: PaneNode, paneId: string): TerminalLeaf | null {
 }
 
 function countRunningWorkerLeaves(node: PaneNode): number {
-  if (node.kind === "leaf") return node.worker?.state === "running" ? 1 : 0;
+  if (node.kind === "leaf") {
+    return node.worker?.state === "running" && node.worker.agentRunning !== false ? 1 : 0;
+  }
   return countRunningWorkerLeaves(node.a) + countRunningWorkerLeaves(node.b);
 }
 
@@ -159,6 +192,14 @@ export default function App() {
   // everywhere.
   const [runs, setRuns] = useState<RunState[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  // Each workspace has its own Spark chat selection. The visible state stays
+  // as a single activeRunId, but this map lets workspace switches restore the
+  // previous chat instead of inheriting another workspace's draft/new-chat UI.
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
+  const activeRunIdRef = useRef(activeRunId);
+  activeRunIdRef.current = activeRunId;
+  const activeRunIdsByWorkspaceRef = useRef<Record<string, string | null>>({});
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [defaultShell, setDefaultShell] = useState<ShellInfo | null>(null);
   const [detectedDefaultShell, setDetectedDefaultShell] = useState<ShellInfo | null>(null);
@@ -178,6 +219,7 @@ export default function App() {
   const panels = usePanelLayout();
   const panelsRef = useRef(panels);
   panelsRef.current = panels;
+  const [draggingPanelSection, setDraggingPanelSection] = useState<PanelSectionKey | null>(null);
   const saveTimer = useRef<number | null>(null);
   // Trailing-debounce timer for the orchestration-event → listRuns refresh.
   // A single run emits a burst of events (planning → running → many worker
@@ -247,8 +289,14 @@ export default function App() {
   // tab earlier, we transparently re-open it and route them to the picked
   // run. Without this, picking a run row (or starting a new run) silently
   // updates state and the user sees no UI change.
-  const handleSelectRun = useCallback((runId: string | null) => {
+  const handleSelectRun = useCallback((runId: string | null, workspaceId?: string | null) => {
+    const targetWorkspaceId = workspaceId ?? activeIdRef.current;
+    if (targetWorkspaceId) {
+      activeRunIdsByWorkspaceRef.current[targetWorkspaceId] = runId;
+    }
+    activeRunIdRef.current = runId;
     setActiveRunId(runId);
+    if (targetWorkspaceId !== activeIdRef.current) return;
     if (runId === null) {
       tabsRef.current.hideRunsTabs();
       return;
@@ -278,6 +326,9 @@ export default function App() {
     const tab = tabs.activeTab;
     if (tab && tab.kind === "runs" && tab.runId) {
       const runId = tab.runId;
+      const workspaceId = activeIdRef.current;
+      if (workspaceId) activeRunIdsByWorkspaceRef.current[workspaceId] = runId;
+      activeRunIdRef.current = runId;
       setActiveRunId((current) => (current === runId ? current : runId));
     }
   }, [tabs.activeTab]);
@@ -358,13 +409,6 @@ export default function App() {
 
   const workspaceIdsKey = useMemo(() => workspaces.map((w) => w.id).join("\0"), [workspaces]);
 
-  // Mirror the active workspace id through a ref so the orchestration event
-  // listener (below) can read the *current* active id without listing it as
-  // an effect dependency — depending on `activeId` would tear down and
-  // re-register the IPC listener on every workspace switch.
-  const activeIdRef = useRef(activeId);
-  activeIdRef.current = activeId;
-
   const refreshRunCount = useCallback(async (workspaceId: string) => {
     try {
       const runs = await window.spark.orchestration.listRuns(workspaceId);
@@ -393,9 +437,18 @@ export default function App() {
     }
   }, []);
 
-  // Initial load + reload on workspace change.
+  // Initial load + reload on workspace change. Run selection is scoped per
+  // workspace, so coming back to a project restores the chat the user was
+  // reading there instead of inheriting another workspace's draft/new-chat
+  // state.
   useEffect(() => {
     if (!booted) return;
+    const remembered =
+      activeId && Object.prototype.hasOwnProperty.call(activeRunIdsByWorkspaceRef.current, activeId)
+        ? activeRunIdsByWorkspaceRef.current[activeId]
+        : null;
+    activeRunIdRef.current = remembered;
+    setActiveRunId((current) => (current === remembered ? current : remembered));
     void refreshRunsFor(activeId);
   }, [activeId, booted, refreshRunsFor]);
 
@@ -405,12 +458,28 @@ export default function App() {
   // disappeared.
   useEffect(() => {
     setActiveRunId((current) => {
-      if (!current) return null;
-      if (current && runs.some((run) => run.id === current)) return current;
+      const workspaceId = activeIdRef.current;
+      if (!workspaceId) {
+        activeRunIdRef.current = null;
+        return null;
+      }
+      if (!current) {
+        activeRunIdsByWorkspaceRef.current[workspaceId] = null;
+        activeRunIdRef.current = null;
+        return null;
+      }
+      if (current && runs.some((run) => run.id === current)) {
+        activeRunIdsByWorkspaceRef.current[workspaceId] = current;
+        activeRunIdRef.current = current;
+        return current;
+      }
       const live = runs.find((run) =>
         ["planning", "running", "reviewing", "blocked", "paused"].includes(run.status),
       );
-      return live?.id ?? runs[0]?.id ?? null;
+      const fallback = live?.id ?? runs[0]?.id ?? null;
+      activeRunIdsByWorkspaceRef.current[workspaceId] = fallback;
+      activeRunIdRef.current = fallback;
+      return fallback;
     });
   }, [runs]);
 
@@ -607,6 +676,7 @@ export default function App() {
         runId: event.runId,
         workerTaskId: event.workerTaskId,
         attemptId: event.attemptId,
+        source: "spark" as const,
         state: "running" as const,
       };
 
@@ -641,7 +711,6 @@ export default function App() {
         if (renamed) {
           t.setLeafWorker(claimTabId, event.attemptId, workerMeta);
           t.setLeafCwd(claimTabId, event.attemptId, workspaceCwd);
-          t.setActiveTab(claimTabId);
           t.setActiveTerminalPane(claimTabId, event.attemptId);
           return;
         }
@@ -667,7 +736,9 @@ export default function App() {
             tab.kind === "terminal" &&
             anyLeafCwdMatches(tab.root, paneRuntimeRef.current, cwdMatches),
         );
-        targetTabId = matching ? matching.id : t.newTerminalTab(workspaceCwd);
+        targetTabId = matching
+          ? matching.id
+          : t.newTerminalTab(workspaceCwd, undefined, { focus: false });
       }
 
       const ok = t.addPaneInTab(targetTabId, event.attemptId, {
@@ -675,7 +746,6 @@ export default function App() {
         worker: workerMeta,
       });
       if (ok) {
-        t.setActiveTab(targetTabId);
         t.setActiveTerminalPane(targetTabId, event.attemptId);
       }
     };
@@ -699,7 +769,9 @@ export default function App() {
             runId: event.runId ?? prior?.runId ?? "",
             workerTaskId: event.workerTaskId ?? prior?.workerTaskId ?? "",
             attemptId,
+            source: "spark",
             state: "done",
+            agentRunning: prior?.agentRunning,
           });
           break;
         }
@@ -717,6 +789,10 @@ export default function App() {
   // stable for the lifetime of the component — which lets the React.memo on
   // WorkspaceRail actually skip renders.
   const handleActivateWorkspace = useCallback((id: string) => {
+    const currentWorkspaceId = activeIdRef.current;
+    if (currentWorkspaceId) {
+      activeRunIdsByWorkspaceRef.current[currentWorkspaceId] = activeRunIdRef.current;
+    }
     setActiveId(id);
   }, []);
 
@@ -758,10 +834,18 @@ export default function App() {
     // negative delta) widens the panel.
     panelsRef.current.setRightWidth(rightWidthAtDragStart.current - delta);
   }, []);
-  const toggleWorkspacesSection = useCallback(() => panelsRef.current.toggleCollapse("workspaces"), []);
-  const toggleGraphSection = useCallback(() => panelsRef.current.toggleCollapse("graph"), []);
-  const toggleAgentSection = useCallback(() => panelsRef.current.toggleCollapse("agent"), []);
-  const toggleExplorerSection = useCallback(() => panelsRef.current.toggleCollapse("explorer"), []);
+  const togglePanelSection = useCallback((section: PanelSectionKey) => {
+    panelsRef.current.toggleCollapse(section);
+  }, []);
+  const movePanelSection = useCallback((section: PanelSectionKey, side: PanelSide, index: number) => {
+    panelsRef.current.moveSection(section, side, index);
+  }, []);
+  const handlePanelSectionDragStart = useCallback((section: PanelSectionKey) => {
+    setDraggingPanelSection(section);
+  }, []);
+  const handlePanelSectionDragEnd = useCallback(() => {
+    setDraggingPanelSection(null);
+  }, []);
 
   const handleOpenSettings = useCallback(() => {
     setSettingsOpen(true);
@@ -777,6 +861,12 @@ export default function App() {
   }, []);
 
   const deleteWs = useCallback((id: string) => {
+    delete activeRunIdsByWorkspaceRef.current[id];
+    if (activeIdRef.current === id) {
+      disposeTerminalPanesInTabs(tabsRef.current.tabs);
+    } else {
+      disposePersistedWorkspaceTerminalPanes(id);
+    }
     setWorkspaces((ws) => {
       const next = ws.filter((w) => w.id !== id);
       // dispose pty for any workers in deleted workspace
@@ -806,6 +896,7 @@ export default function App() {
       workers: [],
     };
     setWorkspaces((list) => [...list, ws]);
+    activeRunIdsByWorkspaceRef.current[ws.id] = null;
     setActiveId(ws.id);
     setEditingId(ws.id);
   }, [workspaces, activeWorkspace, home]);
@@ -819,9 +910,9 @@ export default function App() {
     [tabs],
   );
 
-  // RightPanel FileTree prop callbacks. Hoisted to stable references (keyed
-  // on the now-stable `tabs` object) so the React.memo on RightPanel can skip
-  // re-renders when only unrelated App state changed.
+  // Explorer prop callbacks. Hoisted to stable references (keyed on the
+  // now-stable `tabs` object) so the memoized side panels can skip re-renders
+  // when only unrelated App state changed.
   const handleDeleteFile = useCallback(
     (path: string) => {
       tabs.closeEditorByPath(path);
@@ -952,6 +1043,31 @@ export default function App() {
     tabs.newPreviewTab("");
   }, [tabs]);
 
+  const openInSparkBrowser = useCallback(
+    (url: string) => {
+      if (!isBrowserUrl(url)) return;
+      const existing = tabs.tabs.find(
+        (t) => t.kind === "preview" && (t.url === url || sameOrigin(t.url, url)),
+      );
+      if (existing) {
+        tabs.setPreviewUrl(existing.id, url);
+        tabs.setActiveTab(existing.id);
+        return;
+      }
+      tabs.newPreviewTab(url);
+    },
+    [tabs],
+  );
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const url = (event as CustomEvent<{ url?: unknown }>).detail?.url;
+      if (typeof url === "string") openInSparkBrowser(url);
+    };
+    window.addEventListener("spark:open-browser-url", handler);
+    return () => window.removeEventListener("spark:open-browser-url", handler);
+  }, [openInSparkBrowser]);
+
   const handleTerminalPaneDropToTab = useCallback(
     (payload: TerminalPaneDragPayload, targetTabId?: string) => {
       if (targetTabId) {
@@ -1072,17 +1188,17 @@ export default function App() {
     if (!tab || tab.kind !== "terminal") return;
     const leaf = findLeafByPaneId(tab.root, paneId);
     if (!leaf?.worker) return;
-    // Manual chips (user-typed claude/codex, or AddPane menu launches) have
-    // no lifecycle outside the pane. Clear them outright when the PTY dies
-    // so the pane doesn't keep displaying a stale "DONE" badge after the
-    // agent quits. Spark-owned workers (source="spark") stay visible as
-    // "done" so the run-bookkeeping / review flow can still surface them.
-    if (leaf.worker.source === "manual") {
+    // Manual chips (user-typed claude/codex, or AddPane menu launches) and
+    // legacy chips without an explicit source have no lifecycle outside the
+    // pane. Clear them outright when the PTY dies so an idle shell never keeps
+    // displaying a stale "DONE" badge after the agent quits.
+    if (leaf.worker.source !== "spark") {
       t.setLeafWorker(tabId, paneId, null);
       return;
     }
-    if (leaf.worker.state !== "running") return;
-    t.setLeafWorker(tabId, paneId, { ...leaf.worker, state: "done" });
+    // A PTY exit is not the worker completion signal. Spark-owned panes move
+    // to "done" only when orchestration emits worker_attempt.finished.
+    t.setLeafWorker(tabId, paneId, { ...leaf.worker, agentRunning: false });
   }, []);
 
   // useTerminalSession sniffs the PTY byte stream for the alt-screen toggle
@@ -1092,9 +1208,10 @@ export default function App() {
   // moment they Ctrl+C out — the chip means "an agent is live in this
   // pane" and nothing more, so once the agent quits the pane shows no chip
   // at all (rather than a lingering "DONE" badge).
-  // Spark-orchestrated workers (source="spark") have their own lifecycle
-  // driven by IPC and must never be touched here — otherwise a Ctrl+C in a
-  // worker pane would silently break the run's bookkeeping.
+  // Spark-orchestrated workers (source="spark") keep their completion
+  // lifecycle in the run store, but the terminal chip still follows the
+  // foreground process: when Claude/Codex returns to the shell prompt, the
+  // pane stops advertising an active agent.
   const onTerminalPaneAgentState = useCallback(
     (
       tabId: string,
@@ -1108,6 +1225,14 @@ export default function App() {
       if (!leaf) return;
       const existing = leaf.worker;
       if (state.running) {
+        if (existing && existing.source === "spark") {
+          t.setLeafWorker(tabId, paneId, {
+            ...existing,
+            runtime: state.runtime ?? existing.runtime,
+            agentRunning: true,
+          });
+          return;
+        }
         if (existing && existing.source !== "manual") return;
         const runtime = state.runtime ?? existing?.runtime;
         t.setLeafWorker(tabId, paneId, {
@@ -1117,16 +1242,20 @@ export default function App() {
           attemptId: existing?.attemptId ?? paneId,
           source: "manual",
           state: "running",
+          agentRunning: true,
         });
         return;
       }
       // running=false: the agent's TUI closed — the user Ctrl+C'd out (or
-      // the agent exited) and the shell prompt is back. Clear the manual
-      // chip outright so the pane shows nothing once no agent is live; a
-      // lingering "DONE" badge here is just noise. Only touch chips we own
-      // (manual) — Spark-orchestrated workers keep their IPC-driven "done"
-      // state for the run-bookkeeping / review flow.
-      if (!existing || existing.source !== "manual") return;
+      // the agent exited) and the shell prompt is back. Clear manual chips
+      // outright; for Spark-owned panes, keep the run metadata but mark the
+      // foreground agent inactive so the terminal no longer shows CLAUDE DONE.
+      if (!existing) return;
+      if (existing.source === "spark") {
+        t.setLeafWorker(tabId, paneId, { ...existing, agentRunning: false });
+        return;
+      }
+      if (existing.source !== "manual") return;
       t.setLeafWorker(tabId, paneId, null);
     },
     [],
@@ -1179,14 +1308,23 @@ export default function App() {
       <div style={{ flex: 1, display: "flex", minHeight: 0, position: "relative" }}>
         {showLeft && (
           <WorkspaceRail
+            side="left"
+            sections={panels.sections.left}
+            draggingSection={draggingPanelSection}
             workspaces={workspaces}
             activeId={activeId}
             activeWorkspace={activeWorkspace}
             editingId={editingId}
             width={panels.leftWidth}
             split={panels.leftSplit}
-            workspacesCollapsed={panels.collapsed.workspaces}
-            graphCollapsed={panels.collapsed.graph}
+            collapsed={panels.collapsed}
+            activePath={
+              tabs.activeTab && tabs.activeTab.kind === "editor"
+                ? tabs.activeTab.path
+                : null
+            }
+            runs={runs}
+            activeRunId={activeRunId}
             onActivate={handleActivateWorkspace}
             onEdit={handleEditWorkspace}
             onChange={updateWs}
@@ -1195,9 +1333,16 @@ export default function App() {
             onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
             onSplitChange={panels.setLeftSplit}
-            onToggleWorkspaces={toggleWorkspacesSection}
-            onToggleGraph={toggleGraphSection}
+            onToggleSection={togglePanelSection}
+            onMoveSection={movePanelSection}
+            onSectionDragStart={handlePanelSectionDragStart}
+            onSectionDragEnd={handlePanelSectionDragEnd}
+            onSelectRun={handleSelectRun}
             onOpenFile={openFileByPath}
+            onOpenFileEntry={openEditorFile}
+            onDeleteFile={handleDeleteFile}
+            onRenameFile={handleRenameFile}
+            onRunPlan={handleRunPlan}
           />
         )}
         {showLeft && (
@@ -1255,8 +1400,17 @@ export default function App() {
           />
         )}
         {showRight && (
-          <RightPanel
-            workspace={activeWorkspace}
+          <WorkspaceRail
+            side="right"
+            sections={panels.sections.right}
+            draggingSection={draggingPanelSection}
+            workspaces={workspaces}
+            activeId={activeId}
+            activeWorkspace={activeWorkspace}
+            editingId={editingId}
+            width={panels.rightWidth}
+            split={panels.rightSplit}
+            collapsed={panels.collapsed}
             activePath={
               tabs.activeTab && tabs.activeTab.kind === "editor"
                 ? tabs.activeTab.path
@@ -1264,18 +1418,24 @@ export default function App() {
             }
             runs={runs}
             activeRunId={activeRunId}
-            width={panels.rightWidth}
-            split={panels.rightSplit}
-            agentCollapsed={panels.collapsed.agent}
-            explorerCollapsed={panels.collapsed.explorer}
+            onActivate={handleActivateWorkspace}
+            onEdit={handleEditWorkspace}
+            onChange={updateWs}
+            onPreviewColor={previewWsColor}
+            onDelete={deleteWs}
+            onCloseEditor={handleCloseWorkspaceEditor}
+            onCreate={createWs}
+            onSplitChange={panels.setRightSplit}
+            onToggleSection={togglePanelSection}
+            onMoveSection={movePanelSection}
+            onSectionDragStart={handlePanelSectionDragStart}
+            onSectionDragEnd={handlePanelSectionDragEnd}
             onSelectRun={handleSelectRun}
-            onOpenFile={openEditorFile}
+            onOpenFile={openFileByPath}
+            onOpenFileEntry={openEditorFile}
             onDeleteFile={handleDeleteFile}
             onRenameFile={handleRenameFile}
             onRunPlan={handleRunPlan}
-            onSplitChange={panels.setRightSplit}
-            onToggleAgent={toggleAgentSection}
-            onToggleExplorer={toggleExplorerSection}
           />
         )}
 
@@ -1294,7 +1454,7 @@ export default function App() {
               if (workspaces.some((w) => w.id === workspaceId)) {
                 setActiveId(workspaceId);
               }
-              handleSelectRun(runId);
+              handleSelectRun(runId, workspaceId);
               setSettingsOpen(false);
             }}
           />
@@ -1447,143 +1607,6 @@ const Workspace = React.memo(function Workspace({
             both user shells and worker shells. */}
       </div>
     </div>
-  );
-});
-
-// Memoized: `workspace` is the memoized activeWorkspace, `activePath` is a
-// derived primitive, and every callback is a hoisted stable reference — so
-// the memo skips re-renders from unrelated App state churn.
-const RightPanel = React.memo(function RightPanel({
-  workspace,
-  activePath,
-  runs,
-  activeRunId,
-  width,
-  split,
-  agentCollapsed,
-  explorerCollapsed,
-  onSelectRun,
-  onOpenFile,
-  onDeleteFile,
-  onRenameFile,
-  onRunPlan,
-  onSplitChange,
-  onToggleAgent,
-  onToggleExplorer,
-}: {
-  workspace: Workspace | null;
-  activePath: string | null;
-  runs: RunState[];
-  activeRunId: string | null;
-  width: number;
-  split: number;
-  agentCollapsed: boolean;
-  explorerCollapsed: boolean;
-  onSelectRun: (id: string | null) => void;
-  onOpenFile: (entry: FsEntry) => void;
-  onDeleteFile: (path: string) => void;
-  onRenameFile: (oldPath: string, entry: FsEntry) => void;
-  onRunPlan: (entry: FsEntry) => void;
-  onSplitChange: (ratio: number) => void;
-  onToggleAgent: () => void;
-  onToggleExplorer: () => void;
-}) {
-  const cwd = workspace?.cwd ?? null;
-  const accent = workspace?.color || "var(--accent)";
-
-  // Section-divider drag: snapshot the split ratio and body height at drag
-  // start, then translate a pointer delta into a ratio delta (same pattern
-  // as WorkspaceRail).
-  const bodyRef = useRef<HTMLDivElement | null>(null);
-  const splitAtDragStart = useRef(split);
-  const bodyHeightAtDragStart = useRef(1);
-
-  const [agentSlot, explorerSlot] = sectionSlotStyles(split, agentCollapsed, explorerCollapsed);
-
-  return (
-    <aside
-      style={{
-        width,
-        flex: `0 0 ${width}px`,
-        background: "var(--panel)",
-        display: "flex",
-        flexDirection: "column",
-        minHeight: 0,
-        overflow: "hidden",
-      }}
-    >
-      <div
-        ref={bodyRef}
-        style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}
-      >
-        <section
-          style={{
-            ...agentSlot,
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-          }}
-        >
-          <OrchestrationSidebar
-            workspace={workspace}
-            runs={runs}
-            activeRunId={activeRunId}
-            onSelectRun={onSelectRun}
-            collapsed={agentCollapsed}
-            onToggleCollapse={onToggleAgent}
-          />
-        </section>
-
-        <ResizeHandle
-          orientation="row"
-          disabled={agentCollapsed || explorerCollapsed}
-          accent={accent}
-          ariaLabel="Resize Spark and Explorer"
-          onResizeStart={() => {
-            splitAtDragStart.current = split;
-            bodyHeightAtDragStart.current = bodyRef.current?.clientHeight ?? 1;
-          }}
-          onResize={(delta) => {
-            onSplitChange(splitAtDragStart.current + delta / bodyHeightAtDragStart.current);
-          }}
-        />
-
-        <section
-          style={{
-            ...explorerSlot,
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-          }}
-        >
-          {cwd ? (
-            <FileTree
-              cwd={cwd}
-              activePath={activePath}
-              onOpenFile={onOpenFile}
-              onDeleteFile={onDeleteFile}
-              onRenameFile={onRenameFile}
-              onRunPlan={onRunPlan}
-              collapsed={explorerCollapsed}
-              onToggleCollapse={onToggleExplorer}
-            />
-          ) : (
-            <>
-              <SectionHeader
-                label="Explorer"
-                collapsed={explorerCollapsed}
-                onToggleCollapse={onToggleExplorer}
-              />
-              {!explorerCollapsed && (
-                <div style={{ padding: "12px 14px", color: "var(--muted)", fontSize: 11 }}>
-                  No active workspace.
-                </div>
-              )}
-            </>
-          )}
-        </section>
-      </div>
-    </aside>
   );
 });
 

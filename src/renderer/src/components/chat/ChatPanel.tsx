@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { RunState, Workspace } from "@shared/types";
-import SectionHeader from "../../panels/SectionHeader";
+import type { AddRunMessageAttachmentInput, RunState, Workspace } from "@shared/types";
+import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import { PlusIcon } from "../icons";
 import ChatConversation from "./ChatConversation";
 import ChatComposer from "./ChatComposer";
@@ -19,9 +19,14 @@ interface Props {
   error: string | null;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  headerDrag?: SectionHeaderDragProps;
   onSelectRun: (id: string | null) => void;
   onDeleteRun: (id: string) => void;
-  onStartChat: (message: string, clientMessageId: string) => void | Promise<void>;
+  onStartChat: (
+    message: string,
+    clientMessageId: string,
+    attachments?: AddRunMessageAttachmentInput[],
+  ) => void | Promise<void>;
   onPauseRun: () => void;
   onPauseAfterWorkers: () => void;
   onForcePauseRun: () => void;
@@ -35,6 +40,7 @@ export default function ChatPanel({
   error,
   collapsed,
   onToggleCollapse,
+  headerDrag,
   onSelectRun,
   onDeleteRun,
   onStartChat,
@@ -59,6 +65,7 @@ export default function ChatPanel({
         glyph={<SparkMark size={13} />}
         collapsed={collapsed}
         onToggleCollapse={onToggleCollapse}
+        {...headerDrag}
         meta={activeRun ? <StatusMeta run={activeRun} /> : null}
         actions={<NewChatButton onClick={() => onSelectRun(null)} />}
       />
@@ -78,7 +85,11 @@ export default function ChatPanel({
           {activeRun ? (
             // Keyed by chat id so switching chats remounts the stream — fresh
             // scroll position, no step-card open states carried across.
-            <ChatConversation key={conversationKey(activeRun)} run={activeRun} />
+            <ChatConversation
+              key={conversationKey(activeRun)}
+              run={activeRun}
+              cwd={workspace?.cwd ?? null}
+            />
           ) : (
             <WelcomeState />
           )}

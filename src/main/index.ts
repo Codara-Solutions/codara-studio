@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell } from "electron";
+import { app, BrowserWindow } from "electron";
 import { join } from "node:path";
 import { registerIpc } from "./ipc";
 import * as pty from "./pty-manager";
@@ -89,15 +89,19 @@ function createWindow(): void {
 
   mainWindow.on("ready-to-show", () => mainWindow?.show());
 
+  const openBrowserUrlInSpark = (url: string) => {
+    mainWindow?.webContents.send("app:open-browser-url", url);
+  };
+
   mainWindow.webContents.on("will-navigate", (e, url) => {
     if (!url.startsWith("http://localhost") && !url.startsWith("file://")) {
       e.preventDefault();
-      shell.openExternal(url);
+      openBrowserUrlInSpark(url);
     }
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    openBrowserUrlInSpark(url);
     return { action: "deny" };
   });
 

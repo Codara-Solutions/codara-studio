@@ -137,16 +137,18 @@ function loadPersisted(workspaceId: string | null): PersistedShape | null {
     if (!parsed || parsed.v !== TAB_VERSION || !Array.isArray(parsed.tabs)) {
       return null;
     }
-    // Reset any persisted worker.state="running" markers — the PTY they
-    // pointed at died when the app closed, so the leaf is actually idle.
-    // Without this, a leaf that hosted a worker at shutdown would be stuck
-    // visually showing a running chip and would never be claimed again.
+    // Drop terminal-worker metadata from persisted layouts. Worker chips are
+    // live-session state: manual Claude/Codex chips disappear as soon as the
+    // agent returns to the shell, and Spark-owned "done" chips are shown only
+    // right after a real worker attempt finishes in this app session. Restored
+    // panes are fresh shells, so carrying old badges forward makes idle panes
+    // look like they still belong to Claude/Codex.
     // Runs tabs are derived from the selected chat, not durable workspace
     // layout. Keep persisted editor/terminal/preview tabs, then recreate the
     // Runs tab only when App selects a chat.
     parsed.tabs = normalizeTerminalTitles(parsed.tabs.filter((tab) => tab.kind !== "runs"));
     for (const tab of parsed.tabs) {
-      if (tab.kind === "terminal") cleanupStaleWorkers(tab.root);
+      if (tab.kind === "terminal") cleanupTransientTerminalState(tab.root);
       if (tab.kind === "runs" && (tab.title === "Runs" || tab.title === "Ops")) tab.title = "Runs";
     }
     return parsed;
@@ -155,44 +157,65 @@ function loadPersisted(workspaceId: string | null): PersistedShape | null {
   }
 }
 
-function cleanupStaleWorkers(node: import("./types").PaneNode): void {
+function cleanupTransientTerminalState(node: PaneNode): void {
   if (node.kind === "leaf") {
-    if (!node.worker) return;
-    // Manual/autorun workers have no durable lifecycle outside the live PTY.
-    // A restored pane is idle until useTerminalSession sees a fresh Claude or
-    // Codex start signal, so remove both current and legacy manual markers.
-    if (
-      node.worker.source === "manual" ||
-      node.worker.runId === "manual" ||
-      node.worker.workerTaskId.startsWith("manual-")
-    ) {
-      node.worker = null;
-      return;
-    }
-    if (node.worker.state === "running") {
-      node.worker = { ...node.worker, state: "done" };
-    }
+    delete node.worker;
+    delete node.autorun;
     return;
   }
-  cleanupStaleWorkers(node.a);
-  cleanupStaleWorkers(node.b);
+  cleanupTransientTerminalState(node.a);
+  cleanupTransientTerminalState(node.b);
 }
 
 function persist(workspaceId: string | null, tabs: Tab[], activeId: TabId | null): void {
   const key = storageKey(workspaceId);
   if (!key) return;
   try {
-    const payload: PersistedShape = { v: TAB_VERSION, tabs: normalizeTerminalTitles(tabs), activeId };
+    const payload: PersistedShape = {
+      v: TAB_VERSION,
+      tabs: stripTransientTerminalState(normalizeTerminalTitles(tabs)),
+      activeId,
+    };
     window.localStorage.setItem(key, JSON.stringify(payload));
   } catch {
     // Quota exceeded or storage unavailable; persistence is best-effort.
   }
 }
 
+function stripTransientTerminalState(tabs: Tab[]): Tab[] {
+  let changed = false;
+  const next = tabs.map((tab) => {
+    if (tab.kind !== "terminal") return tab;
+    const root = stripTransientPaneState(tab.root);
+    if (root === tab.root) return tab;
+    changed = true;
+    return { ...tab, root };
+  });
+  return changed ? next : tabs;
+}
+
+function stripTransientPaneState(node: PaneNode): PaneNode {
+  if (node.kind === "leaf") {
+    if (!("worker" in node) && !("autorun" in node)) return node;
+    const { worker: _worker, autorun: _autorun, ...rest } = node;
+    return rest;
+  }
+  const a = stripTransientPaneState(node.a);
+  const b = stripTransientPaneState(node.b);
+  return a === node.a && b === node.b ? node : { ...node, a, b };
+}
+
+function disposeTerminalTabPanes(tab: Tab): void {
+  if (tab.kind !== "terminal") return;
+  for (const pane of collectLeaves(tab.root)) {
+    void window.spark.pty.dispose(pane.paneId).catch(() => undefined);
+  }
+}
+
 // Resolve the initial tabs + activeId for a workspace in a SINGLE
 // localStorage read. Both the lazy useState initializer and the
 // workspace-switch effect funnel through here so loadPersisted (a
-// JSON.parse + a recursive cleanupStaleWorkers walk) only runs once per
+// JSON.parse + a recursive transient-terminal cleanup walk) only runs once per
 // mount/switch instead of three times. Falls back to the default tab set
 // when nothing is persisted (or the persisted blob is a stale version).
 function initialTabsState(workspaceId: string | null, defaultCwd?: string): {
@@ -223,7 +246,7 @@ export interface UseTabsApi {
   selectByIndex: (idx: number) => void;
   setDirty: (id: TabId, dirty: boolean) => void;
   setDetectedUrl: (tabId: TabId, paneId: string, url: string) => void;
-  newTerminalTab: (cwd?: string, autorun?: string) => TabId;
+  newTerminalTab: (cwd?: string, autorun?: string, options?: { focus?: boolean }) => TabId;
   // Open ONE terminal tab whose panes are split into a grid — used when Spark
   // spawns a batch of standing agent terminals, so the user sees them all at
   // once. One pane per spec, each autorunning its agent command.
@@ -262,10 +285,10 @@ export interface UseTabsApi {
   setLeafCwd: (tabId: TabId, paneId: string, cwd: string) => void;
   setLeafScrollback: (tabId: TabId, paneId: string, scrollback: string) => void;
   setLeafWorker: (tabId: TabId, paneId: string, worker: TerminalLeafWorker | null) => void;
-  // Rename a leaf's paneId. The old TerminalPane unmounts (which dispose()s
-  // the old PTY); a new one mounts at the new id and spawns at it. Used by
-  // orchestration to take over an existing user pane (so worker output
-  // appears where the user can see it).
+  // Rename a leaf's paneId. The caller must dispose the old PTY when it is
+  // intentionally replacing a live shell. The new TerminalPane mounts at the
+  // new id and spawns/attaches there. Used by orchestration to take over an
+  // existing user pane so worker output appears where the user can see it.
   renameLeaf: (tabId: TabId, oldPaneId: string, newPaneId: string) => boolean;
   // Smart-add a leaf in a specific tab using a caller-supplied paneId. Picks
   // the largest existing leaf as the split anchor; useful for orchestration
@@ -295,7 +318,7 @@ export interface UseTabsApi {
 export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTabsApi {
   // Parse the persisted layout ONCE for the initial mount. The previous
   // implementation called loadPersisted from both useState initializers,
-  // re-doing the JSON.parse + recursive cleanupStaleWorkers walk twice; a
+  // re-doing the JSON.parse + recursive transient-terminal cleanup walk twice; a
   // single lazy initializer holding the {tabs, activeId} pair collapses
   // that to one parse. We keep `tabs` and `activeId` as separate useState
   // cells (so the many mutating callbacks below stay untouched) and just
@@ -305,14 +328,20 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
   const [activeId, setActiveId] = useState<TabId | null>(initial.activeId);
   const defaultCwdRef = useRef(defaultCwd);
   defaultCwdRef.current = defaultCwd;
+  const liveWorkspaceTabsRef = useRef(new Map<string, { tabs: Tab[]; activeId: TabId | null }>());
+  const tabsWorkspaceIdRef = useRef(workspaceId);
+  if (tabsWorkspaceIdRef.current) {
+    liveWorkspaceTabsRef.current.set(tabsWorkspaceIdRef.current, { tabs, activeId });
+  }
   const workspaceIdRef = useRef(workspaceId);
   workspaceIdRef.current = workspaceId;
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
 
-  // When the workspace switches, swap tabs to the new workspace's persisted
-  // set (or seed a default Runs tab). We deliberately reset rather than
-  // merge: a workspace switch should feel like opening a new project.
+  // When the workspace switches, swap tabs to that workspace's live in-memory
+  // snapshot first, then fall back to its persisted layout. Persistence strips
+  // derived Runs tabs; the live snapshot keeps them so switching away from a
+  // workspace and back restores the exact workbench tab the user was on.
   //
   // initialTabsState parses localStorage exactly once (was three reads
   // before: two initializers + this effect). The `firstRun` guard skips the
@@ -322,9 +351,16 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
   useEffect(() => {
     if (firstRunRef.current) {
       firstRunRef.current = false;
+      tabsWorkspaceIdRef.current = workspaceId;
       return;
     }
-    const next = initialTabsState(workspaceId, defaultCwdRef.current);
+    const previousWorkspaceId = tabsWorkspaceIdRef.current;
+    if (previousWorkspaceId) {
+      liveWorkspaceTabsRef.current.set(previousWorkspaceId, { tabs, activeId });
+    }
+    const live = workspaceId ? liveWorkspaceTabsRef.current.get(workspaceId) : null;
+    const next = live ?? initialTabsState(workspaceId, defaultCwdRef.current);
+    tabsWorkspaceIdRef.current = workspaceId;
     setTabs(next.tabs);
     setActiveId(next.activeId);
   }, [workspaceId]);
@@ -411,6 +447,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         if (curr.length <= 1) return curr;
         const idx = curr.findIndex((t) => t.id === id);
         if (idx === -1) return curr;
+        disposeTerminalTabPanes(curr[idx]);
         const next = curr.filter((t) => t.id !== id);
         setActiveId((active) => {
           if (active !== id) return active;
@@ -430,7 +467,10 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         const target = curr.find((t) => t.id === keepId);
         if (!target) return curr;
         const removed = curr.filter((t) => t.id !== keepId);
-        for (const t of removed) fireDispose(t.id);
+        for (const t of removed) {
+          disposeTerminalTabPanes(t);
+          fireDispose(t.id);
+        }
         setActiveId(keepId);
         return normalizeTerminalTitles([target]);
       });
@@ -484,7 +524,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
   );
 
   const newTerminalTab = useCallback(
-    (cwd?: string, autorun?: string): TabId => {
+    (cwd?: string, autorun?: string, options?: { focus?: boolean }): TabId => {
       const id = makeId("term");
       const paneId = makeId("pane");
       const root = leaf(paneId, cwd, autorun);
@@ -498,7 +538,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         };
         return normalizeTerminalTitles([...curr, tab]);
       });
-      setActiveId(id);
+      if (options?.focus !== false) setActiveId(id);
       return id;
     },
     [],

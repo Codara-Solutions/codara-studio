@@ -25,6 +25,7 @@ export type ChatTimelineItem =
       author: HumanRunMessage["author"];
       messageKind: HumanRunMessage["kind"];
       text: string;
+      attachments: HumanRunMessage["attachments"];
       at: string;
       // How many identical copies of this message were collapsed into this
       // one entry. 1 means it stood alone.
@@ -57,6 +58,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       author: message.author,
       messageKind: message.kind,
       text,
+      attachments: message.attachments ?? [],
       at: message.createdAt,
       repeatCount: 1,
     });
@@ -105,7 +107,8 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       prev &&
       prev.kind === "message" &&
       prev.author === item.author &&
-      prev.text === item.text
+      prev.text === item.text &&
+      attachmentSignature(prev.attachments) === attachmentSignature(item.attachments)
     ) {
       prev.repeatCount += 1;
       continue;
@@ -132,6 +135,7 @@ function collapseDuplicateMessages(
       message.author,
       message.messageKind,
       message.text.replace(/\s+/g, " ").trim(),
+      attachmentSignature(message.attachments),
     ].join("\u0000");
     const recent = recentBySignature.get(signature);
     if (
@@ -152,6 +156,12 @@ function collapseDuplicateMessages(
   }
 
   return collapsed;
+}
+
+function attachmentSignature(
+  attachments: HumanRunMessage["attachments"],
+): string {
+  return (attachments ?? []).map((attachment) => attachment.id || attachment.path).join("|");
 }
 
 // The most recent question Spark asked that the user has not yet answered.
