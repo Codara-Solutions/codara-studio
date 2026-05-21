@@ -243,6 +243,8 @@ export default function GitPanel({
         cwd: workspace.cwd,
         planTitle: smartMergePlanTitle(result.context),
         planText: buildSmartMergePlan(result.context),
+        initialUserNote:
+          "Run this as an autonomous smart merge. Do not ask me to approve routine fetch, diff review, stash preservation, merge, conflict resolution, or verification steps. Pause only for the explicit pause rules in the plan.",
       });
       onRunSnapshot(run, { select: true, focusRuns: true });
     } catch (err) {

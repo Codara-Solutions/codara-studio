@@ -23,22 +23,22 @@ function recommendSmartMergeStrategy(input: {
   hasConflicts: boolean;
   overlapCount?: number;
 }): string {
-  if (input.hasConflicts) return "resolve existing conflicts before fetching more changes";
-  if (input.detached) return "ask which branch should receive the remote changes";
-  if (!input.upstream) return "ask which remote branch to integrate";
+  if (input.hasConflicts) return "auto-resolve the existing merge conflicts";
+  if (input.detached) return "pause; target branch is ambiguous";
+  if (!input.upstream) return "pause; no upstream branch is configured";
   if (input.behind === 0 && input.ahead === 0) {
     return input.hasWorkingChanges ? "preserve local work; upstream is current" : "already up to date";
   }
   if (input.behind > 0 && input.ahead === 0) {
     if (input.hasWorkingChanges && (input.overlapCount ?? 0) > 0) {
-      return "show overlapping diffs first; do not merge until approved";
+      return "auto-merge after protecting local work and reviewing overlaps";
     }
-    return input.hasWorkingChanges ? "preserve local work, then fast-forward" : "fast-forward";
+    return input.hasWorkingChanges ? "auto-preserve local work, then fast-forward" : "auto fast-forward";
   }
   if (input.behind > 0 && input.ahead > 0) {
     return (input.overlapCount ?? 0) > 0
-      ? "show overlapping diffs first; do not merge until approved"
-      : "merge by default; ask before rebase";
+      ? "auto-merge with semantic conflict resolution if needed"
+      : "auto-create a normal merge commit";
   }
   if (input.ahead > 0) return "local branch is ahead; no merge needed";
   return "inspect repository state";
@@ -131,7 +131,7 @@ function fenced(value: string, empty: string): string {
 export function smartMergePlanTitle(context: GitSmartMergeContext): string {
   const branch = context.branch ?? "detached HEAD";
   const upstream = context.upstream ?? "remote";
-  return `Fetch and review ${branch} <- ${upstream}`;
+  return `Smart merge ${branch} <- ${upstream}`;
 }
 
 export function buildSmartMergePlan(context: GitSmartMergeContext): string {
@@ -145,19 +145,20 @@ export function buildSmartMergePlan(context: GitSmartMergeContext): string {
     context.overlappingFiles.length > 0
       ? `${formatCount(context.overlappingFiles.length)} direct file overlap`
       : "no direct file overlap";
-  const overlapRules = context.overlappingFiles.length > 0
-    ? `
-## Overlap safety
-- These files overlap and need plain-language review before any merge command:
+  const overlapRules =
+    context.overlappingFiles.length > 0
+      ? `
+## Overlap handling
+- These files overlap, so inspect their diffs before running the real merge:
 ${formatList(context.overlappingFiles, "No direct file overlap found in the preflight.")}
-- The recommended first answer must be "Show diffs first". Do not mark "Proceed with merge" as recommended while this section has files.
-- If the human still asks to proceed, first run a non-mutating merge simulation such as git merge-tree --write-tree --name-only HEAD ${upstream}. If it reports conflicts or exits non-zero, stop and explain the files. Do not leave conflict markers in the working tree.
-- If a real merge later creates conflicts, immediately tell the human "Git needs a manual resolution" and list the exact conflicted files before editing anything.`
-    : "";
+- Use non-mutating simulation first when possible, for example git merge-tree --write-tree --name-only HEAD ${upstream}. A conflict from the simulation is not a reason to ask yet; it is the list of files Spark must resolve.
+- If the real merge creates conflicts, resolve them semantically by reading both sides and the surrounding code. Remove every conflict marker before staging.
+- Only pause if the correct code cannot be determined after reading the relevant files and diffs.`
+      : "";
 
   return `# ${smartMergePlanTitle(context)}
 
-Fetch has already run. This is a review checkpoint, not merge approval yet. First show the human exactly what would be integrated, then only merge after the human confirms the strategy.
+Fetch has already run. This run is an autonomous smart merge. The user approved Spark to integrate the fetched upstream into the current branch without another confirmation when it can do so safely.
 
 ## Spark preflight
 - Repository: ${context.repositoryRoot}
@@ -191,28 +192,37 @@ ${formatList(localTouchedFiles, "No local file changes were detected.")}
 ${formatList(context.overlappingFiles, "No direct file overlap found in the preflight.")}
 ${overlapRules}
 
-## Operating rules
-- Ask the human at most two concise questions, only for real safety decisions.
-- Mandatory first action: summarize the fetched upstream commits, changed files, exact overlapping files, working-tree state, and recommended strategy in the chat. If there are overlapping files, name every one before asking how to continue.
-- Do not describe overlap as low risk unless the "Files with likely overlap" section is empty.
-- The first question should be a review checkpoint, for example whether to inspect diffs, protect local work, or continue with the recommended path. If overlapping files exist, "inspect diffs first" is the recommended path. Do not run merge, rebase, pull, stash, commit, or any command that changes the branch until the human explicitly approves.
-- If the human approves the recommended path and the working tree is clean, proceed with the smallest safe git operation.
-- Ask before stashing, committing, or otherwise moving uncommitted local work.
-- Ask before choosing a target branch when HEAD is detached or no upstream is configured.
-- Ask before rebase, force operations, history rewriting, or any choice that changes shared branch semantics.
-- Prefer fast-forward when possible.
-- If the branch is divergent, prefer a normal merge commit unless the human explicitly chooses rebase.
-- Do not push. Do not force push. Do not run git reset --hard, git clean, or discard local changes.
-- If conflicts occur, resolve them semantically, remove conflict markers, stage only the resolved merge files, and complete the merge commit only when required to finish the merge.
+## Autonomy rules
+- During plan_analysis, create worker tasks immediately. Do not emit ask_user just to review commits, inspect diffs, stash, fast-forward, run a normal merge, resolve conflicts, stage resolved merge files, or complete a required merge commit.
+- Report progress in chat as notes, not questions: what was fetched, what changed, what command Spark is running, and what finished.
+- Prefer the smallest safe operation: fast-forward when possible; otherwise create a normal merge commit. Do not rebase unless a later human message explicitly asks for it.
+- If the working tree has local changes, preserve them automatically before branch-changing commands. A recoverable stash is allowed. Name it clearly, then restore it after the upstream merge.
+- Before risky merge work, create a recoverable safety ref when possible, for example spark/smart-merge-backup/YYYYMMDD-HHMMSS at the original HEAD.
+- Do not push. Do not force push. Do not run git reset --hard, git clean, checkout --, restore, or any command that discards local work.
 - Keep unrelated pre-existing user changes intact unless the human explicitly says to include them.
+
+## Pause rules
+Pause and ask one concise question only when:
+- HEAD is detached or no upstream branch is configured.
+- Git authentication or network access fails.
+- Git requires a push, force operation, reset, clean, discard, branch target choice, or history rewrite to continue.
+- After inspecting the relevant files and diffs, Spark cannot determine the correct conflict resolution with confidence.
+
+## Merge playbook
+- If behind is 0 and there are no existing conflicts, complete after reporting that the branch is current.
+- If only behind and clean, run git merge --ff-only ${upstream}.
+- If only behind and local work exists, protect the local work, run the fast-forward, then restore the local work.
+- If ahead and behind, run a normal merge from ${upstream}; resolve conflicts if they appear.
+- If an existing merge conflict is already present, finish resolving that conflict before starting any new merge.
+- Stage only files needed for the merge resolution. Do not stage unrelated local edits unless they are part of restoring the user's pre-existing work.
 
 ## Verification
 - Run git status --short --branch before and after the merge work.
 - Run git diff --check after conflict resolution.
+- Search tracked text files for conflict markers with rg -n "<{7}|={7}|>{7}".
 - Run the cheapest relevant project verification command you can identify, such as typecheck or tests. If none is available, explain that clearly.
 
 ## Done means
-- Before merge work starts, the human has seen what will be merged and approved the path.
 - The current branch is integrated with the fetched upstream, or Spark has paused with the exact blocking question.
 - There are no unresolved merge conflicts and no conflict markers left in tracked text files.
 - Verification commands and final git status are reported with exit codes.`;

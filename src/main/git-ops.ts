@@ -484,22 +484,22 @@ function recommendSmartMergeStrategy(input: {
   hasConflicts: boolean;
   overlapCount?: number;
 }): string {
-  if (input.hasConflicts) return "resolve existing conflicts before fetching more changes";
-  if (input.detached) return "ask which branch should receive the remote changes";
-  if (!input.upstream) return "ask which remote branch to integrate";
+  if (input.hasConflicts) return "auto-resolve the existing merge conflicts";
+  if (input.detached) return "pause; target branch is ambiguous";
+  if (!input.upstream) return "pause; no upstream branch is configured";
   if (input.behind === 0 && input.ahead === 0) {
     return input.hasWorkingChanges ? "preserve local work; upstream is current" : "already up to date";
   }
   if (input.behind > 0 && input.ahead === 0) {
     if (input.hasWorkingChanges && (input.overlapCount ?? 0) > 0) {
-      return "show overlapping diffs first; do not merge until approved";
+      return "auto-merge after protecting local work and reviewing overlaps";
     }
-    return input.hasWorkingChanges ? "preserve local work, then fast-forward" : "fast-forward";
+    return input.hasWorkingChanges ? "auto-preserve local work, then fast-forward" : "auto fast-forward";
   }
   if (input.behind > 0 && input.ahead > 0) {
     return (input.overlapCount ?? 0) > 0
-      ? "show overlapping diffs first; do not merge until approved"
-      : "merge by default; ask before rebase";
+      ? "auto-merge with semantic conflict resolution if needed"
+      : "auto-create a normal merge commit";
   }
   if (input.ahead > 0) return "local branch is ahead; no merge needed";
   return "inspect repository state";

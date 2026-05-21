@@ -141,7 +141,7 @@ export default function CommitComposer({
         type="button"
         disabled={!canSmartMerge || anyBusy}
         onClick={onSmartMerge}
-        title="Fetch remote refs and review the merge with Spark"
+        title="Fetch remote refs and let Spark merge safely"
         style={{
           appearance: "none",
           display: "flex",
@@ -176,7 +176,7 @@ export default function CommitComposer({
         }}
       >
         {preparingSmartMerge ? <Spinner size={11} /> : <SparkleIcon />}
-        <span>{preparingSmartMerge ? "Fetching refs" : "Fetch & Review"}</span>
+        <span>{preparingSmartMerge ? "Starting merge" : "Smart Merge"}</span>
         {behind > 0 && (
           <span
             style={{
