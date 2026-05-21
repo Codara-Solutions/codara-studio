@@ -26,6 +26,9 @@ import type { PaneNode, Tab, TerminalLeaf } from "./tabs/types";
 import { basename } from "./path-utils";
 import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
+import { buildBindingTable } from "./shortcuts/bindings";
+import { isRecording } from "./shortcuts/recording";
+import { usePreferences } from "./preferences/usePreferences";
 import { usePanelLayout, type PanelSectionKey, type PanelSide } from "./panels/usePanelLayout";
 import ResizeHandle from "./panels/ResizeHandle";
 
@@ -1203,6 +1206,9 @@ export default function App() {
           tabs.setActiveTab(existing.id);
         }
       },
+      "view.zoomIn": () => window.spark.view.zoomBy(1),
+      "view.zoomOut": () => window.spark.view.zoomBy(-1),
+      "view.zoomReset": () => window.spark.view.setZoomLevel(0),
       "view.selectByIndex": (event) => {
         const index = Number.parseInt(event.key, 10);
         if (Number.isFinite(index) && index >= 1) {
@@ -1246,7 +1252,17 @@ export default function App() {
     [handleNewEditorTab, handleNewPreviewTab, handleNewTerminalTab, tabs],
   );
 
-  useGlobalShortcuts(shortcutHandlers);
+  const { preferences: shortcutPreferences } = usePreferences();
+  const bindingTable = useMemo(
+    () => buildBindingTable(shortcutPreferences.keybindings),
+    [shortcutPreferences.keybindings],
+  );
+  useGlobalShortcuts(bindingTable, shortcutHandlers, {
+    // While the Keybindings settings recorder is active, suppress all
+    // shortcuts so chords like Ctrl+Tab can be captured for rebinding
+    // instead of triggering their currently bound command.
+    isDisabled: () => isRecording(),
+  });
 
   // Dispose PTYs when terminal panes exit. The renderer-side TerminalPane
   // already calls pty.dispose on unmount, so this handler is intentionally
