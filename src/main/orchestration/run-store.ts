@@ -3170,6 +3170,7 @@ export async function pauseRunAfterCurrentWorkers(input: PauseRunInput): Promise
 export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   const resumeInput = autopilotInputFromRun(run);
+  const shouldScheduleManagerAfterResume = shouldResumeManagerPlanning(run);
   if (activeWorkersForRun(run.id).length === 0 && shouldRoutePausedResumeToChat(run)) {
     const chatDecision = await askOpenRouterManagerForChat(run, resumeInput.cwd);
     if (chatDecision) {
@@ -3204,7 +3205,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
       draft.updatedAt = timestamp;
     },
   });
-  if (shouldResumeManagerPlanning(run)) {
+  if (shouldScheduleManagerAfterResume) {
     if (resumed.workerAttempts.length > 0) {
       scheduleAutopilotReview(resumed.id, resumeInput.cwd);
     } else {
