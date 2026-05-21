@@ -639,7 +639,17 @@ export const WorkerNode = React.memo(function WorkerNode({
   const { agent, task, attempt } = row;
   const queued = !task; // a planned agent Spark has not spawned yet
   const status = deriveAgentStatus(task, attempt, stepStatus);
-  const tone = runtimeTone(agent.runtimePreference);
+  // The badge must reflect the runtime that actually ran the worker, not just
+  // the manager's original plan. Manager rewrites and rerouteUnavailableAgent-
+  // Runtimes can swap the runtime at spawn time (e.g. plan said claude but the
+  // selection only enables cursor, so the worker actually spawns on cursor with
+  // composer-2.5-fast). Reading agent.runtimePreference would render CLAUDE
+  // while the terminal shows composer-2.5-fast — exactly the mismatch the user
+  // reported in the runs graph. Prefer the live attempt.runtime, fall back to
+  // the routed task.runtimePreference, and only use the planned-agent value
+  // when nothing has spawned yet (queued).
+  const liveRuntime = attempt?.runtime ?? task?.runtimePreference ?? agent.runtimePreference;
+  const tone = runtimeTone(liveRuntime);
   const running = status === "running";
   const blocked = status === "blocked";
 
@@ -731,7 +741,7 @@ export const WorkerNode = React.memo(function WorkerNode({
             whiteSpace: "nowrap",
           }}
         >
-          {agent.runtimePreference}
+          {liveRuntime}
         </span>
         <span
           style={{

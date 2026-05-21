@@ -911,6 +911,7 @@ function StepDetail({
             {tasks.map((task) => {
               const attempt = maps.attemptByTask.get(task.id);
               const status = deriveAgentStatus(task, attempt, step.status);
+              const liveRuntime = attempt?.runtime ?? task.runtimePreference;
               return (
                 <button
                   type="button"
@@ -930,7 +931,7 @@ function StepDetail({
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
-                    <RuntimeTag runtime={task.runtimePreference} />
+                    <RuntimeTag runtime={liveRuntime} />
                     <span
                       style={{
                         flex: 1,
@@ -1023,7 +1024,7 @@ function WorkerDetail({
       <Section title="Worker" first meta={<StatusWord label={attempt?.status ?? task.status} tone={tone} />}>
         <SnapshotCard title={task.title} subtitle={friendlyWorkerLine(task, attempt, status, report)} tone={tone}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <RuntimeTag runtime={task.runtimePreference} />
+            <RuntimeTag runtime={attempt?.runtime ?? task.runtimePreference} />
             <ElapsedChip
               startedAt={attempt?.startedAt}
               finishedAt={attempt?.finishedAt}
