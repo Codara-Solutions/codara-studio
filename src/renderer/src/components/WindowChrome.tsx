@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 
 type AppRegionStyle = React.CSSProperties & {
   WebkitAppRegion?: "drag" | "no-drag";
@@ -21,6 +21,44 @@ function GearIcon({ size = 14 }: { size?: number }) {
     >
       <circle cx="12" cy="12" r="3.2" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  );
+}
+
+// Window control glyphs match the Windows 11 convention — single-stroke,
+// 10px, centered in a 30×30 button. The maximize/restore glyph swaps
+// between a single rounded rect and two overlapping rects when the window
+// is maximized so the affordance reads as "restore" at a glance.
+function MinimizeIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+      <line x1="0.5" y1="5" x2="9.5" y2="5" stroke="currentColor" strokeWidth="1" />
+    </svg>
+  );
+}
+
+function MaximizeIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+      <rect x="0.5" y="0.5" width="9" height="9" rx="0.5" stroke="currentColor" strokeWidth="1" />
+    </svg>
+  );
+}
+
+function RestoreIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+      <rect x="0.5" y="2.5" width="7" height="7" rx="0.5" stroke="currentColor" strokeWidth="1" />
+      <path d="M2.5 2.5V0.5H9.5V7.5H7.5" stroke="currentColor" strokeWidth="1" fill="none" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+      <line x1="0.5" y1="0.5" x2="9.5" y2="9.5" stroke="currentColor" strokeWidth="1" />
+      <line x1="9.5" y1="0.5" x2="0.5" y2="9.5" stroke="currentColor" strokeWidth="1" />
     </svg>
   );
 }
@@ -86,6 +124,58 @@ function PanelToggle({ on, side, onClick, title, edge }: PanelToggleProps) {
   );
 }
 
+// Generic chrome button used by the gear and the three window controls.
+// `danger` reddens the hover background (used for Close to match the
+// Windows 11 affordance).
+function ChromeButton({
+  title,
+  onClick,
+  danger,
+  children,
+  borderLeft,
+}: {
+  title: string;
+  onClick: () => void;
+  danger?: boolean;
+  children: React.ReactNode;
+  borderLeft?: boolean;
+}) {
+  const [hover, setHover] = useState(false);
+  const hoverBg = danger ? "#c42b1c" : "var(--hover)";
+  const hoverFg = danger ? "#ffffff" : "var(--ink)";
+  return (
+    <button
+      type="button"
+      data-window-control
+      title={title}
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={
+        {
+          appearance: "none",
+          width: 30,
+          height: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: hover ? hoverBg : "transparent",
+          border: "none",
+          borderLeft: borderLeft ? "1px solid var(--rule-soft)" : "none",
+          color: hover ? hoverFg : "var(--ink-dim)",
+          cursor: "default",
+          padding: 0,
+          WebkitAppRegion: "no-drag",
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        } as AppRegionStyle
+      }
+    >
+      {children}
+    </button>
+  );
+}
+
 interface Props {
   platform?: string;
   leftOn: boolean;
@@ -106,11 +196,40 @@ function WindowChrome({
   onToggleRight,
   onOpenSettings,
 }: Props) {
-  const [gearHover, setGearHover] = useState(false);
-  const nativeControlsWidth = platform === "win32" ? 138 : 0;
+  const isWin = platform === "win32";
+  const [maximized, setMaximized] = useState(false);
+
+  // Custom min/max/close are only rendered on Windows; macOS still uses
+  // native traffic lights at the top-left. Track maximized state so the
+  // middle button can swap between maximize / restore glyphs.
+  useEffect(() => {
+    if (!isWin) return;
+    let alive = true;
+    void window.spark.windowControls
+      .isMaximized()
+      .then((v) => {
+        if (alive) setMaximized(v);
+      })
+      .catch(() => undefined);
+    const off = window.spark.windowControls.onStateChanged((state) => {
+      setMaximized(state.maximized);
+    });
+    return () => {
+      alive = false;
+      off();
+    };
+  }, [isWin]);
+
+  const handleMinimize = () => {
+    void window.spark.windowControls.minimize().catch(() => undefined);
+  };
 
   const handleToggleMaximize = () => {
     void window.spark.windowControls.toggleMaximize().catch(() => undefined);
+  };
+
+  const handleClose = () => {
+    void window.spark.windowControls.close().catch(() => undefined);
   };
 
   const handleChromeDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
@@ -174,7 +293,7 @@ function WindowChrome({
       <div
         style={{
           position: "absolute",
-          right: nativeControlsWidth,
+          right: 0,
           top: 0,
           bottom: 0,
           display: "flex",
@@ -182,35 +301,25 @@ function WindowChrome({
         }}
       >
         <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" edge="right" />
-        <button
-          type="button"
-          data-window-control
-          title="Settings"
-          onClick={() => onOpenSettings?.()}
-          onMouseEnter={() => setGearHover(true)}
-          onMouseLeave={() => setGearHover(false)}
-          style={
-            {
-              appearance: "none",
-              width: 30,
-              height: "100%",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: gearHover ? "var(--hover)" : "transparent",
-              border: "none",
-              borderLeft: "1px solid var(--rule-soft)",
-              color: gearHover ? "var(--ink)" : "var(--ink-dim)",
-              cursor: "default",
-              padding: 0,
-              WebkitAppRegion: "no-drag",
-              transition:
-                "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-            } as AppRegionStyle
-          }
-        >
+        <ChromeButton title="Settings" onClick={() => onOpenSettings?.()} borderLeft>
           <GearIcon size={12} />
-        </button>
+        </ChromeButton>
+        {isWin && (
+          <>
+            <ChromeButton title="Minimize" onClick={handleMinimize} borderLeft>
+              <MinimizeIcon />
+            </ChromeButton>
+            <ChromeButton
+              title={maximized ? "Restore" : "Maximize"}
+              onClick={handleToggleMaximize}
+            >
+              {maximized ? <RestoreIcon /> : <MaximizeIcon />}
+            </ChromeButton>
+            <ChromeButton title="Close" onClick={handleClose} danger>
+              <CloseIcon />
+            </ChromeButton>
+          </>
+        )}
       </div>
     </div>
   );

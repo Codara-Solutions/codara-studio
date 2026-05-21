@@ -63,14 +63,13 @@ function createWindow(): void {
     backgroundColor: "#0e0d0b",
     title: "Spark App",
     icon: windowIcon,
+    // `titleBarStyle: "hidden"` removes the OS-painted frame so we can draw
+    // our own chrome. We used to pair this with `titleBarOverlay` to paint
+    // native min/max/close buttons on Windows, but those live in native-
+    // pixel space and don't scale with renderer zoom — at lower zoom the
+    // gear button slid underneath them. Custom HTML buttons in WindowChrome
+    // share the renderer's zoom space, so collisions can't happen.
     titleBarStyle: process.platform === "win32" ? "hidden" : undefined,
-    titleBarOverlay: process.platform === "win32"
-      ? {
-          color: "#171513",
-          symbolColor: "#bdbcb8",
-          height: 30,
-        }
-      : undefined,
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       sandbox: false,
