@@ -631,7 +631,16 @@ export default function FileTree({
   // the `root` reference doesn't change across mutations. The traversal is
   // a single linear walk over the open subtree, so the cost is negligible.
   const flat: FlatRow[] = (() => {
-    const rows = flatten(rootRef.current, 0);
+    // Skip the root node row itself — its name is already shown in the
+    // SectionHeader's `meta` slot, so rendering it again would duplicate
+    // the workspace folder name. We still flatten its children at depth 0.
+    const root = rootRef.current;
+    const rows: FlatRow[] = [];
+    if (root.open) {
+      for (const child of root.children) {
+        rows.push(...flatten(child, 0));
+      }
+    }
     if (pendingCreate) {
       const insertIdx = rows.findIndex(
         (r) => r.kind === "node" && r.node.entry.path === pendingCreate.parentPath,
@@ -644,7 +653,7 @@ export default function FileTree({
           parentPath: pendingCreate.parentPath,
           entryKind: pendingCreate.kind,
         });
-      } else if (pendingCreate.parentPath === rootRef.current.entry.path) {
+      } else if (pendingCreate.parentPath === root.entry.path) {
         rows.unshift({
           kind: "placeholder",
           depth: 0,
