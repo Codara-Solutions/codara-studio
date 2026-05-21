@@ -492,13 +492,13 @@ function recommendSmartMergeStrategy(input: {
   }
   if (input.behind > 0 && input.ahead === 0) {
     if (input.hasWorkingChanges && (input.overlapCount ?? 0) > 0) {
-      return "review overlapping files, then stash or commit local work before fast-forward";
+      return "show overlapping diffs first; do not merge until approved";
     }
     return input.hasWorkingChanges ? "preserve local work, then fast-forward" : "fast-forward";
   }
   if (input.behind > 0 && input.ahead > 0) {
     return (input.overlapCount ?? 0) > 0
-      ? "review overlapping files, then merge by default; ask before rebase"
+      ? "show overlapping diffs first; do not merge until approved"
       : "merge by default; ask before rebase";
   }
   if (input.ahead > 0) return "local branch is ahead; no merge needed";

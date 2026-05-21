@@ -31,13 +31,13 @@ function recommendSmartMergeStrategy(input: {
   }
   if (input.behind > 0 && input.ahead === 0) {
     if (input.hasWorkingChanges && (input.overlapCount ?? 0) > 0) {
-      return "review overlapping files, then stash or commit local work before fast-forward";
+      return "show overlapping diffs first; do not merge until approved";
     }
     return input.hasWorkingChanges ? "preserve local work, then fast-forward" : "fast-forward";
   }
   if (input.behind > 0 && input.ahead > 0) {
     return (input.overlapCount ?? 0) > 0
-      ? "review overlapping files, then merge by default; ask before rebase"
+      ? "show overlapping diffs first; do not merge until approved"
       : "merge by default; ask before rebase";
   }
   if (input.ahead > 0) return "local branch is ahead; no merge needed";
@@ -145,6 +145,15 @@ export function buildSmartMergePlan(context: GitSmartMergeContext): string {
     context.overlappingFiles.length > 0
       ? `${formatCount(context.overlappingFiles.length)} direct file overlap`
       : "no direct file overlap";
+  const overlapRules = context.overlappingFiles.length > 0
+    ? `
+## Overlap safety
+- These files overlap and need plain-language review before any merge command:
+${formatList(context.overlappingFiles, "No direct file overlap found in the preflight.")}
+- The recommended first answer must be "Show diffs first". Do not mark "Proceed with merge" as recommended while this section has files.
+- If the human still asks to proceed, first run a non-mutating merge simulation such as git merge-tree --write-tree --name-only HEAD ${upstream}. If it reports conflicts or exits non-zero, stop and explain the files. Do not leave conflict markers in the working tree.
+- If a real merge later creates conflicts, immediately tell the human "Git needs a manual resolution" and list the exact conflicted files before editing anything.`
+    : "";
 
   return `# ${smartMergePlanTitle(context)}
 
@@ -180,12 +189,13 @@ ${formatList(localTouchedFiles, "No local file changes were detected.")}
 
 ## Files with likely overlap
 ${formatList(context.overlappingFiles, "No direct file overlap found in the preflight.")}
+${overlapRules}
 
 ## Operating rules
 - Ask the human at most two concise questions, only for real safety decisions.
 - Mandatory first action: summarize the fetched upstream commits, changed files, exact overlapping files, working-tree state, and recommended strategy in the chat. If there are overlapping files, name every one before asking how to continue.
 - Do not describe overlap as low risk unless the "Files with likely overlap" section is empty.
-- The first question should be a review checkpoint, for example whether to inspect diffs, protect local work, or continue with the recommended path. Do not run merge, rebase, pull, stash, commit, or any command that changes the branch until the human explicitly approves.
+- The first question should be a review checkpoint, for example whether to inspect diffs, protect local work, or continue with the recommended path. If overlapping files exist, "inspect diffs first" is the recommended path. Do not run merge, rebase, pull, stash, commit, or any command that changes the branch until the human explicitly approves.
 - If the human approves the recommended path and the working tree is clean, proceed with the smallest safe git operation.
 - Ask before stashing, committing, or otherwise moving uncommitted local work.
 - Ask before choosing a target branch when HEAD is detached or no upstream is configured.
