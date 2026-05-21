@@ -169,42 +169,69 @@ export function useTerminalSession({
         }),
       );
 
-      // Standard terminal copy/paste keybindings. Ctrl+Shift+C copies the
-      // current xterm selection to the system clipboard; with no selection we
-      // fall through (return true) so plain Ctrl+C semantics — SIGINT to the
-      // running process — are unaffected. Ctrl+Shift+V reads the clipboard and
-      // writes it to the PTY wrapped in bracketed-paste markers so multi-line
-      // content arrives as literal text without the shell auto-executing each
-      // line. Null bytes are stripped because most shells reject them and some
-      // terminals (ConPTY especially) corrupt the byte stream around them.
+      // Terminal copy/paste keybindings.
+      //
+      // Cross-platform (xterm convention):
+      //   Ctrl+Shift+C with selection → copy
+      //   Ctrl+Shift+V                → bracketed paste from clipboard
+      //
+      // Windows-only (Windows Terminal / VS Code terminal convention — what
+      // every Windows user expects):
+      //   Ctrl+C with selection       → copy (and suppress SIGINT)
+      //   Ctrl+C with no selection    → fall through as ^C / SIGINT
+      //   Ctrl+V                      → bracketed paste from clipboard
+      // Without this branch, plain Ctrl+C on Windows always sends SIGINT,
+      // which the shell renders as "the typed line just disappeared." We
+      // deliberately don't enable this on Linux/macOS — there Ctrl+V is
+      // "quoted-insert" in readline and Ctrl+C copy would break shell muscle
+      // memory.
+      //
+      // Bracketed paste wraps the payload in `\x1b[200~ ... \x1b[201~` so
+      // shells with bracketed-paste enabled (pwsh/PSReadLine, bash, zsh, fish)
+      // treat multi-line content as a single block instead of executing on
+      // every embedded newline. Null bytes are stripped because most shells
+      // reject them and ConPTY can corrupt the byte stream around them.
+      const isWindows = /Windows/i.test(navigator.userAgent);
+      const writePasteFromClipboard = () => {
+        void (async () => {
+          const text = await window.spark.clipboard.readText();
+          if (!text) return;
+          const sanitized = text.replace(/\x00/g, "");
+          if (!sanitized) return;
+          const payload = `\x1b[200~${sanitized}\x1b[201~`;
+          void window.spark.pty.write(sessionId, payload);
+        })();
+      };
       term.attachCustomKeyEventHandler((event) => {
         if (event.type !== "keydown") return true;
-        if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) {
-          return true;
-        }
+        if (!event.ctrlKey || event.altKey || event.metaKey) return true;
         const key = event.key;
-        if (key === "C" || key === "c") {
+        const isC = key === "C" || key === "c";
+        const isV = key === "V" || key === "v";
+        if (!isC && !isV) return true;
+
+        // Ctrl+Shift+{C,V}: cross-platform xterm bindings.
+        if (event.shiftKey) {
+          if (isC) {
+            const selection = term.getSelection();
+            if (!selection) return true;
+            void window.spark.clipboard.writeText(selection);
+            return false;
+          }
+          writePasteFromClipboard();
+          return false;
+        }
+
+        // Plain Ctrl+{C,V}: Windows-only convenience.
+        if (!isWindows) return true;
+        if (isC) {
           const selection = term.getSelection();
-          if (!selection) return true; // no selection → let Ctrl+C through
+          if (!selection) return true; // no selection → let SIGINT through
           void window.spark.clipboard.writeText(selection);
           return false;
         }
-        if (key === "V" || key === "v") {
-          void (async () => {
-            const text = await window.spark.clipboard.readText();
-            if (!text) return;
-            const sanitized = text.replace(/\x00/g, "");
-            if (!sanitized) return;
-            // Bracketed paste: wrap with `\x1b[200~ ... \x1b[201~` so the shell
-            // (when it has bracketed-paste mode enabled — pwsh/PSReadLine,
-            // bash, zsh, fish all do by default) treats the chunk as a single
-            // pasted block instead of executing on every embedded newline.
-            const payload = `\x1b[200~${sanitized}\x1b[201~`;
-            void window.spark.pty.write(sessionId, payload);
-          })();
-          return false;
-        }
-        return true;
+        writePasteFromClipboard();
+        return false;
       });
 
       term.open(container.current);
