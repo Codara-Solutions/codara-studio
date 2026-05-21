@@ -1647,6 +1647,113 @@ async function rerouteUnavailableAgentRuntimes(
   };
 }
 
+// Detects whether the project plan rawContent contains an explicit, universal
+// runtime mandate ("I want all the workers to be cursor", "use only claude",
+// "every agent should be codex"). Returns the mandated runtime or null. When a
+// mandate is present, enforceUserRuntimeMandate rewrites every follow-up task
+// the manager queues to that runtime — overriding the manager's cross-provider
+// verifier rotation and any attempt to escalate to a different runtime on
+// failure. The manager profile contains the same instruction at the prompt
+// layer; this code path is the defensive backstop when the manager forgets.
+function detectPlanRuntimeMandate(run: RunState): WorkerRuntime | null {
+  const planText = run.plans?.[0]?.rawContent ?? "";
+  if (!planText) return null;
+  const runtimes: WorkerRuntime[] = ["cursor", "claude", "codex"];
+  for (const rt of runtimes) {
+    const patterns = [
+      // "all/every/only the workers ... cursor"
+      new RegExp(`\\b(all|every|only|each)\\s+(the\\s+|of\\s+the\\s+)?(worker|workers|agent|agents)\\b[^.\\n]{0,80}\\b${rt}\\b`, "i"),
+      // "cursor only" / "cursor exclusively"
+      new RegExp(`\\b${rt}\\s+(only|exclusively|throughout)\\b`, "i"),
+      // "only cursor" / "exclusively cursor"
+      new RegExp(`\\b(only|exclusively)\\s+${rt}\\b`, "i"),
+      // "use (only) cursor for/workers/agents"
+      new RegExp(`\\buse\\s+(only\\s+)?${rt}\\b`, "i"),
+      // "(workers|agents) (should|must|to) be cursor"
+      new RegExp(`\\b(worker|workers|agent|agents)\\s+(should|must|need(s)?\\s+to|have\\s+to|to)\\s+be\\s+${rt}\\b`, "i"),
+      // "I want ... workers ... be cursor"
+      new RegExp(`\\b(want|need|require)\\s+(all\\s+)?(the\\s+)?(worker|workers|agent|agents)\\s+(to\\s+)?be\\s+${rt}\\b`, "i"),
+    ];
+    for (const re of patterns) {
+      if (re.test(planText)) return rt;
+    }
+  }
+  return null;
+}
+
+// Rewrites every task and plannedAgent in the decision so its runtimePreference,
+// modelHint, and effortHint match the user's mandated runtime. Skips entries
+// already on the mandate, and leaves shell/manual entries alone (those are
+// escape hatches, not autonomous runtimes). If the mandated runtime is not
+// installed, returns the decision unchanged so rerouteUnavailableAgentRuntimes
+// can pick a fallback the usual way.
+async function enforceUserRuntimeMandate(
+  decision: SparkManagerDecision,
+  mandate: WorkerRuntime,
+): Promise<{ decision: SparkManagerDecision; overrides: RuntimeReroute[] }> {
+  const diagnostics = await detectConfiguredAgentRuntimes();
+  const installedKinds = new Set(
+    diagnostics.filter((runtime) => runtime.installed).map((runtime) => runtime.kind),
+  );
+  if (mandate !== "claude" && mandate !== "codex" && mandate !== "cursor") {
+    return { decision, overrides: [] };
+  }
+  if (!installedKinds.has(mandate)) {
+    return { decision, overrides: [] };
+  }
+  const modelDefaults: Record<string, { modelHint?: string; effortHint?: WorkerTask["effortHint"] }> = {
+    cursor: { modelHint: "composer-2.5-fast", effortHint: "medium" },
+    claude: { modelHint: "claude-opus-4-7", effortHint: "high" },
+    codex: { modelHint: "gpt-5.5", effortHint: "high" },
+  };
+  const defaults = modelDefaults[mandate] ?? { modelHint: undefined, effortHint: undefined };
+  const overrides: RuntimeReroute[] = [];
+  const rewrite = (
+    runtimePreference: WorkerRuntime,
+    modelHint: string | undefined,
+    effortHint: WorkerTask["effortHint"] | undefined,
+    contextLabel: string,
+  ) => {
+    if (runtimePreference === mandate) {
+      return { runtimePreference, modelHint, effortHint };
+    }
+    if (
+      runtimePreference !== "claude" &&
+      runtimePreference !== "codex" &&
+      runtimePreference !== "cursor"
+    ) {
+      return { runtimePreference, modelHint, effortHint };
+    }
+    overrides.push({
+      from: runtimePreference,
+      to: mandate,
+      modelHint: defaults.modelHint,
+      effortHint: defaults.effortHint,
+      reason: `User plan mandates runtime '${mandate}' for every worker (${contextLabel})`,
+    });
+    return {
+      runtimePreference: mandate,
+      modelHint: defaults.modelHint,
+      effortHint: defaults.effortHint,
+    };
+  };
+  const steps = decision.steps.map((step) => ({
+    ...step,
+    plannedAgents: step.plannedAgents.map((agent) => ({
+      ...agent,
+      ...rewrite(agent.runtimePreference, agent.modelHint, agent.effortHint, `plannedAgent ${agent.label}`),
+    })),
+  }));
+  const tasks = decision.tasks.map((task) => ({
+    ...task,
+    ...rewrite(task.runtimePreference, task.modelHint, task.effortHint, `task '${task.title}'`),
+  }));
+  return {
+    decision: { ...decision, steps, tasks },
+    overrides,
+  };
+}
+
 function makeExplicitParallelAgent(
   label: string,
   summary: string,
@@ -2537,6 +2644,25 @@ async function applySparkManagerDecision(
   // hybrid-runtime split in shouldEnforceHybridParallelRuntimes) stand.
   // Quality regressions on calculator-shaped tasks should be addressed by
   // tuning the manager profile or worker prompt, not by per-task overrides.
+
+  const userRuntimeMandate = detectPlanRuntimeMandate(run);
+  if (userRuntimeMandate) {
+    const mandateRepair = await enforceUserRuntimeMandate(decision, userRuntimeMandate);
+    decision = mandateRepair.decision;
+    if (mandateRepair.overrides.length > 0) {
+      await appendEvent({
+        workspaceId: run.workspaceId,
+        runId: run.id,
+        type: "spark_manager.user_runtime_mandate_enforced",
+        message: `Rewrote ${mandateRepair.overrides.length} assignment(s) to honor user plan runtime mandate '${userRuntimeMandate}'`,
+        payload: {
+          mandate: userRuntimeMandate,
+          overrides: mandateRepair.overrides,
+          mode,
+        },
+      });
+    }
+  }
 
   const runtimeRepair = await rerouteUnavailableAgentRuntimes(decision);
   decision = runtimeRepair.decision;
