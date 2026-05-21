@@ -18,12 +18,17 @@ interface Props {
 // Graph lane geometry + palette. The lanes are drawn from the ASCII that
 // `git log --graph` emits, one row per output line (commit rows and the pure
 // connector rows between them).
-const LANE_W = 11;
+const LANE_W = 12;
 const LANE_H = 22;
-const NODE_R = 4;
-const GRAPH_COLORS = ["#FFB000", "#DC267F", "#5BA8FF", "#40B0A6", "#B66DFF"];
-const LOCAL_REF_COLOR = "#7FB3FF";
-const REMOTE_REF_COLOR = "#C99BFF";
+const NODE_R = 3.5;
+// Quiet, cohesive lane palette tuned for the dark amber theme. The trunk lane
+// stays neutral so the rail recedes into the panel; subsequent lanes get cool
+// hues so merges/forks still read distinctly without competing with the
+// accent-colored HEAD node.
+const LANE_NEUTRAL = "#5a5754";
+const LANE_TINTS = ["#7da5cc", "#a890c4", "#7fb6a6", "#c79090"];
+const LOCAL_REF_COLOR = "var(--accent)";
+const REMOTE_REF_COLOR = "#a7c0e0";
 
 interface MenuState {
   row: GitLogRow;
@@ -148,23 +153,23 @@ const CommitRowView = React.memo(function CommitRowView({
         gridTemplateColumns: "max-content minmax(0, 1fr)",
         gap: 8,
         alignItems: "center",
-        minHeight: 24,
-        paddingRight: 8,
+        minHeight: 22,
+        paddingRight: 10,
         cursor: "default",
         background:
           isCommit && hover
-            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
+            ? "color-mix(in oklch, var(--ink) 4%, transparent)"
             : "transparent",
         transition: "background var(--motion-fast) var(--ease-out)",
       }}
     >
-      <GraphLane graph={row.graph} refs={refs} />
+      <GraphLane graph={row.graph} refs={refs} isHead={row.isHead === true} />
       {isCommit && (
         <span
           style={{
             minWidth: 0,
             display: "inline-flex",
-            alignItems: "baseline",
+            alignItems: "center",
             gap: 6,
             overflow: "hidden",
             whiteSpace: "nowrap",
@@ -178,7 +183,9 @@ const CommitRowView = React.memo(function CommitRowView({
               textOverflow: "ellipsis",
               fontFamily: "var(--font-sans)",
               fontSize: 12,
+              fontWeight: row.isHead ? 500 : 400,
               color: row.isHead ? "var(--ink)" : "var(--ink-dim)",
+              letterSpacing: "0.005em",
             }}
           >
             {row.subject || "(no message)"}
@@ -192,7 +199,10 @@ const CommitRowView = React.memo(function CommitRowView({
               flex: "0 0 auto",
               fontFamily: "var(--font-mono)",
               fontSize: 10,
-              color: "var(--muted)",
+              fontVariantNumeric: "tabular-nums",
+              color: "var(--muted-2)",
+              opacity: hover ? 1 : 0.85,
+              transition: "opacity var(--motion-fast) var(--ease-out)",
             }}
           >
             {row.shortHash}
@@ -202,7 +212,9 @@ const CommitRowView = React.memo(function CommitRowView({
               flex: "0 0 auto",
               fontFamily: "var(--font-mono)",
               fontSize: 10,
+              fontVariantNumeric: "tabular-nums",
               color: "var(--muted-2)",
+              opacity: 0.75,
               minWidth: 22,
               textAlign: "right",
             }}
@@ -223,147 +235,222 @@ function Hint({ text }: { text: string }): React.ReactElement {
 
 // ── Graph lane rendering ─────────────────────────────────────────────────────
 
-function GraphLane({ graph, refs }: { graph: string; refs: string[] }): React.ReactElement {
-  const tokens = (graph.trimEnd() || "*").split("");
-  return (
-    <span aria-hidden style={{ height: LANE_H, display: "inline-flex", alignItems: "stretch" }}>
-      {tokens.map((token, index) => (
-        <GraphToken
-          key={`${index}-${token}`}
-          token={token}
-          color={tokenColor(tokens, index, refs)}
-          featured={token === "*" && refs.length > 0}
-        />
-      ))}
-    </span>
-  );
-}
+// Each row is rendered as one inline SVG so cross-lane connectors are real
+// curved paths that flow into the vertical rails. With separate per-cell <div>s
+// the diagonals can't reach into adjacent cells, so they read as detached
+// toothpicks; with a single SVG the curves can start at one lane's bottom and
+// land tangent-vertical at the neighbouring lane's top.
+const STROKE_W = 1.5;
 
-function GraphToken({
-  token,
-  color,
-  featured,
+function GraphLane({
+  graph,
+  refs,
+  isHead,
 }: {
-  token: string;
-  color: string;
-  featured: boolean;
+  graph: string;
+  refs: string[];
+  isHead: boolean;
 }): React.ReactElement {
-  if (token === "*") {
-    const r = featured ? NODE_R : NODE_R - 1;
-    return (
-      <span style={{ width: LANE_W, height: "100%", position: "relative", flex: `0 0 ${LANE_W}px` }}>
-        <Rail color={color} />
-        <span
-          style={{
-            position: "absolute",
-            left: Math.floor(LANE_W / 2) - r,
-            top: "50%",
-            width: r * 2,
-            height: r * 2,
-            marginTop: -r,
-            borderRadius: 999,
-            border: `1px solid ${color}`,
-            background: featured ? color : "var(--panel)",
-            boxShadow: featured
-              ? `0 0 7px color-mix(in oklch, ${color} 44%, transparent)`
-              : "none",
-          }}
-        />
-      </span>
-    );
-  }
-  if (token === "|") {
-    return (
-      <span style={{ width: LANE_W, height: "100%", position: "relative", flex: `0 0 ${LANE_W}px` }}>
-        <Rail color={color} />
-      </span>
-    );
-  }
-  if (token === "/" || token === "\\") {
-    return (
-      <span style={{ width: LANE_W, height: "100%", position: "relative", flex: `0 0 ${LANE_W}px` }}>
-        <span
-          style={{
-            position: "absolute",
-            left: Math.floor(LANE_W / 2),
-            top: 2,
-            width: 2,
-            height: LANE_H - 4,
-            background: railColor(color),
-            transform: token === "/" ? "rotate(28deg)" : "rotate(-28deg)",
-            transformOrigin: "center",
-          }}
-        />
-      </span>
-    );
-  }
-  if (token === "_" || token === "-") {
-    return (
-      <span style={{ width: LANE_W, height: "100%", position: "relative", flex: `0 0 ${LANE_W}px` }}>
-        <span
-          style={{
-            position: "absolute",
-            left: 0,
-            right: 0,
-            top: "50%",
-            height: 2,
-            background: railColor(color),
-          }}
-        />
-      </span>
-    );
-  }
-  return <span style={{ width: LANE_W, flex: `0 0 ${LANE_W}px` }} />;
-}
+  const tokens = (graph.trimEnd() || "*").split("");
+  const width = tokens.length * LANE_W;
+  const height = LANE_H;
+  const tokenColors = tokens.map((_, i) => tokenColor(tokens, i));
+  const hasRefs = refs.length > 0;
 
-function Rail({ color }: { color: string }): React.ReactElement {
+  const centerOf = (i: number): number => i * LANE_W + LANE_W / 2;
+
   return (
-    <span
-      style={{
-        position: "absolute",
-        left: Math.floor(LANE_W / 2),
-        top: 0,
-        bottom: 0,
-        width: 2,
-        background: railColor(color),
-      }}
-    />
+    <svg
+      aria-hidden
+      width={width}
+      height={height}
+      style={{ display: "block", flex: `0 0 ${width}px`, overflow: "visible" }}
+    >
+      {/* Pass 1: rails, diagonals, horizontals. Drawn first so nodes sit on top. */}
+      {tokens.map((token, i) => {
+        const color = tokenColors[i];
+        const stroke = railColor(color);
+        const xC = centerOf(i);
+
+        if (token === "|") {
+          return (
+            <line
+              key={`s-${i}`}
+              x1={xC}
+              y1={0}
+              x2={xC}
+              y2={height}
+              stroke={stroke}
+              strokeWidth={STROKE_W}
+              strokeLinecap="square"
+            />
+          );
+        }
+        if (token === "*") {
+          // The rail continues through the node so merges of length 1 read as a
+          // single rail with a dot, not a dot floating between two stubs.
+          return (
+            <line
+              key={`s-${i}`}
+              x1={xC}
+              y1={0}
+              x2={xC}
+              y2={height}
+              stroke={stroke}
+              strokeWidth={STROKE_W}
+              strokeLinecap="square"
+            />
+          );
+        }
+        if (token === "/") {
+          // Lane joining upward to the left: enter at this cell's bottom-right
+          // (where the source lane was) and exit at the top-left (where the
+          // destination lane is in the row above). The cubic control points
+          // are set so the curve is vertical-tangent at both endpoints.
+          const xRight = (i + 1) * LANE_W;
+          const xLeft = i * LANE_W;
+          const d = `M ${xRight} ${height} C ${xRight} ${height * 0.45}, ${xLeft} ${height * 0.55}, ${xLeft} 0`;
+          return (
+            <path
+              key={`s-${i}`}
+              d={d}
+              stroke={stroke}
+              strokeWidth={STROKE_W}
+              fill="none"
+              strokeLinecap="round"
+            />
+          );
+        }
+        if (token === "\\") {
+          const xRight = (i + 1) * LANE_W;
+          const xLeft = i * LANE_W;
+          const d = `M ${xLeft} ${height} C ${xLeft} ${height * 0.45}, ${xRight} ${height * 0.55}, ${xRight} 0`;
+          return (
+            <path
+              key={`s-${i}`}
+              d={d}
+              stroke={stroke}
+              strokeWidth={STROKE_W}
+              fill="none"
+              strokeLinecap="round"
+            />
+          );
+        }
+        if (token === "_" || token === "-") {
+          const xLeft = i * LANE_W;
+          const xRight = (i + 1) * LANE_W;
+          const y = token === "_" ? STROKE_W : height / 2;
+          return (
+            <line
+              key={`s-${i}`}
+              x1={xLeft}
+              y1={y}
+              x2={xRight}
+              y2={y}
+              stroke={stroke}
+              strokeWidth={STROKE_W}
+              strokeLinecap="round"
+            />
+          );
+        }
+        return null;
+      })}
+
+      {/* Pass 2: nodes drawn over the rails. */}
+      {tokens.map((token, i) => {
+        if (token !== "*") return null;
+        const xC = centerOf(i);
+        const yC = height / 2;
+        const color = tokenColors[i];
+        const isHeadNode = isHead;
+        const filled = isHeadNode || hasRefs;
+        const r = isHeadNode ? NODE_R + 0.5 : NODE_R;
+        const dotColor = isHeadNode ? "var(--accent)" : color;
+        return (
+          <g key={`n-${i}`}>
+            {isHeadNode && (
+              <>
+                <circle
+                  cx={xC}
+                  cy={yC}
+                  r={r + 3}
+                  style={{
+                    fill: "color-mix(in oklch, var(--accent) 14%, transparent)",
+                  }}
+                />
+                <circle
+                  cx={xC}
+                  cy={yC}
+                  r={r + 1.5}
+                  style={{
+                    fill: "color-mix(in oklch, var(--accent) 26%, transparent)",
+                  }}
+                />
+              </>
+            )}
+            <circle
+              cx={xC}
+              cy={yC}
+              r={r}
+              style={{
+                fill: filled ? dotColor : "var(--panel)",
+                stroke: filled ? "none" : dotColor,
+                strokeWidth: 1.25,
+              }}
+            />
+          </g>
+        );
+      })}
+    </svg>
   );
 }
 
 function RefBadge({ refName }: { refName: string }): React.ReactElement {
   const remote = refName.includes("/");
   const fg = remote ? REMOTE_REF_COLOR : LOCAL_REF_COLOR;
+  // Strip noisy prefixes: "origin/HEAD" → "origin", "origin/main" → "main".
+  const label =
+    refName === "origin/HEAD"
+      ? "origin"
+      : remote
+        ? refName.split("/").slice(1).join("/") || refName
+        : refName;
   return (
     <span
       title={refName}
       style={{
         flex: "0 0 auto",
-        maxWidth: 96,
+        maxWidth: 110,
         overflow: "hidden",
         textOverflow: "ellipsis",
         whiteSpace: "nowrap",
         padding: "1px 6px",
-        borderRadius: 999,
+        borderRadius: 4,
         fontFamily: "var(--font-mono)",
-        fontSize: 9,
+        fontSize: 9.5,
         fontWeight: 600,
+        letterSpacing: "0.02em",
         color: fg,
-        border: `1px solid color-mix(in oklch, ${fg} 56%, var(--rule-soft))`,
         background: `color-mix(in oklch, ${fg} 14%, transparent)`,
       }}
     >
-      {refName}
+      {label}
     </span>
   );
 }
 
 function railColor(color: string): string {
-  return `color-mix(in oklch, ${color} 42%, var(--rule-soft))`;
+  // Pull the lane color toward the panel background so rails recede instead of
+  // dominating the row. The neutral trunk lane stays as-is.
+  if (color === LANE_NEUTRAL) return color;
+  return `color-mix(in oklch, ${color} 55%, var(--panel))`;
 }
 
 function laneColor(index: number): string {
-  return GRAPH_COLORS[index % GRAPH_COLORS.length];
+  // The trunk lane (index 0) is neutral; tinted hues only appear when the
+  // history actually branches.
+  if (index === 0) return LANE_NEUTRAL;
+  return LANE_TINTS[(index - 1) % LANE_TINTS.length];
 }
 
 // Position of a token among the non-space lanes — drives its palette color.
@@ -375,9 +462,6 @@ function laneIndex(tokens: string[], tokenIndex: number): number {
   return lane;
 }
 
-function tokenColor(tokens: string[], tokenIndex: number, refs: string[]): string {
-  if (tokens[tokenIndex] === "*" && refs.length > 0) {
-    return refs.some((r) => r.includes("/")) ? REMOTE_REF_COLOR : LOCAL_REF_COLOR;
-  }
+function tokenColor(tokens: string[], tokenIndex: number): string {
   return laneColor(laneIndex(tokens, tokenIndex));
 }
