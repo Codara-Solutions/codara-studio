@@ -15,6 +15,7 @@ import {
   getGitLog,
   getGitStatus,
   initRepo,
+  prepareSmartMerge,
   pull,
   push,
   revertCommit,
@@ -78,6 +79,7 @@ import type {
   GitFileChange,
   GitLog,
   GitOpResult,
+  GitSmartMergeResult,
   GitStatus,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
@@ -387,6 +389,10 @@ export function registerIpc(): void {
 
   ipcMain.handle("git:fetch", async (_e, cwd: string): Promise<GitOpResult> => {
     return fetchRemote(cwd);
+  });
+
+  ipcMain.handle("git:prepareSmartMerge", async (_e, cwd: string): Promise<GitSmartMergeResult> => {
+    return prepareSmartMerge(cwd);
   });
 
   ipcMain.handle("git:undoLastCommit", async (_e, cwd: string): Promise<GitOpResult> => {

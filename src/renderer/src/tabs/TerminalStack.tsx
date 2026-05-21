@@ -13,7 +13,14 @@ import type {
   TerminalTab,
 } from "./types";
 import { CloseIcon, DragHandleIcon, PlusIcon, SplitDownIcon, SplitRightIcon } from "../components/icons";
-import { TERMINAL_PANE_DRAG_MIME, parseTerminalPaneDrag, type TerminalPaneDragPayload } from "./terminalDrag";
+import {
+  TERMINAL_PANE_DRAG_MIME,
+  beginTerminalPaneDrag,
+  endTerminalPaneDrag,
+  parseTerminalPaneDrag,
+  peekTerminalPaneDrag,
+  type TerminalPaneDragPayload,
+} from "./terminalDrag";
 
 // TerminalStack hosts every terminal tab in the workspace. Each tab carries a
 // recursive PaneNode tree — leaves are PTY-backed panes, splits are
@@ -425,12 +432,26 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               if (!acceptsTerminalPane(event)) return;
               event.preventDefault();
               event.stopPropagation();
+              if (isSelfDrop(tab.id, leaf.paneId)) {
+                event.dataTransfer.dropEffect = "none";
+                setDropIntent((current) =>
+                  current?.paneId === leaf.paneId ? null : current,
+                );
+                return;
+              }
               setDropIntent(dropIntentFromEvent(event, leaf.paneId));
             }}
             onDragOver={(event) => {
               if (!acceptsTerminalPane(event)) return;
               event.preventDefault();
               event.stopPropagation();
+              if (isSelfDrop(tab.id, leaf.paneId)) {
+                event.dataTransfer.dropEffect = "none";
+                setDropIntent((current) =>
+                  current?.paneId === leaf.paneId ? null : current,
+                );
+                return;
+              }
               event.dataTransfer.dropEffect = "move";
               setDropIntent(dropIntentFromEvent(event, leaf.paneId));
             }}
@@ -450,8 +471,14 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               if (!payload) return;
               event.preventDefault();
               event.stopPropagation();
-              const intent = dropIntentFromEvent(event, leaf.paneId);
               setDropIntent(null);
+              endTerminalPaneDrag();
+              // Dropping a pane onto itself is a no-op — short-circuit so the
+              // move handler doesn't try to remove + reinsert the same leaf.
+              if (payload.tabId === tab.id && payload.paneId === leaf.paneId) {
+                return;
+              }
+              const intent = dropIntentFromEvent(event, leaf.paneId);
               onPaneDrop(payload, tab.id, intent);
             }}
             style={{
@@ -549,8 +576,10 @@ interface DropIntent {
 }
 
 // Visible divider thickness; the grab target is wider so the handle stays
-// easy to hit without a chunky-looking rule.
-const HANDLE_THICKNESS = 4;
+// easy to hit without a chunky-looking rule. The rule itself is paired with a
+// soft theme-aware halo (see ResizeHandle below) so the boundary between two
+// panes stays legible against dark *and* light backgrounds.
+const HANDLE_THICKNESS = 2;
 const HANDLE_HIT = 11;
 const MIN_RATIO = 0.05;
 const MAX_RATIO = 0.95;
@@ -561,6 +590,14 @@ function pct(fraction: number): string {
 
 function acceptsTerminalPane(event: React.DragEvent): boolean {
   return Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
+}
+
+// True when the in-flight drag's source pane is the leaf we're hovering — used
+// to suppress the drop preview so a pane dropped onto itself is a clear no-op
+// rather than appearing to land in one of its own halves.
+function isSelfDrop(tabId: TabId, paneId: string): boolean {
+  const active = peekTerminalPaneDrag();
+  return !!active && active.tabId === tabId && active.paneId === paneId;
 }
 
 function dropIntentFromEvent(
@@ -747,8 +784,16 @@ function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps
     >
       <div
         style={{
-          background: "var(--rule-soft)",
+          // A crisper rule color than --rule-soft, paired with a symmetric
+          // shadow on both sides so the divider reads as a recessed groove in
+          // every theme. color-mix against --ink keeps the halo subtle on
+          // light themes (where pure black would feel heavy) and visible on
+          // dark themes (where alpha-on-black would disappear).
+          background: "var(--rule-strong)",
           pointerEvents: "none",
+          boxShadow: isHorizontal
+            ? "1px 0 4px color-mix(in oklch, var(--ink) 18%, transparent), -1px 0 4px color-mix(in oklch, var(--ink) 18%, transparent)"
+            : "0 1px 4px color-mix(in oklch, var(--ink) 18%, transparent), 0 -1px 4px color-mix(in oklch, var(--ink) 18%, transparent)",
           ...(isHorizontal
             ? { width: HANDLE_THICKNESS, height: "100%" }
             : { height: HANDLE_THICKNESS, width: "100%" }),
@@ -902,10 +947,12 @@ function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }) {
         event.dataTransfer.effectAllowed = "move";
         event.dataTransfer.setData(TERMINAL_PANE_DRAG_MIME, JSON.stringify(payload));
         event.dataTransfer.setData("text/plain", "Spark terminal pane");
+        beginTerminalPaneDrag(payload);
       }}
       onDragEnd={(event) => {
         event.stopPropagation();
         setDragging(false);
+        endTerminalPaneDrag();
       }}
       style={{
         width: 20,

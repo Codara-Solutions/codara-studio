@@ -284,9 +284,11 @@ function WorkspaceRail(props: RailProps) {
         return (
           <GitPanel
             cwd={props.activeWorkspace?.cwd ?? null}
+            workspace={props.activeWorkspace}
             collapsed={collapsed.graph}
             onToggleCollapse={() => onToggleSection("graph")}
             headerDrag={headerDrag("graph")}
+            onRunSnapshot={props.onRunSnapshot}
             onOpenFile={props.onOpenFile}
           />
         );

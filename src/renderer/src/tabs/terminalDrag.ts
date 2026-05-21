@@ -22,6 +22,25 @@ export function parseTerminalPaneDrag(dataTransfer: DataTransfer): TerminalPaneD
   }
 }
 
+// Module-level drag tracker: `DataTransfer.getData` is empty during dragenter /
+// dragover for security reasons, so drop targets can't tell *which* pane is
+// being dragged until the actual drop fires. We need that earlier to suppress
+// the drop preview when the user hovers a pane over itself, so the drag
+// handle stashes the payload here at dragstart and clears it at dragend.
+let activeTerminalPaneDrag: TerminalPaneDragPayload | null = null;
+
+export function beginTerminalPaneDrag(payload: TerminalPaneDragPayload): void {
+  activeTerminalPaneDrag = payload;
+}
+
+export function endTerminalPaneDrag(): void {
+  activeTerminalPaneDrag = null;
+}
+
+export function peekTerminalPaneDrag(): TerminalPaneDragPayload | null {
+  return activeTerminalPaneDrag;
+}
+
 export function parseTabReorderDrag(dataTransfer: DataTransfer): TabReorderDragPayload | null {
   if (!Array.from(dataTransfer.types).includes(TAB_REORDER_DRAG_MIME)) return null;
   try {

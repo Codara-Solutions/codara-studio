@@ -21,6 +21,7 @@ import type {
   GitFileChange,
   GitLog,
   GitOpResult,
+  GitSmartMergeResult,
   GitStatus,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
@@ -197,6 +198,8 @@ const api = {
     push: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:push", cwd),
     pull: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:pull", cwd),
     fetch: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:fetch", cwd),
+    prepareSmartMerge: (cwd: string): Promise<GitSmartMergeResult> =>
+      ipcRenderer.invoke("git:prepareSmartMerge", cwd),
     undoLastCommit: (cwd: string): Promise<GitOpResult> =>
       ipcRenderer.invoke("git:undoLastCommit", cwd),
     checkout: (cwd: string, ref: string): Promise<GitOpResult> =>

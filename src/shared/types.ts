@@ -341,9 +341,10 @@ export interface GitStatus {
  * `graph` (the ASCII lanes git draws between commits).
  */
 export interface GitLogRow {
-  /** ASCII lane prefix from `git log --graph` (e.g. "* | "). */
+  /** Legacy ASCII lane prefix. New rows use parentHashes for graph layout. */
   graph: string;
   hash?: string;
+  parentHashes?: string[];
   shortHash?: string;
   subject?: string;
   author?: string;
@@ -381,6 +382,34 @@ export type GitOpResult = { ok: true } | { ok: false; error: string };
 /** Result of asking Inline AI to draft an editable commit message. */
 export type GitCommitMessageResult =
   | { ok: true; message: string }
+  | { ok: false; error: string };
+
+export interface GitSmartMergeContext {
+  fetchedAt: string;
+  repositoryRoot: string;
+  branch?: string;
+  upstream?: string;
+  detached: boolean;
+  head: string;
+  ahead: number;
+  behind: number;
+  stagedCount: number;
+  unstagedCount: number;
+  hasConflicts: boolean;
+  hasWorkingChanges: boolean;
+  workingFiles: string[];
+  localCommitFiles: string[];
+  remoteChangedFiles: string[];
+  overlappingFiles: string[];
+  statusShort: string;
+  localOnlyCommits: string;
+  remoteOnlyCommits: string;
+  mergeBase?: string;
+  recommendedStrategy: string;
+}
+
+export type GitSmartMergeResult =
+  | { ok: true; context: GitSmartMergeContext }
   | { ok: false; error: string };
 
 export type RunStatus =

@@ -11,6 +11,8 @@ import type {
   GitLog,
   GitLogRow,
   GitOpResult,
+  GitSmartMergeContext,
+  GitSmartMergeResult,
   GitStatus,
 } from "@shared/types";
 import { runInlineAiChatCompletion } from "./inline-ai";
@@ -39,11 +41,11 @@ const MAX_COMMIT_DIFF_CHARS = 10_000;
 const MAX_UNTRACKED_COMMIT_FILES = 10;
 const COMMIT_MESSAGE_MAX_TOKENS = 180;
 
-// `git log` field layout — a leading 0x1f marks where the `--graph` ASCII
-// ends, then one 0x1f-separated field per commit datum. 0x1f never appears in
-// commit text, so splitting on it is unambiguous.
+// `git log` field layout — a leading 0x1f leaves room for the old graph field,
+// then one 0x1f-separated field per commit datum. 0x1f never appears in commit
+// text, so splitting on it is unambiguous.
 const FIELD_SEP = "\u001f";
-const LOG_FORMAT = `%x1f%H%x1f%h%x1f%s%x1f%an%x1f%ar%x1f%D`;
+const LOG_FORMAT = `%x1f%H%x1f%P%x1f%h%x1f%s%x1f%an%x1f%ar%x1f%D`;
 
 const BRANCH_OID = "# branch.oid ";
 const BRANCH_HEAD = "# branch.head ";
@@ -319,8 +321,8 @@ async function computeGitLog(cwd: string): Promise<GitLog> {
   try {
     const { stdout } = await runGit(cwd, [
       "log",
-      "--graph",
       "--all",
+      "--topo-order",
       "--decorate=short",
       "--color=never",
       "--max-count=120",
@@ -373,13 +375,14 @@ function parseLog(stdout: string): GitLogRow[] {
       continue;
     }
     const graph = line.slice(0, sep);
-    const [hash, shortHash, subject, author, relativeDate, decoration] = line
+    const [hash, parents, shortHash, subject, author, relativeDate, decoration] = line
       .slice(sep + 1)
       .split(FIELD_SEP);
     const { refs, isHead } = parseDecoration(decoration ?? "");
     rows.push({
       graph,
       hash,
+      parentHashes: parents ? parents.split(" ").filter(Boolean) : [],
       shortHash,
       subject,
       author,
@@ -447,6 +450,59 @@ async function readGitText(cwd: string, args: string[]): Promise<string> {
   } catch {
     return "";
   }
+}
+
+function splitGitLines(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return [...new Set(values)].sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: "base" }),
+  );
+}
+
+function parseAheadBehind(value: string, fallback: { ahead: number; behind: number }) {
+  const [aheadRaw, behindRaw] = value.trim().split(/\s+/);
+  const ahead = Number(aheadRaw);
+  const behind = Number(behindRaw);
+  return {
+    ahead: Number.isFinite(ahead) ? ahead : fallback.ahead,
+    behind: Number.isFinite(behind) ? behind : fallback.behind,
+  };
+}
+
+function recommendSmartMergeStrategy(input: {
+  upstream?: string;
+  detached: boolean;
+  ahead: number;
+  behind: number;
+  hasWorkingChanges: boolean;
+  hasConflicts: boolean;
+  overlapCount?: number;
+}): string {
+  if (input.hasConflicts) return "resolve existing conflicts before fetching more changes";
+  if (input.detached) return "ask which branch should receive the remote changes";
+  if (!input.upstream) return "ask which remote branch to integrate";
+  if (input.behind === 0 && input.ahead === 0) {
+    return input.hasWorkingChanges ? "preserve local work; upstream is current" : "already up to date";
+  }
+  if (input.behind > 0 && input.ahead === 0) {
+    if (input.hasWorkingChanges && (input.overlapCount ?? 0) > 0) {
+      return "review overlapping files, then stash or commit local work before fast-forward";
+    }
+    return input.hasWorkingChanges ? "preserve local work, then fast-forward" : "fast-forward";
+  }
+  if (input.behind > 0 && input.ahead > 0) {
+    return (input.overlapCount ?? 0) > 0
+      ? "review overlapping files, then merge by default; ask before rebase"
+      : "merge by default; ask before rebase";
+  }
+  if (input.ahead > 0) return "local branch is ahead; no merge needed";
+  return "inspect repository state";
 }
 
 function formatChangeList(status: GitStatus): string {
@@ -654,6 +710,101 @@ export function pull(cwd: string): Promise<GitOpResult> {
 
 export function fetchRemote(cwd: string): Promise<GitOpResult> {
   return mutate(cwd, ["fetch", "--prune"], { timeout: NETWORK_TIMEOUT_MS });
+}
+
+export async function prepareSmartMerge(cwd: string): Promise<GitSmartMergeResult> {
+  const initialStatus = await computeGitStatus(cwd);
+  if (!initialStatus.isRepo) {
+    return { ok: false, error: initialStatus.error ?? "Not a git repository." };
+  }
+
+  try {
+    await runGit(cwd, ["fetch", "--prune"], { timeout: NETWORK_TIMEOUT_MS });
+  } catch (err) {
+    invalidate(cwd);
+    return { ok: false, error: `Fetch failed: ${errorText(err)}` };
+  }
+
+  invalidate(cwd);
+
+  try {
+    const status = await computeGitStatus(cwd);
+    if (!status.isRepo) return { ok: false, error: status.error ?? "Not a git repository." };
+
+    const upstream =
+      status.upstream ||
+      (await readGitText(cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])) ||
+      undefined;
+    let ahead = status.ahead;
+    let behind = status.behind;
+    if (upstream) {
+      const counts = parseAheadBehind(
+        await readGitText(cwd, ["rev-list", "--left-right", "--count", `HEAD...${upstream}`]),
+        { ahead, behind },
+      );
+      ahead = counts.ahead;
+      behind = counts.behind;
+    }
+
+    const mergeBase = upstream ? await readGitText(cwd, ["merge-base", "HEAD", upstream]) : "";
+    const localDiffBase = mergeBase || upstream;
+    const remoteDiffBase = mergeBase || "HEAD";
+
+    const workingFiles = uniqueSorted(
+      [...status.staged, ...status.unstaged].flatMap((file) =>
+        file.oldPath ? [file.oldPath, file.path] : [file.path],
+      ),
+    );
+    const localCommitFiles = localDiffBase
+      ? uniqueSorted(splitGitLines(await readGitText(cwd, ["diff", "--name-only", `${localDiffBase}..HEAD`])))
+      : [];
+    const remoteChangedFiles = upstream && remoteDiffBase
+      ? uniqueSorted(splitGitLines(await readGitText(cwd, ["diff", "--name-only", `${remoteDiffBase}..${upstream}`])))
+      : [];
+    const localTouched = new Set([...workingFiles, ...localCommitFiles]);
+    const overlappingFiles = uniqueSorted(remoteChangedFiles.filter((file) => localTouched.has(file)));
+
+    const context: GitSmartMergeContext = {
+      fetchedAt: new Date().toISOString(),
+      repositoryRoot: (await readGitText(cwd, ["rev-parse", "--show-toplevel"])) || cwd,
+      branch: status.branch,
+      upstream,
+      detached: status.detached,
+      head: (await readGitText(cwd, ["rev-parse", "--short", "HEAD"])) || "(unborn)",
+      ahead,
+      behind,
+      stagedCount: status.staged.length,
+      unstagedCount: status.unstaged.length,
+      hasConflicts: status.hasConflicts,
+      hasWorkingChanges: workingFiles.length > 0,
+      workingFiles,
+      localCommitFiles,
+      remoteChangedFiles,
+      overlappingFiles,
+      statusShort: await readGitText(cwd, ["status", "--short", "--branch"]),
+      localOnlyCommits: upstream
+        ? await readGitText(cwd, ["log", "--oneline", "--decorate=short", "--max-count=12", `${upstream}..HEAD`])
+        : "",
+      remoteOnlyCommits: upstream
+        ? await readGitText(cwd, ["log", "--oneline", "--decorate=short", "--max-count=12", `HEAD..${upstream}`])
+        : "",
+      mergeBase: mergeBase ? mergeBase.slice(0, 12) : undefined,
+      recommendedStrategy: recommendSmartMergeStrategy({
+        upstream,
+        detached: status.detached,
+        ahead,
+        behind,
+        hasWorkingChanges: workingFiles.length > 0,
+        hasConflicts: status.hasConflicts,
+        overlapCount: overlappingFiles.length,
+      }),
+    };
+
+    return { ok: true, context };
+  } catch (err) {
+    invalidate(cwd);
+    return { ok: false, error: errorText(err) };
+  }
 }
 
 export function undoLastCommit(cwd: string): Promise<GitOpResult> {

@@ -1,11 +1,20 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import type { GitDiff, GitFileChange, GitLog, GitOpResult, GitStatus } from "@shared/types";
+import type {
+  GitDiff,
+  GitFileChange,
+  GitLog,
+  GitOpResult,
+  GitStatus,
+  RunState,
+  Workspace,
+} from "@shared/types";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import ChangeRow from "./ChangeRow";
 import ChangeSection from "./ChangeSection";
 import CommitComposer from "./CommitComposer";
 import CommitHistory from "./CommitHistory";
 import DiffView from "./DiffView";
+import { buildSmartMergePlan, requestPrepareSmartMerge, smartMergePlanTitle } from "./smart-merge";
 import {
   CommitIcon,
   IconButton,
@@ -18,10 +27,15 @@ import {
 
 interface Props {
   cwd: string | null;
+  workspace: Workspace | null;
   /** Panel-level collapse, driven by the rail's section layout. */
   collapsed: boolean;
   onToggleCollapse: () => void;
   headerDrag?: SectionHeaderDragProps;
+  onRunSnapshot: (
+    run: RunState,
+    options?: { select?: boolean; focusRuns?: boolean },
+  ) => void;
   /** Opens an absolute path as an editor tab (threaded from App). */
   onOpenFile: (absolutePath: string) => void;
 }
@@ -41,9 +55,11 @@ const POLL_MS = 2500;
 // src/main/git-ops.ts. Slots into the rail's collapsible section layout.
 export default function GitPanel({
   cwd,
+  workspace,
   collapsed,
   onToggleCollapse,
   headerDrag,
+  onRunSnapshot,
   onOpenFile,
 }: Props): React.ReactElement {
   const [status, setStatus] = useState<GitStatus | null>(null);
@@ -210,6 +226,32 @@ export default function GitPanel({
   const handleInit = useCallback(() => {
     if (cwd) void runAction("init", () => window.spark.git.init(cwd));
   }, [cwd, runAction]);
+
+  const handleSmartMerge = useCallback(async (): Promise<void> => {
+    if (!workspace || busyRef.current) return;
+    setBusy("smartMerge");
+    setOpError(null);
+    try {
+      const result = await requestPrepareSmartMerge(workspace.cwd);
+      if (!result.ok) {
+        setOpError(result.error);
+        return;
+      }
+      const run = await window.spark.orchestration.startAutopilot({
+        workspaceId: workspace.id,
+        workspaceName: workspace.name,
+        cwd: workspace.cwd,
+        planTitle: smartMergePlanTitle(result.context),
+        planText: buildSmartMergePlan(result.context),
+      });
+      onRunSnapshot(run, { select: true, focusRuns: true });
+    } catch (err) {
+      setOpError((err as Error).message);
+    } finally {
+      setBusy(null);
+      void refresh(true);
+    }
+  }, [workspace, onRunSnapshot, refresh]);
 
   // History actions can move HEAD or the working tree — drop any open diff so
   // the panel does not keep showing a now-stale one.
@@ -382,6 +424,8 @@ export default function GitPanel({
                 onPush={handlePush}
                 onPull={handlePull}
                 onFetch={handleFetch}
+                onSmartMerge={() => void handleSmartMerge()}
+                canSmartMerge={Boolean(workspace && status.isRepo)}
               />
 
               {stagedCount > 0 && (

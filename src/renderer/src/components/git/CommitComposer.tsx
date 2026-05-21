@@ -26,6 +26,8 @@ interface Props {
   onPush: () => void;
   onPull: () => void;
   onFetch: () => void;
+  onSmartMerge: () => void;
+  canSmartMerge: boolean;
 }
 
 // Commit message box + the branch / sync row. The Commit button is the panel's
@@ -47,11 +49,14 @@ export default function CommitComposer({
   onPush,
   onPull,
   onFetch,
+  onSmartMerge,
+  canSmartMerge,
 }: Props): React.ReactElement {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const anyBusy = busy !== null;
   const committing = busy === "commit";
   const generatingMessage = busy === "generateMessage";
+  const preparingSmartMerge = busy === "smartMerge";
 
   // Grow the textarea with its content, between two and roughly six lines.
   useEffect(() => {
@@ -131,6 +136,64 @@ export default function CommitComposer({
           <SyncIcon />
         </SyncButton>
       </div>
+
+      <button
+        type="button"
+        disabled={!canSmartMerge || anyBusy}
+        onClick={onSmartMerge}
+        title="Fetch remote refs and review the merge with Spark"
+        style={{
+          appearance: "none",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 7,
+          height: 28,
+          width: "100%",
+          padding: "0 10px",
+          borderRadius: 7,
+          cursor: "default",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12,
+          fontWeight: 650,
+          border:
+            canSmartMerge && !anyBusy
+              ? "1px solid color-mix(in oklch, var(--accent) 28%, var(--rule))"
+              : "1px solid var(--rule)",
+          background:
+            canSmartMerge && !anyBusy
+              ? "color-mix(in oklch, var(--accent) 8%, transparent)"
+              : "transparent",
+          color:
+            canSmartMerge && !anyBusy
+              ? "var(--ink-dim)"
+              : preparingSmartMerge
+                ? "var(--ink-dim)"
+                : "var(--muted-2)",
+          opacity: !canSmartMerge && !preparingSmartMerge ? 0.65 : 1,
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+        }}
+      >
+        {preparingSmartMerge ? <Spinner size={11} /> : <SparkleIcon />}
+        <span>{preparingSmartMerge ? "Fetching refs" : "Fetch & Review"}</span>
+        {behind > 0 && (
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              fontWeight: 700,
+              fontVariantNumeric: "tabular-nums",
+              padding: "1px 6px",
+              borderRadius: 999,
+              background: "color-mix(in oklch, var(--accent) 14%, transparent)",
+              color: "var(--ink-dim)",
+            }}
+          >
+            {behind}
+          </span>
+        )}
+      </button>
 
       <textarea
         ref={taRef}
