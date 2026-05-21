@@ -6998,12 +6998,22 @@ async function recordWorkerOutput(
 // which case the worker pane is just a plain pwsh and the prompt is dumped
 // as comments for the user to drive themselves.
 function buildLaunchCommandLine(task: WorkerTask, cwd: string): string | null {
+  // Pin the shell to the workspace directory before the agent CLI starts.
+  // The pty is spawned with cwd=workspaceCwd, but the user's $PROFILE
+  // (PowerShell, bash, zsh) frequently includes a `Set-Location $HOME` /
+  // `cd ~` that moves the shell away before we type the launch command.
+  // The agent CLI inherits cwd from the shell, so without this prefix the
+  // worker ends up running in the user's home directory instead of the
+  // workspace. `cd` works as an alias / built-in in pwsh, bash, zsh and cmd.
+  const cdPrefix =
+    cwd && cwd.trim().length > 0 ? `cd ${quoteShellArg(cwd)}; ` : "";
+
   if (task.runtimePreference === "claude") {
     const args = ["claude", "--dangerously-skip-permissions"];
     if (task.modelHint?.trim()) args.push("--model", quoteShellArg(task.modelHint.trim()));
     const claudeEffort = mapClaudeEffort(task.effortHint);
     if (claudeEffort) args.push("--effort", claudeEffort);
-    return args.join(" ");
+    return cdPrefix + args.join(" ");
   }
   if (task.runtimePreference === "codex") {
     // codex >= v0.128 ignores the older `-c projects."<abs>".trust_level=...`
@@ -7016,7 +7026,7 @@ function buildLaunchCommandLine(task: WorkerTask, cwd: string): string | null {
     if (task.modelHint?.trim()) args.push("-m", quoteShellArg(task.modelHint.trim()));
     const codexEffort = mapCodexEffort(task.effortHint);
     if (codexEffort) args.push("-c", quoteShellArg(`model_reasoning_effort=${codexEffort}`));
-    return args.join(" ");
+    return cdPrefix + args.join(" ");
   }
   if (task.runtimePreference === "cursor") {
     // Cursor CLI: `agent --yolo --model <id>`. The `--trust` flag is rejected
@@ -7044,7 +7054,7 @@ function buildLaunchCommandLine(task: WorkerTask, cwd: string): string | null {
     const args = [head, "--yolo"];
     const modelId = task.modelHint?.trim() || "composer-2.5-fast";
     args.push("--model", quoteShellArg(modelId));
-    return args.join(" ");
+    return cdPrefix + args.join(" ");
   }
   return null;
 }
