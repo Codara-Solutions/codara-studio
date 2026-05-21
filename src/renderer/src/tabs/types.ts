@@ -57,7 +57,7 @@ export interface TerminalLeaf {
 }
 
 export interface TerminalLeafWorker {
-  runtime?: "claude" | "codex" | "opencode";
+  runtime?: "claude" | "codex" | "cursor" | "opencode";
   runId: string;
   workerTaskId: string;
   attemptId: string;

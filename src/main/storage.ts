@@ -1,7 +1,7 @@
 import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import type { AppSettings, AppState, Workspace } from "@shared/types";
+import type { AgentRuntimeKind, AgentRuntimeSelection, AppSettings, AppState, Workspace } from "@shared/types";
 import { sparkHome } from "./spark-home";
 
 const STATE_FILE = "spark-state.json";
@@ -18,6 +18,11 @@ const EMPTY_SETTINGS: AppSettings = {
   langSmithApiKey: "",
   langSmithProject: DEFAULT_LANGSMITH_PROJECT,
   langSmithEndpoint: DEFAULT_LANGSMITH_ENDPOINT,
+  agentRuntimeSelection: "auto",
+  agentMcpSyncEnabled: true,
+  agentSkillSyncEnabled: true,
+  agentDisabledMcpIds: [],
+  agentDisabledSkillIds: [],
 };
 
 let cache: AppState | null = null;
@@ -93,7 +98,33 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
       typeof settings.langSmithEndpoint === "string" && settings.langSmithEndpoint.trim()
         ? settings.langSmithEndpoint.trim().replace(/\/+$/, "")
         : DEFAULT_LANGSMITH_ENDPOINT,
+    agentRuntimeSelection: normalizeAgentRuntimeSelection(settings.agentRuntimeSelection),
+    agentMcpSyncEnabled: settings.agentMcpSyncEnabled !== false,
+    agentSkillSyncEnabled: settings.agentSkillSyncEnabled !== false,
+    agentDisabledMcpIds: normalizeStringArray(settings.agentDisabledMcpIds),
+    agentDisabledSkillIds: normalizeStringArray(settings.agentDisabledSkillIds),
   };
+}
+
+function normalizeAgentRuntimeSelection(value: unknown): AgentRuntimeSelection {
+  const allKinds: AgentRuntimeKind[] = ["claude", "codex", "cursor"];
+  // Legacy single-string formats migrate to the array form so the rest of
+  // the app only has to handle one shape.
+  if (value === "claude") return ["claude"];
+  if (value === "codex") return ["codex"];
+  if (value === "cursor") return ["cursor"];
+  if (value === "both") return ["claude", "codex"];
+  if (value === "auto") return [...allKinds];
+  if (Array.isArray(value)) {
+    const kinds = value.filter((kind): kind is AgentRuntimeKind => allKinds.includes(kind as AgentRuntimeKind));
+    return Array.from(new Set(kinds));
+  }
+  return [...allKinds];
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((item): item is string => typeof item === "string" && item.trim().length > 0))];
 }
 
 async function writeToDisk(state: AppState): Promise<void> {

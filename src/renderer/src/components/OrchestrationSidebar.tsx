@@ -8,6 +8,10 @@ interface Props {
   runs: RunState[];
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
+  onRunSnapshot: (
+    run: RunState,
+    options?: { select?: boolean; focusRuns?: boolean },
+  ) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
   headerDrag?: SectionHeaderDragProps;
@@ -23,6 +27,7 @@ export default function OrchestrationSidebar({
   runs,
   activeRunId,
   onSelectRun,
+  onRunSnapshot,
   collapsed,
   onToggleCollapse,
   headerDrag,
@@ -51,6 +56,9 @@ export default function OrchestrationSidebar({
       if (id === null) {
         setCreatingNewRun(true);
         onSelectRun(null);
+        window.requestAnimationFrame(() => {
+          window.dispatchEvent(new Event("spark:focus-composer"));
+        });
         return;
       }
       setCreatingNewRun(false);
@@ -79,9 +87,10 @@ export default function OrchestrationSidebar({
         initialAttachments: attachments,
       });
       setCreatingNewRun(false);
-      onSelectRun(run.id);
+      onRunSnapshot(run, { select: true, focusRuns: false });
+      return run;
     },
-    [workspace, onSelectRun],
+    [workspace, onRunSnapshot],
   );
 
   const mutate = useCallback(async (action: () => Promise<unknown>) => {
@@ -98,37 +107,43 @@ export default function OrchestrationSidebar({
 
   const handleDeleteRun = useCallback(
     (id: string) => {
-      const run = runs.find((item) => item.id === id);
-      const ok = window.confirm(
-        `Delete chat "${run?.title ?? id}"?\n\nThis is permanent. Active workers are killed and the chat's artifacts are removed.`,
-      );
-      if (!ok) return;
-      void mutate(() => window.spark.orchestration.deleteRun(id));
+      void mutate(async () => {
+        await window.spark.orchestration.deleteRun(id);
+        if (id === activeRunId) handleSelectRun(null);
+      });
     },
-    [runs, mutate],
+    [activeRunId, handleSelectRun, mutate],
   );
 
   const pauseRun = useCallback(() => {
     if (!activeRun) return;
-    void mutate(() =>
-      window.spark.orchestration.pauseRun({ runId: activeRun.id, reason: "Paused by user" }),
-    );
-  }, [activeRun, mutate]);
+    void mutate(async () => {
+      const run = await window.spark.orchestration.pauseRun({
+        runId: activeRun.id,
+        reason: "Paused by user",
+      });
+      onRunSnapshot(run);
+    });
+  }, [activeRun, mutate, onRunSnapshot]);
 
   const pauseAfterWorkers = useCallback(() => {
     if (!activeRun) return;
-    void mutate(() =>
-      window.spark.orchestration.pauseRunAfterCurrentWorkers({
+    void mutate(async () => {
+      const run = await window.spark.orchestration.pauseRunAfterCurrentWorkers({
         runId: activeRun.id,
         reason: "Stop after current workers finish",
-      }),
-    );
-  }, [activeRun, mutate]);
+      });
+      onRunSnapshot(run);
+    });
+  }, [activeRun, mutate, onRunSnapshot]);
 
   const forcePauseRun = useCallback(() => {
     if (!activeRun) return;
-    void mutate(() => window.spark.orchestration.forcePauseRun(activeRun.id));
-  }, [activeRun, mutate]);
+    void mutate(async () => {
+      const run = await window.spark.orchestration.forcePauseRun(activeRun.id);
+      onRunSnapshot(run);
+    });
+  }, [activeRun, mutate, onRunSnapshot]);
 
   return (
     <ChatPanel

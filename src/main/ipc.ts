@@ -1,5 +1,7 @@
-import { ipcMain, dialog, BrowserWindow, app, shell, webContents } from "electron";
+import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard } from "electron";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { join } from "node:path";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, listDir, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
@@ -23,6 +25,8 @@ import {
   unstageFiles,
 } from "./git-ops";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
+import { detectAgentRuntimes } from "./agent-runtimes";
+import { deleteAgentAsset, listAgentAssets, syncAgentAssets } from "./agent-sync";
 import { loadPreferences, setPreference } from "./preferences-store";
 import {
   abortInlineAiCompletion,
@@ -98,6 +102,15 @@ import type {
   UpdateWorkerTaskInput,
 } from "@shared/types";
 
+const MAX_PASTED_IMAGE_BYTES = 12 * 1024 * 1024;
+const PASTED_IMAGE_EXTENSIONS = new Map([
+  ["image/png", ".png"],
+  ["image/jpeg", ".jpg"],
+  ["image/webp", ".webp"],
+  ["image/gif", ".gif"],
+  ["image/bmp", ".bmp"],
+]);
+
 // Fan a preferences change out to every live webContents so the main window
 // and the settings window stay in sync regardless of which one wrote.
 function broadcastPreferencesChanged<K extends PrefKey>(
@@ -126,6 +139,31 @@ export function registerIpc(): void {
   ipcMain.handle("settings:save", async (_e, settings: AppSettings): Promise<AppSettings> => {
     return saveSettings(settings);
   });
+
+  ipcMain.handle(
+    "agents:runtimes",
+    async (_e, input?: { force?: boolean }) => {
+      return detectAgentRuntimes(Boolean(input?.force));
+    },
+  );
+  ipcMain.handle(
+    "agents:sync",
+    async (_e, input?: { cwd?: string | null }) => {
+      return syncAgentAssets({ cwd: input?.cwd ?? null });
+    },
+  );
+  ipcMain.handle(
+    "agents:assets",
+    async (_e, input?: { cwd?: string | null }) => {
+      return listAgentAssets({ cwd: input?.cwd ?? null, settings: await loadSettings() });
+    },
+  );
+  ipcMain.handle(
+    "agents:deleteAsset",
+    async (_e, input: { id: string }) => {
+      return deleteAgentAsset({ id: input.id });
+    },
+  );
 
   ipcMain.handle("preferences:load", async (): Promise<AppPreferences> => {
     return loadPreferences();
@@ -205,6 +243,24 @@ export function registerIpc(): void {
     if (result.canceled) return [];
     return result.filePaths;
   });
+
+  ipcMain.handle(
+    "attachments:savePastedImage",
+    async (_e, input: { dataUrl?: unknown; name?: unknown }): Promise<string> => {
+      const parsed = parsePastedImageDataUrl(input?.dataUrl);
+      const ext = PASTED_IMAGE_EXTENSIONS.get(parsed.mimeType);
+      if (!ext) throw new Error("Unsupported pasted image type.");
+      if (parsed.buffer.byteLength > MAX_PASTED_IMAGE_BYTES) {
+        throw new Error("Pasted image is too large.");
+      }
+
+      const dir = join(app.getPath("userData"), "pasted-images");
+      await fs.mkdir(dir, { recursive: true });
+      const path = join(dir, `${Date.now()}-${randomUUID()}-${pastedImageStem(input?.name)}${ext}`);
+      await fs.writeFile(path, parsed.buffer, { flag: "wx" });
+      return path;
+    },
+  );
 
   ipcMain.handle("fs:list", async (_e, dir: string) => {
     return listDir(dir);
@@ -571,6 +627,26 @@ export function registerIpc(): void {
     }
   });
 
+  // Clipboard bridge for terminal Ctrl+Shift+C / Ctrl+Shift+V. The xterm.js
+  // canvas can't reach navigator.clipboard reliably inside Electron when the
+  // renderer hasn't been granted clipboard-read permission, so route through
+  // main where Electron's `clipboard` API works unconditionally.
+  ipcMain.handle("clipboard:readText", async (): Promise<string> => {
+    try {
+      return clipboard.readText();
+    } catch {
+      return "";
+    }
+  });
+  ipcMain.handle("clipboard:writeText", async (_e, text: string): Promise<void> => {
+    if (typeof text !== "string" || text.length === 0) return;
+    try {
+      clipboard.writeText(text);
+    } catch {
+      /* best-effort */
+    }
+  });
+
   ipcMain.handle("app:openExternal", async (_e, url: string): Promise<void> => {
     if (typeof url !== "string" || url.length === 0) return;
     // Electron's shell.openExternal accepts http(s) and a few extra schemes by
@@ -584,4 +660,21 @@ export function registerIpc(): void {
       /* shell.openExternal rejects when no handler is registered; ignore. */
     }
   });
+}
+
+function parsePastedImageDataUrl(value: unknown): { mimeType: string; buffer: Buffer } {
+  if (typeof value !== "string") throw new Error("Missing pasted image data.");
+  const match = value.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/);
+  if (!match) throw new Error("Invalid pasted image data.");
+  const mimeType = match[1].toLowerCase();
+  const buffer = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+  if (buffer.byteLength === 0) throw new Error("Pasted image is empty.");
+  return { mimeType, buffer };
+}
+
+function pastedImageStem(name: unknown): string {
+  if (typeof name !== "string") return "pasted-image";
+  const withoutExt = name.trim().replace(/\.[A-Za-z0-9]+$/, "");
+  const safe = withoutExt.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return safe || "pasted-image";
 }

@@ -224,10 +224,27 @@ function doSpawn(
       ? opts.cwd
       : process.env.UserProfile || process.env.HOME || process.cwd();
 
+  // Worker panes set SPARK_NO_SHELL_INTEGRATION=1 to keep spark.ps1 from
+  // injecting OSC 633 markers that the embedded TUI would read as user
+  // input. The same panes also do not need the user's $PROFILE — they only
+  // host an agent CLI. Loading the user profile inside a worker pty surfaces
+  // any module load error (e.g. Terminal-Icons → Import-PowerShellDataFile)
+  // as red startup spam before the agent banner. -NoProfile suppresses that
+  // entirely while still letting spark.ps1 run from -File. Regular user
+  // panes never set this env var, so they keep their full profile.
+  const shellArgs = (() => {
+    if (env.SPARK_NO_SHELL_INTEGRATION !== "1") return opts.shell.args;
+    if (opts.shell.family !== "pwsh" && opts.shell.family !== "powershell") return opts.shell.args;
+    if (opts.shell.args.some((arg) => arg === "-NoProfile" || arg === "-noprofile" || arg === "-NOPROFILE")) {
+      return opts.shell.args;
+    }
+    return ["-NoProfile", ...opts.shell.args];
+  })();
+
   // encoding:null asks node-pty for raw Buffers so we can preserve byte
   // boundaries for ANSI/UTF-8 across IPC. xterm.js's parser/decoder reassembles
   // partial sequences across writes when fed Uint8Array.
-  const pty = nodePty.spawn(opts.shell.exe, opts.shell.args, {
+  const pty = nodePty.spawn(opts.shell.exe, shellArgs, {
     name: "xterm-256color",
     cols,
     rows,

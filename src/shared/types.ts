@@ -44,6 +44,11 @@ export interface AppSettings {
   langSmithApiKey: string;
   langSmithProject: string;
   langSmithEndpoint: string;
+  agentRuntimeSelection: AgentRuntimeSelection;
+  agentMcpSyncEnabled: boolean;
+  agentSkillSyncEnabled: boolean;
+  agentDisabledMcpIds: string[];
+  agentDisabledSkillIds: string[];
 }
 
 // User-facing preferences (theme, editor flags, etc.) live in a separate
@@ -158,7 +163,21 @@ export interface PreferencesChange<K extends PrefKey = PrefKey> {
   value: AppPreferences[K];
 }
 
-export type AgentRuntimeKind = "claude" | "codex";
+export type AgentRuntimeKind = "claude" | "codex" | "cursor";
+
+// "auto" means "use every installed runtime" (Spark detects what is on PATH).
+// An array enumerates the exact runtimes the user opted in to — deselecting a
+// runtime in Settings removes it from this array so Spark will not spawn
+// workers on it even if the CLI is installed. The legacy string variants
+// ("both", "claude", "codex", "cursor") are accepted on read for migration
+// from earlier settings files; writes always use the array form.
+export type AgentRuntimeSelection =
+  | "auto"
+  | "both"
+  | "claude"
+  | "codex"
+  | "cursor"
+  | readonly AgentRuntimeKind[];
 
 export type AgentEffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -173,6 +192,8 @@ export interface AgentRuntimeDiagnostic {
   kind: AgentRuntimeKind;
   label: string;
   installed: boolean;
+  disabledBySettings?: boolean;
+  disabledReason?: string;
   executablePath: string | null;
   version: string | null;
   versionError: string | null;
@@ -180,6 +201,55 @@ export interface AgentRuntimeDiagnostic {
   recommendedWorkerCommand: string | null;
   installHint: string;
   lastCheckedAt: string;
+}
+
+export interface AgentSyncResult {
+  startedAt: string;
+  completedAt: string;
+  mcp: {
+    toClaude: string[];
+    toCodex: string[];
+    skipped: string[];
+    errors: string[];
+  };
+  skills: {
+    toClaude: string[];
+    toCodex: string[];
+    skipped: string[];
+    errors: string[];
+  };
+}
+
+export type AgentAssetKind = "mcp" | "skill";
+export type AgentAssetRuntime = "claude" | "codex" | "shared";
+export type AgentAssetScope = "user" | "workspace";
+export type AgentAssetCompatibility = "both" | "claude" | "codex" | "unknown";
+
+export interface AgentAssetInventoryItem {
+  id: string;
+  sessionKey: string;
+  kind: AgentAssetKind;
+  runtime: AgentAssetRuntime;
+  scope: AgentAssetScope;
+  name: string;
+  path: string;
+  enabledForSessions: boolean;
+  detail?: string;
+  canDelete: boolean;
+  compatibility: AgentAssetCompatibility;
+  compatibilityReason?: string;
+  syncable: boolean;
+}
+
+export interface AgentAssetInventory {
+  mcp: AgentAssetInventoryItem[];
+  skills: AgentAssetInventoryItem[];
+}
+
+export interface AgentAssetDeleteResult {
+  ok: boolean;
+  deleted: string[];
+  error?: string;
 }
 
 export interface FsEntry {
@@ -342,7 +412,7 @@ export type StepStatus =
 // replan downstream steps using prior worker reports as evidence.
 export type StepKind = "worker_batch" | "brake";
 
-export type WorkerRuntime = "claude" | "codex" | "shell" | "manual";
+export type WorkerRuntime = "claude" | "codex" | "cursor" | "shell" | "manual";
 
 export type WorkerTaskStatus =
   | "created"
@@ -477,7 +547,15 @@ export interface AutopilotState {
 export type HumanRunMessageAuthor = "user" | "spark" | "system";
 export type HumanRunMessageKind = "note" | "question" | "answer" | "decision";
 
-export type RunMessageAttachmentKind = "image";
+export type RunMessageAttachmentKind = "image" | "file";
+
+export interface RunQuestionOption {
+  id: string;
+  label: string;
+  description: string;
+  answer: string;
+  recommended?: boolean;
+}
 
 export interface RunMessageAttachment {
   id: string;
@@ -496,6 +574,7 @@ export interface HumanRunMessage {
   author: HumanRunMessageAuthor;
   kind: HumanRunMessageKind;
   message: string;
+  questionOptions?: RunQuestionOption[];
   attachments?: RunMessageAttachment[];
   createdAt: string;
 }
@@ -674,6 +753,7 @@ export interface SparkCall {
   runId: string;
   mode:
     | "plan_analysis"
+    | "chat"
     | "step_planning"
     | "worker_prompt_generation"
     | "worker_result_review"
@@ -697,7 +777,7 @@ export interface SparkCall {
   completedAt?: string;
 }
 
-export type SparkManagerMode = "plan_analysis" | "step_planning" | "worker_result_review";
+export type SparkManagerMode = "plan_analysis" | "chat" | "step_planning" | "worker_result_review";
 
 export interface ContextPacket {
   id: string;
@@ -844,12 +924,14 @@ export interface AddRunMessageInput {
   author: HumanRunMessageAuthor;
   kind: HumanRunMessageKind;
   message: string;
+  questionOptions?: RunQuestionOption[];
   attachments?: AddRunMessageAttachmentInput[];
 }
 
 export interface AddRunMessageAttachmentInput {
   sourcePath: string;
   name?: string;
+  kind?: RunMessageAttachmentKind;
 }
 
 // Interrupt mode for an in-flight run when the user wants their message to

@@ -157,6 +157,23 @@ interface PendingCreate {
   kind: "file" | "dir";
 }
 
+interface SelectionRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+interface MarqueeSelection {
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+  additive: boolean;
+  baseSelection: Set<string>;
+  active: boolean;
+}
+
 export default function FileTree({
   cwd,
   activePath,
@@ -172,14 +189,86 @@ export default function FileTree({
   const [contextMenu, setContextMenu] = useState<FileContextMenu | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [pendingCreate, setPendingCreate] = useState<PendingCreate | null>(null);
+  const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(() => new Set());
+  const [selectionAnchorPath, setSelectionAnchorPath] = useState<string | null>(null);
+  const [selectionRect, setSelectionRect] = useState<SelectionRect | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [, force] = useState(0);
   const rootRef = useRef(root);
   rootRef.current = root;
+  const flatRef = useRef<FlatRow[]>([]);
+  const listViewportRef = useRef<HTMLDivElement | null>(null);
+  const rowElementsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  const selectedFilePathsRef = useRef(selectedFilePaths);
+  selectedFilePathsRef.current = selectedFilePaths;
+  const selectionAnchorPathRef = useRef(selectionAnchorPath);
+  selectionAnchorPathRef.current = selectionAnchorPath;
+  const marqueeSelectionRef = useRef<MarqueeSelection | null>(null);
+  const suppressNextClickRef = useRef(false);
   // Imperative handle on the virtualized list. Used to scroll the active node
   // back into view when `activePath` changes from outside the visible window
   // (e.g. opening a file via search, or F2 rename on an off-screen node).
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
+
+  const updateRowElement = useCallback((path: string, element: HTMLDivElement | null) => {
+    if (element) rowElementsRef.current.set(path, element);
+    else rowElementsRef.current.delete(path);
+  }, []);
+
+  const updateMarqueeSelection = useCallback((event: MouseEvent) => {
+    const marquee = marqueeSelectionRef.current;
+    const viewport = listViewportRef.current;
+    if (!marquee || !viewport) return;
+    marquee.currentX = event.clientX;
+    marquee.currentY = event.clientY;
+
+    const moved =
+      Math.abs(marquee.currentX - marquee.startX) >= 4 ||
+      Math.abs(marquee.currentY - marquee.startY) >= 4;
+    if (!moved && !marquee.active) return;
+
+    event.preventDefault();
+    marquee.active = true;
+    const clientRect = rectFromPoints(
+      marquee.startX,
+      marquee.startY,
+      marquee.currentX,
+      marquee.currentY,
+    );
+    const viewportRect = viewport.getBoundingClientRect();
+    setSelectionRect(rectRelativeToViewport(clientRect, viewportRect));
+
+    const next = marquee.additive ? new Set(marquee.baseSelection) : new Set<string>();
+    let firstSelected: string | null = null;
+    for (const [path, element] of rowElementsRef.current) {
+      if (!rectsIntersect(clientRect, element.getBoundingClientRect())) continue;
+      next.add(path);
+      firstSelected ??= path;
+    }
+    setSelectedFilePaths(next);
+    if (firstSelected) setSelectionAnchorPath(firstSelected);
+  }, []);
+
+  const finishMarqueeSelection = useCallback(() => {
+    const marquee = marqueeSelectionRef.current;
+    if (marquee?.active) {
+      suppressNextClickRef.current = true;
+      window.setTimeout(() => {
+        suppressNextClickRef.current = false;
+      }, 0);
+    }
+    marqueeSelectionRef.current = null;
+    setSelectionRect(null);
+    window.removeEventListener("mousemove", updateMarqueeSelection);
+    window.removeEventListener("mouseup", finishMarqueeSelection);
+  }, [updateMarqueeSelection]);
+
+  useEffect(() => {
+    return () => {
+      window.removeEventListener("mousemove", updateMarqueeSelection);
+      window.removeEventListener("mouseup", finishMarqueeSelection);
+    };
+  }, [finishMarqueeSelection, updateMarqueeSelection]);
 
   // Reload when cwd changes
   useEffect(() => {
@@ -189,8 +278,14 @@ export default function FileTree({
       true,
     );
     setRoot(next);
+    setContextMenu(null);
     setRenamingPath(null);
     setPendingCreate(null);
+    setSelectedFilePaths(new Set());
+    setSelectionAnchorPath(null);
+    setSelectionRect(null);
+    marqueeSelectionRef.current = null;
+    rowElementsRef.current.clear();
     (async () => {
       const children = await loadDir(cwd);
       if (cancelled) return;
@@ -304,6 +399,10 @@ export default function FileTree({
   const beginRename = useCallback((entry: FsEntry) => {
     setContextMenu(null);
     setPendingCreate(null);
+    if (!entry.isDir) {
+      setSelectedFilePaths(new Set([entry.path]));
+      setSelectionAnchorPath(entry.path);
+    }
     setRenamingPath(entry.path);
   }, []);
 
@@ -327,6 +426,14 @@ export default function FileTree({
         const renamed = await window.spark.fs.renameFile({ path, newName: nextName });
         await refreshDir(parentPath(path));
         onRenameFile?.(path, renamed);
+        setSelectedFilePaths((prev) => {
+          if (!prev.has(path)) return prev;
+          const next = new Set(prev);
+          next.delete(path);
+          if (!renamed.isDir) next.add(renamed.path);
+          return next;
+        });
+        setSelectionAnchorPath((anchor) => (anchor === path ? renamed.path : anchor));
         setError(null);
       } catch (err) {
         setError((err as Error).message);
@@ -342,6 +449,8 @@ export default function FileTree({
     async (parentEntry: FsEntry, kind: "file" | "dir") => {
       setContextMenu(null);
       setRenamingPath(null);
+      setSelectedFilePaths(new Set());
+      setSelectionAnchorPath(null);
       // If user invoked from a dir, expand it so the placeholder is visible.
       if (parentEntry.isDir) {
         const node = findDir(rootRef.current, parentEntry.path);
@@ -382,16 +491,35 @@ export default function FileTree({
   );
 
   // Delete ----------------------------------------------------------------
-  const deleteEntry = useCallback(
-    async (entry: FsEntry) => {
+  const deleteEntries = useCallback(
+    async (entries: FsEntry[]) => {
+      const uniqueEntries = Array.from(
+        new Map(entries.map((entry) => [entry.path, entry])).values(),
+      );
+      const deletedPaths: string[] = [];
+      const parentPaths = new Set(uniqueEntries.map((entry) => parentPath(entry.path)));
       setContextMenu(null);
       try {
-        await window.spark.fs.deleteFile(entry.path);
-        await refreshDir(parentPath(entry.path));
-        onDeleteFile?.(entry.path);
+        for (const entry of uniqueEntries) {
+          await window.spark.fs.deleteFile(entry.path);
+          deletedPaths.push(entry.path);
+          onDeleteFile?.(entry.path);
+        }
         setError(null);
       } catch (err) {
         setError((err as Error).message);
+      } finally {
+        await Promise.allSettled(Array.from(parentPaths).map((path) => refreshDir(path)));
+        if (deletedPaths.length > 0) {
+          setSelectedFilePaths((prev) => {
+            const next = new Set(prev);
+            for (const path of deletedPaths) next.delete(path);
+            return next;
+          });
+          setSelectionAnchorPath((anchor) =>
+            anchor && deletedPaths.includes(anchor) ? null : anchor,
+          );
+        }
       }
     },
     [onDeleteFile, refreshDir],
@@ -400,20 +528,18 @@ export default function FileTree({
   // Stable per-row handlers --------------------------------------------------
   // Every visible node renders one `<Row>`. `Row` is wrapped in `React.memo`,
   // but memo only pays off if its props are referentially stable across
-  // renders. Previously each `Row` received fresh inline arrows
-  // (`onToggle`, `onCommitRename`, `onContextMenu`), so memo could never skip
-  // a render and an unrelated App state change (workspace color edit, run
-  // event) re-rendered the entire tree. These `useCallback`s take the node /
-  // path as an argument instead, so the function identities never change and
-  // `Row` invokes them itself with its own node.
-  const handleToggle = useCallback(
-    (node: Node) => {
-      if (node.kind === "dir") void toggleDir(node);
-    },
-    [toggleDir],
-  );
-
+  // renders. Previously each `Row` received fresh inline arrows, so memo could
+  // never skip a render and unrelated App state changes repainted the entire
+  // tree. These `useCallback`s take the node / path as an argument instead, so
+  // the function identities stay stable and `Row` invokes them with its node.
   const handleContextMenu = useCallback((entry: FsEntry, x: number, y: number) => {
+    if (entry.isDir) {
+      setSelectedFilePaths(new Set());
+      setSelectionAnchorPath(null);
+    } else if (!selectedFilePathsRef.current.has(entry.path)) {
+      setSelectedFilePaths(new Set([entry.path]));
+      setSelectionAnchorPath(entry.path);
+    }
     setContextMenu({ entry, x, y });
   }, []);
 
@@ -422,6 +548,82 @@ export default function FileTree({
       void commitRename(path, value);
     },
     [commitRename],
+  );
+
+  const handleRowClick = useCallback(
+    (node: Node, event: React.MouseEvent) => {
+      if (suppressNextClickRef.current) {
+        suppressNextClickRef.current = false;
+        event.preventDefault();
+        return;
+      }
+
+      if (node.kind === "dir") {
+        void toggleDir(node);
+        if (!event.ctrlKey && !event.metaKey && !event.shiftKey) {
+          setSelectedFilePaths(new Set());
+          setSelectionAnchorPath(null);
+        }
+        return;
+      }
+
+      const path = node.entry.path;
+      const toggleSelection = event.ctrlKey || event.metaKey;
+      if (event.shiftKey) {
+        const anchorPath = selectionAnchorPathRef.current ?? path;
+        const range = fileRange(flatRef.current, anchorPath, path);
+        setSelectedFilePaths((prev) => {
+          const next = toggleSelection ? new Set(prev) : new Set<string>();
+          for (const selectedPath of range) next.add(selectedPath);
+          return next;
+        });
+        if (!selectionAnchorPathRef.current) setSelectionAnchorPath(path);
+        return;
+      }
+
+      if (toggleSelection) {
+        setSelectedFilePaths((prev) => {
+          const next = new Set(prev);
+          if (next.has(path)) next.delete(path);
+          else next.add(path);
+          return next;
+        });
+        setSelectionAnchorPath(path);
+        return;
+      }
+
+      setSelectedFilePaths(new Set([path]));
+      setSelectionAnchorPath(path);
+      onOpenFile(node.entry);
+    },
+    [onOpenFile, toggleDir],
+  );
+
+  const handleListMouseDown = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (event.button !== 0 || renamingPath) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.closest("button, input, textarea, [contenteditable='true']")
+      ) {
+        return;
+      }
+      setContextMenu(null);
+      marqueeSelectionRef.current = {
+        startX: event.clientX,
+        startY: event.clientY,
+        currentX: event.clientX,
+        currentY: event.clientY,
+        additive: event.ctrlKey || event.metaKey,
+        baseSelection: new Set(selectedFilePathsRef.current),
+        active: false,
+      };
+      window.removeEventListener("mousemove", updateMarqueeSelection);
+      window.removeEventListener("mouseup", finishMarqueeSelection);
+      window.addEventListener("mousemove", updateMarqueeSelection);
+      window.addEventListener("mouseup", finishMarqueeSelection, { once: true });
+    },
+    [finishMarqueeSelection, renamingPath, updateMarqueeSelection],
   );
 
   // Re-flatten on every render. We mutate root.children in place and bump
@@ -453,27 +655,45 @@ export default function FileTree({
     }
     return rows;
   })();
+  flatRef.current = flat;
+  const selectedFileEntries = fileEntriesForPaths(flat, selectedFilePaths);
+  const contextMenuEntries =
+    contextMenu && !contextMenu.entry.isDir && selectedFilePaths.has(contextMenu.entry.path)
+      ? selectedFileEntries.length > 0
+        ? selectedFileEntries
+        : [contextMenu.entry]
+      : contextMenu
+        ? [contextMenu.entry]
+        : [];
 
   // Workspace-level actions
   const newFileAtRoot = useCallback(async () => {
     setRenamingPath(null);
+    setSelectedFilePaths(new Set());
+    setSelectionAnchorPath(null);
     setPendingCreate({ parentPath: cwd, kind: "file" });
   }, [cwd]);
   const newFolderAtRoot = useCallback(async () => {
     setRenamingPath(null);
+    setSelectedFilePaths(new Set());
+    setSelectionAnchorPath(null);
     setPendingCreate({ parentPath: cwd, kind: "dir" });
   }, [cwd]);
   const refreshWorkspace = useCallback(async () => {
     await refreshDir(cwd);
   }, [cwd, refreshDir]);
 
-  // Handle F2 (rename) when an entry is "active"
+  // Handle F2 (rename) when a single file is selected, otherwise the active entry.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "F2" || !activePath) return;
+      if (e.key !== "F2") return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-      const entry = findEntry(rootRef.current, activePath);
+      const selectedPath =
+        selectedFilePaths.size === 1 ? Array.from(selectedFilePaths)[0] : null;
+      const renamePath = selectedPath ?? activePath;
+      if (!renamePath) return;
+      const entry = findEntry(rootRef.current, renamePath);
       if (entry) {
         e.preventDefault();
         beginRename(entry.entry);
@@ -481,12 +701,12 @@ export default function FileTree({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [activePath, beginRename]);
+  }, [activePath, beginRename, selectedFilePaths]);
 
   // Keep the active node scrolled into view. With the list virtualized the
-  // selected row may not be mounted at all (it scrolled off, or was opened
-  // from search), so we drive Virtuoso's imperative API. `scrollIntoView`
-  // is a no-op when the row is already on screen, so this stays cheap.
+  // active row may not be mounted at all (it scrolled off, or was opened from
+  // search), so we drive Virtuoso's imperative API. `scrollIntoView` is a no-op
+  // when the row is already on screen, so this stays cheap.
   useEffect(() => {
     if (!activePath) return;
     const index = flat.findIndex(
@@ -517,18 +737,24 @@ export default function FileTree({
         {...headerDrag}
         meta={
           <span
-            title={cwd}
+            title={
+              selectedFileEntries.length > 1
+                ? `${selectedFileEntries.length} files selected`
+                : cwd
+            }
             style={{
               fontFamily: "var(--font-mono)",
               fontSize: 10,
-              color: "var(--muted)",
+              color: selectedFileEntries.length > 1 ? "var(--accent)" : "var(--muted)",
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
               maxWidth: 132,
             }}
           >
-            {basename(cwd)}
+            {selectedFileEntries.length > 1
+              ? `${selectedFileEntries.length} selected`
+              : basename(cwd)}
           </span>
         }
         actions={
@@ -585,7 +811,17 @@ export default function FileTree({
         passed to `Row` are all referentially stable, so `Row`'s
         `React.memo` skips re-rendering rows whose own data did not change.
       */}
-      <div style={{ flex: 1, minHeight: 0 }}>
+      <div
+        ref={listViewportRef}
+        onMouseDown={handleListMouseDown}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          position: "relative",
+          overflow: "hidden",
+          userSelect: selectionRect ? "none" : undefined,
+        }}
+      >
         <Virtuoso
           ref={virtuosoRef}
           style={{ height: "100%", width: "100%" }}
@@ -607,14 +843,20 @@ export default function FileTree({
                 />
               );
             }
+            const dirNode = row.node.kind === "dir" ? row.node : null;
             return (
               <Row
                 node={row.node}
                 depth={row.depth}
                 active={row.node.entry.path === activePath}
+                selected={!row.node.entry.isDir && selectedFilePaths.has(row.node.entry.path)}
+                dirOpen={Boolean(dirNode?.open)}
+                dirLoading={Boolean(dirNode?.loading)}
+                dirLoaded={Boolean(dirNode?.loaded)}
+                dirError={dirNode?.error}
                 renaming={renamingPath === row.node.entry.path}
-                onToggle={handleToggle}
-                onOpenFile={onOpenFile}
+                onRowClick={handleRowClick}
+                onRowElement={updateRowElement}
                 onContextMenu={handleContextMenu}
                 onCommitRename={handleCommitRename}
                 onCancelRename={cancelRename}
@@ -622,14 +864,33 @@ export default function FileTree({
             );
           }}
         />
+        {selectionRect && (
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              zIndex: 20,
+              left: selectionRect.left,
+              top: selectionRect.top,
+              width: selectionRect.width,
+              height: selectionRect.height,
+              border: "1px solid var(--accent-edge)",
+              borderRadius: 3,
+              background: "color-mix(in oklch, var(--accent) 11%, transparent)",
+              boxShadow: "inset 0 0 0 1px color-mix(in oklch, var(--accent) 18%, transparent)",
+              pointerEvents: "none",
+            }}
+          />
+        )}
       </div>
         </>
       )}
       {contextMenu && (
         <FileMenu
           menu={contextMenu}
+          entries={contextMenuEntries}
           onRunPlan={
-            onRunPlan && isRunnablePlan(contextMenu.entry)
+            onRunPlan && contextMenuEntries.length === 1 && isRunnablePlan(contextMenu.entry)
               ? () => {
                   const entry = contextMenu.entry;
                   setContextMenu(null);
@@ -638,12 +899,17 @@ export default function FileTree({
               : null
           }
           onOpen={
-            contextMenu.entry.isDir
+            contextMenuEntries.some((entry) => entry.isDir)
               ? null
               : () => {
                   setContextMenu(null);
-                  onOpenFile(contextMenu.entry);
+                  for (const entry of contextMenuEntries) onOpenFile(entry);
                 }
+          }
+          openLabel={
+            contextMenuEntries.length > 1
+              ? `Open ${contextMenuEntries.length} files`
+              : "Open"
           }
           onNewFile={() => {
             const entry = contextMenu.entry;
@@ -655,20 +921,34 @@ export default function FileTree({
             setContextMenu(null);
             void beginCreate(entry, "dir");
           }}
-          onRename={() => beginRename(contextMenu.entry)}
-          onReveal={async () => {
-            const entry = contextMenu.entry;
-            const path = entry.path;
-            setContextMenu(null);
-            try {
-              if (isPreviewFile(entry)) await window.spark.openExternal(filePathToBrowserUrl(path));
-              else await window.spark.fs.revealInOS(path);
-            } catch (err) {
-              setError((err as Error).message);
-            }
-          }}
+          onRename={
+            contextMenuEntries.length === 1 ? () => beginRename(contextMenu.entry) : null
+          }
+          onReveal={
+            contextMenuEntries.length === 1
+              ? async () => {
+                  const entry = contextMenu.entry;
+                  const path = entry.path;
+                  setContextMenu(null);
+                  try {
+                    if (isPreviewFile(entry)) {
+                      await window.spark.openExternal(filePathToBrowserUrl(path));
+                    } else {
+                      await window.spark.fs.revealInOS(path);
+                    }
+                  } catch (err) {
+                    setError((err as Error).message);
+                  }
+                }
+              : null
+          }
           revealLabel={isPreviewFile(contextMenu.entry) ? "Open in Preview" : "Reveal in OS"}
-          onDelete={() => void deleteEntry(contextMenu.entry)}
+          onDelete={() => void deleteEntries(contextMenuEntries)}
+          deleteLabel={
+            contextMenuEntries.length > 1
+              ? `Delete ${contextMenuEntries.length} files`
+              : "Delete"
+          }
         />
       )}
     </div>
@@ -687,6 +967,61 @@ function flatten(node: Node, depth: number): FlatRow[] {
     }
   }
   return out;
+}
+
+function visibleFileRows(rows: FlatRow[]): Array<{ path: string; entry: FsEntry }> {
+  return rows.flatMap((row) =>
+    row.kind === "node" && row.node.kind === "file"
+      ? [{ path: row.node.entry.path, entry: row.node.entry }]
+      : [],
+  );
+}
+
+function fileRange(rows: FlatRow[], anchorPath: string, targetPath: string): string[] {
+  const paths = visibleFileRows(rows).map((row) => row.path);
+  const anchorIndex = paths.indexOf(anchorPath);
+  const targetIndex = paths.indexOf(targetPath);
+  if (anchorIndex === -1 || targetIndex === -1) return [targetPath];
+  const start = Math.min(anchorIndex, targetIndex);
+  const end = Math.max(anchorIndex, targetIndex);
+  return paths.slice(start, end + 1);
+}
+
+function fileEntriesForPaths(rows: FlatRow[], paths: Set<string>): FsEntry[] {
+  if (paths.size === 0) return [];
+  return visibleFileRows(rows)
+    .filter((row) => paths.has(row.path))
+    .map((row) => row.entry);
+}
+
+function rectFromPoints(x1: number, y1: number, x2: number, y2: number): SelectionRect {
+  const left = Math.min(x1, x2);
+  const top = Math.min(y1, y2);
+  return {
+    left,
+    top,
+    width: Math.abs(x2 - x1),
+    height: Math.abs(y2 - y1),
+  };
+}
+
+function rectRelativeToViewport(rect: SelectionRect, viewport: DOMRect): SelectionRect {
+  const left = Math.max(0, rect.left - viewport.left);
+  const top = Math.max(0, rect.top - viewport.top);
+  const right = Math.min(viewport.width, rect.left + rect.width - viewport.left);
+  const bottom = Math.min(viewport.height, rect.top + rect.height - viewport.top);
+  return {
+    left,
+    top,
+    width: Math.max(0, right - left),
+    height: Math.max(0, bottom - top),
+  };
+}
+
+function rectsIntersect(a: SelectionRect, b: DOMRect): boolean {
+  const aRight = a.left + a.width;
+  const aBottom = a.top + a.height;
+  return a.left <= b.right && aRight >= b.left && a.top <= b.bottom && aBottom >= b.top;
 }
 
 function makeDir(entry: FsEntry, open = false): DirNode & { kind: "dir" } {
@@ -795,9 +1130,14 @@ interface RowProps {
   node: Node;
   depth: number;
   active: boolean;
+  selected: boolean;
+  dirOpen: boolean;
+  dirLoading: boolean;
+  dirLoaded: boolean;
+  dirError?: string;
   renaming: boolean;
-  onToggle: (node: Node) => void;
-  onOpenFile: (entry: FsEntry) => void;
+  onRowClick: (node: Node, event: React.MouseEvent) => void;
+  onRowElement: (path: string, element: HTMLDivElement | null) => void;
   onContextMenu: (entry: FsEntry, x: number, y: number) => void;
   onCommitRename: (path: string, value: string) => void;
   onCancelRename: () => void;
@@ -806,36 +1146,27 @@ interface RowProps {
 // Custom equality for `Row`'s `React.memo`.
 //
 // A plain shallow compare is NOT enough here: the tree mutates `DirNode`
-// objects *in place* (`open`, `loading`, `loaded`, `error` flip on the same
-// reference) and only bumps a `force()` counter to re-render. A shallow
-// `prevProps.node === nextProps.node` would therefore be `true` after a
-// folder is expanded and the row's own chevron / spinner would never update.
-// So we compare the mutable directory fields explicitly. Everything else
-// (callbacks, `onOpenFile`) is referentially stable by construction.
+// objects in place and only bumps a `force()` counter to re-render. The scalar
+// directory props below snapshot the mutable fields so expand / load state
+// changes still pierce memoization. Everything else is referentially stable by
+// construction.
 function rowPropsEqual(prev: RowProps, next: RowProps): boolean {
-  if (
+  return !(
     prev.node !== next.node ||
     prev.depth !== next.depth ||
     prev.active !== next.active ||
+    prev.selected !== next.selected ||
+    prev.dirOpen !== next.dirOpen ||
+    prev.dirLoading !== next.dirLoading ||
+    prev.dirLoaded !== next.dirLoaded ||
+    prev.dirError !== next.dirError ||
     prev.renaming !== next.renaming ||
-    prev.onToggle !== next.onToggle ||
-    prev.onOpenFile !== next.onOpenFile ||
+    prev.onRowClick !== next.onRowClick ||
+    prev.onRowElement !== next.onRowElement ||
     prev.onContextMenu !== next.onContextMenu ||
     prev.onCommitRename !== next.onCommitRename ||
     prev.onCancelRename !== next.onCancelRename
-  ) {
-    return false;
-  }
-  // Same node reference — re-check the fields that get mutated in place so an
-  // expand / collapse / load still re-renders this row.
-  if (next.node.kind === "dir") {
-    const p = prev.node as DirNode;
-    const n = next.node as DirNode;
-    if (p.open !== n.open || p.loading !== n.loading || p.loaded !== n.loaded || p.error !== n.error) {
-      return false;
-    }
-  }
-  return true;
+  );
 }
 
 // `React.memo`: the tree renders one `Row` per visible node, so without
@@ -848,32 +1179,46 @@ const Row = React.memo(function Row({
   node,
   depth,
   active,
+  selected,
+  dirOpen,
+  dirLoading,
   renaming,
-  onToggle,
-  onOpenFile,
+  onRowClick,
+  onRowElement,
   onContextMenu,
   onCommitRename,
   onCancelRename,
 }: RowProps) {
   const isDir = node.kind === "dir";
   const [hover, setHover] = useState(false);
-  const dirNode = isDir ? (node as DirNode & { kind: "dir" }) : null;
   const rowPaddingLeft = BASE_LEFT + depth * INDENT_STEP;
-  const background = active
-    ? "color-mix(in oklch, var(--ink) 9%, transparent)"
-    : hover
-      ? "color-mix(in oklch, var(--ink) 4%, transparent)"
-      : "transparent";
+  const background = selected
+    ? active
+      ? "color-mix(in oklch, var(--accent) 18%, transparent)"
+      : "color-mix(in oklch, var(--accent) 12%, transparent)"
+    : active
+      ? "color-mix(in oklch, var(--ink) 9%, transparent)"
+      : hover
+        ? "color-mix(in oklch, var(--ink) 4%, transparent)"
+        : "transparent";
+  const rowShadow = selected
+    ? "inset 0 0 0 1px color-mix(in oklch, var(--accent) 38%, transparent)"
+    : active
+      ? "inset 0 0 0 1px color-mix(in oklch, var(--ink) 10%, transparent)"
+      : "none";
 
   // Stable wrappers so this row invokes the shared parent handlers with its
-  // own node / path. These close over `node` (and `onToggle` etc.), so they
-  // change only when this row's own data changes — which is also the only
-  // time `React.memo` lets the row re-render.
-  const handleClick = renaming
-    ? undefined
-    : isDir
-      ? () => onToggle(node)
-      : () => onOpenFile(node.entry);
+  // own node / path. These close over `node`, so they change only when this
+  // row's own data changes, which is also the only time `React.memo` lets the
+  // row re-render.
+  const handleClick = renaming ? undefined : (event: React.MouseEvent) => onRowClick(node, event);
+  const handleMouseEnter = () => setHover(true);
+  const handleRowRef = useCallback(
+    (element: HTMLDivElement | null) => {
+      if (!isDir) onRowElement(node.entry.path, element);
+    },
+    [isDir, node.entry.path, onRowElement],
+  );
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -883,15 +1228,20 @@ const Row = React.memo(function Row({
 
   return (
     <div
+      ref={handleRowRef}
       onClick={handleClick}
       onContextMenu={handleContextMenu}
-      onMouseEnter={() => setHover(true)}
+      onMouseEnter={handleMouseEnter}
       onMouseLeave={() => setHover(false)}
+      aria-selected={selected || active}
       style={{
         ...ROW_STYLE_BASE,
         padding: `0 8px 0 ${rowPaddingLeft}px`,
         background,
-        color: active ? "var(--ink)" : "var(--ink-dim)",
+        color: selected || active ? "var(--ink)" : "var(--ink-dim)",
+        boxShadow: rowShadow,
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       {Array.from({ length: depth }, (_, i) => (
@@ -906,10 +1256,10 @@ const Row = React.memo(function Row({
       ))}
 
       <span aria-hidden style={CHEVRON_CELL_STYLE}>
-        {isDir && <ChevronIcon open={Boolean(dirNode?.open)} />}
+        {isDir && <ChevronIcon open={dirOpen} />}
       </span>
 
-      <FileNodeIcon name={node.entry.name} isDir={isDir} isOpen={Boolean(dirNode?.open)} />
+      <FileNodeIcon name={node.entry.name} isDir={isDir} isOpen={dirOpen} />
 
       {renaming ? (
         <InlineInput
@@ -921,42 +1271,57 @@ const Row = React.memo(function Row({
         <span
           style={{
             ...ROW_LABEL_STYLE,
-            color: active ? "var(--ink)" : "var(--ink-dim)",
+            color: selected || active ? "var(--ink)" : "var(--ink-dim)",
           }}
           title={node.entry.path}
         >
           {node.entry.name}
         </span>
       )}
-      {isDir && dirNode?.loading && <span style={ROW_LOADING_STYLE}>…</span>}
+      {isDir && dirLoading && <span style={ROW_LOADING_STYLE}>…</span>}
     </div>
   );
 }, rowPropsEqual);
 
 function FileMenu({
   menu,
+  entries,
   onRunPlan,
   onOpen,
+  openLabel,
   onNewFile,
   onNewFolder,
   onRename,
   onReveal,
   revealLabel,
   onDelete,
+  deleteLabel,
 }: {
   menu: FileContextMenu;
+  entries: FsEntry[];
   onRunPlan: (() => void) | null;
   onOpen: (() => void) | null;
+  openLabel: string;
   onNewFile: () => void;
   onNewFolder: () => void;
-  onRename: () => void;
-  onReveal: () => void;
+  onRename: (() => void) | null;
+  onReveal: (() => void) | null;
   revealLabel: string;
   onDelete: () => void;
+  deleteLabel: string;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const x = Math.min(menu.x, window.innerWidth - 236);
   const y = Math.min(menu.y, window.innerHeight - 280);
+  const multiple = entries.length > 1;
+  const headerTitle = multiple ? `${entries.length} files selected` : menu.entry.name;
+  const headerMeta = multiple
+    ? "multiple selection"
+    : menu.entry.isDir
+      ? "folder"
+      : menu.entry.ext
+        ? `${menu.entry.ext.toUpperCase()} file`
+        : "file";
 
   // Reset confirm state if user mouse-leaves the menu briefly.
   return (
@@ -990,10 +1355,13 @@ function FileMenu({
           marginBottom: 4,
         }}
       >
-        <FileNodeIcon name={menu.entry.name} isDir={menu.entry.isDir} />
+        <FileNodeIcon
+          name={multiple ? "" : menu.entry.name}
+          isDir={!multiple && menu.entry.isDir}
+        />
         <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
           <span
-            title={menu.entry.name}
+            title={headerTitle}
             style={{
               color: "var(--ink)",
               fontSize: 11,
@@ -1003,10 +1371,10 @@ function FileMenu({
               whiteSpace: "nowrap",
             }}
           >
-            {menu.entry.name}
+            {headerTitle}
           </span>
           <span style={{ color: "var(--muted)", fontSize: 9 }}>
-            {menu.entry.isDir ? "folder" : menu.entry.ext ? `${menu.entry.ext.toUpperCase()} file` : "file"}
+            {headerMeta}
           </span>
         </div>
       </div>
@@ -1018,12 +1386,16 @@ function FileMenu({
           <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
         </>
       )}
-      {onOpen && <MenuButton icon="O" onClick={onOpen} hint="Enter">Open</MenuButton>}
+      {onOpen && (
+        <MenuButton icon="O" onClick={onOpen} hint={multiple ? undefined : "Enter"}>
+          {openLabel}
+        </MenuButton>
+      )}
       <MenuButton icon="N" onClick={onNewFile}>New File</MenuButton>
       <MenuButton icon="F" onClick={onNewFolder}>New Folder</MenuButton>
       <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
-      <MenuButton icon="R" onClick={onRename}>Rename</MenuButton>
-      <MenuButton icon="V" onClick={onReveal}>{revealLabel}</MenuButton>
+      {onRename && <MenuButton icon="R" onClick={onRename}>Rename</MenuButton>}
+      {onReveal && <MenuButton icon="V" onClick={onReveal}>{revealLabel}</MenuButton>}
       <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
       <MenuButton
         icon="D"
@@ -1033,7 +1405,7 @@ function FileMenu({
           else setConfirmDelete(true);
         }}
       >
-        {confirmDelete ? "Click again to confirm" : "Delete"}
+        {confirmDelete ? "Click again to confirm" : deleteLabel}
       </MenuButton>
     </div>
   );

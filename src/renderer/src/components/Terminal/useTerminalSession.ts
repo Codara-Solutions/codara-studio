@@ -66,7 +66,7 @@ interface Options {
   // restores the main screen. `runtime` is best-effort sniffed from
   // surrounding banner text; `null` means the TUI started but we couldn't
   // identify which one.
-  onAgentState?: (state: { runtime: "claude" | "codex" | null; running: boolean }) => void;
+  onAgentState?: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
 }
 
 export interface TerminalSessionApi {
@@ -169,6 +169,44 @@ export function useTerminalSession({
         }),
       );
 
+      // Standard terminal copy/paste keybindings. Ctrl+Shift+C copies the
+      // current xterm selection to the system clipboard; with no selection we
+      // fall through (return true) so plain Ctrl+C semantics — SIGINT to the
+      // running process — are unaffected. Ctrl+Shift+V reads the clipboard and
+      // writes it to the PTY wrapped in bracketed-paste markers so multi-line
+      // content arrives as literal text without the shell auto-executing each
+      // line. Null bytes are stripped because most shells reject them and some
+      // terminals (ConPTY especially) corrupt the byte stream around them.
+      term.attachCustomKeyEventHandler((event) => {
+        if (event.type !== "keydown") return true;
+        if (!event.ctrlKey || !event.shiftKey || event.altKey || event.metaKey) {
+          return true;
+        }
+        const key = event.key;
+        if (key === "C" || key === "c") {
+          const selection = term.getSelection();
+          if (!selection) return true; // no selection → let Ctrl+C through
+          void window.spark.clipboard.writeText(selection);
+          return false;
+        }
+        if (key === "V" || key === "v") {
+          void (async () => {
+            const text = await window.spark.clipboard.readText();
+            if (!text) return;
+            const sanitized = text.replace(/\x00/g, "");
+            if (!sanitized) return;
+            // Bracketed paste: wrap with `\x1b[200~ ... \x1b[201~` so the shell
+            // (when it has bracketed-paste mode enabled — pwsh/PSReadLine,
+            // bash, zsh, fish all do by default) treats the chunk as a single
+            // pasted block instead of executing on every embedded newline.
+            const payload = `\x1b[200~${sanitized}\x1b[201~`;
+            void window.spark.pty.write(sessionId, payload);
+          })();
+          return false;
+        }
+        return true;
+      });
+
       term.open(container.current);
       const restoredScrollback = initialScrollback?.trimEnd();
       if (restoredScrollback) {
@@ -227,7 +265,7 @@ export function useTerminalSession({
       const agentDecoder = new TextDecoder("utf-8", { fatal: false });
       let agentTextRing = "";
       let agentPhase: "idle" | "agent" = "idle";
-      const setAgentRunning = (runtime: "claude" | "codex") => {
+      const setAgentRunning = (runtime: "claude" | "codex" | "cursor") => {
         if (agentPhase === "agent") return;
         agentPhase = "agent";
         onAgentStateRef.current?.({ runtime, running: true });
@@ -258,6 +296,13 @@ export function useTerminalSession({
             exe?.endsWith("\\codex")
           ) {
             setAgentRunning("codex");
+          } else if (
+            exe === "agent" ||
+            exe?.endsWith("/agent") ||
+            exe?.endsWith("\\agent")
+          ) {
+            // Cursor's CLI ships as the `agent` binary.
+            setAgentRunning("cursor");
           }
           return false;
         }
@@ -561,7 +606,7 @@ function containsSchemeSeparator(bytes: Uint8Array): boolean {
   return false;
 }
 
-// CSI / OSC stripper. Ink (Claude / Codex) often positions individual
+// CSI / OSC stripper. Ink (Claude / Codex / Cursor) often positions individual
 // characters with cursor moves, so a banner like "Claude Code v2.1.139"
 // arrives in the raw byte stream as `C\x1b[H l\x1b[H a…` and a literal
 // regex against the unstripped text would never match. Stripping the
@@ -576,11 +621,13 @@ const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 // launch banners do:
 //   - Codex:  `OpenAI Codex (v0.130.0)`
 //   - Claude: `Claude Code v2.1.139`
+//   - Cursor: `Cursor Agent (composer-2.5-fast)` / `Cursor CLI v…`
 // Returns null when nothing matched so the caller leaves the pane alone.
-function sniffRuntime(text: string): "claude" | "codex" | null {
+function sniffRuntime(text: string): "claude" | "codex" | "cursor" | null {
   const stripped = text.replace(CSI_RE, "").replace(OSC_RE, "");
   if (/OpenAI Codex\s*\(?v?\d/.test(stripped)) return "codex";
   if (/Claude Code\s+v?\d/.test(stripped)) return "claude";
+  if (/Cursor\s+(?:Agent|CLI)/i.test(stripped)) return "cursor";
   return null;
 }
 

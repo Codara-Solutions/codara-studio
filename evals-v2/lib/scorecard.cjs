@@ -62,7 +62,37 @@ function buildScorecard(results) {
     medianTimeToFirstWorker: round(
       median(list.map((r) => r.telemetry.timeToFirstWorkerSeconds).filter((v) => v !== null)),
     ),
+    runtimeMix: aggregateRuntimeMix(list),
   }));
+}
+
+// Sum the per-worker runtime breakdown across a variant's runs, so the
+// scorecard shows how often the manager actually routed to claude vs codex
+// vs cursor. The "cursor" runtime (CLI binary `agent`, model
+// composer-2.5-fast) was added as a third worker option, so it gets a
+// pre-allocated 0 bucket alongside claude and codex to keep the breakdown
+// shape stable across runs.
+const KNOWN_RUNTIMES = ["claude", "codex", "cursor"];
+
+function emptyRuntimeMix() {
+  return {
+    implementer: Object.fromEntries(KNOWN_RUNTIMES.map((rt) => [rt, 0])),
+    verifier: Object.fromEntries(KNOWN_RUNTIMES.map((rt) => [rt, 0])),
+    total: Object.fromEntries(KNOWN_RUNTIMES.map((rt) => [rt, 0])),
+  };
+}
+
+function aggregateRuntimeMix(list) {
+  const mix = emptyRuntimeMix();
+  for (const result of list) {
+    const breakdown = result.telemetry?.runtimeBreakdown || {};
+    for (const role of ["implementer", "verifier", "total"]) {
+      for (const [runtime, count] of Object.entries(breakdown[role] || {})) {
+        mix[role][runtime] = (mix[role][runtime] || 0) + count;
+      }
+    }
+  }
+  return mix;
 }
 
 function round(value) {

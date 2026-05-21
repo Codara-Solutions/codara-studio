@@ -55,11 +55,12 @@ export interface SparkManagerDecision {
   status: "run_workers" | "ask_user" | "complete" | "spawn_terminals";
   summary: string;
   question?: string;
+  questionOptions?: SparkManagerQuestionOption[];
   steps: SparkManagerStepDecision[];
   tasks: SparkManagerTaskDecision[];
   /**
    * Set by plan_analysis on the first manager call. Drives downstream
-   * verifier depth (trivial=0, standard=1, complex=2) and the step cap.
+   * verifier depth (trivial=1, standard=1, complex=2) and the step cap.
    * Optional on later modes — those propagate the persisted RunState value.
    */
   taskComplexity?: TaskComplexity;
@@ -79,7 +80,7 @@ export interface SparkManagerDecision {
 }
 
 export interface SparkManagerTerminalRequest {
-  runtime: "claude" | "codex";
+  runtime: "claude" | "codex" | "cursor";
   count: number;
   model?: string;
   effort?: string;
@@ -119,7 +120,15 @@ export interface OpenRouterMessage {
   content: string | OpenRouterContentPart[];
 }
 
-export type OpenRouterManagerMode = "plan_analysis" | "step_planning" | "worker_result_review";
+export interface SparkManagerQuestionOption {
+  id: string;
+  label: string;
+  description: string;
+  answer: string;
+  recommended?: boolean;
+}
+
+export type OpenRouterManagerMode = "plan_analysis" | "chat" | "step_planning" | "worker_result_review";
 
 export interface OpenRouterManagerRequest {
   model: string;
@@ -172,7 +181,7 @@ const DEFAULT_STRUCTURED_OUTPUT_FALLBACK_MODEL = "openai/gpt-4o-mini";
 const SPARK_MANAGER_DECISION_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["status", "summary", "question", "chatReply", "steps", "tasks", "taskComplexity", "terminals"],
+  required: ["status", "summary", "question", "questionOptions", "chatReply", "steps", "tasks", "taskComplexity", "terminals"],
   properties: {
     status: {
       type: "string",
@@ -188,6 +197,38 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
       type: "string",
       description: "Concise question for the human. Empty unless status is ask_user.",
     },
+    questionOptions: {
+      type: "array",
+      description:
+        "Exactly three answer choices when status=ask_user, otherwise []. Mark exactly one recommended=true. The UI adds a fourth custom text answer.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "label", "description", "answer", "recommended"],
+        properties: {
+          id: {
+            type: "string",
+            description: "Stable short id such as option_a, option_b, option_c.",
+          },
+          label: {
+            type: "string",
+            description: "Short option label, 1-5 words.",
+          },
+          description: {
+            type: "string",
+            description: "One sentence explaining the impact/tradeoff.",
+          },
+          answer: {
+            type: "string",
+            description: "Full answer text Spark should treat as the user's response if selected.",
+          },
+          recommended: {
+            type: "boolean",
+            description: "true for exactly one option, preferably the safest practical default.",
+          },
+        },
+      },
+    },
     chatReply: {
       type: "string",
       description:
@@ -197,7 +238,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
       type: "string",
       enum: ["trivial", "standard", "complex", ""],
       description:
-        "Required during plan_analysis: classify the WHOLE RUN's complexity. Drives verifier depth (trivial=0, standard=1, complex=2 peer verifiers) and the step cap. trivial: single-module fix, ≤3 atomic acceptance criteria, no public API touch (max 2 worker_batch steps, no recon, no skeleton). standard: multi-file change OR public API touch with clear scope (max 3-4 steps). complex: subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics (no step cap). Bias toward standard on uncertainty — false-trivial costs one redo via cascade, false-complex burns 9 workers. Empty string \"\" allowed only on step_planning / worker_result_review modes (those propagate the persisted classification).",
+        "Required during plan_analysis: classify the WHOLE RUN's complexity. Drives verifier depth (trivial=1, standard=1, complex=2 peer verifiers) and the step cap. trivial: single-module fix, ≤3 atomic acceptance criteria, no public API touch (max 2 worker_batch steps, no recon, no skeleton). standard: multi-file change OR public API touch with clear scope (max 3-4 steps). complex: subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics (no step cap). Every tier gets at least one verifier follow-up; trivial vs standard differ only in scope and step cap, not in whether work is verified. Bias toward standard on uncertainty — false-complex burns 9 workers. Empty string \"\" allowed only on step_planning / worker_result_review modes (those propagate the persisted classification).",
     },
     terminals: {
       type: "array",
@@ -210,7 +251,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
         properties: {
           runtime: {
             type: "string",
-            enum: ["claude", "codex"],
+            enum: ["claude", "codex", "cursor"],
             description: "Which agent CLI runs in the terminal.",
           },
           count: {
@@ -257,7 +298,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
               properties: {
                 label: { type: "string" },
                 summary: { type: "string" },
-                runtimePreference: { type: "string", enum: ["claude", "codex", "manual", "shell"] },
+                runtimePreference: { type: "string", enum: ["claude", "codex", "cursor", "manual", "shell"] },
                 modelHint: { type: "string" },
                 effortHint: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh"] },
                 taskClass: {
@@ -299,7 +340,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
           stepIndex: { type: "integer", minimum: 0 },
           title: { type: "string" },
           description: { type: "string" },
-          runtimePreference: { type: "string", enum: ["claude", "codex", "manual", "shell"] },
+          runtimePreference: { type: "string", enum: ["claude", "codex", "cursor", "manual", "shell"] },
           modelHint: { type: "string" },
           effortHint: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh"] },
           allowedPaths: {
@@ -361,6 +402,7 @@ export function buildOpenRouterManagerRequest(input: {
   mode?: OpenRouterManagerMode;
   workerReports?: SparkManagerWorkerReportContext[];
   availableRuntimes?: AgentRuntimeDiagnostic[];
+  agentSyncContext?: string;
   promptProfile?: ReturnType<typeof loadManagerPromptProfile>;
 }): OpenRouterManagerRequest {
   const mode = input.mode ?? "step_planning";
@@ -381,6 +423,7 @@ export function buildOpenRouterManagerRequest(input: {
     recentMessages,
     workerReports: input.workerReports,
     availableRuntimes: input.availableRuntimes,
+    agentSyncContext: input.agentSyncContext,
     promptProfile,
     activePlanText: activePlan?.rawContent || activePlan?.summary || "No plan content was provided.",
   });
@@ -438,13 +481,15 @@ interface ManagerUserMessageInput {
   recentMessages: Array<{ author: string; kind: string; message: string; attachments: string[] }>;
   workerReports: SparkManagerWorkerReportContext[] | undefined;
   availableRuntimes: AgentRuntimeDiagnostic[] | undefined;
+  agentSyncContext?: string;
   promptProfile: ManagerPromptProfile;
   activePlanText: string;
 }
 
 function buildManagerUserMessage(input: ManagerUserMessageInput): string {
-  const { mode, cwd, run, recentMessages, workerReports, availableRuntimes, promptProfile, activePlanText } = input;
+  const { mode, cwd, run, recentMessages, workerReports, availableRuntimes, agentSyncContext, promptProfile, activePlanText } = input;
   const isPlanAnalysis = mode === "plan_analysis";
+  const isChat = mode === "chat";
 
   const lines: string[] = [
     "Decide the next manager action for this Spark Agent run.",
@@ -480,6 +525,9 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
   lines.push(
     "AVAILABLE RUNTIMES",
     formatAvailableRuntimes(availableRuntimes),
+    "",
+    "SYNCED MCP / SKILL CAPABILITIES",
+    agentSyncContext || "No synced MCP servers or skills discovered.",
     "",
     "RUN STATE",
     JSON.stringify(formatCompactRunState(run, recentMessages), null, 2),
@@ -520,14 +568,25 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
         return `${idx + 1}.${marker} ${truncate(m.message, 1200)}${attachmentLine}`;
       })
       .join("\n");
-    lines.push(
-      "USER NOTES (binding additions to the project plan)",
-      "Treat each note below as part of the project plan. When designing new worker tasks, integrate these as if they had been in the original plan from the start — write the worker description at full design depth (objective, acceptance criteria, UI polish, behaviors), not as a thin patch on top of existing files. Existing artifacts may inform style/structure but must not constrain the new design's quality bar.",
-      "",
-      olderCount > 0 ? `Older user notes already reflected in the saved steps/reviews: ${olderCount}` : "",
-      formattedAmendments,
-      "",
-    );
+    if (isChat) {
+      lines.push(
+        "CONVERSATION",
+        "Treat these as chat turns. The latest user turn may be a direct question, a request to use tools/workers, or a project amendment. Decide which based on the content and available context.",
+        "",
+        olderCount > 0 ? `Older user turns already reflected in the saved run: ${olderCount}` : "",
+        formattedAmendments,
+        "",
+      );
+    } else {
+      lines.push(
+        "USER NOTES (binding additions to the project plan)",
+        "Treat each note below as part of the project plan. When designing new worker tasks, integrate these as if they had been in the original plan from the start — write the worker description at full design depth (objective, acceptance criteria, UI polish, behaviors), not as a thin patch on top of existing files. Existing artifacts may inform style/structure but must not constrain the new design's quality bar.",
+        "",
+        olderCount > 0 ? `Older user notes already reflected in the saved steps/reviews: ${olderCount}` : "",
+        formattedAmendments,
+        "",
+      );
+    }
   }
 
   lines.push(
@@ -537,7 +596,7 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
     "",
   );
 
-  const unresolvedFreshNote = findUnresolvedFreshUserNote(run);
+  const unresolvedFreshNote = isChat ? null : findUnresolvedFreshUserNote(run);
   if (unresolvedFreshNote) {
     lines.push(
       "FRESH USER NOTE GUARD",
@@ -552,7 +611,7 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
   if (attachmentSummary.length > 0) {
     lines.push(
       "ATTACHMENTS",
-      "Images are stored as run artifacts. Pixel data is supplied only for the most recent user image turn during planning/task-writing calls; older image turns stay as compact artifact references so the run context remains small. If a worker needs an image, include the artifact path in its task.",
+      "Images are stored as run artifacts. File references point at the user's workspace paths and may include compact text previews below. Pixel data is supplied only for the most recent user image turn during planning/task-writing calls. If a worker needs an attachment, include the artifact or file path in its task.",
       "",
       ...attachmentSummary,
       "",
@@ -648,6 +707,8 @@ function buildManagerUserContent(input: {
 
 const MAX_IMAGE_PARTS_PER_MANAGER_CALL = 4;
 const MAX_MANAGER_IMAGE_BYTES = 12 * 1024 * 1024;
+const MAX_FILE_REFERENCE_PREVIEW_BYTES = 96 * 1024;
+const MAX_FILE_REFERENCE_PREVIEW_CHARS = 6000;
 
 function selectImageAttachmentsForManager(
   run: RunState,
@@ -687,14 +748,50 @@ function formatMessageAttachments(message: HumanRunMessage): string[] {
 }
 
 function formatRunAttachmentSummary(run: RunState): string[] {
-  const lines: string[] = [];
+  const blocks: string[][] = [];
   for (const message of run.humanMessages) {
     const attachments = formatMessageAttachments(message);
     if (attachments.length === 0) continue;
-    lines.push(`${message.createdAt} ${message.author}/${message.kind}: ${attachments.join("; ")}`);
+    const block = [`${message.createdAt} ${message.author}/${message.kind}: ${attachments.join("; ")}`];
+    for (const attachment of message.attachments ?? []) {
+      if (attachment.kind !== "file") continue;
+      const preview = formatFileReferencePreview(attachment);
+      if (preview) block.push(preview);
+    }
+    blocks.push(block);
   }
-  if (lines.length <= 8) return lines;
-  return [`... ${lines.length - 8} older attachment turn(s) omitted`, ...lines.slice(-8)];
+  const visible = blocks.slice(-8);
+  const omitted = blocks.length - visible.length;
+  const lines = visible.flat();
+  if (omitted <= 0) return lines;
+  return [`... ${omitted} older attachment turn(s) omitted`, ...lines];
+}
+
+function formatFileReferencePreview(attachment: RunMessageAttachment): string | null {
+  try {
+    const stat = statSync(attachment.path);
+    if (!stat.isFile()) return `   ${attachment.name}: file is no longer readable at ${attachment.path}`;
+    if (stat.size > MAX_FILE_REFERENCE_PREVIEW_BYTES) {
+      return `   ${attachment.name}: ${stat.size} bytes, preview omitted because the file is large.`;
+    }
+    const buffer = readFileSync(attachment.path);
+    if (buffer.includes(0)) {
+      return `   ${attachment.name}: binary file, preview omitted.`;
+    }
+    return [
+      `   ${attachment.name} preview (${attachment.path}):`,
+      indentCodeBlock(truncate(buffer.toString("utf8"), MAX_FILE_REFERENCE_PREVIEW_CHARS)),
+    ].join("\n");
+  } catch {
+    return `   ${attachment.name}: file is no longer readable at ${attachment.path}`;
+  }
+}
+
+function indentCodeBlock(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .map((line) => `   | ${line}`)
+    .join("\n");
 }
 
 function findUnresolvedFreshUserNote(run: RunState): HumanRunMessage | null {
@@ -900,6 +997,7 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
   const steps = normalizeSteps(raw.steps);
   const tasks = normalizeTasks(raw.tasks);
   const question = typeof raw.question === "string" ? raw.question.trim() : undefined;
+  const questionOptions = normalizeQuestionOptions(raw.questionOptions);
   const chatReply = typeof raw.chatReply === "string" ? raw.chatReply.trim() : undefined;
   const taskComplexity = normalizeTaskComplexity(raw.taskComplexity);
 
@@ -908,6 +1006,7 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
       status,
       summary: normalizeText(raw.summary, "Spark needs user input before creating worker tasks."),
       question: question || "Please clarify the next decision Spark should make.",
+      questionOptions,
       chatReply,
       steps: [],
       tasks: [],
@@ -944,12 +1043,23 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
     };
   }
 
-  if (mode === "plan_analysis") {
+  if (mode === "plan_analysis" || mode === "chat") {
     if (steps.length === 0) {
+      if (mode === "chat") {
+        return {
+          status: "complete",
+          summary: normalizeText(raw.summary, "Spark answered the chat turn."),
+          chatReply: chatReply || normalizeText(raw.summary, "Done."),
+          steps: [],
+          tasks: [],
+          taskComplexity,
+        };
+      }
       return {
         status: "ask_user",
         summary: "Spark could not create a step-by-step division from the plan.",
         question: question || "Please clarify the concrete outcome this project plan should produce.",
+        questionOptions,
         chatReply,
         steps: [],
         tasks: [],
@@ -959,7 +1069,10 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
 
     return {
       status: "run_workers",
-      summary: normalizeText(raw.summary, "Spark analyzed the plan into concrete steps."),
+      summary: normalizeText(
+        raw.summary,
+        mode === "chat" ? "Spark decided this chat needs worker help." : "Spark analyzed the plan into concrete steps.",
+      ),
       chatReply,
       steps,
       tasks: [],
@@ -987,6 +1100,7 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
       status: "ask_user",
       summary: "Spark could not produce a worker task from the plan.",
       question: question || "Please clarify the first concrete task to run.",
+      questionOptions,
       chatReply,
       steps: [],
       tasks: [],
@@ -1028,7 +1142,13 @@ function normalizeTerminals(value: unknown): SparkManagerTerminalRequest[] {
     if (!item || typeof item !== "object") continue;
     const rec = item as Record<string, unknown>;
     const runtime =
-      rec.runtime === "codex" ? "codex" : rec.runtime === "claude" ? "claude" : null;
+      rec.runtime === "codex"
+        ? "codex"
+        : rec.runtime === "claude"
+          ? "claude"
+          : rec.runtime === "cursor"
+            ? "cursor"
+            : null;
     if (!runtime) continue;
     const rawCount = typeof rec.count === "number" ? Math.floor(rec.count) : 1;
     const count = Math.min(Math.max(rawCount, 1), 8);
@@ -1192,7 +1312,14 @@ function inferVerifierClassFromShape(shape: {
 }
 
 function normalizeRuntime(value: unknown): WorkerRuntime {
-  if (value === "claude" || value === "codex" || value === "manual" || value === "shell") return value;
+  if (
+    value === "claude" ||
+    value === "codex" ||
+    value === "cursor" ||
+    value === "manual" ||
+    value === "shell"
+  )
+    return value;
   return "manual";
 }
 
@@ -1241,6 +1368,10 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
   const lines: string[] = [];
   for (const r of runtimes) {
     if (!r.installed) {
+      if (r.disabledBySettings) {
+        lines.push(`- ${r.kind} (${r.label}): DISABLED BY SETTINGS — do not assign work to this runtime.`);
+        continue;
+      }
       lines.push(`- ${r.kind} (${r.label}): NOT INSTALLED — do not assign work to this runtime.`);
       continue;
     }
@@ -1261,8 +1392,8 @@ function formatTaskComplexity(complexity: TaskComplexity): string {
     case "trivial":
       return [
         "trivial — single-module fix, ≤3 atomic acceptance criteria, no public API touch.",
-        "Verifier policy: ZERO verifier follow-ups. After an implementation worker reports complete, return tasks=[] and let the step advance — the worker's SELF-CHECK is enough.",
-        "Cascade rule: if the implementation worker reports partial/failed/blocked OR public gates fail, treat the next corrective round AS-IF standard (queue ONE cross-provider verifier on the corrective implementation). Cap promotions at 1 to prevent runaway.",
+        "Verifier policy: ONE verifier follow-up after the implementation worker on a behavioral step. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-4-7 OR gpt-5.5; effortHint = high; allowedPaths = []; taskClass = verifier. A confident self-report is not proof — the verifier re-derives correct behavior and runs adversarial input/output probes.",
+        "Trivial keeps a tight step cap (max 2 worker_batch steps, no recon, no skeleton); it differs from standard only in scope, not in whether work gets verified.",
       ].join("\n");
     case "standard":
       return [
@@ -1300,6 +1431,37 @@ function formatStepDivision(run: RunState): string {
       return lines.join("\n");
     }),
   ].join("\n\n");
+}
+
+function normalizeQuestionOptions(value: unknown): SparkManagerQuestionOption[] {
+  if (!Array.isArray(value)) return [];
+  const options = value
+    .filter((item: unknown): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .slice(0, 3)
+    .map((item, index) => {
+      const label = normalizeText(item.label, `Option ${index + 1}`).slice(0, 80);
+      const answer = normalizeText(item.answer, label).slice(0, 1200);
+      return {
+        id: normalizeText(item.id, `option_${index + 1}`).replace(/[^a-z0-9_-]/gi, "_").slice(0, 40) || `option_${index + 1}`,
+        label,
+        description: normalizeText(item.description, answer).slice(0, 220),
+        answer,
+        recommended: item.recommended === true,
+      };
+    })
+    .filter((item) => item.label && item.answer);
+  if (options.length === 0) return [];
+  if (!options.some((item) => item.recommended)) options[0].recommended = true;
+  let seenRecommended = false;
+  for (const option of options) {
+    if (!option.recommended) continue;
+    if (!seenRecommended) {
+      seenRecommended = true;
+      continue;
+    }
+    option.recommended = false;
+  }
+  return options;
 }
 
 function isImageInputUnsupportedError(error: string): boolean {

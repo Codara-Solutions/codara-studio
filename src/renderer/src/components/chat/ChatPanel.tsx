@@ -26,7 +26,7 @@ interface Props {
     message: string,
     clientMessageId: string,
     attachments?: AddRunMessageAttachmentInput[],
-  ) => void | Promise<void>;
+  ) => RunState | void | Promise<RunState | void>;
   onPauseRun: () => void;
   onPauseAfterWorkers: () => void;
   onForcePauseRun: () => void;
@@ -86,7 +86,7 @@ export default function ChatPanel({
             // Keyed by chat id so switching chats remounts the stream — fresh
             // scroll position, no step-card open states carried across.
             <ChatConversation
-              key={conversationKey(activeRun)}
+              key={`conversation:${activeRun.id}`}
               run={activeRun}
               cwd={workspace?.cwd ?? null}
             />
@@ -94,8 +94,9 @@ export default function ChatPanel({
             <WelcomeState />
           )}
           <ChatComposer
-            key={activeRun?.id ?? "new-chat"}
+            key={`composer:${activeRun?.id ?? "new-chat"}`}
             run={activeRun}
+            cwd={workspace?.cwd ?? null}
             disabled={!workspace}
             onStartChat={onStartChat}
           />
@@ -103,18 +104,6 @@ export default function ChatPanel({
       )}
     </div>
   );
-}
-
-function conversationKey(run: RunState): string {
-  const lastMessage = run.humanMessages[run.humanMessages.length - 1];
-  return [
-    run.id,
-    run.updatedAt,
-    run.status,
-    run.humanMessages.length,
-    lastMessage?.id ?? "",
-    lastMessage?.message ?? "",
-  ].join(":");
 }
 
 function StatusMeta({ run }: { run: RunState }) {
@@ -169,7 +158,15 @@ function SwitcherBar({
   onForcePauseRun: () => void;
 }) {
   const [open, setOpen] = useState<null | "chats" | "controls">(null);
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
+  const activeRunId = activeRun?.id ?? null;
+  const runsKey = runs.map((run) => run.id).join("\0");
+
+  useEffect(() => {
+    setOpen(null);
+    setConfirmingDeleteId(null);
+  }, [activeRunId, runsKey]);
 
   useEffect(() => {
     if (!open) return;
@@ -209,11 +206,24 @@ function SwitcherBar({
 
   const pick = (id: string | null) => {
     setOpen(null);
+    setConfirmingDeleteId(null);
     onSelectRun(id);
   };
   const runControl = (action: () => void) => {
     setOpen(null);
+    setConfirmingDeleteId(null);
     action();
+  };
+  const requestDeleteChat = (id: string) => {
+    setConfirmingDeleteId(id);
+  };
+  const cancelDeleteChat = () => {
+    setConfirmingDeleteId(null);
+  };
+  const deleteChat = (id: string) => {
+    setOpen(null);
+    setConfirmingDeleteId(null);
+    onDeleteRun(id);
   };
 
   return (
@@ -279,7 +289,7 @@ function SwitcherBar({
             color: activeRun ? "var(--ink)" : "var(--ink-dim)",
           }}
         >
-          {activeRun ? activeRun.title : "New chat"}
+          {activeRun ? `Chat - ${activeRun.title}` : "New chat"}
         </span>
         <span aria-hidden style={{ flex: "0 0 auto", color: "var(--muted)", fontSize: 9 }}>
           ▾
@@ -313,9 +323,12 @@ function SwitcherBar({
       {open === "chats" && (
         <ChatList
           runs={runs}
-          activeRunId={activeRun?.id ?? null}
+          activeRunId={activeRunId}
+          confirmingDeleteId={confirmingDeleteId}
           onPick={pick}
-          onDelete={onDeleteRun}
+          onRequestDelete={requestDeleteChat}
+          onCancelDelete={cancelDeleteChat}
+          onConfirmDelete={deleteChat}
         />
       )}
       {open === "controls" && activeRun && (
@@ -344,13 +357,19 @@ const DROPDOWN_STYLE: React.CSSProperties = {
 function ChatList({
   runs,
   activeRunId,
+  confirmingDeleteId,
   onPick,
-  onDelete,
+  onRequestDelete,
+  onCancelDelete,
+  onConfirmDelete,
 }: {
   runs: RunState[];
   activeRunId: string | null;
+  confirmingDeleteId: string | null;
   onPick: (id: string | null) => void;
-  onDelete: (id: string) => void;
+  onRequestDelete: (id: string) => void;
+  onCancelDelete: () => void;
+  onConfirmDelete: (id: string) => void;
 }) {
   return (
     <div style={{ ...DROPDOWN_STYLE, left: 10, right: 10 }}>
@@ -369,8 +388,11 @@ function ChatList({
             key={run.id}
             run={run}
             active={run.id === activeRunId}
+            confirmingDelete={run.id === confirmingDeleteId}
             onPick={onPick}
-            onDelete={onDelete}
+            onRequestDelete={onRequestDelete}
+            onCancelDelete={onCancelDelete}
+            onConfirmDelete={onConfirmDelete}
           />
         ))}
       </div>
@@ -381,17 +403,58 @@ function ChatList({
 function ChatRow({
   run,
   active,
+  confirmingDelete,
   onPick,
-  onDelete,
+  onRequestDelete,
+  onCancelDelete,
+  onConfirmDelete,
 }: {
   run: RunState;
   active: boolean;
+  confirmingDelete: boolean;
   onPick: (id: string) => void;
-  onDelete: (id: string) => void;
+  onRequestDelete: (id: string) => void;
+  onCancelDelete: () => void;
+  onConfirmDelete: (id: string) => void;
 }) {
   const [hover, setHover] = useState(false);
   const [trashHover, setTrashHover] = useState(false);
   const color = statusToneColor(describeRunStatus(run).tone);
+  if (confirmingDelete) {
+    return (
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "minmax(0, 1fr) auto auto",
+          alignItems: "center",
+          gap: 6,
+          borderRadius: 6,
+          padding: "5px 5px 5px 8px",
+          background: "var(--danger-soft)",
+        }}
+      >
+        <span
+          title={`Delete ${run.title}`}
+          style={{
+            minWidth: 0,
+            color: "var(--danger)",
+            fontSize: 11.5,
+            fontWeight: 650,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          Delete this chat?
+        </span>
+        <MiniMenuButton onClick={onCancelDelete}>Cancel</MiniMenuButton>
+        <MiniMenuButton danger onClick={() => onConfirmDelete(run.id)}>
+          Delete
+        </MiniMenuButton>
+      </div>
+    );
+  }
+
   return (
     <div
       onMouseEnter={() => setHover(true)}
@@ -453,7 +516,7 @@ function ChatRow({
         title="Delete chat"
         onClick={(event) => {
           event.stopPropagation();
-          onDelete(run.id);
+          onRequestDelete(run.id);
         }}
         onMouseEnter={() => setTrashHover(true)}
         onMouseLeave={() => setTrashHover(false)}
@@ -478,6 +541,49 @@ function ChatRow({
         <TrashGlyph />
       </button>
     </div>
+  );
+}
+
+function MiniMenuButton({
+  children,
+  danger = false,
+  onClick,
+}: {
+  children: React.ReactNode;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        height: 24,
+        border: `1px solid ${
+          danger
+            ? "color-mix(in oklch, var(--danger) 45%, transparent)"
+            : "var(--rule-soft)"
+        }`,
+        borderRadius: 6,
+        background: hover
+          ? danger
+            ? "color-mix(in oklch, var(--danger) 18%, transparent)"
+            : "var(--hover)"
+          : "transparent",
+        color: danger ? "var(--danger)" : "var(--ink-dim)",
+        padding: "0 7px",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        fontWeight: 650,
+        cursor: "default",
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -584,8 +690,9 @@ function WelcomeState() {
             maxWidth: 268,
           }}
         >
-          Describe a task. Spark plans it, spawns Claude and Codex workers, and
-          reports back. Or right-click a plan file in the explorer to run it.
+          Describe a task. Spark plans it, spawns Claude, Codex, and Cursor
+          workers, and reports back. Or right-click a plan file in the explorer
+          to run it.
         </div>
       </div>
     </div>

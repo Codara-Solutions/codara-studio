@@ -102,6 +102,8 @@ async function runLiveAdapter(adapterId, input) {
     parallelLaunchGroups: isSpark ? sparkTelemetry.parallelLaunchGroups : 0,
     peerMessageCount: isSpark ? sparkTelemetry.peerMessageCount : 0,
     peerAgentCount: isSpark ? sparkTelemetry.peerAgentCount : 0,
+    routing: isSpark ? sparkTelemetry.routing || [] : [],
+    runtimeBreakdown: isSpark ? sparkTelemetry.runtimeBreakdown || {} : {},
     finalStatus: runnerResult.exitReason,
     errorMessage: runnerResult.errorMessage || null,
     artifacts: {
@@ -171,6 +173,8 @@ function telemetryFromSparkArtifact(artifacts) {
     peerMessageCount: 0,
     peerAgentCount: 0,
   };
+  base.routing = [];
+  base.runtimeBreakdown = {};
   const runArtifact = (artifacts || []).find((artifact) => artifact.name === "run.json");
   if (!runArtifact || !fs.existsSync(runArtifact.path)) return base;
   try {
@@ -194,7 +198,10 @@ function telemetryFromSparkArtifact(artifacts) {
       return s ? sum + Math.max(0, (e - s) / 1000) : sum;
     }, 0);
     const critical = first && last ? Math.max(0, (last - first) / 1000) : 0;
+    const { routing, runtimeBreakdown } = extractRouting(run);
     return {
+      routing,
+      runtimeBreakdown,
       retryCount: Math.max(0, attempts.length - (run.workerTasks || []).length),
       workerCount: (run.workerTasks || []).length,
       managerCallCount: (run.sparkCalls || []).length,
@@ -209,6 +216,50 @@ function telemetryFromSparkArtifact(artifacts) {
   } catch {
     return base;
   }
+}
+
+// Per-worker runtime/model routing, so the codex-vs-claude split is
+// measurable from the result file alone. `runtimeBreakdown` splits the
+// implementer count from the verifier count because verifiers are
+// deliberately routed to the opposite runtime of their implementer.
+function extractRouting(run) {
+  const workerTasks = run.workerTasks || [];
+  const attempts = run.workerAttempts || [];
+  const attemptRuntimeByTask = new Map();
+  for (const attempt of attempts) {
+    if (attempt.workerTaskId && attempt.runtime) {
+      attemptRuntimeByTask.set(attempt.workerTaskId, attempt.runtime);
+    }
+  }
+  const routing = workerTasks.map((task) => {
+    const isVerifier = task.taskClass === "verifier";
+    return {
+      taskId: task.id,
+      title: task.title || "",
+      taskClass: task.taskClass || null,
+      role: isVerifier ? "verifier" : "implementer",
+      runtimePreference: task.runtimePreference || null,
+      runtimeUsed: attemptRuntimeByTask.get(task.id) || task.runtimePreference || null,
+      model: task.modelHint || null,
+      effort: task.effortHint || null,
+    };
+  });
+  // Pre-allocate the known runtime buckets (claude, codex, cursor) so the
+  // breakdown is comparable across runs even when a runtime never fired on
+  // this particular task. A new "cursor" worker runtime was added alongside
+  // the original claude/codex pair, so it must appear here too.
+  const KNOWN_RUNTIMES = ["claude", "codex", "cursor"];
+  const runtimeBreakdown = {
+    implementer: Object.fromEntries(KNOWN_RUNTIMES.map((rt) => [rt, 0])),
+    verifier: Object.fromEntries(KNOWN_RUNTIMES.map((rt) => [rt, 0])),
+    total: Object.fromEntries(KNOWN_RUNTIMES.map((rt) => [rt, 0])),
+  };
+  for (const entry of routing) {
+    const runtime = entry.runtimeUsed || "unknown";
+    runtimeBreakdown[entry.role][runtime] = (runtimeBreakdown[entry.role][runtime] || 0) + 1;
+    runtimeBreakdown.total[runtime] = (runtimeBreakdown.total[runtime] || 0) + 1;
+  }
+  return { routing, runtimeBreakdown };
 }
 
 function maxConcurrentIntervals(intervals) {

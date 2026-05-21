@@ -13,6 +13,7 @@ import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
+import AgentCapabilitiesDialog from "./components/AgentCapabilitiesDialog";
 import SearchPanel from "./components/Search/SearchPanel";
 import TabBar from "./tabs/TabBar";
 import EditorStack from "./tabs/EditorStack";
@@ -35,6 +36,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   langSmithApiKey: "",
   langSmithProject: "spark-agent-dev",
   langSmithEndpoint: "https://api.smith.langchain.com",
+  agentRuntimeSelection: "auto",
+  agentMcpSyncEnabled: true,
+  agentSkillSyncEnabled: true,
+  agentDisabledMcpIds: [],
+  agentDisabledSkillIds: [],
 };
 
 function resolveDefaultShell(
@@ -209,6 +215,7 @@ export default function App() {
   const [integratedShell, setIntegratedShell] = useState<ShellInfo | null>(null);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [platform, setPlatform] = useState<string>("");
@@ -284,6 +291,30 @@ export default function App() {
   // the latest chat titles without taking `runs` as a dependency.
   const runsRef = useRef(runs);
   runsRef.current = runs;
+
+  const handleRunSnapshot = useCallback(
+    (
+      run: RunState,
+      options?: { select?: boolean; focusRuns?: boolean },
+    ) => {
+      setRuns((current) => {
+        if (run.workspaceId !== activeIdRef.current) return current;
+        const withoutRun = current.filter((item) => item.id !== run.id);
+        const next = [run, ...withoutRun];
+        next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        return next;
+      });
+
+      if (!options?.select) return;
+      const workspaceId = run.workspaceId;
+      activeRunIdsByWorkspaceRef.current[workspaceId] = run.id;
+      activeRunIdRef.current = run.id;
+      setActiveRunId(run.id);
+      if (workspaceId !== activeIdRef.current) return;
+      tabsRef.current.openRunsTab(run.id, "Runs", options.focusRuns ?? false);
+    },
+    [],
+  );
 
   // Selecting a run must always be visible — if the user closed the Runs
   // tab earlier, we transparently re-open it and route them to the picked
@@ -658,13 +689,17 @@ export default function App() {
       if (!ws) return;
       const workspaceCwd = ws.cwd;
 
-      // Pull the runtime so the worker chip shows CLAUDE/CODEX. Best-effort —
+      // Pull the runtime so the worker chip shows CLAUDE/CODEX/CURSOR. Best-effort —
       // the chip is decoration; the PTY claim itself doesn't depend on it.
-      let runtime: "claude" | "codex" | undefined;
+      let runtime: "claude" | "codex" | "cursor" | undefined;
       try {
         const run = await window.spark.orchestration.getRun(event.runId);
         const task = run?.workerTasks.find((item) => item.id === event.workerTaskId);
-        if (task?.runtimePreference === "claude" || task?.runtimePreference === "codex") {
+        if (
+          task?.runtimePreference === "claude" ||
+          task?.runtimePreference === "codex" ||
+          task?.runtimePreference === "cursor"
+        ) {
           runtime = task.runtimePreference;
         }
       } catch {
@@ -850,6 +885,15 @@ export default function App() {
   const handleOpenSettings = useCallback(() => {
     setSettingsOpen(true);
   }, []);
+
+  const handleOpenCapabilities = useCallback(() => {
+    setCapabilitiesOpen(true);
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("spark:open-capabilities", handleOpenCapabilities);
+    return () => window.removeEventListener("spark:open-capabilities", handleOpenCapabilities);
+  }, [handleOpenCapabilities]);
 
   const updateWs = useCallback((id: string, patch: Partial<Workspace>) => {
     setWorkspaces((ws) => ws.map((w) => (w.id === id ? { ...w, ...patch } : w)));
@@ -1216,7 +1260,7 @@ export default function App() {
     (
       tabId: string,
       paneId: string,
-      state: { runtime: "claude" | "codex" | null; running: boolean },
+      state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean },
     ) => {
       const t = tabsRef.current;
       const tab = t.tabs.find((item) => item.id === tabId);
@@ -1338,6 +1382,7 @@ export default function App() {
             onSectionDragStart={handlePanelSectionDragStart}
             onSectionDragEnd={handlePanelSectionDragEnd}
             onSelectRun={handleSelectRun}
+            onRunSnapshot={handleRunSnapshot}
             onOpenFile={openFileByPath}
             onOpenFileEntry={openEditorFile}
             onDeleteFile={handleDeleteFile}
@@ -1431,6 +1476,7 @@ export default function App() {
             onSectionDragStart={handlePanelSectionDragStart}
             onSectionDragEnd={handlePanelSectionDragEnd}
             onSelectRun={handleSelectRun}
+            onRunSnapshot={handleRunSnapshot}
             onOpenFile={openFileByPath}
             onOpenFileEntry={openEditorFile}
             onDeleteFile={handleDeleteFile}
@@ -1456,6 +1502,19 @@ export default function App() {
               }
               handleSelectRun(runId, workspaceId);
               setSettingsOpen(false);
+            }}
+          />
+        )}
+
+        {capabilitiesOpen && (
+          <AgentCapabilitiesDialog
+            settings={settings}
+            workspaceCwd={activeWorkspace?.cwd ?? null}
+            onClose={() => setCapabilitiesOpen(false)}
+            onSave={async (nextSettings) => {
+              const saved = await window.spark.settings.save(nextSettings);
+              setSettings(saved);
+              setDefaultShell(resolveDefaultShell(shells, saved, detectedDefaultShell));
             }}
           />
         )}
@@ -1505,7 +1564,7 @@ interface WorkspaceProps {
   onTerminalPaneAgentState: (
     tabId: string,
     paneId: string,
-    state: { runtime: "claude" | "codex" | null; running: boolean },
+    state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean },
   ) => void;
   onNewTerminalTab: () => void;
   onNewEditorTab: () => void;

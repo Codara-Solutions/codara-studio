@@ -1,6 +1,10 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AddRunMessageInput,
+  AgentAssetDeleteResult,
+  AgentAssetInventory,
+  AgentRuntimeDiagnostic,
+  AgentSyncResult,
   AppPreferences,
   AppSettings,
   AppState,
@@ -65,6 +69,11 @@ export interface SearchHandle {
   cancel: () => Promise<void>;
 }
 
+function isMissingIpcHandlerError(err: unknown, channel: string): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes(`No handler registered for '${channel}'`);
+}
+
 const api = {
   state: {
     load: (): Promise<AppState> => ipcRenderer.invoke("state:load"),
@@ -73,6 +82,36 @@ const api = {
   settings: {
     load: (): Promise<AppSettings> => ipcRenderer.invoke("settings:load"),
     save: (settings: AppSettings): Promise<AppSettings> => ipcRenderer.invoke("settings:save", settings),
+  },
+  agents: {
+    runtimes: (force = false): Promise<AgentRuntimeDiagnostic[]> =>
+      ipcRenderer.invoke("agents:runtimes", { force }).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:runtimes")) return [];
+        throw err;
+      }),
+    sync: (input?: { cwd?: string | null }): Promise<AgentSyncResult> =>
+      ipcRenderer.invoke("agents:sync", input ?? {}).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:sync")) throw err;
+        const now = new Date().toISOString();
+        return {
+          startedAt: now,
+          completedAt: now,
+          mcp: { toClaude: [], toCodex: [], skipped: [], errors: ["Restart Spark to enable agent sync."] },
+          skills: { toClaude: [], toCodex: [], skipped: [], errors: ["Restart Spark to enable agent sync."] },
+        };
+      }),
+    assets: (input?: { cwd?: string | null }): Promise<AgentAssetInventory> =>
+      ipcRenderer.invoke("agents:assets", input ?? {}).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:assets")) return { mcp: [], skills: [] };
+        throw err;
+      }),
+    deleteAsset: (id: string): Promise<AgentAssetDeleteResult> =>
+      ipcRenderer.invoke("agents:deleteAsset", { id }).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:deleteAsset")) {
+          return { ok: false, deleted: [], error: "Restart Spark to enable agent asset deletion." };
+        }
+        throw err;
+      }),
   },
   preferences: {
     load: (): Promise<AppPreferences> => ipcRenderer.invoke("preferences:load"),
@@ -102,6 +141,10 @@ const api = {
       ipcRenderer.invoke("dialog:openDirectory", defaultPath),
     openImages: (defaultPath?: string): Promise<string[]> =>
       ipcRenderer.invoke("dialog:openImages", defaultPath),
+  },
+  attachments: {
+    savePastedImage: (input: { dataUrl: string; name?: string }): Promise<string> =>
+      ipcRenderer.invoke("attachments:savePastedImage", input),
   },
   fs: {
     list: (dir: string): Promise<FsEntry[]> => ipcRenderer.invoke("fs:list", dir),
@@ -259,6 +302,11 @@ const api = {
   app: {
     platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke("app:platform"),
     home: (): Promise<string> => ipcRenderer.invoke("app:home"),
+  },
+  clipboard: {
+    readText: (): Promise<string> => ipcRenderer.invoke("clipboard:readText"),
+    writeText: (text: string): Promise<void> =>
+      ipcRenderer.invoke("clipboard:writeText", text),
   },
   inlineAi: {
     complete: (req: {

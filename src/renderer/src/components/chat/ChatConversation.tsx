@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { GitDiff, GitDiffLine, GitFileChange, RunMessageAttachment, RunState } from "@shared/types";
+import type { GitDiff, GitDiffLine, GitFileChange, RunMessageAttachment, RunQuestionOption, RunState } from "@shared/types";
+import { makeId } from "@shared/ids";
 import {
   buildChatTimeline,
+  findOpenQuestion,
   stepStatusColor,
   workerStatusColor,
   workerStatusLabel,
@@ -10,13 +12,13 @@ import {
 } from "./timeline";
 import Markdown from "./Markdown";
 
-// The conversation stream for one chat. Renders the merged timeline of
-// human messages and orchestrator steps; steps render as collapsible
-// activity cards so the chat reads like a conversation with the work folded
-// in, not a flat event log.
+// The conversation stream for one chat. Renders human messages, Spark's own
+// model/context activity, and worker steps as one ordered chat timeline.
 
 export default function ChatConversation({ run, cwd }: { run: RunState; cwd: string | null }) {
-  const items = useMemo(() => collapseRenderedDuplicates(buildChatTimeline(run)), [run]);
+  const items = useMemo(() => buildChatTimeline(run), [run]);
+  const timelineKey = useMemo(() => timelineRenderKey(items), [items]);
+  const openQuestion = useMemo(() => findOpenQuestion(run), [run]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Pin to the bottom as the conversation grows. Keyed on the item count and
@@ -24,58 +26,71 @@ export default function ChatConversation({ run, cwd }: { run: RunState; cwd: str
   useEffect(() => {
     const node = scrollRef.current;
     if (node) node.scrollTop = node.scrollHeight;
-  }, [items.length, run.status]);
+  }, [items.length, run.status, timelineKey]);
 
   return (
     <div ref={scrollRef} style={SCROLL_STYLE}>
-      {items.length === 0 ? (
-        <ConversationEmpty />
-      ) : (
-        items.map((item) => (
-          <div key={item.id} style={CHAT_ITEM_STYLE}>
-            {item.kind === "message" ? (
-              <MessageTurn item={item} />
-            ) : (
-              <StepCard item={item} />
-            )}
-          </div>
-        ))
-      )}
+      <div key={timelineKey}>
+        {items.length === 0 ? (
+          <ConversationEmpty />
+        ) : (
+          items.map((item) => (
+            <div key={timelineItemKey(item)} style={CHAT_ITEM_STYLE}>
+              {item.kind === "message" ? (
+                <MessageTurn item={item} runId={run.id} openQuestionId={openQuestion?.id ?? null} />
+              ) : item.kind === "tool" ? (
+                <ToolCallCard item={item} />
+              ) : (
+                <StepCard item={item} />
+              )}
+            </div>
+          ))
+        )}
+      </div>
       <DiffSummaryCard cwd={cwd} run={run} />
     </div>
   );
 }
 
-function collapseRenderedDuplicates(items: ChatTimelineItem[]): ChatTimelineItem[] {
-  const rendered: ChatTimelineItem[] = [];
-  const seenMessages = new Map<string, Extract<ChatTimelineItem, { kind: "message" }>>();
+function timelineItemKey(item: ChatTimelineItem): string {
+  return `${item.kind}:${item.id}`;
+}
 
-  for (const item of items) {
-    if (item.kind !== "message") {
-      rendered.push(item);
-      continue;
-    }
-    const signature = [
-      item.author,
-      item.text.replace(/\s+/g, " ").trim().toLowerCase(),
-      attachmentSignature(item.attachments),
-    ].join("\u0000");
-    const existing = seenMessages.get(signature);
-    if (existing) {
-      existing.repeatCount += item.repeatCount;
-      continue;
-    }
-    rendered.push(item);
-    seenMessages.set(signature, item);
-  }
-
-  return rendered;
+function timelineRenderKey(items: ChatTimelineItem[]): string {
+  return items
+    .map((item) => {
+      if (item.kind === "message") {
+        return [
+          timelineItemKey(item),
+          item.author,
+          item.messageKind,
+          item.text,
+          item.at,
+          item.repeatCount,
+          attachmentSignature(item.attachments),
+        ].join(":");
+      }
+      if (item.kind === "tool") {
+        return [timelineItemKey(item), item.status, item.tone, item.at, item.detail].join(":");
+      }
+      return [timelineItemKey(item), item.status, item.at, item.workers.length].join(":");
+    })
+    .join("|");
 }
 
 type MessageItem = Extract<ChatTimelineItem, { kind: "message" }>;
+type ToolItem = Extract<ChatTimelineItem, { kind: "tool" }>;
 type StepItem = Extract<ChatTimelineItem, { kind: "step" }>;
 
-function MessageTurn({ item }: { item: MessageItem }) {
+function MessageTurn({
+  item,
+  runId,
+  openQuestionId,
+}: {
+  item: MessageItem;
+  runId: string;
+  openQuestionId: string | null;
+}) {
   if (item.author === "system") {
     return (
       <div style={{ display: "flex", justifyContent: "center" }}>
@@ -98,11 +113,13 @@ function MessageTurn({ item }: { item: MessageItem }) {
     );
   }
 
-  // Spark — flat, full width, the assistant voice of the chat.
+  // Spark message: prose first, visually separate from tool activity.
   const isQuestion = item.messageKind === "question";
+  const showChoices = isQuestion && item.id === openQuestionId && (item.questionOptions ?? []).length > 0;
+  const displayText = cleanLegacySparkOutput(item.text);
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+    <div style={SPARK_TURN_STYLE}>
+      <div style={SPARK_HEADER_STYLE}>
         <SparkMark />
         <span style={SPEAKER_LABEL_STYLE}>Spark</span>
         {isQuestion && (
@@ -110,11 +127,232 @@ function MessageTurn({ item }: { item: MessageItem }) {
         )}
         {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
       </div>
-      <div style={{ color: "var(--ink)", paddingLeft: 22 }}>
-        <Markdown text={item.text} />
+      <div style={SPARK_BUBBLE_STYLE}>
+        <Markdown text={displayText} />
         <AttachmentStrip attachments={item.attachments} align="start" />
+        {showChoices && (
+          <QuestionChoices
+            runId={runId}
+            options={(item.questionOptions ?? []).slice(0, 3)}
+          />
+        )}
       </div>
     </div>
+  );
+}
+
+function cleanLegacySparkOutput(text: string): string {
+  const prefix = "Done. Here is the relevant output:";
+  if (!text.trimStart().startsWith(prefix)) return text;
+  const proof = text.trimStart().slice(prefix.length).trim();
+  const parsed = parseProofCommandOutput(proof);
+  if (!parsed || parsed.exitCode !== 0 || !parsed.output.trim()) return text;
+  const target = inferReadCommandTarget(parsed.command);
+  if (!target) return text;
+  return [
+    `\`${displayReadTarget(target)}\` contains:`,
+    "",
+    fencedMarkdown(parsed.output.trim(), markdownLanguageForPath(target)),
+  ].join("\n");
+}
+
+function parseProofCommandOutput(
+  proof: string,
+): { command: string; exitCode: number; output: string } | null {
+  const normalized = proof.replace(/\r\n/g, "\n").trim().replace(/\n\.\.\.$/, "");
+  const match = normalized.match(/^\$?\s*([^\n]+)\n\[exit=(-?\d+)\]\n*([\s\S]*)$/);
+  if (!match) return null;
+  return {
+    command: match[1].trim(),
+    exitCode: Number.parseInt(match[2], 10),
+    output: match[3].trim(),
+  };
+}
+
+function inferReadCommandTarget(command: string): string | null {
+  const tokens = shellishTokens(command.replace(/^\$\s*/, ""));
+  const readIndex = tokens.findIndex((token) => /^(cat|type|gc|get-content)$/i.test(token));
+  if (readIndex < 0) return null;
+  for (let i = readIndex + 1; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (!token || token === "|" || token === ";" || token === "&&" || token === "||") break;
+    if (token.startsWith("-")) {
+      if (/^-path$/i.test(token) || /^-literalpath$/i.test(token)) return tokens[i + 1] ?? null;
+      continue;
+    }
+    return token;
+  }
+  return null;
+}
+
+function shellishTokens(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | null = null;
+  for (const char of command) {
+    if (quote) {
+      if (char === quote) quote = null;
+      else current += char;
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function displayReadTarget(target: string): string {
+  const cleaned = target.trim().replace(/^['"]|['"]$/g, "");
+  const normalized = cleaned.replace(/\\/g, "/");
+  return normalized.length > 90 ? normalized.split("/").filter(Boolean).pop() || normalized : normalized;
+}
+
+function markdownLanguageForPath(path: string): string {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
+  if (lower.endsWith(".json")) return "json";
+  if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "tsx";
+  if (lower.endsWith(".js") || lower.endsWith(".jsx") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "javascript";
+  if (lower.endsWith(".css")) return "css";
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "html";
+  if (lower.endsWith(".toml")) return "toml";
+  if (lower.endsWith(".yaml") || lower.endsWith(".yml")) return "yaml";
+  if (lower.endsWith(".ps1")) return "powershell";
+  if (lower.endsWith(".sh")) return "bash";
+  return "text";
+}
+
+function fencedMarkdown(content: string, language: string): string {
+  let fence = "```";
+  while (content.includes(fence)) fence += "`";
+  return `${fence}${language}\n${content.trim()}\n${fence}`;
+}
+
+function QuestionChoices({ runId, options }: { runId: string; options: RunQuestionOption[] }) {
+  const [custom, setCustom] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inFlight = useRef(false);
+
+  const submitAnswer = async (answer: string) => {
+    const message = answer.trim();
+    if (!message || inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await window.spark.orchestration.addRunMessage({
+        runId,
+        clientMessageId: makeId("client-msg"),
+        author: "user",
+        kind: "answer",
+        message,
+      });
+      await window.spark.orchestration.resumeRun({ runId });
+      setCustom("");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={QUESTION_CHOICES_STYLE}>
+      <div style={QUESTION_OPTION_LIST_STYLE}>
+        {options.map((option, index) => (
+          <QuestionOptionButton
+            key={option.id || index}
+            option={option}
+            index={index}
+            disabled={busy}
+            onChoose={() => void submitAnswer(option.answer)}
+          />
+        ))}
+      </div>
+      <div style={QUESTION_CUSTOM_STYLE}>
+        <textarea
+          value={custom}
+          disabled={busy}
+          onChange={(event) => setCustom(event.target.value)}
+          placeholder="Type a different answer..."
+          rows={2}
+          style={QUESTION_CUSTOM_INPUT_STYLE}
+        />
+        <button
+          type="button"
+          disabled={busy || custom.trim().length === 0}
+          onClick={() => void submitAnswer(custom)}
+          style={{
+            ...QUESTION_CUSTOM_BUTTON_STYLE,
+            opacity: busy || custom.trim().length === 0 ? 0.55 : 1,
+          }}
+        >
+          Send custom
+        </button>
+      </div>
+      {error && <div style={QUESTION_ERROR_STYLE}>{error}</div>}
+    </div>
+  );
+}
+
+function QuestionOptionButton({
+  option,
+  index,
+  disabled,
+  onChoose,
+}: {
+  option: RunQuestionOption;
+  index: number;
+  disabled: boolean;
+  onChoose: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onChoose}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        ...QUESTION_OPTION_STYLE,
+        borderColor: option.recommended
+          ? "color-mix(in oklch, var(--accent) 48%, var(--rule-soft))"
+          : hover && !disabled
+            ? "var(--rule)"
+            : "var(--rule-soft)",
+        background: hover && !disabled
+          ? "color-mix(in oklch, var(--ink) 6%, var(--panel))"
+          : option.recommended
+            ? "color-mix(in oklch, var(--accent) 8%, var(--panel))"
+            : "color-mix(in oklch, var(--ink) 3%, transparent)",
+        opacity: disabled ? 0.65 : 1,
+      }}
+    >
+      <span style={QUESTION_OPTION_INDEX_STYLE}>{index + 1}</span>
+      <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+        <span style={QUESTION_OPTION_TITLE_STYLE}>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {option.label}
+          </span>
+          {option.recommended && <span style={QUESTION_RECOMMENDED_STYLE}>Recommended</span>}
+        </span>
+        <span style={QUESTION_OPTION_DESCRIPTION_STYLE}>{option.description}</span>
+      </span>
+    </button>
   );
 }
 
@@ -125,8 +363,8 @@ function AttachmentStrip({
   attachments: RunMessageAttachment[] | undefined;
   align: "start" | "end";
 }) {
-  const images = (attachments ?? []).filter((attachment) => attachment.kind === "image");
-  if (images.length === 0) return null;
+  const all = attachments ?? [];
+  if (all.length === 0) return null;
   return (
     <div
       style={{
@@ -137,16 +375,16 @@ function AttachmentStrip({
         marginTop: 8,
       }}
     >
-      {images.map((attachment) => (
+      {all.map((attachment) => (
         <a
           key={attachment.id}
           href={fileUrl(attachment.path)}
-          title={attachment.name}
+          title={attachment.path}
           style={{
             display: "inline-flex",
             alignItems: "center",
             gap: 6,
-            maxWidth: 170,
+            maxWidth: 210,
             border: "1px solid var(--rule-soft)",
             borderRadius: 7,
             background: "color-mix(in oklch, var(--ink) 5%, transparent)",
@@ -156,22 +394,12 @@ function AttachmentStrip({
             fontSize: 10.5,
           }}
         >
-          <span
-            style={{
-              width: 22,
-              height: 22,
-              borderRadius: 5,
-              overflow: "hidden",
-              background: "var(--panel)",
-              border: "1px solid var(--rule-soft)",
-              flex: "0 0 22px",
-            }}
-          >
-            <img
-              src={fileUrl(attachment.path)}
-              alt=""
-              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-            />
+          <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex", flex: "0 0 auto" }}>
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none">
+              <path d="M4 2.5h4.2L11 5.3v6.2H4z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+              <path d="M8.1 2.7v2.8h2.7" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+              <path d="M5.8 8h3.8M5.8 10h2.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            </svg>
           </span>
           <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {attachment.name}
@@ -196,6 +424,28 @@ function attachmentSignature(attachments: RunMessageAttachment[] | undefined): s
   return (attachments ?? []).map((attachment) => attachment.id || attachment.path).join("|");
 }
 
+function ActivityShell({
+  color,
+  live,
+  label,
+  children,
+}: {
+  color: string;
+  live: boolean;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={ACTIVITY_SHELL_STYLE}>
+      <div style={ACTIVITY_RAIL_STYLE} aria-hidden>
+        <StatusDot color={color} pulse={live} />
+        <span style={ACTIVITY_RAIL_LABEL_STYLE}>{label}</span>
+      </div>
+      <div style={ACTIVITY_CONTENT_STYLE}>{children}</div>
+    </div>
+  );
+}
+
 function StepCard({ item }: { item: StepItem }) {
   const live =
     item.status === "running" ||
@@ -209,90 +459,180 @@ function StepCard({ item }: { item: StepItem }) {
   ).length;
 
   return (
-    <div
-      style={{
-        border: "1px solid var(--rule-soft)",
-        borderRadius: 9,
-        background: "color-mix(in oklch, var(--ink) 2.5%, var(--panel))",
-        overflow: "hidden",
-      }}
-    >
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        style={{
-          appearance: "none",
-          width: "100%",
-          border: "none",
-          background: "transparent",
-          color: "inherit",
-          display: "flex",
-          alignItems: "center",
-          gap: 9,
-          padding: "9px 10px",
-          cursor: "default",
-          textAlign: "left",
-        }}
-      >
-        <StatusDot color={color} pulse={live} />
-        <span
+    <ActivityShell color={color} live={live} label="STEP">
+      <div style={STEP_CARD_STYLE}>
+        <button
+          type="button"
+          onClick={() => setOpen((value) => !value)}
           style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 9.5,
-            fontWeight: 700,
-            letterSpacing: "0.08em",
-            color: "var(--muted)",
-            flex: "0 0 auto",
-          }}
-        >
-          STEP {String(item.index).padStart(2, "0")}
-        </span>
-        <span
-          style={{
-            flex: 1,
-            minWidth: 0,
-            fontSize: 12,
-            fontWeight: 600,
-            color: "var(--ink)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {item.title}
-        </span>
-        {item.workers.length > 0 && (
-          <span style={{ fontSize: 10, color: "var(--muted)", flex: "0 0 auto" }}>
-            {doneWorkers}/{item.workers.length}
-          </span>
-        )}
-        <Caret open={open} />
-      </button>
-      {open && (
-        <div
-          style={{
-            padding: "0 10px 10px 30px",
+            appearance: "none",
+            width: "100%",
+            border: "none",
+            background: "transparent",
+            color: "inherit",
             display: "flex",
-            flexDirection: "column",
-            gap: 8,
+            alignItems: "center",
+            gap: 9,
+            padding: "9px 10px",
+            cursor: "default",
+            textAlign: "left",
           }}
         >
-          {item.goal && (
-            <div style={{ fontSize: 12, lineHeight: 1.5, color: "var(--ink-dim)" }}>
-              {item.goal}
-            </div>
-          )}
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 9.5,
+              fontWeight: 700,
+              letterSpacing: "0.08em",
+              color: "var(--muted)",
+              flex: "0 0 auto",
+            }}
+          >
+            STEP {String(item.index).padStart(2, "0")}
+          </span>
+          <span
+            style={{
+              flex: 1,
+              minWidth: 0,
+              fontSize: 12,
+              fontWeight: 600,
+              color: "var(--ink)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {item.title}
+          </span>
           {item.workers.length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {item.workers.map((worker) => (
-                <WorkerChip key={worker.id} worker={worker} />
-              ))}
-            </div>
+            <span style={{ fontSize: 10, color: "var(--muted)", flex: "0 0 auto" }}>
+              {doneWorkers}/{item.workers.length}
+            </span>
           )}
-        </div>
-      )}
-    </div>
+          <Caret open={open} />
+        </button>
+        {open && (
+          <div
+            style={{
+              padding: "0 10px 10px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+            }}
+          >
+            {item.goal && (
+              <div style={{ fontSize: 12, lineHeight: 1.5, color: "var(--ink-dim)" }}>
+                {item.goal}
+              </div>
+            )}
+            {item.workers.length > 0 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {item.workers.map((worker) => (
+                  <WorkerChip key={worker.id} worker={worker} />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </ActivityShell>
   );
+}
+
+function ToolCallCard({ item }: { item: ToolItem }) {
+  const live = item.tone === "live";
+  const [open, setOpen] = useState(live || item.status === "failed");
+  const color = toolToneColor(item);
+  const statusLabel =
+    item.status === "started" ? "running" : item.status === "completed" ? "done" : "failed";
+
+  return (
+    <ActivityShell color={color} live={live} label={toolRailLabel(item.activity)}>
+      <div style={TOOL_CARD_STYLE}>
+        <button
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          style={TOOL_HEADER_STYLE}
+          title={item.detail || item.title}
+        >
+          <span style={TOOL_KIND_STYLE}>{toolKindLabel(item.activity)}</span>
+          <span style={TOOL_TITLE_STYLE}>{item.title}</span>
+          {item.detail && <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>}
+          <span
+            style={{
+              ...TOOL_STATUS_STYLE,
+              color,
+              borderColor: `color-mix(in oklch, ${color} 40%, transparent)`,
+              background: `color-mix(in oklch, ${color} 9%, transparent)`,
+            }}
+          >
+            {statusLabel}
+          </span>
+          <Caret open={open} />
+        </button>
+        {open && (
+          <div style={TOOL_BODY_STYLE}>
+            {item.detail && <div style={TOOL_DETAIL_STYLE}>{item.detail}</div>}
+            {item.files.length > 0 && (
+              <div style={TOOL_FILE_LIST_STYLE}>
+                {item.files.map((file) => (
+                  <a
+                    key={file.path}
+                    href={fileUrl(file.path)}
+                    title={file.path}
+                    style={TOOL_FILE_STYLE}
+                  >
+                    <span style={TOOL_FILE_NAME_STYLE}>{file.name}</span>
+                    <span style={TOOL_FILE_SIZE_STYLE}>{formatBytes(file.size)}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+            {item.meta.length > 0 && (
+              <div style={TOOL_META_GRID_STYLE}>
+                {item.meta.map((meta) => (
+                  <span key={`${meta.label}:${meta.value}`} style={TOOL_META_STYLE}>
+                    <span style={TOOL_META_LABEL_STYLE}>{meta.label}</span>
+                    <span style={TOOL_META_VALUE_STYLE}>{meta.value}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </ActivityShell>
+  );
+}
+
+function toolToneColor(item: ToolItem): string {
+  if (item.tone === "failed") return "var(--danger)";
+  if (item.tone === "live") return "var(--accent)";
+  if (item.activity === "context") return "var(--info)";
+  return "var(--ok)";
+}
+
+function toolKindLabel(activity: ToolItem["activity"]): string {
+  if (activity === "manager") return "MODEL CALL";
+  if (activity === "worker") return "WORKER";
+  return "CONTEXT";
+}
+
+function toolRailLabel(activity: ToolItem["activity"]): string {
+  if (activity === "manager") return "MODEL";
+  if (activity === "worker") return "RUN";
+  return "TOOL";
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${trimByteNumber(bytes / 1024)} KB`;
+  return `${trimByteNumber(bytes / (1024 * 1024))} MB`;
+}
+
+function trimByteNumber(value: number): string {
+  return value >= 10 ? value.toFixed(0) : value.toFixed(1).replace(/\.0$/, "");
 }
 
 interface DiffFileSummary {
@@ -717,6 +1057,34 @@ const USER_BUBBLE_STYLE: React.CSSProperties = {
   wordBreak: "break-word",
 };
 
+const SPARK_TURN_STYLE: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "flex-start",
+  gap: 6,
+};
+
+const SPARK_HEADER_STYLE: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  paddingLeft: 2,
+};
+
+const SPARK_BUBBLE_STYLE: React.CSSProperties = {
+  width: "fit-content",
+  maxWidth: "94%",
+  boxSizing: "border-box",
+  color: "var(--ink)",
+  background: "color-mix(in oklch, var(--ink) 4%, var(--panel))",
+  border: "1px solid color-mix(in oklch, var(--rule) 72%, var(--rule-soft))",
+  borderRadius: 10,
+  borderTopLeftRadius: 3,
+  padding: "10px 11px",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.035)",
+  overflowWrap: "anywhere",
+};
+
 const SYSTEM_PILL_STYLE: React.CSSProperties = {
   maxWidth: "90%",
   padding: "4px 10px",
@@ -749,6 +1117,318 @@ const QUESTION_TAG_STYLE: React.CSSProperties = {
   border: "1px solid color-mix(in oklch, var(--warn) 40%, transparent)",
   borderRadius: 999,
   padding: "1px 6px",
+};
+
+const QUESTION_CHOICES_STYLE: React.CSSProperties = {
+  marginTop: 10,
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+};
+
+const QUESTION_OPTION_LIST_STYLE: React.CSSProperties = {
+  display: "grid",
+  gap: 6,
+};
+
+const QUESTION_OPTION_STYLE: React.CSSProperties = {
+  appearance: "none",
+  width: "100%",
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 8,
+  color: "var(--ink)",
+  display: "grid",
+  gridTemplateColumns: "20px minmax(0, 1fr)",
+  gap: 8,
+  padding: "8px 9px",
+  textAlign: "left",
+  cursor: "default",
+  transition:
+    "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
+};
+
+const QUESTION_OPTION_INDEX_STYLE: React.CSSProperties = {
+  width: 20,
+  height: 20,
+  borderRadius: 6,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background: "color-mix(in oklch, var(--ink) 7%, transparent)",
+  color: "var(--muted)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  fontWeight: 700,
+};
+
+const QUESTION_OPTION_TITLE_STYLE: React.CSSProperties = {
+  minWidth: 0,
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  color: "var(--ink)",
+  fontSize: 12.5,
+  fontWeight: 700,
+};
+
+const QUESTION_RECOMMENDED_STYLE: React.CSSProperties = {
+  flex: "0 0 auto",
+  border: "1px solid color-mix(in oklch, var(--accent) 38%, transparent)",
+  borderRadius: 999,
+  color: "var(--accent)",
+  background: "color-mix(in oklch, var(--accent) 8%, transparent)",
+  padding: "1px 6px",
+  fontFamily: "var(--font-mono)",
+  fontSize: 8.5,
+  fontWeight: 700,
+  letterSpacing: "0.04em",
+  textTransform: "uppercase",
+};
+
+const QUESTION_OPTION_DESCRIPTION_STYLE: React.CSSProperties = {
+  color: "var(--ink-dim)",
+  fontSize: 11.5,
+  lineHeight: 1.4,
+};
+
+const QUESTION_CUSTOM_STYLE: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) auto",
+  alignItems: "end",
+  gap: 7,
+};
+
+const QUESTION_CUSTOM_INPUT_STYLE: React.CSSProperties = {
+  width: "100%",
+  boxSizing: "border-box",
+  resize: "vertical",
+  minHeight: 44,
+  maxHeight: 110,
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 8,
+  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+  color: "var(--ink)",
+  outline: "none",
+  padding: "8px 9px",
+  fontFamily: "var(--font-sans)",
+  fontSize: 12,
+  lineHeight: 1.45,
+};
+
+const QUESTION_CUSTOM_BUTTON_STYLE: React.CSSProperties = {
+  appearance: "none",
+  height: 32,
+  border: "1px solid color-mix(in oklch, var(--accent) 46%, transparent)",
+  borderRadius: 8,
+  background: "color-mix(in oklch, var(--accent) 12%, transparent)",
+  color: "var(--accent)",
+  padding: "0 10px",
+  fontFamily: "var(--font-sans)",
+  fontSize: 11,
+  fontWeight: 700,
+  cursor: "default",
+};
+
+const QUESTION_ERROR_STYLE: React.CSSProperties = {
+  color: "var(--danger)",
+  background: "var(--danger-soft)",
+  border: "1px solid color-mix(in oklch, var(--danger) 34%, transparent)",
+  borderRadius: 7,
+  padding: "6px 8px",
+  fontSize: 11,
+  lineHeight: 1.4,
+};
+
+const ACTIVITY_SHELL_STYLE: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "46px minmax(0, 1fr)",
+  gap: 8,
+  alignItems: "start",
+  margin: "3px 0 12px",
+};
+
+const ACTIVITY_RAIL_STYLE: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "flex-end",
+  gap: 5,
+  paddingTop: 11,
+  minWidth: 0,
+};
+
+const ACTIVITY_RAIL_LABEL_STYLE: React.CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  color: "var(--muted-2)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 8.5,
+  fontWeight: 800,
+  letterSpacing: "0.08em",
+  lineHeight: 1,
+};
+
+const ACTIVITY_CONTENT_STYLE: React.CSSProperties = {
+  minWidth: 0,
+};
+
+const STEP_CARD_STYLE: React.CSSProperties = {
+  border: "1px solid color-mix(in oklch, var(--rule-soft) 82%, transparent)",
+  borderRadius: 8,
+  background: "color-mix(in oklch, var(--bg) 54%, var(--panel))",
+  overflow: "hidden",
+  boxSizing: "border-box",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.025)",
+};
+
+const TOOL_CARD_STYLE: React.CSSProperties = {
+  border: "1px solid color-mix(in oklch, var(--rule-soft) 82%, transparent)",
+  borderRadius: 8,
+  background: "color-mix(in oklch, var(--bg) 58%, var(--panel))",
+  overflow: "hidden",
+  boxSizing: "border-box",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.025)",
+};
+
+const TOOL_HEADER_STYLE: React.CSSProperties = {
+  appearance: "none",
+  width: "100%",
+  minHeight: 32,
+  border: "none",
+  background: "transparent",
+  color: "inherit",
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  padding: "7px 8px",
+  cursor: "default",
+  textAlign: "left",
+};
+
+const TOOL_KIND_STYLE: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 8.5,
+  fontWeight: 800,
+  letterSpacing: "0.08em",
+  color: "var(--muted-2)",
+  flex: "0 0 auto",
+};
+
+const TOOL_TITLE_STYLE: React.CSSProperties = {
+  color: "var(--ink-dim)",
+  fontSize: 11.5,
+  fontWeight: 650,
+  minWidth: 0,
+  flex: "0 1 auto",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const TOOL_INLINE_DETAIL_STYLE: React.CSSProperties = {
+  color: "var(--muted-2)",
+  fontSize: 10.5,
+  minWidth: 0,
+  flex: 1,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const TOOL_STATUS_STYLE: React.CSSProperties = {
+  flex: "0 0 auto",
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 999,
+  padding: "1px 6px",
+  fontFamily: "var(--font-mono)",
+  fontSize: 8.5,
+  fontWeight: 700,
+  letterSpacing: "0.04em",
+  textTransform: "uppercase",
+};
+
+const TOOL_BODY_STYLE: React.CSSProperties = {
+  padding: "0 8px 9px",
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+};
+
+const TOOL_DETAIL_STYLE: React.CSSProperties = {
+  color: "var(--ink-dim)",
+  fontSize: 11.5,
+  lineHeight: 1.45,
+};
+
+const TOOL_FILE_LIST_STYLE: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 5,
+};
+
+const TOOL_FILE_STYLE: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(0, 1fr) auto",
+  alignItems: "center",
+  gap: 8,
+  minHeight: 28,
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 7,
+  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+  color: "var(--ink)",
+  padding: "0 8px",
+  textDecoration: "none",
+};
+
+const TOOL_FILE_NAME_STYLE: React.CSSProperties = {
+  minWidth: 0,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  fontWeight: 600,
+};
+
+const TOOL_FILE_SIZE_STYLE: React.CSSProperties = {
+  color: "var(--muted)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+};
+
+const TOOL_META_GRID_STYLE: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 6,
+};
+
+const TOOL_META_STYLE: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 999,
+  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+  padding: "2px 7px",
+  maxWidth: "100%",
+};
+
+const TOOL_META_LABEL_STYLE: React.CSSProperties = {
+  color: "var(--muted)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 9,
+  fontWeight: 700,
+  letterSpacing: "0.04em",
+  textTransform: "uppercase",
+};
+
+const TOOL_META_VALUE_STYLE: React.CSSProperties = {
+  color: "var(--ink-dim)",
+  fontSize: 10.5,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
 };
 
 const DIFF_CARD_STYLE: React.CSSProperties = {

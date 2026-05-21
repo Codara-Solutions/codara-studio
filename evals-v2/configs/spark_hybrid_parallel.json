@@ -9,12 +9,13 @@
   },
   "pool": [
     { "runtime": "claude_code", "model": "claude-opus-4-7", "effort": "max" },
-    { "runtime": "codex", "model": "gpt-5.5", "effort": "xhigh" }
+    { "runtime": "codex", "model": "gpt-5.5", "effort": "xhigh" },
+    { "runtime": "cursor", "model": "composer-2.5-fast", "effort": "max" }
   ],
   "workerPolicy": {
     "manager": "spark",
     "maxParallelWorkers": 4,
-    "implementationRuntimes": ["claude", "codex"],
+    "implementationRuntimes": ["claude", "codex", "cursor"],
     "verification": "opposite_model_then_dual_on_complex",
     "requireNonOverlappingScopes": true
   }

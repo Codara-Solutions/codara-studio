@@ -6,6 +6,8 @@ import type {
   AgentRuntimeDiagnostic,
   AgentRuntimeKind,
   AgentRuntimeModel,
+  AgentRuntimeSelection,
+  AppSettings,
 } from "@shared/types";
 
 const execFileAsync = promisify(execFile);
@@ -31,6 +33,20 @@ const CLAUDE_MODELS: AgentRuntimeModel[] = [
     id: "claude-haiku-4-5",
     label: "Haiku 4.5",
     effortLevels: ["low", "medium", "high"],
+  },
+];
+
+// Source: Cursor CLI (May 2026). Spark only uses composer-2.5-fast — it is
+// peer-quality (≈ opus-4-7-max ≈ gpt-5.5) but materially faster. Older
+// Composer revisions are intentionally NOT exposed: there is no reason to
+// downgrade the runtime to a slower or weaker model. Cursor CLI does not
+// expose reasoning-effort levels.
+const CURSOR_MODELS: AgentRuntimeModel[] = [
+  {
+    id: "composer-2.5-fast",
+    label: "Composer 2.5 Fast",
+    effortLevels: ["medium"],
+    isDefault: true,
   },
 ];
 
@@ -99,6 +115,16 @@ const RUNTIMES: RuntimeSpec[] = [
     installHint: "Install with: npm i -g @openai/codex-cli  (then run `codex` once to log in)",
     recommendedWorkerCommand: (model, effort) =>
       `codex --yolo -m ${model.id} -c "model_reasoning_effort=${effort}"`,
+  },
+  {
+    kind: "cursor",
+    label: "Cursor Agent",
+    executable: "agent",
+    versionArgs: ["--version"],
+    models: CURSOR_MODELS,
+    installHint: "Install with: curl https://cursor.com/install -fsS | bash  (then run `agent login`)",
+    recommendedWorkerCommand: (model) =>
+      `agent --yolo --model ${model.id}`,
   },
 ];
 
@@ -186,4 +212,46 @@ export async function detectAgentRuntimes(force = false): Promise<AgentRuntimeDi
   );
   cache = { value, expires: now + CACHE_MS };
   return value;
+}
+
+export function applyAgentRuntimeSettings(
+  runtimes: AgentRuntimeDiagnostic[],
+  settings?: Pick<AppSettings, "agentRuntimeSelection"> | null,
+): AgentRuntimeDiagnostic[] {
+  const enabled = enabledAgentRuntimeKinds(settings?.agentRuntimeSelection ?? "auto");
+  return runtimes.map((runtime) => {
+    if (enabled.has(runtime.kind)) return runtime;
+    return {
+      ...runtime,
+      installed: false,
+      disabledBySettings: true,
+      disabledReason: "Disabled by Settings > Agents runtime selector.",
+      recommendedWorkerCommand: null,
+      installHint: "Disabled by Settings > Agents runtime selector.",
+    };
+  });
+}
+
+const ALL_RUNTIMES: readonly AgentRuntimeKind[] = ["claude", "codex", "cursor"];
+
+export function enabledAgentRuntimeKinds(
+  selection: AgentRuntimeSelection = "auto",
+): Set<AgentRuntimeKind> {
+  // Array form: explicit subset chosen by the user in Settings. Empty array
+  // disables every runtime (the user has opted out of all of them).
+  if (Array.isArray(selection)) {
+    return new Set(selection.filter((kind) => ALL_RUNTIMES.includes(kind)));
+  }
+  // Legacy string tokens kept for backwards-compat reads from older settings.
+  if (selection === "claude") return new Set<AgentRuntimeKind>(["claude"]);
+  if (selection === "codex") return new Set<AgentRuntimeKind>(["codex"]);
+  if (selection === "cursor") return new Set<AgentRuntimeKind>(["cursor"]);
+  // "auto" and "both" both mean "every runtime Spark knows about".
+  return new Set<AgentRuntimeKind>(ALL_RUNTIMES);
+}
+
+export function normalizeAgentRuntimeSelection(
+  selection: AgentRuntimeSelection | undefined,
+): AgentRuntimeKind[] {
+  return Array.from(enabledAgentRuntimeKinds(selection ?? "auto"));
 }

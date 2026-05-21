@@ -1,9 +1,11 @@
 import { promises as fs, createWriteStream } from "node:fs";
 import { spawn as spawnChild } from "node:child_process";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 import type {
   AddRunMessageInput,
+  AgentRuntimeDiagnostic,
   AgentRuntimeModel,
+  AppSettings,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   PauseRunInput,
@@ -54,6 +56,7 @@ import {
   type OpenRouterManagerRequest,
   type OpenRouterManagerResult,
   type SparkManagerDecision,
+  type SparkManagerQuestionOption,
   type SparkManagerStepDecision,
   type SparkManagerTaskDecision,
   type SparkManagerWorkerReportContext,
@@ -66,7 +69,8 @@ import {
   type LangSmithTrace,
 } from "./langsmith-tracer";
 import * as pty from "../pty-manager";
-import { detectAgentRuntimes } from "../agent-runtimes";
+import { applyAgentRuntimeSettings, detectAgentRuntimes } from "../agent-runtimes";
+import { renderAgentSyncManagerContext, renderAgentSyncPromptLines } from "../agent-sync";
 
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
@@ -93,8 +97,20 @@ const activeAutopilotPlans = new Map<string, Promise<void>>();
 const activeAutopilotReviews = new Map<string, Promise<void>>();
 const runMutationQueues = new Map<string, Promise<void>>();
 const runWriteQueues = new Map<string, Promise<void>>();
-const MAX_IMAGE_ATTACHMENTS_PER_MESSAGE = 4;
+const MAX_ATTACHMENTS_PER_MESSAGE = 8;
 const MAX_IMAGE_ATTACHMENT_BYTES = 12 * 1024 * 1024;
+const DIRECT_FILE_MENTION_SCAN_DEPTH = 6;
+const DIRECT_FILE_MENTION_SCAN_RESULTS = 700;
+const SKIPPED_DIRECT_FILE_MENTION_DIRS = new Set([
+  ".git",
+  ".next",
+  ".turbo",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "out",
+]);
 
 // In-memory authoritative cache of run state, keyed by run id. This module is
 // the SOLE writer of run.json (the orchestration loop lives in the single
@@ -123,6 +139,14 @@ interface RuntimeReroute {
   reason: string;
 }
 
+async function detectConfiguredAgentRuntimes(
+  settings?: AppSettings,
+): Promise<AgentRuntimeDiagnostic[]> {
+  const liveSettings = settings ?? await loadSettings();
+  const runtimes = await detectAgentRuntimes().catch(() => []);
+  return applyAgentRuntimeSettings(runtimes, liveSettings);
+}
+
 export async function createRun(input: CreateRunInput): Promise<RunState> {
   const now = new Date().toISOString();
   const run: RunState = {
@@ -130,6 +154,9 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     workspaceId: input.workspaceId,
     title: input.title?.trim() || `Run - ${input.workspaceName}`,
     status: "idle",
+    settingsSnapshot: {
+      workspaceCwd: input.cwd,
+    },
     artifactDir: "",
     createdAt: now,
     updatedAt: now,
@@ -325,6 +352,10 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       message: initialNote,
       attachments: input.initialAttachments,
     });
+    if (!planText) {
+      scheduleInitialChatDecision(run.id, input);
+      return run;
+    }
   }
 
   if (run.steps.length === 0 && run.workerTasks.length === 0) {
@@ -408,6 +439,23 @@ function scheduleInitialAutopilotPlanning(
   input: StartAutopilotInput,
   opts?: { afterCurrent?: boolean },
 ): void {
+  scheduleInitialManagerDecision(runId, input, "plan_analysis", opts);
+}
+
+function scheduleInitialChatDecision(
+  runId: string,
+  input: StartAutopilotInput,
+  opts?: { afterCurrent?: boolean },
+): void {
+  scheduleInitialManagerDecision(runId, input, "chat", opts);
+}
+
+function scheduleInitialManagerDecision(
+  runId: string,
+  input: StartAutopilotInput,
+  mode: "plan_analysis" | "chat",
+  opts?: { afterCurrent?: boolean },
+): void {
   const existing = activeAutopilotPlans.get(runId);
   if (existing && !opts?.afterCurrent) return;
 
@@ -416,7 +464,7 @@ function scheduleInitialAutopilotPlanning(
     .then(async () => {
       const latest = await getRun(runId);
       if (!latest || latest.status === "paused" || latest.status === "cancelled") return;
-      await runInitialAutopilotPlanning(runId, input);
+      await runInitialAutopilotPlanning(runId, input, mode);
     })
     .catch(async (err) => {
       await markInitialAutopilotPlanningFailed(runId, err);
@@ -430,11 +478,17 @@ function scheduleInitialAutopilotPlanning(
   void cycle;
 }
 
-async function runInitialAutopilotPlanning(runId: string, input: StartAutopilotInput): Promise<void> {
+async function runInitialAutopilotPlanning(
+  runId: string,
+  input: StartAutopilotInput,
+  mode: "plan_analysis" | "chat" = "plan_analysis",
+): Promise<void> {
   let run = await requireRun(runId);
   if (run.status === "paused" || run.status === "cancelled") return;
 
-  let managerPlannedRun = await askOpenRouterManagerForInitialTasks(run, input.cwd);
+  let managerPlannedRun = mode === "chat"
+    ? await askOpenRouterManagerForChat(run, input.cwd)
+    : await askOpenRouterManagerForInitialTasks(run, input.cwd);
   if (
     managerPlannedRun &&
     managerPlannedRun.status !== "paused" &&
@@ -457,10 +511,12 @@ async function runInitialAutopilotPlanning(runId: string, input: StartAutopilotI
       ?? (await askOpenRouterManager(managerPlannedRun, input.cwd, "step_planning"));
   }
 
-  if (!managerPlannedRun && !manualFallbackEnabled()) {
+  if (!managerPlannedRun && (mode === "chat" || !manualFallbackEnabled())) {
     await askHumanQuestion(
       run.id,
-      "OpenRouter is not configured, so Spark cannot plan Claude/Codex worker tasks yet. Add the API key in Settings, then run the plan again.",
+      mode === "chat"
+        ? "OpenRouter is not configured, so Spark cannot think through this chat turn yet. Add the API key in Settings, then send the message again."
+        : "OpenRouter is not configured, so Spark cannot plan Claude/Codex/Cursor worker tasks yet. Add the API key in Settings, then run the plan again.",
     );
     return;
   }
@@ -596,6 +652,28 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
   if (run.status === "paused" || run.status === "cancelled") return;
   if (hasAutopilotCycles(runId) || activeWorkersForRun(runId).length > 0) return;
 
+  const pendingLaunchTasks = pickAutopilotTasks(run);
+  if (pendingLaunchTasks.length > 0) {
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      type: "autopilot.manager_review_deferred_for_pending_tasks",
+      message: `Manager review deferred while ${pendingLaunchTasks.length} queued worker task(s) remain`,
+      payload: {
+        taskIds: pendingLaunchTasks.map((task) => task.id),
+        taskTitles: pendingLaunchTasks.map((task) => task.title),
+        stepIds: [...new Set(pendingLaunchTasks.map((task) => task.stepId).filter(Boolean))],
+      },
+    });
+    const input = autopilotInputFromRun(run);
+    await startAutopilot({
+      ...input,
+      cwd: cwd || input.cwd,
+      runId: run.id,
+    });
+    return;
+  }
+
   const settings = await loadSettings();
   const config = readOpenRouterConfig(settings);
   if (!config) {
@@ -618,42 +696,38 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
     return;
   }
 
-  // Trivial fast-path: skip the manager review LLM call when decideWorkerReport
-  // already accepted everything and every step is complete. The manager review
-  // on a trivial happy-path is a rubber stamp; cut it.
-  const fastPathReview = await tryTrivialFastPathReview(run);
-  if (fastPathReview) return;
+  // NOTE: trivial runs used to skip the manager review entirely (a "rubber
+  // stamp" fast-path). That blind-accepted whatever the implementation worker
+  // self-reported — and eval runs proved a confident worker can fail even the
+  // public gate with zero detection. Trivial runs now fall through to the same
+  // worker_result_review path as standard runs and get one verifier follow-up.
+  // The verifier re-derives ground truth from the filesystem, so it catches
+  // wrong-but-confident implementations the self-check missed.
 
-  // Standard-tier clean-impl fast-path: when an impl worker on a STANDARD run
-  // reports complete and Spark itself can re-run its verificationCommands with
-  // every command exiting 0, skip the verifier follow-up entirely. The verifier
-  // is a safety net for behavioral correctness; if the impl's own checks pass
-  // the net rarely catches anything new and burns ~100s of wall. We still fall
-  // through to the manager review when any command fails.
-  const standardFastPath = await tryStandardCleanImplFastPathReview(run, cwd);
-  if (standardFastPath) {
-    run = standardFastPath;
-    if (run.status === "complete" || run.status === "failed" || run.status === "cancelled") return;
-    // Step is complete but more steps remain — skip the worker_result_review
-    // LLM call (the whole point of this fast-path) and jump straight to
-    // step_planning for the next step.
-  } else {
-    // Loop the worker_result_review when the manager hallucinates a `complete`
-    // verdict despite pending work (completion_refused). On the first refusal
-    // the autopilot used to fall through to pickAutopilotTasks — which
-    // returned empty because nothing had advanced — and the run hung silently
-    // until budget exhaustion. The completion_refused failsafe at
-    // applySparkManagerDecision force-accepts needs_review tasks once
-    // `consecutiveCompletionRefusals` >= 2, but that path is only reached when
-    // worker_result_review is invoked again. Bound the loop to a small number
-    // of iterations so a model that stays stuck still gets force-landed.
-    const REVIEW_REPROMPT_CAP = 3;
-    for (let attempt = 0; attempt < REVIEW_REPROMPT_CAP; attempt++) {
-      run = await askOpenRouterManager(run, cwd, "worker_result_review") ?? run;
-      if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
-      const lastAction = run.autopilot?.lastAction;
-      if (lastAction !== "completion_refused") break;
-    }
+  // NOTE: a standard-tier "clean-impl fast-path" used to skip the verifier
+  // when Spark could re-run the impl worker's OWN verificationCommands and
+  // they all exited 0. But the worker picks those commands itself — they
+  // rarely probe the adversarial edge cases an independent verifier would.
+  // Eval runs proved this: a pricing refactor self-verified green, the
+  // verifier was skipped, and a hidden formatMoney edge case shipped broken.
+  // Standard runs now always go through worker_result_review and earn their
+  // verifier, exactly like trivial and complex runs.
+
+  // Loop the worker_result_review when the manager hallucinates a `complete`
+  // verdict despite pending work (completion_refused). On the first refusal
+  // the autopilot used to fall through to pickAutopilotTasks — which
+  // returned empty because nothing had advanced — and the run hung silently
+  // until budget exhaustion. The completion_refused failsafe at
+  // applySparkManagerDecision force-accepts needs_review tasks once
+  // `consecutiveCompletionRefusals` >= 2, but that path is only reached when
+  // worker_result_review is invoked again. Bound the loop to a small number
+  // of iterations so a model that stays stuck still gets force-landed.
+  const REVIEW_REPROMPT_CAP = 3;
+  for (let attempt = 0; attempt < REVIEW_REPROMPT_CAP; attempt++) {
+    run = await askOpenRouterManager(run, cwd, "worker_result_review") ?? run;
+    if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
+    const lastAction = run.autopilot?.lastAction;
+    if (lastAction !== "completion_refused") break;
   }
   // Brake checkpoint: if the next active step is a brake, resolve it and
   // re-invoke plan_analysis so the manager can extend the plan with prior
@@ -753,8 +827,9 @@ function manualFallbackEnabled(): boolean {
 
 function normalizeOpenRouterManagerMode(
   mode: SparkCall["mode"],
-): "plan_analysis" | "step_planning" | "worker_result_review" {
+): "plan_analysis" | "chat" | "step_planning" | "worker_result_review" {
   if (mode === "worker_result_review") return "worker_result_review";
+  if (mode === "chat") return "chat";
   if (mode === "plan_analysis") return "plan_analysis";
   return "step_planning";
 }
@@ -806,6 +881,11 @@ async function createFallbackAutopilotTask(run: RunState, input: StartAutopilotI
 
 async function askOpenRouterManagerForInitialTasks(run: RunState, cwd: string): Promise<RunState | null> {
   return askOpenRouterManager(run, cwd, "plan_analysis");
+}
+
+async function askOpenRouterManagerForChat(run: RunState, cwd: string): Promise<RunState | null> {
+  const enriched = await enrichLatestUserMessageWithMentionedFiles(run, cwd);
+  return askOpenRouterManager(enriched, cwd, "chat");
 }
 
 // Brake support: when the next active step has kind="brake", treat it as a
@@ -896,7 +976,8 @@ async function askOpenRouterManager(
   const contextPacketPath = join(callDir, "context-packet.json");
   const managerMode = normalizeOpenRouterManagerMode(mode);
   const workerReports = await collectWorkerReportContext(run, managerMode);
-  const availableRuntimes = await detectAgentRuntimes().catch(() => []);
+  const availableRuntimes = await detectConfiguredAgentRuntimes(settings);
+  const agentSyncContext = renderAgentSyncManagerContext({ cwd, settings });
   const requestBody = buildOpenRouterManagerRequest({
     run,
     cwd,
@@ -904,6 +985,7 @@ async function askOpenRouterManager(
     mode: managerMode,
     workerReports,
     availableRuntimes,
+    agentSyncContext,
   });
   const contextWindow = contextWindowForModel(config.model);
   const contextPacket = buildContextPacket({
@@ -943,6 +1025,9 @@ async function askOpenRouterManager(
     openRouterStructuredOutputFallbackModel: config.structuredOutputFallbackModel,
     langSmithProject: langSmithConfig?.project,
     langSmithEndpoint: langSmithConfig?.endpoint,
+    agentRuntimeSelection: settings.agentRuntimeSelection,
+    agentMcpSyncEnabled: settings.agentMcpSyncEnabled,
+    agentSkillSyncEnabled: settings.agentSkillSyncEnabled,
   };
   run.updatedAt = startedAt;
   await saveRun(run);
@@ -1114,6 +1199,9 @@ const TRIVIAL_TOP_TIER_BY_RUNTIME: Record<string, { modelHint: string; effortHin
 
 // Top-tier model identifiers (post-normalization). Anything else for a
 // claude/codex runtime is treated as mid-tier and gets promoted on trivial.
+// Cursor has a single model (composer-2.5-fast) with no effort levels, so it
+// is absent from this table on purpose — promoteForTrivial leaves cursor
+// agents alone.
 // We compare on the base model only — `@<effort>` suffixes are stripped first
 // because grok-4.3 has shipped both `"claude-sonnet-4-6"` and
 // `"claude-sonnet-4-6@medium"` as the modelHint string across runs, and an
@@ -1162,15 +1250,6 @@ function promoteTaskForTrivial(task: SparkManagerTaskDecision): SparkManagerTask
   };
 }
 
-function textLooksLikeCalculator(text: string): boolean {
-  return /\b(calculator|calc\b|arithmetic|keypad|numeric\s+(?:tool|input|ui)|four\s+basic\s+operators)\b/i.test(text);
-}
-
-function textLooksLikeCalculatorStateWork(text: string): boolean {
-  if (!textLooksLikeCalculator(text)) return false;
-  return /\b(keyboard|focus|enter|escape|key(?:down|up)?|handler|event|logic|javascript|js|state|operator|decimal|equals|backspace|clear|divide|division|repeated|input|click|button|interactive|aria|accessible|self-contained|html)\b/i.test(text);
-}
-
 function managerStepText(step: SparkManagerStepDecision): string {
   return [
     step.title,
@@ -1189,102 +1268,29 @@ function managerTaskText(task: SparkManagerTaskDecision): string {
   ].join(" ");
 }
 
-function shouldCodexOwnCalculatorAgent(step: SparkManagerStepDecision, agent: PlannedStepAgent): boolean {
-  if (agent.runtimePreference === "codex") return false;
-  if (agent.taskClass === "verifier") return false;
-  const combined = [managerStepText(step), agent.summary].join(" ");
-  return textLooksLikeCalculatorStateWork(combined);
-}
-
-function shouldCodexOwnCalculatorTask(task: SparkManagerTaskDecision): boolean {
-  if (task.runtimePreference === "codex") return false;
-  const text = managerTaskText(task);
-  if (!textLooksLikeCalculatorStateWork(text)) return false;
-  if (task.taskClass === "verifier") return true;
-  return true;
-}
-
-async function maybeRouteCalculatorStateWorkToCodex(
-  run: RunState,
-  decision: SparkManagerDecision,
-  mode: SparkCall["mode"],
-): Promise<{ decision: SparkManagerDecision; routedAgents: number; routedTasks: number }> {
-  const hasCandidate =
-    decision.steps.some((step) =>
-      step.plannedAgents.some((agent) => shouldCodexOwnCalculatorAgent(step, agent)),
-    ) ||
-    decision.tasks.some(shouldCodexOwnCalculatorTask);
-  if (!hasCandidate) return { decision, routedAgents: 0, routedTasks: 0 };
-
-  const runtimes = await detectAgentRuntimes().catch(() => []);
-  const codexInstalled = runtimes.some((runtime) => runtime.kind === "codex" && runtime.installed);
-  if (!codexInstalled) return { decision, routedAgents: 0, routedTasks: 0 };
-
-  let routedAgents = 0;
-  let routedTasks = 0;
-  const steps = decision.steps.map((step) => {
-    const plannedAgents = step.plannedAgents.map((agent) => {
-      if (!shouldCodexOwnCalculatorAgent(step, agent)) return agent;
-      routedAgents += 1;
-      return {
-        ...agent,
-        runtimePreference: "codex" as WorkerRuntime,
-        modelHint: "gpt-5.5",
-        effortHint: "high" as WorkerTask["effortHint"],
-      };
-    });
-    return plannedAgents === step.plannedAgents ? step : { ...step, plannedAgents };
-  });
-
-  const tasks = decision.tasks.map((task) => {
-    if (!shouldCodexOwnCalculatorTask(task)) return task;
-    routedTasks += 1;
-    const effortHint: WorkerTask["effortHint"] = task.taskClass === "verifier" ? "medium" : "high";
-    return {
-      ...task,
-      runtimePreference: "codex" as WorkerRuntime,
-      modelHint: "gpt-5.5",
-      effortHint,
-    };
-  });
-
-  if (routedAgents === 0 && routedTasks === 0) {
-    return { decision, routedAgents, routedTasks };
-  }
-
-  await appendEvent({
-    workspaceId: run.workspaceId,
-    runId: run.id,
-    type: "spark_manager.calculator_state_work_routed_to_codex",
-    message: `Routed calculator keyboard/state work to Codex (${routedAgents} planned agent(s), ${routedTasks} task(s))`,
-    payload: {
-      mode,
-      routedAgents,
-      routedTasks,
-    },
-  });
-
-  return {
-    decision: {
-      ...decision,
-      steps,
-      tasks,
-    },
-    routedAgents,
-    routedTasks,
-  };
-}
-
 async function maybeEnforceExplicitParallelStagingPlan(
   run: RunState,
   decision: SparkManagerDecision,
   mode: SparkCall["mode"],
 ): Promise<{ decision: SparkManagerDecision; reason: string; stagedFiles: string[] } | null> {
-  if (mode !== "plan_analysis") return null;
+  if (mode !== "plan_analysis" && mode !== "chat") return null;
   if (decision.status !== "run_workers") return null;
   if (decision.steps.length === 0) return null;
 
-  const intent = planIntentTextForRun(run);
+  const intent = [
+    planIntentTextForRun(run),
+    decision.summary,
+    decision.steps
+      .map((step) =>
+        [
+          step.title,
+          step.goal,
+          ...step.acceptanceCriteria,
+          ...step.plannedAgents.map((agent) => [agent.label, agent.summary].join(" ")),
+        ].join("\n"),
+      )
+      .join("\n"),
+  ].join("\n");
   if (!hasExplicitParallelAgentIntent(intent) || !hasUiLogicSplitIntent(intent)) return null;
 
   const finalFile = inferFinalHtmlFile(intent);
@@ -1322,7 +1328,7 @@ async function maybeEnforceExplicitParallelStagingPlan(
       usesWorkspaceSparkParts
         ? "The human does not want a .spark-parts workspace folder; moving staged parallel artifacts into the Spark run artifact directory."
         : shouldUseHybridRuntimes
-          ? "The explicit parallel UI/logic split should use the available Claude+Codex hybrid instead of one runtime for every worker."
+          ? "The explicit parallel UI/logic split should use the available hybrid of installed runtimes instead of one runtime for every worker."
         : hasParallelPartsStep
         ? "The human explicitly requested a final combine step; the manager planned the parallel workers but omitted the integrator."
         : "The human explicitly requested simultaneous/different agents for UI/structure and logic, followed by a combine step.",
@@ -1332,7 +1338,7 @@ async function maybeEnforceExplicitParallelStagingPlan(
       summary: usesWorkspaceSparkParts
         ? "Explicit multi-agent plan repaired: staging moves to the Spark run artifact directory, followed by a single integration worker."
         : shouldUseHybridRuntimes
-          ? "Explicit multi-agent plan repaired: parallel UI/logic staging uses the available Claude+Codex hybrid, followed by a single integration worker."
+          ? "Explicit multi-agent plan repaired: parallel UI/logic staging uses the available runtime hybrid, followed by a single integration worker."
         : hasParallelPartsStep
           ? "Explicit multi-agent plan repaired: parallel staging workers are followed by a single integration worker."
           : "Explicit multi-agent plan enforced: parallel UI/structure and logic staging workers, followed by a single integration worker.",
@@ -1499,7 +1505,7 @@ function shouldEnforceHybridParallelRuntimes(
   runtimes: { ui: WorkerRuntime; logic: WorkerRuntime; integrator: WorkerRuntime },
 ): boolean {
   if (runtimes.ui === runtimes.logic) return false;
-  if (!/\b(different agents?|claude|codex|hybrid)\b/i.test(intent)) return false;
+  if (!/\b(different agents?|claude|codex|cursor|hybrid)\b/i.test(intent)) return false;
   const parallelStep = decision.steps.find((step) => {
     const text = [
       step.title,
@@ -1531,8 +1537,8 @@ function planIntentTextForRun(run: RunState): string {
 function hasExplicitParallelAgentIntent(text: string): boolean {
   const lower = text.toLowerCase();
   const asksForAgents =
-    /\bspawn\b[\s\S]{0,80}\b(agent|worker|codex|claude)s?\b/.test(lower) ||
-    /\b(agent|worker|codex|claude)s?\b[\s\S]{0,80}\b(simultaneous|parallel|at the same time)\b/.test(lower) ||
+    /\bspawn\b[\s\S]{0,80}\b(agent|worker|codex|claude|cursor)s?\b/.test(lower) ||
+    /\b(agent|worker|codex|claude|cursor)s?\b[\s\S]{0,80}\b(simultaneous|parallel|at the same time)\b/.test(lower) ||
     /\bdifferent agent\b/.test(lower);
   const asksForParallel = /\b(simultaneous|parallel|at the same time)\b/.test(lower);
   const asksForCombine = /\b(combine|integrate|merge|assemble)\b/.test(lower);
@@ -1558,7 +1564,7 @@ async function chooseUiLogicRuntimes(): Promise<{
   logic: WorkerRuntime;
   integrator: WorkerRuntime;
 }> {
-  const diagnostics = await detectAgentRuntimes().catch(() => []);
+  const diagnostics = await detectConfiguredAgentRuntimes();
   const installed = new Set(
     diagnostics
       .filter((runtime) => runtime.installed)
@@ -1566,10 +1572,79 @@ async function chooseUiLogicRuntimes(): Promise<{
   );
   const hasClaude = installed.has("claude");
   const hasCodex = installed.has("codex");
-  const ui: WorkerRuntime = hasClaude ? "claude" : hasCodex ? "codex" : "manual";
-  const logic: WorkerRuntime = hasCodex ? "codex" : ui;
-  const integrator: WorkerRuntime = hasClaude ? "claude" : logic;
+  const hasCursor = installed.has("cursor");
+  const ui: WorkerRuntime = hasClaude ? "claude" : hasCursor ? "cursor" : hasCodex ? "codex" : "manual";
+  const logic: WorkerRuntime = hasCodex ? "codex" : hasCursor ? "cursor" : ui;
+  const integrator: WorkerRuntime = hasClaude ? "claude" : hasCursor ? "cursor" : logic;
   return { ui, logic, integrator };
+}
+
+async function rerouteUnavailableAgentRuntimes(
+  decision: SparkManagerDecision,
+): Promise<{ decision: SparkManagerDecision; rerouted: RuntimeReroute[] }> {
+  const diagnostics = await detectConfiguredAgentRuntimes();
+  const available = diagnostics.filter((runtime) => runtime.installed);
+  const availableKinds = new Set(available.map((runtime) => runtime.kind));
+  const fallback = available.find((runtime) => runtime.kind === "codex")
+    ?? available.find((runtime) => runtime.kind === "claude")
+    ?? available.find((runtime) => runtime.kind === "cursor");
+  const rerouted: RuntimeReroute[] = [];
+
+  const rewrite = (runtimePreference: WorkerRuntime, modelHint?: string, effortHint?: WorkerTask["effortHint"]) => {
+    if (runtimePreference !== "claude" && runtimePreference !== "codex" && runtimePreference !== "cursor") {
+      return { runtimePreference, modelHint, effortHint };
+    }
+    if (availableKinds.has(runtimePreference)) {
+      return { runtimePreference, modelHint, effortHint };
+    }
+    if (!fallback) {
+      rerouted.push({
+        from: runtimePreference,
+        to: "manual",
+        reason: "Requested agent runtime is not installed or is disabled by Settings > Agents.",
+      });
+      return {
+        runtimePreference: "manual" as WorkerRuntime,
+        modelHint: undefined,
+        effortHint: undefined,
+      };
+    }
+
+    const model = fallback.models.find((item) => item.isDefault) ?? fallback.models[0];
+    const nextModelHint = modelHint?.trim() && fallback.kind === runtimePreference
+      ? modelHint
+      : model?.id;
+    const nextEffortHint = normalizeWorkerEffortForModel(effortHint, model);
+    rerouted.push({
+      from: runtimePreference,
+      to: fallback.kind,
+      modelHint: nextModelHint,
+      effortHint: nextEffortHint,
+      reason: "Requested agent runtime is not installed or is disabled by Settings > Agents.",
+    });
+    return {
+      runtimePreference: fallback.kind as WorkerRuntime,
+      modelHint: nextModelHint,
+      effortHint: nextEffortHint,
+    };
+  };
+
+  const steps = decision.steps.map((step) => ({
+    ...step,
+    plannedAgents: step.plannedAgents.map((agent) => ({
+      ...agent,
+      ...rewrite(agent.runtimePreference, agent.modelHint, agent.effortHint),
+    })),
+  }));
+  const tasks = decision.tasks.map((task) => ({
+    ...task,
+    ...rewrite(task.runtimePreference, task.modelHint, task.effortHint),
+  }));
+
+  return {
+    decision: { ...decision, steps, tasks },
+    rerouted,
+  };
 }
 
 function makeExplicitParallelAgent(
@@ -1676,6 +1751,32 @@ function decisionTaskScopesOverlap(left: SparkManagerTaskDecision, right: SparkM
   );
 }
 
+function dropVerifierTasksWithExistingPeer(
+  run: RunState,
+  decision: SparkManagerDecision,
+  stepIds: string[],
+): { decision: SparkManagerDecision; dropped: Array<{ title: string; stepId: string; existingTaskId: string }> } {
+  const dropped: Array<{ title: string; stepId: string; existingTaskId: string }> = [];
+  const tasks = decision.tasks.filter((task) => {
+    if (task.taskClass !== "verifier") return true;
+    const stepId = resolveTaskStepId(run, task.stepIndex, stepIds);
+    if (!stepId) return true;
+    const existing = run.workerTasks.find(
+      (candidate) =>
+        candidate.stepId === stepId &&
+        candidate.taskClass === "verifier" &&
+        candidate.status !== "failed" &&
+        candidate.status !== "cancelled",
+    );
+    if (!existing) return true;
+    dropped.push({ title: task.title, stepId, existingTaskId: existing.id });
+    return false;
+  });
+  return dropped.length > 0
+    ? { decision: { ...decision, tasks }, dropped }
+    : { decision, dropped };
+}
+
 // Trivial fast-path: synthesize the worker task locally instead of round-tripping
 // through manager call 2 (step_planning). The manager has zero filesystem access,
 // so its task description guesses file paths — verified on bjgp3uso7, where the
@@ -1687,7 +1788,7 @@ function decisionTaskScopesOverlap(left: SparkManagerTaskDecision, right: SparkM
 //   - run.taskComplexity === 'trivial'
 //   - active step has exactly 1 plannedAgent (parallel work goes through manager)
 //   - active step has no queueable worker tasks yet
-//   - the agent is non-verifier and runs on claude/codex
+//   - the agent is non-verifier and runs on claude/codex/cursor
 //
 // Saves ~3 minutes (manager call 2 was 2992 reasoning tokens / ~3 min on
 // bjgp3uso7).
@@ -1700,7 +1801,11 @@ async function tryTrivialFastPathStepPlanning(run: RunState): Promise<RunState |
   if (agents.length !== 1) return null;
   const agent = agents[0];
   if (agent.taskClass === "verifier") return null;
-  if (agent.runtimePreference !== "claude" && agent.runtimePreference !== "codex") {
+  if (
+    agent.runtimePreference !== "claude" &&
+    agent.runtimePreference !== "codex" &&
+    agent.runtimePreference !== "cursor"
+  ) {
     return null;
   }
   const queueable: WorkerTaskStatus[] = ["created", "queued", "retry_queued"];
@@ -1761,49 +1866,6 @@ async function tryTrivialFastPathStepPlanning(run: RunState): Promise<RunState |
   });
 
   return next;
-}
-
-// Trivial fast-path: skip the manager's worker_result_review LLM call when
-// decideWorkerReport already accepted every task locally and every step is
-// already complete. On bjgp3uso7 manager call 3 spent 514 tokens producing
-// "looks complete, accept run" — a rubber stamp the autopilot can apply
-// deterministically.
-//
-// Returns the run with status=complete on success, null otherwise.
-async function tryTrivialFastPathReview(run: RunState): Promise<RunState | null> {
-  if (run.taskComplexity !== "trivial") return null;
-  if (run.status === "complete" || run.status === "failed" || run.status === "cancelled") {
-    return null;
-  }
-  if (run.workerTasks.length === 0) return null;
-  const everyTaskAccepted = run.workerTasks.every(
-    (t) => t.status === "accepted" || t.status === "cancelled",
-  );
-  if (!everyTaskAccepted) return null;
-  if (run.steps.length === 0) return null;
-  const everyStepDone = run.steps.every(
-    (s) => s.status === "complete" || s.status === "failed" || s.status === "skipped",
-  );
-  if (!everyStepDone) return null;
-
-  return commitRunChange(run, {
-    type: "spark_manager.trivial_fast_path_review",
-    message: "Skipped manager worker_result_review call: trivial run with all tasks accepted and all steps complete",
-    payload: {
-      taskCount: run.workerTasks.length,
-      stepCount: run.steps.length,
-    },
-    mutate: (draft, timestamp) => {
-      draft.status = "complete";
-      draft.autopilot = {
-        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
-        status: "complete",
-        lastAction: "trivial_fast_path_review_skipped",
-        updatedAt: timestamp,
-      };
-      draft.updatedAt = timestamp;
-    },
-  });
 }
 
 // Run an implementation worker's verificationCommands directly from Spark's
@@ -1991,16 +2053,31 @@ async function tryStandardCleanImplFastPathReview(
 const STANDING_TERMINAL_CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
 
 // Build the launch command for a standing interactive terminal: a plain
-// claude/codex session the user drives. Like buildLaunchCommandLine, but
-// without the worker-task wiring — these are not Spark workers.
+// claude/codex/cursor session the user drives. Like buildLaunchCommandLine,
+// but without the worker-task wiring — these are not Spark workers.
 function buildStandingTerminalCommand(
-  runtime: "claude" | "codex",
+  runtime: "claude" | "codex" | "cursor",
   model?: string,
   effort?: string,
 ): string {
   if (runtime === "codex") {
     const args = ["codex", "--yolo"];
     if (model) args.push("-m", quoteShellArg(model));
+    return args.join(" ");
+  }
+  if (runtime === "cursor") {
+    // See buildLaunchCommandLine for cursor — bare "agent" resolves to
+    // agent.ps1 in the parent pwsh and trips the user's $PROFILE hooks
+    // (Terminal-Icons errors). agent.cmd spawns a -NoProfile child instead.
+    // Quoted path needs the `&` call operator in pwsh.
+    const localAppData = process.env.LOCALAPPDATA;
+    const cmdPath = localAppData
+      ? join(localAppData, "cursor-agent", "agent.cmd")
+      : "agent";
+    const head = localAppData ? `& ${quoteShellArg(cmdPath)}` : "agent";
+    const args = [head, "--yolo"];
+    const modelId = model || "composer-2.5-fast";
+    args.push("--model", quoteShellArg(modelId));
     return args.join(" ");
   }
   const args = ["claude", "--dangerously-skip-permissions"];
@@ -2011,18 +2088,19 @@ function buildStandingTerminalCommand(
   return args.join(" ");
 }
 
-function standingTerminalTitle(runtime: "claude" | "codex", model?: string): string {
-  const base = runtime === "codex" ? "Codex" : "Claude";
+function standingTerminalTitle(runtime: "claude" | "codex" | "cursor", model?: string): string {
+  const base = runtime === "codex" ? "Codex" : runtime === "cursor" ? "Cursor" : "Claude";
   return model ? `${base} ${model}` : base;
 }
 
 // One-line chat confirmation for a spawn_terminals decision, e.g. "Opened 2
-// Claude and 1 Codex standing terminals ...". Counts by runtime so the user
-// gets concrete acknowledgement that the request landed.
+// Claude and 1 Codex standing terminals ...". Counts by runtime (claude,
+// codex, cursor) so the user gets concrete acknowledgement that the request
+// landed.
 function describeSpawnedTerminals(terminals: Array<{ runtime: string }>): string {
   const counts = new Map<string, number>();
   for (const terminal of terminals) {
-    const label = terminal.runtime === "codex" ? "Codex" : "Claude";
+    const label = terminal.runtime === "codex" ? "Codex" : terminal.runtime === "cursor" ? "Cursor" : "Claude";
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   const parts = [...counts].map(([label, n]) => `${n} ${label}`);
@@ -2037,7 +2115,7 @@ function describeSpawnedTerminals(terminals: Array<{ runtime: string }>): string
 function spawnedTerminalsTitle(terminals: Array<{ runtime: string }>): string {
   const counts = new Map<string, number>();
   for (const terminal of terminals) {
-    const label = terminal.runtime === "codex" ? "Codex" : "Claude";
+    const label = terminal.runtime === "codex" ? "Codex" : terminal.runtime === "cursor" ? "Cursor" : "Claude";
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   const parts = [...counts].map(([label, n]) => `${label} x${n}`);
@@ -2201,10 +2279,54 @@ async function applySparkManagerDecision(
         });
       }
     }
-    return askHumanQuestion(run.id, decision.question || "Please clarify what Spark should do next.");
+    return askHumanQuestion(
+      run.id,
+      decision.question || "Please clarify what Spark should do next.",
+      decision.questionOptions,
+    );
   }
 
   if (decision.status === "complete") {
+    if (mode === "chat") {
+      return commitRunChange(run, {
+        type: "spark_manager.chat_completed",
+        message: "Spark manager answered the chat turn",
+        payload: {
+          summary: decision.summary,
+        },
+        mutate: (draft, timestamp) => {
+          const terminalStepStatuses = new Set(["complete", "failed", "skipped"]);
+          for (const step of draft.steps) {
+            if (terminalStepStatuses.has(step.status)) continue;
+            step.status = "skipped";
+            step.updatedAt = timestamp;
+          }
+          const cancellableTaskStatuses = new Set([
+            "created",
+            "queued",
+            "claimed",
+            "running",
+            "needs_review",
+            "retry_queued",
+          ]);
+          for (const task of draft.workerTasks) {
+            if (!cancellableTaskStatuses.has(task.status)) continue;
+            task.status = "cancelled";
+            task.updatedAt = timestamp;
+          }
+          draft.currentStepId = undefined;
+          draft.status = "complete";
+          draft.autopilot = {
+            ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+            status: "complete",
+            lastAction: "manager_answered_chat",
+            updatedAt: timestamp,
+          };
+          draft.updatedAt = timestamp;
+        },
+      });
+    }
+
     const repaired = await maybeAppendMissingExplicitParallelIntegratorStep(run);
     if (repaired) return repaired;
 
@@ -2360,6 +2482,19 @@ async function applySparkManagerDecision(
         },
       });
     }
+    // Recon-as-completion guard: even when no steps/tasks remain pending,
+    // refuse `complete` when the run executed only read-only / recon-style
+    // workers and zero non-verifier tasks reported any filesChanged. Without
+    // this, a manager that planned a single recon worker_batch (no following
+    // implementation step) lands the run with no behavioral changes — the
+    // run.json shows `lastAction: "manager_marked_complete"` and the user
+    // gets back an empty diff for a request that demanded code edits. The
+    // existing failsafe at >=2 refusals still applies, so a model that
+    // truly believes no changes are needed can land after the loop.
+    if (mode === "worker_result_review") {
+      const reconRefusal = await maybeReconAsCompletionRefusal(run, decision.summary);
+      if (reconRefusal) return reconRefusal;
+    }
     return commitRunChange(run, {
       type: "spark_manager.completed_run",
       message: "Spark manager marked the run complete",
@@ -2394,8 +2529,28 @@ async function applySparkManagerDecision(
     });
   }
 
-  const calculatorRouting = await maybeRouteCalculatorStateWorkToCodex(run, decision, mode);
-  decision = calculatorRouting.decision;
+  // Note: a hardcoded "route any calculator-shaped step to codex" override
+  // used to live here. It second-guessed every plan touching the word
+  // "calculator" and rewrote claude assignments to codex regardless of what
+  // the manager decided — the dominant cause of "Spark almost only uses
+  // codex" complaints. Removed so the manager's own routing (and the
+  // hybrid-runtime split in shouldEnforceHybridParallelRuntimes) stand.
+  // Quality regressions on calculator-shaped tasks should be addressed by
+  // tuning the manager profile or worker prompt, not by per-task overrides.
+
+  const runtimeRepair = await rerouteUnavailableAgentRuntimes(decision);
+  decision = runtimeRepair.decision;
+  if (runtimeRepair.rerouted.length > 0) {
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      type: "spark_manager.unavailable_runtime_rerouted",
+      message: `Rerouted ${runtimeRepair.rerouted.length} assignment(s) away from disabled or unavailable runtimes`,
+      payload: {
+        rerouted: runtimeRepair.rerouted,
+      },
+    });
+  }
 
   // The manager returned run_workers (or equivalent forward progress); the
   // run is moving again, so clear any prior consecutive-completion-refusal
@@ -2417,7 +2572,7 @@ async function applySparkManagerDecision(
       : run;
   const stepIds: string[] = [];
   const steps: SparkManagerStepDecision[] =
-    mode === "plan_analysis" && decision.steps.length > 0
+    (mode === "plan_analysis" || mode === "chat") && decision.steps.length > 0
       ? decision.steps
       : latest.steps.length > 0
         ? []
@@ -2438,7 +2593,7 @@ async function applySparkManagerDecision(
   // plan with fresh evidence — appending it would duplicate every queued step
   // (we saw 3-7 dup as 8-12, then again as 13-15). Drop the still-queued tail
   // before appending so the plan stays linear and indices stay coherent.
-  if (mode === "plan_analysis" && steps.length > 0 && latest.steps.length > 0) {
+  if ((mode === "plan_analysis" || mode === "chat") && steps.length > 0 && latest.steps.length > 0) {
     const stale = latest.steps.filter((step) =>
       ["queued", "planning", "ready", "blocked"].includes(step.status),
     );
@@ -2465,7 +2620,7 @@ async function applySparkManagerDecision(
   // on this — if it isn't persisted, every review reverts to the default
   // (complex) verifier behavior.
   if (
-    mode === "plan_analysis" &&
+    (mode === "plan_analysis" || mode === "chat") &&
     decision.taskComplexity &&
     decision.taskComplexity !== latest.taskComplexity
   ) {
@@ -2571,33 +2726,15 @@ async function applySparkManagerDecision(
   // depth-conditional VERIFIER FOLLOW-UP RULE and queues 2 peer verifiers on a
   // trivial/standard run, the autopilot drops the excess so the wall-clock
   // savings of the classification are realized regardless of LLM compliance.
-  //   - trivial: drop ALL verifier-class tasks (the SELF-CHECK on the impl is
-  //              the only check this complexity earns).
-  //   - standard: keep at most ONE verifier per step (cross-provider single
-  //              peer), drop additional ones.
+  //   - trivial/standard: keep at most ONE verifier per step (cross-provider
+  //              single peer), drop additional ones. Trivial keeps its one
+  //              verifier — a confident worker self-report is not proof, and
+  //              eval runs showed blind-accepted trivial work failing basic
+  //              input/output checks with zero detection.
   //   - complex: no change (current dual-peer pattern stands).
   if (mode === "worker_result_review" && decision.tasks.length > 0 && latest.taskComplexity) {
     const complexity = latest.taskComplexity;
-    if (complexity === "trivial") {
-      const dropped = decision.tasks.filter((t) => t.taskClass === "verifier");
-      if (dropped.length > 0) {
-        decision = {
-          ...decision,
-          tasks: decision.tasks.filter((t) => t.taskClass !== "verifier"),
-        };
-        await appendEvent({
-          workspaceId: latest.workspaceId,
-          runId: latest.id,
-          type: "spark_manager.adaptive_depth_dropped_verifiers",
-          message: `Dropped ${dropped.length} verifier task(s) on a trivial run (depth-adaptive policy: 0 verifiers)`,
-          payload: {
-            taskComplexity: complexity,
-            droppedCount: dropped.length,
-            droppedTitles: dropped.map((t) => t.title),
-          },
-        });
-      }
-    } else if (complexity === "standard") {
+    if (complexity === "standard" || complexity === "trivial") {
       const verifiersByStep = new Map<string | undefined, SparkManagerTaskDecision[]>();
       for (const task of decision.tasks) {
         if (task.taskClass !== "verifier") continue;
@@ -2619,14 +2756,12 @@ async function applySparkManagerDecision(
         const recentImpl = [...latest.workerTasks]
           .reverse()
           .find((t) => t.taskClass !== "verifier");
-        const oppositeRuntime: WorkerRuntime | undefined =
-          recentImpl?.runtimePreference === "claude"
-            ? "codex"
-            : recentImpl?.runtimePreference === "codex"
-              ? "claude"
-              : undefined;
+        const implRuntime = recentImpl?.runtimePreference;
+        // Prefer ANY verifier whose runtime differs from the impl's. With
+        // three runtimes (claude/codex/cursor) there are two valid
+        // cross-provider picks per impl; either is acceptable.
         const kept =
-          (oppositeRuntime && list.find((t) => t.runtimePreference === oppositeRuntime)) ||
+          (implRuntime && list.find((t) => t.runtimePreference && t.runtimePreference !== implRuntime)) ||
           list[0];
         keptIds.add(kept);
         for (const task of list) {
@@ -2642,7 +2777,7 @@ async function applySparkManagerDecision(
           workspaceId: latest.workspaceId,
           runId: latest.id,
           type: "spark_manager.adaptive_depth_demoted_verifier_pair",
-          message: `Demoted dual-verifier pair to single cross-provider verifier on a standard run (${droppedTitles.length} dropped)`,
+          message: `Demoted dual-verifier pair to single cross-provider verifier on a ${complexity} run (${droppedTitles.length} dropped)`,
           payload: {
             taskComplexity: complexity,
             droppedCount: droppedTitles.length,
@@ -2650,6 +2785,22 @@ async function applySparkManagerDecision(
           },
         });
       }
+    }
+  }
+
+  if (mode === "worker_result_review" && decision.tasks.length > 0) {
+    const verifierDedup = dropVerifierTasksWithExistingPeer(latest, decision, stepIds);
+    if (verifierDedup.dropped.length > 0) {
+      decision = verifierDedup.decision;
+      await appendEvent({
+        workspaceId: latest.workspaceId,
+        runId: latest.id,
+        type: "spark_manager.duplicate_verifier_tasks_dropped",
+        message: `Dropped ${verifierDedup.dropped.length} duplicate verifier task(s) because a verifier already exists for the step`,
+        payload: {
+          dropped: verifierDedup.dropped,
+        },
+      });
     }
   }
 
@@ -2731,7 +2882,17 @@ async function applySparkManagerDecision(
   }
 
   if (mode === "worker_result_review" && decision.tasks.length === 0) {
-    latest = await completeAcceptedReviewingSteps(latest, decision.summary);
+    // Recon-as-completion guard (parallel to the one in applySparkManagerDecision):
+    // the manager can also bypass `status: "complete"` by returning run_workers
+    // with tasks=[] (accept-no-verifier path). Without this check that path
+    // marks the recon step complete via completeAcceptedReviewingSteps, the
+    // run lands with no impl changes, and the user gets an empty diff.
+    const reconRefusal = await maybeReconAsCompletionRefusal(latest, decision.summary);
+    if (reconRefusal) {
+      latest = reconRefusal;
+    } else {
+      latest = await completeAcceptedReviewingSteps(latest, decision.summary);
+    }
   }
 
   let createdTaskCount = 0;
@@ -2882,6 +3043,18 @@ export async function pauseRunAfterCurrentWorkers(input: PauseRunInput): Promise
 
 export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
+  const resumeInput = autopilotInputFromRun(run);
+  if (activeWorkersForRun(run.id).length === 0 && shouldRoutePausedResumeToChat(run)) {
+    const chatDecision = await askOpenRouterManagerForChat(run, resumeInput.cwd);
+    if (chatDecision) {
+      if (chatDecision.status === "paused" || chatDecision.status === "cancelled" || chatDecision.status === "complete") {
+        return chatDecision;
+      }
+      if (chatDecision.steps.length > 0 || chatDecision.workerTasks.length > 0) {
+        return startAutopilot({ ...resumeInput, runId: chatDecision.id });
+      }
+    }
+  }
   const resumePrompt = buildResumePrompt(run);
   await sendResumeSignals(run, resumePrompt);
   const resumed = await commitRunChange(run, {
@@ -2906,7 +3079,6 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     },
   });
   if (shouldResumeManagerPlanning(run)) {
-    const resumeInput = autopilotInputFromRun(resumed);
     if (resumed.workerAttempts.length > 0) {
       scheduleAutopilotReview(resumed.id, resumeInput.cwd);
     } else {
@@ -2969,11 +3141,7 @@ export async function cancelRun(input: CancelRunInput): Promise<RunState> {
 export async function addRunMessage(input: AddRunMessageInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   const attachmentInputs = input.attachments ?? [];
-  const message = input.message.trim() || (
-    attachmentInputs.length > 0
-      ? `Use the attached image${attachmentInputs.length === 1 ? "" : "s"} as context.`
-      : ""
-  );
+  const message = input.message.trim() || fallbackMessageForAttachments(attachmentInputs);
   if (!message) throw new Error("Message is required.");
   const clientMessageId = input.clientMessageId?.trim();
 
@@ -3003,6 +3171,10 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
 
   const messageId = makeId("msg");
   const attachments = await persistRunMessageAttachments(run.id, messageId, attachmentInputs);
+  const questionOptions =
+    input.author === "spark" && input.kind === "question"
+      ? normalizeQuestionOptionsForMessage(message, input.questionOptions)
+      : undefined;
   const humanMessage = {
     id: messageId,
     clientMessageId,
@@ -3010,6 +3182,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     author: input.author,
     kind: input.kind,
     message,
+    questionOptions,
     attachments,
     createdAt: new Date().toISOString(),
   };
@@ -3060,17 +3233,176 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
   });
   if (!messageRecorded) return updated;
 
-  // Re-engage the manager when the user chatted into a terminal run. We hand
-  // off via scheduleInitialAutopilotPlanning because plan_analysis already
-  // reads humanMessages.slice(-8), so the user's new note is in context and
-  // the manager can append additional steps + emit a chatReply. Schedule
-  // afterCurrent in case planning was already in flight.
+  // Re-engage the manager when the user chatted into a terminal run. Terminal
+  // follow-ups begin in chat-decision mode so Spark can either answer directly
+  // from context or choose worker orchestration when tools are useful.
   if (input.author === "user" && wasTerminal) {
     const autopilotInput = autopilotInputFromRun(updated);
-    scheduleInitialAutopilotPlanning(updated.id, autopilotInput, { afterCurrent: true });
+    scheduleInitialChatDecision(updated.id, autopilotInput, { afterCurrent: true });
   }
 
   return updated;
+}
+
+async function enrichLatestUserMessageWithMentionedFiles(run: RunState, cwd: string): Promise<RunState> {
+  if (run.humanMessages.length === 0) return run;
+  const latest = run.humanMessages[run.humanMessages.length - 1];
+  if (latest.author !== "user" || (latest.kind !== "note" && latest.kind !== "answer")) return run;
+
+  const explicitAttachments = (latest.attachments ?? []).filter((attachment) => attachment.kind === "file");
+  const mentionedAttachments = await resolveMentionedFileAttachments(latest.message, cwd, explicitAttachments);
+  if (mentionedAttachments.length === 0) return run;
+
+  return commitRunChange(run, {
+    type: "human.file_mentions_resolved",
+    message: `Resolved ${mentionedAttachments.length} @file mention(s) for manager context`,
+    payload: {
+      messageId: latest.id,
+      attachments: mentionedAttachments.map((attachment) => ({
+        name: attachment.name,
+        path: attachment.path,
+        size: attachment.size,
+        mimeType: attachment.mimeType,
+      })),
+    },
+    mutate: (draft, timestamp) => {
+      const target = draft.humanMessages.find((message) => message.id === latest.id);
+      if (!target) return false;
+      target.attachments = mergeRunMessageAttachments(target.attachments ?? [], mentionedAttachments);
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+async function resolveMentionedFileAttachments(
+  message: string,
+  cwd: string,
+  existing: RunMessageAttachment[],
+): Promise<RunMessageAttachment[]> {
+  if (!cwd) return [];
+  const existingKeys = new Set(existing.map((attachment) => normalizedPathKey(attachment.path)));
+  const attachments: RunMessageAttachment[] = [];
+  for (const token of parseInlineFileMentionTokens(message)) {
+    const path = await resolveMentionedFilePath(cwd, token);
+    if (!path) continue;
+    const key = normalizedPathKey(path);
+    if (existingKeys.has(key)) continue;
+    existingKeys.add(key);
+    try {
+      const stat = await fs.stat(path);
+      if (!stat.isFile()) continue;
+      attachments.push({
+        id: makeId("att-ref"),
+        kind: "file",
+        name: displayPathForResolvedMention(cwd, path),
+        path,
+        mimeType: fileMimeTypeForPath(path),
+        size: stat.size,
+        createdAt: new Date().toISOString(),
+      });
+    } catch {
+      // Ignore stale mentions. The manager still receives the user's text and
+      // can decide whether to ask, answer from other context, or spawn workers.
+    }
+  }
+  return attachments;
+}
+
+async function resolveMentionedFilePath(cwd: string, token: string): Promise<string | null> {
+  const cleaned = cleanInlineFileMentionToken(token);
+  if (!cleaned) return null;
+
+  const directCandidates = isAbsolute(cleaned)
+    ? [cleaned]
+    : [resolvePath(cwd, cleaned)];
+  for (const candidate of directCandidates) {
+    try {
+      const stat = await fs.stat(candidate);
+      if (stat.isFile()) return candidate;
+    } catch {
+      // Try the workspace scan fallback below.
+    }
+  }
+
+  return findWorkspaceFileMention(cwd, normalizeMentionPath(cleaned));
+}
+
+async function findWorkspaceFileMention(cwd: string, normalizedToken: string): Promise<string | null> {
+  let visitedFiles = 0;
+  async function walk(dir: string, depth: number): Promise<string | null> {
+    if (depth > DIRECT_FILE_MENTION_SCAN_DEPTH || visitedFiles >= DIRECT_FILE_MENTION_SCAN_RESULTS) return null;
+    let entries: import("node:fs").Dirent[] = [];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+
+    const files = entries.filter((entry) => entry.isFile());
+    for (const entry of files) {
+      visitedFiles += 1;
+      const fullPath = join(dir, entry.name);
+      const rel = normalizeMentionPath(relative(cwd, fullPath));
+      const name = normalizeMentionPath(entry.name);
+      if (rel === normalizedToken || name === normalizedToken) return fullPath;
+      if (visitedFiles >= DIRECT_FILE_MENTION_SCAN_RESULTS) return null;
+    }
+
+    const dirs = entries.filter((entry) => entry.isDirectory() && !SKIPPED_DIRECT_FILE_MENTION_DIRS.has(entry.name));
+    for (const entry of dirs) {
+      const found = await walk(join(dir, entry.name), depth + 1);
+      if (found) return found;
+      if (visitedFiles >= DIRECT_FILE_MENTION_SCAN_RESULTS) return null;
+    }
+    return null;
+  }
+  return walk(cwd, 0);
+}
+
+function mergeRunMessageAttachments(
+  first: RunMessageAttachment[],
+  second: RunMessageAttachment[],
+): RunMessageAttachment[] {
+  const byPath = new Map<string, RunMessageAttachment>();
+  for (const attachment of [...first, ...second]) {
+    byPath.set(normalizedPathKey(attachment.path), attachment);
+  }
+  return [...byPath.values()];
+}
+
+function parseInlineFileMentionTokens(message: string): string[] {
+  const tokens: string[] = [];
+  const pattern = /(^|[\s([{,;:])@([^\s]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(message)) !== null) {
+    const token = cleanInlineFileMentionToken(match[2]);
+    if (token) tokens.push(token);
+  }
+  return tokens;
+}
+
+function cleanInlineFileMentionToken(token: string): string {
+  return token
+    .trim()
+    .replace(/^@+/, "")
+    .replace(/^['"`]+|['"`]+$/g, "")
+    .replace(/[),.;:!?]+$/g, "");
+}
+
+function normalizeMentionPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\/+/, "").toLowerCase();
+}
+
+function normalizedPathKey(path: string): string {
+  return resolvePath(path).toLowerCase();
+}
+
+function displayPathForResolvedMention(cwd: string, path: string): string {
+  const rel = relative(cwd, path);
+  if (rel && rel !== ".." && !rel.startsWith(`..${"\\"}`) && !rel.startsWith("../") && !isAbsolute(rel)) {
+    return rel;
+  }
+  return basename(path);
 }
 
 async function persistRunMessageAttachments(
@@ -3080,7 +3412,7 @@ async function persistRunMessageAttachments(
 ): Promise<RunMessageAttachment[]> {
   const selected = (inputs ?? [])
     .filter((input) => input?.sourcePath?.trim())
-    .slice(0, MAX_IMAGE_ATTACHMENTS_PER_MESSAGE);
+    .slice(0, MAX_ATTACHMENTS_PER_MESSAGE);
   if (selected.length === 0) return [];
 
   const attachmentDir = join(runDir(runId), "attachments");
@@ -3091,32 +3423,52 @@ async function persistRunMessageAttachments(
   for (const input of selected) {
     const sourcePath = input.sourcePath.trim();
     const mimeType = imageMimeTypeForPath(sourcePath);
-    if (!mimeType) {
+    const kind = input.kind ?? (mimeType ? "image" : "file");
+    if (kind === "image" && !mimeType) {
       throw new Error(`Unsupported image attachment type: ${basename(sourcePath)}`);
     }
     const stat = await fs.stat(sourcePath);
-    if (!stat.isFile()) throw new Error(`Image attachment is not a file: ${sourcePath}`);
-    if (stat.size > MAX_IMAGE_ATTACHMENT_BYTES) {
+    if (!stat.isFile()) throw new Error(`Attachment is not a file: ${sourcePath}`);
+    if (kind === "image" && stat.size > MAX_IMAGE_ATTACHMENT_BYTES) {
       throw new Error(`Image attachment is too large: ${basename(sourcePath)}`);
     }
 
     const id = makeId("att");
-    const ext = normalizedImageExtension(sourcePath);
     const safeName = basename(input.name?.trim() || sourcePath);
+    if (kind === "file") {
+      attachments.push({
+        id,
+        kind,
+        name: safeName,
+        path: sourcePath,
+        mimeType: fileMimeTypeForPath(sourcePath),
+        size: stat.size,
+        createdAt,
+      });
+      continue;
+    }
+
+    const ext = normalizedImageExtension(sourcePath);
     const storedPath = join(attachmentDir, `${messageId}-${id}${ext}`);
     await fs.copyFile(sourcePath, storedPath);
     attachments.push({
       id,
-      kind: "image",
+      kind,
       name: safeName,
       path: storedPath,
-      mimeType,
+      mimeType: mimeType!,
       size: stat.size,
       createdAt,
     });
   }
 
   return attachments;
+}
+
+function fallbackMessageForAttachments(inputs: AddRunMessageInput["attachments"]): string {
+  const count = inputs?.filter((input) => input?.sourcePath?.trim()).length ?? 0;
+  if (count === 0) return "";
+  return `Use the attached reference${count === 1 ? "" : "s"} as context.`;
 }
 
 function imageMimeTypeForPath(path: string): string | null {
@@ -3140,6 +3492,42 @@ function imageMimeTypeForPath(path: string): string | null {
 function normalizedImageExtension(path: string): string {
   const ext = extname(path).toLowerCase();
   return ext === ".jpeg" ? ".jpg" : ext;
+}
+
+function fileMimeTypeForPath(path: string): string {
+  switch (extname(path).toLowerCase()) {
+    case ".css":
+      return "text/css";
+    case ".csv":
+      return "text/csv";
+    case ".htm":
+    case ".html":
+      return "text/html";
+    case ".js":
+    case ".jsx":
+    case ".mjs":
+    case ".cjs":
+      return "text/javascript";
+    case ".json":
+      return "application/json";
+    case ".md":
+    case ".mdx":
+      return "text/markdown";
+    case ".svg":
+      return "image/svg+xml";
+    case ".ts":
+    case ".tsx":
+      return "text/typescript";
+    case ".txt":
+      return "text/plain";
+    case ".xml":
+      return "application/xml";
+    case ".yaml":
+    case ".yml":
+      return "application/yaml";
+    default:
+      return "application/octet-stream";
+  }
 }
 
 // Append a user message AND interrupt the in-flight run so the manager picks
@@ -3534,8 +3922,12 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
     paths,
     createdAt: timestamp,
   };
-  await ensurePeerCommsArtifacts(run, step, task, attempt.id, paths, "prompt_ready").catch(() => undefined);
-  const prompt = renderWorkerPrompt({ cwd: input.cwd, run, step, task, paths });
+  const peerCommsEnabled = shouldUsePeerComms(run, step, task);
+  if (peerCommsEnabled) {
+    await ensurePeerCommsArtifacts(run, step, task, attempt.id, paths, "prompt_ready").catch(() => undefined);
+  }
+  const settings = await loadSettings();
+  const prompt = renderWorkerPrompt({ cwd: input.cwd, run, step, task, paths, settings });
 
   await fs.mkdir(paths.attemptDir, { recursive: true });
   await fs.writeFile(paths.taskJson, JSON.stringify(envelope, null, 2), "utf8");
@@ -3581,10 +3973,11 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
 
 async function rerouteSparkShellTaskToAgent(task: WorkerTask): Promise<RuntimeReroute | null> {
   if (task.createdBy !== "spark" || task.runtimePreference !== "shell") return null;
-  const runtimes = await detectAgentRuntimes().catch(() => []);
+  const runtimes = await detectConfiguredAgentRuntimes();
   const target =
     runtimes.find((runtime) => runtime.kind === "codex" && runtime.installed) ??
-    runtimes.find((runtime) => runtime.kind === "claude" && runtime.installed);
+    runtimes.find((runtime) => runtime.kind === "claude" && runtime.installed) ??
+    runtimes.find((runtime) => runtime.kind === "cursor" && runtime.installed);
   if (!target) return null;
 
   const model = target.models.find((item) => item.isDefault) ?? target.models[0];
@@ -3650,6 +4043,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // before spawning. Idempotent and cheap.
   if (task.runtimePreference === "codex") {
     await ensureCodexProjectTrust(attempt.cwd).catch(() => undefined);
+  }
+  if (task.runtimePreference === "cursor") {
+    await ensureCursorProjectTrust(attempt.cwd).catch(() => undefined);
   }
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd);
   const command = launchCommand
@@ -4058,6 +4454,57 @@ function canCompleteStepImmediatelyAfterLocalReview(
   return true;
 }
 
+// Returns a refusal RunState when the manager wants to land the run with zero
+// implementation changes (recon-as-completion). Returns null when the run has
+// legitimate impl work behind it OR when the refusal counter has already hit
+// the failsafe threshold (so the run can land instead of looping forever).
+// Shared by both the `status: "complete"` path and the `run_workers tasks=[]`
+// path — both can end a run without an implementation worker ever editing a
+// file, so both need the same check.
+async function maybeReconAsCompletionRefusal(
+  run: RunState,
+  summary: string,
+): Promise<RunState | null> {
+  const nonVerifierTasks = run.workerTasks.filter(
+    (task) => task.taskClass !== "verifier",
+  );
+  if (nonVerifierTasks.length === 0) return null;
+  let anyChanges = false;
+  for (const attempt of run.workerAttempts) {
+    const task = run.workerTasks.find((t) => t.id === attempt.workerTaskId);
+    if (!task || task.taskClass === "verifier") continue;
+    if (!attempt.finalReportPath) continue;
+    const report = await readWorkerReport(attempt.finalReportPath);
+    if (report && Array.isArray(report.filesChanged) && report.filesChanged.length > 0) {
+      anyChanges = true;
+      break;
+    }
+  }
+  if (anyChanges) return null;
+  const priorRefusals = run.autopilot?.consecutiveCompletionRefusals ?? 0;
+  const nextRefusals = priorRefusals + 1;
+  if (nextRefusals >= 2) return null;
+  return commitRunChange(run, {
+    type: "spark_manager.completion_refused",
+    message: `Manager wants to land the run after only read-only workers (${nonVerifierTasks.length} non-verifier task(s), 0 filesChanged); replanning to add an implementation step`,
+    payload: {
+      summary,
+      reason: "no_implementation_changes",
+      nonVerifierTaskCount: nonVerifierTasks.length,
+      consecutiveRefusals: nextRefusals,
+    },
+    mutate: (draft, timestamp) => {
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        lastAction: "completion_refused",
+        consecutiveCompletionRefusals: nextRefusals,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 async function completeAcceptedReviewingSteps(
   run: RunState,
   summary: string,
@@ -4108,6 +4555,124 @@ async function completeAcceptedReviewingSteps(
   });
 }
 
+function formatProofAsSparkReply(proof: string): string {
+  const trimmed = proof.trim();
+  const parsed = parseProofCommandOutput(trimmed);
+  if (parsed && parsed.exitCode === 0 && parsed.output.trim()) {
+    const readTarget = inferReadCommandTarget(parsed.command);
+    if (readTarget) {
+      return formatFileContentReply(readTarget, parsed.output);
+    }
+  }
+
+  const compactProof = trimmed.slice(0, 1800);
+  const truncated = compactProof.length < trimmed.length;
+  return [
+    "Done. Verification output:",
+    "",
+    fencedMarkdown(compactProof, "text"),
+    ...(truncated ? ["", "..."] : []),
+  ].join("\n");
+}
+
+function formatFileContentReply(target: string, output: string): string {
+  const content = output.trim();
+  const compactContent = content.slice(0, 2400);
+  const truncated = compactContent.length < content.length;
+  return [
+    `\`${displayReadTarget(target)}\` contains:`,
+    "",
+    fencedMarkdown(compactContent, markdownLanguageForPath(target)),
+    ...(truncated ? ["", "..."] : []),
+  ].join("\n");
+}
+
+function parseProofCommandOutput(
+  proof: string,
+): { command: string; exitCode: number; output: string } | null {
+  const normalized = proof.replace(/\r\n/g, "\n").trim();
+  const match = normalized.match(/^\$?\s*([^\n]+)\n\[exit=(-?\d+)\]\n*([\s\S]*)$/);
+  if (!match) return null;
+  return {
+    command: match[1].trim(),
+    exitCode: Number.parseInt(match[2], 10),
+    output: match[3].trim(),
+  };
+}
+
+function inferReadCommandTarget(command: string): string | null {
+  const tokens = shellishTokens(command.replace(/^\$\s*/, ""));
+  const readIndex = tokens.findIndex((token) =>
+    /^(cat|type|gc|get-content)$/i.test(token),
+  );
+  if (readIndex < 0) return null;
+  for (let i = readIndex + 1; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (!token || token === "|" || token === ";" || token === "&&" || token === "||") break;
+    if (token.startsWith("-")) {
+      if (/^-path$/i.test(token) || /^-literalpath$/i.test(token)) {
+        return tokens[i + 1] ?? null;
+      }
+      continue;
+    }
+    return token;
+  }
+  return null;
+}
+
+function shellishTokens(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | null = null;
+  for (const char of command) {
+    if (quote) {
+      if (char === quote) quote = null;
+      else current += char;
+      continue;
+    }
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function displayReadTarget(target: string): string {
+  const cleaned = target.trim().replace(/^['"]|['"]$/g, "");
+  return cleaned.length > 90 ? basename(cleaned) : cleaned;
+}
+
+function markdownLanguageForPath(path: string): string {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
+  if (lower.endsWith(".json")) return "json";
+  if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "tsx";
+  if (lower.endsWith(".js") || lower.endsWith(".jsx") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "javascript";
+  if (lower.endsWith(".css")) return "css";
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "html";
+  if (lower.endsWith(".toml")) return "toml";
+  if (lower.endsWith(".yaml") || lower.endsWith(".yml")) return "yaml";
+  if (lower.endsWith(".ps1")) return "powershell";
+  if (lower.endsWith(".sh")) return "bash";
+  return "text";
+}
+
+function fencedMarkdown(content: string, language: string): string {
+  let fence = "```";
+  while (content.includes(fence)) fence += "`";
+  return `${fence}${language}\n${content.trim()}\n${fence}`;
+}
+
 // Detects the synthetic report written by writeAutoFailureReport when the
 // agent CLI failed environmentally (launch failure, auth/API/socket failure),
 // and if we haven't already exhausted runtimes, queues a fresh task on the
@@ -4130,12 +4695,22 @@ async function maybeQueueCliLaunchFallback({
     /CLI failed (?:to launch|before producing a final report)|runtime API error|socket connection/i.test(risk),
   );
   if (!isLaunchFailure) return null;
-  const opposite: WorkerRuntime | null =
-    task.runtimePreference === "claude"
-      ? "codex"
-      : task.runtimePreference === "codex"
-        ? "claude"
-        : null;
+  if (
+    task.runtimePreference !== "claude" &&
+    task.runtimePreference !== "codex" &&
+    task.runtimePreference !== "cursor"
+  ) {
+    return null;
+  }
+  const availableRuntimes = await detectConfiguredAgentRuntimes();
+  // Prefer the first installed runtime OTHER than the one that just failed.
+  // Order claude → codex → cursor by default, but skip the failing one. With
+  // three runtimes we may still find a valid fallback even when one runtime
+  // is offline.
+  const preferenceOrder: WorkerRuntime[] = ["claude", "codex", "cursor"];
+  const opposite: WorkerRuntime | null = preferenceOrder
+    .filter((kind) => kind !== task.runtimePreference)
+    .find((kind) => availableRuntimes.some((runtime) => runtime.kind === kind && runtime.installed)) ?? null;
   if (!opposite) return null;
   // Only fall back once per (step, title) lineage. If a sibling with the
   // opposite runtime already exists (failed, cancelled, or pending), both
@@ -4295,6 +4870,7 @@ function estimateTextSections(
 function fallbackModelHintForRuntime(runtime: WorkerRuntime): string | undefined {
   if (runtime === "claude") return "claude-opus-4-7";
   if (runtime === "codex") return "gpt-5.5";
+  if (runtime === "cursor") return "composer-2.5-fast";
   return undefined;
 }
 
@@ -4309,6 +4885,11 @@ function fallbackEffortHintForRuntime(
   if (runtime === "claude") {
     if (prior === "low" || prior === "medium" || prior === "high" || prior === "max") return prior;
     return "high";
+  }
+  if (runtime === "cursor") {
+    // Cursor CLI has no reasoning-effort knob; the field exists only for
+    // schema consistency and the launch command builder ignores it.
+    return "medium";
   }
   return prior;
 }
@@ -4450,6 +5031,14 @@ function normalizeRun(run: RunState): RunState {
   run.humanMessages = dedupeHumanMessages(run.humanMessages);
   for (const message of run.humanMessages) {
     message.attachments ??= [];
+    if (message.author === "spark" && message.kind === "question") {
+      message.questionOptions = normalizeQuestionOptionsForMessage(
+        message.message,
+        message.questionOptions,
+      );
+    } else {
+      delete message.questionOptions;
+    }
   }
   for (const step of run.steps ?? []) {
     step.plannedAgents ??= [];
@@ -4755,9 +5344,22 @@ async function maybeReopenCompletedStepForFollowUpTask(
   run: RunState,
   task: SparkManagerTaskDecision,
 ): Promise<{ run: RunState; stepId: string } | null> {
-  const step = resolveRequestedStepIncludingTerminal(run, task.stepIndex);
+  const isVerifier = task.taskClass === "verifier";
+  // Verifier and corrective follow-ups both need a just-completed impl step
+  // reopened. Trivial runs mark the impl step complete before the verifier is
+  // queued, so without this the verifier task is dropped and the run ships
+  // unverified work.
+  if (!isVerifier && !isCorrectiveFollowUpTask(task)) return null;
+  let step = resolveRequestedStepIncludingTerminal(run, task.stepIndex);
+  if ((!step || step.status !== "complete") && isVerifier) {
+    // The manager may omit or mis-index stepIndex on a verifier follow-up.
+    // Fall back to the most recently completed worker_batch step so the
+    // verifier still lands somewhere instead of being silently dropped.
+    step = [...run.steps]
+      .filter((s) => s.status === "complete" && (s.kind ?? "worker_batch") === "worker_batch")
+      .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))[0];
+  }
   if (!step || step.status !== "complete") return null;
-  if (!isCorrectiveFollowUpTask(task)) return null;
 
   const updated = await commitRunChange(run, {
     type: "spark_manager.completed_step_reopened_for_followup",
@@ -4828,17 +5430,129 @@ function hasActiveStepWorkers(run: RunState, stepId: string, excludingTaskId?: s
   );
 }
 
-async function askHumanQuestion(runId: string, message: string): Promise<RunState> {
+async function askHumanQuestion(
+  runId: string,
+  message: string,
+  options?: SparkManagerQuestionOption[],
+): Promise<RunState> {
   const run = await addRunMessage({
     runId,
     author: "spark",
     kind: "question",
     message,
+    questionOptions: normalizeQuestionOptionsForMessage(message, options),
   });
   return pauseRun({
     runId: run.id,
     reason: HUMAN_INPUT_PAUSE_REASON,
   });
+}
+
+function normalizeQuestionOptionsForMessage(
+  question: string,
+  options: SparkManagerQuestionOption[] | undefined,
+): SparkManagerQuestionOption[] {
+  const normalized = (options ?? [])
+    .slice(0, 3)
+    .map((option, index) => ({
+      id: option.id?.trim() || `option_${index + 1}`,
+      label: option.label?.trim() || `Option ${index + 1}`,
+      description: option.description?.trim() || option.answer?.trim() || option.label?.trim() || "",
+      answer: option.answer?.trim() || option.label?.trim() || "",
+      recommended: option.recommended === true,
+    }))
+    .filter((option) => option.label && option.answer);
+  if (normalized.length >= 3) {
+    if (!normalized.some((option) => option.recommended)) normalized[0].recommended = true;
+    let seenRecommended = false;
+    for (const option of normalized) {
+      if (!option.recommended) continue;
+      if (!seenRecommended) {
+        seenRecommended = true;
+        continue;
+      }
+      option.recommended = false;
+    }
+    return normalized;
+  }
+  return fallbackQuestionOptions(question);
+}
+
+function fallbackQuestionOptions(question: string): SparkManagerQuestionOption[] {
+  const q = question.toLowerCase();
+  if (/\b(export|csv|json|field|privacy|user data)\b/.test(q)) {
+    return [
+      {
+        id: "recommended_json_minimal",
+        label: "JSON minimal",
+        description: "Export only non-sensitive fields as JSON; safest default for implementation.",
+        answer: "Use JSON format and export only non-sensitive fields. Do not include private or credential-like data.",
+        recommended: true,
+      },
+      {
+        id: "csv_basic",
+        label: "CSV basic",
+        description: "Use CSV for spreadsheet workflows with a conservative field set.",
+        answer: "Use CSV format with a conservative set of non-sensitive fields suitable for spreadsheets.",
+        recommended: false,
+      },
+      {
+        id: "ask_full_scope",
+        label: "Full export",
+        description: "Include a broader export surface; higher privacy and review risk.",
+        answer: "Build a broader export flow, but require explicit field allowlisting and avoid sensitive data by default.",
+        recommended: false,
+      },
+    ];
+  }
+  if (/\b(delete|remove|clean|destructive|wipe|purge)\b/.test(q)) {
+    return [
+      {
+        id: "dry_run",
+        label: "Dry run first",
+        description: "Inspect and report what would change before deleting anything.",
+        answer: "Do a dry run first. Report exactly what would be deleted and wait for approval before destructive changes.",
+        recommended: true,
+      },
+      {
+        id: "safe_delete",
+        label: "Safe delete",
+        description: "Delete only clearly generated/transient items with narrow scope.",
+        answer: "Proceed only with safe deletion of clearly generated or transient items inside the requested scope.",
+        recommended: false,
+      },
+      {
+        id: "manual_review",
+        label: "Manual review",
+        description: "Pause and prepare a checklist for me to approve manually.",
+        answer: "Prepare a manual review checklist and do not delete anything automatically.",
+        recommended: false,
+      },
+    ];
+  }
+  return [
+    {
+      id: "safe_default",
+      label: "Safe default",
+      description: "Choose the conservative implementation with minimal scope.",
+      answer: `Use the safest conservative default for this question: ${question}`,
+      recommended: true,
+    },
+    {
+      id: "fast_path",
+      label: "Fast path",
+      description: "Optimize for speed and a narrow useful result.",
+      answer: `Choose the fastest narrow implementation that still satisfies the request: ${question}`,
+      recommended: false,
+    },
+    {
+      id: "thorough_path",
+      label: "Thorough path",
+      description: "Spend more time to cover edge cases and future-proofing.",
+      answer: `Choose the more thorough implementation and include relevant edge cases: ${question}`,
+      recommended: false,
+    },
+  ];
 }
 
 function shouldRecordPauseReasonAsUserNote(reason: string): boolean {
@@ -4873,6 +5587,14 @@ function shouldResumeManagerPlanning(run: RunState): boolean {
   return run.humanMessages.some((message) => message.author === "spark" && message.kind === "question");
 }
 
+function shouldRoutePausedResumeToChat(run: RunState): boolean {
+  if (run.status !== "paused" && run.status !== "blocked") return false;
+  const latest = [...run.humanMessages]
+    .reverse()
+    .find((message) => message.author === "user" && (message.kind === "note" || message.kind === "answer"));
+  return Boolean(latest && parseInlineFileMentionTokens(latest.message).length > 0);
+}
+
 function autopilotInputFromRun(run: RunState): StartAutopilotInput {
   const plan = run.planId
     ? run.plans.find((item) => item.id === run.planId)
@@ -4881,7 +5603,19 @@ function autopilotInputFromRun(run: RunState): StartAutopilotInput {
     .slice()
     .reverse()
     .find((attempt) => attempt.cwd)?.cwd;
-  const cwd = latestAttemptCwd || (plan?.sourceFile ? dirname(plan.sourceFile) : process.cwd());
+  const savedWorkspaceCwd =
+    typeof run.settingsSnapshot?.workspaceCwd === "string"
+      ? run.settingsSnapshot.workspaceCwd
+      : undefined;
+  const latestFileAttachmentDir = run.humanMessages
+    .flatMap((message) => message.attachments ?? [])
+    .reverse()
+    .find((attachment) => attachment.kind === "file")?.path;
+  const cwd =
+    latestAttemptCwd ||
+    savedWorkspaceCwd ||
+    (latestFileAttachmentDir ? dirname(latestFileAttachmentDir) : undefined) ||
+    (plan?.sourceFile ? dirname(plan.sourceFile) : process.cwd());
   return {
     runId: run.id,
     workspaceId: run.workspaceId,
@@ -5120,7 +5854,7 @@ function normalizeStringList(value: unknown): string[] {
 
 function decideWorkerReport(report: WorkerReport): ReviewDecision {
   if (report.status === "complete") {
-    // Trust complete-status reports. Workers are full Claude/Codex harnesses
+    // Trust complete-status reports. Workers are full Claude/Codex/Cursor harnesses
     // and can run their own verification — risks/followups are advisory, not
     // blockers. The manager loop reviews them when planning the next step.
     return {
@@ -5548,7 +6282,7 @@ async function runWorkerSession({
   }
 
   // Hold off on typing until the renderer has reported a real pane size, so
-  // claude/codex paint at the correct width from the very first frame.
+  // claude/codex/cursor paint at the correct width from the very first frame.
   await pty.waitForResize(attemptId, 5_000);
 
   // Mirror the worker's pty byte stream to raw.log so a hung worker is
@@ -5608,8 +6342,11 @@ async function runWorkerSession({
       session: "pty",
     },
   });
-  await updatePeerCommsRegistry(run, run.steps.find((item) => item.id === task.stepId), task, attemptId, paths, "running")
-    .catch(() => undefined);
+  const step = run.steps.find((item) => item.id === task.stepId);
+  if (shouldUsePeerComms(run, step, task)) {
+    await updatePeerCommsRegistry(run, step, task, attemptId, paths, "running")
+      .catch(() => undefined);
+  }
 
   activeWorkerProcesses.set(attemptId, {
     runId: run.id,
@@ -5662,7 +6399,7 @@ async function runWorkerSession({
   // Stagger launch + prompt the same way the TEST CLAUDE button does:
   //  1. wait 1.5s for pwsh to render its prompt,
   //  2. type `claude --dangerously-skip-permissions ...\r`,
-  //  3. sniff pty output for the agent's TUI banner (claude/codex), with a
+  //  3. sniff pty output for the agent's TUI banner (claude/codex/cursor), with a
   //     hard timeout so a bad launch command (codex not installed, wrong
   //     model id, etc.) fails the worker fast instead of hanging the whole
   //     run waiting for a final report that will never come,
@@ -5689,9 +6426,29 @@ async function runWorkerSession({
         }
         if (task.runtimePreference === "codex") {
           await waitForCodexInputReady(attemptId);
+        } else if (task.runtimePreference === "cursor") {
+          await waitForCursorInputReady(attemptId);
         }
       }
-      await pasteAndSubmit(handle, promptText, task.runtimePreference);
+      const submitted = await pasteAndSubmit(attemptId, handle, promptText, task.runtimePreference);
+      if (!submitted) {
+        await recordWorkerOutput(
+          run,
+          task,
+          attemptId,
+          paths,
+          "stderr",
+          `\n[spark] ${task.runtimePreference} accepted the pasted prompt but never started a turn ` +
+            `after repeated submit attempts — the CLI dropped the Enter keystroke during TUI startup.\n`,
+        );
+        await writeAutoFailureReport(
+          paths,
+          task,
+          "agent CLI did not begin the task after the prompt was submitted (submit keystroke dropped during TUI startup)",
+        );
+        failFast(`${task.runtimePreference} CLI did not start the task after prompt submission`);
+        return;
+      }
     } catch (err) {
       await recordWorkerOutput(run, task, attemptId, paths, "stderr",
         `\n[spark] failed to drive worker pane: ${(err as Error).message}\n`);
@@ -5703,6 +6460,16 @@ async function runWorkerSession({
   return result;
 }
 
+// Pre-compiled ANSI escape strippers. Worker pty taps run these on every
+// data chunk (multiple taps per worker × up to N concurrent workers × tens
+// of chunks/sec). Hoisting the regex literals out of the hot path saves the
+// per-chunk recompilation cost.
+const ANSI_CSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const ANSI_OSC_RE = /\x1b\][^\x07]*\x07/g;
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_CSI_RE, "").replace(ANSI_OSC_RE, "");
+}
+
 // Sniff the pty output stream for an agent-TUI marker so we know the launch
 // command actually became the foreground process. If we don't see one inside
 // the budget, the launch failed — pwsh is back at its prompt and pasting the
@@ -5712,10 +6479,11 @@ async function waitForAgentTui(
   attemptId: string,
   runtime: WorkerTask["runtimePreference"],
 ): Promise<{ ok: true } | { ok: false; reason: string; timeoutMs: number }> {
-  // Markers that indicate the CLI's TUI is running. Both claude and codex
-  // emit their model name on first paint, plus Ink/React-CLI specific frames.
-  // We also look for the "bypass permissions" banner claude prints with our
-  // launch flag, and codex's "/help" or "Pasted Content" hints.
+  // Markers that indicate the CLI's TUI is running. Claude, codex, and cursor
+  // each emit their model name on first paint, plus Ink/React-CLI specific
+  // frames. We also look for the "bypass permissions" banner claude prints
+  // with our launch flag, codex's "/help" or "Pasted Content" hints, and
+  // cursor's "Cursor Agent" / "Composer 2.5 Fast" banner.
   const claudeMarkers = [
     "bypass permissions",
     "Sonnet",
@@ -5734,7 +6502,14 @@ async function waitForAgentTui(
     "codex >",
     "Reasoning effort",
   ];
-  const markers = runtime === "codex" ? codexMarkers : claudeMarkers;
+  const cursorMarkers = [
+    "Cursor Agent",
+    "Composer 2.5 Fast",
+    "Plan, search, build anything",
+    "Add a follow-up",
+  ];
+  const markers =
+    runtime === "codex" ? codexMarkers : runtime === "cursor" ? cursorMarkers : claudeMarkers;
   // Patterns that signal a hard launch failure — pwsh complaining the binary
   // isn't on PATH, or a CommandNotFoundException, or the CLI rejecting an
   // invalid flag. If we see any of these we bail immediately rather than
@@ -5749,7 +6524,7 @@ async function waitForAgentTui(
     "Unknown option",
     "is invalid. It must be one of",
   ];
-  const timeoutMs = runtime === "codex" ? 12_000 : 9_000;
+  const timeoutMs = runtime === "codex" ? 12_000 : runtime === "cursor" ? 10_000 : 9_000;
 
   return new Promise((resolve) => {
     let settled = false;
@@ -5787,9 +6562,7 @@ async function waitForAgentTui(
       // ]633;E;<command> doesn't false-positive against marker text like
       // "claude-haiku" — the model name appears in the typed command and
       // would otherwise look identical to the TUI banner.
-      const visible = buffer
-        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "") // CSI
-        .replace(/\x1b\][^\x07]*\x07/g, ""); // OSC ESC ] ... BEL
+      const visible = stripAnsi(buffer);
       for (const marker of markers) {
         if (visible.includes(marker)) {
           finish({ ok: true });
@@ -5816,14 +6589,80 @@ async function waitForAgentTui(
 async function waitForCodexInputReady(attemptId: string): Promise<void> {
   // Codex paints its model banner before it finishes MCP-server startup. If
   // Spark bracket-pastes the worker prompt during that startup window, some
-  // Codex TUI builds drop the paste and sit forever at the empty prompt. Wait
-  // for the actual input placeholder/suggestion to appear before submitting.
+  // Codex TUI builds drop the paste/submit and sit forever at the prompt.
+  //
+  // The placeholder/suggestion strings rotate and change between Codex
+  // releases, so matching them is unreliable on its own (the old fixed list
+  // matched nothing on v0.131.0 and this wait silently degraded to a blind
+  // 18s timeout). The robust signal is the "Starting MCP servers (N/5)" line:
+  // it repaints every spinner frame while servers boot and stops once they
+  // are up. We treat Codex as input-ready when that line has gone quiet for
+  // QUIET_MS, or when a known input-placeholder marker appears, whichever is
+  // first — with a hard cap so a build that prints neither still proceeds.
   const readyMarkers = [
-    "Run /review on my current changes",
-    "Summarize recent commits",
+    "Write tests for",
+    "Explain this codebase",
+    "Summarize recent",
     "Ask about this codebase",
     "What should I work on",
+    "Run /review",
+    "Fix a bug",
+    "/help for",
   ];
+  const HARD_CAP_MS = 30_000;
+  const QUIET_MS = 2_500;
+  const NO_MCP_GRACE_MS = 4_000;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    let buffer = "";
+    let sawMcpStartup = false;
+    let lastMcpSeen = 0;
+    const startedAt = Date.now();
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      offTap();
+      clearInterval(poll);
+      clearTimeout(cap);
+      resolve();
+    };
+    const offTap = pty.tap(attemptId, (chunk) => {
+      // Check THIS chunk for the MCP line — once it stops being repainted,
+      // lastMcpSeen stops advancing and the poll below detects quiescence.
+      const text = stripAnsi(chunk.toString("utf8"));
+      if (/Starting MCP servers/i.test(text)) {
+        sawMcpStartup = true;
+        lastMcpSeen = Date.now();
+      }
+      buffer = (buffer + text).slice(-8192);
+      if (readyMarkers.some((marker) => buffer.includes(marker))) finish();
+    });
+    const poll = setInterval(() => {
+      const now = Date.now();
+      if (sawMcpStartup && now - lastMcpSeen >= QUIET_MS) finish();
+      // No MCP-startup line ever appeared — Codex has no servers configured
+      // or finished before we tapped; give it a short grace then proceed.
+      else if (!sawMcpStartup && now - startedAt >= NO_MCP_GRACE_MS) finish();
+    }, 250);
+    const cap = setTimeout(finish, HARD_CAP_MS);
+  });
+  await delay(400);
+}
+
+async function waitForCursorInputReady(attemptId: string): Promise<void> {
+  // Cursor TUI paints its banner + footer ("Composer 2.5 Fast … main") before
+  // the input box is fully ready to accept a bracketed paste. Empirically the
+  // banner is up by ~3s after spawn. We watch for the input-placeholder
+  // marker "Plan, search, build anything" (initial) or the footer's "Composer"
+  // model line, then add a small settle delay. Hard cap at 20s so a slow
+  // network startup still proceeds.
+  const readyMarkers = [
+    "Plan, search, build anything",
+    "Add a follow-up",
+    "Composer 2.5 Fast",
+  ];
+  const HARD_CAP_MS = 20_000;
+  const SETTLE_MS = 600;
   await new Promise<void>((resolve) => {
     let settled = false;
     let buffer = "";
@@ -5831,31 +6670,24 @@ async function waitForCodexInputReady(attemptId: string): Promise<void> {
       if (settled) return;
       settled = true;
       offTap();
-      clearTimeout(timer);
+      clearTimeout(cap);
       resolve();
     };
     const offTap = pty.tap(attemptId, (chunk) => {
-      buffer = (buffer + chunk.toString("utf8")).slice(-8192);
-      const visible = buffer
-        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-        .replace(/\x1b\][^\x07]*\x07/g, "");
-      if (readyMarkers.some((marker) => visible.includes(marker))) {
-        finish();
-      }
+      buffer = (buffer + stripAnsi(chunk.toString("utf8"))).slice(-8192);
+      if (readyMarkers.some((marker) => buffer.includes(marker))) finish();
     });
-    const timer = setTimeout(finish, 18_000);
+    const cap = setTimeout(finish, HARD_CAP_MS);
   });
-  await delay(250);
+  await delay(SETTLE_MS);
 }
 
 function detectFatalWorkerRuntimeError(
   buffer: string,
   runtime: WorkerTask["runtimePreference"],
 ): string | null {
-  if (runtime !== "claude" && runtime !== "codex") return null;
-  const visible = buffer
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/\x1b\][^\x07]*\x07/g, "");
+  if (runtime !== "claude" && runtime !== "codex" && runtime !== "cursor") return null;
+  const visible = stripAnsi(buffer);
   const checks: Array<[RegExp, string]> = [
     [/API Error:.*socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
     [/API Error:/i, "runtime API error before final report"],
@@ -5903,33 +6735,71 @@ async function writeAutoFailureReport(
 // don't treat each newline as Enter), then submit with \r. Empty prompt =>
 // no-op (manual runtime: user drives the shell themselves).
 async function pasteAndSubmit(
+  attemptId: string,
   handle: { write: (input: string) => void },
   promptText: string,
   runtime: WorkerTask["runtimePreference"],
-): Promise<void> {
+): Promise<boolean> {
   const body = promptText.replace(/\r\n?/g, "\n").trim();
-  if (!body) return;
-  if (runtime === "claude" || runtime === "codex") {
+  if (!body) return true;
+  if (runtime === "claude" || runtime === "codex" || runtime === "cursor") {
     const PASTE_BEGIN = "\x1b[200~";
     const PASTE_END = "\x1b[201~";
-    handle.write(PASTE_BEGIN);
-    await delay(25);
-    handle.write(body);
-    await delay(25);
-    handle.write(PASTE_END);
-    // Long Spark prompts take a moment for the agent TUI to commit from
-    // bracketed-paste into the actual input box. Submitting too early leaves
-    // Claude sitting there with the prompt visible but unsent.
-    await delay(promptSubmitSettleMs(runtime, body.length));
-    handle.write("\r");
-    if (runtime === "claude" || runtime === "codex") {
-      // Some TUI builds drop the first Enter right after a large paste. A
-      // second Enter is harmless while the agent is busy and fixes the stuck
-      // "prompt typed but not submitted" state.
-      await delay(700);
-      handle.write("\r");
+
+    // Watch the worker's pty so we can CONFIRM the prompt was submitted
+    // instead of firing a fixed number of Enters and hoping. Codex drops the
+    // submit keystroke when a large bracketed paste lands while its TUI is
+    // still settling, leaving the prompt visible-but-unsent — that hangs the
+    // whole run until the 90-minute watchdog. The agent has started its turn
+    // once it paints a working/interrupt indicator or its context usage
+    // moves off 0%. Cursor's working indicator is the "Composing" line plus
+    // "ctrl+c to stop" in the follow-up footer. The tap is installed now
+    // (input is idle post-startup) so no stale "esc to interrupt" from the
+    // startup phase is captured.
+    let visible = "";
+    const offTap = pty.tap(attemptId, (chunk) => {
+      visible = (visible + stripAnsi(chunk.toString("utf8"))).slice(-6000);
+    });
+    const startedTurn = (): boolean =>
+      /esc to interrupt/i.test(visible) ||
+      /Context\s+[1-9][0-9]?%\s+used/i.test(visible) ||
+      /\btokens used\b/i.test(visible) ||
+      /\bComposing\b/.test(visible) ||
+      /ctrl\+c to stop/i.test(visible) ||
+      /Composer\s+2\.5\s+Fast\s+·\s+[0-9]+(?:\.[0-9]+)?%/i.test(visible);
+
+    try {
+      handle.write(PASTE_BEGIN);
+      await delay(25);
+      handle.write(body);
+      await delay(25);
+      handle.write(PASTE_END);
+      // Let the TUI commit the bracketed paste into its input box before the
+      // first Enter — submitting mid-commit leaves the prompt unsent.
+      await delay(promptSubmitSettleMs(runtime, body.length));
+
+      // Press Enter, then verify the agent actually started a turn. If it
+      // didn't, the keystroke was dropped (paste still settling, TUI busy) —
+      // press again. Extra Enters once the agent is already working are
+      // harmless newlines typed into an empty input box.
+      const maxAttempts = 22;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        handle.write("\r");
+        const deadline = Date.now() + 2200;
+        while (Date.now() < deadline) {
+          if (startedTurn()) return true;
+          await delay(150);
+        }
+      }
+      // Codex is the runtime with the known dropped-submit failure mode, so
+      // surface a never-started turn as a hard failure (fast watchdog)
+      // rather than hanging. Claude's submit path has been reliable; if our
+      // detector simply did not recognise its working banner, don't
+      // false-fail the worker — proceed and let the report watchdog decide.
+      return runtime === "codex" ? startedTurn() : true;
+    } finally {
+      offTap();
     }
-    return;
   }
   // Manual / shell runtimes: just dump the prompt as text into pwsh as a
   // here-string comment so the user can read it. They drive the work
@@ -5938,6 +6808,7 @@ async function pasteAndSubmit(
   for (const line of body.split("\n")) {
     handle.write(`# ${line}\r`);
   }
+  return true;
 }
 
 function promptSubmitSettleMs(
@@ -5947,6 +6818,7 @@ function promptSubmitSettleMs(
   const sizeCost = Math.ceil(promptLength / 2048) * 150;
   if (runtime === "claude") return clamp(1800 + sizeCost, 1800, 5000);
   if (runtime === "codex") return clamp(1200 + sizeCost, 1200, 4500);
+  if (runtime === "cursor") return clamp(900 + sizeCost, 900, 4000);
   return 0;
 }
 
@@ -6020,6 +6892,34 @@ function buildLaunchCommandLine(task: WorkerTask, cwd: string): string | null {
     if (codexEffort) args.push("-c", quoteShellArg(`model_reasoning_effort=${codexEffort}`));
     return args.join(" ");
   }
+  if (task.runtimePreference === "cursor") {
+    // Cursor CLI: `agent --yolo --model <id>`. The `--trust` flag is rejected
+    // in interactive mode (it is only valid with `--print`), and Cursor does
+    // not expose reasoning-effort levels, so effortHint is ignored here.
+    //
+    // We dispatch through the .cmd shim by its absolute path instead of typing
+    // bare "agent". Reason: pwsh resolves bare "agent" to agent.ps1 (an
+    // ExternalScript), which runs IN THE PARENT pwsh process — that process
+    // has the user's $PROFILE loaded, including any PreCommandLookupAction
+    // hook (e.g. lazy-load Terminal-Icons on Get-ChildItem). agent.ps1 calls
+    // Get-ChildItem internally to find its version dir, triggers the hook,
+    // and floods the pane with red Import-PowerShellDataFile errors before
+    // the Cursor banner even appears. agent.cmd instead spawns a FRESH
+    // powershell.exe with -NoProfile, so the user's profile hooks never run.
+    const localAppData = process.env.LOCALAPPDATA;
+    const cmdPath = localAppData
+      ? join(localAppData, "cursor-agent", "agent.cmd")
+      : "agent";
+    // PowerShell parses a bare quoted string as an expression and reads
+    // `--yolo` as the decrement operator. The `&` call operator tells pwsh
+    // "this quoted string is a command path, invoke it". Skip the prefix
+    // only when we fall back to bare "agent" (an unquoted Get-Command name).
+    const head = localAppData ? `& ${quoteShellArg(cmdPath)}` : "agent";
+    const args = [head, "--yolo"];
+    const modelId = task.modelHint?.trim() || "composer-2.5-fast";
+    args.push("--model", quoteShellArg(modelId));
+    return args.join(" ");
+  }
   return null;
 }
 
@@ -6037,11 +6937,21 @@ function buildLaunchCommandLine(task: WorkerTask, cwd: string): string | null {
 // next codex launch. We serialize per configPath via a process-local lock so
 // the read+check+append window is atomic.
 const codexConfigLocks = new Map<string, Promise<unknown>>();
+// Process-local set of (configPath -> Set<tomlKey>) we've already verified
+// during this Spark session. The first worker spawn in a given cwd does the
+// read-modify-write under the lock; every subsequent spawn in the same cwd
+// short-circuits without touching the filesystem, eliminating the per-spawn
+// lock wait under high concurrency. Cleared on app restart, so a codex
+// upgrade that invalidates the trust format is picked up next launch.
+const codexTrustedCwds = new Map<string, Set<string>>();
 async function ensureCodexProjectTrust(cwd: string): Promise<void> {
   if (!cwd) return;
   const homeDir = process.env.USERPROFILE || process.env.HOME;
   if (!homeDir) return;
   const configPath = join(homeDir, ".codex", "config.toml");
+  const tomlKey = cwd.toLowerCase().replace(/\//g, "\\");
+  const cached = codexTrustedCwds.get(configPath);
+  if (cached?.has(tomlKey)) return;
   const prior = codexConfigLocks.get(configPath) ?? Promise.resolve();
   const next = prior.then(() => writeCodexProjectTrustEntry(configPath, cwd)).catch(() => undefined);
   codexConfigLocks.set(configPath, next);
@@ -6049,6 +6959,9 @@ async function ensureCodexProjectTrust(cwd: string): Promise<void> {
   if (codexConfigLocks.get(configPath) === next) {
     codexConfigLocks.delete(configPath);
   }
+  const set = codexTrustedCwds.get(configPath) ?? new Set<string>();
+  set.add(tomlKey);
+  codexTrustedCwds.set(configPath, set);
 }
 
 async function writeCodexProjectTrustEntry(configPath: string, cwd: string): Promise<void> {
@@ -6066,6 +6979,48 @@ async function writeCodexProjectTrustEntry(configPath: string, cwd: string): Pro
   }
   const sep = existing.length === 0 || existing.endsWith("\n") ? "" : "\n";
   await fs.appendFile(configPath, `${sep}\n${entry}`, "utf8");
+}
+
+// Cursor's interactive TUI rejects --trust (only valid with --print) and so
+// prompts for workspace trust on every fresh cwd. The CLI persists trust as
+// a sentinel file at ~/.cursor/projects/<encoded-cwd>/.workspace-trusted
+// where <encoded-cwd> replaces ':' and '\' and '/' with '-'. Spark writes
+// this file before spawning the worker so node-pty never sees the prompt.
+// Trust grants are per-cwd, so an eval that materializes 500 fresh repos
+// would otherwise need 500 human clicks; this writes them all in one place.
+const cursorTrustedCwds = new Set<string>();
+async function ensureCursorProjectTrust(cwd: string): Promise<void> {
+  if (!cwd) return;
+  const homeDir = process.env.USERPROFILE || process.env.HOME;
+  if (!homeDir) return;
+  if (cursorTrustedCwds.has(cwd)) return;
+  // Cursor encodes the path by stripping the drive colon and converting
+  // every path separator to '-'. Example: "C:\Users\Etienne\Documents\workspace\test"
+  // → "C-Users-Etienne-Documents-workspace-test". Forward slashes also
+  // collapse to '-' so paths normalized either way produce the same key.
+  const encoded = cwd.replace(/[:\\/]+/g, "-").replace(/^-+|-+$/g, "");
+  const projectDir = join(homeDir, ".cursor", "projects", encoded);
+  const trustFile = join(projectDir, ".workspace-trusted");
+  try {
+    // If the marker is already there, nothing to do — just remember it.
+    await fs.access(trustFile);
+    cursorTrustedCwds.add(cwd);
+    return;
+  } catch {
+    /* not yet trusted — write it below */
+  }
+  try {
+    await fs.mkdir(projectDir, { recursive: true });
+    const payload = JSON.stringify(
+      { trustedAt: new Date().toISOString(), workspacePath: cwd },
+      null,
+      2,
+    );
+    await fs.writeFile(trustFile, payload, "utf8");
+    cursorTrustedCwds.add(cwd);
+  } catch {
+    /* swallow — the worst case is the user gets the trust prompt once */
+  }
 }
 
 // Translate Spark's internal effort scale to the values the claude CLI
@@ -6116,20 +7071,75 @@ async function readWorkerPromptForLaunch(paths: WorkerArtifactPaths): Promise<st
 
 function renderWorkerPrompt({
   cwd,
+  run,
   step,
   task,
   paths,
+  settings,
 }: {
   cwd: string;
   run: RunState;
   step?: StepState;
   task: WorkerTask;
   paths: WorkerArtifactPaths;
+  settings: AppSettings;
 }): string {
   if (task.taskClass === "verifier") {
-    return renderVerifierWorkerPrompt({ cwd, step, task, paths });
+    return renderVerifierWorkerPrompt({ cwd, run, step, task, paths, settings });
   }
-  return renderImplementationWorkerPrompt({ cwd, step, task, paths });
+  return renderImplementationWorkerPrompt({ cwd, run, step, task, paths, settings });
+}
+
+function taskContextText(step: StepState | undefined, task: WorkerTask): string {
+  return [
+    task.title,
+    task.description,
+    task.taskClass ?? "",
+    step?.title ?? "",
+    step?.goal ?? "",
+    ...(step?.acceptanceCriteria ?? []),
+    ...(task.expectedOutputs ?? []),
+    ...(task.verificationCommands ?? []),
+  ].join("\n");
+}
+
+function shouldOfferRuntimeDelegation(step: StepState | undefined, task: WorkerTask): boolean {
+  const text = taskContextText(step, task);
+  if (/\b(subagent|sub-agent|delegate|delegation|agent team|worktree|parallel probes?|independent probes?)\b/i.test(text)) {
+    return true;
+  }
+  if (/\b(recon|explor|investigat|triage|large files?|logs?|summari[sz]e|second opinion|independent review)\b/i.test(text)) {
+    return true;
+  }
+  if (task.taskClass === "verifier") {
+    return task.verificationCommands.length > 2 || /\b(complex|subtle|broad|cross-module|multi-file)\b/i.test(text);
+  }
+  return false;
+}
+
+function shouldRenderAgentSyncPromptLines(step: StepState | undefined, task: WorkerTask): boolean {
+  return /\b(mcp|skill|playwright|browser|screenshot|web search|github|figma|notion|railway|runpod|openai docs|image|vision|pdf|spreadsheet|presentation|document)\b/i.test(
+    taskContextText(step, task),
+  );
+}
+
+function shouldUsePeerComms(
+  run: RunState,
+  step: StepState | undefined,
+  task: WorkerTask,
+): boolean {
+  if (!step || !task.canRunParallel) return false;
+  const peerTasks = run.workerTasks.filter((item) => item.stepId === task.stepId && item.id !== task.id);
+  const plannedPeerCount = Math.max(0, (step.plannedAgents?.length ?? 0) - 1);
+  if (peerTasks.length + plannedPeerCount <= 0) return false;
+
+  const text = taskContextText(step, task);
+  if (task.taskClass === "verifier") {
+    return /\b(peer|parallel|disagreement|other runtime|same surface|second verifier)\b/i.test(text);
+  }
+  return /\b(shared|interface|contract|api|schema|integrat|consume|producer|provider|handoff|merge|combine|staging|coordinate|collision|conflict|depends|dependency|same file|data hook|dom hook)\b/i.test(
+    text,
+  );
 }
 
 function renderRuntimeDelegationGuidance(task: WorkerTask): string[] {
@@ -6179,7 +7189,7 @@ function renderPeerCommsGuidance(task: WorkerTask, paths: WorkerArtifactPaths): 
   const dir = quotePwshString(paths.peerCommsDir);
   const self = quotePwshString(task.id);
   return [
-    "Spark may be running several Claude/Codex workers for this same step. Use this mailbox when direct peer coordination would prevent duplicated work, clarify an interface, share a narrow finding, or ask for a second opinion.",
+    "Spark may be running several Claude/Codex/Cursor workers for this same step. Use this mailbox when direct peer coordination would prevent duplicated work, clarify an interface, share a narrow finding, or ask for a second opinion.",
     "This is a run artifact mailbox, not the project source tree; using it is allowed even for read-only verifier tasks.",
     "If your task defines or consumes a shared interface/contract that another peer may depend on, send one short contract note to `all` before editing and check your inbox once before finalizing.",
     `List peers: node ${script} list --dir ${dir}`,
@@ -6281,14 +7291,18 @@ function renderUiVerifierGuidance(step: StepState | undefined, task: WorkerTask)
 
 function renderImplementationWorkerPrompt({
   cwd,
+  run,
   step,
   task,
   paths,
+  settings,
 }: {
   cwd: string;
+  run: RunState;
   step?: StepState;
   task: WorkerTask;
   paths: WorkerArtifactPaths;
+  settings: AppSettings;
 }): string {
   const lines: string[] = [];
   const promptProfile = loadManagerPromptProfile();
@@ -6348,12 +7362,23 @@ function renderImplementationWorkerPrompt({
     lines.push("", "## EXPECTED OUTPUTS", ...task.expectedOutputs.map((output) => `- ${output}`));
   }
 
-  const delegationGuidance = renderRuntimeDelegationGuidance(task);
+  const delegationGuidance = shouldOfferRuntimeDelegation(step, task)
+    ? renderRuntimeDelegationGuidance(task)
+    : [];
   if (delegationGuidance.length) {
     lines.push("", "## RUNTIME-NATIVE DELEGATION", ...delegationGuidance);
   }
 
-  const peerCommsGuidance = renderPeerCommsGuidance(task, paths);
+  const syncGuidance = shouldRenderAgentSyncPromptLines(step, task)
+    ? renderAgentSyncPromptLines({ cwd, runtime: task.runtimePreference, settings })
+    : [];
+  if (syncGuidance.length) {
+    lines.push("", "## SYNCED MCP / SKILL CONTEXT", ...syncGuidance);
+  }
+
+  const peerCommsGuidance = shouldUsePeerComms(run, step, task)
+    ? renderPeerCommsGuidance(task, paths)
+    : [];
   if (peerCommsGuidance.length) {
     lines.push("", "## PEER WORKER COMMUNICATION", ...peerCommsGuidance);
   }
@@ -6405,14 +7430,18 @@ function renderImplementationWorkerPrompt({
 
 function renderVerifierWorkerPrompt({
   cwd,
+  run,
   step,
   task,
   paths,
+  settings,
 }: {
   cwd: string;
+  run: RunState;
   step?: StepState;
   task: WorkerTask;
   paths: WorkerArtifactPaths;
+  settings: AppSettings;
 }): string {
   const lines: string[] = [];
   const promptProfile = loadManagerPromptProfile();
@@ -6477,12 +7506,23 @@ function renderVerifierWorkerPrompt({
     lines.push("", ...uiVerifierGuidance);
   }
 
-  const delegationGuidance = renderRuntimeDelegationGuidance(task);
+  const delegationGuidance = shouldOfferRuntimeDelegation(step, task)
+    ? renderRuntimeDelegationGuidance(task)
+    : [];
   if (delegationGuidance.length) {
     lines.push("", "## RUNTIME-NATIVE DELEGATION", ...delegationGuidance);
   }
 
-  const peerCommsGuidance = renderPeerCommsGuidance(task, paths);
+  const syncGuidance = shouldRenderAgentSyncPromptLines(step, task)
+    ? renderAgentSyncPromptLines({ cwd, runtime: task.runtimePreference, settings })
+    : [];
+  if (syncGuidance.length) {
+    lines.push("", "## SYNCED MCP / SKILL CONTEXT", ...syncGuidance);
+  }
+
+  const peerCommsGuidance = shouldUsePeerComms(run, step, task)
+    ? renderPeerCommsGuidance(task, paths)
+    : [];
   if (peerCommsGuidance.length) {
     lines.push("", "## PEER WORKER COMMUNICATION", ...peerCommsGuidance);
   }
@@ -6494,7 +7534,9 @@ function renderVerifierWorkerPrompt({
     "Read files directly from this path. Do NOT use the prior worker's narrative as your source of truth.",
     "",
     "## TOOL DISCIPLINE",
-    "Read-only tools only. Do not Write, Edit, or run any command that mutates project state (>, >>, tee, rm, mv, chmod, npm install, git commit, git push, destructive SQL). The Spark peer mailbox commands above are the only allowed write outside the project tree.",
+    peerCommsGuidance.length
+      ? "Read-only tools only. Do not Write, Edit, or run any command that mutates project state (>, >>, tee, rm, mv, chmod, npm install, git commit, git push, destructive SQL). The Spark peer mailbox commands above are the only allowed write outside the project tree."
+      : "Read-only tools only. Do not Write, Edit, or run any command that mutates project state (>, >>, tee, rm, mv, chmod, npm install, git commit, git push, destructive SQL).",
     "If you cannot verify a claim because the verification harness or fixture is missing, set verdict=unsure for that claim and explain WHAT is missing in `missing_oracle`. Do NOT create the fixture yourself.",
     "",
     "## FINAL REPORT",

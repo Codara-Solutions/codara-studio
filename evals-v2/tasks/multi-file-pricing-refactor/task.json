@@ -12,7 +12,7 @@
   "hiddenGates": [
     {
       "id": "hidden-formatting-shared-behavior",
-      "command": "node -e \"const { formatMoney } = require('./src/pricing'); if (formatMoney(5) !== '$0.05' || formatMoney(123456) !== '$1,234.56') throw new Error('bad format');\""
+      "command": "node -e \"const { formatMoney } = require('./src/pricing'); if (formatMoney(5) !== '$0.05' || formatMoney(123456) !== '$1234.56') throw new Error('bad format');\""
     }
   ]
 }

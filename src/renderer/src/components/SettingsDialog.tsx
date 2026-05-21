@@ -1,5 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type {
+  AgentAssetInventory,
+  AgentAssetInventoryItem,
+  AgentRuntimeDiagnostic,
+  AgentRuntimeKind,
+  AgentRuntimeSelection,
   AppSettings,
   EditorThemeId,
   RunState,
@@ -35,6 +40,7 @@ interface SettingsDialogProps {
   settings: AppSettings;
   shells: ShellInfo[];
   defaultShell: ShellInfo | null;
+  workspaceCwd?: string | null;
   initialTab?: SettingsTab;
   onClose: () => void;
   onSave: (settings: AppSettings) => Promise<void>;
@@ -47,6 +53,7 @@ export default function SettingsDialog({
   settings,
   shells,
   defaultShell,
+  workspaceCwd,
   initialTab = "general",
   onClose,
   onSave,
@@ -56,11 +63,11 @@ export default function SettingsDialog({
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Whether the active tab uses the draft-and-Save flow (terminal, api) or
-  // auto-applies on change (general, editor, agents, about). The footer
+  // Whether the active tab uses the draft-and-Save flow (terminal, api, agents) or
+  // auto-applies on change (general, editor, about). The footer
   // hides Save/Cancel on auto-save tabs so the UI doesn't pretend the user
   // needs to commit a change that already persisted.
-  const isDraftTab = activeTab === "terminal" || activeTab === "api";
+  const isDraftTab = activeTab === "terminal" || activeTab === "api" || activeTab === "agents";
   // The runs tab has its own scrolling list and per-row destructive actions;
   // the global Save/Cancel footer would be misleading there. Hide the
   // footer entirely on tabs that manage their own persistence semantics.
@@ -217,7 +224,9 @@ export default function SettingsDialog({
               />
             )}
             {activeTab === "api" && <ApiSettings draft={draft} onChange={setDraft} />}
-            {activeTab === "agents" && <AgentsSettings />}
+            {activeTab === "agents" && (
+              <AgentsSettings draft={draft} onChange={setDraft} />
+            )}
             {activeTab === "runs" && <RunsSettings onOpenRun={onOpenRun} />}
             {activeTab === "about" && <AboutSettings />}
           </div>
@@ -423,7 +432,7 @@ function ApiSettings({
       <div style={{ display: "grid", gap: 12 }}>
         <SectionTitle
           title="OpenRouter"
-          detail="Used by Spark Agent to plan Claude and Codex worker tasks."
+          detail="Used by Spark Agent to plan Claude, Codex, and Cursor worker tasks."
         />
         <Label text="OpenRouter API key">
           <input
@@ -823,24 +832,561 @@ function EditorSettings() {
   );
 }
 
-function AgentsSettings() {
+const ALL_AGENT_RUNTIME_KINDS: ReadonlyArray<AgentRuntimeKind> = ["claude", "codex", "cursor"];
+
+function AgentsSettings({
+  draft,
+  onChange,
+}: {
+  draft: AppSettings;
+  onChange: (settings: AppSettings) => void;
+}) {
+  const [diagnostics, setDiagnostics] = useState<AgentRuntimeDiagnostic[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void window.spark.agents
+      .runtimes(true)
+      .then((next) => {
+        if (!alive) return;
+        setDiagnostics(next);
+        setError(null);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setError((err as Error).message);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const enabledKinds = enabledRuntimeKinds(draft.agentRuntimeSelection);
+
+  const toggleRuntime = (kind: AgentRuntimeKind) => {
+    const next = new Set(enabledKinds);
+    if (next.has(kind)) next.delete(kind);
+    else next.add(kind);
+    // Preserve canonical order so the persisted form is stable.
+    const ordered = ALL_AGENT_RUNTIME_KINDS.filter((k) => next.has(k));
+    onChange({ ...draft, agentRuntimeSelection: ordered });
+  };
+
   return (
-    <div style={{ display: "grid", gap: 12 }}>
-      <SectionTitle title="Agents" detail="Manager and worker defaults." />
+    <div style={{ display: "grid", gap: 18 }}>
+      <div style={{ display: "grid", gap: 12 }}>
+        <SectionTitle
+          title="Agent runtimes"
+          detail="Pick which local agent CLIs Spark may dispatch workers to. Each runtime can be toggled independently — deselect any that you do not want Spark to spawn."
+        />
+        <div style={{ display: "grid", gap: 8 }}>
+          {diagnostics?.map((runtime) => (
+            <RuntimeDiagnosticRow
+              key={runtime.kind}
+              runtime={runtime}
+              enabled={enabledKinds.has(runtime.kind)}
+              onToggle={() => toggleRuntime(runtime.kind)}
+            />
+          ))}
+          {!diagnostics && !error ? (
+            <RuntimeDiagnosticSkeleton />
+          ) : null}
+          {error ? (
+            <div style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 12 }}>
+              {error}
+            </div>
+          ) : null}
+        </div>
+      </div>
       <div
         style={{
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 8,
+          padding: 12,
+          background: "color-mix(in oklch, var(--ink) 3%, transparent)",
           color: "var(--muted)",
           fontFamily: "var(--font-sans)",
           fontSize: 12,
-          lineHeight: 1.5,
-          padding: "12px 14px",
-          background: "color-mix(in oklch, var(--ink) 3%, transparent)",
-          border: "1px dashed var(--rule-soft)",
-          borderRadius: 8,
+          lineHeight: 1.45,
         }}
       >
-        More settings coming soon — manager model, worker runtimes, default prompts.
+        MCP servers and skills now live in the Capability Center from the Spark composer. That space is larger and gives
+        per-item activation, compatibility, deletion, and sync controls.
       </div>
+    </div>
+  );
+}
+
+function toggleSessionKey(list: string[], key: string, enabled: boolean): string[] {
+  const next = new Set(list);
+  if (enabled) next.delete(key);
+  else next.add(key);
+  return [...next].sort();
+}
+
+function formatAgentSyncSummary(result: {
+  mcp: { toClaude: string[]; toCodex: string[]; skipped: string[]; errors: string[] };
+  skills: { toClaude: string[]; toCodex: string[]; skipped: string[]; errors: string[] };
+}): string {
+  const mcpCount = result.mcp.toClaude.length + result.mcp.toCodex.length;
+  const skillCount = result.skills.toClaude.length + result.skills.toCodex.length;
+  const errors = [...result.mcp.errors, ...result.skills.errors];
+  const skipped = [...result.mcp.skipped, ...result.skills.skipped];
+  const parts = [`Synced ${mcpCount} MCP and ${skillCount} skill item(s).`];
+  if (errors.length > 0) {
+    parts.push(`Issues: ${errors.slice(0, 2).join(" | ")}`);
+  } else if (mcpCount === 0 && skillCount === 0 && skipped.length > 0) {
+    parts.push("Compatible entries are already available.");
+  }
+  const extra = Math.max(0, errors.length + skipped.length - 2);
+  if (extra > 0 && (errors.length > 0 || (mcpCount === 0 && skillCount === 0))) {
+    parts.push(`+${extra} more.`);
+  }
+  return parts.join(" ");
+}
+
+function CapabilityStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div
+      style={{
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 8,
+        padding: "8px 9px",
+        background: "color-mix(in oklch, var(--bg) 34%, transparent)",
+      }}
+    >
+      <div style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 9, textTransform: "uppercase" }}>
+        {label}
+      </div>
+      <div style={{ color: "var(--ink)", fontFamily: "var(--font-mono)", fontSize: 18, fontWeight: 750, marginTop: 2 }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function CapabilityToggleCard({
+  title,
+  desc,
+  checked,
+  onChange,
+}: {
+  title: string;
+  desc: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <div
+      style={{
+        border: checked
+          ? "1px solid color-mix(in oklch, var(--accent) 44%, var(--rule-strong))"
+          : "1px solid var(--rule-soft)",
+        borderRadius: 10,
+        padding: 12,
+        background: checked
+          ? "color-mix(in oklch, var(--accent) 8%, transparent)"
+          : "color-mix(in oklch, var(--ink) 2%, transparent)",
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1fr) auto",
+        gap: 12,
+        alignItems: "center",
+      }}
+    >
+      <div style={{ minWidth: 0 }}>
+        <div style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 13, fontWeight: 700 }}>
+          {title}
+        </div>
+        <div style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 11, lineHeight: 1.45, marginTop: 3 }}>
+          {desc}
+        </div>
+      </div>
+      <Switch checked={checked} onChange={onChange} />
+    </div>
+  );
+}
+
+function SyncSummaryPanel({ text }: { text: string | null }) {
+  const hasIssue = Boolean(text && /issue|error|could not|failed/i.test(text));
+  return (
+    <div
+      style={{
+        border: `1px solid ${hasIssue ? "color-mix(in oklch, var(--danger) 35%, var(--rule-soft))" : "var(--rule-soft)"}`,
+        borderRadius: 9,
+        padding: "9px 11px",
+        background: hasIssue
+          ? "color-mix(in oklch, var(--danger) 8%, transparent)"
+          : "color-mix(in oklch, var(--ink) 2%, transparent)",
+        color: hasIssue ? "var(--ink)" : "var(--muted)",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        lineHeight: 1.45,
+        overflowWrap: "anywhere",
+      }}
+    >
+      {text ?? "Sync copies compatible MCP and skill items. Protected runtime-native system skills stay in their source runtime."}
+    </div>
+  );
+}
+
+function AgentAssetList({
+  title,
+  detail,
+  emptyText,
+  items,
+  disabledIds,
+  busyId,
+  onToggle,
+  onDelete,
+}: {
+  title: string;
+  detail: string;
+  emptyText: string;
+  items: AgentAssetInventoryItem[];
+  disabledIds: string[];
+  busyId: string | null;
+  onToggle: (item: AgentAssetInventoryItem, enabled: boolean) => void;
+  onDelete: (item: AgentAssetInventoryItem) => void;
+}) {
+  const disabled = new Set(disabledIds);
+  return (
+    <div style={{ display: "grid", gap: 8, paddingTop: 8 }}>
+      <SectionTitle title={title} detail={detail} />
+      {items.length === 0 ? (
+        <div style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 12 }}>
+          {emptyText}
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 7 }}>
+          {items.map((item) => (
+            <AgentAssetRow
+              key={item.id}
+              item={item}
+              enabled={!disabled.has(item.sessionKey)}
+              busy={busyId === item.id}
+              onToggle={onToggle}
+              onDelete={onDelete}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AgentAssetRow({
+  item,
+  enabled,
+  busy,
+  onToggle,
+  onDelete,
+}: {
+  item: AgentAssetInventoryItem;
+  enabled: boolean;
+  busy: boolean;
+  onToggle: (item: AgentAssetInventoryItem, enabled: boolean) => void;
+  onDelete: (item: AgentAssetInventoryItem) => void;
+}) {
+  const compat = compatibilityLabel(item);
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1fr) auto auto",
+        alignItems: "center",
+        gap: 9,
+        padding: "10px 11px",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 8,
+        background: enabled
+          ? "color-mix(in oklch, var(--ink) 3%, transparent)"
+          : "color-mix(in oklch, var(--ink) 2%, transparent)",
+        opacity: enabled ? 1 : 0.68,
+      }}
+    >
+      <span style={{ minWidth: 0, display: "grid", gap: 2 }}>
+        <span
+          style={{
+            color: "var(--ink)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 12,
+            fontWeight: 650,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={item.name}
+        >
+          {item.name}
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap", minWidth: 0 }}>
+          <CapabilityChip
+            text={runtimeLabel(item.runtime)}
+            tone={
+              item.runtime === "codex"
+                ? "blue"
+                : item.runtime === "claude"
+                ? "violet"
+                : "neutral"
+            }
+          />
+          <CapabilityChip text={item.scope} tone="neutral" />
+          <CapabilityChip text={compat.label} tone={compat.tone} title={item.compatibilityReason} />
+          {!item.syncable ? <CapabilityChip text="not mirrored" tone="warning" /> : null}
+        </span>
+      </span>
+      <Switch checked={enabled} onChange={(next) => onToggle(item, next)} />
+      <DangerButton
+        disabled={busy || !item.canDelete}
+        onClick={() => onDelete(item)}
+      >
+        {busy ? "..." : "Delete"}
+      </DangerButton>
+    </div>
+  );
+}
+
+function runtimeLabel(runtime: AgentAssetInventoryItem["runtime"]): string {
+  if (runtime === "shared") return "shared";
+  return runtime;
+}
+
+function compatibilityLabel(item: AgentAssetInventoryItem): { label: string; tone: CapabilityChipTone } {
+  if (item.kind === "mcp") return { label: "Claude + Codex", tone: "success" };
+  if (item.compatibility === "both") return { label: "Claude + Codex", tone: "success" };
+  if (item.compatibility === "codex") return { label: "native", tone: "warning" };
+  if (item.compatibility === "claude") return { label: "Claude only", tone: "violet" };
+  return { label: "compat unknown", tone: "warning" };
+}
+
+type CapabilityChipTone = "neutral" | "success" | "warning" | "blue" | "violet";
+
+function CapabilityChip({
+  text,
+  tone,
+  title,
+}: {
+  text: string;
+  tone: CapabilityChipTone;
+  title?: string;
+}) {
+  const palette: Record<CapabilityChipTone, { bg: string; border: string; color: string }> = {
+    neutral: {
+      bg: "color-mix(in oklch, var(--ink) 6%, transparent)",
+      border: "var(--rule-soft)",
+      color: "var(--muted)",
+    },
+    success: {
+      bg: "color-mix(in oklch, #55d68a 12%, transparent)",
+      border: "color-mix(in oklch, #55d68a 28%, var(--rule-soft))",
+      color: "#92e8b2",
+    },
+    warning: {
+      bg: "color-mix(in oklch, #f0c419 12%, transparent)",
+      border: "color-mix(in oklch, #f0c419 30%, var(--rule-soft))",
+      color: "#f4d35e",
+    },
+    blue: {
+      bg: "color-mix(in oklch, #6ea8ff 13%, transparent)",
+      border: "color-mix(in oklch, #6ea8ff 32%, var(--rule-soft))",
+      color: "#9cc4ff",
+    },
+    violet: {
+      bg: "color-mix(in oklch, var(--accent) 13%, transparent)",
+      border: "color-mix(in oklch, var(--accent) 35%, var(--rule-soft))",
+      color: "var(--accent)",
+    },
+  };
+  const p = palette[tone];
+  return (
+    <span
+      title={title}
+      style={{
+        border: `1px solid ${p.border}`,
+        borderRadius: 999,
+        background: p.bg,
+        color: p.color,
+        padding: "2px 6px",
+        fontFamily: "var(--font-mono)",
+        fontSize: 9,
+        lineHeight: 1.2,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {text}
+    </span>
+  );
+}
+
+function enabledRuntimeKinds(selection: AgentRuntimeSelection): Set<AgentRuntimeKind> {
+  if (Array.isArray(selection)) {
+    return new Set(selection.filter((kind) => ALL_AGENT_RUNTIME_KINDS.includes(kind)));
+  }
+  if (selection === "claude") return new Set<AgentRuntimeKind>(["claude"]);
+  if (selection === "codex") return new Set<AgentRuntimeKind>(["codex"]);
+  if (selection === "cursor") return new Set<AgentRuntimeKind>(["cursor"]);
+  if (selection === "both") return new Set<AgentRuntimeKind>(["claude", "codex"]);
+  return new Set<AgentRuntimeKind>(ALL_AGENT_RUNTIME_KINDS);
+}
+
+function RuntimeDiagnosticRow({
+  runtime,
+  enabled,
+  onToggle,
+}: {
+  runtime: AgentRuntimeDiagnostic;
+  enabled: boolean;
+  onToggle: () => void;
+}) {
+  const active = runtime.installed && enabled;
+  const status = !runtime.installed
+    ? "Missing"
+    : enabled
+      ? "Enabled"
+      : "Off";
+  const dotColor = active
+    ? "var(--accent)"
+    : runtime.installed
+      ? "var(--muted)"
+      : "var(--danger)";
+  const detail = runtime.installed
+    ? runtime.version || runtime.executablePath || "Installed"
+    : runtime.installHint;
+  const canToggle = runtime.installed;
+
+  return (
+    <button
+      type="button"
+      onClick={canToggle ? onToggle : undefined}
+      disabled={!canToggle}
+      title={
+        !canToggle
+          ? "Install this runtime to enable it."
+          : enabled
+            ? `Click to disable ${runtime.label} workers.`
+            : `Click to enable ${runtime.label} workers.`
+      }
+      style={{
+        display: "grid",
+        gridTemplateColumns: "10px minmax(0, 1fr) auto auto",
+        alignItems: "center",
+        gap: 10,
+        padding: "9px 10px",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 8,
+        background: active
+          ? "color-mix(in oklch, var(--accent) 7%, transparent)"
+          : "color-mix(in oklch, var(--ink) 3%, transparent)",
+        cursor: canToggle ? "pointer" : "not-allowed",
+        textAlign: "left",
+        font: "inherit",
+        color: "inherit",
+        width: "100%",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: 999,
+          background: dotColor,
+          boxShadow: active ? "0 0 8px var(--accent-glow)" : "none",
+        }}
+      />
+      <span style={{ minWidth: 0, display: "grid", gap: 2 }}>
+        <span
+          style={{
+            color: "var(--ink)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 13,
+            fontWeight: 650,
+          }}
+        >
+          {runtime.label}
+        </span>
+        <span
+          title={detail}
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {detail}
+        </span>
+      </span>
+      <span
+        style={{
+          color: active ? "var(--ink)" : "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          fontWeight: 700,
+          letterSpacing: "0.1em",
+          textTransform: "uppercase",
+        }}
+      >
+        {status}
+      </span>
+      <RuntimeToggle on={enabled} disabled={!canToggle} />
+    </button>
+  );
+}
+
+function RuntimeToggle({ on, disabled }: { on: boolean; disabled?: boolean }) {
+  const width = 28;
+  const height = 16;
+  const knob = 12;
+  return (
+    <span
+      aria-hidden
+      style={{
+        display: "inline-block",
+        position: "relative",
+        width,
+        height,
+        borderRadius: 999,
+        background: disabled
+          ? "color-mix(in oklch, var(--ink) 8%, transparent)"
+          : on
+            ? "var(--accent)"
+            : "color-mix(in oklch, var(--ink) 18%, transparent)",
+        opacity: disabled ? 0.55 : 1,
+        transition: "background 120ms ease",
+      }}
+    >
+      <span
+        style={{
+          position: "absolute",
+          top: (height - knob) / 2,
+          left: on ? width - knob - 2 : 2,
+          width: knob,
+          height: knob,
+          borderRadius: 999,
+          background: "var(--surface)",
+          transition: "left 120ms ease",
+          boxShadow: "0 1px 2px rgba(0,0,0,0.25)",
+        }}
+      />
+    </span>
+  );
+}
+
+function RuntimeDiagnosticSkeleton() {
+  return (
+    <div
+      style={{
+        color: "var(--muted)",
+        fontFamily: "var(--font-sans)",
+        fontSize: 12,
+        padding: "10px 0",
+      }}
+    >
+      Checking Claude, Codex, and Cursor...
     </div>
   );
 }

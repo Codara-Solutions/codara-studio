@@ -107,7 +107,8 @@ export function stepNeedsAttention(status: StepState["status"]): boolean {
 }
 
 // Per-runtime accent. claude rides the brand accent (it is the flagship
-// runtime); codex is info-blue; shell is ok-green; manual stays neutral.
+// runtime); codex is info-blue; cursor is warn-amber; shell is ok-green;
+// manual stays neutral.
 export function runtimeTone(runtime: WorkerRuntime): RuntimeTone {
   switch (runtime) {
     case "claude":
@@ -121,6 +122,12 @@ export function runtimeTone(runtime: WorkerRuntime): RuntimeTone {
         label: "var(--info)",
         border: "color-mix(in oklch, var(--info) 52%, transparent)",
         bg: "color-mix(in oklch, var(--info) 10%, transparent)",
+      };
+    case "cursor":
+      return {
+        label: "var(--warn)",
+        border: "color-mix(in oklch, var(--warn) 52%, transparent)",
+        bg: "color-mix(in oklch, var(--warn) 10%, transparent)",
       };
     case "shell":
       return {

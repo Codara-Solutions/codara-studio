@@ -64,7 +64,7 @@ interface Props {
   onPaneAgentState: (
     tabId: TabId,
     paneId: string,
-    state: { runtime: "claude" | "codex" | null; running: boolean },
+    state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean },
   ) => void;
 }
 
@@ -83,7 +83,7 @@ type Bundle = {
   onClose: () => void;
   onCwd: (cwd: string) => void;
   onActivity: () => void;
-  onAgentState: (state: { runtime: "claude" | "codex" | null; running: boolean }) => void;
+  onAgentState: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
 };
 
 // React.memo: with the useTabs API object now memoized, TerminalStack's
@@ -768,6 +768,8 @@ interface PaneToolbarProps {
 
 const CLAUDE_LAUNCH_COMMAND = "claude --dangerously-skip-permissions";
 const CODEX_LAUNCH_COMMAND = "codex --yolo";
+// Cursor's CLI worker — only the composer-2.5-fast model is supported, no flags.
+const CURSOR_LAUNCH_COMMAND = "agent";
 
 function PaneToolbar({ dragPayload, onSmartAdd, onSplitRight, onSplitDown, onClose }: PaneToolbarProps) {
   const stop = (e: React.MouseEvent | React.PointerEvent) => e.stopPropagation();
@@ -875,6 +877,7 @@ function PaneToolbar({ dragPayload, onSmartAdd, onSplitRight, onSplitDown, onClo
             if (kind === "shell") onSmartAdd();
             else if (kind === "claude") onSmartAdd(CLAUDE_LAUNCH_COMMAND);
             else if (kind === "codex") onSmartAdd(CODEX_LAUNCH_COMMAND);
+            else if (kind === "cursor") onSmartAdd(CURSOR_LAUNCH_COMMAND);
           }}
         />
       )}
@@ -921,7 +924,7 @@ function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }) {
   );
 }
 
-type AddPaneKind = "shell" | "claude" | "codex";
+type AddPaneKind = "shell" | "claude" | "codex" | "cursor";
 
 // Polished popover anchored to the toolbar's + button. The shell entry is the
 // default smart-add behavior (split the most spacious leaf); the two worker
@@ -933,7 +936,7 @@ function AddPaneMenu({ onPick }: { onPick: (kind: AddPaneKind) => void }) {
     title: string;
     hint: string;
     command?: string;
-    accent: "shell" | "claude" | "codex";
+    accent: "shell" | "claude" | "codex" | "cursor";
     glyph: React.ReactNode;
   }> = [
     {
@@ -958,6 +961,14 @@ function AddPaneMenu({ onPick }: { onPick: (kind: AddPaneKind) => void }) {
       command: CODEX_LAUNCH_COMMAND,
       accent: "codex",
       glyph: <RuntimeGlyph letter="X" />,
+    },
+    {
+      kind: "cursor",
+      title: "Cursor worker",
+      hint: "worker",
+      command: CURSOR_LAUNCH_COMMAND,
+      accent: "cursor",
+      glyph: <RuntimeGlyph letter="U" />,
     },
   ];
 
@@ -1009,7 +1020,7 @@ function AddPaneMenuItem({
   hint: string;
   command?: string;
   glyph: React.ReactNode;
-  accent: "shell" | "claude" | "codex";
+  accent: "shell" | "claude" | "codex" | "cursor";
   onClick: () => void;
 }) {
   const [hover, setHover] = useState(false);
@@ -1127,7 +1138,7 @@ function AddPaneMenuItem({
   );
 }
 
-function menuItemTone(accent: "shell" | "claude" | "codex"): {
+function menuItemTone(accent: "shell" | "claude" | "codex" | "cursor"): {
   color: string;
   background: string;
   border: string;
@@ -1144,6 +1155,13 @@ function menuItemTone(accent: "shell" | "claude" | "codex"): {
       color: "var(--info)",
       background: "color-mix(in oklch, var(--info) 14%, transparent)",
       border: "color-mix(in oklch, var(--info) 30%, transparent)",
+    };
+  }
+  if (accent === "cursor") {
+    return {
+      color: "var(--warn)",
+      background: "color-mix(in oklch, var(--warn) 14%, transparent)",
+      border: "color-mix(in oklch, var(--warn) 30%, transparent)",
     };
   }
   return {

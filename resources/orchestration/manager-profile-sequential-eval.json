@@ -25,7 +25,7 @@
         "- If the active step somehow has multiple plannedAgents, merge their requested outcomes into one task instead of emitting multiple tasks.",
         "- Set canRunParallel=false for implementation tasks. Do not rely on peer mailbox coordination.",
         "- The task.description must be self-contained: objective, acceptance criteria, boundaries, verification commands, and final-report expectations.",
-        "- Use installed runtime/model/effort hints from the plannedAgent when valid. Prefer Claude for exploratory/UI/architecture and Codex for surgical deterministic edits.",
+        "- Use installed runtime/model/effort hints from the plannedAgent when valid. Prefer Claude for exploratory/UI/architecture, Codex for surgical deterministic edits, and Cursor (composer-2.5-fast, single-tier — effortHint='medium' is the only valid choice) for leaf/mechanical work, recon, or feature workers where wall-clock matters more than nuance.",
         "- Return steps=[] in this mode. Set question=\"\" unless a hard product/scope/credential/safety decision is missing."
       ],
       "worker_result_review": [

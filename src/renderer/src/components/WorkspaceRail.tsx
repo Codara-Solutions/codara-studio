@@ -63,6 +63,10 @@ interface RailProps {
   onSectionDragStart: (section: PanelSectionKey) => void;
   onSectionDragEnd: () => void;
   onSelectRun: (id: string | null) => void;
+  onRunSnapshot: (
+    run: RunState,
+    options?: { select?: boolean; focusRuns?: boolean },
+  ) => void;
   onOpenFile: (absolutePath: string) => void;
   onOpenFileEntry: (entry: FsEntry) => void;
   onDeleteFile: (path: string) => void;
@@ -220,6 +224,7 @@ function WorkspaceRail(props: RailProps) {
             runs={props.runs}
             activeRunId={props.activeRunId}
             onSelectRun={props.onSelectRun}
+            onRunSnapshot={props.onRunSnapshot}
             collapsed={collapsed.agent}
             onToggleCollapse={() => onToggleSection("agent")}
             headerDrag={headerDrag("agent")}

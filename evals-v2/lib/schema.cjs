@@ -78,6 +78,11 @@ function buildResult(input) {
       parallelLaunchGroups: number(input.parallelLaunchGroups),
       peerMessageCount: number(input.peerMessageCount),
       peerAgentCount: number(input.peerAgentCount),
+      routing: Array.isArray(input.routing) ? input.routing : [],
+      runtimeBreakdown:
+        input.runtimeBreakdown && typeof input.runtimeBreakdown === "object"
+          ? input.runtimeBreakdown
+          : {},
     },
     artifacts: input.artifacts || {},
   };
