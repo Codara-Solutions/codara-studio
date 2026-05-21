@@ -30,9 +30,12 @@ export type CommandId =
   | "tab.close"
   | "tab.closeOthers"
   | "tab.cycleNext"
-  | "tab.cyclePrev";
+  | "tab.cyclePrev"
+  | "worker.newClaude"
+  | "worker.newCodex"
+  | "worker.newCursor";
 
-export type CommandGroup = "General" | "Navigation" | "View" | "Tabs" | "Terminal";
+export type CommandGroup = "General" | "Navigation" | "View" | "Tabs" | "Terminal" | "Workers";
 
 export type Command = {
   id: CommandId;
@@ -56,6 +59,7 @@ export const COMMAND_GROUPS: CommandGroup[] = [
   "View",
   "Tabs",
   "Terminal",
+  "Workers",
 ];
 
 export const COMMANDS: Command[] = [
@@ -195,6 +199,27 @@ export const COMMANDS: Command[] = [
     label: "Cycle to previous tab",
     group: "Tabs",
     defaultChords: [ctrl("Tab", { shift: true })],
+  },
+  // CLI worker spawners. No default chord — the chord-space we'd want
+  // (Mod+Shift+C/Mod+Alt+C/…) all collide with built-in or browser
+  // bindings. Users bind their own from Settings → Keybindings.
+  {
+    id: "worker.newClaude",
+    label: "New Claude worker tab",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.newCodex",
+    label: "New Codex worker tab",
+    group: "Workers",
+    defaultChords: [],
+  },
+  {
+    id: "worker.newCursor",
+    label: "New Cursor worker tab",
+    group: "Workers",
+    defaultChords: [],
   },
 ];
 

@@ -29,6 +29,11 @@ import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobal
 import { buildBindingTable } from "./shortcuts/bindings";
 import { isRecording } from "./shortcuts/recording";
 import { usePreferences } from "./preferences/usePreferences";
+import {
+  CLAUDE_LAUNCH_COMMAND,
+  CODEX_LAUNCH_COMMAND,
+  CURSOR_LAUNCH_COMMAND,
+} from "./workers/launch-commands";
 import { usePanelLayout, type PanelSectionKey, type PanelSide } from "./panels/usePanelLayout";
 import ResizeHandle from "./panels/ResizeHandle";
 
@@ -1101,6 +1106,17 @@ export default function App() {
     tabs.newTerminalTab(activeWorkspace?.cwd ?? undefined);
   }, [tabs, activeWorkspace?.cwd]);
 
+  // Spawn a new terminal tab that auto-launches the given CLI worker once
+  // the shell prompt is ready. Same machinery as `+ Claude worker` in the
+  // pane toolbar dropdown, exposed here so the keybindings settings can
+  // bind a chord to each.
+  const handleNewWorkerTab = useCallback(
+    (autorun: string) => {
+      tabs.newTerminalTab(activeWorkspace?.cwd ?? undefined, autorun);
+    },
+    [tabs, activeWorkspace?.cwd],
+  );
+
   const handleNewEditorTab = useCallback(() => {
     // No native "open file" dialog wired up yet; surface the search modal,
     // which is the existing path the user knows for picking a file.
@@ -1223,6 +1239,9 @@ export default function App() {
       "tab.newTerminal": handleNewTerminalTab,
       "tab.newEditor": handleNewEditorTab,
       "tab.newPreview": handleNewPreviewTab,
+      "worker.newClaude": () => handleNewWorkerTab(CLAUDE_LAUNCH_COMMAND),
+      "worker.newCodex": () => handleNewWorkerTab(CODEX_LAUNCH_COMMAND),
+      "worker.newCursor": () => handleNewWorkerTab(CURSOR_LAUNCH_COMMAND),
       "tab.close": () => {
         if (tabs.activeId) tabs.closeTab(tabs.activeId);
       },
@@ -1249,7 +1268,7 @@ export default function App() {
         tabs.closeTerminalPane(active.id, active.activePaneId);
       },
     }),
-    [handleNewEditorTab, handleNewPreviewTab, handleNewTerminalTab, tabs],
+    [handleNewEditorTab, handleNewPreviewTab, handleNewTerminalTab, handleNewWorkerTab, tabs],
   );
 
   const { preferences: shortcutPreferences } = usePreferences();

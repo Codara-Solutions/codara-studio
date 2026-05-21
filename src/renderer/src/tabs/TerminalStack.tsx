@@ -14,6 +14,11 @@ import type {
 } from "./types";
 import { CloseIcon, DragHandleIcon, PlusIcon, SplitDownIcon, SplitRightIcon } from "../components/icons";
 import { TERMINAL_PANE_DRAG_MIME, parseTerminalPaneDrag, type TerminalPaneDragPayload } from "./terminalDrag";
+import {
+  CLAUDE_LAUNCH_COMMAND,
+  CODEX_LAUNCH_COMMAND,
+  CURSOR_LAUNCH_COMMAND,
+} from "../workers/launch-commands";
 
 // TerminalStack hosts every terminal tab in the workspace. Each tab carries a
 // recursive PaneNode tree — leaves are PTY-backed panes, splits are
@@ -765,11 +770,6 @@ interface PaneToolbarProps {
   onSplitDown: () => void;
   onClose: () => void;
 }
-
-const CLAUDE_LAUNCH_COMMAND = "claude --dangerously-skip-permissions";
-const CODEX_LAUNCH_COMMAND = "codex --yolo";
-// Cursor's CLI worker — only the composer-2.5-fast model is supported, no flags.
-const CURSOR_LAUNCH_COMMAND = "agent";
 
 function PaneToolbar({ dragPayload, onSmartAdd, onSplitRight, onSplitDown, onClose }: PaneToolbarProps) {
   const stop = (e: React.MouseEvent | React.PointerEvent) => e.stopPropagation();
