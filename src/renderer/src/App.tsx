@@ -899,6 +899,33 @@ export default function App() {
     setWorkspaces((ws) => ws.map((w) => (w.id === id ? { ...w, ...patch } : w)));
   }, []);
 
+  const reorderWs = useCallback((fromIndex: number, toIndex: number) => {
+    setWorkspaces((list) => {
+      if (
+        fromIndex < 0 ||
+        fromIndex >= list.length ||
+        toIndex < 0 ||
+        toIndex > list.length
+      ) {
+        return list;
+      }
+      const next = list.slice();
+      const [moved] = next.splice(fromIndex, 1);
+      const adjusted = toIndex > fromIndex ? toIndex - 1 : toIndex;
+      next.splice(adjusted, 0, moved);
+      // No-op if nothing actually moved (preserve referential equality so memoized
+      // children don't re-render).
+      let changed = false;
+      for (let i = 0; i < list.length; i += 1) {
+        if (list[i].id !== next[i].id) {
+          changed = true;
+          break;
+        }
+      }
+      return changed ? next : list;
+    });
+  }, []);
+
   const previewWsColor = useCallback((id: string, color: string) => {
     if (activeIdRef.current !== id) return;
     document.documentElement.style.setProperty("--accent", color);
@@ -1374,6 +1401,7 @@ export default function App() {
             onChange={updateWs}
             onPreviewColor={previewWsColor}
             onDelete={deleteWs}
+            onReorder={reorderWs}
             onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
             onSplitChange={panels.setLeftSplit}
@@ -1431,6 +1459,7 @@ export default function App() {
               onNewEditorTab={handleNewEditorTab}
               onNewPreviewTab={handleNewPreviewTab}
               onTerminalPaneDrop={handleTerminalPaneDropToTab}
+              onReorderTab={tabs.reorderTab}
             />
           )}
         </main>
@@ -1468,6 +1497,7 @@ export default function App() {
             onChange={updateWs}
             onPreviewColor={previewWsColor}
             onDelete={deleteWs}
+            onReorder={reorderWs}
             onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
             onSplitChange={panels.setRightSplit}
@@ -1570,6 +1600,7 @@ interface WorkspaceProps {
   onNewEditorTab: () => void;
   onNewPreviewTab: () => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: string) => void;
+  onReorderTab: (fromId: string, toId: string, position: "before" | "after") => void;
 }
 
 // Memoized: every prop is either referentially stable (the `tabs` object,
@@ -1595,6 +1626,7 @@ const Workspace = React.memo(function Workspace({
   onNewEditorTab,
   onNewPreviewTab,
   onTerminalPaneDrop,
+  onReorderTab,
 }: WorkspaceProps) {
   return (
     <div
@@ -1615,6 +1647,7 @@ const Workspace = React.memo(function Workspace({
         onNewEditor={onNewEditorTab}
         onNewPreview={onNewPreviewTab}
         onTerminalPaneDrop={onTerminalPaneDrop}
+        onReorderTab={onReorderTab}
       />
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
         <EditorStack

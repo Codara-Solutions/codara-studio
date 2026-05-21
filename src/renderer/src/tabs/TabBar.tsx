@@ -1,7 +1,19 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { Tab, TabId } from "./types";
 import { CloseIcon, FileIcon, PlusIcon } from "../components/icons";
-import { TERMINAL_PANE_DRAG_MIME, parseTerminalPaneDrag, type TerminalPaneDragPayload } from "./terminalDrag";
+import {
+  TAB_REORDER_DRAG_MIME,
+  TERMINAL_PANE_DRAG_MIME,
+  parseTabReorderDrag,
+  parseTerminalPaneDrag,
+  type TerminalPaneDragPayload,
+} from "./terminalDrag";
+
+// Delay before a terminal-pane drag hovering over an inactive tab in the strip
+// activates that tab. Long enough that brushing past a tab during a drag
+// doesn't accidentally switch context; short enough to feel responsive when
+// the user genuinely lingers to drop "into" the target tab.
+const HOVER_ACTIVATE_MS = 350;
 
 // TabBar is the strip at the top of the workspace pane. Visually similar
 // to a code editor's tab strip but with a kind-icon-prefixed label so it's
@@ -26,6 +38,7 @@ interface Props {
   onNewPreview: () => void;
   onNewEditor: () => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: TabId) => void;
+  onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
 }
 
 // React.memo: TabBar's props from App.tsx are referentially stable (the
@@ -41,6 +54,7 @@ function TabBar({
   onNewPreview,
   onNewEditor,
   onTerminalPaneDrop,
+  onReorderTab,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -168,6 +182,7 @@ function TabBar({
             onSelect={onSelect}
             onClose={onClose}
             onTerminalPaneDrop={onTerminalPaneDrop}
+            onReorderTab={onReorderTab}
           />
         ))}
       </div>
@@ -227,7 +242,7 @@ function TabBar({
               }}
             />
             <PickerItem
-              label="Editor"
+              label="Open file…"
               hint="⌘E"
               onClick={() => {
                 setPickerOpen(false);
@@ -259,6 +274,7 @@ interface TabItemProps {
   onSelect: (id: TabId) => void;
   onClose: (id: TabId) => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId: TabId) => void;
+  onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
 }
 
 // React.memo so only the tab whose props actually changed (active flag
@@ -271,13 +287,41 @@ const TabItem = React.memo(function TabItem({
   onSelect,
   onClose,
   onTerminalPaneDrop,
+  onReorderTab,
 }: TabItemProps) {
   const [hover, setHover] = useState(false);
   const [closeHover, setCloseHover] = useState(false);
   const [dropActive, setDropActive] = useState(false);
+  // "before" | "after" while a tab-reorder drag is hovering this item, used
+  // to render the insertion indicator on the correct edge. Null otherwise.
+  const [reorderEdge, setReorderEdge] = useState<"before" | "after" | null>(null);
+  // While dragging this tab as a reorder source, dim it so the user gets
+  // visual confirmation that the strip understood the gesture.
+  const [dragging, setDragging] = useState(false);
+  // Hover-activate timer: a terminal-pane drag that lingers over an
+  // inactive tab flips the workbench to that tab so the user can drop on a
+  // specific pane edge inside.
+  const hoverActivateTimer = useRef<number | null>(null);
+  const clearHoverActivate = () => {
+    if (hoverActivateTimer.current !== null) {
+      window.clearTimeout(hoverActivateTimer.current);
+      hoverActivateTimer.current = null;
+    }
+  };
+  useEffect(() => () => clearHoverActivate(), []);
+
   const acceptsPaneDrop = (event: React.DragEvent): boolean =>
     tab.kind === "terminal" &&
     Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
+  const acceptsReorderDrop = (event: React.DragEvent): boolean =>
+    Array.from(event.dataTransfer.types).includes(TAB_REORDER_DRAG_MIME);
+
+  // Decide whether the pointer is on the left or right half of the tab —
+  // that's the edge the reorder insertion line snaps to.
+  const reorderPositionFor = (event: React.DragEvent): "before" | "after" => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return event.clientX < rect.left + rect.width / 2 ? "before" : "after";
+  };
 
   const background = active
     ? "var(--bg)"
@@ -290,15 +334,55 @@ const TabItem = React.memo(function TabItem({
       role="tab"
       aria-selected={active}
       data-tab-id={tab.id}
+      draggable
+      onDragStart={(event) => {
+        // Use a tab-specific MIME so the strip's terminal-pane drop handler
+        // ignores this drag — and so a pane drag from a TerminalPane drag
+        // handle never collides with a tab reorder.
+        event.dataTransfer.setData(
+          TAB_REORDER_DRAG_MIME,
+          JSON.stringify({ tabId: tab.id }),
+        );
+        event.dataTransfer.effectAllowed = "move";
+        setDragging(true);
+      }}
+      onDragEnd={() => {
+        setDragging(false);
+        setReorderEdge(null);
+        clearHoverActivate();
+      }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       onDragEnter={(event) => {
+        if (acceptsReorderDrop(event)) {
+          event.preventDefault();
+          event.stopPropagation();
+          setReorderEdge(reorderPositionFor(event));
+          return;
+        }
         if (!acceptsPaneDrop(event)) return;
         event.preventDefault();
         event.stopPropagation();
         setDropActive(true);
+        // Activate this tab after a short hover so the user can keep
+        // dragging into the now-visible TerminalStack and pick an exact
+        // pane edge. Don't bother if it's already active.
+        if (!active && hoverActivateTimer.current === null) {
+          hoverActivateTimer.current = window.setTimeout(() => {
+            hoverActivateTimer.current = null;
+            onSelect(tab.id);
+          }, HOVER_ACTIVATE_MS);
+        }
       }}
       onDragOver={(event) => {
+        if (acceptsReorderDrop(event)) {
+          event.preventDefault();
+          event.stopPropagation();
+          event.dataTransfer.dropEffect = "move";
+          const next = reorderPositionFor(event);
+          setReorderEdge((curr) => (curr === next ? curr : next));
+          return;
+        }
         if (!acceptsPaneDrop(event)) return;
         event.preventDefault();
         event.stopPropagation();
@@ -313,13 +397,29 @@ const TabItem = React.memo(function TabItem({
           return;
         }
         setDropActive(false);
+        setReorderEdge(null);
+        clearHoverActivate();
       }}
       onDrop={(event) => {
+        const reorder = parseTabReorderDrag(event.dataTransfer);
+        if (reorder) {
+          event.preventDefault();
+          event.stopPropagation();
+          const position = reorderPositionFor(event);
+          setReorderEdge(null);
+          setDropActive(false);
+          clearHoverActivate();
+          if (reorder.tabId !== tab.id) {
+            onReorderTab(reorder.tabId, tab.id, position);
+          }
+          return;
+        }
         const payload = parseTerminalPaneDrag(event.dataTransfer);
         if (!payload || tab.kind !== "terminal") return;
         event.preventDefault();
         event.stopPropagation();
         setDropActive(false);
+        clearHoverActivate();
         onTerminalPaneDrop(payload, tab.id);
       }}
       onClick={(e) => {
@@ -344,6 +444,7 @@ const TabItem = React.memo(function TabItem({
         color: active ? "var(--ink)" : "var(--ink-dim)",
         outline: dropActive ? "1px solid var(--accent)" : "none",
         outlineOffset: -1,
+        opacity: dragging ? 0.5 : 1,
         fontFamily: "var(--font-sans)",
         fontSize: 12,
         cursor: "default",
@@ -353,6 +454,20 @@ const TabItem = React.memo(function TabItem({
         minWidth: 0,
       }}
     >
+      {reorderEdge && (
+        <span
+          aria-hidden
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            [reorderEdge === "before" ? "left" : "right"]: -1,
+            width: 2,
+            background: "var(--accent)",
+            zIndex: 1,
+          }}
+        />
+      )}
       {active && (
         <span
           aria-hidden

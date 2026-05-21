@@ -244,6 +244,10 @@ export interface UseTabsApi {
   cycleNext: () => void;
   cyclePrev: () => void;
   selectByIndex: (idx: number) => void;
+  // Reorder tabs in the strip. `position` decides whether the dragged tab
+  // lands BEFORE or AFTER the target. No-op when source and target are the
+  // same tab or the move resolves to the existing position.
+  reorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
   setDirty: (id: TabId, dirty: boolean) => void;
   setDetectedUrl: (tabId: TabId, paneId: string, url: string) => void;
   newTerminalTab: (cwd?: string, autorun?: string, options?: { focus?: boolean }) => TabId;
@@ -495,6 +499,26 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
 
   const cycleNext = useCallback(() => cycleBy(1), [cycleBy]);
   const cyclePrev = useCallback(() => cycleBy(-1), [cycleBy]);
+
+  const reorderTab = useCallback(
+    (fromId: TabId, toId: TabId, position: "before" | "after") => {
+      if (fromId === toId) return;
+      setTabs((curr) => {
+        const fromIdx = curr.findIndex((t) => t.id === fromId);
+        const toIdx = curr.findIndex((t) => t.id === toId);
+        if (fromIdx === -1 || toIdx === -1) return curr;
+        const next = curr.slice();
+        const [moving] = next.splice(fromIdx, 1);
+        // After the splice, indices to the right of fromIdx shifted left by 1.
+        const adjustedToIdx = toIdx > fromIdx ? toIdx - 1 : toIdx;
+        const insertIdx = position === "after" ? adjustedToIdx + 1 : adjustedToIdx;
+        if (insertIdx === fromIdx) return curr;
+        next.splice(insertIdx, 0, moving);
+        return normalizeTerminalTitles(next);
+      });
+    },
+    [],
+  );
 
   const selectByIndex = useCallback((idx: number) => {
     setTabs((curr) => {
@@ -1157,6 +1181,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
       cycleNext,
       cyclePrev,
       selectByIndex,
+      reorderTab,
       setDirty,
       setDetectedUrl,
       newTerminalTab,

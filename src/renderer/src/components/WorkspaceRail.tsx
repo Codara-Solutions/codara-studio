@@ -27,6 +27,7 @@ const WORKSPACE_COLORS = [
 ];
 
 const PANEL_SECTION_MIME = "application/x-spark-panel-section";
+const WORKSPACE_ROW_MIME = "application/x-spark-workspace-row";
 
 const SECTION_LABELS: Record<PanelSectionKey, string> = {
   workspaces: "Workspaces",
@@ -55,6 +56,7 @@ interface RailProps {
   onChange: (id: string, patch: Partial<Workspace>) => void;
   onPreviewColor: (id: string, color: string) => void;
   onDelete: (id: string) => void;
+  onReorder: (fromIndex: number, toIndex: number) => void;
   onCloseEditor: () => void;
   onCreate: () => void;
   onSplitChange: (ratio: number) => void;
@@ -96,6 +98,13 @@ function WorkspaceRail(props: RailProps) {
     onSectionDragEnd,
   } = props;
   const [dropIndex, setDropIndex] = useState<number | null>(null);
+  // ── Workspace row reorder ────────────────────────────────────────────────
+  // `wsDragIndex` is the index of the row currently being dragged (so it can
+  // render dimmed); `wsDropIndex` is the insertion index where a drop would
+  // land (a small horizontal line is drawn before that index, or after the
+  // last row when equal to workspaces.length).
+  const [wsDragIndex, setWsDragIndex] = useState<number | null>(null);
+  const [wsDropIndex, setWsDropIndex] = useState<number | null>(null);
   const deleteActiveWorkspace = () => {
     if (!props.activeId) return;
     props.onCloseEditor();
@@ -188,21 +197,85 @@ function WorkspaceRail(props: RailProps) {
               }
             />
             {!collapsed.workspaces && (
-              <div style={{ flex: 1, overflow: "auto", minHeight: 0, padding: "6px 8px 10px" }}>
+              <div
+                style={{ flex: 1, overflow: "auto", minHeight: 0, padding: "6px 8px 10px" }}
+                onDragOver={(event) => {
+                  if (wsDragIndex === null) return;
+                  // Drop into the empty space below the last row → append.
+                  if (event.target === event.currentTarget) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.dataTransfer.dropEffect = "move";
+                    setWsDropIndex(workspaces.length);
+                  }
+                }}
+                onDrop={(event) => {
+                  if (wsDragIndex === null) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const to = wsDropIndex ?? workspaces.length;
+                  if (wsDragIndex !== to && wsDragIndex + 1 !== to) {
+                    props.onReorder(wsDragIndex, to);
+                  }
+                  setWsDragIndex(null);
+                  setWsDropIndex(null);
+                }}
+              >
                 {workspaces.length === 0 && <EmptyState onCreate={onCreate} />}
-                {workspaces.map((w) => (
-                  <WorkspaceRow
-                    key={w.id}
-                    ws={w}
-                    active={w.id === props.activeId}
-                    editing={w.id === props.editingId}
-                    onActivate={() => props.onActivate(w.id)}
-                    onEdit={() => props.onEdit(w.id)}
-                    onChange={(patch) => props.onChange(w.id, patch)}
-                    onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
-                    onCloseEditor={props.onCloseEditor}
-                  />
+                {workspaces.map((w, index) => (
+                  <React.Fragment key={w.id}>
+                    {wsDropIndex === index && wsDragIndex !== null && (
+                      <RowDropIndicator accent={accent} />
+                    )}
+                    <WorkspaceRow
+                      ws={w}
+                      active={w.id === props.activeId}
+                      editing={w.id === props.editingId}
+                      dragging={wsDragIndex === index}
+                      onActivate={() => props.onActivate(w.id)}
+                      onEdit={() => props.onEdit(w.id)}
+                      onChange={(patch) => props.onChange(w.id, patch)}
+                      onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
+                      onCloseEditor={props.onCloseEditor}
+                      onRowDragStart={(event) => {
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData(WORKSPACE_ROW_MIME, w.id);
+                        event.dataTransfer.setData("text/plain", w.name);
+                        setWsDragIndex(index);
+                      }}
+                      onRowDragOver={(event) => {
+                        if (wsDragIndex === null) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        event.dataTransfer.dropEffect = "move";
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        const insertIndex =
+                          event.clientY < rect.top + rect.height / 2 ? index : index + 1;
+                        setWsDropIndex(insertIndex);
+                      }}
+                      onRowDrop={(event) => {
+                        if (wsDragIndex === null) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        const to =
+                          event.clientY < rect.top + rect.height / 2 ? index : index + 1;
+                        if (wsDragIndex !== to && wsDragIndex + 1 !== to) {
+                          props.onReorder(wsDragIndex, to);
+                        }
+                        setWsDragIndex(null);
+                        setWsDropIndex(null);
+                      }}
+                      onRowDragEnd={() => {
+                        setWsDragIndex(null);
+                        setWsDropIndex(null);
+                      }}
+                    />
+                  </React.Fragment>
                 ))}
+                {wsDropIndex === workspaces.length && wsDragIndex !== null && (
+                  <RowDropIndicator accent={accent} />
+                )}
               </div>
             )}
           </>
@@ -369,6 +442,22 @@ function sectionStackStyles(
   return sections.map((section) => (collapsed[section] ? collapsedSlot : fillSlot));
 }
 
+function RowDropIndicator({ accent }: { accent: string }) {
+  return (
+    <div
+      aria-hidden
+      style={{
+        height: 2,
+        margin: "2px 4px",
+        borderRadius: 999,
+        background: accent,
+        boxShadow: `0 0 8px ${accent}`,
+        pointerEvents: "none",
+      }}
+    />
+  );
+}
+
 function PanelDropIndicator({ accent }: { accent: string }) {
   return (
     <div aria-hidden style={{ flex: "0 0 0px", position: "relative", zIndex: 8 }}>
@@ -503,22 +592,32 @@ interface RowProps {
   ws: Workspace;
   active: boolean;
   editing: boolean;
+  dragging: boolean;
   onActivate: () => void;
   onEdit: () => void;
   onChange: (patch: Partial<Workspace>) => void;
   onPreviewColor: (color: string) => void;
   onCloseEditor: () => void;
+  onRowDragStart: (event: React.DragEvent<HTMLDivElement>) => void;
+  onRowDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
+  onRowDrop: (event: React.DragEvent<HTMLDivElement>) => void;
+  onRowDragEnd: () => void;
 }
 
 function WorkspaceRow({
   ws,
   active,
   editing,
+  dragging,
   onActivate,
   onEdit,
   onChange,
   onPreviewColor,
   onCloseEditor,
+  onRowDragStart,
+  onRowDragOver,
+  onRowDrop,
+  onRowDragEnd,
 }: RowProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const colorRef = useRef<HTMLInputElement | null>(null);
@@ -632,6 +731,11 @@ function WorkspaceRow({
   return (
     <div
       ref={rowRef}
+      draggable={!editing}
+      onDragStart={onRowDragStart}
+      onDragOver={onRowDragOver}
+      onDrop={onRowDrop}
+      onDragEnd={onRowDragEnd}
       onClick={editing ? undefined : onActivate}
       onMouseEnter={() => setRowHover(true)}
       onMouseLeave={() => setRowHover(false)}
@@ -642,6 +746,7 @@ function WorkspaceRow({
         padding: editing ? "5px 7px 5px 9px" : "5px 6px 5px 9px",
         background,
         cursor: "default",
+        opacity: dragging ? 0.4 : 1,
         position: "relative",
         border: active
           ? `1px solid color-mix(in oklch, ${accent} 48%, var(--rule-strong))`

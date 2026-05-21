@@ -124,7 +124,7 @@ export const SHORTCUTS: Shortcut[] = [
   },
   {
     id: "tab.newEditor",
-    label: "New editor tab",
+    label: "Open file (search)",
     keys: [MOD_KEY, "E"],
     group: "Tabs",
     match: (e) => isMod(e) && !e.shiftKey && e.key.toLowerCase() === "e",

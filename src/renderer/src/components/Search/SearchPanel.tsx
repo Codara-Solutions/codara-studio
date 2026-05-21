@@ -437,7 +437,7 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
           ) : !cwd ? (
             <Empty text="Open a workspace to search across its files." />
           ) : query.trim().length === 0 ? (
-            <Empty text="Type a query to search the active workspace." />
+            <Empty text="Type to search the workspace. Click a hit to open that file." />
           ) : rows.length === 0 ? (
             <Empty text={running ? "Searching…" : "No results."} />
           ) : (
