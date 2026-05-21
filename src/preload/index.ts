@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webFrame } from "electron";
 import type {
   AddRunMessageInput,
   AgentAssetDeleteResult,
@@ -377,6 +377,21 @@ const api = {
   },
   openInSystemBrowser: (url: string): Promise<void> =>
     ipcRenderer.invoke("app:openExternal", url),
+  view: {
+    // Chromium zoom levels are integer-ish steps where each unit is ~20% of
+    // the page scale. Clamp to the same range Chrome uses (~25% → ~500%) so
+    // repeated keypresses can't pin the UI at an unusable scale.
+    getZoomLevel: (): number => webFrame.getZoomLevel(),
+    setZoomLevel: (level: number): void => {
+      const clamped = Math.max(-5, Math.min(8, level));
+      webFrame.setZoomLevel(clamped);
+    },
+    zoomBy: (delta: number): void => {
+      const next = webFrame.getZoomLevel() + delta;
+      const clamped = Math.max(-5, Math.min(8, next));
+      webFrame.setZoomLevel(clamped);
+    },
+  },
 };
 
 function isBrowserUrl(url: string): boolean {

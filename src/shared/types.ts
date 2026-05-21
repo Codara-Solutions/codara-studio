@@ -120,6 +120,17 @@ export const EDITOR_THEME_IDS: readonly EditorThemeId[] = [
   "xcode-light",
 ] as const;
 
+// Per-command keybinding override. The map is keyed by CommandId (see
+// src/renderer/src/shortcuts/commands.ts); we type the value as a free
+// string here to avoid pulling renderer-only types into shared. The
+// renderer normalizes anything unrecognized back to defaults.
+//
+// Value semantics:
+//   - string  → serialized chord (replaces defaults)
+//   - null    → command intentionally unbound
+//   - missing → use defaults
+export type KeybindingOverridesPref = Record<string, string | null>;
+
 export interface AppPreferences {
   theme: ThemePref;
   vimMode: boolean;
@@ -128,6 +139,7 @@ export interface AppPreferences {
   // OpenRouter model id used for inline ghost-text autocomplete. Free-text
   // input — OpenRouter has hundreds of models, no dropdown.
   inlineAutocompleteModelId: string;
+  keybindings: KeybindingOverridesPref;
 }
 
 export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "google/gemini-3.1-flash-lite";
@@ -154,6 +166,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   editorTheme: "github-dark",
   inlineAutocompleteEnabled: true,
   inlineAutocompleteModelId: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
+  keybindings: {},
 };
 
 export type PrefKey = keyof AppPreferences;

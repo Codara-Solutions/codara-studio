@@ -19,12 +19,21 @@ import {
 import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/ThemeProvider";
 import { usePreferences } from "../preferences/usePreferences";
+import KeybindingsSection from "../shortcuts/KeybindingsSection";
 import { EDITOR_THEME_LABEL } from "./editor-cm/themes";
 import packageJson from "../../../../package.json";
 
 // Settings is a single in-app dialog with seven tabs. Everything renders
 // inline here — there is no separate Settings BrowserWindow.
-type SettingsTab = "general" | "editor" | "terminal" | "api" | "agents" | "runs" | "about";
+type SettingsTab =
+  | "general"
+  | "editor"
+  | "terminal"
+  | "api"
+  | "agents"
+  | "keybindings"
+  | "runs"
+  | "about";
 
 const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: "general", label: "General" },
@@ -32,6 +41,7 @@ const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: "terminal", label: "Default terminal" },
   { id: "api", label: "API and model" },
   { id: "agents", label: "Agents" },
+  { id: "keybindings", label: "Keybindings" },
   { id: "runs", label: "Runs" },
   { id: "about", label: "About" },
 ];
@@ -227,6 +237,7 @@ export default function SettingsDialog({
             {activeTab === "agents" && (
               <AgentsSettings draft={draft} onChange={setDraft} />
             )}
+            {activeTab === "keybindings" && <KeybindingsTab />}
             {activeTab === "runs" && <RunsSettings onOpenRun={onOpenRun} />}
             {activeTab === "about" && <AboutSettings />}
           </div>
@@ -1389,6 +1400,27 @@ function RuntimeDiagnosticSkeleton() {
       Checking Claude, Codex, and Cursor...
     </div>
   );
+}
+
+// Wrapper that hydrates preferences and forwards them to the keybindings
+// editor. Kept here so the section follows the same import/colocation
+// pattern as the other Settings tabs.
+function KeybindingsTab() {
+  const { preferences, setPreference, hydrated } = usePreferences();
+  if (!hydrated) {
+    return (
+      <div
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12,
+        }}
+      >
+        Loading…
+      </div>
+    );
+  }
+  return <KeybindingsSection preferences={preferences} setPreference={setPreference} />;
 }
 
 // Cross-workspace runs index. Shows every run on disk with its status,

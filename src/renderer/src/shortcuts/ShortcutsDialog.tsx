@@ -1,9 +1,13 @@
-import React, { useEffect } from "react";
-import { SHORTCUTS, SHORTCUT_GROUPS } from "./shortcuts";
+import React, { useEffect, useMemo } from "react";
+import { COMMAND_GROUPS } from "./commands";
+import { buildBindingTable, type BindingTable } from "./bindings";
+import { chordToDisplay } from "./chord";
+import { usePreferences } from "../preferences/usePreferences";
 
-// Cheat-sheet rendered straight off the `SHORTCUTS` table so labels and
-// chips stay in lockstep with the dispatcher. The chrome mirrors
-// SettingsDialog so the two modals feel like siblings.
+// Cheat-sheet rendered off the live command registry, with each chord
+// resolved through the user's keybinding overrides so customized chords
+// show through. The chrome mirrors SettingsDialog so the two modals feel
+// like siblings.
 
 interface ShortcutsDialogProps {
   open: boolean;
@@ -11,6 +15,12 @@ interface ShortcutsDialogProps {
 }
 
 export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps) {
+  const { preferences } = usePreferences();
+  const table = useMemo<BindingTable>(
+    () => buildBindingTable(preferences.keybindings),
+    [preferences.keybindings],
+  );
+
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
@@ -118,8 +128,8 @@ export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps)
             gap: 18,
           }}
         >
-          {SHORTCUT_GROUPS.map((group) => {
-            const items = SHORTCUTS.filter((s) => s.group === group);
+          {COMMAND_GROUPS.map((group) => {
+            const items = table.filter((b) => b.command.group === group);
             if (items.length === 0) return null;
             return (
               <section key={group} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -145,34 +155,47 @@ export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps)
                     flexDirection: "column",
                   }}
                 >
-                  {items.map((s) => (
-                    <li
-                      key={s.id}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "space-between",
-                        gap: 12,
-                        padding: "8px 0",
-                        borderBottom: "1px solid var(--rule-soft)",
-                      }}
-                    >
-                      <span
+                  {items.map((b) => {
+                    // We display the first chord in the list so the cheat
+                    // sheet stays uncluttered (zoom-in defaults to two
+                    // shift-equivalent chords — showing both would be
+                    // redundant). "Switch tab 1–9" gets a special label
+                    // because the chord shape is a range.
+                    const chips =
+                      b.command.id === "view.selectByIndex"
+                        ? [...chordToDisplay(b.chords[0]).slice(0, -1), "1…9"]
+                        : b.chords.length > 0
+                          ? chordToDisplay(b.chords[0])
+                          : ["—"];
+                    return (
+                      <li
+                        key={b.command.id}
                         style={{
-                          fontFamily: "var(--font-sans)",
-                          fontSize: 12,
-                          color: "var(--ink)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 12,
+                          padding: "8px 0",
+                          borderBottom: "1px solid var(--rule-soft)",
                         }}
                       >
-                        {s.label}
-                      </span>
-                      <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                        {s.keys.map((k, i) => (
-                          <Kbd key={i}>{k}</Kbd>
-                        ))}
-                      </span>
-                    </li>
-                  ))}
+                        <span
+                          style={{
+                            fontFamily: "var(--font-sans)",
+                            fontSize: 12,
+                            color: "var(--ink)",
+                          }}
+                        >
+                          {b.command.label}
+                        </span>
+                        <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          {chips.map((k, i) => (
+                            <Kbd key={i}>{k}</Kbd>
+                          ))}
+                        </span>
+                      </li>
+                    );
+                  })}
                 </ul>
               </section>
             );

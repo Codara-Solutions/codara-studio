@@ -62,6 +62,22 @@ function normalizeTheme(value: unknown): ThemePref {
   return DEFAULT_PREFERENCES.theme;
 }
 
+function normalizeKeybindings(value: unknown): AppPreferences["keybindings"] {
+  if (!value || typeof value !== "object") return {};
+  const src = value as Record<string, unknown>;
+  const out: AppPreferences["keybindings"] = {};
+  for (const [key, raw] of Object.entries(src)) {
+    if (raw === null) {
+      out[key] = null;
+    } else if (typeof raw === "string" && raw.trim()) {
+      out[key] = raw;
+    }
+    // Anything else (numbers, objects, etc.) is silently dropped; the
+    // renderer falls back to defaults for that command.
+  }
+  return out;
+}
+
 function normalize(input: Partial<AppPreferences> | null | undefined): AppPreferences {
   const src = input && typeof input === "object" ? input : {};
   const inlineModel =
@@ -79,6 +95,7 @@ function normalize(input: Partial<AppPreferences> | null | undefined): AppPrefer
         ? src.inlineAutocompleteEnabled
         : DEFAULT_PREFERENCES.inlineAutocompleteEnabled,
     inlineAutocompleteModelId: inlineModel,
+    keybindings: normalizeKeybindings(src.keybindings),
   };
 }
 
