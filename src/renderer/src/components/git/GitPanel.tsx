@@ -421,6 +421,7 @@ export default function GitPanel({
                 busy={busy}
                 branch={status.branch}
                 detached={status.detached}
+                upstream={status.upstream}
                 ahead={status.ahead}
                 behind={status.behind}
                 onPush={handlePush}

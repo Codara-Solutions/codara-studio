@@ -21,6 +21,7 @@ interface Props {
   busy: string | null;
   branch?: string;
   detached: boolean;
+  upstream?: string;
   ahead: number;
   behind: number;
   onPush: () => void;
@@ -44,6 +45,7 @@ export default function CommitComposer({
   busy,
   branch,
   detached,
+  upstream,
   ahead,
   behind,
   onPush,
@@ -57,6 +59,8 @@ export default function CommitComposer({
   const committing = busy === "commit";
   const generatingMessage = busy === "generateMessage";
   const preparingSmartMerge = busy === "smartMerge";
+  const fetching = busy === "fetch";
+  const showFetchBubble = Boolean(upstream && !detached && behind === 0);
   const smartMergeTitle = canSmartMerge
     ? "Fetch remote refs and let Spark merge safely"
     : detached
@@ -143,6 +147,77 @@ export default function CommitComposer({
           <SyncIcon />
         </SyncButton>
       </div>
+
+      {showFetchBubble && (
+        <button
+          type="button"
+          disabled={anyBusy}
+          onClick={onFetch}
+          title={`Fetch ${upstream}`}
+          style={{
+            appearance: "none",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8,
+            height: 26,
+            width: "100%",
+            padding: "0 8px 0 9px",
+            borderRadius: 999,
+            cursor: "default",
+            fontFamily: "var(--font-sans)",
+            fontSize: 11,
+            fontWeight: 650,
+            border: "1px solid color-mix(in oklch, var(--accent) 24%, var(--rule-soft))",
+            background: anyBusy
+              ? "transparent"
+              : "color-mix(in oklch, var(--accent) 7%, transparent)",
+            color: anyBusy ? "var(--muted-2)" : "var(--ink-dim)",
+            opacity: anyBusy && !fetching ? 0.62 : 1,
+            transition:
+              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
+          }}
+        >
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 7, minWidth: 0 }}>
+            <span
+              aria-hidden
+              style={{
+                width: 6,
+                height: 6,
+                flex: "0 0 6px",
+                borderRadius: 999,
+                background: fetching ? "var(--muted)" : "var(--accent)",
+                boxShadow: fetching ? "none" : "0 0 8px var(--accent-glow)",
+              }}
+            />
+            <span>{fetching ? "Fetching remote" : "Fetch available"}</span>
+          </span>
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              minWidth: 0,
+              color: anyBusy ? "var(--muted-2)" : "var(--muted)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              fontWeight: 650,
+            }}
+          >
+            <span
+              style={{
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                maxWidth: 118,
+              }}
+            >
+              {upstream}
+            </span>
+            {fetching ? <Spinner size={10} /> : <SyncIcon />}
+          </span>
+        </button>
+      )}
 
       <button
         type="button"
