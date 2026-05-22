@@ -39,6 +39,7 @@ interface Props {
   onNewEditor: () => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: TabId) => void;
   onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
+  onPinEditorTab: (id: TabId) => void;
 }
 
 // React.memo: TabBar's props from App.tsx are referentially stable (the
@@ -55,6 +56,7 @@ function TabBar({
   onNewEditor,
   onTerminalPaneDrop,
   onReorderTab,
+  onPinEditorTab,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -140,35 +142,11 @@ function TabBar({
         setTerminalDropActive(false);
         onTerminalPaneDrop(payload);
       }}
-      style={{
-        flex: "0 0 32px",
-        height: 32,
-        display: "flex",
-        alignItems: "stretch",
-        gap: 4,
-        background: "var(--panel)",
-        borderBottom: terminalDropActive
-          ? "1px solid var(--accent)"
-          : "1px solid var(--rule-soft)",
-        padding: "0 8px",
-        position: "relative",
-        boxShadow: terminalDropActive ? "inset 0 -1px 0 var(--accent)" : "none",
-      }}
+      className={
+        terminalDropActive ? "spark-tabbar spark-tabbar--drop-active" : "spark-tabbar"
+      }
     >
-      <div
-        ref={scrollRef}
-        style={{
-          flex: 1,
-          minWidth: 0,
-          display: "flex",
-          alignItems: "stretch",
-          gap: 2,
-          overflowX: "auto",
-          overflowY: "hidden",
-          scrollbarWidth: "none",
-        }}
-        className="spark-tabbar-scroll"
-      >
+      <div ref={scrollRef} className="spark-tabbar-scroll">
         {tabs.map((t) => (
           // onSelect/onClose are passed straight through (no per-tab inline
           // closure) so each TabItem's props stay referentially stable and
@@ -183,56 +161,22 @@ function TabBar({
             onClose={onClose}
             onTerminalPaneDrop={onTerminalPaneDrop}
             onReorderTab={onReorderTab}
+            onPinEditorTab={onPinEditorTab}
           />
         ))}
       </div>
-      <div
-        ref={pickerRef}
-        style={{ position: "relative", display: "flex", alignItems: "center" }}
-      >
+      <div ref={pickerRef} style={{ position: "relative" }}>
         <button
           type="button"
+          className="spark-tabbar-new"
           onClick={() => setPickerOpen((o) => !o)}
           title="New tab"
           aria-label="New tab"
-          style={{
-            appearance: "none",
-            width: 24,
-            height: 24,
-            border: "1px solid var(--rule-soft)",
-            borderRadius: 5,
-            background: "color-mix(in oklch, var(--ink) 2%, transparent)",
-            color: "var(--ink-dim)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            cursor: "default",
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = "var(--hover)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background =
-              "color-mix(in oklch, var(--ink) 2%, transparent)";
-          }}
         >
           <PlusIcon size={12} />
         </button>
         {pickerOpen && (
-          <div
-            style={{
-              position: "absolute",
-              top: 28,
-              right: 0,
-              zIndex: 50,
-              background: "var(--panel-2)",
-              border: "1px solid var(--rule-strong)",
-              borderRadius: 6,
-              boxShadow: "var(--shadow-2)",
-              minWidth: 200,
-              overflow: "hidden",
-            }}
-          >
+          <div className="spark-tabbar-picker">
             <PickerItem
               label="Terminal"
               hint="⌘T"
@@ -275,6 +219,7 @@ interface TabItemProps {
   onClose: (id: TabId) => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId: TabId) => void;
   onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
+  onPinEditorTab: (id: TabId) => void;
 }
 
 // React.memo so only the tab whose props actually changed (active flag
@@ -288,10 +233,11 @@ const TabItem = React.memo(function TabItem({
   onClose,
   onTerminalPaneDrop,
   onReorderTab,
+  onPinEditorTab,
 }: TabItemProps) {
-  const [hover, setHover] = useState(false);
   const [closeHover, setCloseHover] = useState(false);
   const [dropActive, setDropActive] = useState(false);
+  const isPreviewEditor = tab.kind === "editor" && Boolean(tab.preview);
   // "before" | "after" while a tab-reorder drag is hovering this item, used
   // to render the insertion indicator on the correct edge. Null otherwise.
   const [reorderEdge, setReorderEdge] = useState<"before" | "after" | null>(null);
@@ -323,17 +269,22 @@ const TabItem = React.memo(function TabItem({
     return event.clientX < rect.left + rect.width / 2 ? "before" : "after";
   };
 
-  const background = active
-    ? "var(--bg)"
-    : hover
-      ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
-      : "transparent";
+  const tabClass = [
+    "spark-tab",
+    active && "spark-tab--active",
+    dragging && "spark-tab--dragging",
+    dropActive && "spark-tab--drop-target",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <div
       role="tab"
       aria-selected={active}
       data-tab-id={tab.id}
+      data-preview-editor={isPreviewEditor ? "true" : undefined}
+      className={tabClass}
       draggable
       onDragStart={(event) => {
         // Use a tab-specific MIME so the strip's terminal-pane drop handler
@@ -351,8 +302,6 @@ const TabItem = React.memo(function TabItem({
         setReorderEdge(null);
         clearHoverActivate();
       }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
       onDragEnter={(event) => {
         if (acceptsReorderDrop(event)) {
           event.preventDefault();
@@ -426,6 +375,10 @@ const TabItem = React.memo(function TabItem({
         e.stopPropagation();
         onSelect(tab.id);
       }}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        if (tab.kind === "editor") onPinEditorTab(tab.id);
+      }}
       onAuxClick={(e) => {
         if (e.button === 1 && canClose) {
           e.preventDefault();
@@ -434,61 +387,20 @@ const TabItem = React.memo(function TabItem({
         }
       }}
       title={titleFor(tab)}
-      style={{
-        position: "relative",
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 7,
-        padding: "0 8px 0 10px",
-        background,
-        color: active ? "var(--ink)" : "var(--ink-dim)",
-        outline: dropActive ? "1px solid var(--accent)" : "none",
-        outlineOffset: -1,
-        opacity: dragging ? 0.5 : 1,
-        fontFamily: "var(--font-sans)",
-        fontSize: 12,
-        cursor: "default",
-        borderRight: "1px solid var(--rule-soft)",
-        flex: "0 0 auto",
-        maxWidth: 220,
-        minWidth: 0,
-      }}
     >
       {reorderEdge && (
         <span
           aria-hidden
-          style={{
-            position: "absolute",
-            top: 0,
-            bottom: 0,
-            [reorderEdge === "before" ? "left" : "right"]: -1,
-            width: 2,
-            background: "var(--accent)",
-            zIndex: 1,
-          }}
-        />
-      )}
-      {active && (
-        <span
-          aria-hidden
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            right: 0,
-            height: 1,
-            background: "var(--accent)",
-          }}
+          className={`spark-tab__reorder-edge spark-tab__reorder-edge--${reorderEdge}`}
         />
       )}
       <KindIcon tab={tab} />
       <span
-        style={{
-          minWidth: 0,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
+        className={
+          isPreviewEditor
+            ? "spark-tab__label spark-tab__label--preview"
+            : "spark-tab__label"
+        }
       >
         {labelFor(tab)}
       </span>
@@ -507,6 +419,7 @@ const TabItem = React.memo(function TabItem({
       {canClose && (
         <button
           type="button"
+          className="spark-tab__close"
           onMouseEnter={() => setCloseHover(true)}
           onMouseLeave={() => setCloseHover(false)}
           onClick={(e) => {
@@ -515,22 +428,6 @@ const TabItem = React.memo(function TabItem({
           }}
           title="Close"
           aria-label="Close tab"
-          style={{
-            appearance: "none",
-            width: 16,
-            height: 16,
-            border: "none",
-            borderRadius: 3,
-            background: closeHover ? "var(--hover)" : "transparent",
-            color:
-              closeHover || active || hover ? "var(--ink-dim)" : "transparent",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: 0,
-            cursor: "default",
-            flex: "0 0 16px",
-          }}
         >
           <CloseIcon size={10} />
         </button>

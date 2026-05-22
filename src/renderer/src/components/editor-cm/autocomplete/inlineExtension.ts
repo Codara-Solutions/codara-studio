@@ -22,8 +22,8 @@ import { requestOpenRouterCompletion } from "./openrouter";
 // without re-mounting the editor.
 export interface InlineAutocompletePrefs {
   enabled: boolean;
-  apiKey: string;
   modelId: string;
+  delayMs: number;
 }
 
 // Status emitted to the host (EditorPane) so the editor footer can surface
@@ -135,10 +135,9 @@ const ghostDecorations = EditorView.decorations.compute([suggestionField], (stat
   ]);
 });
 
-const DEBOUNCE_MS = 350;
 const CHAIN_DELAY_MS = 80;
 const MIN_PREFIX_CHARS = 2;
-const MAX_LINES = 6;
+const MAX_LINES = 12;
 const CACHE_SIZE = 32;
 const CACHE_TAIL = 512;
 const CACHE_HEAD = 128;
@@ -180,7 +179,7 @@ function shouldTrigger(
   isManual: boolean,
 ): boolean {
   if (!prefs.enabled) return false;
-  if (!prefs.apiKey || !prefs.modelId) return false;
+  if (!prefs.modelId) return false;
   const sel = state.selection.main;
   if (sel.from !== sel.to) return false;
   if (isManual) return true;
@@ -189,16 +188,18 @@ function shouldTrigger(
   const doc = state.doc;
   if (doc.length === 0) return false;
 
-  // Skip if cursor is in the middle of an identifier — typing ghost mid-word
-  // is the most disruptive failure mode.
-  if (cursor < doc.length) {
-    const next = doc.sliceString(cursor, cursor + 1);
-    if (next && /[\w$]/.test(next)) return false;
-  }
-
-  // Require some non-whitespace context within the recent prefix window.
+  // Require some non-whitespace context within the recent prefix window, but
+  // allow a single trailing token character when there is context before it.
+  // That lets inline AI finish words/identifiers without firing on an empty
+  // file after the first character.
   const recent = doc.sliceString(Math.max(0, cursor - 200), cursor);
-  if (recent.replace(/\s/g, "").length < MIN_PREFIX_CHARS) return false;
+  const tokenPrefix = recent.match(/[\w$]+$/)?.[0] ?? "";
+  const contextBeforeToken = recent.slice(0, recent.length - tokenPrefix.length);
+  const hasPartialToken =
+    tokenPrefix.length >= MIN_PREFIX_CHARS ||
+    (tokenPrefix.length === 1 && contextBeforeToken.replace(/\s/g, "").length > 0);
+  const hasEnoughContext = recent.replace(/\s/g, "").length >= MIN_PREFIX_CHARS;
+  if (!hasEnoughContext && !hasPartialToken) return false;
 
   return true;
 }
@@ -207,11 +208,11 @@ class CompletionDriver implements PluginValue {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private controller: AbortController | null = null;
   private inflightKey: string | null = null;
+  private rerunAfterInflight = false;
   private cache = new LRU<string, string>(CACHE_SIZE);
-  // Logged-once flags so a missing API key / model id surfaces in DevTools
-  // exactly once instead of on every keystroke. The flags reset when the
-  // editor remounts, which is the right cadence for "did I fix this?"
-  private warnedNoKey = false;
+  // Logged-once flag so a missing model id surfaces in DevTools exactly
+  // once instead of on every keystroke. The flag resets when the editor
+  // remounts, which is the right cadence for "did I fix this?"
   private warnedNoModel = false;
 
   constructor(
@@ -266,8 +267,14 @@ class CompletionDriver implements PluginValue {
 
   private schedule(isManual: boolean, delayOverride?: number) {
     this.cancelTimer();
-    const delay = delayOverride ?? (isManual ? 0 : DEBOUNCE_MS);
+    const delay = delayOverride ?? (isManual ? 0 : this.autoDelayMs());
     this.timer = setTimeout(() => void this.fire(isManual), delay);
+  }
+
+  private autoDelayMs(): number {
+    const delay = this.ctx.getPrefs().delayMs;
+    if (!Number.isFinite(delay)) return 0;
+    return Math.max(0, Math.min(2_000, Math.round(delay)));
   }
 
   private cancelTimer() {
@@ -283,6 +290,7 @@ class CompletionDriver implements PluginValue {
       this.controller = null;
       this.inflightKey = null;
     }
+    this.rerunAfterInflight = false;
   }
 
   private clearGhost() {
@@ -305,15 +313,10 @@ class CompletionDriver implements PluginValue {
     const state = this.view.state;
     if (!shouldTrigger(state, prefs, isManual)) {
       if (!prefs.enabled) {
+        this.clearGhost();
+        this.cancelTimer();
+        this.cancelInFlight();
         this.emit({ kind: "disabled" });
-      } else if (!prefs.apiKey) {
-        this.emit({ kind: "no-api-key" });
-        if (!this.warnedNoKey) {
-          console.warn(
-            "[inline-ai] enabled but no OpenRouter API key set. Open Settings → API and model.",
-          );
-          this.warnedNoKey = true;
-        }
       } else if (!prefs.modelId) {
         this.emit({ kind: "no-model" });
         if (!this.warnedNoModel) {
@@ -341,6 +344,10 @@ class CompletionDriver implements PluginValue {
     }
 
     if (this.inflightKey === key) return;
+    if (!isManual && this.controller && this.autoDelayMs() === 0) {
+      this.rerunAfterInflight = true;
+      return;
+    }
     this.cancelInFlight();
     const controller = new AbortController();
     this.controller = controller;
@@ -357,7 +364,7 @@ class CompletionDriver implements PluginValue {
           filename: this.ctx.getPath(),
           language: lang,
         },
-        { apiKey: prefs.apiKey, modelId: prefs.modelId },
+        { modelId: prefs.modelId },
         signal,
       );
     } catch (err) {
@@ -375,6 +382,7 @@ class CompletionDriver implements PluginValue {
         this.controller = null;
         this.inflightKey = null;
       }
+      this.scheduleRerunIfNeeded();
       return;
     }
     if (signal.aborted) return;
@@ -390,6 +398,13 @@ class CompletionDriver implements PluginValue {
     if (trimmed) this.cache.set(key, trimmed);
     this.applyResult(trimmed, cursor);
     this.emit({ kind: "ok" });
+    this.scheduleRerunIfNeeded();
+  }
+
+  private scheduleRerunIfNeeded() {
+    if (!this.rerunAfterInflight) return;
+    this.rerunAfterInflight = false;
+    this.schedule(false, 0);
   }
 
   private applyResult(text: string, cursor: number) {

@@ -19,6 +19,7 @@ export type { SparkOpenInput };
 const FONT_SIZE = 13;
 const FIT_DEBOUNCE_MS = 8;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
+const RESTORE_NOTICE = "[restored from last Spark session]";
 // Module-level guard so a sessionId can only ever have one autorun scheduled.
 // Survives component re-mounts (StrictMode dev, HMR) since the PTY itself
 // persists past the renderer-side React tree. See the autorun block below.
@@ -235,16 +236,16 @@ export function useTerminalSession({
       });
 
       term.open(container.current);
-      const restoredScrollback = initialScrollback?.trimEnd();
-      if (restoredScrollback) {
-        term.write(
-          `${restoredScrollback}\r\n\x1b[2m[restored from last Spark session]\x1b[0m\r\n`,
-        );
-      }
       try {
         fit.fit();
       } catch {
         /* host may be 0×0 on first paint; ResizeObserver will fix it. */
+      }
+      const restoredScrollback = initialScrollback?.trimEnd();
+      if (restoredScrollback) {
+        term.write(
+          `${normalizeForTerminalReplay(restoredScrollback)}\r\n\x1b[2m${RESTORE_NOTICE}\x1b[0m\r\n`,
+        );
       }
 
       const prompt = registerPromptTracker(term);
@@ -597,12 +598,20 @@ export function useTerminalSession({
   const getBuffer = useCallback((maxLines = 200): string | null => {
     const t = termRef.current;
     if (!t) return null;
-    const buf = t.buffer.active;
+    const buf = t.buffer.normal;
     const total = buf.length;
     const lines: string[] = [];
     const start = Math.max(0, total - maxLines);
     for (let i = start; i < total; i++) {
-      lines.push(buf.getLine(i)?.translateToString(true) ?? "");
+      const line = buf.getLine(i);
+      if (!line) continue;
+      const text = line.translateToString(true);
+      if (text.trim() === RESTORE_NOTICE) continue;
+      if (line.isWrapped && lines.length > 0) {
+        lines[lines.length - 1] += text;
+      } else {
+        lines.push(text);
+      }
     }
     while (lines.length && lines[lines.length - 1] === "") lines.pop();
     return lines.join("\n");
@@ -614,6 +623,10 @@ export function useTerminalSession({
   }, []);
 
   return { write, focus, getBuffer, getSelection };
+}
+
+function normalizeForTerminalReplay(value: string): string {
+  return value.replace(/\r\n|\r|\n/g, "\r\n");
 }
 
 function stripTrailingPunct(url: string): string {

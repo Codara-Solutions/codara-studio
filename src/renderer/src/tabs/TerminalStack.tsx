@@ -2,7 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
 import type { ShellInfo } from "@shared/types";
 import type { SparkOpenInput } from "../components/Terminal/useTerminalSession";
-import { smartAddTarget, type PanePath } from "./paneTree";
+import {
+  findLeaf,
+  insertLeafAtLeaf,
+  removeLeaf,
+  smartAddTarget,
+  type PanePath,
+} from "./paneTree";
 import type {
   PaneNode,
   Tab,
@@ -19,7 +25,12 @@ import {
   endTerminalPaneDrag,
   parseTerminalPaneDrag,
   peekTerminalPaneDrag,
+  peekTerminalPaneDragState,
+  subscribeTerminalPaneDrag,
+  updateTerminalPaneDragPosition,
+  type TerminalPaneDragPoint,
   type TerminalPaneDragPayload,
+  type TerminalPaneDragState,
 } from "./terminalDrag";
 import {
   CLAUDE_LAUNCH_COMMAND,
@@ -307,6 +318,28 @@ function TerminalStack({
     [],
   );
 
+  useEffect(() => {
+    const updatePosition = (event: DragEvent) => {
+      if (!peekTerminalPaneDrag()) return;
+      updateTerminalDragPositionFromPoint(event);
+    };
+    const finishTerminalDrag = () => {
+      if (!peekTerminalPaneDrag()) return;
+      window.setTimeout(() => endTerminalPaneDrag(), 0);
+    };
+
+    window.addEventListener("drag", updatePosition);
+    window.addEventListener("dragover", updatePosition);
+    window.addEventListener("drop", finishTerminalDrag);
+    window.addEventListener("dragend", finishTerminalDrag);
+    return () => {
+      window.removeEventListener("drag", updatePosition);
+      window.removeEventListener("dragover", updatePosition);
+      window.removeEventListener("drop", finishTerminalDrag);
+      window.removeEventListener("dragend", finishTerminalDrag);
+    };
+  }, []);
+
   if (terminals.length === 0) return null;
   if (!shell) {
     return (
@@ -392,51 +425,206 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   onRatioChange,
   onPaneDrop,
 }: TerminalTabPaneProps) {
+  const tabRootRef = useRef<HTMLDivElement | null>(null);
   const [dropIntent, setDropIntent] = useState<DropIntent | null>(null);
-  // Flatten the pane tree into a positioned leaf list + resize handles.
-  // Every leaf is rendered as a sibling keyed by paneId, so splitting or
-  // closing a pane only adds/removes keys — the panes that stay put keep
-  // their xterm instance and PTY instead of being torn down and respawned
-  // as blank shells.
-  //
-  // useMemo keyed on `tab.root`: the paneTree helpers preserve node
-  // identity for untouched subtrees and only return a new root when the
-  // tree actually changed, so `tab.root` is an exact cache key — this
-  // recursive walk is skipped entirely on renders that didn't touch the
-  // tree (e.g. a sibling pane's activity, or activePaneId flipping).
-  const { leaves, handles } = useMemo(() => {
+  const dropIntentRef = useRef<DropIntent | null>(null);
+  const [dragState, setDragState] = useState<TerminalPaneDragState | null>(() =>
+    peekTerminalPaneDragState(),
+  );
+  const drag = dragState?.payload ?? null;
+  const ghostPos = dragState ? dragGhostPosition(dragState) : null;
+
+  useEffect(() => subscribeTerminalPaneDrag(setDragState), []);
+
+  const setOwnTabRoot = useCallback(
+    (el: HTMLDivElement | null) => {
+      tabRootRef.current = el;
+      setTabRoot(tab.id, el);
+    },
+    [setTabRoot, tab.id],
+  );
+
+  // The base layout is the layout the pointer should target: for same-tab
+  // moves it is the tree with the dragged pane removed, and for cross-tab
+  // moves it is the untouched destination tree. Preview and final drop both
+  // derive from intents computed against this layout.
+  const layoutRoot = useMemo((): PaneNode | null => {
+    if (!drag || drag.tabId !== tab.id) return tab.root;
+    return removeLeaf(tab.root, drag.paneId);
+  }, [tab.root, tab.id, drag]);
+
+  const baseLayout = useMemo(() => layoutTree(layoutRoot), [layoutRoot]);
+
+  const updateDropIntentAtPoint = useCallback(
+    (pointLike: { clientX: number; clientY: number }): DropIntent | null => {
+      const root = tabRootRef.current;
+      const dragPayload = peekTerminalPaneDrag();
+      const point = terminalDragPointFromClient(pointLike);
+      if (!root || !dragPayload || !point) {
+        dropIntentRef.current = null;
+        setDropIntent(null);
+        return null;
+      }
+      const next = dropIntentFromBaseLayout(
+        root.getBoundingClientRect(),
+        baseLayout.leaves,
+        point,
+        dragPayload,
+        tab.id,
+      );
+      if (!next) {
+        dropIntentRef.current = null;
+        setDropIntent(null);
+        return null;
+      }
+      dropIntentRef.current = next;
+      setDropIntent((current) => {
+        if (sameDropIntent(current, next)) return current;
+        return next;
+      });
+      return next;
+    },
+    [baseLayout.leaves, tab.id],
+  );
+
+  useEffect(() => {
+    if (!dragState || !visible) return;
+    updateDropIntentAtPoint(dragState);
+  }, [dragState, visible, updateDropIntentAtPoint]);
+
+  useEffect(() => {
+    if (!dragState || !visible) return;
+
+    const onPointerMove = (event: PointerEvent) => {
+      updateTerminalDragPositionFromPoint(event);
+      updateDropIntentAtPoint(event);
+    };
+    const finish = (event: PointerEvent) => {
+      updateTerminalDragPositionFromPoint(event);
+      const intent = updateDropIntentAtPoint(event);
+      const payload = peekTerminalPaneDrag();
+      if (payload && intent) {
+        onPaneDrop(payload, tab.id, intent);
+      }
+      setDropIntent(null);
+      endTerminalPaneDrag();
+    };
+
+    window.addEventListener("pointermove", onPointerMove, true);
+    window.addEventListener("pointerup", finish, true);
+    window.addEventListener("pointercancel", finish, true);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("pointerup", finish, true);
+      window.removeEventListener("pointercancel", finish, true);
+    };
+  }, [dragState, visible, updateDropIntentAtPoint, onPaneDrop, tab.id]);
+
+  useEffect(() => {
+    if (!dragState) {
+      dropIntentRef.current = null;
+      setDropIntent(null);
+    }
+  }, [dragState]);
+
+  useEffect(() => {
+    dropIntentRef.current = dropIntent;
+  }, [dropIntent]);
+
+  // Full post-drop tree when hovering a drop target — drives live reflow + slot.
+  const dropPreviewRoot = useMemo(() => {
+    if (!drag || !dropIntent) return null;
+    const moving =
+      findLeaf(tab.root, drag.paneId) ??
+      ({ kind: "leaf", paneId: drag.paneId } satisfies TerminalLeaf);
+    const base = drag.tabId === tab.id ? layoutRoot : tab.root;
+    if (!base) return null;
+    return insertLeafAtLeaf(
+      base,
+      dropIntent.paneId,
+      dropIntent.direction,
+      moving,
+      dropIntent.position,
+    );
+  }, [drag, dropIntent, tab.root, tab.id, layoutRoot]);
+
+  const displayRoot = dropPreviewRoot ?? layoutRoot;
+
+  const { flowLeaves, flowHandles, dropSlotRect } = useMemo(() => {
     const ls: LeafBox[] = [];
     const hs: HandleBox[] = [];
-    layoutPanes(tab.root, [], FULL_RECT, ls, hs);
-    return { leaves: ls, handles: hs };
-  }, [tab.root]);
+    if (!displayRoot) {
+      return { flowLeaves: ls, flowHandles: hs, dropSlotRect: null };
+    }
+    layoutPanes(displayRoot, [], FULL_RECT, ls, hs);
+    const slot =
+      drag && dropPreviewRoot
+        ? (ls.find((box) => box.leaf.paneId === drag.paneId)?.rect ?? null)
+        : null;
+    return { flowLeaves: ls, flowHandles: hs, dropSlotRect: slot };
+  }, [displayRoot, drag, dropPreviewRoot]);
+
+  const hideDraggedPane = !!drag && (drag.tabId === tab.id || !!dropPreviewRoot);
+  const layoutAnimating = !!drag && (drag.tabId === tab.id || !!dropPreviewRoot);
+
+  const orderedFlowLeaves = useMemo(() => {
+    const activeId = tab.activePaneId;
+    return [...flowLeaves]
+      .filter((box) => !(hideDraggedPane && drag && box.leaf.paneId === drag.paneId))
+      .sort((a, b) => {
+        if (a.leaf.paneId === activeId) return 1;
+        if (b.leaf.paneId === activeId) return -1;
+        return 0;
+      });
+  }, [flowLeaves, tab.activePaneId, hideDraggedPane, drag]);
+
+  const draggedLeaf =
+    drag?.tabId === tab.id ? findLeaf(tab.root, drag.paneId) : null;
 
   return (
     <div
-      ref={(el) => setTabRoot(tab.id, el)}
+      ref={setOwnTabRoot}
       aria-hidden={!visible}
+      className="spark-terminal-tab"
+      onDragOver={(event) => {
+        if (!acceptsTerminalPane(event)) return;
+        event.preventDefault();
+        updateTerminalDragPositionFromPoint(event);
+      }}
+      onDragLeave={(event) => {
+        if (
+          event.relatedTarget instanceof Node &&
+          event.currentTarget.contains(event.relatedTarget)
+        ) {
+          return;
+        }
+        setDropIntent(null);
+      }}
       style={{
         position: "absolute",
         inset: 0,
         zIndex: visible ? 2 : 1,
         visibility: visible ? "visible" : "hidden",
         pointerEvents: visible ? "auto" : "none",
+        boxSizing: "border-box",
+        padding: "var(--terminal-pane-pad)",
+        background: "var(--panel)",
       }}
     >
-      {leaves.map(({ leaf, rect }) => {
+      {orderedFlowLeaves.map(({ leaf, rect }) => {
         const bundle = getBundle(tab.id, leaf.paneId);
         const isActive = tab.activePaneId === leaf.paneId;
         const workerChip = visibleWorkerChip(leaf.worker);
-        const activeDrop =
-          dropIntent && dropIntent.paneId === leaf.paneId ? dropIntent : null;
         return (
           <div
             key={leaf.paneId}
+            data-terminal-pane-id={leaf.paneId}
             onMouseDown={bundle.onActivate}
             onDragEnter={(event) => {
               if (!acceptsTerminalPane(event)) return;
               event.preventDefault();
               event.stopPropagation();
+              updateTerminalDragPositionFromPoint(event);
               if (isSelfDrop(tab.id, leaf.paneId)) {
                 event.dataTransfer.dropEffect = "none";
                 setDropIntent((current) =>
@@ -450,6 +638,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               if (!acceptsTerminalPane(event)) return;
               event.preventDefault();
               event.stopPropagation();
+              updateTerminalDragPositionFromPoint(event);
               if (isSelfDrop(tab.id, leaf.paneId)) {
                 event.dataTransfer.dropEffect = "none";
                 setDropIntent((current) =>
@@ -486,25 +675,18 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               const intent = dropIntentFromEvent(event, leaf.paneId);
               onPaneDrop(payload, tab.id, intent);
             }}
+            className="spark-terminal-pane"
             style={{
               position: "absolute",
-              left: pct(rect.left),
-              top: pct(rect.top),
-              width: pct(rect.width),
-              height: pct(rect.height),
-              // 1px ring on the active leaf so users always know which
-              // pane keyboard input goes to. Inset so it doesn't push
-              // the xterm canvas inward on every focus toggle.
-              boxShadow: isActive
-                ? "inset 0 0 0 1px var(--accent)"
-                : "inset 0 0 0 1px transparent",
-              outline: activeDrop ? "1px solid var(--accent)" : "none",
-              outlineOffset: -2,
-              transition:
-                "box-shadow var(--motion-fast, 120ms) var(--ease-out, ease-out)",
+              ...paneFrameStyle(rect),
+              zIndex: isActive ? 5 : 1,
+              opacity: layoutAnimating && drag?.paneId !== leaf.paneId ? 0.94 : 1,
+              transition: layoutAnimating
+                ? "left var(--motion) var(--ease-out), top var(--motion) var(--ease-out), width var(--motion) var(--ease-out), height var(--motion) var(--ease-out), opacity var(--motion-fast) var(--ease-out)"
+                : undefined,
             }}
           >
-            {activeDrop ? <PaneDropMarker intent={activeDrop} /> : null}
+            {isActive ? <PaneFocusRing /> : null}
             <TerminalPane
               ref={(h) => setHandle(leaf.paneId, h)}
               sessionId={leaf.paneId}
@@ -512,10 +694,6 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               initialCwd={leaf.cwd}
               initialScrollback={leaf.scrollback}
               initialCommand={leaf.autorun}
-              // A non-active TAB still mounts every pane (so PTYs
-              // survive switches); only the active tab's panes take
-              // pointer events. Within an active tab every pane is
-              // visible — splits share the screen, they aren't tabs.
               visible={visible}
               onDetectedLocalUrl={bundle.onDetectedUrl}
               onSparkOpen={bundle.onSparkOpen}
@@ -535,7 +713,20 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
           </div>
         );
       })}
-      {handles.map((handle) => (
+      {draggedLeaf && drag ? (
+        <DraggedPaneMount
+          tabId={tab.id}
+          leaf={draggedLeaf}
+          shell={shell}
+          getBundle={getBundle}
+          setHandle={setHandle}
+        />
+      ) : null}
+      {dropSlotRect ? <PaneDropSlot rect={dropSlotRect} /> : null}
+      {drag && ghostPos && visible ? (
+        <TerminalDragGhost x={ghostPos.x} y={ghostPos.y} />
+      ) : null}
+      {flowHandles.map((handle) => (
         <ResizeHandle
           key={`h:${handle.path.join("/") || "root"}`}
           handle={handle}
@@ -580,17 +771,70 @@ interface DropIntent {
   position: "before" | "after";
 }
 
-// Visible divider thickness; the grab target is wider so the handle stays
-// easy to hit without a chunky-looking rule. The rule itself is paired with a
-// soft theme-aware halo (see ResizeHandle below) so the boundary between two
-// panes stays legible against dark *and* light backgrounds.
-const HANDLE_THICKNESS = 2;
+// Invisible at rest; a soft groove appears on hover, accent while dragging.
 const HANDLE_HIT = 11;
+const PANE_GAP_PX = 3;
 const MIN_RATIO = 0.05;
 const MAX_RATIO = 0.95;
 
 function pct(fraction: number): string {
   return `${fraction * 100}%`;
+}
+
+function terminalDragPointFromClient(pointLike: {
+  clientX: number;
+  clientY: number;
+}): TerminalPaneDragPoint | null {
+  const { clientX, clientY } = pointLike;
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+  // Chromium can report 0,0 on synthetic drag ticks while the pointer is
+  // elsewhere. Ignoring that keeps the pickup card from snapping to the corner.
+  if (clientX === 0 && clientY === 0) return null;
+  return { clientX, clientY };
+}
+
+function updateTerminalDragPositionFromPoint(pointLike: {
+  clientX: number;
+  clientY: number;
+}): void {
+  const point = terminalDragPointFromClient(pointLike);
+  if (!point) return;
+  updateTerminalPaneDragPosition(point);
+}
+
+function dragGhostPosition(
+  state: TerminalPaneDragState,
+): { x: number; y: number } | null {
+  const point = terminalDragPointFromClient(state);
+  if (!point) return null;
+  return { x: point.clientX, y: point.clientY };
+}
+
+function layoutTree(root: PaneNode | null): { leaves: LeafBox[]; handles: HandleBox[] } {
+  const leaves: LeafBox[] = [];
+  const handles: HandleBox[] = [];
+  if (root) layoutPanes(root, [], FULL_RECT, leaves, handles);
+  return { leaves, handles };
+}
+
+// Inset each pane slightly so rounded cards breathe (macOS split style).
+function paneFrameStyle(rect: FracRect): React.CSSProperties {
+  const g = PANE_GAP_PX;
+  return {
+    left: `calc(${pct(rect.left)} + ${g}px)`,
+    top: `calc(${pct(rect.top)} + ${g}px)`,
+    width: `calc(${pct(rect.width)} - ${g * 2}px)`,
+    height: `calc(${pct(rect.height)} - ${g * 2}px)`,
+  };
+}
+
+function paneFrameClientRect(container: DOMRect, rect: FracRect): DOMRect {
+  const gap = PANE_GAP_PX;
+  const left = container.left + rect.left * container.width + gap;
+  const top = container.top + rect.top * container.height + gap;
+  const width = Math.max(0, rect.width * container.width - gap * 2);
+  const height = Math.max(0, rect.height * container.height - gap * 2);
+  return new DOMRect(left, top, width, height);
 }
 
 function acceptsTerminalPane(event: React.DragEvent): boolean {
@@ -609,9 +853,48 @@ function dropIntentFromEvent(
   event: React.DragEvent<HTMLElement>,
   paneId: string,
 ): DropIntent {
-  const rect = event.currentTarget.getBoundingClientRect();
-  const x = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0.5;
-  const y = rect.height > 0 ? (event.clientY - rect.top) / rect.height : 0.5;
+  return dropIntentFromRect(
+    event.currentTarget.getBoundingClientRect(),
+    event.clientX,
+    event.clientY,
+    paneId,
+  );
+}
+
+function dropIntentFromBaseLayout(
+  containerRect: DOMRect,
+  leaves: LeafBox[],
+  point: TerminalPaneDragPoint,
+  dragPayload: TerminalPaneDragPayload,
+  targetTabId: TabId,
+): DropIntent | null {
+  if (leaves.length === 0) return null;
+  if (!pointInsideRect(point.clientX, point.clientY, containerRect)) return null;
+
+  let best: { box: LeafBox; rect: DOMRect; distance: number } | null = null;
+  for (const box of leaves) {
+    if (dragPayload.tabId === targetTabId && dragPayload.paneId === box.leaf.paneId) {
+      continue;
+    }
+    const rect = paneFrameClientRect(containerRect, box.rect);
+    const contains = pointInsideRect(point.clientX, point.clientY, rect);
+    const distance = contains ? -1 : distanceToRectSq(point.clientX, point.clientY, rect);
+    if (!best || distance < best.distance) {
+      best = { box, rect, distance };
+    }
+  }
+  if (!best) return null;
+  return dropIntentFromRect(best.rect, point.clientX, point.clientY, best.box.leaf.paneId);
+}
+
+function dropIntentFromRect(
+  rect: DOMRect,
+  clientX: number,
+  clientY: number,
+  paneId: string,
+): DropIntent {
+  const x = rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5;
+  const y = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
   const distances = [
     { edge: "left", value: x },
     { edge: "right", value: 1 - x },
@@ -631,39 +914,172 @@ function dropIntentFromEvent(
   return { paneId, direction: "vertical", position: "after" };
 }
 
-function PaneDropMarker({ intent }: { intent: DropIntent }) {
-  const horizontal = intent.direction === "horizontal";
-  const before = intent.position === "before";
-  const previewStyle = horizontal
-    ? {
-        top: 0,
-        bottom: 0,
-        width: "50%",
-        left: before ? 0 : undefined,
-        right: before ? undefined : 0,
-      }
-    : {
-        left: 0,
-        right: 0,
-        height: "50%",
-        top: before ? 0 : undefined,
-        bottom: before ? undefined : 0,
-      };
+function sameDropIntent(a: DropIntent | null, b: DropIntent | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.paneId === b.paneId &&
+    a.direction === b.direction &&
+    a.position === b.position
+  );
+}
+
+function pointInsideRect(x: number, y: number, rect: DOMRect): boolean {
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+}
+
+function distanceToRectSq(x: number, y: number, rect: DOMRect): number {
+  const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
+  const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+  return dx * dx + dy * dy;
+}
+
+// Accent frame drawn above the xterm canvas. Sits on a raised z-index pane so
+// every edge — including splits against a sibling — stays visible.
+function PaneFocusRing() {
   return (
     <div
       aria-hidden
       style={{
         position: "absolute",
-        zIndex: 7,
+        inset: 0,
+        zIndex: 20,
         pointerEvents: "none",
-        border: "1px solid color-mix(in oklch, var(--accent) 42%, transparent)",
-        background:
-          "color-mix(in oklch, var(--accent) 10%, transparent)",
-        boxShadow:
-          "inset 0 0 0 1px color-mix(in oklch, var(--accent) 20%, transparent), inset 0 0 30px color-mix(in oklch, var(--accent) 13%, transparent), 0 0 20px color-mix(in oklch, var(--accent) 16%, transparent)",
-        ...previewStyle,
+        border: "1px solid var(--accent)",
+        borderRadius: "var(--terminal-pane-radius)",
+        boxShadow: [
+          "0 0 0 1px color-mix(in oklch, var(--accent) 24%, transparent)",
+          "inset 0 0 36px color-mix(in oklch, var(--accent) 4%, transparent)",
+        ].join(", "),
+        transition: "box-shadow var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     />
+  );
+}
+
+// Exact footprint the dragged pane will occupy after drop (from preview layout).
+function PaneDropSlot({ rect }: { rect: FracRect }) {
+  return (
+    <div
+      aria-hidden
+      style={{
+        position: "absolute",
+        ...paneFrameStyle(rect),
+        zIndex: 8,
+        pointerEvents: "none",
+        border: "2px dashed color-mix(in oklch, var(--accent) 58%, transparent)",
+        borderRadius: "var(--terminal-pane-radius)",
+        background: "color-mix(in oklch, var(--accent) 11%, transparent)",
+        boxShadow: [
+          "inset 0 0 0 1px color-mix(in oklch, var(--accent) 28%, transparent)",
+          "inset 0 0 40px color-mix(in oklch, var(--accent) 7%, transparent)",
+          "0 0 24px color-mix(in oklch, var(--accent) 16%, transparent)",
+        ].join(", "),
+        transition:
+          "left var(--motion) var(--ease-out), top var(--motion) var(--ease-out), width var(--motion) var(--ease-out), height var(--motion) var(--ease-out)",
+      }}
+    />
+  );
+}
+
+// Keeps the PTY mounted but off-screen while the visible layout omits this pane.
+function DraggedPaneMount({
+  tabId,
+  leaf,
+  shell,
+  getBundle,
+  setHandle,
+}: {
+  tabId: TabId;
+  leaf: TerminalLeaf;
+  shell: ShellInfo;
+  getBundle: (tabId: TabId, paneId: string) => Bundle;
+  setHandle: (paneId: string, h: TerminalPaneHandle | null) => void;
+}) {
+  const bundle = getBundle(tabId, leaf.paneId);
+  return (
+    <div
+      aria-hidden
+      style={{
+        position: "absolute",
+        left: -10000,
+        top: 0,
+        width: 480,
+        height: 320,
+        overflow: "hidden",
+        opacity: 0,
+        pointerEvents: "none",
+      }}
+    >
+      <TerminalPane
+        ref={(h) => setHandle(leaf.paneId, h)}
+        sessionId={leaf.paneId}
+        shell={shell}
+        initialCwd={leaf.cwd}
+        initialScrollback={leaf.scrollback}
+        initialCommand={leaf.autorun}
+        visible={false}
+        onDetectedLocalUrl={bundle.onDetectedUrl}
+        onSparkOpen={bundle.onSparkOpen}
+        onExit={bundle.onExit}
+        onCwd={bundle.onCwd}
+        onActivity={bundle.onActivity}
+        onAgentState={bundle.onAgentState}
+      />
+    </div>
+  );
+}
+
+function TerminalDragGhost({ x, y }: { x: number; y: number }) {
+  return (
+    <div
+      aria-hidden
+      style={{
+        position: "fixed",
+        left: x + 14,
+        top: y + 14,
+        width: 168,
+        height: 108,
+        zIndex: 10000,
+        pointerEvents: "none",
+        borderRadius: "var(--terminal-pane-radius)",
+        border: "1px solid var(--accent)",
+        background: "color-mix(in oklch, var(--panel) 88%, var(--accent) 12%)",
+        boxShadow: [
+          "0 0 0 1px color-mix(in oklch, var(--accent) 22%, transparent)",
+          "0 14px 36px rgba(0, 0, 0, 0.38)",
+          "0 0 28px color-mix(in oklch, var(--accent) 18%, transparent)",
+        ].join(", "),
+        transform: "rotate(-1.5deg) scale(1.02)",
+        backdropFilter: "blur(8px)",
+        WebkitBackdropFilter: "blur(8px)",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          borderRadius: "inherit",
+          background:
+            "repeating-linear-gradient(0deg, color-mix(in oklch, var(--ink) 4%, transparent) 0 2px, transparent 2px 18px)",
+          opacity: 0.55,
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          left: 10,
+          bottom: 10,
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          letterSpacing: "0.06em",
+          color: "var(--accent)",
+          fontWeight: 600,
+        }}
+      >
+        &gt; terminal
+      </div>
+    </div>
   );
 }
 
@@ -712,11 +1128,12 @@ interface ResizeHandleProps {
   onRatioChange: (ratio: number) => void;
 }
 
-// A draggable divider between two panes. Rendered as a flat sibling of the
-// leaf wrappers and positioned over the split boundary, with a wide invisible
-// hit area centred on the thin visible rule.
+// A draggable divider between two panes. Invisible until hover; then a recessed
+// groove that works on any theme. Accent only while actively resizing.
 function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps) {
   const draggingRef = useRef(false);
+  const [dragging, setDragging] = useState(false);
+  const [hover, setHover] = useState(false);
   const { rect, ratio } = handle;
   const isHorizontal = handle.direction === "horizontal";
   // Boundary as a fraction of the whole tab, derived from the split's own
@@ -729,6 +1146,7 @@ function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps
     e.preventDefault();
     e.stopPropagation();
     draggingRef.current = true;
+    setDragging(true);
     (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
   };
 
@@ -754,8 +1172,25 @@ function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps
 
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     draggingRef.current = false;
+    setDragging(false);
     (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
   };
+
+  const showLine = dragging || hover;
+  const cursor = isHorizontal ? "col-resize" : "row-resize";
+  const groove = isHorizontal
+    ? `linear-gradient(to right,
+        transparent 0%,
+        color-mix(in oklch, var(--ink) 7%, transparent) 42%,
+        color-mix(in oklch, var(--ink) 4%, transparent) 50%,
+        color-mix(in oklch, var(--ink) 7%, transparent) 58%,
+        transparent 100%)`
+    : `linear-gradient(to bottom,
+        transparent 0%,
+        color-mix(in oklch, var(--ink) 7%, transparent) 42%,
+        color-mix(in oklch, var(--ink) 4%, transparent) 50%,
+        color-mix(in oklch, var(--ink) 7%, transparent) 58%,
+        transparent 100%)`;
 
   return (
     <div
@@ -763,12 +1198,14 @@ function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       aria-hidden
       style={{
         position: "absolute",
-        zIndex: 4,
+        zIndex: dragging ? 8 : hover ? 7 : 3,
         touchAction: "none",
-        cursor: isHorizontal ? "col-resize" : "row-resize",
+        cursor,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -789,21 +1226,21 @@ function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps
     >
       <div
         style={{
-          // A crisper rule color than --rule-soft, paired with a symmetric
-          // shadow on both sides so the divider reads as a recessed groove in
-          // every theme. color-mix against --ink keeps the halo subtle on
-          // light themes (where pure black would feel heavy) and visible on
-          // dark themes (where alpha-on-black would disappear).
-          background: "var(--rule-strong)",
           pointerEvents: "none",
-          boxShadow: isHorizontal
-            ? "1px 0 4px color-mix(in oklch, var(--ink) 18%, transparent), -1px 0 4px color-mix(in oklch, var(--ink) 18%, transparent)"
-            : "0 1px 4px color-mix(in oklch, var(--ink) 18%, transparent), 0 -1px 4px color-mix(in oklch, var(--ink) 18%, transparent)",
-          ...(isHorizontal
-            ? { width: HANDLE_THICKNESS, height: "100%" }
-            : { height: HANDLE_THICKNESS, width: "100%" }),
+          opacity: showLine ? 1 : 0,
+          transition: "opacity var(--motion-fast) var(--ease-out)",
+          ...(isHorizontal ? { width: dragging ? 2 : 3, height: "100%" } : { height: dragging ? 2 : 3, width: "100%" }),
+          ...(dragging
+            ? {
+                background: "var(--accent)",
+                boxShadow: "0 0 10px var(--accent-glow)",
+              }
+            : { background: groove }),
         }}
       />
+      {dragging ? (
+        <div style={{ position: "fixed", inset: 0, zIndex: 9999, cursor }} />
+      ) : null}
     </div>
   );
 }
@@ -932,28 +1369,48 @@ function PaneToolbar({ dragPayload, onSmartAdd, onSplitRight, onSplitDown, onClo
 
 function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }) {
   const [dragging, setDragging] = useState(false);
+  const pointerIdRef = useRef<number | null>(null);
+
+  const finishPointerDrag = (event: React.PointerEvent<HTMLSpanElement>) => {
+    if (pointerIdRef.current !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    updateTerminalDragPositionFromPoint(event);
+    pointerIdRef.current = null;
+    setDragging(false);
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    window.setTimeout(() => {
+      if (peekTerminalPaneDrag()?.paneId === payload.paneId) endTerminalPaneDrag();
+    }, 0);
+  };
+
   return (
     <span
       role="button"
       tabIndex={-1}
-      draggable
-      title="Drag pane to tab bar"
-      aria-label="Drag pane to tab bar"
+      title="Drag pane"
+      aria-label="Drag pane"
       onMouseDown={(event) => event.stopPropagation()}
-      onPointerDown={(event) => event.stopPropagation()}
-      onDragStart={(event) => {
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
         event.stopPropagation();
+        pointerIdRef.current = event.pointerId;
         setDragging(true);
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData(TERMINAL_PANE_DRAG_MIME, JSON.stringify(payload));
-        event.dataTransfer.setData("text/plain", "Spark terminal pane");
-        beginTerminalPaneDrag(payload);
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+        beginTerminalPaneDrag(
+          payload,
+          terminalDragPointFromClient(event) ?? { clientX: 0, clientY: 0 },
+        );
       }}
-      onDragEnd={(event) => {
+      onPointerMove={(event) => {
+        if (pointerIdRef.current !== event.pointerId) return;
+        event.preventDefault();
         event.stopPropagation();
-        setDragging(false);
-        endTerminalPaneDrag();
+        updateTerminalDragPositionFromPoint(event);
       }}
+      onPointerUp={finishPointerDrag}
+      onPointerCancel={finishPointerDrag}
       style={{
         width: 20,
         height: 20,
@@ -964,6 +1421,7 @@ function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }) {
         justifyContent: "center",
         cursor: dragging ? "grabbing" : "grab",
         background: dragging ? "color-mix(in oklch, var(--accent) 18%, transparent)" : "transparent",
+        touchAction: "none",
       }}
     >
       <DragHandleIcon size={12} />

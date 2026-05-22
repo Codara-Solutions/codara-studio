@@ -136,7 +136,7 @@ type Node = (DirNode & { kind: "dir" }) | (FileNode & { kind: "file" });
 interface Props {
   cwd: string;
   activePath?: string | null;
-  onOpenFile: (entry: FsEntry) => void;
+  onOpenFile: (entry: FsEntry, options?: { preview?: boolean }) => void;
   onDeleteFile?: (path: string) => void;
   onRenameFile?: (oldPath: string, entry: FsEntry) => void;
   // Right-click a .md/.html file to hand it to the orchestrator as a plan.
@@ -912,7 +912,8 @@ export default function FileTree({
               ? null
               : () => {
                   setContextMenu(null);
-                  for (const entry of contextMenuEntries) onOpenFile(entry);
+                  const preview = contextMenuEntries.length === 1;
+                  for (const entry of contextMenuEntries) onOpenFile(entry, { preview });
                 }
           }
           openLabel={

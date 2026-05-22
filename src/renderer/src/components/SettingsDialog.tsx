@@ -13,7 +13,9 @@ import type {
 } from "@shared/types";
 import {
   APP_THEME_IDS,
+  DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
   EDITOR_THEME_IDS,
+  INLINE_AI_DELAY_PRESETS,
   INLINE_AI_MODEL_PRESETS,
 } from "@shared/types";
 import { runStatusColor } from "../lib/run-status";
@@ -146,7 +148,7 @@ export default function SettingsDialog({
           // shouldn't make the dialog grow or shrink. Only the inner content
           // pane scrolls; the dialog stays the same size.
           width: "min(560px, calc(100vw - 44px))",
-          height: "min(620px, calc(100vh - 44px))",
+          height: "min(720px, calc(100vh - 44px))",
           display: "flex",
           flexDirection: "column",
           background: "var(--panel)",
@@ -761,6 +763,23 @@ function EditorSettings() {
       </div>
     );
   }
+  const currentInlineModelId = preferences.inlineAutocompleteModelId.trim();
+  const currentInlinePreset = INLINE_AI_MODEL_PRESETS.find(
+    (preset) => preset.id === currentInlineModelId,
+  );
+  const setInlineModel = (modelId: string) => {
+    void setPreference("inlineAutocompleteModelId", modelId);
+  };
+  const normalizeInlineModelInput = () => {
+    const next = preferences.inlineAutocompleteModelId.trim() || DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID;
+    if (next !== preferences.inlineAutocompleteModelId) {
+      setInlineModel(next);
+    }
+  };
+  const currentInlineDelayMs = Math.max(
+    0,
+    Math.min(2_000, Math.round(preferences.inlineAutocompleteDelayMs)),
+  );
   return (
     <div style={{ display: "grid", gap: 18 }}>
       <SectionTitle title="Code editor" detail="Editing behaviour for the file editor pane." />
@@ -793,7 +812,7 @@ function EditorSettings() {
 
       <SectionTitle
         title="Inline AI"
-        detail="Ghost-text autocomplete reuses the OpenRouter key from the API tab."
+        detail="Ghost-text autocomplete and git commit-message drafts share this OpenRouter model."
       />
       <ToggleRow
         title="Inline AI autocomplete"
@@ -801,32 +820,162 @@ function EditorSettings() {
         checked={preferences.inlineAutocompleteEnabled}
         onChange={(v) => void setPreference("inlineAutocompleteEnabled", v)}
       />
-      <Label text="Inline AI model">
-        <div style={{ display: "grid", gap: 6 }}>
+      <div style={{ display: "grid", gap: 7 }}>
+        <span
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 11,
+            fontWeight: 600,
+            letterSpacing: "0.1em",
+            textTransform: "uppercase",
+          }}
+        >
+          Suggestion timing
+        </span>
+        <div
+          role="group"
+          aria-label="Inline AI suggestion timing"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+            gap: 6,
+          }}
+        >
+          {INLINE_AI_DELAY_PRESETS.map((preset) => (
+            <TimingPresetButton
+              key={preset.value}
+              label={preset.label}
+              hint={preset.hint}
+              active={currentInlineDelayMs === preset.value}
+              onClick={() =>
+                void setPreference("inlineAutocompleteDelayMs", preset.value)
+              }
+            />
+          ))}
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(0, 1fr) auto",
+            gap: 10,
+            alignItems: "center",
+          }}
+        >
+          <input
+            aria-label="Inline AI wait time"
+            type="range"
+            min={0}
+            max={2000}
+            step={50}
+            value={currentInlineDelayMs}
+            onChange={(event) =>
+              void setPreference("inlineAutocompleteDelayMs", Number(event.currentTarget.value))
+            }
+            style={{ width: "100%" }}
+          />
+          <span
+            style={{
+              color: "var(--muted)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              minWidth: 44,
+              textAlign: "right",
+            }}
+          >
+            {currentInlineDelayMs === 0 ? "live" : `${currentInlineDelayMs}ms`}
+          </span>
+        </div>
+      </div>
+      <div style={{ display: "grid", gap: 7 }}>
+        <span
+          id="inline-ai-model-label"
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 11,
+            fontWeight: 600,
+            letterSpacing: "0.1em",
+            textTransform: "uppercase",
+          }}
+        >
+          Inline AI model
+        </span>
+        <div
+          role="group"
+          aria-label="Inline AI model presets"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+            gap: 8,
+          }}
+        >
           {INLINE_AI_MODEL_PRESETS.map((preset) => (
             <ModelPresetCard
               key={preset.id}
               label={preset.label}
               modelId={preset.id}
               hint={preset.hint}
-              active={preferences.inlineAutocompleteModelId === preset.id}
-              onClick={() =>
-                void setPreference("inlineAutocompleteModelId", preset.id)
-              }
+              detail={preset.detail}
+              badge={preset.badge}
+              active={currentInlineModelId === preset.id}
+              onClick={() => setInlineModel(preset.id)}
             />
           ))}
         </div>
-        <input
-          type="text"
-          spellCheck={false}
-          autoComplete="off"
-          value={preferences.inlineAutocompleteModelId}
-          onChange={(e) =>
-            void setPreference("inlineAutocompleteModelId", e.target.value)
-          }
-          placeholder="x-ai/grok-code-fast-1"
-          style={{ ...inputStyle, fontFamily: "var(--font-mono)", fontSize: 12 }}
-        />
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(0, 1fr) auto",
+            gap: 8,
+            alignItems: "center",
+          }}
+        >
+          <input
+            aria-labelledby="inline-ai-model-label"
+            type="text"
+            spellCheck={false}
+            autoComplete="off"
+            value={preferences.inlineAutocompleteModelId}
+            onChange={(e) =>
+              void setPreference("inlineAutocompleteModelId", e.target.value)
+            }
+            onBlur={normalizeInlineModelInput}
+            placeholder={DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID}
+            style={{ ...inputStyle, fontFamily: "var(--font-mono)", fontSize: 12 }}
+          />
+          <button
+            type="button"
+            aria-label="Use default Inline AI model"
+            onClick={() => setInlineModel(DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID)}
+            title="Use the recommended Inline AI model"
+            style={{
+              ...inputStyle,
+              width: "auto",
+              padding: "8px 10px",
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: "0.1em",
+              textTransform: "uppercase",
+              color:
+                currentInlineModelId === DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID
+                  ? "var(--ink)"
+                  : "var(--muted)",
+              cursor: "default",
+              whiteSpace: "nowrap",
+              borderColor:
+                currentInlineModelId === DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID
+                  ? "color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
+                  : "var(--rule-soft)",
+              background:
+                currentInlineModelId === DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID
+                  ? "color-mix(in oklch, var(--accent) 12%, transparent)"
+                  : "color-mix(in oklch, var(--ink) 3%, transparent)",
+            }}
+          >
+            Default
+          </button>
+        </div>
         <div
           style={{
             color: "var(--muted)",
@@ -835,10 +984,14 @@ function EditorSettings() {
             lineHeight: 1.45,
           }}
         >
-          Pick a preset above or paste any OpenRouter model id (e.g.{" "}
-          <code>x-ai/grok-code-fast-1</code>).
+          {currentInlinePreset
+            ? `${currentInlinePreset.label} is selected.`
+            : currentInlineModelId
+              ? "Custom OpenRouter model selected."
+              : "No model selected."}{" "}
+          Paste any OpenRouter model id to override the presets.
         </div>
-      </Label>
+      </div>
     </div>
   );
 }
@@ -2188,15 +2341,13 @@ function SelectOption({
   );
 }
 
-function ModelPresetCard({
+function TimingPresetButton({
   label,
-  modelId,
   hint,
   active,
   onClick,
 }: {
   label: string;
-  modelId: string;
   hint: string;
   active: boolean;
   onClick: () => void;
@@ -2206,6 +2357,83 @@ function ModelPresetCard({
     <button
       type="button"
       aria-pressed={active}
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        textAlign: "left",
+        border: active
+          ? "1px solid color-mix(in oklch, var(--accent) 46%, var(--rule-strong))"
+          : hover
+            ? "1px solid var(--rule-soft)"
+            : "1px solid transparent",
+        borderRadius: 7,
+        background: active
+          ? "color-mix(in oklch, var(--accent) 10%, transparent)"
+          : hover
+            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
+            : "color-mix(in oklch, var(--ink) 2%, transparent)",
+        color: "var(--ink)",
+        padding: "7px 9px",
+        cursor: "default",
+        display: "grid",
+        gap: 2,
+        minHeight: 46,
+        boxShadow: active
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+          : "none",
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <span
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+          fontWeight: 700,
+          color: active ? "var(--ink)" : "var(--ink-dim)",
+        }}
+      >
+        {label}
+      </span>
+      <span
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 9,
+          lineHeight: 1.3,
+          color: "var(--muted)",
+        }}
+      >
+        {hint}
+      </span>
+    </button>
+  );
+}
+
+function ModelPresetCard({
+  label,
+  modelId,
+  hint,
+  detail,
+  badge,
+  active,
+  onClick,
+}: {
+  label: string;
+  modelId: string;
+  hint: string;
+  detail: string;
+  badge?: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      aria-label={`Use ${label} for Inline AI`}
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -2252,7 +2480,7 @@ function ModelPresetCard({
         <span
           style={{
             display: "flex",
-            alignItems: "baseline",
+            alignItems: "center",
             gap: 8,
             minWidth: 0,
           }}
@@ -2263,23 +2491,48 @@ function ModelPresetCard({
               fontSize: 13,
               fontWeight: 600,
               color: "var(--ink)",
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
             }}
           >
             {label}
           </span>
-          <span
-            style={{
-              color: "var(--muted)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 10,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              minWidth: 0,
-            }}
-          >
-            {modelId}
-          </span>
+          {badge && (
+            <span
+              style={{
+                color: active ? "var(--ink)" : "var(--muted)",
+                border: active
+                  ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
+                  : "1px solid var(--rule-soft)",
+                borderRadius: 999,
+                padding: "1px 6px",
+                fontFamily: "var(--font-sans)",
+                fontSize: 9,
+                fontWeight: 800,
+                letterSpacing: "0.08em",
+                textTransform: "uppercase",
+                flex: "0 0 auto",
+              }}
+            >
+              {badge}
+            </span>
+          )}
+        </span>
+        <span
+          title={modelId}
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            minWidth: 0,
+          }}
+        >
+          {modelId}
         </span>
         <span
           style={{
@@ -2290,6 +2543,16 @@ function ModelPresetCard({
           }}
         >
           {hint}
+        </span>
+        <span
+          style={{
+            color: "var(--muted-2)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            lineHeight: 1.35,
+          }}
+        >
+          {detail}
         </span>
       </span>
     </button>

@@ -16,7 +16,6 @@ export interface CompletionRequest {
 }
 
 export interface OpenRouterCompletionDeps {
-  apiKey: string;
   modelId: string;
 }
 
@@ -67,7 +66,7 @@ export async function requestOpenRouterCompletion(
     if (response.error && response.error !== "aborted") {
       throw new Error(response.error);
     }
-    return response.text.trim();
+    return response.text;
   } finally {
     signal.removeEventListener("abort", onAbort);
   }

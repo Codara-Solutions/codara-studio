@@ -99,8 +99,13 @@ test("right sidebar sections stay ordered in a compact window", async () => {
   }
 });
 
-test("settings dialog saves default terminal and OpenRouter model settings", async () => {
+test("settings dialog saves default terminal, OpenRouter, and inline model settings", async () => {
   const { userDataDir } = await prepareElectronWorkspace("spark-agent-settings-e2e-");
+  await writeFile(
+    join(userDataDir, "spark-preferences.json"),
+    JSON.stringify({ inlineAutocompleteModelId: "google/gemini-3.1-flash-lite" }, null, 2),
+    "utf8",
+  );
 
   let app: ElectronApplication | null = null;
   try {
@@ -117,14 +122,33 @@ test("settings dialog saves default terminal and OpenRouter model settings", asy
     await page.getByRole("button", { name: "Settings" }).click();
     await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
 
+    await page.getByRole("button", { name: "Editor" }).click();
+    const inlineModelInput = page.getByRole("textbox", { name: "Inline AI model" });
+    await expect(inlineModelInput).toHaveValue("google/gemini-3.5-flash");
+    await expect(page.getByRole("button", { name: "Use Gemini 3.5 Flash for Inline AI" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await page.getByRole("button", { name: "Use Gemini 3.5 Flash Nitro for Inline AI" }).click();
+    await expect(inlineModelInput).toHaveValue("google/gemini-3.5-flash:nitro");
+    await page.getByRole("button", { name: "Use GLM-4.7 Nitro for Inline AI" }).click();
+    await expect(inlineModelInput).toHaveValue("z-ai/glm-4.7:nitro");
+    await page.getByRole("button", { name: "Use default Inline AI model" }).click();
+    await expect(inlineModelInput).toHaveValue("google/gemini-3.5-flash");
+    const inlineWaitInput = page.getByLabel("Inline AI wait time");
+    await expect(inlineWaitInput).toHaveValue("0");
+    await page.getByRole("button", { name: /After pause/ }).click();
+    await expect(inlineWaitInput).toHaveValue("1500");
+
+    await page.getByRole("button", { name: "Default terminal" }).click();
     const terminalButton = page.getByRole("button", { name: /Use .* as default terminal/ }).first();
     await expect(terminalButton).toBeVisible();
     await terminalButton.click();
 
-    await page.getByRole("button", { name: "API + MODEL" }).click();
+    await page.getByRole("button", { name: "API and model" }).click();
     await page.getByLabel("OPENROUTER API KEY").fill("test-openrouter-key");
     await page.getByLabel("MODEL").fill("test/settings-model");
-    await clickButton(page, "SAVE");
+    await clickButton(page, "Save");
     await expect(page.getByRole("dialog", { name: "Settings" })).toBeHidden();
 
     const settings = JSON.parse(await readFile(join(userDataDir, "spark-settings.json"), "utf8")) as {
@@ -135,6 +159,15 @@ test("settings dialog saves default terminal and OpenRouter model settings", asy
     expect(settings.defaultShellId).toBeTruthy();
     expect(settings.openRouterApiKey).toBe("test-openrouter-key");
     expect(settings.openRouterModel).toBe("test/settings-model");
+
+    await expect
+      .poll(async () => {
+        const preferences = JSON.parse(
+          await readFile(join(userDataDir, "spark-preferences.json"), "utf8"),
+        ) as { inlineAutocompleteDelayMs?: number; inlineAutocompleteModelId?: string };
+        return `${preferences.inlineAutocompleteModelId}:${preferences.inlineAutocompleteDelayMs}`;
+      })
+      .toBe("google/gemini-3.5-flash:1500");
   } finally {
     await app?.close();
   }

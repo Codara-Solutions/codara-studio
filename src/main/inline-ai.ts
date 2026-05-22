@@ -13,16 +13,18 @@ const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
 const MAX_PREFIX = 4000;
 const MAX_SUFFIX = 2000;
-const MAX_OUTPUT_TOKENS = 256;
+const MAX_OUTPUT_TOKENS = 512;
 
 const COMPLETION_SYSTEM_PROMPT = `You perform fill-in-the-middle code completion.
 
 You receive PREFIX (code before the cursor) and SUFFIX (code after the cursor). Your output is inserted EXACTLY at the cursor position. PREFIX + your_output + SUFFIX must form valid, syntactically-correct code.
 
-Output the next chunk of code you can predict with high confidence. Stop when the next decision becomes genuinely ambiguous. A good chunk is usually:
-- The remaining characters of a partially-typed token, OR
-- A full line (statement, signature, expression), OR
-- A short block (2-6 lines) when its closing delimiter is already in SUFFIX.
+Output the next useful chunk of code you can predict with high confidence. Prefer enough text to save a meaningful edit, then stop when the next decision becomes genuinely ambiguous. A good chunk is usually:
+- The remaining characters of a partially-typed identifier, property, keyword, or string word, OR
+- The rest of the current expression or statement, OR
+- A short predictable block, up to about 12 lines, when the surrounding code makes the block obvious.
+
+When PREFIX ends inside a word or identifier, finish that word first. If SUFFIX starts with the rest of the same word or identifier, output only the missing bridge text or output empty string. Do not duplicate text that is already present after the cursor.
 
 Hard rules:
 1. NEVER repeat any text already present in PREFIX or SUFFIX.
@@ -49,6 +51,10 @@ PREFIX: "const sum = (a, b) => "
 SUFFIX: ";"
 OUTPUT: "a + b"
 
+PREFIX: "const inlineAutocom"
+SUFFIX: ""
+OUTPUT: "pleteDelayMs"
+
 PREFIX: "function fetchUser(id: string) {\\n  "
 SUFFIX: "\\n}"
 OUTPUT: "return fetch(\`/api/users/\${id}\`).then(r => r.json());"`;
@@ -68,7 +74,14 @@ export interface InlineAiCompletionResponse {
 }
 
 interface OpenRouterChatResponse {
-  choices?: Array<{ message?: { content?: unknown } }>;
+  choices?: Array<{
+    finish_reason?: string;
+    message?: {
+      content?: unknown;
+      reasoning?: unknown;
+      reasoning_details?: unknown;
+    };
+  }>;
   error?: { message?: string };
 }
 
@@ -77,12 +90,15 @@ interface OpenRouterChatMessage {
   content: string;
 }
 
+type OpenRouterReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
 export interface InlineAiChatCompletionRequest {
   modelId: string;
   requestId: string;
   messages: OpenRouterChatMessage[];
   maxTokens?: number;
   temperature?: number;
+  reasoningEffort?: OpenRouterReasoningEffort;
 }
 
 // Track in-flight requests so the renderer can abort them by id when the
@@ -133,6 +149,30 @@ function extractContent(response: OpenRouterChatResponse): string {
   return "";
 }
 
+function supportsOpenRouterReasoningEffort(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  return (
+    id.startsWith("google/gemini-3") ||
+    id.startsWith("google/gemini-2.5") ||
+    id.startsWith("openai/gpt-oss") ||
+    id.startsWith("openai/o") ||
+    id.startsWith("openai/gpt-5") ||
+    id.startsWith("x-ai/grok") ||
+    id.startsWith("z-ai/glm")
+  );
+}
+
+function requiresOpenRouterReasoning(modelId: string): boolean {
+  return modelId.toLowerCase().startsWith("openai/gpt-oss");
+}
+
+function reasoningForRequest(modelId: string, effort?: OpenRouterReasoningEffort) {
+  if (!effort || !supportsOpenRouterReasoningEffort(modelId)) return undefined;
+  const normalizedEffort =
+    effort === "none" && requiresOpenRouterReasoning(modelId) ? "minimal" : effort;
+  return { effort: normalizedEffort, exclude: true };
+}
+
 export async function runInlineAiCompletion(
   req: InlineAiCompletionRequest,
 ): Promise<InlineAiCompletionResponse> {
@@ -141,6 +181,7 @@ export async function runInlineAiCompletion(
     requestId: req.requestId,
     maxTokens: MAX_OUTPUT_TOKENS,
     temperature: 0.2,
+    reasoningEffort: "none",
     messages: [
       { role: "system", content: COMPLETION_SYSTEM_PROMPT },
       { role: "user", content: buildUserPrompt(req) },
@@ -156,18 +197,21 @@ export async function runInlineAiChatCompletion(
   if (!apiKey) {
     return { text: "", error: "OpenRouter API key not set" };
   }
-  if (!req.modelId) {
+  const modelId = req.modelId.trim();
+  if (!modelId) {
     return { text: "", error: "No inline-AI model configured" };
   }
 
   const controller = new AbortController();
   inflight.set(req.requestId, controller);
+  const reasoning = reasoningForRequest(modelId, req.reasoningEffort);
 
   const body = {
-    model: req.modelId,
+    model: modelId,
     temperature: req.temperature ?? 0.2,
     max_tokens: req.maxTokens ?? MAX_OUTPUT_TOKENS,
     messages: req.messages,
+    ...(reasoning ? { reasoning } : {}),
   };
 
   try {
@@ -195,7 +239,7 @@ export async function runInlineAiChatCompletion(
     }
 
     const json = (await response.json()) as OpenRouterChatResponse;
-    return { text: extractContent(json).trim(), error: null };
+    return { text: extractContent(json), error: null };
   } catch (err) {
     if (controller.signal.aborted) {
       return { text: "", error: "aborted" };

@@ -6,6 +6,15 @@ export interface TerminalPaneDragPayload {
   paneId: string;
 }
 
+export interface TerminalPaneDragPoint {
+  clientX: number;
+  clientY: number;
+}
+
+export interface TerminalPaneDragState extends TerminalPaneDragPoint {
+  payload: TerminalPaneDragPayload;
+}
+
 export interface TabReorderDragPayload {
   tabId: string;
 }
@@ -27,17 +36,59 @@ export function parseTerminalPaneDrag(dataTransfer: DataTransfer): TerminalPaneD
 // being dragged until the actual drop fires. We need that earlier to suppress
 // the drop preview when the user hovers a pane over itself, so the drag
 // handle stashes the payload here at dragstart and clears it at dragend.
-let activeTerminalPaneDrag: TerminalPaneDragPayload | null = null;
+let activeTerminalPaneDrag: TerminalPaneDragState | null = null;
 
-export function beginTerminalPaneDrag(payload: TerminalPaneDragPayload): void {
-  activeTerminalPaneDrag = payload;
+type TerminalPaneDragListener = (active: TerminalPaneDragState | null) => void;
+const terminalPaneDragListeners = new Set<TerminalPaneDragListener>();
+
+function notifyTerminalPaneDragListeners(): void {
+  const active = activeTerminalPaneDrag;
+  for (const listener of terminalPaneDragListeners) {
+    listener(active);
+  }
+}
+
+/** Subscribe to pane drag start/end so layouts can reflow while dragging. */
+export function subscribeTerminalPaneDrag(
+  listener: TerminalPaneDragListener,
+): () => void {
+  terminalPaneDragListeners.add(listener);
+  listener(activeTerminalPaneDrag);
+  return () => {
+    terminalPaneDragListeners.delete(listener);
+  };
+}
+
+export function beginTerminalPaneDrag(
+  payload: TerminalPaneDragPayload,
+  point: TerminalPaneDragPoint = { clientX: 0, clientY: 0 },
+): void {
+  activeTerminalPaneDrag = { payload, ...point };
+  notifyTerminalPaneDragListeners();
+}
+
+export function updateTerminalPaneDragPosition(point: TerminalPaneDragPoint): void {
+  if (!activeTerminalPaneDrag) return;
+  if (
+    activeTerminalPaneDrag.clientX === point.clientX &&
+    activeTerminalPaneDrag.clientY === point.clientY
+  ) {
+    return;
+  }
+  activeTerminalPaneDrag = { ...activeTerminalPaneDrag, ...point };
+  notifyTerminalPaneDragListeners();
 }
 
 export function endTerminalPaneDrag(): void {
   activeTerminalPaneDrag = null;
+  notifyTerminalPaneDragListeners();
 }
 
 export function peekTerminalPaneDrag(): TerminalPaneDragPayload | null {
+  return activeTerminalPaneDrag?.payload ?? null;
+}
+
+export function peekTerminalPaneDragState(): TerminalPaneDragState | null {
   return activeTerminalPaneDrag;
 }
 

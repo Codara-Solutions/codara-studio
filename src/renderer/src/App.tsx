@@ -22,7 +22,7 @@ import PreviewStack from "./tabs/PreviewStack";
 import RunsStack from "./tabs/RunsStack";
 import { useTabs } from "./tabs/useTabs";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
-import type { PaneNode, Tab, TerminalLeaf } from "./tabs/types";
+import type { PaneNode, Tab, TabId, TerminalLeaf } from "./tabs/types";
 import { basename } from "./path-utils";
 import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
@@ -983,8 +983,8 @@ export default function App() {
   // ── File / editor tab integration ──────────────────────────────────────────
 
   const openEditorFile = useCallback(
-    (entry: FsEntry) => {
-      tabs.openEditorTab(entry);
+    (entry: FsEntry, options?: { preview?: boolean }) => {
+      tabs.openEditorTab(entry, options);
     },
     [tabs],
   );
@@ -1106,13 +1106,36 @@ export default function App() {
     tabs.newTerminalTab(activeWorkspace?.cwd ?? undefined);
   }, [tabs, activeWorkspace?.cwd]);
 
-  // Spawn a new terminal tab that auto-launches the given CLI worker once
-  // the shell prompt is ready. Same machinery as `+ Claude worker` in the
-  // pane toolbar dropdown, exposed here so the keybindings settings can
-  // bind a chord to each.
+  // Add a terminal pane that auto-launches the given CLI worker once the
+  // shell prompt is ready. Worker keybinds should keep the user's current
+  // terminal tab together instead of creating a separate terminal tab.
   const handleNewWorkerTab = useCallback(
     (autorun: string) => {
-      tabs.newTerminalTab(activeWorkspace?.cwd ?? undefined, autorun);
+      const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+      const target =
+        active?.kind === "terminal"
+          ? active
+          : tabs.tabs.find((t) => t.kind === "terminal");
+      if (!target || target.kind !== "terminal") {
+        tabs.newTerminalTab(activeWorkspace?.cwd ?? undefined, autorun);
+        return;
+      }
+
+      const paneId = makeId("pane");
+      const activeLeaf = findLeafByPaneId(target.root, target.activePaneId);
+      const cwd =
+        paneRuntimeRef.current.get(target.activePaneId)?.cwd ??
+        activeLeaf?.cwd ??
+        activeWorkspace?.cwd ??
+        undefined;
+      const added = tabs.addPaneInTab(target.id, paneId, { cwd, autorun });
+      if (added) {
+        tabs.setActiveTab(target.id);
+        tabs.setActiveTerminalPane(target.id, paneId);
+        return;
+      }
+
+      tabs.newTerminalTab(cwd, autorun);
     },
     [tabs, activeWorkspace?.cwd],
   );
@@ -1495,6 +1518,7 @@ export default function App() {
               onNewPreviewTab={handleNewPreviewTab}
               onTerminalPaneDrop={handleTerminalPaneDropToTab}
               onReorderTab={tabs.reorderTab}
+              onPinEditorTab={tabs.pinEditorTab}
             />
           )}
         </main>
@@ -1636,6 +1660,7 @@ interface WorkspaceProps {
   onNewPreviewTab: () => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: string) => void;
   onReorderTab: (fromId: string, toId: string, position: "before" | "after") => void;
+  onPinEditorTab: (id: TabId) => void;
 }
 
 // Memoized: every prop is either referentially stable (the `tabs` object,
@@ -1662,6 +1687,7 @@ const Workspace = React.memo(function Workspace({
   onNewPreviewTab,
   onTerminalPaneDrop,
   onReorderTab,
+  onPinEditorTab,
 }: WorkspaceProps) {
   return (
     <div
@@ -1683,6 +1709,7 @@ const Workspace = React.memo(function Workspace({
         onNewPreview={onNewPreviewTab}
         onTerminalPaneDrop={onTerminalPaneDrop}
         onReorderTab={onReorderTab}
+        onPinEditorTab={onPinEditorTab}
       />
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
         <EditorStack

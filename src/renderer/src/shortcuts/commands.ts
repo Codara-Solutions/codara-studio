@@ -205,19 +205,19 @@ export const COMMANDS: Command[] = [
   // bindings. Users bind their own from Settings → Keybindings.
   {
     id: "worker.newClaude",
-    label: "New Claude worker tab",
+    label: "New Claude worker pane",
     group: "Workers",
     defaultChords: [],
   },
   {
     id: "worker.newCodex",
-    label: "New Codex worker tab",
+    label: "New Codex worker pane",
     group: "Workers",
     defaultChords: [],
   },
   {
     id: "worker.newCursor",
-    label: "New Cursor worker tab",
+    label: "New Cursor worker pane",
     group: "Workers",
     defaultChords: [],
   },

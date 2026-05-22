@@ -25,6 +25,9 @@ export interface EditorTab extends BaseTab {
   // ext/name without a second IPC round-trip.
   entry: FsEntry;
   dirty: boolean;
+  // VS Code-style preview tabs are temporary: opening another file replaces
+  // the preview until the tab is pinned by double-clicking or by editing.
+  preview?: boolean;
 }
 
 // Each terminal tab owns a recursive tree of panes. A leaf is one PTY-backed

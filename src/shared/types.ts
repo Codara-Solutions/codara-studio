@@ -136,13 +136,17 @@ export interface AppPreferences {
   vimMode: boolean;
   editorTheme: EditorThemeId;
   inlineAutocompleteEnabled: boolean;
+  inlineAutocompleteDelayMs: number;
   // OpenRouter model id used for inline ghost-text autocomplete. Free-text
   // input — OpenRouter has hundreds of models, no dropdown.
   inlineAutocompleteModelId: string;
   keybindings: KeybindingOverridesPref;
 }
 
-export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "google/gemini-3.1-flash-lite";
+export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "google/gemini-3.5-flash";
+export const LEGACY_DEFAULT_INLINE_AUTOCOMPLETE_MODEL_IDS = [
+  "google/gemini-3.1-flash-lite",
+] as const;
 
 // Curated picks for the inline-AI model selector in Settings. Free text
 // still works for any other OpenRouter model id; this list is just the
@@ -152,11 +156,58 @@ export const INLINE_AI_MODEL_PRESETS: ReadonlyArray<{
   id: string;
   label: string;
   hint: string;
+  detail: string;
+  badge?: string;
 }> = [
   {
-    id: "google/gemini-3.1-flash-lite",
-    label: "Gemini 3.1 Flash Lite",
-    hint: "Google's fastest tier, low-latency.",
+    id: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
+    label: "Gemini 3.5 Flash",
+    hint: "Recommended for ghost text and commit-message drafts.",
+    detail: "Flash latency, 1M context, minimal thinking in Spark.",
+    badge: "Default",
+  },
+  {
+    id: "google/gemini-3.5-flash:nitro",
+    label: "Gemini 3.5 Flash Nitro",
+    hint: "Same model on OpenRouter's highest-throughput route.",
+    detail: "Use when autocomplete latency matters more than routing cost.",
+    badge: "Fast",
+  },
+  {
+    id: "z-ai/glm-4.7:nitro",
+    label: "GLM-4.7 Nitro",
+    hint: "Z.ai GLM model on OpenRouter's nitro route.",
+    detail: "Use as a custom fast route for inline suggestions and commit drafts.",
+    badge: "Nitro",
+  },
+];
+
+export const DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS = 0;
+
+export const INLINE_AI_DELAY_PRESETS: ReadonlyArray<{
+  value: number;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: 0,
+    label: "Live",
+    hint: "Predict while you type.",
+  },
+  {
+    value: 250,
+    label: "Fast",
+    hint: "Quarter-second pause.",
+  },
+  {
+    value: 900,
+    label: "Steady",
+    hint: "Wait for a short pause.",
+  },
+  {
+    value: 1500,
+    label: "After pause",
+    hint: "Wait 1.5 seconds.",
   },
 ];
 
@@ -165,6 +216,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   vimMode: false,
   editorTheme: "github-dark",
   inlineAutocompleteEnabled: true,
+  inlineAutocompleteDelayMs: DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS,
   inlineAutocompleteModelId: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
   keybindings: {},
 };

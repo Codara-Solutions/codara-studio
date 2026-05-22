@@ -96,14 +96,32 @@ function terminalTitleForIndex(index: number): string {
   return index === 0 ? "terminals" : `terminals ${index + 1}`;
 }
 
+function terminalTitleKey(title: string): string {
+  return title.trim().toLowerCase();
+}
+
+function reserveNextTerminalTitle(used: Set<string>): string {
+  for (let index = 0; ; index += 1) {
+    const title = terminalTitleForIndex(index);
+    const key = terminalTitleKey(title);
+    if (!used.has(key)) {
+      used.add(key);
+      return title;
+    }
+  }
+}
+
 function normalizeTerminalTitles(tabs: Tab[]): Tab[] {
-  let terminalIndex = 0;
+  const used = new Set<string>();
   let changed = false;
   const next = tabs.map((tab) => {
     if (tab.kind !== "terminal") return tab;
-    const title = terminalTitleForIndex(terminalIndex);
-    terminalIndex += 1;
-    if (tab.title === title) return tab;
+    const key = terminalTitleKey(tab.title);
+    if (key && !used.has(key)) {
+      used.add(key);
+      return tab;
+    }
+    const title = reserveNextTerminalTitle(used);
     changed = true;
     return { ...tab, title };
   });
@@ -300,7 +318,13 @@ export interface UseTabsApi {
   addPaneInTab: (
     tabId: TabId,
     paneId: string,
-    options?: { rootWidth?: number; rootHeight?: number; cwd?: string; worker?: TerminalLeafWorker | null },
+    options?: {
+      rootWidth?: number;
+      rootHeight?: number;
+      cwd?: string;
+      autorun?: string;
+      worker?: TerminalLeafWorker | null;
+    },
   ) => boolean;
   newPreviewTab: (url: string) => TabId;
   // Open (or relabel) the runs tab bound to a chat. Each chat owns exactly
@@ -310,7 +334,8 @@ export interface UseTabsApi {
   hideRunsTabs: () => void;
   // Close the runs tab bound to a chat (used when the chat is deleted).
   closeRunsTabFor: (runId: string) => void;
-  openEditorTab: (entry: FsEntry) => TabId;
+  openEditorTab: (entry: FsEntry, options?: { preview?: boolean }) => TabId;
+  pinEditorTab: (id: TabId) => void;
   setEditorEntry: (oldPath: string, entry: FsEntry) => void;
   closeEditorByPath: (path: string) => void;
   setActiveEditorPath: (path: string) => void;
@@ -530,7 +555,11 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
 
   const setDirty = useCallback((id: TabId, dirty: boolean) => {
     setTabs((curr) =>
-      curr.map((t) => (t.id === id && t.kind === "editor" ? { ...t, dirty } : t)),
+      curr.map((t) =>
+        t.id === id && t.kind === "editor"
+          ? { ...t, dirty, preview: dirty ? false : t.preview }
+          : t,
+      ),
     );
   }, []);
 
@@ -932,7 +961,13 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
     (
       tabId: TabId,
       paneId: string,
-      options?: { rootWidth?: number; rootHeight?: number; cwd?: string; worker?: TerminalLeafWorker | null },
+      options?: {
+        rootWidth?: number;
+        rootHeight?: number;
+        cwd?: string;
+        autorun?: string;
+        worker?: TerminalLeafWorker | null;
+      },
     ): boolean => {
       let added = false;
       setTabs((curr) =>
@@ -949,7 +984,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
             options?.rootHeight ?? 900,
           );
           if (!target) return t;
-          const newLeaf = leaf(paneId, options?.cwd);
+          const newLeaf = leaf(paneId, options?.cwd, options?.autorun);
           if (options?.worker !== undefined) newLeaf.worker = options.worker;
           const root = splitAtLeaf(t.root, target.paneId, target.direction, newLeaf);
           added = true;
@@ -1078,18 +1113,44 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
     [fireDispose],
   );
 
-  const openEditorTab = useCallback((entry: FsEntry): TabId => {
+  const openEditorTab = useCallback((entry: FsEntry, options?: { preview?: boolean }): TabId => {
     // The setter is invoked synchronously by React, so reading `outId`
     // back after `setTabs` returns is safe. TypeScript can't see through
     // the closure on its own, hence the unknown-cast at the end.
     let outId: TabId | null = null;
+    const usePreview = options?.preview !== false;
     setTabs((curr) => {
       const existing = curr.find(
-        (t) => t.kind === "editor" && t.path === entry.path,
+        (t): t is EditorTab => t.kind === "editor" && t.path === entry.path,
       );
       if (existing) {
         outId = existing.id;
-        return curr;
+        if (usePreview || !existing.preview) return curr;
+        return curr.map((t) =>
+          t.id === existing.id && t.kind === "editor"
+            ? { ...t, preview: false }
+            : t,
+        );
+      }
+      const reusablePreview = usePreview
+        ? curr.find(
+            (t): t is EditorTab => t.kind === "editor" && Boolean(t.preview) && !t.dirty,
+          )
+        : null;
+      if (reusablePreview) {
+        outId = reusablePreview.id;
+        return curr.map((t) =>
+          t.id === reusablePreview.id && t.kind === "editor"
+            ? {
+                ...t,
+                title: basename(entry.path),
+                path: entry.path,
+                entry,
+                dirty: false,
+                preview: true,
+              }
+            : t,
+        );
       }
       const id = makeId("editor");
       outId = id;
@@ -1100,11 +1161,22 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         path: entry.path,
         entry,
         dirty: false,
+        preview: usePreview,
       };
       return [...curr, tab];
     });
     if (outId) setActiveId(outId);
     return (outId ?? makeId("editor")) as TabId;
+  }, []);
+
+  const pinEditorTab = useCallback((id: TabId) => {
+    setTabs((curr) =>
+      curr.map((t) =>
+        t.id === id && t.kind === "editor" && t.preview
+          ? { ...t, preview: false }
+          : t,
+      ),
+    );
   }, []);
 
   const setEditorEntry = useCallback((oldPath: string, entry: FsEntry) => {
@@ -1203,6 +1275,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
       hideRunsTabs,
       closeRunsTabFor,
       openEditorTab,
+      pinEditorTab,
       setEditorEntry,
       closeEditorByPath,
       setActiveEditorPath,

@@ -70,7 +70,7 @@ interface RailProps {
     options?: { select?: boolean; focusRuns?: boolean },
   ) => void;
   onOpenFile: (absolutePath: string) => void;
-  onOpenFileEntry: (entry: FsEntry) => void;
+  onOpenFileEntry: (entry: FsEntry, options?: { preview?: boolean }) => void;
   onDeleteFile: (path: string) => void;
   onRenameFile: (oldPath: string, entry: FsEntry) => void;
   onRunPlan: (entry: FsEntry) => void;

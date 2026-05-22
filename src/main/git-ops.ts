@@ -17,6 +17,7 @@ import type {
 } from "@shared/types";
 import { runInlineAiChatCompletion } from "./inline-ai";
 import { loadPreferences } from "./preferences-store";
+import { loadSettings } from "./storage";
 
 // The git backend for the Source Control panel: cached status / log reads
 // plus the mutating operations (stage, commit, push, …). Every git call goes
@@ -39,7 +40,7 @@ const MAX_DIFF_LINES = 4000;
 const MAX_COMMIT_PROMPT_CHARS = 28_000;
 const MAX_COMMIT_DIFF_CHARS = 10_000;
 const MAX_UNTRACKED_COMMIT_FILES = 10;
-const COMMIT_MESSAGE_MAX_TOKENS = 180;
+const COMMIT_MESSAGE_MAX_TOKENS = 320;
 
 // `git log` field layout — a leading 0x1f leaves room for the old graph field,
 // then one 0x1f-separated field per commit datum. 0x1f never appears in commit
@@ -56,6 +57,8 @@ interface RunResult {
   stdout: string;
   stderr: string;
 }
+
+type CommitMessageScope = "staged" | "all";
 
 // Single choke point for every git invocation. `credential.interactive=false`
 // + GIT_TERMINAL_PROMPT=0 make an auth-required network op fail fast instead
@@ -436,7 +439,11 @@ const COMMIT_MESSAGE_SYSTEM_PROMPT = `You write concise Git commit messages.
 
 Use the repository's recent commit subjects as the style guide. Prefer the same convention if there is one. Write in imperative present tense unless the recent subjects clearly use another style.
 
-Return only the commit message text. No markdown, no quotes, no label. Use a single subject line when that is enough; add a blank line and a short body only when the change is too broad for a clear subject.`;
+Return only the commit message text. No markdown, no quotes, no label. Do not output reasoning. Use a single subject line when that is enough. Never return an empty response.
+
+Make the subject concrete. Name the main user-visible capability, API, model, setting, component, or bug fixed. Avoid vague filler such as "enhance", "improve", "update handling", "changes", "various", or invented umbrella phrases. Do not summarize implementation mechanics like token limits unless that is the main user-facing change.
+
+If the commit target spans unrelated areas, do not hide them behind a vague "and" subject. Write one specific subject line, then a blank line and a short body covering the main change groups. A one-line message like "Refine terminal tabs and inline AI commit drafting" is invalid for a mixed diff. Do not mention changes marked as outside the commit target. Avoid performance words like "optimize" unless the diff clearly shows performance work.`;
 
 function truncateForPrompt(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -505,12 +512,23 @@ function recommendSmartMergeStrategy(input: {
   return "inspect repository state";
 }
 
-function formatChangeList(status: GitStatus): string {
+function formatChangeList(status: GitStatus, scope: CommitMessageScope): string {
   const lines: string[] = [];
   for (const file of status.staged) {
     const path = file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path;
     lines.push(`staged ${file.status}: ${path}`);
   }
+  if (scope === "all") {
+    for (const file of status.unstaged) {
+      const path = file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path;
+      lines.push(`working ${file.status}: ${path}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatExcludedChangeList(status: GitStatus): string {
+  const lines: string[] = [];
   for (const file of status.unstaged) {
     const path = file.oldPath ? `${file.oldPath} -> ${file.path}` : file.path;
     lines.push(`working ${file.status}: ${path}`);
@@ -540,42 +558,234 @@ async function collectUntrackedDiffForPrompt(cwd: string, status: GitStatus): Pr
   return chunks.join("\n\n");
 }
 
+function commitTargetChanges(status: GitStatus, scope: CommitMessageScope): GitFileChange[] {
+  return scope === "staged" ? status.staged : [...status.staged, ...status.unstaged];
+}
+
+function humanizePathPart(value: string): string {
+  const stem = value
+    .replace(/\.[^.]+$/, "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[-_.]+/g, " ")
+    .trim();
+  return stem || "project files";
+}
+
+function commonDirectory(parts: string[][]): string | null {
+  if (parts.length === 0) return null;
+  const first = parts[0].slice(0, -1);
+  const common: string[] = [];
+  for (let i = 0; i < first.length; i++) {
+    const segment = first[i];
+    if (parts.every((pathParts) => pathParts[i] === segment)) {
+      common.push(segment);
+    } else {
+      break;
+    }
+  }
+  return common.length > 0 ? common[common.length - 1] : null;
+}
+
+function includesAny(value: string, needles: string[]): boolean {
+  return needles.some((needle) => value.includes(needle));
+}
+
+function pushUnique(list: string[], value: string): void {
+  if (!list.includes(value)) list.push(value);
+}
+
+interface CommitMessageSignals {
+  touchesInlineAi: boolean;
+  touchesCommitDrafts: boolean;
+  touchesInlineSettings: boolean;
+  touchesTerminalTabs: boolean;
+}
+
+function analyzeCommitMessageSignals(files: GitFileChange[]): CommitMessageSignals {
+  const paths = files.map((file) => file.path.toLowerCase());
+  return {
+    touchesInlineAi: paths.some((path) =>
+      includesAny(path, ["inline-ai", "inlineextension", "inlineautocomplete", "openrouter.ts"]),
+    ),
+    touchesCommitDrafts: paths.some((path) =>
+      includesAny(path, ["git-ops", "/git/", "commitcomposer", "gitpanel"]),
+    ),
+    touchesInlineSettings: paths.some((path) =>
+      includesAny(path, ["settingsdialog", "preferences-store", "shared/types"]),
+    ),
+    touchesTerminalTabs: paths.some((path) =>
+      includesAny(path, ["terminalstack", "tabbar", "terminaldrag", "tabs/usetabs", "tabs/types"]),
+    ),
+  };
+}
+
+function describeCommitArea(files: GitFileChange[]): string {
+  const paths = files.map((file) => file.path);
+  const signals = analyzeCommitMessageSignals(files);
+
+  if (signals.touchesInlineAi && signals.touchesCommitDrafts) return "inline AI commit messages";
+  if (signals.touchesInlineAi && signals.touchesInlineSettings) return "inline AI settings";
+  if (signals.touchesInlineAi) return "inline AI suggestions";
+  if (signals.touchesCommitDrafts) return "source control commit messages";
+  if (signals.touchesInlineSettings) return "settings";
+
+  const splitPaths = paths.map((path) => path.split("/").filter(Boolean));
+  if (splitPaths.length === 1) {
+    return humanizePathPart(splitPaths[0][splitPaths[0].length - 1] ?? paths[0]);
+  }
+
+  const dir = commonDirectory(splitPaths);
+  if (dir) return humanizePathPart(dir);
+  return "project files";
+}
+
+function fallbackCommitVerb(files: GitFileChange[]): string {
+  if (files.length > 0 && files.every((file) => file.status === "added" || file.untracked)) {
+    return "Add";
+  }
+  if (files.length > 0 && files.every((file) => file.status === "deleted")) {
+    return "Remove";
+  }
+  if (files.length > 0 && files.every((file) => file.status === "renamed")) {
+    return "Rename";
+  }
+  if (files.some((file) => file.status === "conflicted")) return "Resolve";
+  return "Update";
+}
+
+function buildFallbackCommitMessage(input: {
+  status: GitStatus;
+  scope: CommitMessageScope;
+  stagedDiff: string;
+  unstagedDiff: string;
+  untrackedDiff: string;
+}): string {
+  const files = commitTargetChanges(input.status, input.scope);
+  const signals = analyzeCommitMessageSignals(files);
+  const diff = [input.stagedDiff, input.unstagedDiff, input.untrackedDiff]
+    .join("\n")
+    .toLowerCase();
+
+  let subject = `${fallbackCommitVerb(files)} ${describeCommitArea(files)}`;
+  if (
+    signals.touchesTerminalTabs &&
+    (signals.touchesInlineAi || signals.touchesCommitDrafts || signals.touchesInlineSettings)
+  ) {
+    subject = diff.includes("z-ai/glm") || diff.includes("reasoningforrequest")
+      ? "Fix GLM inline completions and terminal tabs"
+      : "Fix inline AI completions and terminal tabs";
+  } else if (signals.touchesInlineAi && signals.touchesCommitDrafts) {
+    subject = "Fix inline AI suggestions and commit drafts";
+  } else if (signals.touchesInlineAi && signals.touchesInlineSettings) {
+    subject = "Add inline AI model and timing settings";
+  } else if (signals.touchesInlineAi) {
+    subject = "Fix inline AI suggestions";
+  } else if (signals.touchesCommitDrafts) {
+    subject = "Fix source control commit drafts";
+  } else if (signals.touchesTerminalTabs) {
+    subject = "Refine terminal tab layout";
+  }
+
+  const bullets: string[] = [];
+  if (signals.touchesTerminalTabs) {
+    pushUnique(bullets, "Rework terminal tab layout, dragging, and worker pane spawning");
+  }
+  if (diff.includes("reasoningforrequest") || diff.includes("z-ai/glm")) {
+    pushUnique(bullets, "Disable GLM reasoning for inline completions and commit drafts");
+  }
+  if (diff.includes("max_output_tokens") || diff.includes("finish that word first")) {
+    pushUnique(bullets, "Let inline suggestions finish words and return longer chunks");
+  }
+  if (diff.includes("z-ai/glm-4.7:nitro")) {
+    pushUnique(bullets, "Add GLM-4.7 Nitro as an inline AI preset");
+  }
+  if (
+    signals.touchesInlineAi &&
+    (diff.includes("main reads from settings") ||
+      diff.includes("inline-ai:complete") ||
+      diff.includes("runinlineaichatcompletion"))
+  ) {
+    pushUnique(bullets, "Route autocomplete through the main-process OpenRouter proxy");
+  }
+  if (
+    diff.includes("buildfallbackcommitmessage") ||
+    diff.includes("shouldretrygeneratedcommitmessage") ||
+    diff.includes("inline ai returned an empty commit message")
+  ) {
+    pushUnique(bullets, "Retry empty or generic commit drafts with scoped fallbacks");
+  }
+  if (diff.includes("commit target") || diff.includes("formatexcludedchangelist")) {
+    pushUnique(bullets, "Limit commit-message prompts to the active commit target");
+  }
+  if (diff.includes("inlineautocompletedelayms") || diff.includes("inline_ai_delay_presets")) {
+    pushUnique(bullets, "Add inline AI presets, timing controls, and preference migration");
+  }
+  if (diff.includes("reasoningeffort") || diff.includes("reasoningforrequest")) {
+    pushUnique(bullets, "Handle reasoning-model responses without exposing reasoning text");
+  }
+
+  if (bullets.length === 0 && files.length > 1) {
+    pushUnique(bullets, `Touch ${files.length} files in ${describeCommitArea(files)}`);
+  }
+  return bullets.length > 0
+    ? `${subject}\n\n${bullets.slice(0, 5).map((line) => `- ${line}`).join("\n")}`
+    : subject;
+}
+
 function buildCommitMessagePrompt(input: {
+  scope: CommitMessageScope;
   recentSubjects: string;
   statusShort: string;
   changeList: string;
+  excludedChangeList: string;
   stagedDiff: string;
   unstagedDiff: string;
   untrackedDiff: string;
 }): string {
   const recent = input.recentSubjects || "(no previous commits found)";
-  const stagedDiff = truncateForPrompt(input.stagedDiff || "(none)", MAX_COMMIT_DIFF_CHARS);
-  const unstagedDiff = truncateForPrompt(input.unstagedDiff || "(none)", MAX_COMMIT_DIFF_CHARS);
-  const untrackedDiff = truncateForPrompt(input.untrackedDiff || "(none)", MAX_COMMIT_DIFF_CHARS / 2);
+  const target =
+    input.scope === "staged"
+      ? "staged changes only. Unstaged and untracked changes are outside this commit target."
+      : "all current source-control changes. Nothing is staged, so Spark's Commit All flow will stage everything before committing.";
+  const diffSections =
+    input.scope === "staged"
+      ? `STAGED DIFF:
+${truncateForPrompt(input.stagedDiff || "(none)", MAX_COMMIT_DIFF_CHARS)}
+
+OUTSIDE COMMIT TARGET:
+${input.excludedChangeList || "(none)"}`
+      : `STAGED DIFF:
+${truncateForPrompt(input.stagedDiff || "(none)", MAX_COMMIT_DIFF_CHARS)}
+
+UNSTAGED TRACKED DIFF:
+${truncateForPrompt(input.unstagedDiff || "(none)", MAX_COMMIT_DIFF_CHARS)}
+
+UNTRACKED FILE PREVIEW:
+${truncateForPrompt(input.untrackedDiff || "(none)", MAX_COMMIT_DIFF_CHARS / 2)}`;
   const body = `RECENT COMMIT SUBJECTS:
 ${recent}
+
+COMMIT TARGET:
+${target}
 
 CURRENT GIT STATUS:
 ${input.statusShort || "(none)"}
 
-CHANGED FILES:
+CHANGED FILES IN COMMIT TARGET:
 ${input.changeList || "(none)"}
 
-STAGED DIFF:
-${stagedDiff}
+${diffSections}
 
-UNSTAGED TRACKED DIFF:
-${unstagedDiff}
-
-UNTRACKED FILE PREVIEW:
-${untrackedDiff}
-
-Draft an editable commit message for all current source-control changes. Keep the subject specific and under about 72 characters.`;
+Draft an editable commit message for the commit target only. Keep the subject specific and under about 72 characters. Prefer a subject like "Add <specific feature>" or "Fix <specific bug>" over generic wording. If the commit target spans multiple feature areas or more than five files, include a blank line and 2-5 concrete bullet lines. Do not use a single umbrella subject for mixed terminal, inline AI, settings, and source-control changes.`;
   return truncateForPrompt(body, MAX_COMMIT_PROMPT_CHARS);
 }
 
 function sanitizeGeneratedCommitMessage(raw: string): string {
-  let text = raw.replace(/\r\n/g, "\n").trim();
+  let text = raw
+    .replace(/\r\n/g, "\n")
+    .replace(/[\u2010-\u2015\u2212]/g, "-")
+    .replace(/\u00a0/g, " ")
+    .trim();
   text = text.replace(/^```[a-zA-Z0-9_-]*\s*/, "").replace(/```$/, "").trim();
   text = text.replace(/^commit message:\s*/i, "").trim();
   if (
@@ -592,6 +802,61 @@ function sanitizeGeneratedCommitMessage(raw: string): string {
     .trim();
 }
 
+function firstCommitMessageLine(message: string): string {
+  return message.split("\n").find((line) => line.trim())?.trim() ?? "";
+}
+
+function commitMessageBodyLines(message: string): string[] {
+  const lines = message.split("\n");
+  const firstNonEmpty = lines.findIndex((line) => line.trim());
+  if (firstNonEmpty < 0) return [];
+  return lines.slice(firstNonEmpty + 1).map((line) => line.trim()).filter(Boolean);
+}
+
+function commitMessageRetryReason(message: string, signals: CommitMessageSignals): string | null {
+  const subject = firstCommitMessageLine(message);
+  if (!subject) return "The draft was empty.";
+  if (/\b(enhanc(?:e|es|ed|ing)|improv(?:e|es|ed|ing)|various|misc(?:ellaneous)?|changes?)\b/i.test(subject)) {
+    return `The subject was too vague: "${subject}".`;
+  }
+  if (/\b(update|adjust|tweak)\s+\w*\s*handling\b/i.test(subject)) {
+    return `The subject hid the concrete change behind vague handling wording: "${subject}".`;
+  }
+  if (/^update\s+(inline ai commit messages|project files|settings|source control commit messages)\b/i.test(subject)) {
+    return `The subject was too narrow or generic: "${subject}".`;
+  }
+  if (/^add\s+source control commit message draft/i.test(subject)) {
+    return `The subject missed other major change groups: "${subject}".`;
+  }
+  if (/^refine\s+terminal tabs\s+and\s+inline ai commit drafting\b/i.test(subject)) {
+    return `The subject was too broad for the actual changes: "${subject}".`;
+  }
+  if (/\btoken limit\b/i.test(subject)) return "The subject focused on implementation mechanics.";
+  if (/\bfull-?change\b/i.test(subject)) return "The subject used an invented umbrella phrase.";
+
+  const text = message.toLowerCase();
+  const hasTerminalMention = /\b(terminal|tab|tabs|pane|panes|drag|layout)\b/.test(text);
+  const hasInlineOrCommitMention =
+    /\b(inline|autocomplete|ai|commit|source control|openrouter|model)\b/.test(text);
+  const hasMixedTerminalAndAiWork =
+    signals.touchesTerminalTabs &&
+    (signals.touchesInlineAi || signals.touchesCommitDrafts || signals.touchesInlineSettings);
+  if (hasMixedTerminalAndAiWork && !hasTerminalMention) {
+    return "The draft missed the terminal tab and pane changes.";
+  }
+  if (hasMixedTerminalAndAiWork && !hasInlineOrCommitMention) {
+    return "The draft missed the inline AI and commit-draft changes.";
+  }
+  if (hasMixedTerminalAndAiWork) {
+    const bodyLines = commitMessageBodyLines(message);
+    const bulletCount = bodyLines.filter((line) => /^[-*]\s+\S/.test(line)).length;
+    if (bulletCount < 2) {
+      return "The draft collapsed multiple major change groups into a one-line umbrella message.";
+    }
+  }
+  return null;
+}
+
 export async function generateCommitMessage(cwd: string): Promise<GitCommitMessageResult> {
   try {
     const status = await computeGitStatus(cwd);
@@ -602,46 +867,99 @@ export async function generateCommitMessage(cwd: string): Promise<GitCommitMessa
     if (changeCount === 0) {
       return { ok: false, error: "No changes to summarize." };
     }
+    const scope: CommitMessageScope = status.staged.length > 0 ? "staged" : "all";
 
     const preferences = await loadPreferences();
     const modelId = preferences.inlineAutocompleteModelId.trim();
     if (!modelId) {
       return { ok: false, error: "No inline-AI model configured." };
     }
+    const settings = await loadSettings();
+    const managerModelId = settings.openRouterModel.trim();
+    const retryModelId =
+      managerModelId && managerModelId !== modelId ? managerModelId : modelId;
+    const signals = analyzeCommitMessageSignals(commitTargetChanges(status, scope));
 
     const [recentSubjects, statusShort, stagedDiff, unstagedDiff, untrackedDiff] =
       await Promise.all([
         readGitText(cwd, ["log", "--max-count=12", "--pretty=format:%s"]),
         readGitText(cwd, ["status", "--short"]),
         readGitText(cwd, ["diff", "--cached", "--no-color", "--no-ext-diff", "--unified=3"]),
-        readGitText(cwd, ["diff", "--no-color", "--no-ext-diff", "--unified=3"]),
-        collectUntrackedDiffForPrompt(cwd, status),
+        scope === "all"
+          ? readGitText(cwd, ["diff", "--no-color", "--no-ext-diff", "--unified=3"])
+          : Promise.resolve(""),
+        scope === "all" ? collectUntrackedDiffForPrompt(cwd, status) : Promise.resolve(""),
       ]);
 
+    const commitPrompt = buildCommitMessagePrompt({
+      scope,
+      recentSubjects,
+      statusShort,
+      changeList: formatChangeList(status, scope),
+      excludedChangeList: scope === "staged" ? formatExcludedChangeList(status) : "",
+      stagedDiff,
+      unstagedDiff,
+      untrackedDiff,
+    });
+
+    const requestId = `git-commit-message-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const response = await runInlineAiChatCompletion({
       modelId,
-      requestId: `git-commit-message-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      requestId,
       maxTokens: COMMIT_MESSAGE_MAX_TOKENS,
       temperature: 0.25,
+      reasoningEffort: "none",
       messages: [
         { role: "system", content: COMMIT_MESSAGE_SYSTEM_PROMPT },
         {
           role: "user",
-          content: buildCommitMessagePrompt({
-            recentSubjects,
-            statusShort,
-            changeList: formatChangeList(status),
-            stagedDiff,
-            unstagedDiff,
-            untrackedDiff,
-          }),
+          content: commitPrompt,
         },
       ],
     });
 
-    if (response.error) return { ok: false, error: response.error };
-    const message = sanitizeGeneratedCommitMessage(response.text);
-    if (!message) return { ok: false, error: "Inline AI returned an empty commit message." };
+    if (response.error && /api key/i.test(response.error)) return { ok: false, error: response.error };
+    if (response.error && retryModelId === modelId) return { ok: false, error: response.error };
+    let message = response.error ? "" : sanitizeGeneratedCommitMessage(response.text);
+    const retryReason = message ? commitMessageRetryReason(message, signals) : "The draft was empty.";
+    if (response.error || retryReason) {
+      const retry = await runInlineAiChatCompletion({
+        modelId: retryModelId,
+        requestId: `${requestId}-retry-${retryModelId.replace(/[^A-Za-z0-9_-]+/g, "-")}`,
+        maxTokens: COMMIT_MESSAGE_MAX_TOKENS * 2,
+        temperature: 0.1,
+        reasoningEffort: "none",
+        messages: [
+          { role: "system", content: COMMIT_MESSAGE_SYSTEM_PROMPT },
+          {
+            role: "user",
+            content: `${commitPrompt}\n\n${
+              response.error
+                ? `The inline model ${modelId} failed with: ${response.error}. Draft the commit message with this fallback model.`
+                : `${retryReason} Previous draft: "${firstCommitMessageLine(message)}". Rewrite it so all major change groups are represented.`
+            } This diff includes terminal tab/pane drag layout work and inline AI/commit-draft work when both are present. Do not return reasoning and do not return an empty response.`,
+          },
+        ],
+      });
+      if (retry.error && message) {
+        return { ok: true, message };
+      }
+      const retryMessage = sanitizeGeneratedCommitMessage(retry.text);
+      if (retryMessage && !commitMessageRetryReason(retryMessage, signals)) {
+        message = retryMessage;
+      } else {
+        message = "";
+      }
+    }
+    if (!message) {
+      message = buildFallbackCommitMessage({
+        status,
+        scope,
+        stagedDiff,
+        unstagedDiff,
+        untrackedDiff,
+      });
+    }
     return { ok: true, message };
   } catch (err) {
     return { ok: false, error: errorText(err) };

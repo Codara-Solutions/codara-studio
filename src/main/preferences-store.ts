@@ -2,8 +2,10 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import {
   APP_THEME_IDS,
+  DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS,
   DEFAULT_PREFERENCES,
   EDITOR_THEME_IDS,
+  LEGACY_DEFAULT_INLINE_AUTOCOMPLETE_MODEL_IDS,
   type AppPreferences,
   type EditorThemeId,
   type PrefKey,
@@ -78,12 +80,25 @@ function normalizeKeybindings(value: unknown): AppPreferences["keybindings"] {
   return out;
 }
 
-function normalize(input: Partial<AppPreferences> | null | undefined): AppPreferences {
+function normalizeInlineDelay(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS;
+  }
+  return Math.max(0, Math.min(2_000, Math.round(value)));
+}
+
+function normalize(
+  input: Partial<AppPreferences> | null | undefined,
+  opts: { migrateLegacyInlineDefault?: boolean } = {},
+): AppPreferences {
   const src = input && typeof input === "object" ? input : {};
+  const rawInlineModel =
+    typeof src.inlineAutocompleteModelId === "string" ? src.inlineAutocompleteModelId.trim() : "";
   const inlineModel =
-    typeof src.inlineAutocompleteModelId === "string" && src.inlineAutocompleteModelId.trim()
-      ? src.inlineAutocompleteModelId.trim()
-      : DEFAULT_PREFERENCES.inlineAutocompleteModelId;
+    opts.migrateLegacyInlineDefault &&
+    (LEGACY_DEFAULT_INLINE_AUTOCOMPLETE_MODEL_IDS as readonly string[]).includes(rawInlineModel)
+      ? DEFAULT_PREFERENCES.inlineAutocompleteModelId
+      : rawInlineModel || DEFAULT_PREFERENCES.inlineAutocompleteModelId;
   return {
     theme: normalizeTheme(src.theme),
     vimMode: typeof src.vimMode === "boolean" ? src.vimMode : DEFAULT_PREFERENCES.vimMode,
@@ -94,6 +109,7 @@ function normalize(input: Partial<AppPreferences> | null | undefined): AppPrefer
       typeof src.inlineAutocompleteEnabled === "boolean"
         ? src.inlineAutocompleteEnabled
         : DEFAULT_PREFERENCES.inlineAutocompleteEnabled,
+    inlineAutocompleteDelayMs: normalizeInlineDelay(src.inlineAutocompleteDelayMs),
     inlineAutocompleteModelId: inlineModel,
     keybindings: normalizeKeybindings(src.keybindings),
   };
@@ -102,7 +118,9 @@ function normalize(input: Partial<AppPreferences> | null | undefined): AppPrefer
 async function readFromDisk(): Promise<AppPreferences> {
   try {
     const raw = await fs.readFile(prefsPath(), "utf8");
-    return normalize(JSON.parse(raw) as Partial<AppPreferences>);
+    return normalize(JSON.parse(raw) as Partial<AppPreferences>, {
+      migrateLegacyInlineDefault: true,
+    });
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return { ...DEFAULT_PREFERENCES };

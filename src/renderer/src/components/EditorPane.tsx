@@ -34,7 +34,6 @@ import {
   inlineCompletion,
   type InlineAutocompleteStatus,
 } from "./editor-cm/autocomplete/inlineExtension";
-import { useOpenRouterKey } from "./editor-cm/useOpenRouterKey";
 import { usePreferences } from "../preferences/usePreferences";
 
 // Vim ex-commands (`:w`, `:q`, `:wq`, `:x`) and arrow→hjkl remaps are
@@ -81,7 +80,6 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const { preferences } = usePreferences();
-  const apiKeyRef = useOpenRouterKey();
   // The inline-AI plugin fires `onStatus` on every transition (~every 350ms
   // while typing). We forward each status into <AIStatusFooter>, which owns
   // the `aiStatus` useState itself, so an AI tick re-renders only the footer
@@ -146,8 +144,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       inlineCompletion({
         getPrefs: () => ({
           enabled: prefsRef.current.inlineAutocompleteEnabled,
-          apiKey: apiKeyRef.current,
           modelId: prefsRef.current.inlineAutocompleteModelId,
+          delayMs: prefsRef.current.inlineAutocompleteDelayMs,
         }),
         getPath: () => pathRef.current,
         getLanguage: () => languageLabelRef.current,

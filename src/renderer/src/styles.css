@@ -59,6 +59,16 @@
   --right-w: 360px;
   --font-size: 13px;
 
+  /* Terminal panes — macOS-like rounded cards with a soft gutter */
+  --terminal-pane-radius: 10px;
+  --terminal-pane-pad: 8px;
+  --terminal-pane-gap: 3px;
+
+  /* Tab strip — rounded tops, active tab joins the content area */
+  --tabbar-h: 36px;
+  --tab-radius: 8px;
+  --tab-pad-x: 12px;
+
   /* Motion */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);          /* expo-ish out  */
   --ease-out-fast: cubic-bezier(0.32, 0.72, 0, 1);     /* swift settle  */
@@ -396,7 +406,199 @@ a { color: inherit; }
   to { stroke-dashoffset: 0; }
 }
 
+/* ── Tab strip (macOS-style) ─────────────────────────────────────────────── */
+.spark-tabbar {
+  flex: 0 0 var(--tabbar-h);
+  height: var(--tabbar-h);
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 0 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--rule-soft);
+  position: relative;
+  box-sizing: border-box;
+}
+
+.spark-tabbar--drop-active {
+  border-bottom-color: color-mix(in oklch, var(--accent) 45%, var(--rule-soft));
+  box-shadow: inset 0 -1px 0 color-mix(in oklch, var(--accent) 35%, transparent);
+}
+
+.spark-tabbar-scroll {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  padding-top: 4px;
+}
+
+.spark-tabbar-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.spark-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  max-width: 200px;
+  min-width: 0;
+  padding: 5px var(--tab-pad-x) 6px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--tab-radius) var(--tab-radius) 0 0;
+  background: color-mix(in oklch, var(--ink) 3%, var(--panel));
+  color: var(--ink-dim);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out);
+}
+
+.spark-tab:hover:not(.spark-tab--active) {
+  background: color-mix(in oklch, var(--ink) 6%, var(--panel));
+  color: var(--ink);
+}
+
+.spark-tab--active {
+  z-index: 2;
+  margin-bottom: -1px;
+  padding-bottom: 7px;
+  background: var(--bg);
+  color: var(--ink);
+  border-color: var(--rule-soft);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, white 6%, transparent),
+    0 -1px 0 var(--bg);
+}
+
+.spark-tab--dragging {
+  opacity: 0.45;
+}
+
+.spark-tab--drop-target {
+  outline: 1px solid color-mix(in oklch, var(--accent) 55%, transparent);
+  outline-offset: 1px;
+}
+
+.spark-tab__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spark-tab__label--preview {
+  font-style: italic;
+}
+
+.spark-tab__reorder-edge {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow);
+  z-index: 3;
+}
+
+.spark-tab__reorder-edge--before {
+  left: -2px;
+}
+
+.spark-tab__reorder-edge--after {
+  right: -2px;
+}
+
+.spark-tab__close {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: default;
+  opacity: 0;
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.spark-tab:hover .spark-tab__close,
+.spark-tab--active .spark-tab__close {
+  opacity: 1;
+}
+
+.spark-tab__close:hover {
+  background: color-mix(in oklch, var(--ink) 10%, transparent);
+  color: var(--ink-dim);
+}
+
+.spark-tabbar-new {
+  appearance: none;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  margin-bottom: 5px;
+  border: none;
+  border-radius: 50%;
+  background: color-mix(in oklch, var(--ink) 4%, transparent);
+  color: var(--ink-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.spark-tabbar-new:hover {
+  background: color-mix(in oklch, var(--ink) 9%, transparent);
+  color: var(--ink);
+}
+
+.spark-tabbar-picker {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 50;
+  min-width: 200px;
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid color-mix(in oklch, var(--rule) 80%, transparent);
+  background: color-mix(in oklch, var(--panel-2) 94%, transparent);
+  box-shadow: var(--shadow-2);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
 /* ── xterm.js host ──────────────────────────────────────────────────────── */
+.spark-terminal-pane {
+  overflow: hidden;
+  border-radius: var(--terminal-pane-radius);
+  background: var(--bg);
+}
+
 .xterm-host {
   box-sizing: border-box;
   width: 100%;
