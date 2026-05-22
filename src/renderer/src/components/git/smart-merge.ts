@@ -67,6 +67,14 @@ async function prepareSmartMergeFallback(cwd: string): Promise<GitSmartMergeResu
   if (!status.isRepo) {
     return { ok: false, error: status.error ?? "Not a git repository." };
   }
+  if (!status.hasConflicts && status.behind === 0) {
+    return {
+      ok: false,
+      error: status.upstream
+        ? `Nothing to merge from ${status.upstream}.`
+        : "Nothing to merge; no upstream branch is configured.",
+    };
+  }
 
   const workingFiles = collectWorkingFiles(status);
   const context: GitSmartMergeContext = {

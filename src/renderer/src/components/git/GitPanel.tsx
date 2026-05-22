@@ -427,7 +427,9 @@ export default function GitPanel({
                 onPull={handlePull}
                 onFetch={handleFetch}
                 onSmartMerge={() => void handleSmartMerge()}
-                canSmartMerge={Boolean(workspace && status.isRepo)}
+                canSmartMerge={Boolean(
+                  workspace && status.isRepo && (status.behind > 0 || status.hasConflicts),
+                )}
               />
 
               {stagedCount > 0 && (

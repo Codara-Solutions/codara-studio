@@ -1064,6 +1064,15 @@ export async function prepareSmartMerge(cwd: string): Promise<GitSmartMergeResul
       behind = counts.behind;
     }
 
+    if (!status.hasConflicts && behind === 0) {
+      return {
+        ok: false,
+        error: upstream
+          ? `Nothing to merge from ${upstream}.`
+          : "Nothing to merge; no upstream branch is configured.",
+      };
+    }
+
     const mergeBase = upstream ? await readGitText(cwd, ["merge-base", "HEAD", upstream]) : "";
     const localDiffBase = mergeBase || upstream;
     const remoteDiffBase = mergeBase || "HEAD";

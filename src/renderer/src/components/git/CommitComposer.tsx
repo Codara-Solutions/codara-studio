@@ -57,6 +57,13 @@ export default function CommitComposer({
   const committing = busy === "commit";
   const generatingMessage = busy === "generateMessage";
   const preparingSmartMerge = busy === "smartMerge";
+  const smartMergeTitle = canSmartMerge
+    ? "Fetch remote refs and let Spark merge safely"
+    : detached
+      ? "Checkout a branch before using Smart Merge"
+      : behind <= 0
+        ? "No incoming changes to merge"
+        : "Smart Merge is unavailable";
 
   // Grow the textarea with its content, between two and roughly six lines.
   useEffect(() => {
@@ -141,7 +148,7 @@ export default function CommitComposer({
         type="button"
         disabled={!canSmartMerge || anyBusy}
         onClick={onSmartMerge}
-        title="Fetch remote refs and let Spark merge safely"
+        title={smartMergeTitle}
         style={{
           appearance: "none",
           display: "flex",
