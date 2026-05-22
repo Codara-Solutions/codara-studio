@@ -76,6 +76,11 @@ const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
 const CONTINUE_INPUT = "continue\r";
 const HUMAN_INPUT_PAUSE_REASON = "Spark needs human input before continuing.";
+// How many run directories under ~/.SparkAgent/runs/ we keep on disk. Older
+// runs are swept lazily on the first listRuns() call per process. Bumped from
+// "unbounded" because users reported the runs/ tree growing into GB of pty
+// raw.log + worker artifacts after a few weeks of heavy use.
+const RUN_RETENTION_KEEP = 50;
 
 // Lightweight handle for a running worker. The pty itself lives in
 // pty-manager (same place user-spawned terminals live); this just remembers
@@ -129,6 +134,10 @@ const SKIPPED_DIRECT_FILE_MENTION_DIRS = new Set([
 // only read snapshots and the IPC bridge structured-clones results across to
 // the renderer, so no caller relies on getRun handing back a fresh deep copy.
 const runCache = new Map<string, RunState>();
+
+// One-shot per process: fired lazily from listRuns(). Keeps the runs/ dir
+// from growing unbounded (see RUN_RETENTION_KEEP).
+let didRetentionSweep = false;
 
 interface RuntimeReroute {
   [key: string]: unknown;
@@ -209,7 +218,73 @@ export async function getRun(runId: string): Promise<RunState | null> {
   }
 }
 
+// Recursively delete any runs beyond RUN_RETENTION_KEEP, oldest-first. Reads
+// each run.json for its createdAt; falls back to the directory mtime if the
+// JSON is unreadable so a corrupt run still has a stable position in the
+// ordering. Reuses deleteRun() so the in-memory runCache is evicted in lockstep
+// with the on-disk removal. Best-effort: every failure is swallowed so a
+// permission / EBUSY hiccup never bubbles up into the IPC reply for listRuns.
+async function runRetentionSweep(): Promise<void> {
+  try {
+    const root = runsRoot();
+    let names: string[];
+    try {
+      names = await fs.readdir(root);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw err;
+    }
+    if (names.length <= RUN_RETENTION_KEEP) return;
+
+    const entries = await Promise.all(
+      names.map(async (name) => {
+        let createdAt: string | null = null;
+        try {
+          const raw = await fs.readFile(runPath(name), "utf8");
+          const parsed = JSON.parse(raw) as { createdAt?: unknown };
+          if (typeof parsed.createdAt === "string") createdAt = parsed.createdAt;
+        } catch {
+          /* fall through to mtime */
+        }
+        if (!createdAt) {
+          try {
+            const stat = await fs.stat(join(root, name));
+            createdAt = new Date(stat.mtimeMs).toISOString();
+          } catch {
+            createdAt = "1970-01-01T00:00:00.000Z";
+          }
+        }
+        return { name, createdAt };
+      }),
+    );
+
+    // Newest first, then drop the head we want to keep.
+    entries.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const toPurge = entries.slice(RUN_RETENTION_KEEP);
+    for (const entry of toPurge) {
+      try {
+        await deleteRun(entry.name);
+      } catch {
+        // deleteRun requires an in-memory run; for purely on-disk leftovers
+        // that aren't cached, fall back to rmRunDirHard + cache eviction.
+        try { await rmRunDirHard(join(root, entry.name)); } catch { /* best-effort */ }
+        runCache.delete(entry.name);
+      }
+    }
+  } catch (err) {
+    console.error("[run-store] runRetentionSweep failed", err);
+  }
+}
+
 export async function listRuns(workspaceId?: string): Promise<RunState[]> {
+  // Lazy, one-shot retention sweep. Fire-and-forget so the user's first
+  // listRuns() doesn't pay the cost of N stats + rms; the next refresh will
+  // already see the pruned tree.
+  if (!didRetentionSweep) {
+    didRetentionSweep = true;
+    void runRetentionSweep();
+  }
+
   let names: string[];
   try {
     names = await fs.readdir(runsRoot());
@@ -6493,9 +6568,25 @@ async function runWorkerSession({
   let failFast: (reason: string) => void = () => undefined;
   const exitPromise = new Promise<{ exitCode: number; error?: string }>((resolve) => {
     let settled = false;
+    // Separate guard for the kill so the funnel through finish() is idempotent
+    // even if some path also tries to kill directly. Without this, early-resolve
+    // paths (hardTimeout, failFast) leaked the pwsh + agent CLI tree (200-500MB)
+    // until app quit because finish() resolved without disposing the pty.
+    let killed = false;
+    const killWorkerTree = (): void => {
+      if (killed) return;
+      killed = true;
+      try { pty.killImmediate(attemptId); } catch { /* idempotent */ }
+      try { handle.kill?.(); } catch { /* defensive; pty.dispose may have already fired */ }
+    };
     const finish = (value: { exitCode: number; error?: string }) => {
       if (settled) return;
       settled = true;
+      // Tear down the worker tree BEFORE resolving so callers awaiting
+      // exitPromise observe a fully cleaned-up worker. killImmediate is a
+      // no-op if the pty already exited via offExit, so success paths cost
+      // nothing.
+      killWorkerTree();
       offExit();
       offRawTap();
       rawStream.end();
@@ -6518,9 +6609,16 @@ async function runWorkerSession({
         });
     }, 750);
     const hardTimeout = setTimeout(() => {
+      // Belt-and-braces: kill here too in case finish() is ever refactored to
+      // not own the teardown. The `killed` guard makes the inner call in
+      // finish() a no-op.
+      killWorkerTree();
       finish({ exitCode: 1, error: "Worker timed out after 90 minutes." });
     }, 90 * 60 * 1000);
-    failFast = (reason: string) => finish({ exitCode: 1, error: reason });
+    failFast = (reason: string) => {
+      killWorkerTree();
+      finish({ exitCode: 1, error: reason });
+    };
   });
 
   // Stagger launch + prompt the same way the TEST CLAUDE button does:

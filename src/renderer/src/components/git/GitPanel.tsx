@@ -46,9 +46,89 @@ interface DiffTarget {
   untracked: boolean;
 }
 
-// How often the panel re-reads git state while it is on screen. The main
-// process caches reads for ~2s, so this is close to a free poll.
-const POLL_MS = 2500;
+// How often the panel re-reads git state while it is on screen. The fs watcher
+// drives most updates already — this poll is a safety net for changes the
+// watcher misses (e.g. ref / index writes that bypass the worktree).
+const POLL_MS = 10000;
+
+// Cheap shallow equality on git status. Used to skip no-op setState calls so
+// the change-row React.memo gates actually hold, instead of being defeated by
+// fresh array identities arriving every poll.
+function sameStatus(a: GitStatus | null, b: GitStatus | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (
+    a.isRepo !== b.isRepo ||
+    a.branch !== b.branch ||
+    a.detached !== b.detached ||
+    a.upstream !== b.upstream ||
+    a.ahead !== b.ahead ||
+    a.behind !== b.behind ||
+    a.hasConflicts !== b.hasConflicts ||
+    a.error !== b.error ||
+    a.staged.length !== b.staged.length ||
+    a.unstaged.length !== b.unstaged.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < a.staged.length; i++) {
+    const x = a.staged[i];
+    const y = b.staged[i];
+    if (
+      x.path !== y.path ||
+      x.status !== y.status ||
+      x.staged !== y.staged ||
+      x.untracked !== y.untracked ||
+      x.oldPath !== y.oldPath
+    ) {
+      return false;
+    }
+  }
+  for (let i = 0; i < a.unstaged.length; i++) {
+    const x = a.unstaged[i];
+    const y = b.unstaged[i];
+    if (
+      x.path !== y.path ||
+      x.status !== y.status ||
+      x.staged !== y.staged ||
+      x.untracked !== y.untracked ||
+      x.oldPath !== y.oldPath
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Cheap shallow equality on git log. Commit shas are the identity here — if
+// every row hash + ref decoration is unchanged, the graph view models can be
+// reused and the memoized commit rows skip re-rendering.
+function sameLog(a: GitLog | null, b: GitLog | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.isRepo !== b.isRepo || a.error !== b.error || a.rows.length !== b.rows.length) {
+    return false;
+  }
+  for (let i = 0; i < a.rows.length; i++) {
+    const x = a.rows[i];
+    const y = b.rows[i];
+    if (
+      x.hash !== y.hash ||
+      x.subject !== y.subject ||
+      x.isHead !== y.isHead ||
+      x.graph !== y.graph
+    ) {
+      return false;
+    }
+    const xRefs = x.refs ?? [];
+    const yRefs = y.refs ?? [];
+    if (xRefs.length !== yRefs.length) return false;
+    for (let j = 0; j < xRefs.length; j++) {
+      if (xRefs[j] !== yRefs[j]) return false;
+    }
+  }
+  return true;
+}
 
 // The left-rail Source Control panel — branch + commit composer, staged /
 // working change lists, and the commit-graph history, over the git backend in
@@ -82,6 +162,9 @@ export default function GitPanel({
   const statusRef = useRef<GitStatus | null>(status);
   statusRef.current = status;
 
+  const logRef = useRef<GitLog | null>(log);
+  logRef.current = log;
+
   const refresh = useCallback(async (silent = false): Promise<void> => {
     const target = cwdRef.current;
     if (!target) {
@@ -96,8 +179,10 @@ export default function GitPanel({
         window.spark.git.log(target),
       ]);
       if (cwdRef.current !== target) return;
-      setStatus(nextStatus);
-      setLog(nextLog);
+      // Skip the setState when nothing changed — keeps row identities stable
+      // so memoized children don't re-render on every poll tick.
+      if (!sameStatus(statusRef.current, nextStatus)) setStatus(nextStatus);
+      if (!sameLog(logRef.current, nextLog)) setLog(nextLog);
     } catch (err) {
       if (cwdRef.current === target) setOpError((err as Error).message);
     } finally {

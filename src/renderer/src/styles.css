@@ -385,20 +385,6 @@ a { color: inherit; }
   to { transform: rotate(360deg); }
 }
 
-/* Step-connector glow: the moving spark + halo on connector lines whenever
-   a step is busy and the next is waiting on its output. The dot rides from
-   left → right (start → next step), the halo softly pulses underneath. */
-@keyframes spark-connector-flow {
-  0%   { left: -36px; opacity: 0; }
-  15%  { opacity: 1; }
-  85%  { opacity: 1; }
-  100% { left: 100%; opacity: 0; }
-}
-@keyframes spark-connector-halo {
-  0%, 100% { opacity: 0.45; }
-  50%      { opacity: 1; }
-}
-
 /* Run-graph wire flow: a dashed accent stroke that travels along a live wire
    (spine segment or worker rib). The dash geometry lives in the
    .spark-wire-flow utility below; the reduced-motion block collapses it. */

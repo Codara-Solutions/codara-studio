@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import type { GitLogRow } from "@shared/types";
 import ChangeSection from "./ChangeSection";
 import CommitMenu from "./CommitMenu";
@@ -61,7 +61,10 @@ export default function CommitHistory({
 }: Props): React.ReactElement {
   const [menu, setMenu] = useState<MenuState | null>(null);
   const commitCount = rows.filter((r) => r.hash).length;
-  const graphRows = buildCommitGraphViewModels(rows);
+  // Keep view-model identity stable across renders when `rows` itself didn't
+  // change — GitPanel's shallow-compare keeps `rows` stable for no-op polls,
+  // so this memo lets the memoized commit rows actually skip re-rendering.
+  const graphRows = useMemo(() => buildCommitGraphViewModels(rows), [rows]);
 
   // Dismiss the context menu on any outside interaction. The opening click is
   // stopped at the row, so it never reaches this listener.

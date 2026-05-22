@@ -898,6 +898,42 @@ export default function App() {
     setCapabilitiesOpen(true);
   }, []);
 
+  // Dialog onClose handlers hoisted to stable refs so the memoized dialog
+  // components don't see a fresh arrow on every App render.
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
+  }, []);
+  const closeCapabilities = useCallback(() => {
+    setCapabilitiesOpen(false);
+  }, []);
+  const closeShortcuts = useCallback(() => {
+    setShortcutsOpen(false);
+  }, []);
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+  }, []);
+
+  // Dialog onSave / onOpenRun / onOpenFile handlers hoisted so the dialogs
+  // and search panel keep stable prop identities across App renders.
+  const handleSaveSettings = useCallback(
+    async (nextSettings: AppSettings) => {
+      const saved = await window.spark.settings.save(nextSettings);
+      setSettings(saved);
+      setDefaultShell(resolveDefaultShell(shells, saved, detectedDefaultShell));
+    },
+    [shells, detectedDefaultShell],
+  );
+  const handleSettingsOpenRun = useCallback(
+    (runId: string, workspaceId: string) => {
+      if (workspaces.some((w) => w.id === workspaceId)) {
+        setActiveId(workspaceId);
+      }
+      handleSelectRun(runId, workspaceId);
+      setSettingsOpen(false);
+    },
+    [workspaces, handleSelectRun],
+  );
+
   useEffect(() => {
     window.addEventListener("spark:open-capabilities", handleOpenCapabilities);
     return () => window.removeEventListener("spark:open-capabilities", handleOpenCapabilities);
@@ -987,6 +1023,16 @@ export default function App() {
       tabs.openEditorTab(entry, options);
     },
     [tabs],
+  );
+
+  // SearchPanel onOpenFile: open the picked file then dismiss the panel.
+  // Hoisted to keep SearchPanel's prop identity stable across App renders.
+  const handleSearchOpenFile = useCallback(
+    (entry: FsEntry) => {
+      openEditorFile(entry);
+      setSearchOpen(false);
+    },
+    [openEditorFile],
   );
 
   // Explorer prop callbacks. Hoisted to stable references (keyed on the
@@ -1579,19 +1625,9 @@ export default function App() {
             settings={settings}
             shells={shells}
             defaultShell={defaultShell}
-            onClose={() => setSettingsOpen(false)}
-            onSave={async (nextSettings) => {
-              const saved = await window.spark.settings.save(nextSettings);
-              setSettings(saved);
-              setDefaultShell(resolveDefaultShell(shells, saved, detectedDefaultShell));
-            }}
-            onOpenRun={(runId, workspaceId) => {
-              if (workspaces.some((w) => w.id === workspaceId)) {
-                setActiveId(workspaceId);
-              }
-              handleSelectRun(runId, workspaceId);
-              setSettingsOpen(false);
-            }}
+            onClose={closeSettings}
+            onSave={handleSaveSettings}
+            onOpenRun={handleSettingsOpenRun}
           />
         )}
 
@@ -1599,28 +1635,21 @@ export default function App() {
           <AgentCapabilitiesDialog
             settings={settings}
             workspaceCwd={activeWorkspace?.cwd ?? null}
-            onClose={() => setCapabilitiesOpen(false)}
-            onSave={async (nextSettings) => {
-              const saved = await window.spark.settings.save(nextSettings);
-              setSettings(saved);
-              setDefaultShell(resolveDefaultShell(shells, saved, detectedDefaultShell));
-            }}
+            onClose={closeCapabilities}
+            onSave={handleSaveSettings}
           />
         )}
 
         <ShortcutsDialog
           open={shortcutsOpen}
-          onClose={() => setShortcutsOpen(false)}
+          onClose={closeShortcuts}
         />
 
         <SearchPanel
           open={searchOpen}
           cwd={activeWorkspace?.cwd ?? null}
-          onClose={() => setSearchOpen(false)}
-          onOpenFile={(entry) => {
-            openEditorFile(entry);
-            setSearchOpen(false);
-          }}
+          onClose={closeSearch}
+          onOpenFile={handleSearchOpenFile}
         />
       </div>
 
@@ -1689,6 +1718,73 @@ const Workspace = React.memo(function Workspace({
   onReorderTab,
   onPinEditorTab,
 }: WorkspaceProps) {
+  // Destructure the tabs methods we need. useTabs returns a memoized API whose
+  // methods are stable for the hook's lifetime, so destructuring here gives us
+  // truly stable references — meaning the useCallback wrappers below also stay
+  // stable and the memoized children (TabBar/EditorStack/TerminalStack) keep
+  // their React.memo intact across App renders.
+  const {
+    setActiveTab,
+    closeTab,
+    setDirty,
+    setActiveTerminalPane,
+    setTerminalSplitRatio,
+    splitTerminalPane,
+    moveTerminalPane,
+    closeTerminalPane,
+  } = tabs;
+
+  const handleTabSelect = useCallback(
+    (id: TabId) => setActiveTab(id),
+    [setActiveTab],
+  );
+  const handleTabClose = useCallback(
+    (id: TabId) => closeTab(id),
+    [closeTab],
+  );
+  const handleEditorDirty = useCallback(
+    (id: TabId, dirty: boolean) => setDirty(id, dirty),
+    [setDirty],
+  );
+  const handleSparkOpen = useCallback(
+    (input: { file: string }) => onSparkOpenFile(input.file),
+    [onSparkOpenFile],
+  );
+  const handlePaneExit = useCallback(
+    (tabId: string, paneId: string) => onTerminalPaneExit(tabId, paneId),
+    [onTerminalPaneExit],
+  );
+  const handleActivatePane = useCallback(
+    (tabId: string, paneId: string) => setActiveTerminalPane(tabId, paneId),
+    [setActiveTerminalPane],
+  );
+  const handleSplitRatioChange = useCallback(
+    (tabId: string, path: Parameters<typeof setTerminalSplitRatio>[1], ratio: number) =>
+      setTerminalSplitRatio(tabId, path, ratio),
+    [setTerminalSplitRatio],
+  );
+  const handleSplitPane = useCallback(
+    (
+      tabId: string,
+      paneId: string,
+      direction: Parameters<typeof splitTerminalPane>[2],
+      autorun?: string,
+    ) => splitTerminalPane(tabId, paneId, direction, autorun),
+    [splitTerminalPane],
+  );
+  const handleMovePane = useCallback(
+    (
+      payload: TerminalPaneDragPayload,
+      targetTabId: string,
+      target?: Parameters<typeof moveTerminalPane>[3],
+    ) => moveTerminalPane(payload.tabId, payload.paneId, targetTabId, target),
+    [moveTerminalPane],
+  );
+  const handleClosePane = useCallback(
+    (tabId: string, paneId: string) => closeTerminalPane(tabId, paneId),
+    [closeTerminalPane],
+  );
+
   return (
     <div
       style={{
@@ -1702,8 +1798,8 @@ const Workspace = React.memo(function Workspace({
       <TabBar
         tabs={tabs.tabs}
         activeId={tabs.activeId}
-        onSelect={(id) => tabs.setActiveTab(id)}
-        onClose={(id) => tabs.closeTab(id)}
+        onSelect={handleTabSelect}
+        onClose={handleTabClose}
         onNewTerminal={onNewTerminalTab}
         onNewEditor={onNewEditorTab}
         onNewPreview={onNewPreviewTab}
@@ -1715,27 +1811,21 @@ const Workspace = React.memo(function Workspace({
         <EditorStack
           tabs={tabs.tabs}
           activeId={tabs.activeId}
-          onDirtyChange={(id, dirty) => tabs.setDirty(id, dirty)}
-          onClose={(id) => tabs.closeTab(id)}
+          onDirtyChange={handleEditorDirty}
+          onClose={handleTabClose}
         />
         <TerminalStack
           tabs={tabs.tabs}
           activeId={tabs.activeId}
           shell={shell}
           onDetectedUrl={onDetectedUrl}
-          onSparkOpen={(input) => onSparkOpenFile(input.file)}
-          onPaneExit={(tabId, paneId) => onTerminalPaneExit(tabId, paneId)}
-          onActivatePane={(tabId, paneId) => tabs.setActiveTerminalPane(tabId, paneId)}
-          onSplitRatioChange={(tabId, path, ratio) =>
-            tabs.setTerminalSplitRatio(tabId, path, ratio)
-          }
-          onSplitPane={(tabId, paneId, direction, autorun) =>
-            tabs.splitTerminalPane(tabId, paneId, direction, autorun)
-          }
-          onMovePane={(payload, targetTabId, target) =>
-            tabs.moveTerminalPane(payload.tabId, payload.paneId, targetTabId, target)
-          }
-          onClosePane={(tabId, paneId) => tabs.closeTerminalPane(tabId, paneId)}
+          onSparkOpen={handleSparkOpen}
+          onPaneExit={handlePaneExit}
+          onActivatePane={handleActivatePane}
+          onSplitRatioChange={handleSplitRatioChange}
+          onSplitPane={handleSplitPane}
+          onMovePane={handleMovePane}
+          onClosePane={handleClosePane}
           onPaneCwd={onPaneCwd}
           onPaneActivity={onPaneActivity}
           onPaneScrollback={onPaneScrollback}

@@ -121,6 +121,31 @@ export function useTerminalSession({
   // changes accent color.
   const themeUnsubRef = useRef<(() => void) | null>(null);
 
+  // Background-pane data throttling. When `visible` is false the pane is in
+  // an unmounted tab or a non-foreground workspace — the user can't see it,
+  // so feeding xterm.write() per PTY chunk is pure renderer-CPU waste
+  // (DOM-cell allocation, decode, reflow). Instead, buffer the raw bytes and
+  // flush in one big write the moment the pane becomes visible again. The
+  // PTY itself keeps running; only the renderer-side write is deferred.
+  //
+  // The sniffers (URL, agent) are also gated — they update state that's only
+  // surfaced via UI affordances on the visible pane, so deferring them while
+  // hidden is fine. They resume on the next chunk after the flush.
+  const hiddenBufferRef = useRef<Uint8Array[]>([]);
+  const hiddenBytesRef = useRef<number>(0);
+  // Cap chosen to fit a few screens of dense TUI output (claude/codex full
+  // redraws on ~120-col panes are ~30-60 KB each). 256 KB ≈ 4-8 redraws,
+  // enough to preserve the most-recent visible state when the user flips
+  // back. FIFO trim past the cap — older bytes the user can't see anyway.
+  const HIDDEN_BUFFER_CAP = 256 * 1024;
+  // Live mirror of the latest `visible` value so the pty.onData closure
+  // (which is captured once per sessionId) reads the current flag instead
+  // of the stale value from mount time.
+  const visibleRef = useRef<boolean>(visible);
+  useEffect(() => {
+    visibleRef.current = visible;
+  }, [visible]);
+
   useEffect(() => {
     let disposed = false;
     const cleanups: Array<() => void> = [];
@@ -364,6 +389,28 @@ export function useTerminalSession({
           data instanceof Uint8Array
             ? data
             : new TextEncoder().encode(String(data));
+
+        // Hidden-pane fast path. When the pane isn't on screen, skip the
+        // entire hot path — xterm.write (DOM cell churn), URL sniff, agent
+        // sniff — and just stash the raw bytes. They'll be flushed in one
+        // write on the next visible-transition. PTY keeps streaming; only
+        // the renderer-side cost is deferred.
+        if (!visibleRef.current) {
+          hiddenBufferRef.current.push(bytes);
+          hiddenBytesRef.current += bytes.length;
+          // FIFO trim past the cap so a long-running background agent
+          // streaming MB of output doesn't pin renderer memory.
+          while (
+            hiddenBytesRef.current > HIDDEN_BUFFER_CAP &&
+            hiddenBufferRef.current.length > 1
+          ) {
+            const dropped = hiddenBufferRef.current.shift();
+            if (dropped) hiddenBytesRef.current -= dropped.length;
+          }
+          onActivityRef.current?.();
+          return;
+        }
+
         term.write(bytes);
         onActivityRef.current?.();
 
@@ -573,9 +620,50 @@ export function useTerminalSession({
       }
       termRef.current = null;
       fitRef.current = null;
+      // Drop any buffered hidden-pane bytes — the xterm they were destined
+      // for is gone. The PTY remains alive (see comment above); a future
+      // remount will get fresh chunks from main, not the stale prefix.
+      hiddenBufferRef.current = [];
+      hiddenBytesRef.current = 0;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
+
+  // Flush buffered PTY bytes the moment the pane comes back on screen.
+  // Runs BEFORE the fit/focus layout effect below so the visible buffer is
+  // populated when xterm reflows. Tracks the previous visibility in a ref
+  // so the flush only fires on a real false→true transition — the initial
+  // mount (prev=undefined, current=true) is treated as a no-op since the
+  // buffer is empty anyway, but the guard keeps that invariant explicit.
+  const prevVisibleRef = useRef<boolean | null>(null);
+  useLayoutEffect(() => {
+    const prev = prevVisibleRef.current;
+    prevVisibleRef.current = visible;
+    if (!visible) return;
+    if (prev === false && hiddenBufferRef.current.length > 0) {
+      const term = termRef.current;
+      if (term) {
+        // Coalesce all chunks into one write so xterm's parser sees a single
+        // contiguous stream — partial ANSI sequences across chunk boundaries
+        // still reassemble correctly because the bytes are concatenated in
+        // arrival order.
+        const total = hiddenBytesRef.current;
+        const merged = new Uint8Array(total);
+        let off = 0;
+        for (const chunk of hiddenBufferRef.current) {
+          merged.set(chunk, off);
+          off += chunk.length;
+        }
+        try {
+          term.write(merged);
+        } catch {
+          /* xterm may dispose mid-flush during a fast tab switch */
+        }
+      }
+      hiddenBufferRef.current = [];
+      hiddenBytesRef.current = 0;
+    }
+  }, [visible]);
 
   useLayoutEffect(() => {
     if (!visible) return;

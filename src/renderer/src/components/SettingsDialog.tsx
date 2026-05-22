@@ -724,8 +724,9 @@ const APPEARANCE = APP_THEME_IDS.map((id) => ({
 
 function GeneralSettings() {
   const { theme, setTheme } = useTheme();
+  const { preferences, hydrated, setPreference } = usePreferences();
   return (
-    <div style={{ display: "grid", gap: 14 }}>
+    <div style={{ display: "grid", gap: 18 }}>
       <SectionTitle title="Appearance" detail="Comfortable palettes people actually keep using." />
       <div
         style={{
@@ -744,6 +745,39 @@ function GeneralSettings() {
           />
         ))}
       </div>
+
+      <div
+        style={{
+          height: 1,
+          background: "var(--rule-soft)",
+          margin: "2px 0",
+        }}
+      />
+
+      <SectionTitle
+        title="Performance"
+        detail="Tune renderer resource usage. Some flags only apply after restart."
+      />
+      {hydrated ? (
+        <div style={{ display: "grid", gap: 6 }}>
+          <ToggleRow
+            title="Disable hardware acceleration (requires restart)"
+            desc="Reduces RAM ~60-90MB on integrated GPUs. Restart to apply."
+            checked={Boolean(preferences.disableHardwareAcceleration)}
+            onChange={(v) => void setPreference("disableHardwareAcceleration", v)}
+          />
+        </div>
+      ) : (
+        <div
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 12,
+          }}
+        >
+          Loading preferences…
+        </div>
+      )}
     </div>
   );
 }

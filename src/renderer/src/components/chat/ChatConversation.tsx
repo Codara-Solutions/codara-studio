@@ -17,20 +17,20 @@ import Markdown from "./Markdown";
 
 export default function ChatConversation({ run, cwd }: { run: RunState; cwd: string | null }) {
   const items = useMemo(() => buildChatTimeline(run), [run]);
-  const timelineKey = useMemo(() => timelineRenderKey(items), [items]);
   const openQuestion = useMemo(() => findOpenQuestion(run), [run]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Pin to the bottom as the conversation grows. Keyed on the item count and
-  // run status so a new turn or a status change scrolls into view.
+  // run state so a new turn or a status change scrolls into view. run.updatedAt
+  // ticks on every stream update so we keep following the tail during streams.
   useEffect(() => {
     const node = scrollRef.current;
     if (node) node.scrollTop = node.scrollHeight;
-  }, [items.length, run.status, timelineKey]);
+  }, [items.length, run.status, run.updatedAt]);
 
   return (
     <div ref={scrollRef} style={SCROLL_STYLE}>
-      <div key={timelineKey}>
+      <div>
         {items.length === 0 ? (
           <ConversationEmpty />
         ) : (
@@ -56,33 +56,11 @@ function timelineItemKey(item: ChatTimelineItem): string {
   return `${item.kind}:${item.id}`;
 }
 
-function timelineRenderKey(items: ChatTimelineItem[]): string {
-  return items
-    .map((item) => {
-      if (item.kind === "message") {
-        return [
-          timelineItemKey(item),
-          item.author,
-          item.messageKind,
-          item.text,
-          item.at,
-          item.repeatCount,
-          attachmentSignature(item.attachments),
-        ].join(":");
-      }
-      if (item.kind === "tool") {
-        return [timelineItemKey(item), item.status, item.tone, item.at, item.detail].join(":");
-      }
-      return [timelineItemKey(item), item.status, item.at, item.workers.length].join(":");
-    })
-    .join("|");
-}
-
 type MessageItem = Extract<ChatTimelineItem, { kind: "message" }>;
 type ToolItem = Extract<ChatTimelineItem, { kind: "tool" }>;
 type StepItem = Extract<ChatTimelineItem, { kind: "step" }>;
 
-function MessageTurn({
+const MessageTurn = React.memo(function MessageTurn({
   item,
   runId,
   openQuestionId,
@@ -139,7 +117,7 @@ function MessageTurn({
       </div>
     </div>
   );
-}
+});
 
 function cleanLegacySparkOutput(text: string): string {
   const prefix = "Done. Here is the relevant output:";
@@ -420,10 +398,6 @@ function fileUrl(path: string): string {
   return `file:///${parts.map(encodeURIComponent).join("/")}`;
 }
 
-function attachmentSignature(attachments: RunMessageAttachment[] | undefined): string {
-  return (attachments ?? []).map((attachment) => attachment.id || attachment.path).join("|");
-}
-
 function ActivityShell({
   color,
   live,
@@ -446,7 +420,7 @@ function ActivityShell({
   );
 }
 
-function StepCard({ item }: { item: StepItem }) {
+const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
   const live =
     item.status === "running" ||
     item.status === "planning" ||
@@ -537,9 +511,9 @@ function StepCard({ item }: { item: StepItem }) {
       </div>
     </ActivityShell>
   );
-}
+});
 
-function ToolCallCard({ item }: { item: ToolItem }) {
+const ToolCallCard = React.memo(function ToolCallCard({ item }: { item: ToolItem }) {
   const live = item.tone === "live";
   const [open, setOpen] = useState(live || item.status === "failed");
   const color = toolToneColor(item);
@@ -603,7 +577,7 @@ function ToolCallCard({ item }: { item: ToolItem }) {
       </div>
     </ActivityShell>
   );
-}
+});
 
 function toolToneColor(item: ToolItem): string {
   if (item.tone === "failed") return "var(--danger)";

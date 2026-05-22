@@ -5,63 +5,44 @@ import { join } from "node:path";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, listDir, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
-import {
-  checkoutRef,
-  commitChanges,
-  discardChanges,
-  fetchRemote,
-  generateCommitMessage,
-  getGitDiff,
-  getGitLog,
-  getGitStatus,
-  initRepo,
-  prepareSmartMerge,
-  pull,
-  push,
-  revertCommit,
-  stageAll,
-  stageFiles,
-  undoLastCommit,
-  unstageAll,
-  unstageFiles,
-} from "./git-ops";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { detectAgentRuntimes } from "./agent-runtimes";
-import { deleteAgentAsset, listAgentAssets, syncAgentAssets } from "./agent-sync";
 import { loadPreferences, setPreference } from "./preferences-store";
-import {
-  abortInlineAiCompletion,
-  runInlineAiCompletion,
-  type InlineAiCompletionRequest,
-  type InlineAiCompletionResponse,
-} from "./inline-ai";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
-import {
-  addRunMessage,
-  appendTestEvent,
-  createStep,
-  createRun,
-  createWorkerTask,
-  deleteRun,
-  forcePauseRun,
-  getRunArtifactPaths,
-  getRun,
-  interruptRunWithMessage,
-  launchWorkerAttempt,
-  listRuns,
-  pauseRunAfterCurrentWorkers,
-  pauseRun,
-  prepareWorkerTask,
-  readWorkerReport,
-  resumeRun,
-  startAutopilot,
-  updateRunStatus,
-  updateStep,
-  updateWorkerTask,
-} from "./orchestration/run-store";
 import { listEvents } from "./orchestration/event-log";
+import type {
+  InlineAiCompletionRequest,
+  InlineAiCompletionResponse,
+} from "./inline-ai";
+
+// Heavy modules deferred via dynamic import to keep cold startup snappy. Each
+// cache slot is populated on the first IPC call that needs the module and
+// reused thereafter, so we pay the resolve+evaluate cost once per process.
+let gitOpsMod: typeof import("./git-ops") | undefined;
+async function getGitOps(): Promise<typeof import("./git-ops")> {
+  gitOpsMod ??= await import("./git-ops");
+  return gitOpsMod;
+}
+
+let agentSyncMod: typeof import("./agent-sync") | undefined;
+async function getAgentSync(): Promise<typeof import("./agent-sync")> {
+  agentSyncMod ??= await import("./agent-sync");
+  return agentSyncMod;
+}
+
+let inlineAiMod: typeof import("./inline-ai") | undefined;
+async function getInlineAi(): Promise<typeof import("./inline-ai")> {
+  inlineAiMod ??= await import("./inline-ai");
+  return inlineAiMod;
+}
+
+let runStoreMod: typeof import("./orchestration/run-store") | undefined;
+async function getRunStore(): Promise<typeof import("./orchestration/run-store")> {
+  runStoreMod ??= await import("./orchestration/run-store");
+  return runStoreMod;
+}
 import type {
   AddRunMessageInput,
   AppPreferences,
@@ -151,18 +132,21 @@ export function registerIpc(): void {
   ipcMain.handle(
     "agents:sync",
     async (_e, input?: { cwd?: string | null }) => {
+      const { syncAgentAssets } = await getAgentSync();
       return syncAgentAssets({ cwd: input?.cwd ?? null });
     },
   );
   ipcMain.handle(
     "agents:assets",
     async (_e, input?: { cwd?: string | null }) => {
+      const { listAgentAssets } = await getAgentSync();
       return listAgentAssets({ cwd: input?.cwd ?? null, settings: await loadSettings() });
     },
   );
   ipcMain.handle(
     "agents:deleteAsset",
     async (_e, input: { id: string }) => {
+      const { deleteAgentAsset } = await getAgentSync();
       return deleteAgentAsset({ id: input.id });
     },
   );
@@ -188,10 +172,12 @@ export function registerIpc(): void {
   ipcMain.handle(
     "inline-ai:complete",
     async (_e, req: InlineAiCompletionRequest): Promise<InlineAiCompletionResponse> => {
+      const { runInlineAiCompletion } = await getInlineAi();
       return runInlineAiCompletion(req);
     },
   );
   ipcMain.handle("inline-ai:abort", async (_e, requestId: string): Promise<void> => {
+    const { abortInlineAiCompletion } = await getInlineAi();
     abortInlineAiCompletion(requestId);
   });
 
@@ -319,10 +305,12 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("git:status", async (_e, cwd: string): Promise<GitStatus> => {
+    const { getGitStatus } = await getGitOps();
     return getGitStatus(cwd);
   });
 
   ipcMain.handle("git:log", async (_e, cwd: string): Promise<GitLog> => {
+    const { getGitLog } = await getGitOps();
     return getGitLog(cwd);
   });
 
@@ -332,6 +320,7 @@ export function registerIpc(): void {
       _e,
       input: { cwd: string; path: string; staged: boolean; untracked: boolean },
     ): Promise<GitDiff> => {
+      const { getGitDiff } = await getGitOps();
       return getGitDiff(input.cwd, input.path, {
         staged: input.staged,
         untracked: input.untracked,
@@ -342,6 +331,7 @@ export function registerIpc(): void {
   ipcMain.handle(
     "git:stage",
     async (_e, input: { cwd: string; paths: string[] }): Promise<GitOpResult> => {
+      const { stageFiles } = await getGitOps();
       return stageFiles(input.cwd, input.paths);
     },
   );
@@ -349,21 +339,25 @@ export function registerIpc(): void {
   ipcMain.handle(
     "git:unstage",
     async (_e, input: { cwd: string; paths: string[] }): Promise<GitOpResult> => {
+      const { unstageFiles } = await getGitOps();
       return unstageFiles(input.cwd, input.paths);
     },
   );
 
   ipcMain.handle("git:stageAll", async (_e, cwd: string): Promise<GitOpResult> => {
+    const { stageAll } = await getGitOps();
     return stageAll(cwd);
   });
 
   ipcMain.handle("git:unstageAll", async (_e, cwd: string): Promise<GitOpResult> => {
+    const { unstageAll } = await getGitOps();
     return unstageAll(cwd);
   });
 
   ipcMain.handle(
     "git:discard",
     async (_e, input: { cwd: string; files: GitFileChange[] }): Promise<GitOpResult> => {
+      const { discardChanges } = await getGitOps();
       return discardChanges(input.cwd, input.files);
     },
   );
@@ -371,37 +365,45 @@ export function registerIpc(): void {
   ipcMain.handle(
     "git:commit",
     async (_e, input: { cwd: string; message: string }): Promise<GitOpResult> => {
+      const { commitChanges } = await getGitOps();
       return commitChanges(input.cwd, input.message);
     },
   );
 
   ipcMain.handle("git:generateCommitMessage", async (_e, cwd: string): Promise<GitCommitMessageResult> => {
+    const { generateCommitMessage } = await getGitOps();
     return generateCommitMessage(cwd);
   });
 
   ipcMain.handle("git:push", async (_e, cwd: string): Promise<GitOpResult> => {
+    const { push } = await getGitOps();
     return push(cwd);
   });
 
   ipcMain.handle("git:pull", async (_e, cwd: string): Promise<GitOpResult> => {
+    const { pull } = await getGitOps();
     return pull(cwd);
   });
 
   ipcMain.handle("git:fetch", async (_e, cwd: string): Promise<GitOpResult> => {
+    const { fetchRemote } = await getGitOps();
     return fetchRemote(cwd);
   });
 
   ipcMain.handle("git:prepareSmartMerge", async (_e, cwd: string): Promise<GitSmartMergeResult> => {
+    const { prepareSmartMerge } = await getGitOps();
     return prepareSmartMerge(cwd);
   });
 
   ipcMain.handle("git:undoLastCommit", async (_e, cwd: string): Promise<GitOpResult> => {
+    const { undoLastCommit } = await getGitOps();
     return undoLastCommit(cwd);
   });
 
   ipcMain.handle(
     "git:checkout",
     async (_e, input: { cwd: string; ref: string }): Promise<GitOpResult> => {
+      const { checkoutRef } = await getGitOps();
       return checkoutRef(input.cwd, input.ref);
     },
   );
@@ -409,23 +411,28 @@ export function registerIpc(): void {
   ipcMain.handle(
     "git:revert",
     async (_e, input: { cwd: string; hash: string }): Promise<GitOpResult> => {
+      const { revertCommit } = await getGitOps();
       return revertCommit(input.cwd, input.hash);
     },
   );
 
   ipcMain.handle("git:init", async (_e, cwd: string): Promise<GitOpResult> => {
+    const { initRepo } = await getGitOps();
     return initRepo(cwd);
   });
 
   ipcMain.handle("orchestration:createRun", async (_e, input: CreateRunInput): Promise<RunState> => {
+    const { createRun } = await getRunStore();
     return createRun(input);
   });
 
   ipcMain.handle("orchestration:getRun", async (_e, runId: string): Promise<RunState | null> => {
+    const { getRun } = await getRunStore();
     return getRun(runId);
   });
 
   ipcMain.handle("orchestration:listRuns", async (_e, workspaceId?: string): Promise<RunState[]> => {
+    const { listRuns } = await getRunStore();
     return listRuns(workspaceId);
   });
 
@@ -434,77 +441,95 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("orchestration:getArtifactPaths", async (_e, runId: string): Promise<RunArtifactPaths> => {
+    const { getRunArtifactPaths } = await getRunStore();
     return getRunArtifactPaths(runId);
   });
 
   ipcMain.handle("orchestration:appendTestEvent", async (_e, args: { runId: string; message?: string }): Promise<SparkEvent> => {
+    const { appendTestEvent } = await getRunStore();
     return appendTestEvent(args.runId, args.message);
   });
 
   ipcMain.handle("orchestration:startAutopilot", async (_e, input: StartAutopilotInput): Promise<RunState> => {
+    const { startAutopilot } = await getRunStore();
     return startAutopilot(input);
   });
 
   ipcMain.handle("orchestration:pauseRun", async (_e, input: PauseRunInput): Promise<RunState> => {
+    const { pauseRun } = await getRunStore();
     return pauseRun(input);
   });
 
   ipcMain.handle("orchestration:pauseRunAfterCurrentWorkers", async (_e, input: PauseRunInput): Promise<RunState> => {
+    const { pauseRunAfterCurrentWorkers } = await getRunStore();
     return pauseRunAfterCurrentWorkers(input);
   });
 
   ipcMain.handle("orchestration:forcePauseRun", async (_e, runId: string): Promise<RunState> => {
+    const { forcePauseRun } = await getRunStore();
     return forcePauseRun(runId);
   });
 
   ipcMain.handle("orchestration:resumeRun", async (_e, input: ResumeRunInput): Promise<RunState> => {
+    const { resumeRun } = await getRunStore();
     return resumeRun(input);
   });
 
   ipcMain.handle("orchestration:addRunMessage", async (_e, input: AddRunMessageInput): Promise<RunState> => {
+    const { addRunMessage } = await getRunStore();
     return addRunMessage(input);
   });
 
   ipcMain.handle(
     "orchestration:interruptRunWithMessage",
     async (_e, input: InterruptRunWithMessageInput): Promise<RunState> => {
+      const { interruptRunWithMessage } = await getRunStore();
       return interruptRunWithMessage(input);
     },
   );
 
   ipcMain.handle("orchestration:updateRunStatus", async (_e, input: UpdateRunStatusInput): Promise<RunState> => {
+    const { updateRunStatus } = await getRunStore();
     return updateRunStatus(input);
   });
 
   ipcMain.handle("orchestration:createStep", async (_e, input: CreateStepInput): Promise<RunState> => {
+    const { createStep } = await getRunStore();
     return createStep(input);
   });
 
   ipcMain.handle("orchestration:updateStep", async (_e, input: UpdateStepInput): Promise<RunState> => {
+    const { updateStep } = await getRunStore();
     return updateStep(input);
   });
 
   ipcMain.handle("orchestration:createWorkerTask", async (_e, input: CreateWorkerTaskInput): Promise<RunState> => {
+    const { createWorkerTask } = await getRunStore();
     return createWorkerTask(input);
   });
 
   ipcMain.handle("orchestration:updateWorkerTask", async (_e, input: UpdateWorkerTaskInput): Promise<RunState> => {
+    const { updateWorkerTask } = await getRunStore();
     return updateWorkerTask(input);
   });
 
   ipcMain.handle("orchestration:prepareWorkerTask", async (_e, input: PrepareWorkerTaskInput) => {
+    const { prepareWorkerTask } = await getRunStore();
     return prepareWorkerTask(input);
   });
 
   ipcMain.handle("orchestration:launchWorkerAttempt", async (_e, input: LaunchWorkerAttemptInput): Promise<RunState> => {
+    const { launchWorkerAttempt } = await getRunStore();
     return launchWorkerAttempt(input);
   });
 
   ipcMain.handle("orchestration:readWorkerReport", async (_e, path: string) => {
+    const { readWorkerReport } = await getRunStore();
     return readWorkerReport(path);
   });
 
   ipcMain.handle("orchestration:deleteRun", async (_e, runId: string): Promise<void> => {
+    const { deleteRun } = await getRunStore();
     await deleteRun(runId);
   });
 

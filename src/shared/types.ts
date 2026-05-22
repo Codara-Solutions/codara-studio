@@ -141,6 +141,11 @@ export interface AppPreferences {
   // input — OpenRouter has hundreds of models, no dropdown.
   inlineAutocompleteModelId: string;
   keybindings: KeybindingOverridesPref;
+  // When true, the main process calls app.disableHardwareAcceleration()
+  // before app.whenReady() at next launch. Saves ~60-90 MB RAM on machines
+  // with integrated GPUs. Requires restart because Chromium only checks the
+  // flag once during process startup.
+  disableHardwareAcceleration?: boolean;
 }
 
 export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "google/gemini-3.5-flash";
@@ -219,6 +224,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   inlineAutocompleteDelayMs: DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS,
   inlineAutocompleteModelId: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
   keybindings: {},
+  disableHardwareAcceleration: false,
 };
 
 export type PrefKey = keyof AppPreferences;

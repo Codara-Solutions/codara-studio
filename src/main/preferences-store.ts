@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { readFileSync, promises as fs } from "node:fs";
 import { join } from "node:path";
 import {
   APP_THEME_IDS,
@@ -19,6 +19,11 @@ import { sparkHome } from "./spark-home";
 const PREFS_FILE = "spark-preferences.json";
 
 let cache: AppPreferences | null = null;
+// Separate cache for getPreferenceSync(): the sync reader is invoked before
+// app.whenReady() so it cannot share the async cache (which is populated by
+// loadPreferences() during IPC init). Once filled it is reused across calls
+// in the same process, so a single boot only pays one fs.readFileSync.
+let syncCache: AppPreferences | null = null;
 let writing: Promise<void> = Promise.resolve();
 
 function prefsPath(): string {
@@ -112,6 +117,10 @@ function normalize(
     inlineAutocompleteDelayMs: normalizeInlineDelay(src.inlineAutocompleteDelayMs),
     inlineAutocompleteModelId: inlineModel,
     keybindings: normalizeKeybindings(src.keybindings),
+    disableHardwareAcceleration:
+      typeof src.disableHardwareAcceleration === "boolean"
+        ? src.disableHardwareAcceleration
+        : DEFAULT_PREFERENCES.disableHardwareAcceleration,
   };
 }
 
@@ -159,4 +168,31 @@ export async function setPreference<K extends PrefKey>(
 
 export async function flushPreferences(): Promise<void> {
   await writing;
+}
+
+function readFromDiskSync(): AppPreferences {
+  try {
+    const raw = readFileSync(prefsPath(), "utf8");
+    return normalize(JSON.parse(raw) as Partial<AppPreferences>, {
+      migrateLegacyInlineDefault: true,
+    });
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { ...DEFAULT_PREFERENCES };
+    }
+    console.error("[preferences] sync read failed, using defaults:", err);
+    return { ...DEFAULT_PREFERENCES };
+  }
+}
+
+// Synchronously read a single preference. Used before app.whenReady() to
+// honour flags Chromium can only consume during process startup (e.g.
+// app.disableHardwareAcceleration). Falls back to the default for the key
+// when the prefs file is absent (first launch) or unparseable.
+export function getPreferenceSync<K extends PrefKey>(key: K): AppPreferences[K] {
+  if (!syncCache) {
+    syncCache = readFromDiskSync();
+  }
+  const value = syncCache[key];
+  return value === undefined ? DEFAULT_PREFERENCES[key] : value;
 }

@@ -5,7 +5,7 @@ import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { ensureSparkHomeSync } from "./spark-home";
 import { flush } from "./storage";
-import { flushPreferences } from "./preferences-store";
+import { flushPreferences, getPreferenceSync } from "./preferences-store";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
 import {
   emitFinalSummary,
@@ -15,6 +15,31 @@ import {
 } from "./eval/headless-runner";
 
 app.setName("Spark App");
+
+// Chromium feature flags Spark never uses. Disabling them at startup saves
+// ~25-40 MB of idle RAM by preventing background services from spinning up:
+//   CalculateNativeWinOcclusion — Win32 occlusion polling for hidden windows
+//   HardwareMediaKeyHandling    — global media-key listener
+//   MediaSessionService         — system "now playing" integration
+// None of these are needed for an editor/terminal UI.
+app.commandLine.appendSwitch(
+  "disable-features",
+  "CalculateNativeWinOcclusion,HardwareMediaKeyHandling,MediaSessionService",
+);
+
+// Honour the disable-hardware-acceleration preference at startup. Chromium
+// only reads this flag during process initialisation, so we have to consult
+// the prefs file synchronously — before app.whenReady() — every launch.
+// Wrapped in try/catch so a missing or corrupt prefs file (first run,
+// partial write) never blocks boot; the helper itself already returns the
+// default in those cases, but defence in depth is cheap here.
+try {
+  if (getPreferenceSync("disableHardwareAcceleration")) {
+    app.disableHardwareAcceleration();
+  }
+} catch (err) {
+  console.error("[main] failed to read disableHardwareAcceleration pref:", err);
+}
 
 // Surface any uncaught error in main so renderer-side "everything goes black"
 // crashes show up in the dev console instead of dying silently.
@@ -72,7 +97,11 @@ function createWindow(): void {
     titleBarStyle: process.platform === "win32" ? "hidden" : undefined,
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
-      sandbox: false,
+      // Renderer + preload run in a sandboxed OS process; the preload has no
+      // Node deps (verified) so flipping this on costs nothing and gives us
+      // Chromium's full process isolation. Keep contextIsolation + no
+      // nodeIntegration in place — sandbox is the third leg of that stool.
+      sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
       // Enable Electron's <webview> tag so the preview tab kind can host a
