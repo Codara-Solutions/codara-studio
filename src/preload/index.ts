@@ -12,6 +12,7 @@ import type {
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
+  FileListResult,
   FsChangeEvent,
   FsEntry,
   FsFileContent,
@@ -149,6 +150,8 @@ const api = {
   },
   fs: {
     list: (dir: string): Promise<FsEntry[]> => ipcRenderer.invoke("fs:list", dir),
+    listFiles: (root: string): Promise<FileListResult> =>
+      ipcRenderer.invoke("fs:listFiles", root),
     readText: (path: string): Promise<FsFileContent> => ipcRenderer.invoke("fs:readText", path),
     readEx: (path: string): Promise<FsReadResult> => ipcRenderer.invoke("fs:readEx", path),
     listMarkdownFiles: (root: string): Promise<PlanFile[]> =>

@@ -15,6 +15,7 @@ import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
 import AgentCapabilitiesDialog from "./components/AgentCapabilitiesDialog";
 import SearchPanel from "./components/Search/SearchPanel";
+import FileSearchPanel from "./components/Search/FileSearchPanel";
 import TabBar from "./tabs/TabBar";
 import EditorStack from "./tabs/EditorStack";
 import TerminalStack from "./tabs/TerminalStack";
@@ -226,6 +227,7 @@ export default function App() {
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [platform, setPlatform] = useState<string>("");
   const [home, setHome] = useState<string>("");
   // Side-panel layout: outer widths, internal split ratios, per-section
@@ -912,6 +914,9 @@ export default function App() {
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
   }, []);
+  const closeFileSearch = useCallback(() => {
+    setFileSearchOpen(false);
+  }, []);
 
   // Dialog onSave / onOpenRun / onOpenFile handlers hoisted so the dialogs
   // and search panel keep stable prop identities across App renders.
@@ -1025,12 +1030,13 @@ export default function App() {
     [tabs],
   );
 
-  // SearchPanel onOpenFile: open the picked file then dismiss the panel.
-  // Hoisted to keep SearchPanel's prop identity stable across App renders.
+  // File/search panels: open the picked file then dismiss the panel.
+  // Hoisted to keep panel prop identities stable across App renders.
   const handleSearchOpenFile = useCallback(
     (entry: FsEntry) => {
       openEditorFile(entry);
       setSearchOpen(false);
+      setFileSearchOpen(false);
     },
     [openEditorFile],
   );
@@ -1152,6 +1158,34 @@ export default function App() {
     tabs.newTerminalTab(activeWorkspace?.cwd ?? undefined);
   }, [tabs, activeWorkspace?.cwd]);
 
+  const handleNewBalancedTerminalPane = useCallback(() => {
+    const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+    const target =
+      active?.kind === "terminal"
+        ? active
+        : tabs.tabs.find((t) => t.kind === "terminal");
+    if (!target || target.kind !== "terminal") {
+      tabs.newTerminalTab(activeWorkspace?.cwd ?? undefined);
+      return;
+    }
+
+    const paneId = makeId("pane");
+    const activeLeaf = findLeafByPaneId(target.root, target.activePaneId);
+    const cwd =
+      paneRuntimeRef.current.get(target.activePaneId)?.cwd ??
+      activeLeaf?.cwd ??
+      activeWorkspace?.cwd ??
+      undefined;
+    const added = tabs.addBalancedPaneToTab(target.id, paneId, { cwd });
+    if (added) {
+      tabs.setActiveTab(target.id);
+      tabs.setActiveTerminalPane(target.id, paneId);
+      return;
+    }
+
+    tabs.newTerminalTab(cwd);
+  }, [tabs, activeWorkspace?.cwd]);
+
   // Add a terminal pane that auto-launches the given CLI worker once the
   // shell prompt is ready. Worker keybinds should keep the user's current
   // terminal tab together instead of creating a separate terminal tab.
@@ -1187,9 +1221,8 @@ export default function App() {
   );
 
   const handleNewEditorTab = useCallback(() => {
-    // No native "open file" dialog wired up yet; surface the search modal,
-    // which is the existing path the user knows for picking a file.
-    setSearchOpen(true);
+    setSearchOpen(false);
+    setFileSearchOpen(true);
   }, []);
 
   const handleNewPreviewTab = useCallback(() => {
@@ -1269,6 +1302,7 @@ export default function App() {
         window.dispatchEvent(new CustomEvent("spark:toggle-sidebar"));
       },
       "search.open": () => {
+        setFileSearchOpen(false);
         setSearchOpen(true);
         window.dispatchEvent(new CustomEvent("spark:open-search"));
       },
@@ -1306,6 +1340,7 @@ export default function App() {
         );
       },
       "tab.newTerminal": handleNewTerminalTab,
+      "terminal.newBalancedPane": handleNewBalancedTerminalPane,
       "tab.newEditor": handleNewEditorTab,
       "tab.newPreview": handleNewPreviewTab,
       "worker.newClaude": () => handleNewWorkerTab(CLAUDE_LAUNCH_COMMAND),
@@ -1337,7 +1372,14 @@ export default function App() {
         tabs.closeTerminalPane(active.id, active.activePaneId);
       },
     }),
-    [handleNewEditorTab, handleNewPreviewTab, handleNewTerminalTab, handleNewWorkerTab, tabs],
+    [
+      handleNewBalancedTerminalPane,
+      handleNewEditorTab,
+      handleNewPreviewTab,
+      handleNewTerminalTab,
+      handleNewWorkerTab,
+      tabs,
+    ],
   );
 
   const { preferences: shortcutPreferences } = usePreferences();
@@ -1649,6 +1691,13 @@ export default function App() {
           open={searchOpen}
           cwd={activeWorkspace?.cwd ?? null}
           onClose={closeSearch}
+          onOpenFile={handleSearchOpenFile}
+        />
+
+        <FileSearchPanel
+          open={fileSearchOpen}
+          cwd={activeWorkspace?.cwd ?? null}
+          onClose={closeFileSearch}
           onOpenFile={handleSearchOpenFile}
         />
       </div>

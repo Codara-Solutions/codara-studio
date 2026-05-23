@@ -57,9 +57,28 @@ export function insertLeafAtLeaf(
   direction: TerminalSplit["direction"],
   movingPane: TerminalLeaf,
   position: "before" | "after",
+  options?: { rebalanceLine?: boolean },
 ): PaneNode {
+  if (options?.rebalanceLine && node.kind === "split" && node.direction === direction) {
+    const line = flattenLeafLine(node, direction);
+    if (line) {
+      const targetIndex = line.findIndex((item) => item.paneId === paneId);
+      if (targetIndex >= 0) {
+        const insertIndex = position === "before" ? targetIndex : targetIndex + 1;
+        return buildLinearSplit(
+          [
+            ...line.slice(0, insertIndex),
+            movingPane,
+            ...line.slice(insertIndex),
+          ],
+          direction,
+        );
+      }
+    }
+  }
   if (node.kind === "leaf") {
     if (node.paneId !== paneId) return node;
+    if (options?.rebalanceLine) return node;
     return {
       kind: "split",
       direction,
@@ -68,10 +87,40 @@ export function insertLeafAtLeaf(
       b: position === "before" ? node : movingPane,
     };
   }
-  const a = insertLeafAtLeaf(node.a, paneId, direction, movingPane, position);
-  const b = insertLeafAtLeaf(node.b, paneId, direction, movingPane, position);
+  const a = insertLeafAtLeaf(node.a, paneId, direction, movingPane, position, options);
+  const b = insertLeafAtLeaf(node.b, paneId, direction, movingPane, position, options);
   if (a === node.a && b === node.b) return node;
   return { ...node, a, b };
+}
+
+function flattenLeafLine(
+  node: PaneNode,
+  direction: TerminalSplit["direction"],
+): TerminalLeaf[] | null {
+  if (node.kind === "leaf") return [node];
+  if (node.direction !== direction) return null;
+  const a = flattenLeafLine(node.a, direction);
+  const b = flattenLeafLine(node.b, direction);
+  if (!a || !b) return null;
+  return [...a, ...b];
+}
+
+function buildLinearSplit(
+  nodes: PaneNode[],
+  direction: TerminalSplit["direction"],
+): PaneNode {
+  if (nodes.length === 0) {
+    throw new Error("Cannot build an empty terminal pane split.");
+  }
+  if (nodes.length === 1) return nodes[0];
+  const headCount = Math.floor(nodes.length / 2);
+  return {
+    kind: "split",
+    direction,
+    ratio: headCount / nodes.length,
+    a: buildLinearSplit(nodes.slice(0, headCount), direction),
+    b: buildLinearSplit(nodes.slice(headCount), direction),
+  };
 }
 
 // Drop the leaf carrying `paneId`. If it was one half of a split, the split

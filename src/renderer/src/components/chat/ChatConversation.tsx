@@ -15,8 +15,19 @@ import Markdown from "./Markdown";
 // The conversation stream for one chat. Renders human messages, Spark's own
 // model/context activity, and worker steps as one ordered chat timeline.
 
+type MessageItem = Extract<ChatTimelineItem, { kind: "message" }>;
+type ToolItem = Extract<ChatTimelineItem, { kind: "tool" }>;
+type StepItem = Extract<ChatTimelineItem, { kind: "step" }>;
+type ActivityGroupItem = {
+  kind: "activity-group";
+  id: string;
+  at: string;
+  items: ToolItem[];
+};
+type ConversationItem = ChatTimelineItem | ActivityGroupItem;
+
 export default function ChatConversation({ run, cwd }: { run: RunState; cwd: string | null }) {
-  const items = useMemo(() => buildChatTimeline(run), [run]);
+  const items = useMemo(() => groupCompletedActivity(buildChatTimeline(run)), [run]);
   const openQuestion = useMemo(() => findOpenQuestion(run), [run]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -39,7 +50,9 @@ export default function ChatConversation({ run, cwd }: { run: RunState; cwd: str
               {item.kind === "message" ? (
                 <MessageTurn item={item} runId={run.id} openQuestionId={openQuestion?.id ?? null} />
               ) : item.kind === "tool" ? (
-                <ToolCallCard item={item} />
+                <ToolActivityRow item={item} />
+              ) : item.kind === "activity-group" ? (
+                <ActivityGroup item={item} />
               ) : (
                 <StepCard item={item} />
               )}
@@ -52,13 +65,42 @@ export default function ChatConversation({ run, cwd }: { run: RunState; cwd: str
   );
 }
 
-function timelineItemKey(item: ChatTimelineItem): string {
+function timelineItemKey(item: ConversationItem): string {
   return `${item.kind}:${item.id}`;
 }
 
-type MessageItem = Extract<ChatTimelineItem, { kind: "message" }>;
-type ToolItem = Extract<ChatTimelineItem, { kind: "tool" }>;
-type StepItem = Extract<ChatTimelineItem, { kind: "step" }>;
+function groupCompletedActivity(items: ChatTimelineItem[]): ConversationItem[] {
+  const grouped: ConversationItem[] = [];
+  let buffer: ToolItem[] = [];
+
+  const flush = () => {
+    if (buffer.length === 1) {
+      grouped.push(buffer[0]);
+    } else if (buffer.length > 1) {
+      const first = buffer[0];
+      const last = buffer[buffer.length - 1];
+      grouped.push({
+        kind: "activity-group",
+        id: `${first.id}:${last.id}:${buffer.length}`,
+        at: first.at,
+        items: buffer,
+      });
+    }
+    buffer = [];
+  };
+
+  for (const item of items) {
+    if (item.kind === "tool" && item.status === "completed" && item.tone === "done") {
+      buffer.push(item);
+      continue;
+    }
+    flush();
+    grouped.push(item);
+  }
+
+  flush();
+  return grouped;
+}
 
 const MessageTurn = React.memo(function MessageTurn({
   item,
@@ -398,28 +440,6 @@ function fileUrl(path: string): string {
   return `file:///${parts.map(encodeURIComponent).join("/")}`;
 }
 
-function ActivityShell({
-  color,
-  live,
-  label,
-  children,
-}: {
-  color: string;
-  live: boolean;
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div style={ACTIVITY_SHELL_STYLE}>
-      <div style={ACTIVITY_RAIL_STYLE} aria-hidden>
-        <StatusDot color={color} pulse={live} />
-        <span style={ACTIVITY_RAIL_LABEL_STYLE}>{label}</span>
-      </div>
-      <div style={ACTIVITY_CONTENT_STYLE}>{children}</div>
-    </div>
-  );
-}
-
 const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
   const live =
     item.status === "running" ||
@@ -433,169 +453,227 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
   ).length;
 
   return (
-    <ActivityShell color={color} live={live} label="STEP">
-      <div style={STEP_CARD_STYLE}>
-        <button
-          type="button"
-          onClick={() => setOpen((value) => !value)}
-          style={{
-            appearance: "none",
-            width: "100%",
-            border: "none",
-            background: "transparent",
-            color: "inherit",
-            display: "flex",
-            alignItems: "center",
-            gap: 9,
-            padding: "9px 10px",
-            cursor: "default",
-            textAlign: "left",
-          }}
-        >
-          <span
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: 9.5,
-              fontWeight: 700,
-              letterSpacing: "0.08em",
-              color: "var(--muted)",
-              flex: "0 0 auto",
-            }}
-          >
-            STEP {String(item.index).padStart(2, "0")}
+    <div style={STEP_CARD_STYLE}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        style={STEP_HEADER_STYLE}
+        title={item.goal || item.title}
+      >
+        <StatusDot color={color} pulse={live} size={6} />
+        <span style={STEP_INDEX_STYLE}>STEP {String(item.index).padStart(2, "0")}</span>
+        <span style={STEP_TITLE_STYLE}>{item.title}</span>
+        {item.goal && <span style={STEP_GOAL_INLINE_STYLE}>{item.goal}</span>}
+        {item.workers.length > 0 && (
+          <span style={STEP_COUNT_STYLE}>
+            {doneWorkers}/{item.workers.length}
           </span>
-          <span
-            style={{
-              flex: 1,
-              minWidth: 0,
-              fontSize: 12,
-              fontWeight: 600,
-              color: "var(--ink)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {item.title}
-          </span>
-          {item.workers.length > 0 && (
-            <span style={{ fontSize: 10, color: "var(--muted)", flex: "0 0 auto" }}>
-              {doneWorkers}/{item.workers.length}
-            </span>
-          )}
-          <Caret open={open} />
-        </button>
-        {open && (
-          <div
-            style={{
-              padding: "0 10px 10px",
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-            }}
-          >
-            {item.goal && (
-              <div style={{ fontSize: 12, lineHeight: 1.5, color: "var(--ink-dim)" }}>
-                {item.goal}
-              </div>
-            )}
-            {item.workers.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {item.workers.map((worker) => (
-                  <WorkerChip key={worker.id} worker={worker} />
-                ))}
-              </div>
-            )}
-          </div>
         )}
-      </div>
-    </ActivityShell>
+        <Caret open={open} />
+      </button>
+      {open && (
+        <div style={STEP_BODY_STYLE}>
+          {item.goal && (
+            <div style={{ fontSize: 12, lineHeight: 1.45, color: "var(--ink-dim)" }}>
+              {item.goal}
+            </div>
+          )}
+          {item.workers.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+              {item.workers.map((worker) => (
+                <WorkerChip key={worker.id} worker={worker} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 });
 
-const ToolCallCard = React.memo(function ToolCallCard({ item }: { item: ToolItem }) {
+const ActivityGroup = React.memo(function ActivityGroup({ item }: { item: ActivityGroupItem }) {
+  const [open, setOpen] = useState(false);
+  const summary = activityGroupSummary(item.items);
+
+  return (
+    <div style={ACTIVITY_GROUP_STYLE}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        style={ACTIVITY_GROUP_HEADER_STYLE}
+        title={summary.detail}
+      >
+        <StatusDot color="var(--muted-2)" pulse={false} size={5} />
+        <span style={TOOL_KIND_STYLE}>LOG</span>
+        <span style={ACTIVITY_GROUP_TITLE_STYLE}>{summary.title}</span>
+        {summary.detail && <span style={ACTIVITY_GROUP_DETAIL_STYLE}>{summary.detail}</span>}
+        <Caret open={open} />
+      </button>
+      {open && (
+        <div style={ACTIVITY_GROUP_BODY_STYLE}>
+          {item.items.map((tool) => (
+            <ToolActivityRow key={tool.id} item={tool} embedded />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
+
+const ToolActivityRow = React.memo(function ToolActivityRow({
+  item,
+  embedded = false,
+}: {
+  item: ToolItem;
+  embedded?: boolean;
+}) {
   const live = item.tone === "live";
   const [open, setOpen] = useState(live || item.status === "failed");
   const color = toolToneColor(item);
-  const statusLabel =
-    item.status === "started" ? "running" : item.status === "completed" ? "done" : "failed";
+  const statusLabel = toolStatusLabel(item.status);
+  const stats = compactToolStats(item);
+  const hasDetails = item.detail.length > 0 || item.files.length > 0 || item.meta.length > 0;
+  const loud = live || item.status === "failed";
 
   return (
-    <ActivityShell color={color} live={live} label={toolRailLabel(item.activity)}>
-      <div style={TOOL_CARD_STYLE}>
-        <button
-          type="button"
-          onClick={() => setOpen((value) => !value)}
-          style={TOOL_HEADER_STYLE}
-          title={item.detail || item.title}
-        >
-          <span style={TOOL_KIND_STYLE}>{toolKindLabel(item.activity)}</span>
-          <span style={TOOL_TITLE_STYLE}>{item.title}</span>
-          {item.detail && <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>}
+    <div
+      style={{
+        ...TOOL_ROW_STYLE,
+        ...(embedded ? TOOL_ROW_EMBEDDED_STYLE : {}),
+        borderColor: item.status === "failed"
+          ? "color-mix(in oklch, var(--danger) 38%, transparent)"
+          : live
+            ? "color-mix(in oklch, var(--accent) 34%, transparent)"
+            : open
+              ? "var(--rule-soft)"
+              : "transparent",
+        background: item.status === "failed"
+          ? "color-mix(in oklch, var(--danger) 9%, transparent)"
+          : live
+            ? "color-mix(in oklch, var(--accent) 7%, transparent)"
+            : open
+              ? "color-mix(in oklch, var(--ink) 3%, transparent)"
+              : "transparent",
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => {
+          if (hasDetails) setOpen((value) => !value);
+        }}
+        style={TOOL_ROW_BUTTON_STYLE}
+        title={item.detail || item.title}
+      >
+        <StatusDot color={color} pulse={live} size={5} />
+        <span style={TOOL_KIND_STYLE}>{toolKindLabel(item.activity)}</span>
+        <span style={TOOL_TITLE_STYLE}>{item.title}</span>
+        {item.detail && <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>}
+        {stats && <span style={TOOL_STATS_STYLE}>{stats}</span>}
+        {loud && (
           <span
             style={{
               ...TOOL_STATUS_STYLE,
               color,
-              borderColor: `color-mix(in oklch, ${color} 40%, transparent)`,
-              background: `color-mix(in oklch, ${color} 9%, transparent)`,
+              borderColor: `color-mix(in oklch, ${color} 38%, transparent)`,
+              background: `color-mix(in oklch, ${color} 8%, transparent)`,
             }}
           >
             {statusLabel}
           </span>
-          <Caret open={open} />
-        </button>
-        {open && (
-          <div style={TOOL_BODY_STYLE}>
-            {item.detail && <div style={TOOL_DETAIL_STYLE}>{item.detail}</div>}
-            {item.files.length > 0 && (
-              <div style={TOOL_FILE_LIST_STYLE}>
-                {item.files.map((file) => (
-                  <a
-                    key={file.path}
-                    href={fileUrl(file.path)}
-                    title={file.path}
-                    style={TOOL_FILE_STYLE}
-                  >
-                    <span style={TOOL_FILE_NAME_STYLE}>{file.name}</span>
-                    <span style={TOOL_FILE_SIZE_STYLE}>{formatBytes(file.size)}</span>
-                  </a>
-                ))}
-              </div>
-            )}
-            {item.meta.length > 0 && (
-              <div style={TOOL_META_GRID_STYLE}>
-                {item.meta.map((meta) => (
-                  <span key={`${meta.label}:${meta.value}`} style={TOOL_META_STYLE}>
-                    <span style={TOOL_META_LABEL_STYLE}>{meta.label}</span>
-                    <span style={TOOL_META_VALUE_STYLE}>{meta.value}</span>
-                  </span>
-                ))}
-              </div>
-            )}
-          </div>
         )}
-      </div>
-    </ActivityShell>
+        {hasDetails && <Caret open={open} />}
+      </button>
+      {open && hasDetails && <ToolDetails item={item} />}
+    </div>
   );
 });
+
+function ToolDetails({ item }: { item: ToolItem }) {
+  return (
+    <div style={TOOL_DETAILS_STYLE}>
+      {item.detail && <div style={TOOL_DETAIL_STYLE}>{item.detail}</div>}
+      {item.files.length > 0 && (
+        <div style={TOOL_FILE_LIST_STYLE}>
+          {item.files.map((file) => (
+            <a
+              key={file.path}
+              href={fileUrl(file.path)}
+              title={file.path}
+              style={TOOL_FILE_STYLE}
+            >
+              <span style={TOOL_FILE_NAME_STYLE}>{file.name}</span>
+              <span style={TOOL_FILE_SIZE_STYLE}>{formatBytes(file.size)}</span>
+            </a>
+          ))}
+        </div>
+      )}
+      {item.meta.length > 0 && (
+        <div style={TOOL_META_GRID_STYLE}>
+          {item.meta.map((meta) => (
+            <span key={`${meta.label}:${meta.value}`} style={TOOL_META_STYLE}>
+              <span style={TOOL_META_LABEL_STYLE}>{meta.label}</span>
+              <span style={TOOL_META_VALUE_STYLE}>{meta.value}</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function activityGroupSummary(items: ToolItem[]): { title: string; detail: string } {
+  const counts = {
+    context: 0,
+    manager: 0,
+    worker: 0,
+  };
+  for (const item of items) counts[item.activity] += 1;
+  const detail = [
+    counts.manager > 0 ? `${counts.manager} model` : null,
+    counts.worker > 0 ? `${counts.worker} worker` : null,
+    counts.context > 0 ? `${counts.context} context` : null,
+  ].filter((part): part is string => Boolean(part)).join(" / ");
+  return {
+    title: `${items.length} ${items.length === 1 ? "action" : "actions"} completed`,
+    detail,
+  };
+}
+
+function compactToolStats(item: ToolItem): string {
+  const duration = toolMetaValue(item, "Duration");
+  if (item.activity === "context") {
+    const files = toolMetaValue(item, "Files");
+    return files ? `${files} ${files === "1" ? "file" : "files"}` : "";
+  }
+  if (item.activity === "manager") {
+    const tokens = toolMetaValue(item, "Tokens");
+    return [duration, tokens].filter(Boolean).join(" / ");
+  }
+  const exit = toolMetaValue(item, "Exit");
+  return [duration, exit ? `exit ${exit}` : null].filter(Boolean).join(" / ");
+}
+
+function toolMetaValue(item: ToolItem, label: string): string | null {
+  return item.meta.find((meta) => meta.label === label)?.value ?? null;
+}
+
+function toolStatusLabel(status: ToolItem["status"]): string {
+  if (status === "started") return "running";
+  if (status === "failed") return "failed";
+  return "done";
+}
 
 function toolToneColor(item: ToolItem): string {
   if (item.tone === "failed") return "var(--danger)";
   if (item.tone === "live") return "var(--accent)";
   if (item.activity === "context") return "var(--info)";
-  return "var(--ok)";
+  return "var(--muted-2)";
 }
 
 function toolKindLabel(activity: ToolItem["activity"]): string {
-  if (activity === "manager") return "MODEL CALL";
-  if (activity === "worker") return "WORKER";
-  return "CONTEXT";
-}
-
-function toolRailLabel(activity: ToolItem["activity"]): string {
   if (activity === "manager") return "MODEL";
-  if (activity === "worker") return "RUN";
-  return "TOOL";
+  if (activity === "worker") return "WORKER";
+  return "CTX";
 }
 
 function formatBytes(bytes: number): string {
@@ -881,11 +959,11 @@ function WorkerChip({ worker }: { worker: ChatWorker }) {
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 6,
-        padding: "3px 8px",
+        gap: 5,
+        padding: "2px 7px",
         borderRadius: 999,
         border: "1px solid var(--rule-soft)",
-        background: "var(--panel-2)",
+        background: "color-mix(in oklch, var(--ink) 3%, transparent)",
         fontSize: 10,
         color: "var(--ink-dim)",
         maxWidth: 150,
@@ -949,16 +1027,16 @@ function ConversationEmpty() {
   );
 }
 
-function StatusDot({ color, pulse }: { color: string; pulse: boolean }) {
+function StatusDot({ color, pulse, size = 7 }: { color: string; pulse: boolean; size?: number }) {
   return (
     <span
       aria-hidden
       style={{
-        width: 7,
-        height: 7,
+        width: size,
+        height: size,
         borderRadius: 999,
         background: color,
-        flex: "0 0 7px",
+        flex: `0 0 ${size}px`,
         animation: pulse ? "spark-pulse 1.3s ease-in-out infinite" : undefined,
       }}
     />
@@ -1010,23 +1088,23 @@ const SCROLL_STYLE: React.CSSProperties = {
   overflowY: "auto",
   display: "block",
   background: "var(--panel)",
-  padding: "14px 14px 18px",
+  padding: "12px 12px 16px",
 };
 
 const CHAT_ITEM_STYLE: React.CSSProperties = {
-  marginBottom: 11,
+  marginBottom: 8,
 };
 
 const USER_BUBBLE_STYLE: React.CSSProperties = {
-  maxWidth: "86%",
-  background: "color-mix(in oklch, var(--accent) 16%, var(--panel))",
-  border: "1px solid var(--accent-edge)",
-  borderRadius: 10,
-  borderTopRightRadius: 3,
-  padding: "9px 11px",
+  maxWidth: "84%",
+  background: "color-mix(in oklch, var(--accent) 9%, var(--panel-2))",
+  border: "1px solid color-mix(in oklch, var(--accent) 26%, var(--rule-soft))",
+  borderRadius: 8,
+  borderTopRightRadius: 4,
+  padding: "8px 10px",
   color: "var(--ink)",
   fontSize: 13,
-  lineHeight: 1.5,
+  lineHeight: 1.45,
   whiteSpace: "pre-wrap",
   wordBreak: "break-word",
 };
@@ -1035,7 +1113,7 @@ const SPARK_TURN_STYLE: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
   alignItems: "flex-start",
-  gap: 6,
+  gap: 4,
 };
 
 const SPARK_HEADER_STYLE: React.CSSProperties = {
@@ -1050,23 +1128,21 @@ const SPARK_BUBBLE_STYLE: React.CSSProperties = {
   maxWidth: "94%",
   boxSizing: "border-box",
   color: "var(--ink)",
-  background: "color-mix(in oklch, var(--ink) 4%, var(--panel))",
-  border: "1px solid color-mix(in oklch, var(--rule) 72%, var(--rule-soft))",
-  borderRadius: 10,
-  borderTopLeftRadius: 3,
-  padding: "10px 11px",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.035)",
+  background: "transparent",
+  border: "none",
+  borderRadius: 0,
+  padding: "0 2px",
   overflowWrap: "anywhere",
 };
 
 const SYSTEM_PILL_STYLE: React.CSSProperties = {
   maxWidth: "90%",
-  padding: "4px 10px",
+  padding: "3px 8px",
   borderRadius: 999,
-  background: "color-mix(in oklch, var(--ink) 4%, transparent)",
-  border: "1px solid var(--rule-soft)",
+  background: "transparent",
+  border: "1px solid color-mix(in oklch, var(--rule-soft) 70%, transparent)",
   color: "var(--muted)",
-  fontSize: 10.5,
+  fontSize: 10,
   lineHeight: 1.35,
   textAlign: "center",
   overflow: "hidden",
@@ -1213,69 +1289,153 @@ const QUESTION_ERROR_STYLE: React.CSSProperties = {
   lineHeight: 1.4,
 };
 
-const ACTIVITY_SHELL_STYLE: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "46px minmax(0, 1fr)",
-  gap: 8,
-  alignItems: "start",
-  margin: "3px 0 12px",
+const STEP_CARD_STYLE: React.CSSProperties = {
+  border: "1px solid color-mix(in oklch, var(--rule-soft) 78%, transparent)",
+  borderRadius: 7,
+  background: "color-mix(in oklch, var(--bg) 42%, var(--panel))",
+  overflow: "hidden",
+  boxSizing: "border-box",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.02)",
 };
 
-const ACTIVITY_RAIL_STYLE: React.CSSProperties = {
+const STEP_HEADER_STYLE: React.CSSProperties = {
+  appearance: "none",
+  width: "100%",
+  minHeight: 31,
+  border: "none",
+  background: "transparent",
+  color: "inherit",
   display: "flex",
   alignItems: "center",
-  justifyContent: "flex-end",
-  gap: 5,
-  paddingTop: 11,
-  minWidth: 0,
+  gap: 8,
+  padding: "6px 9px",
+  cursor: "default",
+  textAlign: "left",
 };
 
-const ACTIVITY_RAIL_LABEL_STYLE: React.CSSProperties = {
+const STEP_INDEX_STYLE: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 9,
+  fontWeight: 750,
+  letterSpacing: "0.08em",
+  color: "var(--muted)",
+  flex: "0 0 auto",
+};
+
+const STEP_TITLE_STYLE: React.CSSProperties = {
+  flex: "0 1 auto",
   minWidth: 0,
+  color: "var(--ink)",
+  fontSize: 12,
+  fontWeight: 650,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
-  color: "var(--muted-2)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 8.5,
-  fontWeight: 800,
-  letterSpacing: "0.08em",
-  lineHeight: 1,
 };
 
-const ACTIVITY_CONTENT_STYLE: React.CSSProperties = {
+const STEP_GOAL_INLINE_STYLE: React.CSSProperties = {
+  flex: 1,
   minWidth: 0,
-};
-
-const STEP_CARD_STYLE: React.CSSProperties = {
-  border: "1px solid color-mix(in oklch, var(--rule-soft) 82%, transparent)",
-  borderRadius: 8,
-  background: "color-mix(in oklch, var(--bg) 54%, var(--panel))",
+  color: "var(--muted)",
+  fontSize: 11,
   overflow: "hidden",
-  boxSizing: "border-box",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.025)",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
 };
 
-const TOOL_CARD_STYLE: React.CSSProperties = {
-  border: "1px solid color-mix(in oklch, var(--rule-soft) 82%, transparent)",
-  borderRadius: 8,
-  background: "color-mix(in oklch, var(--bg) 58%, var(--panel))",
-  overflow: "hidden",
-  boxSizing: "border-box",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.025)",
+const STEP_COUNT_STYLE: React.CSSProperties = {
+  flex: "0 0 auto",
+  color: "var(--muted)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  fontVariantNumeric: "tabular-nums",
 };
 
-const TOOL_HEADER_STYLE: React.CSSProperties = {
+const STEP_BODY_STYLE: React.CSSProperties = {
+  padding: "0 9px 9px 23px",
+  display: "flex",
+  flexDirection: "column",
+  gap: 7,
+};
+
+const ACTIVITY_GROUP_STYLE: React.CSSProperties = {
+  margin: "1px 0",
+  borderRadius: 6,
+};
+
+const ACTIVITY_GROUP_HEADER_STYLE: React.CSSProperties = {
   appearance: "none",
   width: "100%",
-  minHeight: 32,
+  minHeight: 25,
+  border: "1px solid transparent",
+  borderRadius: 6,
+  background: "transparent",
+  color: "inherit",
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  padding: "3px 7px",
+  cursor: "default",
+  textAlign: "left",
+};
+
+const ACTIVITY_GROUP_TITLE_STYLE: React.CSSProperties = {
+  color: "var(--muted)",
+  fontSize: 11,
+  fontWeight: 600,
+  minWidth: 0,
+  flex: "0 1 auto",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const ACTIVITY_GROUP_DETAIL_STYLE: React.CSSProperties = {
+  flex: 1,
+  minWidth: 0,
+  color: "var(--muted-2)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 9.5,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
+};
+
+const ACTIVITY_GROUP_BODY_STYLE: React.CSSProperties = {
+  marginLeft: 12,
+  paddingLeft: 8,
+  borderLeft: "1px solid var(--rule-soft)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 1,
+};
+
+const TOOL_ROW_STYLE: React.CSSProperties = {
+  margin: "1px 0",
+  border: "1px solid transparent",
+  borderRadius: 6,
+  overflow: "hidden",
+  boxSizing: "border-box",
+  transition:
+    "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+};
+
+const TOOL_ROW_EMBEDDED_STYLE: React.CSSProperties = {
+  margin: 0,
+  borderRadius: 5,
+};
+
+const TOOL_ROW_BUTTON_STYLE: React.CSSProperties = {
+  appearance: "none",
+  width: "100%",
+  minHeight: 25,
   border: "none",
   background: "transparent",
   color: "inherit",
   display: "flex",
   alignItems: "center",
   gap: 7,
-  padding: "7px 8px",
+  padding: "3px 7px",
   cursor: "default",
   textAlign: "left",
 };
@@ -1310,29 +1470,38 @@ const TOOL_INLINE_DETAIL_STYLE: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
+const TOOL_STATS_STYLE: React.CSSProperties = {
+  color: "var(--muted)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 9.5,
+  flex: "0 0 auto",
+  whiteSpace: "nowrap",
+};
+
 const TOOL_STATUS_STYLE: React.CSSProperties = {
   flex: "0 0 auto",
   border: "1px solid var(--rule-soft)",
   borderRadius: 999,
-  padding: "1px 6px",
+  padding: "1px 5px",
   fontFamily: "var(--font-mono)",
-  fontSize: 8.5,
+  fontSize: 8,
   fontWeight: 700,
   letterSpacing: "0.04em",
   textTransform: "uppercase",
 };
 
-const TOOL_BODY_STYLE: React.CSSProperties = {
-  padding: "0 8px 9px",
+const TOOL_DETAILS_STYLE: React.CSSProperties = {
+  borderTop: "1px solid color-mix(in oklch, var(--rule-soft) 62%, transparent)",
+  padding: "7px 8px 8px 26px",
   display: "flex",
   flexDirection: "column",
-  gap: 8,
+  gap: 7,
 };
 
 const TOOL_DETAIL_STYLE: React.CSSProperties = {
   color: "var(--ink-dim)",
-  fontSize: 11.5,
-  lineHeight: 1.45,
+  fontSize: 11,
+  lineHeight: 1.4,
 };
 
 const TOOL_FILE_LIST_STYLE: React.CSSProperties = {
@@ -1346,12 +1515,12 @@ const TOOL_FILE_STYLE: React.CSSProperties = {
   gridTemplateColumns: "minmax(0, 1fr) auto",
   alignItems: "center",
   gap: 8,
-  minHeight: 28,
+  minHeight: 25,
   border: "1px solid var(--rule-soft)",
-  borderRadius: 7,
-  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
-  color: "var(--ink)",
-  padding: "0 8px",
+  borderRadius: 5,
+  background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+  color: "var(--ink-dim)",
+  padding: "0 7px",
   textDecoration: "none",
 };
 
@@ -1374,24 +1543,24 @@ const TOOL_FILE_SIZE_STYLE: React.CSSProperties = {
 const TOOL_META_GRID_STYLE: React.CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
-  gap: 6,
+  gap: 5,
 };
 
 const TOOL_META_STYLE: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
-  gap: 5,
-  border: "1px solid var(--rule-soft)",
-  borderRadius: 999,
-  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
-  padding: "2px 7px",
+  gap: 4,
+  border: "none",
+  borderRadius: 0,
+  background: "transparent",
+  padding: 0,
   maxWidth: "100%",
 };
 
 const TOOL_META_LABEL_STYLE: React.CSSProperties = {
   color: "var(--muted)",
   fontFamily: "var(--font-mono)",
-  fontSize: 9,
+  fontSize: 8.5,
   fontWeight: 700,
   letterSpacing: "0.04em",
   textTransform: "uppercase",
@@ -1399,7 +1568,8 @@ const TOOL_META_LABEL_STYLE: React.CSSProperties = {
 
 const TOOL_META_VALUE_STYLE: React.CSSProperties = {
   color: "var(--ink-dim)",
-  fontSize: 10.5,
+  fontFamily: "var(--font-mono)",
+  fontSize: 9.5,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",

@@ -17,6 +17,7 @@ export type CommandId =
   | "sidebar.toggle"
   | "search.open"
   | "terminal.toggle"
+  | "terminal.newBalancedPane"
   | "terminal.splitRight"
   | "terminal.splitDown"
   | "terminal.closePane"
@@ -98,6 +99,12 @@ export const COMMANDS: Command[] = [
     label: "Toggle terminal",
     group: "View",
     defaultChords: [mod("`")],
+  },
+  {
+    id: "terminal.newBalancedPane",
+    label: "New terminal pane (equal sizes)",
+    group: "Terminal",
+    defaultChords: [mod("t", { shift: true })],
   },
   {
     id: "terminal.splitRight",

@@ -1,14 +1,25 @@
 import { shell } from "electron";
 import { promises as fs } from "node:fs";
 import { basename, dirname, extname, join, relative } from "node:path";
-import type { FsEntry, FsFileContent, FsReadResult, PlanFile } from "@shared/types";
+import type { FileListResult, FsEntry, FsFileContent, FsReadResult, PlanFile } from "@shared/types";
 import { FS_READ_TEXT_LIMIT_BYTES } from "@shared/types";
 import { writeFileAtomic } from "./fs-atomic";
 
 const MAX_TEXT_FILE_BYTES = FS_READ_TEXT_LIMIT_BYTES;
+const MAX_FILE_LIST_FILES = 10000;
 const MAX_PLAN_FILES = 200;
 const MAX_PLAN_SCAN_DEPTH = 5;
 const SKIPPED_PLAN_DIRS = new Set([".git", "node_modules", "out", "dist", "build", ".next", ".turbo"]);
+const SKIPPED_FILE_LIST_DIRS = new Set([
+  ".git",
+  "node_modules",
+  "out",
+  "dist",
+  "build",
+  ".next",
+  ".turbo",
+  "coverage",
+]);
 
 export async function listDir(dir: string): Promise<FsEntry[]> {
   let entries: import("node:fs").Dirent[];
@@ -36,6 +47,18 @@ export async function listDir(dir: string): Promise<FsEntry[]> {
     return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
   });
   return out;
+}
+
+export async function listFiles(root: string): Promise<FileListResult> {
+  const files: FsEntry[] = [];
+  await collectFiles(root, files, root);
+  files.sort((a, b) =>
+    a.path.localeCompare(b.path, undefined, { sensitivity: "base" }),
+  );
+  return {
+    files,
+    truncated: files.length >= MAX_FILE_LIST_FILES,
+  };
 }
 
 async function isDirSafe(p: string): Promise<boolean> {
@@ -172,6 +195,40 @@ async function makeEntry(path: string, isDir: boolean): Promise<FsEntry> {
     isDir,
     ext: isDir ? undefined : extname(name).replace(/^\./, "").toLowerCase() || undefined,
   };
+}
+
+async function collectFiles(
+  dir: string,
+  files: FsEntry[],
+  root: string,
+): Promise<void> {
+  if (files.length >= MAX_FILE_LIST_FILES) return;
+
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR" || code === "EACCES") return;
+    throw err;
+  }
+
+  for (const entry of entries) {
+    if (files.length >= MAX_FILE_LIST_FILES) return;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (path !== root && SKIPPED_FILE_LIST_DIRS.has(entry.name)) continue;
+      await collectFiles(path, files, root);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    files.push({
+      name: entry.name,
+      path,
+      isDir: false,
+      ext: extname(entry.name).replace(/^\./, "").toLowerCase() || undefined,
+    });
+  }
 }
 
 async function collectMarkdownFiles(

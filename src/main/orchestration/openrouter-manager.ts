@@ -607,6 +607,40 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
     );
   }
 
+  // Cross-step plan hint left by the previous worker_result_review pass. When
+  // review proposed follow-up tasks that pointed past the end of the existing
+  // plan (e.g. "exploration done, now edit calculator.html" with stepIndex=2
+  // when only step 1 existed), we captured them rather than silently drop.
+  // Surface the proposed work to plan_analysis as a strong hint so it emits
+  // the missing steps. Without this section the run parked in reviewing/blocked.
+  if (isPlanAnalysis && run.autopilot?.pendingPlanHint) {
+    const hint = run.autopilot.pendingPlanHint;
+    lines.push(
+      "PLAN HINT (from latest worker_result_review)",
+      "The previous review pass proposed the follow-up tasks below but their stepIndex pointed past the end of the existing plan. Treat them as a strong hint about the work the next slice should cover. Use them as the basis for the next worker_batch step(s); refine titles/scope/runtime/effort as needed. Do not parrot them verbatim if a better decomposition is obvious.",
+      "",
+      `Review summary: ${truncate(hint.summary, 800)}`,
+      "",
+      ...hint.droppedTasks.map((t, i) =>
+        [
+          `${i + 1}. ${t.title}`,
+          `   description: ${truncate(t.description, 1200)}`,
+          t.allowedPaths && t.allowedPaths.length > 0
+            ? `   allowedPaths: ${t.allowedPaths.join(", ")}`
+            : "",
+          t.runtimePreference ? `   runtimePreference: ${t.runtimePreference}` : "",
+          t.taskClass ? `   taskClass: ${t.taskClass}` : "",
+          typeof t.requestedStepIndex === "number"
+            ? `   requestedStepIndex: ${t.requestedStepIndex}`
+            : "",
+        ]
+          .filter((line) => line.length > 0)
+          .join("\n"),
+      ),
+      "",
+    );
+  }
+
   const attachmentSummary = formatRunAttachmentSummary(run);
   if (attachmentSummary.length > 0) {
     lines.push(

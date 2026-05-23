@@ -353,6 +353,11 @@ export interface PlanFile {
   relativePath: string;
 }
 
+export interface FileListResult {
+  files: FsEntry[];
+  truncated: boolean;
+}
+
 export interface RenameFileInput {
   path: string;
   newName: string;
@@ -642,6 +647,25 @@ export interface AutopilotState {
    * run that finished without orchestration steps.
    */
   spawnedTerminals?: number;
+  /**
+   * Cross-step gap hint left by worker_result_review when it proposed
+   * follow-up tasks that pointed past the end of the existing plan. The next
+   * plan_analysis pass reads this so the proposed work survives, instead of
+   * being silently dropped and the run parking in `reviewing/blocked`.
+   * Cleared once plan_analysis emits new steps that consume it.
+   */
+  pendingPlanHint?: {
+    summary: string;
+    droppedTasks: Array<{
+      title: string;
+      description: string;
+      requestedStepIndex?: number;
+      allowedPaths?: string[];
+      runtimePreference?: string;
+      taskClass?: string;
+    }>;
+    createdAt: string;
+  };
 }
 
 export type HumanRunMessageAuthor = "user" | "spark" | "system";

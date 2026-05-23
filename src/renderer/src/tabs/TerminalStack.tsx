@@ -78,6 +78,7 @@ interface Props {
       paneId: string;
       direction: TerminalSplit["direction"];
       position: "before" | "after";
+      mode: "split" | "line";
     },
   ) => void;
   onClosePane: (tabId: TabId, paneId: string) => void;
@@ -304,6 +305,7 @@ function TerminalStack({
         paneId: string;
         direction: TerminalSplit["direction"];
         position: "before" | "after";
+        mode: "split" | "line";
       },
     ) => {
       moveRef.current(payload, targetTabId, target);
@@ -405,6 +407,7 @@ interface TerminalTabPaneProps {
       paneId: string;
       direction: TerminalSplit["direction"];
       position: "before" | "after";
+      mode: "split" | "line";
     },
   ) => void;
 }
@@ -444,16 +447,15 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
     [setTabRoot, tab.id],
   );
 
-  // The base layout is the layout the pointer should target: for same-tab
-  // moves it is the tree with the dragged pane removed, and for cross-tab
-  // moves it is the untouched destination tree. Preview and final drop both
-  // derive from intents computed against this layout.
+  // The rendered base omits the dragged pane, but hit-testing uses the
+  // original geometry so a same-tab drag still targets the row/cell the user
+  // is pointing at instead of a sibling that expanded into the empty space.
   const layoutRoot = useMemo((): PaneNode | null => {
     if (!drag || drag.tabId !== tab.id) return tab.root;
     return removeLeaf(tab.root, drag.paneId);
   }, [tab.root, tab.id, drag]);
 
-  const baseLayout = useMemo(() => layoutTree(layoutRoot), [layoutRoot]);
+  const baseLayout = useMemo(() => layoutTree(tab.root), [tab.root]);
 
   const updateDropIntentAtPoint = useCallback(
     (pointLike: { clientX: number; clientY: number }): DropIntent | null => {
@@ -539,13 +541,15 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
       ({ kind: "leaf", paneId: drag.paneId } satisfies TerminalLeaf);
     const base = drag.tabId === tab.id ? layoutRoot : tab.root;
     if (!base) return null;
-    return insertLeafAtLeaf(
+    const next = insertLeafAtLeaf(
       base,
       dropIntent.paneId,
       dropIntent.direction,
       moving,
       dropIntent.position,
+      { rebalanceLine: dropIntent.mode === "line" },
     );
+    return next === base ? null : next;
   }, [drag, dropIntent, tab.root, tab.id, layoutRoot]);
 
   const displayRoot = dropPreviewRoot ?? layoutRoot;
@@ -563,6 +567,11 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
         : null;
     return { flowLeaves: ls, flowHandles: hs, dropSlotRect: slot };
   }, [displayRoot, drag, dropPreviewRoot]);
+
+  const resizeIntersections = useMemo(
+    () => buildResizeIntersections(flowHandles),
+    [flowHandles],
+  );
 
   const hideDraggedPane = !!drag && (drag.tabId === tab.id || !!dropPreviewRoot);
   const layoutAnimating = !!drag && (drag.tabId === tab.id || !!dropPreviewRoot);
@@ -734,6 +743,14 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
           onRatioChange={(ratio) => onRatioChange(tab.id, handle.path, ratio)}
         />
       ))}
+      {resizeIntersections.map((intersection) => (
+        <ResizeIntersectionGrip
+          key={intersection.key}
+          intersection={intersection}
+          getContainer={() => getTabRoot(tab.id)}
+          onRatioChange={(path, ratio) => onRatioChange(tab.id, path, ratio)}
+        />
+      ))}
     </div>
   );
 });
@@ -765,15 +782,41 @@ interface HandleBox {
   rect: FracRect;
 }
 
+interface ResizeIntersection {
+  key: string;
+  x: number;
+  y: number;
+  xHandles: HandleBox[];
+  yHandles: HandleBox[];
+}
+
 interface DropIntent {
   paneId: string;
   direction: TerminalSplit["direction"];
   position: "before" | "after";
+  mode: "split" | "line";
 }
 
 // Invisible at rest; a soft groove appears on hover, accent while dragging.
 const HANDLE_HIT = 11;
+const INTERSECTION_GRIP = 14;
 const PANE_GAP_PX = 3;
+const LINE_DROP_EDGE_PX = 12;
+const RESIZE_SNAP_STEP = 1 / 24;
+const RESIZE_SNAP_PX = 8;
+const RESIZE_SNAP_RATIOS = [
+  1 / 6,
+  1 / 5,
+  1 / 4,
+  1 / 3,
+  2 / 5,
+  1 / 2,
+  3 / 5,
+  2 / 3,
+  3 / 4,
+  4 / 5,
+  5 / 6,
+];
 const MIN_RATIO = 0.05;
 const MAX_RATIO = 0.95;
 
@@ -817,6 +860,68 @@ function layoutTree(root: PaneNode | null): { leaves: LeafBox[]; handles: Handle
   return { leaves, handles };
 }
 
+function buildResizeIntersections(handles: HandleBox[]): ResizeIntersection[] {
+  const verticalLines = handles.filter((handle) => handle.direction === "horizontal");
+  const horizontalLines = handles.filter((handle) => handle.direction === "vertical");
+  const groups = new Map<string, ResizeIntersection>();
+  for (const horizontalHandle of verticalLines) {
+    const x = handleBoundary(horizontalHandle);
+    const yStart = horizontalHandle.rect.top;
+    const yEnd = horizontalHandle.rect.top + horizontalHandle.rect.height;
+    for (const verticalHandle of horizontalLines) {
+      const y = handleBoundary(verticalHandle);
+      const xStart = verticalHandle.rect.left;
+      const xEnd = verticalHandle.rect.left + verticalHandle.rect.width;
+      if (
+        x >= xStart - 0.001 &&
+        x <= xEnd + 0.001 &&
+        y >= yStart - 0.001 &&
+        y <= yEnd + 0.001
+      ) {
+        const key = `${coordinateKey(x)}:${coordinateKey(y)}`;
+        let intersection = groups.get(key);
+        if (!intersection) {
+          intersection = { key, x, y, xHandles: [], yHandles: [] };
+          groups.set(key, intersection);
+        }
+        addUniqueHandle(intersection.xHandles, horizontalHandle);
+        addUniqueHandle(intersection.yHandles, verticalHandle);
+      }
+    }
+  }
+  return [...groups.values()].map((intersection) => ({
+    ...intersection,
+    key: intersectionKey(intersection),
+  }));
+}
+
+function handleBoundary(handle: HandleBox): number {
+  return handle.direction === "horizontal"
+    ? handle.rect.left + handle.rect.width * handle.ratio
+    : handle.rect.top + handle.rect.height * handle.ratio;
+}
+
+function coordinateKey(value: number): string {
+  return String(Math.round(value * 10000));
+}
+
+function addUniqueHandle(handles: HandleBox[], handle: HandleBox): void {
+  const key = handlePathKey(handle);
+  if (!handles.some((item) => handlePathKey(item) === key)) {
+    handles.push(handle);
+  }
+}
+
+function intersectionKey(intersection: Pick<ResizeIntersection, "xHandles" | "yHandles">): string {
+  const xKeys = intersection.xHandles.map(handlePathKey).sort().join(",");
+  const yKeys = intersection.yHandles.map(handlePathKey).sort().join(",");
+  return `x:${xKeys}|y:${yKeys}`;
+}
+
+function handlePathKey(handle: HandleBox): string {
+  return handle.path.join("/") || "root";
+}
+
 // Inset each pane slightly so rounded cards breathe (macOS split style).
 function paneFrameStyle(rect: FracRect): React.CSSProperties {
   const g = PANE_GAP_PX;
@@ -835,6 +940,15 @@ function paneFrameClientRect(container: DOMRect, rect: FracRect): DOMRect {
   const width = Math.max(0, rect.width * container.width - gap * 2);
   const height = Math.max(0, rect.height * container.height - gap * 2);
   return new DOMRect(left, top, width, height);
+}
+
+function leafCellClientRect(container: DOMRect, rect: FracRect): DOMRect {
+  return new DOMRect(
+    container.left + rect.left * container.width,
+    container.top + rect.top * container.height,
+    rect.width * container.width,
+    rect.height * container.height,
+  );
 }
 
 function acceptsTerminalPane(event: React.DragEvent): boolean {
@@ -871,20 +985,30 @@ function dropIntentFromBaseLayout(
   if (leaves.length === 0) return null;
   if (!pointInsideRect(point.clientX, point.clientY, containerRect)) return null;
 
-  let best: { box: LeafBox; rect: DOMRect; distance: number } | null = null;
+  let best: { box: LeafBox; rect: DOMRect; distance: number; contains: boolean } | null = null;
   for (const box of leaves) {
     if (dragPayload.tabId === targetTabId && dragPayload.paneId === box.leaf.paneId) {
       continue;
     }
-    const rect = paneFrameClientRect(containerRect, box.rect);
+    const rect = leafCellClientRect(containerRect, box.rect);
     const contains = pointInsideRect(point.clientX, point.clientY, rect);
     const distance = contains ? -1 : distanceToRectSq(point.clientX, point.clientY, rect);
     if (!best || distance < best.distance) {
-      best = { box, rect, distance };
+      best = { box, rect, distance, contains };
     }
   }
   if (!best) return null;
-  return dropIntentFromRect(best.rect, point.clientX, point.clientY, best.box.leaf.paneId);
+  const mode =
+    best.contains && isNearInsertEdge(best.rect, point.clientX, point.clientY)
+      ? "line"
+      : "split";
+  return dropIntentFromRect(
+    best.rect,
+    point.clientX,
+    point.clientY,
+    best.box.leaf.paneId,
+    mode,
+  );
 }
 
 function dropIntentFromRect(
@@ -892,6 +1016,7 @@ function dropIntentFromRect(
   clientX: number,
   clientY: number,
   paneId: string,
+  mode: DropIntent["mode"] = "split",
 ): DropIntent {
   const x = rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5;
   const y = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
@@ -903,15 +1028,15 @@ function dropIntentFromRect(
   ].sort((a, b) => a.value - b.value);
   const edge = distances[0]?.edge ?? "right";
   if (edge === "left") {
-    return { paneId, direction: "horizontal", position: "before" };
+    return { paneId, direction: "horizontal", position: "before", mode };
   }
   if (edge === "right") {
-    return { paneId, direction: "horizontal", position: "after" };
+    return { paneId, direction: "horizontal", position: "after", mode };
   }
   if (edge === "top") {
-    return { paneId, direction: "vertical", position: "before" };
+    return { paneId, direction: "vertical", position: "before", mode };
   }
-  return { paneId, direction: "vertical", position: "after" };
+  return { paneId, direction: "vertical", position: "after", mode };
 }
 
 function sameDropIntent(a: DropIntent | null, b: DropIntent | null): boolean {
@@ -920,7 +1045,8 @@ function sameDropIntent(a: DropIntent | null, b: DropIntent | null): boolean {
   return (
     a.paneId === b.paneId &&
     a.direction === b.direction &&
-    a.position === b.position
+    a.position === b.position &&
+    a.mode === b.mode
   );
 }
 
@@ -932,6 +1058,16 @@ function distanceToRectSq(x: number, y: number, rect: DOMRect): number {
   const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
   const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
   return dx * dx + dy * dy;
+}
+
+function isNearInsertEdge(rect: DOMRect, clientX: number, clientY: number): boolean {
+  const edgeDistance = Math.min(
+    Math.abs(clientX - rect.left),
+    Math.abs(rect.right - clientX),
+    Math.abs(clientY - rect.top),
+    Math.abs(rect.bottom - clientY),
+  );
+  return edgeDistance <= LINE_DROP_EDGE_PX;
 }
 
 // Accent frame drawn above the xterm canvas. Sits on a raised z-index pane so
@@ -1128,6 +1264,49 @@ interface ResizeHandleProps {
   onRatioChange: (ratio: number) => void;
 }
 
+function ratioForHandle(
+  handle: HandleBox,
+  container: DOMRect,
+  clientX: number,
+  clientY: number,
+): number | null {
+  if (handle.direction === "horizontal") {
+    const splitLeft = container.left + handle.rect.left * container.width;
+    const splitWidth = handle.rect.width * container.width;
+    if (splitWidth <= 0) return null;
+    return snapResizeRatio((clientX - splitLeft) / splitWidth, splitWidth);
+  }
+
+  const splitTop = container.top + handle.rect.top * container.height;
+  const splitHeight = handle.rect.height * container.height;
+  if (splitHeight <= 0) return null;
+  return snapResizeRatio((clientY - splitTop) / splitHeight, splitHeight);
+}
+
+function snapResizeRatio(rawRatio: number, splitPixels: number): number {
+  const clamped = Math.min(MAX_RATIO, Math.max(MIN_RATIO, rawRatio));
+  const snapDistance = splitPixels > 0 ? RESIZE_SNAP_PX / splitPixels : 0;
+  const snappedMajor = nearestRatio(clamped, RESIZE_SNAP_RATIOS);
+  if (Math.abs(clamped - snappedMajor) <= snapDistance) {
+    return snappedMajor;
+  }
+  const gridRatio = Math.round(clamped / RESIZE_SNAP_STEP) * RESIZE_SNAP_STEP;
+  return Math.min(MAX_RATIO, Math.max(MIN_RATIO, gridRatio));
+}
+
+function nearestRatio(value: number, ratios: number[]): number {
+  let best = ratios[0];
+  let bestDistance = Math.abs(value - best);
+  for (let i = 1; i < ratios.length; i++) {
+    const distance = Math.abs(value - ratios[i]);
+    if (distance < bestDistance) {
+      best = ratios[i];
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
 // A draggable divider between two panes. Invisible until hover; then a recessed
 // groove that works on any theme. Accent only while actively resizing.
 function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps) {
@@ -1147,7 +1326,7 @@ function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps
     e.stopPropagation();
     draggingRef.current = true;
     setDragging(true);
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    e.currentTarget.setPointerCapture?.(e.pointerId);
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1155,25 +1334,14 @@ function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps
     const container = getContainer();
     if (!container) return;
     const cr = container.getBoundingClientRect();
-    let next: number;
-    if (isHorizontal) {
-      const splitLeft = cr.left + rect.left * cr.width;
-      const splitWidth = rect.width * cr.width;
-      if (splitWidth <= 0) return;
-      next = (e.clientX - splitLeft) / splitWidth;
-    } else {
-      const splitTop = cr.top + rect.top * cr.height;
-      const splitHeight = rect.height * cr.height;
-      if (splitHeight <= 0) return;
-      next = (e.clientY - splitTop) / splitHeight;
-    }
-    onRatioChange(Math.min(MAX_RATIO, Math.max(MIN_RATIO, next)));
+    const next = ratioForHandle(handle, cr, e.clientX, e.clientY);
+    if (next !== null) onRatioChange(next);
   };
 
   const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
     draggingRef.current = false;
     setDragging(false);
-    (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
   };
 
   const showLine = dragging || hover;
@@ -1240,6 +1408,114 @@ function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps
       />
       {dragging ? (
         <div style={{ position: "fixed", inset: 0, zIndex: 9999, cursor }} />
+      ) : null}
+    </div>
+  );
+}
+
+interface ResizeIntersectionGripProps {
+  intersection: ResizeIntersection;
+  getContainer: () => HTMLDivElement | null;
+  onRatioChange: (path: PanePath, ratio: number) => void;
+}
+
+function ResizeIntersectionGrip({
+  intersection,
+  getContainer,
+  onRatioChange,
+}: ResizeIntersectionGripProps) {
+  const draggingRef = useRef(false);
+  const [dragging, setDragging] = useState(false);
+  const [hover, setHover] = useState(false);
+
+  const updateBoth = (clientX: number, clientY: number) => {
+    const container = getContainer();
+    if (!container) return;
+    const cr = container.getBoundingClientRect();
+    for (const handle of intersection.xHandles) {
+      const ratio = ratioForHandle(handle, cr, clientX, clientY);
+      if (ratio !== null) onRatioChange(handle.path, ratio);
+    }
+    for (const handle of intersection.yHandles) {
+      const ratio = ratioForHandle(handle, cr, clientX, clientY);
+      if (ratio !== null) onRatioChange(handle.path, ratio);
+    }
+  };
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    draggingRef.current = true;
+    setDragging(true);
+    updateBoth(e.clientX, e.clientY);
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!draggingRef.current) return;
+    updateBoth(e.clientX, e.clientY);
+  };
+
+  const onPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    draggingRef.current = false;
+    setDragging(false);
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+  };
+
+  const active = dragging || hover;
+  const dotColor = active ? "var(--accent)" : "var(--muted)";
+
+  return (
+    <div
+      aria-hidden
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        position: "absolute",
+        zIndex: dragging ? 11 : hover ? 10 : 5,
+        left: `calc(${pct(intersection.x)} - ${INTERSECTION_GRIP / 2}px)`,
+        top: `calc(${pct(intersection.y)} - ${INTERSECTION_GRIP / 2}px)`,
+        width: INTERSECTION_GRIP,
+        height: INTERSECTION_GRIP,
+        borderRadius: 4,
+        touchAction: "none",
+        cursor: dragging ? "grabbing" : "grab",
+        display: "grid",
+        gridTemplateColumns: "repeat(2, 3px)",
+        gridTemplateRows: "repeat(2, 3px)",
+        gap: 2,
+        alignContent: "center",
+        justifyContent: "center",
+        background: active
+          ? "color-mix(in oklch, var(--accent) 16%, var(--panel))"
+          : "color-mix(in oklch, var(--panel) 82%, transparent)",
+        border: active
+          ? "1px solid color-mix(in oklch, var(--accent) 58%, transparent)"
+          : "1px solid color-mix(in oklch, var(--rule-strong) 74%, transparent)",
+        boxShadow: dragging ? "0 0 12px var(--accent-glow)" : "none",
+        opacity: active ? 1 : 0.58,
+        transition:
+          "opacity var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      {[0, 1, 2, 3].map((index) => (
+        <span
+          key={index}
+          style={{
+            width: 3,
+            height: 3,
+            borderRadius: 999,
+            background: dotColor,
+            pointerEvents: "none",
+          }}
+        />
+      ))}
+      {dragging ? (
+        <div style={{ position: "fixed", inset: 0, zIndex: 9999, cursor: "grabbing" }} />
       ) : null}
     </div>
   );

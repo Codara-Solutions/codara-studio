@@ -809,11 +809,22 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
   // worker reports as evidence.
   run = await resolveActiveBrakeAndReplan(run, cwd);
   if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
+  // Cross-step plan hint: when worker_result_review tried to queue work into
+  // a non-existent step (a real-world Grok-4.3 behavior — exploration done,
+  // model wants to add the "now implement it" step itself), applySparkManagerDecision
+  // captured those proposed tasks as a plan hint instead of silently dropping.
+  // Re-invoke plan_analysis so the manager extends the plan with that hint in
+  // context. Without this re-entry the run parks in reviewing/blocked forever.
+  let tasks = pickAutopilotTasks(run);
+  if (tasks.length === 0 && run.autopilot?.pendingPlanHint && !needsStepPlanning(run)) {
+    run = (await askOpenRouterManager(run, cwd, "plan_analysis")) ?? run;
+    if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
+    tasks = pickAutopilotTasks(run);
+  }
   // After advancing past a worker (and possibly a brake), the next active step
   // is usually a worker_batch that has plannedAgents but no worker tasks yet.
   // Call step_planning so the manager turns those plannedAgents into worker
   // task prompts before we try to launch.
-  let tasks = pickAutopilotTasks(run);
   if (tasks.length === 0 && needsStepPlanning(run)) {
     const fastPathPlan = await tryTrivialFastPathStepPlanning(run);
     run = fastPathPlan ?? ((await askOpenRouterManager(run, cwd, "step_planning")) ?? run);
@@ -1330,7 +1341,7 @@ function managerStepText(step: SparkManagerStepDecision): string {
     step.title,
     step.goal,
     ...(step.acceptanceCriteria ?? []),
-    ...(step.plannedAgents ?? []).map((agent) => agent.summary),
+    ...(step.plannedAgents ?? []).map((agent) => [agent.label, agent.summary].filter(Boolean).join(" ")),
   ].join(" ");
 }
 
@@ -1352,19 +1363,13 @@ async function maybeEnforceExplicitParallelStagingPlan(
   if (decision.status !== "run_workers") return null;
   if (decision.steps.length === 0) return null;
 
+  const sourceIntent = explicitParallelSourceIntentForMode(run, mode);
+  if (mode === "chat" && !hasExplicitParallelAgentIntent(sourceIntent)) return null;
+
   const intent = [
-    planIntentTextForRun(run),
+    sourceIntent,
     decision.summary,
-    decision.steps
-      .map((step) =>
-        [
-          step.title,
-          step.goal,
-          ...step.acceptanceCriteria,
-          ...step.plannedAgents.map((agent) => [agent.label, agent.summary].join(" ")),
-        ].join("\n"),
-      )
-      .join("\n"),
+    decision.steps.map(managerStepText).join("\n"),
   ].join("\n");
   if (!hasExplicitParallelAgentIntent(intent) || !hasUiLogicSplitIntent(intent)) return null;
 
@@ -1431,6 +1436,15 @@ async function maybeEnforceExplicitParallelStagingPlan(
       taskComplexity: decision.taskComplexity ?? "standard",
     },
   };
+}
+
+function explicitParallelSourceIntentForMode(run: RunState, mode: SparkCall["mode"]): string {
+  if (mode !== "chat") return planIntentTextForRun(run);
+
+  // A chat follow-up is an amendment to the current run, not a fresh replay of
+  // the original plan. Only re-apply the explicit parallel staging override
+  // when the latest user turn itself asks for parallel agents.
+  return latestUserRunMessageText(run);
 }
 
 async function maybeAppendMissingExplicitParallelIntegratorStep(run: RunState): Promise<RunState | null> {
@@ -1607,6 +1621,15 @@ function planIntentTextForRun(run: RunState): string {
     .filter((message) => message.author === "user" && (message.kind === "note" || message.kind === "answer"))
     .map((message) => message.message);
   return [plan?.rawContent ?? "", ...notes].join("\n");
+}
+
+function latestUserRunMessageText(run: RunState): string {
+  return (
+    [...run.humanMessages]
+      .reverse()
+      .find((message) => message.author === "user" && (message.kind === "note" || message.kind === "answer"))
+      ?.message ?? ""
+  );
 }
 
 function hasExplicitParallelAgentIntent(text: string): boolean {
@@ -3098,6 +3121,11 @@ async function applySparkManagerDecision(
 
   let createdTaskCount = 0;
   let droppedTaskCount = 0;
+  // Review-mode tasks that target a non-existent step are not really drops —
+  // they are cross-step gap proposals (e.g. "exploration is done, now edit
+  // file X"). Capture them as a plan hint so the next plan_analysis pass
+  // extends the plan instead of the run silently parking in reviewing/blocked.
+  const crossStepHintTasks: SparkManagerTaskDecision[] = [];
   for (const task of decision.tasks) {
     let stepId = resolveTaskStepId(latest, task.stepIndex, stepIds);
     if (!stepId && mode === "worker_result_review") {
@@ -3109,6 +3137,9 @@ async function applySparkManagerDecision(
     }
     if (!stepId) {
       droppedTaskCount += 1;
+      if (mode === "worker_result_review") {
+        crossStepHintTasks.push(task);
+      }
       await appendEvent({
         workspaceId: latest.workspaceId,
         runId: latest.id,
@@ -3118,6 +3149,7 @@ async function applySparkManagerDecision(
           title: task.title,
           requestedStepIndex: task.stepIndex,
           completedStepCount: latest.steps.filter((step) => isTerminalStepStatus(step.status)).length,
+          capturedAsPlanHint: mode === "worker_result_review",
         },
       });
       continue;
@@ -3147,6 +3179,61 @@ async function applySparkManagerDecision(
   }
 
   latest = await requireRun(latest.id);
+
+  // Persist or clear the cross-step plan hint. Review-mode drops become hints
+  // for the next plan_analysis call; any successful plan_analysis pass that
+  // emits new steps consumes the prior hint (the gap is now planned for).
+  if (crossStepHintTasks.length > 0) {
+    latest = await commitRunChange(latest, {
+      type: "autopilot.plan_hint_captured",
+      message: `Captured ${crossStepHintTasks.length} cross-step task hint(s) from review for next plan_analysis`,
+      payload: {
+        summary: decision.summary,
+        taskTitles: crossStepHintTasks.map((t) => t.title),
+      },
+      mutate: (draft, timestamp) => {
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+          pendingPlanHint: {
+            summary: decision.summary,
+            droppedTasks: crossStepHintTasks.map((t) => ({
+              title: t.title,
+              description: t.description,
+              requestedStepIndex: t.stepIndex,
+              allowedPaths: t.allowedPaths,
+              runtimePreference: t.runtimePreference,
+              taskClass: t.taskClass,
+            })),
+            createdAt: timestamp,
+          },
+          updatedAt: timestamp,
+        };
+        draft.updatedAt = timestamp;
+      },
+    });
+  } else if (
+    (mode === "plan_analysis" || mode === "chat") &&
+    steps.length > 0 &&
+    latest.autopilot?.pendingPlanHint
+  ) {
+    latest = await commitRunChange(latest, {
+      type: "autopilot.plan_hint_consumed",
+      message: "Cleared pending plan hint after plan_analysis emitted new steps",
+      payload: {
+        consumedTaskTitles: latest.autopilot.pendingPlanHint.droppedTasks.map((t) => t.title),
+      },
+      mutate: (draft, timestamp) => {
+        if (!draft.autopilot) return;
+        const { pendingPlanHint: _consumed, ...rest } = draft.autopilot;
+        draft.autopilot = {
+          ...rest,
+          updatedAt: timestamp,
+        };
+        draft.updatedAt = timestamp;
+      },
+    });
+  }
+
   await appendEvent({
     workspaceId: latest.workspaceId,
     runId: latest.id,
@@ -3159,6 +3246,7 @@ async function applySparkManagerDecision(
       tasksRequested: decision.tasks.length,
       tasksCreated: createdTaskCount,
       tasksDropped: droppedTaskCount,
+      planHintCaptured: crossStepHintTasks.length,
       runtimes: decision.tasks.map((task) => task.runtimePreference),
     },
   });
@@ -4671,6 +4759,22 @@ async function maybeReconAsCompletionRefusal(
     (task) => task.taskClass !== "verifier",
   );
   if (nonVerifierTasks.length === 0) return null;
+  // Brake-bypass: if the very next non-terminal step after the currently
+  // reviewing one is a brake, the recon-with-no-edits shape is EXPECTED —
+  // the brake exists precisely to trigger plan_analysis re-entry with the
+  // recon evidence so an implementation step can be planned next. Refusing
+  // here keeps the recon step stuck in `reviewing`, the brake never becomes
+  // active, and the autopilot loops on worker_result_review until the 2x
+  // refusal cap force-accepts. That looks like a hang to the user and can
+  // also trip step_planning into asking a generic "what should I do" question
+  // because the only un-terminated step has plannedAgents already satisfied.
+  const reviewingStepIdx = run.steps.findIndex((step) => step.status === "reviewing");
+  if (reviewingStepIdx >= 0) {
+    const nextStep = run.steps[reviewingStepIdx + 1];
+    if (nextStep && (nextStep.kind ?? "worker_batch") === "brake" && !isTerminalStepStatus(nextStep.status)) {
+      return null;
+    }
+  }
   let anyChanges = false;
   for (const attempt of run.workerAttempts) {
     const task = run.workerTasks.find((t) => t.id === attempt.workerTaskId);
@@ -5491,10 +5595,21 @@ function needsStepPlanning(run: RunState): boolean {
   if (!active) return false;
   if ((active.kind ?? "worker_batch") !== "worker_batch") return false;
   if ((active.plannedAgents?.length ?? 0) === 0) return false;
+  // A step already in `reviewing` has its tasks done — step_planning has
+  // nothing to plan and the model will either return tasks=[] or, worse,
+  // fall back to status=ask_user with a generic "Please clarify the first
+  // concrete task" question. The reviewing state is handled by
+  // worker_result_review and the brake-resolution path, not by replanning.
+  if (active.status === "reviewing") return false;
+  const stepTasks = run.workerTasks.filter((task) => task.stepId === active.id);
+  // If we already have at least one task per plannedAgent for this step,
+  // there is nothing to plan — even if those tasks are accepted/in-progress
+  // rather than queueable. This guards against the autopilot looping into
+  // step_planning after the only task has finished and the step is sitting
+  // in `reviewing` waiting for the manager-review pass.
+  if (stepTasks.length >= (active.plannedAgents?.length ?? 0)) return false;
   const queueable: WorkerTaskStatus[] = ["created", "queued", "retry_queued"];
-  const hasQueueable = run.workerTasks.some(
-    (task) => task.stepId === active.id && queueable.includes(task.status),
-  );
+  const hasQueueable = stepTasks.some((task) => queueable.includes(task.status));
   return !hasQueueable;
 }
 

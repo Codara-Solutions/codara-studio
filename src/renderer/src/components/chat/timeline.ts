@@ -311,9 +311,7 @@ function managerModeLabel(mode: SparkCall["mode"]): string {
 }
 
 function managerModeCompletedDetail(call: SparkCall): string {
-  const duration = formatDurationShort(call.durationMs);
-  if (duration) return `Completed in ${duration}`;
-  return "Completed";
+  return call.mode === "final_summary" ? "Final response ready" : "";
 }
 
 function formatDurationShort(ms: number | undefined): string | null {

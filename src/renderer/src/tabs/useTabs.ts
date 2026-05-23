@@ -71,24 +71,54 @@ function titleFromUrl(url: string): string {
   }
 }
 
-// Build a balanced split tree from N leaves so a batch of spawned agent
-// terminals lands as a grid (2 -> side by side, 4 -> 2x2, ...) with every
-// pane visible at once. Halves the list at each level alternating split
-// direction; the ratio follows the leaf-count split so panes come out
-// roughly equal-area. Callers must pass at least one leaf.
-function buildPaneGrid(
-  leaves: TerminalLeaf[],
+// Build a readable row-major grid for batches of agent terminals. The old
+// recursive split kept equal area but produced awkward mixed columns for
+// counts like 5; rows keep the scan path predictable (5 -> 3 over 2).
+function buildPaneGrid(leaves: TerminalLeaf[]): PaneNode {
+  if (leaves.length <= 1) return leaves[0];
+  const columns = Math.ceil(Math.sqrt(leaves.length));
+  const rows = Math.ceil(leaves.length / columns);
+  const rowSizes = distributeGridRows(leaves.length, rows);
+  let index = 0;
+  const rowItems = rowSizes.map((size) => {
+    const rowLeaves = leaves.slice(index, index + size);
+    index += size;
+    return {
+      node: buildWeightedPaneLine(
+        rowLeaves.map((item) => ({ node: item, weight: 1 })),
+        "horizontal",
+      ),
+      weight: size,
+    };
+  });
+  return buildWeightedPaneLine(rowItems, "vertical");
+}
+
+function distributeGridRows(count: number, rows: number): number[] {
+  const base = Math.floor(count / rows);
+  const extra = count % rows;
+  return Array.from({ length: rows }, (_, index) => base + (index < extra ? 1 : 0));
+}
+
+function buildWeightedPaneLine(
+  items: Array<{ node: PaneNode; weight: number }>,
   direction: TerminalSplit["direction"],
 ): PaneNode {
-  if (leaves.length <= 1) return leaves[0];
-  const head = Math.ceil(leaves.length / 2);
-  const flip = direction === "horizontal" ? "vertical" : "horizontal";
+  if (items.length === 0) {
+    throw new Error("Cannot build an empty terminal pane grid.");
+  }
+  if (items.length === 1) return items[0].node;
+  const head = Math.ceil(items.length / 2);
+  const aItems = items.slice(0, head);
+  const bItems = items.slice(head);
+  const aWeight = aItems.reduce((sum, item) => sum + item.weight, 0);
+  const total = aWeight + bItems.reduce((sum, item) => sum + item.weight, 0);
   return {
     kind: "split",
     direction,
-    ratio: head / leaves.length,
-    a: buildPaneGrid(leaves.slice(0, head), flip),
-    b: buildPaneGrid(leaves.slice(head), flip),
+    ratio: aWeight / total,
+    a: buildWeightedPaneLine(aItems, direction),
+    b: buildWeightedPaneLine(bItems, direction),
   };
 }
 
@@ -284,6 +314,15 @@ export interface UseTabsApi {
     cwd: string | undefined,
     specs: Array<{ command: string; runtime?: string }>,
   ) => void;
+  addBalancedPaneToTab: (
+    tabId: TabId,
+    paneId: string,
+    options?: {
+      cwd?: string;
+      autorun?: string;
+      worker?: TerminalLeafWorker | null;
+    },
+  ) => boolean;
   detachTerminalPaneToNewTab: (tabId: TabId, paneId: string) => TabId | null;
   moveTerminalPane: (
     sourceTabId: TabId,
@@ -293,6 +332,7 @@ export interface UseTabsApi {
       paneId: string;
       direction: TerminalSplit["direction"];
       position: "before" | "after";
+      mode?: "split" | "line";
     },
   ) => boolean;
   splitTerminalPane: (
@@ -613,7 +653,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
           id,
           kind: "terminal",
           title: "terminals",
-          root: buildPaneGrid(leaves, "horizontal"),
+          root: buildPaneGrid(leaves),
           activePaneId: leaves[0].paneId,
         };
         return normalizeTerminalTitles([...curr, tab]);
@@ -635,7 +675,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         const paneId = makeId("pane");
         return leaf(paneId, cwd, spec.command || undefined);
       });
-      const newGrid = buildPaneGrid(newLeaves, "horizontal");
+      const newGrid = buildPaneGrid(newLeaves);
       setTabs((curr) =>
         curr.map((t) => {
           if (t.id !== tabId || t.kind !== "terminal") return t;
@@ -654,6 +694,36 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         }),
       );
       setActiveId(tabId);
+    },
+    [],
+  );
+
+  const addBalancedPaneToTab = useCallback(
+    (
+      tabId: TabId,
+      paneId: string,
+      options?: {
+        cwd?: string;
+        autorun?: string;
+        worker?: TerminalLeafWorker | null;
+      },
+    ): boolean => {
+      let added = false;
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          if (findLeaf(t.root, paneId)) {
+            added = true;
+            return t;
+          }
+          const newLeaf = leaf(paneId, options?.cwd, options?.autorun);
+          if (options?.worker !== undefined) newLeaf.worker = options.worker;
+          const root = buildPaneGrid([...collectLeaves(t.root), newLeaf]);
+          added = true;
+          return { ...t, root, activePaneId: paneId };
+        }),
+      );
+      return added;
     },
     [],
   );
@@ -713,6 +783,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         paneId: string;
         direction: TerminalSplit["direction"];
         position: "before" | "after";
+        mode?: "split" | "line";
       },
     ): boolean => {
       if (sourceTabId === targetTabId && target?.paneId === paneId) return false;
@@ -758,6 +829,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
             target.direction,
             liveMovingLeaf,
             target.position,
+            { rebalanceLine: target.mode === "line" },
           );
           if (destinationRoot === insertBase) return curr;
         } else {
@@ -1259,6 +1331,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
       newTerminalTab,
       newTerminalGrid,
       addAgentGridToTab,
+      addBalancedPaneToTab,
       detachTerminalPaneToNewTab,
       moveTerminalPane,
       splitTerminalPane,

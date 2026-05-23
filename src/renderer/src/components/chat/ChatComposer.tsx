@@ -426,7 +426,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat }: Props)
     <div
       style={{
         flex: "0 0 auto",
-        padding: "10px 14px 12px",
+        padding: "8px 12px 10px",
         background: "var(--panel)",
         borderTop: "1px solid var(--rule-soft)",
       }}
@@ -448,10 +448,10 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat }: Props)
       )}
       <div
         style={{
-          border: "1px solid var(--rule)",
-          borderRadius: 10,
-          background: "var(--panel-2)",
-          padding: 8,
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 8,
+          background: "color-mix(in oklch, var(--ink) 3%, var(--panel))",
+          padding: 7,
           position: "relative",
           boxShadow: "none",
           transition:
@@ -525,7 +525,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat }: Props)
             color: "var(--ink)",
             fontFamily: "var(--font-sans)",
             fontSize: 13,
-            lineHeight: 1.5,
+            lineHeight: 1.45,
             display: "block",
             maxHeight: MAX_TEXTAREA_H,
           }}
@@ -534,8 +534,8 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat }: Props)
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 8,
-            marginTop: 6,
+            gap: 6,
+            marginTop: 5,
           }}
         >
           <span
@@ -554,7 +554,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat }: Props)
               : pastingImages
                 ? "Adding pasted image..."
               : isActive
-                ? "Send queues for the next decision"
+                ? "Queued for next manager decision"
                 : "Enter to send, Shift+Enter for a new line"}
           </span>
           <IconButton
@@ -1005,11 +1005,11 @@ function IconButton({
       onMouseLeave={() => setHover(false)}
       style={{
         appearance: "none",
-        width: 28,
-        height: 28,
-        flex: "0 0 28px",
+        width: 26,
+        height: 26,
+        flex: "0 0 26px",
         border: "1px solid var(--rule-soft)",
-        borderRadius: 7,
+        borderRadius: 6,
         background: hover && !disabled ? "var(--hover)" : "transparent",
         color: disabled ? "var(--muted-2)" : "var(--ink-dim)",
         display: "flex",
@@ -1062,11 +1062,11 @@ function SendButton({ onClick, disabled }: { onClick: () => void; disabled: bool
       onMouseLeave={() => setHover(false)}
       style={{
         appearance: "none",
-        width: 28,
-        height: 28,
-        flex: "0 0 28px",
+        width: 26,
+        height: 26,
+        flex: "0 0 26px",
         border: "none",
-        borderRadius: 8,
+        borderRadius: 7,
         background: disabled
           ? "color-mix(in oklch, var(--ink) 7%, transparent)"
           : hover
@@ -1119,11 +1119,11 @@ function TextButton({
         border: `1px solid ${
           disabled ? "var(--rule-soft)" : "color-mix(in oklch, " + color + " 45%, transparent)"
         }`,
-        borderRadius: 7,
+        borderRadius: 6,
         background: hover && !disabled ? "var(--hover)" : "transparent",
         color: disabled ? "var(--muted)" : color,
-        height: 28,
-        padding: "0 10px",
+        height: 26,
+        padding: "0 8px",
         fontFamily: "var(--font-sans)",
         fontSize: 11,
         fontWeight: 600,

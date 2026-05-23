@@ -4,7 +4,7 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
-import { createFile, createFolder, deleteFile, listDir, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
+import { createFile, createFolder, deleteFile, listDir, listFiles, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { detectAgentRuntimes } from "./agent-runtimes";
 import { loadPreferences, setPreference } from "./preferences-store";
@@ -52,6 +52,7 @@ import type {
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
+  FileListResult,
   FsEntry,
   FsFileContent,
   FsReadResult,
@@ -252,6 +253,10 @@ export function registerIpc(): void {
 
   ipcMain.handle("fs:list", async (_e, dir: string) => {
     return listDir(dir);
+  });
+
+  ipcMain.handle("fs:listFiles", async (_e, root: string): Promise<FileListResult> => {
+    return listFiles(root);
   });
 
   ipcMain.handle("fs:readText", async (_e, path: string): Promise<FsFileContent> => {
