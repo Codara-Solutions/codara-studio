@@ -13,6 +13,7 @@ import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
+import SessionInspector from "./components/SessionInspector";
 import AgentCapabilitiesDialog from "./components/AgentCapabilitiesDialog";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
@@ -228,6 +229,10 @@ export default function App() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
+  // Pure renderer overlay — reads the active run, displays cost / events /
+  // context-window / failure tabs. Toggled via the `session.openInspector`
+  // shortcut (Mod+Shift+I).
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [platform, setPlatform] = useState<string>("");
   const [home, setHome] = useState<string>("");
   // Side-panel layout: outer widths, internal split ratios, per-section
@@ -917,6 +922,9 @@ export default function App() {
   const closeFileSearch = useCallback(() => {
     setFileSearchOpen(false);
   }, []);
+  const closeInspector = useCallback(() => {
+    setInspectorOpen(false);
+  }, []);
 
   // Dialog onSave / onOpenRun / onOpenFile handlers hoisted so the dialogs
   // and search panel keep stable prop identities across App renders.
@@ -1294,6 +1302,7 @@ export default function App() {
         setSettingsOpen(true);
         window.dispatchEvent(new CustomEvent("spark:open-settings"));
       },
+      "session.openInspector": () => setInspectorOpen((open) => !open),
       "composer.focus": () => {
         window.dispatchEvent(new CustomEvent("spark:focus-composer"));
       },
@@ -1670,6 +1679,13 @@ export default function App() {
             onClose={closeSettings}
             onSave={handleSaveSettings}
             onOpenRun={handleSettingsOpenRun}
+          />
+        )}
+
+        {inspectorOpen && (
+          <SessionInspector
+            run={runs.find((r) => r.id === activeRunId) ?? null}
+            onClose={closeInspector}
           />
         )}
 

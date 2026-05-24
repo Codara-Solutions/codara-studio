@@ -13,6 +13,7 @@ import { ctrl, mod, type Chord } from "./chord";
 export type CommandId =
   | "shortcuts.open"
   | "settings.open"
+  | "session.openInspector"
   | "composer.focus"
   | "sidebar.toggle"
   | "search.open"
@@ -75,6 +76,15 @@ export const COMMANDS: Command[] = [
     label: "Open settings",
     group: "General",
     defaultChords: [mod(",")],
+  },
+  {
+    id: "session.openInspector",
+    label: "Open session inspector",
+    group: "General",
+    // Mod+Shift+I — overlay with cost / events / context window / failure
+    // tabs against the active chat run. Mod+I alone often triggers DevTools
+    // in Chromium contexts, so the inspector lives on its Shifted variant.
+    defaultChords: [mod("i", { shift: true })],
   },
   {
     id: "composer.focus",
