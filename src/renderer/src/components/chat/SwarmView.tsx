@@ -78,6 +78,29 @@ export default function SwarmView({ run, cwd }: Props) {
     };
   }, []);
 
+  // Scratch-tile PTY lifecycle. The "+" empty-cell button spawns a fresh
+  // `swarm-scratch:*` PTY that is owned exclusively by this swarm — there
+  // is no TerminalStack tab backing it, so when SwarmView unmounts (chat
+  // switch, swarm toggled off, key-driven remount via `swarm:${runId}`) the
+  // PTY would leak with no UI ever displaying it again. We dispose every
+  // scratch PTY on unmount.
+  //
+  // The cleanup reads from a ref instead of `scratchTiles` directly so the
+  // closure sees the LATEST array, not the empty array captured at mount.
+  // A useEffect with `[scratchTiles]` deps would dispose on every add too,
+  // which is wrong — we want lifecycle-end disposal, not per-update.
+  const scratchTilesRef = useRef<SwarmTile[]>(scratchTiles);
+  useEffect(() => {
+    scratchTilesRef.current = scratchTiles;
+  }, [scratchTiles]);
+  useEffect(() => {
+    return () => {
+      for (const tile of scratchTilesRef.current) {
+        void window.spark.pty.dispose(tile.paneId).catch(() => undefined);
+      }
+    };
+  }, []);
+
   // Build the worker tile list from the run. Each WorkerAttempt becomes a
   // tile; the tile's sessionId is the attemptId (== the PTY id the
   // orchestrator spawned the worker into). Live attempts come first; the
@@ -471,6 +494,13 @@ function SwarmTileView({
     tile.status &&
     !LIVE_STATUSES.has(tile.status) &&
     tile.status !== "succeeded";
+  // Worker tiles mirror a PTY whose canonical xterm lives in TerminalStack
+  // (same sessionId). Two ResizeObservers + two pty.resize calls with
+  // different dimensions would race and the smaller would win, garbling the
+  // larger xterm. Mark worker tiles read-only so they only render output.
+  // Scratch tiles ARE the canonical pane for their PTY (no TerminalStack
+  // mirror exists), so they keep full input + resize ownership.
+  const isMirror = tile.kind === "worker";
   return (
     <div
       style={{
@@ -493,6 +523,7 @@ function SwarmTileView({
             shell={shell}
             visible
             initialCwd={cwd}
+            readOnly={isMirror}
           />
         ) : (
           <div
