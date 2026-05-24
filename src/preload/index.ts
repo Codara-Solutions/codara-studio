@@ -395,6 +395,13 @@ const api = {
       webFrame.setZoomLevel(clamped);
     },
   },
+  ui: {
+    // Tells main which run the user is currently looking at so the
+    // notification module can suppress "run complete" alerts for that run.
+    // Null = no run selected (e.g. the new-chat draft composer).
+    setActiveRun: (id: string | null): Promise<void> =>
+      ipcRenderer.invoke("ui:setActiveRun", id),
+  },
 };
 
 function isBrowserUrl(url: string): boolean {

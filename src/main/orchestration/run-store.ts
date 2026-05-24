@@ -5417,6 +5417,9 @@ async function commitRunChange(
   },
 ): Promise<RunState> {
   let result: RunState | null = null;
+  let prevStatus: RunState["status"] | null = null;
+  let nextStatus: RunState["status"] | null = null;
+  let persisted = false;
   const previous = runMutationQueues.get(run.id) ?? Promise.resolve();
   const next = previous
     .catch(() => {
@@ -5424,6 +5427,11 @@ async function commitRunChange(
     })
     .then(async () => {
       const latest = await requireRun(run.id);
+      // Capture the pre-mutation status so we can detect transitions after
+      // persistence. The notifications module suppresses no-ops (rule 3), so
+      // recording the previous value here is the only way to tell mutations
+      // that touch status apart from the (much more common) ones that don't.
+      prevStatus = latest.status;
       const timestamp = new Date().toISOString();
       const changed = change.mutate(latest, timestamp);
       result = latest;
@@ -5444,12 +5452,28 @@ async function commitRunChange(
         message: change.message,
         payload: change.payload,
       });
+      nextStatus = latest.status;
+      persisted = true;
     });
   runMutationQueues.set(run.id, next);
   try {
     await next;
   } finally {
     if (runMutationQueues.get(run.id) === next) runMutationQueues.delete(run.id);
+  }
+  // Fire desktop notifications for blocked / complete transitions. Lazy-load
+  // the module so the run-store cold path doesn't pull in the Electron
+  // Notification API on every import — matches the deferred-load pattern used
+  // for heavy modules in ipc.ts.
+  if (persisted && result && prevStatus !== nextStatus && nextStatus !== null) {
+    void (async () => {
+      try {
+        const mod = await import("../notifications");
+        mod.notifyRunStateTransition(result!, prevStatus, nextStatus!);
+      } catch {
+        /* notification delivery is best-effort */
+      }
+    })();
   }
   return result ?? (await requireRun(run.id));
 }

@@ -48,9 +48,22 @@ export default function OrchestrationSidebar({
     if (activeRunId) setCreatingNewRun(false);
   }, [activeRunId]);
 
+  // Keep the main process in sync with whatever the user is looking at so
+  // notification suppression works even when the selection changes externally
+  // (e.g. workbench tab sync, right-click Run plan) or on first mount.
+  // Drafting a new chat counts as "looking at nothing", so report null.
+  useEffect(() => {
+    const id = creatingNewRun ? null : activeRunId;
+    void window.spark.ui?.setActiveRun(id);
+  }, [activeRunId, creatingNewRun]);
+
   // Selecting null is the panel's "new chat" intent: show the draft composer
   // and clear the workbench Runs tab. A real id clears the draft and lifts
   // the selection to App.
+  //
+  // The active-run id is reported to the main process via the effect above,
+  // which fires after either branch updates state, so the notification
+  // module always sees what the user is currently looking at.
   const handleSelectRun = useCallback(
     (id: string | null) => {
       if (id === null) {
