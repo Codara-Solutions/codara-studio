@@ -4,9 +4,10 @@ import { registerIpc } from "./ipc";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { ensureSparkHomeSync } from "./spark-home";
-import { flush } from "./storage";
+import { flush, loadState } from "./storage";
 import { flushPreferences, getPreferenceSync } from "./preferences-store";
 import { registerMainWindow } from "./notifications";
+import { setAllowedRoots } from "./fs-sandbox";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
 import {
   emitFinalSummary,
@@ -208,6 +209,21 @@ app.whenReady().then(async () => {
       failHeadless(1, (err as Error).message || String(err));
     }
     return;
+  }
+
+  // Seed the fs sandbox allowlist from saved workspaces BEFORE registering
+  // IPC. Otherwise the very first fs:list / fs:setWatchRoot from the renderer
+  // races the renderer's own ui:setAllowedRoots call and the project root
+  // gets rejected as "not allowed". The renderer still refreshes the list
+  // when workspaces change at runtime.
+  try {
+    const state = await loadState();
+    const roots = state.workspaces
+      .map((w) => w.cwd)
+      .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
+    setAllowedRoots(roots);
+  } catch (err) {
+    console.error("[main] failed to seed fs sandbox roots:", err);
   }
 
   registerIpc();

@@ -117,6 +117,14 @@ export function registerIpc(): void {
 
   ipcMain.handle("state:save", async (_e, state: AppState): Promise<void> => {
     await saveState(state);
+    // Refresh the fs sandbox allowlist whenever workspaces change. The
+    // renderer also pushes via ui:setAllowedRoots, but updating here means a
+    // newly-added workspace is reachable the instant it's persisted, even
+    // before the renderer effect that calls setAllowedRoots fires.
+    const roots = state.workspaces
+      .map((w) => w.cwd)
+      .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
+    setAllowedRoots(roots);
   });
 
   ipcMain.handle("settings:load", async (): Promise<AppSettings> => {
