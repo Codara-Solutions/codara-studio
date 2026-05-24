@@ -6025,18 +6025,83 @@ export function applyHookStateReport(report: {
   const worker = activeWorkerProcesses.get(report.paneId);
   if (!worker) return;
 
-  // De-dup: identical state + note as the last report is a no-op. Workers
-  // often re-emit the same state on every tool call ("still working") — we
-  // don't want to flood the event log or wake the renderer for those.
+  // De-dup: identical state + note as the last report on the
+  // ActiveWorkerProcess is a no-op for THAT object's event stream — workers
+  // often re-emit the same state on every tool call ("still working") and we
+  // don't want to flood worker_attempt.state_reported. We still bridge to
+  // WorkerAttempt unconditionally below so the renderer side recovers even
+  // if regex briefly overwrote a value the hook had previously claimed.
   const sameState = worker.runtimeState === report.state;
   const sameNote = (worker.runtimeStateNote ?? undefined) === (report.note ?? undefined);
-  if (sameState && sameNote) return;
+  const skipWorkerEvent = sameState && sameNote;
 
   const previousState = worker.runtimeState;
   const timestamp = new Date().toISOString();
   worker.runtimeState = report.state;
   worker.runtimeStateNote = report.note;
   worker.runtimeStateAt = timestamp;
+
+  // Bridge to WorkerAttempt so the renderer (which reads
+  // WorkerAttempt.runtimeState via timeline.ts → ChatConversation.tsx) sees
+  // hook reports too — without this, only the regex tail poller can move
+  // the chip. WorkerRuntimeState and RuntimeState are the same union so
+  // the value passes through; runtimeStateSource = "hook" tells
+  // reportTerminalState to skip its next regex tick for HOOK_TRUST_MS.
+  // Best-effort: if the attempt isn't in the cache (run not yet loaded)
+  // we still updated ActiveWorkerProcess above; the next poller tick will
+  // hydrate the cache and the next hook report will land cleanly.
+  //
+  // Note: this runs even when skipWorkerEvent is true, because the regex
+  // detector may have stomped on a previous hook value between dedupes —
+  // a fresh hook tick of the same "working" must still reclaim the
+  // WorkerAttempt slot if regex flipped it to "blocked" in the meantime.
+  const match = findAttemptByPaneId(report.paneId);
+  if (match) {
+    const { run: targetRun, attempt: targetAttempt } = match;
+    const attemptStateChanged =
+      targetAttempt.runtimeState !== report.state ||
+      targetAttempt.runtimeStateSource !== "hook";
+    if (attemptStateChanged) {
+      const attemptPrevious = targetAttempt.runtimeState ?? null;
+      targetAttempt.runtimeState = report.state;
+      targetAttempt.runtimeStateUpdatedAt = timestamp;
+      targetAttempt.runtimeStateSource = "hook";
+      targetRun.updatedAt = timestamp;
+      // Same fire-and-forget save pattern reportTerminalState uses — the
+      // event below is the authoritative UI trigger, the run.json rewrite
+      // is bookkeeping that mustn't block the hook RPC reply.
+      void saveRun(targetRun).catch(() => undefined);
+      void appendEvent({
+        timestamp,
+        workspaceId: targetRun.workspaceId,
+        runId: targetRun.id,
+        workerTaskId: targetAttempt.workerTaskId,
+        attemptId: targetAttempt.id,
+        type: "worker_attempt.runtime_state_changed",
+        message: `Worker attempt runtime state: ${attemptPrevious ?? "unknown"} -> ${report.state}`,
+        payload: {
+          previous: attemptPrevious,
+          state: report.state,
+          attemptId: targetAttempt.id,
+          source: "hook",
+          note: report.note,
+        },
+      }).catch((err) => {
+        console.warn("[run-store] appendEvent for hook attempt state failed:", err);
+      });
+    } else {
+      // No attempt-side change but still refresh the timestamp so the
+      // HOOK_TRUST_MS window in reportTerminalState slides forward — that's
+      // the whole point of receiving repeat hook reports. No save / no
+      // event: nothing observable changed for the renderer.
+      targetAttempt.runtimeStateUpdatedAt = timestamp;
+    }
+  }
+
+  // Bail out of the ActiveWorkerProcess event emit when the hook just
+  // re-stated the same value. The renderer-side update above already kept
+  // the trust window fresh, so nothing else is needed.
+  if (skipWorkerEvent) return;
 
   // Fire-and-forget event so a subscriber (renderer, Session Inspector,
   // headless eval) can pick up the change. Don't await — the hook RPC must
@@ -6212,6 +6277,31 @@ function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input:
   };
 }
 
+// How long (ms) a hook-sourced runtime state is considered authoritative
+// over the regex tail poller. The doc rule is "hook reports win over regex
+// detection". We implement that as a 5-second trust window: if the worker
+// last self-reported via the localhost RPC inside that window, the regex
+// poller is gagged. After the window the hook stream is considered stale
+// (the agent may have crashed without sending a final state) and the regex
+// detector is allowed to take back over.
+const HOOK_TRUST_MS = 5_000;
+
+// Find the WorkerAttempt + its parent RunState anywhere in the in-memory
+// run cache. paneId === attempt.id for Spark workers (pty-manager keys
+// sessions by attemptId). Returns null if no cached run owns that attempt
+// — happens for manual user-spawned terminals and for runs that haven't
+// been loaded from disk yet. Bounded by RUN_RETENTION_KEEP (~50 cached
+// runs × workerAttempts each), so cheap.
+function findAttemptByPaneId(
+  paneId: string,
+): { run: RunState; attempt: WorkerAttempt } | null {
+  for (const run of runCache.values()) {
+    const attempt = run.workerAttempts.find((item) => item.id === paneId);
+    if (attempt) return { run, attempt };
+  }
+  return null;
+}
+
 // Live agent state report from the renderer-side terminal poller. paneId is
 // the same id the renderer used for pty:spawn — for Spark workers this is
 // the attemptId. We walk the in-memory run cache to find the matching
@@ -6222,33 +6312,47 @@ function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input:
 // panes with no matching attempt (manual user-spawned claude/codex panes)
 // are silently dropped — the renderer doesn't filter by ownership before
 // reporting and we want a single round-trip, not a probe + write.
+//
+// Hook priority: when the same attempt also has a hook RPC stream
+// (applyHookStateReport landed within HOOK_TRUST_MS), the hook wins and
+// this regex report is dropped. After the trust window expires the regex
+// detector takes back over so a crashed hook doesn't freeze the UI.
 export async function reportTerminalState(
   paneId: string,
   state: RuntimeState,
 ): Promise<void> {
   if (!paneId) return;
-  // Cache is keyed by runId; we look up by attemptId so we scan every cached
-  // run for a matching attempt. The cache is bounded by RUN_RETENTION_KEEP
-  // (50 entries) so the scan is O(50 × workerAttempts.length) — small in
-  // every realistic case. If the run isn't cached yet, the poller will fire
-  // again on the next 300 ms tick and pick up the freshly-loaded run.
-  let targetRun: RunState | null = null;
-  let targetAttempt: WorkerAttempt | null = null;
-  for (const run of runCache.values()) {
-    const attempt = run.workerAttempts.find((item) => item.id === paneId);
-    if (attempt) {
-      targetRun = run;
-      targetAttempt = attempt;
-      break;
+  const match = findAttemptByPaneId(paneId);
+  if (!match) return;
+  const { run: targetRun, attempt: targetAttempt } = match;
+
+  // Hook trumps regex while the hook stream is fresh. We compare against
+  // Date.now() (not the new event's timestamp) because runtimeStateUpdatedAt
+  // is ISO-encoded; Date.parse round-trips that cleanly.
+  if (targetAttempt.runtimeStateSource === "hook" && targetAttempt.runtimeStateUpdatedAt) {
+    const lastHookAt = Date.parse(targetAttempt.runtimeStateUpdatedAt);
+    if (Number.isFinite(lastHookAt) && Date.now() - lastHookAt < HOOK_TRUST_MS) {
+      return;
     }
   }
-  if (!targetRun || !targetAttempt) return;
-  if (targetAttempt.runtimeState === state) return; // no-op transition
+
+  // No-op transition. When the value matches we still re-stamp the source
+  // and timestamp (for any case where the hook trust window just expired
+  // with the same state the regex is now reporting), but emit no event
+  // and skip the run.json rewrite — nothing visible changed for the UI.
+  if (targetAttempt.runtimeState === state) {
+    if (targetAttempt.runtimeStateSource !== "regex") {
+      targetAttempt.runtimeStateSource = "regex";
+      targetAttempt.runtimeStateUpdatedAt = new Date().toISOString();
+    }
+    return;
+  }
 
   const timestamp = new Date().toISOString();
   const previous = targetAttempt.runtimeState ?? null;
   targetAttempt.runtimeState = state;
   targetAttempt.runtimeStateUpdatedAt = timestamp;
+  targetAttempt.runtimeStateSource = "regex";
   targetRun.updatedAt = timestamp;
   // saveRun re-writes run.json; the cache stays in sync via writeRunFile().
   // We don't await the save before broadcasting — the event below is the
@@ -6267,6 +6371,7 @@ export async function reportTerminalState(
       previous,
       state,
       attemptId: targetAttempt.id,
+      source: "regex",
     },
   });
 }

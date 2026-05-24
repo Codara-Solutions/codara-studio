@@ -23,7 +23,14 @@ export interface ShellInfo {
 // (big bet A), which is intentionally the fallback for CLIs that can't or
 // don't talk to the hook endpoint. Optional + tolerant of being filled in
 // from multiple sources.
-export type WorkerRuntimeState = "working" | "blocked" | "idle" | "done";
+//
+// Historical aliasing: big bet A (state-detection / regex tail poller)
+// introduced `RuntimeState` and big bet E1 (hook-contract) introduced
+// `WorkerRuntimeState` with the same union. We keep `RuntimeState` as the
+// canonical name and `WorkerRuntimeState` as a thin alias so the legacy
+// callers in hook-rpc / run-store keep compiling without churn. New code
+// should reach for `RuntimeState`.
+export type WorkerRuntimeState = RuntimeState;
 
 export interface Worker {
   id: string;
@@ -888,14 +895,25 @@ export interface WorkerAttempt {
   diffPath?: string;
   error?: string;
   /**
-   * Latest agent state reported by the renderer-side terminal poller. Updated
-   * via the `terminalState:report` IPC; `undefined` means we haven't sniffed
-   * yet (or this attempt is not hosted in a renderer-visible pane — headless
-   * eval runs).
+   * Latest agent state for this attempt. Two writers feed this field:
+   *   - the renderer-side terminal poller (big bet A) via `terminalState:report`
+   *     IPC → `reportTerminalState`. Source = "regex".
+   *   - the localhost hook RPC (big bet E1) via `/state` POST →
+   *     `applyHookStateReport`. Source = "hook".
+   * `undefined` means neither writer has fired yet (run hasn't started,
+   * headless eval, or the attempt is not hosted in a renderer-visible pane).
    */
   runtimeState?: RuntimeState;
   /** ISO timestamp captured the last time runtimeState changed. */
   runtimeStateUpdatedAt?: string;
+  /**
+   * Which writer last updated `runtimeState`. The doc rule is "hook wins
+   * over regex" — `reportTerminalState` honours this by refusing to
+   * overwrite a fresh hook report (see HOOK_TRUST_MS in run-store.ts).
+   * `undefined` means the field is unset or was written before this
+   * provenance bit existed.
+   */
+  runtimeStateSource?: "hook" | "regex";
 }
 
 export interface WorkerTaskEnvelope {
