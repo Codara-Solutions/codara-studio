@@ -168,6 +168,10 @@ const api = {
     savePastedImage: (input: { dataUrl: string; name?: string }): Promise<string> =>
       ipcRenderer.invoke("attachments:savePastedImage", input),
   },
+  drawing: {
+    save: (input: { dataUrl: string }): Promise<string> =>
+      ipcRenderer.invoke("drawing:save", input),
+  },
   fs: {
     list: (dir: string): Promise<FsEntry[]> => ipcRenderer.invoke("fs:list", dir),
     listFiles: (root: string): Promise<FileListResult> =>
@@ -332,6 +336,8 @@ const api = {
   app: {
     platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke("app:platform"),
     home: (): Promise<string> => ipcRenderer.invoke("app:home"),
+    inspectorPreloadUrl: (): Promise<string> =>
+      ipcRenderer.invoke("app:inspectorPreloadUrl"),
   },
   ui: {
     // Tell main which filesystem roots the renderer considers in scope right

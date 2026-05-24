@@ -2,6 +2,8 @@ import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard } fr
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, listDir, listFiles, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
@@ -258,6 +260,32 @@ export function registerIpc(): void {
       await fs.mkdir(dir, { recursive: true });
       const path = join(dir, `${Date.now()}-${randomUUID()}-${pastedImageStem(input?.name)}${ext}`);
       await fs.writeFile(path, parsed.buffer, { flag: "wx" });
+      return path;
+    },
+  );
+
+  // Save a draw-mode screenshot (page capture + freehand annotation, both
+  // already composited in the renderer) under <tmp>/spark-drawings as a PNG.
+  // Returning the path — not the base64 bytes — keeps the chat message small
+  // and lets Claude Code use its native image-read tool on the file. Inputs
+  // are validated as a `data:image/png;base64,...` URL; everything else is
+  // rejected so a compromised webview can't drop arbitrary bytes on disk.
+  ipcMain.handle(
+    "drawing:save",
+    async (_e, input: { dataUrl?: unknown }): Promise<string> => {
+      const value = input?.dataUrl;
+      if (typeof value !== "string") throw new Error("Missing drawing data.");
+      const match = value.match(/^data:image\/png;base64,([A-Za-z0-9+/=\s]+)$/);
+      if (!match) throw new Error("Drawing must be a PNG data URL.");
+      const buffer = Buffer.from(match[1].replace(/\s/g, ""), "base64");
+      if (buffer.byteLength === 0) throw new Error("Drawing is empty.");
+      if (buffer.byteLength > MAX_PASTED_IMAGE_BYTES) {
+        throw new Error("Drawing is too large.");
+      }
+      const dir = join(tmpdir(), "spark-drawings");
+      await fs.mkdir(dir, { recursive: true });
+      const path = join(dir, `${Date.now()}-${randomUUID()}.png`);
+      await fs.writeFile(path, buffer, { flag: "wx" });
       return path;
     },
   );
@@ -675,6 +703,15 @@ export function registerIpc(): void {
 
   ipcMain.handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);
   ipcMain.handle("app:home", async (): Promise<string> => app.getPath("home"));
+
+  // Resolve the absolute file:// URL of the webview-side inspector preload
+  // bundle so the renderer can attach it via `<webview preload="...">`.
+  // The bundle is emitted by electron-vite alongside the main renderer
+  // preload, so we walk relative to `__dirname` (out/main).
+  ipcMain.handle("app:inspectorPreloadUrl", async (): Promise<string> => {
+    const path = join(__dirname, "..", "preload", "inspector-preload.js");
+    return pathToFileURL(path).toString();
+  });
 
   // Project-wide search. The renderer kicks off a search and gets back an
   // ID; the main process then streams `search:hit:<id>` and ends with
