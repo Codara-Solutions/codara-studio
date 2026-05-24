@@ -20,6 +20,87 @@ const FONT_SIZE = 13;
 const FIT_DEBOUNCE_MS = 8;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
 const RESTORE_NOTICE = "[restored from last Spark session]";
+
+// Internal-only union of every agent CLI we can detect from terminal output.
+// Spark's public surface (App.tsx, TerminalStack.tsx, run-store, etc.) still
+// only models the three first-party runtimes — anything outside that set is
+// coerced to `null` at the onAgentState boundary so the UI accent / tab-type
+// machinery doesn't need to grow new cases for each new banner we recognise.
+// Detection is still useful even when coerced: the running=true edge fires,
+// which is enough to keep the activity indicator in sync.
+type AgentRuntime =
+  | "claude"
+  | "codex"
+  | "cursor"
+  | "aider"
+  | "droid"
+  | "amp"
+  | "opencode"
+  | "grok"
+  | "hermes"
+  | "pi"
+  | "antigravity"
+  | "kimi"
+  | "kiro"
+  | "copilot"
+  | "cline";
+
+// Public runtime tag emitted through onAgentState. Mirrors the three runtimes
+// the rest of the app already knows how to render. The boundary in
+// useTerminalSession coerces every other AgentRuntime down to `null`.
+type PublicAgentRuntime = "claude" | "codex" | "cursor";
+
+const KNOWN_PUBLIC_RUNTIMES: ReadonlySet<AgentRuntime> = new Set([
+  "claude",
+  "codex",
+  "cursor",
+]);
+
+function coercePublicRuntime(runtime: AgentRuntime): PublicAgentRuntime | null {
+  return KNOWN_PUBLIC_RUNTIMES.has(runtime) ? (runtime as PublicAgentRuntime) : null;
+}
+
+// Banner / first-prompt boilerplate patterns. Order is significant: more
+// specific patterns sit before broader ones so a vendor that includes a
+// generic keyword (e.g. "Grok") in their banner can't be mis-tagged by a
+// looser regex below. Patterns must match launch banner text only — they
+// should NOT fire on ordinary shell output (file listings, help text,
+// README content, log tails). See research/HERDR_LEARNINGS.md §2 for the
+// upstream catalogue these came from.
+//
+// Caveats per herdr:
+//   - pi:     `Pi v` is generic; false positives are plausible in noisy
+//             shell output. Documented here rather than dropped because
+//             first-mover detection is still useful when we have it.
+//   - cline:  detection is unreliable upstream; we keep the banner regex
+//             for the running=true edge but expect misses.
+//   - copilot: structural-only per herdr (e.g. `esc to cancel` for the
+//              working signal). We rely on the banner alone for now.
+const RUNTIME_BANNERS: ReadonlyArray<{ runtime: AgentRuntime; pattern: RegExp }> = [
+  // First-party runtimes — keep these at the top so they take precedence.
+  { runtime: "codex",      pattern: /OpenAI Codex\s*\(?v?\d/ },
+  { runtime: "claude",     pattern: /Claude Code\s+v?\d/ },
+  { runtime: "cursor",     pattern: /Cursor\s+(?:Agent|CLI)/i },
+  // Third-party CLIs (alphabetical within tier). Each pattern is anchored
+  // on banner-style text (product name + version, or a vendor-specific
+  // header) so README mentions and stray log lines don't trigger them.
+  { runtime: "aider",      pattern: /\baider\s+v\d|\baider\s+chat\b/i },
+  { runtime: "amp",        pattern: /\bSourcegraph\s+Amp\b|\bAmp\s+CLI\b/i },
+  { runtime: "antigravity",pattern: /\bAntigravity\b|\bagy\s+v?\d/i },
+  { runtime: "cline",      pattern: /\bCline\s+v\d|\bcline-cli\b/i },
+  { runtime: "copilot",    pattern: /\bGitHub\s+Copilot\s+CLI\b|\bcopilot\s+v\d/i },
+  { runtime: "droid",      pattern: /\bDroid\s+CLI\b|\bfactory\.ai\b/i },
+  { runtime: "grok",       pattern: /\bGrok\s+v\d|\bxAI\s+Grok\b/i },
+  { runtime: "hermes",     pattern: /\bHermes\s+v\d|\bhermes-agent\b/i },
+  { runtime: "kimi",       pattern: /\bKimi\s+v\d|\bkimi-code\b/i },
+  { runtime: "kiro",       pattern: /\bKiro\s+v\d|\bkiro-cli\b/i },
+  { runtime: "opencode",   pattern: /\bOpenCode\s+v\d|\bopencode\b/i },
+  // `Pi v` is generic enough that it can plausibly fire on unrelated
+  // shell output. Keep it last in the iteration order so any more specific
+  // pattern above wins first.
+  { runtime: "pi",         pattern: /\bPi\s+v\d/ },
+];
+
 // Module-level guard so a sessionId can only ever have one autorun scheduled.
 // Survives component re-mounts (StrictMode dev, HMR) since the PTY itself
 // persists past the renderer-side React tree. See the autorun block below.
@@ -318,10 +399,15 @@ export function useTerminalSession({
       const agentDecoder = new TextDecoder("utf-8", { fatal: false });
       let agentTextRing = "";
       let agentPhase: "idle" | "agent" = "idle";
-      const setAgentRunning = (runtime: "claude" | "codex" | "cursor") => {
+      const setAgentRunning = (runtime: AgentRuntime) => {
         if (agentPhase === "agent") return;
         agentPhase = "agent";
-        onAgentStateRef.current?.({ runtime, running: true });
+        // Coerce non-first-party runtimes down to `null` at the boundary so
+        // App.tsx / TerminalStack / run-store keep seeing the existing public
+        // surface ("claude" | "codex" | "cursor" | null) without growing new
+        // cases for every newly detected CLI. running=true still fires so the
+        // activity indicator tracks correctly.
+        onAgentStateRef.current?.({ runtime: coercePublicRuntime(runtime), running: true });
       };
       const resetAgentPhase = () => {
         if (agentPhase === "agent") {
@@ -743,19 +829,23 @@ const CSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
 // Identify which agent CLI is running by scanning a short rolling buffer of
-// recent visible text. Patterns are specific enough to the live banners
-// that ordinary shell output (file listings, commit messages, README
-// content, `claude --help`) does NOT trigger them — only the actual
-// launch banners do:
+// recent visible text against the RUNTIME_BANNERS table at the top of the
+// file. Patterns are specific enough to live launch banners / first-prompt
+// boilerplate that ordinary shell output (file listings, commit messages,
+// README content, `claude --help`) does NOT trigger them. Examples:
 //   - Codex:  `OpenAI Codex (v0.130.0)`
 //   - Claude: `Claude Code v2.1.139`
 //   - Cursor: `Cursor Agent (composer-2.5-fast)` / `Cursor CLI v…`
+//   - Aider:  `aider v0.65.0`
+//   - Droid:  `Droid CLI` / `factory.ai`
 // Returns null when nothing matched so the caller leaves the pane alone.
-function sniffRuntime(text: string): "claude" | "codex" | "cursor" | null {
+// Iteration order mirrors the table: first-party runtimes first, then
+// third-party CLIs ordered most-specific to least-specific.
+function sniffRuntime(text: string): AgentRuntime | null {
   const stripped = text.replace(CSI_RE, "").replace(OSC_RE, "");
-  if (/OpenAI Codex\s*\(?v?\d/.test(stripped)) return "codex";
-  if (/Claude Code\s+v?\d/.test(stripped)) return "claude";
-  if (/Cursor\s+(?:Agent|CLI)/i.test(stripped)) return "cursor";
+  for (const entry of RUNTIME_BANNERS) {
+    if (entry.pattern.test(stripped)) return entry.runtime;
+  }
   return null;
 }
 
