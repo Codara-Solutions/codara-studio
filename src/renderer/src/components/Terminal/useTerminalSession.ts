@@ -1,6 +1,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import type { ShellInfo } from "@shared/types";
@@ -171,9 +172,9 @@ export function useTerminalSession({
         cursorBlink: false,
         cursorStyle: "bar",
         cursorInactiveStyle: "none",
-        // 5k lines × 80 cols × ~16 B per cell ~= 6 MB per session. 10k doubled
-        // that for output almost no one scrolls back to.
-        scrollback: 5_000,
+        // AI agents blow past 1K-line buffers in a single turn; 50K is the
+        // floor for reviewing what claude/codex actually did.
+        scrollback: 50_000,
         allowProposedApi: true,
         allowTransparency: true,
         convertEol: false,
@@ -194,6 +195,27 @@ export function useTerminalSession({
           void window.spark.openExternal?.(uri);
         }),
       );
+
+      // WebGL renderer with software fallback. The DOM renderer is xterm's
+      // default; the WebGL renderer is several × faster on agent-style output
+      // (full-screen redraws, scrollback, large bursts). On context loss
+      // (driver crash, lost GPU, tab move between displays) we dispose the
+      // addon and xterm transparently falls back to DOM.
+      let webgl: WebglAddon | null = null;
+      try {
+        webgl = new WebglAddon();
+        webgl.onContextLoss(() => {
+          try {
+            webgl?.dispose();
+          } catch {
+            /* ignore */
+          }
+          webgl = null;
+        });
+        term.loadAddon(webgl);
+      } catch {
+        webgl = null;
+      }
 
       // Terminal copy/paste keybindings.
       //
@@ -228,8 +250,130 @@ export function useTerminalSession({
           void window.spark.pty.write(sessionId, payload);
         })();
       };
+
+      // Inline find overlay (Cmd/Ctrl+F). A chrome bar pinned to the top-right
+      // of the xterm host that drives SearchAddon.findNext / findPrevious.
+      // Built as a plain DOM tree inside the host div (no React) so it can
+      // live entirely inside the useTerminalSession effect.
+      let searchOverlay: HTMLDivElement | null = null;
+      let searchInput: HTMLInputElement | null = null;
+      const searchOpts = { caseSensitive: false, regex: false, wholeWord: false };
+      const openSearch = () => {
+        if (!container.current) return;
+        if (!searchOverlay) {
+          const bar = document.createElement("div");
+          bar.style.cssText = [
+            "position:absolute",
+            "top:6px",
+            "right:6px",
+            "height:24px",
+            "display:flex",
+            "align-items:center",
+            "gap:4px",
+            "padding:0 4px",
+            "background:var(--panel)",
+            "border:1px solid var(--rule-strong)",
+            "border-radius:4px",
+            "font-family:monospace",
+            "font-size:12px",
+            "z-index:10",
+          ].join(";");
+          const input = document.createElement("input");
+          input.type = "text";
+          input.placeholder = "Find";
+          input.style.cssText = [
+            "background:transparent",
+            "border:none",
+            "outline:none",
+            "color:inherit",
+            "font:inherit",
+            "width:160px",
+            "padding:0 4px",
+          ].join(";");
+          const mkBtn = (label: string, title: string) => {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.textContent = label;
+            b.title = title;
+            b.style.cssText = [
+              "background:transparent",
+              "border:none",
+              "color:inherit",
+              "font:inherit",
+              "cursor:pointer",
+              "padding:0 4px",
+              "height:20px",
+            ].join(";");
+            return b;
+          };
+          const prevBtn = mkBtn("‹", "Previous match");
+          const nextBtn = mkBtn("›", "Next match");
+          const closeBtn = mkBtn("×", "Close");
+          const runFind = (dir: "next" | "prev") => {
+            const term2 = termRef.current;
+            const q = input.value;
+            if (!term2 || !q) return;
+            if (dir === "next") search.findNext(q, searchOpts);
+            else search.findPrevious(q, searchOpts);
+          };
+          input.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              e.stopPropagation();
+              closeSearch();
+            } else if (e.key === "Enter") {
+              e.preventDefault();
+              e.stopPropagation();
+              runFind(e.shiftKey ? "prev" : "next");
+            }
+          });
+          prevBtn.addEventListener("click", () => runFind("prev"));
+          nextBtn.addEventListener("click", () => runFind("next"));
+          closeBtn.addEventListener("click", () => closeSearch());
+          bar.appendChild(input);
+          bar.appendChild(prevBtn);
+          bar.appendChild(nextBtn);
+          bar.appendChild(closeBtn);
+          // The xterm host needs position:relative for absolute children to
+          // anchor correctly. TerminalPane sets width/height inline but not
+          // position; set it here so the overlay floats over the terminal.
+          if (getComputedStyle(container.current).position === "static") {
+            container.current.style.position = "relative";
+          }
+          container.current.appendChild(bar);
+          searchOverlay = bar;
+          searchInput = input;
+        }
+        searchOverlay.style.display = "flex";
+        searchInput?.focus();
+        searchInput?.select();
+      };
+      const closeSearch = () => {
+        if (searchOverlay) searchOverlay.style.display = "none";
+        termRef.current?.focus();
+      };
+      cleanups.push(() => {
+        if (searchOverlay && searchOverlay.parentNode) {
+          searchOverlay.parentNode.removeChild(searchOverlay);
+        }
+        searchOverlay = null;
+        searchInput = null;
+      });
+
       term.attachCustomKeyEventHandler((event) => {
         if (event.type !== "keydown") return true;
+        // Cmd/Ctrl+F → open inline find overlay. Checked before the
+        // copy/paste branch since that one bails on metaKey.
+        if (
+          (event.ctrlKey || event.metaKey) &&
+          !event.altKey &&
+          !event.shiftKey &&
+          (event.key === "f" || event.key === "F")
+        ) {
+          event.preventDefault();
+          openSearch();
+          return false;
+        }
         if (!event.ctrlKey || event.altKey || event.metaKey) return true;
         const key = event.key;
         const isC = key === "C" || key === "c";
@@ -508,6 +652,8 @@ export function useTerminalSession({
       //    The shell only cares about the FINAL size.
       let lastSentCols = term.cols;
       let lastSentRows = term.rows;
+      let lastAppliedCols = term.cols;
+      let lastAppliedRows = term.rows;
       let lastW = container.current?.clientWidth ?? 0;
       let lastH = container.current?.clientHeight ?? 0;
       let fitTimer: number | null = null;
@@ -534,11 +680,26 @@ export function useTerminalSession({
             if (w === lastW && h === lastH) return;
             lastW = w;
             lastH = h;
+            // Cheap dedupe: if proposeDimensions reports the same cell
+            // count we already applied, skip the fit + pty resize entirely.
+            // Window drags often produce sub-cell pixel deltas that don't
+            // change cols/rows; reflowing xterm and SIGWINCH'ing the shell
+            // for those is pure waste.
+            const proposed = fit.proposeDimensions();
+            if (
+              proposed &&
+              proposed.cols === lastAppliedCols &&
+              proposed.rows === lastAppliedRows
+            ) {
+              return;
+            }
             try {
               fit.fit();
             } catch {
               return;
             }
+            lastAppliedCols = term.cols;
+            lastAppliedRows = term.rows;
             if (ptyTimer !== null) window.clearTimeout(ptyTimer);
             ptyTimer = window.setTimeout(flushPtyResize, PTY_RESIZE_DEBOUNCE_MS);
           }, FIT_DEBOUNCE_MS);
