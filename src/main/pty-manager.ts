@@ -449,6 +449,27 @@ export function write(id: string, data: string): void {
   s.pty.write(data);
 }
 
+// Inject text as a bracketed paste (CSI 200~ ... CSI 201~) followed by an
+// optional submit (CR). Every "write to a running CLI" feature needs this —
+// element inspector, drag-drop file paths, slash commands, persona
+// injection — so they all go through the same node-pty path as user input.
+//
+// Sanitization: ConPTY corrupts NULs in its input stream, so they're stripped.
+// vibeyard's helper also gates on the terminal having advertised ?2004h
+// (bracketed-paste mode); we skip that subtlety here because every modern
+// interactive shell (bash, zsh, fish, pwsh+PSReadLine) enables it by default,
+// and TUIs like claude/codex treat the escape pair as a no-op if they ignore
+// it. If a future caller targets a non-interactive shell that doesn't honor
+// bracketed paste, the escapes will be echoed verbatim and that's the bug to
+// fix at the call site, not here.
+export function inject(id: string, text: string, opts?: { submit?: boolean }): void {
+  if (!sessions.has(id)) return;
+  const sanitized = text.replace(/\x00/g, "");
+  write(id, `\x1b[200~${sanitized}\x1b[201~`);
+  const submit = opts?.submit ?? true;
+  if (submit) write(id, "\r");
+}
+
 export function resize(id: string, cols: number, rows: number): void {
   const s = sessions.get(id);
   if (!s) return;

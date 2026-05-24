@@ -569,6 +569,13 @@ export function registerIpc(): void {
     pty.write(args.id, args.data);
   });
 
+  ipcMain.handle(
+    "pty:inject",
+    async (_e, args: { id: string; text: string; submit?: boolean }) => {
+      pty.inject(args.id, args.text, { submit: args.submit ?? true });
+    },
+  );
+
   ipcMain.handle("pty:resize", async (_e, args: { id: string; cols: number; rows: number }) => {
     pty.resize(args.id, args.cols, args.rows);
   });
