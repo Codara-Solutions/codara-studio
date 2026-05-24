@@ -13,6 +13,7 @@ import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import { listEvents } from "./orchestration/event-log";
+import { setActiveRunId } from "./notifications";
 import type {
   InlineAiCompletionRequest,
   InlineAiCompletionResponse,
@@ -649,6 +650,14 @@ export function registerIpc(): void {
       }
     },
   );
+
+  // Renderer reports which run is currently selected so main can suppress
+  // "run complete" notifications for the run the user is already looking at.
+  // Passing null clears the selection (e.g. when the user opens the "new
+  // chat" draft composer).
+  ipcMain.handle("ui:setActiveRun", async (_e, runId: string | null): Promise<void> => {
+    setActiveRunId(typeof runId === "string" ? runId : null);
+  });
 
   ipcMain.handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);
   ipcMain.handle("app:home", async (): Promise<string> => app.getPath("home"));

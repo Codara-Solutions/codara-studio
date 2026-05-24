@@ -6,6 +6,7 @@ import * as fsWatcher from "./fs-watcher";
 import { ensureSparkHomeSync } from "./spark-home";
 import { flush } from "./storage";
 import { flushPreferences, getPreferenceSync } from "./preferences-store";
+import { registerMainWindow } from "./notifications";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
 import {
   emitFinalSummary,
@@ -114,6 +115,12 @@ function createWindow(): void {
   const windowForEvents = mainWindow;
   windowForEvents.on("maximize", () => sendWindowState(windowForEvents));
   windowForEvents.on("unmaximize", () => sendWindowState(windowForEvents));
+
+  // Notifications module reads focus state on demand via isFocused(); the
+  // registration just hands it the window handle. focus/blur events are not
+  // wired here because they aren't needed — the trigger logic queries focus
+  // synchronously at notify time.
+  registerMainWindow(windowForEvents);
 
   mainWindow.on("ready-to-show", () => mainWindow?.show());
 

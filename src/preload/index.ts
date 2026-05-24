@@ -317,6 +317,11 @@ const api = {
     // call it on boot and whenever the workspace list changes.
     setAllowedRoots: (roots: string[]): Promise<void> =>
       ipcRenderer.invoke("ui:setAllowedRoots", roots),
+    // Tells main which run the user is currently looking at so the
+    // notification module can suppress "run complete" alerts for that run.
+    // Null = no run selected (e.g. the new-chat draft composer).
+    setActiveRun: (id: string | null): Promise<void> =>
+      ipcRenderer.invoke("ui:setActiveRun", id),
   },
   clipboard: {
     readText: (): Promise<string> => ipcRenderer.invoke("clipboard:readText"),
