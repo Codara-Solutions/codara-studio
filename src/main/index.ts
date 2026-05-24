@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { registerIpc } from "./ipc";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
+import { startAgentSocket, stopAgentSocket } from "./agent-socket";
 import { ensureSparkHomeSync } from "./spark-home";
 import { flush, loadState } from "./storage";
 import { flushPreferences, getPreferenceSync } from "./preferences-store";
@@ -196,6 +197,16 @@ app.whenReady().then(async () => {
     console.error("[main] path enrichment failed:", err),
   );
 
+  // Start the JSON-RPC agent socket as early as possible so its env vars are
+  // populated before pty-manager spawns its first session (user terminal or
+  // worker pane). Failures here are non-fatal — Spark itself works without
+  // the socket; sub-agents just won't be able to dial back in.
+  try {
+    await startAgentSocket();
+  } catch (err) {
+    console.error("[main] failed to start agent socket", err);
+  }
+
   if (isHeadlessEval) {
     // Headless eval mode: never create a BrowserWindow, never wire renderer
     // IPC. The headless runner drives the autopilot directly and prints a
@@ -208,6 +219,7 @@ app.whenReady().then(async () => {
       const outcome = await runHeadlessEval(headlessArgs.args!);
       emitFinalSummary(outcome);
       pty.disposeAll();
+      await stopAgentSocket().catch(() => undefined);
       await flush();
       // Schedule a hard process.exit() fallback before app.exit(): on Windows,
       // node-pty's conPTY teardown can leave non-daemon worker handles that
@@ -227,6 +239,7 @@ app.whenReady().then(async () => {
       app.exit(exitCode);
     } catch (err) {
       pty.disposeAll();
+      await stopAgentSocket().catch(() => undefined);
       await flush().catch(() => undefined);
       const hardExitTimer = setTimeout(() => process.exit(1), 3000);
       hardExitTimer.unref();
@@ -311,5 +324,6 @@ app.on("before-quit", async () => {
   // can only land on 127.0.0.1) gets a clean close instead of a connection
   // reset during shutdown.
   await stopHookRpc().catch(() => undefined);
+  await stopAgentSocket().catch(() => undefined);
   await flushAllStores();
 });
