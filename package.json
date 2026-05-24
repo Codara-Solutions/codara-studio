@@ -26,7 +26,6 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
-    "@iconify-json/catppuccin": "^1.2.17",
     "@codemirror/lang-css": "^6.3.1",
     "@codemirror/lang-html": "^6.4.11",
     "@codemirror/lang-javascript": "^6.2.5",
@@ -39,6 +38,7 @@
     "@codemirror/search": "^6.7.0",
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.42.1",
+    "@iconify-json/catppuccin": "^1.2.17",
     "@replit/codemirror-vim": "^6.3.0",
     "@uiw/codemirror-theme-atomone": "^4.25.9",
     "@uiw/codemirror-theme-aura": "^4.25.9",
@@ -52,6 +52,7 @@
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
     "node-pty": "^1.0.0",
     "react-virtuoso": "^4.18.7"
