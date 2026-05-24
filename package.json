@@ -97,6 +97,10 @@
       {
         "from": "resources/orchestration",
         "to": "orchestration"
+      },
+      {
+        "from": "resources/claude-hooks",
+        "to": "claude-hooks"
       }
     ],
     "directories": {
