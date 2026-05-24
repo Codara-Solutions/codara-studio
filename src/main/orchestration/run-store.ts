@@ -6070,6 +6070,67 @@ export function applyHookStateReport(report: {
   })();
 }
 
+// CLI hook ingestion (big-bet "CLI hook ingestion — free observability").
+// Sibling to applyHookStateReport above: that one handles state transitions
+// (worker says "I'm blocked on a permission prompt"), this one handles
+// everything else — tool calls, prompt submissions, compaction, session
+// start, etc. — so the Session Inspector tab and Cost-Tracking pill have a
+// canonical event log.
+//
+// The hook-watcher dispatches state-bearing events (Notification, Stop,
+// SubagentStop) through applyHookStateReport so the worker's runtimeState
+// updates; everything else lands here as a plain event log entry. We:
+//   1. look up the ActiveWorkerProcess by paneId so we can stamp the event
+//      with runId/stepId/workerTaskId/attemptId (without those, the Session
+//      Inspector can't filter the log per-worker);
+//   2. if no worker matches, drop quietly — same rule as applyHookStateReport.
+//      A future "ambient" hook (claude pane the user spawned themselves with
+//      our env vars) can be wired up later if we want it.
+//   3. otherwise append a hook.<HookName> event so consumers see the raw
+//      payload. We do NOT throttle these — Claude's PreToolUse fires once
+//      per tool call which is bursty but bounded.
+export function applyHookEvent(input: {
+  paneId: string;
+  hookName: string;
+  payload?: Record<string, unknown> | null;
+  // ISO timestamp the hook recorded the event. Falls back to now() if the
+  // script's clock disagreed or the wrapper was missing a timestamp.
+  timestamp?: string;
+  // Optional human-readable summary for logs. Hook-watcher fills this in
+  // for the hooks where a short label helps (PreToolUse: tool name, etc.).
+  message?: string;
+}): void {
+  const worker = activeWorkerProcesses.get(input.paneId);
+  if (!worker) return;
+  const timestamp = input.timestamp ?? new Date().toISOString();
+  void (async () => {
+    try {
+      const run = await getRun(worker.runId);
+      if (!run) return;
+      await appendEvent({
+        timestamp,
+        workspaceId: run.workspaceId,
+        runId: worker.runId,
+        stepId: worker.stepId,
+        workerTaskId: worker.workerTaskId,
+        attemptId: worker.attemptId,
+        type: `hook.${input.hookName}`,
+        message: input.message,
+        payload: {
+          paneId: input.paneId,
+          hookName: input.hookName,
+          ...(input.payload && typeof input.payload === "object"
+            ? { hookPayload: input.payload }
+            : {}),
+          source: "cli-hook",
+        },
+      });
+    } catch (err) {
+      console.warn("[run-store] appendEvent for hook event failed:", err);
+    }
+  })();
+}
+
 function shouldResumeManagerPlanning(run: RunState): boolean {
   if (activeWorkersForRun(run.id).length > 0) return false;
   if (run.status !== "paused" || run.autopilot?.status !== "paused") return false;

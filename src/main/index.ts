@@ -19,6 +19,8 @@ import {
 } from "./eval/headless-runner";
 import { registerAutoUpdater } from "./auto-updater";
 import { startHookRpc, stopHookRpc } from "./hook-rpc";
+import { installClaudeHooks } from "./hook-installer";
+import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 
 // run-store is heavy (loads openrouter, langsmith, agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
@@ -186,6 +188,16 @@ function createWindow(): void {
 app.whenReady().then(async () => {
   ensureSparkHomeSync();
 
+  // Install Spark's Python hooks into ~/.claude/settings.json so every
+  // Claude Code session pipes SessionStart / PreToolUse / Notification / Stop
+  // / ... events into <spark-home>/hooks/ for the watcher to ingest below.
+  // This is the "CLI hook ingestion (free observability)" big-bet's installer
+  // half. Fire-and-forget — failures (no Claude installed, settings.json
+  // malformed, etc) are logged but never block boot.
+  void installClaudeHooks().catch((err) =>
+    console.warn("[main] hook installer failed:", err),
+  );
+
   // Warm the enriched-PATH cache. Electron from Finder/Dock/Explorer inherits
   // a sparse PATH that doesn't include npm-global, nvm, scoop, etc. The first
   // call sources the user's login shell (or reads the Windows registry) and
@@ -290,6 +302,18 @@ app.whenReady().then(async () => {
     console.warn("[main] hook RPC failed to start:", err);
   }
 
+  // CLI hook ingestion watcher (big-bet "CLI hook ingestion — free
+  // observability"). The installer (called earlier in app.whenReady) drops
+  // spark-hook.py into ~/.claude/settings.json; the watcher consumes the
+  // resulting JSON files from <spark-home>/hooks/. Started AFTER IPC + the
+  // hook RPC so dispatching events into run-store can immediately fan out
+  // to renderer listeners.
+  try {
+    await startHookWatcher();
+  } catch (err) {
+    console.warn("[main] hook watcher failed to start:", err);
+  }
+
   createWindow();
   if (mainWindow) registerAutoUpdater(mainWindow);
 
@@ -324,6 +348,10 @@ app.on("before-quit", async () => {
   // can only land on 127.0.0.1) gets a clean close instead of a connection
   // reset during shutdown.
   await stopHookRpc().catch(() => undefined);
+  // Stop the hook file watcher so fs.watch handles release before the event
+  // loop drains. Without this an in-flight `fs.rename` to processed/ can
+  // keep the process alive briefly past quit.
+  await stopHookWatcher().catch(() => undefined);
   await stopAgentSocket().catch(() => undefined);
   await flushAllStores();
 });
