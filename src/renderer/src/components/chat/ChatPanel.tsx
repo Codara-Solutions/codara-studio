@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { AddRunMessageAttachmentInput, RunState, Workspace } from "@shared/types";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
-import { PlusIcon } from "../icons";
+import { GridIcon, PlusIcon } from "../icons";
 import ChatConversation from "./ChatConversation";
 import ChatComposer from "./ChatComposer";
+import SwarmView from "./SwarmView";
 import { describeRunStatus, statusToneColor } from "./timeline";
 
 // The Spark chat panel: the workspace's chats live here, one conversation at
@@ -48,6 +49,24 @@ export default function ChatPanel({
   onPauseAfterWorkers,
   onForcePauseRun,
 }: Props) {
+  // Swarm view toggle — flips the chat body from the normal
+  // conversation+composer layout to a grid of live worker terminals. State
+  // is scoped to this panel so the toggle survives switching tabs but
+  // resets if the section is collapsed (the toolbar disappears anyway).
+  // Per-chat keying via run.id means a chat that has no swarm-worthy
+  // workers can still flip in/out without other chats inheriting the state.
+  const [swarmActive, setSwarmActive] = useState(false);
+  // Drop swarm mode when there is no active chat to render workers from —
+  // the swarm grid needs a RunState. Also drop it when the section is
+  // collapsed: the user can't see the toggle so the only way back out
+  // would be expand + toggle.
+  useEffect(() => {
+    if (!activeRun) setSwarmActive(false);
+  }, [activeRun]);
+  useEffect(() => {
+    if (collapsed) setSwarmActive(false);
+  }, [collapsed]);
+
   return (
     <div
       style={{
@@ -67,7 +86,17 @@ export default function ChatPanel({
         onToggleCollapse={onToggleCollapse}
         {...headerDrag}
         meta={activeRun ? <StatusMeta run={activeRun} /> : null}
-        actions={<NewChatButton onClick={() => onSelectRun(null)} />}
+        actions={
+          <>
+            {activeRun && (
+              <SwarmToggleButton
+                active={swarmActive}
+                onClick={() => setSwarmActive((value) => !value)}
+              />
+            )}
+            <NewChatButton onClick={() => onSelectRun(null)} />
+          </>
+        }
       />
       {!collapsed && (
         <>
@@ -82,7 +111,19 @@ export default function ChatPanel({
             onForcePauseRun={onForcePauseRun}
           />
           {error && <ErrorBar message={error} />}
-          {activeRun ? (
+          {swarmActive && activeRun ? (
+            // Swarm grid is keyed on the run id so flipping between chats
+            // remounts the grid (and its TerminalPane instances) for the
+            // new chat's worker set. Toggling swarm off+on within the same
+            // chat reuses the same key, so xterm state survives the round
+            // trip — and the underlying PTYs stay alive regardless because
+            // useTerminalSession only disposes the renderer-side Terminal.
+            <SwarmView
+              key={`swarm:${activeRun.id}`}
+              run={activeRun}
+              cwd={workspace?.cwd ?? null}
+            />
+          ) : activeRun ? (
             // Keyed by chat id so switching chats remounts the stream — fresh
             // scroll position, no step-card open states carried across.
             <ChatConversation
@@ -93,16 +134,59 @@ export default function ChatPanel({
           ) : (
             <WelcomeState />
           )}
-          <ChatComposer
-            key={`composer:${activeRun?.id ?? "new-chat"}`}
-            run={activeRun}
-            cwd={workspace?.cwd ?? null}
-            disabled={!workspace}
-            onStartChat={onStartChat}
-          />
+          {!swarmActive && (
+            <ChatComposer
+              key={`composer:${activeRun?.id ?? "new-chat"}`}
+              run={activeRun}
+              cwd={workspace?.cwd ?? null}
+              disabled={!workspace}
+              onStartChat={onStartChat}
+            />
+          )}
         </>
       )}
     </div>
+  );
+}
+
+function SwarmToggleButton({
+  active,
+  onClick,
+}: {
+  active: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={active ? "Hide swarm grid" : "Show swarm grid (live worker terminals)"}
+      aria-label="Toggle swarm view"
+      aria-pressed={active}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        width: 22,
+        height: 22,
+        border: "none",
+        borderRadius: 5,
+        background: active
+          ? "color-mix(in oklch, var(--accent) 22%, transparent)"
+          : hover
+            ? "var(--hover)"
+            : "transparent",
+        color: active ? "var(--accent)" : hover ? "var(--ink)" : "var(--ink-dim)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 0,
+        cursor: "default",
+      }}
+    >
+      <GridIcon size={12} />
+    </button>
   );
 }
 

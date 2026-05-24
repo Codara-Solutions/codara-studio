@@ -131,6 +131,14 @@ interface Options {
   // command as an OSC 633;E marker that the running TUI then reads as a
   // user prompt — see resources/shell-integration/spark.ps1:22).
   extraEnv?: Record<string, string>;
+  // Mirror-pane mode. When true the xterm still attaches to the PTY's data
+  // stream (so the user sees output), but the hook does NOT send pty.resize
+  // calls and does NOT forward keystrokes via pty.write. Used by SwarmView
+  // tiles where the canonical pane lives in TerminalStack — without this
+  // flag, two ResizeObservers would race and the smaller cols/rows would win,
+  // garbling the larger xterm. Explicit pty.write calls (e.g. SwarmView's
+  // broadcast button) bypass this hook entirely and still work.
+  readOnly?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   onCwd?: (cwd: string) => void;
@@ -168,6 +176,7 @@ export function useTerminalSession({
   initialScrollback,
   initialCommand,
   extraEnv,
+  readOnly = false,
   onSearchReady,
   onExit,
   onCwd,
@@ -176,6 +185,14 @@ export function useTerminalSession({
   onActivity,
   onAgentState,
 }: Options): TerminalSessionApi {
+  // Latest-value ref so the input/resize closures (captured once per
+  // sessionId) see the freshest readOnly flag without re-running the
+  // expensive xterm setup effect.
+  const readOnlyRef = useRef<boolean>(readOnly);
+  useEffect(() => {
+    readOnlyRef.current = readOnly;
+  }, [readOnly]);
+
   const detectedRef = useRef<string | null>(null);
   // Latest-callback refs so the effect can run exactly once per `sessionId`
   // while still calling the freshest closures from the parent.
@@ -322,6 +339,10 @@ export function useTerminalSession({
       // reject them and ConPTY can corrupt the byte stream around them.
       const isWindows = /Windows/i.test(navigator.userAgent);
       const writePasteFromClipboard = () => {
+        // Read-only mirror panes must not paste into the PTY — the canonical
+        // pane owns input. Clipboard read is also skipped so a paste shortcut
+        // in a mirror tile is a true no-op rather than a phantom read.
+        if (readOnlyRef.current) return;
         void (async () => {
           const text = await window.spark.clipboard.readText();
           if (!text) return;
@@ -696,6 +717,15 @@ export function useTerminalSession({
       cleanups.push(offData, offExit);
 
       const inputDisposable = term.onData((data) => {
+        // Read-only / mirror panes (e.g. SwarmView tiles) must not forward
+        // keystrokes — the canonical xterm for the same PTY lives elsewhere
+        // and accepts user input there. Activity still pings since hover/
+        // focus on the mirror tile is a meaningful "this PTY isn't idle"
+        // signal for the orchestrator.
+        if (readOnlyRef.current) {
+          onActivityRef.current?.();
+          return;
+        }
         void window.spark.pty.write(sessionId, data);
         onActivityRef.current?.();
       });
@@ -749,6 +779,12 @@ export function useTerminalSession({
       const flushPtyResize = () => {
         ptyTimer = null;
         if (disposed || !spawned) return;
+        // Read-only mirror panes must not send pty.resize — the canonical
+        // pane owns the PTY's dimensions. Without this guard, two mounts
+        // of the same sessionId would each fit() to their own container
+        // size and race their pty.resize calls; the last (often smaller)
+        // one would win and garble the larger xterm's display.
+        if (readOnlyRef.current) return;
         if (term.cols === lastSentCols && term.rows === lastSentRows) return;
         lastSentCols = term.cols;
         lastSentRows = term.rows;
@@ -799,13 +835,17 @@ export function useTerminalSession({
       }
 
       // Initial size is now real — ship it once explicitly so the shell prompt
-      // paints at the correct width on first render.
+      // paints at the correct width on first render. Skip on read-only mirror
+      // panes; the canonical pane already sized this PTY.
       try {
         fit.fit();
       } catch {
         /* host transitioned to display:none between mount and now */
       }
-      if (term.cols !== lastSentCols || term.rows !== lastSentRows) {
+      if (
+        !readOnlyRef.current &&
+        (term.cols !== lastSentCols || term.rows !== lastSentRows)
+      ) {
         lastSentCols = term.cols;
         lastSentRows = term.rows;
         void window.spark.pty.resize(sessionId, term.cols, term.rows);
@@ -828,9 +868,16 @@ export function useTerminalSession({
       // already launched the TUI. Once we commit to writing, we mark the id
       // permanently so no later remount can resurrect the timer.
       const cmd = initialCommand?.trim();
-      if (cmd && cmd.length > 0 && !startupCommandHandled && !autorunFiredSessions.has(sessionId)) {
+      if (
+        cmd &&
+        cmd.length > 0 &&
+        !startupCommandHandled &&
+        !autorunFiredSessions.has(sessionId) &&
+        !readOnlyRef.current
+      ) {
         const autorunTimer = window.setTimeout(() => {
           if (disposed) return;
+          if (readOnlyRef.current) return;
           autorunFiredSessions.add(sessionId);
           void window.spark.pty.write(sessionId, `${cmd}\r`);
         }, 1500);
