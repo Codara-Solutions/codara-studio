@@ -1107,6 +1107,10 @@ async function askOpenRouterManager(
   const sparkCall: SparkCall = {
     id: callId,
     runId: run.id,
+    // Capture the active step at call-start so per-step cost rollups can
+    // attribute this call without replaying the event log. Undefined for
+    // plan_analysis calls that fire before any step exists.
+    stepId: run.currentStepId,
     mode,
     model: config.model,
     status: "started",
@@ -1199,8 +1203,21 @@ async function askOpenRouterManager(
       targetCall.promptTokenEstimate = contextPacket.tokenEstimate;
       targetCall.contextWindowTokens = completedContextWindow.tokens;
       targetCall.contextWindowSource = completedContextWindow.source;
+      // Cost + token-split fields from the OpenRouter-prices layer. Optional —
+      // older runs and unknown models leave these undefined; the Costs tab and
+      // header pill handle that gracefully.
+      if (typeof result.costUsd === "number") targetCall.costUsd = result.costUsd;
+      if (typeof result.inputTokens === "number") targetCall.inputTokens = result.inputTokens;
+      if (typeof result.outputTokens === "number") targetCall.outputTokens = result.outputTokens;
+      if (typeof result.cacheReadTokens === "number") {
+        targetCall.cacheReadTokens = result.cacheReadTokens;
+      }
       targetCall.completedAt = completedAt;
     }
+    // Recompute the run-level rollup + per-step rollups now that we have a
+    // fresh call cost. Cheap (O(calls) per save) and keeps the pill reactive
+    // without a separate aggregator.
+    recomputeRunCostRollups(latest);
     latest.updatedAt = completedAt;
     await saveRun(latest);
     if (result.fallbackFrom) {
@@ -1237,6 +1254,14 @@ async function askOpenRouterManager(
         promptTokenEstimate: contextPacket.tokenEstimate,
         contextWindowTokens: completedContextWindow.tokens,
         contextWindowSource: completedContextWindow.source,
+        // Cost / token-split fields from the price-table layer so the event
+        // log carries the same data the SparkCall record does. Lets the
+        // Session Inspector Costs tab and any external audit replay both.
+        costUsd: result.costUsd,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        cacheReadTokens: result.cacheReadTokens,
+        runTotalCostUsd: latest.totalCostUsd,
         parsedJsonPath,
         decision: result.decision,
       },
@@ -5434,7 +5459,52 @@ function normalizeRun(run: RunState): RunState {
   if (run.seen === undefined) {
     run.seen = run.status === "complete" ? true : false;
   }
+  // Backfill cost rollups on load so runs persisted before the cost-tracking
+  // big bet landed pick up a totalCostUsd on the next read. Cheap (O(calls))
+  // and avoids special-casing the renderer for legacy run.json files.
+  recomputeRunCostRollups(run);
   return run;
+}
+
+/**
+ * Sum every priced SparkCall on a run and stamp `totalCostUsd` on the run
+ * record (always) and each step record that owns at least one priced call.
+ * Calls without a `costUsd` field contribute nothing; the rollup only writes
+ * a number when at least one call had one — leaves the field undefined
+ * otherwise so the UI can keep its "no data" path distinct from "$0.00".
+ */
+function recomputeRunCostRollups(run: RunState): void {
+  let runTotal = 0;
+  let runHasAny = false;
+  const stepTotals = new Map<string, number>();
+  const stepHasAny = new Set<string>();
+  for (const call of run.sparkCalls ?? []) {
+    const cost = typeof call.costUsd === "number" && Number.isFinite(call.costUsd) ? call.costUsd : null;
+    if (cost === null) continue;
+    runTotal += cost;
+    runHasAny = true;
+    if (call.stepId) {
+      stepTotals.set(call.stepId, (stepTotals.get(call.stepId) ?? 0) + cost);
+      stepHasAny.add(call.stepId);
+    }
+  }
+  if (runHasAny) {
+    run.totalCostUsd = roundCost(runTotal);
+  } else {
+    delete run.totalCostUsd;
+  }
+  for (const step of run.steps ?? []) {
+    if (stepHasAny.has(step.id)) {
+      step.totalCostUsd = roundCost(stepTotals.get(step.id) ?? 0);
+    } else {
+      delete step.totalCostUsd;
+    }
+  }
+}
+
+function roundCost(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.round(value * 1_000_000) / 1_000_000;
 }
 
 const NORMALIZE_DUPLICATE_MESSAGE_WINDOW_MS = 120_000;
