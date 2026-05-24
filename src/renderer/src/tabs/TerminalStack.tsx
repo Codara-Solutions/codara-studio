@@ -18,7 +18,7 @@ import type {
   TerminalSplit,
   TerminalTab,
 } from "./types";
-import { CloseIcon, DragHandleIcon, PlusIcon, SplitDownIcon, SplitRightIcon } from "../components/icons";
+import { CloseIcon, DragHandleIcon, PlusIcon, SplitDownIcon, SplitRightIcon, ZoomPaneIcon } from "../components/icons";
 import {
   TERMINAL_PANE_DRAG_MIME,
   beginTerminalPaneDrag,
@@ -82,6 +82,10 @@ interface Props {
     },
   ) => void;
   onClosePane: (tabId: TabId, paneId: string) => void;
+  // Toggle the named pane between zoom (full tab area) and normal (its
+  // position in the BSP split). The state lives on the TerminalTab so it
+  // survives tab switches; the consumer flips `zoomedPaneId` on/off.
+  onTabZoomToggle: (tabId: TabId, paneId: string) => void;
   onPaneCwd: (tabId: TabId, paneId: string, cwd: string) => void;
   onPaneActivity: (tabId: TabId, paneId: string) => void;
   onPaneScrollback: (tabId: TabId, paneId: string, scrollback: string) => void;
@@ -105,6 +109,7 @@ type Bundle = {
   onSplitDown: () => void;
   onSmartAdd: (autorun?: string) => void;
   onClose: () => void;
+  onToggleZoom: () => void;
   onCwd: (cwd: string) => void;
   onActivity: () => void;
   onAgentState: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
@@ -126,6 +131,7 @@ function TerminalStack({
   onSplitPane,
   onMovePane,
   onClosePane,
+  onTabZoomToggle,
   onPaneCwd,
   onPaneActivity,
   onPaneScrollback,
@@ -150,6 +156,7 @@ function TerminalStack({
   const splitRef = useRef(onSplitPane);
   const moveRef = useRef(onMovePane);
   const closeRef = useRef(onClosePane);
+  const zoomToggleRef = useRef(onTabZoomToggle);
   const cwdRef = useRef(onPaneCwd);
   const activityRef = useRef(onPaneActivity);
   const scrollbackRef = useRef(onPaneScrollback);
@@ -163,11 +170,12 @@ function TerminalStack({
     splitRef.current = onSplitPane;
     moveRef.current = onMovePane;
     closeRef.current = onClosePane;
+    zoomToggleRef.current = onTabZoomToggle;
     cwdRef.current = onPaneCwd;
     activityRef.current = onPaneActivity;
     scrollbackRef.current = onPaneScrollback;
     agentStateRef.current = onPaneAgentState;
-  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onPaneCwd, onPaneActivity, onPaneScrollback, onPaneAgentState]);
+  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneScrollback, onPaneAgentState]);
 
   // Latest tab roots so the + smart-add button can read whichever PaneNode
   // tree is current at click time (a stale capture would split a tree that
@@ -234,6 +242,7 @@ function TerminalStack({
           onSplitDown: () => splitRef.current(tabId, paneId, "vertical"),
           onSmartAdd: (autorun?: string) => smartAddInTab(tabId, autorun),
           onClose: () => closeRef.current(tabId, paneId),
+          onToggleZoom: () => zoomToggleRef.current(tabId, paneId),
           onCwd: (cwd: string) => cwdRef.current(tabId, paneId, cwd),
           onActivity: () => {
             activityRef.current(tabId, paneId);
@@ -576,6 +585,15 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   const hideDraggedPane = !!drag && (drag.tabId === tab.id || !!dropPreviewRoot);
   const layoutAnimating = !!drag && (drag.tabId === tab.id || !!dropPreviewRoot);
 
+  // Zoom is honored only when the named pane actually exists in this tab's
+  // current tree. If the zoomed leaf was closed (which clears the id) we
+  // fall back to the normal split layout automatically.
+  const zoomedPaneId: string | null =
+    tab.zoomedPaneId &&
+    flowLeaves.some((box) => box.leaf.paneId === tab.zoomedPaneId)
+      ? tab.zoomedPaneId
+      : null;
+
   const orderedFlowLeaves = useMemo(() => {
     const activeId = tab.activePaneId;
     return [...flowLeaves]
@@ -624,6 +642,11 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
         const bundle = getBundle(tab.id, leaf.paneId);
         const isActive = tab.activePaneId === leaf.paneId;
         const workerChip = visibleWorkerChip(leaf.worker);
+        const isZoomed = zoomedPaneId === leaf.paneId;
+        const isHiddenByZoom = zoomedPaneId !== null && !isZoomed;
+        // Zoomed pane occupies the full tab area; everything else stays
+        // mounted but is hidden so its xterm/PTY survives the toggle.
+        const renderRect = isZoomed ? FULL_RECT : rect;
         return (
           <div
             key={leaf.paneId}
@@ -687,8 +710,13 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
             className="spark-terminal-pane"
             style={{
               position: "absolute",
-              ...paneFrameStyle(rect),
-              zIndex: isActive ? 5 : 1,
+              ...paneFrameStyle(renderRect),
+              // display:none keeps the React subtree (and the xterm canvas /
+              // PTY behind it) mounted while removing it from layout. When
+              // the wrapper toggles back to "block", the parent
+              // ResizeObserver fires and xterm reflows to the new size.
+              display: isHiddenByZoom ? "none" : undefined,
+              zIndex: isZoomed ? 6 : isActive ? 5 : 1,
               opacity: layoutAnimating && drag?.paneId !== leaf.paneId ? 0.94 : 1,
               transition: layoutAnimating
                 ? "left var(--motion) var(--ease-out), top var(--motion) var(--ease-out), width var(--motion) var(--ease-out), height var(--motion) var(--ease-out), opacity var(--motion-fast) var(--ease-out)"
@@ -696,6 +724,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
             }}
           >
             {isActive ? <PaneFocusRing /> : null}
+            {isZoomed ? <PaneZoomedRing /> : null}
             <TerminalPane
               ref={(h) => setHandle(leaf.paneId, h)}
               sessionId={leaf.paneId}
@@ -718,6 +747,8 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               onSplitRight={bundle.onSplitRight}
               onSplitDown={bundle.onSplitDown}
               onClose={bundle.onClose}
+              onToggleZoom={bundle.onToggleZoom}
+              isZoomed={isZoomed}
             />
           </div>
         );
@@ -735,22 +766,26 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
       {drag && ghostPos && visible ? (
         <TerminalDragGhost x={ghostPos.x} y={ghostPos.y} />
       ) : null}
-      {flowHandles.map((handle) => (
-        <ResizeHandle
-          key={`h:${handle.path.join("/") || "root"}`}
-          handle={handle}
-          getContainer={() => getTabRoot(tab.id)}
-          onRatioChange={(ratio) => onRatioChange(tab.id, handle.path, ratio)}
-        />
-      ))}
-      {resizeIntersections.map((intersection) => (
-        <ResizeIntersectionGrip
-          key={intersection.key}
-          intersection={intersection}
-          getContainer={() => getTabRoot(tab.id)}
-          onRatioChange={(path, ratio) => onRatioChange(tab.id, path, ratio)}
-        />
-      ))}
+      {zoomedPaneId === null
+        ? flowHandles.map((handle) => (
+            <ResizeHandle
+              key={`h:${handle.path.join("/") || "root"}`}
+              handle={handle}
+              getContainer={() => getTabRoot(tab.id)}
+              onRatioChange={(ratio) => onRatioChange(tab.id, handle.path, ratio)}
+            />
+          ))
+        : null}
+      {zoomedPaneId === null
+        ? resizeIntersections.map((intersection) => (
+            <ResizeIntersectionGrip
+              key={intersection.key}
+              intersection={intersection}
+              getContainer={() => getTabRoot(tab.id)}
+              onRatioChange={(path, ratio) => onRatioChange(tab.id, path, ratio)}
+            />
+          ))
+        : null}
     </div>
   );
 });
@@ -1068,6 +1103,28 @@ function isNearInsertEdge(rect: DOMRect, clientX: number, clientY: number): bool
     Math.abs(rect.bottom - clientY),
   );
   return edgeDistance <= LINE_DROP_EDGE_PX;
+}
+
+// Subtle accent border that signals the pane is currently full-tab zoomed.
+// Sits below PaneFocusRing's z-index so the focus ring still wins when this
+// pane is also active. Pointer events are off so the canvas underneath stays
+// interactive.
+function PaneZoomedRing() {
+  return (
+    <div
+      aria-hidden
+      style={{
+        position: "absolute",
+        inset: 0,
+        zIndex: 19,
+        pointerEvents: "none",
+        border: "1px solid color-mix(in oklch, var(--accent) 64%, transparent)",
+        borderRadius: "var(--terminal-pane-radius)",
+        boxShadow:
+          "0 0 0 1px color-mix(in oklch, var(--accent) 18%, transparent), 0 0 36px color-mix(in oklch, var(--accent) 12%, transparent)",
+      }}
+    />
+  );
 }
 
 // Accent frame drawn above the xterm canvas. Sits on a raised z-index pane so
@@ -1527,9 +1584,19 @@ interface PaneToolbarProps {
   onSplitRight: () => void;
   onSplitDown: () => void;
   onClose: () => void;
+  onToggleZoom: () => void;
+  isZoomed: boolean;
 }
 
-function PaneToolbar({ dragPayload, onSmartAdd, onSplitRight, onSplitDown, onClose }: PaneToolbarProps) {
+function PaneToolbar({
+  dragPayload,
+  onSmartAdd,
+  onSplitRight,
+  onSplitDown,
+  onClose,
+  onToggleZoom,
+  isZoomed,
+}: PaneToolbarProps) {
   const stop = (e: React.MouseEvent | React.PointerEvent) => e.stopPropagation();
   const [menuOpen, setMenuOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -1624,6 +1691,13 @@ function PaneToolbar({ dragPayload, onSmartAdd, onSplitRight, onSplitDown, onClo
       </ToolbarButton>
       <ToolbarButton title="Split down (Ctrl+Shift+\\)" onClick={onSplitDown}>
         <SplitDownIcon size={12} />
+      </ToolbarButton>
+      <ToolbarButton
+        title={isZoomed ? "Restore pane (Ctrl+Shift+Z)" : "Zoom pane (Ctrl+Shift+Z)"}
+        onClick={onToggleZoom}
+        active={isZoomed}
+      >
+        <ZoomPaneIcon size={12} zoomed={isZoomed} />
       </ToolbarButton>
       <ToolbarButton title="Close pane" onClick={onClose} danger>
         <CloseIcon size={12} />

@@ -92,6 +92,13 @@ export interface TerminalTab extends BaseTab {
   kind: "terminal";
   root: PaneNode;
   activePaneId: string;
+  // When set, the named leaf is displayed at full tab size and every other
+  // leaf is hidden via CSS (display:none) — but kept mounted, so xterm
+  // canvases and PTY connections survive the zoom toggle. The split tree and
+  // its ratios are untouched; on unzoom the original layout is restored
+  // pixel-for-pixel. Cleared automatically when the leaf is closed or the
+  // pane is split.
+  zoomedPaneId?: string | null;
 }
 
 export interface PreviewTab extends BaseTab {

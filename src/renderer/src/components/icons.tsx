@@ -157,6 +157,41 @@ export function CloseIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+export function ZoomPaneIcon({ size = 14, zoomed = false }: { size?: number; zoomed?: boolean }) {
+  // Four corner brackets — reads as "expand to fill" when not zoomed and
+  // "collapse back into split" when zoomed. The zoomed state pulls the
+  // brackets inward so the affordance toggles visibly.
+  const inset = zoomed ? 4 : 2.5;
+  const armLen = zoomed ? 1.6 : 2.2;
+  const min = inset;
+  const max = 14 - inset;
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {/* top-left */}
+      <line x1={min} y1={min + armLen} x2={min} y2={min} />
+      <line x1={min} y1={min} x2={min + armLen} y2={min} />
+      {/* top-right */}
+      <line x1={max - armLen} y1={min} x2={max} y2={min} />
+      <line x1={max} y1={min} x2={max} y2={min + armLen} />
+      {/* bottom-right */}
+      <line x1={max} y1={max - armLen} x2={max} y2={max} />
+      <line x1={max} y1={max} x2={max - armLen} y2={max} />
+      {/* bottom-left */}
+      <line x1={min + armLen} y1={max} x2={min} y2={max} />
+      <line x1={min} y1={max} x2={min} y2={max - armLen} />
+    </svg>
+  );
+}
+
 export function SplitRightIcon({ size = 14 }: { size?: number }) {
   // A rectangle with a centered vertical divider — reads as "two side-by-side
   // panes". Used for "split right" (Mod+\) on the terminal pane toolbar.

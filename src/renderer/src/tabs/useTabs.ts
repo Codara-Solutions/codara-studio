@@ -342,6 +342,10 @@ export interface UseTabsApi {
     autorun?: string,
   ) => string | null;
   closeTerminalPane: (tabId: TabId, paneId: string) => void;
+  // Flip `zoomedPaneId` for a tab: sets it to `paneId` if currently null or a
+  // different pane, clears it if `paneId` is already the zoomed one. Stored
+  // on the tab so it persists across tab switches.
+  toggleTerminalPaneZoom: (tabId: TabId, paneId: string) => void;
   setActiveTerminalPane: (tabId: TabId, paneId: string) => void;
   setTerminalSplitRatio: (tabId: TabId, path: PanePath, ratio: number) => void;
   setLeafCwd: (tabId: TabId, paneId: string, cwd: string) => void;
@@ -891,7 +895,9 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
             // current shell directory rather than dropping back to project root.
             newLeaf,
           );
-          return { ...t, root, activePaneId: fresh };
+          // Splitting a zoomed pane unzooms (the other panes need to be
+          // visible again so the new split is meaningful).
+          return { ...t, root, activePaneId: fresh, zoomedPaneId: null };
         }),
       );
       return newPaneId;
@@ -927,7 +933,11 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
             const fallback = nextLeafAfter(root, paneId);
             activePaneId = fallback?.paneId ?? activePaneId;
           }
-          next.push({ ...t, root, activePaneId });
+          // If the closing pane was the zoomed one, drop the zoom so the
+          // restored layout shows everything. (Closing a non-zoomed pane
+          // while another is zoomed leaves the zoom intact.)
+          const zoomedPaneId = t.zoomedPaneId === paneId ? null : t.zoomedPaneId;
+          next.push({ ...t, root, activePaneId, zoomedPaneId });
         }
         if (next.length === 0) {
           // Restoring the seed tab keeps the workbench from rendering an
@@ -956,6 +966,24 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
           if (t.activePaneId === paneId) return t;
           if (!findLeaf(t.root, paneId)) return t;
           return { ...t, activePaneId: paneId };
+        }),
+      );
+    },
+    [],
+  );
+
+  // Toggle the per-tab zoom: a second click on the same pane unzooms;
+  // pressing zoom on a different pane re-zooms onto that pane. The split
+  // tree and its ratios are untouched, so unzoom restores the exact layout.
+  const toggleTerminalPaneZoom = useCallback(
+    (tabId: TabId, paneId: string) => {
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          if (!findLeaf(t.root, paneId)) return t;
+          const next = t.zoomedPaneId === paneId ? null : paneId;
+          if ((t.zoomedPaneId ?? null) === next) return t;
+          return { ...t, zoomedPaneId: next, activePaneId: paneId };
         }),
       );
     },
@@ -1336,6 +1364,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
       moveTerminalPane,
       splitTerminalPane,
       closeTerminalPane,
+      toggleTerminalPaneZoom,
       setActiveTerminalPane,
       setTerminalSplitRatio,
       setLeafCwd,
