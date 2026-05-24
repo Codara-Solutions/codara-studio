@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { platform } from "node:os";
 import type {
   AgentEffortLevel,
+  AgentRuntimeCapabilities,
   AgentRuntimeDiagnostic,
   AgentRuntimeKind,
   AgentRuntimeModel,
@@ -84,6 +85,41 @@ const CODEX_MODELS: AgentRuntimeModel[] = [
     effortLevels: ["minimal", "low", "medium", "high"],
   },
 ];
+
+// Per-runtime capability flags. Source of truth: research/VIBEYARD_LEARNINGS.md
+// §3 table. Update both places together when a CLI gains/loses a feature.
+const CAPABILITIES_BY_KIND: Record<AgentRuntimeKind, AgentRuntimeCapabilities> = {
+  claude: {
+    sessionResume: true,
+    costTracking: true,
+    contextWindow: true,
+    hookStatus: true,
+    shiftEnterNewline: true,
+    planModeArg: true,
+    systemPromptInjection: true,
+    defaultContextWindowSize: 200000,
+  },
+  codex: {
+    sessionResume: true,
+    costTracking: false,
+    contextWindow: false,
+    hookStatus: true,
+    shiftEnterNewline: false,
+    planModeArg: false,
+    systemPromptInjection: true,
+    defaultContextWindowSize: 200000,
+  },
+  cursor: {
+    sessionResume: true,
+    costTracking: false,
+    contextWindow: false,
+    hookStatus: false,
+    shiftEnterNewline: false,
+    planModeArg: false,
+    systemPromptInjection: false,
+    defaultContextWindowSize: 200000,
+  },
+};
 
 interface RuntimeSpec {
   kind: AgentRuntimeKind;
@@ -186,6 +222,7 @@ async function diagnoseRuntime(spec: RuntimeSpec): Promise<AgentRuntimeDiagnosti
     recommendedWorkerCommand,
     installHint: spec.installHint,
     lastCheckedAt: new Date().toISOString(),
+    capabilities: CAPABILITIES_BY_KIND[spec.kind],
   };
 }
 

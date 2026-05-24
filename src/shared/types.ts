@@ -259,6 +259,26 @@ export interface AgentRuntimeModel {
   isDefault?: boolean;
 }
 
+// Per-runtime feature flags. Different CLIs expose different capabilities
+// (Codex doesn't surface cost or context-window data, Cursor doesn't support
+// hook status or planMode, etc.). Renderer code uses these flags via the
+// <Capability /> wrapper to conditionally render runtime-specific UI.
+export interface AgentRuntimeCapabilities {
+  sessionResume: boolean;
+  costTracking: boolean;
+  contextWindow: boolean;
+  hookStatus: boolean;
+  shiftEnterNewline: boolean;
+  planModeArg: boolean;
+  systemPromptInjection: boolean;
+  defaultContextWindowSize: number;
+}
+
+export type AgentRuntimeCapability = keyof Omit<
+  AgentRuntimeCapabilities,
+  "defaultContextWindowSize"
+>;
+
 export interface AgentRuntimeDiagnostic {
   kind: AgentRuntimeKind;
   label: string;
@@ -272,6 +292,7 @@ export interface AgentRuntimeDiagnostic {
   recommendedWorkerCommand: string | null;
   installHint: string;
   lastCheckedAt: string;
+  capabilities: AgentRuntimeCapabilities;
 }
 
 export interface AgentSyncResult {
