@@ -7,7 +7,7 @@ import { startAgentSocket, stopAgentSocket } from "./agent-socket";
 import { ensureSparkHomeSync } from "./spark-home";
 import { flush, loadState } from "./storage";
 import { flushPreferences, getPreferenceSync } from "./preferences-store";
-import { registerMainWindow } from "./notifications";
+import { registerMainWindow, startNotifications } from "./notifications";
 import { setAllowedRoots } from "./fs-sandbox";
 import { getEnrichedPath } from "./path-reconstruction";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
@@ -316,6 +316,10 @@ app.whenReady().then(async () => {
 
   createWindow();
   if (mainWindow) registerAutoUpdater(mainWindow);
+  // Start the four-channel notifier subscription to run-store events. The
+  // BrowserWindow getter is already wired by registerMainWindow() inside
+  // createWindow(); this kicks off the event subscription. Idempotent.
+  startNotifications();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

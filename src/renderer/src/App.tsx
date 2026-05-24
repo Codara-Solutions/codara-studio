@@ -18,6 +18,8 @@ import AgentCapabilitiesDialog from "./components/AgentCapabilitiesDialog";
 import UpdateBanner from "./components/UpdateBanner";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
+import ToastHost from "./components/Toast";
+import { playNotificationSound } from "./components/notification-sounds";
 import TabBar from "./tabs/TabBar";
 import EditorStack from "./tabs/EditorStack";
 import TerminalStack from "./tabs/TerminalStack";
@@ -676,6 +678,19 @@ export default function App() {
         runRefreshTimer.current = null;
       }
     };
+  }, []);
+
+  // Subscribe to renderer-side notification channels. The toast channel is
+  // owned by <ToastHost/> below; this effect handles the embedded-sound
+  // channel by playing the right WAV clip whenever main fires
+  // "notification:sound". The main process has already filtered against
+  // the user's preferences before sending — by the time we get here, the
+  // user has the sound channel enabled, so we just play.
+  useEffect(() => {
+    const off = window.spark.notifications.onNotificationSound(({ kind }) => {
+      playNotificationSound(kind);
+    });
+    return () => off();
   }, []);
 
   // Theme the entire UI with the active workspace's color. Falls back to the
@@ -1753,6 +1768,8 @@ export default function App() {
           onClose={closeFileSearch}
           onOpenFile={handleSearchOpenFile}
         />
+
+        <ToastHost onSelectRun={handleSelectRun} />
       </div>
 
       <StatusBar

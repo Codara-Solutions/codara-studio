@@ -101,6 +101,10 @@
       {
         "from": "resources/claude-hooks",
         "to": "claude-hooks"
+      },
+      {
+        "from": "resources/sounds",
+        "to": "sounds"
       }
     ],
     "directories": {
