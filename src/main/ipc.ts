@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, listDir, listFiles, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
+import { assertAllowedReadPath, setAllowedRoots } from "./fs-sandbox";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { detectAgentRuntimes } from "./agent-runtimes";
 import { loadPreferences, setPreference } from "./preferences-store";
@@ -251,23 +252,33 @@ export function registerIpc(): void {
     },
   );
 
+  // Read-path sandbox: each handler below rejects paths outside the active
+  // workspace roots + a small static allowlist (see fs-sandbox.ts). Write/
+  // create/delete handlers further down are intentionally NOT gated — they
+  // have a different attack surface and broader internal use; future work can
+  // extend the sandbox to those if needed.
   ipcMain.handle("fs:list", async (_e, dir: string) => {
+    assertAllowedReadPath(dir);
     return listDir(dir);
   });
 
   ipcMain.handle("fs:listFiles", async (_e, root: string): Promise<FileListResult> => {
+    assertAllowedReadPath(root);
     return listFiles(root);
   });
 
   ipcMain.handle("fs:readText", async (_e, path: string): Promise<FsFileContent> => {
+    assertAllowedReadPath(path);
     return readTextFile(path);
   });
 
   ipcMain.handle("fs:readEx", async (_e, path: string): Promise<FsReadResult> => {
+    assertAllowedReadPath(path);
     return readFileEx(path);
   });
 
   ipcMain.handle("fs:listMarkdownFiles", async (_e, root: string): Promise<PlanFile[]> => {
+    assertAllowedReadPath(root);
     return listMarkdownFiles(root);
   });
 
@@ -292,7 +303,19 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("fs:setWatchRoot", async (e, root: string | null): Promise<void> => {
+    // Gate only the root path here; downstream watcher events do not need a
+    // per-event check (they all fire inside the gated root).
+    if (root !== null) assertAllowedReadPath(root);
     fsWatcher.setWatchRoot(e.sender, root);
+  });
+
+  // The renderer is authoritative about which workspaces are open, but the
+  // sandbox lives in main. Renderer pushes the cwd list whenever it changes;
+  // main treats the list as the source of truth for read-path checks.
+  ipcMain.handle("ui:setAllowedRoots", async (_e, roots: unknown): Promise<void> => {
+    if (!Array.isArray(roots)) return;
+    const cleaned = roots.filter((r): r is string => typeof r === "string" && r.length > 0);
+    setAllowedRoots(cleaned);
   });
 
   ipcMain.handle("fs:revealInOS", async (_e, path: string): Promise<void> => {

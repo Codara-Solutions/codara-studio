@@ -309,6 +309,13 @@ const api = {
     platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke("app:platform"),
     home: (): Promise<string> => ipcRenderer.invoke("app:home"),
   },
+  ui: {
+    // Tell main which filesystem roots the renderer considers in scope right
+    // now. Main uses this list to gate fs:* read handlers; renderer should
+    // call it on boot and whenever the workspace list changes.
+    setAllowedRoots: (roots: string[]): Promise<void> =>
+      ipcRenderer.invoke("ui:setAllowedRoots", roots),
+  },
   clipboard: {
     readText: (): Promise<string> => ipcRenderer.invoke("clipboard:readText"),
     writeText: (text: string): Promise<void> =>

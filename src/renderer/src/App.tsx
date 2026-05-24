@@ -449,6 +449,32 @@ export default function App() {
   }, [showLeft]);
 
   const workspaceIdsKey = useMemo(() => workspaces.map((w) => w.id).join("\0"), [workspaces]);
+  // Comma-joined sorted list of workspace cwds. Used as a stable dep for the
+  // setAllowedRoots push so we only re-send when the actual cwd set changes
+  // (renaming a workspace's color, for instance, must not re-fire the IPC).
+  const workspaceCwdsKey = useMemo(
+    () =>
+      workspaces
+        .map((w) => w.cwd)
+        .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0)
+        .slice()
+        .sort()
+        .join("\0"),
+    [workspaces],
+  );
+
+  // Push the renderer's set of active workspace cwds to main so the fs:*
+  // read handlers know which paths are in scope. Main treats this list as the
+  // authoritative source of allowed workspace roots; if the renderer never
+  // calls this, only the static CLI/config dirs in fs-sandbox.ts remain
+  // reachable — that's the safe default for a fresh boot.
+  useEffect(() => {
+    if (!booted) return;
+    const cwds = workspaceCwdsKey ? workspaceCwdsKey.split("\0").filter((c) => c.length > 0) : [];
+    void window.spark.ui?.setAllowedRoots(cwds).catch(() => {
+      /* sandbox push is best-effort; failures only restrict reachable reads */
+    });
+  }, [booted, workspaceCwdsKey]);
 
   const refreshRunCount = useCallback(async (workspaceId: string) => {
     try {
