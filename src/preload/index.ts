@@ -24,8 +24,10 @@ import type {
   GitOpResult,
   GitSmartMergeResult,
   GitStatus,
+  InAppNotificationPayload,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
+  NotificationSoundKind,
   PauseRunInput,
   PlanFile,
   PrefKey,
@@ -55,6 +57,8 @@ type OrchestrationEventHandler = (event: SparkEvent) => void;
 type FsChangeHandler = (event: FsChangeEvent) => void;
 type WindowStateHandler = (state: { maximized: boolean }) => void;
 type PreferencesChangeHandler = (change: PreferencesChange) => void;
+type InAppNotificationHandler = (payload: InAppNotificationPayload) => void;
+type NotificationSoundHandler = (info: { kind: NotificationSoundKind }) => void;
 // Hits arrive batched (one IPC message per ~100 hits or per ~24ms) — see
 // `streamGrep` in the main process. The handler receives the whole batch.
 type SearchHitHandler = (hits: SearchHit[]) => void;
@@ -126,6 +130,28 @@ const api = {
         handler(change);
       ipcRenderer.on("preferences:changed", listener);
       return () => ipcRenderer.off("preferences:changed", listener);
+    },
+  },
+  // Renderer subscriptions for the four-channel notification system.
+  // Two channels are renderer-side (in-app toast + embedded sound clip);
+  // the other two (native Notification, OS dock badge / taskbar flash)
+  // live entirely in main and don't surface here.
+  notifications: {
+    onInAppNotification: (handler: InAppNotificationHandler): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        payload: InAppNotificationPayload,
+      ) => handler(payload);
+      ipcRenderer.on("notification:in-app", listener);
+      return () => ipcRenderer.off("notification:in-app", listener);
+    },
+    onNotificationSound: (handler: NotificationSoundHandler): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        info: { kind: NotificationSoundKind },
+      ) => handler(info);
+      ipcRenderer.on("notification:sound", listener);
+      return () => ipcRenderer.off("notification:sound", listener);
     },
   },
   shells: {

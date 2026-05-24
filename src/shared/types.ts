@@ -131,6 +131,19 @@ export const EDITOR_THEME_IDS: readonly EditorThemeId[] = [
 //   - missing → use defaults
 export type KeybindingOverridesPref = Record<string, string | null>;
 
+// Per-channel toggles for the four-channel notification system. Each
+// channel fires independently when an alert trigger fires; toggling one
+// off means that specific channel stays silent even if the others fire.
+// The 3-rule policy (suppress when focused on the run that needs you,
+// never on no-change, alert on blocked + on complete-when-not-watching)
+// gates ALL channels before they are even consulted.
+export interface NotificationChannelsPref {
+  inApp: boolean;
+  native: boolean;
+  sound: boolean;
+  osCues: boolean;
+}
+
 export interface AppPreferences {
   theme: ThemePref;
   vimMode: boolean;
@@ -146,6 +159,11 @@ export interface AppPreferences {
   // with integrated GPUs. Requires restart because Chromium only checks the
   // flag once during process startup.
   disableHardwareAcceleration?: boolean;
+  // Per-channel notification toggles. Source of truth for which channels
+  // fire when an orchestration event matches the alert policy. Legacy
+  // `notifications: { enabled, sounds }` blobs from older spark-preferences
+  // files are read at migration time and folded into these flags.
+  notificationChannels: NotificationChannelsPref;
 }
 
 export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "google/gemini-3.5-flash";
@@ -216,6 +234,13 @@ export const INLINE_AI_DELAY_PRESETS: ReadonlyArray<{
   },
 ];
 
+export const DEFAULT_NOTIFICATION_CHANNELS: NotificationChannelsPref = {
+  inApp: true,
+  native: true,
+  sound: true,
+  osCues: true,
+};
+
 export const DEFAULT_PREFERENCES: AppPreferences = {
   theme: "spark-classic",
   vimMode: false,
@@ -225,7 +250,26 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   inlineAutocompleteModelId: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
   keybindings: {},
   disableHardwareAcceleration: false,
+  notificationChannels: { ...DEFAULT_NOTIFICATION_CHANNELS },
 };
+
+// Discriminated payload for the in-app toast IPC channel. `kind` drives the
+// toast colour: blocked → danger red, complete → success/info teal. `runId`
+// lets the renderer route a click to "select run" so the user can jump
+// straight to the chat that needs them.
+export type InAppNotificationKind = "blocked" | "complete";
+
+export interface InAppNotificationPayload {
+  id: string;
+  kind: InAppNotificationKind;
+  title: string;
+  body: string;
+  runId?: string;
+  workspaceId?: string;
+  createdAt: string;
+}
+
+export type NotificationSoundKind = "needs-you" | "done";
 
 export type PrefKey = keyof AppPreferences;
 

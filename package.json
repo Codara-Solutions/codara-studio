@@ -95,6 +95,10 @@
       {
         "from": "resources/orchestration",
         "to": "orchestration"
+      },
+      {
+        "from": "resources/sounds",
+        "to": "sounds"
       }
     ],
     "directories": {

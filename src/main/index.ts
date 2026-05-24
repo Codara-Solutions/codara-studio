@@ -6,6 +6,7 @@ import * as fsWatcher from "./fs-watcher";
 import { ensureSparkHomeSync } from "./spark-home";
 import { flush } from "./storage";
 import { flushPreferences, getPreferenceSync } from "./preferences-store";
+import { setMainWindowGetter, startNotifications } from "./notifications";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
 import {
   emitFinalSummary,
@@ -205,6 +206,13 @@ app.whenReady().then(async () => {
 
   registerIpc();
   createWindow();
+  // Wire up the four-channel notifier. Provides the notifier with a live
+  // BrowserWindow getter (so flashFrame / webContents.send always reach
+  // the current window, even after a renderer crash + recreate) and
+  // starts the orchestration-event subscription. Both calls are
+  // idempotent so multiple invocations would be safe.
+  setMainWindowGetter(() => mainWindow);
+  startNotifications();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

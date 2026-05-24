@@ -3,11 +3,13 @@ import { join } from "node:path";
 import {
   APP_THEME_IDS,
   DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS,
+  DEFAULT_NOTIFICATION_CHANNELS,
   DEFAULT_PREFERENCES,
   EDITOR_THEME_IDS,
   LEGACY_DEFAULT_INLINE_AUTOCOMPLETE_MODEL_IDS,
   type AppPreferences,
   type EditorThemeId,
+  type NotificationChannelsPref,
   type PrefKey,
   type ThemePref,
 } from "@shared/types";
@@ -92,6 +94,48 @@ function normalizeInlineDelay(value: unknown): number {
   return Math.max(0, Math.min(2_000, Math.round(value)));
 }
 
+// Normalize the four-channel notification preferences. Reads the new
+// `notificationChannels` blob if present, otherwise falls back to the
+// legacy `notifications: { enabled, sounds }` shape from older prefs
+// files. Unknown / missing channels resolve to true (on by default) so
+// users who skip a Spark version that introduces a new channel get the
+// channel auto-enabled instead of silently disabled.
+function normalizeNotificationChannels(
+  value: unknown,
+  legacy: unknown,
+): NotificationChannelsPref {
+  const defaults = DEFAULT_NOTIFICATION_CHANNELS;
+  // Legacy shape: `notifications: { enabled, sounds }`. If `enabled` is
+  // explicitly false, the user had alerts switched off — carry that into
+  // all four new channels. If `sounds` is explicitly false, keep the
+  // sound channel off but leave the rest on.
+  let legacyEnabledAll: boolean | undefined;
+  let legacySoundsOnly: boolean | undefined;
+  if (legacy && typeof legacy === "object") {
+    const src = legacy as Record<string, unknown>;
+    if (typeof src.enabled === "boolean") legacyEnabledAll = src.enabled;
+    if (typeof src.sounds === "boolean") legacySoundsOnly = src.sounds;
+  }
+
+  const base: NotificationChannelsPref = legacyEnabledAll === false
+    ? { inApp: false, native: false, sound: false, osCues: false }
+    : { ...defaults };
+  if (legacySoundsOnly === false && legacyEnabledAll !== false) {
+    base.sound = false;
+  }
+
+  if (!value || typeof value !== "object") {
+    return base;
+  }
+  const src = value as Record<string, unknown>;
+  return {
+    inApp: typeof src.inApp === "boolean" ? src.inApp : base.inApp,
+    native: typeof src.native === "boolean" ? src.native : base.native,
+    sound: typeof src.sound === "boolean" ? src.sound : base.sound,
+    osCues: typeof src.osCues === "boolean" ? src.osCues : base.osCues,
+  };
+}
+
 function normalize(
   input: Partial<AppPreferences> | null | undefined,
   opts: { migrateLegacyInlineDefault?: boolean } = {},
@@ -121,6 +165,10 @@ function normalize(
       typeof src.disableHardwareAcceleration === "boolean"
         ? src.disableHardwareAcceleration
         : DEFAULT_PREFERENCES.disableHardwareAcceleration,
+    notificationChannels: normalizeNotificationChannels(
+      src.notificationChannels,
+      (src as Record<string, unknown>).notifications,
+    ),
   };
 }
 

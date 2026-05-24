@@ -778,6 +778,67 @@ function GeneralSettings() {
           Loading preferences…
         </div>
       )}
+
+      <div
+        style={{
+          height: 1,
+          background: "var(--rule-soft)",
+          margin: "2px 0",
+        }}
+      />
+
+      <SectionTitle
+        title="Notifications"
+        detail="Pick which channels fire when a run is blocked or finishes while you're away. The 3-rule policy gates all channels — they never fire when you're already watching the chat that finished."
+      />
+      {hydrated ? (
+        <div style={{ display: "grid", gap: 6 }}>
+          <ToggleRow
+            title="In-app toast"
+            desc="Stacked top-right card. Click to jump to the chat that needs you."
+            checked={preferences.notificationChannels.inApp}
+            onChange={(v) =>
+              void setPreference("notificationChannels", {
+                ...preferences.notificationChannels,
+                inApp: v,
+              })
+            }
+          />
+          <ToggleRow
+            title="Native OS notification"
+            desc="System tray / notification center alert via your OS notifications service."
+            checked={preferences.notificationChannels.native}
+            onChange={(v) =>
+              void setPreference("notificationChannels", {
+                ...preferences.notificationChannels,
+                native: v,
+              })
+            }
+          />
+          <ToggleRow
+            title="Embedded sound clip"
+            desc="Plays a short cue: one for 'needs you' (blocked), one for 'done'."
+            checked={preferences.notificationChannels.sound}
+            onChange={(v) =>
+              void setPreference("notificationChannels", {
+                ...preferences.notificationChannels,
+                sound: v,
+              })
+            }
+          />
+          <ToggleRow
+            title="OS-specific cues"
+            desc="macOS dock badge / Windows taskbar flash. Clears when you focus Spark."
+            checked={preferences.notificationChannels.osCues}
+            onChange={(v) =>
+              void setPreference("notificationChannels", {
+                ...preferences.notificationChannels,
+                osCues: v,
+              })
+            }
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
