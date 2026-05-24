@@ -585,6 +585,23 @@ export type WorkerAttemptStatus =
   | "timed_out"
   | "cancelled";
 
+// Live agent state, sniffed by the renderer-side terminal poller (300ms tick,
+// 2-tick confirm). Orthogonal to WorkerAttemptStatus — that lifecycle is owned
+// by orchestration, this one mirrors what the agent's TUI is doing right now
+// inside its pane. Used to drive the worker chip tone (live spinner vs steady
+// red vs unseen-done) and to trigger downstream notifications.
+//   - "working" : the agent is actively thinking / streaming tokens.
+//   - "blocked" : the agent is waiting for the user (permission prompt,
+//                 confirmation, "do you want to proceed?").
+//   - "idle"    : no working/blocked patterns seen for the debounce window.
+//                 We're between turns or the prompt is back.
+//   - "done"    : the foreground TUI has exited; the shell prompt is showing.
+//                 The orchestration attempt may still be in flight (the worker
+//                 might be writing its final report), but the agent itself
+//                 has handed control back.
+// null means "no detection has fired yet" — treat as unknown.
+export type RuntimeState = "working" | "blocked" | "idle" | "done";
+
 export type ReviewDecisionType =
   | "accept"
   | "retry_same_worker"
@@ -870,6 +887,15 @@ export interface WorkerAttempt {
   finalReportPath?: string;
   diffPath?: string;
   error?: string;
+  /**
+   * Latest agent state reported by the renderer-side terminal poller. Updated
+   * via the `terminalState:report` IPC; `undefined` means we haven't sniffed
+   * yet (or this attempt is not hosted in a renderer-visible pane — headless
+   * eval runs).
+   */
+  runtimeState?: RuntimeState;
+  /** ISO timestamp captured the last time runtimeState changed. */
+  runtimeStateUpdatedAt?: string;
 }
 
 export interface WorkerTaskEnvelope {

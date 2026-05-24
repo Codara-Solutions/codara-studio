@@ -79,6 +79,7 @@ import type {
   PlanFile,
   RunArtifactPaths,
   RunState,
+  RuntimeState,
   SearchHit,
   SearchOptions,
   SearchSummary,
@@ -649,6 +650,20 @@ export function registerIpc(): void {
   ipcMain.handle("pty:dispose", async (_e, args: { id: string }) => {
     pty.dispose(args.id);
   });
+
+  // Live runtime-state report from the renderer-side terminal poller. Main
+  // forwards the report into run-store (which finds the worker attempt by
+  // paneId/attemptId and updates its `runtimeState` field, broadcasting a
+  // change event). Reports for panes with no matching attempt — manual
+  // claude/codex panes started by the user — are silently ignored.
+  ipcMain.handle(
+    "terminalState:report",
+    async (_e, input: { paneId: string; state: RuntimeState }) => {
+      if (!input?.paneId || !input.state) return;
+      const store = await getRunStore();
+      await store.reportTerminalState(input.paneId, input.state);
+    },
+  );
 
   ipcMain.handle("window:minimize", async (e): Promise<void> => {
     BrowserWindow.fromWebContents(e.sender)?.minimize();
