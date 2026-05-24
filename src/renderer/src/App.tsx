@@ -14,6 +14,7 @@ import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
 import AgentCapabilitiesDialog from "./components/AgentCapabilitiesDialog";
+import UpdateBanner from "./components/UpdateBanner";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
 import TabBar from "./tabs/TabBar";
@@ -1513,6 +1514,11 @@ export default function App() {
         background: "var(--bg)",
       }}
     >
+      {/* Auto-updater banner — position:fixed so the banner sits above
+          WindowChrome without disturbing the existing flex layout. Renders
+          nothing in the resting state, so it's a no-op outside of the
+          packaged-app update lifecycle. */}
+      <UpdateBanner />
       <WindowChrome
         platform={platform}
         leftOn={showLeft}
