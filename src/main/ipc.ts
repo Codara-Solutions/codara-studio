@@ -67,6 +67,7 @@ import type {
   GitStatus,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
+  MarkRunSeenInput,
   PauseRunInput,
   PrefKey,
   PreferencesChange,
@@ -520,6 +521,11 @@ export function registerIpc(): void {
   ipcMain.handle("orchestration:updateRunStatus", async (_e, input: UpdateRunStatusInput): Promise<RunState> => {
     const { updateRunStatus } = await getRunStore();
     return updateRunStatus(input);
+  });
+
+  ipcMain.handle("orchestration:markRunSeen", async (_e, input: MarkRunSeenInput): Promise<RunState> => {
+    const { markRunSeen } = await getRunStore();
+    return markRunSeen(input);
   });
 
   ipcMain.handle("orchestration:createStep", async (_e, input: CreateStepInput): Promise<RunState> => {

@@ -8,6 +8,7 @@ import type {
   AppSettings,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
+  MarkRunSeenInput,
   PauseRunInput,
   CancelRunInput,
   ContextPacket,
@@ -169,6 +170,9 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     artifactDir: "",
     createdAt: now,
     updatedAt: now,
+    // Fresh run hasn't been "seen done" yet; flips when the user focuses
+    // a `status === "complete"` chat (see `markRunSeen`).
+    seen: false,
     plans: [],
     steps: [],
     workerTasks: [],
@@ -3964,6 +3968,26 @@ export async function updateRunStatus(input: UpdateRunStatusInput): Promise<RunS
   });
 }
 
+// Flip the "seen" attention bit to true. The renderer calls this when the
+// user focuses a chat whose status is `complete` and `seen === false`, so
+// the visual treatment drops from done-unseen (teal) back to done-seen
+// (green). Idempotent — calling on a run that is already seen, or whose
+// status isn't `complete`, is a no-op.
+export async function markRunSeen(input: MarkRunSeenInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  if (run.seen === true || run.status !== "complete") return run;
+  return commitRunChange(run, {
+    type: "run.seen",
+    message: "Run marked seen",
+    payload: { previousSeen: run.seen ?? false },
+    mutate: (draft, timestamp) => {
+      if (draft.seen === true) return false;
+      draft.seen = true;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 export async function createStep(input: CreateStepInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   const title = input.title.trim();
@@ -5362,6 +5386,13 @@ function normalizeRun(run: RunState): RunState {
   } else {
     delete run.completedAt;
   }
+  // Older run.json files (pre-attention-rollup) didn't track `seen`. A
+  // freshly-loaded complete run from disk has no signal to claim "I'm
+  // unseen", so treat it as already-seen — otherwise every prior run would
+  // turn teal the first time Spark restarts.
+  if (run.seen === undefined) {
+    run.seen = run.status === "complete" ? true : false;
+  }
   return run;
 }
 
@@ -5428,9 +5459,8 @@ async function commitRunChange(
     .then(async () => {
       const latest = await requireRun(run.id);
       // Capture the pre-mutation status so we can detect transitions after
-      // persistence. The notifications module suppresses no-ops (rule 3), so
-      // recording the previous value here is the only way to tell mutations
-      // that touch status apart from the (much more common) ones that don't.
+      // persistence. The notifications module suppresses no-ops (rule 3), and
+      // the seen-flag reset below also needs the prior status.
       prevStatus = latest.status;
       const timestamp = new Date().toISOString();
       const changed = change.mutate(latest, timestamp);
@@ -5440,6 +5470,13 @@ async function commitRunChange(
         latest.completedAt ??= timestamp;
       } else {
         delete latest.completedAt;
+      }
+      // Non-complete → complete transitions reset the "seen" attention bit so
+      // the chat surfaces as done-unseen until the user focuses it. Other
+      // terminal statuses (failed/cancelled) are deliberately not part of the
+      // seen calculus — they have their own dedicated tones in the UI.
+      if (prevStatus !== "complete" && latest.status === "complete") {
+        latest.seen = false;
       }
       await saveRun(latest);
       await appendEvent({
