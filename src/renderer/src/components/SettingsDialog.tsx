@@ -23,6 +23,7 @@ import { useTheme } from "../theme/ThemeProvider";
 import { usePreferences } from "../preferences/usePreferences";
 import KeybindingsSection from "../shortcuts/KeybindingsSection";
 import { EDITOR_THEME_LABEL } from "./editor-cm/themes";
+import { Capability } from "./Capability";
 import packageJson from "../../../../package.json";
 
 // Settings is a single in-app dialog with seven tabs. Everything renders
@@ -1517,6 +1518,31 @@ function RuntimeDiagnosticRow({
         >
           {detail}
         </span>
+        {runtime.installed ? (
+          <span style={capabilityChipRowStyle}>
+            <Capability runtime={runtime} feature="costTracking">
+              <CapabilityChip text="cost" tone="neutral" title="Reports per-run cost" />
+            </Capability>
+            <Capability runtime={runtime} feature="contextWindow">
+              <CapabilityChip text="context" tone="neutral" title="Reports context-window usage" />
+            </Capability>
+            <Capability runtime={runtime} feature="hookStatus">
+              <CapabilityChip text="hooks" tone="neutral" title="Supports hook status events" />
+            </Capability>
+            <Capability runtime={runtime} feature="planModeArg">
+              <CapabilityChip text="plan-mode" tone="neutral" title="Accepts a plan-mode argument" />
+            </Capability>
+            <Capability runtime={runtime} feature="shiftEnterNewline">
+              <CapabilityChip text="shift+enter" tone="neutral" title="Supports shift+enter newline" />
+            </Capability>
+            <Capability runtime={runtime} feature="systemPromptInjection">
+              <CapabilityChip text="sys-prompt" tone="neutral" title="Accepts an injected system prompt" />
+            </Capability>
+            <Capability runtime={runtime} feature="sessionResume">
+              <CapabilityChip text="resume" tone="neutral" title="Supports session resume" />
+            </Capability>
+          </span>
+        ) : null}
       </span>
       <span
         style={{
@@ -1534,6 +1560,13 @@ function RuntimeDiagnosticRow({
     </button>
   );
 }
+
+const capabilityChipRowStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 4,
+  marginTop: 4,
+};
 
 function RuntimeToggle({ on, disabled }: { on: boolean; disabled?: boolean }) {
   const width = 28;
