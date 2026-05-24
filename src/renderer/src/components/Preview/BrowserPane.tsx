@@ -29,6 +29,7 @@ import AddressBar, { type AddressBarHandle } from "./AddressBar";
 type WebviewMethods = {
   loadURL: (url: string) => Promise<void>;
   reload: () => void;
+  reloadIgnoringCache: () => void;
   goBack: () => void;
   goForward: () => void;
   canGoBack: () => boolean;
@@ -38,23 +39,42 @@ type WebviewMethods = {
   closeDevTools: () => void;
 };
 
+// Structural mirror of Electron.Input for the fields we read out of the
+// webview's `before-input-event`. Inlined because the renderer doesn't ship
+// Electron's TS types, and we only need a tiny slice of that interface.
+type WebviewInput = {
+  type: string;
+  key: string;
+  code: string;
+  // Electron lowercases these: "ctrl"/"control", "shift", "alt", "meta"/"cmd".
+  modifiers: ReadonlyArray<string>;
+  isAutoRepeat?: boolean;
+};
+
 type WebviewElement = HTMLElement &
   Partial<WebviewMethods> & {
     src: string;
+    // Electron's <webview> dispatches DOM-style single-arg events
+    // (dom-ready, did-navigate, did-fail-load, …) AND the two-arg
+    // `before-input-event` ((event, input)). The local override accepts
+    // either shape so call sites stay terse.
     addEventListener: (
       type: string,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      listener: (e: any) => void,
+      listener: (...args: any[]) => void,
     ) => void;
     removeEventListener: (
       type: string,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      listener: (e: any) => void,
+      listener: (...args: any[]) => void,
     ) => void;
   };
 
 export interface BrowserPaneHandle {
-  reload: () => void;
+  // `ignoreCache: true` calls Chromium's `reloadIgnoringCache` (hard reload).
+  // Default is the normal cache-respecting reload — existing callers stay
+  // unchanged.
+  reload: (opts?: { ignoreCache?: boolean }) => void;
   goBack: () => void;
   goForward: () => void;
   loadURL: (url: string) => void;
@@ -189,10 +209,61 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       setError(`${e.errorDescription} (${e.errorCode})`);
     };
 
+    // Forward host shortcuts (Cmd/Ctrl+P, Cmd/Ctrl+T, …) out of the
+    // <webview>. When focus is inside the embedded page, key events fire
+    // in the guest's renderer and never reach our window — so the global
+    // shortcut manager (src/renderer/src/shortcuts/useGlobalShortcuts.ts)
+    // never sees them. Electron's `before-input-event` is the only hook
+    // that fires on the host side for guest key presses, so we use it to
+    // reconstruct a synthetic KeyboardEvent and dispatch it on the host
+    // document. The shortcut manager listens at capture phase on `window`
+    // and matches against the standard modifier + key fields, so a plain
+    // dispatch is enough — no DOM ancestry tricks needed.
+    //
+    // Filter: only forward chord-style keystrokes (any modifier held).
+    // Plain typing, arrows, page-up etc. must stay inside the webview or
+    // we'd break in-page input.
+    //
+    // We intentionally do NOT call event.preventDefault() on the webview
+    // event: the host shortcut manager only swallows the synthetic event
+    // when it claims the chord, and we don't have a clean way to ask it
+    // "did you handle this?" from out here. So the chord both fires the
+    // host shortcut (if any) AND reaches the page. For the common Cmd+P /
+    // Cmd+T / Cmd+K cases the page rarely binds the same chord, so the
+    // duplicate dispatch is harmless. This is the quick-win trade-off
+    // documented in research/README.md; tightening it later would require
+    // the shortcut manager to surface a "claimed" signal.
+    const onBeforeInputEvent = (_e: unknown, input: WebviewInput) => {
+      if (input.type !== "keyDown") return;
+      const mods = input.modifiers ?? [];
+      if (mods.length === 0) return;
+      const hasChordMod =
+        mods.includes("ctrl") ||
+        mods.includes("control") ||
+        mods.includes("alt") ||
+        mods.includes("meta") ||
+        mods.includes("cmd");
+      if (!hasChordMod) return;
+      const key = input.key;
+      if (!key) return;
+      const synth = new KeyboardEvent("keydown", {
+        key,
+        code: input.code,
+        ctrlKey: mods.includes("ctrl") || mods.includes("control"),
+        shiftKey: mods.includes("shift"),
+        altKey: mods.includes("alt"),
+        metaKey: mods.includes("meta") || mods.includes("cmd"),
+        bubbles: true,
+        cancelable: true,
+      });
+      document.dispatchEvent(synth);
+    };
+
     wv.addEventListener("dom-ready", onDomReady);
     wv.addEventListener("did-navigate", onDidNavigate);
     wv.addEventListener("did-navigate-in-page", onDidNavigateInPage);
     wv.addEventListener("did-fail-load", onDidFailLoad);
+    wv.addEventListener("before-input-event", onBeforeInputEvent);
 
     return () => {
       // Detach our listeners; intentionally do NOT remove the webview
@@ -202,6 +273,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       wv.removeEventListener("did-navigate", onDidNavigate);
       wv.removeEventListener("did-navigate-in-page", onDidNavigateInPage);
       wv.removeEventListener("did-fail-load", onDidFailLoad);
+      wv.removeEventListener("before-input-event", onBeforeInputEvent);
     };
   }, [hasUrl]);
 
@@ -229,9 +301,15 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   useImperativeHandle(
     ref,
     (): BrowserPaneHandle => ({
-      reload: () => {
+      reload: (opts) => {
         try {
-          webviewRef.current?.reload?.();
+          const wv = webviewRef.current;
+          if (!wv) return;
+          if (opts?.ignoreCache && wv.reloadIgnoringCache) {
+            wv.reloadIgnoringCache();
+          } else {
+            wv.reload?.();
+          }
         } catch {
           /* webview not yet dom-ready */
         }
@@ -304,8 +382,18 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
           }
           onUrlChange(next);
         }}
-        onReload={() => {
-          try { webviewRef.current?.reload?.(); } catch { /* not dom-ready */ }
+        onReload={({ ignoreCache }) => {
+          const wv = webviewRef.current;
+          if (!wv) return;
+          try {
+            if (ignoreCache && wv.reloadIgnoringCache) {
+              wv.reloadIgnoringCache();
+            } else {
+              wv.reload?.();
+            }
+          } catch {
+            /* webview not dom-ready */
+          }
         }}
         onBack={() => {
           try { webviewRef.current?.goBack?.(); } catch { /* not dom-ready */ }

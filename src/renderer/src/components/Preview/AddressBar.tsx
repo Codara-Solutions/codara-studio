@@ -47,7 +47,10 @@ interface Props {
   canGoBack: boolean;
   canGoForward: boolean;
   onSubmit: (url: string) => void;
-  onReload: () => void;
+  // Shift-click triggers a hard reload (ignore HTTP cache). Plain click is a
+  // normal reload. The reload button forwards the click's shift state via
+  // this opts object so the parent can route to the correct webview method.
+  onReload: (opts: { ignoreCache: boolean }) => void;
   onBack: () => void;
   onForward: () => void;
   onOpenDevTools: () => void;
@@ -177,7 +180,11 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
           disabled={!canGoForward}
           onClick={onForward}
         />
-        <ChromeButton label="↻" title="Reload" onClick={onReload} />
+        <ChromeButton
+          label="↻"
+          title="Reload (Shift+click for hard reload, ignore cache)"
+          onClick={(e) => onReload({ ignoreCache: e.shiftKey })}
+        />
         <div ref={portsAnchor} style={{ position: "relative" }}>
           <button
             type="button"
@@ -344,7 +351,10 @@ function ChromeButton({
   label: string;
   title: string;
   disabled?: boolean;
-  onClick: () => void;
+  // Accepts the click event so callers can observe modifier keys (e.g.
+  // Shift-click on Reload triggers reloadIgnoringCache). Callers that don't
+  // care can simply ignore the argument.
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
 }) {
   return (
     <button
