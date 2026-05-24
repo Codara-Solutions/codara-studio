@@ -1397,6 +1397,11 @@ export default function App() {
         if (!active || active.kind !== "terminal") return;
         tabs.closeTerminalPane(active.id, active.activePaneId);
       },
+      "terminal.toggleZoom": () => {
+        const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+        if (!active || active.kind !== "terminal") return;
+        tabs.toggleTerminalPaneZoom(active.id, active.activePaneId);
+      },
     }),
     [
       handleNewBalancedTerminalPane,
@@ -1807,6 +1812,7 @@ const Workspace = React.memo(function Workspace({
     splitTerminalPane,
     moveTerminalPane,
     closeTerminalPane,
+    toggleTerminalPaneZoom,
   } = tabs;
 
   const handleTabSelect = useCallback(
@@ -1859,6 +1865,10 @@ const Workspace = React.memo(function Workspace({
     (tabId: string, paneId: string) => closeTerminalPane(tabId, paneId),
     [closeTerminalPane],
   );
+  const handlePaneZoomToggle = useCallback(
+    (tabId: string, paneId: string) => toggleTerminalPaneZoom(tabId, paneId),
+    [toggleTerminalPaneZoom],
+  );
 
   return (
     <div
@@ -1901,6 +1911,7 @@ const Workspace = React.memo(function Workspace({
           onSplitPane={handleSplitPane}
           onMovePane={handleMovePane}
           onClosePane={handleClosePane}
+          onTabZoomToggle={handlePaneZoomToggle}
           onPaneCwd={onPaneCwd}
           onPaneActivity={onPaneActivity}
           onPaneScrollback={onPaneScrollback}

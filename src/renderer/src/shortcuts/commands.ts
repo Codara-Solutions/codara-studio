@@ -21,6 +21,7 @@ export type CommandId =
   | "terminal.splitRight"
   | "terminal.splitDown"
   | "terminal.closePane"
+  | "terminal.toggleZoom"
   | "view.selectByIndex"
   | "view.zoomIn"
   | "view.zoomOut"
@@ -128,6 +129,14 @@ export const COMMANDS: Command[] = [
     // Mod+Shift+K mirrors VS Code's "kill terminal" chord and stays clear
     // of shell readline (Ctrl+K).
     defaultChords: [mod("k", { shift: true })],
+  },
+  {
+    id: "terminal.toggleZoom",
+    label: "Toggle terminal pane zoom",
+    group: "Terminal",
+    // Mod+Shift+Z mirrors the tmux/iTerm "zoom pane" convention; stays out
+    // of the way of the shell's literal Ctrl+Z (suspend).
+    defaultChords: [mod("z", { shift: true })],
   },
   {
     id: "view.selectByIndex",
