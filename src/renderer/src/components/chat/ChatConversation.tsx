@@ -952,10 +952,22 @@ function statusText(status: GitFileChange["status"]): string {
 }
 
 function WorkerChip({ worker }: { worker: ChatWorker }) {
-  const color = workerStatusColor(worker.status);
+  // runtimeState (from the live terminal poller) wins over the static
+  // workerTask status for the dot tone, because it reflects what the agent
+  // is doing *right now* — accept ("blocked" → steady red) is more urgent
+  // than the task-status colour. Falls back to the task-status colour when
+  // no live state has been reported yet. The chip's text label still uses
+  // the task status so the orchestration lifecycle stays readable.
+  const liveColor = runtimeStateColor(worker.runtimeState);
+  const color = liveColor ?? workerStatusColor(worker.status);
+  // Only animate "working". The other live states (blocked / idle / done)
+  // and any non-running task status stay static. Counter-intuitive but
+  // herdr-validated: pulsing everything makes nothing read as urgent.
+  const pulse = worker.runtimeState === "working";
+  const titleSuffix = worker.runtimeState ? ` · ${worker.runtimeState}` : "";
   return (
     <span
-      title={`${worker.title} — ${worker.status}`}
+      title={`${worker.title} — ${worker.status}${titleSuffix}`}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -971,7 +983,14 @@ function WorkerChip({ worker }: { worker: ChatWorker }) {
     >
       <span
         aria-hidden
-        style={{ width: 6, height: 6, borderRadius: 999, background: color, flex: "0 0 6px" }}
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: 999,
+          background: color,
+          flex: "0 0 6px",
+          animation: pulse ? "spark-pulse 1.3s ease-in-out infinite" : undefined,
+        }}
       />
       <span
         style={{
@@ -985,6 +1004,30 @@ function WorkerChip({ worker }: { worker: ChatWorker }) {
       <span style={{ color: "var(--muted)" }}>{workerStatusLabel(worker.status)}</span>
     </span>
   );
+}
+
+// Map the renderer-side terminal poller's RuntimeState to design-token
+// colors. Reuses the same tokens the rest of the chat uses so a theme swap
+// flows through automatically:
+//   working → accent (the live "spinner is on" colour).
+//   blocked → danger (steady red, no pulse — the "act on this" indicator).
+//   idle    → muted (the agent is between turns, nothing for you to do).
+//   done    → ok    (the foreground TUI exited; the attempt may still wrap).
+// Returns null when there's no live state yet, so the caller can fall back
+// to the orchestration status colour.
+function runtimeStateColor(state: ChatWorker["runtimeState"]): string | null {
+  switch (state) {
+    case "working":
+      return "var(--accent)";
+    case "blocked":
+      return "var(--danger)";
+    case "idle":
+      return "var(--muted-2)";
+    case "done":
+      return "var(--ok)";
+    default:
+      return null;
+  }
 }
 
 // A count badge for a message that was sent (or asked) more than once in a

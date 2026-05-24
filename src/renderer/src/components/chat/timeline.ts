@@ -1,5 +1,6 @@
 import type {
   HumanRunMessage,
+  RuntimeState,
   SparkCall,
   RunState,
   StepStatus,
@@ -20,6 +21,15 @@ export interface ChatWorker {
   title: string;
   runtime: WorkerRuntime;
   status: WorkerTaskStatus;
+  /**
+   * Live agent state sniffed by the renderer-side terminal poller for the
+   * most recent attempt of this task. `undefined` means the poller hasn't
+   * reported anything yet (run hasn't started, headless eval, or the agent
+   * launched too recently for the 2-tick confirmation). Drives the dot
+   * tone in the worker chip; the existing `status` field still governs
+   * whether the chip is shown.
+   */
+  runtimeState?: RuntimeState;
 }
 
 export interface ChatToolFile {
@@ -125,6 +135,18 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
     items.push(workerAttemptTimelineItem(attempt, taskById.get(attempt.workerTaskId), run.createdAt));
   }
 
+  // Build a "latest attempt per task" map once so the per-step mapper below
+  // doesn't redo this scan for every step. Attempts are keyed by workerTaskId
+  // and we keep the one with the highest attemptNumber — that's the one whose
+  // pty is currently on screen (older attempts have either finished or were
+  // disposed when the task was retried).
+  const latestAttemptByTask = new Map<string, WorkerAttempt>();
+  for (const attempt of run.workerAttempts) {
+    const prior = latestAttemptByTask.get(attempt.workerTaskId);
+    if (!prior || attempt.attemptNumber > prior.attemptNumber) {
+      latestAttemptByTask.set(attempt.workerTaskId, attempt);
+    }
+  }
   const orderedSteps = [...run.steps].sort((a, b) => a.index - b.index);
   orderedSteps.forEach((step, i) => {
     const workers: ChatWorker[] = run.workerTasks
@@ -134,6 +156,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
         title: task.title,
         runtime: task.runtimePreference,
         status: task.status,
+        runtimeState: latestAttemptByTask.get(task.id)?.runtimeState,
       }));
     items.push({
       kind: "step",

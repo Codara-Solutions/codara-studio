@@ -21,6 +21,7 @@ import type {
   RunArtifactPaths,
   RunMessageAttachment,
   RunState,
+  RuntimeState,
   SparkCall,
   SparkEvent,
   StartAutopilotInput,
@@ -6037,6 +6038,65 @@ function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input:
       "",
     ].join("\r\n"),
   };
+}
+
+// Live agent state report from the renderer-side terminal poller. paneId is
+// the same id the renderer used for pty:spawn — for Spark workers this is
+// the attemptId. We walk the in-memory run cache to find the matching
+// attempt, stamp the new state on it, and broadcast a change event so the
+// chat UI and notification system can react.
+//
+// Hot path: this runs every time a worker pane changes state. Reports for
+// panes with no matching attempt (manual user-spawned claude/codex panes)
+// are silently dropped — the renderer doesn't filter by ownership before
+// reporting and we want a single round-trip, not a probe + write.
+export async function reportTerminalState(
+  paneId: string,
+  state: RuntimeState,
+): Promise<void> {
+  if (!paneId) return;
+  // Cache is keyed by runId; we look up by attemptId so we scan every cached
+  // run for a matching attempt. The cache is bounded by RUN_RETENTION_KEEP
+  // (50 entries) so the scan is O(50 × workerAttempts.length) — small in
+  // every realistic case. If the run isn't cached yet, the poller will fire
+  // again on the next 300 ms tick and pick up the freshly-loaded run.
+  let targetRun: RunState | null = null;
+  let targetAttempt: WorkerAttempt | null = null;
+  for (const run of runCache.values()) {
+    const attempt = run.workerAttempts.find((item) => item.id === paneId);
+    if (attempt) {
+      targetRun = run;
+      targetAttempt = attempt;
+      break;
+    }
+  }
+  if (!targetRun || !targetAttempt) return;
+  if (targetAttempt.runtimeState === state) return; // no-op transition
+
+  const timestamp = new Date().toISOString();
+  const previous = targetAttempt.runtimeState ?? null;
+  targetAttempt.runtimeState = state;
+  targetAttempt.runtimeStateUpdatedAt = timestamp;
+  targetRun.updatedAt = timestamp;
+  // saveRun re-writes run.json; the cache stays in sync via writeRunFile().
+  // We don't await the save before broadcasting — the event below is the
+  // authoritative trigger for UI updates, and a slow disk write must not
+  // delay the chat indicator flipping.
+  void saveRun(targetRun).catch(() => undefined);
+  await appendEvent({
+    timestamp,
+    workspaceId: targetRun.workspaceId,
+    runId: targetRun.id,
+    workerTaskId: targetAttempt.workerTaskId,
+    attemptId: targetAttempt.id,
+    type: "worker_attempt.runtime_state_changed",
+    message: `Worker attempt runtime state: ${previous ?? "unknown"} -> ${state}`,
+    payload: {
+      previous,
+      state,
+      attemptId: targetAttempt.id,
+    },
+  });
 }
 
 export async function readWorkerReport(path: string): Promise<WorkerReport | null> {

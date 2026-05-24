@@ -3,7 +3,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
-import type { ShellInfo } from "@shared/types";
+import type { RuntimeState, ShellInfo } from "@shared/types";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import {
@@ -318,15 +318,115 @@ export function useTerminalSession({
       const agentDecoder = new TextDecoder("utf-8", { fatal: false });
       let agentTextRing = "";
       let agentPhase: "idle" | "agent" = "idle";
+      let activeRuntime: "claude" | "codex" | "cursor" | null = null;
+
+      // ── Runtime state poller (the live working / blocked / idle / done
+      // sniffer that drives chip tone and notifications). Polls the visible
+      // xterm buffer every STATE_POLL_MS ms; only runs while an agent has
+      // been detected in the pane (gated by agentPhase). All flags live in
+      // this closure so they reset cleanly across agent enter/exit cycles.
+      let stateTimer: number | null = null;
+      // The candidate state from the most recent tick. Becomes confirmed
+      // once we see the same value on two consecutive ticks (1-tick debounce
+      // for noisy mid-redraw matches).
+      let pendingState: RuntimeState | null = null;
+      // The state we've already reported to main. Only fire the IPC when we
+      // transition to a different confirmed state — avoids hammering the
+      // run-store with no-op writes while the agent is still doing the same
+      // thing tick after tick.
+      let confirmedState: RuntimeState | null = null;
+      // Wall-clock time we first saw "no working/blocked match" while
+      // confirmedState was still "working". The debounce only fires after
+      // IDLE_DEBOUNCE_MS of consecutive empty ticks — protects against the
+      // ~700 ms gap between Codex/Claude Ink redraws where the spinner
+      // momentarily isn't on screen.
+      let idleSinceMs: number | null = null;
+      const reportRuntimeState = (state: RuntimeState) => {
+        // Fire-and-forget. The renderer doesn't care about the ack — if main
+        // is busy or the IPC is briefly unavailable we'd just miss this
+        // tick, and the next poll will retry from scratch.
+        void window.spark.terminalState?.report?.({ paneId: sessionId, state });
+      };
+      const stopStatePoller = () => {
+        if (stateTimer !== null) {
+          window.clearInterval(stateTimer);
+          stateTimer = null;
+        }
+        pendingState = null;
+        confirmedState = null;
+        idleSinceMs = null;
+      };
+      const tickStatePoller = () => {
+        const t = termRef.current;
+        if (!t || !activeRuntime) return;
+        const tail = readTerminalTail(t, STATE_TAIL_ROWS);
+        const raw = classifyTail(activeRuntime, tail);
+        const now = Date.now();
+        // Working → Idle: require IDLE_DEBOUNCE_MS of consecutive empty (no
+        // working/blocked match) ticks before we accept the flip. Working
+        // doesn't go straight to "idle" because Ink's between-redraws gap
+        // would flicker the indicator every turn.
+        if (confirmedState === "working" && raw === null) {
+          if (idleSinceMs === null) idleSinceMs = now;
+          if (now - idleSinceMs >= IDLE_DEBOUNCE_MS) {
+            confirmedState = "idle";
+            pendingState = null;
+            idleSinceMs = null;
+            reportRuntimeState("idle");
+          }
+          return;
+        }
+        // Any other transition cancels the working-idle countdown.
+        idleSinceMs = null;
+        if (raw === null) {
+          // No pattern matched and we weren't in `working` — leave the last
+          // confirmed state alone. We only ever publish on a positive match
+          // or after the working→idle debounce above.
+          pendingState = null;
+          return;
+        }
+        // 2-tick confirmation: a single bouncy match doesn't promote.
+        if (pendingState !== raw) {
+          pendingState = raw;
+          return;
+        }
+        if (confirmedState !== raw) {
+          confirmedState = raw;
+          reportRuntimeState(raw);
+        }
+      };
+      const startStatePoller = (runtime: "claude" | "codex" | "cursor") => {
+        activeRuntime = runtime;
+        // Reset confirmation state for the new agent so a previous attempt's
+        // "blocked" can't bleed into the fresh session.
+        pendingState = null;
+        confirmedState = null;
+        idleSinceMs = null;
+        if (stateTimer !== null) window.clearInterval(stateTimer);
+        stateTimer = window.setInterval(tickStatePoller, STATE_POLL_MS);
+      };
+
       const setAgentRunning = (runtime: "claude" | "codex" | "cursor") => {
         if (agentPhase === "agent") return;
         agentPhase = "agent";
         onAgentStateRef.current?.({ runtime, running: true });
+        startStatePoller(runtime);
       };
       const resetAgentPhase = () => {
         if (agentPhase === "agent") {
           onAgentStateRef.current?.({ runtime: null, running: false });
+          // The TUI just exited; flip the live state to "done" so any UI
+          // subscriber sees the transition immediately (the orchestration
+          // worker may still be writing its final report, but the agent is
+          // off-screen). The poller stops here — we don't keep scanning a
+          // pwsh prompt for blocked/working patterns.
+          if (confirmedState !== "done") {
+            confirmedState = "done";
+            reportRuntimeState("done");
+          }
         }
+        activeRuntime = null;
+        stopStatePoller();
         agentPhase = "idle";
         agentTextRing = "";
       };
@@ -369,6 +469,11 @@ export function useTerminalSession({
         }
         return false;
       };
+      // Tear down the state poller on unmount. The closure-bound `stateTimer`
+      // is the only owner — main has no per-pane handle to clean up, so a
+      // missed clearInterval here would leak a timer for the lifetime of the
+      // (now-disposed) hook.
+      cleanups.push(() => stopStatePoller());
       const osc633Dispose = term.parser.registerOscHandler(633, handleOsc633);
       cleanups.push(() => osc633Dispose.dispose());
       // FinalTerm OSC 133;A is the generic "prompt start" marker emitted by
@@ -758,6 +863,162 @@ function sniffRuntime(text: string): "claude" | "codex" | "cursor" | null {
   if (/Cursor\s+(?:Agent|CLI)/i.test(stripped)) return "cursor";
   return null;
 }
+
+// Per-runtime "what is the agent doing right now" pattern tables. Each entry
+// owns three sets of regexes that run against the same plain-text tail of the
+// xterm buffer.
+//
+//   `working`: the agent is generating / streaming. Match anything the live
+//              status line prints while thinking — most CLIs paint a spinner
+//              with text like "esc to interrupt" or "(thinking)".
+//   `blocked`: the agent is waiting on the user for permission or
+//              confirmation. These prompts are the whole point of the
+//              detection — Spark surfaces them as the "needs you" signal.
+//   `done`   : the agent has actively printed a completion line (vs simply
+//              going quiet, which is `idle`). Today we mostly fall back to
+//              the OSC 633;A "prompt is back" boundary (handled elsewhere),
+//              but a positive completion match lets us cut over without
+//              waiting for the debounce window.
+//
+// Patterns were lifted from herdr's hand-tuned table (research/HERDR_LEARNINGS
+// quick-win B), trimmed to the three runtimes Spark spawns today. The patterns
+// match against the CSI/OSC-stripped tail string so Ink's per-character cursor
+// moves do not interleave bytes inside the literal we're looking for.
+interface RuntimePatterns {
+  working: RegExp[];
+  blocked: RegExp[];
+  done: RegExp[];
+}
+
+const RUNTIME_PATTERNS: Record<"claude" | "codex" | "cursor", RuntimePatterns> = {
+  // Claude Code (Anthropic). The "esc to interrupt" footer is on screen the
+  // entire time it's streaming a turn, and the permission prompt is the
+  // canonical "blocked on you" UI.
+  claude: {
+    working: [
+      /esc to interrupt/i,
+      /\(?\s*esc to cancel\s*\)?/i,
+      /thinking[…\.]/i,
+      /\bworking[…\.]/i,
+      /\bcompacting[…\.]/i,
+    ],
+    blocked: [
+      /Do you want to (?:proceed|continue|allow)/i,
+      /Allow .* to (?:edit|run|read)/i,
+      /\bWaiting for your input\b/i,
+      /Press (?:y|n|enter|esc) to/i,
+      /Enter your (?:response|answer|choice):/i,
+    ],
+    done: [
+      /Session ended\./i,
+      /\bGoodbye\b!?/i,
+    ],
+  },
+  // OpenAI Codex CLI. Lower-case "thinking" / "working" footer lines, and a
+  // "shell command" approval prompt that mirrors Claude's permission flow.
+  codex: {
+    working: [
+      /esc to interrupt/i,
+      /\(thinking\)/i,
+      /\(working\)/i,
+      /Generating/i,
+      /Streaming/i,
+    ],
+    blocked: [
+      /Approve shell command/i,
+      /Approve this (?:edit|patch|command)/i,
+      /Do you want to (?:proceed|continue)/i,
+      /\[y\/N\]/i,
+      /\(y\/n\)/i,
+    ],
+    done: [
+      /Session complete\./i,
+      /\bExiting\b\./i,
+    ],
+  },
+  // Cursor Agent / Cursor CLI. Similar Ink TUI patterns; "press enter" and
+  // explicit "waiting for confirmation" copy when blocked.
+  cursor: {
+    working: [
+      /esc to interrupt/i,
+      /\(generating\)/i,
+      /thinking[…\.]/i,
+    ],
+    blocked: [
+      /Waiting for (?:confirmation|approval)/i,
+      /Approve (?:edit|patch|tool)/i,
+      /Press enter to/i,
+      /Continue\? \(y\/n\)/i,
+    ],
+    done: [
+      /Conversation ended\./i,
+    ],
+  },
+};
+
+// Match plain-text tail against a runtime's pattern table. Returns the first
+// state that fires, in priority order: blocked > working > done. Blocked wins
+// over working because a TUI can paint "esc to interrupt" inside a permission
+// dialog (the dialog is still rendered above the streaming footer); the
+// blocked prompt is the actionable one for the user.
+function classifyTail(
+  runtime: "claude" | "codex" | "cursor",
+  tail: string,
+): RuntimeState | null {
+  const table = RUNTIME_PATTERNS[runtime];
+  if (!table) return null;
+  const stripped = tail.replace(CSI_RE, "").replace(OSC_RE, "");
+  for (const re of table.blocked) {
+    if (re.test(stripped)) return "blocked";
+  }
+  for (const re of table.working) {
+    if (re.test(stripped)) return "working";
+  }
+  for (const re of table.done) {
+    if (re.test(stripped)) return "done";
+  }
+  return null;
+}
+
+// Read the last `maxRows` lines of an xterm Terminal buffer as plain text.
+// Concatenates wrapped logical lines back together so a banner the agent
+// printed across two physical rows still matches a single regex. Cheap by
+// design — we only walk the active buffer (no scrollback) and skip empty
+// trailing rows, which is what the regex would scan anyway.
+function readTerminalTail(term: Terminal, maxRows: number): string {
+  const buf = term.buffer.active;
+  const total = buf.length;
+  const start = Math.max(0, total - maxRows);
+  const parts: string[] = [];
+  for (let i = start; i < total; i++) {
+    const line = buf.getLine(i);
+    if (!line) continue;
+    const text = line.translateToString(true);
+    if (line.isWrapped && parts.length > 0) {
+      parts[parts.length - 1] += text;
+    } else {
+      parts.push(text);
+    }
+  }
+  while (parts.length && parts[parts.length - 1] === "") parts.pop();
+  return parts.join("\n");
+}
+
+// Polling cadence for the live-state sniffer. 300 ms is the cheapest interval
+// that still reads as "instant" in a chat UI (one frame of cognitive delay).
+// xterm's `buffer.active.getLine().translateToString(true)` is a couple-µs
+// operation per row; reading 40 rows per tick across a dozen panes is well
+// under 1 ms of renderer work per second.
+const STATE_POLL_MS = 300;
+// Number of rows of the visible buffer we feed into the regex match.
+const STATE_TAIL_ROWS = 40;
+// Working → Idle transition requires this many ms of consecutive empty ticks
+// before flipping. Codex and Claude both have ~700 ms gaps mid-turn where no
+// status line is on screen (between Ink redraws); a flat 1.2 s window covers
+// those without making the indicator feel laggy. The 2-tick confirm on every
+// other transition is also applied (one tick is the minimum to debounce the
+// occasional regex bounce when the TUI is mid-redraw).
+const IDLE_DEBOUNCE_MS = 1_200;
 
 // Reverse spark.ps1's __Spark-Esc encoding (control chars, ';' and '\'
 // are emitted as `\xHH`). Best-effort: unknown escapes are passed through.

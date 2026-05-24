@@ -35,6 +35,7 @@ import type {
   RenameFileInput,
   RunArtifactPaths,
   RunState,
+  RuntimeState,
   SearchHit,
   SearchOptions,
   SearchSummary,
@@ -291,6 +292,22 @@ const api = {
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.off(channel, listener);
     },
+  },
+  terminalState: {
+    /**
+     * Report a transition in the live agent state for a single pane. Fired by
+     * the renderer-side poller in `useTerminalSession`; main forwards the
+     * update into run-store so any worker attempt hosted in that pane carries
+     * the freshest "what is the agent doing" state.
+     *
+     * `paneId` is the same id used for pty:spawn — for Spark workers this is
+     * the attemptId, for manual claude/codex panes it's the leaf id. Main
+     * silently drops reports for panes that have no live WorkerAttempt
+     * attached (manual user panes), so the IPC is safe to call from every
+     * pane the poller is watching.
+     */
+    report: (input: { paneId: string; state: RuntimeState }): Promise<void> =>
+      ipcRenderer.invoke("terminalState:report", input),
   },
   windowControls: {
     minimize: (): Promise<void> => ipcRenderer.invoke("window:minimize"),
