@@ -275,6 +275,8 @@ const api = {
       ipcRenderer.invoke("pty:spawn", args),
     write: (id: string, data: string): Promise<void> =>
       ipcRenderer.invoke("pty:write", { id, data }),
+    inject: (id: string, text: string, opts?: { submit?: boolean }): Promise<void> =>
+      ipcRenderer.invoke("pty:inject", { id, text, submit: opts?.submit }),
     resize: (id: string, cols: number, rows: number): Promise<void> =>
       ipcRenderer.invoke("pty:resize", { id, cols, rows }),
     dispose: (id: string): Promise<void> => ipcRenderer.invoke("pty:dispose", { id }),
