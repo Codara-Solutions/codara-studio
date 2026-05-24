@@ -4,6 +4,7 @@ import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import type { WebContents } from "electron";
 import type { ShellInfo } from "@shared/types";
+import { injectEnrichedPath } from "./path-reconstruction";
 
 interface Session {
   id: string;
@@ -200,6 +201,13 @@ function doSpawn(
   delete env.NO_COLOR;
   delete env.NODE_DISABLE_COLORS;
   delete env.NODE_NO_READLINE;
+
+  // Replace the inherited (potentially sparse — Electron-from-Finder/Dock
+  // strips a lot of user PATH entries) PATH with the enriched value built
+  // at app startup from the user's login shell / Windows registry. The
+  // cache is warmed in src/main/index.ts; on a cold call we just see the
+  // process.env PATH fallback, which is no worse than today.
+  injectEnrichedPath(env);
 
   // Per-shell env overrides (e.g. integrated strip shells set ZDOTDIR /
   // SPARK_USER_ZDOTDIR so the bundled zshrc loads the user's existing
