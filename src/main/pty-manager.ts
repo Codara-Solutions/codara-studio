@@ -19,6 +19,12 @@ interface Session {
   flushTimer: NodeJS.Timeout | null;
   resizedAt: number;
   exited: boolean;
+  // Ring buffer of the most recent raw pty bytes for this session, used by
+  // the agent-socket terminal.read RPC so a sibling sub-agent can peek at
+  // another worker's output without going through the renderer's xterm
+  // scrollback. Capped at TAIL_BUFFER_BYTES to keep RAM bounded.
+  tail: Buffer[];
+  tailBytes: number;
 }
 
 const sessions = new Map<string, Session>();
@@ -39,6 +45,21 @@ const GRACE_MS = 250;
 
 const FLUSH_MS = 16;
 const MAX_BUFFER_BYTES = 96_000;
+// Per-session tail buffer cap. 64 KB is enough for a few thousand text-mode
+// terminal lines (well past the 40-line agent-state-detection window) while
+// staying cheap in idle RAM even with many concurrent worker panes.
+const TAIL_BUFFER_BYTES = 64 * 1024;
+
+// Env vars that agent-socket asks pty-manager to inject into every spawned
+// pty. Populated from src/main/index.ts via setAgentSocketEnv() once the
+// socket server is listening; sub-agent CLIs running inside the pty read
+// these to dial back into Spark over JSON-RPC.
+let agentSocketEnv: { url: string; token: string } | null = null;
+
+/** Called by agent-socket once its HTTP server is listening. */
+export function setAgentSocketEnv(env: { url: string; token: string } | null): void {
+  agentSocketEnv = env;
+}
 
 // Some shells run user-profile work that writes shared on-disk caches at
 // startup (Terminal-Icons calls Export-Clixml on its theme files every time
@@ -219,6 +240,21 @@ function doSpawn(
     }
   }
 
+  // Agent-socket handshake. Every pty we spawn — user panes and worker panes
+  // alike — gets SPARK_AGENT_SOCKET + SPARK_AGENT_TOKEN so any sub-agent CLI
+  // running inside the pty can dial back into Spark over JSON-RPC. The
+  // socket is localhost-only and token-protected (see src/main/agent-socket.ts),
+  // so exposing the env vars to user panes does not widen the trust surface
+  // beyond "any local process the user already trusted with a shell prompt".
+  if (agentSocketEnv) {
+    env.SPARK_AGENT_SOCKET = agentSocketEnv.url;
+    env.SPARK_AGENT_TOKEN = agentSocketEnv.token;
+    // Best-effort hint to sub-agents about which pty they're running in.
+    // Lets terminal.read RPC default to "read my own tail" if a CLI ever
+    // wants that, without forcing the caller to know its own attemptId.
+    env.SPARK_AGENT_PANE_ID = opts.id;
+  }
+
   const cwd =
     opts.cwd && opts.cwd.trim().length > 0
       ? opts.cwd
@@ -265,6 +301,8 @@ function doSpawn(
     flushTimer: null,
     resizedAt: 0,
     exited: false,
+    tail: [],
+    tailBytes: 0,
   };
 
   pty.onData((data: string | Buffer) => enqueueData(opts.id, data));
@@ -402,6 +440,16 @@ function enqueueData(id: string, data: string | Buffer): void {
       }
     }
   }
+  // Tail ring buffer for agent-socket terminal.read. Append, then trim from
+  // the head until total bytes fit under TAIL_BUFFER_BYTES. Whole chunks are
+  // dropped at a time to keep this O(1) per write — we accept a small amount
+  // of slop above the cap until the next write trims it again.
+  s.tail.push(chunk);
+  s.tailBytes += chunk.length;
+  while (s.tail.length > 1 && s.tailBytes - (s.tail[0]?.length ?? 0) > TAIL_BUFFER_BYTES) {
+    const dropped = s.tail.shift();
+    if (dropped) s.tailBytes -= dropped.length;
+  }
   s.pendingChunks.push(chunk);
   s.pendingBytes += chunk.length;
 
@@ -506,6 +554,22 @@ export function waitForResize(id: string, timeoutMs: number): Promise<boolean> {
     };
     tick();
   });
+}
+
+// Snapshot the recent raw bytes of a session's tail buffer. Used by the
+// agent-socket terminal.read RPC so a sibling sub-agent can sample another
+// worker's output. Returns up to maxBytes from the end (clamped to the
+// per-session ring buffer size — see TAIL_BUFFER_BYTES). Returns null when
+// the session doesn't exist so the caller can distinguish "no data yet" from
+// "unknown pane".
+export function readTail(id: string, maxBytes: number): Buffer | null {
+  const s = sessions.get(id);
+  if (!s) return null;
+  const cap = Math.max(0, Math.min(maxBytes | 0, TAIL_BUFFER_BYTES));
+  if (cap === 0 || s.tail.length === 0) return Buffer.alloc(0);
+  const merged = s.tail.length === 1 ? s.tail[0] : Buffer.concat(s.tail, s.tailBytes);
+  if (merged.length <= cap) return merged;
+  return merged.subarray(merged.length - cap);
 }
 
 // Subscribe to the raw byte stream of a session. Returns an unsubscribe fn.
@@ -621,5 +685,7 @@ function killNow(id: string): void {
     }
   }
   if (s.flushTimer) clearTimeout(s.flushTimer);
+  s.tail = [];
+  s.tailBytes = 0;
   sessions.delete(id);
 }
