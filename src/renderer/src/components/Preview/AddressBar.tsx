@@ -5,6 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { DrawIcon, InspectIcon } from "../icons";
 
 // AddressBar is the chrome for a preview tab: back/forward, reload, URL
 // input, ports preset dropdown, open-in-system-browser, open-devtools.
@@ -46,12 +47,16 @@ interface Props {
   url: string;
   canGoBack: boolean;
   canGoForward: boolean;
+  inspecting: boolean;
+  drawing: boolean;
   onSubmit: (url: string) => void;
   onReload: () => void;
   onBack: () => void;
   onForward: () => void;
   onOpenDevTools: () => void;
   onOpenExternal: (url: string) => void;
+  onToggleInspect: () => void;
+  onToggleDraw: () => void;
 }
 
 const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
@@ -59,12 +64,16 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
     url,
     canGoBack,
     canGoForward,
+    inspecting,
+    drawing,
     onSubmit,
     onReload,
     onBack,
     onForward,
     onOpenDevTools,
     onOpenExternal,
+    onToggleInspect,
+    onToggleDraw,
   },
   ref,
 ) {
@@ -288,6 +297,20 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
           }}
         />
         <ChromeButton
+          label={<InspectIcon size={12} />}
+          title={inspecting ? "Stop inspecting (Esc)" : "Inspect an element"}
+          disabled={!url}
+          active={inspecting}
+          onClick={onToggleInspect}
+        />
+        <ChromeButton
+          label={<DrawIcon size={12} />}
+          title={drawing ? "Exit draw mode" : "Draw on the page"}
+          disabled={!url}
+          active={drawing}
+          onClick={onToggleDraw}
+        />
+        <ChromeButton
           label="↗"
           title="Open in system browser"
           disabled={!url}
@@ -339,37 +362,50 @@ function ChromeButton({
   label,
   title,
   disabled,
+  active,
   onClick,
 }: {
-  label: string;
+  label: React.ReactNode;
   title: string;
   disabled?: boolean;
+  active?: boolean;
   onClick: () => void;
 }) {
+  // `active` paints the button in accent ink + a soft accent wash so toggle
+  // buttons (Inspect / Draw) read as "on" without dragging in a new component.
+  const baseBackground = active
+    ? "color-mix(in oklch, var(--accent) 22%, transparent)"
+    : "transparent";
   return (
     <button
       type="button"
       title={title}
       aria-label={title}
+      aria-pressed={active ? true : undefined}
       disabled={disabled}
       onClick={onClick}
       style={{
         appearance: "none",
         width: 24,
         height: 22,
-        background: "transparent",
-        border: "1px solid var(--rule-soft)",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: baseBackground,
+        border: `1px solid ${
+          active ? "color-mix(in oklch, var(--accent) 55%, transparent)" : "var(--rule-soft)"
+        }`,
         borderRadius: 4,
-        color: disabled ? "var(--muted)" : "var(--ink-dim)",
+        color: disabled ? "var(--muted)" : active ? "var(--accent)" : "var(--ink-dim)",
         fontFamily: "var(--font-mono)",
         fontSize: 11,
         cursor: "default",
       }}
       onMouseEnter={(e) => {
-        if (!disabled) e.currentTarget.style.background = "var(--hover)";
+        if (!disabled && !active) e.currentTarget.style.background = "var(--hover)";
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.background = "transparent";
+        e.currentTarget.style.background = baseBackground;
       }}
     >
       {label}

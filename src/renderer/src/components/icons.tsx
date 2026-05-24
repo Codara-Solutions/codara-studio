@@ -218,6 +218,48 @@ export function DragHandleIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+export function InspectIcon({ size = 14 }: { size?: number }) {
+  // Crosshair + corner marks: reads as "pick an element in the browser pane".
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M2 4.5 V2.5 H4.5" />
+      <path d="M9.5 2.5 H12 V4.5" />
+      <path d="M12 9.5 V12 H9.5" />
+      <path d="M4.5 12 H2 V9.5" />
+      <circle cx="7" cy="7" r="1.6" />
+    </svg>
+  );
+}
+
+export function DrawIcon({ size = 14 }: { size?: number }) {
+  // A pencil tip with a short stroke trail — "annotate this page".
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9 2.5 L11.5 5 L5.5 11 H3 V8.5 Z" />
+      <path d="M8.2 3.3 L10.7 5.8" />
+      <path d="M2.5 12.5 H6" />
+    </svg>
+  );
+}
+
 export function ChevronIcon({ open }: { open: boolean }) {
   return (
     <span

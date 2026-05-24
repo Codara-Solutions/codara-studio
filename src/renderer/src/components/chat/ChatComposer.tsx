@@ -85,6 +85,32 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat }: Props)
     return () => window.removeEventListener("spark:focus-composer", handler);
   }, []);
 
+  // Other surfaces (e.g. the browser pane's inspector + draw mode) can ship
+  // a ready-made prompt into the composer by dispatching `spark:prefill-
+  // composer`. We append to the current draft so a user typing in the
+  // composer doesn't lose their work mid-thought, and focus the textarea so
+  // the next Enter sends what was just injected.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ text?: unknown }>).detail;
+      const text = typeof detail?.text === "string" ? detail.text : "";
+      if (!text) return;
+      setDraft((current) => {
+        if (!current.trim()) return text;
+        return current.endsWith("\n") ? `${current}${text}` : `${current}\n${text}`;
+      });
+      window.setTimeout(() => {
+        const node = textareaRef.current;
+        if (!node) return;
+        node.focus();
+        const end = node.value.length;
+        node.setSelectionRange(end, end);
+      }, 0);
+    };
+    window.addEventListener("spark:prefill-composer", handler);
+    return () => window.removeEventListener("spark:prefill-composer", handler);
+  }, []);
+
   // Grow the textarea with its content up to a cap, then scroll internally.
   useEffect(() => {
     const node = textareaRef.current;
