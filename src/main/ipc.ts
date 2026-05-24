@@ -749,6 +749,14 @@ export function registerIpc(): void {
       /* shell.openExternal rejects when no handler is registered; ignore. */
     }
   });
+
+  // Auto-updater: renderer's "Restart and install" button calls this after
+  // the download-complete event arrives. Lazy-imported so loading ipc.ts
+  // never pulls in electron-updater on the dev/test path.
+  ipcMain.handle("updater:quitAndInstall", async (): Promise<void> => {
+    const { quitAndInstall } = await import("./auto-updater");
+    quitAndInstall();
+  });
 }
 
 function parsePastedImageDataUrl(value: unknown): { mimeType: string; buffer: Buffer } {

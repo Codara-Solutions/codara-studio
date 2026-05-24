@@ -61,6 +61,25 @@ type PreferencesChangeHandler = (change: PreferencesChange) => void;
 type SearchHitHandler = (hits: SearchHit[]) => void;
 type SearchDoneHandler = (summary: SearchSummary) => void;
 
+// electron-updater event surface. The main process narrows each
+// autoUpdater.on(...) callback into one of these `kind` strings and bundles
+// the relevant fields under `payload`. Renderer treats payload as an opaque
+// bag and inspects only the fields it cares about per kind.
+export type UpdaterEventKind =
+  | "checking-for-update"
+  | "update-available"
+  | "update-not-available"
+  | "download-progress"
+  | "update-downloaded"
+  | "error";
+
+export interface UpdaterEvent {
+  kind: UpdaterEventKind;
+  payload?: unknown;
+}
+
+type UpdaterEventHandler = (event: UpdaterEvent) => void;
+
 export interface SearchStartCallbacks {
   onHit: SearchHitHandler;
   onDone: SearchDoneHandler;
@@ -330,6 +349,20 @@ const api = {
     readText: (): Promise<string> => ipcRenderer.invoke("clipboard:readText"),
     writeText: (text: string): Promise<void> =>
       ipcRenderer.invoke("clipboard:writeText", text),
+  },
+  updater: {
+    // Subscribe to electron-updater lifecycle events. The returned function
+    // unsubscribes the listener; callers should invoke it in a useEffect
+    // cleanup so the banner component doesn't leak listeners on remount.
+    onEvent: (handler: UpdaterEventHandler): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, event: UpdaterEvent) => handler(event);
+      ipcRenderer.on("updater:event", listener);
+      return () => ipcRenderer.off("updater:event", listener);
+    },
+    // Triggered by the "Restart and install" button after the
+    // update-downloaded event. Main side calls autoUpdater.quitAndInstall()
+    // which quits the app and runs the installer.
+    quitAndInstall: (): Promise<void> => ipcRenderer.invoke("updater:quitAndInstall"),
   },
   inlineAi: {
     complete: (req: {

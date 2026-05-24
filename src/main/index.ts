@@ -16,6 +16,7 @@ import {
   fail as failHeadless,
   runHeadlessEval,
 } from "./eval/headless-runner";
+import { registerAutoUpdater } from "./auto-updater";
 
 app.setName("Spark App");
 
@@ -240,6 +241,7 @@ app.whenReady().then(async () => {
 
   registerIpc();
   createWindow();
+  if (mainWindow) registerAutoUpdater(mainWindow);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
