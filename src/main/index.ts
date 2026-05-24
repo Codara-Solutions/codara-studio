@@ -6,6 +6,7 @@ import * as fsWatcher from "./fs-watcher";
 import { ensureSparkHomeSync } from "./spark-home";
 import { flush } from "./storage";
 import { flushPreferences, getPreferenceSync } from "./preferences-store";
+import { getEnrichedPath } from "./path-reconstruction";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
 import {
   emitFinalSummary,
@@ -163,6 +164,17 @@ function createWindow(): void {
 
 app.whenReady().then(async () => {
   ensureSparkHomeSync();
+
+  // Warm the enriched-PATH cache. Electron from Finder/Dock/Explorer inherits
+  // a sparse PATH that doesn't include npm-global, nvm, scoop, etc. The first
+  // call sources the user's login shell (or reads the Windows registry) and
+  // caches the result; later PTY spawns and binary lookups read the cached
+  // value synchronously via getCachedEnrichedPath(). Fire-and-forget — we
+  // don't block startup; pre-warm callers just see process.env.PATH until
+  // the lookup finishes, which is fine.
+  void getEnrichedPath().catch((err) =>
+    console.error("[main] path enrichment failed:", err),
+  );
 
   if (isHeadlessEval) {
     // Headless eval mode: never create a BrowserWindow, never wire renderer

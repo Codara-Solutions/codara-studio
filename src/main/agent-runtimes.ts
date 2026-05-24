@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { platform } from "node:os";
 import type {
   AgentEffortLevel,
   AgentRuntimeDiagnostic,
@@ -9,6 +8,8 @@ import type {
   AgentRuntimeSelection,
   AppSettings,
 } from "@shared/types";
+
+import { resolveBinary } from "./binary-resolver";
 
 const execFileAsync = promisify(execFile);
 
@@ -128,20 +129,6 @@ const RUNTIMES: RuntimeSpec[] = [
   },
 ];
 
-async function findOnPath(executable: string): Promise<string | null> {
-  const lookup = platform() === "win32" ? "where" : "which";
-  try {
-    const { stdout } = await execFileAsync(lookup, [executable], {
-      windowsHide: true,
-      timeout: VERSION_TIMEOUT_MS,
-    });
-    const first = stdout.split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-    return first ?? null;
-  } catch {
-    return null;
-  }
-}
-
 async function probeVersion(
   executable: string,
   args: string[],
@@ -159,12 +146,20 @@ async function probeVersion(
 }
 
 async function diagnoseRuntime(spec: RuntimeSpec): Promise<AgentRuntimeDiagnostic> {
-  const executablePath = await findOnPath(spec.executable);
+  // Use the binary resolver so installs that aren't on the inherited PATH
+  // (npm-global behind a sparse Electron-from-Finder PATH, scoop shims,
+  // nvm versions, etc.) still get found. The resolver internally falls
+  // through which/where -> npm prefix -g -> common install dirs and caches
+  // hits per-name.
+  const executablePath = await resolveBinary(spec.executable);
   const installed = executablePath !== null;
   let version: string | null = null;
   let versionError: string | null = null;
   if (installed) {
-    const probe = await probeVersion(spec.executable, spec.versionArgs);
+    // Prefer the absolute path for version probing so we hit the same binary
+    // we just resolved, even if PATH lookup would have found a different
+    // install. The exec call still applies its own timeout.
+    const probe = await probeVersion(executablePath!, spec.versionArgs);
     version = probe.version;
     versionError = probe.error;
   }
