@@ -580,6 +580,15 @@ export interface RunState {
    * elapsed-time UI can freeze at the real finish time.
    */
   completedAt?: string;
+  /**
+   * Attention bit for the "done while you were elsewhere" UX. Set to false on
+   * every transition into `complete` and flipped to true when the user
+   * actively focuses/selects this chat (see `orchestration:markRunSeen`).
+   * Only tracked for the `complete` status — the other terminal statuses
+   * (failed, cancelled) are not the "you should look at this" signal we care
+   * about here. Treat `undefined` as `false`.
+   */
+  seen?: boolean;
   plans: PlanState[];
   steps: StepState[];
   workerTasks: WorkerTask[];
@@ -939,6 +948,10 @@ export interface UpdateRunStatusInput {
   runId: string;
   status: RunStatus;
   currentStepId?: string;
+}
+
+export interface MarkRunSeenInput {
+  runId: string;
 }
 
 export interface CreateStepInput {

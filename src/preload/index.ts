@@ -26,6 +26,7 @@ import type {
   GitStatus,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
+  MarkRunSeenInput,
   PauseRunInput,
   PlanFile,
   PrefKey,
@@ -240,6 +241,8 @@ const api = {
       ipcRenderer.invoke("orchestration:interruptRunWithMessage", input),
     updateRunStatus: (input: UpdateRunStatusInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:updateRunStatus", input),
+    markRunSeen: (input: MarkRunSeenInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:markRunSeen", input),
     createStep: (input: CreateStepInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:createStep", input),
     updateStep: (input: UpdateStepInput): Promise<RunState> =>
