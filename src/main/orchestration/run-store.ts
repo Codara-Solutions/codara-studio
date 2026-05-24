@@ -34,6 +34,7 @@ import type {
   WorkerTaskStatus,
   WorkerAttempt,
   WorkerArtifactPaths,
+  WorkerRuntimeState,
   VerifierVerdict,
   WorkerReport,
   WorkerTaskEnvelope,
@@ -97,6 +98,14 @@ interface ActiveWorkerProcess {
   command: string;
   write: (input: string) => void;
   kill: () => void;
+  // Self-reported runtime state from the worker process via the hook RPC
+  // (big-bet "Hook contract for sub-agents to self-report"). Updated by
+  // applyHookStateReport; authoritative over any regex-tail detection
+  // pulled from pty output (big bet A) — the doc says so. Optional + last
+  // update wins.
+  runtimeState?: WorkerRuntimeState;
+  runtimeStateNote?: string;
+  runtimeStateAt?: string;
 }
 
 const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
@@ -5988,6 +5997,77 @@ function normalizePlannedAgentLabel(label: string | undefined, stepIndex: number
 
 function activeWorkersForRun(runId: string): ActiveWorkerProcess[] {
   return Array.from(activeWorkerProcesses.values()).filter((worker) => worker.runId === runId);
+}
+
+// Hook RPC handoff (big-bet "Hook contract for sub-agents to self-report").
+// Called from hook-rpc.ts when a worker POSTs to /state. The paneId is the
+// PTY session id, which Spark uses interchangeably with attemptId for active
+// workers — see ActiveWorkerProcess.attemptId + how pty-manager keys sessions
+// by opts.id. We:
+//   1. find the ActiveWorkerProcess by paneId,
+//   2. de-dup repeat reports of the same state (no event, no spam),
+//   3. otherwise mutate in place and append a worker_attempt.state_reported
+//      event so the renderer can react (or a future Session Inspector tab
+//      can replay the timeline).
+//
+// Tolerates an unknown paneId quietly — a worker spawned outside Spark's
+// orchestration loop (e.g. a user-launched claude pane that picked up the
+// env vars) is allowed to call us, but if we don't have an ActiveWorkerProcess
+// to attach the state to we just drop the report. This matches the doc's
+// "hook wins when present" rule: if there's no worker to update, there's
+// nothing to win.
+export function applyHookStateReport(report: {
+  paneId: string;
+  state: WorkerRuntimeState;
+  note?: string;
+}): void {
+  const worker = activeWorkerProcesses.get(report.paneId);
+  if (!worker) return;
+
+  // De-dup: identical state + note as the last report is a no-op. Workers
+  // often re-emit the same state on every tool call ("still working") — we
+  // don't want to flood the event log or wake the renderer for those.
+  const sameState = worker.runtimeState === report.state;
+  const sameNote = (worker.runtimeStateNote ?? undefined) === (report.note ?? undefined);
+  if (sameState && sameNote) return;
+
+  const previousState = worker.runtimeState;
+  const timestamp = new Date().toISOString();
+  worker.runtimeState = report.state;
+  worker.runtimeStateNote = report.note;
+  worker.runtimeStateAt = timestamp;
+
+  // Fire-and-forget event so a subscriber (renderer, Session Inspector,
+  // headless eval) can pick up the change. Don't await — the hook RPC must
+  // stay responsive even if appendEvent has to fsync a big events.jsonl.
+  // The workspaceId is looked up async via getRun so renderer filtering by
+  // workspace keeps working; if the run was deleted under us the event is
+  // skipped silently.
+  void (async () => {
+    try {
+      const run = await getRun(worker.runId);
+      if (!run) return;
+      await appendEvent({
+        timestamp,
+        workspaceId: run.workspaceId,
+        runId: worker.runId,
+        stepId: worker.stepId,
+        workerTaskId: worker.workerTaskId,
+        attemptId: worker.attemptId,
+        type: "worker_attempt.state_reported",
+        message: `Worker self-reported state: ${report.state}`,
+        payload: {
+          paneId: report.paneId,
+          state: report.state,
+          previousState,
+          note: report.note,
+          source: "hook",
+        },
+      });
+    } catch (err) {
+      console.warn("[run-store] appendEvent for hook state failed:", err);
+    }
+  })();
 }
 
 function shouldResumeManagerPlanning(run: RunState): boolean {
