@@ -13,6 +13,18 @@ export interface ShellInfo {
   env?: Record<string, string>;
 }
 
+// Self-reported state from a sub-agent via the hook RPC contract (big bet
+// "Hook contract for sub-agents to self-report"). A worker can be:
+//   working — the agent is mid-turn doing actual work
+//   blocked — the agent is waiting on a permission prompt / human input
+//   idle    — the agent has nothing to do but is still alive
+//   done    — the agent has finished its task
+// When a hook report is present it wins over any tail-text regex detection
+// (big bet A), which is intentionally the fallback for CLIs that can't or
+// don't talk to the hook endpoint. Optional + tolerant of being filled in
+// from multiple sources.
+export type WorkerRuntimeState = "working" | "blocked" | "idle" | "done";
+
 export interface Worker {
   id: string;
   name?: string;
@@ -22,6 +34,16 @@ export interface Worker {
   runId?: string;
   workerTaskId?: string;
   attemptId?: string;
+  // Self-reported runtime state from the worker process via the hook RPC.
+  // Authoritative over regex-tail detection when set. Last update wins.
+  runtimeState?: WorkerRuntimeState;
+  // Free-form note from the worker explaining the current state (e.g. the
+  // permission prompt text, or "running tests"). Optional; surfaced in
+  // logs/UI when present.
+  runtimeStateNote?: string;
+  // ISO timestamp of the most recent hook report so the UI can decide
+  // whether the state is fresh.
+  runtimeStateAt?: string;
 }
 
 export interface Workspace {

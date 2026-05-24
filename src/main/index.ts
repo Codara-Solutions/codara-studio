@@ -13,6 +13,17 @@ import {
   fail as failHeadless,
   runHeadlessEval,
 } from "./eval/headless-runner";
+import { startHookRpc, stopHookRpc } from "./hook-rpc";
+
+// run-store is heavy (loads openrouter, langsmith, agent-sync transitively).
+// ipc.ts dynamically imports it for the same reason — keep startup snappy by
+// deferring the resolve until a hook actually fires. The async import is
+// cached after the first call.
+let runStoreMod: typeof import("./orchestration/run-store") | undefined;
+async function getRunStore(): Promise<typeof import("./orchestration/run-store")> {
+  runStoreMod ??= await import("./orchestration/run-store");
+  return runStoreMod;
+}
 
 app.setName("Spark App");
 
@@ -204,6 +215,32 @@ app.whenReady().then(async () => {
   }
 
   registerIpc();
+
+  // Hook RPC server for sub-agents (big-bet "Hook contract for sub-agents to
+  // self-report"). Starts before createWindow so the very first worker pty
+  // sees SPARK_HOOK_* env vars in pty-manager.spawn(). Failures here MUST NOT
+  // block startup — if the port bind fails for any reason, we log loudly and
+  // continue; sub-agents will fall back to regex-tail detection. The
+  // onStateReport handler dynamically imports run-store so we don't pay its
+  // module-load cost on cold start unless a worker actually phones in.
+  try {
+    const { port } = await startHookRpc({
+      onStateReport: (report) => {
+        void (async () => {
+          try {
+            const runStore = await getRunStore();
+            runStore.applyHookStateReport(report);
+          } catch (err) {
+            console.warn("[main] hook RPC apply threw:", err);
+          }
+        })();
+      },
+    });
+    console.log(`[main] hook RPC listening on 127.0.0.1:${port}`);
+  } catch (err) {
+    console.warn("[main] hook RPC failed to start:", err);
+  }
+
   createWindow();
 
   app.on("activate", () => {
@@ -233,5 +270,9 @@ app.on("window-all-closed", async () => {
 app.on("before-quit", async () => {
   pty.disposeAll();
   fsWatcher.disposeAll();
+  // Close the hook RPC alongside ptys so any in-flight worker post (which
+  // can only land on 127.0.0.1) gets a clean close instead of a connection
+  // reset during shutdown.
+  await stopHookRpc().catch(() => undefined);
   await flushAllStores();
 });

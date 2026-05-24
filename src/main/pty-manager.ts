@@ -4,6 +4,7 @@ import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import type { WebContents } from "electron";
 import type { ShellInfo } from "@shared/types";
+import { getHookRpcEnvSafe } from "./hook-rpc";
 
 interface Session {
   id: string;
@@ -217,6 +218,19 @@ function doSpawn(
     for (const [k, v] of Object.entries(opts.env)) {
       if (typeof v === "string") env[k] = v;
     }
+  }
+  // Hook RPC env (big-bet "Hook contract for sub-agents to self-report").
+  // Layered LAST so the values main process owns (URL, token) can't be
+  // accidentally overridden by a caller — every worker pty sees the same
+  // URL + token, and a per-pane SPARK_PANE_ID equal to the pty's session id.
+  // getHookRpcEnvSafe returns null in headless eval mode or before
+  // startHookRpc has run, in which case workers spawn without the env block
+  // and the regex-tail fallback (big bet A) takes over.
+  const hookEnv = getHookRpcEnvSafe(opts.id);
+  if (hookEnv) {
+    env.SPARK_HOOK_URL = hookEnv.SPARK_HOOK_URL;
+    env.SPARK_HOOK_TOKEN = hookEnv.SPARK_HOOK_TOKEN;
+    env.SPARK_PANE_ID = hookEnv.SPARK_PANE_ID;
   }
 
   const cwd =
