@@ -594,6 +594,14 @@ export interface RunState {
    * read the classification regardless of when in the run it fires.
    */
   taskComplexity?: TaskComplexity;
+  /**
+   * Aggregate USD cost across every priced SparkCall on this run. Recomputed
+   * after each manager call by summing call-level `costUsd` values. Surfaced
+   * in the chat header pill and the Session Inspector Costs tab. Stays
+   * undefined until at least one priced call lands so older runs without
+   * cost data render `$0.00` only when they actually had a $0 call.
+   */
+  totalCostUsd?: number;
 }
 
 export interface RunWorkerGroupStats {
@@ -740,6 +748,13 @@ export interface StepState {
   verificationCommands: string[];
   workerTaskIds: string[];
   reviewSummary?: string;
+  /**
+   * Per-step roll-up of manager-call USD cost. Computed from the SparkCall
+   * records that name this step (via the next-active-step pointer at call
+   * time). Worker-side LLM cost is not yet tracked — Spark only sees the
+   * manager's OpenRouter usage today.
+   */
+  totalCostUsd?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -875,6 +890,13 @@ export interface ReviewDecision {
 export interface SparkCall {
   id: string;
   runId: string;
+  /**
+   * The run's `currentStepId` at call start. Lets per-step cost rollups
+   * walk sparkCalls without needing to replay events. Plan-analysis runs
+   * before any step exists leave this undefined; cost attributes to the
+   * run total only in that case.
+   */
+  stepId?: string;
   mode:
     | "plan_analysis"
     | "chat"
@@ -896,6 +918,17 @@ export interface SparkCall {
   promptTokenEstimate?: number;
   contextWindowTokens?: number;
   contextWindowSource?: "known" | "default";
+  /**
+   * Cost / token-split fields populated after a successful manager call via
+   * `priceCall(...)` in `src/main/openrouter-prices.ts`. `costUsd` is zero when
+   * the model isn't in the price table or the response carried no usage block;
+   * the token counts still populate so the Costs tab can show usage even when
+   * the dollar number is unknown.
+   */
+  costUsd?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
   error?: string;
   createdAt: string;
   completedAt?: string;

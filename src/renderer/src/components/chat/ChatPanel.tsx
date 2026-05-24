@@ -66,7 +66,7 @@ export default function ChatPanel({
         collapsed={collapsed}
         onToggleCollapse={onToggleCollapse}
         {...headerDrag}
-        meta={activeRun ? <StatusMeta run={activeRun} /> : null}
+        meta={activeRun ? <HeaderMeta run={activeRun} /> : null}
         actions={<NewChatButton onClick={() => onSelectRun(null)} />}
       />
       {!collapsed && (
@@ -106,6 +106,25 @@ export default function ChatPanel({
   );
 }
 
+function HeaderMeta({ run }: { run: RunState }) {
+  // Status + cost share one row to keep the SectionHeader compact. The pill
+  // hides itself when the run hasn't recorded any cost yet (priced
+  // manager call hasn't completed).
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <StatusMeta run={run} />
+      <CostPill run={run} />
+    </span>
+  );
+}
+
 function StatusMeta({ run }: { run: RunState }) {
   const status = describeRunStatus(run);
   const color = statusToneColor(status.tone);
@@ -136,6 +155,53 @@ function StatusMeta({ run }: { run: RunState }) {
       {status.detail && <span>{status.detail}</span>}
     </span>
   );
+}
+
+// Live total of every priced manager (OpenRouter) call on this run, sourced
+// from the run-store `totalCostUsd` rollup that recomputes after each call.
+// Worker-side LLM cost is not yet tracked — Spark only sees the manager's
+// OpenRouter usage today. Hidden until at least one priced call has landed
+// so chats that ran before the price-table existed don't surface a fake $0.
+function CostPill({ run }: { run: RunState }) {
+  const total = run.totalCostUsd;
+  if (typeof total !== "number" || !Number.isFinite(total)) return null;
+  return (
+    <span
+      title={`OpenRouter manager spend on this chat: ${formatCostUsd(total)}. Worker LLM cost is not tracked yet.`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        height: 18,
+        padding: "0 7px",
+        borderRadius: 999,
+        border: "1px solid var(--rule-soft)",
+        background: "var(--panel-2)",
+        color: "var(--ink-dim)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span aria-hidden style={{ color: "var(--muted)" }}>$</span>
+      <span>{formatCostUsd(total, { stripDollar: true })}</span>
+    </span>
+  );
+}
+
+// Cost is sub-cent for cheap models and tens of dollars for big runs, so a
+// single fixed precision feels wrong. The pill renders 2 decimals once a run
+// crosses 1¢ and 4 decimals below, so users see real activity even on
+// gemini-flash chats.
+function formatCostUsd(value: number, opts: { stripDollar?: boolean } = {}): string {
+  const abs = Math.abs(value);
+  let formatted: string;
+  if (abs >= 0.01) formatted = value.toFixed(2);
+  else if (abs >= 0.0001) formatted = value.toFixed(4);
+  else if (abs > 0) formatted = "<0.0001";
+  else formatted = "0.00";
+  if (opts.stripDollar) return formatted;
+  return formatted.startsWith("<") ? `<$0.0001` : `$${formatted}`;
 }
 
 function SwitcherBar({
