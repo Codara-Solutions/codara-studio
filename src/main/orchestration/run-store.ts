@@ -72,6 +72,8 @@ import {
 import * as pty from "../pty-manager";
 import { applyAgentRuntimeSettings, detectAgentRuntimes } from "../agent-runtimes";
 import { renderAgentSyncManagerContext, renderAgentSyncPromptLines } from "../agent-sync";
+import { getProvider } from "../providers";
+import type { SpawnOpts } from "../providers/types";
 
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
@@ -2259,42 +2261,71 @@ async function tryStandardCleanImplFastPathReview(
   });
 }
 
+// Effort levels Spark passes through verbatim when building a Claude
+// standing terminal. "max" is intentionally omitted: the user types these
+// terminals manually and Claude rejects `--effort max` outside of certain
+// model+plan combinations. "minimal" is omitted because the Claude CLI
+// rejects it outright (Codex's lowest tier). Anything else from this set
+// gets forwarded to the provider's buildArgs unchanged.
 const STANDING_TERMINAL_CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
 
 // Build the launch command for a standing interactive terminal: a plain
 // claude/codex/cursor session the user drives. Like buildLaunchCommandLine,
 // but without the worker-task wiring — these are not Spark workers.
+//
+// The CLI-specific argv is produced by the runtime's `CliProvider`
+// (see src/main/providers/) so adding a new CLI later only requires a new
+// provider file. This function still owns shell-rendering concerns
+// (quoting, the cursor pwsh dispatch quirk) because those depend on the
+// shell we're spawning into, not on the CLI itself.
 function buildStandingTerminalCommand(
   runtime: "claude" | "codex" | "cursor",
   model?: string,
   effort?: string,
 ): string {
-  if (runtime === "codex") {
-    const args = ["codex", "--yolo"];
-    if (model) args.push("-m", quoteShellArg(model));
-    return args.join(" ");
+  // Behaviour preservation: the previous inline builder only forwarded
+  // `effort` for Claude (and only the four gated values below). Codex and
+  // Cursor standing terminals deliberately ignored effort, even when the
+  // caller passed it. We replicate that gate here so the provider doesn't
+  // start emitting `-c "model_reasoning_effort=..."` for codex terminals
+  // it never did before.
+  let effectiveEffort: SpawnOpts["effort"];
+  if (runtime === "claude" && effort && STANDING_TERMINAL_CLAUDE_EFFORTS.has(effort)) {
+    effectiveEffort = effort as SpawnOpts["effort"];
   }
+
+  const provider = getProvider(runtime);
+  const providerArgs = provider.buildArgs({
+    cwd: "",
+    model: model?.trim(),
+    effort: effectiveEffort,
+  });
+
+  // Render the argv into a single shell-ready string. The head segment is
+  // the binary itself: for Cursor on Windows we dispatch through the
+  // absolute path to `agent.cmd` because typing bare `agent` into pwsh
+  // resolves to `agent.ps1` (an ExternalScript that runs IN THE PARENT
+  // pwsh) and trips the user's $PROFILE hooks (Terminal-Icons floods the
+  // pane with Import-PowerShellDataFile errors before the Cursor banner
+  // even appears). `agent.cmd` spawns a fresh -NoProfile child.
+  const head = renderStandingTerminalHead(runtime);
+  const tail = providerArgs.map((arg) => quoteShellArg(arg));
+  return [head, ...tail].join(" ");
+}
+
+function renderStandingTerminalHead(runtime: "claude" | "codex" | "cursor"): string {
   if (runtime === "cursor") {
-    // See buildLaunchCommandLine for cursor — bare "agent" resolves to
-    // agent.ps1 in the parent pwsh and trips the user's $PROFILE hooks
-    // (Terminal-Icons errors). agent.cmd spawns a -NoProfile child instead.
-    // Quoted path needs the `&` call operator in pwsh.
     const localAppData = process.env.LOCALAPPDATA;
-    const cmdPath = localAppData
-      ? join(localAppData, "cursor-agent", "agent.cmd")
-      : "agent";
-    const head = localAppData ? `& ${quoteShellArg(cmdPath)}` : "agent";
-    const args = [head, "--yolo"];
-    const modelId = model || "composer-2.5-fast";
-    args.push("--model", quoteShellArg(modelId));
-    return args.join(" ");
+    if (localAppData) {
+      // Quoted path needs the `&` call operator in pwsh.
+      const cmdPath = join(localAppData, "cursor-agent", "agent.cmd");
+      return `& ${quoteShellArg(cmdPath)}`;
+    }
+    return "agent";
   }
-  const args = ["claude", "--dangerously-skip-permissions"];
-  if (model) args.push("--model", quoteShellArg(model));
-  if (effort && STANDING_TERMINAL_CLAUDE_EFFORTS.has(effort)) {
-    args.push("--effort", effort);
-  }
-  return args.join(" ");
+  // Claude and Codex are well-behaved on every shell we ship: their bin
+  // names are unique on PATH and don't collide with PowerShell aliases.
+  return runtime === "codex" ? "codex" : "claude";
 }
 
 function standingTerminalTitle(runtime: "claude" | "codex" | "cursor", model?: string): string {
