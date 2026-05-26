@@ -4,7 +4,6 @@ import type { FsEntry, RunState, Workspace } from "@shared/types";
 import { MinusIcon, PlusIcon } from "./icons";
 import FileTree from "./FileTree";
 import GitPanel from "./git/GitPanel";
-import OrchestrationSidebar from "./OrchestrationSidebar";
 import {
   PANEL_HEADER_H,
   PANEL_SECTION_KEYS,
@@ -32,7 +31,6 @@ const WORKSPACE_ROW_MIME = "application/x-spark-workspace-row";
 const SECTION_LABELS: Record<PanelSectionKey, string> = {
   workspaces: "Workspaces",
   graph: "Source Control",
-  agent: "Spark",
   explorer: "Explorer",
 };
 
@@ -49,8 +47,6 @@ interface RailProps {
   split: number;
   collapsed: Record<PanelSectionKey, boolean>;
   activePath: string | null;
-  runs: RunState[];
-  activeRunId: string | null;
   onActivate: (id: string) => void;
   onEdit: (id: string) => void;
   onChange: (id: string, patch: Partial<Workspace>) => void;
@@ -64,7 +60,6 @@ interface RailProps {
   onMoveSection: (section: PanelSectionKey, side: PanelSide, index: number) => void;
   onSectionDragStart: (section: PanelSectionKey) => void;
   onSectionDragEnd: () => void;
-  onSelectRun: (id: string | null) => void;
   onRunSnapshot: (
     run: RunState,
     options?: { select?: boolean; focusRuns?: boolean },
@@ -290,19 +285,6 @@ function WorkspaceRail(props: RailProps) {
             headerDrag={headerDrag("graph")}
             onRunSnapshot={props.onRunSnapshot}
             onOpenFile={props.onOpenFile}
-          />
-        );
-      case "agent":
-        return (
-          <OrchestrationSidebar
-            workspace={props.activeWorkspace}
-            runs={props.runs}
-            activeRunId={props.activeRunId}
-            onSelectRun={props.onSelectRun}
-            onRunSnapshot={props.onRunSnapshot}
-            collapsed={collapsed.agent}
-            onToggleCollapse={() => onToggleSection("agent")}
-            headerDrag={headerDrag("agent")}
           />
         );
       case "explorer": {

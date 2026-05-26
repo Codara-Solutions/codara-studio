@@ -14,6 +14,7 @@ interface Props {
   ) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  collapsible?: boolean;
   headerDrag?: SectionHeaderDragProps;
 }
 
@@ -30,6 +31,7 @@ export default function OrchestrationSidebar({
   onRunSnapshot,
   collapsed,
   onToggleCollapse,
+  collapsible = true,
   headerDrag,
 }: Props) {
   const [creatingNewRun, setCreatingNewRun] = useState(false);
@@ -194,6 +196,7 @@ export default function OrchestrationSidebar({
       error={error}
       collapsed={collapsed}
       onToggleCollapse={onToggleCollapse}
+      collapsible={collapsible}
       headerDrag={headerDrag}
       onSelectRun={handleSelectRun}
       onDeleteRun={handleDeleteRun}

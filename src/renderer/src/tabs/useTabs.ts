@@ -16,6 +16,7 @@ import {
   type PanePath,
 } from "./paneTree";
 import type {
+  ChatTab,
   EditorTab,
   PaneNode,
   PreviewTab,
@@ -43,6 +44,7 @@ import type {
 // store's open + close pair.
 
 const STORAGE_KEY_PREFIX = "spark.tabs:";
+const CHAT_TAB_ID = "spark-chat";
 // v4: chat-scoped Runs tabs. Empty/global Runs placeholders are migrated out
 // on load so existing editor/terminal tabs survive this UX cleanup. v3 dropped the
 // removed "project"/CRM tab kind. v2 introduced the recursive PaneNode tree on
@@ -172,8 +174,28 @@ function createTerminalTab(cwd?: string, autorun?: string, title = "terminals"):
   };
 }
 
+function createChatTab(): ChatTab {
+  return {
+    id: CHAT_TAB_ID,
+    kind: "chat",
+    title: "Spark",
+  };
+}
+
+function ensureChatTab(tabs: Tab[]): Tab[] {
+  const existing = tabs.find((tab): tab is ChatTab => tab.kind === "chat");
+  if (existing) {
+    return tabs.map((tab) =>
+      tab.id === existing.id && (tab.id !== CHAT_TAB_ID || tab.title !== "Spark")
+        ? { ...tab, id: CHAT_TAB_ID, title: "Spark" }
+        : tab,
+    );
+  }
+  return [createChatTab(), ...tabs];
+}
+
 function defaultTabs(cwd?: string): Tab[] {
-  return [createTerminalTab(cwd)];
+  return [createChatTab(), createTerminalTab(cwd)];
 }
 
 function loadPersisted(workspaceId: string | null): PersistedShape | null {
@@ -195,11 +217,13 @@ function loadPersisted(workspaceId: string | null): PersistedShape | null {
     // Runs tabs are derived from the selected chat, not durable workspace
     // layout. Keep persisted editor/terminal/preview tabs, then recreate the
     // Runs tab only when App selects a chat.
-    parsed.tabs = normalizeTerminalTitles(
-      parsed.tabs.filter(
-        (tab) =>
-          tab.kind !== "runs" &&
-          !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
+    parsed.tabs = ensureChatTab(
+      normalizeTerminalTitles(
+        parsed.tabs.filter(
+          (tab) =>
+            tab.kind !== "runs" &&
+            !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
+        ),
       ),
     );
     for (const tab of parsed.tabs) {
@@ -388,6 +412,7 @@ export interface UseTabsApi {
       worker?: TerminalLeafWorker | null;
     },
   ) => boolean;
+  openChatTab: (options?: { focus?: boolean }) => TabId;
   newPreviewTab: (url: string) => TabId;
   // Open (or relabel) the runs tab bound to a chat. Each chat owns exactly
   // one runs tab. `focus` selects it too — true for explicit navigation,
@@ -539,6 +564,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         if (curr.length <= 1) return curr;
         const idx = curr.findIndex((t) => t.id === id);
         if (idx === -1) return curr;
+        if (curr[idx].kind === "chat") return curr;
         disposeTerminalTabPanes(curr[idx]);
         const next = curr.filter((t) => t.id !== id);
         setActiveId((active) => {
@@ -559,7 +585,10 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         const target = curr.find((t) => t.id === keepId);
         if (!target) return curr;
         const next = curr.filter(
-          (t) => t.id === keepId || (t.kind === "terminal" && t.scope?.kind === "workers"),
+          (t) =>
+            t.id === keepId ||
+            t.kind === "chat" ||
+            (t.kind === "terminal" && t.scope?.kind === "workers"),
         );
         const removed = curr.filter((t) => !next.some((kept) => kept.id === t.id));
         for (const t of removed) {
@@ -1183,6 +1212,12 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
     [],
   );
 
+  const openChatTab = useCallback((options?: { focus?: boolean }): TabId => {
+    setTabs((curr) => ensureChatTab(curr));
+    if (options?.focus !== false) setActiveId(CHAT_TAB_ID);
+    return CHAT_TAB_ID;
+  }, []);
+
   const newPreviewTab = useCallback((url: string): TabId => {
     const id = makeId("preview");
     const tab: PreviewTab = {
@@ -1483,6 +1518,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
       setLeafWorker,
       renameLeaf,
       addPaneInTab,
+      openChatTab,
       newPreviewTab,
       openRunsTab,
       hideRunsTabs,

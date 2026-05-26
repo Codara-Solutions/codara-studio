@@ -1,7 +1,7 @@
 // Tab discriminated union for the workspace's tabs+stacks layout.
 //
-// Every "kind" maps 1:1 to a Stack component (EditorStack, TerminalStack,
-// PreviewStack, RunsStack). The Stack is responsible for keeping every tab
+// Every "kind" maps 1:1 to a Stack component (ChatStack, EditorStack,
+// TerminalStack, PreviewStack, RunsStack). The Stack is responsible for keeping every tab
 // of its kind mounted in an absolutely positioned div and toggling
 // `visibility: hidden` + `pointer-events: none` based on whether the tab
 // owns the active id. Mounting is the contract that keeps editor cursors,
@@ -14,6 +14,10 @@ export type TabId = string;
 export interface BaseTab {
   id: TabId;
   title: string;
+}
+
+export interface ChatTab extends BaseTab {
+  kind: "chat";
 }
 
 export interface EditorTab extends BaseTab {
@@ -121,6 +125,6 @@ export interface RunsTab extends BaseTab {
   runId: string | null;
 }
 
-export type Tab = EditorTab | TerminalTab | PreviewTab | RunsTab;
+export type Tab = ChatTab | EditorTab | TerminalTab | PreviewTab | RunsTab;
 
 export type TabKind = Tab["kind"];

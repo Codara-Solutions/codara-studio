@@ -13,7 +13,8 @@ export interface SectionHeaderProps extends SectionHeaderDragProps {
   label: string;
   collapsed: boolean;
   onToggleCollapse: () => void;
-  // Optional leading glyph (e.g. the Spark mark on the agent section).
+  collapsible?: boolean;
+  // Optional leading glyph (e.g. the Spark mark on the chat header).
   glyph?: React.ReactNode;
   // Optional zero-padded mono count shown before the action cluster.
   count?: number;
@@ -36,6 +37,7 @@ export function SectionHeader({
   count,
   meta,
   actions,
+  collapsible = true,
   draggable = false,
   dragging = false,
   onDragStart,
@@ -72,8 +74,14 @@ export function SectionHeader({
     >
       <button
         type="button"
-        aria-expanded={!collapsed}
-        title={collapsed ? `Expand ${label}` : `Collapse ${label}`}
+        aria-expanded={collapsible ? !collapsed : undefined}
+        title={
+          collapsible
+            ? collapsed
+              ? `Expand ${label}`
+              : `Collapse ${label}`
+            : label
+        }
         style={{
           appearance: "none",
           background: "transparent",
@@ -110,6 +118,7 @@ export function SectionHeader({
             suppressClick.current = false;
             return;
           }
+          if (!collapsible) return;
           onToggleCollapse();
         }}
       >
@@ -131,7 +140,7 @@ export function SectionHeader({
             <DragHandleIcon size={13} />
           </span>
         )}
-        <Chevron collapsed={collapsed} hover={hover} />
+        {collapsible && <Chevron collapsed={collapsed} hover={hover} />}
         {glyph != null && (
           <span style={{ display: "inline-flex", alignItems: "center", flex: "0 0 auto" }}>
             {glyph}

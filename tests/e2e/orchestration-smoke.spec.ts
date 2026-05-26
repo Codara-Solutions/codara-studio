@@ -71,7 +71,7 @@ test("autopilot runs from a selected markdown plan", async () => {
   }
 });
 
-test("right sidebar sections stay ordered in a compact window", async () => {
+test("spark chat renders as a workbench tab", async () => {
   const { userDataDir } = await prepareElectronWorkspace("spark-agent-layout-e2e-");
 
   let app: ElectronApplication | null = null;
@@ -84,16 +84,13 @@ test("right sidebar sections stay ordered in a compact window", async () => {
       },
     });
     const page = await app.firstWindow();
-    await page.setViewportSize({ width: 357, height: 747 });
+    await page.setViewportSize({ width: 900, height: 747 });
     await page.waitForLoadState("domcontentloaded");
-    await expect(page.getByText("SPARK AGENT")).toBeVisible();
+    await expect(page.getByText("Spark App")).toBeVisible();
 
-    const inspector = await page.getByText("DEV INSPECTOR").boundingBox();
-    const explorer = await page.getByText("EXPLORER").boundingBox();
-
-    expect(inspector).not.toBeNull();
-    expect(explorer).not.toBeNull();
-    expect(inspector!.y).toBeLessThan(explorer!.y);
+    await expect(page.getByRole("tab", { name: /Spark/ })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /terminals/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Explorer workspace" })).toBeVisible();
   } finally {
     await app?.close();
   }

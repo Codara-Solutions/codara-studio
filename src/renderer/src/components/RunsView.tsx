@@ -12,7 +12,7 @@ import RunCanvas from "./runs/RunCanvas";
 interface Props {
   workspace: Workspace | null;
   // Lifted state from App — the runs list and selection are owned upstream so
-  // this canvas and the right-panel chat panel always agree.
+  // this canvas and the Spark chat tab always agree.
   runs: RunState[];
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
@@ -31,12 +31,12 @@ export default function RunsView({ workspace, runs, activeRunId }: Props) {
     return (
       <EmptyState
         heading="No runs yet"
-        text="Start a chat in the Spark panel, or right-click a plan file in the explorer."
+        text="Start a chat in the Spark tab, or right-click a plan file in the explorer."
       />
     );
   }
   if (!activeRun) {
-    return <EmptyState heading="No run selected" text="Pick a chat from the Spark panel." />;
+    return <EmptyState heading="No run selected" text="Pick a chat from the Spark tab." />;
   }
   if (isTerminalSpawnRun(activeRun)) {
     return (

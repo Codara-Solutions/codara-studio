@@ -1520,7 +1520,7 @@ function collectAttention(
   if (run.status === "paused") {
     items.push({
       title: "Run paused",
-      detail: run.autopilot?.stopReason || "Resume it from the Spark panel.",
+      detail: run.autopilot?.stopReason || "Resume it from the Spark tab.",
       tone: "var(--info)",
       mark: "pending",
     });

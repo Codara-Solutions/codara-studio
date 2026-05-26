@@ -30,13 +30,12 @@ export const LEFT_WIDTH_RANGE = { min: 196, max: 460 } as const;
 export const RIGHT_WIDTH_RANGE = { min: 300, max: 640 } as const;
 const SPLIT_RANGE = { min: 0.2, max: 0.8 } as const;
 
-export type PanelSectionKey = "workspaces" | "graph" | "agent" | "explorer";
+export type PanelSectionKey = "workspaces" | "graph" | "explorer";
 export type PanelSide = "left" | "right";
 
 export const PANEL_SECTION_KEYS: readonly PanelSectionKey[] = [
   "workspaces",
   "graph",
-  "agent",
   "explorer",
 ] as const;
 
@@ -59,10 +58,10 @@ const DEFAULT_LAYOUT: PanelLayout = {
   rightWidth: 360,
   leftSplit: 0.52,
   rightSplit: 0.64,
-  collapsed: { workspaces: false, graph: false, agent: false, explorer: false },
+  collapsed: { workspaces: false, graph: false, explorer: false },
   sections: {
     left: ["workspaces", "graph"],
-    right: ["agent", "explorer"],
+    right: ["explorer"],
   },
 };
 
@@ -120,7 +119,6 @@ function sanitize(raw: Partial<PanelLayout> | null | undefined): PanelLayout {
     collapsed: {
       workspaces: Boolean(c.workspaces),
       graph: Boolean(c.graph),
-      agent: Boolean(c.agent),
       explorer: Boolean(c.explorer),
     },
     sections: sanitizeSections((raw as { sections?: unknown }).sections),

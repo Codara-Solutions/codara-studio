@@ -157,6 +157,17 @@ export function CloseIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+export function SparkIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M8 1.25L9.35 6.05L14.15 7.4L9.35 8.75L8 13.55L6.65 8.75L1.85 7.4L6.65 6.05L8 1.25Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
 export function ZoomPaneIcon({ size = 14, zoomed = false }: { size?: number; zoomed?: boolean }) {
   // Four corner brackets — reads as "expand to fill" when not zoomed and
   // "collapse back into split" when zoomed. The zoomed state pulls the

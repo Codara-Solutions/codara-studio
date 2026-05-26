@@ -21,6 +21,7 @@ import FileSearchPanel from "./components/Search/FileSearchPanel";
 import ToastHost from "./components/Toast";
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar from "./tabs/TabBar";
+import ChatStack from "./tabs/ChatStack";
 import EditorStack from "./tabs/EditorStack";
 import TerminalStack from "./tabs/TerminalStack";
 import PreviewStack from "./tabs/PreviewStack";
@@ -153,10 +154,9 @@ export default function App() {
   const [showRight, setShowRight] = useState(true);
   const [runCountsByWorkspace, setRunCountsByWorkspace] = useState<Record<string, number>>({});
   // Runs for the currently active workspace, plus the user's selection. Lifted
-  // here so the workbench RunsView and the right-panel chat panel both
-  // read from the same source of truth — picking a run on the right updates
-  // the canvas in the centre, deleting a run on the right removes it
-  // everywhere.
+  // here so the workbench RunsView and Spark chat tab both read from the same
+  // source of truth: picking a chat updates the graph, deleting a chat removes
+  // it everywhere.
   const [runs, setRuns] = useState<RunState[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   // Each workspace has its own Spark chat selection. The visible state stays
@@ -287,32 +287,37 @@ export default function App() {
       activeRunIdRef.current = run.id;
       setActiveRunId(run.id);
       if (workspaceId !== activeIdRef.current) return;
-      tabsRef.current.openRunsTab(run.id, "Runs", options.focusRuns ?? false);
+      const focusRuns = options.focusRuns ?? false;
+      tabsRef.current.openRunsTab(run.id, "Runs", focusRuns);
+      if (!focusRuns) tabsRef.current.openChatTab({ focus: true });
     },
     [],
   );
 
-  // Selecting a run must always be visible — if the user closed the Runs
-  // tab earlier, we transparently re-open it and route them to the picked
-  // run. Without this, picking a run row (or starting a new run) silently
-  // updates state and the user sees no UI change.
-  const handleSelectRun = useCallback((runId: string | null, workspaceId?: string | null) => {
-    const targetWorkspaceId = workspaceId ?? activeIdRef.current;
-    if (targetWorkspaceId) {
-      activeRunIdsByWorkspaceRef.current[targetWorkspaceId] = runId;
-    }
-    activeRunIdRef.current = runId;
-    setActiveRunId(runId);
-    if (targetWorkspaceId !== activeIdRef.current) return;
-    if (runId === null) {
-      tabsRef.current.hideRunsTabs();
-      return;
-    }
-    // Selecting a chat focuses its node-graph tab in the workbench. The
-    // background effect below keeps the tab in existence; this is the
-    // explicit-navigation path, so it focuses.
-    tabsRef.current.openRunsTab(runId, "Runs", true);
-  }, []);
+  const handleSelectRun = useCallback(
+    (
+      runId: string | null,
+      workspaceId?: string | null,
+      options?: { focus?: "chat" | "runs" | "none" },
+    ) => {
+      const targetWorkspaceId = workspaceId ?? activeIdRef.current;
+      if (targetWorkspaceId) {
+        activeRunIdsByWorkspaceRef.current[targetWorkspaceId] = runId;
+      }
+      activeRunIdRef.current = runId;
+      setActiveRunId(runId);
+      if (targetWorkspaceId !== activeIdRef.current) return;
+      const focus = options?.focus ?? "chat";
+      if (runId === null) {
+        tabsRef.current.hideRunsTabs();
+        if (focus === "chat") tabsRef.current.openChatTab({ focus: true });
+        return;
+      }
+      tabsRef.current.openRunsTab(runId, "Runs", focus === "runs");
+      if (focus === "chat") tabsRef.current.openChatTab({ focus: true });
+    },
+    [],
+  );
 
   // Keep the active chat's node-graph tab in existence without stealing
   // focus — handleSelectRun focuses it on explicit navigation; this only
@@ -328,7 +333,7 @@ export default function App() {
   }, [activeRunId, runs]);
 
   // Mirror the workbench selection back into the active chat: clicking a
-  // chat's node-graph tab makes the right-side chat panel follow along.
+  // chat's node-graph tab makes the Spark chat tab follow along.
   useEffect(() => {
     const tab = tabs.activeTab;
     if (tab && tab.kind === "runs" && tab.runId) {
@@ -1237,7 +1242,10 @@ export default function App() {
       },
       "session.openInspector": () => setInspectorOpen((open) => !open),
       "composer.focus": () => {
-        window.dispatchEvent(new CustomEvent("spark:focus-composer"));
+        tabs.openChatTab({ focus: true });
+        window.requestAnimationFrame(() => {
+          window.dispatchEvent(new CustomEvent("spark:focus-composer"));
+        });
       },
       "sidebar.toggle": () => {
         setShowRight((visible) => !visible);
@@ -1711,8 +1719,6 @@ export default function App() {
                 ? tabs.activeTab.path
                 : null
             }
-            runs={runs}
-            activeRunId={activeRunId}
             onActivate={handleActivateWorkspace}
             onEdit={handleEditWorkspace}
             onChange={updateWs}
@@ -1726,7 +1732,6 @@ export default function App() {
             onMoveSection={movePanelSection}
             onSectionDragStart={handlePanelSectionDragStart}
             onSectionDragEnd={handlePanelSectionDragEnd}
-            onSelectRun={handleSelectRun}
             onRunSnapshot={handleRunSnapshot}
             onOpenFile={openFileByPath}
             onOpenFileEntry={openEditorFile}
@@ -1764,6 +1769,7 @@ export default function App() {
               runs={runs}
               activeRunId={activeRunId}
               onSelectRun={handleSelectRun}
+              onRunSnapshot={handleRunSnapshot}
               onDetectedUrl={handleDetectedUrl}
               onSparkOpenFile={openFileByPath}
               onTerminalPaneExit={onTerminalPaneExit}
@@ -1808,8 +1814,6 @@ export default function App() {
                 ? tabs.activeTab.path
                 : null
             }
-            runs={runs}
-            activeRunId={activeRunId}
             onActivate={handleActivateWorkspace}
             onEdit={handleEditWorkspace}
             onChange={updateWs}
@@ -1823,7 +1827,6 @@ export default function App() {
             onMoveSection={movePanelSection}
             onSectionDragStart={handlePanelSectionDragStart}
             onSectionDragEnd={handlePanelSectionDragEnd}
-            onSelectRun={handleSelectRun}
             onRunSnapshot={handleRunSnapshot}
             onOpenFile={openFileByPath}
             onOpenFileEntry={openEditorFile}
@@ -1910,6 +1913,10 @@ interface WorkspaceProps {
   runs: RunState[];
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
+  onRunSnapshot: (
+    run: RunState,
+    options?: { select?: boolean; focusRuns?: boolean },
+  ) => void;
   onDetectedUrl: (tabId: string, paneId: string, url: string) => void;
   onSparkOpenFile: (path: string) => void;
   onTerminalPaneExit: (tabId: string, paneId: string) => void;
@@ -1941,6 +1948,7 @@ const Workspace = React.memo(function Workspace({
   runs,
   activeRunId,
   onSelectRun,
+  onRunSnapshot,
   onDetectedUrl,
   onSparkOpenFile,
   onTerminalPaneExit,
@@ -2065,6 +2073,15 @@ const Workspace = React.memo(function Workspace({
         onPinEditorTab={onPinEditorTab}
       />
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
+        <ChatStack
+          tabs={visibleTabs}
+          activeId={effectiveActiveId}
+          workspace={workspace}
+          runs={runs}
+          activeRunId={activeRunId}
+          onSelectRun={onSelectRun}
+          onRunSnapshot={onRunSnapshot}
+        />
         <EditorStack
           tabs={visibleTabs}
           activeId={effectiveActiveId}

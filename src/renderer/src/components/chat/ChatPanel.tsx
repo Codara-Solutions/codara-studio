@@ -20,6 +20,7 @@ interface Props {
   error: string | null;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  collapsible?: boolean;
   headerDrag?: SectionHeaderDragProps;
   onSelectRun: (id: string | null) => void;
   onDeleteRun: (id: string) => void;
@@ -41,6 +42,7 @@ export default function ChatPanel({
   error,
   collapsed,
   onToggleCollapse,
+  collapsible = true,
   headerDrag,
   onSelectRun,
   onDeleteRun,
@@ -84,6 +86,7 @@ export default function ChatPanel({
         glyph={<SparkMark size={13} />}
         collapsed={collapsed}
         onToggleCollapse={onToggleCollapse}
+        collapsible={collapsible}
         {...headerDrag}
         meta={activeRun ? <HeaderMeta run={activeRun} /> : null}
         actions={
@@ -129,7 +132,6 @@ export default function ChatPanel({
             <ChatConversation
               key={`conversation:${activeRun.id}`}
               run={activeRun}
-              cwd={workspace?.cwd ?? null}
             />
           ) : (
             <WelcomeState />

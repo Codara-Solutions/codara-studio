@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { Tab, TabId } from "./types";
-import { CloseIcon, FileIcon, PlusIcon } from "../components/icons";
+import { CloseIcon, FileIcon, PlusIcon, SparkIcon } from "../components/icons";
 import {
   TAB_REORDER_DRAG_MIME,
   TERMINAL_PANE_DRAG_MIME,
@@ -19,8 +19,8 @@ const HOVER_ACTIVATE_MS = 350;
 
 // TabBar is the strip at the top of the workspace pane. Visually similar
 // to a code editor's tab strip but with a kind-icon-prefixed label so it's
-// obvious at a glance that you're switching between an editor, a terminal,
-// a preview window, and a runs canvas.
+// obvious at a glance that you're switching between Spark chat, an editor,
+// a terminal, a preview window, and a runs canvas.
 //
 // Behavior worth calling out:
 //   - Wheel-deltaY scrolls the strip horizontally (terax pattern). Allows
@@ -263,7 +263,7 @@ function TabBar({
             key={t.id}
             tab={t}
             active={t.id === activeId}
-            canClose={tabs.length > 1}
+            canClose={tabs.length > 1 && t.kind !== "chat"}
             paneDragHover={t.id === paneHoverTabId}
             onSelect={onSelect}
             onClose={onClose}
@@ -551,6 +551,13 @@ const TabItem = React.memo(function TabItem({
 });
 
 function KindIcon({ tab }: { tab: Tab }) {
+  if (tab.kind === "chat") {
+    return (
+      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
+        <SparkIcon size={13} />
+      </span>
+    );
+  }
   if (tab.kind === "editor") {
     return (
       <span style={{ display: "inline-flex", flex: "0 0 14px" }}>
@@ -589,6 +596,7 @@ function labelFor(t: Tab): string {
 }
 
 function titleFor(t: Tab): string {
+  if (t.kind === "chat") return t.title;
   if (t.kind === "editor") return t.path;
   if (t.kind === "preview") return t.url;
   if (t.kind === "terminal") return t.title;
