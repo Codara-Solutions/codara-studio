@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo } from "react";
 import type { RunState, Workspace } from "@shared/types";
 import { isRunningStatus, runStatusColor } from "../lib/run-status";
 import { sortSteps } from "./runs/run-format";
@@ -136,7 +136,6 @@ function RunHeader({ run }: { run: RunState }) {
             {isTerminalSpawnRun(run) ? "Spark terminals" : run.title}
           </span>
           <StatusPill status={run.status} />
-          <RunIdChip runId={run.id} />
         </div>
         <div
           title={activeStep?.goal}
@@ -342,77 +341,6 @@ function StatusPill({ status }: { status: RunState["status"] }) {
       )}
       {status}
     </span>
-  );
-}
-
-function RunIdChip({ runId }: { runId: string }) {
-  const [copied, setCopied] = useState(false);
-  const [hover, setHover] = useState(false);
-  const onCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(runId);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      /* Clipboard API can fail in non-secure contexts; degrade silently. */
-    }
-  };
-  return (
-    <button
-      type="button"
-      onClick={onCopy}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title={`Run id: ${runId}\nClick to copy.`}
-      style={{
-        flex: "0 0 auto",
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "3px 9px",
-        background: "color-mix(in oklch, var(--ink) 4%, transparent)",
-        color: "var(--muted)",
-        border: `1px solid ${hover ? "var(--rule-strong)" : "var(--rule-soft)"}`,
-        borderRadius: 999,
-        fontFamily: "var(--font-mono)",
-        fontSize: 10,
-        letterSpacing: "0.03em",
-        cursor: "pointer",
-        transition:
-          "color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <span style={{ opacity: 0.7 }}>id</span>
-      <span style={{ color: "var(--ink-dim)" }}>{runId.slice(0, 8)}</span>
-      <span
-        aria-hidden
-        style={{
-          width: 11,
-          height: 11,
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: copied ? "var(--ok)" : "currentColor",
-        }}
-      >
-        {copied ? (
-          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
-            <path
-              d="M2 6.5l2.5 2.5L10 3.5"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        ) : (
-          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
-            <rect x="3.5" y="3.5" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.2" />
-            <path d="M2.5 8.5V2.5h6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-          </svg>
-        )}
-      </span>
-    </button>
   );
 }
 

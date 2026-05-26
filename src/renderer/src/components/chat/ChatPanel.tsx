@@ -418,30 +418,12 @@ function SwitcherBar({
         >
           {activeRun ? `Chat - ${activeRun.title}` : "New chat"}
         </span>
-        {activeRun && (
-          <span
-            title={activeRun.id}
-            style={{
-              flex: "0 0 auto",
-              fontFamily: "var(--font-mono)",
-              fontSize: 9.5,
-              fontWeight: 600,
-              color: "var(--muted)",
-              letterSpacing: "0.04em",
-              padding: "1px 5px",
-              borderRadius: 4,
-              border: "1px solid var(--rule-soft)",
-              background: "color-mix(in oklch, var(--panel-2) 80%, transparent)",
-            }}
-          >
-            #{shortRunId(activeRun.id)}
-          </span>
-        )}
         {doneUnseen && <DoneUnseenPill />}
         <span aria-hidden style={{ flex: "0 0 auto", color: "var(--muted)", fontSize: 9 }}>
           ▾
         </span>
       </button>
+      {activeRun && <RunIdCopyChip runId={activeRun.id} />}
       {open && (
         <ChatList
           runs={runs}
@@ -665,6 +647,91 @@ function shortRunId(id: string): string {
   const tail = id.split("-").pop();
   if (!tail) return id.slice(-6);
   return tail.slice(-6);
+}
+
+function RunIdCopyChip({ runId }: { runId: string }) {
+  const [copied, setCopied] = useState(false);
+  const [hover, setHover] = useState(false);
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(runId);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      /* Clipboard API can fail in non-secure contexts; degrade silently. */
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title={`Run id: ${runId}\nClick to copy.`}
+      style={{
+        appearance: "none",
+        flex: "0 0 auto",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        height: 22,
+        padding: "0 7px",
+        background: copied
+          ? "color-mix(in oklch, var(--ok) 14%, transparent)"
+          : hover
+            ? "var(--hover)"
+            : "color-mix(in oklch, var(--panel-2) 80%, transparent)",
+        color: copied ? "var(--ok)" : "var(--muted)",
+        border: `1px solid ${
+          copied
+            ? "color-mix(in oklch, var(--ok) 45%, transparent)"
+            : hover
+              ? "var(--rule-strong)"
+              : "var(--rule-soft)"
+        }`,
+        borderRadius: 999,
+        fontFamily: "var(--font-mono)",
+        fontSize: 9.5,
+        fontWeight: 600,
+        letterSpacing: "0.04em",
+        cursor: "default",
+        transition:
+          "color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <span style={{ opacity: 0.7 }}>id</span>
+      <span style={{ color: copied ? "var(--ok)" : "var(--ink-dim)" }}>
+        #{shortRunId(runId)}
+      </span>
+      <span
+        aria-hidden
+        style={{
+          width: 11,
+          height: 11,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        {copied ? (
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+            <path
+              d="M2 6.5l2.5 2.5L10 3.5"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        ) : (
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+            <rect x="3.5" y="3.5" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.2" />
+            <path d="M2.5 8.5V2.5h6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+          </svg>
+        )}
+      </span>
+    </button>
+  );
 }
 
 function DoneUnseenPill() {

@@ -1440,7 +1440,10 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
   lines.push("- shell: always available (deterministic command-only tasks).");
   lines.push("- manual: always available (human executes; only when automation is unsafe).");
   lines.push(
-    "Tier semantics: pick by taskClass — skeleton → tier=top + highest effort; feature → tier=mid + medium effort; leaf → tier=cheap + low effort. Never pick tier=top for a mechanical leaf (e.g. running a single shell command and reporting its output) — that wastes context and money for no gain.",
+    "Tier semantics:",
+    "- Multi-model runtime (Claude): skeleton → tier=top model + highest available effort; feature → tier=mid model + medium effort; leaf → tier=mid (sonnet) at low/minimal effort. Never assign claude-opus-4-7 to a leaf task.",
+    "- Single-model runtime (Codex, Cursor): the model never changes — vary EFFORT to express tier. Codex (gpt-5.5): skeleton → high/xhigh, feature → medium, leaf → minimal. Cursor (composer-2.5-fast): one effort level, treat as the cheap leaf pick.",
+    "- Never pick a top tier or high/xhigh/max effort for a mechanical leaf (e.g. running a single shell command and reporting its output) — that wastes context and money for no gain.",
   );
   return lines.join("\n");
 }

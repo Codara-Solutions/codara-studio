@@ -30,21 +30,15 @@ const CLAUDE_MODELS: AgentRuntimeModel[] = [
   {
     id: "claude-opus-4-7",
     label: "Opus 4.7",
-    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+    effortLevels: ["minimal", "medium", "high", "xhigh", "max"],
     isDefault: true,
     tier: "top",
   },
   {
     id: "claude-sonnet-4-6",
     label: "Sonnet 4.6",
-    effortLevels: ["low", "medium", "high", "max"],
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
     tier: "mid",
-  },
-  {
-    id: "claude-haiku-4-5",
-    label: "Haiku 4.5",
-    effortLevels: ["low", "medium", "high"],
-    tier: "cheap",
   },
 ];
 

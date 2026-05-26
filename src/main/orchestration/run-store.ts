@@ -2959,13 +2959,14 @@ async function applySparkManagerDecision(
 
   // Trivial worker model floor: when the run is classified trivial, the
   // implementation worker is the ONLY check on the work (zero verifier
-  // follow-ups). Mid-tier sonnet/gpt-5.4 misses 1-of-N distinct issues without
-  // a verifier to catch it; we observed exactly this on a 3-bug fix where the
+  // follow-ups). Mid-tier sonnet misses 1-of-N distinct issues without a
+  // verifier to catch it; we observed exactly this on a 3-bug fix where the
   // worker landed only 2/3 hidden gates. Code-level enforcement: walk every
   // plannedAgent on every step and every incoming task, and promote any
-  // mid-tier (sonnet/gpt-5.4) feature/leaf assignment to top-tier (opus@high
-  // for claude, gpt-5.5@high for codex). Manager prompt drift would otherwise
-  // silently re-introduce the regression.
+  // non-top-tier feature assignment to top-tier (opus@high for claude,
+  // gpt-5.5@high for codex). Codex now ships only gpt-5.5 so the model
+  // bump is effectively an effort bump there; sonnet→opus still applies.
+  // Leaf and verifier are exempt from this floor (see promoteForTrivial).
   if (latest.taskComplexity === "trivial") {
     const stepBumps: Array<{ stepId: string; bumped: number }> = [];
     for (const step of latest.steps) {
@@ -4766,6 +4767,15 @@ export async function undoToCheckpoint(input: UndoToCheckpointInput): Promise<Un
     activeWorkers.map((w) => w.workerTaskId).filter((id): id is string => Boolean(id)),
   );
 
+  // Cutoff timestamp = the undone user message's createdAt. Anything created
+  // at or after that timestamp is downstream of the message and gets trimmed
+  // (steps, worker tasks, attempts, manager calls). Without this the chat
+  // timeline keeps rendering all the post-message work (step cards, tool
+  // rows, Spark's prose reply) even though humanMessages is trimmed —
+  // exactly the "agent's message still there after undo" the user reported.
+  const undoneMessage = run.humanMessages[pointer];
+  const cutoff = undoneMessage?.createdAt;
+
   const updated = await commitRunChange(run, {
     type: "run.checkpoint_restored",
     message: `Undid checkpoint ${checkpoint.id} (${input.scope})`,
@@ -4780,15 +4790,42 @@ export async function undoToCheckpoint(input: UndoToCheckpointInput): Promise<Un
     mutate: (draft, timestamp) => {
       draft.humanMessages = draft.humanMessages.slice(0, pointer);
       draft.checkpoints = (draft.checkpoints ?? []).slice(0, checkpointIndex);
-      draft.status = "paused";
+
+      if (cutoff) {
+        draft.steps = draft.steps.filter((step) => step.createdAt < cutoff);
+        const keptStepIds = new Set(draft.steps.map((step) => step.id));
+        draft.workerTasks = draft.workerTasks.filter((task) => task.createdAt < cutoff);
+        const keptTaskIds = new Set(draft.workerTasks.map((task) => task.id));
+        // An attempt survives only if its task does. Anything left here whose
+        // status was still active gets flipped to cancelled below — the PTY
+        // is already dead from the kill loop above.
+        draft.workerAttempts = draft.workerAttempts.filter((attempt) =>
+          keptTaskIds.has(attempt.workerTaskId),
+        );
+        draft.sparkCalls = draft.sparkCalls.filter((call) => call.createdAt < cutoff);
+        if (draft.currentStepId && !keptStepIds.has(draft.currentStepId)) {
+          draft.currentStepId = undefined;
+        }
+      }
+
+      // "complete" gives a quiet "done" badge with no Resume button, and is a
+      // terminal status — so the user's next message goes through
+      // addRunMessage's wasTerminal branch and re-engages the manager from a
+      // clean slate. Semantically: the run finished what it was doing
+      // (forcibly, because the user undid), and is awaiting fresh input.
+      draft.status = "complete";
+      draft.completedAt = timestamp;
+      draft.seen = true;
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
-        status: "paused",
+        status: "idle",
         lastAction: "undo",
         stopReason: "Undone by user",
-        pausedAt: timestamp,
         updatedAt: timestamp,
       };
+
+      // Flip any surviving active attempts/tasks to cancelled — the PTY is
+      // dead, leaving them as "running" would misrepresent the state.
       for (const attempt of draft.workerAttempts) {
         if (!cancelledAttemptIds.has(attempt.id)) continue;
         if (
@@ -5891,6 +5928,23 @@ async function appendCompletionSummaryMessage(runId: string): Promise<RunState> 
   if (run.steps.length === 0 && run.workerTasks.length === 0) return run;
   const completedAt = run.completedAt ?? run.updatedAt;
   const completedAtMs = Date.parse(completedAt);
+  // If the manager already posted a chatReply note for this completion turn,
+  // suppress the templated summary entirely — one Spark bubble per turn is the
+  // goal. The chatReply is emitted as spark/note by applySparkManagerDecision
+  // just before the run flips to complete, so a spark/note whose createdAt is
+  // at-or-after completedAt (with a small grace window for clock skew) is the
+  // user-facing answer; the auto-summary would just duplicate it.
+  const lastMessage = run.humanMessages[run.humanMessages.length - 1];
+  if (lastMessage && lastMessage.author === "spark" && lastMessage.kind === "note") {
+    const lastMs = Date.parse(lastMessage.createdAt);
+    if (
+      Number.isFinite(lastMs) &&
+      Number.isFinite(completedAtMs) &&
+      lastMs >= completedAtMs - 5_000
+    ) {
+      return run;
+    }
+  }
   const alreadyAppended = run.humanMessages.some((message) => {
     if (message.author !== "spark" || message.kind !== "decision") return false;
     const messageAt = Date.parse(message.createdAt);

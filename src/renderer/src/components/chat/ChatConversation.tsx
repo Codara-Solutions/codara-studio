@@ -1189,16 +1189,19 @@ const USER_BUBBLE_STYLE: React.CSSProperties = {
 
 const SPARK_TURN_STYLE: React.CSSProperties = {
   display: "flex",
-  flexDirection: "column",
-  alignItems: "flex-start",
-  gap: 4,
+  flexDirection: "row",
+  flexWrap: "wrap",
+  alignItems: "baseline",
+  columnGap: 8,
+  rowGap: 4,
 };
 
 const SPARK_HEADER_STYLE: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
+  display: "inline-flex",
+  alignItems: "baseline",
   gap: 7,
   paddingLeft: 2,
+  flex: "0 0 auto",
 };
 
 const SPARK_BUBBLE_STYLE: React.CSSProperties = {
@@ -1215,6 +1218,7 @@ const SPARK_BUBBLE_STYLE: React.CSSProperties = {
 
 const DONE_MARKER_STYLE: React.CSSProperties = {
   marginTop: 4,
+  flexBasis: "100%",
   display: "inline-flex",
   alignItems: "center",
   gap: 5,
