@@ -23,6 +23,8 @@ experiments/
 
 # Local-only artifacts (not source)
 .claude/
+.gyp-venv/
+.npmrc
 __pycache__/
 evals/results/
 evals-v2/results/

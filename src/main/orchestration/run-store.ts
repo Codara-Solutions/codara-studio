@@ -7711,7 +7711,13 @@ async function waitForCodexInputReady(attemptId: string): Promise<void> {
         lastMcpSeen = Date.now();
       }
       buffer = (buffer + text).slice(-8192);
-      if (readyMarkers.some((marker) => buffer.includes(marker))) finish();
+      // The placeholder/suggestion strings paint on the banner in the SAME
+      // frame as "Starting MCP servers (0/N)", so they are NOT a reliable
+      // "input ready" signal once a startup line has appeared — trusting them
+      // there short-circuits the MCP-quiet wait and pastes mid-startup, which
+      // Codex drops. Only let them resolve early when no MCP startup is
+      // happening (no servers configured), where banner ≈ input ready.
+      if (!sawMcpStartup && readyMarkers.some((marker) => buffer.includes(marker))) finish();
     });
     const poll = setInterval(() => {
       const now = Date.now();
@@ -7836,13 +7842,21 @@ async function pasteAndSubmit(
     const offTap = pty.tap(attemptId, (chunk) => {
       visible = (visible + stripAnsi(chunk.toString("utf8"))).slice(-6000);
     });
-    const startedTurn = (): boolean =>
-      /esc to interrupt/i.test(visible) ||
-      /Context\s+[1-9][0-9]?%\s+used/i.test(visible) ||
-      /\btokens used\b/i.test(visible) ||
-      /\bComposing\b/.test(visible) ||
-      /ctrl\+c to stop/i.test(visible) ||
-      /Composer\s+2\.5\s+Fast\s+·\s+[0-9]+(?:\.[0-9]+)?%/i.test(visible);
+    const startedTurn = (): boolean => {
+      // Codex's MCP-startup spinner prints "(Ns • esc to interrupt)" too, so
+      // "esc to interrupt" only means a real turn once that startup line is
+      // gone. Without this guard a paste dropped during startup is read as a
+      // started turn (false positive) and the run hangs at an empty prompt.
+      const mcpStarting = /Starting MCP servers/i.test(visible);
+      return (
+        (!mcpStarting && /esc to interrupt/i.test(visible)) ||
+        /Context\s+[1-9][0-9]?%\s+used/i.test(visible) ||
+        /\btokens used\b/i.test(visible) ||
+        /\bComposing\b/.test(visible) ||
+        /ctrl\+c to stop/i.test(visible) ||
+        /Composer\s+2\.5\s+Fast\s+·\s+[0-9]+(?:\.[0-9]+)?%/i.test(visible)
+      );
+    };
 
     try {
       handle.write(PASTE_BEGIN);
