@@ -92,6 +92,13 @@ export interface TerminalTab extends BaseTab {
   kind: "terminal";
   root: PaneNode;
   activePaneId: string;
+  // Run-scoped worker tabs are mounted like normal terminals so their PTYs
+  // keep running, but the tab strip only shows them while their run is the
+  // active chat.
+  scope?: {
+    kind: "workers";
+    runId: string;
+  };
   // When set, the named leaf is displayed at full tab size and every other
   // leaf is hidden via CSS (display:none) — but kept mounted, so xterm
   // canvases and PTY connections survive the zoom toggle. The split tree and

@@ -94,14 +94,6 @@ function isBrowserUrl(url: string): boolean {
   return /^(https?:|file:)/i.test(url);
 }
 
-// Compare two filesystem paths case-insensitively (Windows is the target
-// platform; case-sensitive matching would split "C:\\Foo" and "c:\\foo").
-// Trailing slashes / mixed separators are normalised before comparison.
-function samePath(a: string, b: string): boolean {
-  const norm = (s: string): string => s.replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
-  return norm(a) === norm(b);
-}
-
 function collectTerminalPaneIds(node: PaneNode, ids: Set<string>): void {
   if (node.kind === "leaf") {
     ids.add(node.paneId);
@@ -130,60 +122,6 @@ function disposePersistedWorkspaceTerminalPanes(workspaceId: string): void {
   } catch {
     /* best-effort cleanup only */
   }
-}
-
-// Walk a pane tree and return the first leaf that:
-//  - is currently idle (no PTY activity in the last `idleThresholdMs`);
-//  - has a cwd that matches the workspace (per `cwdMatches`); and
-//  - is free to reuse for an incoming worker on `incomingRunId`.
-// The runtime map is read-only here; callers that mutate it should
-// guard for the case where a leaf has no entry yet (e.g. a freshly-mounted
-// pane that hasn't received any PTY data — treated as activity at "now").
-function findIdleLeaf(
-  node: PaneNode,
-  runtime: Map<string, { cwd?: string; lastActivityAt: number }>,
-  now: number,
-  idleThresholdMs: number,
-  cwdMatches: (cwd: string | undefined) => boolean,
-  incomingRunId: string | undefined,
-): TerminalLeaf | null {
-  if (node.kind === "leaf") {
-    // Worker-pane reuse rules:
-    //  - state="running": always off-limits, the worker is mid-flight.
-    //  - state="done" on the SAME run as the incoming worker: off-limits, so
-    //    a verifier doesn't stomp the impl's output the user is still
-    //    reading from this run.
-    //  - state="done" on a DIFFERENT (or finished) run: reclaimable. Without
-    //    this clause every run leaks a pane per worker forever — six workers
-    //    in run A means six dead panes blocking run B from reusing any of
-    //    them, even after run A is complete.
-    if (node.worker) {
-      if (node.worker.state === "running") return null;
-      if (incomingRunId && node.worker.runId === incomingRunId) return null;
-    }
-    const entry = runtime.get(node.paneId);
-    const liveCwd = entry?.cwd ?? node.cwd;
-    if (!cwdMatches(liveCwd)) return null;
-    const lastActivityAt = entry?.lastActivityAt ?? now;
-    if (now - lastActivityAt < idleThresholdMs) return null;
-    return node;
-  }
-  return (
-    findIdleLeaf(node.a, runtime, now, idleThresholdMs, cwdMatches, incomingRunId) ??
-    findIdleLeaf(node.b, runtime, now, idleThresholdMs, cwdMatches, incomingRunId)
-  );
-}
-
-function anyLeafCwdMatches(
-  node: PaneNode,
-  runtime: Map<string, { cwd?: string; lastActivityAt: number }>,
-  cwdMatches: (cwd: string | undefined) => boolean,
-): boolean {
-  if (node.kind === "leaf") {
-    const entry = runtime.get(node.paneId);
-    return cwdMatches(entry?.cwd ?? node.cwd);
-  }
-  return anyLeafCwdMatches(node.a, runtime, cwdMatches) || anyLeafCwdMatches(node.b, runtime, cwdMatches);
 }
 
 function findLeafByPaneId(node: PaneNode, paneId: string): TerminalLeaf | null {
@@ -306,6 +244,16 @@ export default function App() {
   // Tabs are scoped per-workspace so each workspace remembers its own layout.
   // useTabs internally swaps tab lists when the workspaceId argument changes.
   const tabs = useTabs(activeId, activeWorkspace?.cwd);
+  const visibleWorkbenchTabs = useMemo(
+    () => tabs.tabs.filter((tab) => isTabVisibleForRun(tab, activeRunId)),
+    [tabs.tabs, activeRunId],
+  );
+  const activeVisibleTabId = useMemo(() => {
+    if (tabs.activeId && visibleWorkbenchTabs.some((tab) => tab.id === tabs.activeId)) {
+      return tabs.activeId;
+    }
+    return visibleWorkbenchTabs[0]?.id ?? null;
+  }, [tabs.activeId, visibleWorkbenchTabs]);
 
   // useTabs returns a fresh object every render, which would force any
   // useCallback/useEffect that depends on `tabs` to re-run on every render.
@@ -639,7 +587,10 @@ export default function App() {
       // re-mark the workspace ~500ms later so the regular debounced flush
       // re-lists it once things have quiesced.
       if (event.type === "run.deleted") {
-        if (event.runId) tabsRef.current.closeRunsTabFor(event.runId);
+        if (event.runId) {
+          tabsRef.current.closeRunsTabFor(event.runId);
+          tabsRef.current.closeWorkerTerminalTabFor(event.runId);
+        }
         const deletedWorkspaceId = event.workspaceId;
         window.setTimeout(() => {
           runRefreshPendingRef.current.add(deletedWorkspaceId);
@@ -731,21 +682,12 @@ export default function App() {
 
   // When the orchestration runner emits `envelope_prepared`, the worker is
   // about to start and is waiting for a renderer-side PTY at sessionId =
-  // attemptId. We host that PTY inside the user's visible TerminalStack so
-  // the agent's xterm output is watchable. Claim policy:
-  //   1. Prefer reusing a leaf in a terminal tab that has the workspace
-  //      cwd and no PTY activity in the last IDLE_THRESHOLD_MS.
-  //   2. If none, smart-split a fresh leaf into the most appropriate
-  //      terminal tab (active one if its cwd matches, else any terminal
-  //      tab on the workspace, else create a new one).
-  // Claiming a leaf disposes its existing PTY and renames the leaf's
-  // paneId to attemptId; React re-mounts TerminalPane, which spawns a
-  // fresh PTY at the new id, and run-store's `pty.waitForSpawn(attemptId)`
-  // resolves.
+  // attemptId. Spark workers live in one run-scoped terminal tab titled
+  // "workers" instead of claiming arbitrary user shells. The tab stays mounted
+  // across chat switches so PTYs continue running, but the tab strip only
+  // reveals it while its run is the active chat.
   useEffect(() => {
     if (!booted) return;
-
-    const IDLE_THRESHOLD_MS = 1500;
 
     const handleEnvelopePrepared = async (event: SparkEvent) => {
       if (event.type !== "worker_task.envelope_prepared") return;
@@ -784,72 +726,11 @@ export default function App() {
 
       const t = tabsRef.current;
       if (!t) return;
-      const now = Date.now();
-      const cwdMatches = (leafCwd: string | undefined): boolean => {
-        if (!leafCwd) return true; // unset cwd is treated as workspace root
-        return samePath(leafCwd, workspaceCwd);
-      };
-
-      // 1. Find an idle leaf in any terminal tab whose cwd matches.
-      let claimTabId: string | null = null;
-      let claimPaneId: string | null = null;
-      for (const tab of t.tabs) {
-        if (tab.kind !== "terminal") continue;
-        const idleLeaf = findIdleLeaf(tab.root, paneRuntimeRef.current, now, IDLE_THRESHOLD_MS, cwdMatches, event.runId ?? undefined);
-        if (idleLeaf) {
-          claimTabId = tab.id;
-          claimPaneId = idleLeaf.paneId;
-          break;
-        }
-      }
-
-      if (claimTabId && claimPaneId) {
-        // Reuse: dispose the user's PTY and rename the leaf to attemptId.
-        // React unmounts the old TerminalPane (which already has its own
-        // dispose-on-unmount path), then mounts a new one at the new id.
-        void window.spark.pty.dispose(claimPaneId).catch(() => undefined);
-        paneRuntimeRef.current.delete(claimPaneId);
-        const renamed = t.renameLeaf(claimTabId, claimPaneId, event.attemptId);
-        if (renamed) {
-          t.setLeafWorker(claimTabId, event.attemptId, workerMeta);
-          t.setLeafCwd(claimTabId, event.attemptId, workspaceCwd);
-          t.setActiveTerminalPane(claimTabId, event.attemptId);
-          return;
-        }
-      }
-
-      // 2. No idle leaf — find or create a terminal tab and smart-add a new
-      //    leaf with paneId=attemptId. Prefer the currently-active terminal
-      //    tab if it has the right cwd; otherwise the first terminal tab
-      //    that does; otherwise create a fresh one.
-      const activeTerminal = t.tabs.find(
-        (tab) => tab.id === t.activeId && tab.kind === "terminal",
-      );
-      let targetTabId: string | null = null;
-      if (
-        activeTerminal &&
-        activeTerminal.kind === "terminal" &&
-        anyLeafCwdMatches(activeTerminal.root, paneRuntimeRef.current, cwdMatches)
-      ) {
-        targetTabId = activeTerminal.id;
-      } else {
-        const matching = t.tabs.find(
-          (tab) =>
-            tab.kind === "terminal" &&
-            anyLeafCwdMatches(tab.root, paneRuntimeRef.current, cwdMatches),
-        );
-        targetTabId = matching
-          ? matching.id
-          : t.newTerminalTab(workspaceCwd, undefined, { focus: false });
-      }
-
-      const ok = t.addPaneInTab(targetTabId, event.attemptId, {
-        cwd: workspaceCwd,
-        worker: workerMeta,
+      const tabId = t.ensureWorkerTerminalTab(event.runId, workspaceCwd, event.attemptId, workerMeta, {
+        focus: false,
       });
-      if (ok) {
-        t.setActiveTerminalPane(targetTabId, event.attemptId);
-      }
+      t.setLeafCwd(tabId, event.attemptId, workspaceCwd);
+      t.setActiveTerminalPane(tabId, event.attemptId);
     };
 
     // Mark the worker pane "done" on attempt finish — keeps the xterm
@@ -1372,15 +1253,15 @@ export default function App() {
         // terminal tab. If a terminal tab already exists and is active,
         // fall back to cycling to the next one for parity with the
         // "toggle visible terminal" mental model.
-        const existing = tabs.tabs.find((t) => t.kind === "terminal");
+        const existing = visibleWorkbenchTabs.find((t) => t.kind === "terminal");
         if (!existing) {
           handleNewTerminalTab();
           return;
         }
-        if (tabs.activeId === existing.id) {
+        if (activeVisibleTabId === existing.id) {
           // Find any other terminal to cycle to; otherwise leave the
           // current one selected.
-          const others = tabs.tabs.filter((t) => t.kind === "terminal" && t.id !== existing.id);
+          const others = visibleWorkbenchTabs.filter((t) => t.kind === "terminal" && t.id !== existing.id);
           if (others.length > 0) tabs.setActiveTab(others[0].id);
         } else {
           tabs.setActiveTab(existing.id);
@@ -1392,7 +1273,8 @@ export default function App() {
       "view.selectByIndex": (event) => {
         const index = Number.parseInt(event.key, 10);
         if (Number.isFinite(index) && index >= 1) {
-          tabs.selectByIndex(index - 1);
+          const target = visibleWorkbenchTabs[index - 1];
+          if (target) tabs.setActiveTab(target.id);
         }
         // Keep the legacy event so any listener (e.g. right panel run
         // selector) can also respond.
@@ -1408,32 +1290,45 @@ export default function App() {
       "worker.newCodex": () => handleNewWorkerTab(CODEX_LAUNCH_COMMAND),
       "worker.newCursor": () => handleNewWorkerTab(CURSOR_LAUNCH_COMMAND),
       "tab.close": () => {
-        if (tabs.activeId) tabs.closeTab(tabs.activeId);
+        if (activeVisibleTabId) tabs.closeTab(activeVisibleTabId);
       },
       "tab.closeOthers": () => {
-        if (tabs.activeId) tabs.closeOthers(tabs.activeId);
+        if (activeVisibleTabId) tabs.closeOthers(activeVisibleTabId);
       },
-      "tab.cycleNext": () => tabs.cycleNext(),
-      "tab.cyclePrev": () => tabs.cyclePrev(),
+      "tab.cycleNext": () => {
+        if (!activeVisibleTabId || visibleWorkbenchTabs.length === 0) return;
+        const idx = visibleWorkbenchTabs.findIndex((tab) => tab.id === activeVisibleTabId);
+        const next = visibleWorkbenchTabs[(Math.max(0, idx) + 1) % visibleWorkbenchTabs.length];
+        if (next) tabs.setActiveTab(next.id);
+      },
+      "tab.cyclePrev": () => {
+        if (!activeVisibleTabId || visibleWorkbenchTabs.length === 0) return;
+        const idx = visibleWorkbenchTabs.findIndex((tab) => tab.id === activeVisibleTabId);
+        const prev =
+          visibleWorkbenchTabs[
+            (Math.max(0, idx) - 1 + visibleWorkbenchTabs.length) % visibleWorkbenchTabs.length
+          ];
+        if (prev) tabs.setActiveTab(prev.id);
+      },
       "terminal.splitRight": () => {
         // The active workbench tab dictates which split happens — we only
         // act on terminal tabs so this chord is a no-op anywhere else.
-        const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+        const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
         if (!active || active.kind !== "terminal") return;
         tabs.splitTerminalPane(active.id, active.activePaneId, "horizontal");
       },
       "terminal.splitDown": () => {
-        const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+        const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
         if (!active || active.kind !== "terminal") return;
         tabs.splitTerminalPane(active.id, active.activePaneId, "vertical");
       },
       "terminal.closePane": () => {
-        const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+        const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
         if (!active || active.kind !== "terminal") return;
         tabs.closeTerminalPane(active.id, active.activePaneId);
       },
       "terminal.toggleZoom": () => {
-        const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+        const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
         if (!active || active.kind !== "terminal") return;
         tabs.toggleTerminalPaneZoom(active.id, active.activePaneId);
       },
@@ -1444,7 +1339,9 @@ export default function App() {
       handleNewPreviewTab,
       handleNewTerminalTab,
       handleNewWorkerTab,
+      activeVisibleTabId,
       tabs,
+      visibleWorkbenchTabs,
     ],
   );
 
@@ -1672,7 +1569,7 @@ export default function App() {
       disabled: !activeWorkspace,
       disabledReason: activeWorkspace ? undefined : "Open a workspace first.",
     });
-    const openWorkers = enumerateOpenWorkers(tabs.tabs, runs);
+    const openWorkers = enumerateOpenWorkers(visibleWorkbenchTabs, runs);
     for (const worker of openWorkers) {
       list.push({
         id: `worker-existing-${worker.injectId}`,
@@ -1683,7 +1580,7 @@ export default function App() {
       });
     }
     return list;
-  }, [activeWorkspace, activeRunId, runs, tabs.tabs]);
+  }, [activeWorkspace, activeRunId, runs, visibleWorkbenchTabs]);
 
   const routeSelection = useCallback(
     async (payload: SelectionPayload, destinationId: string) => {
@@ -1998,6 +1895,14 @@ export default function App() {
 
 // ── Workspace pane (tab strip + stacks) ──────────────────────────────────────
 
+function isTabVisibleForRun(tab: Tab, activeRunId: string | null): boolean {
+  return !(
+    tab.kind === "terminal" &&
+    tab.scope?.kind === "workers" &&
+    tab.scope.runId !== activeRunId
+  );
+}
+
 interface WorkspaceProps {
   tabs: ReturnType<typeof useTabs>;
   workspace: Workspace | null;
@@ -2067,6 +1972,20 @@ const Workspace = React.memo(function Workspace({
     closeTerminalPane,
     toggleTerminalPaneZoom,
   } = tabs;
+  const visibleTabs = useMemo(
+    () => tabs.tabs.filter((tab) => isTabVisibleForRun(tab, activeRunId)),
+    [tabs.tabs, activeRunId],
+  );
+  const effectiveActiveId = useMemo(() => {
+    if (tabs.activeId && visibleTabs.some((tab) => tab.id === tabs.activeId)) {
+      return tabs.activeId;
+    }
+    return visibleTabs[0]?.id ?? null;
+  }, [tabs.activeId, visibleTabs]);
+  useEffect(() => {
+    if (!effectiveActiveId || tabs.activeId === effectiveActiveId) return;
+    setActiveTab(effectiveActiveId);
+  }, [effectiveActiveId, tabs.activeId, setActiveTab]);
 
   const handleTabSelect = useCallback(
     (id: TabId) => setActiveTab(id),
@@ -2134,8 +2053,8 @@ const Workspace = React.memo(function Workspace({
       }}
     >
       <TabBar
-        tabs={tabs.tabs}
-        activeId={tabs.activeId}
+        tabs={visibleTabs}
+        activeId={effectiveActiveId}
         onSelect={handleTabSelect}
         onClose={handleTabClose}
         onNewTerminal={onNewTerminalTab}
@@ -2147,14 +2066,14 @@ const Workspace = React.memo(function Workspace({
       />
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
         <EditorStack
-          tabs={tabs.tabs}
-          activeId={tabs.activeId}
+          tabs={visibleTabs}
+          activeId={effectiveActiveId}
           onDirtyChange={handleEditorDirty}
           onClose={handleTabClose}
         />
         <TerminalStack
           tabs={tabs.tabs}
-          activeId={tabs.activeId}
+          activeId={effectiveActiveId}
           shell={shell}
           onDetectedUrl={onDetectedUrl}
           onSparkOpen={handleSparkOpen}
@@ -2171,13 +2090,13 @@ const Workspace = React.memo(function Workspace({
           onPaneAgentState={onTerminalPaneAgentState}
         />
         <PreviewStack
-          tabs={tabs.tabs}
-          activeId={tabs.activeId}
+          tabs={visibleTabs}
+          activeId={effectiveActiveId}
           onUrlChange={onPreviewUrlChange}
         />
         <RunsStack
-          tabs={tabs.tabs}
-          activeId={tabs.activeId}
+          tabs={visibleTabs}
+          activeId={effectiveActiveId}
           workspace={workspace}
           runs={runs}
           activeRunId={activeRunId}
