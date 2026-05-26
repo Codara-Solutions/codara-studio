@@ -1,5 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { AddRunMessageAttachmentInput, FsEntry, RunState } from "@shared/types";
+import type {
+  AddRunMessageAttachmentInput,
+  AgentEffortLevel,
+  ChatBackendKind,
+  ChatMode,
+  FsEntry,
+  RunState,
+} from "@shared/types";
 import { makeId } from "@shared/ids";
 import { findOpenQuestion } from "./timeline";
 
@@ -61,6 +68,77 @@ interface MentionQuery {
   query: string;
 }
 
+interface ChatModelOption {
+  id: string;
+  label: string;
+  backend: ChatBackendKind;
+  effortLevels?: AgentEffortLevel[];
+}
+
+interface ChatBackendGroup {
+  backend: ChatBackendKind;
+  label: string;
+  models: ChatModelOption[];
+}
+
+const ALL_EFFORTS: AgentEffortLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+const CHAT_BACKEND_GROUPS: ChatBackendGroup[] = [
+  {
+    backend: "openrouter",
+    label: "OpenRouter",
+    models: [
+      { id: "google/gemini-flash-latest", label: "Gemini Flash", backend: "openrouter" },
+      { id: "openai/gpt-4o", label: "GPT-4o", backend: "openrouter" },
+      { id: "anthropic/claude-opus-4-7", label: "Claude Opus", backend: "openrouter" },
+    ],
+  },
+  {
+    backend: "claude",
+    label: "Claude Code",
+    models: [
+      {
+        id: "claude-opus-4-7",
+        label: "Opus 4.7",
+        backend: "claude",
+        effortLevels: ["low", "medium", "high"],
+      },
+      {
+        id: "claude-sonnet-4-6",
+        label: "Sonnet 4.6",
+        backend: "claude",
+        effortLevels: ["low", "medium", "high"],
+      },
+    ],
+  },
+  {
+    backend: "codex",
+    label: "Codex",
+    models: [
+      {
+        id: "gpt-5.5",
+        label: "GPT-5.5",
+        backend: "codex",
+        effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
+      },
+    ],
+  },
+];
+
+const DEFAULT_CHAT_BACKEND: ChatBackendKind = "openrouter";
+const DEFAULT_CHAT_MODEL = "google/gemini-flash-latest";
+const DEFAULT_CHAT_MODE: ChatMode = "execute";
+const DEFAULT_CHAT_EFFORT: AgentEffortLevel = "medium";
+
+const EFFORT_LABELS: Record<AgentEffortLevel, string> = {
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "xHigh",
+  max: "Max",
+};
+
 export default function ChatComposer({ run, cwd, disabled, onStartChat, onForcePauseRun }: Props) {
   const [draft, setDraft] = useState("");
   const [images, setImages] = useState<AddRunMessageAttachmentInput[]>([]);
@@ -72,6 +150,14 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const [busy, setBusy] = useState(false);
   const [pastingImages, setPastingImages] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [draftChatBackend, setDraftChatBackend] = useState<ChatBackendKind>(DEFAULT_CHAT_BACKEND);
+  const [draftChatModel, setDraftChatModel] = useState<string>(DEFAULT_CHAT_MODEL);
+  const [draftChatMode, setDraftChatMode] = useState<ChatMode>(DEFAULT_CHAT_MODE);
+  const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(DEFAULT_CHAT_EFFORT);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [effortPickerOpen, setEffortPickerOpen] = useState(false);
+  const modelPickerRef = useRef<HTMLDivElement>(null);
+  const effortPickerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Synchronous in-flight latch — blocks a second send before React has
   // re-rendered the busy state, which a fast double-click or Enter-key
@@ -411,6 +497,109 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     textareaRef.current?.focus();
   };
 
+  const activeChatBackend: ChatBackendKind = run_?.chatBackend ?? draftChatBackend;
+  const activeChatModelId: string = run_?.chatModel ?? draftChatModel;
+  const activeChatMode: ChatMode = run_?.chatMode ?? draftChatMode;
+  const activeChatEffort: AgentEffortLevel = run_?.chatEffort ?? draftChatEffort;
+  const activeChatModel: ChatModelOption =
+    findChatModel(activeChatBackend, activeChatModelId) ?? fallbackChatModel(activeChatBackend);
+  const availableEfforts: AgentEffortLevel[] =
+    activeChatBackend === "openrouter"
+      ? ALL_EFFORTS
+      : activeChatModel.effortLevels && activeChatModel.effortLevels.length > 0
+        ? activeChatModel.effortLevels
+        : ALL_EFFORTS;
+  const visibleEffort: AgentEffortLevel = availableEfforts.includes(activeChatEffort)
+    ? activeChatEffort
+    : (availableEfforts[0] ?? DEFAULT_CHAT_EFFORT);
+
+  // When the run is null the chips just steer local state; once a run exists
+  // we fire the orchestration IPC so the manager picks up the choice on the
+  // next turn. The IPC is best-effort — failures land in the toast bar.
+  const applyChatBackendChange = (changes: {
+    chatBackend?: ChatBackendKind;
+    chatModel?: string;
+    chatMode?: ChatMode;
+    chatEffort?: AgentEffortLevel;
+  }) => {
+    if (changes.chatBackend !== undefined) setDraftChatBackend(changes.chatBackend);
+    if (changes.chatModel !== undefined) setDraftChatModel(changes.chatModel);
+    if (changes.chatMode !== undefined) setDraftChatMode(changes.chatMode);
+    if (changes.chatEffort !== undefined) setDraftChatEffort(changes.chatEffort);
+    if (!run_) return;
+    // IPC is wired in a follow-up patch on the main process; cast lets the
+    // renderer call it ahead of time without dragging the preload contract
+    // into this changelist. Failures fall through to the toast bar.
+    const orchestration = window.spark.orchestration as unknown as {
+      updateChatBackend?: (input: {
+        runId: string;
+        chatBackend?: ChatBackendKind;
+        chatModel?: string;
+        chatMode?: ChatMode;
+        chatEffort?: AgentEffortLevel;
+      }) => Promise<unknown>;
+    };
+    if (typeof orchestration.updateChatBackend !== "function") return;
+    void orchestration.updateChatBackend({ runId: run_.id, ...changes }).catch((err: unknown) => {
+      setError((err as Error).message);
+    });
+  };
+
+  const onPickModel = (model: ChatModelOption) => {
+    const backendChanged = model.backend !== activeChatBackend;
+    const nextEffortLevels =
+      model.backend === "openrouter"
+        ? ALL_EFFORTS
+        : model.effortLevels && model.effortLevels.length > 0
+          ? model.effortLevels
+          : ALL_EFFORTS;
+    const nextEffort: AgentEffortLevel = nextEffortLevels.includes(activeChatEffort)
+      ? activeChatEffort
+      : (nextEffortLevels.includes(DEFAULT_CHAT_EFFORT)
+          ? DEFAULT_CHAT_EFFORT
+          : (nextEffortLevels[0] ?? DEFAULT_CHAT_EFFORT));
+    applyChatBackendChange({
+      chatBackend: backendChanged ? model.backend : undefined,
+      chatModel: model.id,
+      chatEffort: nextEffort !== activeChatEffort ? nextEffort : undefined,
+    });
+    setModelPickerOpen(false);
+  };
+
+  const onPickEffort = (effort: AgentEffortLevel) => {
+    applyChatBackendChange({ chatEffort: effort });
+    setEffortPickerOpen(false);
+  };
+
+  const onToggleMode = () => {
+    applyChatBackendChange({ chatMode: activeChatMode === "execute" ? "talk" : "execute" });
+  };
+
+  useEffect(() => {
+    if (!modelPickerOpen && !effortPickerOpen) return;
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (modelPickerOpen && modelPickerRef.current && !modelPickerRef.current.contains(target)) {
+        setModelPickerOpen(false);
+      }
+      if (effortPickerOpen && effortPickerRef.current && !effortPickerRef.current.contains(target)) {
+        setEffortPickerOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setModelPickerOpen(false);
+        setEffortPickerOpen(false);
+      }
+    };
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [modelPickerOpen, effortPickerOpen]);
+
   const placeholder = !run_
     ? "Tell Spark what to build, or describe a task."
     : openQuestion
@@ -537,6 +726,87 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
             marginTop: 5,
           }}
         >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              flex: "0 0 auto",
+            }}
+          >
+            <div ref={modelPickerRef} style={{ position: "relative", display: "inline-flex" }}>
+              <ChipButton
+                title={`${chatBackendLabel(activeChatBackend)} — pick model`}
+                active={modelPickerOpen}
+                onClick={() => {
+                  setModelPickerOpen((open) => !open);
+                  setEffortPickerOpen(false);
+                }}
+              >
+                <ChipGlyph kind="model" />
+                <span>{activeChatModel.label}</span>
+                <ChipCaret />
+              </ChipButton>
+              {modelPickerOpen && (
+                <ChipPopover>
+                  {CHAT_BACKEND_GROUPS.map((group) => (
+                    <div key={group.backend} style={{ display: "grid", gap: 1 }}>
+                      <ChipGroupHeader label={group.label} />
+                      {group.models.map((model) => (
+                        <ChipRow
+                          key={model.id}
+                          label={model.label}
+                          hint={model.id}
+                          active={model.id === activeChatModelId && model.backend === activeChatBackend}
+                          onPick={() => onPickModel(model)}
+                        />
+                      ))}
+                    </div>
+                  ))}
+                </ChipPopover>
+              )}
+            </div>
+            <div ref={effortPickerRef} style={{ position: "relative", display: "inline-flex" }}>
+              <ChipButton
+                title="Reasoning effort"
+                active={effortPickerOpen}
+                onClick={() => {
+                  setEffortPickerOpen((open) => !open);
+                  setModelPickerOpen(false);
+                }}
+              >
+                <ChipGlyph kind="effort" />
+                <span>{EFFORT_LABELS[visibleEffort]}</span>
+                <ChipCaret />
+              </ChipButton>
+              {effortPickerOpen && (
+                <ChipPopover>
+                  <ChipGroupHeader label="Effort" />
+                  {availableEfforts.map((effort) => (
+                    <ChipRow
+                      key={effort}
+                      label={EFFORT_LABELS[effort]}
+                      active={effort === visibleEffort}
+                      onPick={() => onPickEffort(effort)}
+                    />
+                  ))}
+                </ChipPopover>
+              )}
+            </div>
+            <ChipButton
+              title={
+                activeChatMode === "execute"
+                  ? "Execute mode — Spark spawns workers to do the work. Click to switch to Talk."
+                  : "Talk mode — pure conversation, no workers. Click to switch to Execute."
+              }
+              active={false}
+              accent
+              onClick={onToggleMode}
+            >
+              <ChipGlyph kind={activeChatMode === "execute" ? "execute" : "talk"} />
+              <span>{activeChatMode === "execute" ? "Execute" : "Talk"}</span>
+            </ChipButton>
+          </div>
           <span
             style={{
               flex: 1,
@@ -546,6 +816,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
+              textAlign: "center",
             }}
           >
             {busy
@@ -556,6 +827,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
                 ? "Queued for next manager decision"
                 : "Enter to send, Shift+Enter for a new line"}
           </span>
+          <TokenCounter used={0} budget={400_000} />
           <IconButton
             title="MCP and skills"
             disabled={false}
@@ -577,6 +849,25 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
       </div>
     </div>
   );
+}
+
+function findChatModel(backend: ChatBackendKind, modelId: string): ChatModelOption | null {
+  for (const group of CHAT_BACKEND_GROUPS) {
+    if (group.backend !== backend) continue;
+    const hit = group.models.find((model) => model.id === modelId);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function fallbackChatModel(backend: ChatBackendKind): ChatModelOption {
+  const group = CHAT_BACKEND_GROUPS.find((entry) => entry.backend === backend);
+  if (group && group.models.length > 0) return group.models[0];
+  return CHAT_BACKEND_GROUPS[0].models[0];
+}
+
+function chatBackendLabel(backend: ChatBackendKind): string {
+  return CHAT_BACKEND_GROUPS.find((entry) => entry.backend === backend)?.label ?? backend;
 }
 
 function messageForSend(draft: string, attachmentCount: number): string {
@@ -1169,4 +1460,282 @@ function TextButton({
       {children}
     </button>
   );
+}
+
+function ChipButton({
+  children,
+  title,
+  active,
+  accent,
+  onClick,
+}: {
+  children: React.ReactNode;
+  title: string;
+  active: boolean;
+  accent?: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const accentBorder = "color-mix(in oklch, var(--accent) 55%, transparent)";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onClick();
+        }
+      }}
+      title={title}
+      aria-label={title}
+      aria-haspopup={accent ? undefined : "listbox"}
+      aria-expanded={accent ? undefined : active}
+      style={{
+        appearance: "none",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        height: 24,
+        border: `1px solid ${active || accent ? accentBorder : "var(--rule-soft)"}`,
+        borderRadius: 6,
+        padding: "0 8px",
+        background: hover ? "var(--hover)" : active ? "color-mix(in oklch, var(--accent) 10%, transparent)" : "transparent",
+        color: "var(--ink-dim)",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        fontWeight: 600,
+        cursor: "default",
+        whiteSpace: "nowrap",
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ChipPopover({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      role="listbox"
+      style={{
+        position: "absolute",
+        left: 0,
+        bottom: "calc(100% + 6px)",
+        zIndex: 60,
+        minWidth: 200,
+        border: "1px solid var(--rule-strong)",
+        borderRadius: 8,
+        background: "var(--panel-2)",
+        boxShadow: "var(--shadow-2)",
+        padding: 5,
+        display: "grid",
+        gap: 4,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function ChipGroupHeader({ label }: { label: string }) {
+  return (
+    <div
+      style={{
+        padding: "4px 7px 2px",
+        color: "var(--muted)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 9,
+        textTransform: "uppercase",
+        letterSpacing: "0.08em",
+      }}
+    >
+      {label}
+    </div>
+  );
+}
+
+function ChipRow({
+  label,
+  hint,
+  active,
+  onPick,
+}: {
+  label: string;
+  hint?: string;
+  active: boolean;
+  onPick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      role="option"
+      aria-selected={active}
+      onMouseDown={(event) => {
+        event.preventDefault();
+        onPick();
+      }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        width: "100%",
+        border: "none",
+        borderRadius: 6,
+        background: active
+          ? "color-mix(in oklch, var(--accent) 16%, transparent)"
+          : hover
+            ? "var(--hover)"
+            : "transparent",
+        color: active ? "var(--ink)" : "var(--ink-dim)",
+        display: "grid",
+        gridTemplateColumns: hint ? "minmax(0, 1fr) auto" : "minmax(0, 1fr)",
+        gap: 8,
+        alignItems: "center",
+        padding: "6px 8px",
+        textAlign: "left",
+        cursor: "default",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        fontWeight: active ? 700 : 600,
+      }}
+    >
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {label}
+      </span>
+      {hint && (
+        <span
+          style={{
+            color: "var(--muted)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {hint}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function ChipGlyph({ kind }: { kind: "model" | "effort" | "execute" | "talk" }) {
+  switch (kind) {
+    case "model":
+      return (
+        <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden>
+          <circle cx="7" cy="7" r="2.6" stroke="currentColor" strokeWidth="1.2" />
+          <path
+            d="M7 1.6v1.4M7 11v1.4M1.6 7h1.4M11 7h1.4M3.1 3.1l1 1M9.9 9.9l1 1M3.1 10.9l1-1M9.9 4.1l1-1"
+            stroke="currentColor"
+            strokeWidth="1.1"
+            strokeLinecap="round"
+          />
+        </svg>
+      );
+    case "effort":
+      return (
+        <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden>
+          <rect x="2" y="8.5" width="2" height="3.5" rx="0.6" fill="currentColor" />
+          <rect x="6" y="6" width="2" height="6" rx="0.6" fill="currentColor" />
+          <rect x="10" y="3.5" width="2" height="8.5" rx="0.6" fill="currentColor" />
+        </svg>
+      );
+    case "execute":
+      return (
+        <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden>
+          <path
+            d="M2.6 2.4h6l3 3v6.2H2.6z"
+            stroke="currentColor"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
+          <path d="M8.4 2.6v2.8h2.8" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M5 7.6h4M5 9.6h2.6" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+        </svg>
+      );
+    case "talk":
+      return (
+        <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden>
+          <path
+            d="M2.4 4.2c0-1 .9-1.8 2-1.8h5.2c1.1 0 2 .8 2 1.8v3.4c0 1-.9 1.8-2 1.8H6.8L4 11.6V9.4h-.4c-1.1 0-1.2-.8-1.2-1.8z"
+            stroke="currentColor"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+  }
+}
+
+function ChipCaret() {
+  return (
+    <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden>
+      <path
+        d="M2 5l2-2 2 2"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function TokenCounter({ used, budget }: { used: number; budget: number }) {
+  const ratio = budget > 0 ? Math.min(1, Math.max(0, used / budget)) : 0;
+  return (
+    <div
+      title={`${formatTokens(used)} / ${formatTokens(budget)} tokens used in this chat`}
+      aria-label="Token usage"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        height: 24,
+        padding: "0 8px",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 6,
+        color: "var(--muted)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        whiteSpace: "nowrap",
+        flex: "0 0 auto",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 28,
+          height: 3,
+          borderRadius: 2,
+          background: "var(--rule-soft)",
+          position: "relative",
+          overflow: "hidden",
+          display: "inline-block",
+        }}
+      >
+        <span
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: `${ratio * 100}%`,
+            background: "color-mix(in oklch, var(--accent) 75%, transparent)",
+          }}
+        />
+      </span>
+      <span>{`${formatTokens(used)}/${formatTokens(budget)}`}</span>
+    </div>
+  );
+}
+
+function formatTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return `${value}`;
 }

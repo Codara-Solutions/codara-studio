@@ -608,6 +608,21 @@ export type RunStatus =
   | "failed"
   | "cancelled";
 
+// Which "Spark Agent" backend drives this chat's manager decisions and (in Talk
+// mode) chat replies. Today this is OpenRouter via fetch() to an LLM API; the
+// two CLI options spawn a real `claude` or `codex` process under node-pty and
+// drive it for the chat surface (uses the user's paid Claude/Codex
+// subscription instead of API credits). When the chat-level field is unset on
+// a RunState, callers fall back to OpenRouter for backwards compatibility with
+// pre-feature runs.
+export type ChatBackendKind = "openrouter" | "claude" | "codex";
+
+// Manager behaviour mode chosen per chat:
+//   execute — Spark spawns workers to do the work (current behaviour).
+//   talk    — no workers, pure conversational chat with the chosen backend.
+// Mode is the "Execute / Talk" toggle on the composer.
+export type ChatMode = "execute" | "talk";
+
 export type PlanStatus = "draft" | "imported" | "analyzed" | "active" | "complete" | "archived";
 
 export type StepStatus =
@@ -746,6 +761,32 @@ export interface RunState {
    * not a git repo.
    */
   checkpoints?: Checkpoint[];
+  /**
+   * Which Spark Agent backend drives this chat. Undefined on legacy runs and
+   * treated as "openrouter" by the dispatch layer — keeps pre-feature chats
+   * working unchanged.
+   */
+  chatBackend?: ChatBackendKind;
+  /**
+   * Model id passed to the chosen backend. For OpenRouter this is a free-form
+   * provider/model slug (e.g. "google/gemini-flash-latest"); for Claude one of
+   * "claude-opus-4-7" / "claude-sonnet-4-6"; for Codex always "gpt-5.5". When
+   * undefined the backend picks its registered default.
+   */
+  chatModel?: string;
+  /** Execute = Spark spawns workers; Talk = pure conversational backend chat. */
+  chatMode?: ChatMode;
+  /** Reasoning-effort level forwarded to the backend (Claude `--effort`, Codex
+   * `-c model_reasoning_effort=...`). Undefined leaves it at the CLI default. */
+  chatEffort?: AgentEffortLevel;
+  /**
+   * Provider-side session UUID for the CC/Codex CLI backing this chat. Stored
+   * so the next spawn can `claude -r <uuid>` or `codex resume <uuid>` and
+   * pick the conversation back up after the app closes. Stays undefined until
+   * the first CC/Codex spawn for this chat. Irrelevant for the OpenRouter
+   * backend (no equivalent session-id concept).
+   */
+  chatSessionUuid?: string;
 }
 
 export interface Checkpoint {
@@ -768,6 +809,20 @@ export interface UndoToCheckpointInput {
   runId: string;
   checkpointId: string;
   scope: "chat" | "chat+code";
+}
+
+// IPC payload for the composer's backend/model/mode/effort selector chip. Any
+// subset of the four fields may be updated in one call — passing only
+// `chatMode` toggles Execute<->Talk while leaving backend/model/effort
+// untouched. Sending `chatBackend` flips the backend; the dispatch layer in
+// run-store starts a fresh CLI session next message (no auto-handoff of prior
+// turns — selected per chat answer #3).
+export interface UpdateChatBackendInput {
+  runId: string;
+  chatBackend?: ChatBackendKind;
+  chatModel?: string;
+  chatMode?: ChatMode;
+  chatEffort?: AgentEffortLevel;
 }
 
 export interface UndoToCheckpointResult {

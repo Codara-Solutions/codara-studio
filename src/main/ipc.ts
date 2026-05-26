@@ -70,6 +70,7 @@ import type {
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
+  UpdateChatBackendInput,
   PauseRunInput,
   PrefKey,
   PreferencesChange,
@@ -574,6 +575,14 @@ export function registerIpc(): void {
     const { markRunSeen } = await getRunStore();
     return markRunSeen(input);
   });
+
+  ipcMain.handle(
+    "orchestration:updateChatBackend",
+    async (_e, input: UpdateChatBackendInput): Promise<RunState> => {
+      const { updateChatBackend } = await getRunStore();
+      return updateChatBackend(input);
+    },
+  );
 
   ipcMain.handle("orchestration:createStep", async (_e, input: CreateStepInput): Promise<RunState> => {
     const { createStep } = await getRunStore();

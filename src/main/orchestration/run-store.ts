@@ -13,6 +13,7 @@ import type {
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
   PauseRunInput,
+  UpdateChatBackendInput,
   CancelRunInput,
   ContextPacket,
   ResumeRunInput,
@@ -92,6 +93,7 @@ import { renderAgentSyncManagerContext, renderAgentSyncPromptLines } from "../ag
 import { isSparkPreviewMcpAvailable } from "../mcp-installer";
 import { getProvider } from "../providers";
 import type { SpawnOpts } from "../providers/types";
+import { resolveChatBackendConfig } from "./spark-agent-backend";
 
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
@@ -1168,6 +1170,19 @@ async function askOpenRouterManager(
   const config = readOpenRouterConfig(settings);
   if (!config) return null;
   const langSmithConfig = readLangSmithConfig(settings);
+
+  // Resolve the per-chat backend selector. Today the dispatch is shallow: when
+  // a non-OpenRouter backend is selected we still drive the OpenRouter
+  // pipeline (the real claude-backend / codex-backend implementations land in
+  // a follow-up) but log a notice so the user knows the chip's choice didn't
+  // route to a real CLI yet. The per-chat MODEL override DOES take effect for
+  // OpenRouter chats — that piece is genuinely working today.
+  const chatConfig = resolveChatBackendConfig(run, settings);
+  const effectiveModel =
+    chatConfig.backend === "openrouter" && chatConfig.model
+      ? chatConfig.model
+      : config.model;
+  const resolvedConfig: OpenRouterConfig = { ...config, model: effectiveModel };
 
   const callId = makeId("spark");
   const callDir = join(runDir(run.id), "spark-calls", callId);
@@ -4192,6 +4207,53 @@ export async function updateRunStatus(input: UpdateRunStatusInput): Promise<RunS
     mutate: (draft, timestamp) => {
       draft.status = input.status;
       if (input.currentStepId !== undefined) draft.currentStepId = input.currentStepId;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Persist the composer chip's backend/model/mode/effort selection onto the
+// run. The fields are all optional on the input — passing only `chatMode`
+// toggles Execute<->Talk without touching the others. The mutator does
+// nothing when every field on the input is undefined (UI sanity), and emits
+// a single `run.chat_backend_updated` event so the renderer and any audit
+// listener see the change.
+export async function updateChatBackend(input: UpdateChatBackendInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const noChange =
+    input.chatBackend === undefined &&
+    input.chatModel === undefined &&
+    input.chatMode === undefined &&
+    input.chatEffort === undefined;
+  if (noChange) return run;
+  return commitRunChange(run, {
+    type: "run.chat_backend_updated",
+    message: "Chat backend / model / mode / effort updated",
+    payload: {
+      previous: {
+        chatBackend: run.chatBackend,
+        chatModel: run.chatModel,
+        chatMode: run.chatMode,
+        chatEffort: run.chatEffort,
+      },
+      next: {
+        chatBackend: input.chatBackend ?? run.chatBackend,
+        chatModel: input.chatModel ?? run.chatModel,
+        chatMode: input.chatMode ?? run.chatMode,
+        chatEffort: input.chatEffort ?? run.chatEffort,
+      },
+    },
+    mutate: (draft, timestamp) => {
+      if (input.chatBackend !== undefined) draft.chatBackend = input.chatBackend;
+      if (input.chatModel !== undefined) draft.chatModel = input.chatModel.trim() || undefined;
+      if (input.chatMode !== undefined) draft.chatMode = input.chatMode;
+      if (input.chatEffort !== undefined) draft.chatEffort = input.chatEffort;
+      // Switching backend invalidates the prior session UUID — the new
+      // backend would mis-resume otherwise. Selected per the answers: no
+      // cross-backend handoff; each backend gets its own fresh thread.
+      if (input.chatBackend !== undefined && input.chatBackend !== run.chatBackend) {
+        draft.chatSessionUuid = undefined;
+      }
       draft.updatedAt = timestamp;
     },
   });

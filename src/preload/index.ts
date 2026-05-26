@@ -29,6 +29,7 @@ import type {
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
   NotificationSoundKind,
+  UpdateChatBackendInput,
   PauseRunInput,
   PlanFile,
   PrefKey,
@@ -297,6 +298,8 @@ const api = {
       ipcRenderer.invoke("orchestration:updateRunStatus", input),
     markRunSeen: (input: MarkRunSeenInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:markRunSeen", input),
+    updateChatBackend: (input: UpdateChatBackendInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:updateChatBackend", input),
     createStep: (input: CreateStepInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:createStep", input),
     updateStep: (input: UpdateStepInput): Promise<RunState> =>
