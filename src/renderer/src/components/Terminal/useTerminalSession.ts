@@ -106,6 +106,18 @@ const RUNTIME_BANNERS: ReadonlyArray<{ runtime: AgentRuntime; pattern: RegExp }>
 // Survives component re-mounts (StrictMode dev, HMR) since the PTY itself
 // persists past the renderer-side React tree. See the autorun block below.
 const autorunFiredSessions = new Set<string>();
+// In-memory cache of the full xterm buffer captured right before a TerminalPane
+// unmounts. Workspace switches unmount every pane of the previous workspace,
+// which disposes its xterm (and the 50K-line scrollback inside it) while the
+// PTY keeps running in main. The leaf-level `initialScrollback` persisted into
+// localStorage is capped at ~40 KB and sampled only every 2s — too small to
+// hold a Claude session's worth of output. Stashing the full buffer here on
+// unmount and replaying it on the next mount lets a workspace round-trip
+// restore the scrollback the user was looking at. One-shot per sessionId:
+// consumed by the next mount. Capped per session so a chatty PTY can't pin
+// arbitrary RAM if the user never returns to its workspace.
+const xtermBufferSnapshots = new Map<string, string>();
+const SNAPSHOT_MAX_LINES = 10_000;
 // Matches dev-server-style local URLs (vite, next dev, webpack, ...). Anchors
 // on a word boundary so we do not capture substrings of longer paths. The
 // `\x1b` exclusion stops ANSI escape bytes from being absorbed when a URL
@@ -476,6 +488,32 @@ export function useTerminalSession({
           openSearch();
           return false;
         }
+        // Shift+Enter: insert a line break instead of submitting. The right
+        // byte sequence depends on what's reading the PTY:
+        //   - Ink-based agent TUIs (Claude Code / Codex / Cursor) read
+        //     `\x1b\r` (ESC + CR — the standard Alt+Enter / iTerm2
+        //     shift-enter convention, same thing claude's `/terminal-setup`
+        //     binds Shift+Enter to) as "insert newline in input box".
+        //     Sending backslash + LF here makes Claude render a literal `\`
+        //     (Codex happened to swallow the trailing `\` as a continuation,
+        //     which is what masked the bug).
+        //   - Bare shells (bash/zsh/pwsh) treat backslash + LF as a
+        //     multi-line continuation marker, which is the muscle-memory
+        //     behaviour at a shell prompt.
+        if (
+          event.key === "Enter" &&
+          event.shiftKey &&
+          !event.ctrlKey &&
+          !event.altKey &&
+          !event.metaKey
+        ) {
+          event.preventDefault();
+          if (!readOnlyRef.current) {
+            const payload = agentPhase === "agent" ? "\x1b\r" : "\\\n";
+            void window.spark.pty.write(sessionId, payload);
+          }
+          return false;
+        }
         if (!event.ctrlKey || event.altKey || event.metaKey) return true;
         const key = event.key;
         const isC = key === "C" || key === "c";
@@ -483,13 +521,19 @@ export function useTerminalSession({
         if (!isC && !isV) return true;
 
         // Ctrl+Shift+{C,V}: cross-platform xterm bindings.
+        // preventDefault is required on the paste branches: without it the
+        // browser still fires a native `paste` event on xterm's hidden
+        // textarea, xterm wraps it in bracketed-paste a second time, and the
+        // shell receives the clipboard twice.
         if (event.shiftKey) {
           if (isC) {
             const selection = term.getSelection();
             if (!selection) return true;
+            event.preventDefault();
             void window.spark.clipboard.writeText(selection);
             return false;
           }
+          event.preventDefault();
           writePasteFromClipboard();
           return false;
         }
@@ -499,12 +543,39 @@ export function useTerminalSession({
         if (isC) {
           const selection = term.getSelection();
           if (!selection) return true; // no selection → let SIGINT through
+          event.preventDefault();
           void window.spark.clipboard.writeText(selection);
           return false;
         }
+        event.preventDefault();
         writePasteFromClipboard();
         return false;
       });
+
+      // Native-terminal right-click: copy current selection if one exists,
+      // otherwise paste from clipboard. Matches ConHost / Windows Terminal
+      // "quick-edit" behavior the user expects. preventDefault suppresses
+      // the OS context menu so the click is consumed entirely by the
+      // terminal.
+      const host = container.current;
+      if (host) {
+        const handleContextMenu = (event: MouseEvent) => {
+          event.preventDefault();
+          const term2 = termRef.current;
+          if (!term2) return;
+          const selection = term2.getSelection();
+          if (selection) {
+            void window.spark.clipboard.writeText(selection);
+            term2.clearSelection();
+            return;
+          }
+          writePasteFromClipboard();
+        };
+        host.addEventListener("contextmenu", handleContextMenu);
+        cleanups.push(() => {
+          host.removeEventListener("contextmenu", handleContextMenu);
+        });
+      }
 
       term.open(container.current);
       try {
@@ -512,11 +583,23 @@ export function useTerminalSession({
       } catch {
         /* host may be 0×0 on first paint; ResizeObserver will fix it. */
       }
-      const restoredScrollback = initialScrollback?.trimEnd();
-      if (restoredScrollback) {
-        term.write(
-          `${normalizeForTerminalReplay(restoredScrollback)}\r\n\x1b[2m${RESTORE_NOTICE}\x1b[0m\r\n`,
-        );
+      // Prefer the in-memory snapshot captured during the previous unmount —
+      // it's the full visible+scrollback buffer (up to SNAPSHOT_MAX_LINES) and
+      // exists only for workspace-switch round-trips. Falls back to the leaf's
+      // localStorage-persisted scrollback (smaller, sampled) for the cold-start
+      // app-restart path; that one still carries the RESTORE_NOTICE so the user
+      // knows the prompt below is fresh.
+      const liveSnapshot = xtermBufferSnapshots.get(sessionId);
+      if (liveSnapshot) {
+        xtermBufferSnapshots.delete(sessionId);
+        term.write(`${normalizeForTerminalReplay(liveSnapshot)}\r\n`);
+      } else {
+        const restoredScrollback = initialScrollback?.trimEnd();
+        if (restoredScrollback) {
+          term.write(
+            `${normalizeForTerminalReplay(restoredScrollback)}\r\n\x1b[2m${RESTORE_NOTICE}\x1b[0m\r\n`,
+          );
+        }
       }
 
       const prompt = registerPromptTracker(term);
@@ -846,6 +929,14 @@ export function useTerminalSession({
         return;
       }
 
+      // Drain any bytes the pty emitted while the previous TerminalPane was
+      // unmounted (workspace switched away). Main holds those bytes in a
+      // detached backlog per pause()/resume() in pty-manager.ts; this call
+      // flushes them back through the same data channel as live output, so
+      // the user sees everything the agent printed during the gap. On a
+      // fresh session this is a no-op (backlog empty, already attached).
+      void window.spark.pty.resume(sessionId);
+
       // Two-stage debounce, ported from the terax design.
       //  - FIT runs on a tight (~one frame) timer so xterm visually keeps up
       //    with the window during drag. Local, no IPC.
@@ -975,6 +1066,15 @@ export function useTerminalSession({
     return () => {
       disposed = true;
       window.clearTimeout(startTimer);
+      // Tell main to stop firing pty bytes at the about-to-be-dead IPC
+      // listener and instead accumulate them in a per-session backlog. The
+      // very next mount of this sessionId calls resume() to drain it. Done
+      // BEFORE running the cleanups (which include offData) so the window
+      // between "listener removed" and "main processes pause" is as short
+      // as possible — any chunk that slips through during that one-tick
+      // gap is also absorbed by pause() itself, which moves the pending
+      // flush queue into the backlog.
+      void window.spark.pty.pause?.(sessionId);
       for (const fn of cleanups) {
         try {
           fn();
@@ -989,6 +1089,22 @@ export function useTerminalSession({
           /* ignore */
         }
         themeUnsubRef.current = null;
+      }
+      // Snapshot the full xterm buffer (visible + scrollback) into the
+      // module-level cache so the next mount of this sessionId — typically the
+      // user returning to this workspace — can replay what was on screen
+      // instead of starting from an empty terminal plus whatever short
+      // 40 KB snippet the periodic onActivity sampler last persisted.
+      const dyingTerm = termRef.current;
+      if (dyingTerm) {
+        try {
+          const snapshot = captureXtermBuffer(dyingTerm, SNAPSHOT_MAX_LINES);
+          if (snapshot.length > 0) {
+            xtermBufferSnapshots.set(sessionId, snapshot);
+          }
+        } catch {
+          /* best-effort; an inaccessible buffer just means no scrollback restore */
+        }
       }
       // Detach the renderer-side xterm from the PTY, but do not kill the
       // process. Terminal panes unmount during workspace switches and hidden
@@ -1096,6 +1212,33 @@ export function useTerminalSession({
 
 function normalizeForTerminalReplay(value: string): string {
   return value.replace(/\r\n|\r|\n/g, "\r\n");
+}
+
+// Read up to `maxLines` lines from the end of the xterm buffer (visible rows
+// + scrollback) as plain text. Wrapped logical lines are stitched back
+// together so a long Claude/Codex response that line-wrapped in the original
+// width still replays as one line. Loses ANSI styling — replay is intended
+// to give the user readable scrollback after a workspace round-trip, not
+// pixel-perfect re-rendering of an Ink TUI's last frame. Trailing empty
+// rows are trimmed so the replayed text doesn't open with blank space.
+function captureXtermBuffer(term: Terminal, maxLines: number): string {
+  const buf = term.buffer.normal;
+  const total = buf.length;
+  const start = Math.max(0, total - maxLines);
+  const lines: string[] = [];
+  for (let i = start; i < total; i++) {
+    const line = buf.getLine(i);
+    if (!line) continue;
+    const text = line.translateToString(true);
+    if (text.trim() === RESTORE_NOTICE) continue;
+    if (line.isWrapped && lines.length > 0) {
+      lines[lines.length - 1] += text;
+    } else {
+      lines.push(text);
+    }
+  }
+  while (lines.length && lines[lines.length - 1] === "") lines.pop();
+  return lines.join("\n");
 }
 
 function stripTrailingPunct(url: string): string {

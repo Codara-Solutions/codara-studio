@@ -41,6 +41,16 @@ import {
 } from "./workers/launch-commands";
 import { usePanelLayout, type PanelSectionKey, type PanelSide } from "./panels/usePanelLayout";
 import ResizeHandle from "./panels/ResizeHandle";
+import {
+  SelectionRoutingProvider,
+  type RoutingDestination,
+  type SelectionPayload,
+  type SelectionRoutingApi,
+} from "./routing/SelectionRoutingContext";
+import {
+  enumerateOpenWorkers,
+  workerMenuLabel,
+} from "./routing/enumerate-open-workers";
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
@@ -1546,6 +1556,208 @@ export default function App() {
     [tabs.tabs, activeWorkspace?.workers.length],
   );
 
+  // ── Selection routing (preview overlays) ──────────────────────────────
+  //
+  // The browser pane's inspector + draw overlays each produce a
+  // SelectionPayload (text prompt, optionally an annotated PNG path). The
+  // SelectionRouteMenu calls route() with one of the destinations below to
+  // ship that payload at:
+  //   - a brand-new Spark chat (startAutopilot with the payload pre-filled)
+  //   - the currently-focused Spark chat (addRunMessage)
+  //   - a freshly-spawned Claude Code or Codex worker pane (new pane with
+  //     autorun + delayed pty.inject once the agent REPL settles)
+  //   - any currently-running CLI worker pane (pty.inject)
+  //
+  // Image attachments only travel on the chat destinations. PTYs are text
+  // only, so worker routes embed the saved PNG's absolute path in the prompt
+  // and the CLI agent reads the file off disk.
+
+  // Spawn a fresh worker pane in the same way the keyboard shortcut does
+  // (handleNewWorkerTab). Returns the new pane id so the caller can later
+  // inject a prompt once the agent is up; null if no terminal tab exists
+  // and we had to fall back to creating a whole new tab (no stable id).
+  const spawnRoutedWorkerPane = useCallback(
+    (autorun: string): string | null => {
+      const t = tabsRef.current;
+      const active = t.tabs.find((tab) => tab.id === t.activeId);
+      const target =
+        active?.kind === "terminal"
+          ? active
+          : t.tabs.find((tab) => tab.kind === "terminal");
+      if (!target || target.kind !== "terminal") {
+        t.newTerminalTab(activeWorkspace?.cwd ?? undefined, autorun);
+        return null;
+      }
+      const paneId = makeId("pane");
+      const activeLeaf = findLeafByPaneId(target.root, target.activePaneId);
+      const cwd =
+        paneRuntimeRef.current.get(target.activePaneId)?.cwd ??
+        activeLeaf?.cwd ??
+        activeWorkspace?.cwd ??
+        undefined;
+      const added = t.addPaneInTab(target.id, paneId, { cwd, autorun });
+      if (!added) {
+        t.newTerminalTab(cwd, autorun);
+        return null;
+      }
+      t.setActiveTab(target.id);
+      t.setActiveTerminalPane(target.id, paneId);
+      return paneId;
+    },
+    [activeWorkspace?.cwd],
+  );
+
+  // Wait for a freshly-spawned worker pane's CLI agent to enter its REPL
+  // before typing our prompt at it. We watch the leaf's `worker.agentRunning`
+  // bit which `onTerminalPaneAgentState` flips on alt-screen detection. If
+  // it never flips (very slow boot, agent crashed) we time out and inject
+  // anyway — at worst the text lands at the shell, which is recoverable.
+  const waitForAgentReady = useCallback(
+    (paneId: string, timeoutMs = 30000): Promise<void> =>
+      new Promise((resolve) => {
+        const start = Date.now();
+        const tick = () => {
+          for (const tab of tabsRef.current.tabs) {
+            if (tab.kind !== "terminal") continue;
+            const leaf = findLeafByPaneId(tab.root, paneId);
+            if (leaf?.worker?.agentRunning) {
+              resolve();
+              return;
+            }
+          }
+          if (Date.now() - start > timeoutMs) {
+            resolve();
+            return;
+          }
+          window.setTimeout(tick, 250);
+        };
+        tick();
+      }),
+    [],
+  );
+
+  const routingDestinations = useMemo<RoutingDestination[]>(() => {
+    const list: RoutingDestination[] = [];
+    list.push({
+      id: "chat-new",
+      kind: "chat-new",
+      label: "New Spark chat",
+      group: "chat",
+      disabled: !activeWorkspace,
+      disabledReason: activeWorkspace ? undefined : "Open a workspace first.",
+    });
+    const currentRun = activeRunId ? runs.find((r) => r.id === activeRunId) ?? null : null;
+    list.push({
+      id: "chat-current",
+      kind: "chat-current",
+      label: currentRun ? "Send to current chat" : "Send to current chat",
+      sublabel: currentRun?.title,
+      group: "chat",
+      disabled: !currentRun,
+      disabledReason: currentRun ? undefined : "No chat is currently focused.",
+    });
+    list.push({
+      id: "worker-new-claude",
+      kind: "worker-new-claude",
+      label: "New Claude Code worker",
+      group: "worker-new",
+      disabled: !activeWorkspace,
+      disabledReason: activeWorkspace ? undefined : "Open a workspace first.",
+    });
+    list.push({
+      id: "worker-new-codex",
+      kind: "worker-new-codex",
+      label: "New Codex worker",
+      group: "worker-new",
+      disabled: !activeWorkspace,
+      disabledReason: activeWorkspace ? undefined : "Open a workspace first.",
+    });
+    const openWorkers = enumerateOpenWorkers(tabs.tabs, runs);
+    for (const worker of openWorkers) {
+      list.push({
+        id: `worker-existing-${worker.injectId}`,
+        kind: "worker-existing",
+        label: workerMenuLabel(worker),
+        sublabel: worker.source === "spark" ? undefined : "manual",
+        group: "worker-existing",
+      });
+    }
+    return list;
+  }, [activeWorkspace, activeRunId, runs, tabs.tabs]);
+
+  const routeSelection = useCallback(
+    async (payload: SelectionPayload, destinationId: string) => {
+      if (destinationId === "chat-new") {
+        const ws = activeWorkspace;
+        if (!ws) throw new Error("No workspace.");
+        const attachments = payload.imagePath
+          ? [{ sourcePath: payload.imagePath, kind: "image" as const }]
+          : undefined;
+        const run = await window.spark.orchestration.startAutopilot({
+          workspaceId: ws.id,
+          workspaceName: ws.name,
+          cwd: ws.cwd,
+          initialUserNote: payload.text,
+          initialUserNoteClientMessageId: makeId("client-msg"),
+          initialAttachments: attachments,
+        });
+        handleSelectRun(run.id);
+        void refreshRunsFor(ws.id);
+        return;
+      }
+      if (destinationId === "chat-current") {
+        const runId = activeRunIdRef.current;
+        if (!runId) throw new Error("No active chat.");
+        const attachments = payload.imagePath
+          ? [{ sourcePath: payload.imagePath, kind: "image" as const }]
+          : undefined;
+        await window.spark.orchestration.addRunMessage({
+          runId,
+          clientMessageId: makeId("client-msg"),
+          author: "user",
+          kind: "note",
+          message: payload.text,
+          attachments,
+        });
+        return;
+      }
+      if (destinationId === "worker-new-claude" || destinationId === "worker-new-codex") {
+        const autorun =
+          destinationId === "worker-new-claude" ? CLAUDE_LAUNCH_COMMAND : CODEX_LAUNCH_COMMAND;
+        const paneId = spawnRoutedWorkerPane(autorun);
+        if (!paneId) {
+          // Fell back to a fresh tab; the leaf was created internally and we
+          // don't have a handle to inject into. Skip the auto-prompt — the
+          // user can paste the text manually if they want.
+          return;
+        }
+        // Fire-and-forget so the menu can close immediately; the agent boot
+        // takes seconds and we don't want to block the UI on it.
+        void (async () => {
+          await waitForAgentReady(paneId);
+          try {
+            await window.spark.pty.inject(paneId, payload.text, { submit: true });
+          } catch {
+            /* pane may have been closed; nothing to recover */
+          }
+        })();
+        return;
+      }
+      if (destinationId.startsWith("worker-existing-")) {
+        const injectId = destinationId.slice("worker-existing-".length);
+        await window.spark.pty.inject(injectId, payload.text, { submit: true });
+        return;
+      }
+      throw new Error(`Unknown routing destination: ${destinationId}`);
+    },
+    [activeWorkspace, handleSelectRun, refreshRunsFor, spawnRoutedWorkerPane, waitForAgentReady],
+  );
+
+  const routingApi = useMemo<SelectionRoutingApi>(
+    () => ({ destinations: routingDestinations, route: routeSelection }),
+    [routingDestinations, routeSelection],
+  );
+
   if (bootError) {
     return (
       <div style={{ padding: 20, color: "var(--danger)" }}>
@@ -1560,6 +1772,7 @@ export default function App() {
   const terminalShell = integratedShell ?? defaultShell;
 
   return (
+    <SelectionRoutingProvider value={routingApi}>
     <div
       style={{
         height: "100%",
@@ -1779,6 +1992,7 @@ export default function App() {
         workerCount={workerCount}
       />
     </div>
+    </SelectionRoutingProvider>
   );
 }
 

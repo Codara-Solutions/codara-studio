@@ -1,9 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
+import SelectionRouteMenu from "./SelectionRouteMenu";
+import type { SelectionPayload } from "../../routing/SelectionRoutingContext";
 
 // Floating popover shown after the inspector preload reports a picked
 // element. The user can attach a short note ("make it red") which gets
-// composed with the captured selector + visible text + url, then prefilled
-// into the chat composer.
+// composed with the captured selector + visible text + url into a
+// SelectionPayload; clicking "Send to…" opens the routing menu so the
+// user picks where the selection should land.
 
 export interface InspectorPick {
   selector: string;
@@ -14,20 +17,29 @@ export interface InspectorPick {
 
 interface Props {
   pick: InspectorPick;
-  onSubmit: (note: string) => void;
+  buildPayload: (note: string) => SelectionPayload;
   onCancel: () => void;
 }
 
-export default function InspectorOverlay({ pick, onSubmit, onCancel }: Props) {
+export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props) {
   const [note, setNote] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [pendingPayload, setPendingPayload] = useState<SelectionPayload | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const sendButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     textareaRef.current?.focus();
   }, []);
 
-  const submit = () => {
-    onSubmit(note.trim());
+  const openMenu = () => {
+    const button = sendButtonRef.current;
+    if (!button) return;
+    const rect = button.getBoundingClientRect();
+    setMenuAnchor({ x: rect.right - 264, y: rect.top });
+    setPendingPayload(buildPayload(note.trim()));
+    setMenuOpen(true);
   };
 
   return (
@@ -95,13 +107,13 @@ export default function InspectorOverlay({ pick, onSubmit, onCancel }: Props) {
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              submit();
+              openMenu();
             } else if (e.key === "Escape") {
               e.preventDefault();
               onCancel();
             }
           }}
-          placeholder="Describe the change you want — Enter to send."
+          placeholder="Describe the change you want — Enter to pick a destination."
           rows={3}
           style={{
             width: "100%",
@@ -128,14 +140,25 @@ export default function InspectorOverlay({ pick, onSubmit, onCancel }: Props) {
             Cancel
           </button>
           <button
+            ref={sendButtonRef}
             type="button"
-            onClick={submit}
+            onClick={openMenu}
             style={buttonStyle({ tone: "accent" })}
           >
-            Send to chat
+            Send to…
           </button>
         </div>
       </div>
+
+      {menuOpen && menuAnchor && pendingPayload && (
+        <SelectionRouteMenu
+          payload={pendingPayload}
+          anchor={menuAnchor}
+          mode="above"
+          onClose={() => setMenuOpen(false)}
+          onRouted={() => onCancel()}
+        />
+      )}
     </div>
   );
 }

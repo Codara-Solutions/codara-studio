@@ -9,6 +9,7 @@ import React, {
 import AddressBar, { type AddressBarHandle } from "./AddressBar";
 import InspectorOverlay, { type InspectorPick } from "./InspectorOverlay";
 import DrawOverlay from "./DrawOverlay";
+import type { SelectionPayload } from "../../routing/SelectionRoutingContext";
 
 // BrowserPane wraps Electron's <webview> tag for preview tabs. We use
 // <webview> over <iframe> because it sidesteps X-Frame-Options/CSP and
@@ -49,25 +50,13 @@ type WebviewMethods = {
   capturePage: () => Promise<CapturedImage>;
 };
 
-// Structural mirror of Electron.Input for the fields we read out of the
-// webview's `before-input-event`. Inlined because the renderer doesn't ship
-// Electron's TS types, and we only need a tiny slice of that interface.
-type WebviewInput = {
-  type: string;
-  key: string;
-  code: string;
-  // Electron lowercases these: "ctrl"/"control", "shift", "alt", "meta"/"cmd".
-  modifiers: ReadonlyArray<string>;
-  isAutoRepeat?: boolean;
-};
-
 type WebviewElement = HTMLElement &
   Partial<WebviewMethods> & {
     src: string;
     // Electron's <webview> dispatches DOM-style single-arg events
-    // (dom-ready, did-navigate, did-fail-load, …) AND the two-arg
-    // `before-input-event` ((event, input)). The local override accepts
-    // either shape so call sites stay terse.
+    // (dom-ready, did-navigate, did-fail-load, …). The local override is
+    // here only to keep call sites terse — the rest of the tag's API is
+    // covered by HTMLElement.
     addEventListener: (
       type: string,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -199,7 +188,15 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     if (!webview) {
       webview = document.createElement("webview") as WebviewElement;
       // Sandboxed safety: keep contextIsolation on for the embedded site.
-      webview.setAttribute("webpreferences", "contextIsolation=yes");
+      // backgroundThrottling=no keeps timers, animations, and websocket
+      // heartbeats running at full speed when the preview tab is hidden
+      // behind another Spark tab — without this, dev servers (Vite, webpack)
+      // drop their HMR socket on Chromium's throttle and trigger a refresh
+      // when the user comes back.
+      webview.setAttribute(
+        "webpreferences",
+        "contextIsolation=yes,backgroundThrottling=no",
+      );
       webview.setAttribute("allowpopups", "true");
       // The inspector preload runs inside the embedded page's renderer to
       // capture element picks and report back via `ipcRenderer.sendToHost`.
@@ -256,55 +253,12 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       setError(`${e.errorDescription} (${e.errorCode})`);
     };
 
-    // Forward host shortcuts (Cmd/Ctrl+P, Cmd/Ctrl+T, …) out of the
-    // <webview>. When focus is inside the embedded page, key events fire
-    // in the guest's renderer and never reach our window — so the global
-    // shortcut manager (src/renderer/src/shortcuts/useGlobalShortcuts.ts)
-    // never sees them. Electron's `before-input-event` is the only hook
-    // that fires on the host side for guest key presses, so we use it to
-    // reconstruct a synthetic KeyboardEvent and dispatch it on the host
-    // document. The shortcut manager listens at capture phase on `window`
-    // and matches against the standard modifier + key fields, so a plain
-    // dispatch is enough — no DOM ancestry tricks needed.
-    //
-    // Filter: only forward chord-style keystrokes (any modifier held).
-    // Plain typing, arrows, page-up etc. must stay inside the webview or
-    // we'd break in-page input.
-    //
-    // We intentionally do NOT call event.preventDefault() on the webview
-    // event: the host shortcut manager only swallows the synthetic event
-    // when it claims the chord, and we don't have a clean way to ask it
-    // "did you handle this?" from out here. So the chord both fires the
-    // host shortcut (if any) AND reaches the page. For the common Cmd+P /
-    // Cmd+T / Cmd+K cases the page rarely binds the same chord, so the
-    // duplicate dispatch is harmless. This is the quick-win trade-off
-    // documented in research/README.md; tightening it later would require
-    // the shortcut manager to surface a "claimed" signal.
-    const onBeforeInputEvent = (_e: unknown, input: WebviewInput) => {
-      if (input.type !== "keyDown") return;
-      const mods = input.modifiers ?? [];
-      if (mods.length === 0) return;
-      const hasChordMod =
-        mods.includes("ctrl") ||
-        mods.includes("control") ||
-        mods.includes("alt") ||
-        mods.includes("meta") ||
-        mods.includes("cmd");
-      if (!hasChordMod) return;
-      const key = input.key;
-      if (!key) return;
-      const synth = new KeyboardEvent("keydown", {
-        key,
-        code: input.code,
-        ctrlKey: mods.includes("ctrl") || mods.includes("control"),
-        shiftKey: mods.includes("shift"),
-        altKey: mods.includes("alt"),
-        metaKey: mods.includes("meta") || mods.includes("cmd"),
-        bubbles: true,
-        cancelable: true,
-      });
-      document.dispatchEvent(synth);
-    };
+    // Host-shortcut forwarding for keystrokes while focus is inside the
+    // <webview> lives in main + preload (search for `before-input-event`).
+    // The webview tag does NOT emit that event itself, so a listener here
+    // would be dead — the main process observes it on the guest's
+    // webContents and pushes a synthetic KeyboardEvent up through the
+    // preload onto `window`.
 
     // `ipc-message` is the channel the inspector preload uses to ship picks
     // back to the host via `sendToHost`. We only care about our two events
@@ -325,7 +279,6 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     wv.addEventListener("did-navigate", onDidNavigate);
     wv.addEventListener("did-navigate-in-page", onDidNavigateInPage);
     wv.addEventListener("did-fail-load", onDidFailLoad);
-    wv.addEventListener("before-input-event", onBeforeInputEvent);
     wv.addEventListener("ipc-message", onIpcMessage);
 
     return () => {
@@ -336,7 +289,6 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       wv.removeEventListener("did-navigate", onDidNavigate);
       wv.removeEventListener("did-navigate-in-page", onDidNavigateInPage);
       wv.removeEventListener("did-fail-load", onDidFailLoad);
-      wv.removeEventListener("before-input-event", onBeforeInputEvent);
       wv.removeEventListener("ipc-message", onIpcMessage);
     };
   }, [hasUrl, preloadReady, inspectorPreloadUrl]);
@@ -399,12 +351,11 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     });
   }, []);
 
-  // Compose the captured inspector pick + the user's note into a chat
-  // prompt and prefill the composer. We dispatch a custom event rather
-  // than calling orchestration IPC directly so the active chat selection
-  // is owned by App-level state — the composer simply listens.
-  const submitInspectorPick = useCallback(
-    (pick: InspectorPick, note: string) => {
+  // Compose an inspector pick + the user's note into a SelectionPayload.
+  // The routing menu (opened by InspectorOverlay) decides where the payload
+  // lands — chat composer, a new Spark chat, or an open CLI worker.
+  const buildInspectorPayload = useCallback(
+    (pick: InspectorPick, note: string): SelectionPayload => {
       const url = pick.url || currentUrl || urlRef.current;
       let pageHint = "";
       try {
@@ -422,21 +373,21 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         `Regarding the <${pick.tagName}>` +
         (pageHint ? ` at ${pageHint}` : "") +
         `${selector}${text}${noteSuffix}`.replace(/^\s+/, "");
-      window.dispatchEvent(
-        new CustomEvent("spark:prefill-composer", { detail: { text: message } }),
-      );
-      setInspectorPick(null);
+      return { source: "inspect", text: message };
     },
     [currentUrl],
   );
 
   // Capture the embedded page, composite the drawing canvas on top, write
-  // the PNG to <tmp>/spark-drawings via the main process, and prefill the
-  // chat with a file:// reference so Claude Code can open it natively.
-  const submitDrawing = useCallback(
-    async (drawingDataUrl: string, note: string) => {
+  // the PNG to <tmp>/spark-drawings via the main process, and return a
+  // SelectionPayload referencing the saved file. Worker prompts use the raw
+  // absolute path so CLI agents can hand it directly to local image tools.
+  // The routing menu (opened by DrawOverlay) picks the destination after
+  // this resolves.
+  const prepareDrawingPayload = useCallback(
+    async (drawingDataUrl: string, note: string): Promise<SelectionPayload | null> => {
       const wv = webviewRef.current;
-      if (!wv || !domReadyRef.current) return;
+      if (!wv || !domReadyRef.current) return null;
       setDrawingBusy(true);
       try {
         const captured = await wv.capturePage?.();
@@ -445,13 +396,16 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         const savedPath = await window.spark.drawing.save({ dataUrl: composed });
         const fileUrl = pathToFileUrl(savedPath);
         const message =
-          `See this annotated screenshot: ${fileUrl}` + (note ? ` — ${note}` : "");
-        window.dispatchEvent(
-          new CustomEvent("spark:prefill-composer", { detail: { text: message } }),
-        );
-        setDrawing(false);
+          `See this annotated screenshot: "${savedPath}"` + (note ? ` - ${note}` : "");
+        return {
+          source: "draw",
+          text: message,
+          imagePath: savedPath,
+          imageFileUrl: fileUrl,
+        };
       } catch (err) {
         setError(`Could not save drawing: ${(err as Error).message}`);
+        return null;
       } finally {
         setDrawingBusy(false);
       }
@@ -619,13 +573,13 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         <DrawOverlay
           active={drawing}
           busy={drawingBusy}
-          onSend={(dataUrl, note) => void submitDrawing(dataUrl, note)}
+          preparePayload={prepareDrawingPayload}
           onClose={() => setDrawing(false)}
         />
         {inspectorPick ? (
           <InspectorOverlay
             pick={inspectorPick}
-            onSubmit={(note) => submitInspectorPick(inspectorPick, note)}
+            buildPayload={(note) => buildInspectorPayload(inspectorPick, note)}
             onCancel={() => setInspectorPick(null)}
           />
         ) : null}

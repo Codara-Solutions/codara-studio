@@ -1,31 +1,43 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import SelectionRouteMenu from "./SelectionRouteMenu";
+import type { SelectionPayload } from "../../routing/SelectionRoutingContext";
 
 // Transparent canvas overlay used by the browser pane's "Draw" mode. The
 // user sketches freehand strokes on top of the embedded page; clicking
-// "Send" asks the parent to capture the page (via `webview.capturePage`),
-// composite the strokes over it, and ship the result to chat as a file path.
+// "Send to…" asks the parent to capture the page (via `webview.capturePage`),
+// composite the strokes over it, save the PNG, and hand back a
+// SelectionPayload so the routing menu can ship it to any chat or worker.
 // The canvas only steals pointer events while active — the pane below stays
 // fully interactive when draw mode is off.
 
 interface Props {
   active: boolean;
   busy: boolean;
-  onSend: (drawingDataUrl: string, note: string) => void;
+  // Parent runs the async capture + save and returns the payload (or null
+  // when the capture failed). Called once per "Send to…" click before the
+  // routing menu opens.
+  preparePayload: (drawingDataUrl: string, note: string) => Promise<SelectionPayload | null>;
   onClose: () => void;
 }
 
 const STROKE_COLOR = "#ff3b30";
 const STROKE_WIDTH = 3;
+const STROKE_COLORS = ["#ff3b30", "#f0c419", "#35c759", "#2f80ed", "#af52de", "#f7f2e8"];
 
 type Stroke = { points: Array<{ x: number; y: number }>; color: string; width: number };
 
-export default function DrawOverlay({ active, busy, onSend, onClose }: Props) {
+export default function DrawOverlay({ active, busy, preparePayload, onClose }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const sendButtonRef = useRef<HTMLButtonElement | null>(null);
   const strokesRef = useRef<Stroke[]>([]);
   const currentStrokeRef = useRef<Stroke | null>(null);
   const [, setStrokeTick] = useState(0);
   const [note, setNote] = useState("");
+  const [strokeColor, setStrokeColor] = useState(STROKE_COLOR);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [pendingPayload, setPendingPayload] = useState<SelectionPayload | null>(null);
 
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -91,6 +103,8 @@ export default function DrawOverlay({ active, busy, onSend, onClose }: Props) {
       currentStrokeRef.current = null;
       setNote("");
       setStrokeTick((n) => n + 1);
+      setMenuOpen(false);
+      setPendingPayload(null);
     }
   }, [active]);
 
@@ -102,7 +116,7 @@ export default function DrawOverlay({ active, busy, onSend, onClose }: Props) {
     const rect = (e.target as HTMLCanvasElement).getBoundingClientRect();
     currentStrokeRef.current = {
       points: [{ x: e.clientX - rect.left, y: e.clientY - rect.top }],
-      color: STROKE_COLOR,
+      color: strokeColor,
       width: STROKE_WIDTH,
     };
     redraw();
@@ -147,12 +161,20 @@ export default function DrawOverlay({ active, busy, onSend, onClose }: Props) {
     redraw();
   };
 
-  const send = () => {
+  const requestSend = async () => {
     if (busy) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const dataUrl = canvas.toDataURL("image/png");
-    onSend(dataUrl, note.trim());
+    const payload = await preparePayload(dataUrl, note.trim());
+    if (!payload) return;
+    const button = sendButtonRef.current;
+    const anchor = button
+      ? { x: button.getBoundingClientRect().right - 264, y: button.getBoundingClientRect().top }
+      : { x: window.innerWidth - 280, y: window.innerHeight - 80 };
+    setPendingPayload(payload);
+    setMenuAnchor(anchor);
+    setMenuOpen(true);
   };
 
   const hasStrokes = strokesRef.current.length > 0 || currentStrokeRef.current != null;
@@ -180,7 +202,10 @@ export default function DrawOverlay({ active, busy, onSend, onClose }: Props) {
           width: "100%",
           height: "100%",
           cursor: "crosshair",
-          pointerEvents: "auto",
+          // While the routing menu is open, let clicks fall through instead
+          // of starting a stray stroke — the user dismissing the menu
+          // shouldn't pepper their drawing with dots.
+          pointerEvents: menuOpen ? "none" : "auto",
           touchAction: "none",
           background: "transparent",
         }}
@@ -214,8 +239,75 @@ export default function DrawOverlay({ active, busy, onSend, onClose }: Props) {
               letterSpacing: "0.08em",
             }}
           >
-            Draw mode {busy ? "— capturing…" : ""}
+            Draw mode {busy ? "Capturing..." : ""}
           </span>
+          <div
+            aria-label="Stroke color"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              height: 24,
+              padding: "0 5px",
+              background: "color-mix(in oklch, var(--ink) 5%, transparent)",
+              border: "1px solid var(--rule-soft)",
+              borderRadius: 999,
+            }}
+          >
+            {STROKE_COLORS.map((color) => (
+              <button
+                key={color}
+                type="button"
+                aria-label={`Use ${color}`}
+                onClick={() => setStrokeColor(color)}
+                disabled={busy}
+                style={{
+                  appearance: "none",
+                  width: 16,
+                  height: 16,
+                  padding: 0,
+                  borderRadius: 999,
+                  border:
+                    strokeColor.toLowerCase() === color.toLowerCase()
+                      ? "2px solid var(--ink)"
+                      : "1px solid color-mix(in oklch, var(--ink) 25%, transparent)",
+                  background: color,
+                  boxShadow:
+                    strokeColor.toLowerCase() === color.toLowerCase()
+                      ? "0 0 0 2px color-mix(in oklch, var(--accent) 35%, transparent)"
+                      : "none",
+                  cursor: "default",
+                }}
+              />
+            ))}
+            <label
+              title="Custom color"
+              style={{
+                width: 18,
+                height: 18,
+                borderRadius: 999,
+                overflow: "hidden",
+                border: "1px solid var(--rule)",
+                background: strokeColor,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <input
+                type="color"
+                value={strokeColor}
+                disabled={busy}
+                onChange={(e) => setStrokeColor(e.target.value)}
+                style={{
+                  width: 26,
+                  height: 26,
+                  opacity: 0,
+                  cursor: "default",
+                }}
+              />
+            </label>
+          </div>
           <ToolButton onClick={undo} disabled={busy || !hasStrokes}>
             Undo
           </ToolButton>
@@ -226,33 +318,63 @@ export default function DrawOverlay({ active, busy, onSend, onClose }: Props) {
             Exit
           </ToolButton>
         </div>
-        <input
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              if (hasStrokes) send();
-            }
-          }}
-          disabled={busy}
-          placeholder="Optional note — describe what you sketched."
+        <label
           style={{
-            height: 28,
-            padding: "0 10px",
-            background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+            display: "grid",
+            gridTemplateColumns: "auto minmax(0, 1fr)",
+            alignItems: "center",
+            gap: 9,
+            minHeight: 34,
+            padding: "4px 5px 4px 10px",
+            background:
+              "linear-gradient(180deg, color-mix(in oklch, var(--panel-3) 70%, transparent), color-mix(in oklch, var(--panel-2) 92%, transparent))",
             border: "1px solid var(--rule-soft)",
             borderRadius: 6,
-            color: "var(--ink)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 12,
-            outline: "none",
+            boxShadow: "inset 0 1px 0 rgba(255,255,255,0.035)",
           }}
-        />
+        >
+          <span
+            style={{
+              color: "var(--muted)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Note
+          </span>
+          <input
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                if (hasStrokes) void requestSend();
+              }
+            }}
+            disabled={busy}
+            placeholder="Add context for the agent"
+            style={{
+              minWidth: 0,
+              height: 24,
+              padding: "0 6px",
+              background: "transparent",
+              border: "none",
+              color: "var(--ink)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 12,
+              outline: "none",
+            }}
+          />
+        </label>
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
           <button
+            ref={sendButtonRef}
             type="button"
-            onClick={send}
+            onClick={() => void requestSend()}
             disabled={busy || !hasStrokes}
             style={{
               appearance: "none",
@@ -271,10 +393,25 @@ export default function DrawOverlay({ active, busy, onSend, onClose }: Props) {
               cursor: "default",
             }}
           >
-            {busy ? "Sending…" : "Send to chat"}
+            {busy ? "Sending…" : "Send to…"}
           </button>
         </div>
       </div>
+
+      {menuOpen && menuAnchor && pendingPayload && (
+        <SelectionRouteMenu
+          payload={pendingPayload}
+          anchor={menuAnchor}
+          mode="above"
+          onClose={() => setMenuOpen(false)}
+          onRouted={() => {
+            // Leave draw mode after a successful route so the user gets a
+            // clean slate; matches the behaviour the old "Send to chat"
+            // button had.
+            onClose();
+          }}
+        />
+      )}
     </div>
   );
 }

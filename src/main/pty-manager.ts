@@ -27,6 +27,23 @@ interface Session {
   // scrollback. Capped at TAIL_BUFFER_BYTES to keep RAM bounded.
   tail: Buffer[];
   tailBytes: number;
+  // Whether the renderer has a live IPC listener bound to this session. When
+  // the renderer-side TerminalPane unmounts during a workspace switch, it
+  // calls pause(id), which flips this to false. enqueueData then diverts
+  // bytes into detachedBacklog instead of webContents.send (which would be
+  // dropped on receipt with no listener). On reattach the renderer calls
+  // resume(id), which drains the backlog through webContents.send first and
+  // flips back to true so live data resumes normally. Default true — fresh
+  // sessions are always attached at spawn time.
+  attached: boolean;
+  // Bytes emitted by the pty while attached=false. Replayed once on resume
+  // so the user sees everything the agent printed during the detached window
+  // (typical case: a Claude run that kept streaming while the user was in
+  // another workspace). Capped at DETACHED_BACKLOG_BYTES with FIFO trim —
+  // worst case the very oldest bytes of a long detachment fall off, which
+  // is fine since the in-memory xterm snapshot covers the pre-unmount era.
+  detachedBacklog: Buffer[];
+  detachedBacklogBytes: number;
 }
 
 const sessions = new Map<string, Session>();
@@ -51,6 +68,11 @@ const MAX_BUFFER_BYTES = 96_000;
 // terminal lines (well past the 40-line agent-state-detection window) while
 // staying cheap in idle RAM even with many concurrent worker panes.
 const TAIL_BUFFER_BYTES = 64 * 1024;
+// Per-session cap for bytes held while the renderer is detached (workspace
+// switched away). 2 MB covers a long Claude streaming response plus its
+// tool output without putting an unbounded amount of dead PTY data into
+// process memory. FIFO-trimmed past the cap.
+const DETACHED_BACKLOG_BYTES = 2 * 1024 * 1024;
 
 // Env vars that agent-socket asks pty-manager to inject into every spawned
 // pty. Populated from src/main/index.ts via setAgentSocketEnv() once the
@@ -325,6 +347,9 @@ function doSpawn(
     exited: false,
     tail: [],
     tailBytes: 0,
+    attached: true,
+    detachedBacklog: [],
+    detachedBacklogBytes: 0,
   };
 
   pty.onData((data: string | Buffer) => enqueueData(opts.id, data));
@@ -472,6 +497,22 @@ function enqueueData(id: string, data: string | Buffer): void {
     const dropped = s.tail.shift();
     if (dropped) s.tailBytes -= dropped.length;
   }
+  // Renderer is detached (workspace switched away) — divert into the backlog
+  // instead of the pending flush queue. The backlog is replayed in one shot
+  // when the renderer reattaches; sending via webContents.send while the
+  // renderer-side IPC listener is unbound would drop the bytes on the floor.
+  if (!s.attached) {
+    s.detachedBacklog.push(chunk);
+    s.detachedBacklogBytes += chunk.length;
+    while (
+      s.detachedBacklog.length > 1 &&
+      s.detachedBacklogBytes - (s.detachedBacklog[0]?.length ?? 0) > DETACHED_BACKLOG_BYTES
+    ) {
+      const dropped = s.detachedBacklog.shift();
+      if (dropped) s.detachedBacklogBytes -= dropped.length;
+    }
+    return;
+  }
   s.pendingChunks.push(chunk);
   s.pendingBytes += chunk.length;
 
@@ -485,6 +526,65 @@ function enqueueData(id: string, data: string | Buffer): void {
     s.flushTimer = null;
     flushDataNow(s);
   }, FLUSH_MS);
+}
+
+// Called by the renderer when a TerminalPane unmounts (workspace switch). Any
+// pty bytes that arrive while paused are diverted into detachedBacklog and
+// replayed on resume. Idempotent: re-pausing an already-paused session is a
+// no-op. Pending chunks queued for the next 16 ms flush are absorbed into the
+// backlog so the small window between cleanup and pause is not lost.
+export function pause(id: string): void {
+  const s = sessions.get(id);
+  if (!s) return;
+  if (!s.attached) return;
+  s.attached = false;
+  if (s.pendingChunks.length > 0) {
+    for (const chunk of s.pendingChunks) {
+      s.detachedBacklog.push(chunk);
+      s.detachedBacklogBytes += chunk.length;
+    }
+    s.pendingChunks = [];
+    s.pendingBytes = 0;
+    while (
+      s.detachedBacklog.length > 1 &&
+      s.detachedBacklogBytes - (s.detachedBacklog[0]?.length ?? 0) > DETACHED_BACKLOG_BYTES
+    ) {
+      const dropped = s.detachedBacklog.shift();
+      if (dropped) s.detachedBacklogBytes -= dropped.length;
+    }
+  }
+  if (s.flushTimer) {
+    clearTimeout(s.flushTimer);
+    s.flushTimer = null;
+  }
+}
+
+// Called by the renderer when a TerminalPane (re)mounts. Drains the
+// detachedBacklog through the same webContents.send channel as live data so
+// the onData listener receives the missed bytes in arrival order, then flips
+// `attached` back to true so subsequent pty output resumes the normal flush
+// path. Safe to call on a fresh session (no backlog, attached already true).
+export function resume(id: string): void {
+  const s = sessions.get(id);
+  if (!s) return;
+  if (
+    s.detachedBacklog.length > 0 &&
+    s.webContents &&
+    !s.webContents.isDestroyed()
+  ) {
+    const total = s.detachedBacklogBytes;
+    const merged =
+      s.detachedBacklog.length === 1
+        ? s.detachedBacklog[0]
+        : Buffer.concat(s.detachedBacklog, total);
+    s.webContents.send(
+      s.dataChannel,
+      new Uint8Array(merged.buffer, merged.byteOffset, merged.byteLength),
+    );
+  }
+  s.detachedBacklog = [];
+  s.detachedBacklogBytes = 0;
+  s.attached = true;
 }
 
 function flushDataNow(s: Session): void {
@@ -730,5 +830,7 @@ function killNow(id: string): void {
   if (s.flushTimer) clearTimeout(s.flushTimer);
   s.tail = [];
   s.tailBytes = 0;
+  s.detachedBacklog = [];
+  s.detachedBacklogBytes = 0;
   sessions.delete(id);
 }

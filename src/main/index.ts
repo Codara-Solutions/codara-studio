@@ -8,7 +8,7 @@ import { ensureSparkHomeSync } from "./spark-home";
 import { flush, loadState } from "./storage";
 import { flushPreferences, getPreferenceSync } from "./preferences-store";
 import { registerMainWindow, startNotifications } from "./notifications";
-import { setAllowedRoots } from "./fs-sandbox";
+import { setSeededRoots } from "./fs-sandbox";
 import { getEnrichedPath } from "./path-reconstruction";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
 import {
@@ -261,16 +261,18 @@ app.whenReady().then(async () => {
   }
 
   // Seed the fs sandbox allowlist from saved workspaces BEFORE registering
-  // IPC. Otherwise the very first fs:list / fs:setWatchRoot from the renderer
-  // races the renderer's own ui:setAllowedRoots call and the project root
-  // gets rejected as "not allowed". The renderer still refreshes the list
-  // when workspaces change at runtime.
+  // IPC. The renderer's own ui:setAllowedRoots push (App.tsx) only fires
+  // AFTER FileTree/ChatComposer mount and call fs:list / fs:setWatchRoot
+  // (effects fire bottom-up: child effects run before parent effects).
+  // The seed is kept in its own list inside fs-sandbox.ts so renderer pushes
+  // can't accidentally shrink it during boot. The renderer still owns the
+  // live workspaceRoots list for runtime add/remove.
   try {
     const state = await loadState();
     const roots = state.workspaces
       .map((w) => w.cwd)
       .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
-    setAllowedRoots(roots);
+    setSeededRoots(roots);
   } catch (err) {
     console.error("[main] failed to seed fs sandbox roots:", err);
   }
@@ -316,6 +318,35 @@ app.whenReady().then(async () => {
 
   createWindow();
   if (mainWindow) registerAutoUpdater(mainWindow);
+
+  // Forward chord keystrokes (Ctrl/Cmd/Alt/Meta + key) from any <webview>
+  // guest back to its host renderer so app-wide shortcuts (Ctrl+1, Ctrl+P,
+  // …) keep working when focus is inside the embedded page. Listening on
+  // the webContents is the only place this fires — the webview *tag* in the
+  // host renderer does NOT emit before-input-event, so the host-side
+  // listener we tried first was always dead. The host preload turns the
+  // forwarded payload into a synthetic KeyboardEvent dispatched on window.
+  app.on("web-contents-created", (_e, contents) => {
+    if (contents.getType() !== "webview") return;
+    contents.on("before-input-event", (_event, input) => {
+      if (input.type !== "keyDown") return;
+      const mods = input.modifiers ?? [];
+      const hasChord =
+        mods.includes("control") ||
+        mods.includes("alt") ||
+        mods.includes("meta");
+      if (!hasChord) return;
+      if (!input.key) return;
+      const host = contents.hostWebContents;
+      if (!host || host.isDestroyed()) return;
+      host.send("webview:chord-key", {
+        key: input.key,
+        code: input.code,
+        modifiers: mods,
+      });
+    });
+  });
+
   // Start the four-channel notifier subscription to run-store events. The
   // BrowserWindow getter is already wired by registerMainWindow() inside
   // createWindow(); this kicks off the event subscription. Idempotent.

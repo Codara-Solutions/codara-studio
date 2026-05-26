@@ -15,15 +15,36 @@ import os from "node:os";
 //   * Only gates read primitives (fs:list, fs:listFiles, fs:readText,
 //     fs:readEx, fs:listMarkdownFiles, fs:setWatchRoot). Write/create/
 //     delete handlers have a different attack surface and are untouched.
-//   * Until the renderer calls setAllowedRoots(), only the static CLI/cache
-//     dirs are reachable. That's the safe default for a fresh boot.
+//
+// Two distinct lists, both consulted on every check:
+//   * seededRoots — populated once at boot from spark-state.json before the
+//     window is created. Survives every renderer push so FileTree/
+//     ChatComposer's first fs:list (which fires before App.tsx's
+//     ui:setAllowedRoots effect, because child effects run before parent
+//     effects) can't trip the assertion just because the renderer hasn't
+//     pushed yet.
+//   * workspaceRoots — replaced by every ui:setAllowedRoots push. Reflects
+//     the renderer's authoritative live set as workspaces are added/removed
+//     at runtime.
+// Either match grants access. The seed never shrinks; runtime removals
+// don't revoke prior seed entries, which is fine for a defence-in-depth
+// sandbox (no UI calls fs:* against removed workspaces anyway).
 
+let seededRoots: string[] = [];
 let workspaceRoots: string[] = [];
 
-export function setAllowedRoots(roots: string[]): void {
-  workspaceRoots = roots
+function resolveAll(roots: string[]): string[] {
+  return roots
     .filter((r): r is string => typeof r === "string" && r.length > 0)
     .map((r) => path.resolve(r));
+}
+
+export function setSeededRoots(roots: string[]): void {
+  seededRoots = resolveAll(roots);
+}
+
+export function setAllowedRoots(roots: string[]): void {
+  workspaceRoots = resolveAll(roots);
 }
 
 function home(seg: string): string {
@@ -44,7 +65,7 @@ function staticAllowed(): string[] {
 export function isAllowedReadPath(target: string): boolean {
   if (typeof target !== "string" || target.length === 0) return false;
   const abs = path.resolve(target);
-  const roots = [...workspaceRoots, ...staticAllowed()];
+  const roots = [...seededRoots, ...workspaceRoots, ...staticAllowed()];
   for (const root of roots) {
     // Allow exact root match AND any descendant. path.relative returns "" for
     // an exact match and a relative path starting with ".." when `abs` lies

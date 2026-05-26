@@ -651,6 +651,18 @@ export function registerIpc(): void {
     pty.dispose(args.id);
   });
 
+  // Pause / resume the live byte stream while the renderer-side TerminalPane
+  // is unmounted (workspace switch). Paused sessions buffer pty output into a
+  // detached backlog instead of sending it to webContents — the listener is
+  // gone, so the send would be dropped. Resume drains the backlog through the
+  // same data channel before live output continues.
+  ipcMain.handle("pty:pause", async (_e, args: { id: string }) => {
+    pty.pause(args.id);
+  });
+  ipcMain.handle("pty:resume", async (_e, args: { id: string }) => {
+    pty.resume(args.id);
+  });
+
   // Live runtime-state report from the renderer-side terminal poller. Main
   // forwards the report into run-store (which finds the worker attempt by
   // paneId/attemptId and updates its `runtimeState` field, broadcasting a

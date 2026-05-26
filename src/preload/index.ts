@@ -333,6 +333,8 @@ const api = {
     resize: (id: string, cols: number, rows: number): Promise<void> =>
       ipcRenderer.invoke("pty:resize", { id, cols, rows }),
     dispose: (id: string): Promise<void> => ipcRenderer.invoke("pty:dispose", { id }),
+    pause: (id: string): Promise<void> => ipcRenderer.invoke("pty:pause", { id }),
+    resume: (id: string): Promise<void> => ipcRenderer.invoke("pty:resume", { id }),
     onData: (id: string, handler: PtyDataHandler): (() => void) => {
       const channel = `pty:data:${id}`;
       const listener = (_e: Electron.IpcRendererEvent, data: Uint8Array | string) => handler(data);
@@ -515,6 +517,34 @@ ipcRenderer.on("app:open-browser-url", (_event, url: string) => {
   if (typeof url === "string" && isBrowserUrl(url)) {
     dispatchOpenInSparkBrowser(url);
   }
+});
+
+// Replay chord keystrokes from a focused <webview> guest as a synthetic
+// KeyboardEvent on the host window. The main process is the one that
+// observes them via `before-input-event` (a WebContents-only event — the
+// <webview> tag does not surface it) and pushes the relevant fields here.
+// useGlobalShortcuts.ts registers a capture-phase listener on window, so
+// dispatching on window is what makes Ctrl+1, Cmd+P, … keep working when
+// focus is inside an embedded page.
+type WebviewChordKey = {
+  key: string;
+  code?: string;
+  modifiers?: ReadonlyArray<string>;
+};
+ipcRenderer.on("webview:chord-key", (_event, payload: WebviewChordKey) => {
+  if (!payload || typeof payload.key !== "string" || !payload.key) return;
+  const mods = payload.modifiers ?? [];
+  const synth = new KeyboardEvent("keydown", {
+    key: payload.key,
+    code: payload.code ?? "",
+    ctrlKey: mods.includes("ctrl") || mods.includes("control"),
+    shiftKey: mods.includes("shift"),
+    altKey: mods.includes("alt"),
+    metaKey: mods.includes("meta") || mods.includes("cmd"),
+    bubbles: true,
+    cancelable: true,
+  });
+  window.dispatchEvent(synth);
 });
 
 contextBridge.exposeInMainWorld("spark", api);
