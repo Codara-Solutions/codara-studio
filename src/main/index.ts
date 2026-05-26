@@ -3,9 +3,13 @@ import { join } from "node:path";
 import { registerIpc } from "./ipc";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
+import { startAgentSocket, stopAgentSocket } from "./agent-socket";
 import { ensureSparkHomeSync } from "./spark-home";
-import { flush } from "./storage";
+import { flush, loadState } from "./storage";
 import { flushPreferences, getPreferenceSync } from "./preferences-store";
+import { registerMainWindow, startNotifications } from "./notifications";
+import { setSeededRoots } from "./fs-sandbox";
+import { getEnrichedPath } from "./path-reconstruction";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
 import {
   emitFinalSummary,
@@ -13,6 +17,20 @@ import {
   fail as failHeadless,
   runHeadlessEval,
 } from "./eval/headless-runner";
+import { registerAutoUpdater } from "./auto-updater";
+import { startHookRpc, stopHookRpc } from "./hook-rpc";
+import { installClaudeHooks } from "./hook-installer";
+import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
+
+// run-store is heavy (loads openrouter, langsmith, agent-sync transitively).
+// ipc.ts dynamically imports it for the same reason — keep startup snappy by
+// deferring the resolve until a hook actually fires. The async import is
+// cached after the first call.
+let runStoreMod: typeof import("./orchestration/run-store") | undefined;
+async function getRunStore(): Promise<typeof import("./orchestration/run-store")> {
+  runStoreMod ??= await import("./orchestration/run-store");
+  return runStoreMod;
+}
 
 app.setName("Spark App");
 
@@ -115,6 +133,12 @@ function createWindow(): void {
   windowForEvents.on("maximize", () => sendWindowState(windowForEvents));
   windowForEvents.on("unmaximize", () => sendWindowState(windowForEvents));
 
+  // Notifications module reads focus state on demand via isFocused(); the
+  // registration just hands it the window handle. focus/blur events are not
+  // wired here because they aren't needed — the trigger logic queries focus
+  // synchronously at notify time.
+  registerMainWindow(windowForEvents);
+
   mainWindow.on("ready-to-show", () => mainWindow?.show());
 
   const openBrowserUrlInSpark = (url: string) => {
@@ -164,6 +188,37 @@ function createWindow(): void {
 app.whenReady().then(async () => {
   ensureSparkHomeSync();
 
+  // Install Spark's Python hooks into ~/.claude/settings.json so every
+  // Claude Code session pipes SessionStart / PreToolUse / Notification / Stop
+  // / ... events into <spark-home>/hooks/ for the watcher to ingest below.
+  // This is the "CLI hook ingestion (free observability)" big-bet's installer
+  // half. Fire-and-forget — failures (no Claude installed, settings.json
+  // malformed, etc) are logged but never block boot.
+  void installClaudeHooks().catch((err) =>
+    console.warn("[main] hook installer failed:", err),
+  );
+
+  // Warm the enriched-PATH cache. Electron from Finder/Dock/Explorer inherits
+  // a sparse PATH that doesn't include npm-global, nvm, scoop, etc. The first
+  // call sources the user's login shell (or reads the Windows registry) and
+  // caches the result; later PTY spawns and binary lookups read the cached
+  // value synchronously via getCachedEnrichedPath(). Fire-and-forget — we
+  // don't block startup; pre-warm callers just see process.env.PATH until
+  // the lookup finishes, which is fine.
+  void getEnrichedPath().catch((err) =>
+    console.error("[main] path enrichment failed:", err),
+  );
+
+  // Start the JSON-RPC agent socket as early as possible so its env vars are
+  // populated before pty-manager spawns its first session (user terminal or
+  // worker pane). Failures here are non-fatal — Spark itself works without
+  // the socket; sub-agents just won't be able to dial back in.
+  try {
+    await startAgentSocket();
+  } catch (err) {
+    console.error("[main] failed to start agent socket", err);
+  }
+
   if (isHeadlessEval) {
     // Headless eval mode: never create a BrowserWindow, never wire renderer
     // IPC. The headless runner drives the autopilot directly and prints a
@@ -176,6 +231,7 @@ app.whenReady().then(async () => {
       const outcome = await runHeadlessEval(headlessArgs.args!);
       emitFinalSummary(outcome);
       pty.disposeAll();
+      await stopAgentSocket().catch(() => undefined);
       await flush();
       // Schedule a hard process.exit() fallback before app.exit(): on Windows,
       // node-pty's conPTY teardown can leave non-daemon worker handles that
@@ -195,6 +251,7 @@ app.whenReady().then(async () => {
       app.exit(exitCode);
     } catch (err) {
       pty.disposeAll();
+      await stopAgentSocket().catch(() => undefined);
       await flush().catch(() => undefined);
       const hardExitTimer = setTimeout(() => process.exit(1), 3000);
       hardExitTimer.unref();
@@ -203,8 +260,97 @@ app.whenReady().then(async () => {
     return;
   }
 
+  // Seed the fs sandbox allowlist from saved workspaces BEFORE registering
+  // IPC. The renderer's own ui:setAllowedRoots push (App.tsx) only fires
+  // AFTER FileTree/ChatComposer mount and call fs:list / fs:setWatchRoot
+  // (effects fire bottom-up: child effects run before parent effects).
+  // The seed is kept in its own list inside fs-sandbox.ts so renderer pushes
+  // can't accidentally shrink it during boot. The renderer still owns the
+  // live workspaceRoots list for runtime add/remove.
+  try {
+    const state = await loadState();
+    const roots = state.workspaces
+      .map((w) => w.cwd)
+      .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
+    setSeededRoots(roots);
+  } catch (err) {
+    console.error("[main] failed to seed fs sandbox roots:", err);
+  }
+
   registerIpc();
+
+  // Hook RPC server for sub-agents (big-bet "Hook contract for sub-agents to
+  // self-report"). Starts before createWindow so the very first worker pty
+  // sees SPARK_HOOK_* env vars in pty-manager.spawn(). Failures here MUST NOT
+  // block startup — if the port bind fails for any reason, we log loudly and
+  // continue; sub-agents will fall back to regex-tail detection. The
+  // onStateReport handler dynamically imports run-store so we don't pay its
+  // module-load cost on cold start unless a worker actually phones in.
+  try {
+    const { port } = await startHookRpc({
+      onStateReport: (report) => {
+        void (async () => {
+          try {
+            const runStore = await getRunStore();
+            runStore.applyHookStateReport(report);
+          } catch (err) {
+            console.warn("[main] hook RPC apply threw:", err);
+          }
+        })();
+      },
+    });
+    console.log(`[main] hook RPC listening on 127.0.0.1:${port}`);
+  } catch (err) {
+    console.warn("[main] hook RPC failed to start:", err);
+  }
+
+  // CLI hook ingestion watcher (big-bet "CLI hook ingestion — free
+  // observability"). The installer (called earlier in app.whenReady) drops
+  // spark-hook.py into ~/.claude/settings.json; the watcher consumes the
+  // resulting JSON files from <spark-home>/hooks/. Started AFTER IPC + the
+  // hook RPC so dispatching events into run-store can immediately fan out
+  // to renderer listeners.
+  try {
+    await startHookWatcher();
+  } catch (err) {
+    console.warn("[main] hook watcher failed to start:", err);
+  }
+
   createWindow();
+  if (mainWindow) registerAutoUpdater(mainWindow);
+
+  // Forward chord keystrokes (Ctrl/Cmd/Alt/Meta + key) from any <webview>
+  // guest back to its host renderer so app-wide shortcuts (Ctrl+1, Ctrl+P,
+  // …) keep working when focus is inside the embedded page. Listening on
+  // the webContents is the only place this fires — the webview *tag* in the
+  // host renderer does NOT emit before-input-event, so the host-side
+  // listener we tried first was always dead. The host preload turns the
+  // forwarded payload into a synthetic KeyboardEvent dispatched on window.
+  app.on("web-contents-created", (_e, contents) => {
+    if (contents.getType() !== "webview") return;
+    contents.on("before-input-event", (_event, input) => {
+      if (input.type !== "keyDown") return;
+      const mods = input.modifiers ?? [];
+      const hasChord =
+        mods.includes("control") ||
+        mods.includes("alt") ||
+        mods.includes("meta");
+      if (!hasChord) return;
+      if (!input.key) return;
+      const host = contents.hostWebContents;
+      if (!host || host.isDestroyed()) return;
+      host.send("webview:chord-key", {
+        key: input.key,
+        code: input.code,
+        modifiers: mods,
+      });
+    });
+  });
+
+  // Start the four-channel notifier subscription to run-store events. The
+  // BrowserWindow getter is already wired by registerMainWindow() inside
+  // createWindow(); this kicks off the event subscription. Idempotent.
+  startNotifications();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -233,5 +379,14 @@ app.on("window-all-closed", async () => {
 app.on("before-quit", async () => {
   pty.disposeAll();
   fsWatcher.disposeAll();
+  // Close the hook RPC alongside ptys so any in-flight worker post (which
+  // can only land on 127.0.0.1) gets a clean close instead of a connection
+  // reset during shutdown.
+  await stopHookRpc().catch(() => undefined);
+  // Stop the hook file watcher so fs.watch handles release before the event
+  // loop drains. Without this an in-flight `fs.rename` to processed/ can
+  // keep the process alive briefly past quit.
+  await stopHookWatcher().catch(() => undefined);
+  await stopAgentSocket().catch(() => undefined);
   await flushAllStores();
 });

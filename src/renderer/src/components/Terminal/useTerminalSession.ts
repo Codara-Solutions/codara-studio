@@ -1,9 +1,10 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
-import type { ShellInfo } from "@shared/types";
+import type { RuntimeState, ShellInfo } from "@shared/types";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import {
@@ -20,10 +21,103 @@ const FONT_SIZE = 13;
 const FIT_DEBOUNCE_MS = 8;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
 const RESTORE_NOTICE = "[restored from last Spark session]";
+
+// Internal-only union of every agent CLI we can detect from terminal output.
+// Spark's public surface (App.tsx, TerminalStack.tsx, run-store, etc.) still
+// only models the three first-party runtimes — anything outside that set is
+// coerced to `null` at the onAgentState boundary so the UI accent / tab-type
+// machinery doesn't need to grow new cases for each new banner we recognise.
+// Detection is still useful even when coerced: the running=true edge fires,
+// which is enough to keep the activity indicator in sync.
+type AgentRuntime =
+  | "claude"
+  | "codex"
+  | "cursor"
+  | "aider"
+  | "droid"
+  | "amp"
+  | "opencode"
+  | "grok"
+  | "hermes"
+  | "pi"
+  | "antigravity"
+  | "kimi"
+  | "kiro"
+  | "copilot"
+  | "cline";
+
+// Public runtime tag emitted through onAgentState. Mirrors the three runtimes
+// the rest of the app already knows how to render. The boundary in
+// useTerminalSession coerces every other AgentRuntime down to `null`.
+type PublicAgentRuntime = "claude" | "codex" | "cursor";
+
+const KNOWN_PUBLIC_RUNTIMES: ReadonlySet<AgentRuntime> = new Set([
+  "claude",
+  "codex",
+  "cursor",
+]);
+
+function coercePublicRuntime(runtime: AgentRuntime): PublicAgentRuntime | null {
+  return KNOWN_PUBLIC_RUNTIMES.has(runtime) ? (runtime as PublicAgentRuntime) : null;
+}
+
+// Banner / first-prompt boilerplate patterns. Order is significant: more
+// specific patterns sit before broader ones so a vendor that includes a
+// generic keyword (e.g. "Grok") in their banner can't be mis-tagged by a
+// looser regex below. Patterns must match launch banner text only — they
+// should NOT fire on ordinary shell output (file listings, help text,
+// README content, log tails). See research/HERDR_LEARNINGS.md §2 for the
+// upstream catalogue these came from.
+//
+// Caveats per herdr:
+//   - pi:     `Pi v` is generic; false positives are plausible in noisy
+//             shell output. Documented here rather than dropped because
+//             first-mover detection is still useful when we have it.
+//   - cline:  detection is unreliable upstream; we keep the banner regex
+//             for the running=true edge but expect misses.
+//   - copilot: structural-only per herdr (e.g. `esc to cancel` for the
+//              working signal). We rely on the banner alone for now.
+const RUNTIME_BANNERS: ReadonlyArray<{ runtime: AgentRuntime; pattern: RegExp }> = [
+  // First-party runtimes — keep these at the top so they take precedence.
+  { runtime: "codex",      pattern: /OpenAI Codex\s*\(?v?\d/ },
+  { runtime: "claude",     pattern: /Claude Code\s+v?\d/ },
+  { runtime: "cursor",     pattern: /Cursor\s+(?:Agent|CLI)/i },
+  // Third-party CLIs (alphabetical within tier). Each pattern is anchored
+  // on banner-style text (product name + version, or a vendor-specific
+  // header) so README mentions and stray log lines don't trigger them.
+  { runtime: "aider",      pattern: /\baider\s+v\d|\baider\s+chat\b/i },
+  { runtime: "amp",        pattern: /\bSourcegraph\s+Amp\b|\bAmp\s+CLI\b/i },
+  { runtime: "antigravity",pattern: /\bAntigravity\b|\bagy\s+v?\d/i },
+  { runtime: "cline",      pattern: /\bCline\s+v\d|\bcline-cli\b/i },
+  { runtime: "copilot",    pattern: /\bGitHub\s+Copilot\s+CLI\b|\bcopilot\s+v\d/i },
+  { runtime: "droid",      pattern: /\bDroid\s+CLI\b|\bfactory\.ai\b/i },
+  { runtime: "grok",       pattern: /\bGrok\s+v\d|\bxAI\s+Grok\b/i },
+  { runtime: "hermes",     pattern: /\bHermes\s+v\d|\bhermes-agent\b/i },
+  { runtime: "kimi",       pattern: /\bKimi\s+v\d|\bkimi-code\b/i },
+  { runtime: "kiro",       pattern: /\bKiro\s+v\d|\bkiro-cli\b/i },
+  { runtime: "opencode",   pattern: /\bOpenCode\s+v\d|\bopencode\b/i },
+  // `Pi v` is generic enough that it can plausibly fire on unrelated
+  // shell output. Keep it last in the iteration order so any more specific
+  // pattern above wins first.
+  { runtime: "pi",         pattern: /\bPi\s+v\d/ },
+];
+
 // Module-level guard so a sessionId can only ever have one autorun scheduled.
 // Survives component re-mounts (StrictMode dev, HMR) since the PTY itself
 // persists past the renderer-side React tree. See the autorun block below.
 const autorunFiredSessions = new Set<string>();
+// In-memory cache of the full xterm buffer captured right before a TerminalPane
+// unmounts. Workspace switches unmount every pane of the previous workspace,
+// which disposes its xterm (and the 50K-line scrollback inside it) while the
+// PTY keeps running in main. The leaf-level `initialScrollback` persisted into
+// localStorage is capped at ~40 KB and sampled only every 2s — too small to
+// hold a Claude session's worth of output. Stashing the full buffer here on
+// unmount and replaying it on the next mount lets a workspace round-trip
+// restore the scrollback the user was looking at. One-shot per sessionId:
+// consumed by the next mount. Capped per session so a chatty PTY can't pin
+// arbitrary RAM if the user never returns to its workspace.
+const xtermBufferSnapshots = new Map<string, string>();
+const SNAPSHOT_MAX_LINES = 10_000;
 // Matches dev-server-style local URLs (vite, next dev, webpack, ...). Anchors
 // on a word boundary so we do not capture substrings of longer paths. The
 // `\x1b` exclusion stops ANSI escape bytes from being absorbed when a URL
@@ -49,6 +143,14 @@ interface Options {
   // command as an OSC 633;E marker that the running TUI then reads as a
   // user prompt — see resources/shell-integration/spark.ps1:22).
   extraEnv?: Record<string, string>;
+  // Mirror-pane mode. When true the xterm still attaches to the PTY's data
+  // stream (so the user sees output), but the hook does NOT send pty.resize
+  // calls and does NOT forward keystrokes via pty.write. Used by SwarmView
+  // tiles where the canonical pane lives in TerminalStack — without this
+  // flag, two ResizeObservers would race and the smaller cols/rows would win,
+  // garbling the larger xterm. Explicit pty.write calls (e.g. SwarmView's
+  // broadcast button) bypass this hook entirely and still work.
+  readOnly?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   onCwd?: (cwd: string) => void;
@@ -86,6 +188,7 @@ export function useTerminalSession({
   initialScrollback,
   initialCommand,
   extraEnv,
+  readOnly = false,
   onSearchReady,
   onExit,
   onCwd,
@@ -94,6 +197,14 @@ export function useTerminalSession({
   onActivity,
   onAgentState,
 }: Options): TerminalSessionApi {
+  // Latest-value ref so the input/resize closures (captured once per
+  // sessionId) see the freshest readOnly flag without re-running the
+  // expensive xterm setup effect.
+  const readOnlyRef = useRef<boolean>(readOnly);
+  useEffect(() => {
+    readOnlyRef.current = readOnly;
+  }, [readOnly]);
+
   const detectedRef = useRef<string | null>(null);
   // Latest-callback refs so the effect can run exactly once per `sessionId`
   // while still calling the freshest closures from the parent.
@@ -171,9 +282,9 @@ export function useTerminalSession({
         cursorBlink: false,
         cursorStyle: "bar",
         cursorInactiveStyle: "none",
-        // 5k lines × 80 cols × ~16 B per cell ~= 6 MB per session. 10k doubled
-        // that for output almost no one scrolls back to.
-        scrollback: 5_000,
+        // AI agents blow past 1K-line buffers in a single turn; 50K is the
+        // floor for reviewing what claude/codex actually did.
+        scrollback: 50_000,
         allowProposedApi: true,
         allowTransparency: true,
         convertEol: false,
@@ -194,6 +305,27 @@ export function useTerminalSession({
           void window.spark.openExternal?.(uri);
         }),
       );
+
+      // WebGL renderer with software fallback. The DOM renderer is xterm's
+      // default; the WebGL renderer is several × faster on agent-style output
+      // (full-screen redraws, scrollback, large bursts). On context loss
+      // (driver crash, lost GPU, tab move between displays) we dispose the
+      // addon and xterm transparently falls back to DOM.
+      let webgl: WebglAddon | null = null;
+      try {
+        webgl = new WebglAddon();
+        webgl.onContextLoss(() => {
+          try {
+            webgl?.dispose();
+          } catch {
+            /* ignore */
+          }
+          webgl = null;
+        });
+        term.loadAddon(webgl);
+      } catch {
+        webgl = null;
+      }
 
       // Terminal copy/paste keybindings.
       //
@@ -219,6 +351,10 @@ export function useTerminalSession({
       // reject them and ConPTY can corrupt the byte stream around them.
       const isWindows = /Windows/i.test(navigator.userAgent);
       const writePasteFromClipboard = () => {
+        // Read-only mirror panes must not paste into the PTY — the canonical
+        // pane owns input. Clipboard read is also skipped so a paste shortcut
+        // in a mirror tile is a true no-op rather than a phantom read.
+        if (readOnlyRef.current) return;
         void (async () => {
           const text = await window.spark.clipboard.readText();
           if (!text) return;
@@ -228,8 +364,156 @@ export function useTerminalSession({
           void window.spark.pty.write(sessionId, payload);
         })();
       };
+
+      // Inline find overlay (Cmd/Ctrl+F). A chrome bar pinned to the top-right
+      // of the xterm host that drives SearchAddon.findNext / findPrevious.
+      // Built as a plain DOM tree inside the host div (no React) so it can
+      // live entirely inside the useTerminalSession effect.
+      let searchOverlay: HTMLDivElement | null = null;
+      let searchInput: HTMLInputElement | null = null;
+      const searchOpts = { caseSensitive: false, regex: false, wholeWord: false };
+      const openSearch = () => {
+        if (!container.current) return;
+        if (!searchOverlay) {
+          const bar = document.createElement("div");
+          bar.style.cssText = [
+            "position:absolute",
+            "top:6px",
+            "right:6px",
+            "height:24px",
+            "display:flex",
+            "align-items:center",
+            "gap:4px",
+            "padding:0 4px",
+            "background:var(--panel)",
+            "border:1px solid var(--rule-strong)",
+            "border-radius:4px",
+            "font-family:monospace",
+            "font-size:12px",
+            "z-index:10",
+          ].join(";");
+          const input = document.createElement("input");
+          input.type = "text";
+          input.placeholder = "Find";
+          input.style.cssText = [
+            "background:transparent",
+            "border:none",
+            "outline:none",
+            "color:inherit",
+            "font:inherit",
+            "width:160px",
+            "padding:0 4px",
+          ].join(";");
+          const mkBtn = (label: string, title: string) => {
+            const b = document.createElement("button");
+            b.type = "button";
+            b.textContent = label;
+            b.title = title;
+            b.style.cssText = [
+              "background:transparent",
+              "border:none",
+              "color:inherit",
+              "font:inherit",
+              "cursor:pointer",
+              "padding:0 4px",
+              "height:20px",
+            ].join(";");
+            return b;
+          };
+          const prevBtn = mkBtn("‹", "Previous match");
+          const nextBtn = mkBtn("›", "Next match");
+          const closeBtn = mkBtn("×", "Close");
+          const runFind = (dir: "next" | "prev") => {
+            const term2 = termRef.current;
+            const q = input.value;
+            if (!term2 || !q) return;
+            if (dir === "next") search.findNext(q, searchOpts);
+            else search.findPrevious(q, searchOpts);
+          };
+          input.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              e.stopPropagation();
+              closeSearch();
+            } else if (e.key === "Enter") {
+              e.preventDefault();
+              e.stopPropagation();
+              runFind(e.shiftKey ? "prev" : "next");
+            }
+          });
+          prevBtn.addEventListener("click", () => runFind("prev"));
+          nextBtn.addEventListener("click", () => runFind("next"));
+          closeBtn.addEventListener("click", () => closeSearch());
+          bar.appendChild(input);
+          bar.appendChild(prevBtn);
+          bar.appendChild(nextBtn);
+          bar.appendChild(closeBtn);
+          // The xterm host needs position:relative for absolute children to
+          // anchor correctly. TerminalPane sets width/height inline but not
+          // position; set it here so the overlay floats over the terminal.
+          if (getComputedStyle(container.current).position === "static") {
+            container.current.style.position = "relative";
+          }
+          container.current.appendChild(bar);
+          searchOverlay = bar;
+          searchInput = input;
+        }
+        searchOverlay.style.display = "flex";
+        searchInput?.focus();
+        searchInput?.select();
+      };
+      const closeSearch = () => {
+        if (searchOverlay) searchOverlay.style.display = "none";
+        termRef.current?.focus();
+      };
+      cleanups.push(() => {
+        if (searchOverlay && searchOverlay.parentNode) {
+          searchOverlay.parentNode.removeChild(searchOverlay);
+        }
+        searchOverlay = null;
+        searchInput = null;
+      });
+
       term.attachCustomKeyEventHandler((event) => {
         if (event.type !== "keydown") return true;
+        // Cmd/Ctrl+F → open inline find overlay. Checked before the
+        // copy/paste branch since that one bails on metaKey.
+        if (
+          (event.ctrlKey || event.metaKey) &&
+          !event.altKey &&
+          !event.shiftKey &&
+          (event.key === "f" || event.key === "F")
+        ) {
+          event.preventDefault();
+          openSearch();
+          return false;
+        }
+        // Shift+Enter: insert a line break instead of submitting. The right
+        // byte sequence depends on what's reading the PTY:
+        //   - Ink-based agent TUIs (Claude Code / Codex / Cursor) read
+        //     `\x1b\r` (ESC + CR — the standard Alt+Enter / iTerm2
+        //     shift-enter convention, same thing claude's `/terminal-setup`
+        //     binds Shift+Enter to) as "insert newline in input box".
+        //     Sending backslash + LF here makes Claude render a literal `\`
+        //     (Codex happened to swallow the trailing `\` as a continuation,
+        //     which is what masked the bug).
+        //   - Bare shells (bash/zsh/pwsh) treat backslash + LF as a
+        //     multi-line continuation marker, which is the muscle-memory
+        //     behaviour at a shell prompt.
+        if (
+          event.key === "Enter" &&
+          event.shiftKey &&
+          !event.ctrlKey &&
+          !event.altKey &&
+          !event.metaKey
+        ) {
+          event.preventDefault();
+          if (!readOnlyRef.current) {
+            const payload = agentPhase === "agent" ? "\x1b\r" : "\\\n";
+            void window.spark.pty.write(sessionId, payload);
+          }
+          return false;
+        }
         if (!event.ctrlKey || event.altKey || event.metaKey) return true;
         const key = event.key;
         const isC = key === "C" || key === "c";
@@ -237,13 +521,19 @@ export function useTerminalSession({
         if (!isC && !isV) return true;
 
         // Ctrl+Shift+{C,V}: cross-platform xterm bindings.
+        // preventDefault is required on the paste branches: without it the
+        // browser still fires a native `paste` event on xterm's hidden
+        // textarea, xterm wraps it in bracketed-paste a second time, and the
+        // shell receives the clipboard twice.
         if (event.shiftKey) {
           if (isC) {
             const selection = term.getSelection();
             if (!selection) return true;
+            event.preventDefault();
             void window.spark.clipboard.writeText(selection);
             return false;
           }
+          event.preventDefault();
           writePasteFromClipboard();
           return false;
         }
@@ -253,12 +543,39 @@ export function useTerminalSession({
         if (isC) {
           const selection = term.getSelection();
           if (!selection) return true; // no selection → let SIGINT through
+          event.preventDefault();
           void window.spark.clipboard.writeText(selection);
           return false;
         }
+        event.preventDefault();
         writePasteFromClipboard();
         return false;
       });
+
+      // Native-terminal right-click: copy current selection if one exists,
+      // otherwise paste from clipboard. Matches ConHost / Windows Terminal
+      // "quick-edit" behavior the user expects. preventDefault suppresses
+      // the OS context menu so the click is consumed entirely by the
+      // terminal.
+      const host = container.current;
+      if (host) {
+        const handleContextMenu = (event: MouseEvent) => {
+          event.preventDefault();
+          const term2 = termRef.current;
+          if (!term2) return;
+          const selection = term2.getSelection();
+          if (selection) {
+            void window.spark.clipboard.writeText(selection);
+            term2.clearSelection();
+            return;
+          }
+          writePasteFromClipboard();
+        };
+        host.addEventListener("contextmenu", handleContextMenu);
+        cleanups.push(() => {
+          host.removeEventListener("contextmenu", handleContextMenu);
+        });
+      }
 
       term.open(container.current);
       try {
@@ -266,11 +583,23 @@ export function useTerminalSession({
       } catch {
         /* host may be 0×0 on first paint; ResizeObserver will fix it. */
       }
-      const restoredScrollback = initialScrollback?.trimEnd();
-      if (restoredScrollback) {
-        term.write(
-          `${normalizeForTerminalReplay(restoredScrollback)}\r\n\x1b[2m${RESTORE_NOTICE}\x1b[0m\r\n`,
-        );
+      // Prefer the in-memory snapshot captured during the previous unmount —
+      // it's the full visible+scrollback buffer (up to SNAPSHOT_MAX_LINES) and
+      // exists only for workspace-switch round-trips. Falls back to the leaf's
+      // localStorage-persisted scrollback (smaller, sampled) for the cold-start
+      // app-restart path; that one still carries the RESTORE_NOTICE so the user
+      // knows the prompt below is fresh.
+      const liveSnapshot = xtermBufferSnapshots.get(sessionId);
+      if (liveSnapshot) {
+        xtermBufferSnapshots.delete(sessionId);
+        term.write(`${normalizeForTerminalReplay(liveSnapshot)}\r\n`);
+      } else {
+        const restoredScrollback = initialScrollback?.trimEnd();
+        if (restoredScrollback) {
+          term.write(
+            `${normalizeForTerminalReplay(restoredScrollback)}\r\n\x1b[2m${RESTORE_NOTICE}\x1b[0m\r\n`,
+          );
+        }
       }
 
       const prompt = registerPromptTracker(term);
@@ -318,15 +647,102 @@ export function useTerminalSession({
       const agentDecoder = new TextDecoder("utf-8", { fatal: false });
       let agentTextRing = "";
       let agentPhase: "idle" | "agent" = "idle";
-      const setAgentRunning = (runtime: "claude" | "codex" | "cursor") => {
+      // Tracks the first-party runtime ("claude"|"codex"|"cursor") if the
+      // detected runtime maps to one — drives the state poller below, which
+      // only has regex tables for those three. Non-first-party runtimes still
+      // fire onAgentState (running=true) but skip the poller.
+      let activeRuntime: "claude" | "codex" | "cursor" | null = null;
+
+      // ── Runtime state poller (the live working / blocked / idle / done
+      // sniffer that drives chip tone and notifications). Polls the visible
+      // xterm buffer every STATE_POLL_MS ms; only runs while an agent has
+      // been detected in the pane (gated by agentPhase). All flags live in
+      // this closure so they reset cleanly across agent enter/exit cycles.
+      let stateTimer: number | null = null;
+      let pendingState: RuntimeState | null = null;
+      let confirmedState: RuntimeState | null = null;
+      let idleSinceMs: number | null = null;
+      const reportRuntimeState = (state: RuntimeState) => {
+        void window.spark.terminalState?.report?.({ paneId: sessionId, state });
+      };
+      const stopStatePoller = () => {
+        if (stateTimer !== null) {
+          window.clearInterval(stateTimer);
+          stateTimer = null;
+        }
+        pendingState = null;
+        confirmedState = null;
+        idleSinceMs = null;
+      };
+      const tickStatePoller = () => {
+        const t = termRef.current;
+        if (!t || !activeRuntime) return;
+        const tail = readTerminalTail(t, STATE_TAIL_ROWS);
+        const raw = classifyTail(activeRuntime, tail);
+        const now = Date.now();
+        if (confirmedState === "working" && raw === null) {
+          if (idleSinceMs === null) idleSinceMs = now;
+          if (now - idleSinceMs >= IDLE_DEBOUNCE_MS) {
+            confirmedState = "idle";
+            pendingState = null;
+            idleSinceMs = null;
+            reportRuntimeState("idle");
+          }
+          return;
+        }
+        idleSinceMs = null;
+        if (raw === null) {
+          pendingState = null;
+          return;
+        }
+        if (pendingState !== raw) {
+          pendingState = raw;
+          return;
+        }
+        if (confirmedState !== raw) {
+          confirmedState = raw;
+          reportRuntimeState(raw);
+        }
+      };
+      const startStatePoller = (runtime: "claude" | "codex" | "cursor") => {
+        activeRuntime = runtime;
+        pendingState = null;
+        confirmedState = null;
+        idleSinceMs = null;
+        if (stateTimer !== null) window.clearInterval(stateTimer);
+        stateTimer = window.setInterval(tickStatePoller, STATE_POLL_MS);
+      };
+
+      const setAgentRunning = (runtime: AgentRuntime) => {
         if (agentPhase === "agent") return;
         agentPhase = "agent";
-        onAgentStateRef.current?.({ runtime, running: true });
+        // Coerce non-first-party runtimes down to `null` at the boundary so
+        // App.tsx / TerminalStack / run-store keep seeing the existing public
+        // surface ("claude" | "codex" | "cursor" | null) without growing new
+        // cases for every newly detected CLI. running=true still fires so the
+        // activity indicator tracks correctly.
+        const publicRuntime = coercePublicRuntime(runtime);
+        onAgentStateRef.current?.({ runtime: publicRuntime, running: true });
+        // Only the three first-party runtimes have regex tables in
+        // RUNTIME_PATTERNS — others rely on hook reports from E1 or no state
+        // signal at all.
+        if (publicRuntime) startStatePoller(publicRuntime);
       };
       const resetAgentPhase = () => {
         if (agentPhase === "agent") {
           onAgentStateRef.current?.({ runtime: null, running: false });
+          // The TUI just exited; flip the live state to "done" so any UI
+          // subscriber sees the transition immediately (the orchestration
+          // worker may still be writing its final report, but the agent is
+          // off-screen). The poller stops here — we don't keep scanning a
+          // pwsh prompt for blocked/working patterns.
+          if (confirmedState !== "done") {
+            confirmedState = "done";
+            reportRuntimeState("done");
+          }
         }
+        activeRuntime = null;
+        stopStatePoller();
         agentPhase = "idle";
         agentTextRing = "";
       };
@@ -369,6 +785,11 @@ export function useTerminalSession({
         }
         return false;
       };
+      // Tear down the state poller on unmount. The closure-bound `stateTimer`
+      // is the only owner — main has no per-pane handle to clean up, so a
+      // missed clearInterval here would leak a timer for the lifetime of the
+      // (now-disposed) hook.
+      cleanups.push(() => stopStatePoller());
       const osc633Dispose = term.parser.registerOscHandler(633, handleOsc633);
       cleanups.push(() => osc633Dispose.dispose());
       // FinalTerm OSC 133;A is the generic "prompt start" marker emitted by
@@ -466,6 +887,15 @@ export function useTerminalSession({
       cleanups.push(offData, offExit);
 
       const inputDisposable = term.onData((data) => {
+        // Read-only / mirror panes (e.g. SwarmView tiles) must not forward
+        // keystrokes — the canonical xterm for the same PTY lives elsewhere
+        // and accepts user input there. Activity still pings since hover/
+        // focus on the mirror tile is a meaningful "this PTY isn't idle"
+        // signal for the orchestrator.
+        if (readOnlyRef.current) {
+          onActivityRef.current?.();
+          return;
+        }
         void window.spark.pty.write(sessionId, data);
         onActivityRef.current?.();
       });
@@ -499,6 +929,14 @@ export function useTerminalSession({
         return;
       }
 
+      // Drain any bytes the pty emitted while the previous TerminalPane was
+      // unmounted (workspace switched away). Main holds those bytes in a
+      // detached backlog per pause()/resume() in pty-manager.ts; this call
+      // flushes them back through the same data channel as live output, so
+      // the user sees everything the agent printed during the gap. On a
+      // fresh session this is a no-op (backlog empty, already attached).
+      void window.spark.pty.resume(sessionId);
+
       // Two-stage debounce, ported from the terax design.
       //  - FIT runs on a tight (~one frame) timer so xterm visually keeps up
       //    with the window during drag. Local, no IPC.
@@ -508,6 +946,8 @@ export function useTerminalSession({
       //    The shell only cares about the FINAL size.
       let lastSentCols = term.cols;
       let lastSentRows = term.rows;
+      let lastAppliedCols = term.cols;
+      let lastAppliedRows = term.rows;
       let lastW = container.current?.clientWidth ?? 0;
       let lastH = container.current?.clientHeight ?? 0;
       let fitTimer: number | null = null;
@@ -517,6 +957,12 @@ export function useTerminalSession({
       const flushPtyResize = () => {
         ptyTimer = null;
         if (disposed || !spawned) return;
+        // Read-only mirror panes must not send pty.resize — the canonical
+        // pane owns the PTY's dimensions. Without this guard, two mounts
+        // of the same sessionId would each fit() to their own container
+        // size and race their pty.resize calls; the last (often smaller)
+        // one would win and garble the larger xterm's display.
+        if (readOnlyRef.current) return;
         if (term.cols === lastSentCols && term.rows === lastSentRows) return;
         lastSentCols = term.cols;
         lastSentRows = term.rows;
@@ -534,11 +980,26 @@ export function useTerminalSession({
             if (w === lastW && h === lastH) return;
             lastW = w;
             lastH = h;
+            // Cheap dedupe: if proposeDimensions reports the same cell
+            // count we already applied, skip the fit + pty resize entirely.
+            // Window drags often produce sub-cell pixel deltas that don't
+            // change cols/rows; reflowing xterm and SIGWINCH'ing the shell
+            // for those is pure waste.
+            const proposed = fit.proposeDimensions();
+            if (
+              proposed &&
+              proposed.cols === lastAppliedCols &&
+              proposed.rows === lastAppliedRows
+            ) {
+              return;
+            }
             try {
               fit.fit();
             } catch {
               return;
             }
+            lastAppliedCols = term.cols;
+            lastAppliedRows = term.rows;
             if (ptyTimer !== null) window.clearTimeout(ptyTimer);
             ptyTimer = window.setTimeout(flushPtyResize, PTY_RESIZE_DEBOUNCE_MS);
           }, FIT_DEBOUNCE_MS);
@@ -552,13 +1013,17 @@ export function useTerminalSession({
       }
 
       // Initial size is now real — ship it once explicitly so the shell prompt
-      // paints at the correct width on first render.
+      // paints at the correct width on first render. Skip on read-only mirror
+      // panes; the canonical pane already sized this PTY.
       try {
         fit.fit();
       } catch {
         /* host transitioned to display:none between mount and now */
       }
-      if (term.cols !== lastSentCols || term.rows !== lastSentRows) {
+      if (
+        !readOnlyRef.current &&
+        (term.cols !== lastSentCols || term.rows !== lastSentRows)
+      ) {
         lastSentCols = term.cols;
         lastSentRows = term.rows;
         void window.spark.pty.resize(sessionId, term.cols, term.rows);
@@ -581,9 +1046,16 @@ export function useTerminalSession({
       // already launched the TUI. Once we commit to writing, we mark the id
       // permanently so no later remount can resurrect the timer.
       const cmd = initialCommand?.trim();
-      if (cmd && cmd.length > 0 && !startupCommandHandled && !autorunFiredSessions.has(sessionId)) {
+      if (
+        cmd &&
+        cmd.length > 0 &&
+        !startupCommandHandled &&
+        !autorunFiredSessions.has(sessionId) &&
+        !readOnlyRef.current
+      ) {
         const autorunTimer = window.setTimeout(() => {
           if (disposed) return;
+          if (readOnlyRef.current) return;
           autorunFiredSessions.add(sessionId);
           void window.spark.pty.write(sessionId, `${cmd}\r`);
         }, 1500);
@@ -594,6 +1066,15 @@ export function useTerminalSession({
     return () => {
       disposed = true;
       window.clearTimeout(startTimer);
+      // Tell main to stop firing pty bytes at the about-to-be-dead IPC
+      // listener and instead accumulate them in a per-session backlog. The
+      // very next mount of this sessionId calls resume() to drain it. Done
+      // BEFORE running the cleanups (which include offData) so the window
+      // between "listener removed" and "main processes pause" is as short
+      // as possible — any chunk that slips through during that one-tick
+      // gap is also absorbed by pause() itself, which moves the pending
+      // flush queue into the backlog.
+      void window.spark.pty.pause?.(sessionId);
       for (const fn of cleanups) {
         try {
           fn();
@@ -608,6 +1089,22 @@ export function useTerminalSession({
           /* ignore */
         }
         themeUnsubRef.current = null;
+      }
+      // Snapshot the full xterm buffer (visible + scrollback) into the
+      // module-level cache so the next mount of this sessionId — typically the
+      // user returning to this workspace — can replay what was on screen
+      // instead of starting from an empty terminal plus whatever short
+      // 40 KB snippet the periodic onActivity sampler last persisted.
+      const dyingTerm = termRef.current;
+      if (dyingTerm) {
+        try {
+          const snapshot = captureXtermBuffer(dyingTerm, SNAPSHOT_MAX_LINES);
+          if (snapshot.length > 0) {
+            xtermBufferSnapshots.set(sessionId, snapshot);
+          }
+        } catch {
+          /* best-effort; an inaccessible buffer just means no scrollback restore */
+        }
       }
       // Detach the renderer-side xterm from the PTY, but do not kill the
       // process. Terminal panes unmount during workspace switches and hidden
@@ -717,6 +1214,33 @@ function normalizeForTerminalReplay(value: string): string {
   return value.replace(/\r\n|\r|\n/g, "\r\n");
 }
 
+// Read up to `maxLines` lines from the end of the xterm buffer (visible rows
+// + scrollback) as plain text. Wrapped logical lines are stitched back
+// together so a long Claude/Codex response that line-wrapped in the original
+// width still replays as one line. Loses ANSI styling — replay is intended
+// to give the user readable scrollback after a workspace round-trip, not
+// pixel-perfect re-rendering of an Ink TUI's last frame. Trailing empty
+// rows are trimmed so the replayed text doesn't open with blank space.
+function captureXtermBuffer(term: Terminal, maxLines: number): string {
+  const buf = term.buffer.normal;
+  const total = buf.length;
+  const start = Math.max(0, total - maxLines);
+  const lines: string[] = [];
+  for (let i = start; i < total; i++) {
+    const line = buf.getLine(i);
+    if (!line) continue;
+    const text = line.translateToString(true);
+    if (text.trim() === RESTORE_NOTICE) continue;
+    if (line.isWrapped && lines.length > 0) {
+      lines[lines.length - 1] += text;
+    } else {
+      lines.push(text);
+    }
+  }
+  while (lines.length && lines[lines.length - 1] === "") lines.pop();
+  return lines.join("\n");
+}
+
 function stripTrailingPunct(url: string): string {
   return url.replace(/[.,);\]]+$/, "");
 }
@@ -743,21 +1267,181 @@ const CSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const OSC_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
 // Identify which agent CLI is running by scanning a short rolling buffer of
-// recent visible text. Patterns are specific enough to the live banners
-// that ordinary shell output (file listings, commit messages, README
-// content, `claude --help`) does NOT trigger them — only the actual
-// launch banners do:
+// recent visible text against the RUNTIME_BANNERS table at the top of the
+// file. Patterns are specific enough to live launch banners / first-prompt
+// boilerplate that ordinary shell output (file listings, commit messages,
+// README content, `claude --help`) does NOT trigger them. Examples:
 //   - Codex:  `OpenAI Codex (v0.130.0)`
 //   - Claude: `Claude Code v2.1.139`
 //   - Cursor: `Cursor Agent (composer-2.5-fast)` / `Cursor CLI v…`
+//   - Aider:  `aider v0.65.0`
+//   - Droid:  `Droid CLI` / `factory.ai`
 // Returns null when nothing matched so the caller leaves the pane alone.
-function sniffRuntime(text: string): "claude" | "codex" | "cursor" | null {
+// Iteration order mirrors the table: first-party runtimes first, then
+// third-party CLIs ordered most-specific to least-specific.
+function sniffRuntime(text: string): AgentRuntime | null {
   const stripped = text.replace(CSI_RE, "").replace(OSC_RE, "");
-  if (/OpenAI Codex\s*\(?v?\d/.test(stripped)) return "codex";
-  if (/Claude Code\s+v?\d/.test(stripped)) return "claude";
-  if (/Cursor\s+(?:Agent|CLI)/i.test(stripped)) return "cursor";
+  for (const entry of RUNTIME_BANNERS) {
+    if (entry.pattern.test(stripped)) return entry.runtime;
+  }
   return null;
 }
+
+// Per-runtime "what is the agent doing right now" pattern tables. Each entry
+// owns three sets of regexes that run against the same plain-text tail of the
+// xterm buffer.
+//
+//   `working`: the agent is generating / streaming. Match anything the live
+//              status line prints while thinking — most CLIs paint a spinner
+//              with text like "esc to interrupt" or "(thinking)".
+//   `blocked`: the agent is waiting on the user for permission or
+//              confirmation. These prompts are the whole point of the
+//              detection — Spark surfaces them as the "needs you" signal.
+//   `done`   : the agent has actively printed a completion line (vs simply
+//              going quiet, which is `idle`). Today we mostly fall back to
+//              the OSC 633;A "prompt is back" boundary (handled elsewhere),
+//              but a positive completion match lets us cut over without
+//              waiting for the debounce window.
+//
+// Patterns were lifted from herdr's hand-tuned table (research/HERDR_LEARNINGS
+// quick-win B), trimmed to the three runtimes Spark spawns today. The patterns
+// match against the CSI/OSC-stripped tail string so Ink's per-character cursor
+// moves do not interleave bytes inside the literal we're looking for.
+interface RuntimePatterns {
+  working: RegExp[];
+  blocked: RegExp[];
+  done: RegExp[];
+}
+
+const RUNTIME_PATTERNS: Record<"claude" | "codex" | "cursor", RuntimePatterns> = {
+  // Claude Code (Anthropic). The "esc to interrupt" footer is on screen the
+  // entire time it's streaming a turn, and the permission prompt is the
+  // canonical "blocked on you" UI.
+  claude: {
+    working: [
+      /esc to interrupt/i,
+      /\(?\s*esc to cancel\s*\)?/i,
+      /thinking[…\.]/i,
+      /\bworking[…\.]/i,
+      /\bcompacting[…\.]/i,
+    ],
+    blocked: [
+      /Do you want to (?:proceed|continue|allow)/i,
+      /Allow .* to (?:edit|run|read)/i,
+      /\bWaiting for your input\b/i,
+      /Press (?:y|n|enter|esc) to/i,
+      /Enter your (?:response|answer|choice):/i,
+    ],
+    done: [
+      /Session ended\./i,
+      /\bGoodbye\b!?/i,
+    ],
+  },
+  // OpenAI Codex CLI. Lower-case "thinking" / "working" footer lines, and a
+  // "shell command" approval prompt that mirrors Claude's permission flow.
+  codex: {
+    working: [
+      /esc to interrupt/i,
+      /\(thinking\)/i,
+      /\(working\)/i,
+      /Generating/i,
+      /Streaming/i,
+    ],
+    blocked: [
+      /Approve shell command/i,
+      /Approve this (?:edit|patch|command)/i,
+      /Do you want to (?:proceed|continue)/i,
+      /\[y\/N\]/i,
+      /\(y\/n\)/i,
+    ],
+    done: [
+      /Session complete\./i,
+      /\bExiting\b\./i,
+    ],
+  },
+  // Cursor Agent / Cursor CLI. Similar Ink TUI patterns; "press enter" and
+  // explicit "waiting for confirmation" copy when blocked.
+  cursor: {
+    working: [
+      /esc to interrupt/i,
+      /\(generating\)/i,
+      /thinking[…\.]/i,
+    ],
+    blocked: [
+      /Waiting for (?:confirmation|approval)/i,
+      /Approve (?:edit|patch|tool)/i,
+      /Press enter to/i,
+      /Continue\? \(y\/n\)/i,
+    ],
+    done: [
+      /Conversation ended\./i,
+    ],
+  },
+};
+
+// Match plain-text tail against a runtime's pattern table. Returns the first
+// state that fires, in priority order: blocked > working > done. Blocked wins
+// over working because a TUI can paint "esc to interrupt" inside a permission
+// dialog (the dialog is still rendered above the streaming footer); the
+// blocked prompt is the actionable one for the user.
+function classifyTail(
+  runtime: "claude" | "codex" | "cursor",
+  tail: string,
+): RuntimeState | null {
+  const table = RUNTIME_PATTERNS[runtime];
+  if (!table) return null;
+  const stripped = tail.replace(CSI_RE, "").replace(OSC_RE, "");
+  for (const re of table.blocked) {
+    if (re.test(stripped)) return "blocked";
+  }
+  for (const re of table.working) {
+    if (re.test(stripped)) return "working";
+  }
+  for (const re of table.done) {
+    if (re.test(stripped)) return "done";
+  }
+  return null;
+}
+
+// Read the last `maxRows` lines of an xterm Terminal buffer as plain text.
+// Concatenates wrapped logical lines back together so a banner the agent
+// printed across two physical rows still matches a single regex. Cheap by
+// design — we only walk the active buffer (no scrollback) and skip empty
+// trailing rows, which is what the regex would scan anyway.
+function readTerminalTail(term: Terminal, maxRows: number): string {
+  const buf = term.buffer.active;
+  const total = buf.length;
+  const start = Math.max(0, total - maxRows);
+  const parts: string[] = [];
+  for (let i = start; i < total; i++) {
+    const line = buf.getLine(i);
+    if (!line) continue;
+    const text = line.translateToString(true);
+    if (line.isWrapped && parts.length > 0) {
+      parts[parts.length - 1] += text;
+    } else {
+      parts.push(text);
+    }
+  }
+  while (parts.length && parts[parts.length - 1] === "") parts.pop();
+  return parts.join("\n");
+}
+
+// Polling cadence for the live-state sniffer. 300 ms is the cheapest interval
+// that still reads as "instant" in a chat UI (one frame of cognitive delay).
+// xterm's `buffer.active.getLine().translateToString(true)` is a couple-µs
+// operation per row; reading 40 rows per tick across a dozen panes is well
+// under 1 ms of renderer work per second.
+const STATE_POLL_MS = 300;
+// Number of rows of the visible buffer we feed into the regex match.
+const STATE_TAIL_ROWS = 40;
+// Working → Idle transition requires this many ms of consecutive empty ticks
+// before flipping. Codex and Claude both have ~700 ms gaps mid-turn where no
+// status line is on screen (between Ink redraws); a flat 1.2 s window covers
+// those without making the indicator feel laggy. The 2-tick confirm on every
+// other transition is also applied (one tick is the minimum to debounce the
+// occasional regex bounce when the TUI is mid-redraw).
+const IDLE_DEBOUNCE_MS = 1_200;
 
 // Reverse spark.ps1's __Spark-Esc encoding (control chars, ';' and '\'
 // are emitted as `\xHH`). Best-effort: unknown escapes are passed through.

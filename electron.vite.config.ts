@@ -27,7 +27,15 @@ export default defineConfig({
     build: {
       minify: "esbuild",
       rollupOptions: {
-        input: { index: resolve(__dirname, "src/preload/index.ts") },
+        input: {
+          // Main renderer preload — exposes window.spark.
+          index: resolve(__dirname, "src/preload/index.ts"),
+          // Webview-side preload used by the browser pane's inspect mode.
+          // Loaded into the embedded <webview>'s renderer via the `preload`
+          // attribute on the tag; communicates with the host via
+          // `ipcRenderer.sendToHost`.
+          "inspector-preload": resolve(__dirname, "src/preload/inspector-preload.ts"),
+        },
       },
     },
   },

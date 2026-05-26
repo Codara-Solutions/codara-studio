@@ -24,8 +24,11 @@ import type {
   GitOpResult,
   GitSmartMergeResult,
   GitStatus,
+  InAppNotificationPayload,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
+  MarkRunSeenInput,
+  NotificationSoundKind,
   PauseRunInput,
   PlanFile,
   PrefKey,
@@ -35,6 +38,7 @@ import type {
   RenameFileInput,
   RunArtifactPaths,
   RunState,
+  RuntimeState,
   SearchHit,
   SearchOptions,
   SearchSummary,
@@ -55,10 +59,31 @@ type OrchestrationEventHandler = (event: SparkEvent) => void;
 type FsChangeHandler = (event: FsChangeEvent) => void;
 type WindowStateHandler = (state: { maximized: boolean }) => void;
 type PreferencesChangeHandler = (change: PreferencesChange) => void;
+type InAppNotificationHandler = (payload: InAppNotificationPayload) => void;
+type NotificationSoundHandler = (info: { kind: NotificationSoundKind }) => void;
 // Hits arrive batched (one IPC message per ~100 hits or per ~24ms) — see
 // `streamGrep` in the main process. The handler receives the whole batch.
 type SearchHitHandler = (hits: SearchHit[]) => void;
 type SearchDoneHandler = (summary: SearchSummary) => void;
+
+// electron-updater event surface. The main process narrows each
+// autoUpdater.on(...) callback into one of these `kind` strings and bundles
+// the relevant fields under `payload`. Renderer treats payload as an opaque
+// bag and inspects only the fields it cares about per kind.
+export type UpdaterEventKind =
+  | "checking-for-update"
+  | "update-available"
+  | "update-not-available"
+  | "download-progress"
+  | "update-downloaded"
+  | "error";
+
+export interface UpdaterEvent {
+  kind: UpdaterEventKind;
+  payload?: unknown;
+}
+
+type UpdaterEventHandler = (event: UpdaterEvent) => void;
 
 export interface SearchStartCallbacks {
   onHit: SearchHitHandler;
@@ -128,6 +153,28 @@ const api = {
       return () => ipcRenderer.off("preferences:changed", listener);
     },
   },
+  // Renderer subscriptions for the four-channel notification system.
+  // Two channels are renderer-side (in-app toast + embedded sound clip);
+  // the other two (native Notification, OS dock badge / taskbar flash)
+  // live entirely in main and don't surface here.
+  notifications: {
+    onInAppNotification: (handler: InAppNotificationHandler): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        payload: InAppNotificationPayload,
+      ) => handler(payload);
+      ipcRenderer.on("notification:in-app", listener);
+      return () => ipcRenderer.off("notification:in-app", listener);
+    },
+    onNotificationSound: (handler: NotificationSoundHandler): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        info: { kind: NotificationSoundKind },
+      ) => handler(info);
+      ipcRenderer.on("notification:sound", listener);
+      return () => ipcRenderer.off("notification:sound", listener);
+    },
+  },
   shells: {
     list: (): Promise<ShellInfo[]> => ipcRenderer.invoke("shells:list"),
     default: (): Promise<ShellInfo | null> => ipcRenderer.invoke("shells:default"),
@@ -147,6 +194,10 @@ const api = {
   attachments: {
     savePastedImage: (input: { dataUrl: string; name?: string }): Promise<string> =>
       ipcRenderer.invoke("attachments:savePastedImage", input),
+  },
+  drawing: {
+    save: (input: { dataUrl: string }): Promise<string> =>
+      ipcRenderer.invoke("drawing:save", input),
   },
   fs: {
     list: (dir: string): Promise<FsEntry[]> => ipcRenderer.invoke("fs:list", dir),
@@ -240,6 +291,8 @@ const api = {
       ipcRenderer.invoke("orchestration:interruptRunWithMessage", input),
     updateRunStatus: (input: UpdateRunStatusInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:updateRunStatus", input),
+    markRunSeen: (input: MarkRunSeenInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:markRunSeen", input),
     createStep: (input: CreateStepInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:createStep", input),
     updateStep: (input: UpdateStepInput): Promise<RunState> =>
@@ -275,9 +328,13 @@ const api = {
       ipcRenderer.invoke("pty:spawn", args),
     write: (id: string, data: string): Promise<void> =>
       ipcRenderer.invoke("pty:write", { id, data }),
+    inject: (id: string, text: string, opts?: { submit?: boolean }): Promise<void> =>
+      ipcRenderer.invoke("pty:inject", { id, text, submit: opts?.submit }),
     resize: (id: string, cols: number, rows: number): Promise<void> =>
       ipcRenderer.invoke("pty:resize", { id, cols, rows }),
     dispose: (id: string): Promise<void> => ipcRenderer.invoke("pty:dispose", { id }),
+    pause: (id: string): Promise<void> => ipcRenderer.invoke("pty:pause", { id }),
+    resume: (id: string): Promise<void> => ipcRenderer.invoke("pty:resume", { id }),
     onData: (id: string, handler: PtyDataHandler): (() => void) => {
       const channel = `pty:data:${id}`;
       const listener = (_e: Electron.IpcRendererEvent, data: Uint8Array | string) => handler(data);
@@ -291,6 +348,22 @@ const api = {
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.off(channel, listener);
     },
+  },
+  terminalState: {
+    /**
+     * Report a transition in the live agent state for a single pane. Fired by
+     * the renderer-side poller in `useTerminalSession`; main forwards the
+     * update into run-store so any worker attempt hosted in that pane carries
+     * the freshest "what is the agent doing" state.
+     *
+     * `paneId` is the same id used for pty:spawn — for Spark workers this is
+     * the attemptId, for manual claude/codex panes it's the leaf id. Main
+     * silently drops reports for panes that have no live WorkerAttempt
+     * attached (manual user panes), so the IPC is safe to call from every
+     * pane the poller is watching.
+     */
+    report: (input: { paneId: string; state: RuntimeState }): Promise<void> =>
+      ipcRenderer.invoke("terminalState:report", input),
   },
   windowControls: {
     minimize: (): Promise<void> => ipcRenderer.invoke("window:minimize"),
@@ -308,11 +381,39 @@ const api = {
   app: {
     platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke("app:platform"),
     home: (): Promise<string> => ipcRenderer.invoke("app:home"),
+    inspectorPreloadUrl: (): Promise<string> =>
+      ipcRenderer.invoke("app:inspectorPreloadUrl"),
+  },
+  ui: {
+    // Tell main which filesystem roots the renderer considers in scope right
+    // now. Main uses this list to gate fs:* read handlers; renderer should
+    // call it on boot and whenever the workspace list changes.
+    setAllowedRoots: (roots: string[]): Promise<void> =>
+      ipcRenderer.invoke("ui:setAllowedRoots", roots),
+    // Tells main which run the user is currently looking at so the
+    // notification module can suppress "run complete" alerts for that run.
+    // Null = no run selected (e.g. the new-chat draft composer).
+    setActiveRun: (id: string | null): Promise<void> =>
+      ipcRenderer.invoke("ui:setActiveRun", id),
   },
   clipboard: {
     readText: (): Promise<string> => ipcRenderer.invoke("clipboard:readText"),
     writeText: (text: string): Promise<void> =>
       ipcRenderer.invoke("clipboard:writeText", text),
+  },
+  updater: {
+    // Subscribe to electron-updater lifecycle events. The returned function
+    // unsubscribes the listener; callers should invoke it in a useEffect
+    // cleanup so the banner component doesn't leak listeners on remount.
+    onEvent: (handler: UpdaterEventHandler): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, event: UpdaterEvent) => handler(event);
+      ipcRenderer.on("updater:event", listener);
+      return () => ipcRenderer.off("updater:event", listener);
+    },
+    // Triggered by the "Restart and install" button after the
+    // update-downloaded event. Main side calls autoUpdater.quitAndInstall()
+    // which quits the app and runs the installer.
+    quitAndInstall: (): Promise<void> => ipcRenderer.invoke("updater:quitAndInstall"),
   },
   inlineAi: {
     complete: (req: {
@@ -416,6 +517,34 @@ ipcRenderer.on("app:open-browser-url", (_event, url: string) => {
   if (typeof url === "string" && isBrowserUrl(url)) {
     dispatchOpenInSparkBrowser(url);
   }
+});
+
+// Replay chord keystrokes from a focused <webview> guest as a synthetic
+// KeyboardEvent on the host window. The main process is the one that
+// observes them via `before-input-event` (a WebContents-only event — the
+// <webview> tag does not surface it) and pushes the relevant fields here.
+// useGlobalShortcuts.ts registers a capture-phase listener on window, so
+// dispatching on window is what makes Ctrl+1, Cmd+P, … keep working when
+// focus is inside an embedded page.
+type WebviewChordKey = {
+  key: string;
+  code?: string;
+  modifiers?: ReadonlyArray<string>;
+};
+ipcRenderer.on("webview:chord-key", (_event, payload: WebviewChordKey) => {
+  if (!payload || typeof payload.key !== "string" || !payload.key) return;
+  const mods = payload.modifiers ?? [];
+  const synth = new KeyboardEvent("keydown", {
+    key: payload.key,
+    code: payload.code ?? "",
+    ctrlKey: mods.includes("ctrl") || mods.includes("control"),
+    shiftKey: mods.includes("shift"),
+    altKey: mods.includes("alt"),
+    metaKey: mods.includes("meta") || mods.includes("cmd"),
+    bubbles: true,
+    cancelable: true,
+  });
+  window.dispatchEvent(synth);
 });
 
 contextBridge.exposeInMainWorld("spark", api);

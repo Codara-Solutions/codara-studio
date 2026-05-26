@@ -146,6 +146,7 @@ function normalizeTerminalTitles(tabs: Tab[]): Tab[] {
   let changed = false;
   const next = tabs.map((tab) => {
     if (tab.kind !== "terminal") return tab;
+    if (tab.scope?.kind === "workers") return tab;
     const key = terminalTitleKey(tab.title);
     if (key && !used.has(key)) {
       used.add(key);
@@ -194,7 +195,13 @@ function loadPersisted(workspaceId: string | null): PersistedShape | null {
     // Runs tabs are derived from the selected chat, not durable workspace
     // layout. Keep persisted editor/terminal/preview tabs, then recreate the
     // Runs tab only when App selects a chat.
-    parsed.tabs = normalizeTerminalTitles(parsed.tabs.filter((tab) => tab.kind !== "runs"));
+    parsed.tabs = normalizeTerminalTitles(
+      parsed.tabs.filter(
+        (tab) =>
+          tab.kind !== "runs" &&
+          !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
+      ),
+    );
     for (const tab of parsed.tabs) {
       if (tab.kind === "terminal") cleanupTransientTerminalState(tab.root);
       if (tab.kind === "runs" && (tab.title === "Runs" || tab.title === "Ops")) tab.title = "Runs";
@@ -232,12 +239,16 @@ function persist(workspaceId: string | null, tabs: Tab[], activeId: TabId | null
 
 function stripTransientTerminalState(tabs: Tab[]): Tab[] {
   let changed = false;
-  const next = tabs.map((tab) => {
-    if (tab.kind !== "terminal") return tab;
+  const next = tabs.flatMap((tab): Tab[] => {
+    if (tab.kind === "terminal" && tab.scope?.kind === "workers") {
+      changed = true;
+      return [];
+    }
+    if (tab.kind !== "terminal") return [tab];
     const root = stripTransientPaneState(tab.root);
-    if (root === tab.root) return tab;
+    if (root === tab.root) return [tab];
     changed = true;
-    return { ...tab, root };
+    return [{ ...tab, root }];
   });
   return changed ? next : tabs;
 }
@@ -323,6 +334,13 @@ export interface UseTabsApi {
       worker?: TerminalLeafWorker | null;
     },
   ) => boolean;
+  ensureWorkerTerminalTab: (
+    runId: string,
+    cwd: string | undefined,
+    paneId: string,
+    worker: TerminalLeafWorker,
+    options?: { focus?: boolean },
+  ) => TabId;
   detachTerminalPaneToNewTab: (tabId: TabId, paneId: string) => TabId | null;
   moveTerminalPane: (
     sourceTabId: TabId,
@@ -342,6 +360,10 @@ export interface UseTabsApi {
     autorun?: string,
   ) => string | null;
   closeTerminalPane: (tabId: TabId, paneId: string) => void;
+  // Flip `zoomedPaneId` for a tab: sets it to `paneId` if currently null or a
+  // different pane, clears it if `paneId` is already the zoomed one. Stored
+  // on the tab so it persists across tab switches.
+  toggleTerminalPaneZoom: (tabId: TabId, paneId: string) => void;
   setActiveTerminalPane: (tabId: TabId, paneId: string) => void;
   setTerminalSplitRatio: (tabId: TabId, path: PanePath, ratio: number) => void;
   setLeafCwd: (tabId: TabId, paneId: string, cwd: string) => void;
@@ -374,6 +396,7 @@ export interface UseTabsApi {
   hideRunsTabs: () => void;
   // Close the runs tab bound to a chat (used when the chat is deleted).
   closeRunsTabFor: (runId: string) => void;
+  closeWorkerTerminalTabFor: (runId: string) => void;
   openEditorTab: (entry: FsEntry, options?: { preview?: boolean }) => TabId;
   pinEditorTab: (id: TabId) => void;
   setEditorEntry: (oldPath: string, entry: FsEntry) => void;
@@ -535,13 +558,16 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
       setTabs((curr) => {
         const target = curr.find((t) => t.id === keepId);
         if (!target) return curr;
-        const removed = curr.filter((t) => t.id !== keepId);
+        const next = curr.filter(
+          (t) => t.id === keepId || (t.kind === "terminal" && t.scope?.kind === "workers"),
+        );
+        const removed = curr.filter((t) => !next.some((kept) => kept.id === t.id));
         for (const t of removed) {
           disposeTerminalTabPanes(t);
           fireDispose(t.id);
         }
         setActiveId(keepId);
-        return normalizeTerminalTitles([target]);
+        return normalizeTerminalTitles(next);
       });
     },
     [fireDispose],
@@ -728,6 +754,71 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
     [],
   );
 
+  const ensureWorkerTerminalTab = useCallback(
+    (
+      runId: string,
+      cwd: string | undefined,
+      paneId: string,
+      worker: TerminalLeafWorker,
+      options?: { focus?: boolean },
+    ): TabId => {
+      const existingId = tabsRef.current.find(
+        (t): t is TerminalTab =>
+          t.kind === "terminal" && t.scope?.kind === "workers" && t.scope.runId === runId,
+      )?.id;
+      const resultId = existingId ?? makeId("term");
+      setTabs((curr) => {
+        const existing = curr.find(
+          (t): t is TerminalTab =>
+            t.kind === "terminal" && t.scope?.kind === "workers" && t.scope.runId === runId,
+        );
+        if (existing) {
+          const hasPane = Boolean(findLeaf(existing.root, paneId));
+          const newLeaf = leaf(paneId, cwd);
+          newLeaf.worker = worker;
+          const root = hasPane
+            ? setLeafField(
+                cwd
+                  ? setLeafField(existing.root, paneId, "cwd", cwd)
+                  : existing.root,
+                paneId,
+                "worker",
+                worker,
+              )
+            : buildPaneGrid([
+                ...collectLeaves(existing.root),
+                newLeaf,
+              ]);
+          return curr.map((tab) =>
+            tab.id === existing.id && tab.kind === "terminal"
+              ? {
+                  ...tab,
+                  title: "workers",
+                  scope: { kind: "workers", runId },
+                  root,
+                  activePaneId: paneId,
+                }
+              : tab,
+          );
+        }
+        const firstLeaf = leaf(paneId, cwd);
+        firstLeaf.worker = worker;
+        const tab: TerminalTab = {
+          id: resultId,
+          kind: "terminal",
+          title: "workers",
+          scope: { kind: "workers", runId },
+          root: firstLeaf,
+          activePaneId: paneId,
+        };
+        return [...curr, tab];
+      });
+      if (options?.focus === true) setActiveId(resultId);
+      return resultId;
+    },
+    [],
+  );
+
   const detachTerminalPaneToNewTab = useCallback(
     (tabId: TabId, paneId: string): TabId | null => {
       const currentSource = tabsRef.current.find(
@@ -891,7 +982,9 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
             // current shell directory rather than dropping back to project root.
             newLeaf,
           );
-          return { ...t, root, activePaneId: fresh };
+          // Splitting a zoomed pane unzooms (the other panes need to be
+          // visible again so the new split is meaningful).
+          return { ...t, root, activePaneId: fresh, zoomedPaneId: null };
         }),
       );
       return newPaneId;
@@ -927,7 +1020,11 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
             const fallback = nextLeafAfter(root, paneId);
             activePaneId = fallback?.paneId ?? activePaneId;
           }
-          next.push({ ...t, root, activePaneId });
+          // If the closing pane was the zoomed one, drop the zoom so the
+          // restored layout shows everything. (Closing a non-zoomed pane
+          // while another is zoomed leaves the zoom intact.)
+          const zoomedPaneId = t.zoomedPaneId === paneId ? null : t.zoomedPaneId;
+          next.push({ ...t, root, activePaneId, zoomedPaneId });
         }
         if (next.length === 0) {
           // Restoring the seed tab keeps the workbench from rendering an
@@ -956,6 +1053,24 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
           if (t.activePaneId === paneId) return t;
           if (!findLeaf(t.root, paneId)) return t;
           return { ...t, activePaneId: paneId };
+        }),
+      );
+    },
+    [],
+  );
+
+  // Toggle the per-tab zoom: a second click on the same pane unzooms;
+  // pressing zoom on a different pane re-zooms onto that pane. The split
+  // tree and its ratios are untouched, so unzoom restores the exact layout.
+  const toggleTerminalPaneZoom = useCallback(
+    (tabId: TabId, paneId: string) => {
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          if (!findLeaf(t.root, paneId)) return t;
+          const next = t.zoomedPaneId === paneId ? null : paneId;
+          if ((t.zoomedPaneId ?? null) === next) return t;
+          return { ...t, zoomedPaneId: next, activePaneId: paneId };
         }),
       );
     },
@@ -1185,6 +1300,29 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
     [fireDispose],
   );
 
+  const closeWorkerTerminalTabFor = useCallback((runId: string) => {
+    setTabs((curr) => {
+      const idx = curr.findIndex(
+        (t) => t.kind === "terminal" && t.scope?.kind === "workers" && t.scope.runId === runId,
+      );
+      if (idx === -1) return curr;
+      const tabId = curr[idx].id;
+      disposeTerminalTabPanes(curr[idx]);
+      if (curr.length <= 1) {
+        const seed = defaultTabs(defaultCwdRef.current);
+        setActiveId(seed[0].id);
+        return seed;
+      }
+      const next = curr.filter((_, i) => i !== idx);
+      setActiveId((active) =>
+        active === tabId
+          ? next[Math.max(0, idx - 1)]?.id ?? next[0]?.id ?? null
+          : active,
+      );
+      return normalizeTerminalTitles(next);
+    });
+  }, []);
+
   const openEditorTab = useCallback((entry: FsEntry, options?: { preview?: boolean }): TabId => {
     // The setter is invoked synchronously by React, so reading `outId`
     // back after `setTabs` returns is safe. TypeScript can't see through
@@ -1332,10 +1470,12 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
       newTerminalGrid,
       addAgentGridToTab,
       addBalancedPaneToTab,
+      ensureWorkerTerminalTab,
       detachTerminalPaneToNewTab,
       moveTerminalPane,
       splitTerminalPane,
       closeTerminalPane,
+      toggleTerminalPaneZoom,
       setActiveTerminalPane,
       setTerminalSplitRatio,
       setLeafCwd,
@@ -1347,6 +1487,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
       openRunsTab,
       hideRunsTabs,
       closeRunsTabFor,
+      closeWorkerTerminalTabFor,
       openEditorTab,
       pinEditorTab,
       setEditorEntry,

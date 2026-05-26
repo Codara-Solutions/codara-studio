@@ -4,6 +4,8 @@ import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import type { WebContents } from "electron";
 import type { ShellInfo } from "@shared/types";
+import { injectEnrichedPath } from "./path-reconstruction";
+import { getHookRpcEnvSafe } from "./hook-rpc";
 
 interface Session {
   id: string;
@@ -19,6 +21,29 @@ interface Session {
   flushTimer: NodeJS.Timeout | null;
   resizedAt: number;
   exited: boolean;
+  // Ring buffer of the most recent raw pty bytes for this session, used by
+  // the agent-socket terminal.read RPC so a sibling sub-agent can peek at
+  // another worker's output without going through the renderer's xterm
+  // scrollback. Capped at TAIL_BUFFER_BYTES to keep RAM bounded.
+  tail: Buffer[];
+  tailBytes: number;
+  // Whether the renderer has a live IPC listener bound to this session. When
+  // the renderer-side TerminalPane unmounts during a workspace switch, it
+  // calls pause(id), which flips this to false. enqueueData then diverts
+  // bytes into detachedBacklog instead of webContents.send (which would be
+  // dropped on receipt with no listener). On reattach the renderer calls
+  // resume(id), which drains the backlog through webContents.send first and
+  // flips back to true so live data resumes normally. Default true — fresh
+  // sessions are always attached at spawn time.
+  attached: boolean;
+  // Bytes emitted by the pty while attached=false. Replayed once on resume
+  // so the user sees everything the agent printed during the detached window
+  // (typical case: a Claude run that kept streaming while the user was in
+  // another workspace). Capped at DETACHED_BACKLOG_BYTES with FIFO trim —
+  // worst case the very oldest bytes of a long detachment fall off, which
+  // is fine since the in-memory xterm snapshot covers the pre-unmount era.
+  detachedBacklog: Buffer[];
+  detachedBacklogBytes: number;
 }
 
 const sessions = new Map<string, Session>();
@@ -39,6 +64,26 @@ const GRACE_MS = 250;
 
 const FLUSH_MS = 16;
 const MAX_BUFFER_BYTES = 96_000;
+// Per-session tail buffer cap. 64 KB is enough for a few thousand text-mode
+// terminal lines (well past the 40-line agent-state-detection window) while
+// staying cheap in idle RAM even with many concurrent worker panes.
+const TAIL_BUFFER_BYTES = 64 * 1024;
+// Per-session cap for bytes held while the renderer is detached (workspace
+// switched away). 2 MB covers a long Claude streaming response plus its
+// tool output without putting an unbounded amount of dead PTY data into
+// process memory. FIFO-trimmed past the cap.
+const DETACHED_BACKLOG_BYTES = 2 * 1024 * 1024;
+
+// Env vars that agent-socket asks pty-manager to inject into every spawned
+// pty. Populated from src/main/index.ts via setAgentSocketEnv() once the
+// socket server is listening; sub-agent CLIs running inside the pty read
+// these to dial back into Spark over JSON-RPC.
+let agentSocketEnv: { url: string; token: string } | null = null;
+
+/** Called by agent-socket once its HTTP server is listening. */
+export function setAgentSocketEnv(env: { url: string; token: string } | null): void {
+  agentSocketEnv = env;
+}
 
 // Some shells run user-profile work that writes shared on-disk caches at
 // startup (Terminal-Icons calls Export-Clixml on its theme files every time
@@ -201,6 +246,13 @@ function doSpawn(
   delete env.NODE_DISABLE_COLORS;
   delete env.NODE_NO_READLINE;
 
+  // Replace the inherited (potentially sparse — Electron-from-Finder/Dock
+  // strips a lot of user PATH entries) PATH with the enriched value built
+  // at app startup from the user's login shell / Windows registry. The
+  // cache is warmed in src/main/index.ts; on a cold call we just see the
+  // process.env PATH fallback, which is no worse than today.
+  injectEnrichedPath(env);
+
   // Per-shell env overrides (e.g. integrated strip shells set ZDOTDIR /
   // SPARK_USER_ZDOTDIR so the bundled zshrc loads the user's existing
   // config, and SPARK_TERMINAL=1 so subprocesses can detect they're in a
@@ -217,6 +269,34 @@ function doSpawn(
     for (const [k, v] of Object.entries(opts.env)) {
       if (typeof v === "string") env[k] = v;
     }
+  }
+  // Hook RPC env (big-bet "Hook contract for sub-agents to self-report").
+  // Layered LAST so the values main process owns (URL, token) can't be
+  // accidentally overridden by a caller — every worker pty sees the same
+  // URL + token, and a per-pane SPARK_PANE_ID equal to the pty's session id.
+  // getHookRpcEnvSafe returns null in headless eval mode or before
+  // startHookRpc has run, in which case workers spawn without the env block
+  // and the regex-tail fallback (big bet A) takes over.
+  const hookEnv = getHookRpcEnvSafe(opts.id);
+  if (hookEnv) {
+    env.SPARK_HOOK_URL = hookEnv.SPARK_HOOK_URL;
+    env.SPARK_HOOK_TOKEN = hookEnv.SPARK_HOOK_TOKEN;
+    env.SPARK_PANE_ID = hookEnv.SPARK_PANE_ID;
+  }
+
+  // Agent-socket handshake. Every pty we spawn — user panes and worker panes
+  // alike — gets SPARK_AGENT_SOCKET + SPARK_AGENT_TOKEN so any sub-agent CLI
+  // running inside the pty can dial back into Spark over JSON-RPC. The
+  // socket is localhost-only and token-protected (see src/main/agent-socket.ts),
+  // so exposing the env vars to user panes does not widen the trust surface
+  // beyond "any local process the user already trusted with a shell prompt".
+  if (agentSocketEnv) {
+    env.SPARK_AGENT_SOCKET = agentSocketEnv.url;
+    env.SPARK_AGENT_TOKEN = agentSocketEnv.token;
+    // Best-effort hint to sub-agents about which pty they're running in.
+    // Lets terminal.read RPC default to "read my own tail" if a CLI ever
+    // wants that, without forcing the caller to know its own attemptId.
+    env.SPARK_AGENT_PANE_ID = opts.id;
   }
 
   const cwd =
@@ -265,6 +345,11 @@ function doSpawn(
     flushTimer: null,
     resizedAt: 0,
     exited: false,
+    tail: [],
+    tailBytes: 0,
+    attached: true,
+    detachedBacklog: [],
+    detachedBacklogBytes: 0,
   };
 
   pty.onData((data: string | Buffer) => enqueueData(opts.id, data));
@@ -402,6 +487,32 @@ function enqueueData(id: string, data: string | Buffer): void {
       }
     }
   }
+  // Tail ring buffer for agent-socket terminal.read. Append, then trim from
+  // the head until total bytes fit under TAIL_BUFFER_BYTES. Whole chunks are
+  // dropped at a time to keep this O(1) per write — we accept a small amount
+  // of slop above the cap until the next write trims it again.
+  s.tail.push(chunk);
+  s.tailBytes += chunk.length;
+  while (s.tail.length > 1 && s.tailBytes - (s.tail[0]?.length ?? 0) > TAIL_BUFFER_BYTES) {
+    const dropped = s.tail.shift();
+    if (dropped) s.tailBytes -= dropped.length;
+  }
+  // Renderer is detached (workspace switched away) — divert into the backlog
+  // instead of the pending flush queue. The backlog is replayed in one shot
+  // when the renderer reattaches; sending via webContents.send while the
+  // renderer-side IPC listener is unbound would drop the bytes on the floor.
+  if (!s.attached) {
+    s.detachedBacklog.push(chunk);
+    s.detachedBacklogBytes += chunk.length;
+    while (
+      s.detachedBacklog.length > 1 &&
+      s.detachedBacklogBytes - (s.detachedBacklog[0]?.length ?? 0) > DETACHED_BACKLOG_BYTES
+    ) {
+      const dropped = s.detachedBacklog.shift();
+      if (dropped) s.detachedBacklogBytes -= dropped.length;
+    }
+    return;
+  }
   s.pendingChunks.push(chunk);
   s.pendingBytes += chunk.length;
 
@@ -415,6 +526,65 @@ function enqueueData(id: string, data: string | Buffer): void {
     s.flushTimer = null;
     flushDataNow(s);
   }, FLUSH_MS);
+}
+
+// Called by the renderer when a TerminalPane unmounts (workspace switch). Any
+// pty bytes that arrive while paused are diverted into detachedBacklog and
+// replayed on resume. Idempotent: re-pausing an already-paused session is a
+// no-op. Pending chunks queued for the next 16 ms flush are absorbed into the
+// backlog so the small window between cleanup and pause is not lost.
+export function pause(id: string): void {
+  const s = sessions.get(id);
+  if (!s) return;
+  if (!s.attached) return;
+  s.attached = false;
+  if (s.pendingChunks.length > 0) {
+    for (const chunk of s.pendingChunks) {
+      s.detachedBacklog.push(chunk);
+      s.detachedBacklogBytes += chunk.length;
+    }
+    s.pendingChunks = [];
+    s.pendingBytes = 0;
+    while (
+      s.detachedBacklog.length > 1 &&
+      s.detachedBacklogBytes - (s.detachedBacklog[0]?.length ?? 0) > DETACHED_BACKLOG_BYTES
+    ) {
+      const dropped = s.detachedBacklog.shift();
+      if (dropped) s.detachedBacklogBytes -= dropped.length;
+    }
+  }
+  if (s.flushTimer) {
+    clearTimeout(s.flushTimer);
+    s.flushTimer = null;
+  }
+}
+
+// Called by the renderer when a TerminalPane (re)mounts. Drains the
+// detachedBacklog through the same webContents.send channel as live data so
+// the onData listener receives the missed bytes in arrival order, then flips
+// `attached` back to true so subsequent pty output resumes the normal flush
+// path. Safe to call on a fresh session (no backlog, attached already true).
+export function resume(id: string): void {
+  const s = sessions.get(id);
+  if (!s) return;
+  if (
+    s.detachedBacklog.length > 0 &&
+    s.webContents &&
+    !s.webContents.isDestroyed()
+  ) {
+    const total = s.detachedBacklogBytes;
+    const merged =
+      s.detachedBacklog.length === 1
+        ? s.detachedBacklog[0]
+        : Buffer.concat(s.detachedBacklog, total);
+    s.webContents.send(
+      s.dataChannel,
+      new Uint8Array(merged.buffer, merged.byteOffset, merged.byteLength),
+    );
+  }
+  s.detachedBacklog = [];
+  s.detachedBacklogBytes = 0;
+  s.attached = true;
 }
 
 function flushDataNow(s: Session): void {
@@ -447,6 +617,27 @@ export function write(id: string, data: string): void {
   const s = sessions.get(id);
   if (!s) return;
   s.pty.write(data);
+}
+
+// Inject text as a bracketed paste (CSI 200~ ... CSI 201~) followed by an
+// optional submit (CR). Every "write to a running CLI" feature needs this —
+// element inspector, drag-drop file paths, slash commands, persona
+// injection — so they all go through the same node-pty path as user input.
+//
+// Sanitization: ConPTY corrupts NULs in its input stream, so they're stripped.
+// vibeyard's helper also gates on the terminal having advertised ?2004h
+// (bracketed-paste mode); we skip that subtlety here because every modern
+// interactive shell (bash, zsh, fish, pwsh+PSReadLine) enables it by default,
+// and TUIs like claude/codex treat the escape pair as a no-op if they ignore
+// it. If a future caller targets a non-interactive shell that doesn't honor
+// bracketed paste, the escapes will be echoed verbatim and that's the bug to
+// fix at the call site, not here.
+export function inject(id: string, text: string, opts?: { submit?: boolean }): void {
+  if (!sessions.has(id)) return;
+  const sanitized = text.replace(/\x00/g, "");
+  write(id, `\x1b[200~${sanitized}\x1b[201~`);
+  const submit = opts?.submit ?? true;
+  if (submit) write(id, "\r");
 }
 
 export function resize(id: string, cols: number, rows: number): void {
@@ -506,6 +697,22 @@ export function waitForResize(id: string, timeoutMs: number): Promise<boolean> {
     };
     tick();
   });
+}
+
+// Snapshot the recent raw bytes of a session's tail buffer. Used by the
+// agent-socket terminal.read RPC so a sibling sub-agent can sample another
+// worker's output. Returns up to maxBytes from the end (clamped to the
+// per-session ring buffer size — see TAIL_BUFFER_BYTES). Returns null when
+// the session doesn't exist so the caller can distinguish "no data yet" from
+// "unknown pane".
+export function readTail(id: string, maxBytes: number): Buffer | null {
+  const s = sessions.get(id);
+  if (!s) return null;
+  const cap = Math.max(0, Math.min(maxBytes | 0, TAIL_BUFFER_BYTES));
+  if (cap === 0 || s.tail.length === 0) return Buffer.alloc(0);
+  const merged = s.tail.length === 1 ? s.tail[0] : Buffer.concat(s.tail, s.tailBytes);
+  if (merged.length <= cap) return merged;
+  return merged.subarray(merged.length - cap);
 }
 
 // Subscribe to the raw byte stream of a session. Returns an unsubscribe fn.
@@ -621,5 +828,9 @@ function killNow(id: string): void {
     }
   }
   if (s.flushTimer) clearTimeout(s.flushTimer);
+  s.tail = [];
+  s.tailBytes = 0;
+  s.detachedBacklog = [];
+  s.detachedBacklogBytes = 0;
   sessions.delete(id);
 }

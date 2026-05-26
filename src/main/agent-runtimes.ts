@@ -1,191 +1,76 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { platform } from "node:os";
 import type {
   AgentEffortLevel,
   AgentRuntimeDiagnostic,
   AgentRuntimeKind,
-  AgentRuntimeModel,
   AgentRuntimeSelection,
   AppSettings,
 } from "@shared/types";
+
+import { listProviders } from "./providers";
+import type { CliProvider } from "./providers/types";
 
 const execFileAsync = promisify(execFile);
 
 const VERSION_TIMEOUT_MS = 4000;
 
-// Neither Claude Code CLI nor Codex CLI exposes a `--list-models` command, so
-// we hardcode the capability map here. Update this when new model aliases or
-// effort levels ship.
-const CLAUDE_MODELS: AgentRuntimeModel[] = [
-  {
-    id: "claude-opus-4-7",
-    label: "Opus 4.7",
-    effortLevels: ["low", "medium", "high", "xhigh", "max"],
-    isDefault: true,
-  },
-  {
-    id: "claude-sonnet-4-6",
-    label: "Sonnet 4.6",
-    effortLevels: ["low", "medium", "high", "max"],
-  },
-  {
-    id: "claude-haiku-4-5",
-    label: "Haiku 4.5",
-    effortLevels: ["low", "medium", "high"],
-  },
-];
-
-// Source: Cursor CLI (May 2026). Spark only uses composer-2.5-fast — it is
-// peer-quality (≈ opus-4-7-max ≈ gpt-5.5) but materially faster. Older
-// Composer revisions are intentionally NOT exposed: there is no reason to
-// downgrade the runtime to a slower or weaker model. Cursor CLI does not
-// expose reasoning-effort levels.
-const CURSOR_MODELS: AgentRuntimeModel[] = [
-  {
-    id: "composer-2.5-fast",
-    label: "Composer 2.5 Fast",
-    effortLevels: ["medium"],
-    isDefault: true,
-  },
-];
-
-// Source: https://developers.openai.com/codex/models (May 2026).
-// Effort levels: https://developers.openai.com/codex/config-reference —
-// `model_reasoning_effort` accepts minimal | low | medium | high | xhigh,
-// with the docs noting "xhigh is model-dependent". gpt-5.5 is ChatGPT-login
-// only; the rest work via API key too. gpt-5.3-codex-spark is a research
-// preview gated to ChatGPT Pro.
-const CODEX_MODELS: AgentRuntimeModel[] = [
-  {
-    id: "gpt-5.5",
-    label: "GPT-5.5",
-    effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
-    isDefault: true,
-  },
-  {
-    id: "gpt-5.4",
-    label: "GPT-5.4",
-    effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
-  },
-  {
-    id: "gpt-5.4-mini",
-    label: "GPT-5.4 mini",
-    effortLevels: ["minimal", "low", "medium", "high"],
-  },
-  {
-    id: "gpt-5.3-codex",
-    label: "GPT-5.3-Codex",
-    effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
-  },
-  {
-    id: "gpt-5.3-codex-spark",
-    label: "GPT-5.3-Codex-Spark",
-    effortLevels: ["minimal", "low", "medium", "high"],
-  },
-];
-
-interface RuntimeSpec {
-  kind: AgentRuntimeKind;
-  label: string;
-  executable: string;
-  versionArgs: string[];
-  models: AgentRuntimeModel[];
-  installHint: string;
-  recommendedWorkerCommand(model: AgentRuntimeModel, effort: AgentEffortLevel): string;
-}
-
-const RUNTIMES: RuntimeSpec[] = [
-  {
-    kind: "claude",
-    label: "Claude Code",
-    executable: "claude",
-    versionArgs: ["--version"],
-    models: CLAUDE_MODELS,
-    installHint: "Install with: npm i -g @anthropic-ai/claude-code  (then run `claude` once to log in)",
-    recommendedWorkerCommand: (model, effort) =>
-      `claude --dangerously-skip-permissions --model ${model.id} --effort ${effort}`,
-  },
-  {
-    kind: "codex",
-    label: "Codex CLI",
-    executable: "codex",
-    versionArgs: ["--version"],
-    models: CODEX_MODELS,
-    installHint: "Install with: npm i -g @openai/codex-cli  (then run `codex` once to log in)",
-    recommendedWorkerCommand: (model, effort) =>
-      `codex --yolo -m ${model.id} -c "model_reasoning_effort=${effort}"`,
-  },
-  {
-    kind: "cursor",
-    label: "Cursor Agent",
-    executable: "agent",
-    versionArgs: ["--version"],
-    models: CURSOR_MODELS,
-    installHint: "Install with: curl https://cursor.com/install -fsS | bash  (then run `agent login`)",
-    recommendedWorkerCommand: (model) =>
-      `agent --yolo --model ${model.id}`,
-  },
-];
-
-async function findOnPath(executable: string): Promise<string | null> {
-  const lookup = platform() === "win32" ? "where" : "which";
-  try {
-    const { stdout } = await execFileAsync(lookup, [executable], {
-      windowsHide: true,
-      timeout: VERSION_TIMEOUT_MS,
-    });
-    const first = stdout.split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-    return first ?? null;
-  } catch {
-    return null;
-  }
-}
-
 async function probeVersion(
   executable: string,
   args: string[],
-): Promise<{ version: string | null; error: string | null }> {
+): Promise<{ output: string | null; error: string | null }> {
   try {
     const { stdout, stderr } = await execFileAsync(executable, args, {
       windowsHide: true,
       timeout: VERSION_TIMEOUT_MS,
     });
     const out = (stdout || stderr).trim();
-    return { version: out || null, error: null };
+    return { output: out || null, error: null };
   } catch (err) {
-    return { version: null, error: (err as Error).message };
+    return { output: null, error: (err as Error).message };
   }
 }
 
-async function diagnoseRuntime(spec: RuntimeSpec): Promise<AgentRuntimeDiagnostic> {
-  const executablePath = await findOnPath(spec.executable);
+async function diagnoseProvider(provider: CliProvider): Promise<AgentRuntimeDiagnostic> {
+  // Use the binary resolver so installs that aren't on the inherited PATH
+  // (npm-global behind a sparse Electron-from-Finder PATH, scoop shims,
+  // nvm versions, etc.) still get found. The resolver internally falls
+  // through which/where -> npm prefix -g -> common install dirs and caches
+  // hits per-name.
+  const executablePath = await provider.resolveBinary();
   const installed = executablePath !== null;
   let version: string | null = null;
   let versionError: string | null = null;
   if (installed) {
-    const probe = await probeVersion(spec.executable, spec.versionArgs);
-    version = probe.version;
+    // Prefer the absolute path for version probing so we hit the same binary
+    // we just resolved, even if PATH lookup would have found a different
+    // install. The exec call still applies its own timeout.
+    const probe = await probeVersion(executablePath!, provider.versionArgs);
+    version = probe.output ? provider.parseVersion(probe.output) : null;
     versionError = probe.error;
   }
-  const defaultModel = spec.models.find((m) => m.isDefault) ?? spec.models[0];
+  const defaultModel =
+    provider.models.find((m) => m.isDefault) ?? provider.models[0];
   const defaultEffort: AgentEffortLevel = defaultModel?.effortLevels.includes("medium")
     ? "medium"
     : (defaultModel?.effortLevels[0] ?? "medium");
   const recommendedWorkerCommand =
-    installed && defaultModel ? spec.recommendedWorkerCommand(defaultModel, defaultEffort) : null;
+    installed && defaultModel
+      ? provider.recommendedWorkerCommand(defaultModel, defaultEffort)
+      : null;
 
   return {
-    kind: spec.kind,
-    label: spec.label,
+    kind: provider.id,
+    label: provider.displayName,
     installed,
     executablePath,
     version,
     versionError,
-    models: spec.models,
+    models: provider.models,
     recommendedWorkerCommand,
-    installHint: spec.installHint,
+    installHint: provider.installHint,
     lastCheckedAt: new Date().toISOString(),
+    capabilities: provider.capabilities,
   };
 }
 
@@ -201,10 +86,11 @@ export async function detectAgentRuntimes(force = false): Promise<AgentRuntimeDi
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean);
+  const providers = listProviders();
   const value = await Promise.all(
-    RUNTIMES.map(async (spec) => {
-      const diag = await diagnoseRuntime(spec);
-      if (masked.includes(spec.kind.toLowerCase())) {
+    providers.map(async (provider) => {
+      const diag = await diagnoseProvider(provider);
+      if (masked.includes(provider.id.toLowerCase())) {
         return { ...diag, installed: false, version: null };
       }
       return diag;
@@ -232,7 +118,9 @@ export function applyAgentRuntimeSettings(
   });
 }
 
-const ALL_RUNTIMES: readonly AgentRuntimeKind[] = ["claude", "codex", "cursor"];
+// The runtime kinds Spark recognizes today. Derived from the provider
+// registry so adding a new provider automatically expands this set.
+const ALL_RUNTIMES: readonly AgentRuntimeKind[] = listProviders().map((p) => p.id);
 
 export function enabledAgentRuntimeKinds(
   selection: AgentRuntimeSelection = "auto",

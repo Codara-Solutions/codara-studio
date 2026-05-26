@@ -1,5 +1,6 @@
 import type {
   HumanRunMessage,
+  RuntimeState,
   SparkCall,
   RunState,
   StepStatus,
@@ -20,6 +21,15 @@ export interface ChatWorker {
   title: string;
   runtime: WorkerRuntime;
   status: WorkerTaskStatus;
+  /**
+   * Live agent state sniffed by the renderer-side terminal poller for the
+   * most recent attempt of this task. `undefined` means the poller hasn't
+   * reported anything yet (run hasn't started, headless eval, or the agent
+   * launched too recently for the 2-tick confirmation). Drives the dot
+   * tone in the worker chip; the existing `status` field still governs
+   * whether the chip is shown.
+   */
+  runtimeState?: RuntimeState;
 }
 
 export interface ChatToolFile {
@@ -125,6 +135,18 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
     items.push(workerAttemptTimelineItem(attempt, taskById.get(attempt.workerTaskId), run.createdAt));
   }
 
+  // Build a "latest attempt per task" map once so the per-step mapper below
+  // doesn't redo this scan for every step. Attempts are keyed by workerTaskId
+  // and we keep the one with the highest attemptNumber — that's the one whose
+  // pty is currently on screen (older attempts have either finished or were
+  // disposed when the task was retried).
+  const latestAttemptByTask = new Map<string, WorkerAttempt>();
+  for (const attempt of run.workerAttempts) {
+    const prior = latestAttemptByTask.get(attempt.workerTaskId);
+    if (!prior || attempt.attemptNumber > prior.attemptNumber) {
+      latestAttemptByTask.set(attempt.workerTaskId, attempt);
+    }
+  }
   const orderedSteps = [...run.steps].sort((a, b) => a.index - b.index);
   orderedSteps.forEach((step, i) => {
     const workers: ChatWorker[] = run.workerTasks
@@ -134,6 +156,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
         title: task.title,
         runtime: task.runtimePreference,
         status: task.status,
+        runtimeState: latestAttemptByTask.get(task.id)?.runtimeState,
       }));
     items.push({
       kind: "step",
@@ -423,7 +446,14 @@ export function findOpenQuestion(run: RunState): HumanRunMessage | null {
   return null;
 }
 
-export type ChatStatusTone = "live" | "paused" | "blocked" | "done" | "failed" | "idle";
+export type ChatStatusTone =
+  | "live"
+  | "paused"
+  | "blocked"
+  | "done"
+  | "done-unseen"
+  | "failed"
+  | "idle";
 
 export interface ChatStatus {
   label: string;
@@ -451,12 +481,17 @@ export function describeRunStatus(run: RunState): ChatStatus {
       return { label: "Paused", tone: "paused", detail: stepDetail };
     case "blocked":
       return { label: "Needs you", tone: "blocked", detail: "waiting on a reply" };
-    case "complete":
+    case "complete": {
+      // Done-unseen surfaces in teal so a run that finished while the user
+      // was elsewhere visually pops out from already-acknowledged green
+      // runs. The flag flips to true on focus — see `markRunSeen`.
+      const seen = run.seen === true;
       return {
         label: "Done",
-        tone: "done",
+        tone: seen ? "done" : "done-unseen",
         detail: total > 0 ? `${total} steps` : undefined,
       };
+    }
     case "failed":
       return { label: "Failed", tone: "failed" };
     case "cancelled":
@@ -473,14 +508,56 @@ export function statusToneColor(tone: ChatStatusTone): string {
     case "paused":
       return "var(--info)";
     case "blocked":
-      return "var(--warn)";
+      // Steady red — distinct from `failed`'s --danger because blocked dots
+      // never animate (see ChatPanel/ChatRow), while failed rows render the
+      // same hue with their own ambient styling.
+      return "var(--danger)";
     case "done":
       return "var(--ok)";
+    case "done-unseen":
+      // Teal: "finished while you were elsewhere". --info is the closest
+      // existing token across every theme (it's a cool blue/teal). It reads
+      // clearly different from --ok (green, done-seen) and --accent (warm).
+      return "var(--info)";
     case "failed":
       return "var(--danger)";
     default:
       return "var(--muted)";
   }
+}
+
+// Priority ranking used by `workspaceAttentionPriority` to roll multiple
+// chats up to one "what should I look at first" signal per workspace.
+// Higher value wins. The buckets are intentionally coarse — a single
+// done-unseen chat outranks any number of live/done-seen ones because
+// "needs your eyes" trumps "still running".
+const ATTENTION_PRIORITY: Record<ChatStatusTone, number> = {
+  blocked: 4,
+  "done-unseen": 3,
+  live: 2,
+  done: 1,
+  paused: 1,
+  failed: 0,
+  idle: 0,
+};
+
+// Workspace-level "what should I look at first" signal. Computes the max
+// attention priority across the given run list (one chat per run).
+//
+// Usage:
+//   const priority = workspaceAttentionPriority(runs.filter(r => r.workspaceId === ws.id));
+//   if (priority > 0) renderBadge();
+//
+// Returns 0 when there are no chats or none of them want attention. Pure
+// function; safe to call inside a render.
+export function workspaceAttentionPriority(runs: RunState[]): number {
+  let max = 0;
+  for (const run of runs) {
+    const tone = describeRunStatus(run).tone;
+    const value = ATTENTION_PRIORITY[tone] ?? 0;
+    if (value > max) max = value;
+  }
+  return max;
 }
 
 export function stepStatusColor(status: StepStatus): string {

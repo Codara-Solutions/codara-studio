@@ -13,6 +13,25 @@ export interface ShellInfo {
   env?: Record<string, string>;
 }
 
+// Self-reported state from a sub-agent via the hook RPC contract (big bet
+// "Hook contract for sub-agents to self-report"). A worker can be:
+//   working — the agent is mid-turn doing actual work
+//   blocked — the agent is waiting on a permission prompt / human input
+//   idle    — the agent has nothing to do but is still alive
+//   done    — the agent has finished its task
+// When a hook report is present it wins over any tail-text regex detection
+// (big bet A), which is intentionally the fallback for CLIs that can't or
+// don't talk to the hook endpoint. Optional + tolerant of being filled in
+// from multiple sources.
+//
+// Historical aliasing: big bet A (state-detection / regex tail poller)
+// introduced `RuntimeState` and big bet E1 (hook-contract) introduced
+// `WorkerRuntimeState` with the same union. We keep `RuntimeState` as the
+// canonical name and `WorkerRuntimeState` as a thin alias so the legacy
+// callers in hook-rpc / run-store keep compiling without churn. New code
+// should reach for `RuntimeState`.
+export type WorkerRuntimeState = RuntimeState;
+
 export interface Worker {
   id: string;
   name?: string;
@@ -22,6 +41,16 @@ export interface Worker {
   runId?: string;
   workerTaskId?: string;
   attemptId?: string;
+  // Self-reported runtime state from the worker process via the hook RPC.
+  // Authoritative over regex-tail detection when set. Last update wins.
+  runtimeState?: WorkerRuntimeState;
+  // Free-form note from the worker explaining the current state (e.g. the
+  // permission prompt text, or "running tests"). Optional; surfaced in
+  // logs/UI when present.
+  runtimeStateNote?: string;
+  // ISO timestamp of the most recent hook report so the UI can decide
+  // whether the state is fresh.
+  runtimeStateAt?: string;
 }
 
 export interface Workspace {
@@ -131,6 +160,19 @@ export const EDITOR_THEME_IDS: readonly EditorThemeId[] = [
 //   - missing → use defaults
 export type KeybindingOverridesPref = Record<string, string | null>;
 
+// Per-channel toggles for the four-channel notification system. Each
+// channel fires independently when an alert trigger fires; toggling one
+// off means that specific channel stays silent even if the others fire.
+// The 3-rule policy (suppress when focused on the run that needs you,
+// never on no-change, alert on blocked + on complete-when-not-watching)
+// gates ALL channels before they are even consulted.
+export interface NotificationChannelsPref {
+  inApp: boolean;
+  native: boolean;
+  sound: boolean;
+  osCues: boolean;
+}
+
 export interface AppPreferences {
   theme: ThemePref;
   vimMode: boolean;
@@ -146,6 +188,11 @@ export interface AppPreferences {
   // with integrated GPUs. Requires restart because Chromium only checks the
   // flag once during process startup.
   disableHardwareAcceleration?: boolean;
+  // Per-channel notification toggles. Source of truth for which channels
+  // fire when an orchestration event matches the alert policy. Legacy
+  // `notifications: { enabled, sounds }` blobs from older spark-preferences
+  // files are read at migration time and folded into these flags.
+  notificationChannels: NotificationChannelsPref;
 }
 
 export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "google/gemini-3.5-flash";
@@ -216,6 +263,13 @@ export const INLINE_AI_DELAY_PRESETS: ReadonlyArray<{
   },
 ];
 
+export const DEFAULT_NOTIFICATION_CHANNELS: NotificationChannelsPref = {
+  inApp: true,
+  native: true,
+  sound: true,
+  osCues: true,
+};
+
 export const DEFAULT_PREFERENCES: AppPreferences = {
   theme: "spark-classic",
   vimMode: false,
@@ -225,7 +279,26 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   inlineAutocompleteModelId: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
   keybindings: {},
   disableHardwareAcceleration: false,
+  notificationChannels: { ...DEFAULT_NOTIFICATION_CHANNELS },
 };
+
+// Discriminated payload for the in-app toast IPC channel. `kind` drives the
+// toast colour: blocked → danger red, complete → success/info teal. `runId`
+// lets the renderer route a click to "select run" so the user can jump
+// straight to the chat that needs them.
+export type InAppNotificationKind = "blocked" | "complete";
+
+export interface InAppNotificationPayload {
+  id: string;
+  kind: InAppNotificationKind;
+  title: string;
+  body: string;
+  runId?: string;
+  workspaceId?: string;
+  createdAt: string;
+}
+
+export type NotificationSoundKind = "needs-you" | "done";
 
 export type PrefKey = keyof AppPreferences;
 
@@ -259,6 +332,26 @@ export interface AgentRuntimeModel {
   isDefault?: boolean;
 }
 
+// Per-runtime feature flags. Different CLIs expose different capabilities
+// (Codex doesn't surface cost or context-window data, Cursor doesn't support
+// hook status or planMode, etc.). Renderer code uses these flags via the
+// <Capability /> wrapper to conditionally render runtime-specific UI.
+export interface AgentRuntimeCapabilities {
+  sessionResume: boolean;
+  costTracking: boolean;
+  contextWindow: boolean;
+  hookStatus: boolean;
+  shiftEnterNewline: boolean;
+  planModeArg: boolean;
+  systemPromptInjection: boolean;
+  defaultContextWindowSize: number;
+}
+
+export type AgentRuntimeCapability = keyof Omit<
+  AgentRuntimeCapabilities,
+  "defaultContextWindowSize"
+>;
+
 export interface AgentRuntimeDiagnostic {
   kind: AgentRuntimeKind;
   label: string;
@@ -272,6 +365,7 @@ export interface AgentRuntimeDiagnostic {
   recommendedWorkerCommand: string | null;
   installHint: string;
   lastCheckedAt: string;
+  capabilities: AgentRuntimeCapabilities;
 }
 
 export interface AgentSyncResult {
@@ -542,6 +636,23 @@ export type WorkerAttemptStatus =
   | "timed_out"
   | "cancelled";
 
+// Live agent state, sniffed by the renderer-side terminal poller (300ms tick,
+// 2-tick confirm). Orthogonal to WorkerAttemptStatus — that lifecycle is owned
+// by orchestration, this one mirrors what the agent's TUI is doing right now
+// inside its pane. Used to drive the worker chip tone (live spinner vs steady
+// red vs unseen-done) and to trigger downstream notifications.
+//   - "working" : the agent is actively thinking / streaming tokens.
+//   - "blocked" : the agent is waiting for the user (permission prompt,
+//                 confirmation, "do you want to proceed?").
+//   - "idle"    : no working/blocked patterns seen for the debounce window.
+//                 We're between turns or the prompt is back.
+//   - "done"    : the foreground TUI has exited; the shell prompt is showing.
+//                 The orchestration attempt may still be in flight (the worker
+//                 might be writing its final report), but the agent itself
+//                 has handed control back.
+// null means "no detection has fired yet" — treat as unknown.
+export type RuntimeState = "working" | "blocked" | "idle" | "done";
+
 export type ReviewDecisionType =
   | "accept"
   | "retry_same_worker"
@@ -580,6 +691,15 @@ export interface RunState {
    * elapsed-time UI can freeze at the real finish time.
    */
   completedAt?: string;
+  /**
+   * Attention bit for the "done while you were elsewhere" UX. Set to false on
+   * every transition into `complete` and flipped to true when the user
+   * actively focuses/selects this chat (see `orchestration:markRunSeen`).
+   * Only tracked for the `complete` status — the other terminal statuses
+   * (failed, cancelled) are not the "you should look at this" signal we care
+   * about here. Treat `undefined` as `false`.
+   */
+  seen?: boolean;
   plans: PlanState[];
   steps: StepState[];
   workerTasks: WorkerTask[];
@@ -594,6 +714,14 @@ export interface RunState {
    * read the classification regardless of when in the run it fires.
    */
   taskComplexity?: TaskComplexity;
+  /**
+   * Aggregate USD cost across every priced SparkCall on this run. Recomputed
+   * after each manager call by summing call-level `costUsd` values. Surfaced
+   * in the chat header pill and the Session Inspector Costs tab. Stays
+   * undefined until at least one priced call lands so older runs without
+   * cost data render `$0.00` only when they actually had a $0 call.
+   */
+  totalCostUsd?: number;
 }
 
 export interface RunWorkerGroupStats {
@@ -740,6 +868,13 @@ export interface StepState {
   verificationCommands: string[];
   workerTaskIds: string[];
   reviewSummary?: string;
+  /**
+   * Per-step roll-up of manager-call USD cost. Computed from the SparkCall
+   * records that name this step (via the next-active-step pointer at call
+   * time). Worker-side LLM cost is not yet tracked — Spark only sees the
+   * manager's OpenRouter usage today.
+   */
+  totalCostUsd?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -818,6 +953,26 @@ export interface WorkerAttempt {
   finalReportPath?: string;
   diffPath?: string;
   error?: string;
+  /**
+   * Latest agent state for this attempt. Two writers feed this field:
+   *   - the renderer-side terminal poller (big bet A) via `terminalState:report`
+   *     IPC → `reportTerminalState`. Source = "regex".
+   *   - the localhost hook RPC (big bet E1) via `/state` POST →
+   *     `applyHookStateReport`. Source = "hook".
+   * `undefined` means neither writer has fired yet (run hasn't started,
+   * headless eval, or the attempt is not hosted in a renderer-visible pane).
+   */
+  runtimeState?: RuntimeState;
+  /** ISO timestamp captured the last time runtimeState changed. */
+  runtimeStateUpdatedAt?: string;
+  /**
+   * Which writer last updated `runtimeState`. The doc rule is "hook wins
+   * over regex" — `reportTerminalState` honours this by refusing to
+   * overwrite a fresh hook report (see HOOK_TRUST_MS in run-store.ts).
+   * `undefined` means the field is unset or was written before this
+   * provenance bit existed.
+   */
+  runtimeStateSource?: "hook" | "regex";
 }
 
 export interface WorkerTaskEnvelope {
@@ -875,6 +1030,13 @@ export interface ReviewDecision {
 export interface SparkCall {
   id: string;
   runId: string;
+  /**
+   * The run's `currentStepId` at call start. Lets per-step cost rollups
+   * walk sparkCalls without needing to replay events. Plan-analysis runs
+   * before any step exists leave this undefined; cost attributes to the
+   * run total only in that case.
+   */
+  stepId?: string;
   mode:
     | "plan_analysis"
     | "chat"
@@ -896,6 +1058,17 @@ export interface SparkCall {
   promptTokenEstimate?: number;
   contextWindowTokens?: number;
   contextWindowSource?: "known" | "default";
+  /**
+   * Cost / token-split fields populated after a successful manager call via
+   * `priceCall(...)` in `src/main/openrouter-prices.ts`. `costUsd` is zero when
+   * the model isn't in the price table or the response carried no usage block;
+   * the token counts still populate so the Costs tab can show usage even when
+   * the dollar number is unknown.
+   */
+  costUsd?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
   error?: string;
   createdAt: string;
   completedAt?: string;
@@ -939,6 +1112,10 @@ export interface UpdateRunStatusInput {
   runId: string;
   status: RunStatus;
   currentStepId?: string;
+}
+
+export interface MarkRunSeenInput {
+  runId: string;
 }
 
 export interface CreateStepInput {

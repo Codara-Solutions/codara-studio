@@ -13,9 +13,13 @@ import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import StatusBar from "./components/StatusBar";
 import SettingsDialog from "./components/SettingsDialog";
+import SessionInspector from "./components/SessionInspector";
 import AgentCapabilitiesDialog from "./components/AgentCapabilitiesDialog";
+import UpdateBanner from "./components/UpdateBanner";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
+import ToastHost from "./components/Toast";
+import { playNotificationSound } from "./components/notification-sounds";
 import TabBar from "./tabs/TabBar";
 import EditorStack from "./tabs/EditorStack";
 import TerminalStack from "./tabs/TerminalStack";
@@ -37,6 +41,16 @@ import {
 } from "./workers/launch-commands";
 import { usePanelLayout, type PanelSectionKey, type PanelSide } from "./panels/usePanelLayout";
 import ResizeHandle from "./panels/ResizeHandle";
+import {
+  SelectionRoutingProvider,
+  type RoutingDestination,
+  type SelectionPayload,
+  type SelectionRoutingApi,
+} from "./routing/SelectionRoutingContext";
+import {
+  enumerateOpenWorkers,
+  workerMenuLabel,
+} from "./routing/enumerate-open-workers";
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
@@ -80,14 +94,6 @@ function isBrowserUrl(url: string): boolean {
   return /^(https?:|file:)/i.test(url);
 }
 
-// Compare two filesystem paths case-insensitively (Windows is the target
-// platform; case-sensitive matching would split "C:\\Foo" and "c:\\foo").
-// Trailing slashes / mixed separators are normalised before comparison.
-function samePath(a: string, b: string): boolean {
-  const norm = (s: string): string => s.replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
-  return norm(a) === norm(b);
-}
-
 function collectTerminalPaneIds(node: PaneNode, ids: Set<string>): void {
   if (node.kind === "leaf") {
     ids.add(node.paneId);
@@ -116,60 +122,6 @@ function disposePersistedWorkspaceTerminalPanes(workspaceId: string): void {
   } catch {
     /* best-effort cleanup only */
   }
-}
-
-// Walk a pane tree and return the first leaf that:
-//  - is currently idle (no PTY activity in the last `idleThresholdMs`);
-//  - has a cwd that matches the workspace (per `cwdMatches`); and
-//  - is free to reuse for an incoming worker on `incomingRunId`.
-// The runtime map is read-only here; callers that mutate it should
-// guard for the case where a leaf has no entry yet (e.g. a freshly-mounted
-// pane that hasn't received any PTY data — treated as activity at "now").
-function findIdleLeaf(
-  node: PaneNode,
-  runtime: Map<string, { cwd?: string; lastActivityAt: number }>,
-  now: number,
-  idleThresholdMs: number,
-  cwdMatches: (cwd: string | undefined) => boolean,
-  incomingRunId: string | undefined,
-): TerminalLeaf | null {
-  if (node.kind === "leaf") {
-    // Worker-pane reuse rules:
-    //  - state="running": always off-limits, the worker is mid-flight.
-    //  - state="done" on the SAME run as the incoming worker: off-limits, so
-    //    a verifier doesn't stomp the impl's output the user is still
-    //    reading from this run.
-    //  - state="done" on a DIFFERENT (or finished) run: reclaimable. Without
-    //    this clause every run leaks a pane per worker forever — six workers
-    //    in run A means six dead panes blocking run B from reusing any of
-    //    them, even after run A is complete.
-    if (node.worker) {
-      if (node.worker.state === "running") return null;
-      if (incomingRunId && node.worker.runId === incomingRunId) return null;
-    }
-    const entry = runtime.get(node.paneId);
-    const liveCwd = entry?.cwd ?? node.cwd;
-    if (!cwdMatches(liveCwd)) return null;
-    const lastActivityAt = entry?.lastActivityAt ?? now;
-    if (now - lastActivityAt < idleThresholdMs) return null;
-    return node;
-  }
-  return (
-    findIdleLeaf(node.a, runtime, now, idleThresholdMs, cwdMatches, incomingRunId) ??
-    findIdleLeaf(node.b, runtime, now, idleThresholdMs, cwdMatches, incomingRunId)
-  );
-}
-
-function anyLeafCwdMatches(
-  node: PaneNode,
-  runtime: Map<string, { cwd?: string; lastActivityAt: number }>,
-  cwdMatches: (cwd: string | undefined) => boolean,
-): boolean {
-  if (node.kind === "leaf") {
-    const entry = runtime.get(node.paneId);
-    return cwdMatches(entry?.cwd ?? node.cwd);
-  }
-  return anyLeafCwdMatches(node.a, runtime, cwdMatches) || anyLeafCwdMatches(node.b, runtime, cwdMatches);
 }
 
 function findLeafByPaneId(node: PaneNode, paneId: string): TerminalLeaf | null {
@@ -228,6 +180,10 @@ export default function App() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
+  // Pure renderer overlay — reads the active run, displays cost / events /
+  // context-window / failure tabs. Toggled via the `session.openInspector`
+  // shortcut (Mod+Shift+I).
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [platform, setPlatform] = useState<string>("");
   const [home, setHome] = useState<string>("");
   // Side-panel layout: outer widths, internal split ratios, per-section
@@ -288,6 +244,16 @@ export default function App() {
   // Tabs are scoped per-workspace so each workspace remembers its own layout.
   // useTabs internally swaps tab lists when the workspaceId argument changes.
   const tabs = useTabs(activeId, activeWorkspace?.cwd);
+  const visibleWorkbenchTabs = useMemo(
+    () => tabs.tabs.filter((tab) => isTabVisibleForRun(tab, activeRunId)),
+    [tabs.tabs, activeRunId],
+  );
+  const activeVisibleTabId = useMemo(() => {
+    if (tabs.activeId && visibleWorkbenchTabs.some((tab) => tab.id === tabs.activeId)) {
+      return tabs.activeId;
+    }
+    return visibleWorkbenchTabs[0]?.id ?? null;
+  }, [tabs.activeId, visibleWorkbenchTabs]);
 
   // useTabs returns a fresh object every render, which would force any
   // useCallback/useEffect that depends on `tabs` to re-run on every render.
@@ -449,6 +415,32 @@ export default function App() {
   }, [showLeft]);
 
   const workspaceIdsKey = useMemo(() => workspaces.map((w) => w.id).join("\0"), [workspaces]);
+  // Comma-joined sorted list of workspace cwds. Used as a stable dep for the
+  // setAllowedRoots push so we only re-send when the actual cwd set changes
+  // (renaming a workspace's color, for instance, must not re-fire the IPC).
+  const workspaceCwdsKey = useMemo(
+    () =>
+      workspaces
+        .map((w) => w.cwd)
+        .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0)
+        .slice()
+        .sort()
+        .join("\0"),
+    [workspaces],
+  );
+
+  // Push the renderer's set of active workspace cwds to main so the fs:*
+  // read handlers know which paths are in scope. Main treats this list as the
+  // authoritative source of allowed workspace roots; if the renderer never
+  // calls this, only the static CLI/config dirs in fs-sandbox.ts remain
+  // reachable — that's the safe default for a fresh boot.
+  useEffect(() => {
+    if (!booted) return;
+    const cwds = workspaceCwdsKey ? workspaceCwdsKey.split("\0").filter((c) => c.length > 0) : [];
+    void window.spark.ui?.setAllowedRoots(cwds).catch(() => {
+      /* sandbox push is best-effort; failures only restrict reachable reads */
+    });
+  }, [booted, workspaceCwdsKey]);
 
   const refreshRunCount = useCallback(async (workspaceId: string) => {
     try {
@@ -595,7 +587,10 @@ export default function App() {
       // re-mark the workspace ~500ms later so the regular debounced flush
       // re-lists it once things have quiesced.
       if (event.type === "run.deleted") {
-        if (event.runId) tabsRef.current.closeRunsTabFor(event.runId);
+        if (event.runId) {
+          tabsRef.current.closeRunsTabFor(event.runId);
+          tabsRef.current.closeWorkerTerminalTabFor(event.runId);
+        }
         const deletedWorkspaceId = event.workspaceId;
         window.setTimeout(() => {
           runRefreshPendingRef.current.add(deletedWorkspaceId);
@@ -646,6 +641,19 @@ export default function App() {
     };
   }, []);
 
+  // Subscribe to renderer-side notification channels. The toast channel is
+  // owned by <ToastHost/> below; this effect handles the embedded-sound
+  // channel by playing the right WAV clip whenever main fires
+  // "notification:sound". The main process has already filtered against
+  // the user's preferences before sending — by the time we get here, the
+  // user has the sound channel enabled, so we just play.
+  useEffect(() => {
+    const off = window.spark.notifications.onNotificationSound(({ kind }) => {
+      playNotificationSound(kind);
+    });
+    return () => off();
+  }, []);
+
   // Theme the entire UI with the active workspace's color. Falls back to the
   // default yellow when nothing is active.
   useEffect(() => {
@@ -674,21 +682,12 @@ export default function App() {
 
   // When the orchestration runner emits `envelope_prepared`, the worker is
   // about to start and is waiting for a renderer-side PTY at sessionId =
-  // attemptId. We host that PTY inside the user's visible TerminalStack so
-  // the agent's xterm output is watchable. Claim policy:
-  //   1. Prefer reusing a leaf in a terminal tab that has the workspace
-  //      cwd and no PTY activity in the last IDLE_THRESHOLD_MS.
-  //   2. If none, smart-split a fresh leaf into the most appropriate
-  //      terminal tab (active one if its cwd matches, else any terminal
-  //      tab on the workspace, else create a new one).
-  // Claiming a leaf disposes its existing PTY and renames the leaf's
-  // paneId to attemptId; React re-mounts TerminalPane, which spawns a
-  // fresh PTY at the new id, and run-store's `pty.waitForSpawn(attemptId)`
-  // resolves.
+  // attemptId. Spark workers live in one run-scoped terminal tab titled
+  // "workers" instead of claiming arbitrary user shells. The tab stays mounted
+  // across chat switches so PTYs continue running, but the tab strip only
+  // reveals it while its run is the active chat.
   useEffect(() => {
     if (!booted) return;
-
-    const IDLE_THRESHOLD_MS = 1500;
 
     const handleEnvelopePrepared = async (event: SparkEvent) => {
       if (event.type !== "worker_task.envelope_prepared") return;
@@ -727,72 +726,11 @@ export default function App() {
 
       const t = tabsRef.current;
       if (!t) return;
-      const now = Date.now();
-      const cwdMatches = (leafCwd: string | undefined): boolean => {
-        if (!leafCwd) return true; // unset cwd is treated as workspace root
-        return samePath(leafCwd, workspaceCwd);
-      };
-
-      // 1. Find an idle leaf in any terminal tab whose cwd matches.
-      let claimTabId: string | null = null;
-      let claimPaneId: string | null = null;
-      for (const tab of t.tabs) {
-        if (tab.kind !== "terminal") continue;
-        const idleLeaf = findIdleLeaf(tab.root, paneRuntimeRef.current, now, IDLE_THRESHOLD_MS, cwdMatches, event.runId ?? undefined);
-        if (idleLeaf) {
-          claimTabId = tab.id;
-          claimPaneId = idleLeaf.paneId;
-          break;
-        }
-      }
-
-      if (claimTabId && claimPaneId) {
-        // Reuse: dispose the user's PTY and rename the leaf to attemptId.
-        // React unmounts the old TerminalPane (which already has its own
-        // dispose-on-unmount path), then mounts a new one at the new id.
-        void window.spark.pty.dispose(claimPaneId).catch(() => undefined);
-        paneRuntimeRef.current.delete(claimPaneId);
-        const renamed = t.renameLeaf(claimTabId, claimPaneId, event.attemptId);
-        if (renamed) {
-          t.setLeafWorker(claimTabId, event.attemptId, workerMeta);
-          t.setLeafCwd(claimTabId, event.attemptId, workspaceCwd);
-          t.setActiveTerminalPane(claimTabId, event.attemptId);
-          return;
-        }
-      }
-
-      // 2. No idle leaf — find or create a terminal tab and smart-add a new
-      //    leaf with paneId=attemptId. Prefer the currently-active terminal
-      //    tab if it has the right cwd; otherwise the first terminal tab
-      //    that does; otherwise create a fresh one.
-      const activeTerminal = t.tabs.find(
-        (tab) => tab.id === t.activeId && tab.kind === "terminal",
-      );
-      let targetTabId: string | null = null;
-      if (
-        activeTerminal &&
-        activeTerminal.kind === "terminal" &&
-        anyLeafCwdMatches(activeTerminal.root, paneRuntimeRef.current, cwdMatches)
-      ) {
-        targetTabId = activeTerminal.id;
-      } else {
-        const matching = t.tabs.find(
-          (tab) =>
-            tab.kind === "terminal" &&
-            anyLeafCwdMatches(tab.root, paneRuntimeRef.current, cwdMatches),
-        );
-        targetTabId = matching
-          ? matching.id
-          : t.newTerminalTab(workspaceCwd, undefined, { focus: false });
-      }
-
-      const ok = t.addPaneInTab(targetTabId, event.attemptId, {
-        cwd: workspaceCwd,
-        worker: workerMeta,
+      const tabId = t.ensureWorkerTerminalTab(event.runId, workspaceCwd, event.attemptId, workerMeta, {
+        focus: false,
       });
-      if (ok) {
-        t.setActiveTerminalPane(targetTabId, event.attemptId);
-      }
+      t.setLeafCwd(tabId, event.attemptId, workspaceCwd);
+      t.setActiveTerminalPane(tabId, event.attemptId);
     };
 
     // Mark the worker pane "done" on attempt finish — keeps the xterm
@@ -916,6 +854,9 @@ export default function App() {
   }, []);
   const closeFileSearch = useCallback(() => {
     setFileSearchOpen(false);
+  }, []);
+  const closeInspector = useCallback(() => {
+    setInspectorOpen(false);
   }, []);
 
   // Dialog onSave / onOpenRun / onOpenFile handlers hoisted so the dialogs
@@ -1294,6 +1235,7 @@ export default function App() {
         setSettingsOpen(true);
         window.dispatchEvent(new CustomEvent("spark:open-settings"));
       },
+      "session.openInspector": () => setInspectorOpen((open) => !open),
       "composer.focus": () => {
         window.dispatchEvent(new CustomEvent("spark:focus-composer"));
       },
@@ -1311,15 +1253,15 @@ export default function App() {
         // terminal tab. If a terminal tab already exists and is active,
         // fall back to cycling to the next one for parity with the
         // "toggle visible terminal" mental model.
-        const existing = tabs.tabs.find((t) => t.kind === "terminal");
+        const existing = visibleWorkbenchTabs.find((t) => t.kind === "terminal");
         if (!existing) {
           handleNewTerminalTab();
           return;
         }
-        if (tabs.activeId === existing.id) {
+        if (activeVisibleTabId === existing.id) {
           // Find any other terminal to cycle to; otherwise leave the
           // current one selected.
-          const others = tabs.tabs.filter((t) => t.kind === "terminal" && t.id !== existing.id);
+          const others = visibleWorkbenchTabs.filter((t) => t.kind === "terminal" && t.id !== existing.id);
           if (others.length > 0) tabs.setActiveTab(others[0].id);
         } else {
           tabs.setActiveTab(existing.id);
@@ -1331,7 +1273,8 @@ export default function App() {
       "view.selectByIndex": (event) => {
         const index = Number.parseInt(event.key, 10);
         if (Number.isFinite(index) && index >= 1) {
-          tabs.selectByIndex(index - 1);
+          const target = visibleWorkbenchTabs[index - 1];
+          if (target) tabs.setActiveTab(target.id);
         }
         // Keep the legacy event so any listener (e.g. right panel run
         // selector) can also respond.
@@ -1347,29 +1290,47 @@ export default function App() {
       "worker.newCodex": () => handleNewWorkerTab(CODEX_LAUNCH_COMMAND),
       "worker.newCursor": () => handleNewWorkerTab(CURSOR_LAUNCH_COMMAND),
       "tab.close": () => {
-        if (tabs.activeId) tabs.closeTab(tabs.activeId);
+        if (activeVisibleTabId) tabs.closeTab(activeVisibleTabId);
       },
       "tab.closeOthers": () => {
-        if (tabs.activeId) tabs.closeOthers(tabs.activeId);
+        if (activeVisibleTabId) tabs.closeOthers(activeVisibleTabId);
       },
-      "tab.cycleNext": () => tabs.cycleNext(),
-      "tab.cyclePrev": () => tabs.cyclePrev(),
+      "tab.cycleNext": () => {
+        if (!activeVisibleTabId || visibleWorkbenchTabs.length === 0) return;
+        const idx = visibleWorkbenchTabs.findIndex((tab) => tab.id === activeVisibleTabId);
+        const next = visibleWorkbenchTabs[(Math.max(0, idx) + 1) % visibleWorkbenchTabs.length];
+        if (next) tabs.setActiveTab(next.id);
+      },
+      "tab.cyclePrev": () => {
+        if (!activeVisibleTabId || visibleWorkbenchTabs.length === 0) return;
+        const idx = visibleWorkbenchTabs.findIndex((tab) => tab.id === activeVisibleTabId);
+        const prev =
+          visibleWorkbenchTabs[
+            (Math.max(0, idx) - 1 + visibleWorkbenchTabs.length) % visibleWorkbenchTabs.length
+          ];
+        if (prev) tabs.setActiveTab(prev.id);
+      },
       "terminal.splitRight": () => {
         // The active workbench tab dictates which split happens — we only
         // act on terminal tabs so this chord is a no-op anywhere else.
-        const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+        const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
         if (!active || active.kind !== "terminal") return;
         tabs.splitTerminalPane(active.id, active.activePaneId, "horizontal");
       },
       "terminal.splitDown": () => {
-        const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+        const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
         if (!active || active.kind !== "terminal") return;
         tabs.splitTerminalPane(active.id, active.activePaneId, "vertical");
       },
       "terminal.closePane": () => {
-        const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+        const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
         if (!active || active.kind !== "terminal") return;
         tabs.closeTerminalPane(active.id, active.activePaneId);
+      },
+      "terminal.toggleZoom": () => {
+        const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
+        if (!active || active.kind !== "terminal") return;
+        tabs.toggleTerminalPaneZoom(active.id, active.activePaneId);
       },
     }),
     [
@@ -1378,7 +1339,9 @@ export default function App() {
       handleNewPreviewTab,
       handleNewTerminalTab,
       handleNewWorkerTab,
+      activeVisibleTabId,
       tabs,
+      visibleWorkbenchTabs,
     ],
   );
 
@@ -1490,6 +1453,208 @@ export default function App() {
     [tabs.tabs, activeWorkspace?.workers.length],
   );
 
+  // ── Selection routing (preview overlays) ──────────────────────────────
+  //
+  // The browser pane's inspector + draw overlays each produce a
+  // SelectionPayload (text prompt, optionally an annotated PNG path). The
+  // SelectionRouteMenu calls route() with one of the destinations below to
+  // ship that payload at:
+  //   - a brand-new Spark chat (startAutopilot with the payload pre-filled)
+  //   - the currently-focused Spark chat (addRunMessage)
+  //   - a freshly-spawned Claude Code or Codex worker pane (new pane with
+  //     autorun + delayed pty.inject once the agent REPL settles)
+  //   - any currently-running CLI worker pane (pty.inject)
+  //
+  // Image attachments only travel on the chat destinations. PTYs are text
+  // only, so worker routes embed the saved PNG's absolute path in the prompt
+  // and the CLI agent reads the file off disk.
+
+  // Spawn a fresh worker pane in the same way the keyboard shortcut does
+  // (handleNewWorkerTab). Returns the new pane id so the caller can later
+  // inject a prompt once the agent is up; null if no terminal tab exists
+  // and we had to fall back to creating a whole new tab (no stable id).
+  const spawnRoutedWorkerPane = useCallback(
+    (autorun: string): string | null => {
+      const t = tabsRef.current;
+      const active = t.tabs.find((tab) => tab.id === t.activeId);
+      const target =
+        active?.kind === "terminal"
+          ? active
+          : t.tabs.find((tab) => tab.kind === "terminal");
+      if (!target || target.kind !== "terminal") {
+        t.newTerminalTab(activeWorkspace?.cwd ?? undefined, autorun);
+        return null;
+      }
+      const paneId = makeId("pane");
+      const activeLeaf = findLeafByPaneId(target.root, target.activePaneId);
+      const cwd =
+        paneRuntimeRef.current.get(target.activePaneId)?.cwd ??
+        activeLeaf?.cwd ??
+        activeWorkspace?.cwd ??
+        undefined;
+      const added = t.addPaneInTab(target.id, paneId, { cwd, autorun });
+      if (!added) {
+        t.newTerminalTab(cwd, autorun);
+        return null;
+      }
+      t.setActiveTab(target.id);
+      t.setActiveTerminalPane(target.id, paneId);
+      return paneId;
+    },
+    [activeWorkspace?.cwd],
+  );
+
+  // Wait for a freshly-spawned worker pane's CLI agent to enter its REPL
+  // before typing our prompt at it. We watch the leaf's `worker.agentRunning`
+  // bit which `onTerminalPaneAgentState` flips on alt-screen detection. If
+  // it never flips (very slow boot, agent crashed) we time out and inject
+  // anyway — at worst the text lands at the shell, which is recoverable.
+  const waitForAgentReady = useCallback(
+    (paneId: string, timeoutMs = 30000): Promise<void> =>
+      new Promise((resolve) => {
+        const start = Date.now();
+        const tick = () => {
+          for (const tab of tabsRef.current.tabs) {
+            if (tab.kind !== "terminal") continue;
+            const leaf = findLeafByPaneId(tab.root, paneId);
+            if (leaf?.worker?.agentRunning) {
+              resolve();
+              return;
+            }
+          }
+          if (Date.now() - start > timeoutMs) {
+            resolve();
+            return;
+          }
+          window.setTimeout(tick, 250);
+        };
+        tick();
+      }),
+    [],
+  );
+
+  const routingDestinations = useMemo<RoutingDestination[]>(() => {
+    const list: RoutingDestination[] = [];
+    list.push({
+      id: "chat-new",
+      kind: "chat-new",
+      label: "New Spark chat",
+      group: "chat",
+      disabled: !activeWorkspace,
+      disabledReason: activeWorkspace ? undefined : "Open a workspace first.",
+    });
+    const currentRun = activeRunId ? runs.find((r) => r.id === activeRunId) ?? null : null;
+    list.push({
+      id: "chat-current",
+      kind: "chat-current",
+      label: currentRun ? "Send to current chat" : "Send to current chat",
+      sublabel: currentRun?.title,
+      group: "chat",
+      disabled: !currentRun,
+      disabledReason: currentRun ? undefined : "No chat is currently focused.",
+    });
+    list.push({
+      id: "worker-new-claude",
+      kind: "worker-new-claude",
+      label: "New Claude Code worker",
+      group: "worker-new",
+      disabled: !activeWorkspace,
+      disabledReason: activeWorkspace ? undefined : "Open a workspace first.",
+    });
+    list.push({
+      id: "worker-new-codex",
+      kind: "worker-new-codex",
+      label: "New Codex worker",
+      group: "worker-new",
+      disabled: !activeWorkspace,
+      disabledReason: activeWorkspace ? undefined : "Open a workspace first.",
+    });
+    const openWorkers = enumerateOpenWorkers(visibleWorkbenchTabs, runs);
+    for (const worker of openWorkers) {
+      list.push({
+        id: `worker-existing-${worker.injectId}`,
+        kind: "worker-existing",
+        label: workerMenuLabel(worker),
+        sublabel: worker.source === "spark" ? undefined : "manual",
+        group: "worker-existing",
+      });
+    }
+    return list;
+  }, [activeWorkspace, activeRunId, runs, visibleWorkbenchTabs]);
+
+  const routeSelection = useCallback(
+    async (payload: SelectionPayload, destinationId: string) => {
+      if (destinationId === "chat-new") {
+        const ws = activeWorkspace;
+        if (!ws) throw new Error("No workspace.");
+        const attachments = payload.imagePath
+          ? [{ sourcePath: payload.imagePath, kind: "image" as const }]
+          : undefined;
+        const run = await window.spark.orchestration.startAutopilot({
+          workspaceId: ws.id,
+          workspaceName: ws.name,
+          cwd: ws.cwd,
+          initialUserNote: payload.text,
+          initialUserNoteClientMessageId: makeId("client-msg"),
+          initialAttachments: attachments,
+        });
+        handleSelectRun(run.id);
+        void refreshRunsFor(ws.id);
+        return;
+      }
+      if (destinationId === "chat-current") {
+        const runId = activeRunIdRef.current;
+        if (!runId) throw new Error("No active chat.");
+        const attachments = payload.imagePath
+          ? [{ sourcePath: payload.imagePath, kind: "image" as const }]
+          : undefined;
+        await window.spark.orchestration.addRunMessage({
+          runId,
+          clientMessageId: makeId("client-msg"),
+          author: "user",
+          kind: "note",
+          message: payload.text,
+          attachments,
+        });
+        return;
+      }
+      if (destinationId === "worker-new-claude" || destinationId === "worker-new-codex") {
+        const autorun =
+          destinationId === "worker-new-claude" ? CLAUDE_LAUNCH_COMMAND : CODEX_LAUNCH_COMMAND;
+        const paneId = spawnRoutedWorkerPane(autorun);
+        if (!paneId) {
+          // Fell back to a fresh tab; the leaf was created internally and we
+          // don't have a handle to inject into. Skip the auto-prompt — the
+          // user can paste the text manually if they want.
+          return;
+        }
+        // Fire-and-forget so the menu can close immediately; the agent boot
+        // takes seconds and we don't want to block the UI on it.
+        void (async () => {
+          await waitForAgentReady(paneId);
+          try {
+            await window.spark.pty.inject(paneId, payload.text, { submit: true });
+          } catch {
+            /* pane may have been closed; nothing to recover */
+          }
+        })();
+        return;
+      }
+      if (destinationId.startsWith("worker-existing-")) {
+        const injectId = destinationId.slice("worker-existing-".length);
+        await window.spark.pty.inject(injectId, payload.text, { submit: true });
+        return;
+      }
+      throw new Error(`Unknown routing destination: ${destinationId}`);
+    },
+    [activeWorkspace, handleSelectRun, refreshRunsFor, spawnRoutedWorkerPane, waitForAgentReady],
+  );
+
+  const routingApi = useMemo<SelectionRoutingApi>(
+    () => ({ destinations: routingDestinations, route: routeSelection }),
+    [routingDestinations, routeSelection],
+  );
+
   if (bootError) {
     return (
       <div style={{ padding: 20, color: "var(--danger)" }}>
@@ -1504,6 +1669,7 @@ export default function App() {
   const terminalShell = integratedShell ?? defaultShell;
 
   return (
+    <SelectionRoutingProvider value={routingApi}>
     <div
       style={{
         height: "100%",
@@ -1513,6 +1679,11 @@ export default function App() {
         background: "var(--bg)",
       }}
     >
+      {/* Auto-updater banner — position:fixed so the banner sits above
+          WindowChrome without disturbing the existing flex layout. Renders
+          nothing in the resting state, so it's a no-op outside of the
+          packaged-app update lifecycle. */}
+      <UpdateBanner />
       <WindowChrome
         platform={platform}
         leftOn={showLeft}
@@ -1673,6 +1844,13 @@ export default function App() {
           />
         )}
 
+        {inspectorOpen && (
+          <SessionInspector
+            run={runs.find((r) => r.id === activeRunId) ?? null}
+            onClose={closeInspector}
+          />
+        )}
+
         {capabilitiesOpen && (
           <AgentCapabilitiesDialog
             settings={settings}
@@ -1700,6 +1878,8 @@ export default function App() {
           onClose={closeFileSearch}
           onOpenFile={handleSearchOpenFile}
         />
+
+        <ToastHost onSelectRun={handleSelectRun} />
       </div>
 
       <StatusBar
@@ -1709,10 +1889,19 @@ export default function App() {
         workerCount={workerCount}
       />
     </div>
+    </SelectionRoutingProvider>
   );
 }
 
 // ── Workspace pane (tab strip + stacks) ──────────────────────────────────────
+
+function isTabVisibleForRun(tab: Tab, activeRunId: string | null): boolean {
+  return !(
+    tab.kind === "terminal" &&
+    tab.scope?.kind === "workers" &&
+    tab.scope.runId !== activeRunId
+  );
+}
 
 interface WorkspaceProps {
   tabs: ReturnType<typeof useTabs>;
@@ -1781,7 +1970,22 @@ const Workspace = React.memo(function Workspace({
     splitTerminalPane,
     moveTerminalPane,
     closeTerminalPane,
+    toggleTerminalPaneZoom,
   } = tabs;
+  const visibleTabs = useMemo(
+    () => tabs.tabs.filter((tab) => isTabVisibleForRun(tab, activeRunId)),
+    [tabs.tabs, activeRunId],
+  );
+  const effectiveActiveId = useMemo(() => {
+    if (tabs.activeId && visibleTabs.some((tab) => tab.id === tabs.activeId)) {
+      return tabs.activeId;
+    }
+    return visibleTabs[0]?.id ?? null;
+  }, [tabs.activeId, visibleTabs]);
+  useEffect(() => {
+    if (!effectiveActiveId || tabs.activeId === effectiveActiveId) return;
+    setActiveTab(effectiveActiveId);
+  }, [effectiveActiveId, tabs.activeId, setActiveTab]);
 
   const handleTabSelect = useCallback(
     (id: TabId) => setActiveTab(id),
@@ -1833,6 +2037,10 @@ const Workspace = React.memo(function Workspace({
     (tabId: string, paneId: string) => closeTerminalPane(tabId, paneId),
     [closeTerminalPane],
   );
+  const handlePaneZoomToggle = useCallback(
+    (tabId: string, paneId: string) => toggleTerminalPaneZoom(tabId, paneId),
+    [toggleTerminalPaneZoom],
+  );
 
   return (
     <div
@@ -1845,8 +2053,8 @@ const Workspace = React.memo(function Workspace({
       }}
     >
       <TabBar
-        tabs={tabs.tabs}
-        activeId={tabs.activeId}
+        tabs={visibleTabs}
+        activeId={effectiveActiveId}
         onSelect={handleTabSelect}
         onClose={handleTabClose}
         onNewTerminal={onNewTerminalTab}
@@ -1858,14 +2066,14 @@ const Workspace = React.memo(function Workspace({
       />
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
         <EditorStack
-          tabs={tabs.tabs}
-          activeId={tabs.activeId}
+          tabs={visibleTabs}
+          activeId={effectiveActiveId}
           onDirtyChange={handleEditorDirty}
           onClose={handleTabClose}
         />
         <TerminalStack
           tabs={tabs.tabs}
-          activeId={tabs.activeId}
+          activeId={effectiveActiveId}
           shell={shell}
           onDetectedUrl={onDetectedUrl}
           onSparkOpen={handleSparkOpen}
@@ -1875,19 +2083,20 @@ const Workspace = React.memo(function Workspace({
           onSplitPane={handleSplitPane}
           onMovePane={handleMovePane}
           onClosePane={handleClosePane}
+          onTabZoomToggle={handlePaneZoomToggle}
           onPaneCwd={onPaneCwd}
           onPaneActivity={onPaneActivity}
           onPaneScrollback={onPaneScrollback}
           onPaneAgentState={onTerminalPaneAgentState}
         />
         <PreviewStack
-          tabs={tabs.tabs}
-          activeId={tabs.activeId}
+          tabs={visibleTabs}
+          activeId={effectiveActiveId}
           onUrlChange={onPreviewUrlChange}
         />
         <RunsStack
-          tabs={tabs.tabs}
-          activeId={tabs.activeId}
+          tabs={visibleTabs}
+          activeId={effectiveActiveId}
           workspace={workspace}
           runs={runs}
           activeRunId={activeRunId}

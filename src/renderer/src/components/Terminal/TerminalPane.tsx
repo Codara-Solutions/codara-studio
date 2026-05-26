@@ -30,6 +30,13 @@ interface Props {
   initialScrollback?: string;
   initialCommand?: string;
   extraEnv?: Record<string, string>;
+  // Mirror-pane mode. When true the xterm attaches to the PTY's data stream
+  // (so output renders) but the pane does NOT forward keystrokes or send
+  // pty.resize calls. Used by SwarmView tiles where the canonical xterm
+  // for the same sessionId is mounted in TerminalStack — without this, two
+  // ResizeObservers race and the smaller cols/rows wins, garbling the
+  // canonical pane's display.
+  readOnly?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   onCwd?: (cwd: string) => void;
@@ -49,6 +56,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       initialScrollback,
       initialCommand,
       extraEnv,
+      readOnly,
       onSearchReady,
       onExit,
       onCwd,
@@ -70,6 +78,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       initialScrollback,
       initialCommand,
       extraEnv,
+      readOnly,
       onSearchReady,
       onExit,
       onCwd,

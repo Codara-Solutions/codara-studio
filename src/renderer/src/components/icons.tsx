@@ -157,6 +157,41 @@ export function CloseIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+export function ZoomPaneIcon({ size = 14, zoomed = false }: { size?: number; zoomed?: boolean }) {
+  // Four corner brackets — reads as "expand to fill" when not zoomed and
+  // "collapse back into split" when zoomed. The zoomed state pulls the
+  // brackets inward so the affordance toggles visibly.
+  const inset = zoomed ? 4 : 2.5;
+  const armLen = zoomed ? 1.6 : 2.2;
+  const min = inset;
+  const max = 14 - inset;
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {/* top-left */}
+      <line x1={min} y1={min + armLen} x2={min} y2={min} />
+      <line x1={min} y1={min} x2={min + armLen} y2={min} />
+      {/* top-right */}
+      <line x1={max - armLen} y1={min} x2={max} y2={min} />
+      <line x1={max} y1={min} x2={max} y2={min + armLen} />
+      {/* bottom-right */}
+      <line x1={max} y1={max - armLen} x2={max} y2={max} />
+      <line x1={max} y1={max} x2={max - armLen} y2={max} />
+      {/* bottom-left */}
+      <line x1={min + armLen} y1={max} x2={min} y2={max} />
+      <line x1={min} y1={max} x2={min} y2={max - armLen} />
+    </svg>
+  );
+}
+
 export function SplitRightIcon({ size = 14 }: { size?: number }) {
   // A rectangle with a centered vertical divider — reads as "two side-by-side
   // panes". Used for "split right" (Mod+\) on the terminal pane toolbar.
@@ -214,6 +249,95 @@ export function DragHandleIcon({ size = 14 }: { size?: number }) {
       <circle cx="9" cy="7" r="0.65" fill="currentColor" stroke="none" />
       <circle cx="5" cy="10" r="0.65" fill="currentColor" stroke="none" />
       <circle cx="9" cy="10" r="0.65" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function InspectIcon({ size = 14 }: { size?: number }) {
+  // Crosshair + corner marks: reads as "pick an element in the browser pane".
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M2 4.5 V2.5 H4.5" />
+      <path d="M9.5 2.5 H12 V4.5" />
+      <path d="M12 9.5 V12 H9.5" />
+      <path d="M4.5 12 H2 V9.5" />
+      <circle cx="7" cy="7" r="1.6" />
+    </svg>
+  );
+}
+
+export function DrawIcon({ size = 14 }: { size?: number }) {
+  // A pencil tip with a short stroke trail — "annotate this page".
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M9 2.5 L11.5 5 L5.5 11 H3 V8.5 Z" />
+      <path d="M8.2 3.3 L10.7 5.8" />
+      <path d="M2.5 12.5 H6" />
+    </svg>
+  );
+}
+
+export function GridIcon({ size = 14 }: { size?: number }) {
+  // A 2×2 cell grid — reads as "tiled view". Used on the Swarm toggle in
+  // the chat header to switch the centre area from the standard
+  // conversation+graph layout to the swarm grid of live worker terminals.
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="2" y="2" width="4" height="4" rx="0.6" />
+      <rect x="8" y="2" width="4" height="4" rx="0.6" />
+      <rect x="2" y="8" width="4" height="4" rx="0.6" />
+      <rect x="8" y="8" width="4" height="4" rx="0.6" />
+    </svg>
+  );
+}
+
+export function BroadcastIcon({ size = 14 }: { size?: number }) {
+  // A radiating-arc transmitter — reads as "send to many". Used on the
+  // Swarm header's Broadcast button: pressing it opens a textarea that
+  // pipes one prompt into every live worker PTY in the swarm.
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="7" cy="7" r="1.4" />
+      <path d="M4 4.2 A 4 4 0 0 0 4 9.8" />
+      <path d="M10 4.2 A 4 4 0 0 1 10 9.8" />
+      <path d="M2.2 2.6 A 6.4 6.4 0 0 0 2.2 11.4" />
+      <path d="M11.8 2.6 A 6.4 6.4 0 0 1 11.8 11.4" />
     </svg>
   );
 }

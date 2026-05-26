@@ -12,6 +12,7 @@ import type {
   WorkerRuntime,
   WorkerTask,
 } from "@shared/types";
+import { priceCall, type OpenRouterUsage } from "../openrouter-prices";
 import {
   buildManagerSystemPrompt,
   formatManagerModeRules,
@@ -156,10 +157,10 @@ interface OpenRouterResponse {
       content?: unknown;
     };
   }>;
-  usage?: {
-    prompt_tokens?: number;
-    completion_tokens?: number;
-  };
+  // The `usage` block is provider-shaped; we type it as OpenRouterUsage (which
+  // is a permissive superset) so the cost-pricing layer can read every known
+  // variant — prompt_tokens / input_tokens, cache_read_input_tokens, etc.
+  usage?: OpenRouterUsage;
   error?: {
     message?: string;
   };
@@ -173,6 +174,16 @@ export interface OpenRouterManagerResult {
   fallbackFrom?: string;
   promptTokens?: number;
   completionTokens?: number;
+  /**
+   * USD cost computed by `priceCall(...)` against the hardcoded price table.
+   * Zero (with token counts still populated) when the model isn't in the
+   * table or the response carried no usage block. Persisted onto the
+   * matching SparkCall record by the run-store completion handler.
+   */
+  costUsd?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
 }
 
 const DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
@@ -984,6 +995,10 @@ async function performOpenRouterManagerRequest({
 
   const content = extractMessageContent(rawResponse);
   const parsed = parseJsonObject(content);
+  // Price the call against the hardcoded model table. Missing usage / unknown
+  // model -> zero cost with whatever token counts we could parse, so a partial
+  // response never crashes the call site.
+  const priced = priceCall({ model, usage: rawResponse.usage });
   return {
     decision: normalizeManagerDecision(parsed, mode),
     rawResponse,
@@ -992,6 +1007,10 @@ async function performOpenRouterManagerRequest({
     fallbackFrom,
     promptTokens: rawResponse.usage?.prompt_tokens,
     completionTokens: rawResponse.usage?.completion_tokens,
+    costUsd: priced.costUsd,
+    inputTokens: priced.inputTokens,
+    outputTokens: priced.outputTokens,
+    cacheReadTokens: priced.cacheReadTokens,
   };
 }
 

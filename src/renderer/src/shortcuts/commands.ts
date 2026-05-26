@@ -13,6 +13,7 @@ import { ctrl, mod, type Chord } from "./chord";
 export type CommandId =
   | "shortcuts.open"
   | "settings.open"
+  | "session.openInspector"
   | "composer.focus"
   | "sidebar.toggle"
   | "search.open"
@@ -21,6 +22,7 @@ export type CommandId =
   | "terminal.splitRight"
   | "terminal.splitDown"
   | "terminal.closePane"
+  | "terminal.toggleZoom"
   | "view.selectByIndex"
   | "view.zoomIn"
   | "view.zoomOut"
@@ -77,6 +79,15 @@ export const COMMANDS: Command[] = [
     defaultChords: [mod(",")],
   },
   {
+    id: "session.openInspector",
+    label: "Open session inspector",
+    group: "General",
+    // Mod+Shift+I — overlay with cost / events / context window / failure
+    // tabs against the active chat run. Mod+I alone often triggers DevTools
+    // in Chromium contexts, so the inspector lives on its Shifted variant.
+    defaultChords: [mod("i", { shift: true })],
+  },
+  {
     id: "composer.focus",
     label: "Focus chat composer",
     group: "Navigation",
@@ -128,6 +139,14 @@ export const COMMANDS: Command[] = [
     // Mod+Shift+K mirrors VS Code's "kill terminal" chord and stays clear
     // of shell readline (Ctrl+K).
     defaultChords: [mod("k", { shift: true })],
+  },
+  {
+    id: "terminal.toggleZoom",
+    label: "Toggle terminal pane zoom",
+    group: "Terminal",
+    // Mod+Shift+Z mirrors the tmux/iTerm "zoom pane" convention; stays out
+    // of the way of the shell's literal Ctrl+Z (suspend).
+    defaultChords: [mod("z", { shift: true })],
   },
   {
     id: "view.selectByIndex",

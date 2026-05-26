@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { AddRunMessageAttachmentInput, RunState, Workspace } from "@shared/types";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
-import { PlusIcon } from "../icons";
+import { GridIcon, PlusIcon } from "../icons";
 import ChatConversation from "./ChatConversation";
 import ChatComposer from "./ChatComposer";
+import SwarmView from "./SwarmView";
 import { describeRunStatus, statusToneColor } from "./timeline";
 
 // The Spark chat panel: the workspace's chats live here, one conversation at
@@ -48,6 +49,24 @@ export default function ChatPanel({
   onPauseAfterWorkers,
   onForcePauseRun,
 }: Props) {
+  // Swarm view toggle — flips the chat body from the normal
+  // conversation+composer layout to a grid of live worker terminals. State
+  // is scoped to this panel so the toggle survives switching tabs but
+  // resets if the section is collapsed (the toolbar disappears anyway).
+  // Per-chat keying via run.id means a chat that has no swarm-worthy
+  // workers can still flip in/out without other chats inheriting the state.
+  const [swarmActive, setSwarmActive] = useState(false);
+  // Drop swarm mode when there is no active chat to render workers from —
+  // the swarm grid needs a RunState. Also drop it when the section is
+  // collapsed: the user can't see the toggle so the only way back out
+  // would be expand + toggle.
+  useEffect(() => {
+    if (!activeRun) setSwarmActive(false);
+  }, [activeRun]);
+  useEffect(() => {
+    if (collapsed) setSwarmActive(false);
+  }, [collapsed]);
+
   return (
     <div
       style={{
@@ -66,8 +85,18 @@ export default function ChatPanel({
         collapsed={collapsed}
         onToggleCollapse={onToggleCollapse}
         {...headerDrag}
-        meta={activeRun ? <StatusMeta run={activeRun} /> : null}
-        actions={<NewChatButton onClick={() => onSelectRun(null)} />}
+        meta={activeRun ? <HeaderMeta run={activeRun} /> : null}
+        actions={
+          <>
+            {activeRun && (
+              <SwarmToggleButton
+                active={swarmActive}
+                onClick={() => setSwarmActive((value) => !value)}
+              />
+            )}
+            <NewChatButton onClick={() => onSelectRun(null)} />
+          </>
+        }
       />
       {!collapsed && (
         <>
@@ -82,7 +111,19 @@ export default function ChatPanel({
             onForcePauseRun={onForcePauseRun}
           />
           {error && <ErrorBar message={error} />}
-          {activeRun ? (
+          {swarmActive && activeRun ? (
+            // Swarm grid is keyed on the run id so flipping between chats
+            // remounts the grid (and its TerminalPane instances) for the
+            // new chat's worker set. Toggling swarm off+on within the same
+            // chat reuses the same key, so xterm state survives the round
+            // trip — and the underlying PTYs stay alive regardless because
+            // useTerminalSession only disposes the renderer-side Terminal.
+            <SwarmView
+              key={`swarm:${activeRun.id}`}
+              run={activeRun}
+              cwd={workspace?.cwd ?? null}
+            />
+          ) : activeRun ? (
             // Keyed by chat id so switching chats remounts the stream — fresh
             // scroll position, no step-card open states carried across.
             <ChatConversation
@@ -93,16 +134,78 @@ export default function ChatPanel({
           ) : (
             <WelcomeState />
           )}
-          <ChatComposer
-            key={`composer:${activeRun?.id ?? "new-chat"}`}
-            run={activeRun}
-            cwd={workspace?.cwd ?? null}
-            disabled={!workspace}
-            onStartChat={onStartChat}
-          />
+          {!swarmActive && (
+            <ChatComposer
+              key={`composer:${activeRun?.id ?? "new-chat"}`}
+              run={activeRun}
+              cwd={workspace?.cwd ?? null}
+              disabled={!workspace}
+              onStartChat={onStartChat}
+            />
+          )}
         </>
       )}
     </div>
+  );
+}
+
+function HeaderMeta({ run }: { run: RunState }) {
+  // Status + cost share one row to keep the SectionHeader compact. The pill
+  // hides itself when the run hasn't recorded any cost yet (priced
+  // manager call hasn't completed).
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 8,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <StatusMeta run={run} />
+      <CostPill run={run} />
+    </span>
+  );
+}
+
+function SwarmToggleButton({
+  active,
+  onClick,
+}: {
+  active: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={active ? "Hide swarm grid" : "Show swarm grid (live worker terminals)"}
+      aria-label="Toggle swarm view"
+      aria-pressed={active}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        width: 22,
+        height: 22,
+        border: "none",
+        borderRadius: 5,
+        background: active
+          ? "color-mix(in oklch, var(--accent) 22%, transparent)"
+          : hover
+            ? "var(--hover)"
+            : "transparent",
+        color: active ? "var(--accent)" : hover ? "var(--ink)" : "var(--ink-dim)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 0,
+        cursor: "default",
+      }}
+    >
+      <GridIcon size={12} />
+    </button>
   );
 }
 
@@ -136,6 +239,53 @@ function StatusMeta({ run }: { run: RunState }) {
       {status.detail && <span>{status.detail}</span>}
     </span>
   );
+}
+
+// Live total of every priced manager (OpenRouter) call on this run, sourced
+// from the run-store `totalCostUsd` rollup that recomputes after each call.
+// Worker-side LLM cost is not yet tracked — Spark only sees the manager's
+// OpenRouter usage today. Hidden until at least one priced call has landed
+// so chats that ran before the price-table existed don't surface a fake $0.
+function CostPill({ run }: { run: RunState }) {
+  const total = run.totalCostUsd;
+  if (typeof total !== "number" || !Number.isFinite(total)) return null;
+  return (
+    <span
+      title={`OpenRouter manager spend on this chat: ${formatCostUsd(total)}. Worker LLM cost is not tracked yet.`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        height: 18,
+        padding: "0 7px",
+        borderRadius: 999,
+        border: "1px solid var(--rule-soft)",
+        background: "var(--panel-2)",
+        color: "var(--ink-dim)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        whiteSpace: "nowrap",
+      }}
+    >
+      <span aria-hidden style={{ color: "var(--muted)" }}>$</span>
+      <span>{formatCostUsd(total, { stripDollar: true })}</span>
+    </span>
+  );
+}
+
+// Cost is sub-cent for cheap models and tens of dollars for big runs, so a
+// single fixed precision feels wrong. The pill renders 2 decimals once a run
+// crosses 1¢ and 4 decimals below, so users see real activity even on
+// gemini-flash chats.
+function formatCostUsd(value: number, opts: { stripDollar?: boolean } = {}): string {
+  const abs = Math.abs(value);
+  let formatted: string;
+  if (abs >= 0.01) formatted = value.toFixed(2);
+  else if (abs >= 0.0001) formatted = value.toFixed(4);
+  else if (abs > 0) formatted = "<0.0001";
+  else formatted = "0.00";
+  if (opts.stripDollar) return formatted;
+  return formatted.startsWith("<") ? `<$0.0001` : `$${formatted}`;
 }
 
 function SwitcherBar({
@@ -190,14 +340,19 @@ function SwitcherBar({
     };
   }, [open]);
 
-  const triggerColor = activeRun
-    ? statusToneColor(describeRunStatus(activeRun).tone)
-    : "var(--muted)";
+  const activeTone = activeRun ? describeRunStatus(activeRun).tone : null;
+  const triggerColor = activeTone ? statusToneColor(activeTone) : "var(--muted)";
+  // Only true `live` tones pulse — blocked/done-unseen are urgent in their
+  // own way but should read as steady-state, not motion. Derive from the
+  // tone (not `activeRun.status`) so any future status-to-tone changes flow
+  // through automatically.
+  const pulseTrigger = activeTone === "live";
   const live =
     !!activeRun &&
     (activeRun.status === "running" ||
       activeRun.status === "planning" ||
       activeRun.status === "reviewing");
+  const doneUnseen = activeTone === "done-unseen";
   const canForce =
     !!activeRun &&
     activeRun.status !== "complete" &&
@@ -273,7 +428,7 @@ function SwitcherBar({
             borderRadius: 999,
             background: triggerColor,
             flex: "0 0 7px",
-            animation: live ? "spark-pulse 1.3s ease-in-out infinite" : undefined,
+            animation: pulseTrigger ? "spark-pulse 1.3s ease-in-out infinite" : undefined,
           }}
         />
         <span
@@ -291,6 +446,7 @@ function SwitcherBar({
         >
           {activeRun ? `Chat - ${activeRun.title}` : "New chat"}
         </span>
+        {doneUnseen && <DoneUnseenPill />}
         <span aria-hidden style={{ flex: "0 0 auto", color: "var(--muted)", fontSize: 9 }}>
           ▾
         </span>
@@ -541,6 +697,36 @@ function ChatRow({
         <TrashGlyph />
       </button>
     </div>
+  );
+}
+
+// "done · unseen" pill rendered in the SwitcherBar trigger when the active
+// chat just finished while the user was elsewhere. Disappears once they
+// focus the chat (which fires markRunSeen → tone becomes "done").
+function DoneUnseenPill() {
+  return (
+    <span
+      style={{
+        flex: "0 0 auto",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        height: 17,
+        padding: "0 7px",
+        borderRadius: 999,
+        background: "color-mix(in oklch, var(--info) 18%, transparent)",
+        border: "1px solid color-mix(in oklch, var(--info) 45%, transparent)",
+        color: "var(--info)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 9.5,
+        fontWeight: 650,
+        letterSpacing: "0.04em",
+        textTransform: "lowercase",
+        whiteSpace: "nowrap",
+      }}
+    >
+      done · unseen
+    </span>
   );
 }
 

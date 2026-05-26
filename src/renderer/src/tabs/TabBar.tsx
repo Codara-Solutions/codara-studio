@@ -6,6 +6,8 @@ import {
   TERMINAL_PANE_DRAG_MIME,
   parseTabReorderDrag,
   parseTerminalPaneDrag,
+  peekTerminalPaneDrag,
+  subscribeTerminalPaneDrag,
   type TerminalPaneDragPayload,
 } from "./terminalDrag";
 
@@ -61,10 +63,115 @@ function TabBar({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [terminalDropActive, setTerminalDropActive] = useState(false);
+  // Tab id that a pointer-based pane drag is currently hovering over — drives
+  // hover-activate (open the tab so the user can see where they're aiming)
+  // and the drop-target outline on that TabItem.
+  const [paneHoverTabId, setPaneHoverTabId] = useState<TabId | null>(null);
   const pickerRef = useRef<HTMLDivElement | null>(null);
 
   const acceptsTerminalPane = (event: React.DragEvent): boolean =>
     Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
+
+  // The pane drag uses pointer events (see PaneDragHandle), so the HTML5
+  // onDragEnter hover-activate on each TabItem never fires for it. We
+  // subscribe to the module-level drag state instead, then run our own
+  // pointermove hit-test against each tab's bounding rect — when the user
+  // lingers over an inactive terminal tab during a drag, that tab opens so
+  // the now-visible TerminalStack can take over the drop targeting.
+  useEffect(() => {
+    let dragActive = false;
+    let hoverTimer: number | null = null;
+    let hoverTargetId: TabId | null = null;
+    const clearPaneHoverActivate = () => {
+      if (hoverTimer !== null) {
+        window.clearTimeout(hoverTimer);
+        hoverTimer = null;
+      }
+      hoverTargetId = null;
+    };
+
+    // subscribeTerminalPaneDrag fires the listener synchronously on
+    // registration with the current state, so the helpers above must be
+    // declared first — otherwise we hit a TDZ error on the very first call.
+    const unsubscribe = subscribeTerminalPaneDrag((state) => {
+      dragActive = !!state;
+      if (!state) {
+        clearPaneHoverActivate();
+        setPaneHoverTabId(null);
+      }
+    });
+
+    const onPointerMove = (event: PointerEvent) => {
+      if (!dragActive) return;
+      if (!peekTerminalPaneDrag()) return;
+      const scrollEl = scrollRef.current;
+      if (!scrollEl) return;
+      const stripRect = scrollEl.getBoundingClientRect();
+      // Pointer not over the strip → cancel any pending activation and clear
+      // the drop-target highlight; the pane's own area will pick up the drop.
+      if (
+        event.clientY < stripRect.top ||
+        event.clientY > stripRect.bottom ||
+        event.clientX < stripRect.left ||
+        event.clientX > stripRect.right
+      ) {
+        clearPaneHoverActivate();
+        setPaneHoverTabId((curr) => (curr === null ? curr : null));
+        return;
+      }
+      let hoveredId: TabId | null = null;
+      const tabEls = scrollEl.querySelectorAll<HTMLElement>("[data-tab-id]");
+      for (const el of tabEls) {
+        const r = el.getBoundingClientRect();
+        if (
+          event.clientX >= r.left &&
+          event.clientX <= r.right &&
+          event.clientY >= r.top &&
+          event.clientY <= r.bottom
+        ) {
+          hoveredId = el.dataset.tabId ?? null;
+          break;
+        }
+      }
+      if (!hoveredId) {
+        clearPaneHoverActivate();
+        setPaneHoverTabId((curr) => (curr === null ? curr : null));
+        return;
+      }
+      const hoveredTab = tabs.find((t) => t.id === hoveredId);
+      // Only terminal tabs are valid pane-drop destinations, so only those
+      // get the hover-activate / highlight treatment.
+      if (!hoveredTab || hoveredTab.kind !== "terminal") {
+        clearPaneHoverActivate();
+        setPaneHoverTabId((curr) => (curr === null ? curr : null));
+        return;
+      }
+      setPaneHoverTabId((curr) => (curr === hoveredId ? curr : hoveredId));
+      // Already the active tab — no need to schedule a switch.
+      if (hoveredTab.id === activeId) {
+        clearPaneHoverActivate();
+        return;
+      }
+      // Re-arm only if the target changed, so brushing past a tab doesn't
+      // cancel an in-progress activation of the tab the user actually wants.
+      if (hoverTargetId === hoveredId) return;
+      clearPaneHoverActivate();
+      hoverTargetId = hoveredId;
+      const targetId = hoveredId;
+      hoverTimer = window.setTimeout(() => {
+        hoverTimer = null;
+        hoverTargetId = null;
+        onSelect(targetId);
+      }, HOVER_ACTIVATE_MS);
+    };
+
+    window.addEventListener("pointermove", onPointerMove, true);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove, true);
+      clearPaneHoverActivate();
+      unsubscribe();
+    };
+  }, [tabs, activeId, onSelect]);
 
   // Convert vertical wheel deltas to horizontal scroll on the tab strip,
   // but only when there's actually overflow to scroll. We register with
@@ -157,6 +264,7 @@ function TabBar({
             tab={t}
             active={t.id === activeId}
             canClose={tabs.length > 1}
+            paneDragHover={t.id === paneHoverTabId}
             onSelect={onSelect}
             onClose={onClose}
             onTerminalPaneDrop={onTerminalPaneDrop}
@@ -212,6 +320,11 @@ interface TabItemProps {
   tab: Tab;
   active: boolean;
   canClose: boolean;
+  // True while a pointer-based pane drag is hovering over this tab. The
+  // pointer-event drag (PaneDragHandle) bypasses HTML5 dragenter/dragleave,
+  // so the parent TabBar hit-tests pointer position against each tab and
+  // feeds the result here so the row can still show drop-target styling.
+  paneDragHover: boolean;
   // Take the tab id rather than a pre-bound closure: the parent can hand
   // down ONE stable callback for every row, which (together with React.memo
   // below) lets a single tab's change skip re-rendering its siblings.
@@ -229,6 +342,7 @@ const TabItem = React.memo(function TabItem({
   tab,
   active,
   canClose,
+  paneDragHover,
   onSelect,
   onClose,
   onTerminalPaneDrop,
@@ -273,7 +387,7 @@ const TabItem = React.memo(function TabItem({
     "spark-tab",
     active && "spark-tab--active",
     dragging && "spark-tab--dragging",
-    dropActive && "spark-tab--drop-target",
+    (dropActive || paneDragHover) && "spark-tab--drop-target",
   ]
     .filter(Boolean)
     .join(" ");

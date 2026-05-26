@@ -23,6 +23,7 @@ import { useTheme } from "../theme/ThemeProvider";
 import { usePreferences } from "../preferences/usePreferences";
 import KeybindingsSection from "../shortcuts/KeybindingsSection";
 import { EDITOR_THEME_LABEL } from "./editor-cm/themes";
+import { Capability } from "./Capability";
 import packageJson from "../../../../package.json";
 
 // Settings is a single in-app dialog with seven tabs. Everything renders
@@ -778,6 +779,67 @@ function GeneralSettings() {
           Loading preferences…
         </div>
       )}
+
+      <div
+        style={{
+          height: 1,
+          background: "var(--rule-soft)",
+          margin: "2px 0",
+        }}
+      />
+
+      <SectionTitle
+        title="Notifications"
+        detail="Pick which channels fire when a run is blocked or finishes while you're away. The 3-rule policy gates all channels — they never fire when you're already watching the chat that finished."
+      />
+      {hydrated ? (
+        <div style={{ display: "grid", gap: 6 }}>
+          <ToggleRow
+            title="In-app toast"
+            desc="Stacked top-right card. Click to jump to the chat that needs you."
+            checked={preferences.notificationChannels.inApp}
+            onChange={(v) =>
+              void setPreference("notificationChannels", {
+                ...preferences.notificationChannels,
+                inApp: v,
+              })
+            }
+          />
+          <ToggleRow
+            title="Native OS notification"
+            desc="System tray / notification center alert via your OS notifications service."
+            checked={preferences.notificationChannels.native}
+            onChange={(v) =>
+              void setPreference("notificationChannels", {
+                ...preferences.notificationChannels,
+                native: v,
+              })
+            }
+          />
+          <ToggleRow
+            title="Embedded sound clip"
+            desc="Plays a short cue: one for 'needs you' (blocked), one for 'done'."
+            checked={preferences.notificationChannels.sound}
+            onChange={(v) =>
+              void setPreference("notificationChannels", {
+                ...preferences.notificationChannels,
+                sound: v,
+              })
+            }
+          />
+          <ToggleRow
+            title="OS-specific cues"
+            desc="macOS dock badge / Windows taskbar flash. Clears when you focus Spark."
+            checked={preferences.notificationChannels.osCues}
+            onChange={(v) =>
+              void setPreference("notificationChannels", {
+                ...preferences.notificationChannels,
+                osCues: v,
+              })
+            }
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1517,6 +1579,31 @@ function RuntimeDiagnosticRow({
         >
           {detail}
         </span>
+        {runtime.installed ? (
+          <span style={capabilityChipRowStyle}>
+            <Capability runtime={runtime} feature="costTracking">
+              <CapabilityChip text="cost" tone="neutral" title="Reports per-run cost" />
+            </Capability>
+            <Capability runtime={runtime} feature="contextWindow">
+              <CapabilityChip text="context" tone="neutral" title="Reports context-window usage" />
+            </Capability>
+            <Capability runtime={runtime} feature="hookStatus">
+              <CapabilityChip text="hooks" tone="neutral" title="Supports hook status events" />
+            </Capability>
+            <Capability runtime={runtime} feature="planModeArg">
+              <CapabilityChip text="plan-mode" tone="neutral" title="Accepts a plan-mode argument" />
+            </Capability>
+            <Capability runtime={runtime} feature="shiftEnterNewline">
+              <CapabilityChip text="shift+enter" tone="neutral" title="Supports shift+enter newline" />
+            </Capability>
+            <Capability runtime={runtime} feature="systemPromptInjection">
+              <CapabilityChip text="sys-prompt" tone="neutral" title="Accepts an injected system prompt" />
+            </Capability>
+            <Capability runtime={runtime} feature="sessionResume">
+              <CapabilityChip text="resume" tone="neutral" title="Supports session resume" />
+            </Capability>
+          </span>
+        ) : null}
       </span>
       <span
         style={{
@@ -1534,6 +1621,13 @@ function RuntimeDiagnosticRow({
     </button>
   );
 }
+
+const capabilityChipRowStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 4,
+  marginTop: 4,
+};
 
 function RuntimeToggle({ on, disabled }: { on: boolean; disabled?: boolean }) {
   const width = 28;

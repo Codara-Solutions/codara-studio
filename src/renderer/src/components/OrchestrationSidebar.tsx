@@ -48,9 +48,40 @@ export default function OrchestrationSidebar({
     if (activeRunId) setCreatingNewRun(false);
   }, [activeRunId]);
 
+  // Keep the main process in sync with whatever the user is looking at so
+  // notification suppression works even when the selection changes externally
+  // (e.g. workbench tab sync, right-click Run plan) or on first mount.
+  // Drafting a new chat counts as "looking at nothing", so report null.
+  useEffect(() => {
+    const id = creatingNewRun ? null : activeRunId;
+    void window.spark.ui?.setActiveRun(id);
+  }, [activeRunId, creatingNewRun]);
+
+  // Defensive: if a chat lands as active without going through
+  // `handleSelectRun` (e.g. workbench tab sync, deep-link), still flip the
+  // attention bit. Watches the active chat itself so a run that finishes
+  // while already focused also clears.
+  useEffect(() => {
+    if (!activeRunId) return;
+    const target = runs.find((run) => run.id === activeRunId);
+    if (!target || target.status !== "complete" || target.seen === true) return;
+    void window.spark.orchestration
+      .markRunSeen({ runId: activeRunId })
+      .then((updated) => onRunSnapshot(updated))
+      .catch(() => {
+        /* best-effort attention bit — never throw out of an effect */
+      });
+  }, [activeRunId, runs, onRunSnapshot]);
+
   // Selecting null is the panel's "new chat" intent: show the draft composer
   // and clear the workbench Runs tab. A real id clears the draft and lifts
   // the selection to App.
+  //
+  // Side effects: focusing a chat whose status is `complete` and unseen flips
+  // the seen bit through `orchestration:markRunSeen` (fire and forget; the
+  // broadcast from the main process refreshes the run). The active-run id is
+  // also reported to the main process via the effect above so the
+  // notification module always sees what the user is currently looking at.
   const handleSelectRun = useCallback(
     (id: string | null) => {
       if (id === null) {
@@ -62,9 +93,18 @@ export default function OrchestrationSidebar({
         return;
       }
       setCreatingNewRun(false);
+      const target = runs.find((run) => run.id === id);
+      if (target && target.status === "complete" && target.seen !== true) {
+        void window.spark.orchestration
+          .markRunSeen({ runId: id })
+          .then((updated) => onRunSnapshot(updated))
+          .catch(() => {
+            /* best-effort attention bit — never block selection on failure */
+          });
+      }
       onSelectRun(id);
     },
-    [onSelectRun],
+    [onSelectRun, onRunSnapshot, runs],
   );
 
   // First message of a draft chat starts the orchestrator with that message

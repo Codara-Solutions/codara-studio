@@ -8,6 +8,7 @@ import type {
   AppSettings,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
+  MarkRunSeenInput,
   PauseRunInput,
   CancelRunInput,
   ContextPacket,
@@ -21,6 +22,7 @@ import type {
   RunArtifactPaths,
   RunMessageAttachment,
   RunState,
+  RuntimeState,
   SparkCall,
   SparkEvent,
   StartAutopilotInput,
@@ -33,6 +35,7 @@ import type {
   WorkerTaskStatus,
   WorkerAttempt,
   WorkerArtifactPaths,
+  WorkerRuntimeState,
   VerifierVerdict,
   WorkerReport,
   WorkerTaskEnvelope,
@@ -71,6 +74,8 @@ import {
 import * as pty from "../pty-manager";
 import { applyAgentRuntimeSettings, detectAgentRuntimes } from "../agent-runtimes";
 import { renderAgentSyncManagerContext, renderAgentSyncPromptLines } from "../agent-sync";
+import { getProvider } from "../providers";
+import type { SpawnOpts } from "../providers/types";
 
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
@@ -94,6 +99,14 @@ interface ActiveWorkerProcess {
   command: string;
   write: (input: string) => void;
   kill: () => void;
+  // Self-reported runtime state from the worker process via the hook RPC
+  // (big-bet "Hook contract for sub-agents to self-report"). Updated by
+  // applyHookStateReport; authoritative over any regex-tail detection
+  // pulled from pty output (big bet A) — the doc says so. Optional + last
+  // update wins.
+  runtimeState?: WorkerRuntimeState;
+  runtimeStateNote?: string;
+  runtimeStateAt?: string;
 }
 
 const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
@@ -169,6 +182,9 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     artifactDir: "",
     createdAt: now,
     updatedAt: now,
+    // Fresh run hasn't been "seen done" yet; flips when the user focuses
+    // a `status === "complete"` chat (see `markRunSeen`).
+    seen: false,
     plans: [],
     steps: [],
     workerTasks: [],
@@ -1091,6 +1107,10 @@ async function askOpenRouterManager(
   const sparkCall: SparkCall = {
     id: callId,
     runId: run.id,
+    // Capture the active step at call-start so per-step cost rollups can
+    // attribute this call without replaying the event log. Undefined for
+    // plan_analysis calls that fire before any step exists.
+    stepId: run.currentStepId,
     mode,
     model: config.model,
     status: "started",
@@ -1183,8 +1203,21 @@ async function askOpenRouterManager(
       targetCall.promptTokenEstimate = contextPacket.tokenEstimate;
       targetCall.contextWindowTokens = completedContextWindow.tokens;
       targetCall.contextWindowSource = completedContextWindow.source;
+      // Cost + token-split fields from the OpenRouter-prices layer. Optional —
+      // older runs and unknown models leave these undefined; the Costs tab and
+      // header pill handle that gracefully.
+      if (typeof result.costUsd === "number") targetCall.costUsd = result.costUsd;
+      if (typeof result.inputTokens === "number") targetCall.inputTokens = result.inputTokens;
+      if (typeof result.outputTokens === "number") targetCall.outputTokens = result.outputTokens;
+      if (typeof result.cacheReadTokens === "number") {
+        targetCall.cacheReadTokens = result.cacheReadTokens;
+      }
       targetCall.completedAt = completedAt;
     }
+    // Recompute the run-level rollup + per-step rollups now that we have a
+    // fresh call cost. Cheap (O(calls) per save) and keeps the pill reactive
+    // without a separate aggregator.
+    recomputeRunCostRollups(latest);
     latest.updatedAt = completedAt;
     await saveRun(latest);
     if (result.fallbackFrom) {
@@ -1221,6 +1254,14 @@ async function askOpenRouterManager(
         promptTokenEstimate: contextPacket.tokenEstimate,
         contextWindowTokens: completedContextWindow.tokens,
         contextWindowSource: completedContextWindow.source,
+        // Cost / token-split fields from the price-table layer so the event
+        // log carries the same data the SparkCall record does. Lets the
+        // Session Inspector Costs tab and any external audit replay both.
+        costUsd: result.costUsd,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        cacheReadTokens: result.cacheReadTokens,
+        runTotalCostUsd: latest.totalCostUsd,
         parsedJsonPath,
         decision: result.decision,
       },
@@ -2255,42 +2296,71 @@ async function tryStandardCleanImplFastPathReview(
   });
 }
 
+// Effort levels Spark passes through verbatim when building a Claude
+// standing terminal. "max" is intentionally omitted: the user types these
+// terminals manually and Claude rejects `--effort max` outside of certain
+// model+plan combinations. "minimal" is omitted because the Claude CLI
+// rejects it outright (Codex's lowest tier). Anything else from this set
+// gets forwarded to the provider's buildArgs unchanged.
 const STANDING_TERMINAL_CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
 
 // Build the launch command for a standing interactive terminal: a plain
 // claude/codex/cursor session the user drives. Like buildLaunchCommandLine,
 // but without the worker-task wiring — these are not Spark workers.
+//
+// The CLI-specific argv is produced by the runtime's `CliProvider`
+// (see src/main/providers/) so adding a new CLI later only requires a new
+// provider file. This function still owns shell-rendering concerns
+// (quoting, the cursor pwsh dispatch quirk) because those depend on the
+// shell we're spawning into, not on the CLI itself.
 function buildStandingTerminalCommand(
   runtime: "claude" | "codex" | "cursor",
   model?: string,
   effort?: string,
 ): string {
-  if (runtime === "codex") {
-    const args = ["codex", "--yolo"];
-    if (model) args.push("-m", quoteShellArg(model));
-    return args.join(" ");
+  // Behaviour preservation: the previous inline builder only forwarded
+  // `effort` for Claude (and only the four gated values below). Codex and
+  // Cursor standing terminals deliberately ignored effort, even when the
+  // caller passed it. We replicate that gate here so the provider doesn't
+  // start emitting `-c "model_reasoning_effort=..."` for codex terminals
+  // it never did before.
+  let effectiveEffort: SpawnOpts["effort"];
+  if (runtime === "claude" && effort && STANDING_TERMINAL_CLAUDE_EFFORTS.has(effort)) {
+    effectiveEffort = effort as SpawnOpts["effort"];
   }
+
+  const provider = getProvider(runtime);
+  const providerArgs = provider.buildArgs({
+    cwd: "",
+    model: model?.trim(),
+    effort: effectiveEffort,
+  });
+
+  // Render the argv into a single shell-ready string. The head segment is
+  // the binary itself: for Cursor on Windows we dispatch through the
+  // absolute path to `agent.cmd` because typing bare `agent` into pwsh
+  // resolves to `agent.ps1` (an ExternalScript that runs IN THE PARENT
+  // pwsh) and trips the user's $PROFILE hooks (Terminal-Icons floods the
+  // pane with Import-PowerShellDataFile errors before the Cursor banner
+  // even appears). `agent.cmd` spawns a fresh -NoProfile child.
+  const head = renderStandingTerminalHead(runtime);
+  const tail = providerArgs.map((arg) => quoteShellArg(arg));
+  return [head, ...tail].join(" ");
+}
+
+function renderStandingTerminalHead(runtime: "claude" | "codex" | "cursor"): string {
   if (runtime === "cursor") {
-    // See buildLaunchCommandLine for cursor — bare "agent" resolves to
-    // agent.ps1 in the parent pwsh and trips the user's $PROFILE hooks
-    // (Terminal-Icons errors). agent.cmd spawns a -NoProfile child instead.
-    // Quoted path needs the `&` call operator in pwsh.
     const localAppData = process.env.LOCALAPPDATA;
-    const cmdPath = localAppData
-      ? join(localAppData, "cursor-agent", "agent.cmd")
-      : "agent";
-    const head = localAppData ? `& ${quoteShellArg(cmdPath)}` : "agent";
-    const args = [head, "--yolo"];
-    const modelId = model || "composer-2.5-fast";
-    args.push("--model", quoteShellArg(modelId));
-    return args.join(" ");
+    if (localAppData) {
+      // Quoted path needs the `&` call operator in pwsh.
+      const cmdPath = join(localAppData, "cursor-agent", "agent.cmd");
+      return `& ${quoteShellArg(cmdPath)}`;
+    }
+    return "agent";
   }
-  const args = ["claude", "--dangerously-skip-permissions"];
-  if (model) args.push("--model", quoteShellArg(model));
-  if (effort && STANDING_TERMINAL_CLAUDE_EFFORTS.has(effort)) {
-    args.push("--effort", effort);
-  }
-  return args.join(" ");
+  // Claude and Codex are well-behaved on every shell we ship: their bin
+  // names are unique on PATH and don't collide with PowerShell aliases.
+  return runtime === "codex" ? "codex" : "claude";
 }
 
 function standingTerminalTitle(runtime: "claude" | "codex" | "cursor", model?: string): string {
@@ -3964,6 +4034,26 @@ export async function updateRunStatus(input: UpdateRunStatusInput): Promise<RunS
   });
 }
 
+// Flip the "seen" attention bit to true. The renderer calls this when the
+// user focuses a chat whose status is `complete` and `seen === false`, so
+// the visual treatment drops from done-unseen (teal) back to done-seen
+// (green). Idempotent — calling on a run that is already seen, or whose
+// status isn't `complete`, is a no-op.
+export async function markRunSeen(input: MarkRunSeenInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  if (run.seen === true || run.status !== "complete") return run;
+  return commitRunChange(run, {
+    type: "run.seen",
+    message: "Run marked seen",
+    payload: { previousSeen: run.seen ?? false },
+    mutate: (draft, timestamp) => {
+      if (draft.seen === true) return false;
+      draft.seen = true;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 export async function createStep(input: CreateStepInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   const title = input.title.trim();
@@ -5362,7 +5452,59 @@ function normalizeRun(run: RunState): RunState {
   } else {
     delete run.completedAt;
   }
+  // Older run.json files (pre-attention-rollup) didn't track `seen`. A
+  // freshly-loaded complete run from disk has no signal to claim "I'm
+  // unseen", so treat it as already-seen — otherwise every prior run would
+  // turn teal the first time Spark restarts.
+  if (run.seen === undefined) {
+    run.seen = run.status === "complete" ? true : false;
+  }
+  // Backfill cost rollups on load so runs persisted before the cost-tracking
+  // big bet landed pick up a totalCostUsd on the next read. Cheap (O(calls))
+  // and avoids special-casing the renderer for legacy run.json files.
+  recomputeRunCostRollups(run);
   return run;
+}
+
+/**
+ * Sum every priced SparkCall on a run and stamp `totalCostUsd` on the run
+ * record (always) and each step record that owns at least one priced call.
+ * Calls without a `costUsd` field contribute nothing; the rollup only writes
+ * a number when at least one call had one — leaves the field undefined
+ * otherwise so the UI can keep its "no data" path distinct from "$0.00".
+ */
+function recomputeRunCostRollups(run: RunState): void {
+  let runTotal = 0;
+  let runHasAny = false;
+  const stepTotals = new Map<string, number>();
+  const stepHasAny = new Set<string>();
+  for (const call of run.sparkCalls ?? []) {
+    const cost = typeof call.costUsd === "number" && Number.isFinite(call.costUsd) ? call.costUsd : null;
+    if (cost === null) continue;
+    runTotal += cost;
+    runHasAny = true;
+    if (call.stepId) {
+      stepTotals.set(call.stepId, (stepTotals.get(call.stepId) ?? 0) + cost);
+      stepHasAny.add(call.stepId);
+    }
+  }
+  if (runHasAny) {
+    run.totalCostUsd = roundCost(runTotal);
+  } else {
+    delete run.totalCostUsd;
+  }
+  for (const step of run.steps ?? []) {
+    if (stepHasAny.has(step.id)) {
+      step.totalCostUsd = roundCost(stepTotals.get(step.id) ?? 0);
+    } else {
+      delete step.totalCostUsd;
+    }
+  }
+}
+
+function roundCost(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.round(value * 1_000_000) / 1_000_000;
 }
 
 const NORMALIZE_DUPLICATE_MESSAGE_WINDOW_MS = 120_000;
@@ -5417,6 +5559,9 @@ async function commitRunChange(
   },
 ): Promise<RunState> {
   let result: RunState | null = null;
+  let prevStatus: RunState["status"] | null = null;
+  let nextStatus: RunState["status"] | null = null;
+  let persisted = false;
   const previous = runMutationQueues.get(run.id) ?? Promise.resolve();
   const next = previous
     .catch(() => {
@@ -5424,6 +5569,10 @@ async function commitRunChange(
     })
     .then(async () => {
       const latest = await requireRun(run.id);
+      // Capture the pre-mutation status so we can detect transitions after
+      // persistence. The notifications module suppresses no-ops (rule 3), and
+      // the seen-flag reset below also needs the prior status.
+      prevStatus = latest.status;
       const timestamp = new Date().toISOString();
       const changed = change.mutate(latest, timestamp);
       result = latest;
@@ -5432,6 +5581,13 @@ async function commitRunChange(
         latest.completedAt ??= timestamp;
       } else {
         delete latest.completedAt;
+      }
+      // Non-complete → complete transitions reset the "seen" attention bit so
+      // the chat surfaces as done-unseen until the user focuses it. Other
+      // terminal statuses (failed/cancelled) are deliberately not part of the
+      // seen calculus — they have their own dedicated tones in the UI.
+      if (prevStatus !== "complete" && latest.status === "complete") {
+        latest.seen = false;
       }
       await saveRun(latest);
       await appendEvent({
@@ -5444,12 +5600,28 @@ async function commitRunChange(
         message: change.message,
         payload: change.payload,
       });
+      nextStatus = latest.status;
+      persisted = true;
     });
   runMutationQueues.set(run.id, next);
   try {
     await next;
   } finally {
     if (runMutationQueues.get(run.id) === next) runMutationQueues.delete(run.id);
+  }
+  // Fire desktop notifications for blocked / complete transitions. Lazy-load
+  // the module so the run-store cold path doesn't pull in the Electron
+  // Notification API on every import — matches the deferred-load pattern used
+  // for heavy modules in ipc.ts.
+  if (persisted && result && prevStatus !== nextStatus && nextStatus !== null) {
+    void (async () => {
+      try {
+        const mod = await import("../notifications");
+        mod.notifyRunStateTransition(result!, prevStatus, nextStatus!);
+      } catch {
+        /* notification delivery is best-effort */
+      }
+    })();
   }
   return result ?? (await requireRun(run.id));
 }
@@ -5898,6 +6070,203 @@ function activeWorkersForRun(runId: string): ActiveWorkerProcess[] {
   return Array.from(activeWorkerProcesses.values()).filter((worker) => worker.runId === runId);
 }
 
+// Hook RPC handoff (big-bet "Hook contract for sub-agents to self-report").
+// Called from hook-rpc.ts when a worker POSTs to /state. The paneId is the
+// PTY session id, which Spark uses interchangeably with attemptId for active
+// workers — see ActiveWorkerProcess.attemptId + how pty-manager keys sessions
+// by opts.id. We:
+//   1. find the ActiveWorkerProcess by paneId,
+//   2. de-dup repeat reports of the same state (no event, no spam),
+//   3. otherwise mutate in place and append a worker_attempt.state_reported
+//      event so the renderer can react (or a future Session Inspector tab
+//      can replay the timeline).
+//
+// Tolerates an unknown paneId quietly — a worker spawned outside Spark's
+// orchestration loop (e.g. a user-launched claude pane that picked up the
+// env vars) is allowed to call us, but if we don't have an ActiveWorkerProcess
+// to attach the state to we just drop the report. This matches the doc's
+// "hook wins when present" rule: if there's no worker to update, there's
+// nothing to win.
+export function applyHookStateReport(report: {
+  paneId: string;
+  state: WorkerRuntimeState;
+  note?: string;
+}): void {
+  const worker = activeWorkerProcesses.get(report.paneId);
+  if (!worker) return;
+
+  // De-dup: identical state + note as the last report on the
+  // ActiveWorkerProcess is a no-op for THAT object's event stream — workers
+  // often re-emit the same state on every tool call ("still working") and we
+  // don't want to flood worker_attempt.state_reported. We still bridge to
+  // WorkerAttempt unconditionally below so the renderer side recovers even
+  // if regex briefly overwrote a value the hook had previously claimed.
+  const sameState = worker.runtimeState === report.state;
+  const sameNote = (worker.runtimeStateNote ?? undefined) === (report.note ?? undefined);
+  const skipWorkerEvent = sameState && sameNote;
+
+  const previousState = worker.runtimeState;
+  const timestamp = new Date().toISOString();
+  worker.runtimeState = report.state;
+  worker.runtimeStateNote = report.note;
+  worker.runtimeStateAt = timestamp;
+
+  // Bridge to WorkerAttempt so the renderer (which reads
+  // WorkerAttempt.runtimeState via timeline.ts → ChatConversation.tsx) sees
+  // hook reports too — without this, only the regex tail poller can move
+  // the chip. WorkerRuntimeState and RuntimeState are the same union so
+  // the value passes through; runtimeStateSource = "hook" tells
+  // reportTerminalState to skip its next regex tick for HOOK_TRUST_MS.
+  // Best-effort: if the attempt isn't in the cache (run not yet loaded)
+  // we still updated ActiveWorkerProcess above; the next poller tick will
+  // hydrate the cache and the next hook report will land cleanly.
+  //
+  // Note: this runs even when skipWorkerEvent is true, because the regex
+  // detector may have stomped on a previous hook value between dedupes —
+  // a fresh hook tick of the same "working" must still reclaim the
+  // WorkerAttempt slot if regex flipped it to "blocked" in the meantime.
+  const match = findAttemptByPaneId(report.paneId);
+  if (match) {
+    const { run: targetRun, attempt: targetAttempt } = match;
+    const attemptStateChanged =
+      targetAttempt.runtimeState !== report.state ||
+      targetAttempt.runtimeStateSource !== "hook";
+    if (attemptStateChanged) {
+      const attemptPrevious = targetAttempt.runtimeState ?? null;
+      targetAttempt.runtimeState = report.state;
+      targetAttempt.runtimeStateUpdatedAt = timestamp;
+      targetAttempt.runtimeStateSource = "hook";
+      targetRun.updatedAt = timestamp;
+      // Same fire-and-forget save pattern reportTerminalState uses — the
+      // event below is the authoritative UI trigger, the run.json rewrite
+      // is bookkeeping that mustn't block the hook RPC reply.
+      void saveRun(targetRun).catch(() => undefined);
+      void appendEvent({
+        timestamp,
+        workspaceId: targetRun.workspaceId,
+        runId: targetRun.id,
+        workerTaskId: targetAttempt.workerTaskId,
+        attemptId: targetAttempt.id,
+        type: "worker_attempt.runtime_state_changed",
+        message: `Worker attempt runtime state: ${attemptPrevious ?? "unknown"} -> ${report.state}`,
+        payload: {
+          previous: attemptPrevious,
+          state: report.state,
+          attemptId: targetAttempt.id,
+          source: "hook",
+          note: report.note,
+        },
+      }).catch((err) => {
+        console.warn("[run-store] appendEvent for hook attempt state failed:", err);
+      });
+    } else {
+      // No attempt-side change but still refresh the timestamp so the
+      // HOOK_TRUST_MS window in reportTerminalState slides forward — that's
+      // the whole point of receiving repeat hook reports. No save / no
+      // event: nothing observable changed for the renderer.
+      targetAttempt.runtimeStateUpdatedAt = timestamp;
+    }
+  }
+
+  // Bail out of the ActiveWorkerProcess event emit when the hook just
+  // re-stated the same value. The renderer-side update above already kept
+  // the trust window fresh, so nothing else is needed.
+  if (skipWorkerEvent) return;
+
+  // Fire-and-forget event so a subscriber (renderer, Session Inspector,
+  // headless eval) can pick up the change. Don't await — the hook RPC must
+  // stay responsive even if appendEvent has to fsync a big events.jsonl.
+  // The workspaceId is looked up async via getRun so renderer filtering by
+  // workspace keeps working; if the run was deleted under us the event is
+  // skipped silently.
+  void (async () => {
+    try {
+      const run = await getRun(worker.runId);
+      if (!run) return;
+      await appendEvent({
+        timestamp,
+        workspaceId: run.workspaceId,
+        runId: worker.runId,
+        stepId: worker.stepId,
+        workerTaskId: worker.workerTaskId,
+        attemptId: worker.attemptId,
+        type: "worker_attempt.state_reported",
+        message: `Worker self-reported state: ${report.state}`,
+        payload: {
+          paneId: report.paneId,
+          state: report.state,
+          previousState,
+          note: report.note,
+          source: "hook",
+        },
+      });
+    } catch (err) {
+      console.warn("[run-store] appendEvent for hook state failed:", err);
+    }
+  })();
+}
+
+// CLI hook ingestion (big-bet "CLI hook ingestion — free observability").
+// Sibling to applyHookStateReport above: that one handles state transitions
+// (worker says "I'm blocked on a permission prompt"), this one handles
+// everything else — tool calls, prompt submissions, compaction, session
+// start, etc. — so the Session Inspector tab and Cost-Tracking pill have a
+// canonical event log.
+//
+// The hook-watcher dispatches state-bearing events (Notification, Stop,
+// SubagentStop) through applyHookStateReport so the worker's runtimeState
+// updates; everything else lands here as a plain event log entry. We:
+//   1. look up the ActiveWorkerProcess by paneId so we can stamp the event
+//      with runId/stepId/workerTaskId/attemptId (without those, the Session
+//      Inspector can't filter the log per-worker);
+//   2. if no worker matches, drop quietly — same rule as applyHookStateReport.
+//      A future "ambient" hook (claude pane the user spawned themselves with
+//      our env vars) can be wired up later if we want it.
+//   3. otherwise append a hook.<HookName> event so consumers see the raw
+//      payload. We do NOT throttle these — Claude's PreToolUse fires once
+//      per tool call which is bursty but bounded.
+export function applyHookEvent(input: {
+  paneId: string;
+  hookName: string;
+  payload?: Record<string, unknown> | null;
+  // ISO timestamp the hook recorded the event. Falls back to now() if the
+  // script's clock disagreed or the wrapper was missing a timestamp.
+  timestamp?: string;
+  // Optional human-readable summary for logs. Hook-watcher fills this in
+  // for the hooks where a short label helps (PreToolUse: tool name, etc.).
+  message?: string;
+}): void {
+  const worker = activeWorkerProcesses.get(input.paneId);
+  if (!worker) return;
+  const timestamp = input.timestamp ?? new Date().toISOString();
+  void (async () => {
+    try {
+      const run = await getRun(worker.runId);
+      if (!run) return;
+      await appendEvent({
+        timestamp,
+        workspaceId: run.workspaceId,
+        runId: worker.runId,
+        stepId: worker.stepId,
+        workerTaskId: worker.workerTaskId,
+        attemptId: worker.attemptId,
+        type: `hook.${input.hookName}`,
+        message: input.message,
+        payload: {
+          paneId: input.paneId,
+          hookName: input.hookName,
+          ...(input.payload && typeof input.payload === "object"
+            ? { hookPayload: input.payload }
+            : {}),
+          source: "cli-hook",
+        },
+      });
+    } catch (err) {
+      console.warn("[run-store] appendEvent for hook event failed:", err);
+    }
+  })();
+}
+
 function shouldResumeManagerPlanning(run: RunState): boolean {
   if (activeWorkersForRun(run.id).length > 0) return false;
   if (run.status !== "paused" || run.autopilot?.status !== "paused") return false;
@@ -6037,6 +6406,105 @@ function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input:
       "",
     ].join("\r\n"),
   };
+}
+
+// How long (ms) a hook-sourced runtime state is considered authoritative
+// over the regex tail poller. The doc rule is "hook reports win over regex
+// detection". We implement that as a 5-second trust window: if the worker
+// last self-reported via the localhost RPC inside that window, the regex
+// poller is gagged. After the window the hook stream is considered stale
+// (the agent may have crashed without sending a final state) and the regex
+// detector is allowed to take back over.
+const HOOK_TRUST_MS = 5_000;
+
+// Find the WorkerAttempt + its parent RunState anywhere in the in-memory
+// run cache. paneId === attempt.id for Spark workers (pty-manager keys
+// sessions by attemptId). Returns null if no cached run owns that attempt
+// — happens for manual user-spawned terminals and for runs that haven't
+// been loaded from disk yet. Bounded by RUN_RETENTION_KEEP (~50 cached
+// runs × workerAttempts each), so cheap.
+function findAttemptByPaneId(
+  paneId: string,
+): { run: RunState; attempt: WorkerAttempt } | null {
+  for (const run of runCache.values()) {
+    const attempt = run.workerAttempts.find((item) => item.id === paneId);
+    if (attempt) return { run, attempt };
+  }
+  return null;
+}
+
+// Live agent state report from the renderer-side terminal poller. paneId is
+// the same id the renderer used for pty:spawn — for Spark workers this is
+// the attemptId. We walk the in-memory run cache to find the matching
+// attempt, stamp the new state on it, and broadcast a change event so the
+// chat UI and notification system can react.
+//
+// Hot path: this runs every time a worker pane changes state. Reports for
+// panes with no matching attempt (manual user-spawned claude/codex panes)
+// are silently dropped — the renderer doesn't filter by ownership before
+// reporting and we want a single round-trip, not a probe + write.
+//
+// Hook priority: when the same attempt also has a hook RPC stream
+// (applyHookStateReport landed within HOOK_TRUST_MS), the hook wins and
+// this regex report is dropped. After the trust window expires the regex
+// detector takes back over so a crashed hook doesn't freeze the UI.
+export async function reportTerminalState(
+  paneId: string,
+  state: RuntimeState,
+): Promise<void> {
+  if (!paneId) return;
+  const match = findAttemptByPaneId(paneId);
+  if (!match) return;
+  const { run: targetRun, attempt: targetAttempt } = match;
+
+  // Hook trumps regex while the hook stream is fresh. We compare against
+  // Date.now() (not the new event's timestamp) because runtimeStateUpdatedAt
+  // is ISO-encoded; Date.parse round-trips that cleanly.
+  if (targetAttempt.runtimeStateSource === "hook" && targetAttempt.runtimeStateUpdatedAt) {
+    const lastHookAt = Date.parse(targetAttempt.runtimeStateUpdatedAt);
+    if (Number.isFinite(lastHookAt) && Date.now() - lastHookAt < HOOK_TRUST_MS) {
+      return;
+    }
+  }
+
+  // No-op transition. When the value matches we still re-stamp the source
+  // and timestamp (for any case where the hook trust window just expired
+  // with the same state the regex is now reporting), but emit no event
+  // and skip the run.json rewrite — nothing visible changed for the UI.
+  if (targetAttempt.runtimeState === state) {
+    if (targetAttempt.runtimeStateSource !== "regex") {
+      targetAttempt.runtimeStateSource = "regex";
+      targetAttempt.runtimeStateUpdatedAt = new Date().toISOString();
+    }
+    return;
+  }
+
+  const timestamp = new Date().toISOString();
+  const previous = targetAttempt.runtimeState ?? null;
+  targetAttempt.runtimeState = state;
+  targetAttempt.runtimeStateUpdatedAt = timestamp;
+  targetAttempt.runtimeStateSource = "regex";
+  targetRun.updatedAt = timestamp;
+  // saveRun re-writes run.json; the cache stays in sync via writeRunFile().
+  // We don't await the save before broadcasting — the event below is the
+  // authoritative trigger for UI updates, and a slow disk write must not
+  // delay the chat indicator flipping.
+  void saveRun(targetRun).catch(() => undefined);
+  await appendEvent({
+    timestamp,
+    workspaceId: targetRun.workspaceId,
+    runId: targetRun.id,
+    workerTaskId: targetAttempt.workerTaskId,
+    attemptId: targetAttempt.id,
+    type: "worker_attempt.runtime_state_changed",
+    message: `Worker attempt runtime state: ${previous ?? "unknown"} -> ${state}`,
+    payload: {
+      previous,
+      state,
+      attemptId: targetAttempt.id,
+      source: "regex",
+    },
+  });
 }
 
 export async function readWorkerReport(path: string): Promise<WorkerReport | null> {
