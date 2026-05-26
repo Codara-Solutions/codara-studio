@@ -103,6 +103,10 @@
         "to": "claude-hooks"
       },
       {
+        "from": "resources/spark-preview-mcp",
+        "to": "spark-preview-mcp"
+      },
+      {
         "from": "resources/sounds",
         "to": "sounds"
       }

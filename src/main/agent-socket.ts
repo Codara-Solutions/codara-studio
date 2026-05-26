@@ -1,7 +1,14 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { promises as fsp } from "node:fs";
+import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import * as pty from "./pty-manager";
+import { sparkHome } from "./spark-home";
+import { writeFileAtomic } from "./fs-atomic";
+import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
+
+const HANDSHAKE_FILE = "agent-socket.json";
 
 // JSON-RPC server hosted by main, exposed to sub-agents via SPARK_AGENT_SOCKET +
 // SPARK_AGENT_TOKEN env vars. Sub-agents POST {jsonrpc:"2.0",method,params,id}
@@ -123,6 +130,13 @@ export async function startAgentSocket(): Promise<ServerHandle> {
   const url = `http://127.0.0.1:${address.port}`;
   currentHandle = { server, url, token };
   pty.setAgentSocketEnv({ url, token });
+  // Persist a handshake file so MCP servers spawned by external runtimes
+  // (Claude Code, Codex) — which do not inherit Spark's pty env — can pick
+  // up the current URL + token. Best-effort: a failed write only means the
+  // spark-preview MCP server has to back off and retry.
+  void writeHandshakeFile({ url, token }).catch((err) =>
+    console.warn("[agent-socket] failed to write handshake file:", err),
+  );
   return currentHandle;
 }
 
@@ -132,12 +146,30 @@ export async function stopAgentSocket(): Promise<void> {
   if (!handle) return;
   currentHandle = null;
   pty.setAgentSocketEnv(null);
+  // Remove the handshake file so any MCP server child that survived Spark's
+  // shutdown returns "Spark offline" on next call instead of speaking to a
+  // closed port.
+  await fsp.rm(handshakeFilePath(), { force: true }).catch(() => undefined);
   await new Promise<void>((resolve) => {
     handle.server.close(() => resolve());
     // close() waits for all open connections — force the issue so quit
     // doesn't hang behind a long-poll from a stuck sub-agent.
     handle.server.closeAllConnections?.();
   });
+}
+
+function handshakeFilePath(): string {
+  return join(sparkHome(), HANDSHAKE_FILE);
+}
+
+async function writeHandshakeFile(input: { url: string; token: string }): Promise<void> {
+  const payload = JSON.stringify({
+    url: input.url,
+    token: input.token,
+    pid: process.pid,
+    writtenAt: new Date().toISOString(),
+  }, null, 2);
+  await writeFileAtomic(handshakeFilePath(), payload);
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse, expectedToken: string): Promise<void> {
@@ -248,6 +280,17 @@ async function dispatch(
         return await handleTerminalRead(params, id);
       case "chat.append":
         return await handleChatAppend(params, id);
+      case "preview.list":
+      case "preview.navigate":
+      case "preview.url":
+      case "preview.snapshot":
+      case "preview.evaluate":
+      case "preview.click":
+      case "preview.type":
+      case "preview.press_key":
+      case "preview.wait_for":
+      case "preview.screenshot":
+        return await handlePreviewOp(method, params, id);
       case "tab.create":
       case "pane.split":
         // The renderer owns tab/pane state and reaching it from main requires
@@ -300,6 +343,22 @@ async function handleTerminalRead(
     truncatedBytes: tail.length >= TERMINAL_READ_MAX_BYTES,
     text: output,
   });
+}
+
+async function handlePreviewOp(
+  method: string,
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const op = method.replace(/^preview\./, "") as PreviewOpName;
+  const previewParams: PreviewOpParams = { ...params };
+  try {
+    const result = await requestPreviewOp(op, previewParams);
+    return successResponse(id, result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return errorResponse(id, ERR_INTERNAL, message);
+  }
 }
 
 async function handleChatAppend(

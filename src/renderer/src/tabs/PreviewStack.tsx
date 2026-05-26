@@ -2,6 +2,12 @@ import React, { useEffect, useMemo, useRef } from "react";
 import BrowserPane, {
   type BrowserPaneHandle,
 } from "../components/Preview/BrowserPane";
+import {
+  registerPreviewTab,
+  setActivePreviewTab,
+  unregisterPreviewTab,
+  updatePreviewTabUrl,
+} from "../components/Preview/registry";
 import type { PreviewTab, Tab, TabId } from "./types";
 
 // PreviewStack hosts preview tabs. Each <BrowserPane> wraps an Electron
@@ -54,9 +60,19 @@ function PreviewStack({ tabs, activeId, onUrlChange }: Props) {
   };
 
   const handles = useRef(new Map<TabId, BrowserPaneHandle | null>());
-  const setHandle = (id: TabId, h: BrowserPaneHandle | null) => {
-    if (h) handles.current.set(id, h);
-    else handles.current.delete(id);
+  // Track the most recent URL fed into the registry so the per-tab url
+  // callback below only re-syncs on actual change.
+  const lastRegisteredUrl = useRef(new Map<TabId, string>());
+  const setHandle = (id: TabId, h: BrowserPaneHandle | null, url: string) => {
+    if (h) {
+      handles.current.set(id, h);
+      registerPreviewTab({ id, handle: h, url });
+      lastRegisteredUrl.current.set(id, url);
+    } else {
+      handles.current.delete(id);
+      unregisterPreviewTab(id);
+      lastRegisteredUrl.current.delete(id);
+    }
   };
 
   // GC for tabs that have been closed entirely (no longer in the previews
@@ -68,7 +84,31 @@ function PreviewStack({ tabs, activeId, onUrlChange }: Props) {
       if (!live.has(id)) callbacks.current.delete(id);
     }
     for (const id of handles.current.keys()) {
-      if (!live.has(id)) handles.current.delete(id);
+      if (!live.has(id)) {
+        handles.current.delete(id);
+        unregisterPreviewTab(id);
+        lastRegisteredUrl.current.delete(id);
+      }
+    }
+  }, [previews]);
+
+  // Sync the active preview tab into the module registry so the spark-preview
+  // MCP bridge picks the right webview by default. activeId may belong to a
+  // non-preview tab; passing it through is safe — the registry only honors
+  // ids it already knows about.
+  useEffect(() => {
+    setActivePreviewTab(activeId ?? null);
+  }, [activeId]);
+
+  // Keep the registry's per-tab URL in sync with the live tab list (covers
+  // address-bar navigations the parent didn't drive).
+  useEffect(() => {
+    for (const t of previews) {
+      const prev = lastRegisteredUrl.current.get(t.id);
+      if (prev !== t.url) {
+        updatePreviewTabUrl(t.id, t.url);
+        lastRegisteredUrl.current.set(t.id, t.url);
+      }
     }
   }, [previews]);
 
@@ -93,7 +133,7 @@ function PreviewStack({ tabs, activeId, onUrlChange }: Props) {
             }}
           >
             <BrowserPane
-              ref={(h) => setHandle(t.id, h)}
+              ref={(h) => setHandle(t.id, h, t.url)}
               url={t.url}
               visible={visible}
               onUrlChange={getUrlCallback(t.id)}

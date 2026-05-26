@@ -5,7 +5,7 @@ import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { startAgentSocket, stopAgentSocket } from "./agent-socket";
 import { ensureSparkHomeSync } from "./spark-home";
-import { flush, loadState } from "./storage";
+import { flush, loadSettings, loadState } from "./storage";
 import { flushPreferences, getPreferenceSync } from "./preferences-store";
 import { registerMainWindow, startNotifications } from "./notifications";
 import { setSeededRoots } from "./fs-sandbox";
@@ -20,6 +20,8 @@ import {
 import { registerAutoUpdater } from "./auto-updater";
 import { startHookRpc, stopHookRpc } from "./hook-rpc";
 import { installClaudeHooks } from "./hook-installer";
+import { installPlaywrightMcp } from "./mcp-installer";
+import { registerPreviewBridge } from "./preview-bridge";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 
 // run-store is heavy (loads openrouter, langsmith, agent-sync transitively).
@@ -198,6 +200,20 @@ app.whenReady().then(async () => {
     console.warn("[main] hook installer failed:", err),
   );
 
+  // Auto-install the Playwright MCP server in the user's Claude / Codex
+  // configs so verifier passes can drive a real browser instead of falling
+  // back to inline DOM stubs. Guarded by a setting (default on) and gated
+  // by file/dir existence — does nothing for users without those runtimes.
+  void (async () => {
+    try {
+      const settings = await loadSettings();
+      if (settings.playwrightMcpAutoInstall === false) return;
+      await installPlaywrightMcp();
+    } catch (err) {
+      console.warn("[main] playwright mcp installer failed:", err);
+    }
+  })();
+
   // Warm the enriched-PATH cache. Electron from Finder/Dock/Explorer inherits
   // a sparse PATH that doesn't include npm-global, nvm, scoop, etc. The first
   // call sources the user's login shell (or reads the Windows registry) and
@@ -278,6 +294,7 @@ app.whenReady().then(async () => {
   }
 
   registerIpc();
+  registerPreviewBridge();
 
   // Hook RPC server for sub-agents (big-bet "Hook contract for sub-agents to
   // self-report"). Starts before createWindow so the very first worker pty

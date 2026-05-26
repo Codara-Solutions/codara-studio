@@ -81,8 +81,15 @@ import {
   type LangSmithTrace,
 } from "./langsmith-tracer";
 import * as pty from "../pty-manager";
+import {
+  formatStuckReason,
+  installStuckWatchdog,
+  STUCK_REASON_PREFIX,
+  type StuckWatchdog,
+} from "./worker-watchdog";
 import { applyAgentRuntimeSettings, detectAgentRuntimes } from "../agent-runtimes";
 import { renderAgentSyncManagerContext, renderAgentSyncPromptLines } from "../agent-sync";
+import { isSparkPreviewMcpAvailable } from "../mcp-installer";
 import { getProvider } from "../providers";
 import type { SpawnOpts } from "../providers/types";
 
@@ -680,6 +687,12 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     return;
   }
 
+  const retry = await maybeAutoRetryStuckAttempt(launched, attemptId);
+  if (retry) {
+    scheduleAutopilotCycles(runId, [retry.attemptId]);
+    return;
+  }
+
   const latest = await requireRun(launched.id);
   if (latest.status === "paused") return;
   const hasOtherActiveCycles = hasOtherAutopilotCycles(runId, attemptId);
@@ -711,6 +724,73 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   if (!hasOtherActiveCycles && !hasOtherActiveWorkers) {
     scheduleAutopilotReview(runId, cwd);
   }
+}
+
+// Auto-restart-from-disk for stuck workers. When the watchdog fails an attempt
+// with the STUCK_REASON_PREFIX, skip the manager replan: the workspace state
+// the worker was editing is still on disk, so we just prepare + launch a fresh
+// attempt for the same task. Capped by workerStuckMaxAutoRetries so a truly
+// broken model can't loop forever.
+async function maybeAutoRetryStuckAttempt(
+  run: RunState,
+  attemptId: string,
+): Promise<{ attemptId: string } | null> {
+  const failed = run.workerAttempts.find((a) => a.id === attemptId);
+  if (!failed || failed.status !== "failed") return null;
+  if (!failed.error?.startsWith(STUCK_REASON_PREFIX)) return null;
+
+  const settings = await loadSettings();
+  const max = settings.workerStuckMaxAutoRetries;
+  if (max <= 0) return null;
+
+  const task = run.workerTasks.find((t) => t.id === failed.workerTaskId);
+  if (!task) return null;
+  const stuckCount = run.workerAttempts.filter(
+    (a) => a.workerTaskId === task.id && a.error?.startsWith(STUCK_REASON_PREFIX),
+  ).length;
+  if (stuckCount > max) return null;
+
+  await appendEvent({
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    attemptId,
+    type: "worker_attempt.auto_retry_stuck",
+    message: `Auto-retrying stuck worker (attempt ${stuckCount} of ${max})`,
+    payload: {
+      runtime: task.runtimePreference,
+      stuckAttemptId: attemptId,
+      stuckCount,
+      maxRetries: max,
+    },
+  });
+
+  await commitRunChange(run, {
+    type: "worker_attempt.auto_retry_reset",
+    message: `Resetting task + step state for stuck-retry: ${task.title}`,
+    payload: { workerTaskId: task.id, stepId: task.stepId },
+    mutate: (draft, timestamp) => {
+      const t = draft.workerTasks.find((x) => x.id === task.id);
+      if (t) {
+        t.status = "queued";
+        t.updatedAt = timestamp;
+      }
+      const s = task.stepId ? draft.steps.find((x) => x.id === task.stepId) : undefined;
+      if (s && s.status === "failed") {
+        s.status = "ready";
+        s.updatedAt = timestamp;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+
+  const envelope = await prepareWorkerTask({
+    runId: run.id,
+    workerTaskId: task.id,
+    cwd: failed.cwd,
+  });
+  return { attemptId: envelope.attemptId };
 }
 
 function scheduleAutopilotCycles(runId: string, attemptIds: string[]): void {
@@ -1735,10 +1815,9 @@ async function chooseUiLogicRuntimes(): Promise<{
   );
   const hasClaude = installed.has("claude");
   const hasCodex = installed.has("codex");
-  const hasCursor = installed.has("cursor");
-  const ui: WorkerRuntime = hasClaude ? "claude" : hasCursor ? "cursor" : hasCodex ? "codex" : "manual";
-  const logic: WorkerRuntime = hasCodex ? "codex" : hasCursor ? "cursor" : ui;
-  const integrator: WorkerRuntime = hasClaude ? "claude" : hasCursor ? "cursor" : logic;
+  const ui: WorkerRuntime = hasClaude ? "claude" : hasCodex ? "codex" : "manual";
+  const logic: WorkerRuntime = hasCodex ? "codex" : ui;
+  const integrator: WorkerRuntime = hasClaude ? "claude" : logic;
   return { ui, logic, integrator };
 }
 
@@ -1749,12 +1828,11 @@ async function rerouteUnavailableAgentRuntimes(
   const available = diagnostics.filter((runtime) => runtime.installed);
   const availableKinds = new Set(available.map((runtime) => runtime.kind));
   const fallback = available.find((runtime) => runtime.kind === "codex")
-    ?? available.find((runtime) => runtime.kind === "claude")
-    ?? available.find((runtime) => runtime.kind === "cursor");
+    ?? available.find((runtime) => runtime.kind === "claude");
   const rerouted: RuntimeReroute[] = [];
 
   const rewrite = (runtimePreference: WorkerRuntime, modelHint?: string, effortHint?: WorkerTask["effortHint"]) => {
-    if (runtimePreference !== "claude" && runtimePreference !== "codex" && runtimePreference !== "cursor") {
+    if (runtimePreference !== "claude" && runtimePreference !== "codex") {
       return { runtimePreference, modelHint, effortHint };
     }
     if (availableKinds.has(runtimePreference)) {
@@ -1811,17 +1889,17 @@ async function rerouteUnavailableAgentRuntimes(
 }
 
 // Detects whether the project plan rawContent contains an explicit, universal
-// runtime mandate ("I want all the workers to be cursor", "use only claude",
-// "every agent should be codex"). Returns the mandated runtime or null. When a
-// mandate is present, enforceUserRuntimeMandate rewrites every follow-up task
-// the manager queues to that runtime — overriding the manager's cross-provider
-// verifier rotation and any attempt to escalate to a different runtime on
-// failure. The manager profile contains the same instruction at the prompt
-// layer; this code path is the defensive backstop when the manager forgets.
+// runtime mandate ("use only claude", "every agent should be codex"). Returns
+// the mandated runtime or null. When a mandate is present,
+// enforceUserRuntimeMandate rewrites every follow-up task the manager queues
+// to that runtime — overriding the manager's cross-provider verifier rotation
+// and any attempt to escalate to a different runtime on failure. The manager
+// profile contains the same instruction at the prompt layer; this code path
+// is the defensive backstop when the manager forgets.
 function detectPlanRuntimeMandate(run: RunState): WorkerRuntime | null {
   const planText = run.plans?.[0]?.rawContent ?? "";
   if (!planText) return null;
-  const runtimes: WorkerRuntime[] = ["cursor", "claude", "codex"];
+  const runtimes: WorkerRuntime[] = ["claude", "codex"];
   for (const rt of runtimes) {
     const patterns = [
       // "all/every/only the workers ... cursor"
@@ -1858,14 +1936,13 @@ async function enforceUserRuntimeMandate(
   const installedKinds = new Set(
     diagnostics.filter((runtime) => runtime.installed).map((runtime) => runtime.kind),
   );
-  if (mandate !== "claude" && mandate !== "codex" && mandate !== "cursor") {
+  if (mandate !== "claude" && mandate !== "codex") {
     return { decision, overrides: [] };
   }
   if (!installedKinds.has(mandate)) {
     return { decision, overrides: [] };
   }
   const modelDefaults: Record<string, { modelHint?: string; effortHint?: WorkerTask["effortHint"] }> = {
-    cursor: { modelHint: "composer-2.5-fast", effortHint: "medium" },
     claude: { modelHint: "claude-opus-4-7", effortHint: "high" },
     codex: { modelHint: "gpt-5.5", effortHint: "high" },
   };
@@ -1882,8 +1959,7 @@ async function enforceUserRuntimeMandate(
     }
     if (
       runtimePreference !== "claude" &&
-      runtimePreference !== "codex" &&
-      runtimePreference !== "cursor"
+      runtimePreference !== "codex"
     ) {
       return { runtimePreference, modelHint, effortHint };
     }
@@ -2073,8 +2149,7 @@ async function tryTrivialFastPathStepPlanning(run: RunState): Promise<RunState |
   if (agent.taskClass === "verifier") return null;
   if (
     agent.runtimePreference !== "claude" &&
-    agent.runtimePreference !== "codex" &&
-    agent.runtimePreference !== "cursor"
+    agent.runtimePreference !== "codex"
   ) {
     return null;
   }
@@ -2329,25 +2404,23 @@ async function tryStandardCleanImplFastPathReview(
 const STANDING_TERMINAL_CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
 
 // Build the launch command for a standing interactive terminal: a plain
-// claude/codex/cursor session the user drives. Like buildLaunchCommandLine,
-// but without the worker-task wiring — these are not Spark workers.
+// claude/codex session the user drives. Like buildLaunchCommandLine, but
+// without the worker-task wiring — these are not Spark workers.
 //
 // The CLI-specific argv is produced by the runtime's `CliProvider`
 // (see src/main/providers/) so adding a new CLI later only requires a new
-// provider file. This function still owns shell-rendering concerns
-// (quoting, the cursor pwsh dispatch quirk) because those depend on the
-// shell we're spawning into, not on the CLI itself.
+// provider file.
 function buildStandingTerminalCommand(
-  runtime: "claude" | "codex" | "cursor",
+  runtime: "claude" | "codex",
   model?: string,
   effort?: string,
 ): string {
   // Behaviour preservation: the previous inline builder only forwarded
-  // `effort` for Claude (and only the four gated values below). Codex and
-  // Cursor standing terminals deliberately ignored effort, even when the
-  // caller passed it. We replicate that gate here so the provider doesn't
-  // start emitting `-c "model_reasoning_effort=..."` for codex terminals
-  // it never did before.
+  // `effort` for Claude (and only the four gated values below). Codex
+  // standing terminals deliberately ignored effort, even when the caller
+  // passed it. We replicate that gate here so the provider doesn't start
+  // emitting `-c "model_reasoning_effort=..."` for codex terminals it never
+  // did before.
   let effectiveEffort: SpawnOpts["effort"];
   if (runtime === "claude" && effort && STANDING_TERMINAL_CLAUDE_EFFORTS.has(effort)) {
     effectiveEffort = effort as SpawnOpts["effort"];
@@ -2360,46 +2433,25 @@ function buildStandingTerminalCommand(
     effort: effectiveEffort,
   });
 
-  // Render the argv into a single shell-ready string. The head segment is
-  // the binary itself: for Cursor on Windows we dispatch through the
-  // absolute path to `agent.cmd` because typing bare `agent` into pwsh
-  // resolves to `agent.ps1` (an ExternalScript that runs IN THE PARENT
-  // pwsh) and trips the user's $PROFILE hooks (Terminal-Icons floods the
-  // pane with Import-PowerShellDataFile errors before the Cursor banner
-  // even appears). `agent.cmd` spawns a fresh -NoProfile child.
-  const head = renderStandingTerminalHead(runtime);
+  // Claude and Codex bin names are unique on PATH and don't collide with
+  // PowerShell aliases, so the head is just the runtime name.
+  const head = runtime === "codex" ? "codex" : "claude";
   const tail = providerArgs.map((arg) => quoteShellArg(arg));
   return [head, ...tail].join(" ");
 }
 
-function renderStandingTerminalHead(runtime: "claude" | "codex" | "cursor"): string {
-  if (runtime === "cursor") {
-    const localAppData = process.env.LOCALAPPDATA;
-    if (localAppData) {
-      // Quoted path needs the `&` call operator in pwsh.
-      const cmdPath = join(localAppData, "cursor-agent", "agent.cmd");
-      return `& ${quoteShellArg(cmdPath)}`;
-    }
-    return "agent";
-  }
-  // Claude and Codex are well-behaved on every shell we ship: their bin
-  // names are unique on PATH and don't collide with PowerShell aliases.
-  return runtime === "codex" ? "codex" : "claude";
-}
-
-function standingTerminalTitle(runtime: "claude" | "codex" | "cursor", model?: string): string {
-  const base = runtime === "codex" ? "Codex" : runtime === "cursor" ? "Cursor" : "Claude";
+function standingTerminalTitle(runtime: "claude" | "codex", model?: string): string {
+  const base = runtime === "codex" ? "Codex" : "Claude";
   return model ? `${base} ${model}` : base;
 }
 
 // One-line chat confirmation for a spawn_terminals decision, e.g. "Opened 2
 // Claude and 1 Codex standing terminals ...". Counts by runtime (claude,
-// codex, cursor) so the user gets concrete acknowledgement that the request
-// landed.
+// codex) so the user gets concrete acknowledgement that the request landed.
 function describeSpawnedTerminals(terminals: Array<{ runtime: string }>): string {
   const counts = new Map<string, number>();
   for (const terminal of terminals) {
-    const label = terminal.runtime === "codex" ? "Codex" : terminal.runtime === "cursor" ? "Cursor" : "Claude";
+    const label = terminal.runtime === "codex" ? "Codex" : "Claude";
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   const parts = [...counts].map(([label, n]) => `${n} ${label}`);
@@ -2414,7 +2466,7 @@ function describeSpawnedTerminals(terminals: Array<{ runtime: string }>): string
 function spawnedTerminalsTitle(terminals: Array<{ runtime: string }>): string {
   const counts = new Map<string, number>();
   for (const terminal of terminals) {
-    const label = terminal.runtime === "codex" ? "Codex" : terminal.runtime === "cursor" ? "Cursor" : "Claude";
+    const label = terminal.runtime === "codex" ? "Codex" : "Claude";
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   const parts = [...counts].map(([label, n]) => `${label} x${n}`);
@@ -4467,8 +4519,7 @@ async function rerouteSparkShellTaskToAgent(task: WorkerTask): Promise<RuntimeRe
   const runtimes = await detectConfiguredAgentRuntimes();
   const target =
     runtimes.find((runtime) => runtime.kind === "codex" && runtime.installed) ??
-    runtimes.find((runtime) => runtime.kind === "claude" && runtime.installed) ??
-    runtimes.find((runtime) => runtime.kind === "cursor" && runtime.installed);
+    runtimes.find((runtime) => runtime.kind === "claude" && runtime.installed);
   if (!target) return null;
 
   const model = target.models.find((item) => item.isDefault) ?? target.models[0];
@@ -4534,9 +4585,6 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // before spawning. Idempotent and cheap.
   if (task.runtimePreference === "codex") {
     await ensureCodexProjectTrust(attempt.cwd).catch(() => undefined);
-  }
-  if (task.runtimePreference === "cursor") {
-    await ensureCursorProjectTrust(attempt.cwd).catch(() => undefined);
   }
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd);
   const command = launchCommand
@@ -5378,17 +5426,14 @@ async function maybeQueueCliLaunchFallback({
   if (!isLaunchFailure) return null;
   if (
     task.runtimePreference !== "claude" &&
-    task.runtimePreference !== "codex" &&
-    task.runtimePreference !== "cursor"
+    task.runtimePreference !== "codex"
   ) {
     return null;
   }
   const availableRuntimes = await detectConfiguredAgentRuntimes();
   // Prefer the first installed runtime OTHER than the one that just failed.
-  // Order claude → codex → cursor by default, but skip the failing one. With
-  // three runtimes we may still find a valid fallback even when one runtime
-  // is offline.
-  const preferenceOrder: WorkerRuntime[] = ["claude", "codex", "cursor"];
+  // Order claude → codex by default, but skip the failing one.
+  const preferenceOrder: WorkerRuntime[] = ["claude", "codex"];
   const opposite: WorkerRuntime | null = preferenceOrder
     .filter((kind) => kind !== task.runtimePreference)
     .find((kind) => availableRuntimes.some((runtime) => runtime.kind === kind && runtime.installed)) ?? null;
@@ -5551,7 +5596,6 @@ function estimateTextSections(
 function fallbackModelHintForRuntime(runtime: WorkerRuntime): string | undefined {
   if (runtime === "claude") return "claude-opus-4-7";
   if (runtime === "codex") return "gpt-5.5";
-  if (runtime === "cursor") return "composer-2.5-fast";
   return undefined;
 }
 
@@ -5566,11 +5610,6 @@ function fallbackEffortHintForRuntime(
   if (runtime === "claude") {
     if (prior === "low" || prior === "medium" || prior === "high" || prior === "max") return prior;
     return "high";
-  }
-  if (runtime === "cursor") {
-    // Cursor CLI has no reasoning-effort knob; the field exists only for
-    // schema consistency and the launch command builder ignores it.
-    return "medium";
   }
   return prior;
 }
@@ -7620,6 +7659,7 @@ async function runWorkerSession({
   task,
   attemptId,
   paths,
+  cwd,
   launchCommand,
   promptText,
   command,
@@ -7653,7 +7693,9 @@ async function runWorkerSession({
   const rawStream = createWriteStream(paths.rawLog, { flags: "a" });
   let fatalErrorTimer: NodeJS.Timeout | undefined;
   let fatalErrorBuffer = "";
+  let stuckWatchdog: StuckWatchdog | null = null;
   const offRawTap = pty.tap(attemptId, (chunk) => {
+    stuckWatchdog?.bumpPtyActivity();
     try {
       rawStream.write(chunk);
     } catch {
@@ -7751,6 +7793,7 @@ async function runWorkerSession({
       clearInterval(reportPoll);
       clearTimeout(hardTimeout);
       if (fatalErrorTimer) clearTimeout(fatalErrorTimer);
+      stuckWatchdog?.stop();
       resolve(value);
     };
     const offExit = pty.onExit(attemptId, (info) => {
@@ -7778,6 +7821,41 @@ async function runWorkerSession({
       finish({ exitCode: 1, error: reason });
     };
   });
+
+  void (async () => {
+    const settings = await loadSettings();
+    if (!settings.workerStuckDetectEnabled) return;
+    stuckWatchdog = installStuckWatchdog({
+      task,
+      cwd,
+      launchTimestampMs: Date.now(),
+      idleThresholdMs: settings.workerStuckIdleSeconds * 1000,
+      onStuck: (info) => {
+        const reason = formatStuckReason(info);
+        void (async () => {
+          await recordWorkerOutput(run, task, attemptId, paths, "stderr", `\n[spark] ${reason}\n`);
+          await writeAutoFailureReport(paths, task, reason);
+          await appendEvent({
+            workspaceId: run.workspaceId,
+            runId: run.id,
+            stepId: task.stepId,
+            workerTaskId: task.id,
+            attemptId,
+            type: "worker_attempt.stuck",
+            message: `Worker stuck — auto-killed: ${reason}`,
+            payload: {
+              runtime: task.runtimePreference,
+              ptyIdleMs: info.ptyIdleMs,
+              sessionLogIdleMs: info.sessionLogIdleMs,
+              workspaceIdleMs: info.workspaceIdleMs,
+              sessionLogPath: info.sessionLogPath,
+            },
+          }).catch(() => undefined);
+          failFast(reason);
+        })();
+      },
+    });
+  })();
 
   // Stagger launch + prompt the same way the TEST CLAUDE button does:
   //  1. wait 1.5s for pwsh to render its prompt,
@@ -7809,8 +7887,6 @@ async function runWorkerSession({
         }
         if (task.runtimePreference === "codex") {
           await waitForCodexInputReady(attemptId);
-        } else if (task.runtimePreference === "cursor") {
-          await waitForCursorInputReady(attemptId);
         }
       }
       const submitted = await pasteAndSubmit(attemptId, handle, promptText, task.runtimePreference);
@@ -7862,11 +7938,10 @@ async function waitForAgentTui(
   attemptId: string,
   runtime: WorkerTask["runtimePreference"],
 ): Promise<{ ok: true } | { ok: false; reason: string; timeoutMs: number }> {
-  // Markers that indicate the CLI's TUI is running. Claude, codex, and cursor
-  // each emit their model name on first paint, plus Ink/React-CLI specific
+  // Markers that indicate the CLI's TUI is running. Claude and codex each
+  // emit their model name on first paint, plus Ink/React-CLI specific
   // frames. We also look for the "bypass permissions" banner claude prints
-  // with our launch flag, codex's "/help" or "Pasted Content" hints, and
-  // cursor's "Cursor Agent" / "Composer 2.5 Fast" banner.
+  // with our launch flag and codex's "/help" or "Pasted Content" hints.
   const claudeMarkers = [
     "bypass permissions",
     "Sonnet",
@@ -7885,14 +7960,7 @@ async function waitForAgentTui(
     "codex >",
     "Reasoning effort",
   ];
-  const cursorMarkers = [
-    "Cursor Agent",
-    "Composer 2.5 Fast",
-    "Plan, search, build anything",
-    "Add a follow-up",
-  ];
-  const markers =
-    runtime === "codex" ? codexMarkers : runtime === "cursor" ? cursorMarkers : claudeMarkers;
+  const markers = runtime === "codex" ? codexMarkers : claudeMarkers;
   // Patterns that signal a hard launch failure — pwsh complaining the binary
   // isn't on PATH, or a CommandNotFoundException, or the CLI rejecting an
   // invalid flag. If we see any of these we bail immediately rather than
@@ -7907,7 +7975,7 @@ async function waitForAgentTui(
     "Unknown option",
     "is invalid. It must be one of",
   ];
-  const timeoutMs = runtime === "codex" ? 12_000 : runtime === "cursor" ? 10_000 : 9_000;
+  const timeoutMs = runtime === "codex" ? 12_000 : 9_000;
 
   return new Promise((resolve) => {
     let settled = false;
@@ -8038,44 +8106,11 @@ async function waitForCodexInputReady(attemptId: string): Promise<void> {
   await delay(400);
 }
 
-async function waitForCursorInputReady(attemptId: string): Promise<void> {
-  // Cursor TUI paints its banner + footer ("Composer 2.5 Fast … main") before
-  // the input box is fully ready to accept a bracketed paste. Empirically the
-  // banner is up by ~3s after spawn. We watch for the input-placeholder
-  // marker "Plan, search, build anything" (initial) or the footer's "Composer"
-  // model line, then add a small settle delay. Hard cap at 20s so a slow
-  // network startup still proceeds.
-  const readyMarkers = [
-    "Plan, search, build anything",
-    "Add a follow-up",
-    "Composer 2.5 Fast",
-  ];
-  const HARD_CAP_MS = 20_000;
-  const SETTLE_MS = 600;
-  await new Promise<void>((resolve) => {
-    let settled = false;
-    let buffer = "";
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      offTap();
-      clearTimeout(cap);
-      resolve();
-    };
-    const offTap = pty.tap(attemptId, (chunk) => {
-      buffer = (buffer + stripAnsi(chunk.toString("utf8"))).slice(-8192);
-      if (readyMarkers.some((marker) => buffer.includes(marker))) finish();
-    });
-    const cap = setTimeout(finish, HARD_CAP_MS);
-  });
-  await delay(SETTLE_MS);
-}
-
 function detectFatalWorkerRuntimeError(
   buffer: string,
   runtime: WorkerTask["runtimePreference"],
 ): string | null {
-  if (runtime !== "claude" && runtime !== "codex" && runtime !== "cursor") return null;
+  if (runtime !== "claude" && runtime !== "codex") return null;
   const visible = stripAnsi(buffer);
   const checks: Array<[RegExp, string]> = [
     [/API Error:.*socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
@@ -8131,7 +8166,7 @@ async function pasteAndSubmit(
 ): Promise<boolean> {
   const body = promptText.replace(/\r\n?/g, "\n").trim();
   if (!body) return true;
-  if (runtime === "claude" || runtime === "codex" || runtime === "cursor") {
+  if (runtime === "claude" || runtime === "codex") {
     const PASTE_BEGIN = "\x1b[200~";
     const PASTE_END = "\x1b[201~";
 
@@ -8215,7 +8250,6 @@ function promptSubmitSettleMs(
   const sizeCost = Math.ceil(promptLength / 2048) * 150;
   if (runtime === "claude") return clamp(1800 + sizeCost, 1800, 5000);
   if (runtime === "codex") return clamp(1200 + sizeCost, 1200, 4500);
-  if (runtime === "cursor") return clamp(900 + sizeCost, 900, 4000);
   return 0;
 }
 
@@ -8299,34 +8333,6 @@ function buildLaunchCommandLine(task: WorkerTask, cwd: string): string | null {
     if (codexEffort) args.push("-c", quoteShellArg(`model_reasoning_effort=${codexEffort}`));
     return cdPrefix + args.join(" ");
   }
-  if (task.runtimePreference === "cursor") {
-    // Cursor CLI: `agent --yolo --model <id>`. The `--trust` flag is rejected
-    // in interactive mode (it is only valid with `--print`), and Cursor does
-    // not expose reasoning-effort levels, so effortHint is ignored here.
-    //
-    // We dispatch through the .cmd shim by its absolute path instead of typing
-    // bare "agent". Reason: pwsh resolves bare "agent" to agent.ps1 (an
-    // ExternalScript), which runs IN THE PARENT pwsh process — that process
-    // has the user's $PROFILE loaded, including any PreCommandLookupAction
-    // hook (e.g. lazy-load Terminal-Icons on Get-ChildItem). agent.ps1 calls
-    // Get-ChildItem internally to find its version dir, triggers the hook,
-    // and floods the pane with red Import-PowerShellDataFile errors before
-    // the Cursor banner even appears. agent.cmd instead spawns a FRESH
-    // powershell.exe with -NoProfile, so the user's profile hooks never run.
-    const localAppData = process.env.LOCALAPPDATA;
-    const cmdPath = localAppData
-      ? join(localAppData, "cursor-agent", "agent.cmd")
-      : "agent";
-    // PowerShell parses a bare quoted string as an expression and reads
-    // `--yolo` as the decrement operator. The `&` call operator tells pwsh
-    // "this quoted string is a command path, invoke it". Skip the prefix
-    // only when we fall back to bare "agent" (an unquoted Get-Command name).
-    const head = localAppData ? `& ${quoteShellArg(cmdPath)}` : "agent";
-    const args = [head, "--yolo"];
-    const modelId = task.modelHint?.trim() || "composer-2.5-fast";
-    args.push("--model", quoteShellArg(modelId));
-    return cdPrefix + args.join(" ");
-  }
   return null;
 }
 
@@ -8395,41 +8401,6 @@ async function writeCodexProjectTrustEntry(configPath: string, cwd: string): Pro
 // this file before spawning the worker so node-pty never sees the prompt.
 // Trust grants are per-cwd, so an eval that materializes 500 fresh repos
 // would otherwise need 500 human clicks; this writes them all in one place.
-const cursorTrustedCwds = new Set<string>();
-async function ensureCursorProjectTrust(cwd: string): Promise<void> {
-  if (!cwd) return;
-  const homeDir = process.env.USERPROFILE || process.env.HOME;
-  if (!homeDir) return;
-  if (cursorTrustedCwds.has(cwd)) return;
-  // Cursor encodes the path by stripping the drive colon and converting
-  // every path separator to '-'. Example: "C:\Users\Etienne\Documents\workspace\test"
-  // → "C-Users-Etienne-Documents-workspace-test". Forward slashes also
-  // collapse to '-' so paths normalized either way produce the same key.
-  const encoded = cwd.replace(/[:\\/]+/g, "-").replace(/^-+|-+$/g, "");
-  const projectDir = join(homeDir, ".cursor", "projects", encoded);
-  const trustFile = join(projectDir, ".workspace-trusted");
-  try {
-    // If the marker is already there, nothing to do — just remember it.
-    await fs.access(trustFile);
-    cursorTrustedCwds.add(cwd);
-    return;
-  } catch {
-    /* not yet trusted — write it below */
-  }
-  try {
-    await fs.mkdir(projectDir, { recursive: true });
-    const payload = JSON.stringify(
-      { trustedAt: new Date().toISOString(), workspacePath: cwd },
-      null,
-      2,
-    );
-    await fs.writeFile(trustFile, payload, "utf8");
-    cursorTrustedCwds.add(cwd);
-  } catch {
-    /* swallow — the worst case is the user gets the trust prompt once */
-  }
-}
-
 // Translate Spark's internal effort scale to the values the claude CLI
 // actually accepts: low, medium, high, xhigh, max. Spark's manager profile
 // emits "minimal" for the cheapest/quickest leaf tasks, which the CLI
@@ -8525,7 +8496,7 @@ function shouldOfferRuntimeDelegation(step: StepState | undefined, task: WorkerT
 }
 
 function shouldRenderAgentSyncPromptLines(step: StepState | undefined, task: WorkerTask): boolean {
-  return /\b(mcp|skill|playwright|browser|screenshot|web search|github|figma|notion|railway|runpod|openai docs|image|vision|pdf|spreadsheet|presentation|document)\b/i.test(
+  return /\b(mcp|skill|spark[- ]preview|preview|playwright|browser|screenshot|web search|github|figma|notion|railway|runpod|openai docs|image|vision|pdf|spreadsheet|presentation|document)\b/i.test(
     taskContextText(step, task),
   );
 }
@@ -8648,7 +8619,11 @@ function taskLooksLikeCalculator(step: StepState | undefined, task: WorkerTask):
   return /\b(calculator|calculate|arithmetic|keypad|numeric input)\b/i.test(text);
 }
 
-function renderUiQualityGuidance(step: StepState | undefined, task: WorkerTask): string[] {
+function renderUiQualityGuidance(
+  step: StepState | undefined,
+  task: WorkerTask,
+  opts?: { sparkPreviewMcpAvailable?: boolean },
+): string[] {
   if (!taskLooksLikeVisibleUi(step, task)) {
     return [];
   }
@@ -8662,6 +8637,12 @@ function renderUiQualityGuidance(step: StepState | undefined, task: WorkerTask):
     "- Before reporting `complete`, run or construct a UI smoke probe. At minimum, prove the final file has the expected controls, no accidental external refs, no `eval`/`new Function`, and that the primary user flow updates the visible DOM/state.",
     "- Include file:line evidence for the main markup, core styles, event wiring, and any dynamic display updates in `proof[]`.",
   ];
+  if (opts?.sparkPreviewMcpAvailable) {
+    lines.push(
+      "- The `spark-preview` MCP server is available in this session. It drives the actual <preview> tab inside Spark App — same DOM the user sees, no separate browser window. Call `spark_preview_navigate` with a `file://` URL (for standalone HTML) or your dev-server URL; if no preview tab is open Spark will open one automatically. Then `spark_preview_snapshot` + `spark_preview_click` / `spark_preview_type` / `spark_preview_press_key` to exercise the primary user flow. Capture the final snapshot or `spark_preview_screenshot` evidence in `proof[]`.",
+      "- Do NOT substitute an inline Node VM + JSDOM probe for the spark-preview run. The whole point is that the verifier and the human see the same DOM/CSS the real browser produces.",
+    );
+  }
   if (taskLooksLikeCalculator(step, task)) {
     lines.push(
       "- Calculator quality floor: include visible controls for clear, decimal, the four basic operators, equals, and a correction path such as backspace or CE. For a `professional` calculator, consider percent and sign toggle unless the plan explicitly rules them out.",
@@ -8674,7 +8655,11 @@ function renderUiQualityGuidance(step: StepState | undefined, task: WorkerTask):
   return lines;
 }
 
-function renderUiVerifierGuidance(step: StepState | undefined, task: WorkerTask): string[] {
+function renderUiVerifierGuidance(
+  step: StepState | undefined,
+  task: WorkerTask,
+  opts?: { sparkPreviewMcpAvailable?: boolean },
+): string[] {
   if (!taskLooksLikeVisibleUi(step, task)) return [];
   const lines = [
     "## UI / FRONTEND 10/10 VERIFICATION",
@@ -8685,6 +8670,12 @@ function renderUiVerifierGuidance(step: StepState | undefined, task: WorkerTask)
     "- For standalone HTML/CSS/JS, verify viewport meta, semantic landmarks, self-contained assets when required, no accidental external src/href, and no `eval()` or `new Function()`.",
     "- Run deterministic DOM/static probes and behavioral probes. Browser screenshots are ideal when available; if browser/file access is unavailable, state that limitation and compensate with static + runtime probes rather than guessing.",
   ];
+  if (opts?.sparkPreviewMcpAvailable) {
+    lines.push(
+      "- The `spark-preview` MCP server is registered in this session. You MUST use it to verify visible UI claims instead of inline Node VM + JSDOM stubs. The server drives the live <preview> tab inside Spark App — the same pixels the user sees. Call `spark_preview_navigate` with a `file://` URL (standalone HTML) or the served URL; if no preview tab is open Spark will open one automatically. Take a `spark_preview_snapshot` for the accessibility-flavored outline, and drive the primary user flow with `spark_preview_click` / `spark_preview_type` / `spark_preview_press_key`. Attach the snapshot or `spark_preview_screenshot` evidence in `proof[]` for each behavioral atomic claim.",
+      "- Treat the absence of a spark-preview snapshot for any behavioral UI claim as `unsure`, not `verified`. Static DOM grep alone cannot prove rendering, event wiring, or focus behavior.",
+    );
+  }
   if (taskLooksLikeCalculator(step, task)) {
     lines.push(
       "- Calculator probes must include: `2 + 3 = 5`, `7 / 2 = 3.5`, `0.1 + 0.2` displays as `0.3`, divide-by-zero shows an error and recovers on next digit, repeated equals continues the prior operation, correction/backspace works, and keyboard Enter/Escape/operator input works.",
@@ -8744,7 +8735,11 @@ function renderImplementationWorkerPrompt({
     "- Before reporting `complete`, run or construct a small probe that checks the exact public contract you implemented, and include the command/output in `proof[]`.",
   );
 
-  const uiQualityGuidance = renderUiQualityGuidance(step, task);
+  const sparkPreviewMcpAvailable = isSparkPreviewMcpAvailable({
+    cwd,
+    autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
+  });
+  const uiQualityGuidance = renderUiQualityGuidance(step, task, { sparkPreviewMcpAvailable });
   if (uiQualityGuidance.length) {
     lines.push("", "## UI QUALITY BAR", ...uiQualityGuidance);
   }
@@ -8908,7 +8903,11 @@ function renderVerifierWorkerPrompt({
     );
   }
 
-  const uiVerifierGuidance = renderUiVerifierGuidance(step, task);
+  const sparkPreviewMcpAvailable = isSparkPreviewMcpAvailable({
+    cwd,
+    autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
+  });
+  const uiVerifierGuidance = renderUiVerifierGuidance(step, task, { sparkPreviewMcpAvailable });
   if (uiVerifierGuidance.length) {
     lines.push("", ...uiVerifierGuidance);
   }

@@ -78,6 +78,10 @@ export interface AppSettings {
   agentSkillSyncEnabled: boolean;
   agentDisabledMcpIds: string[];
   agentDisabledSkillIds: string[];
+  playwrightMcpAutoInstall: boolean;
+  workerStuckDetectEnabled: boolean;
+  workerStuckIdleSeconds: number;
+  workerStuckMaxAutoRetries: number;
 }
 
 // User-facing preferences (theme, editor flags, etc.) live in a separate
@@ -307,20 +311,20 @@ export interface PreferencesChange<K extends PrefKey = PrefKey> {
   value: AppPreferences[K];
 }
 
-export type AgentRuntimeKind = "claude" | "codex" | "cursor";
+export type AgentRuntimeKind = "claude" | "codex";
 
 // "auto" means "use every installed runtime" (Spark detects what is on PATH).
 // An array enumerates the exact runtimes the user opted in to — deselecting a
 // runtime in Settings removes it from this array so Spark will not spawn
 // workers on it even if the CLI is installed. The legacy string variants
 // ("both", "claude", "codex", "cursor") are accepted on read for migration
-// from earlier settings files; writes always use the array form.
+// from earlier settings files; writes always use the array form. "cursor"
+// is silently dropped on read — Spark App only supports Claude + Codex now.
 export type AgentRuntimeSelection =
   | "auto"
   | "both"
   | "claude"
   | "codex"
-  | "cursor"
   | readonly AgentRuntimeKind[];
 
 export type AgentEffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -622,7 +626,7 @@ export type StepStatus =
 // replan downstream steps using prior worker reports as evidence.
 export type StepKind = "worker_batch" | "brake";
 
-export type WorkerRuntime = "claude" | "codex" | "cursor" | "shell" | "manual";
+export type WorkerRuntime = "claude" | "codex" | "shell" | "manual";
 
 export type WorkerTaskStatus =
   | "created"

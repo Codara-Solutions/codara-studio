@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentAssetInventory, AgentAssetInventoryItem, AppSettings } from "@shared/types";
 
 interface Props {
@@ -9,6 +9,23 @@ interface Props {
 }
 
 type CapabilityKind = "mcp" | "skill";
+type RuntimeColumn = "claude" | "codex" | "shared";
+type RuntimeFilter = "all" | RuntimeColumn | "both";
+
+interface NameGroup {
+  kind: CapabilityKind;
+  name: string;
+  sessionKey: string;
+  installs: Record<RuntimeColumn, AgentAssetInventoryItem[]>;
+  any: AgentAssetInventoryItem;
+}
+
+const RUNTIME_COLUMNS: RuntimeColumn[] = ["claude", "codex", "shared"];
+const RUNTIME_LABEL: Record<RuntimeColumn, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  shared: "Shared",
+};
 
 export default function AgentCapabilitiesDialog({
   settings,
@@ -22,6 +39,8 @@ export default function AgentCapabilitiesDialog({
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [runtimeFilter, setRuntimeFilter] = useState<RuntimeFilter>("all");
 
   const refreshAssets = () => {
     void window.spark.agents
@@ -47,7 +66,9 @@ export default function AgentCapabilitiesDialog({
   }, [onClose]);
 
   const mcp = assets?.mcp ?? [];
-  const skills = (assets?.skills ?? []).filter((item) => item.compatibility !== "codex");
+  // Show every skill — including Codex-native ones — so the user can see
+  // per-agent rosters and delete entries from just one runtime.
+  const skills = assets?.skills ?? [];
   const disabled = useMemo(
     () => new Set([...draft.agentDisabledMcpIds, ...draft.agentDisabledSkillIds]),
     [draft.agentDisabledMcpIds, draft.agentDisabledSkillIds],
@@ -56,6 +77,25 @@ export default function AgentCapabilitiesDialog({
   const activeSkillCount = skills.filter((item) => !disabled.has(item.sessionKey)).length;
   const activeCount = activeMcpCount + activeSkillCount;
   const totalCount = mcp.length + skills.length;
+
+  const mcpGroups = useMemo(() => groupByName(mcp, "mcp"), [mcp]);
+  const skillGroups = useMemo(() => groupByName(skills, "skill"), [skills]);
+  const filteredMcp = useMemo(
+    () => filterGroups(mcpGroups, search, runtimeFilter),
+    [mcpGroups, search, runtimeFilter],
+  );
+  const filteredSkills = useMemo(
+    () => filterGroups(skillGroups, search, runtimeFilter),
+    [skillGroups, search, runtimeFilter],
+  );
+  const claudeInstallCount = useMemo(
+    () => countInstalls([...mcpGroups, ...skillGroups], "claude"),
+    [mcpGroups, skillGroups],
+  );
+  const codexInstallCount = useMemo(
+    () => countInstalls([...mcpGroups, ...skillGroups], "codex"),
+    [mcpGroups, skillGroups],
+  );
 
   const save = async () => {
     setSaving(true);
@@ -146,21 +186,45 @@ export default function AgentCapabilitiesDialog({
                   checked={draft.agentSkillSyncEnabled}
                   onChange={(agentSkillSyncEnabled) => setDraft((d) => ({ ...d, agentSkillSyncEnabled }))}
                 />
+                <PolicyToggle
+                  title="Auto-install Spark Preview MCP"
+                  detail="Register the spark-preview MCP so verifiers can drive the live <preview> tab inside Spark — same DOM the user sees, no extra browser window."
+                  checked={draft.playwrightMcpAutoInstall}
+                  onChange={(playwrightMcpAutoInstall) => setDraft((d) => ({ ...d, playwrightMcpAutoInstall }))}
+                />
               </div>
             </div>
 
             <div style={panelStyle}>
-              <Section title="Inventory" detail="Enabled items are available to future sessions after Save." />
+              <Section title="Inventory" detail="Each row shows where an MCP or skill is installed. Uninstall removes it from that runtime only." />
               <div style={metricGridStyle}>
-                <Metric label="MCP" value={activeMcpCount} detail={`${mcp.length} total`} />
-                <Metric label="Skills" value={activeSkillCount} detail={`${skills.length} total`} />
+                <Metric label="Claude installs" value={claudeInstallCount.total} detail={`${claudeInstallCount.mcp} MCP · ${claudeInstallCount.skill} skill`} />
+                <Metric label="Codex installs" value={codexInstallCount.total} detail={`${codexInstallCount.mcp} MCP · ${codexInstallCount.skill} skill`} />
               </div>
               <div style={syncBarStyle}>
                 <button type="button" disabled={syncing} onClick={syncAssets} style={primaryButtonStyle}>
                   {syncing ? "Syncing" : "Sync"}
                 </button>
-                <div style={syncCopyStyle}>Share compatible MCP and skill entries between installed runtimes.</div>
+                <div style={syncCopyStyle}>Copy missing compatible entries from one runtime to the other.</div>
               </div>
+            </div>
+          </section>
+
+          <section style={filterBarStyle}>
+            <input
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Filter by name or path"
+              style={searchInputStyle}
+              spellCheck={false}
+            />
+            <div style={filterChipsStyle}>
+              <FilterChip label="All" active={runtimeFilter === "all"} onClick={() => setRuntimeFilter("all")} />
+              <FilterChip label="Claude only" active={runtimeFilter === "claude"} onClick={() => setRuntimeFilter("claude")} />
+              <FilterChip label="Codex only" active={runtimeFilter === "codex"} onClick={() => setRuntimeFilter("codex")} />
+              <FilterChip label="Both" active={runtimeFilter === "both"} onClick={() => setRuntimeFilter("both")} />
+              <FilterChip label="Shared" active={runtimeFilter === "shared"} onClick={() => setRuntimeFilter("shared")} />
             </div>
           </section>
 
@@ -169,11 +233,13 @@ export default function AgentCapabilitiesDialog({
               kind="mcp"
               title="MCP Servers"
               detail="Tool connectors exposed by workspace and user runtime configs."
-              items={mcp}
+              groups={filteredMcp}
+              totalGroups={mcpGroups.length}
               activeCount={activeMcpCount}
+              totalItems={mcp.length}
               disabled={disabled}
               busyId={busyId}
-              emptyText="No MCP servers found for this workspace."
+              emptyText={mcpGroups.length === 0 ? "No MCP servers found for this workspace." : "No MCP servers match the current filter."}
               onToggle={toggleItem}
               onDelete={deleteItem}
             />
@@ -181,11 +247,13 @@ export default function AgentCapabilitiesDialog({
               kind="skill"
               title="Skills"
               detail="Reusable workflows workers can load only when they are relevant."
-              items={skills}
+              groups={filteredSkills}
+              totalGroups={skillGroups.length}
               activeCount={activeSkillCount}
+              totalItems={skills.length}
               disabled={disabled}
               busyId={busyId}
-              emptyText="No shareable skills found for this workspace."
+              emptyText={skillGroups.length === 0 ? "No shareable skills found for this workspace." : "No skills match the current filter."}
               onToggle={toggleItem}
               onDelete={deleteItem}
             />
@@ -217,8 +285,10 @@ function CapabilityGroup({
   kind,
   title,
   detail,
-  items,
+  groups,
+  totalGroups,
   activeCount,
+  totalItems,
   disabled,
   busyId,
   emptyText,
@@ -228,8 +298,10 @@ function CapabilityGroup({
   kind: CapabilityKind;
   title: string;
   detail: string;
-  items: AgentAssetInventoryItem[];
+  groups: NameGroup[];
+  totalGroups: number;
   activeCount: number;
+  totalItems: number;
   disabled: Set<string>;
   busyId: string | null;
   emptyText: string;
@@ -240,28 +312,30 @@ function CapabilityGroup({
     <div style={capabilityPanelStyle}>
       <div style={capabilityHeaderStyle}>
         <Section title={title} detail={detail} />
-        <div style={groupCountStyle}>
+        <div style={groupCountStyle} title={`${groups.length} of ${totalGroups} shown`}>
           <span style={groupCountNumberStyle}>{activeCount}</span>
-          <span style={groupCountLabelStyle}>/ {items.length}</span>
+          <span style={groupCountLabelStyle}>/ {totalItems}</span>
         </div>
       </div>
 
       <div style={tableShellStyle}>
         <div style={tableHeaderStyle}>
           <span>Name</span>
-          <span>Source</span>
-          <span>State</span>
+          <span>Claude</span>
+          <span>Codex</span>
+          <span>Shared</span>
+          <span style={{ textAlign: "right" }}>Awareness</span>
         </div>
-        {items.length === 0 ? (
+        {groups.length === 0 ? (
           <div style={emptyStateStyle}>{emptyText}</div>
         ) : (
-          items.map((item) => (
-            <AssetRow
-              key={item.id}
+          groups.map((group) => (
+            <GroupRow
+              key={`${group.kind}:${group.name}`}
               kind={kind}
-              item={item}
-              enabled={!disabled.has(item.sessionKey)}
-              busy={busyId === item.id}
+              group={group}
+              enabled={!disabled.has(group.sessionKey)}
+              busyId={busyId}
               onToggle={onToggle}
               onDelete={onDelete}
             />
@@ -272,56 +346,174 @@ function CapabilityGroup({
   );
 }
 
-function AssetRow({
+function GroupRow({
   kind,
-  item,
+  group,
   enabled,
-  busy,
+  busyId,
   onToggle,
   onDelete,
 }: {
   kind: CapabilityKind;
-  item: AgentAssetInventoryItem;
+  group: NameGroup;
   enabled: boolean;
-  busy: boolean;
+  busyId: string | null;
   onToggle: (item: AgentAssetInventoryItem, enabled: boolean) => void;
   onDelete: (item: AgentAssetInventoryItem) => void;
 }) {
-  const compat = compatibility(item);
-  const disabledDelete = busy || !item.canDelete;
+  const compat = compatibility(group.any);
+  const installedRuntimes = RUNTIME_COLUMNS.filter((rt) => group.installs[rt].length > 0);
+  const installedLabel =
+    installedRuntimes.length === 0
+      ? "not installed"
+      : installedRuntimes.map((rt) => RUNTIME_LABEL[rt]).join(" + ");
+
   return (
-    <div style={{ ...rowStyle, opacity: enabled ? 1 : 0.58 }}>
+    <div style={{ ...rowStyle, opacity: enabled ? 1 : 0.55 }}>
       <div style={{ minWidth: 0 }}>
-        <div style={nameStyle} title={item.name}>
-          {item.name}
+        <div style={nameStyle} title={group.name}>
+          {group.name}
         </div>
-        <div style={pathStyle} title={item.path}>
-          {item.path}
+        <div style={nameSubStyle}>
+          <Chip text={kind === "mcp" ? "MCP" : "skill"} tone="neutral" />
+          <Chip text={compat.label} tone={compat.tone} title={group.any.compatibilityReason} />
+          <span style={installedSummaryStyle}>{installedLabel}</span>
         </div>
       </div>
-      <div style={chipColumnStyle}>
-        <Chip text={kind === "mcp" ? "MCP" : "skill"} tone="neutral" />
-        <Chip text={sourceLabel(item)} tone="neutral" />
-        <Chip text={compat.label} tone={compat.tone} title={item.compatibilityReason} />
-        {!item.syncable ? <Chip text="native" tone="warning" /> : null}
-        {!item.canDelete ? <Chip text="protected" tone="warning" /> : null}
-      </div>
+      {RUNTIME_COLUMNS.map((rt) => (
+        <RuntimeCell
+          key={rt}
+          runtime={rt}
+          items={group.installs[rt]}
+          busyId={busyId}
+          onDelete={onDelete}
+        />
+      ))}
       <div style={rowControlsStyle}>
-        <Switch checked={enabled} onChange={(next) => onToggle(item, next)} />
-        <button
-          type="button"
-          disabled={disabledDelete}
-          onClick={() => onDelete(item)}
-          style={{
-            ...dangerButtonStyle,
-            opacity: disabledDelete ? 0.5 : 1,
-            cursor: disabledDelete ? "not-allowed" : "pointer",
-          }}
-        >
-          {busy ? "..." : "Delete"}
-        </button>
+        <Switch checked={enabled} onChange={(next) => onToggle(group.any, next)} />
       </div>
     </div>
+  );
+}
+
+function RuntimeCell({
+  runtime,
+  items,
+  busyId,
+  onDelete,
+}: {
+  runtime: RuntimeColumn;
+  items: AgentAssetInventoryItem[];
+  busyId: string | null;
+  onDelete: (item: AgentAssetInventoryItem) => void;
+}) {
+  if (items.length === 0) {
+    return (
+      <div style={runtimeCellStyle}>
+        <span style={emptyCellStyle}>—</span>
+      </div>
+    );
+  }
+  return (
+    <div style={runtimeCellStyle}>
+      {items.map((item) => (
+        <InstallChip
+          key={item.id}
+          item={item}
+          runtime={runtime}
+          busy={busyId === item.id}
+          onDelete={onDelete}
+        />
+      ))}
+    </div>
+  );
+}
+
+function InstallChip({
+  item,
+  runtime,
+  busy,
+  onDelete,
+}: {
+  item: AgentAssetInventoryItem;
+  runtime: RuntimeColumn;
+  busy: boolean;
+  onDelete: (item: AgentAssetInventoryItem) => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const startConfirm = () => {
+    setConfirming(true);
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => setConfirming(false), 4000);
+  };
+
+  const handleClick = () => {
+    if (busy) return;
+    if (!item.canDelete) return;
+    if (!confirming) {
+      startConfirm();
+      return;
+    }
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    setConfirming(false);
+    onDelete(item);
+  };
+
+  const scopeText = scopeShortLabel(item);
+  const tone = runtimeTone(runtime);
+
+  return (
+    <div style={installChipStyle} title={item.path}>
+      <div style={installChipMetaStyle}>
+        <span style={{ ...installScopeChipStyle, ...tone }}>{scopeText}</span>
+        {!item.syncable ? <span style={installFlagChipStyle}>native</span> : null}
+        {!item.canDelete ? <span style={installFlagChipStyle}>protected</span> : null}
+      </div>
+      <button
+        type="button"
+        disabled={busy || !item.canDelete}
+        onClick={handleClick}
+        style={{
+          ...uninstallButtonStyle,
+          ...(confirming ? uninstallConfirmStyle : null),
+          opacity: busy || !item.canDelete ? 0.5 : 1,
+          cursor: busy || !item.canDelete ? "not-allowed" : "pointer",
+        }}
+      >
+        {busy ? "Removing…" : confirming ? "Confirm?" : "Uninstall"}
+      </button>
+    </div>
+  );
+}
+
+function FilterChip({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        ...filterChipStyle,
+        ...(active ? filterChipActiveStyle : null),
+      }}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -474,9 +666,99 @@ function compatibility(item: AgentAssetInventoryItem): { label: string; tone: Ch
   return { label: "review", tone: "warning" };
 }
 
-function sourceLabel(item: AgentAssetInventoryItem): string {
-  if (item.runtime === "shared") return item.scope;
-  return `${item.runtime} ${item.scope}`;
+function groupByName(items: AgentAssetInventoryItem[], kind: CapabilityKind): NameGroup[] {
+  const map = new Map<string, NameGroup>();
+  for (const item of items) {
+    const key = `${kind}:${item.name.toLowerCase()}`;
+    let group = map.get(key);
+    if (!group) {
+      group = {
+        kind,
+        name: item.name,
+        sessionKey: item.sessionKey,
+        installs: { claude: [], codex: [], shared: [] },
+        any: item,
+      };
+      map.set(key, group);
+    }
+    group.installs[item.runtime].push(item);
+  }
+  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function filterGroups(
+  groups: NameGroup[],
+  search: string,
+  runtimeFilter: RuntimeFilter,
+): NameGroup[] {
+  const q = search.trim().toLowerCase();
+  return groups.filter((group) => {
+    if (q) {
+      const haystack = [
+        group.name,
+        ...RUNTIME_COLUMNS.flatMap((rt) => group.installs[rt].map((i) => i.path)),
+      ]
+        .join(" ")
+        .toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    const installed = RUNTIME_COLUMNS.filter((rt) => group.installs[rt].length > 0);
+    switch (runtimeFilter) {
+      case "all":
+        return true;
+      case "claude":
+        return installed.length === 1 && installed[0] === "claude";
+      case "codex":
+        return installed.length === 1 && installed[0] === "codex";
+      case "shared":
+        return group.installs.shared.length > 0;
+      case "both":
+        return group.installs.claude.length > 0 && group.installs.codex.length > 0;
+      default:
+        return true;
+    }
+  });
+}
+
+function countInstalls(
+  groups: NameGroup[],
+  runtime: RuntimeColumn,
+): { total: number; mcp: number; skill: number } {
+  let mcp = 0;
+  let skill = 0;
+  for (const group of groups) {
+    if (group.installs[runtime].length === 0) continue;
+    if (group.kind === "mcp") mcp += 1;
+    else skill += 1;
+  }
+  return { total: mcp + skill, mcp, skill };
+}
+
+function scopeShortLabel(item: AgentAssetInventoryItem): string {
+  return item.scope;
+}
+
+function runtimeTone(runtime: RuntimeColumn): React.CSSProperties {
+  switch (runtime) {
+    case "claude":
+      return {
+        background: "color-mix(in oklch, var(--accent) 14%, transparent)",
+        border: "1px solid color-mix(in oklch, var(--accent) 36%, var(--rule-soft))",
+        color: "var(--accent)",
+      };
+    case "codex":
+      return {
+        background: "color-mix(in oklch, var(--info) 14%, transparent)",
+        border: "1px solid color-mix(in oklch, var(--info) 36%, var(--rule-soft))",
+        color: "var(--info)",
+      };
+    case "shared":
+      return {
+        background: "color-mix(in oklch, var(--ok) 12%, transparent)",
+        border: "1px solid color-mix(in oklch, var(--ok) 30%, var(--rule-soft))",
+        color: "var(--ok)",
+      };
+  }
 }
 
 function toggleKey(list: string[], key: string, enabled: boolean): string[] {
@@ -512,8 +794,8 @@ const overlayStyle: React.CSSProperties = {
 };
 
 const dialogStyle: React.CSSProperties = {
-  width: "min(1040px, calc(100vw - 44px))",
-  height: "min(740px, calc(100vh - 44px))",
+  width: "min(1180px, calc(100vw - 44px))",
+  height: "min(780px, calc(100vh - 44px))",
   display: "grid",
   gridTemplateRows: "auto minmax(0, 1fr) auto",
   background: "var(--panel)",
@@ -560,8 +842,8 @@ const mainStyle: React.CSSProperties = {
   overflow: "auto",
   padding: 18,
   display: "grid",
-  gridTemplateRows: "auto minmax(0, 1fr)",
-  gap: 16,
+  gridTemplateRows: "auto auto minmax(0, 1fr)",
+  gap: 14,
 };
 
 const summaryGridStyle: React.CSSProperties = {
@@ -573,8 +855,54 @@ const summaryGridStyle: React.CSSProperties = {
 const capabilityGridStyle: React.CSSProperties = {
   minHeight: 0,
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+  gridTemplateColumns: "minmax(0, 1fr)",
+  gap: 14,
+};
+
+const filterBarStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "minmax(220px, 360px) minmax(0, 1fr)",
   gap: 12,
+  alignItems: "center",
+};
+
+const searchInputStyle: React.CSSProperties = {
+  appearance: "none",
+  border: "1px solid var(--rule-strong)",
+  borderRadius: 7,
+  background: "color-mix(in oklch, var(--bg) 30%, transparent)",
+  color: "var(--ink)",
+  padding: "8px 11px",
+  fontFamily: "var(--font-sans)",
+  fontSize: 12,
+  outline: "none",
+};
+
+const filterChipsStyle: React.CSSProperties = {
+  display: "flex",
+  gap: 6,
+  flexWrap: "wrap",
+  justifyContent: "flex-end",
+};
+
+const filterChipStyle: React.CSSProperties = {
+  appearance: "none",
+  border: "1px solid var(--rule-strong)",
+  borderRadius: 999,
+  background: "transparent",
+  color: "var(--ink-dim)",
+  padding: "5px 11px",
+  fontFamily: "var(--font-sans)",
+  fontSize: 11,
+  fontWeight: 700,
+  letterSpacing: 0.02,
+  cursor: "pointer",
+};
+
+const filterChipActiveStyle: React.CSSProperties = {
+  border: "1px solid color-mix(in oklch, var(--accent) 50%, var(--rule-strong))",
+  background: "color-mix(in oklch, var(--accent) 16%, transparent)",
+  color: "var(--ink)",
 };
 
 const panelStyle: React.CSSProperties = {
@@ -710,14 +1038,16 @@ const tableShellStyle: React.CSSProperties = {
   background: "color-mix(in oklch, var(--bg) 22%, transparent)",
 };
 
+const ROW_GRID = "minmax(180px, 1.3fr) minmax(140px, 1fr) minmax(140px, 1fr) minmax(140px, 1fr) 72px";
+
 const tableHeaderStyle: React.CSSProperties = {
   position: "sticky",
   top: 0,
   zIndex: 1,
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) minmax(118px, 0.64fr) 104px",
+  gridTemplateColumns: ROW_GRID,
   gap: 12,
-  padding: "7px 10px",
+  padding: "8px 12px",
   borderBottom: "1px solid var(--rule-soft)",
   background: "color-mix(in oklch, var(--panel) 90%, var(--bg))",
   color: "var(--muted)",
@@ -729,10 +1059,10 @@ const tableHeaderStyle: React.CSSProperties = {
 
 const rowStyle: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) minmax(118px, 0.64fr) auto",
+  gridTemplateColumns: ROW_GRID,
   gap: 12,
-  alignItems: "center",
-  padding: "10px",
+  alignItems: "stretch",
+  padding: "12px",
   borderBottom: "1px solid var(--rule-soft)",
   background: "color-mix(in oklch, var(--ink) 2.4%, transparent)",
 };
@@ -746,22 +1076,18 @@ const nameStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-const pathStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10,
-  lineHeight: 1.35,
-  marginTop: 3,
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const chipColumnStyle: React.CSSProperties = {
+const nameSubStyle: React.CSSProperties = {
   display: "flex",
+  alignItems: "center",
   gap: 5,
   flexWrap: "wrap",
-  minWidth: 0,
+  marginTop: 5,
+};
+
+const installedSummaryStyle: React.CSSProperties = {
+  color: "var(--muted)",
+  fontSize: 10,
+  lineHeight: 1.3,
 };
 
 const rowControlsStyle: React.CSSProperties = {
@@ -769,6 +1095,81 @@ const rowControlsStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "flex-end",
   gap: 8,
+};
+
+const runtimeCellStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  minWidth: 0,
+};
+
+const emptyCellStyle: React.CSSProperties = {
+  color: "var(--ink-dim)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 12,
+  opacity: 0.6,
+};
+
+const installChipStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 5,
+  padding: "7px 8px",
+  borderRadius: 6,
+  border: "1px solid var(--rule-soft)",
+  background: "color-mix(in oklch, var(--bg) 36%, transparent)",
+  minWidth: 0,
+};
+
+const installChipMetaStyle: React.CSSProperties = {
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 4,
+  alignItems: "center",
+};
+
+const installScopeChipStyle: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
+  fontWeight: 720,
+  padding: "2px 7px",
+  borderRadius: 999,
+  border: "1px solid var(--rule-soft)",
+  background: "color-mix(in oklch, var(--ink) 5%, transparent)",
+  color: "var(--muted)",
+  whiteSpace: "nowrap",
+};
+
+const installFlagChipStyle: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 9,
+  padding: "1px 6px",
+  borderRadius: 999,
+  border: "1px solid color-mix(in oklch, var(--warn) 30%, var(--rule-soft))",
+  background: "color-mix(in oklch, var(--warn) 10%, transparent)",
+  color: "var(--warn)",
+  whiteSpace: "nowrap",
+};
+
+const uninstallButtonStyle: React.CSSProperties = {
+  appearance: "none",
+  alignSelf: "flex-start",
+  border: "1px solid color-mix(in oklch, var(--danger) 40%, var(--rule-strong))",
+  borderRadius: 6,
+  background: "transparent",
+  color: "var(--danger)",
+  padding: "4px 9px",
+  fontFamily: "var(--font-sans)",
+  fontSize: 11,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const uninstallConfirmStyle: React.CSSProperties = {
+  background: "color-mix(in oklch, var(--danger) 16%, transparent)",
+  border: "1px solid color-mix(in oklch, var(--danger) 70%, var(--rule-strong))",
+  color: "var(--ink)",
 };
 
 const emptyStateStyle: React.CSSProperties = {

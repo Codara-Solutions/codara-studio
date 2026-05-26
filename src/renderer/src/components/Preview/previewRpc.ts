@@ -1,0 +1,334 @@
+// Renderer-side handler for preview-bridge requests. Listens for
+// "preview-bridge:request" from main, dispatches the op against the picked
+// preview tab's BrowserPaneHandle, and sends back a "preview-bridge:response"
+// with the same reqId so main can match it.
+//
+// All op semantics live in here. The bridge itself is op-agnostic.
+//
+// All probes are executed via webview.executeJavaScript with a tiny IIFE
+// that does the DOM work — this gives us click/type/snapshot without
+// pulling in Playwright or a CDP layer.
+
+import { ensurePreviewTab, listPreviewTabs, pickPreviewTab } from "./registry";
+
+type PreviewOpName =
+  | "list"
+  | "navigate"
+  | "snapshot"
+  | "evaluate"
+  | "click"
+  | "type"
+  | "press_key"
+  | "wait_for"
+  | "screenshot"
+  | "url";
+
+interface BridgeRequest {
+  reqId: string;
+  op: PreviewOpName;
+  params: Record<string, unknown> & { tabId?: string | null };
+}
+
+interface BridgeResponse {
+  reqId: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+}
+
+let registered = false;
+
+export function registerPreviewRpcHandler(): void {
+  if (registered) return;
+  registered = true;
+  const previewBridge = window.spark?.previewBridge;
+  if (!previewBridge) {
+    console.warn("[previewRpc] window.spark.previewBridge is missing; preview tools disabled");
+    return;
+  }
+  previewBridge.onRequest(async (raw) => {
+    const req: BridgeRequest = {
+      reqId: raw.reqId,
+      op: raw.op as PreviewOpName,
+      params: raw.params as BridgeRequest["params"],
+    };
+    try {
+      const result = await dispatch(req);
+      previewBridge.sendResponse({ reqId: req.reqId, ok: true, result } satisfies BridgeResponse);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      previewBridge.sendResponse({ reqId: req.reqId, ok: false, error: message } satisfies BridgeResponse);
+    }
+  });
+}
+
+async function dispatch(req: BridgeRequest): Promise<unknown> {
+  switch (req.op) {
+    case "list":
+      return { tabs: listPreviewTabs() };
+    case "navigate":
+      return navigate(req.params);
+    case "url":
+      return urlOf(req.params);
+    case "snapshot":
+      return snapshot(req.params);
+    case "evaluate":
+      return evaluate(req.params);
+    case "click":
+      return click(req.params);
+    case "type":
+      return typeText(req.params);
+    case "press_key":
+      return pressKey(req.params);
+    case "wait_for":
+      return waitFor(req.params);
+    case "screenshot":
+      return screenshot(req.params);
+    default:
+      throw new Error(`unknown preview op: ${(req.op as string) ?? "?"}`);
+  }
+}
+
+function requireTab(params: { tabId?: string | null }) {
+  const tab = pickPreviewTab(params.tabId ?? null);
+  if (!tab) {
+    throw new Error(
+      "No preview tab is open. Open a preview tab in Spark (right-click → Preview, or open a localhost URL) before calling spark-preview tools.",
+    );
+  }
+  return tab;
+}
+
+async function navigate(params: Record<string, unknown>): Promise<unknown> {
+  const url = readString(params, "url");
+  if (!url) throw new Error("navigate requires 'url'");
+  let tab;
+  let opened = false;
+  if (params.tabId) {
+    tab = pickPreviewTab(typeof params.tabId === "string" ? params.tabId : null);
+    if (!tab) throw new Error(`preview tab not found: ${String(params.tabId)}`);
+  } else {
+    const before = pickPreviewTab(null);
+    tab = await ensurePreviewTab(url);
+    opened = !before;
+  }
+  // ensurePreviewTab created the tab with the target URL, so loadURL is a
+  // redundant nav in that case but cheap. For an existing tab it's the real
+  // navigation.
+  tab.handle.loadURL(url);
+  await waitDomReady(tab.handle, 15_000);
+  return { url: tab.handle.getURL(), tabId: tab.id, opened };
+}
+
+async function urlOf(params: Record<string, unknown>): Promise<unknown> {
+  const tab = requireTab(params);
+  return { url: tab.handle.getURL(), title: tab.handle.getTitle() };
+}
+
+async function snapshot(params: Record<string, unknown>): Promise<unknown> {
+  const mode = readString(params, "mode") ?? "outline";
+  const maxBytes = readNumber(params, "maxBytes") ?? 12_000;
+  const tab = requireTab(params);
+  const code = `(${snapshotProbe.toString()})(${JSON.stringify({ mode, maxBytes })})`;
+  const value = await tab.handle.executeJavaScript(code);
+  return value;
+}
+
+async function evaluate(params: Record<string, unknown>): Promise<unknown> {
+  const code = readString(params, "code");
+  if (!code) throw new Error("evaluate requires 'code'");
+  const awaitPromise = readBool(params, "awaitPromise") ?? false;
+  const tab = requireTab(params);
+  const wrapped = awaitPromise
+    ? `Promise.resolve((async () => { ${code} })()).then((__r) => JSON.parse(JSON.stringify(__r ?? null)))`
+    : `(() => { const __r = (function() { ${code} })(); return JSON.parse(JSON.stringify(__r ?? null)); })()`;
+  const result = await tab.handle.executeJavaScript(wrapped);
+  return { value: result };
+}
+
+async function click(params: Record<string, unknown>): Promise<unknown> {
+  const selector = readString(params, "selector");
+  if (!selector) throw new Error("click requires 'selector'");
+  const tab = requireTab(params);
+  const code = `(${clickProbe.toString()})(${JSON.stringify({ selector })})`;
+  return tab.handle.executeJavaScript(code);
+}
+
+async function typeText(params: Record<string, unknown>): Promise<unknown> {
+  const selector = readString(params, "selector");
+  const text = readString(params, "text");
+  if (!selector) throw new Error("type requires 'selector'");
+  if (text === null) throw new Error("type requires 'text'");
+  const clearFirst = readBool(params, "clearFirst") ?? false;
+  const tab = requireTab(params);
+  const code = `(${typeProbe.toString()})(${JSON.stringify({ selector, text, clearFirst })})`;
+  return tab.handle.executeJavaScript(code);
+}
+
+async function pressKey(params: Record<string, unknown>): Promise<unknown> {
+  const key = readString(params, "key");
+  if (!key) throw new Error("press_key requires 'key'");
+  const selector = readString(params, "selector");
+  const tab = requireTab(params);
+  const code = `(${pressKeyProbe.toString()})(${JSON.stringify({ key, selector })})`;
+  return tab.handle.executeJavaScript(code);
+}
+
+async function waitFor(params: Record<string, unknown>): Promise<unknown> {
+  const selector = readString(params, "selector");
+  if (!selector) throw new Error("wait_for requires 'selector'");
+  const state = (readString(params, "state") as "attached" | "visible" | "hidden" | null) ?? "visible";
+  const timeoutMs = readNumber(params, "timeoutMs") ?? 5_000;
+  const tab = requireTab(params);
+  const code = `(${waitForProbe.toString()})(${JSON.stringify({ selector, state, timeoutMs })})`;
+  return tab.handle.executeJavaScript(code);
+}
+
+async function screenshot(params: Record<string, unknown>): Promise<unknown> {
+  const tab = requireTab(params);
+  const dataUrl = await tab.handle.capturePngDataUrl();
+  return { dataUrl, url: tab.handle.getURL() };
+}
+
+async function waitDomReady(handle: { isReady: () => boolean }, timeoutMs: number): Promise<void> {
+  const started = Date.now();
+  while (!handle.isReady()) {
+    if (Date.now() - started > timeoutMs) throw new Error("timed out waiting for preview dom-ready");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+function readString(params: Record<string, unknown>, key: string): string | null {
+  const value = params[key];
+  return typeof value === "string" ? value : null;
+}
+function readNumber(params: Record<string, unknown>, key: string): number | null {
+  const value = params[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+function readBool(params: Record<string, unknown>, key: string): boolean | null {
+  const value = params[key];
+  return typeof value === "boolean" ? value : null;
+}
+
+// ---------------------------------------------------------------------------
+// Probes — these functions are stringified and run inside the <webview>'s
+// renderer context via executeJavaScript. They MUST be self-contained: no
+// closures over the renderer's host module scope, no TypeScript-only syntax.
+// Inputs/outputs travel as JSON.
+// ---------------------------------------------------------------------------
+
+function snapshotProbe(opts: { mode: string; maxBytes: number }) {
+  function describe(el: Element, depth: number): string {
+    const tag = el.tagName.toLowerCase();
+    const role = el.getAttribute("role") || "";
+    const name =
+      el.getAttribute("aria-label") ||
+      el.getAttribute("aria-labelledby") ||
+      el.getAttribute("title") ||
+      (el as HTMLElement).innerText?.trim().slice(0, 80) ||
+      "";
+    const id = el.id ? `#${el.id}` : "";
+    const cls = el.className && typeof el.className === "string"
+      ? `.${el.className.trim().split(/\s+/).slice(0, 3).join(".")}`
+      : "";
+    const meta: string[] = [];
+    if (role) meta.push(`role=${role}`);
+    if (name) meta.push(`name=${JSON.stringify(name)}`);
+    const head = `${"  ".repeat(depth)}<${tag}${id}${cls}>${meta.length ? " " + meta.join(" ") : ""}`;
+    return head;
+  }
+  function walk(el: Element, depth: number, lines: string[], budget: { left: number }): void {
+    if (budget.left <= 0) return;
+    const line = describe(el, depth);
+    if (line.length + 1 > budget.left) {
+      lines.push(line.slice(0, budget.left));
+      budget.left = 0;
+      return;
+    }
+    lines.push(line);
+    budget.left -= line.length + 1;
+    const children = Array.from(el.children);
+    for (const child of children) {
+      if (budget.left <= 0) break;
+      const skip = ["script", "style", "noscript", "meta", "link"].includes(child.tagName.toLowerCase());
+      if (skip) continue;
+      walk(child, depth + 1, lines, budget);
+    }
+  }
+  const lines: string[] = [];
+  const budget = { left: Math.max(1000, opts.maxBytes) };
+  if (document.body) walk(document.body, 0, lines, budget);
+  const truncated = budget.left <= 0;
+  return {
+    url: location.href,
+    title: document.title,
+    mode: opts.mode,
+    snapshot: lines.join("\n"),
+    truncated,
+  };
+}
+
+function clickProbe(opts: { selector: string }) {
+  const el = document.querySelector(opts.selector) as HTMLElement | null;
+  if (!el) return { ok: false, error: `selector not found: ${opts.selector}` };
+  el.scrollIntoView({ block: "center" });
+  const rect = el.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+  const opts2 = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 } as MouseEventInit;
+  el.dispatchEvent(new PointerEvent("pointerdown", opts2 as PointerEventInit));
+  el.dispatchEvent(new MouseEvent("mousedown", opts2));
+  el.dispatchEvent(new PointerEvent("pointerup", opts2 as PointerEventInit));
+  el.dispatchEvent(new MouseEvent("mouseup", opts2));
+  el.click();
+  return { ok: true, tag: el.tagName.toLowerCase(), x, y };
+}
+
+function typeProbe(opts: { selector: string; text: string; clearFirst: boolean }) {
+  const el = document.querySelector(opts.selector) as HTMLElement | null;
+  if (!el) return { ok: false, error: `selector not found: ${opts.selector}` };
+  const input = el as HTMLInputElement | HTMLTextAreaElement;
+  el.focus();
+  if (opts.clearFirst && "value" in input) input.value = "";
+  if ("value" in input) {
+    input.value = (opts.clearFirst ? "" : input.value ?? "") + opts.text;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  } else if ((el as HTMLElement).isContentEditable) {
+    document.execCommand("insertText", false, opts.text);
+  } else {
+    return { ok: false, error: "element is not an input, textarea, or contentEditable" };
+  }
+  return { ok: true, value: "value" in input ? input.value : undefined };
+}
+
+function pressKeyProbe(opts: { key: string; selector: string | null }) {
+  const target = (opts.selector ? document.querySelector(opts.selector) : document.activeElement) as HTMLElement | null;
+  const dispatchOn = target ?? document.body;
+  const keyName = opts.key;
+  const keyCodeMap: Record<string, number> = { Enter: 13, Escape: 27, Tab: 9, Backspace: 8, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Space: 32 };
+  const keyCode = keyCodeMap[keyName] ?? (keyName.length === 1 ? keyName.charCodeAt(0) : 0);
+  const init = { key: keyName === "Space" ? " " : keyName, code: keyName, keyCode, which: keyCode, bubbles: true, cancelable: true } as KeyboardEventInit;
+  dispatchOn.dispatchEvent(new KeyboardEvent("keydown", init));
+  dispatchOn.dispatchEvent(new KeyboardEvent("keypress", init));
+  dispatchOn.dispatchEvent(new KeyboardEvent("keyup", init));
+  return { ok: true, target: dispatchOn?.tagName?.toLowerCase?.() ?? null };
+}
+
+function waitForProbe(opts: { selector: string; state: string; timeoutMs: number }) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + opts.timeoutMs;
+    const check = () => {
+      const el = document.querySelector(opts.selector) as HTMLElement | null;
+      let match = false;
+      if (opts.state === "attached") match = el !== null;
+      else if (opts.state === "hidden") match = !el || (el.offsetParent === null && el.tagName !== "BODY");
+      else match = !!el && el.offsetParent !== null;
+      if (match) return resolve({ ok: true, foundAt: new Date().toISOString() });
+      if (Date.now() >= deadline) return resolve({ ok: false, error: `timed out waiting for '${opts.selector}' to be ${opts.state}` });
+      setTimeout(check, 75);
+    };
+    check();
+  });
+}

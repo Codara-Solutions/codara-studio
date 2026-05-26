@@ -1092,7 +1092,7 @@ function EditorSettings() {
   );
 }
 
-const ALL_AGENT_RUNTIME_KINDS: ReadonlyArray<AgentRuntimeKind> = ["claude", "codex", "cursor"];
+const ALL_AGENT_RUNTIME_KINDS: ReadonlyArray<AgentRuntimeKind> = ["claude", "codex"];
 
 function AgentsSettings({
   draft,
@@ -1174,6 +1174,121 @@ function AgentsSettings({
         MCP servers and skills now live in the Capability Center from the Spark composer. That space is larger and gives
         per-item activation, compatibility, deletion, and sync controls.
       </div>
+
+      <div style={{ display: "grid", gap: 8 }}>
+        <SectionTitle
+          title="Stuck-worker watchdog"
+          detail="Three-channel idle detector. A worker is killed and auto-restarted from its on-disk state only when the pty stream, the agent's session log, and the workspace filesystem are ALL silent for the threshold. Long thinks and tool work each ping at least one channel, so false positives are essentially zero."
+        />
+        <ToggleRow
+          title="Auto-kill stuck workers"
+          desc="If a Claude or Codex worker stops emitting any activity at all, kill it and (optionally) spin up a fresh attempt on the same task."
+          checked={draft.workerStuckDetectEnabled}
+          onChange={(workerStuckDetectEnabled) =>
+            onChange({ ...draft, workerStuckDetectEnabled })
+          }
+        />
+        <NumberRow
+          title="Idle threshold (seconds)"
+          desc="All three channels (pty, session log, workspace) must be silent for this long before the worker is declared stuck. Default 180s."
+          min={60}
+          max={3600}
+          value={draft.workerStuckIdleSeconds}
+          disabled={!draft.workerStuckDetectEnabled}
+          onChange={(workerStuckIdleSeconds) =>
+            onChange({ ...draft, workerStuckIdleSeconds })
+          }
+        />
+        <NumberRow
+          title="Max auto-retries per task"
+          desc="After this many stuck-fails on the same task, Spark stops auto-retrying and surfaces it to the planner instead. 0 disables auto-retry (kill only). Default 2."
+          min={0}
+          max={5}
+          value={draft.workerStuckMaxAutoRetries}
+          disabled={!draft.workerStuckDetectEnabled}
+          onChange={(workerStuckMaxAutoRetries) =>
+            onChange({ ...draft, workerStuckMaxAutoRetries })
+          }
+        />
+      </div>
+    </div>
+  );
+}
+
+function NumberRow({
+  title,
+  desc,
+  min,
+  max,
+  value,
+  disabled,
+  onChange,
+}: {
+  title: string;
+  desc: string;
+  min: number;
+  max: number;
+  value: number;
+  disabled?: boolean;
+  onChange: (next: number) => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 14,
+        padding: "10px 0",
+        opacity: disabled ? 0.55 : 1,
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            fontFamily: "var(--font-sans)",
+            fontSize: 13,
+            fontWeight: 600,
+            color: "var(--ink)",
+          }}
+        >
+          {title}
+        </div>
+        <div
+          style={{
+            fontFamily: "var(--font-sans)",
+            fontSize: 11,
+            color: "var(--muted)",
+            lineHeight: 1.45,
+            marginTop: 2,
+          }}
+        >
+          {desc}
+        </div>
+      </div>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        value={value}
+        disabled={disabled}
+        onChange={(e) => {
+          const next = Number(e.target.value);
+          if (!Number.isFinite(next)) return;
+          onChange(Math.min(max, Math.max(min, Math.trunc(next))));
+        }}
+        style={{
+          width: 72,
+          flex: "0 0 72px",
+          padding: "6px 8px",
+          borderRadius: 6,
+          border: "1px solid var(--rule-strong)",
+          background: "var(--panel)",
+          color: "var(--ink)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12,
+          textAlign: "right",
+        }}
+      />
     </div>
   );
 }
@@ -1485,7 +1600,6 @@ function enabledRuntimeKinds(selection: AgentRuntimeSelection): Set<AgentRuntime
   }
   if (selection === "claude") return new Set<AgentRuntimeKind>(["claude"]);
   if (selection === "codex") return new Set<AgentRuntimeKind>(["codex"]);
-  if (selection === "cursor") return new Set<AgentRuntimeKind>(["cursor"]);
   if (selection === "both") return new Set<AgentRuntimeKind>(["claude", "codex"]);
   return new Set<AgentRuntimeKind>(ALL_AGENT_RUNTIME_KINDS);
 }

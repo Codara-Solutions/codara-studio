@@ -23,6 +23,10 @@ const EMPTY_SETTINGS: AppSettings = {
   agentSkillSyncEnabled: true,
   agentDisabledMcpIds: [],
   agentDisabledSkillIds: [],
+  playwrightMcpAutoInstall: true,
+  workerStuckDetectEnabled: true,
+  workerStuckIdleSeconds: 180,
+  workerStuckMaxAutoRetries: 2,
 };
 
 let cache: AppState | null = null;
@@ -103,16 +107,27 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     agentSkillSyncEnabled: settings.agentSkillSyncEnabled !== false,
     agentDisabledMcpIds: normalizeStringArray(settings.agentDisabledMcpIds),
     agentDisabledSkillIds: normalizeStringArray(settings.agentDisabledSkillIds),
+    playwrightMcpAutoInstall: settings.playwrightMcpAutoInstall !== false,
+    workerStuckDetectEnabled: settings.workerStuckDetectEnabled !== false,
+    workerStuckIdleSeconds: clampInt(settings.workerStuckIdleSeconds, 60, 3600, 180),
+    workerStuckMaxAutoRetries: clampInt(settings.workerStuckMaxAutoRetries, 0, 5, 2),
   };
 }
 
+function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
 function normalizeAgentRuntimeSelection(value: unknown): AgentRuntimeSelection {
-  const allKinds: AgentRuntimeKind[] = ["claude", "codex", "cursor"];
+  const allKinds: AgentRuntimeKind[] = ["claude", "codex"];
   // Legacy single-string formats migrate to the array form so the rest of
-  // the app only has to handle one shape.
+  // the app only has to handle one shape. The "cursor" string is silently
+  // dropped — Spark App only supports Claude + Codex now.
   if (value === "claude") return ["claude"];
   if (value === "codex") return ["codex"];
-  if (value === "cursor") return ["cursor"];
+  if (value === "cursor") return [...allKinds];
   if (value === "both") return ["claude", "codex"];
   if (value === "auto") return [...allKinds];
   if (Array.isArray(value)) {

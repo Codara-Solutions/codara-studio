@@ -44,10 +44,12 @@ type WebviewMethods = {
   canGoBack: () => boolean;
   canGoForward: () => boolean;
   getURL: () => string;
+  getTitle: () => string;
   openDevTools: () => void;
   closeDevTools: () => void;
   send: (channel: string, ...args: unknown[]) => void;
   capturePage: () => Promise<CapturedImage>;
+  executeJavaScript: (code: string, userGesture?: boolean) => Promise<unknown>;
 };
 
 type WebviewElement = HTMLElement &
@@ -78,8 +80,15 @@ export interface BrowserPaneHandle {
   goForward: () => void;
   loadURL: (url: string) => void;
   getURL: () => string;
+  getTitle: () => string;
   openDevTools: () => void;
   focusAddressBar: () => void;
+  // Surface area used by the spark-preview MCP bridge. None of these throw
+  // when the webview isn't yet dom-ready — they reject with a descriptive
+  // error the bridge can forward to the calling sub-agent.
+  isReady: () => boolean;
+  executeJavaScript: (code: string) => Promise<unknown>;
+  capturePngDataUrl: () => Promise<string>;
 }
 
 interface Props {
@@ -465,6 +474,29 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         }
       },
       focusAddressBar: () => addressRef.current?.focus(),
+      getTitle: () => {
+        try {
+          return webviewRef.current?.getTitle?.() ?? "";
+        } catch {
+          return "";
+        }
+      },
+      isReady: () => domReadyRef.current,
+      executeJavaScript: async (code: string) => {
+        const wv = webviewRef.current;
+        if (!wv || !domReadyRef.current || !wv.executeJavaScript) {
+          throw new Error("preview tab is not ready");
+        }
+        return wv.executeJavaScript(code, false);
+      },
+      capturePngDataUrl: async () => {
+        const wv = webviewRef.current;
+        if (!wv || !domReadyRef.current || !wv.capturePage) {
+          throw new Error("preview tab is not ready");
+        }
+        const img = await wv.capturePage();
+        return img?.toDataURL?.() ?? "";
+      },
     }),
     [currentUrl, url],
   );

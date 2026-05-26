@@ -25,6 +25,7 @@ import ChatStack from "./tabs/ChatStack";
 import EditorStack from "./tabs/EditorStack";
 import TerminalStack from "./tabs/TerminalStack";
 import PreviewStack from "./tabs/PreviewStack";
+import { setOpenPreviewTabFn } from "./components/Preview/registry";
 import RunsStack from "./tabs/RunsStack";
 import { useTabs } from "./tabs/useTabs";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
@@ -65,6 +66,10 @@ const DEFAULT_SETTINGS: AppSettings = {
   agentSkillSyncEnabled: true,
   agentDisabledMcpIds: [],
   agentDisabledSkillIds: [],
+  playwrightMcpAutoInstall: true,
+  workerStuckDetectEnabled: true,
+  workerStuckIdleSeconds: 180,
+  workerStuckMaxAutoRetries: 2,
 };
 
 function resolveDefaultShell(
@@ -744,16 +749,15 @@ export default function App() {
       if (!ws) return;
       const workspaceCwd = ws.cwd;
 
-      // Pull the runtime so the worker chip shows CLAUDE/CODEX/CURSOR. Best-effort —
+      // Pull the runtime so the worker chip shows CLAUDE/CODEX. Best-effort —
       // the chip is decoration; the PTY claim itself doesn't depend on it.
-      let runtime: "claude" | "codex" | "cursor" | undefined;
+      let runtime: "claude" | "codex" | undefined;
       try {
         const run = await window.spark.orchestration.getRun(event.runId);
         const task = run?.workerTasks.find((item) => item.id === event.workerTaskId);
         if (
           task?.runtimePreference === "claude" ||
-          task?.runtimePreference === "codex" ||
-          task?.runtimePreference === "cursor"
+          task?.runtimePreference === "codex"
         ) {
           runtime = task.runtimePreference;
         }
@@ -1246,6 +1250,16 @@ export default function App() {
     window.addEventListener("spark:open-browser-url", handler);
     return () => window.removeEventListener("spark:open-browser-url", handler);
   }, [openInSparkBrowser]);
+
+  // Expose a tab-creation entry point to the preview registry so the
+  // spark-preview MCP bridge can auto-open a preview tab when a sub-agent
+  // calls navigate without one already being open. The registered fn returns
+  // the new tab id; the bridge then waits for PreviewStack to mount its
+  // BrowserPaneHandle and drives the navigation.
+  useEffect(() => {
+    setOpenPreviewTabFn((url: string) => tabs.newPreviewTab(url));
+    return () => setOpenPreviewTabFn(null);
+  }, [tabs]);
 
   const handleTerminalPaneDropToTab = useCallback(
     (payload: TerminalPaneDragPayload, targetTabId?: string) => {

@@ -287,8 +287,6 @@ function runtimeLabel(runtime: WorkerRuntime): string {
       return "Claude";
     case "codex":
       return "Codex";
-    case "cursor":
-      return "Cursor";
     case "shell":
       return "Shell";
     case "manual":

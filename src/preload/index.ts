@@ -405,6 +405,24 @@ const api = {
     writeText: (text: string): Promise<void> =>
       ipcRenderer.invoke("clipboard:writeText", text),
   },
+  // Spark-preview MCP bridge: main forwards preview-tool requests here, the
+  // renderer dispatches against the picked preview tab and sends a response
+  // back through ipcRenderer.send. One listener per renderer process.
+  previewBridge: {
+    onRequest: (
+      handler: (req: { reqId: string; op: string; params: Record<string, unknown> }) => void,
+    ): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        req: { reqId: string; op: string; params: Record<string, unknown> },
+      ) => handler(req);
+      ipcRenderer.on("preview-bridge:request", listener);
+      return () => ipcRenderer.off("preview-bridge:request", listener);
+    },
+    sendResponse: (response: { reqId: string; ok: boolean; result?: unknown; error?: string }): void => {
+      ipcRenderer.send("preview-bridge:response", response);
+    },
+  },
   updater: {
     // Subscribe to electron-updater lifecycle events. The returned function
     // unsubscribes the listener; callers should invoke it in a useEffect

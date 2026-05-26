@@ -81,7 +81,7 @@ export interface SparkManagerDecision {
 }
 
 export interface SparkManagerTerminalRequest {
-  runtime: "claude" | "codex" | "cursor";
+  runtime: "claude" | "codex";
   count: number;
   model?: string;
   effort?: string;
@@ -262,7 +262,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
         properties: {
           runtime: {
             type: "string",
-            enum: ["claude", "codex", "cursor"],
+            enum: ["claude", "codex"],
             description: "Which agent CLI runs in the terminal.",
           },
           count: {
@@ -309,7 +309,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
               properties: {
                 label: { type: "string" },
                 summary: { type: "string" },
-                runtimePreference: { type: "string", enum: ["claude", "codex", "cursor", "manual", "shell"] },
+                runtimePreference: { type: "string", enum: ["claude", "codex", "manual", "shell"] },
                 modelHint: { type: "string" },
                 effortHint: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh"] },
                 taskClass: {
@@ -351,7 +351,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
           stepIndex: { type: "integer", minimum: 0 },
           title: { type: "string" },
           description: { type: "string" },
-          runtimePreference: { type: "string", enum: ["claude", "codex", "cursor", "manual", "shell"] },
+          runtimePreference: { type: "string", enum: ["claude", "codex", "manual", "shell"] },
           modelHint: { type: "string" },
           effortHint: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh"] },
           allowedPaths: {
@@ -1199,9 +1199,7 @@ function normalizeTerminals(value: unknown): SparkManagerTerminalRequest[] {
         ? "codex"
         : rec.runtime === "claude"
           ? "claude"
-          : rec.runtime === "cursor"
-            ? "cursor"
-            : null;
+          : null;
     if (!runtime) continue;
     const rawCount = typeof rec.count === "number" ? Math.floor(rec.count) : 1;
     const count = Math.min(Math.max(rawCount, 1), 8);
@@ -1368,7 +1366,6 @@ function normalizeRuntime(value: unknown): WorkerRuntime {
   if (
     value === "claude" ||
     value === "codex" ||
-    value === "cursor" ||
     value === "manual" ||
     value === "shell"
   )

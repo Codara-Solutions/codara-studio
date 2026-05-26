@@ -133,8 +133,9 @@ export function enabledAgentRuntimeKinds(
   // Legacy string tokens kept for backwards-compat reads from older settings.
   if (selection === "claude") return new Set<AgentRuntimeKind>(["claude"]);
   if (selection === "codex") return new Set<AgentRuntimeKind>(["codex"]);
-  if (selection === "cursor") return new Set<AgentRuntimeKind>(["cursor"]);
-  // "auto" and "both" both mean "every runtime Spark knows about".
+  // "auto" and "both" both mean "every runtime Spark knows about". The
+  // historical "cursor" token migrates here implicitly (we no longer support
+  // Cursor as a runtime — Spark App only spawns Claude or Codex workers).
   return new Set<AgentRuntimeKind>(ALL_RUNTIMES);
 }
 

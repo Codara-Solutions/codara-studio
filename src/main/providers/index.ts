@@ -17,14 +17,12 @@ import type { AgentRuntimeKind } from "@shared/types";
 
 import { claudeProvider } from "./claude";
 import { codexProvider } from "./codex";
-import { cursorProvider } from "./cursor";
 
 import type { CliProvider } from "./types";
 
 const PROVIDERS: readonly CliProvider[] = [
   claudeProvider,
   codexProvider,
-  cursorProvider,
 ];
 
 /**

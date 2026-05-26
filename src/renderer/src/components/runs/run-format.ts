@@ -123,12 +123,6 @@ export function runtimeTone(runtime: WorkerRuntime): RuntimeTone {
         border: "color-mix(in oklch, var(--info) 52%, transparent)",
         bg: "color-mix(in oklch, var(--info) 10%, transparent)",
       };
-    case "cursor":
-      return {
-        label: "var(--warn)",
-        border: "color-mix(in oklch, var(--warn) 52%, transparent)",
-        bg: "color-mix(in oklch, var(--warn) 10%, transparent)",
-      };
     case "shell":
       return {
         label: "var(--ok)",
