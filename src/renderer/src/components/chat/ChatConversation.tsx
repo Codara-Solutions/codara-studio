@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { RunMessageAttachment, RunQuestionOption, RunState } from "@shared/types";
+import type { Checkpoint, RunMessageAttachment, RunQuestionOption, RunState } from "@shared/types";
 import { makeId } from "@shared/ids";
 import {
   buildChatTimeline,
@@ -29,6 +29,46 @@ type ConversationItem = ChatTimelineItem | ActivityGroupItem;
 export default function ChatConversation({ run }: { run: RunState }) {
   const items = useMemo(() => groupCompletedActivity(buildChatTimeline(run)), [run]);
   const openQuestion = useMemo(() => findOpenQuestion(run), [run]);
+  // On a completed run, stamp a tiny "done" marker under the LAST Spark prose
+  // message so the user sees the run finished without a separate completion
+  // turn duplicating the answer. The id-matching keys the marker to that one
+  // bubble; everything else renders unchanged.
+  const doneMarkerSparkMessageId = useMemo(() => {
+    if (run.status !== "complete") return null;
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      const item = items[i];
+      if (item.kind !== "message") continue;
+      if (item.author !== "spark") continue;
+      if (item.messageKind === "decision") continue;
+      return item.id;
+    }
+    return null;
+  }, [items, run.status]);
+  // Undo is only ever offered on the genuinely-last user message — and only
+  // once its checkpoint has actually landed. Two reasons:
+  //   1. "Undo my last message" is the only mental model that doesn't
+  //      surprise: a click peels off exactly one user turn. Successive undos
+  //      keep working backwards.
+  //   2. Background-created checkpoints take ~a tick to land. If we matched
+  //      "latest checkpoint that has a message" instead of "latest message
+  //      that has a checkpoint", we'd briefly show the pill on the PREVIOUS
+  //      user message right after a send, and a misclick there would wipe
+  //      two messages instead of one.
+  const latestUndoableCheckpoint = useMemo(() => {
+    let lastUserMessageId: string | null = null;
+    for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
+      if (run.humanMessages[i].author === "user") {
+        lastUserMessageId = run.humanMessages[i].id;
+        break;
+      }
+    }
+    if (!lastUserMessageId) return null;
+    return (
+      (run.checkpoints ?? []).find(
+        (entry) => entry.kind === "user-message" && entry.messageId === lastUserMessageId,
+      ) ?? null
+    );
+  }, [run.checkpoints, run.humanMessages]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Pin to the bottom as the conversation grows. Keyed on the item count and
@@ -48,7 +88,17 @@ export default function ChatConversation({ run }: { run: RunState }) {
           items.map((item) => (
             <div key={timelineItemKey(item)} style={CHAT_ITEM_STYLE}>
               {item.kind === "message" ? (
-                <MessageTurn item={item} runId={run.id} openQuestionId={openQuestion?.id ?? null} />
+                <MessageTurn
+                  item={item}
+                  runId={run.id}
+                  openQuestionId={openQuestion?.id ?? null}
+                  checkpoint={
+                    latestUndoableCheckpoint?.messageId === item.id
+                      ? latestUndoableCheckpoint
+                      : null
+                  }
+                  showDoneMarker={doneMarkerSparkMessageId === item.id}
+                />
               ) : item.kind === "tool" ? (
                 <ToolActivityRow item={item} />
               ) : item.kind === "activity-group" ? (
@@ -105,10 +155,14 @@ const MessageTurn = React.memo(function MessageTurn({
   item,
   runId,
   openQuestionId,
+  checkpoint,
+  showDoneMarker,
 }: {
   item: MessageItem;
   runId: string;
   openQuestionId: string | null;
+  checkpoint: Checkpoint | null;
+  showDoneMarker: boolean;
 }) {
   if (item.author === "system") {
     return (
@@ -128,6 +182,7 @@ const MessageTurn = React.memo(function MessageTurn({
           <AttachmentStrip attachments={item.attachments} align="end" />
         </div>
         {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
+        {checkpoint && <UndoControl runId={runId} checkpoint={checkpoint} />}
       </div>
     );
   }
@@ -169,23 +224,39 @@ const MessageTurn = React.memo(function MessageTurn({
           />
         )}
       </div>
+      {showDoneMarker && <DoneMarker />}
     </div>
   );
 });
 
+function DoneMarker() {
+  return (
+    <div style={DONE_MARKER_STYLE}>
+      <span style={DONE_MARKER_DOT_STYLE} />
+      <span>done</span>
+    </div>
+  );
+}
+
 function CompletionMessage({ text }: { text: string }) {
   const body = completionBodyText(text);
-  return (
-    <div style={COMPLETION_CARD_STYLE}>
-      <div style={COMPLETION_HEADER_STYLE}>
-        <StatusDot color="var(--ok)" pulse={false} size={6} />
-        <span style={COMPLETION_TITLE_STYLE}>Run complete</span>
+  if (!body) {
+    return (
+      <div style={COMPLETION_INLINE_STYLE}>
+        <StatusDot color="var(--ok)" pulse={false} size={5} />
+        <span style={COMPLETION_INLINE_LABEL_STYLE}>done</span>
       </div>
-      {body && (
-        <div style={COMPLETION_BODY_STYLE}>
-          <Markdown text={body} />
-        </div>
-      )}
+    );
+  }
+  return (
+    <div style={SPARK_BUBBLE_STYLE}>
+      <div style={COMPLETION_INLINE_STYLE}>
+        <StatusDot color="var(--ok)" pulse={false} size={5} />
+        <span style={COMPLETION_INLINE_LABEL_STYLE}>done</span>
+      </div>
+      <div style={COMPLETION_BODY_STYLE}>
+        <Markdown text={body} />
+      </div>
     </div>
   );
 }
@@ -801,6 +872,210 @@ function runtimeStateColor(state: ChatWorker["runtimeState"]): string | null {
 
 // A count badge for a message that was sent (or asked) more than once in a
 // row — see buildChatTimeline's adjacent-duplicate collapse.
+function UndoControl({ runId, checkpoint }: { runId: string; checkpoint: Checkpoint }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: MouseEvent) => {
+      if (
+        wrapRef.current &&
+        event.target instanceof Node &&
+        !wrapRef.current.contains(event.target)
+      ) {
+        setOpen(false);
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const undo = async (scope: "chat" | "chat+code") => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await window.spark.orchestration.undoToCheckpoint({
+        runId,
+        checkpointId: checkpoint.id,
+        scope,
+      });
+      // Push the fresh RunState through the renderer's snapshot channel so the
+      // chat re-renders immediately (the undo pill goes away, trimmed messages
+      // disappear). Without this we'd wait for the 250ms debounced listRuns
+      // refresh that the orchestration event channel triggers — long enough
+      // for the UI to feel stuck.
+      window.dispatchEvent(
+        new CustomEvent("spark:run-snapshot", { detail: { run: result.run } }),
+      );
+      // Drop the undone message back into the composer so the user can edit
+      // and resend — same shape as an "edit your last message" UX. Replace,
+      // not append, since we're recovering the prior draft verbatim.
+      if (result.restoredText) {
+        window.dispatchEvent(
+          new CustomEvent("spark:prefill-composer", {
+            detail: { text: result.restoredText, replace: true },
+          }),
+        );
+      }
+      setOpen(false);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const hasCodeSnapshot = !!checkpoint.sha;
+
+  return (
+    <div ref={wrapRef} style={{ position: "relative" }}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        title="Undo to this point"
+        aria-label="Undo to this point"
+        disabled={busy}
+        style={{
+          appearance: "none",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          height: 20,
+          padding: "0 7px",
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 999,
+          background: open ? "var(--hover)" : "transparent",
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10.5,
+          fontWeight: 600,
+          cursor: "default",
+        }}
+      >
+        <UndoGlyph />
+        <span>Undo</span>
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            right: 0,
+            zIndex: 30,
+            minWidth: 196,
+            border: "1px solid var(--rule-strong)",
+            borderRadius: 8,
+            background: "var(--panel-2)",
+            boxShadow: "var(--shadow-2)",
+            padding: 5,
+          }}
+        >
+          <UndoMenuRow
+            label="Undo message"
+            sub="Rewind chat only"
+            onClick={() => void undo("chat")}
+            disabled={busy}
+          />
+          <UndoMenuRow
+            label="Undo message and code"
+            sub={
+              hasCodeSnapshot
+                ? "Rewind chat + restore workspace files"
+                : "No workspace snapshot available"
+            }
+            danger
+            onClick={() => void undo("chat+code")}
+            disabled={busy || !hasCodeSnapshot}
+          />
+          {error && (
+            <div style={{ color: "var(--danger)", fontSize: 10.5, padding: "5px 8px" }}>
+              {error}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UndoMenuRow({
+  label,
+  sub,
+  danger = false,
+  disabled = false,
+  onClick,
+}: {
+  label: string;
+  sub: string;
+  danger?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        width: "100%",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "flex-start",
+        gap: 1,
+        border: "none",
+        borderRadius: 6,
+        background: hover && !disabled ? "var(--hover)" : "transparent",
+        padding: "6px 9px",
+        fontFamily: "var(--font-sans)",
+        textAlign: "left",
+        cursor: "default",
+        opacity: disabled ? 0.5 : 1,
+      }}
+    >
+      <span
+        style={{
+          fontSize: 12,
+          fontWeight: 600,
+          color: danger ? "var(--danger)" : "var(--ink)",
+        }}
+      >
+        {label}
+      </span>
+      <span style={{ fontSize: 10.5, color: "var(--muted)" }}>{sub}</span>
+    </button>
+  );
+}
+
+function UndoGlyph() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden>
+      <path
+        d="M2.5 5.5 L4.5 3.5 M2.5 5.5 L4.5 7.5 M2.5 5.5 H7 a2.5 2.5 0 0 1 0 5 H5"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+    </svg>
+  );
+}
+
 function RepeatChip({ count }: { count: number }) {
   return (
     <span
@@ -938,35 +1213,45 @@ const SPARK_BUBBLE_STYLE: React.CSSProperties = {
   overflowWrap: "anywhere",
 };
 
-const COMPLETION_CARD_STYLE: React.CSSProperties = {
-  width: "min(100%, 560px)",
-  maxWidth: "94%",
-  boxSizing: "border-box",
-  border: "1px solid color-mix(in oklch, var(--ok) 30%, var(--rule-soft))",
-  borderRadius: 8,
-  background: "color-mix(in oklch, var(--ok) 6%, var(--panel))",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
-  padding: "10px 11px 11px",
-};
-
-const COMPLETION_HEADER_STYLE: React.CSSProperties = {
-  display: "flex",
+const DONE_MARKER_STYLE: React.CSSProperties = {
+  marginTop: 4,
+  display: "inline-flex",
   alignItems: "center",
-  gap: 7,
-  minHeight: 18,
-};
-
-const COMPLETION_TITLE_STYLE: React.CSSProperties = {
-  color: "var(--ink)",
+  gap: 5,
+  color: "var(--muted)",
   fontFamily: "var(--font-mono)",
-  fontSize: 10,
-  fontWeight: 800,
+  fontSize: 9,
+  fontWeight: 700,
   letterSpacing: "0.08em",
   textTransform: "uppercase",
 };
 
+const DONE_MARKER_DOT_STYLE: React.CSSProperties = {
+  width: 5,
+  height: 5,
+  borderRadius: 999,
+  background: "var(--ok)",
+  display: "inline-block",
+};
+
+const COMPLETION_INLINE_STYLE: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  color: "var(--muted)",
+};
+
+const COMPLETION_INLINE_LABEL_STYLE: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 9,
+  fontWeight: 700,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+  color: "var(--muted)",
+};
+
 const COMPLETION_BODY_STYLE: React.CSSProperties = {
-  marginTop: 8,
+  marginTop: 6,
   color: "var(--ink-dim)",
 };
 

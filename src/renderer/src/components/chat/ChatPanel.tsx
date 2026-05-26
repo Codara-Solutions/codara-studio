@@ -29,8 +29,6 @@ interface Props {
     clientMessageId: string,
     attachments?: AddRunMessageAttachmentInput[],
   ) => RunState | void | Promise<RunState | void>;
-  onPauseRun: () => void;
-  onPauseAfterWorkers: () => void;
   onForcePauseRun: () => void;
 }
 
@@ -47,8 +45,6 @@ export default function ChatPanel({
   onSelectRun,
   onDeleteRun,
   onStartChat,
-  onPauseRun,
-  onPauseAfterWorkers,
   onForcePauseRun,
 }: Props) {
   // Swarm view toggle — flips the chat body from the normal
@@ -106,12 +102,8 @@ export default function ChatPanel({
           <SwitcherBar
             runs={runs}
             activeRun={activeRun}
-            busy={busy}
             onSelectRun={onSelectRun}
             onDeleteRun={onDeleteRun}
-            onPauseRun={onPauseRun}
-            onPauseAfterWorkers={onPauseAfterWorkers}
-            onForcePauseRun={onForcePauseRun}
           />
           {error && <ErrorBar message={error} />}
           {swarmActive && activeRun ? (
@@ -143,6 +135,7 @@ export default function ChatPanel({
               cwd={workspace?.cwd ?? null}
               disabled={!workspace}
               onStartChat={onStartChat}
+              onForcePauseRun={onForcePauseRun}
             />
           )}
         </>
@@ -293,30 +286,22 @@ function formatCostUsd(value: number, opts: { stripDollar?: boolean } = {}): str
 function SwitcherBar({
   runs,
   activeRun,
-  busy,
   onSelectRun,
   onDeleteRun,
-  onPauseRun,
-  onPauseAfterWorkers,
-  onForcePauseRun,
 }: {
   runs: RunState[];
   activeRun: RunState | null;
-  busy: boolean;
   onSelectRun: (id: string | null) => void;
   onDeleteRun: (id: string) => void;
-  onPauseRun: () => void;
-  onPauseAfterWorkers: () => void;
-  onForcePauseRun: () => void;
 }) {
-  const [open, setOpen] = useState<null | "chats" | "controls">(null);
+  const [open, setOpen] = useState(false);
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
   const activeRunId = activeRun?.id ?? null;
   const runsKey = runs.map((run) => run.id).join("\0");
 
   useEffect(() => {
-    setOpen(null);
+    setOpen(false);
     setConfirmingDeleteId(null);
   }, [activeRunId, runsKey]);
 
@@ -328,11 +313,11 @@ function SwitcherBar({
         event.target instanceof Node &&
         !barRef.current.contains(event.target)
       ) {
-        setOpen(null);
+        setOpen(false);
       }
     };
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(null);
+      if (event.key === "Escape") setOpen(false);
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -349,27 +334,12 @@ function SwitcherBar({
   // tone (not `activeRun.status`) so any future status-to-tone changes flow
   // through automatically.
   const pulseTrigger = activeTone === "live";
-  const live =
-    !!activeRun &&
-    (activeRun.status === "running" ||
-      activeRun.status === "planning" ||
-      activeRun.status === "reviewing");
   const doneUnseen = activeTone === "done-unseen";
-  const canForce =
-    !!activeRun &&
-    activeRun.status !== "complete" &&
-    activeRun.status !== "failed" &&
-    activeRun.status !== "cancelled";
 
   const pick = (id: string | null) => {
-    setOpen(null);
+    setOpen(false);
     setConfirmingDeleteId(null);
     onSelectRun(id);
-  };
-  const runControl = (action: () => void) => {
-    setOpen(null);
-    setConfirmingDeleteId(null);
-    action();
   };
   const requestDeleteChat = (id: string) => {
     setConfirmingDeleteId(id);
@@ -378,7 +348,7 @@ function SwitcherBar({
     setConfirmingDeleteId(null);
   };
   const deleteChat = (id: string) => {
-    setOpen(null);
+    setOpen(false);
     setConfirmingDeleteId(null);
     onDeleteRun(id);
   };
@@ -399,7 +369,7 @@ function SwitcherBar({
     >
       <button
         type="button"
-        onClick={() => setOpen((value) => (value === "chats" ? null : "chats"))}
+        onClick={() => setOpen((value) => !value)}
         style={{
           appearance: "none",
           flex: 1,
@@ -411,15 +381,15 @@ function SwitcherBar({
           padding: "0 8px",
           border: "none",
           borderRadius: 7,
-          background: open === "chats" ? "var(--hover-strong)" : "transparent",
+          background: open ? "var(--hover-strong)" : "transparent",
           cursor: "default",
           transition: "background var(--motion-fast) var(--ease-out)",
         }}
         onMouseEnter={(e) => {
-          if (open !== "chats") e.currentTarget.style.background = "var(--hover)";
+          if (!open) e.currentTarget.style.background = "var(--hover)";
         }}
         onMouseLeave={(e) => {
-          if (open !== "chats") e.currentTarget.style.background = "transparent";
+          if (!open) e.currentTarget.style.background = "transparent";
         }}
       >
         <span
@@ -448,37 +418,31 @@ function SwitcherBar({
         >
           {activeRun ? `Chat - ${activeRun.title}` : "New chat"}
         </span>
+        {activeRun && (
+          <span
+            title={activeRun.id}
+            style={{
+              flex: "0 0 auto",
+              fontFamily: "var(--font-mono)",
+              fontSize: 9.5,
+              fontWeight: 600,
+              color: "var(--muted)",
+              letterSpacing: "0.04em",
+              padding: "1px 5px",
+              borderRadius: 4,
+              border: "1px solid var(--rule-soft)",
+              background: "color-mix(in oklch, var(--panel-2) 80%, transparent)",
+            }}
+          >
+            #{shortRunId(activeRun.id)}
+          </span>
+        )}
         {doneUnseen && <DoneUnseenPill />}
         <span aria-hidden style={{ flex: "0 0 auto", color: "var(--muted)", fontSize: 9 }}>
           ▾
         </span>
       </button>
-      {canForce && (
-        <button
-          type="button"
-          title="Run controls"
-          disabled={busy}
-          onClick={() => setOpen((value) => (value === "controls" ? null : "controls"))}
-          style={{
-            appearance: "none",
-            width: 28,
-            height: 28,
-            flex: "0 0 28px",
-            border: "1px solid var(--rule-soft)",
-            borderRadius: 7,
-            background: open === "controls" ? "var(--hover-strong)" : "transparent",
-            color: "var(--ink-dim)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            cursor: "default",
-            fontSize: 14,
-          }}
-        >
-          <span aria-hidden>⋯</span>
-        </button>
-      )}
-      {open === "chats" && (
+      {open && (
         <ChatList
           runs={runs}
           activeRunId={activeRunId}
@@ -487,14 +451,6 @@ function SwitcherBar({
           onRequestDelete={requestDeleteChat}
           onCancelDelete={cancelDeleteChat}
           onConfirmDelete={deleteChat}
-        />
-      )}
-      {open === "controls" && activeRun && (
-        <ControlsMenu
-          live={live}
-          onPauseRun={() => runControl(onPauseRun)}
-          onPauseAfterWorkers={() => runControl(onPauseAfterWorkers)}
-          onForcePauseRun={() => runControl(onForcePauseRun)}
         />
       )}
     </div>
@@ -705,6 +661,12 @@ function ChatRow({
 // "done · unseen" pill rendered in the SwitcherBar trigger when the active
 // chat just finished while the user was elsewhere. Disappears once they
 // focus the chat (which fires markRunSeen → tone becomes "done").
+function shortRunId(id: string): string {
+  const tail = id.split("-").pop();
+  if (!tail) return id.slice(-6);
+  return tail.slice(-6);
+}
+
 function DoneUnseenPill() {
   return (
     <span
@@ -772,36 +734,6 @@ function MiniMenuButton({
     >
       {children}
     </button>
-  );
-}
-
-function ControlsMenu({
-  live,
-  onPauseRun,
-  onPauseAfterWorkers,
-  onForcePauseRun,
-}: {
-  live: boolean;
-  onPauseRun: () => void;
-  onPauseAfterWorkers: () => void;
-  onForcePauseRun: () => void;
-}) {
-  return (
-    <div style={{ ...DROPDOWN_STYLE, right: 10, minWidth: 196 }}>
-      {live && (
-        <>
-          <MenuRow onClick={onPauseAfterWorkers}>
-            <span style={{ color: "var(--ink-dim)" }}>Stop after workers</span>
-          </MenuRow>
-          <MenuRow onClick={onPauseRun}>
-            <span style={{ color: "var(--ink-dim)" }}>Pause now</span>
-          </MenuRow>
-        </>
-      )}
-      <MenuRow onClick={onForcePauseRun}>
-        <span style={{ color: "var(--danger)" }}>Force pause</span>
-      </MenuRow>
-    </div>
   );
 }
 

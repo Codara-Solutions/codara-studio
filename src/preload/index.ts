@@ -46,6 +46,8 @@ import type {
   SparkEvent,
   StartAutopilotInput,
   StartSearchResponse,
+  UndoToCheckpointInput,
+  UndoToCheckpointResult,
   UpdateRunStatusInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
@@ -287,6 +289,8 @@ const api = {
       ipcRenderer.invoke("orchestration:resumeRun", input),
     addRunMessage: (input: AddRunMessageInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:addRunMessage", input),
+    undoToCheckpoint: (input: UndoToCheckpointInput): Promise<UndoToCheckpointResult> =>
+      ipcRenderer.invoke("orchestration:undoToCheckpoint", input),
     interruptRunWithMessage: (input: InterruptRunWithMessageInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:interruptRunWithMessage", input),
     updateRunStatus: (input: UpdateRunStatusInput): Promise<RunState> =>

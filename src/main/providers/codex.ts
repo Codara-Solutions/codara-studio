@@ -33,26 +33,31 @@ const CODEX_MODELS: AgentRuntimeModel[] = [
     label: "GPT-5.5",
     effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
     isDefault: true,
+    tier: "top",
   },
   {
     id: "gpt-5.4",
     label: "GPT-5.4",
     effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
+    tier: "mid",
   },
   {
     id: "gpt-5.4-mini",
     label: "GPT-5.4 mini",
     effortLevels: ["minimal", "low", "medium", "high"],
+    tier: "cheap",
   },
   {
     id: "gpt-5.3-codex",
     label: "GPT-5.3-Codex",
     effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
+    tier: "mid",
   },
   {
     id: "gpt-5.3-codex-spark",
     label: "GPT-5.3-Codex-Spark",
     effortLevels: ["minimal", "low", "medium", "high"],
+    tier: "cheap",
   },
 ];
 

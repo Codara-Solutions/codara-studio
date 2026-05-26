@@ -87,6 +87,8 @@ import type {
   SparkEvent,
   StartAutopilotInput,
   StartSearchResponse,
+  UndoToCheckpointInput,
+  UndoToCheckpointResult,
   UpdateRunStatusInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
@@ -546,6 +548,14 @@ export function registerIpc(): void {
     const { addRunMessage } = await getRunStore();
     return addRunMessage(input);
   });
+
+  ipcMain.handle(
+    "orchestration:undoToCheckpoint",
+    async (_e, input: UndoToCheckpointInput): Promise<UndoToCheckpointResult> => {
+      const { undoToCheckpoint } = await getRunStore();
+      return undoToCheckpoint(input);
+    },
+  );
 
   ipcMain.handle(
     "orchestration:interruptRunWithMessage",

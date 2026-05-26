@@ -325,11 +325,22 @@ export type AgentRuntimeSelection =
 
 export type AgentEffortLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
+// Capability tier the manager uses to pick a model from a runtime's list.
+// 'top' is the runtime's strongest model (architectural decisions, hard
+// debugging, peak reasoning); 'mid' is the standard implementation pick;
+// 'cheap' is the cheapest acceptable model for mechanical / leaf work
+// (reads, one-shot shell calls, well-defined transformations). Optional so
+// older provider configs continue to work — formatAvailableRuntimes treats
+// an undefined tier as "unspecified" and lets the manager reason from the
+// ordering instead.
+export type AgentModelTier = "top" | "mid" | "cheap";
+
 export interface AgentRuntimeModel {
   id: string;
   label: string;
   effortLevels: AgentEffortLevel[];
   isDefault?: boolean;
+  tier?: AgentModelTier;
 }
 
 // Per-runtime feature flags. Different CLIs expose different capabilities
@@ -722,6 +733,45 @@ export interface RunState {
    * cost data render `$0.00` only when they actually had a $0 call.
    */
   totalCostUsd?: number;
+  /**
+   * Per-run checkpoint history. A checkpoint pairs a chat-history pointer
+   * (humanMessages length at the time the checkpoint was created) with a git
+   * commit on the hidden `refs/spark/runs/{runId}` shadow ref that captures the
+   * workspace contents. Lets the user undo back to any past user-message state
+   * — chat only, or chat plus workspace files. Empty when the workspace cwd is
+   * not a git repo.
+   */
+  checkpoints?: Checkpoint[];
+}
+
+export interface Checkpoint {
+  id: string;
+  kind: "run-start" | "user-message";
+  /** humanMessages.length at the moment this checkpoint was created. Restoring
+   * "chat only" trims humanMessages back to this count. */
+  messagePointer: number;
+  /** Git commit SHA on the run's shadow ref, or null if the workspace was not
+   * a git repo and the snapshot could not be taken. */
+  sha: string | null;
+  /** humanMessages id of the user message that triggered this checkpoint, if any. */
+  messageId?: string;
+  /** Short label rendered in the undo popover. */
+  label: string;
+  createdAt: string;
+}
+
+export interface UndoToCheckpointInput {
+  runId: string;
+  checkpointId: string;
+  scope: "chat" | "chat+code";
+}
+
+export interface UndoToCheckpointResult {
+  run: RunState;
+  /** Text of the user message that the checkpoint represented, so the renderer
+   * can prefill the composer with it. Null when the checkpoint was a run-start
+   * baseline (no associated user message). */
+  restoredText: string | null;
 }
 
 export interface RunWorkerGroupStats {

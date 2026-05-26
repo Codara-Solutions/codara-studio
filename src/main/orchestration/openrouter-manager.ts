@@ -1431,12 +1431,17 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
     const versionPart = r.version ? ` v${r.version.split(/\s+/)[0]}` : "";
     const modelList = r.models.map((m) => {
       const efforts = m.effortLevels.join("/");
-      return `${m.id} [${efforts}]`;
+      const tier = m.tier ? ` tier=${m.tier}` : "";
+      const def = m.isDefault ? " default" : "";
+      return `${m.id} [${efforts}${tier}${def}]`;
     }).join(", ");
     lines.push(`- ${r.kind} (${r.label})${versionPart} INSTALLED. Models: ${modelList}`);
   }
   lines.push("- shell: always available (deterministic command-only tasks).");
   lines.push("- manual: always available (human executes; only when automation is unsafe).");
+  lines.push(
+    "Tier semantics: pick by taskClass — skeleton → tier=top + highest effort; feature → tier=mid + medium effort; leaf → tier=cheap + low effort. Never pick tier=top for a mechanical leaf (e.g. running a single shell command and reporting its output) — that wastes context and money for no gain.",
+  );
   return lines.join("\n");
 }
 

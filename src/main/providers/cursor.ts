@@ -43,6 +43,9 @@ const CURSOR_MODELS: AgentRuntimeModel[] = [
     label: "Composer 2.5 Fast",
     effortLevels: ["medium"],
     isDefault: true,
+    // Peer-quality vs opus/gpt-5.5 but tuned for wall-clock — best used as
+    // the cheap pick for mechanical leaf work on small surfaces.
+    tier: "cheap",
   },
 ];
 

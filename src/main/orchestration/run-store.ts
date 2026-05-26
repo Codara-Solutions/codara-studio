@@ -4,6 +4,9 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve as reso
 import type {
   AddRunMessageInput,
   AgentRuntimeDiagnostic,
+  Checkpoint,
+  UndoToCheckpointInput,
+  UndoToCheckpointResult,
   AgentRuntimeModel,
   AppSettings,
   InterruptRunWithMessageInput,
@@ -65,6 +68,12 @@ import {
   type SparkManagerWorkerReportContext,
 } from "./openrouter-manager";
 import { DEFAULT_MANAGER_PROMPT_PROFILE, loadManagerPromptProfile } from "./prompt-profile";
+import {
+  createCheckpoint,
+  deleteRunCheckpoints,
+  restoreCheckpointCode,
+  rewindShadowRef,
+} from "./checkpoints";
 import {
   finishLangSmithManagerTrace,
   readLangSmithConfig,
@@ -210,6 +219,16 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
       workspaceName: input.workspaceName,
       artifactDir: run.artifactDir,
     },
+  });
+
+  // Take a baseline snapshot in the background so a fresh chat opens without
+  // waiting on `git add -A`. The baseline shows up on the next event tick.
+  void recordCheckpointInBackground({
+    runId: run.id,
+    cwd: input.cwd,
+    kind: "run-start",
+    messagePointer: 0,
+    label: "Chat start",
   });
 
   return run;
@@ -1350,7 +1369,12 @@ function isTopTierModel(hint: string | undefined): boolean {
 }
 
 function promoteForTrivial(agent: PlannedStepAgent): PlannedStepAgent {
-  if (agent.taskClass === "skeleton" || agent.taskClass === "verifier") return agent;
+  // Skeleton/verifier are exempt from the floor by design; leaf is mechanical
+  // work where top-tier "taste" buys nothing — running a single shell command
+  // and reporting its output does not benefit from Opus 4.7@high, and the
+  // surprise cost (e.g. a chat-mode "what time is it?" worker on opus) is
+  // worse than the recipe's intended cheap pick.
+  if (agent.taskClass === "skeleton" || agent.taskClass === "verifier" || agent.taskClass === "leaf") return agent;
   const floor = TRIVIAL_TOP_TIER_BY_RUNTIME[agent.runtimePreference];
   if (!floor) return agent;
   const needsModelBump = !isTopTierModel(agent.modelHint);
@@ -1364,7 +1388,7 @@ function promoteForTrivial(agent: PlannedStepAgent): PlannedStepAgent {
 }
 
 function promoteTaskForTrivial(task: SparkManagerTaskDecision): SparkManagerTaskDecision {
-  if (task.taskClass === "skeleton" || task.taskClass === "verifier") return task;
+  if (task.taskClass === "skeleton" || task.taskClass === "verifier" || task.taskClass === "leaf") return task;
   const floor = TRIVIAL_TOP_TIER_BY_RUNTIME[task.runtimePreference];
   if (!floor) return task;
   const needsModelBump = !isTopTierModel(task.modelHint);
@@ -3601,7 +3625,93 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     scheduleInitialChatDecision(updated.id, autopilotInput, { afterCurrent: true });
   }
 
+  // Snapshot the workspace asynchronously after the message lands. `git add -A`
+  // can take a beat on a large repo, and we don't want that latency hanging
+  // off the send button — the message itself is already saved, the manager
+  // can already start working. The checkpoint shows up a moment later via the
+  // orchestration event channel and the undo pill appears with it.
+  if (input.author === "user") {
+    const cwd = workspaceCwdFromRun(updated);
+    if (cwd) {
+      const labelText = message.length > 60 ? `${message.slice(0, 60).trimEnd()}…` : message;
+      void recordCheckpointInBackground({
+        runId: updated.id,
+        cwd,
+        kind: "user-message",
+        messageId,
+        messagePointer: Math.max(0, updated.humanMessages.length - 1),
+        label: labelText,
+      });
+    }
+  }
+
   return updated;
+}
+
+// Per-run task chain. Checkpoint creation parents each new git commit to the
+// previous shadow-ref tip, so concurrent tasks would interleave parents and
+// invert the chronology (a "later" baseline ending up as the child of a
+// "newer" user-message commit). Serializing here keeps the git graph in the
+// same order the chat events fired.
+const checkpointTaskQueue = new Map<string, Promise<unknown>>();
+
+function recordCheckpointInBackground(input: {
+  runId: string;
+  cwd: string;
+  kind: Checkpoint["kind"];
+  messageId?: string;
+  messagePointer: number;
+  label: string;
+}): Promise<void> {
+  const prior = checkpointTaskQueue.get(input.runId) ?? Promise.resolve();
+  const task = prior
+    .catch(() => undefined)
+    .then(() => doRecordCheckpoint(input))
+    .catch(() => undefined);
+  checkpointTaskQueue.set(input.runId, task);
+  return task;
+}
+
+function scheduleShadowRefRewind(input: {
+  runId: string;
+  cwd: string;
+  sha: string | null;
+}): Promise<void> {
+  const prior = checkpointTaskQueue.get(input.runId) ?? Promise.resolve();
+  const task = prior
+    .catch(() => undefined)
+    .then(() => rewindShadowRef(input))
+    .catch(() => undefined);
+  checkpointTaskQueue.set(input.runId, task);
+  return task;
+}
+
+async function doRecordCheckpoint(input: {
+  runId: string;
+  cwd: string;
+  kind: Checkpoint["kind"];
+  messageId?: string;
+  messagePointer: number;
+  label: string;
+}): Promise<void> {
+  const checkpoint = await createCheckpoint(input);
+  const fresh = await getRun(input.runId);
+  if (!fresh) return;
+  await commitRunChange(fresh, {
+    type: "run.checkpoint_created",
+    message: `Checkpoint ${checkpoint.kind} ${checkpoint.id}`,
+    payload: { checkpointId: checkpoint.id, sha: checkpoint.sha, kind: checkpoint.kind },
+    mutate: (draft, timestamp) => {
+      draft.checkpoints = [...(draft.checkpoints ?? []), checkpoint];
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+function workspaceCwdFromRun(run: RunState): string | undefined {
+  return typeof run.settingsSnapshot?.workspaceCwd === "string"
+    ? (run.settingsSnapshot.workspaceCwd as string)
+    : undefined;
 }
 
 async function enrichLatestUserMessageWithMentionedFiles(run: RunState, cwd: string): Promise<RunState> {
@@ -4570,9 +4680,147 @@ export async function deleteRun(runId: string): Promise<void> {
   // before the rm so EBUSY/EPERM doesn't bounce us.
   await rmRunDirHard(runDir(run.id));
 
+  // Drop the shadow ref that backs this run's checkpoints. Best-effort; a
+  // missing ref or non-repo workspace is fine.
+  const cwd = workspaceCwdFromRun(run);
+  if (cwd) await deleteRunCheckpoints(cwd, run.id);
+
   // Evict from the in-memory cache so a later getRun for this id falls
   // through to disk (and correctly returns null now that the file is gone).
   runCache.delete(run.id);
+}
+
+// Rewind the run to a user-message checkpoint. The undo *removes* that
+// message: humanMessages is trimmed back to the checkpoint's index, the
+// checkpoint entry (and any later ones) is dropped, and the shadow ref is
+// rewound to the previous checkpoint's sha so future checkpoints don't get
+// parented to a stale tip. With scope='chat+code', the worktree is also
+// restored to the snapshot.
+//
+// Returns the restored message text so the renderer can drop it back into the
+// composer — the user can edit and resend, the same way an "edit your last
+// message" flow would feel.
+export async function undoToCheckpoint(input: UndoToCheckpointInput): Promise<UndoToCheckpointResult> {
+  const run = await requireRun(input.runId);
+  const checkpoints = run.checkpoints ?? [];
+  const checkpointIndex = checkpoints.findIndex((entry) => entry.id === input.checkpointId);
+  if (checkpointIndex < 0) throw new Error("Checkpoint not found on this run.");
+  const checkpoint = checkpoints[checkpointIndex];
+
+  if (input.scope === "chat+code") {
+    if (!checkpoint.sha) {
+      throw new Error("This checkpoint has no workspace snapshot — chat-only undo is still available.");
+    }
+    const cwd = workspaceCwdFromRun(run);
+    if (!cwd) throw new Error("Workspace path missing — cannot restore code.");
+    await restoreCheckpointCode({ cwd, sha: checkpoint.sha });
+  }
+
+  const pointer = Math.max(0, Math.min(checkpoint.messagePointer, run.humanMessages.length));
+  const restoredMessage = checkpoint.messageId
+    ? run.humanMessages.find((entry) => entry.id === checkpoint.messageId) ?? null
+    : null;
+  const restoredText = restoredMessage?.message ?? null;
+
+  const parentCheckpoint = checkpoints
+    .slice(0, checkpointIndex)
+    .reverse()
+    .find((entry) => entry.sha);
+  const cwd = workspaceCwdFromRun(run);
+  if (cwd) {
+    void scheduleShadowRefRewind({
+      runId: run.id,
+      cwd,
+      sha: parentCheckpoint?.sha ?? null,
+    });
+  }
+
+  // Undo also force-pauses the run: kill in-flight workers, drop autopilot
+  // cycles, mark active attempts/tasks cancelled. Without this the workers
+  // keep running uphill against an undone chat, flooding the renderer with
+  // step/worker events and making the chat feel chaotic ("stutters and weird
+  // stuff"). One atomic commitRunChange below transitions all of that state
+  // in a single broadcast so the renderer sees one clean snapshot.
+  const activeWorkers = activeWorkersForRun(run.id);
+  for (const worker of activeWorkers) {
+    try {
+      worker.kill();
+    } catch {
+      /* worker.kill is best-effort */
+    }
+    try {
+      pty.killImmediate(worker.attemptId);
+    } catch {
+      /* session may have already exited */
+    }
+    activeWorkerProcesses.delete(worker.attemptId);
+  }
+  for (const key of [...activeAutopilotCycles.keys()]) {
+    if (key.startsWith(`${run.id}:`)) activeAutopilotCycles.delete(key);
+  }
+  activeAutopilotPlans.delete(run.id);
+  activeAutopilotReviews.delete(run.id);
+
+  const cancelledAttemptIds = new Set(activeWorkers.map((w) => w.attemptId));
+  const cancelledTaskIds = new Set(
+    activeWorkers.map((w) => w.workerTaskId).filter((id): id is string => Boolean(id)),
+  );
+
+  const updated = await commitRunChange(run, {
+    type: "run.checkpoint_restored",
+    message: `Undid checkpoint ${checkpoint.id} (${input.scope})`,
+    payload: {
+      checkpointId: checkpoint.id,
+      scope: input.scope,
+      pointer,
+      sha: checkpoint.sha,
+      cancelledAttemptIds: [...cancelledAttemptIds],
+      cancelledTaskIds: [...cancelledTaskIds],
+    },
+    mutate: (draft, timestamp) => {
+      draft.humanMessages = draft.humanMessages.slice(0, pointer);
+      draft.checkpoints = (draft.checkpoints ?? []).slice(0, checkpointIndex);
+      draft.status = "paused";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "paused",
+        lastAction: "undo",
+        stopReason: "Undone by user",
+        pausedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      for (const attempt of draft.workerAttempts) {
+        if (!cancelledAttemptIds.has(attempt.id)) continue;
+        if (
+          attempt.status === "preparing" ||
+          attempt.status === "prompt_ready" ||
+          attempt.status === "launching" ||
+          attempt.status === "running" ||
+          attempt.status === "finishing"
+        ) {
+          attempt.status = "cancelled";
+          attempt.finishedAt = attempt.finishedAt ?? timestamp;
+        }
+      }
+      for (const task of draft.workerTasks) {
+        if (!cancelledTaskIds.has(task.id)) continue;
+        if (
+          task.status === "created" ||
+          task.status === "queued" ||
+          task.status === "claimed" ||
+          task.status === "running" ||
+          task.status === "needs_review" ||
+          task.status === "retry_queued"
+        ) {
+          task.status = "cancelled";
+          task.updatedAt = timestamp;
+        }
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+
+  return { run: updated, restoredText };
 }
 
 // Force-pause: hard-kill every active worker for the run, stop all autopilot
@@ -5636,6 +5884,11 @@ async function commitRunChange(
 async function appendCompletionSummaryMessage(runId: string): Promise<RunState> {
   const run = await requireRun(runId);
   if (run.status !== "complete") return run;
+  // Chat-only runs (no steps, no worker tasks) already showed their answer in
+  // the chatReply Spark bubble. A separate "Run complete / Spark answered the
+  // chat." turn would just repeat that. The renderer paints a tiny "done"
+  // marker under the last Spark bubble instead.
+  if (run.steps.length === 0 && run.workerTasks.length === 0) return run;
   const completedAt = run.completedAt ?? run.updatedAt;
   const completedAtMs = Date.parse(completedAt);
   const alreadyAppended = run.humanMessages.some((message) => {

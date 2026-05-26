@@ -95,6 +95,14 @@ function isBrowserUrl(url: string): boolean {
   return /^(https?:|file:)/i.test(url);
 }
 
+// A run only needs a workbench tab once it has actual orchestrated work to
+// show: at least one step or worker task. Pure chat-mode answers (e.g.
+// "what is X?") leave both arrays empty and live entirely in the right-side
+// chat conversation — no node graph tab for them.
+function runHasWorkbench(run: RunState): boolean {
+  return run.steps.length > 0 || run.workerTasks.length > 0;
+}
+
 function collectTerminalPaneIds(node: PaneNode, ids: Set<string>): void {
   if (node.kind === "leaf") {
     ids.add(node.paneId);
@@ -288,8 +296,13 @@ export default function App() {
       setActiveRunId(run.id);
       if (workspaceId !== activeIdRef.current) return;
       const focusRuns = options.focusRuns ?? false;
-      tabsRef.current.openRunsTab(run.id, "Runs", focusRuns);
-      if (!focusRuns) tabsRef.current.openChatTab({ focus: true });
+      if (runHasWorkbench(run)) {
+        tabsRef.current.openRunsTab(run.id, "Runs", focusRuns);
+        if (!focusRuns) tabsRef.current.openChatTab({ focus: true });
+      } else {
+        tabsRef.current.hideRunsTabs();
+        tabsRef.current.openChatTab({ focus: true });
+      }
     },
     [],
   );
@@ -313,23 +326,36 @@ export default function App() {
         if (focus === "chat") tabsRef.current.openChatTab({ focus: true });
         return;
       }
-      tabsRef.current.openRunsTab(runId, "Runs", focus === "runs");
-      if (focus === "chat") tabsRef.current.openChatTab({ focus: true });
+      const target = runsRef.current.find((r) => r.id === runId) ?? null;
+      const hasWorkbench = target ? runHasWorkbench(target) : false;
+      if (hasWorkbench) {
+        tabsRef.current.openRunsTab(runId, "Runs", focus === "runs");
+      } else {
+        tabsRef.current.hideRunsTabs();
+      }
+      if (focus === "chat" || (!hasWorkbench && focus === "runs")) {
+        tabsRef.current.openChatTab({ focus: true });
+      }
     },
     [],
   );
 
   // Keep the active chat's node-graph tab in existence without stealing
-  // focus — handleSelectRun focuses it on explicit navigation; this only
-  // guarantees the tab survives a reload and keeps its label synced to the
-  // run title. A live run emitting events therefore can't yank the user off
-  // an editor tab.
+  // focus. Chat-only runs (no steps, no worker tasks) intentionally have NO
+  // workbench tab — the answer lives in the right-panel conversation only.
+  // When such a run later sprouts steps (e.g. user follows up with "do it"),
+  // this effect lazily opens the tab on the next runs update.
   useEffect(() => {
     if (!activeRunId) {
       tabsRef.current.hideRunsTabs();
       return;
     }
-    tabsRef.current.openRunsTab(activeRunId, "Runs", false);
+    const target = runsRef.current.find((r) => r.id === activeRunId) ?? null;
+    if (target && runHasWorkbench(target)) {
+      tabsRef.current.openRunsTab(activeRunId, "Runs", false);
+    } else {
+      tabsRef.current.hideRunsTabs();
+    }
   }, [activeRunId, runs]);
 
   // Mirror the workbench selection back into the active chat: clicking a
@@ -645,6 +671,21 @@ export default function App() {
       }
     };
   }, []);
+
+  // Sibling components that receive a fresh RunState from an IPC mutation can
+  // dispatch `spark:run-snapshot` to push it through immediately, instead of
+  // waiting for the debounced refresh that the orchestration event channel
+  // drives. Used by the chat-message undo flow so the undo pill disappears
+  // the instant the IPC call resolves rather than after a 250ms listRuns
+  // roundtrip.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ run?: RunState }>).detail;
+      if (detail?.run) handleRunSnapshot(detail.run);
+    };
+    window.addEventListener("spark:run-snapshot", handler);
+    return () => window.removeEventListener("spark:run-snapshot", handler);
+  }, [handleRunSnapshot]);
 
   // Subscribe to renderer-side notification channels. The toast channel is
   // owned by <ToastHost/> below; this effect handles the embedded-sound

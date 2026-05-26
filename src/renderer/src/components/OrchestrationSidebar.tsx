@@ -157,28 +157,6 @@ export default function OrchestrationSidebar({
     [activeRunId, handleSelectRun, mutate],
   );
 
-  const pauseRun = useCallback(() => {
-    if (!activeRun) return;
-    void mutate(async () => {
-      const run = await window.spark.orchestration.pauseRun({
-        runId: activeRun.id,
-        reason: "Paused by user",
-      });
-      onRunSnapshot(run);
-    });
-  }, [activeRun, mutate, onRunSnapshot]);
-
-  const pauseAfterWorkers = useCallback(() => {
-    if (!activeRun) return;
-    void mutate(async () => {
-      const run = await window.spark.orchestration.pauseRunAfterCurrentWorkers({
-        runId: activeRun.id,
-        reason: "Stop after current workers finish",
-      });
-      onRunSnapshot(run);
-    });
-  }, [activeRun, mutate, onRunSnapshot]);
-
   const forcePauseRun = useCallback(() => {
     if (!activeRun) return;
     void mutate(async () => {
@@ -201,8 +179,6 @@ export default function OrchestrationSidebar({
       onSelectRun={handleSelectRun}
       onDeleteRun={handleDeleteRun}
       onStartChat={startChat}
-      onPauseRun={pauseRun}
-      onPauseAfterWorkers={pauseAfterWorkers}
       onForcePauseRun={forcePauseRun}
     />
   );

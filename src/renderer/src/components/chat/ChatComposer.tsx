@@ -21,6 +21,7 @@ interface Props {
     clientMessageId: string,
     attachments?: AddRunMessageAttachmentInput[],
   ) => RunState | void | Promise<RunState | void>;
+  onForcePauseRun: () => void;
 }
 
 const MAX_TEXTAREA_H = 168;
@@ -60,7 +61,7 @@ interface MentionQuery {
   query: string;
 }
 
-export default function ChatComposer({ run, cwd, disabled, onStartChat }: Props) {
+export default function ChatComposer({ run, cwd, disabled, onStartChat, onForcePauseRun }: Props) {
   const [draft, setDraft] = useState("");
   const [images, setImages] = useState<AddRunMessageAttachmentInput[]>([]);
   const [fileMentions, setFileMentions] = useState<FileMention[]>([]);
@@ -85,17 +86,20 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat }: Props)
     return () => window.removeEventListener("spark:focus-composer", handler);
   }, []);
 
-  // Other surfaces (e.g. the browser pane's inspector + draw mode) can ship
-  // a ready-made prompt into the composer by dispatching `spark:prefill-
-  // composer`. We append to the current draft so a user typing in the
-  // composer doesn't lose their work mid-thought, and focus the textarea so
-  // the next Enter sends what was just injected.
+  // Other surfaces (e.g. the browser pane's inspector + draw mode, or the
+  // chat-message undo button) can ship a ready-made prompt into the composer
+  // by dispatching `spark:prefill-composer`. Default behavior appends to the
+  // current draft so a user typing in the composer doesn't lose their work
+  // mid-thought; pass `replace: true` to overwrite the draft entirely (used
+  // by undo so the just-removed message reappears verbatim for editing).
   useEffect(() => {
     const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ text?: unknown }>).detail;
+      const detail = (event as CustomEvent<{ text?: unknown; replace?: unknown }>).detail;
       const text = typeof detail?.text === "string" ? detail.text : "";
       if (!text) return;
+      const replace = detail?.replace === true;
       setDraft((current) => {
+        if (replace) return text;
         if (!current.trim()) return text;
         return current.endsWith("\n") ? `${current}${text}` : `${current}\n${text}`;
       });
@@ -251,37 +255,6 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat }: Props)
           await window.spark.orchestration.resumeRun({ runId: run_.id });
         }
       }
-      setDraft("");
-      setImages([]);
-      setFileReferences([]);
-      setMentionQuery(null);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      inFlight.current = false;
-      setBusy(false);
-    }
-  };
-
-  const sendNow = async () => {
-    if (inFlight.current || !run_ || pastingImages) return;
-    const clientMessageId = makeId("client-msg");
-    inFlight.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      const attachments = await attachmentsForCurrentDraft();
-      const message = messageForSend(draft, attachments.length);
-      if (!message) return;
-      await window.spark.orchestration.interruptRunWithMessage({
-        runId: run_.id,
-        clientMessageId,
-        message,
-        kind: "note",
-        mode: "hard",
-        reason: "Hard-cancelled by user message",
-        attachments,
-      });
       setDraft("");
       setImages([]);
       setFileReferences([]);
@@ -595,12 +568,11 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat }: Props)
               Resume
             </TextButton>
           )}
-          {isActive && (
-            <TextButton onClick={sendNow} disabled={!canSend} tone="danger">
-              Send now
-            </TextButton>
+          {isActive ? (
+            <StopButton onClick={onForcePauseRun} />
+          ) : (
+            <SendButton onClick={send} disabled={!canSend} />
           )}
-          <SendButton onClick={send} disabled={!canSend} />
         </div>
       </div>
     </div>
@@ -1072,6 +1044,42 @@ function FileGlyph() {
       <path d="M8.1 2.7v2.8h2.7" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
       <path d="M5.8 8h3.8M5.8 10h2.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
+  );
+}
+
+function StopButton({ onClick }: { onClick: () => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title="Stop run"
+      aria-label="Stop run"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        width: 26,
+        height: 26,
+        flex: "0 0 26px",
+        border: "none",
+        borderRadius: 7,
+        background: hover
+          ? "color-mix(in oklch, var(--danger) 88%, var(--ink))"
+          : "var(--danger)",
+        color: "var(--accent-ink)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 0,
+        cursor: "default",
+        transition: "background var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden>
+        <rect x="1" y="1" width="8" height="8" rx="1.5" />
+      </svg>
+    </button>
   );
 }
 
