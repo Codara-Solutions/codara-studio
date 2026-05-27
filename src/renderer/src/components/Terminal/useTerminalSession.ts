@@ -1124,7 +1124,9 @@ export function useTerminalSession({
       // as possible — any chunk that slips through during that one-tick
       // gap is also absorbed by pause() itself, which moves the pending
       // flush queue into the backlog.
-      void window.spark.pty.pause?.(sessionId);
+      if (!readOnlyRef.current) {
+        void window.spark.pty.pause?.(sessionId);
+      }
       for (const fn of cleanups) {
         try {
           fn();

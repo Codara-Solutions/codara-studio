@@ -162,12 +162,9 @@ interface ClaudeChatSession {
    *  on the active turn and refuse to start more turns on this session. */
   fatal: boolean;
   fatalMessage: string | null;
-  /** Fast-mode and 1M-context are session-level toggles in CC, accessed via
-   *  the /fast and /context slash commands. We track what's been applied so
-   *  we only send the slash command on the first turn that requests a
-   *  changed state — sending /fast every turn would re-toggle on each turn
-   *  and silently flip the state the user expected. */
-  appliedFastMode: boolean;
+  /** 1M-context is a session-level toggle in CC, accessed via /context. We
+   *  track what's been applied so we only send the slash command when the
+   *  desired state changes. */
   appliedOneMillionContext: boolean;
   /** Tool calls observed during the current turn — populated by the JSONL
    *  translator when CC fires `mcp__spark-orchestrator__*` (or any other
@@ -324,34 +321,21 @@ export const claudeBackend: SparkAgentBackend = {
         });
       }
 
-      // Apply session-level toggles (Fast mode, 1M context) BEFORE the
-      // prompt. CC exposes these as slash commands inside the interactive
-      // REPL, not as CLI flags — and they're toggles, so we only fire when
-      // the desired state differs from what we've applied. Both run as
-      // their own typed-command turns (slash → CC executes synchronously,
-      // returns to the prompt) so we settle and submit the same way as a
-      // user prompt, then move on to the actual chat prompt below.
-      if (input.chat.fastMode !== chat.appliedFastMode) {
+      // Apply the Claude 1M context toggle BEFORE the prompt. Fast mode is
+      // Codex-only in Spark; Claude Code always uses the normal output mode.
+      // CC exposes context as a slash command inside the interactive REPL,
+      // not as a CLI flag, and the command runs as its own typed turn.
+      const desiredOneMillionContext = true;
+      if (desiredOneMillionContext !== chat.appliedOneMillionContext) {
         emit({
           kind: "system_note",
-          message: `Toggling Claude fast mode → ${input.chat.fastMode ? "on" : "off"}`,
-        });
-        await typeSlashCommand(chat, "/fast");
-        chat.appliedFastMode = input.chat.fastMode;
-      }
-      if (input.chat.oneMillionContext !== chat.appliedOneMillionContext) {
-        emit({
-          kind: "system_note",
-          message: `Toggling Claude context window → ${
-            input.chat.oneMillionContext ? "1M" : "200k"
-          }`,
+          message: "Toggling Claude context window -> 1M",
         });
         // Best-guess syntax for the 1M-context toggle. CC's interactive
         // command catalog isn't published — if /context 1m fails the user
-        // sees an error in the next turn and we iterate. Toggling off uses
-        // the same command form (CC parses the argument: "1m" vs "default").
-        await typeSlashCommand(chat, input.chat.oneMillionContext ? "/context 1m" : "/context default");
-        chat.appliedOneMillionContext = input.chat.oneMillionContext;
+        // sees an error in the next turn and we iterate.
+        await typeSlashCommand(chat, "/context 1m");
+        chat.appliedOneMillionContext = desiredOneMillionContext;
       }
 
       // Inject the prompt using the same bracketed-paste-then-Enter pattern
@@ -753,10 +737,8 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     lastUsage: {},
     fatal: false,
     fatalMessage: null,
-    // CC starts every session with fast off and the default 200k context, so
-    // applied=false is the truthful initial state — we'll only send the
-    // slash command on the first turn that requests something different.
-    appliedFastMode: false,
+    // CC starts every session with the default 200k context, so applied=false
+    // is the truthful initial state. Spark requests 1M for every Claude chat.
     appliedOneMillionContext: false,
     turnToolCalls: [],
     // Seeded to now so the first 90s window still applies if CC fails to
@@ -1000,8 +982,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * Type a slash command into CC's Ink REPL and let it commit. Slash commands
  * execute synchronously and return to the input prompt (no Stop hook fires
  * for them), so we just paste + settle + Enter + sleep — no turn waiter.
- * Used for session-level toggles like /fast and /context that need to
- * run before the user's actual prompt for the turn.
+ * Used for session-level commands like /context that need to run before the
+ * user's actual prompt for the turn.
  */
 async function typeSlashCommand(chat: ClaudeChatSession, command: string): Promise<void> {
   chat.session.writeRaw(PASTE_BEGIN);
@@ -1029,41 +1011,6 @@ function effectiveTurnTimeoutMs(chat: ClaudeChatSession): number {
   return chat.pendingMcpToolCalls.size > 0
     ? EXTENDED_TURN_TIMEOUT_MS
     : TURN_TIMEOUT_MS;
-}
-
-async function waitForTurnFile(
-  turnFile: string,
-  chat: ClaudeChatSession,
-): Promise<{ ok: true } | { ok: false; message: string }> {
-  // Sliding deadline: trip only after the effective cap of JSONL silence.
-  // CC streams tool_use / assistant blocks throughout a healthy turn. While
-  // CC is blocked inside a long-poll MCP call (spark_wait_for_workers) the
-  // JSONL is silent — but pendingMcpToolCalls flips the cap to 30 min so
-  // the wait_for_workers tool_result has time to arrive before we declare
-  // the turn dead.
-  while (true) {
-    if (chat.fatal) {
-      return {
-        ok: false,
-        message:
-          chat.fatalMessage ?? "Claude Code session terminated before turn end.",
-      };
-    }
-    const cap = effectiveTurnTimeoutMs(chat);
-    if (Date.now() - chat.lastJsonlActivityAt >= cap) {
-      return {
-        ok: false,
-        message: `Claude Code did not signal turn end within ${cap}ms.`,
-      };
-    }
-    try {
-      await fs.access(turnFile);
-      return { ok: true };
-    } catch {
-      // not yet written; keep polling
-    }
-    await sleep(TURN_POLL_INTERVAL_MS);
-  }
 }
 
 /**

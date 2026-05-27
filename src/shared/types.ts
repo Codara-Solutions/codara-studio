@@ -798,17 +798,15 @@ export interface RunState {
    */
   chatSessionMode?: ChatMode;
   /**
-   * Fast-mode toggle for the chat backend. Claude: typed as the `/fast` slash
-   * command after the REPL is ready (one-shot per spawn). Codex: passed as
+   * Fast-mode toggle for the chat backend. Codex-only: passed as
    * `--enable fast_mode` (true) or `--disable fast_mode` (false) at spawn
-   * time. OpenRouter ignores it. Default false (unset).
+   * time. Claude Code and OpenRouter ignore it. Default false (unset).
    */
   chatFastMode?: boolean;
   /**
-   * 1M-context toggle. Claude-only — typed as the `/context 1m` slash command
-   * after the REPL is ready. Toggling off (or unset) leaves CC at its default
-   * 200k. Codex ignores it (no 1M offering as of GPT-5.5). OpenRouter ignores
-   * it (model-id selects the variant). Default false (unset).
+   * 1M-context toggle. Claude Code is normalized to true and applies
+   * `/context 1m` after the REPL is ready. Codex and OpenRouter normalize it
+   * to false because they do not use this toggle.
    */
   chat1mContext?: boolean;
 }
@@ -835,12 +833,10 @@ export interface UndoToCheckpointInput {
   scope: "chat" | "chat+code";
 }
 
-// IPC payload for the composer's backend/model/mode/effort selector chip. Any
-// subset of the four fields may be updated in one call — passing only
-// `chatMode` toggles Execute<->Talk while leaving backend/model/effort
-// untouched. Sending `chatBackend` flips the backend; the dispatch layer in
-// run-store starts a fresh CLI session next message (no auto-handoff of prior
-// turns — selected per chat answer #3).
+// IPC payload for the composer's backend/model/mode/effort selector chip.
+// Feature flags are normalized by backend: Claude Code always uses 1M context,
+// and fast mode is Codex-only. Sending `chatBackend` flips the backend; the
+// dispatch layer in run-store starts a fresh CLI session next message.
 export interface UpdateChatBackendInput {
   runId: string;
   chatBackend?: ChatBackendKind;

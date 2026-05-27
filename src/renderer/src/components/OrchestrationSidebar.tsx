@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AddRunMessageAttachmentInput, RunState, Workspace } from "@shared/types";
 import type { SectionHeaderDragProps } from "../panels/SectionHeader";
 import ChatPanel from "./chat/ChatPanel";
@@ -36,7 +36,6 @@ export default function OrchestrationSidebar({
   headerDrag,
 }: Props) {
   const [creatingNewRun, setCreatingNewRun] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const selectedRun = useMemo(
@@ -172,14 +171,11 @@ export default function OrchestrationSidebar({
   );
 
   const mutate = useCallback(async (action: () => Promise<unknown>) => {
-    setBusy(true);
     setError(null);
     try {
       await action();
     } catch (err) {
       setError((err as Error).message);
-    } finally {
-      setBusy(false);
     }
   }, []);
 
@@ -219,7 +215,6 @@ export default function OrchestrationSidebar({
       workspace={workspace}
       runs={runs}
       activeRun={activeRun}
-      busy={busy}
       error={error}
       collapsed={collapsed}
       onToggleCollapse={onToggleCollapse}

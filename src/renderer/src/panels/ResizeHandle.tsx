@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { SPLIT_HANDLE, WIDTH_HANDLE } from "./usePanelLayout";
 
 interface ResizeHandleProps {

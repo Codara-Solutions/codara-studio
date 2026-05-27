@@ -10,6 +10,12 @@ import type {
 } from "@shared/types";
 import { makeId } from "@shared/ids";
 import { contextWindowForModel } from "@shared/context-window";
+import {
+  chatBackendSupportsFastMode,
+  effectiveChatFastMode,
+  effectiveChatOneMillionContext,
+  normalizeChatFeatureFlags,
+} from "@shared/chat-policy";
 import { findOpenQuestion } from "./timeline";
 import ContextPill from "./composer/ContextPill";
 import ModelPicker from "./composer/ModelPicker";
@@ -166,9 +172,14 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
         const first = groups[0]?.models[0];
         if (!first) return;
         const { baseId, oneMillion } = decomposeModelId(first.id);
+        const normalizedFlags = normalizeChatFeatureFlags(first.backend, {
+          chatFastMode: draftFastMode,
+          chat1mContext: oneMillion,
+        });
         setDraftChatBackend(first.backend);
         setDraftChatModel(baseId);
-        setDraftOneMillionContext(oneMillion);
+        setDraftFastMode(normalizedFlags.chatFastMode);
+        setDraftOneMillionContext(normalizedFlags.chat1mContext);
         const allowedEfforts = effortsFor(first);
         const clamped = clampEffort(draftChatEffort, allowedEfforts);
         if (clamped && clamped !== draftChatEffort) setDraftChatEffort(clamped);
@@ -581,8 +592,10 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const activeChatModelId: string = run_?.chatModel ?? draftChatModel;
   const activeChatMode: ChatMode = run_?.chatMode ?? draftChatMode;
   const activeChatEffort: AgentEffortLevel = run_?.chatEffort ?? draftChatEffort;
-  const activeFastMode: boolean = run_?.chatFastMode ?? draftFastMode;
-  const activeOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
+  const rawFastMode: boolean = run_?.chatFastMode ?? draftFastMode;
+  const rawOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
+  const activeFastMode: boolean = effectiveChatFastMode(activeChatBackend, rawFastMode);
+  const activeOneMillionContext: boolean = effectiveChatOneMillionContext(activeChatBackend);
   // The active model's option pulled from the STATIC catalog (Claude/Codex);
   // null for OpenRouter (its catalog is dynamic — the configured model
   // lives in settings). Used only to derive the available effort cycle for
@@ -593,11 +606,9 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     activeChatModelId,
     activeOneMillionContext,
   );
-  // Fast mode applies to Claude (typed as /fast) and Codex (CLI feature
-  // flag). OpenRouter has no equivalent. 1M context is now a model variant
-  // surfaced as separate dropdown rows (with a 1M badge) — there's no
-  // standalone 1M pill anymore.
-  const fastModeAvailable = activeChatBackend === "claude" || activeChatBackend === "codex";
+  // Fast mode is a Codex-only feature. Claude Code always runs with 1M
+  // context, represented by the Claude 1M model rows in the picker.
+  const fastModeAvailable = chatBackendSupportsFastMode(activeChatBackend);
   const availableEfforts: AgentEffortLevel[] = effortsFor(activeChatModelOption);
   const visibleEffort: AgentEffortLevel = availableEfforts.includes(activeChatEffort)
     ? activeChatEffort
@@ -614,12 +625,30 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     chatFastMode?: boolean;
     chat1mContext?: boolean;
   }) => {
-    if (changes.chatBackend !== undefined) setDraftChatBackend(changes.chatBackend);
-    if (changes.chatModel !== undefined) setDraftChatModel(changes.chatModel);
-    if (changes.chatMode !== undefined) setDraftChatMode(changes.chatMode);
-    if (changes.chatEffort !== undefined) setDraftChatEffort(changes.chatEffort);
-    if (changes.chatFastMode !== undefined) setDraftFastMode(changes.chatFastMode);
-    if (changes.chat1mContext !== undefined) setDraftOneMillionContext(changes.chat1mContext);
+    const targetBackend = changes.chatBackend ?? activeChatBackend;
+    const normalizedFlags = normalizeChatFeatureFlags(targetBackend, {
+      chatFastMode: changes.chatFastMode ?? rawFastMode,
+      chat1mContext: changes.chat1mContext ?? rawOneMillionContext,
+    });
+    const normalizedChanges = { ...changes };
+    if (
+      changes.chatFastMode !== undefined ||
+      normalizedFlags.chatFastMode !== rawFastMode
+    ) {
+      normalizedChanges.chatFastMode = normalizedFlags.chatFastMode;
+    }
+    if (
+      changes.chat1mContext !== undefined ||
+      normalizedFlags.chat1mContext !== rawOneMillionContext
+    ) {
+      normalizedChanges.chat1mContext = normalizedFlags.chat1mContext;
+    }
+    if (normalizedChanges.chatBackend !== undefined) setDraftChatBackend(normalizedChanges.chatBackend);
+    if (normalizedChanges.chatModel !== undefined) setDraftChatModel(normalizedChanges.chatModel);
+    if (normalizedChanges.chatMode !== undefined) setDraftChatMode(normalizedChanges.chatMode);
+    if (normalizedChanges.chatEffort !== undefined) setDraftChatEffort(normalizedChanges.chatEffort);
+    if (normalizedChanges.chatFastMode !== undefined) setDraftFastMode(normalizedChanges.chatFastMode);
+    if (normalizedChanges.chat1mContext !== undefined) setDraftOneMillionContext(normalizedChanges.chat1mContext);
     if (!run_) return;
     // IPC is wired in a follow-up patch on the main process; cast lets the
     // renderer call it ahead of time without dragging the preload contract
@@ -636,7 +665,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
       }) => Promise<unknown>;
     };
     if (typeof orchestration.updateChatBackend !== "function") return;
-    void orchestration.updateChatBackend({ runId: run_.id, ...changes }).catch((err: unknown) => {
+    void orchestration.updateChatBackend({ runId: run_.id, ...normalizedChanges }).catch((err: unknown) => {
       setError((err as Error).message);
     });
   };
@@ -832,13 +861,9 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
                 type="button"
                 className={`composer-fast${activeFastMode ? " is-active" : ""}`}
                 title={
-                  activeChatBackend === "claude"
-                    ? activeFastMode
-                      ? "Fast mode on — Claude uses /fast for quicker responses. Click to disable."
-                      : "Fast mode off — click to enable Claude's /fast (faster output, same model)."
-                    : activeFastMode
-                      ? "Fast mode on — Codex spawns with fast_mode enabled. Click to disable."
-                      : "Fast mode off — Codex spawns with fast_mode disabled. Click to enable."
+                  activeFastMode
+                    ? "Fast mode on — Codex spawns with fast_mode enabled. Click to disable."
+                    : "Fast mode off — Codex spawns with fast_mode disabled. Click to enable."
                 }
                 aria-label={activeFastMode ? "Fast mode on" : "Fast mode off"}
                 aria-pressed={activeFastMode}
@@ -1564,231 +1589,6 @@ function TextButton({
   );
 }
 
-function ChipButton({
-  children,
-  title,
-  active,
-  accent,
-  onClick,
-}: {
-  children: React.ReactNode;
-  title: string;
-  active: boolean;
-  accent?: boolean;
-  onClick: () => void;
-}) {
-  const [hover, setHover] = useState(false);
-  const accentBorder = "color-mix(in oklch, var(--accent) 55%, transparent)";
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          onClick();
-        }
-      }}
-      title={title}
-      aria-label={title}
-      aria-haspopup={accent ? undefined : "listbox"}
-      aria-expanded={accent ? undefined : active}
-      style={{
-        appearance: "none",
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        height: 24,
-        border: `1px solid ${active || accent ? accentBorder : "var(--rule-soft)"}`,
-        borderRadius: 6,
-        padding: "0 8px",
-        background: hover ? "var(--hover)" : active ? "color-mix(in oklch, var(--accent) 10%, transparent)" : "transparent",
-        color: "var(--ink-dim)",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: 600,
-        cursor: "default",
-        whiteSpace: "nowrap",
-        transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function ChipPopover({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      role="listbox"
-      style={{
-        position: "absolute",
-        left: 0,
-        bottom: "calc(100% + 6px)",
-        zIndex: 60,
-        minWidth: 200,
-        border: "1px solid var(--rule-strong)",
-        borderRadius: 8,
-        background: "var(--panel-2)",
-        boxShadow: "var(--shadow-2)",
-        padding: 5,
-        display: "grid",
-        gap: 4,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
-function ChipGroupHeader({ label }: { label: string }) {
-  return (
-    <div
-      style={{
-        padding: "4px 7px 2px",
-        color: "var(--muted)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 9,
-        textTransform: "uppercase",
-        letterSpacing: "0.08em",
-      }}
-    >
-      {label}
-    </div>
-  );
-}
-
-function ChipRow({
-  label,
-  hint,
-  active,
-  onPick,
-}: {
-  label: string;
-  hint?: string;
-  active: boolean;
-  onPick: () => void;
-}) {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      type="button"
-      role="option"
-      aria-selected={active}
-      onMouseDown={(event) => {
-        event.preventDefault();
-        onPick();
-      }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        appearance: "none",
-        width: "100%",
-        border: "none",
-        borderRadius: 6,
-        background: active
-          ? "color-mix(in oklch, var(--accent) 16%, transparent)"
-          : hover
-            ? "var(--hover)"
-            : "transparent",
-        color: active ? "var(--ink)" : "var(--ink-dim)",
-        display: "grid",
-        gridTemplateColumns: hint ? "minmax(0, 1fr) auto" : "minmax(0, 1fr)",
-        gap: 8,
-        alignItems: "center",
-        padding: "6px 8px",
-        textAlign: "left",
-        cursor: "default",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: active ? 700 : 600,
-      }}
-    >
-      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {label}
-      </span>
-      {hint && (
-        <span
-          style={{
-            color: "var(--muted)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            whiteSpace: "nowrap",
-          }}
-        >
-          {hint}
-        </span>
-      )}
-    </button>
-  );
-}
-
-function ChipGlyph({ kind }: { kind: "model" | "effort" | "execute" | "talk" }) {
-  switch (kind) {
-    case "model":
-      return (
-        <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden>
-          <circle cx="7" cy="7" r="2.6" stroke="currentColor" strokeWidth="1.2" />
-          <path
-            d="M7 1.6v1.4M7 11v1.4M1.6 7h1.4M11 7h1.4M3.1 3.1l1 1M9.9 9.9l1 1M3.1 10.9l1-1M9.9 4.1l1-1"
-            stroke="currentColor"
-            strokeWidth="1.1"
-            strokeLinecap="round"
-          />
-        </svg>
-      );
-    case "effort":
-      return (
-        <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden>
-          <rect x="2" y="8.5" width="2" height="3.5" rx="0.6" fill="currentColor" />
-          <rect x="6" y="6" width="2" height="6" rx="0.6" fill="currentColor" />
-          <rect x="10" y="3.5" width="2" height="8.5" rx="0.6" fill="currentColor" />
-        </svg>
-      );
-    case "execute":
-      return (
-        <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden>
-          <path
-            d="M2.6 2.4h6l3 3v6.2H2.6z"
-            stroke="currentColor"
-            strokeWidth="1.2"
-            strokeLinejoin="round"
-          />
-          <path d="M8.4 2.6v2.8h2.8" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-          <path d="M5 7.6h4M5 9.6h2.6" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-        </svg>
-      );
-    case "talk":
-      return (
-        <svg width="11" height="11" viewBox="0 0 14 14" fill="none" aria-hidden>
-          <path
-            d="M2.4 4.2c0-1 .9-1.8 2-1.8h5.2c1.1 0 2 .8 2 1.8v3.4c0 1-.9 1.8-2 1.8H6.8L4 11.6V9.4h-.4c-1.1 0-1.2-.8-1.2-1.8z"
-            stroke="currentColor"
-            strokeWidth="1.2"
-            strokeLinejoin="round"
-          />
-        </svg>
-      );
-  }
-}
-
-function ChipCaret() {
-  return (
-    <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden>
-      <path
-        d="M2 5l2-2 2 2"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
 // Lightning bolt glyph for the Fast-mode toggle. Filled in the active
 // state so it reads as "on" even without a surrounding pill.
 function LightningIcon() {
@@ -1797,58 +1597,4 @@ function LightningIcon() {
       <path d="M8.2 0.4 L2.5 7.6 H6 L5.2 13.6 L11.2 6 H7.5 L8.2 0.4 Z" />
     </svg>
   );
-}
-
-function TokenCounter({ used, budget }: { used: number; budget: number }) {
-  const ratio = budget > 0 ? Math.min(1, Math.max(0, used / budget)) : 0;
-  return (
-    <div
-      title={`${formatTokens(used)} / ${formatTokens(budget)} tokens used in this chat`}
-      aria-label="Token usage"
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        height: 24,
-        padding: "0 8px",
-        border: "1px solid var(--rule-soft)",
-        borderRadius: 6,
-        color: "var(--muted)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 10,
-        whiteSpace: "nowrap",
-        flex: "0 0 auto",
-      }}
-    >
-      <span
-        aria-hidden
-        style={{
-          width: 28,
-          height: 3,
-          borderRadius: 2,
-          background: "var(--rule-soft)",
-          position: "relative",
-          overflow: "hidden",
-          display: "inline-block",
-        }}
-      >
-        <span
-          style={{
-            position: "absolute",
-            inset: 0,
-            width: `${ratio * 100}%`,
-            background: "color-mix(in oklch, var(--accent) 75%, transparent)",
-          }}
-        />
-      </span>
-      <span>{`${formatTokens(used)}/${formatTokens(budget)}`}</span>
-    </div>
-  );
-}
-
-function formatTokens(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0";
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return `${Math.round(value)}`;
 }

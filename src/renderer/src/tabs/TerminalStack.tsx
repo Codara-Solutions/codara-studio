@@ -968,15 +968,6 @@ function paneFrameStyle(rect: FracRect): React.CSSProperties {
   };
 }
 
-function paneFrameClientRect(container: DOMRect, rect: FracRect): DOMRect {
-  const gap = PANE_GAP_PX;
-  const left = container.left + rect.left * container.width + gap;
-  const top = container.top + rect.top * container.height + gap;
-  const width = Math.max(0, rect.width * container.width - gap * 2);
-  const height = Math.max(0, rect.height * container.height - gap * 2);
-  return new DOMRect(left, top, width, height);
-}
-
 function leafCellClientRect(container: DOMRect, rect: FracRect): DOMRect {
   return new DOMRect(
     container.left + rect.left * container.width,

@@ -540,7 +540,9 @@ function doSpawn(
   }
 
   pty.onExit(({ exitCode, signal }) => {
-    const s = sessions.get(opts.id);
+    const current = sessions.get(opts.id);
+    if (current && current !== session) return;
+    const s = current ?? session;
     if (s) {
       s.exited = true;
       flushDataNow(s);
@@ -556,7 +558,7 @@ function doSpawn(
       }
       if (s.flushTimer) clearTimeout(s.flushTimer);
     }
-    sessions.delete(opts.id);
+    if (current === session) sessions.delete(opts.id);
     const t = pendingKills.get(opts.id);
     if (t) {
       clearTimeout(t);

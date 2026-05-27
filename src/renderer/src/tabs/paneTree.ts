@@ -147,7 +147,8 @@ export function setRatioAtPath(
 ): PaneNode {
   if (path.length === 0) {
     if (node.kind !== "split") return node;
-    return { ...node, ratio: clamp(ratio, 0.05, 0.95) };
+    const nextRatio = clamp(ratio, 0.05, 0.95);
+    return nextRatio === node.ratio ? node : { ...node, ratio: nextRatio };
   }
   if (node.kind !== "split") return node;
   const [head, ...rest] = path;
@@ -167,6 +168,7 @@ export function setLeafField<K extends keyof TerminalLeaf>(
 ): PaneNode {
   if (node.kind === "leaf") {
     if (node.paneId !== paneId) return node;
+    if (Object.is(node[key], value)) return node;
     return { ...node, [key]: value };
   }
   const a = setLeafField(node.a, paneId, key, value);

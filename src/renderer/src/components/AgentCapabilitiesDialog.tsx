@@ -1228,12 +1228,3 @@ const primaryButtonStyle: React.CSSProperties = {
   border: "1px solid color-mix(in oklch, var(--accent) 50%, var(--rule-strong))",
   background: "color-mix(in oklch, var(--accent) 12%, transparent)",
 };
-
-const dangerButtonStyle: React.CSSProperties = {
-  ...ghostButtonStyle,
-  borderRadius: 6,
-  color: "var(--danger)",
-  border: "1px solid color-mix(in oklch, var(--danger) 42%, var(--rule-strong))",
-  padding: "5px 9px",
-  fontSize: 11,
-};

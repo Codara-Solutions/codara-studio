@@ -165,7 +165,6 @@ export default function App() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showLeft, setShowLeft] = useState(true);
   const [showRight, setShowRight] = useState(true);
-  const [runCountsByWorkspace, setRunCountsByWorkspace] = useState<Record<string, number>>({});
   // Runs for the currently active workspace, plus the user's selection. Lifted
   // here so the workbench RunsView and Spark chat tab both read from the same
   // source of truth: picking a chat updates the graph, deleting a chat removes
@@ -450,7 +449,6 @@ export default function App() {
     if (!showLeft) setEditingId(null);
   }, [showLeft]);
 
-  const workspaceIdsKey = useMemo(() => workspaces.map((w) => w.id).join("\0"), [workspaces]);
   // Comma-joined sorted list of workspace cwds. Used as a stable dep for the
   // setAllowedRoots push so we only re-send when the actual cwd set changes
   // (renaming a workspace's color, for instance, must not re-fire the IPC).
@@ -477,18 +475,6 @@ export default function App() {
       /* sandbox push is best-effort; failures only restrict reachable reads */
     });
   }, [booted, workspaceCwdsKey]);
-
-  const refreshRunCount = useCallback(async (workspaceId: string) => {
-    try {
-      const runs = await window.spark.orchestration.listRuns(workspaceId);
-      setRunCountsByWorkspace((current) => ({
-        ...current,
-        [workspaceId]: runs.length,
-      }));
-    } catch {
-      /* The Runs view will surface detailed orchestration errors. */
-    }
-  }, []);
 
   // Refresh the lifted runs list for whichever workspace is active right now.
   // Reads activeId via the closure, so wrap the body in a function that takes
@@ -553,33 +539,6 @@ export default function App() {
   }, [runs]);
 
   useEffect(() => {
-    if (!booted) return;
-    // Derive the id list from `workspaceIdsKey` (the only input that actually
-    // matters here) rather than depending on the `workspaces` array itself —
-    // `workspaces` gets a new reference on every color edit / worker update,
-    // which would needlessly re-fire N listRuns IPC calls. The key changes
-    // only when a workspace is added/removed/reordered, which is exactly when
-    // the per-workspace run counts need a full refresh.
-    const ids = workspaceIdsKey ? workspaceIdsKey.split("\0") : [];
-    if (ids.length === 0) {
-      setRunCountsByWorkspace({});
-      return;
-    }
-    let cancelled = false;
-    void Promise.all(
-      ids.map(async (id) => [id, (await window.spark.orchestration.listRuns(id)).length] as const),
-    ).then((entries) => {
-      if (cancelled) return;
-      setRunCountsByWorkspace(Object.fromEntries(entries));
-    }).catch(() => {
-      /* Counts are only for tab visibility; failures should not block boot. */
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [booted, workspaceIdsKey]);
-
-  useEffect(() => {
     if (!booted) return undefined;
 
     // Trailing-debounce window. A burst of orchestration events (a run going
@@ -600,7 +559,6 @@ export default function App() {
       pending.clear();
       const currentActiveId = activeIdRef.current;
       for (const workspaceId of workspaceIds) {
-        void refreshRunCount(workspaceId);
         if (workspaceId === currentActiveId) {
           void refreshRunsFor(workspaceId);
         }
@@ -664,7 +622,7 @@ export default function App() {
         }
       }
     });
-  }, [booted, refreshRunCount, refreshRunsFor]);
+  }, [booted, refreshRunsFor]);
 
   // Clear the run-refresh debounce timer on unmount so a pending flush can't
   // fire into an unmounted tree.
