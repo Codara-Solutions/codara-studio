@@ -11,6 +11,23 @@ import type {
 import { makeId } from "@shared/ids";
 import { contextWindowForModel } from "@shared/context-window";
 import { findOpenQuestion } from "./timeline";
+import ContextPill from "./composer/ContextPill";
+import ModelPicker from "./composer/ModelPicker";
+import PlanModeToggle from "./composer/PlanModeToggle";
+import ThinkingControl from "./composer/ThinkingControl";
+import {
+  ALL_EFFORTS,
+  DEFAULT_CHAT_BACKEND,
+  DEFAULT_CHAT_EFFORT,
+  DEFAULT_CHAT_MODE,
+  DEFAULT_CHAT_MODEL,
+  buildVisibleGroups,
+  clampEffort,
+  decomposeModelId,
+  effortsFor,
+  findOptionInCatalog,
+  type ChatModelOption,
+} from "./composer/types";
 
 // Per-chat selector bag forwarded from the draft composer chip into the
 // new-chat creation call so the chip's choice survives draft→live. Once a run
@@ -84,81 +101,6 @@ interface MentionQuery {
   query: string;
 }
 
-interface ChatModelOption {
-  id: string;
-  label: string;
-  backend: ChatBackendKind;
-  effortLevels?: AgentEffortLevel[];
-}
-
-interface ChatBackendGroup {
-  backend: ChatBackendKind;
-  label: string;
-  models: ChatModelOption[];
-}
-
-const ALL_EFFORTS: AgentEffortLevel[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
-
-const CHAT_BACKEND_GROUPS: ChatBackendGroup[] = [
-  {
-    backend: "openrouter",
-    label: "OpenRouter",
-    models: [
-      { id: "google/gemini-flash-latest", label: "Gemini Flash", backend: "openrouter" },
-      { id: "openai/gpt-4o", label: "GPT-4o", backend: "openrouter" },
-      { id: "anthropic/claude-opus-4-7", label: "Claude Opus", backend: "openrouter" },
-    ],
-  },
-  {
-    backend: "claude",
-    label: "Claude Code",
-    models: [
-      {
-        id: "claude-opus-4-7",
-        label: "Opus 4.7",
-        backend: "claude",
-        // Claude --effort accepts exactly these 5 (verified). No "minimal".
-        effortLevels: ["low", "medium", "high", "xhigh", "max"],
-      },
-      {
-        id: "claude-sonnet-4-6",
-        label: "Sonnet 4.6",
-        backend: "claude",
-        effortLevels: ["low", "medium", "high", "xhigh", "max"],
-      },
-    ],
-  },
-  {
-    backend: "codex",
-    label: "Codex",
-    models: [
-      {
-        id: "gpt-5.5",
-        label: "GPT-5.5",
-        backend: "codex",
-        // Codex model_reasoning_effort accepts these 5 — no "max". Verified
-        // with `codex doctor -c model_reasoning_effort=max` failing on
-        // "config could not be loaded".
-        effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
-      },
-    ],
-  },
-];
-
-const DEFAULT_CHAT_BACKEND: ChatBackendKind = "openrouter";
-const DEFAULT_CHAT_MODEL = "google/gemini-flash-latest";
-const DEFAULT_CHAT_MODE: ChatMode = "execute";
-const DEFAULT_CHAT_EFFORT: AgentEffortLevel = "medium";
-
-const EFFORT_LABELS: Record<AgentEffortLevel, string> = {
-  minimal: "Minimal",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "xHigh",
-  max: "Max",
-};
-
 export default function ChatComposer({ run, cwd, disabled, onStartChat, onForcePauseRun }: Props) {
   const [draft, setDraft] = useState("");
   const [images, setImages] = useState<AddRunMessageAttachmentInput[]>([]);
@@ -174,16 +116,18 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const [draftChatModel, setDraftChatModel] = useState<string>(DEFAULT_CHAT_MODEL);
   const [draftChatMode, setDraftChatMode] = useState<ChatMode>(DEFAULT_CHAT_MODE);
   const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(DEFAULT_CHAT_EFFORT);
+  // Tracks whether the draft default has been resolved from settings + runtime
+  // diagnostics. The first paint uses the hardcoded fallbacks above; once the
+  // IPC round-trip returns we replace them with the actual first visible
+  // model so the bar doesn't open on a model the user can't see in the
+  // dropdown (e.g. the legacy Gemini default when no OpenRouter is configured).
+  const draftDefaultsResolved = useRef(false);
   const [draftFastMode, setDraftFastMode] = useState<boolean>(false);
   const [draftOneMillionContext, setDraftOneMillionContext] = useState<boolean>(false);
   // Running per-chat token total, summed from chat.usage SparkEvents. Reset
   // whenever the active run changes so a fresh chat starts at 0; for the
   // draft (no run yet) we also stay at 0 because no events have fired.
   const [tokensUsed, setTokensUsed] = useState(0);
-  const [modelPickerOpen, setModelPickerOpen] = useState(false);
-  const [effortPickerOpen, setEffortPickerOpen] = useState(false);
-  const modelPickerRef = useRef<HTMLDivElement>(null);
-  const effortPickerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Synchronous in-flight latch — blocks a second send before React has
   // re-rendered the busy state, which a fast double-click or Enter-key
@@ -196,6 +140,48 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     const handler = () => textareaRef.current?.focus();
     window.addEventListener("spark:focus-composer", handler);
     return () => window.removeEventListener("spark:focus-composer", handler);
+  }, []);
+
+  // Resolve the draft default from settings + runtimes. The hardcoded
+  // fallback above (OpenRouter + Gemini Flash) only matters before this
+  // resolves: once we know what's actually available we land on the first
+  // visible model (Claude Opus 4.7 in the common case), so the bar never
+  // opens on a model the user can't see in the dropdown. Runs once per
+  // mount; an active run uses run.chatBackend/run.chatModel and is unaffected.
+  useEffect(() => {
+    if (draftDefaultsResolved.current) return;
+    let cancelled = false;
+    void Promise.all([
+      window.spark.agents.runtimes(),
+      window.spark.settings.load(),
+    ])
+      .then(([diagnostics, settings]) => {
+        if (cancelled) return;
+        draftDefaultsResolved.current = true;
+        const orModel = (settings.openRouterModel ?? "").trim();
+        const groups = buildVisibleGroups({
+          diagnostics: diagnostics ?? [],
+          openRouterModel: orModel,
+        });
+        const first = groups[0]?.models[0];
+        if (!first) return;
+        const { baseId, oneMillion } = decomposeModelId(first.id);
+        setDraftChatBackend(first.backend);
+        setDraftChatModel(baseId);
+        setDraftOneMillionContext(oneMillion);
+        const allowedEfforts = effortsFor(first);
+        const clamped = clampEffort(draftChatEffort, allowedEfforts);
+        if (clamped && clamped !== draftChatEffort) setDraftChatEffort(clamped);
+      })
+      .catch(() => {
+        /* keep hardcoded defaults; ModelPicker will surface the empty state */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // intentionally one-shot: subsequent settings changes don't override the
+    // draft, since by that point the user has typically committed a choice.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Other surfaces (e.g. the browser pane's inspector + draw mode, or the
@@ -585,20 +571,22 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const activeChatEffort: AgentEffortLevel = run_?.chatEffort ?? draftChatEffort;
   const activeFastMode: boolean = run_?.chatFastMode ?? draftFastMode;
   const activeOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
-  const activeChatModel: ChatModelOption =
-    findChatModel(activeChatBackend, activeChatModelId) ?? fallbackChatModel(activeChatBackend);
-  // Fast mode applies to Claude (typed as /fast) and Codex (CLI feature flag).
-  // OpenRouter has no equivalent — the chip hides the toggle for it. 1M
-  // context is Claude-only (Codex's GPT-5.5 maxes at 400k; OpenRouter chooses
-  // by model id).
+  // The active model's option pulled from the STATIC catalog (Claude/Codex);
+  // null for OpenRouter (its catalog is dynamic — the configured model
+  // lives in settings). Used only to derive the available effort cycle for
+  // the thinking pill; rendering of the model name happens inside the
+  // ModelPicker which reads from the dynamic visible groups.
+  const activeChatModelOption = findOptionInCatalog(
+    activeChatBackend,
+    activeChatModelId,
+    activeOneMillionContext,
+  );
+  // Fast mode applies to Claude (typed as /fast) and Codex (CLI feature
+  // flag). OpenRouter has no equivalent. 1M context is now a model variant
+  // surfaced as separate dropdown rows (with a 1M badge) — there's no
+  // standalone 1M pill anymore.
   const fastModeAvailable = activeChatBackend === "claude" || activeChatBackend === "codex";
-  const oneMillionContextAvailable = activeChatBackend === "claude";
-  const availableEfforts: AgentEffortLevel[] =
-    activeChatBackend === "openrouter"
-      ? ALL_EFFORTS
-      : activeChatModel.effortLevels && activeChatModel.effortLevels.length > 0
-        ? activeChatModel.effortLevels
-        : ALL_EFFORTS;
+  const availableEfforts: AgentEffortLevel[] = effortsFor(activeChatModelOption);
   const visibleEffort: AgentEffortLevel = availableEfforts.includes(activeChatEffort)
     ? activeChatEffort
     : (availableEfforts[0] ?? DEFAULT_CHAT_EFFORT);
@@ -642,6 +630,10 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   };
 
   const onPickModel = (model: ChatModelOption) => {
+    // Virtual `:1m` ids decompose into (baseId, oneMillion=true). The
+    // backend only ever sees the real id; the 1M flag rides as
+    // chat1mContext in the same payload the legacy 1M pill used to write.
+    const { baseId, oneMillion } = decomposeModelId(model.id);
     const backendChanged = model.backend !== activeChatBackend;
     const nextEffortLevels =
       model.backend === "openrouter"
@@ -656,15 +648,14 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
           : (nextEffortLevels[0] ?? DEFAULT_CHAT_EFFORT));
     applyChatBackendChange({
       chatBackend: backendChanged ? model.backend : undefined,
-      chatModel: model.id,
+      chatModel: baseId,
       chatEffort: nextEffort !== activeChatEffort ? nextEffort : undefined,
+      chat1mContext: oneMillion !== activeOneMillionContext ? oneMillion : undefined,
     });
-    setModelPickerOpen(false);
   };
 
   const onPickEffort = (effort: AgentEffortLevel) => {
     applyChatBackendChange({ chatEffort: effort });
-    setEffortPickerOpen(false);
   };
 
   const onToggleMode = () => {
@@ -676,35 +667,14 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     applyChatBackendChange({ chatFastMode: !activeFastMode });
   };
 
-  const onToggleOneMillionContext = () => {
-    if (!oneMillionContextAvailable) return;
-    applyChatBackendChange({ chat1mContext: !activeOneMillionContext });
-  };
+  // 1M context used to be a standalone pill; it now lives as virtual rows
+  // in the model dropdown ("Opus 4.7 1M" etc.), so onPickModel writes
+  // chat1mContext directly via applyChatBackendChange. No standalone
+  // toggle handler is needed here anymore.
 
-  useEffect(() => {
-    if (!modelPickerOpen && !effortPickerOpen) return;
-    const onMouseDown = (event: MouseEvent) => {
-      const target = event.target as Node | null;
-      if (modelPickerOpen && modelPickerRef.current && !modelPickerRef.current.contains(target)) {
-        setModelPickerOpen(false);
-      }
-      if (effortPickerOpen && effortPickerRef.current && !effortPickerRef.current.contains(target)) {
-        setEffortPickerOpen(false);
-      }
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setModelPickerOpen(false);
-        setEffortPickerOpen(false);
-      }
-    };
-    window.addEventListener("mousedown", onMouseDown);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("mousedown", onMouseDown);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [modelPickerOpen, effortPickerOpen]);
+  // Click-outside / Escape handling for the model picker lives inside the
+  // ModelPicker component itself — the thinking pill is click-to-cycle and
+  // has no popover, so no global listener is needed here anymore.
 
   const placeholder = !run_
     ? "Tell Spark what to build, or describe a task."
@@ -743,16 +713,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
         </div>
       )}
       <div
-        style={{
-          border: "1px solid var(--rule-soft)",
-          borderRadius: 8,
-          background: "color-mix(in oklch, var(--ink) 3%, var(--panel))",
-          padding: 7,
-          position: "relative",
-          boxShadow: "none",
-          transition:
-            "border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
-        }}
+        className={`composer-shell${activeChatMode === "execute" ? " is-execute-mode" : ""}`}
         onMouseDown={focusComposerShell}
       >
         {mentionQuery && (
@@ -842,80 +803,22 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
               flex: "0 0 auto",
             }}
           >
-            <div ref={modelPickerRef} style={{ position: "relative", display: "inline-flex" }}>
-              <ChipButton
-                title={`${chatBackendLabel(activeChatBackend)} — pick model`}
-                active={modelPickerOpen}
-                onClick={() => {
-                  setModelPickerOpen((open) => !open);
-                  setEffortPickerOpen(false);
-                }}
-              >
-                <ChipGlyph kind="model" />
-                <span>{activeChatModel.label}</span>
-                <ChipCaret />
-              </ChipButton>
-              {modelPickerOpen && (
-                <ChipPopover>
-                  {CHAT_BACKEND_GROUPS.map((group) => (
-                    <div key={group.backend} style={{ display: "grid", gap: 1 }}>
-                      <ChipGroupHeader label={group.label} />
-                      {group.models.map((model) => (
-                        <ChipRow
-                          key={model.id}
-                          label={model.label}
-                          hint={model.id}
-                          active={model.id === activeChatModelId && model.backend === activeChatBackend}
-                          onPick={() => onPickModel(model)}
-                        />
-                      ))}
-                    </div>
-                  ))}
-                </ChipPopover>
-              )}
-            </div>
-            <div ref={effortPickerRef} style={{ position: "relative", display: "inline-flex" }}>
-              <ChipButton
-                title="Reasoning effort"
-                active={effortPickerOpen}
-                onClick={() => {
-                  setEffortPickerOpen((open) => !open);
-                  setModelPickerOpen(false);
-                }}
-              >
-                <ChipGlyph kind="effort" />
-                <span>{EFFORT_LABELS[visibleEffort]}</span>
-                <ChipCaret />
-              </ChipButton>
-              {effortPickerOpen && (
-                <ChipPopover>
-                  <ChipGroupHeader label="Effort" />
-                  {availableEfforts.map((effort) => (
-                    <ChipRow
-                      key={effort}
-                      label={EFFORT_LABELS[effort]}
-                      active={effort === visibleEffort}
-                      onPick={() => onPickEffort(effort)}
-                    />
-                  ))}
-                </ChipPopover>
-              )}
-            </div>
-            <ChipButton
-              title={
-                activeChatMode === "execute"
-                  ? "Execute mode — Spark spawns workers to do the work. Click to switch to Talk."
-                  : "Talk mode — pure conversation, no workers. Click to switch to Execute."
-              }
-              active={false}
-              accent
-              onClick={onToggleMode}
-            >
-              <ChipGlyph kind={activeChatMode === "execute" ? "execute" : "talk"} />
-              <span>{activeChatMode === "execute" ? "Execute" : "Talk"}</span>
-            </ChipButton>
+            <ModelPicker
+              activeBackend={activeChatBackend}
+              activeModelId={activeChatModelId}
+              activeOneMillion={activeOneMillionContext}
+              onPick={onPickModel}
+            />
+            <ThinkingControl
+              effort={visibleEffort}
+              availableEfforts={availableEfforts}
+              onCycle={onPickEffort}
+            />
+            <PlanModeToggle mode={activeChatMode} onToggle={onToggleMode} />
             {fastModeAvailable && (
-              <ChipButton
+              <button
+                type="button"
+                className={`composer-fast${activeFastMode ? " is-active" : ""}`}
                 title={
                   activeChatBackend === "claude"
                     ? activeFastMode
@@ -925,24 +828,12 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
                       ? "Fast mode on — Codex spawns with fast_mode enabled. Click to disable."
                       : "Fast mode off — Codex spawns with fast_mode disabled. Click to enable."
                 }
-                active={activeFastMode}
+                aria-label={activeFastMode ? "Fast mode on" : "Fast mode off"}
+                aria-pressed={activeFastMode}
                 onClick={onToggleFastMode}
               >
-                <span>{activeFastMode ? "Fast on" : "Fast off"}</span>
-              </ChipButton>
-            )}
-            {oneMillionContextAvailable && (
-              <ChipButton
-                title={
-                  activeOneMillionContext
-                    ? "1M context on — Claude session uses the 1M-token window (subscription feature). Click to revert to 200k."
-                    : "1M context off — Claude session uses the default 200k. Click to enable 1M."
-                }
-                active={activeOneMillionContext}
-                onClick={onToggleOneMillionContext}
-              >
-                <span>{activeOneMillionContext ? "1M ctx" : "200k ctx"}</span>
-              </ChipButton>
+                <LightningIcon />
+              </button>
             )}
           </div>
           {hasActiveWorker ? (
@@ -973,7 +864,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
                   : "Enter to send, Shift+Enter for a new line"}
             </span>
           )}
-          <TokenCounter
+          <ContextPill
             used={tokensUsed}
             budget={
               activeOneMillionContext && activeChatBackend === "claude"
@@ -1002,25 +893,6 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
       </div>
     </div>
   );
-}
-
-function findChatModel(backend: ChatBackendKind, modelId: string): ChatModelOption | null {
-  for (const group of CHAT_BACKEND_GROUPS) {
-    if (group.backend !== backend) continue;
-    const hit = group.models.find((model) => model.id === modelId);
-    if (hit) return hit;
-  }
-  return null;
-}
-
-function fallbackChatModel(backend: ChatBackendKind): ChatModelOption {
-  const group = CHAT_BACKEND_GROUPS.find((entry) => entry.backend === backend);
-  if (group && group.models.length > 0) return group.models[0];
-  return CHAT_BACKEND_GROUPS[0].models[0];
-}
-
-function chatBackendLabel(backend: ChatBackendKind): string {
-  return CHAT_BACKEND_GROUPS.find((entry) => entry.backend === backend)?.label ?? backend;
 }
 
 function messageForSend(draft: string, attachmentCount: number): string {
@@ -1901,6 +1773,16 @@ function ChipCaret() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+// Lightning bolt glyph for the Fast-mode toggle. Filled in the active
+// state so it reads as "on" even without a surrounding pill.
+function LightningIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 14 14" fill="currentColor" aria-hidden>
+      <path d="M8.2 0.4 L2.5 7.6 H6 L5.2 13.6 L11.2 6 H7.5 L8.2 0.4 Z" />
     </svg>
   );
 }
