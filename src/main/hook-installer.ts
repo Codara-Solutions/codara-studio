@@ -97,12 +97,16 @@ function resolveHookScriptPath(): string {
 }
 
 // Resolve the python executable. Prefer `python3` (most POSIX systems have
-// only python3 on PATH), fall back to `python` (Windows installer default
-// and the Microsoft Store stub). We DON'T verify the binary exists here —
-// the failure surface is "the hook command errors when fired" which Claude
-// logs to its own debug surface. Trying to probe at install time would
-// double the startup cost (fork/exec on every launch) for marginal benefit.
-function resolvePythonBinary(): string {
+// only python3 on PATH — modern macOS ships no bare `python` at all), fall
+// back to `python` (Windows installer default and the Microsoft Store stub).
+// We DON'T verify the binary exists here — the failure surface is "the hook
+// command errors when fired" which Claude logs to its own debug surface.
+// Trying to probe at install time would double the startup cost (fork/exec
+// on every launch) for marginal benefit. Exported so the per-run hook config
+// in claude-backend uses the SAME decision — hardcoding `python` there broke
+// every Talk/Execute turn on macOS (Stop hook → "python: command not found"
+// → no turn-done marker → turns only ended on the 90s timeout).
+export function resolvePythonBinary(): string {
   return process.platform === "win32" ? "python" : "python3";
 }
 

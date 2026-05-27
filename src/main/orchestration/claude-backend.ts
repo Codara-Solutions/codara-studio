@@ -35,6 +35,7 @@ import { backendPtySessionId } from "@shared/backend-pty";
 import type { ChatMode } from "@shared/types";
 
 import { writeFileAtomic } from "../fs-atomic";
+import { resolvePythonBinary } from "../hook-installer";
 import { installOrchestratorMcpForCC, isSparkOrchestratorMcpInstalled } from "../mcp-installer";
 import { claudeProvider } from "../providers/claude";
 import { sparkHome } from "../spark-home";
@@ -548,19 +549,27 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
       : join(__dirname, "..", "..", "resources", "claude-hooks", name);
   const userPromptScript = hookScript("spark-cc-userprompt.py");
   const stopScript = hookScript("spark-cc-stop.py");
+  // Resolve the python launcher per-platform (python3 on POSIX, python on
+  // Windows) — NOT a hardcoded `python`. Modern macOS ships no bare `python`,
+  // so hardcoding it made the Stop hook fail with "python: command not found";
+  // the turn-done marker then never landed and every turn hung until the 90s
+  // timeout. Shared with the global hook installer so the decision lives in
+  // one place. The hook runs inside the pty's enriched-PATH env, so the bare
+  // launcher name resolves there.
+  const python = resolvePythonBinary();
   const settingsPayload = {
     hooks: {
       UserPromptSubmit: [
         {
           hooks: [
-            { type: "command", command: `python "${userPromptScript}"` },
+            { type: "command", command: `${python} "${userPromptScript}"` },
           ],
         },
       ],
       Stop: [
         {
           hooks: [
-            { type: "command", command: `python "${stopScript}"` },
+            { type: "command", command: `${python} "${stopScript}"` },
           ],
         },
       ],
