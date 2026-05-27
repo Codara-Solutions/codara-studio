@@ -127,7 +127,7 @@ export async function startHookWatcher(): Promise<void> {
   );
 
   try {
-    const watcher = fsWatch(hooksDir, { persistent: true }, (eventType, filename) => {
+    const watcher = fsWatch(hooksDir, { persistent: true }, (_eventType, filename) => {
       if (state.stopped) return;
       if (filename && typeof filename === "string") {
         const name = filename.toString();

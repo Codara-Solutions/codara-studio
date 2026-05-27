@@ -1,5 +1,4 @@
 import { promises as fs, createWriteStream } from "node:fs";
-import { spawn as spawnChild } from "node:child_process";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 import type {
   AddRunMessageInput,
@@ -50,6 +49,7 @@ import {
   estimateImageTokens,
   estimateTokensFromText,
 } from "@shared/context-window";
+import { normalizeChatFeatureFlags } from "@shared/chat-policy";
 import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
 import { writeFileAtomic } from "../fs-atomic";
 import { loadSettings } from "../storage";
@@ -190,6 +190,10 @@ async function detectConfiguredAgentRuntimes(
 
 export async function createRun(input: CreateRunInput): Promise<RunState> {
   const now = new Date().toISOString();
+  const initialChatFlags = normalizeChatFeatureFlags(input.chatBackend ?? "openrouter", {
+    chatFastMode: input.chatFastMode,
+    chat1mContext: input.chat1mContext,
+  });
   const run: RunState = {
     id: makeId("run"),
     workspaceId: input.workspaceId,
@@ -223,8 +227,8 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     chatModel: input.chatModel?.trim() || undefined,
     chatMode: input.chatMode,
     chatEffort: input.chatEffort,
-    chatFastMode: input.chatFastMode,
-    chat1mContext: input.chat1mContext,
+    chatFastMode: initialChatFlags.chatFastMode,
+    chat1mContext: initialChatFlags.chat1mContext,
   };
   run.artifactDir = runDir(run.id);
 
@@ -1699,15 +1703,6 @@ function managerStepText(step: SparkManagerStepDecision): string {
   ].join(" ");
 }
 
-function managerTaskText(task: SparkManagerTaskDecision): string {
-  return [
-    task.title,
-    task.description,
-    ...(task.expectedOutputs ?? []),
-    ...(task.verificationCommands ?? []),
-  ].join(" ");
-}
-
 async function maybeEnforceExplicitParallelStagingPlan(
   run: RunState,
   decision: SparkManagerDecision,
@@ -2420,188 +2415,6 @@ async function tryTrivialFastPathStepPlanning(run: RunState): Promise<RunState |
   });
 
   return next;
-}
-
-// Run an implementation worker's verificationCommands directly from Spark's
-// process so we can confirm the worker's report claims with deterministic exit
-// codes — no LLM in the loop. Used by tryStandardCleanImplFastPathReview to
-// decide whether the verifier follow-up is necessary.
-//
-// Per-command timeout caps the total cost when a command hangs (e.g. a test
-// that opens an interactive prompt). Output is captured but only the first
-// 600 chars are surfaced — same budget the worker uses in its proof[] entries.
-async function runVerificationCommandsLocally(
-  commands: string[],
-  cwd: string,
-  perCommandTimeoutMs = 90_000,
-): Promise<Array<{ command: string; exitCode: number | null; stdout: string; stderr: string; timedOut: boolean }>> {
-  const results: Array<{ command: string; exitCode: number | null; stdout: string; stderr: string; timedOut: boolean }> = [];
-  for (const command of commands) {
-    const trimmed = command.trim();
-    if (!trimmed) continue;
-    const result = await new Promise<{ command: string; exitCode: number | null; stdout: string; stderr: string; timedOut: boolean }>((resolve) => {
-      const child = spawnChild(trimmed, {
-        cwd,
-        shell: true,
-        windowsHide: true,
-      });
-      let stdout = "";
-      let stderr = "";
-      let timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        try { child.kill(); } catch { /* ignore */ }
-      }, perCommandTimeoutMs);
-      child.stdout?.on("data", (chunk) => {
-        if (stdout.length < 8000) stdout += chunk.toString("utf8");
-      });
-      child.stderr?.on("data", (chunk) => {
-        if (stderr.length < 8000) stderr += chunk.toString("utf8");
-      });
-      child.on("error", (err) => {
-        clearTimeout(timer);
-        resolve({ command: trimmed, exitCode: null, stdout, stderr: stderr + `\nspawn error: ${err.message}`, timedOut });
-      });
-      child.on("exit", (code) => {
-        clearTimeout(timer);
-        resolve({
-          command: trimmed,
-          exitCode: code,
-          stdout: stdout.slice(0, 600),
-          stderr: stderr.slice(0, 600),
-          timedOut,
-        });
-      });
-    });
-    results.push(result);
-  }
-  return results;
-}
-
-// Standard-tier deterministic verifier-skip. After the impl worker on a
-// standard-complexity run has been accepted and BEFORE we call the
-// worker_result_review LLM (which would queue a verifier task), re-run the
-// impl's verificationCommands ourselves. If every command exits 0, mark the
-// step complete and let the autopilot loop advance — saving the verifier's
-// ~100s of wall on clean runs. If anything fails, return null so the existing
-// manager-review path runs and queues the verifier as a corrective.
-//
-// We deliberately DON'T do this for complex tier (two peer verifiers exist for
-// a reason: catch what one model misses) or trivial tier (already skipped).
-async function tryStandardCleanImplFastPathReview(
-  run: RunState,
-  cwd: string,
-): Promise<RunState | null> {
-  if (run.taskComplexity !== "standard") return null;
-  if (run.status === "complete" || run.status === "failed" || run.status === "cancelled") {
-    return null;
-  }
-  // Find the most recent accepted impl worker (taskClass != verifier).
-  const acceptedImpls = run.workerTasks
-    .filter((t) => t.status === "accepted" && t.taskClass !== "verifier")
-    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
-  if (acceptedImpls.length === 0) return null;
-  const impl = acceptedImpls[0];
-  if (!impl.stepId) return null;
-  // Skip when a verifier already exists for the impl's step (manager already
-  // queued one in a prior cycle, or the prior impl was itself a verifier).
-  const verifierExists = run.workerTasks.some(
-    (t) => t.stepId === impl.stepId && t.taskClass === "verifier",
-  );
-  if (verifierExists) return null;
-  // Skip when the impl's step already wrapped (nothing to short-circuit).
-  const step = run.steps.find((s) => s.id === impl.stepId);
-  if (!step) return null;
-  if (["complete", "failed", "skipped"].includes(step.status)) return null;
-  // Product-facing UI work needs an adversarial verifier even when the
-  // implementation supplied green smoke commands. The quality failures we care
-  // about here are often "dead affordance" or "looks unfinished" gaps that a
-  // narrow command cannot see.
-  if (taskLooksLikeVisibleUi(step, impl)) return null;
-  // Skip when there are still active sibling tasks on the same step — wait for
-  // them to settle before we decide whether the step is clean.
-  const siblingActive = run.workerTasks.some(
-    (t) =>
-      t.stepId === impl.stepId &&
-      t.id !== impl.id &&
-      ["created", "queued", "claimed", "running", "needs_review", "retry_queued"].includes(t.status),
-  );
-  if (siblingActive) return null;
-  const commands = (impl.verificationCommands ?? []).map((c) => c.trim()).filter(Boolean);
-  if (commands.length === 0) return null;
-
-  await appendEvent({
-    workspaceId: run.workspaceId,
-    runId: run.id,
-    stepId: impl.stepId,
-    type: "spark_manager.standard_clean_impl_check_started",
-    message: `Re-running ${commands.length} verificationCommand(s) deterministically to decide whether the verifier is needed`,
-    payload: { workerTaskId: impl.id, commands },
-  });
-
-  const results = await runVerificationCommandsLocally(commands, cwd);
-  const allClean = results.length > 0 && results.every((r) => r.exitCode === 0);
-
-  await appendEvent({
-    workspaceId: run.workspaceId,
-    runId: run.id,
-    stepId: impl.stepId,
-    type: allClean
-      ? "spark_manager.standard_clean_impl_check_passed"
-      : "spark_manager.standard_clean_impl_check_failed",
-    message: allClean
-      ? "Deterministic re-run of verificationCommands all green; skipping verifier follow-up"
-      : "Deterministic re-run of verificationCommands had at least one non-zero exit; falling through to manager review + verifier",
-    payload: {
-      workerTaskId: impl.id,
-      results: results.map((r) => ({
-        command: r.command,
-        exitCode: r.exitCode,
-        timedOut: r.timedOut,
-        stdoutSnippet: r.stdout,
-        stderrSnippet: r.stderr,
-      })),
-    },
-  });
-
-  if (!allClean) return null;
-
-  return commitRunChange(run, {
-    type: "spark_manager.standard_fast_path_review",
-    message: "Skipped manager worker_result_review + verifier: standard run with clean impl + green verificationCommands",
-    payload: {
-      workerTaskId: impl.id,
-      stepId: impl.stepId,
-      commands,
-    },
-    mutate: (draft, timestamp) => {
-      const targetStep = draft.steps.find((s) => s.id === impl.stepId);
-      if (targetStep) {
-        targetStep.status = "complete";
-        targetStep.updatedAt = timestamp;
-        if (draft.currentStepId === targetStep.id) draft.currentStepId = undefined;
-      }
-      const allStepsTerminal =
-        draft.steps.length > 0 &&
-        draft.steps.every((s) => ["complete", "failed", "skipped"].includes(s.status));
-      if (allStepsTerminal) {
-        draft.status = "complete";
-        draft.autopilot = {
-          ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
-          status: "complete",
-          lastAction: "standard_fast_path_review_skipped",
-          updatedAt: timestamp,
-        };
-      } else {
-        draft.autopilot = {
-          ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
-          lastAction: "standard_fast_path_review_skipped",
-          updatedAt: timestamp,
-        };
-      }
-      draft.updatedAt = timestamp;
-    },
-  });
 }
 
 // Effort levels Spark passes through verbatim when building a Claude
@@ -4446,8 +4259,15 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
     input.chatBackend === undefined &&
     input.chatModel === undefined &&
     input.chatMode === undefined &&
-    input.chatEffort === undefined;
+    input.chatEffort === undefined &&
+    input.chatFastMode === undefined &&
+    input.chat1mContext === undefined;
   if (noChange) return run;
+  const nextBackend = input.chatBackend ?? run.chatBackend ?? "openrouter";
+  const nextFeatureFlags = normalizeChatFeatureFlags(nextBackend, {
+    chatFastMode: input.chatFastMode ?? run.chatFastMode,
+    chat1mContext: input.chat1mContext ?? run.chat1mContext,
+  });
   return commitRunChange(run, {
     type: "run.chat_backend_updated",
     message: "Chat backend / model / mode / effort updated",
@@ -4457,14 +4277,16 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
         chatModel: run.chatModel,
         chatMode: run.chatMode,
         chatEffort: run.chatEffort,
+        chatFastMode: run.chatFastMode,
+        chat1mContext: run.chat1mContext,
       },
       next: {
         chatBackend: input.chatBackend ?? run.chatBackend,
         chatModel: input.chatModel ?? run.chatModel,
         chatMode: input.chatMode ?? run.chatMode,
         chatEffort: input.chatEffort ?? run.chatEffort,
-        chatFastMode: input.chatFastMode ?? run.chatFastMode,
-        chat1mContext: input.chat1mContext ?? run.chat1mContext,
+        chatFastMode: nextFeatureFlags.chatFastMode,
+        chat1mContext: nextFeatureFlags.chat1mContext,
       },
     },
     mutate: (draft, timestamp) => {
@@ -4472,8 +4294,8 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
       if (input.chatModel !== undefined) draft.chatModel = input.chatModel.trim() || undefined;
       if (input.chatMode !== undefined) draft.chatMode = input.chatMode;
       if (input.chatEffort !== undefined) draft.chatEffort = input.chatEffort;
-      if (input.chatFastMode !== undefined) draft.chatFastMode = input.chatFastMode;
-      if (input.chat1mContext !== undefined) draft.chat1mContext = input.chat1mContext;
+      draft.chatFastMode = nextFeatureFlags.chatFastMode;
+      draft.chat1mContext = nextFeatureFlags.chat1mContext;
       // Switching backend invalidates the prior session UUID — the new
       // backend would mis-resume otherwise. Selected per the answers: no
       // cross-backend handoff; each backend gets its own fresh thread.
@@ -5631,124 +5453,6 @@ async function completeAcceptedReviewingSteps(
       draft.updatedAt = timestamp;
     },
   });
-}
-
-function formatProofAsSparkReply(proof: string): string {
-  const trimmed = proof.trim();
-  const parsed = parseProofCommandOutput(trimmed);
-  if (parsed && parsed.exitCode === 0 && parsed.output.trim()) {
-    const readTarget = inferReadCommandTarget(parsed.command);
-    if (readTarget) {
-      return formatFileContentReply(readTarget, parsed.output);
-    }
-  }
-
-  const compactProof = trimmed.slice(0, 1800);
-  const truncated = compactProof.length < trimmed.length;
-  return [
-    "Done. Verification output:",
-    "",
-    fencedMarkdown(compactProof, "text"),
-    ...(truncated ? ["", "..."] : []),
-  ].join("\n");
-}
-
-function formatFileContentReply(target: string, output: string): string {
-  const content = output.trim();
-  const compactContent = content.slice(0, 2400);
-  const truncated = compactContent.length < content.length;
-  return [
-    `\`${displayReadTarget(target)}\` contains:`,
-    "",
-    fencedMarkdown(compactContent, markdownLanguageForPath(target)),
-    ...(truncated ? ["", "..."] : []),
-  ].join("\n");
-}
-
-function parseProofCommandOutput(
-  proof: string,
-): { command: string; exitCode: number; output: string } | null {
-  const normalized = proof.replace(/\r\n/g, "\n").trim();
-  const match = normalized.match(/^\$?\s*([^\n]+)\n\[exit=(-?\d+)\]\n*([\s\S]*)$/);
-  if (!match) return null;
-  return {
-    command: match[1].trim(),
-    exitCode: Number.parseInt(match[2], 10),
-    output: match[3].trim(),
-  };
-}
-
-function inferReadCommandTarget(command: string): string | null {
-  const tokens = shellishTokens(command.replace(/^\$\s*/, ""));
-  const readIndex = tokens.findIndex((token) =>
-    /^(cat|type|gc|get-content)$/i.test(token),
-  );
-  if (readIndex < 0) return null;
-  for (let i = readIndex + 1; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    if (!token || token === "|" || token === ";" || token === "&&" || token === "||") break;
-    if (token.startsWith("-")) {
-      if (/^-path$/i.test(token) || /^-literalpath$/i.test(token)) {
-        return tokens[i + 1] ?? null;
-      }
-      continue;
-    }
-    return token;
-  }
-  return null;
-}
-
-function shellishTokens(command: string): string[] {
-  const tokens: string[] = [];
-  let current = "";
-  let quote: "'" | "\"" | null = null;
-  for (const char of command) {
-    if (quote) {
-      if (char === quote) quote = null;
-      else current += char;
-      continue;
-    }
-    if (char === "'" || char === "\"") {
-      quote = char;
-      continue;
-    }
-    if (/\s/.test(char)) {
-      if (current) {
-        tokens.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += char;
-  }
-  if (current) tokens.push(current);
-  return tokens;
-}
-
-function displayReadTarget(target: string): string {
-  const cleaned = target.trim().replace(/^['"]|['"]$/g, "");
-  return cleaned.length > 90 ? basename(cleaned) : cleaned;
-}
-
-function markdownLanguageForPath(path: string): string {
-  const lower = path.toLowerCase();
-  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
-  if (lower.endsWith(".json")) return "json";
-  if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "tsx";
-  if (lower.endsWith(".js") || lower.endsWith(".jsx") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "javascript";
-  if (lower.endsWith(".css")) return "css";
-  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "html";
-  if (lower.endsWith(".toml")) return "toml";
-  if (lower.endsWith(".yaml") || lower.endsWith(".yml")) return "yaml";
-  if (lower.endsWith(".ps1")) return "powershell";
-  if (lower.endsWith(".sh")) return "bash";
-  return "text";
-}
-
-function fencedMarkdown(content: string, language: string): string {
-  let fence = "```";
-  while (content.includes(fence)) fence += "`";
-  return `${fence}${language}\n${content.trim()}\n${fence}`;
 }
 
 // Detects the synthetic report written by writeAutoFailureReport when the
@@ -8631,9 +8335,9 @@ async function markAttemptRunning(
 }
 
 async function recordWorkerOutput(
-  run: RunState,
-  task: WorkerTask,
-  attemptId: string,
+  _run: RunState,
+  _task: WorkerTask,
+  _attemptId: string,
   paths: WorkerArtifactPaths,
   stream: "stdout" | "stderr",
   text: string,

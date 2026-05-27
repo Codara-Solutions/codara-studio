@@ -785,6 +785,7 @@ export function registerIpc(): void {
     "search:start",
     async (e, opts: SearchOptions): Promise<StartSearchResponse> => {
       const sender = e.sender;
+      assertAllowedReadPath(opts.root);
       const searchId = `search-${Date.now().toString(36)}-${(searchCounter++).toString(36)}`;
       const hitChannel = `search:hit:${searchId}`;
       const doneChannel = `search:done:${searchId}`;
@@ -803,6 +804,10 @@ export function registerIpc(): void {
         },
       );
       activeSearches.set(searchId, handle);
+      sender.once("destroyed", () => {
+        handle.cancel();
+        activeSearches.delete(searchId);
+      });
       return { searchId };
     },
   );

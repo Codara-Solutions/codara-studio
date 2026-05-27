@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import { useMemo } from "react";
 import type { RunState, Workspace } from "@shared/types";
 import { isRunningStatus, runStatusColor } from "../lib/run-status";
 import { sortSteps } from "./runs/run-format";

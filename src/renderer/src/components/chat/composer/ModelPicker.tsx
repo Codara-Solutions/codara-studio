@@ -17,9 +17,8 @@ interface Props {
 // The model pill + grouped dropdown menu. Reads agents.runtimes() and
 // settings.openRouterModel to decide what to show: only enabled CLI
 // runtimes appear, and the "API" group surfaces just the single model
-// configured in settings (matching vienna's behavior). 1M-context variants
-// ride as separate dropdown rows with a "1M" badge; selecting one fires
-// onPick with isOneMillion:true so the composer can flip chat1mContext.
+// configured in settings (matching vienna's behavior). Claude rows are 1M-only
+// and carry a "1M" badge; selecting one sets chat1mContext=true.
 export default function ModelPicker({
   activeBackend,
   activeModelId,

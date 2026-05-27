@@ -39,27 +39,15 @@ export const ALL_EFFORTS: AgentEffortLevel[] = [
 
 // Catalogs. Claude and Codex are fixed; the OpenRouter "API" group is built
 // dynamically from settings.openRouterModel at render time (one row, the
-// configured model). 1M variants ride as virtual rows with the `:1m`
-// suffix — selecting one sets chat1mContext=true via decomposeModelId.
+// configured model). Claude Code is always shown as 1M-context rows only,
+// so selecting Opus/Sonnet always sets chat1mContext=true.
 const CLAUDE_MODELS: ChatModelOption[] = [
-  {
-    id: "claude-opus-4-7",
-    label: "Opus 4.7",
-    backend: "claude",
-    effortLevels: ["low", "medium", "high", "xhigh", "max"],
-  },
   {
     id: "claude-opus-4-7:1m",
     label: "Opus 4.7 1M",
     backend: "claude",
     effortLevels: ["low", "medium", "high", "xhigh", "max"],
     isOneMillion: true,
-  },
-  {
-    id: "claude-sonnet-4-6",
-    label: "Sonnet 4.6",
-    backend: "claude",
-    effortLevels: ["low", "medium", "high", "xhigh", "max"],
   },
   {
     id: "claude-sonnet-4-6:1m",

@@ -1,4 +1,3 @@
-import React from "react";
 import { fileIconUrl, folderIconUrl } from "./iconResolver";
 
 type Props = {

@@ -62,9 +62,11 @@ test("autopilot runs from a selected markdown plan", async () => {
     expect(attempt.stdoutLogPath && existsSync(attempt.stdoutLogPath)).toBeTruthy();
     expect(attempt.stderrLogPath && existsSync(attempt.stderrLogPath)).toBeTruthy();
     expect(attempt.rawLogPath && existsSync(attempt.rawLogPath)).toBeTruthy();
-    expect(attempt.finalReportPath && existsSync(attempt.finalReportPath)).toBeTruthy();
+    const finalReportPath = attempt.finalReportPath;
+    expect(finalReportPath && existsSync(finalReportPath)).toBeTruthy();
+    if (!finalReportPath) throw new Error("Missing final report path");
 
-    const report = JSON.parse(await readFile(attempt.finalReportPath, "utf8")) as { status: string };
+    const report = JSON.parse(await readFile(finalReportPath, "utf8")) as { status: string };
     expect(report.status).toBe("partial");
   } finally {
     await app?.close();
@@ -231,6 +233,7 @@ test("run uses the latest selected plan text instead of reusing old worker tasks
 
     const promptPath = latest.workerAttempts[0].promptPath;
     expect(promptPath && existsSync(promptPath)).toBeTruthy();
+    if (!promptPath) throw new Error("Missing prompt path");
     const prompt = await readFile(promptPath, "utf8");
     expect(prompt).toContain("PROJECT PLAN SNAPSHOT");
     expect(prompt).toContain("Build a one file HTML calculator.");

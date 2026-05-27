@@ -42,6 +42,10 @@ import type {
   SparkManagerDecision,
   SparkManagerWorkerReportContext,
 } from "./openrouter-manager";
+import {
+  effectiveChatFastMode,
+  effectiveChatOneMillionContext,
+} from "@shared/chat-policy";
 
 /**
  * Per-chat configuration passed into every backend call. Resolved by
@@ -65,11 +69,9 @@ export interface ChatBackendConfig {
    *  assistant replies from the OLD mode's persona, and CC/Codex anchor on
    *  that when they resume. */
   sessionMode?: ChatMode;
-  /** Fast-mode toggle. Claude → /fast slash command on REPL ready. Codex
-   *  → --enable/disable fast_mode arg at spawn. OpenRouter ignores. */
+  /** Fast-mode toggle. Codex-only; Claude Code and OpenRouter ignore it. */
   fastMode: boolean;
-  /** 1M-context toggle. Claude-only → /context 1m slash command on REPL
-   *  ready. Codex and OpenRouter ignore (no equivalent feature). */
+  /** 1M-context toggle. Claude Code always runs with /context 1m. */
   oneMillionContext: boolean;
 }
 
@@ -250,8 +252,8 @@ export function resolveChatBackendConfig(
     effort,
     sessionUuid: run.chatSessionUuid,
     sessionMode: run.chatSessionMode,
-    fastMode: run.chatFastMode ?? false,
-    oneMillionContext: run.chat1mContext ?? false,
+    fastMode: effectiveChatFastMode(backend, run.chatFastMode),
+    oneMillionContext: effectiveChatOneMillionContext(backend),
   };
 }
 

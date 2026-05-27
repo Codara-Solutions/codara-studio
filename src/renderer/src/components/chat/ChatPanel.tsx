@@ -34,7 +34,6 @@ interface Props {
   workspace: Workspace | null;
   runs: RunState[];
   activeRun: RunState | null;
-  busy: boolean;
   error: string | null;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -55,7 +54,6 @@ export default function ChatPanel({
   workspace,
   runs,
   activeRun,
-  busy,
   error,
   collapsed,
   onToggleCollapse,
@@ -79,23 +77,18 @@ export default function ChatPanel({
   // submitting / printing, useful for debugging hook fires, slash-command
   // responses, and weird interactive states.
   const [chatView, setChatView] = useState<ChatView>("chat");
-  // Drop swarm mode when there is no active chat to render workers from —
-  // the swarm grid needs a RunState. Also drop it when the section is
-  // collapsed: the user can't see the toggle so the only way back out
-  // would be expand + toggle.
+  // A new chat starts in the normal conversation view. Swarm/terminal state
+  // should not leak between runs because their PTYs/workers are run-scoped.
   useEffect(() => {
-    if (!activeRun) setSwarmActive(false);
-  }, [activeRun]);
+    setSwarmActive(false);
+    setChatView("chat");
+  }, [activeRun?.id]);
+
+  // Drop swarm mode when the section is collapsed: the user can't see the
+  // toggle, so the only way back out would be expand + toggle.
   useEffect(() => {
     if (collapsed) setSwarmActive(false);
   }, [collapsed]);
-  // Reset to Chat view when switching to a different chat — the terminal
-  // tab is per-chat (each chat's PTY is keyed by run.id) and a fresh chat
-  // shouldn't inherit the previous one's view. Also reset when there's no
-  // active chat at all.
-  useEffect(() => {
-    if (!activeRun) setChatView("chat");
-  }, [activeRun?.id]);
   // OpenRouter chats have no PTY to attach to — force back to Chat view if
   // the backend doesn't support the terminal tab.
   const backendSessionId = activeRun
@@ -116,7 +109,7 @@ export default function ChatPanel({
   // Once the PTY exists, render TerminalPane; otherwise show a placeholder.
   const [backendPtyExists, setBackendPtyExists] = useState(false);
   useEffect(() => {
-    if (!backendSessionId) {
+    if (!backendSessionId || chatView !== "terminal") {
       setBackendPtyExists(false);
       return;
     }
@@ -137,7 +130,7 @@ export default function ChatPanel({
       disposed = true;
       window.clearInterval(interval);
     };
-  }, [backendSessionId]);
+  }, [backendSessionId, chatView]);
 
   return (
     <div

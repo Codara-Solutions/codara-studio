@@ -174,9 +174,11 @@ function defaultSparkUserDataDir(): string {
   return join(process.env.XDG_CONFIG_HOME || join(process.env.HOME || "", ".config"), "Spark Agent");
 }
 
-function realUserFlowEnv(userDataDir: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
+function realUserFlowEnv(userDataDir: string): Record<string, string> {
+  const env: Record<string, string> = {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    ),
     SPARK_USER_DATA_DIR: userDataDir,
   };
   delete env.SPARK_ENABLE_MANUAL_FALLBACK;
