@@ -114,17 +114,49 @@ export interface ManagerCallResult {
 }
 
 /**
- * Streaming event a Talk-mode backend may emit between request and response.
- * The dispatcher relays these to the renderer over the existing orchestration
- * event bus as `chat-stream` events so the UI can render partial assistant
- * output, tool calls, etc. as they arrive — without waiting for the full
- * manager-decision result.
+ * Streaming event a Talk-mode (and Execute-mode) backend emits between
+ * request and response. The run-store dispatcher relays each event onto the
+ * orchestration event bus as a `chat.<kind>` SparkEvent so the renderer's
+ * ChatConversation can grow a live assistant bubble + render tool calls in
+ * place as they arrive — without waiting for the full manager-decision
+ * result.
+ *
+ * Naming convention is snake_case-after-dot to match Spark's existing
+ * SparkEvent type vocabulary (`spark_call.completed`, `run.status_updated`).
  */
 export type ChatStreamEvent =
-  | { kind: "assistant-text"; text: string }
-  | { kind: "tool-use"; toolName: string; input: unknown; toolUseId: string }
-  | { kind: "tool-result"; toolUseId: string; output: string; isError?: boolean }
-  | { kind: "system"; message: string }
+  | {
+      kind: "assistant_block";
+      /** Stable per-message id from the CLI's JSONL transcript. Consecutive
+       *  blocks may share a messageId — the renderer concatenates them into
+       *  the same bubble. */
+      messageId: string;
+      text: string;
+    }
+  | {
+      kind: "tool_use";
+      toolName: string;
+      input: unknown;
+      toolUseId: string;
+    }
+  | {
+      kind: "tool_result";
+      toolUseId: string;
+      output: string;
+      isError?: boolean;
+    }
+  | { kind: "system_note"; message: string }
+  | {
+      kind: "usage";
+      /** Tokens the backend reports for this turn. Drives the composer's
+       *  token-counter chip when accumulated across the chat. */
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      /** Model's full context window in tokens, when the backend exposes it.
+       *  Defaults handled renderer-side via contextWindowForModel(). */
+      contextWindowTokens?: number;
+    }
   | { kind: "error"; message: string };
 
 export type ChatStreamHandler = (event: ChatStreamEvent) => void;

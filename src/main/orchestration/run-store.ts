@@ -93,7 +93,8 @@ import { renderAgentSyncManagerContext, renderAgentSyncPromptLines } from "../ag
 import { isSparkPreviewMcpAvailable } from "../mcp-installer";
 import { getProvider } from "../providers";
 import type { SpawnOpts } from "../providers/types";
-import { resolveChatBackendConfig } from "./spark-agent-backend";
+import { resolveChatBackendConfig, type ChatStreamEvent } from "./spark-agent-backend";
+import { getBackend } from "./backend-registry";
 
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
@@ -213,6 +214,15 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
       status: "idle",
       updatedAt: now,
     },
+    // Stamp the chip's draft selections onto the fresh run so the chip's
+    // backend/model/mode/effort survive the draft→live transition without an
+    // extra updateChatBackend round-trip. Fields are individually optional
+    // because pre-feature callers pass none of them; resolveChatBackendConfig
+    // falls back to OpenRouter + the global default model in that case.
+    chatBackend: input.chatBackend,
+    chatModel: input.chatModel?.trim() || undefined,
+    chatMode: input.chatMode,
+    chatEffort: input.chatEffort,
   };
   run.artifactDir = runDir(run.id);
 
@@ -1167,22 +1177,30 @@ async function askOpenRouterManager(
   mode: SparkCall["mode"],
 ): Promise<RunState | null> {
   const settings = await loadSettings();
-  const config = readOpenRouterConfig(settings);
-  if (!config) return null;
+  const chatConfig = resolveChatBackendConfig(run, settings);
+
+  // Non-OpenRouter backends own their own request lifecycle (spawn a real
+  // `claude` / `codex` CLI, tail its JSONL transcript, etc.). Dispatch and
+  // skip the OpenRouter-specific SparkCall + artifact + LangSmith pipeline
+  // below. Both backends still apply their resulting SparkManagerDecision
+  // through applySparkManagerDecision so downstream worker spawns + chat
+  // replies work identically.
+  if (chatConfig.backend !== "openrouter") {
+    return await askChatBackendNonOpenRouter(run, cwd, mode, chatConfig, settings);
+  }
+
+  const baseConfig = readOpenRouterConfig(settings);
+  if (!baseConfig) return null;
   const langSmithConfig = readLangSmithConfig(settings);
 
-  // Resolve the per-chat backend selector. Today the dispatch is shallow: when
-  // a non-OpenRouter backend is selected we still drive the OpenRouter
-  // pipeline (the real claude-backend / codex-backend implementations land in
-  // a follow-up) but log a notice so the user knows the chip's choice didn't
-  // route to a real CLI yet. The per-chat MODEL override DOES take effect for
-  // OpenRouter chats — that piece is genuinely working today.
-  const chatConfig = resolveChatBackendConfig(run, settings);
-  const effectiveModel =
-    chatConfig.backend === "openrouter" && chatConfig.model
-      ? chatConfig.model
-      : config.model;
-  const resolvedConfig: OpenRouterConfig = { ...config, model: effectiveModel };
+  // The composer chip's per-chat model override beats the global setting. We
+  // shadow `config` with the resolved version so the rest of the pipeline
+  // (request body, SparkCall record, artifacts, LangSmith trace) all see the
+  // chip's selected model without a per-call-site rewrite.
+  const config: OpenRouterConfig =
+    chatConfig.model && chatConfig.model !== baseConfig.model
+      ? { ...baseConfig, model: chatConfig.model }
+      : baseConfig;
 
   const callId = makeId("spark");
   const callDir = join(runDir(run.id), "spark-calls", callId);
@@ -1425,6 +1443,119 @@ async function askOpenRouterManager(
         ].join(" "),
       );
     }
+    return null;
+  }
+}
+
+// Non-OpenRouter backend dispatch — see askOpenRouterManager's top branch.
+// Calls the chosen backend (Claude Code or Codex) via the backend registry,
+// forwards streaming chat events onto the orchestration event bus, persists
+// any new CLI-side session UUID returned by the backend onto the RunState,
+// records a minimal SparkCall for cost/audit consistency, and applies the
+// resulting SparkManagerDecision through the same downstream path the
+// OpenRouter pipeline uses.
+async function askChatBackendNonOpenRouter(
+  run: RunState,
+  cwd: string,
+  mode: SparkCall["mode"],
+  chatConfig: ReturnType<typeof resolveChatBackendConfig>,
+  settings: AppSettings,
+): Promise<RunState | null> {
+  const backend = getBackend(chatConfig.backend);
+  const callId = makeId("spark");
+  const startedAt = new Date().toISOString();
+
+  // Stream events from the backend get appended to the run's event log so the
+  // renderer (which already subscribes to orchestration:event) can render
+  // partial assistant text, tool calls, and tool results as they arrive.
+  const onStream = (event: ChatStreamEvent): void => {
+    void appendEvent({
+      timestamp: new Date().toISOString(),
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      sparkCallId: callId,
+      type: `chat.${event.kind}`,
+      payload: event as unknown as Record<string, unknown>,
+    });
+  };
+
+  // Open the SparkCall record up front so the renderer's "manager is thinking"
+  // affordance has something to attach to. We fill in cost / duration once the
+  // backend resolves; the OpenRouter pipeline does the same.
+  const sparkCall: SparkCall = {
+    id: callId,
+    runId: run.id,
+    stepId: run.currentStepId,
+    mode,
+    model: chatConfig.model,
+    status: "started",
+    createdAt: startedAt,
+  };
+  run.sparkCalls.push(sparkCall);
+  run.updatedAt = startedAt;
+  await saveRun(run);
+
+  const callStartedMs = Date.now();
+  try {
+    const result = await backend.requestManagerDecision(
+      { run, cwd, mode: normalizeOpenRouterManagerMode(mode), settings, chat: chatConfig },
+      onStream,
+    );
+    const latest = await requireRun(run.id);
+    const targetCall = latest.sparkCalls.find((call) => call.id === callId);
+    const completedAt = new Date().toISOString();
+    if (targetCall) {
+      targetCall.status = "completed";
+      targetCall.model = result.model;
+      targetCall.durationMs = result.durationMs;
+      if (typeof result.promptTokens === "number") targetCall.promptTokens = result.promptTokens;
+      if (typeof result.completionTokens === "number") targetCall.completionTokens = result.completionTokens;
+      if (typeof result.costUsd === "number") targetCall.costUsd = result.costUsd;
+      if (typeof result.inputTokens === "number") targetCall.inputTokens = result.inputTokens;
+      if (typeof result.outputTokens === "number") targetCall.outputTokens = result.outputTokens;
+      if (typeof result.cacheReadTokens === "number") targetCall.cacheReadTokens = result.cacheReadTokens;
+      targetCall.completedAt = completedAt;
+    }
+    if (result.newSessionUuid && result.newSessionUuid !== latest.chatSessionUuid) {
+      latest.chatSessionUuid = result.newSessionUuid;
+    }
+    recomputeRunCostRollups(latest);
+    latest.updatedAt = completedAt;
+    await saveRun(latest);
+    if (result.notice) {
+      await appendEvent({
+        timestamp: completedAt,
+        workspaceId: latest.workspaceId,
+        runId: latest.id,
+        sparkCallId: callId,
+        type: "chat.backend_notice",
+        message: result.notice,
+        payload: { backend: chatConfig.backend },
+      });
+    }
+    return applySparkManagerDecision(latest, result.decision, mode);
+  } catch (err) {
+    const latest = await requireRun(run.id);
+    const targetCall = latest.sparkCalls.find((call) => call.id === callId);
+    const completedAt = new Date().toISOString();
+    const error = err instanceof Error ? err.message : String(err);
+    if (targetCall) {
+      targetCall.status = "failed";
+      targetCall.error = error;
+      targetCall.completedAt = completedAt;
+      targetCall.durationMs = Date.now() - callStartedMs;
+    }
+    latest.updatedAt = completedAt;
+    await saveRun(latest);
+    await appendEvent({
+      timestamp: completedAt,
+      workspaceId: latest.workspaceId,
+      runId: latest.id,
+      sparkCallId: callId,
+      type: "spark_call.failed",
+      message: `Spark manager (${chatConfig.backend}) call failed: ${error}`,
+      payload: { mode, model: chatConfig.model, backend: chatConfig.backend, error },
+    });
     return null;
   }
 }

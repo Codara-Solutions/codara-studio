@@ -6,9 +6,22 @@ import type {
   ChatMode,
   FsEntry,
   RunState,
+  SparkEvent,
 } from "@shared/types";
 import { makeId } from "@shared/ids";
+import { contextWindowForModel } from "@shared/context-window";
 import { findOpenQuestion } from "./timeline";
+
+// Per-chat selector bag forwarded from the draft composer chip into the
+// new-chat creation call so the chip's choice survives draft→live. Once a run
+// exists, chip changes flow through updateChatBackend instead; this bag is
+// only consulted on the very first send for a draft.
+export interface ChatComposerStartConfig {
+  backend?: ChatBackendKind;
+  model?: string;
+  mode?: ChatMode;
+  effort?: AgentEffortLevel;
+}
 
 // The chat composer. One surface for two jobs:
 //   - draft chat (run === null): the first message starts a brand-new chat.
@@ -27,6 +40,7 @@ interface Props {
     message: string,
     clientMessageId: string,
     attachments?: AddRunMessageAttachmentInput[],
+    chatConfig?: ChatComposerStartConfig,
   ) => RunState | void | Promise<RunState | void>;
   onForcePauseRun: () => void;
 }
@@ -154,6 +168,10 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const [draftChatModel, setDraftChatModel] = useState<string>(DEFAULT_CHAT_MODEL);
   const [draftChatMode, setDraftChatMode] = useState<ChatMode>(DEFAULT_CHAT_MODE);
   const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(DEFAULT_CHAT_EFFORT);
+  // Running per-chat token total, summed from chat.usage SparkEvents. Reset
+  // whenever the active run changes so a fresh chat starts at 0; for the
+  // draft (no run yet) we also stay at 0 because no events have fired.
+  const [tokensUsed, setTokensUsed] = useState(0);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [effortPickerOpen, setEffortPickerOpen] = useState(false);
   const modelPickerRef = useRef<HTMLDivElement>(null);
@@ -208,6 +226,32 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     node.style.height = "auto";
     node.style.height = `${Math.min(node.scrollHeight, MAX_TEXTAREA_H)}px`;
   }, [draft]);
+
+  // Reset the token accumulator on run change so a freshly-selected chat
+  // starts at 0 rather than carrying the previous chat's running total.
+  useEffect(() => {
+    setTokensUsed(0);
+  }, [run?.id]);
+
+  // Accumulate live chat.usage SparkEvents into a running per-chat total.
+  // The manager fires one chat.usage event per backend call carrying that
+  // call's inputTokens; summing them gives the user a feel for how much
+  // context this chat has consumed across its lifetime. Filtered by runId
+  // so cross-chat events don't bleed in.
+  useEffect(() => {
+    const runId = run?.id;
+    if (!runId) return;
+    const off = window.spark.orchestration.onEvent((event: SparkEvent) => {
+      if (event.runId !== runId) return;
+      if (event.type !== "chat.usage") return;
+      const payload = (event.payload ?? {}) as Record<string, unknown>;
+      const raw = payload.inputTokens;
+      const value = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+      if (value <= 0) return;
+      setTokensUsed((prev) => prev + value);
+    });
+    return off;
+  }, [run?.id]);
 
   useEffect(() => {
     setFileReferences([]);
@@ -327,7 +371,13 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
       const message = messageForSend(draft, attachments.length);
       if (!message) return;
       if (!run_) {
-        await onStartChat(message, clientMessageId, attachments);
+        const chatConfig: ChatComposerStartConfig = {
+          backend: draftChatBackend,
+          model: draftChatModel,
+          mode: draftChatMode,
+          effort: draftChatEffort,
+        };
+        await onStartChat(message, clientMessageId, attachments, chatConfig);
       } else {
         await window.spark.orchestration.addRunMessage({
           runId: run_.id,
@@ -827,7 +877,10 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
                 ? "Queued for next manager decision"
                 : "Enter to send, Shift+Enter for a new line"}
           </span>
-          <TokenCounter used={0} budget={400_000} />
+          <TokenCounter
+            used={tokensUsed}
+            budget={contextWindowForModel(activeChatModelId).tokens}
+          />
           <IconButton
             title="MCP and skills"
             disabled={false}
@@ -1735,7 +1788,8 @@ function TokenCounter({ used, budget }: { used: number; budget: number }) {
 }
 
 function formatTokens(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return `${value}`;
+  return `${Math.round(value)}`;
 }

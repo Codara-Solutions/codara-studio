@@ -107,6 +107,10 @@
         "to": "spark-preview-mcp"
       },
       {
+        "from": "resources/spark-orchestrator-mcp",
+        "to": "spark-orchestrator-mcp"
+      },
+      {
         "from": "resources/sounds",
         "to": "sounds"
       }

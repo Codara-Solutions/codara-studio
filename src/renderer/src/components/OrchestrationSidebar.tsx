@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import type { AddRunMessageAttachmentInput, RunState, Workspace } from "@shared/types";
 import type { SectionHeaderDragProps } from "../panels/SectionHeader";
 import ChatPanel from "./chat/ChatPanel";
+import type { ChatComposerStartConfig } from "./chat/ChatComposer";
 
 interface Props {
   workspace: Workspace | null;
@@ -113,17 +114,48 @@ export default function OrchestrationSidebar({
   // as the opening note. Intentionally not wrapped in try/catch — the
   // composer awaits this and keeps the draft + surfaces the error if it
   // throws.
+  //
+  // chatConfig carries the draft composer's chip selections
+  // (backend/model/mode/effort). When any are set we create the run up-front
+  // through createRun so those fields are stamped on the fresh RunState, then
+  // hand the runId to startAutopilot — this avoids touching the autopilot
+  // input contract while still threading the chip's choice through to the
+  // first manager call. When chatConfig is empty we keep the original
+  // single-call path so legacy callers (no chip selection) behave identically.
   const startChat = useCallback(
     async (
       message: string,
       clientMessageId: string,
       attachments?: AddRunMessageAttachmentInput[],
+      chatConfig?: ChatComposerStartConfig,
     ) => {
       if (!workspace) return;
+      const hasChatConfig = Boolean(
+        chatConfig &&
+          (chatConfig.backend !== undefined ||
+            chatConfig.model !== undefined ||
+            chatConfig.mode !== undefined ||
+            chatConfig.effort !== undefined),
+      );
+      let runId: string | undefined;
+      if (hasChatConfig) {
+        const created = await window.spark.orchestration.createRun({
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          cwd: workspace.cwd,
+          title: deriveDraftChatTitle(message, workspace.name),
+          chatBackend: chatConfig?.backend,
+          chatModel: chatConfig?.model,
+          chatMode: chatConfig?.mode,
+          chatEffort: chatConfig?.effort,
+        });
+        runId = created.id;
+      }
       const run = await window.spark.orchestration.startAutopilot({
         workspaceId: workspace.id,
         workspaceName: workspace.name,
         cwd: workspace.cwd,
+        runId,
         initialUserNote: message,
         initialUserNoteClientMessageId: clientMessageId,
         initialAttachments: attachments,
@@ -182,4 +214,18 @@ export default function OrchestrationSidebar({
       onForcePauseRun={forcePauseRun}
     />
   );
+}
+
+// Mirrors chatTitleFromInput in run-store: when we pre-create the run from
+// the renderer (so we can stamp the chip's chat backend/model/mode/effort
+// before startAutopilot fires), we have to derive the title locally. Keep
+// the logic identical so a chat created via the chat-config path looks the
+// same in the switcher as one created via the legacy single-call path.
+function deriveDraftChatTitle(note: string, workspaceName: string): string {
+  const trimmed = note.trim().replace(/\s+/g, " ");
+  if (!trimmed) return `Run - ${workspaceName}`;
+  if (trimmed.length <= 52) return trimmed;
+  const cut = trimmed.slice(0, 49);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > 24 ? cut.slice(0, lastSpace) : cut).trimEnd()}...`;
 }

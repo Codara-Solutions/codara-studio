@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { Checkpoint, RunMessageAttachment, RunQuestionOption, RunState } from "@shared/types";
+import type { Checkpoint, RunMessageAttachment, RunQuestionOption, RunState, SparkEvent } from "@shared/types";
 import { makeId } from "@shared/ids";
 import {
   buildChatTimeline,
@@ -25,6 +25,65 @@ type ActivityGroupItem = {
   items: ToolItem[];
 };
 type ConversationItem = ChatTimelineItem | ActivityGroupItem;
+
+// In-flight assistant turn streamed from a Claude/Codex backend via
+// `chat.*` orchestration events. Lives only in renderer state; once the
+// turn finishes the run-store rewrites it as a persisted spark "note"
+// message and we drop this buffer.
+interface LiveToolCall {
+  toolUseId: string;
+  toolName: string;
+  input: unknown;
+  output?: string;
+  isError?: boolean;
+  at: string;
+}
+
+interface LiveStreamState {
+  // Most recent messageId seen on a `chat.assistant_block`. Successive
+  // blocks with the same id concatenate; a new id starts a fresh segment
+  // (each segment is its own paragraph under one bubble for the turn).
+  segments: Array<{ messageId: string; text: string }>;
+  toolCalls: LiveToolCall[];
+  notes: Array<{ id: string; message: string; tone: "system" | "backend" }>;
+  errors: Array<{ id: string; message: string }>;
+  // Latest event timestamp — used to detect when a persisted spark
+  // message has surpassed the live buffer and we can clear it.
+  lastEventAt: string;
+}
+
+const EMPTY_LIVE_STATE: LiveStreamState = {
+  segments: [],
+  toolCalls: [],
+  notes: [],
+  errors: [],
+  lastEventAt: "",
+};
+
+function isChatStreamEventType(type: string): boolean {
+  return (
+    type === "chat.assistant_block" ||
+    type === "chat.tool_use" ||
+    type === "chat.tool_result" ||
+    type === "chat.system_note" ||
+    type === "chat.usage" ||
+    type === "chat.error" ||
+    type === "chat.backend_notice"
+  );
+}
+
+function hasLiveContent(state: LiveStreamState): boolean {
+  return (
+    state.segments.length > 0 ||
+    state.toolCalls.length > 0 ||
+    state.notes.length > 0 ||
+    state.errors.length > 0
+  );
+}
+
+function liveTextFromState(state: LiveStreamState): string {
+  return state.segments.map((segment) => segment.text).join("\n\n").trim();
+}
 
 export default function ChatConversation({ run }: { run: RunState }) {
   const items = useMemo(() => groupCompletedActivity(buildChatTimeline(run)), [run]);
@@ -71,18 +130,196 @@ export default function ChatConversation({ run }: { run: RunState }) {
   }, [run.checkpoints, run.humanMessages]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Live-streaming buffer for in-flight Claude/Codex Talk-mode turns. Fed by
+  // `chat.*` orchestration events; cleared when the run-store finalises the
+  // turn as a persisted spark `note` message or the user switches chats.
+  const [live, setLive] = useState<LiveStreamState>(EMPTY_LIVE_STATE);
+
+  // Reset the live buffer whenever we switch chats. Without this a stale
+  // partial bubble from a previous Talk turn would briefly leak into the
+  // newly-selected chat before its own events start arriving.
+  useEffect(() => {
+    setLive(EMPTY_LIVE_STATE);
+  }, [run.id]);
+
+  // Subscribe to the orchestration event bus and accumulate the chat.* stream
+  // into renderer state. Filtered by runId so cross-chat events don't bleed
+  // into the active conversation.
+  useEffect(() => {
+    const off = window.spark.orchestration.onEvent((event: SparkEvent) => {
+      if (event.runId !== run.id) return;
+      if (!isChatStreamEventType(event.type)) return;
+      const payload = (event.payload ?? {}) as Record<string, unknown>;
+      const at = event.timestamp;
+
+      setLive((prev) => {
+        const next: LiveStreamState = {
+          segments: prev.segments,
+          toolCalls: prev.toolCalls,
+          notes: prev.notes,
+          errors: prev.errors,
+          lastEventAt: at > prev.lastEventAt ? at : prev.lastEventAt,
+        };
+
+        if (event.type === "chat.assistant_block") {
+          const messageId = typeof payload.messageId === "string" ? payload.messageId : "";
+          const text = typeof payload.text === "string" ? payload.text : "";
+          if (!messageId && !text) return prev;
+          const lastSegment = next.segments[next.segments.length - 1];
+          if (lastSegment && lastSegment.messageId === messageId) {
+            next.segments = [
+              ...next.segments.slice(0, -1),
+              { messageId, text: lastSegment.text + text },
+            ];
+          } else {
+            next.segments = [...next.segments, { messageId, text }];
+          }
+          return next;
+        }
+
+        if (event.type === "chat.tool_use") {
+          const toolUseId = typeof payload.toolUseId === "string" ? payload.toolUseId : event.id;
+          const toolName = typeof payload.toolName === "string" ? payload.toolName : "tool";
+          next.toolCalls = [
+            ...next.toolCalls,
+            { toolUseId, toolName, input: payload.input, at },
+          ];
+          return next;
+        }
+
+        if (event.type === "chat.tool_result") {
+          const toolUseId = typeof payload.toolUseId === "string" ? payload.toolUseId : "";
+          const output = typeof payload.output === "string" ? payload.output : "";
+          const isError = payload.isError === true;
+          let matched = false;
+          next.toolCalls = next.toolCalls.map((call) => {
+            if (!matched && call.toolUseId === toolUseId) {
+              matched = true;
+              return { ...call, output, isError };
+            }
+            return call;
+          });
+          if (!matched) {
+            // Orphan result (rare — backend emitted result without a matching
+            // tool_use, or events arrived out of order). Surface it anyway so
+            // the user can see what happened.
+            next.toolCalls = [
+              ...next.toolCalls,
+              {
+                toolUseId: toolUseId || event.id,
+                toolName: "(unknown tool)",
+                input: undefined,
+                output,
+                isError,
+                at,
+              },
+            ];
+          }
+          return next;
+        }
+
+        if (event.type === "chat.system_note" || event.type === "chat.backend_notice") {
+          const message =
+            typeof payload.message === "string"
+              ? payload.message
+              : typeof event.message === "string"
+                ? event.message
+                : "";
+          if (!message) return prev;
+          next.notes = [
+            ...next.notes,
+            {
+              id: event.id,
+              message,
+              tone: event.type === "chat.backend_notice" ? "backend" : "system",
+            },
+          ];
+          return next;
+        }
+
+        if (event.type === "chat.error") {
+          const message =
+            typeof payload.message === "string"
+              ? payload.message
+              : typeof event.message === "string"
+                ? event.message
+                : "Streaming error.";
+          next.errors = [...next.errors, { id: event.id, message }];
+          return next;
+        }
+
+        // chat.usage is metadata only — accumulating per-chat token totals
+        // belongs to the composer chip (Subagent E), not the conversation
+        // bubble. Drop the event here to avoid churning state pointlessly.
+        return prev;
+      });
+    });
+    return off;
+  }, [run.id]);
+
+  // When the run-store persists the streamed turn as a real spark `note`
+  // message, the conversation timeline already shows the finished version
+  // and the live buffer would just duplicate it. Clear it as soon as a
+  // spark note arrives that's newer than our last event.
+  useEffect(() => {
+    if (!hasLiveContent(live)) return;
+    const liveText = liveTextFromState(live);
+    const liveTextNorm = liveText.replace(/\s+/g, " ").trim();
+    for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
+      const message = run.humanMessages[i];
+      if (message.author !== "spark") continue;
+      if (message.kind !== "note" && message.kind !== "decision") continue;
+      const persistedAt = message.createdAt;
+      const persistedNorm = (message.message ?? "").replace(/\s+/g, " ").trim();
+      const sameText =
+        liveTextNorm.length > 0 &&
+        (persistedNorm === liveTextNorm || persistedNorm.startsWith(liveTextNorm));
+      const isLater = live.lastEventAt && persistedAt >= live.lastEventAt;
+      if (sameText || isLater) {
+        setLive(EMPTY_LIVE_STATE);
+        return;
+      }
+      // Only inspect the most recent spark note; older ones can't match a
+      // turn we just started streaming.
+      break;
+    }
+  }, [run.humanMessages, live]);
+
   // Pin to the bottom as the conversation grows. Keyed on the item count and
   // run state so a new turn or a status change scrolls into view. run.updatedAt
   // ticks on every stream update so we keep following the tail during streams.
+  // For live streaming we keep the "stay pinned if already pinned" rule — if
+  // the user has scrolled up to re-read a worker report we don't yank them
+  // back to the tail every time a token arrives.
+  const wasAtBottomRef = useRef(true);
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node) return;
+    const onScroll = () => {
+      const slack = 24;
+      wasAtBottomRef.current =
+        node.scrollHeight - node.scrollTop - node.clientHeight <= slack;
+    };
+    node.addEventListener("scroll", onScroll, { passive: true });
+    return () => node.removeEventListener("scroll", onScroll);
+  }, []);
   useEffect(() => {
     const node = scrollRef.current;
     if (node) node.scrollTop = node.scrollHeight;
-  }, [items.length, run.status, run.updatedAt]);
+    wasAtBottomRef.current = true;
+  }, [items.length, run.status, run.updatedAt, run.id]);
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node) return;
+    if (wasAtBottomRef.current) node.scrollTop = node.scrollHeight;
+  }, [live]);
+
+  const showLive = hasLiveContent(live);
 
   return (
     <div ref={scrollRef} style={SCROLL_STYLE}>
       <div>
-        {items.length === 0 ? (
+        {items.length === 0 && !showLive ? (
           <ConversationEmpty />
         ) : (
           items.map((item) => (
@@ -108,6 +345,11 @@ export default function ChatConversation({ run }: { run: RunState }) {
               )}
             </div>
           ))
+        )}
+        {showLive && (
+          <div style={CHAT_ITEM_STYLE}>
+            <LiveAssistantTurn live={live} />
+          </div>
         )}
       </div>
     </div>
@@ -228,6 +470,163 @@ const MessageTurn = React.memo(function MessageTurn({
     </div>
   );
 });
+
+// The in-flight assistant bubble — one bubble per turn, even if the backend
+// emitted multiple `chat.assistant_block` events with different messageIds.
+// Distinct from a finalised message: thin accent border on the left edge +
+// a "typing…" pip in the header. Tool calls render as collapsible rows
+// directly under the prose; system notes and errors get their own muted /
+// danger-tone bubbles.
+function LiveAssistantTurn({ live }: { live: LiveStreamState }) {
+  const liveText = liveTextFromState(live);
+
+  return (
+    <div style={SPARK_TURN_STYLE}>
+      <div style={SPARK_HEADER_STYLE}>
+        <SparkMark />
+        <span style={SPEAKER_LABEL_STYLE}>Spark</span>
+        <LiveTypingPip />
+      </div>
+      <div style={LIVE_BUBBLE_STYLE}>
+        {liveText.length > 0 ? <Markdown text={liveText} /> : <LiveEllipsis />}
+        {live.toolCalls.length > 0 && (
+          <div style={LIVE_TOOL_LIST_STYLE}>
+            {live.toolCalls.map((call) => (
+              <LiveToolRow key={call.toolUseId} call={call} />
+            ))}
+          </div>
+        )}
+        {live.notes.length > 0 && (
+          <div style={LIVE_NOTE_LIST_STYLE}>
+            {live.notes.map((note) => (
+              <div
+                key={note.id}
+                style={{
+                  ...LIVE_NOTE_STYLE,
+                  borderColor:
+                    note.tone === "backend"
+                      ? "color-mix(in oklch, var(--accent) 28%, var(--rule-soft))"
+                      : "var(--rule-soft)",
+                }}
+              >
+                <span style={LIVE_NOTE_LABEL_STYLE}>
+                  {note.tone === "backend" ? "backend" : "system"}
+                </span>
+                <span>{note.message}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {live.errors.length > 0 && (
+          <div style={LIVE_ERROR_LIST_STYLE}>
+            {live.errors.map((err) => (
+              <div key={err.id} style={LIVE_ERROR_STYLE}>
+                {err.message}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LiveTypingPip() {
+  return (
+    <span style={LIVE_PIP_STYLE} title="Streaming...">
+      <span style={LIVE_PIP_DOT_STYLE} />
+      <span>typing</span>
+    </span>
+  );
+}
+
+function LiveEllipsis() {
+  return (
+    <span style={LIVE_ELLIPSIS_STYLE}>
+      <span style={LIVE_ELLIPSIS_DOT_STYLE} />
+      <span style={{ ...LIVE_ELLIPSIS_DOT_STYLE, animationDelay: "0.15s" }} />
+      <span style={{ ...LIVE_ELLIPSIS_DOT_STYLE, animationDelay: "0.3s" }} />
+    </span>
+  );
+}
+
+function LiveToolRow({ call }: { call: LiveToolCall }) {
+  const finished = call.output !== undefined;
+  const failed = finished && call.isError === true;
+  const [open, setOpen] = useState(failed);
+  const inputPreview = compactPreview(formatToolPayload(call.input));
+  const outputPreview = finished ? compactPreview(call.output ?? "") : "running...";
+  const color = failed ? "var(--danger)" : finished ? "var(--muted-2)" : "var(--accent)";
+
+  return (
+    <div
+      style={{
+        ...LIVE_TOOL_ROW_STYLE,
+        borderColor: failed
+          ? "color-mix(in oklch, var(--danger) 38%, transparent)"
+          : finished
+            ? open
+              ? "var(--rule-soft)"
+              : "transparent"
+            : "color-mix(in oklch, var(--accent) 34%, transparent)",
+        background: failed
+          ? "color-mix(in oklch, var(--danger) 9%, transparent)"
+          : finished
+            ? open
+              ? "color-mix(in oklch, var(--ink) 3%, transparent)"
+              : "transparent"
+            : "color-mix(in oklch, var(--accent) 7%, transparent)",
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        style={TOOL_ROW_BUTTON_STYLE}
+        title={call.toolName}
+      >
+        <StatusDot color={color} pulse={!finished} size={5} />
+        <span style={TOOL_KIND_STYLE}>TOOL</span>
+        <span style={TOOL_TITLE_STYLE}>{call.toolName}</span>
+        <span style={TOOL_INLINE_DETAIL_STYLE}>{inputPreview || outputPreview}</span>
+        <Caret open={open} />
+      </button>
+      {open && (
+        <div style={TOOL_DETAILS_STYLE}>
+          {inputPreview.length > 0 && (
+            <div>
+              <div style={LIVE_TOOL_LABEL_STYLE}>input</div>
+              <pre style={LIVE_TOOL_PRE_STYLE}>{formatToolPayload(call.input)}</pre>
+            </div>
+          )}
+          {finished && (
+            <div>
+              <div style={{ ...LIVE_TOOL_LABEL_STYLE, color: failed ? "var(--danger)" : "var(--muted)" }}>
+                {failed ? "error" : "result"}
+              </div>
+              <pre style={LIVE_TOOL_PRE_STYLE}>{call.output ?? ""}</pre>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function compactPreview(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (flat.length <= 96) return flat;
+  return `${flat.slice(0, 93)}...`;
+}
+
+function formatToolPayload(input: unknown): string {
+  if (input == null) return "";
+  if (typeof input === "string") return input;
+  try {
+    return JSON.stringify(input, null, 2);
+  } catch {
+    return String(input);
+  }
+}
 
 function DoneMarker() {
   return (
@@ -1697,4 +2096,156 @@ const TOOL_META_VALUE_STYLE: React.CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
+};
+
+// Live streaming bubble — distinct from the finalised SPARK_BUBBLE_STYLE by
+// the thin accent left border + soft accent wash. The header still uses the
+// standard SPARK_HEADER_STYLE so the speaker label keeps its place, but the
+// added "typing" pip in the header and the border treatment here make the
+// in-flight state read at a glance.
+const LIVE_BUBBLE_STYLE: React.CSSProperties = {
+  width: "fit-content",
+  maxWidth: "94%",
+  boxSizing: "border-box",
+  color: "var(--ink)",
+  background: "color-mix(in oklch, var(--accent) 5%, var(--panel-2))",
+  border: "1px solid color-mix(in oklch, var(--accent) 22%, var(--rule-soft))",
+  borderLeft: "2px solid color-mix(in oklch, var(--accent) 55%, var(--rule-strong))",
+  borderRadius: 8,
+  borderTopLeftRadius: 4,
+  padding: "8px 10px",
+  display: "flex",
+  flexDirection: "column",
+  gap: 6,
+  overflowWrap: "anywhere",
+  transition:
+    "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+};
+
+const LIVE_PIP_STYLE: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  fontFamily: "var(--font-mono)",
+  fontSize: 8.5,
+  fontWeight: 700,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+  color: "var(--accent)",
+  border: "1px solid color-mix(in oklch, var(--accent) 40%, transparent)",
+  borderRadius: 999,
+  padding: "1px 6px",
+};
+
+const LIVE_PIP_DOT_STYLE: React.CSSProperties = {
+  width: 5,
+  height: 5,
+  borderRadius: 999,
+  background: "var(--accent)",
+  display: "inline-block",
+  animation: "spark-pulse 1.3s ease-in-out infinite",
+};
+
+const LIVE_ELLIPSIS_STYLE: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  height: 16,
+};
+
+const LIVE_ELLIPSIS_DOT_STYLE: React.CSSProperties = {
+  width: 5,
+  height: 5,
+  borderRadius: 999,
+  background: "var(--muted)",
+  display: "inline-block",
+  animation: "spark-pulse 1.3s ease-in-out infinite",
+};
+
+const LIVE_TOOL_LIST_STYLE: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+  marginTop: 2,
+};
+
+const LIVE_TOOL_ROW_STYLE: React.CSSProperties = {
+  border: "1px solid transparent",
+  borderRadius: 6,
+  overflow: "hidden",
+  boxSizing: "border-box",
+  transition:
+    "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+};
+
+const LIVE_TOOL_LABEL_STYLE: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 8.5,
+  fontWeight: 700,
+  letterSpacing: "0.06em",
+  textTransform: "uppercase",
+  color: "var(--muted)",
+  marginBottom: 4,
+};
+
+const LIVE_TOOL_PRE_STYLE: React.CSSProperties = {
+  margin: 0,
+  fontFamily: "var(--font-mono)",
+  fontSize: 10.5,
+  lineHeight: 1.45,
+  color: "var(--ink-dim)",
+  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 5,
+  padding: "6px 8px",
+  maxHeight: 180,
+  overflow: "auto",
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
+};
+
+const LIVE_NOTE_LIST_STYLE: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  marginTop: 2,
+};
+
+const LIVE_NOTE_STYLE: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 6,
+  background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+  color: "var(--muted)",
+  fontSize: 11,
+  lineHeight: 1.4,
+  padding: "4px 7px",
+};
+
+const LIVE_NOTE_LABEL_STYLE: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 8.5,
+  fontWeight: 700,
+  letterSpacing: "0.06em",
+  textTransform: "uppercase",
+  color: "var(--muted-2)",
+};
+
+const LIVE_ERROR_LIST_STYLE: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  marginTop: 2,
+};
+
+const LIVE_ERROR_STYLE: React.CSSProperties = {
+  color: "var(--danger)",
+  background: "var(--danger-soft)",
+  border: "1px solid color-mix(in oklch, var(--danger) 36%, transparent)",
+  borderRadius: 6,
+  padding: "6px 8px",
+  fontSize: 11,
+  lineHeight: 1.4,
 };

@@ -30,12 +30,18 @@ const SERVER_NAME = "spark-preview";
 const LEGACY_SERVER_NAME = "playwright";
 const SPARK_VERSION = "1";
 
+export const SPARK_ORCHESTRATOR_SERVER_NAME = "spark-orchestrator";
+const ORCHESTRATOR_SPARK_VERSION = "1";
+
 const CLAUDE_USER_CONFIG = join(homedir(), ".claude.json");
 const CODEX_USER_CONFIG = join(homedir(), ".codex", "config.toml");
 const CODEX_DIR = join(homedir(), ".codex");
 
 const CODEX_BLOCK_START = "# >>> SPARK_AGENT_BUILTIN_MCP";
 const CODEX_BLOCK_END = "# <<< SPARK_AGENT_BUILTIN_MCP";
+
+const CODEX_ORCHESTRATOR_BLOCK_START = "# >>> SPARK_AGENT_ORCHESTRATOR_MCP";
+const CODEX_ORCHESTRATOR_BLOCK_END = "# <<< SPARK_AGENT_ORCHESTRATOR_MCP";
 
 interface ManagedClaudeMcpServer {
   type: "stdio";
@@ -53,6 +59,13 @@ function resolveServerScript(): string {
   return join(__dirname, "..", "..", "resources", "spark-preview-mcp", "server.js");
 }
 
+function resolveOrchestratorServerScript(): string {
+  if (app.isPackaged) {
+    return join(process.resourcesPath, "spark-orchestrator-mcp", "server.js");
+  }
+  return join(__dirname, "..", "..", "resources", "spark-orchestrator-mcp", "server.js");
+}
+
 function resolveNodeCommand(): string {
   // process.execPath inside Electron points at the Electron binary, which
   // ALSO works as a Node interpreter when ELECTRON_RUN_AS_NODE=1 is set in
@@ -66,6 +79,14 @@ function buildServerArgs(): string[] {
 }
 
 function buildServerEnv(): Record<string, string> {
+  return { ELECTRON_RUN_AS_NODE: "1" };
+}
+
+function buildOrchestratorServerArgs(): string[] {
+  return [resolveOrchestratorServerScript()];
+}
+
+function buildOrchestratorServerEnv(): Record<string, string> {
   return { ELECTRON_RUN_AS_NODE: "1" };
 }
 
@@ -354,6 +375,208 @@ function tomlHasUserSparkPreviewSectionAt(path: string): boolean {
   return hasUserSparkPreviewSection(raw);
 }
 
+// ---------------------------------------------------------------------------
+// spark-orchestrator MCP — installed on demand, NOT on app boot
+// ---------------------------------------------------------------------------
+//
+// The orchestrator MCP server gives the CLI (claude / codex) running in
+// Execute mode access to spark_spawn_workers / spark_ask_user /
+// spark_complete / spark_get_worker_status. It is wired into the SAME user
+// configs as spark-preview (~/.claude.json + ~/.codex/config.toml), but the
+// backends call installOrchestratorMcpFor*() lazily before spawning so
+// passive users who never run Execute mode don't get the entry written.
+
+function renderOrchestratorClaudeEntry(): ManagedClaudeMcpServer {
+  return {
+    type: "stdio",
+    command: resolveNodeCommand(),
+    args: buildOrchestratorServerArgs(),
+    env: buildOrchestratorServerEnv(),
+    _sparkManaged: true,
+    _sparkVersion: ORCHESTRATOR_SPARK_VERSION,
+  };
+}
+
+function orchestratorMatchesCurrent(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Record<string, unknown>;
+  if (entry._sparkVersion !== ORCHESTRATOR_SPARK_VERSION) return false;
+  if (entry.command !== resolveNodeCommand()) return false;
+  const expectedArgs = buildOrchestratorServerArgs();
+  if (!Array.isArray(entry.args)) return false;
+  const args = entry.args as unknown[];
+  if (args.length !== expectedArgs.length) return false;
+  if (!args.every((arg, i) => arg === expectedArgs[i])) return false;
+  const env = entry.env as Record<string, unknown> | undefined;
+  if (!env || env.ELECTRON_RUN_AS_NODE !== "1") return false;
+  return true;
+}
+
+export async function installOrchestratorMcpForCC(): Promise<void> {
+  if (!existsSync(CLAUDE_USER_CONFIG)) return;
+
+  let raw: string;
+  try {
+    raw = await fs.readFile(CLAUDE_USER_CONFIG, "utf8");
+  } catch (err) {
+    console.warn("[mcp-installer] could not read ~/.claude.json:", err);
+    return;
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      console.warn("[mcp-installer] ~/.claude.json is not a JSON object; skipping orchestrator install");
+      return;
+    }
+    parsed = value as Record<string, unknown>;
+  } catch (err) {
+    console.warn(
+      "[mcp-installer] ~/.claude.json parse failed; skipping orchestrator install:",
+      (err as Error).message,
+    );
+    return;
+  }
+
+  const servers =
+    parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers)
+      ? (parsed.mcpServers as Record<string, unknown>)
+      : {};
+
+  const existing = servers[SPARK_ORCHESTRATOR_SERVER_NAME];
+  if (existing && !isSparkManaged(existing)) {
+    // User owns this entry — never overwrite.
+    return;
+  }
+  if (existing && orchestratorMatchesCurrent(existing)) {
+    return;
+  }
+
+  servers[SPARK_ORCHESTRATOR_SERVER_NAME] = renderOrchestratorClaudeEntry();
+  parsed.mcpServers = servers;
+  try {
+    const payload = JSON.stringify(parsed, null, 2) + "\n";
+    if (raw === payload) return;
+    await writeFileAtomic(CLAUDE_USER_CONFIG, payload);
+  } catch (err) {
+    console.warn("[mcp-installer] failed to write ~/.claude.json (orchestrator):", err);
+  }
+}
+
+function hasUserOrchestratorSection(text: string): boolean {
+  const withoutManaged = stripOrchestratorBlock(text);
+  const pattern =
+    /^\s*\[mcp_servers\.(?:"spark-orchestrator"|'spark-orchestrator'|spark-orchestrator)\]\s*$/m;
+  return pattern.test(withoutManaged);
+}
+
+function stripOrchestratorBlock(text: string): string {
+  const start = text.indexOf(CODEX_ORCHESTRATOR_BLOCK_START);
+  const end = text.indexOf(CODEX_ORCHESTRATOR_BLOCK_END);
+  if (start === -1 || end === -1 || end < start) return text;
+  const after = end + CODEX_ORCHESTRATOR_BLOCK_END.length;
+  return `${text.slice(0, start).trimEnd()}\n${text.slice(after).trimStart()}`.trimEnd() + "\n";
+}
+
+function renderOrchestratorCodexBlock(): string {
+  const args = buildOrchestratorServerArgs();
+  return [
+    CODEX_ORCHESTRATOR_BLOCK_START,
+    `# Managed by Spark App. Auto-installs the spark-orchestrator MCP so the`,
+    `# Codex CLI running in Execute mode can spawn Spark workers, ask the user`,
+    `# clarifying questions, and mark the run complete. Disable via Settings >`,
+    `# Capabilities or delete this block (Spark will re-add it on the next`,
+    `# Execute-mode spawn unless the auto-install toggle is off).`,
+    `# Version: ${ORCHESTRATOR_SPARK_VERSION}`,
+    "",
+    `[mcp_servers."${SPARK_ORCHESTRATOR_SERVER_NAME}"]`,
+    `command = ${tomlString(resolveNodeCommand())}`,
+    `args = [${args.map(tomlString).join(", ")}]`,
+    `enabled = true`,
+    "",
+    `[mcp_servers."${SPARK_ORCHESTRATOR_SERVER_NAME}".env]`,
+    `ELECTRON_RUN_AS_NODE = "1"`,
+    CODEX_ORCHESTRATOR_BLOCK_END,
+  ].join("\n");
+}
+
+export async function installOrchestratorMcpForCodex(): Promise<void> {
+  if (!directoryExists(CODEX_DIR)) return;
+
+  let existing = "";
+  try {
+    existing = await fs.readFile(CODEX_USER_CONFIG, "utf8");
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      console.warn("[mcp-installer] could not read ~/.codex/config.toml (orchestrator):", err);
+      return;
+    }
+  }
+
+  // If the user has a non-Spark `spark-orchestrator` server defined outside
+  // our managed block, leave the file alone.
+  if (hasUserOrchestratorSection(existing)) return;
+
+  const stripped = stripOrchestratorBlock(existing);
+  const block = renderOrchestratorCodexBlock();
+  const base = stripped.trimEnd();
+  const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
+  if (next === existing) return;
+
+  try {
+    await fs.writeFile(CODEX_USER_CONFIG, next, "utf8");
+  } catch (err) {
+    console.warn("[mcp-installer] failed to write ~/.codex/config.toml (orchestrator):", err);
+  }
+}
+
+export async function isSparkOrchestratorMcpInstalled(
+  target: "claude" | "codex",
+): Promise<boolean> {
+  if (target === "claude") {
+    if (!existsSync(CLAUDE_USER_CONFIG)) return false;
+    let raw: string;
+    try {
+      raw = await fs.readFile(CLAUDE_USER_CONFIG, "utf8");
+    } catch {
+      return false;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    const servers = (parsed as Record<string, unknown>).mcpServers;
+    if (!servers || typeof servers !== "object" || Array.isArray(servers)) return false;
+    const entry = (servers as Record<string, unknown>)[SPARK_ORCHESTRATOR_SERVER_NAME];
+    if (!entry) return false;
+    // If a user-owned entry exists we consider it installed (don't reinstall
+    // over it). If a Spark-managed entry exists, only treat it as installed
+    // when it matches the current version + script path.
+    if (!isSparkManaged(entry)) return true;
+    return orchestratorMatchesCurrent(entry);
+  }
+
+  // target === "codex"
+  if (!directoryExists(CODEX_DIR)) return false;
+  let existing = "";
+  try {
+    existing = await fs.readFile(CODEX_USER_CONFIG, "utf8");
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    return false;
+  }
+  if (hasUserOrchestratorSection(existing)) return true;
+  // Managed block present?
+  return (
+    existing.includes(CODEX_ORCHESTRATOR_BLOCK_START) &&
+    existing.includes(CODEX_ORCHESTRATOR_BLOCK_END)
+  );
+}
+
 // Test/diagnostic surface.
 export const __test = {
   SERVER_NAME,
@@ -370,4 +593,15 @@ export const __test = {
   matchesCurrent,
   resolveServerScript,
   resolveNodeCommand,
+  // Orchestrator-specific
+  SPARK_ORCHESTRATOR_SERVER_NAME,
+  ORCHESTRATOR_SPARK_VERSION,
+  CODEX_ORCHESTRATOR_BLOCK_START,
+  CODEX_ORCHESTRATOR_BLOCK_END,
+  resolveOrchestratorServerScript,
+  renderOrchestratorClaudeEntry,
+  renderOrchestratorCodexBlock,
+  hasUserOrchestratorSection,
+  stripOrchestratorBlock,
+  orchestratorMatchesCurrent,
 };

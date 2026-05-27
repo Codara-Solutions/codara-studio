@@ -3,7 +3,7 @@ import type { AddRunMessageAttachmentInput, RunState, Workspace } from "@shared/
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import { GridIcon, PlusIcon } from "../icons";
 import ChatConversation from "./ChatConversation";
-import ChatComposer from "./ChatComposer";
+import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
 import SwarmView from "./SwarmView";
 import { describeRunStatus, statusToneColor } from "./timeline";
 
@@ -28,6 +28,7 @@ interface Props {
     message: string,
     clientMessageId: string,
     attachments?: AddRunMessageAttachmentInput[],
+    chatConfig?: ChatComposerStartConfig,
   ) => RunState | void | Promise<RunState | void>;
   onForcePauseRun: () => void;
 }

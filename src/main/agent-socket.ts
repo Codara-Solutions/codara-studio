@@ -291,6 +291,14 @@ async function dispatch(
       case "preview.wait_for":
       case "preview.screenshot":
         return await handlePreviewOp(method, params, id);
+      case "orchestrator.spawn_workers":
+        return await handleOrchestratorSpawnWorkers(params, id);
+      case "orchestrator.ask_user":
+        return await handleOrchestratorAskUser(params, id);
+      case "orchestrator.complete":
+        return await handleOrchestratorComplete(params, id);
+      case "orchestrator.get_worker_status":
+        return await handleOrchestratorGetWorkerStatus(params, id);
       case "tab.create":
       case "pane.split":
         // The renderer owns tab/pane state and reaching it from main requires
@@ -397,6 +405,206 @@ async function handleChatAppend(
       return errorResponse(id, ERR_INVALID_PARAMS, message);
     }
     return errorResponse(id, ERR_INTERNAL, message);
+  }
+}
+
+// ── orchestrator.* — Execute-mode tools called by Claude/Codex via the
+// spark-orchestrator MCP server. The CLI is acting as Spark's manager; these
+// tools let it spawn Spark workers, ask the user a clarifying question, and
+// mark the run complete. Each call carries `runId` (the MCP server forwards
+// `process.env.SPARK_RUN_ID` that pty-manager injected at spawn time).
+//
+// v0 implementation queues workers via createWorkerTask + prepareWorkerTask
+// and relies on the existing autopilot loop (or the next plan_analysis tick)
+// to pick them up. Full end-to-end launch from this call site is a Phase 2
+// concern — at that point we'll add an explicit launchWorkerAttempt + result
+// wait so the LLM can `await` worker completion synchronously.
+
+const ASK_USER_POLL_MS = 500;
+const ASK_USER_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — covers the user being AFK
+const ORCHESTRATOR_RUNTIME_FALLBACK = "claude" as const;
+
+interface OrchestratorWorkerInput {
+  title: string;
+  description: string;
+  runtimePreference?: "claude" | "codex" | "shell" | "manual";
+  modelHint?: string;
+  effortHint?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  allowedPaths?: string[];
+  forbiddenPaths?: string[];
+  expectedOutputs?: string[];
+  verificationCommands?: string[];
+  taskClass?: "skeleton" | "feature" | "leaf" | "verifier";
+}
+
+async function handleOrchestratorSpawnWorkers(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const rawWorkers = params.workers;
+  if (!Array.isArray(rawWorkers) || rawWorkers.length === 0) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "workers array is required and non-empty");
+  }
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) {
+    return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  }
+  const cwd = typeof run.settingsSnapshot?.workspaceCwd === "string"
+    ? run.settingsSnapshot.workspaceCwd
+    : process.cwd();
+
+  const workerTaskIds: string[] = [];
+  for (const raw of rawWorkers) {
+    if (!raw || typeof raw !== "object") continue;
+    const w = raw as Record<string, unknown> & OrchestratorWorkerInput;
+    const title = typeof w.title === "string" ? w.title.trim() : "";
+    if (!title) continue;
+    const description = typeof w.description === "string" ? w.description : "";
+    const updated = await runStore.createWorkerTask({
+      runId,
+      title,
+      description,
+      runtimePreference: (w.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK) as
+        | "claude" | "codex" | "shell" | "manual",
+      modelHint: typeof w.modelHint === "string" ? w.modelHint : undefined,
+      effortHint: w.effortHint,
+      allowedPaths: Array.isArray(w.allowedPaths) ? w.allowedPaths.filter((p): p is string => typeof p === "string") : [],
+      forbiddenPaths: Array.isArray(w.forbiddenPaths) ? w.forbiddenPaths.filter((p): p is string => typeof p === "string") : [],
+      expectedOutputs: Array.isArray(w.expectedOutputs) ? w.expectedOutputs.filter((p): p is string => typeof p === "string") : [],
+      verificationCommands: Array.isArray(w.verificationCommands)
+        ? w.verificationCommands.filter((p): p is string => typeof p === "string")
+        : [],
+      taskClass: w.taskClass,
+      createdBy: "spark",
+    });
+    // The just-created task is the LAST entry on updated.workerTasks.
+    const created = updated.workerTasks.at(-1);
+    if (!created) continue;
+    workerTaskIds.push(created.id);
+    try {
+      await runStore.prepareWorkerTask({ runId, workerTaskId: created.id, cwd });
+    } catch {
+      // prepareWorkerTask failures shouldn't block subsequent queueings; the
+      // worker stays in 'created' state and the autopilot will retry.
+    }
+  }
+  return successResponse(id, { worker_task_ids: workerTaskIds });
+}
+
+async function handleOrchestratorAskUser(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const question = stringParam(params, "question");
+  if (!question) return errorResponse(id, ERR_INVALID_PARAMS, "question is required");
+  const rawOptions = Array.isArray(params.options) ? params.options : [];
+  const options = rawOptions
+    .filter((o): o is Record<string, unknown> => Boolean(o) && typeof o === "object")
+    .slice(0, 4)
+    .map((o, idx) => ({
+      id: typeof o.id === "string" ? o.id : `option_${idx + 1}`,
+      label: typeof o.label === "string" ? o.label : `Option ${idx + 1}`,
+      description: typeof o.description === "string" ? o.description : "",
+      answer: typeof o.answer === "string" ? o.answer : (typeof o.label === "string" ? o.label : `Option ${idx + 1}`),
+      recommended: o.recommended === true,
+    }));
+
+  const runStore = await getRunStore();
+  try {
+    await runStore.addRunMessage({
+      runId,
+      author: "spark",
+      kind: "question",
+      message: question,
+      questionOptions: options,
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+
+  const askedAt = Date.now();
+  const deadline = askedAt + ASK_USER_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, ASK_USER_POLL_MS));
+    const run = await runStore.getRun(runId);
+    if (!run) {
+      return errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-ask: ${runId}`);
+    }
+    const answer = [...run.humanMessages]
+      .reverse()
+      .find((m) =>
+        m.author === "user" &&
+        (m.kind === "answer" || m.kind === "note") &&
+        Date.parse(m.createdAt) > askedAt,
+      );
+    if (answer) {
+      return successResponse(id, { answer: answer.message, kind: answer.kind });
+    }
+  }
+  return errorResponse(id, ERR_INTERNAL, "ask_user timed out waiting for human response");
+}
+
+async function handleOrchestratorComplete(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const summary = stringParam(params, "summary") ?? "";
+  const runStore = await getRunStore();
+  try {
+    if (summary) {
+      await runStore.addRunMessage({
+        runId,
+        author: "spark",
+        kind: "note",
+        message: summary,
+      });
+    }
+    await runStore.updateRunStatus({ runId, status: "complete" });
+    return successResponse(id, { ok: true });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleOrchestratorGetWorkerStatus(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const workerTaskId = stringParam(params, "worker_task_id");
+  if (!workerTaskId) return errorResponse(id, ERR_INVALID_PARAMS, "worker_task_id is required");
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) {
+    return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  }
+  try {
+    const task = run.workerTasks.find((wt) => wt.id === workerTaskId);
+    if (!task) {
+      return errorResponse(id, ERR_INVALID_PARAMS, `unknown worker_task_id: ${workerTaskId}`);
+    }
+    const lastAttempt = [...run.workerAttempts]
+      .reverse()
+      .find((a) => a.workerTaskId === workerTaskId);
+    return successResponse(id, {
+      worker_task_id: workerTaskId,
+      task_status: task.status,
+      attempt_status: lastAttempt?.status ?? null,
+      runtime: lastAttempt?.runtime ?? task.runtimePreference,
+      started_at: lastAttempt?.startedAt ?? null,
+      finished_at: lastAttempt?.finishedAt ?? null,
+      final_report_path: lastAttempt?.finalReportPath ?? null,
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }
 }
 

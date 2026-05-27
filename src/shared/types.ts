@@ -906,7 +906,11 @@ export interface AutopilotState {
 }
 
 export type HumanRunMessageAuthor = "user" | "spark" | "system";
-export type HumanRunMessageKind = "note" | "question" | "answer" | "decision";
+// "assistant_stream" is the in-progress assistant message a CC/Codex Talk-mode
+// backend grows in place while the model is generating. The renderer renders
+// it as a live bubble; once the turn ends, the message is rewritten as
+// kind="note" (author="spark") so it persists like any other assistant turn.
+export type HumanRunMessageKind = "note" | "question" | "answer" | "decision" | "assistant_stream";
 
 export type RunMessageAttachmentKind = "image" | "file";
 
@@ -1215,6 +1219,16 @@ export interface CreateRunInput {
   workspaceName: string;
   cwd: string;
   title?: string;
+  // Per-chat backend selections forwarded from the composer's chip when
+  // creating a fresh chat. Optional — when omitted, the run defaults to
+  // OpenRouter + the global manager model and the chip starts on its
+  // defaults. ChatPanel reads the draft chip values and threads them
+  // through onStartChat → createRunInput so the chip's selection survives
+  // the draft→live transition.
+  chatBackend?: ChatBackendKind;
+  chatModel?: string;
+  chatMode?: ChatMode;
+  chatEffort?: AgentEffortLevel;
 }
 
 export interface UpdateRunStatusInput {
