@@ -21,6 +21,8 @@ import {
   DEFAULT_CHAT_EFFORT,
   DEFAULT_CHAT_MODE,
   DEFAULT_CHAT_MODEL,
+  buildVisibleGroups,
+  clampEffort,
   decomposeModelId,
   effortsFor,
   findOptionInCatalog,
@@ -114,6 +116,12 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const [draftChatModel, setDraftChatModel] = useState<string>(DEFAULT_CHAT_MODEL);
   const [draftChatMode, setDraftChatMode] = useState<ChatMode>(DEFAULT_CHAT_MODE);
   const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(DEFAULT_CHAT_EFFORT);
+  // Tracks whether the draft default has been resolved from settings + runtime
+  // diagnostics. The first paint uses the hardcoded fallbacks above; once the
+  // IPC round-trip returns we replace them with the actual first visible
+  // model so the bar doesn't open on a model the user can't see in the
+  // dropdown (e.g. the legacy Gemini default when no OpenRouter is configured).
+  const draftDefaultsResolved = useRef(false);
   const [draftFastMode, setDraftFastMode] = useState<boolean>(false);
   const [draftOneMillionContext, setDraftOneMillionContext] = useState<boolean>(false);
   // Running per-chat token total, summed from chat.usage SparkEvents. Reset
@@ -132,6 +140,48 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     const handler = () => textareaRef.current?.focus();
     window.addEventListener("spark:focus-composer", handler);
     return () => window.removeEventListener("spark:focus-composer", handler);
+  }, []);
+
+  // Resolve the draft default from settings + runtimes. The hardcoded
+  // fallback above (OpenRouter + Gemini Flash) only matters before this
+  // resolves: once we know what's actually available we land on the first
+  // visible model (Claude Opus 4.7 in the common case), so the bar never
+  // opens on a model the user can't see in the dropdown. Runs once per
+  // mount; an active run uses run.chatBackend/run.chatModel and is unaffected.
+  useEffect(() => {
+    if (draftDefaultsResolved.current) return;
+    let cancelled = false;
+    void Promise.all([
+      window.spark.agents.runtimes(),
+      window.spark.settings.load(),
+    ])
+      .then(([diagnostics, settings]) => {
+        if (cancelled) return;
+        draftDefaultsResolved.current = true;
+        const orModel = (settings.openRouterModel ?? "").trim();
+        const groups = buildVisibleGroups({
+          diagnostics: diagnostics ?? [],
+          openRouterModel: orModel,
+        });
+        const first = groups[0]?.models[0];
+        if (!first) return;
+        const { baseId, oneMillion } = decomposeModelId(first.id);
+        setDraftChatBackend(first.backend);
+        setDraftChatModel(baseId);
+        setDraftOneMillionContext(oneMillion);
+        const allowedEfforts = effortsFor(first);
+        const clamped = clampEffort(draftChatEffort, allowedEfforts);
+        if (clamped && clamped !== draftChatEffort) setDraftChatEffort(clamped);
+      })
+      .catch(() => {
+        /* keep hardcoded defaults; ModelPicker will surface the empty state */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // intentionally one-shot: subsequent settings changes don't override the
+    // draft, since by that point the user has typically committed a choice.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Other surfaces (e.g. the browser pane's inspector + draw mode, or the
