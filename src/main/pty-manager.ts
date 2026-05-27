@@ -1,7 +1,8 @@
 import * as nodePty from "node-pty";
 import { spawn as spawnChild } from "node:child_process";
-import { promises as fsp } from "node:fs";
-import { join } from "node:path";
+import { promises as fsp, chmodSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import type { WebContents } from "electron";
 import type { ShellInfo } from "@shared/types";
 import { injectEnrichedPath } from "./path-reconstruction";
@@ -180,9 +181,79 @@ export interface SpawnOptions {
   startupCommand?: string;
 }
 
+// node-pty on POSIX (macOS/Linux) never execs the target program directly.
+// Every spawn goes through a bundled `spawn-helper` executable: node-pty
+// posix_spawn()s the helper, which chdir()s into the cwd, claims the slave
+// PTY as its controlling terminal, then execvp()s the real program (see
+// node-pty src/unix/pty.cc — argv[0] is the helper, argv[2] the program).
+// If the prebuilt `spawn-helper` is missing its execute bit, posix_spawn
+// fails with EACCES and node-pty surfaces it as the opaque error
+// "posix_spawnp failed." — which kills EVERY pty (user terminals, worker
+// panes, and the Claude/Codex chat backends), leaving a black terminal.
+//
+// The bit goes missing whenever node_modules is materialised without
+// preserving POSIX mode bits: a tree copied from Windows, a perms-stripping
+// archive restore, or an npm cache that didn't keep +x. node-pty's own
+// loader (lib/utils.js) does NOT chmod the helper at runtime, so nothing
+// self-corrects. Windows is immune — ConPTY has no spawn-helper — which is
+// exactly why "works on Windows, black on Mac" is the signature symptom.
+//
+// This guard restores the bit once per process, before the first spawn. It's
+// a no-op on Windows and on the common case where the bit is already set.
+let helperExecChecked = false;
+function ensureSpawnHelperExecutable(): void {
+  if (helperExecChecked) return;
+  helperExecChecked = true;
+  if (process.platform === "win32") return;
+  try {
+    const req = createRequire(__filename);
+    const ptyRoot = dirname(req.resolve("node-pty/package.json"));
+    // Cover both the unbundled dev tree and a packaged app where node-pty is
+    // relocated under app.asar.unpacked (node-pty itself does the same
+    // app.asar → app.asar.unpacked rewrite when resolving helperPath). chmod
+    // on the virtual app.asar copy fails harmlessly and is ignored.
+    const roots = new Set<string>([
+      ptyRoot,
+      ptyRoot.replace("app.asar", "app.asar.unpacked"),
+    ]);
+    for (const root of roots) {
+      for (const helper of [
+        join(root, "build", "Release", "spawn-helper"),
+        join(root, "prebuilds", `${process.platform}-${process.arch}`, "spawn-helper"),
+      ]) {
+        let mode: number;
+        try {
+          mode = statSync(helper).mode;
+        } catch {
+          continue; // not this layout / not present
+        }
+        // The app runs as the file owner, so owner-execute (S_IXUSR, 0o100) is
+        // what posix_spawn actually needs. If it's missing, restore the
+        // canonical 0755 the prebuild ships with.
+        if ((mode & 0o100) === 0) {
+          try {
+            chmodSync(helper, mode | 0o755);
+            console.warn(
+              `[pty-manager] restored missing execute bit on node-pty spawn-helper: ${helper}`,
+            );
+          } catch (err) {
+            console.error(
+              `[pty-manager] could not mark spawn-helper executable (${helper}):`,
+              err,
+            );
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[pty-manager] spawn-helper executable check failed:", err);
+  }
+}
+
 export async function spawn(
   opts: SpawnOptions,
 ): Promise<{ id: string; pid: number; startupCommandHandled?: boolean }> {
+  ensureSpawnHelperExecutable();
   const pending = pendingKills.get(opts.id);
   if (pending) {
     clearTimeout(pending);
