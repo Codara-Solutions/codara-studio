@@ -223,6 +223,8 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     chatModel: input.chatModel?.trim() || undefined,
     chatMode: input.chatMode,
     chatEffort: input.chatEffort,
+    chatFastMode: input.chatFastMode,
+    chat1mContext: input.chat1mContext,
   };
   run.artifactDir = runDir(run.id);
 
@@ -468,11 +470,14 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   });
 
   // Pre-run user note: append before initial planning so the manager's
-  // plan_analysis read of run.humanMessages picks it up. Only on first start
-  // (no runId passed in); recursive startAutopilot calls already carry the
-  // run forward and shouldn't re-append.
+  // plan_analysis read of run.humanMessages picks it up. addRunMessage
+  // dedupes by clientMessageId, so re-entering startAutopilot with the same
+  // initialUserNote (recursive resume) is a no-op. The previous guard on
+  // `!input.runId` mis-skipped fresh chats too whenever the caller had
+  // pre-created the run via createRun() to thread chip config — which is
+  // what the v1 chip flow does.
   const initialNote = input.initialUserNote?.trim();
-  if (!input.runId && initialNote) {
+  if (initialNote) {
     run = await addRunMessage({
       runId: run.id,
       clientMessageId: input.initialUserNoteClientMessageId,
@@ -709,6 +714,24 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   if (latest.status === "paused") return;
   const hasOtherActiveCycles = hasOtherAutopilotCycles(runId, attemptId);
   const hasOtherActiveWorkers = activeWorkersForRun(runId).some((worker) => worker.attemptId !== attemptId);
+  // For execute-mode CC/Codex chat backends, the CC/Codex manager session is
+  // doing review itself (reading the worker's final_report_path returned by
+  // spark_wait_for_workers and deciding spark_complete vs spawn correctives).
+  // We need the worker_task to reach a TERMINAL status (accepted/failed/
+  // cancelled) so spark_wait_for_workers actually unblocks — `needs_review`
+  // is non-terminal in the WorkerTaskStatus enum, and the OpenRouter-driven
+  // review path that normally transitions needs_review → accepted via
+  // decideWorkerReport is explicitly skipped below. So auto-accept on
+  // success here; the CC manager will inspect the report and judge quality.
+  const isExecuteModeCliManager =
+    (latest.chatBackend === "claude" || latest.chatBackend === "codex") &&
+    latest.chatMode === "execute";
+  const finishedAttempt = latest.workerAttempts.find((a) => a.id === attemptId);
+  const finishedTaskId = finishedAttempt?.workerTaskId;
+  const shouldAutoAccept =
+    isExecuteModeCliManager &&
+    Boolean(finishedTaskId) &&
+    latest.workerTasks.find((t) => t.id === finishedTaskId)?.status === "needs_review";
 
   await commitRunChange(latest, {
     type: "autopilot.cycle_completed",
@@ -717,6 +740,7 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
       workerTasks: latest.workerTasks.length,
       workerAttempts: latest.workerAttempts.length,
       waitingForOtherWorkers: hasOtherActiveCycles || hasOtherActiveWorkers,
+      autoAcceptedForExecuteModeCli: shouldAutoAccept,
     },
     mutate: (draft, timestamp) => {
       draft.status = hasOtherActiveCycles || hasOtherActiveWorkers ? "running" : "reviewing";
@@ -729,12 +753,43 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
             : "worker_cycle_completed_needs_manager_review",
         updatedAt: timestamp,
       };
+      if (shouldAutoAccept && finishedTaskId) {
+        const taskInDraft = draft.workerTasks.find((t) => t.id === finishedTaskId);
+        if (taskInDraft && taskInDraft.status === "needs_review") {
+          taskInDraft.status = "accepted";
+          taskInDraft.updatedAt = timestamp;
+          // Also roll up the parent step's review status so it doesn't sit
+          // at "reviewing" forever — the manager (CC) consumes the report
+          // directly via final_report_path.
+          if (taskInDraft.stepId) {
+            const stepInDraft = draft.steps.find((s) => s.id === taskInDraft.stepId);
+            if (stepInDraft && stepInDraft.status === "reviewing") {
+              stepInDraft.status = "complete";
+              stepInDraft.updatedAt = timestamp;
+            }
+          }
+        }
+      }
       draft.updatedAt = timestamp;
     },
   });
 
   if (!hasOtherActiveCycles && !hasOtherActiveWorkers) {
-    scheduleAutopilotReview(runId, cwd);
+    // Skip the autopilot's worker_result_review re-prompt when the chat
+    // backend is a long-lived CC/Codex execute session. In that flow the
+    // manager is ALREADY waiting on spark_wait_for_workers in its current
+    // turn; when those workers terminate, the wait_for_workers RPC unblocks
+    // and the same CC/Codex session decides what to do next (read final
+    // reports, then spark_complete or spawn correctives) — all inside its
+    // active turn. Re-prompting it with latestUserPromptFromRun would be
+    // the SAME prompt as turn 1 (because askChatBackendNonOpenRouter has no
+    // mode-specific message builder), which is precisely how one user
+    // message produced multiple worker-spawn rounds in run-mpo92kqf-7eaym0.
+    // OpenRouter manager retains the review re-prompt because OpenRouter's
+    // openrouter-manager.ts:buildManagerUserMessage DOES vary by mode.
+    if (!isExecuteModeCliManager) {
+      scheduleAutopilotReview(runId, cwd);
+    }
   }
 }
 
@@ -805,7 +860,7 @@ async function maybeAutoRetryStuckAttempt(
   return { attemptId: envelope.attemptId };
 }
 
-function scheduleAutopilotCycles(runId: string, attemptIds: string[]): void {
+export function scheduleAutopilotCycles(runId: string, attemptIds: string[]): void {
   for (const attemptId of attemptIds) {
     const key = autopilotCycleKey(runId, attemptId);
     if (activeAutopilotCycles.has(key)) continue;
@@ -1518,6 +1573,14 @@ async function askChatBackendNonOpenRouter(
     }
     if (result.newSessionUuid && result.newSessionUuid !== latest.chatSessionUuid) {
       latest.chatSessionUuid = result.newSessionUuid;
+    }
+    // Stamp the mode the session was spawned under. Next-turn dispatch
+    // checks this against the current chatMode and forces a fresh session
+    // on mismatch — otherwise CC/Codex resume into a transcript whose prior
+    // assistant replies were written in the old mode's persona and the new
+    // mode's prompt gets ignored.
+    if (result.newSessionUuid) {
+      latest.chatSessionMode = chatConfig.mode;
     }
     recomputeRunCostRollups(latest);
     latest.updatedAt = completedAt;
@@ -4372,6 +4435,8 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
         chatModel: input.chatModel ?? run.chatModel,
         chatMode: input.chatMode ?? run.chatMode,
         chatEffort: input.chatEffort ?? run.chatEffort,
+        chatFastMode: input.chatFastMode ?? run.chatFastMode,
+        chat1mContext: input.chat1mContext ?? run.chat1mContext,
       },
     },
     mutate: (draft, timestamp) => {
@@ -4379,12 +4444,24 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
       if (input.chatModel !== undefined) draft.chatModel = input.chatModel.trim() || undefined;
       if (input.chatMode !== undefined) draft.chatMode = input.chatMode;
       if (input.chatEffort !== undefined) draft.chatEffort = input.chatEffort;
+      if (input.chatFastMode !== undefined) draft.chatFastMode = input.chatFastMode;
+      if (input.chat1mContext !== undefined) draft.chat1mContext = input.chat1mContext;
       // Switching backend invalidates the prior session UUID — the new
       // backend would mis-resume otherwise. Selected per the answers: no
       // cross-backend handoff; each backend gets its own fresh thread.
       if (input.chatBackend !== undefined && input.chatBackend !== run.chatBackend) {
         draft.chatSessionUuid = undefined;
+        draft.chatSessionMode = undefined;
       }
+      // Mode flips (talk↔execute) DO NOT invalidate the session — the
+      // backend's mid-turn handler respawns CC/Codex with the new
+      // --append-system-prompt + MCP-isolation args but still passes
+      // -r <uuid> so the conversation history is preserved. To stop the
+      // model anchoring on its prior-mode persona, the backend ALSO
+      // prepends a "ROLE UPDATE" prelude to the next user prompt. That
+      // combination — new system prompt + resumed transcript + inline
+      // role-shift announcement — lets the user toggle mid-chat without
+      // losing the chat thread. See spark-chat-mode-anchor memory.
       draft.updatedAt = timestamp;
     },
   });
@@ -5112,6 +5189,19 @@ export async function forcePauseRun(runId: string): Promise<RunState> {
   const reason = "Force-paused by user";
   const activeWorkers = activeWorkersForRun(run.id);
 
+  // 0. Interrupt the chat backend's live CC/Codex turn so the orchestrator
+  //    stops calling tools mid-stream. Without this, the model keeps firing
+  //    Edit/Bash/etc. for up to ~90s after the user clicked Stop while we're
+  //    still polling waitForTurnFile. Backends that don't have an active
+  //    session for this run no-op.
+  for (const backendKind of ["claude", "codex"] as const) {
+    try {
+      getBackend(backendKind).interruptChat?.(run.id);
+    } catch {
+      /* never let one backend's interrupt failure block the pause */
+    }
+  }
+
   // 1. Kill every PTY immediately. No GRACE_MS, no taskkill race.
   for (const worker of activeWorkers) {
     try {
@@ -5188,6 +5278,44 @@ export async function forcePauseRun(runId: string): Promise<RunState> {
       draft.updatedAt = timestamp;
     },
   });
+}
+
+// Stop-as-give-back: the Stop button in execute-mode chat. Combines force-pause
+// (ESC the CC/Codex turn + kill workers) with undo-to-checkpoint (trim the
+// pending user message and downstream state). When CC/Codex received the user
+// prompt but Spark was still mid-spawn or mid-turn, ESC alone leaves the
+// message visible in the timeline as if it had been processed — confusing
+// because the model never finished thinking about it. This wrapper rolls back
+// to the checkpoint BEFORE the latest user message and returns the original
+// text so the renderer can prefill the composer for editing/resubmit.
+export async function stopAndUndoPending(
+  runId: string,
+): Promise<UndoToCheckpointResult> {
+  const run = await requireRun(runId);
+  // Walk humanMessages backwards to find the latest one authored by the user.
+  const lastUserMessage = [...run.humanMessages].reverse().find((m) => m.author === "user");
+  if (!lastUserMessage) {
+    // No user message to undo (e.g. brand-new run, planning hasn't started).
+    // Fall back to force-pause so Stop still does SOMETHING visible.
+    const paused = await forcePauseRun(runId);
+    return { run: paused, restoredText: null };
+  }
+  // Match the checkpoint by messageId — same lookup the renderer's
+  // UndoControl uses (ChatConversation:116-130).
+  const checkpoint = (run.checkpoints ?? []).find(
+    (c) => c.kind === "user-message" && c.messageId === lastUserMessage.id,
+  );
+  if (!checkpoint) {
+    // No checkpoint yet — checkpoint creation is async (recordCheckpointInBackground)
+    // so a Stop fired in the first few ms after send can race ahead of it.
+    // Fall back to force-pause; user can still retype if needed.
+    const paused = await forcePauseRun(runId);
+    return { run: paused, restoredText: null };
+  }
+  // scope="chat" deliberately — never auto-revert workspace edits the user
+  // might want to keep. ChatConversation's manual undo dropdown is the place
+  // for scope=chat+code if the user wants to also rewind the filesystem.
+  return undoToCheckpoint({ runId, checkpointId: checkpoint.id, scope: "chat" });
 }
 
 // Recursively delete the run directory with retries. Windows will reject

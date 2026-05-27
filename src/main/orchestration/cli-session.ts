@@ -37,8 +37,28 @@ export interface CliSessionOptions {
    *            whose mtime > spawnTime; pick its name as session UUID.
    *   - Codex: scan `~/.codex/sessions/YYYY/MM/DD/` for the newest
    *            `rollout-*.jsonl`.
+   *
+   * Ignored when `fixedJsonlPath` is provided.
    */
-  discoverJsonlPath: () => Promise<string | null>;
+  discoverJsonlPath?: () => Promise<string | null>;
+  /**
+   * Pre-determined JSONL transcript path. When set, cli-session skips
+   * discovery entirely and tails this path immediately (tailJsonl tolerates
+   * the file not existing yet — it'll pick up entries when the CLI eventually
+   * creates the file). Preferred for backends that can pre-determine the path
+   * via a session-id flag (e.g. CC's `--session-id <uuid>`), avoiding the
+   * chicken-and-egg of needing the CLI to create the JSONL before we can
+   * send it any input that would cause it to write to the JSONL.
+   */
+  fixedJsonlPath?: string;
+  /**
+   * When true, the JSONL tailer seeks to end-of-file on first poll instead of
+   * replaying every existing line. Use when resuming an existing session (CC
+   * `-r <uuid>`, Codex `resume <uuid>`) — without this, prior turns'
+   * assistant text is re-delivered as fresh `assistant_block` events and
+   * pollutes the current turn's accumulator.
+   */
+  skipExistingJsonl?: boolean;
   /** Default 200ms. */
   discoverPollMs?: number;
   /** Default 10s. */
@@ -71,6 +91,13 @@ export interface CliSession {
   onStdout(handler: (chunk: Buffer) => void): () => void;
   /** Subscribe to process exit. */
   onExit(handler: (info: { exitCode: number; signal?: number }) => void): () => void;
+  /**
+   * Resolves once the PTY has emitted any stdout — a coarse readiness signal
+   * for backends that need to know "the CLI's TUI has rendered, it's safe to
+   * write input". Rejects after timeoutMs with an Error. Idempotent: returns
+   * an already-resolved promise if stdout has already arrived.
+   */
+  waitForFirstStdout(timeoutMs: number): Promise<void>;
   /** Dispose pty + tail. Idempotent. */
   dispose(): Promise<void>;
 }
@@ -111,6 +138,8 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
   let jsonlPath: string | null = null;
   let tail: Disposable | null = null;
   let disposed = false;
+  let firstStdoutSeen = false;
+  const firstStdoutWaiters = new Set<() => void>();
 
   const entryHandlers = new Set<(entry: unknown) => void | Promise<void>>();
   const stdoutHandlers = new Set<(chunk: Buffer) => void>();
@@ -131,6 +160,17 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
   }
 
   const detachStdout = pty.tap(opts.sessionId, (chunk) => {
+    if (!firstStdoutSeen) {
+      firstStdoutSeen = true;
+      for (const resolve of firstStdoutWaiters) {
+        try {
+          resolve();
+        } catch {
+          // swallow — never let a waiter's resolve callback break the tap
+        }
+      }
+      firstStdoutWaiters.clear();
+    }
     for (const h of stdoutHandlers) {
       try {
         h(chunk);
@@ -149,34 +189,56 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
     }
   });
 
-  // JSONL discovery loop runs concurrently with the PTY's startup; once a
-  // path is found we hand it to tailJsonl and stop polling.
-  void (async () => {
-    const startedAt = Date.now();
-    while (!disposed) {
-      let found: string | null = null;
-      try {
-        found = await opts.discoverJsonlPath();
-      } catch {
-        found = null;
+  // JSONL acquisition. Two paths:
+  //   - fixedJsonlPath: tail it immediately. tailJsonl tolerates the file not
+  //     existing yet — it'll pick up entries when the CLI eventually creates
+  //     the file. Preferred whenever the backend can pre-determine the path
+  //     (e.g. CC's --session-id <uuid>), because it avoids a chicken-and-egg
+  //     where we'd otherwise need the CLI to write the JSONL before we send
+  //     any input that would cause it to write to the JSONL.
+  //   - discoverJsonlPath: legacy poll-and-discover. Surfaces a synthetic
+  //     error after jsonlReadyTimeoutMs so the backend can react instead of
+  //     hanging forever.
+  if (opts.fixedJsonlPath) {
+    jsonlPath = opts.fixedJsonlPath;
+    tail = tailJsonl(
+      opts.fixedJsonlPath,
+      (entry) => dispatchEntry(entry),
+      undefined,
+      { startFromEnd: opts.skipExistingJsonl ?? false },
+    );
+  } else if (opts.discoverJsonlPath) {
+    const discover = opts.discoverJsonlPath;
+    void (async () => {
+      const startedAt = Date.now();
+      while (!disposed) {
+        let found: string | null = null;
+        try {
+          found = await discover();
+        } catch {
+          found = null;
+        }
+        if (found) {
+          jsonlPath = found;
+          tail = tailJsonl(
+            found,
+            (entry) => dispatchEntry(entry),
+            undefined,
+            { startFromEnd: opts.skipExistingJsonl ?? false },
+          );
+          return;
+        }
+        if (Date.now() - startedAt > jsonlReadyTimeoutMs) {
+          await dispatchEntry({
+            __spark_cli_session_error: true,
+            message: `CLI session JSONL not found within ${jsonlReadyTimeoutMs}ms`,
+          });
+          return;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, discoverPollMs));
       }
-      if (found) {
-        jsonlPath = found;
-        tail = tailJsonl(found, (entry) => dispatchEntry(entry));
-        return;
-      }
-      if (Date.now() - startedAt > jsonlReadyTimeoutMs) {
-        // Surface a synthetic error so the backend can react (typically by
-        // appending a system note to the chat and disposing the session).
-        await dispatchEntry({
-          __spark_cli_session_error: true,
-          message: `CLI session JSONL not found within ${jsonlReadyTimeoutMs}ms`,
-        });
-        return;
-      }
-      await new Promise<void>((resolve) => setTimeout(resolve, discoverPollMs));
-    }
-  })();
+    })();
+  }
 
   return {
     id: opts.sessionId,
@@ -202,13 +264,56 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
       exitHandlers.add(handler);
       return () => exitHandlers.delete(handler);
     },
+    waitForFirstStdout: (timeoutMs: number) => {
+      if (firstStdoutSeen) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          firstStdoutWaiters.delete(onReady);
+          reject(new Error(`CLI session did not emit any stdout within ${timeoutMs}ms`));
+        }, timeoutMs);
+        const onReady = (): void => {
+          clearTimeout(timer);
+          resolve();
+        };
+        firstStdoutWaiters.add(onReady);
+      });
+    },
     dispose: async () => {
       if (disposed) return;
       disposed = true;
       tail?.dispose();
       detachStdout();
+      // Register an exit waiter BEFORE the kill, then await it. The CLI's
+      // file handles (notably CC's JSONL transcript) stay locked by the
+      // dying process for tens of ms after killImmediate returns on Windows
+      // (taskkill /T /F is async-spawned and node-pty.kill only signals).
+      // If a respawn races into that window, the new CC's `-r <uuid>` opens
+      // the still-locked JSONL and exits with code 1 ("No conversation
+      // found"). Waiting for the actual exit event before returning lets
+      // the OS release the file lock.
+      let exitFired = false;
+      const exitDetach = pty.onExit(opts.sessionId, () => {
+        exitFired = true;
+      });
       detachExit();
-      pty.dispose(opts.sessionId);
+      // killImmediate (not dispose) — dispose() schedules kill via
+      // setTimeout(GRACE_MS) and leaves the entry in pty-manager's sessions
+      // map. A subsequent pty.spawn({id: opts.sessionId}) would then
+      // short-circuit and return the still-dying PTY with its original
+      // (stale) args, silently discarding any new args we just built — which
+      // is exactly how mode-flip respawns kept reusing the old talk-mode CC
+      // subprocess despite Spark intending to relaunch in execute mode. The
+      // GRACE_MS soft-dispose is for UI panes that re-attach a webContents;
+      // headless CLI sessions have no such re-attach path, so kill now.
+      pty.killImmediate(opts.sessionId);
+      // Poll for exit up to 2s. On Windows, killImmediate triggers a
+      // detached taskkill /T /F that walks the descendant tree — usually
+      // settles in <100ms but can stretch when antivirus/Defender is hot.
+      const deadlineAt = Date.now() + 2000;
+      while (!exitFired && Date.now() < deadlineAt) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      }
+      exitDetach();
     },
   };
 }

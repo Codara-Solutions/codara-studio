@@ -135,7 +135,9 @@ export default function OrchestrationSidebar({
           (chatConfig.backend !== undefined ||
             chatConfig.model !== undefined ||
             chatConfig.mode !== undefined ||
-            chatConfig.effort !== undefined),
+            chatConfig.effort !== undefined ||
+            chatConfig.fastMode !== undefined ||
+            chatConfig.oneMillionContext !== undefined),
       );
       let runId: string | undefined;
       if (hasChatConfig) {
@@ -148,6 +150,8 @@ export default function OrchestrationSidebar({
           chatModel: chatConfig?.model,
           chatMode: chatConfig?.mode,
           chatEffort: chatConfig?.effort,
+          chatFastMode: chatConfig?.fastMode,
+          chat1mContext: chatConfig?.oneMillionContext,
         });
         runId = created.id;
       }
@@ -192,8 +196,21 @@ export default function OrchestrationSidebar({
   const forcePauseRun = useCallback(() => {
     if (!activeRun) return;
     void mutate(async () => {
-      const run = await window.spark.orchestration.forcePauseRun(activeRun.id);
-      onRunSnapshot(run);
+      // Stop button = "give me my message back": rolls back to the checkpoint
+      // before the latest user-message AND interrupts CC/Codex AND kills
+      // workers AND prefills the composer with the original text so the user
+      // can edit and resubmit. Falls back to plain force-pause if there's no
+      // user-message checkpoint yet (e.g. a Stop fired in the first few ms of
+      // a fresh run before checkpoint creation completed).
+      const result = await window.spark.orchestration.stopAndUndoPending(activeRun.id);
+      onRunSnapshot(result.run);
+      if (result.restoredText != null && result.restoredText.length > 0) {
+        window.dispatchEvent(
+          new CustomEvent("spark:prefill-composer", {
+            detail: { text: result.restoredText, replace: true },
+          }),
+        );
+      }
     });
   }, [activeRun, mutate, onRunSnapshot]);
 

@@ -167,7 +167,7 @@ const TOOLS = [
   {
     name: "spark_get_worker_status",
     description:
-      "Look up the current status of a worker task by id. Returns the worker_task_id, task_status, the latest attempt's status / runtime / timestamps, and the final report path if the worker has finished. Use after spark_spawn_workers to check progress.",
+      "One-shot snapshot of a worker task's current status — use sparingly for ad-hoc spot checks. For waiting on completion, prefer spark_wait_for_workers, which long-polls and returns when workers reach a terminal state. Returns worker_task_id, task_status, the latest attempt's status / runtime / timestamps, and the final_report_path if the worker has finished.",
     inputSchema: {
       type: "object",
       required: ["worker_task_id"],
@@ -185,6 +185,39 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "spark_wait_for_workers",
+    description:
+      "Block until the listed worker tasks reach a terminal state (accepted / failed / cancelled) or timeout_ms elapses. This is the canonical way to wait on workers — call it once after spark_spawn_workers and react to the results. Returns each worker's final task_status, attempt_status, finished_at, and final_report_path so you can read each report and decide whether to spark_complete (default) or spark_spawn_workers (only for genuine regressions/corrective fixes).",
+    inputSchema: {
+      type: "object",
+      required: ["worker_task_ids"],
+      properties: {
+        runId: {
+          type: "string",
+          description:
+            "Spark run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+        },
+        worker_task_ids: {
+          type: "array",
+          minItems: 1,
+          items: { type: "string" },
+          description: "Worker task ids returned from spark_spawn_workers.",
+        },
+        mode: {
+          type: "string",
+          enum: ["all", "any"],
+          description: "Return when ALL listed workers terminate (default) or as soon as ANY one terminates.",
+        },
+        timeout_ms: {
+          type: "number",
+          description:
+            "Max wait in milliseconds. Defaults to 600000 (10 min). Capped at 1200000 (20 min). On timeout, returns whichever workers DID terminate plus reason='timeout'.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 const TOOL_TO_RPC = {
@@ -192,6 +225,7 @@ const TOOL_TO_RPC = {
   spark_ask_user: "orchestrator.ask_user",
   spark_complete: "orchestrator.complete",
   spark_get_worker_status: "orchestrator.get_worker_status",
+  spark_wait_for_workers: "orchestrator.wait_for_workers",
 };
 
 function resolveSparkHome() {

@@ -787,6 +787,30 @@ export interface RunState {
    * backend (no equivalent session-id concept).
    */
   chatSessionUuid?: string;
+  /**
+   * Which mode (`talk` / `execute`) the persisted `chatSessionUuid` was
+   * spawned under. Tracked separately from `chatMode` because the user can
+   * flip the chip after a session was already created. On the next spawn,
+   * if `chatSessionMode !== chatMode`, we drop the session UUID and start
+   * a fresh CC/Codex session — resuming would let the prior mode's persona
+   * (recorded in the JSONL transcript as the assistant's earlier replies)
+   * anchor the new turn's behavior. Undefined alongside chatSessionUuid.
+   */
+  chatSessionMode?: ChatMode;
+  /**
+   * Fast-mode toggle for the chat backend. Claude: typed as the `/fast` slash
+   * command after the REPL is ready (one-shot per spawn). Codex: passed as
+   * `--enable fast_mode` (true) or `--disable fast_mode` (false) at spawn
+   * time. OpenRouter ignores it. Default false (unset).
+   */
+  chatFastMode?: boolean;
+  /**
+   * 1M-context toggle. Claude-only — typed as the `/context 1m` slash command
+   * after the REPL is ready. Toggling off (or unset) leaves CC at its default
+   * 200k. Codex ignores it (no 1M offering as of GPT-5.5). OpenRouter ignores
+   * it (model-id selects the variant). Default false (unset).
+   */
+  chat1mContext?: boolean;
 }
 
 export interface Checkpoint {
@@ -823,6 +847,8 @@ export interface UpdateChatBackendInput {
   chatModel?: string;
   chatMode?: ChatMode;
   chatEffort?: AgentEffortLevel;
+  chatFastMode?: boolean;
+  chat1mContext?: boolean;
 }
 
 export interface UndoToCheckpointResult {
@@ -1229,6 +1255,8 @@ export interface CreateRunInput {
   chatModel?: string;
   chatMode?: ChatMode;
   chatEffort?: AgentEffortLevel;
+  chatFastMode?: boolean;
+  chat1mContext?: boolean;
 }
 
 export interface UpdateRunStatusInput {

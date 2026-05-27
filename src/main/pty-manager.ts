@@ -44,6 +44,16 @@ interface Session {
   // is fine since the in-memory xterm snapshot covers the pre-unmount era.
   detachedBacklog: Buffer[];
   detachedBacklogBytes: number;
+  // Set true synchronously by killNow before the underlying pty.kill() runs.
+  // Gates the pty.onData closure: on Windows ConPTY drains stdout for up to
+  // ~1 second after kill (FLUSH_DATA_INTERVAL in node-pty's windowsConoutConnection),
+  // and that delayed drain would otherwise reach enqueueData → sessions.get(id),
+  // which after killNow's sessions.delete + a same-id respawn returns the NEW
+  // session. The old pty's drain bytes would interleave into the new pty's
+  // output stream on the same dataChannel and corrupt xterm rendering (the
+  // mode-flip Talk↔Execute symptom: characters from the old assistant text
+  // appear injected into the new turn's frames).
+  disposed: boolean;
 }
 
 const sessions = new Map<string, Session>();
@@ -61,6 +71,47 @@ const dataTaps = new Map<string, Array<(chunk: Buffer) => void>>();
 
 const pendingKills = new Map<string, NodeJS.Timeout>();
 const GRACE_MS = 250;
+
+// When a PTY is killed while a renderer's webContents is bound to its
+// sessionId — and a fresh PTY spawns at the same id within a short window —
+// preserve the renderer binding across the gap so the xterm in the UI follows
+// the new process instead of going silent. The mode-flip respawn flow in
+// claude-backend kills + respawns at the same sessionId ~150ms apart; without
+// this stash the new PTY would be created with webContents:null (headless
+// cli-session passes null) and the renderer's Terminal tab would stay
+// attached to a dead pid forever. 10-second TTL means a delayed respawn (e.g.
+// app coming back from a hang) still picks up the binding; a permanent
+// dispose (deleteRun, app quit) leaves the entry to expire naturally.
+interface StrandedBinding {
+  webContents: WebContents;
+  expiresAt: number;
+  tailSnapshot: Buffer | null;
+}
+const strandedBindings = new Map<string, StrandedBinding>();
+const STRANDED_BINDING_TTL_MS = 10_000;
+
+function stashWebContents(id: string, s: Session): void {
+  const wc = s.webContents;
+  if (!wc || wc.isDestroyed()) return;
+  let snapshot: Buffer | null = null;
+  if (s.tail.length > 0) {
+    snapshot = s.tail.length === 1 ? s.tail[0] : Buffer.concat(s.tail, s.tailBytes);
+  }
+  strandedBindings.set(id, {
+    webContents: wc,
+    expiresAt: Date.now() + STRANDED_BINDING_TTL_MS,
+    tailSnapshot: snapshot,
+  });
+}
+
+function consumeStrandedBinding(id: string): StrandedBinding | null {
+  const entry = strandedBindings.get(id);
+  if (!entry) return null;
+  strandedBindings.delete(id);
+  if (entry.expiresAt < Date.now()) return null;
+  if (entry.webContents.isDestroyed()) return null;
+  return entry;
+}
 
 const FLUSH_MS = 16;
 const MAX_BUFFER_BYTES = 96_000;
@@ -140,7 +191,24 @@ export async function spawn(
 
   const existing = sessions.get(opts.id);
   if (existing) {
+    // A late-attaching webContents (e.g. ChatPanel's backend-terminal tab
+    // mounting after the cli-session already spawned the PTY) needs the
+    // recent scrollback or it sees a blank xterm — historical bytes only
+    // went to dataTaps before, never to webContents.send. Replay the tail
+    // buffer once, before attach, so the user sees CC's banner + recent
+    // turn instead of a black hole.
+    const previouslyDetached = !existing.webContents && Boolean(opts.webContents);
     if (opts.webContents) existing.webContents = opts.webContents;
+    if (previouslyDetached && opts.webContents && existing.tail.length > 0) {
+      const snapshot = existing.tail.length === 1
+        ? existing.tail[0]
+        : Buffer.concat(existing.tail, existing.tailBytes);
+      try {
+        opts.webContents.send(existing.dataChannel, snapshot);
+      } catch {
+        /* webContents may have been destroyed before we got here; OK */
+      }
+    }
     try {
       existing.pty.resize(Math.max(1, opts.cols | 0), Math.max(1, opts.rows | 0));
       existing.resizedAt = Date.now();
@@ -334,10 +402,16 @@ function doSpawn(
     useConpty: process.platform === "win32" ? true : undefined,
   } as nodePty.IPtyForkOptions);
 
+  // If a renderer's xterm was bound to this sessionId on a just-killed PTY
+  // (mode-flip respawn), re-adopt that webContents so the UI follows the new
+  // process. A headless cli-session passes webContents:null; the renderer
+  // never re-spawns on its own. Without this adoption the xterm tab keeps
+  // listening on `pty:data:<sessionId>` but the new pty has no sink.
+  const stranded = opts.webContents ? null : consumeStrandedBinding(opts.id);
   const session: Session = {
     id: opts.id,
     pty,
-    webContents: opts.webContents ?? null,
+    webContents: opts.webContents ?? stranded?.webContents ?? null,
     dataChannel: `pty:data:${opts.id}`,
     exitChannel: `pty:exit:${opts.id}`,
     pendingChunks: [],
@@ -350,9 +424,37 @@ function doSpawn(
     attached: true,
     detachedBacklog: [],
     detachedBacklogBytes: 0,
+    disposed: false,
   };
 
-  pty.onData((data: string | Buffer) => enqueueData(opts.id, data));
+  // Capture the local session reference so we can identity-gate this closure.
+  // On a same-id respawn, the OLD pty's drain bytes call this callback for
+  // up to ~1s after kill (ConPTY's FLUSH_DATA_INTERVAL); without the gate they
+  // would land in the NEW session and corrupt xterm output. See Session.disposed.
+  pty.onData((data: string | Buffer) => {
+    if (session.disposed) return;
+    enqueueData(opts.id, data);
+  });
+
+  // On a stranded-binding adoption (mode-flip respawn), push a hard terminal
+  // reset to the adopted webContents BEFORE the new pty emits anything. The
+  // killed pty's last partial Ink frame left the xterm in an inconsistent
+  // state (alt-screen on, cursor parked mid-line, scroll region set, SGR
+  // colors active). Without this reset, the new pty's Ink frames paint over
+  // a dirty cell grid and characters interleave with leftover glyphs.
+  // Sequence: \x1b[?1049l (exit alt-screen) + \x1bc (RIS / full reset) +
+  // \x1b[H (cursor home) + \x1b[2J (clear viewport) + \x1b[3J (clear scrollback).
+  if (stranded && session.webContents && !session.webContents.isDestroyed()) {
+    const reset = Buffer.from("\x1b[?1049l\x1bc\x1b[H\x1b[2J\x1b[3J", "utf8");
+    try {
+      session.webContents.send(
+        session.dataChannel,
+        new Uint8Array(reset.buffer, reset.byteOffset, reset.byteLength),
+      );
+    } catch {
+      /* destroyed mid-send; harmless */
+    }
+  }
 
   pty.onExit(({ exitCode, signal }) => {
     const s = sessions.get(opts.id);
@@ -361,6 +463,13 @@ function doSpawn(
       flushDataNow(s);
       if (s.webContents && !s.webContents.isDestroyed()) {
         s.webContents.send(s.exitChannel, { exitCode, signal });
+      }
+      // Stash for a potential same-id respawn (mode-flip flow). If the kill
+      // path already stashed, that wins — overwriting with stale tail would
+      // duplicate replay. Only stash here for natural exits that didn't go
+      // through killNow.
+      if (!strandedBindings.has(opts.id)) {
+        stashWebContents(opts.id, s);
       }
       if (s.flushTimer) clearTimeout(s.flushTimer);
     }
@@ -613,6 +722,14 @@ function flushDataNow(s: Session): void {
   s.webContents.send(s.dataChannel, new Uint8Array(merged.buffer, merged.byteOffset, merged.byteLength));
 }
 
+/** True iff a PTY with this id is currently registered. Used by the
+ *  renderer-side backend-terminal tab to decide whether to mount its
+ *  xterm — mounting too early triggers a spawn attempt for the placeholder
+ *  shell, which fails with ENOENT and surfaces as "File not found". */
+export function exists(id: string): boolean {
+  return sessions.has(id);
+}
+
 export function write(id: string, data: string): void {
   const s = sessions.get(id);
   if (!s) return;
@@ -792,6 +909,15 @@ function killNow(id: string): void {
   }
   const s = sessions.get(id);
   if (!s) return;
+  // Synchronously mark the session disposed BEFORE kill() so the pty.onData
+  // gate (above in doSpawn) drops any late drain bytes. Without this, ConPTY
+  // can keep firing onData for ~1s after kill, and those bytes would route
+  // through enqueueData → sessions.get(id) → land in the next same-id session.
+  s.disposed = true;
+  // Stash the renderer-attached webContents so a fast respawn at the same id
+  // (mode-flip in claude-backend) can re-bind it; otherwise the xterm tab in
+  // the UI silently goes deaf to the new process.
+  stashWebContents(id, s);
   try {
     flushDataNow(s);
     s.pty.kill();

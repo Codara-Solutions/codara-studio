@@ -37,6 +37,11 @@ interface Props {
   // ResizeObservers race and the smaller cols/rows wins, garbling the
   // canonical pane's display.
   readOnly?: boolean;
+  // Input-only mirror. Forwards no keystrokes (like readOnly) but DOES send
+  // pty.resize calls. Use when this is the only view of the PTY (e.g. the
+  // chat panel's backend-terminal tab) so the PTY tracks the xterm's actual
+  // dimensions instead of staying at a tiny default size.
+  inputBlocked?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   onCwd?: (cwd: string) => void;
@@ -57,6 +62,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       initialCommand,
       extraEnv,
       readOnly,
+      inputBlocked,
       onSearchReady,
       onExit,
       onCwd,
@@ -79,6 +85,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       initialCommand,
       extraEnv,
       readOnly,
+      inputBlocked,
       onSearchReady,
       onExit,
       onCwd,

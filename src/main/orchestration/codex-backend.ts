@@ -25,6 +25,7 @@ import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { backendPtySessionId } from "@shared/backend-pty";
 import type { ChatMode } from "@shared/types";
 
 import type {
@@ -34,6 +35,7 @@ import type {
   SparkAgentBackend,
 } from "./spark-agent-backend";
 import { buildTalkReplyDecision, latestUserPromptFromRun } from "./spark-agent-backend";
+import { buildExecuteDecisionFromToolCalls } from "./claude-backend";
 import { startCliSession, type CliSession } from "./cli-session";
 import {
   installOrchestratorMcpForCodex,
@@ -49,6 +51,10 @@ interface CodexChatSession {
    *  Execute) trigger a dispose-and-respawn-with-resume so the new spawn
    *  picks up the right system-prompt file. */
   spawnMode: ChatMode;
+  /** fast_mode flag value the process was launched with. Codex sets this
+   *  via --enable/--disable at spawn time; flipping mid-chat requires
+   *  dispose-and-respawn-with-resume just like spawnMode does. */
+  spawnFastMode: boolean;
   /** Accumulated assistant text across the *current* turn — reset when a new
    *  turn begins so each manager call gets the reply for that turn only. */
   accumulatedText: string;
@@ -63,11 +69,49 @@ interface CodexChatSession {
    *  delta as the turn's usage rather than the cumulative total so the cost
    *  chip reflects per-turn spend like every other backend. */
   turnStartUsage: { input: number; output: number; cached: number } | null;
+  /** Tool calls observed during the current turn. In Execute mode we read
+   *  this after the turn ends to convert spark_spawn_workers calls into a
+   *  SparkManagerDecision the run-store can act on — mirrors the claude
+   *  backend's turnToolCalls field. */
+  turnToolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }>;
+  /** Wall-clock ms of the most recent JSONL line observed from Codex. Used
+   *  by waitForTurnEnd as a sliding deadline so long-poll MCP tool calls
+   *  (e.g. spark_wait_for_workers blocking 10-20 min) don't trip the 90s
+   *  wall-clock cap. Mirrors claude-backend's lastJsonlActivityAt. */
+  lastJsonlActivityAt: number;
+  /** Spark MCP long-poll tool calls in flight (function_call emitted, no
+   *  matching function_call_output yet). When non-empty waitForTurnEnd
+   *  extends its cap to EXTENDED_TURN_TIMEOUT_MS — without this, the rollout
+   *  goes silent during spark_wait_for_workers' 10-20 min block and the 90s
+   *  wall-clock trips before workers can report back. Keyed by call_id.
+   *  Mirrors claude-backend's pendingMcpToolCalls. */
+  pendingMcpToolCalls: Map<
+    string,
+    { toolName: string; startedAt: number; expiresAt: number }
+  >;
 }
 
 const SESSIONS = new Map<string, CodexChatSession>();
 
 const TURN_TIMEOUT_MS = 90_000;
+// While a Spark long-poll MCP tool call is in flight (spark_wait_for_workers),
+// the rollout JSONL emits the initial function_call entry once and is then
+// silent for the 10-20 min that the tool blocks. We extend the cap to 30 min
+// while any tracked entry is outstanding so the function_call_output has time
+// to arrive. See claude-backend.ts for the matching CC-side reasoning.
+const EXTENDED_TURN_TIMEOUT_MS = 30 * 60_000;
+// Per-entry expiry on pendingMcpToolCalls: if Codex emits function_call then
+// dies before function_call_output, the entry would otherwise hold the cap
+// indefinitely. 25 min covers the in-server soft ceiling plus slop.
+const MAX_PENDING_MCP_HOLD_MS = 25 * 60_000;
+
+// Only Spark MCP long-pollers extend the cap. Codex writes the bare tool name
+// in payload.name (e.g. "spark_wait_for_workers"); the mcp__server__ prefix
+// lives in payload.namespace, so name alone is the gate.
+function isSparkLongPollMcpTool(name: string): boolean {
+  return name === "spark_wait_for_workers";
+}
+
 const TALK_PROMPT_FILENAME = "codex-talk.md";
 const EXECUTE_PROMPT_RESOURCE_FILENAME = "codex-execute-prompt.md";
 
@@ -268,10 +312,23 @@ function buildArgs(input: ManagerRequestInput, promptPath: string): string[] {
   if (chat.effort) {
     args.push("-c", `model_reasoning_effort=${chat.effort}`);
   }
+  // Codex's fast_mode is a feature flag (`codex features list` shows it as
+  // stable=true by default). Always pass an explicit --enable/--disable so
+  // the chip's choice is authoritative regardless of the user's saved
+  // config.toml. Codex has no 1M-context offering today; chat.oneMillionContext
+  // is ignored here (Claude-only feature).
+  args.push(chat.fastMode ? "--enable" : "--disable", "fast_mode");
   // `model_instructions_file` works for both Talk and Execute prompts — the
   // caller picks the right `promptPath` based on `chat.mode`.
   args.push("-c", `model_instructions_file="${promptPath}"`);
   args.push("-c", "project_doc_max_bytes=0");
+  // Sandbox enforcement. Both modes use read-only:
+  // - Talk: user is asking questions, no writes expected.
+  // - Execute: Codex is a *manager* — it delegates ALL file changes to
+  //   workers (which run in their own sandboxes with their own write
+  //   permissions). The orchestrator itself doesn't need to write.
+  //   Read-only enforces this even if the prompt drifts.
+  args.push("-s", "read-only");
   return args;
 }
 
@@ -305,7 +362,16 @@ async function spawnSession(
   const args = buildArgs(input, promptPath);
   const spawnDate = new Date();
   const spawnedAt = Date.now();
-  const sessionId = `spark-codex-talk-${input.run.id}`;
+  // Deterministic sessionId so the renderer's backend-terminal tab can
+  // attach to the same PTY without a state-sync round-trip via the helper.
+  const sessionId =
+    backendPtySessionId(input.run.id, "codex") ?? `spark-codex-talk-${input.run.id}`;
+  // Emit the resolved flag set so failing runs can be diagnosed from
+  // events.jsonl without re-instrumenting.
+  onStream?.({
+    kind: "system_note",
+    message: `Spawning codex (mode=${input.chat.mode}) args: ${args.map((a) => JSON.stringify(a)).join(" ")}`,
+  });
   const cli = await startCliSession({
     sessionId,
     cwd: input.cwd,
@@ -314,20 +380,32 @@ async function spawnSession(
     env: { SPARK_RUN_ID: input.run.id },
     jsonlReadyTimeoutMs: 15_000,
     discoverJsonlPath: () => discoverRolloutPath(spawnedAt, spawnDate),
+    // Resume case: the rollout JSONL already contains prior turns. Skip the
+    // existing content so the tailer only delivers fresh appended lines —
+    // otherwise replayed assistant blocks pile into the current turn's
+    // accumulator and the reply becomes "previous answer + actual answer".
+    skipExistingJsonl: Boolean(input.chat.sessionUuid),
   });
 
   const session: CodexChatSession = {
     cli,
     sessionUuid: input.chat.sessionUuid ?? null,
     spawnMode: input.chat.mode,
+    spawnFastMode: input.chat.fastMode,
     accumulatedText: "",
     lastMessageId: null,
     pendingResolve: null,
     pendingReject: null,
     turnStartUsage: null,
+    turnToolCalls: [],
+    lastJsonlActivityAt: Date.now(),
+    pendingMcpToolCalls: new Map(),
   };
 
   cli.onJsonlEntry((raw) => {
+    // Every JSONL line is liveness: refresh the sliding deadline so
+    // waitForTurnEnd doesn't trip during a long-poll MCP call.
+    session.lastJsonlActivityAt = Date.now();
     const entry = raw as JsonlEntry;
     if (entry?.__spark_cli_session_error) {
       const msg = entry.message ?? "Codex CLI session error";
@@ -341,6 +419,9 @@ async function spawnSession(
   cli.onExit((info) => {
     // If the process dies mid-turn, fail the waiter so the manager call
     // returns instead of hanging until the 90s timeout.
+    // Also clear any orphan MCP entries — defensive only since pendingReject
+    // settles the waiter immediately, but keeps the map clean across spawns.
+    session.pendingMcpToolCalls.clear();
     if (session.pendingReject) {
       const msg = `codex exited (code=${info.exitCode}${info.signal ? `, signal=${info.signal}` : ""})`;
       onStream?.({ kind: "error", message: msg });
@@ -426,10 +507,25 @@ function handleEntry(
       const p = payload as { name?: unknown; arguments?: unknown; call_id?: unknown };
       const toolName = typeof p.name === "string" ? p.name : "tool";
       const toolUseId = typeof p.call_id === "string" ? p.call_id : `call_${Date.now()}`;
+      const parsedInput = tryParseJson(p.arguments);
+      // Track for execute-mode SparkManagerDecision conversion after the
+      // turn ends — same pattern as the Claude backend.
+      session.turnToolCalls.push({ toolName, toolUseId, input: parsedInput });
+      // Track Spark long-poll MCP calls so waitForTurnEnd extends its cap
+      // while Codex is blocked inside the tool. Removed by function_call_output;
+      // backstopped by expiresAt sweep in effectiveTurnTimeoutMs.
+      if (isSparkLongPollMcpTool(toolName)) {
+        const startedAt = Date.now();
+        session.pendingMcpToolCalls.set(toolUseId, {
+          toolName,
+          startedAt,
+          expiresAt: startedAt + MAX_PENDING_MCP_HOLD_MS,
+        });
+      }
       onStream?.({
         kind: "tool_use",
         toolName,
-        input: tryParseJson(p.arguments),
+        input: parsedInput,
         toolUseId,
       });
       return;
@@ -437,6 +533,8 @@ function handleEntry(
     if (payloadType === "function_call_output") {
       const p = payload as { call_id?: unknown; output?: unknown };
       const toolUseId = typeof p.call_id === "string" ? p.call_id : "";
+      // Clear the pending-MCP entry (no-op if not tracked).
+      if (toolUseId) session.pendingMcpToolCalls.delete(toolUseId);
       onStream?.({
         kind: "tool_result",
         toolUseId,
@@ -458,20 +556,48 @@ function submitPrompt(cli: CliSession, prompt: string): void {
   }
 }
 
+
+// Sweep expired pending-MCP entries and return the cap that applies now.
+// While a tracked long-poll MCP call is in flight, the cap is
+// EXTENDED_TURN_TIMEOUT_MS; otherwise normal TURN_TIMEOUT_MS.
+function effectiveTurnTimeoutMs(session: CodexChatSession): number {
+  const now = Date.now();
+  for (const [id, entry] of session.pendingMcpToolCalls) {
+    if (now > entry.expiresAt) session.pendingMcpToolCalls.delete(id);
+  }
+  return session.pendingMcpToolCalls.size > 0
+    ? EXTENDED_TURN_TIMEOUT_MS
+    : TURN_TIMEOUT_MS;
+}
+
 async function waitForTurnEnd(session: CodexChatSession): Promise<void> {
+  // Seed the activity stamp at submit time so a Codex that fails to print
+  // anything within TURN_TIMEOUT_MS still trips. Subsequent JSONL lines
+  // refresh it (see CodexChatSession.lastJsonlActivityAt).
+  session.lastJsonlActivityAt = Date.now();
   return new Promise<void>((resolve, reject) => {
     let settled = false;
-    const timer = setTimeout(() => {
+    // Sliding deadline: poll every 500ms and trip only when there's been
+    // (effective cap) of JSONL silence. Long-poll MCP tool calls (e.g.
+    // spark_wait_for_workers, 10-20 min) emit a function_call ONCE and then
+    // the rollout is silent until function_call_output lands. The cap
+    // extends to EXTENDED_TURN_TIMEOUT_MS while pendingMcpToolCalls is
+    // non-empty so the output has time to arrive.
+    const tick = setInterval(() => {
       if (settled) return;
-      settled = true;
-      session.pendingResolve = null;
-      session.pendingReject = null;
-      reject(new Error(`Codex turn timed out after ${TURN_TIMEOUT_MS}ms`));
-    }, TURN_TIMEOUT_MS);
+      const cap = effectiveTurnTimeoutMs(session);
+      if (Date.now() - session.lastJsonlActivityAt >= cap) {
+        settled = true;
+        clearInterval(tick);
+        session.pendingResolve = null;
+        session.pendingReject = null;
+        reject(new Error(`Codex turn timed out after ${cap}ms`));
+      }
+    }, 500);
     session.pendingResolve = () => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearInterval(tick);
       session.pendingResolve = null;
       session.pendingReject = null;
       resolve();
@@ -479,7 +605,7 @@ async function waitForTurnEnd(session: CodexChatSession): Promise<void> {
     session.pendingReject = (err) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearInterval(tick);
       session.pendingResolve = null;
       session.pendingReject = null;
       reject(err);
@@ -498,13 +624,20 @@ export const codexBackend: SparkAgentBackend = {
     const startedAt = Date.now();
     try {
       let session = SESSIONS.get(input.run.id);
-      if (session && session.spawnMode !== input.chat.mode) {
-        // Mid-chat mode flip — respawn with the new prompt. Carry the
-        // sessionUuid forward via `chat.sessionUuid` so the new spawn uses
-        // `codex resume <uuid>` and keeps the same rollout transcript.
+      const fastModeChanged = session && session.spawnFastMode !== input.chat.fastMode;
+      if (session && (session.spawnMode !== input.chat.mode || fastModeChanged)) {
+        // Mode or fast_mode flip → respawn with the new spawn args. Resume
+        // via `codex resume <uuid>` brings the rollout transcript along.
+        // Execute mode's `model_instructions_file` points at the manager
+        // prompt that strongly redirects Codex to call spark_spawn_workers,
+        // which dominates over any prior chat-mode turns in the rollout.
+        const modeChanged = session.spawnMode !== input.chat.mode;
+        const reason = modeChanged
+          ? `mode ${session.spawnMode} → ${input.chat.mode}`
+          : `fast_mode ${session.spawnFastMode ? "on" : "off"} → ${input.chat.fastMode ? "on" : "off"}`;
         onStream?.({
           kind: "system_note",
-          message: `Switching Codex from ${session.spawnMode} to ${input.chat.mode} mode — respawning with the new prompt.`,
+          message: `Respawning Codex with new ${reason}.`,
         });
         const resumeUuid = session.sessionUuid;
         try {
@@ -522,12 +655,16 @@ export const codexBackend: SparkAgentBackend = {
         session = await spawnSession(input, onStream);
         SESSIONS.set(input.run.id, session);
       }
-
       // Snapshot cumulative usage so this turn's token-count deltas don't
       // accidentally include earlier turns' totals.
       session.accumulatedText = "";
       session.lastMessageId = null;
       session.turnStartUsage = { input: 0, output: 0, cached: 0 };
+      session.turnToolCalls = [];
+      // The model can only have one outstanding tool call at a time, so this
+      // is expected to be empty between turns. Defensive clear in case a
+      // previous turn's orphan would extend an unrelated turn.
+      session.pendingMcpToolCalls.clear();
 
       const prompt = latestUserPromptFromRun(input.run);
       if (!prompt.trim()) {
@@ -547,14 +684,29 @@ export const codexBackend: SparkAgentBackend = {
       const finalText =
         session.accumulatedText.trim() ||
         "(Codex completed the turn without producing a visible message.)";
+      const newSessionUuid =
+        session.sessionUuid && session.sessionUuid !== input.chat.sessionUuid
+          ? session.sessionUuid
+          : undefined;
+      // Execute mode: turn spark_spawn_workers tool calls into a
+      // SparkManagerDecision — same shape grok produces, so the run-store
+      // pipeline spawns workers exactly the same way.
+      if (input.chat.mode === "execute") {
+        return {
+          decision: buildExecuteDecisionFromToolCalls(
+            session.turnToolCalls,
+            session.accumulatedText.trim(),
+          ),
+          durationMs: Date.now() - startedAt,
+          model: input.chat.model,
+          newSessionUuid,
+        };
+      }
       return {
         decision: buildTalkReplyDecision(finalText),
         durationMs: Date.now() - startedAt,
         model: input.chat.model,
-        newSessionUuid:
-          session.sessionUuid && session.sessionUuid !== input.chat.sessionUuid
-            ? session.sessionUuid
-            : undefined,
+        newSessionUuid,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -576,6 +728,18 @@ export const codexBackend: SparkAgentBackend = {
       await session.cli.dispose();
     } catch {
       // swallow — dispose is best-effort
+    }
+  },
+
+  interruptChat(runId: string): void {
+    const session = SESSIONS.get(runId);
+    if (!session) return;
+    // ESC aborts the in-flight Codex turn. Session stays alive so the next
+    // user message can continue the conversation.
+    try {
+      session.cli.interrupt();
+    } catch {
+      // session may already be disposed; nothing useful to surface
     }
   },
 };

@@ -32,11 +32,14 @@ import type { CliProvider, ResumeOpts, SpawnOpts } from "./types";
 // stalled on "model: loading" and never accepted the prompt. With a single
 // model the differentiator becomes the reasoning-effort knob: leaf work
 // uses minimal, feature uses medium, skeleton uses high/xhigh.
+// Codex model_reasoning_effort accepts minimal/low/medium/high/xhigh —
+// NOT max. Verified against `codex doctor -c model_reasoning_effort=...`:
+// `max` fails with "config could not be loaded"; the other five pass.
 const CODEX_MODELS: AgentRuntimeModel[] = [
   {
     id: "gpt-5.5",
     label: "GPT-5.5",
-    effortLevels: ["minimal", "medium", "high", "xhigh"],
+    effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
     isDefault: true,
     tier: "top",
   },

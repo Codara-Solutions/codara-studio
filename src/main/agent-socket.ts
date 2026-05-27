@@ -7,6 +7,7 @@ import * as pty from "./pty-manager";
 import { sparkHome } from "./spark-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
+import type { RunState } from "@shared/types";
 
 const HANDSHAKE_FILE = "agent-socket.json";
 
@@ -299,6 +300,8 @@ async function dispatch(
         return await handleOrchestratorComplete(params, id);
       case "orchestrator.get_worker_status":
         return await handleOrchestratorGetWorkerStatus(params, id);
+      case "orchestrator.wait_for_workers":
+        return await handleOrchestratorWaitForWorkers(params, id);
       case "tab.create":
       case "pane.split":
         // The renderer owns tab/pane state and reaching it from main requires
@@ -457,6 +460,7 @@ async function handleOrchestratorSpawnWorkers(
     : process.cwd();
 
   const workerTaskIds: string[] = [];
+  const attemptIdsToLaunch: string[] = [];
   for (const raw of rawWorkers) {
     if (!raw || typeof raw !== "object") continue;
     const w = raw as Record<string, unknown> & OrchestratorWorkerInput;
@@ -485,11 +489,24 @@ async function handleOrchestratorSpawnWorkers(
     if (!created) continue;
     workerTaskIds.push(created.id);
     try {
-      await runStore.prepareWorkerTask({ runId, workerTaskId: created.id, cwd });
+      const envelope = await runStore.prepareWorkerTask({ runId, workerTaskId: created.id, cwd });
+      // The prepared attempt is sitting at prompt_ready; schedule the
+      // autopilot cycle that flips it to launching + actually spawns the
+      // worker CLI. Before the execute-mode autopilot-review-skip landed
+      // (run-store.ts:741+), this happened indirectly via the eventual
+      // worker_result_review pickup. Now nobody calls launchWorkerAttempt
+      // unless we do it here — without this, CC's manager turn spawns
+      // workers that sit forever in prompt_ready, blocks on
+      // spark_wait_for_workers until the 90s turn timeout fires, and
+      // reports back "Worker was cancelled before execution."
+      attemptIdsToLaunch.push(envelope.attemptId);
     } catch {
       // prepareWorkerTask failures shouldn't block subsequent queueings; the
       // worker stays in 'created' state and the autopilot will retry.
     }
+  }
+  if (attemptIdsToLaunch.length > 0) {
+    runStore.scheduleAutopilotCycles(runId, attemptIdsToLaunch);
   }
   return successResponse(id, { worker_task_ids: workerTaskIds });
 }
@@ -571,6 +588,98 @@ async function handleOrchestratorComplete(
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }
+}
+
+const WAIT_FOR_WORKERS_POLL_MS = 500;
+const WAIT_FOR_WORKERS_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min default
+const WAIT_FOR_WORKERS_MAX_TIMEOUT_MS = 20 * 60 * 1000; // 20 min cap (req.setTimeout in MCP client is also 20 min)
+const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "cancelled"]);
+
+async function handleOrchestratorWaitForWorkers(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const rawIds = Array.isArray(params.worker_task_ids) ? params.worker_task_ids : null;
+  if (!rawIds || rawIds.length === 0) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "worker_task_ids must be a non-empty array");
+  }
+  const workerTaskIds = rawIds.filter((x): x is string => typeof x === "string" && x.length > 0);
+  if (workerTaskIds.length === 0) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "worker_task_ids contained no valid string ids");
+  }
+  const mode = params.mode === "any" ? "any" : "all";
+  const requestedTimeout =
+    typeof params.timeout_ms === "number" && Number.isFinite(params.timeout_ms) && params.timeout_ms > 0
+      ? Math.min(params.timeout_ms, WAIT_FOR_WORKERS_MAX_TIMEOUT_MS)
+      : WAIT_FOR_WORKERS_DEFAULT_TIMEOUT_MS;
+  const runStore = await getRunStore();
+  const deadline = Date.now() + requestedTimeout;
+  const snapshotWorkers = (run: RunState): {
+    worker_task_id: string;
+    task_status: string | null;
+    attempt_status: string | null;
+    runtime: string | null;
+    started_at: string | null;
+    finished_at: string | null;
+    final_report_path: string | null;
+    is_terminal: boolean;
+  }[] =>
+    workerTaskIds.map((wtid) => {
+      const task = run.workerTasks.find((wt) => wt.id === wtid);
+      const lastAttempt = task
+        ? [...run.workerAttempts].reverse().find((a) => a.workerTaskId === wtid)
+        : null;
+      const taskStatus = task ? task.status : null;
+      return {
+        worker_task_id: wtid,
+        task_status: taskStatus,
+        attempt_status: lastAttempt?.status ?? null,
+        runtime: lastAttempt?.runtime ?? task?.runtimePreference ?? null,
+        started_at: lastAttempt?.startedAt ?? null,
+        finished_at: lastAttempt?.finishedAt ?? null,
+        final_report_path: lastAttempt?.finalReportPath ?? null,
+        is_terminal: taskStatus !== null && TERMINAL_WORKER_TASK_STATUSES.has(taskStatus),
+      };
+    });
+  const firstRun = await runStore.getRun(runId);
+  if (!firstRun) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  const unknownIds = workerTaskIds.filter(
+    (wtid) => !firstRun.workerTasks.some((wt) => wt.id === wtid),
+  );
+  if (unknownIds.length > 0) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `unknown worker_task_ids: ${unknownIds.join(", ")}`,
+    );
+  }
+  while (Date.now() < deadline) {
+    const run = await runStore.getRun(runId);
+    if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-wait: ${runId}`);
+    const snapshot = snapshotWorkers(run);
+    const terminalCount = snapshot.filter((w) => w.is_terminal).length;
+    if (mode === "any" && terminalCount > 0) {
+      return successResponse(id, {
+        workers: snapshot.map(({ is_terminal: _t, ...rest }) => rest),
+        reason: "any_terminal",
+      });
+    }
+    if (mode === "all" && terminalCount === snapshot.length) {
+      return successResponse(id, {
+        workers: snapshot.map(({ is_terminal: _t, ...rest }) => rest),
+        reason: "all_terminal",
+      });
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, WAIT_FOR_WORKERS_POLL_MS));
+  }
+  const finalRun = await runStore.getRun(runId);
+  const finalSnapshot = finalRun ? snapshotWorkers(finalRun) : snapshotWorkers(firstRun);
+  return successResponse(id, {
+    workers: finalSnapshot.map(({ is_terminal: _t, ...rest }) => rest),
+    reason: "timeout",
+  });
 }
 
 async function handleOrchestratorGetWorkerStatus(

@@ -151,6 +151,13 @@ interface Options {
   // garbling the larger xterm. Explicit pty.write calls (e.g. SwarmView's
   // broadcast button) bypass this hook entirely and still work.
   readOnly?: boolean;
+  // Input-only mirror: forward NO keystrokes (like readOnly) but DO send
+  // pty.resize so the underlying PTY tracks this xterm's cols/rows. Used
+  // when this pane is the SOLE view of the PTY (no canonical sibling pane
+  // exists), so resizing is safe — the alternative is the PTY staying at
+  // its tiny default size while the user's xterm fills the panel, leaving
+  // most of the visible area unpainted.
+  inputBlocked?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   onCwd?: (cwd: string) => void;
@@ -189,6 +196,7 @@ export function useTerminalSession({
   initialCommand,
   extraEnv,
   readOnly = false,
+  inputBlocked = false,
   onSearchReady,
   onExit,
   onCwd,
@@ -204,6 +212,13 @@ export function useTerminalSession({
   useEffect(() => {
     readOnlyRef.current = readOnly;
   }, [readOnly]);
+  // Same pattern for inputBlocked. The closures below decide on each event
+  // whether to forward keystrokes — checking the ref lets the parent flip
+  // the prop without forcing the xterm setup effect to re-run.
+  const inputBlockedRef = useRef<boolean>(inputBlocked);
+  useEffect(() => {
+    inputBlockedRef.current = inputBlocked;
+  }, [inputBlocked]);
 
   const detectedRef = useRef<string | null>(null);
   // Latest-callback refs so the effect can run exactly once per `sessionId`
@@ -354,7 +369,7 @@ export function useTerminalSession({
         // Read-only mirror panes must not paste into the PTY — the canonical
         // pane owns input. Clipboard read is also skipped so a paste shortcut
         // in a mirror tile is a true no-op rather than a phantom read.
-        if (readOnlyRef.current) return;
+        if (readOnlyRef.current || inputBlockedRef.current) return;
         void (async () => {
           const text = await window.spark.clipboard.readText();
           if (!text) return;
@@ -508,7 +523,7 @@ export function useTerminalSession({
           !event.metaKey
         ) {
           event.preventDefault();
-          if (!readOnlyRef.current) {
+          if (!readOnlyRef.current && !inputBlockedRef.current) {
             const payload = agentPhase === "agent" ? "\x1b\r" : "\\\n";
             void window.spark.pty.write(sessionId, payload);
           }
@@ -891,8 +906,9 @@ export function useTerminalSession({
         // keystrokes — the canonical xterm for the same PTY lives elsewhere
         // and accepts user input there. Activity still pings since hover/
         // focus on the mirror tile is a meaningful "this PTY isn't idle"
-        // signal for the orchestrator.
-        if (readOnlyRef.current) {
+        // signal for the orchestrator. `inputBlocked` is the sole-view
+        // variant — same input-suppression, but resize stays enabled.
+        if (readOnlyRef.current || inputBlockedRef.current) {
           onActivityRef.current?.();
           return;
         }

@@ -26,11 +26,14 @@ import { resolveBinary } from "../binary-resolver";
 
 import type { CliProvider, ResumeOpts, SpawnOpts } from "./types";
 
+// Claude --effort accepts low/medium/high/xhigh/max — NOT minimal. Both
+// Opus 4.7 and Sonnet 4.6 share the same 5-tier ladder; tier sizing affects
+// throughput/latency, not the available knobs.
 const CLAUDE_MODELS: AgentRuntimeModel[] = [
   {
     id: "claude-opus-4-7",
     label: "Opus 4.7",
-    effortLevels: ["minimal", "medium", "high", "xhigh", "max"],
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
     isDefault: true,
     tier: "top",
   },

@@ -21,6 +21,8 @@ export interface ChatComposerStartConfig {
   model?: string;
   mode?: ChatMode;
   effort?: AgentEffortLevel;
+  fastMode?: boolean;
+  oneMillionContext?: boolean;
 }
 
 // The chat composer. One surface for two jobs:
@@ -115,13 +117,14 @@ const CHAT_BACKEND_GROUPS: ChatBackendGroup[] = [
         id: "claude-opus-4-7",
         label: "Opus 4.7",
         backend: "claude",
-        effortLevels: ["low", "medium", "high"],
+        // Claude --effort accepts exactly these 5 (verified). No "minimal".
+        effortLevels: ["low", "medium", "high", "xhigh", "max"],
       },
       {
         id: "claude-sonnet-4-6",
         label: "Sonnet 4.6",
         backend: "claude",
-        effortLevels: ["low", "medium", "high"],
+        effortLevels: ["low", "medium", "high", "xhigh", "max"],
       },
     ],
   },
@@ -133,6 +136,9 @@ const CHAT_BACKEND_GROUPS: ChatBackendGroup[] = [
         id: "gpt-5.5",
         label: "GPT-5.5",
         backend: "codex",
+        // Codex model_reasoning_effort accepts these 5 — no "max". Verified
+        // with `codex doctor -c model_reasoning_effort=max` failing on
+        // "config could not be loaded".
         effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
       },
     ],
@@ -168,6 +174,8 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const [draftChatModel, setDraftChatModel] = useState<string>(DEFAULT_CHAT_MODEL);
   const [draftChatMode, setDraftChatMode] = useState<ChatMode>(DEFAULT_CHAT_MODE);
   const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(DEFAULT_CHAT_EFFORT);
+  const [draftFastMode, setDraftFastMode] = useState<boolean>(false);
+  const [draftOneMillionContext, setDraftOneMillionContext] = useState<boolean>(false);
   // Running per-chat token total, summed from chat.usage SparkEvents. Reset
   // whenever the active run changes so a fresh chat starts at 0; for the
   // draft (no run yet) we also stay at 0 because no events have fired.
@@ -376,6 +384,8 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
           model: draftChatModel,
           mode: draftChatMode,
           effort: draftChatEffort,
+          fastMode: draftFastMode,
+          oneMillionContext: draftOneMillionContext,
         };
         await onStartChat(message, clientMessageId, attachments, chatConfig);
       } else {
@@ -551,8 +561,16 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const activeChatModelId: string = run_?.chatModel ?? draftChatModel;
   const activeChatMode: ChatMode = run_?.chatMode ?? draftChatMode;
   const activeChatEffort: AgentEffortLevel = run_?.chatEffort ?? draftChatEffort;
+  const activeFastMode: boolean = run_?.chatFastMode ?? draftFastMode;
+  const activeOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
   const activeChatModel: ChatModelOption =
     findChatModel(activeChatBackend, activeChatModelId) ?? fallbackChatModel(activeChatBackend);
+  // Fast mode applies to Claude (typed as /fast) and Codex (CLI feature flag).
+  // OpenRouter has no equivalent — the chip hides the toggle for it. 1M
+  // context is Claude-only (Codex's GPT-5.5 maxes at 400k; OpenRouter chooses
+  // by model id).
+  const fastModeAvailable = activeChatBackend === "claude" || activeChatBackend === "codex";
+  const oneMillionContextAvailable = activeChatBackend === "claude";
   const availableEfforts: AgentEffortLevel[] =
     activeChatBackend === "openrouter"
       ? ALL_EFFORTS
@@ -571,11 +589,15 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     chatModel?: string;
     chatMode?: ChatMode;
     chatEffort?: AgentEffortLevel;
+    chatFastMode?: boolean;
+    chat1mContext?: boolean;
   }) => {
     if (changes.chatBackend !== undefined) setDraftChatBackend(changes.chatBackend);
     if (changes.chatModel !== undefined) setDraftChatModel(changes.chatModel);
     if (changes.chatMode !== undefined) setDraftChatMode(changes.chatMode);
     if (changes.chatEffort !== undefined) setDraftChatEffort(changes.chatEffort);
+    if (changes.chatFastMode !== undefined) setDraftFastMode(changes.chatFastMode);
+    if (changes.chat1mContext !== undefined) setDraftOneMillionContext(changes.chat1mContext);
     if (!run_) return;
     // IPC is wired in a follow-up patch on the main process; cast lets the
     // renderer call it ahead of time without dragging the preload contract
@@ -587,6 +609,8 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
         chatModel?: string;
         chatMode?: ChatMode;
         chatEffort?: AgentEffortLevel;
+        chatFastMode?: boolean;
+        chat1mContext?: boolean;
       }) => Promise<unknown>;
     };
     if (typeof orchestration.updateChatBackend !== "function") return;
@@ -623,6 +647,16 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
 
   const onToggleMode = () => {
     applyChatBackendChange({ chatMode: activeChatMode === "execute" ? "talk" : "execute" });
+  };
+
+  const onToggleFastMode = () => {
+    if (!fastModeAvailable) return;
+    applyChatBackendChange({ chatFastMode: !activeFastMode });
+  };
+
+  const onToggleOneMillionContext = () => {
+    if (!oneMillionContextAvailable) return;
+    applyChatBackendChange({ chat1mContext: !activeOneMillionContext });
   };
 
   useEffect(() => {
@@ -856,6 +890,36 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
               <ChipGlyph kind={activeChatMode === "execute" ? "execute" : "talk"} />
               <span>{activeChatMode === "execute" ? "Execute" : "Talk"}</span>
             </ChipButton>
+            {fastModeAvailable && (
+              <ChipButton
+                title={
+                  activeChatBackend === "claude"
+                    ? activeFastMode
+                      ? "Fast mode on — Claude uses /fast for quicker responses. Click to disable."
+                      : "Fast mode off — click to enable Claude's /fast (faster output, same model)."
+                    : activeFastMode
+                      ? "Fast mode on — Codex spawns with fast_mode enabled. Click to disable."
+                      : "Fast mode off — Codex spawns with fast_mode disabled. Click to enable."
+                }
+                active={activeFastMode}
+                onClick={onToggleFastMode}
+              >
+                <span>{activeFastMode ? "Fast on" : "Fast off"}</span>
+              </ChipButton>
+            )}
+            {oneMillionContextAvailable && (
+              <ChipButton
+                title={
+                  activeOneMillionContext
+                    ? "1M context on — Claude session uses the 1M-token window (subscription feature). Click to revert to 200k."
+                    : "1M context off — Claude session uses the default 200k. Click to enable 1M."
+                }
+                active={activeOneMillionContext}
+                onClick={onToggleOneMillionContext}
+              >
+                <span>{activeOneMillionContext ? "1M ctx" : "200k ctx"}</span>
+              </ChipButton>
+            )}
           </div>
           <span
             style={{
@@ -879,7 +943,11 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
           </span>
           <TokenCounter
             used={tokensUsed}
-            budget={contextWindowForModel(activeChatModelId).tokens}
+            budget={
+              activeOneMillionContext && activeChatBackend === "claude"
+                ? 1_000_000
+                : contextWindowForModel(activeChatModelId).tokens
+            }
           />
           <IconButton
             title="MCP and skills"

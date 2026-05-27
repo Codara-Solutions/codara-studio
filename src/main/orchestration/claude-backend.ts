@@ -26,10 +26,12 @@
 // stream event.
 
 import { app } from "electron";
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { backendPtySessionId } from "@shared/backend-pty";
 import type { ChatMode } from "@shared/types";
 
 import { writeFileAtomic } from "../fs-atomic";
@@ -37,6 +39,11 @@ import { installOrchestratorMcpForCC, isSparkOrchestratorMcpInstalled } from "..
 import { claudeProvider } from "../providers/claude";
 import { sparkHome } from "../spark-home";
 
+import type {
+  SparkManagerDecision,
+  SparkManagerQuestionOption,
+  SparkManagerTaskDecision,
+} from "./openrouter-manager";
 import { startCliSession, type CliSession } from "./cli-session";
 import {
   buildTalkReplyDecision,
@@ -49,9 +56,75 @@ import {
 
 const TURN_POLL_INTERVAL_MS = 200;
 const TURN_TIMEOUT_MS = 90_000;
+// When a Spark long-poll MCP tool call is in flight (currently only
+// spark_wait_for_workers — see isSparkLongPollMcpTool below), the turn-end
+// waiter extends its cap to this value. spark_wait_for_workers can block for
+// 10-20 minutes while workers run, and the CC JSONL is silent during the wait
+// (only the initial `tool_use` line is emitted). Without this extension the
+// wall-clock 90s cap trips roughly when the tool_result is about to land, and
+// the resulting turn-timeout fast-path cancels every queued worker via
+// applySparkManagerDecision (run-store.ts:2841).
+const EXTENDED_TURN_TIMEOUT_MS = 30 * 60_000;
+// Per-entry expiry on pendingMcpToolCalls. If a CLI emits a `tool_use` and
+// then dies before emitting the matching `tool_result`, the entry would
+// otherwise hold the cap indefinitely. 25 min covers the in-MCP-server soft
+// ceiling (20 min for spark_wait_for_workers) plus slop, after which the
+// entry is swept and the regular TURN_TIMEOUT_MS reasserts.
+const MAX_PENDING_MCP_HOLD_MS = 25 * 60_000;
+
+// Only Spark MCP long-pollers extend the cap — every other MCP tool returns
+// quickly and tracking them would broaden the "ignore 90s" surface unnecessarily.
+function isSparkLongPollMcpTool(name: string): boolean {
+  return (
+    name === "spark_wait_for_workers" ||
+    name === "mcp__spark-orchestrator__spark_wait_for_workers"
+  );
+}
+// CC's Stop hook fires when the assistant finishes its turn, but the JSONL
+// tailer is on a 150ms poll AND CC sometimes flushes the assistant message
+// to disk slightly AFTER firing the hook. Without this grace window we
+// occasionally return the "no output" fallback when the assistant block is
+// 50-300ms behind. 1.5s covers the observed worst case and the user only
+// pays it on the rare "Stop fired with no text yet" path.
+const POST_STOP_ASSISTANT_GRACE_MS = 1_500;
+const POST_STOP_GRACE_POLL_MS = 50;
+// CC's Ink REPL renders its banner within a few hundred ms in the typical
+// case, but cold-start (first launch of the day, package self-updater, etc.)
+// can take a few seconds. 15s is a comfortable ceiling — past that we fall
+// through and try writing anyway; the prompt write is harmless if dropped
+// and the user sees the turn-timeout error rather than a hang.
+const REPL_READY_TIMEOUT_MS = 15_000;
+// Bracketed-paste control codes Ink REPLs (CC and Codex both) honor. Using
+// these lets us inject a prompt that contains slashes, newlines, escape
+// codes, or any other character without Ink interpreting it as a command.
+const PASTE_BEGIN = "\x1b[200~";
+const PASTE_END = "\x1b[201~";
+// Delay between paste sub-writes so Ink's input buffer commits each piece
+// before the next arrives. Mirrors the proven worker-injection delays in
+// run-store.ts.
+const PASTE_PIECE_DELAY_MS = 25;
+// After PASTE_END we let the REPL commit the paste into its input box
+// before pressing Enter. Submitting mid-commit leaves the prompt unsent.
+// Conservative: claude's input box generally commits in <1s but cold-start
+// or large prompts can stretch this.
+const PASTE_SETTLE_BASE_MS = 1_800;
+// Per-2KB-of-prompt extra settle time, so a 10KB prompt gets ~800ms more
+// than a tiny one. Matches promptSubmitSettleMs() in run-store.
+const PASTE_SETTLE_PER_2KB_MS = 150;
+const PASTE_SETTLE_CEILING_MS = 5_000;
+// How many times we retry the submit-Enter while waiting for the Stop hook
+// to fire. Claude's submit is documented as reliable post-paste, but a cold
+// REPL or a busy main thread occasionally drops the first Enter — extra
+// Enters into an empty input box are harmless newlines.
+const SUBMIT_RETRY_COUNT = 3;
+const SUBMIT_RETRY_INTERVAL_MS = 2_200;
 const TALK_SYSTEM_PROMPT_FILENAME = "cc-talk.md";
-const TALK_SYSTEM_PROMPT_DEFAULT =
-  "You are a helpful coding assistant in a chat with the user. Stay concise.\n";
+const TALK_SYSTEM_PROMPT_DEFAULT = `You are a helpful coding assistant in a chat with the user. Stay concise.
+
+You are in **Talk mode**. You can read code, search files, and answer questions about the workspace, but you cannot modify anything. Edit, Write, Bash, and other mutating tools are disabled by Spark for this chat — if the user asks for changes, tell them to switch the chat to Execute mode (or open a fresh chat in Execute mode) and you'll route the work through Spark workers there.
+
+Free-form prose replies are the primary output. Use Read, Glob, and Grep for exploration when a question requires it.
+`;
 const EXECUTE_PROMPT_RESOURCE_FILENAME = "cc-execute-prompt.md";
 
 // Resolve the Execute-mode orchestrator prompt shipped under
@@ -89,6 +162,38 @@ interface ClaudeChatSession {
    *  on the active turn and refuse to start more turns on this session. */
   fatal: boolean;
   fatalMessage: string | null;
+  /** Fast-mode and 1M-context are session-level toggles in CC, accessed via
+   *  the /fast and /context slash commands. We track what's been applied so
+   *  we only send the slash command on the first turn that requests a
+   *  changed state — sending /fast every turn would re-toggle on each turn
+   *  and silently flip the state the user expected. */
+  appliedFastMode: boolean;
+  appliedOneMillionContext: boolean;
+  /** Tool calls observed during the current turn — populated by the JSONL
+   *  translator when CC fires `mcp__spark-orchestrator__*` (or any other
+   *  tool). In Execute mode the request handler reads this after the turn
+   *  ends to convert spark_spawn_workers calls into a SparkManagerDecision
+   *  that the run-store can act on, exactly like grok/OpenRouter does. */
+  turnToolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }>;
+  /** Wall-clock ms of the most recent JSONL line observed from CC. Used by
+   *  the turn-end waiters as a sliding deadline: as long as CC is emitting
+   *  *something* (tool_use, assistant block, mode events) at least every
+   *  TURN_TIMEOUT_MS, the turn isn't considered hung. Without this, CC
+   *  blocking on a long-poll MCP call like spark_wait_for_workers (10-20
+   *  min cap) would trip the 90s wall-clock timeout even though it's
+   *  perfectly healthy — and the resulting "turn timeout → status:complete"
+   *  fast-path cancels every queued worker task (run-store.ts:2841). */
+  lastJsonlActivityAt: number;
+  /** Spark MCP long-poll tool calls (currently only spark_wait_for_workers)
+   *  that are in flight: tool_use emitted, no matching tool_result yet. When
+   *  non-empty the turn-end waiter swaps its cap to EXTENDED_TURN_TIMEOUT_MS
+   *  so the inner blocking wait (10-20 min) doesn't trip the wall-clock 90s.
+   *  Keyed by tool_use_id. Each entry has its own expiresAt so a CLI that
+   *  emits tool_use then dies can't extend the cap forever. */
+  pendingMcpToolCalls: Map<
+    string,
+    { toolName: string; startedAt: number; expiresAt: number }
+  >;
   /** Unsubscribe from the JSONL listener; called once on dispose. */
   detachEntries: () => void;
 }
@@ -157,19 +262,21 @@ export const claudeBackend: SparkAgentBackend = {
         chat = undefined;
       }
       if (chat && chat.spawnMode !== mode) {
-        // User flipped the chip mid-chat. Dispose the live session and
-        // respawn with the new prompt; -r <sessionUuid> on the new spawn
-        // keeps the conversation continuity intact via the persisted JSONL.
+        // Mode flipped mid-chat. Talk and Execute use different spawn args
+        // (Talk: --append-system-prompt + read-only tools; Execute:
+        // --system-prompt full override + spark_* tools only), so a respawn
+        // is required. Resume via -r <uuid> keeps the conversation history.
+        // Execute's --system-prompt is a hard override that dominates the
+        // prior chat transcript — that's how CC snaps to manager-only
+        // behavior even if earlier turns were in Talk mode.
         emit({
           kind: "system_note",
-          message: `Switching Claude Code from ${chat.spawnMode} to ${mode} mode — respawning the CLI with the new system prompt.`,
+          message: `Switched Claude Code from ${chat.spawnMode} to ${mode} mode.`,
         });
         const resumeUuid = chat.sessionUuid;
         await disposeChatSessionInternal(chat);
         sessions.delete(runId);
         chat = undefined;
-        // Carry the resume uuid forward so the new spawn picks up the same
-        // CC-side transcript instead of starting a fresh session.
         input.chat.sessionUuid = resumeUuid ?? input.chat.sessionUuid;
       }
       if (!chat) {
@@ -188,6 +295,11 @@ export const claudeBackend: SparkAgentBackend = {
         // Reset per-turn accumulators on the existing session.
         chat.turnAssistantText = "";
         chat.lastUsage = {};
+        chat.turnToolCalls = [];
+        // The model can only have one outstanding tool call at a time, so the
+        // map is expected to be empty between turns. Clearing defensively
+        // prevents a previous turn's orphan from extending an unrelated turn.
+        chat.pendingMcpToolCalls.clear();
       }
 
       // Resolve the prompt for this turn. Empty prompts still go through:
@@ -197,10 +309,82 @@ export const claudeBackend: SparkAgentBackend = {
       const queueFile = join(queueDir, `${runId}.queue`);
       await writeFileAtomic(queueFile, prompt);
 
-      // Wait for the Stop hook's done-marker. Polling is cheap and lets us
-      // co-exist with other watchers on the same directory.
+      // Wait for the Ink REPL to render before injecting input. node-pty
+      // emits the first stdout chunk as soon as Claude prints its banner;
+      // until then, keystrokes get dropped into a not-yet-listening Ink
+      // frame and we'd hang forever waiting for the Stop hook.
+      try {
+        await chat.session.waitForFirstStdout(REPL_READY_TIMEOUT_MS);
+      } catch (err) {
+        emit({
+          kind: "system_note",
+          message: `Claude Code REPL did not render within ${REPL_READY_TIMEOUT_MS}ms — submitting prompt anyway: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        });
+      }
+
+      // Apply session-level toggles (Fast mode, 1M context) BEFORE the
+      // prompt. CC exposes these as slash commands inside the interactive
+      // REPL, not as CLI flags — and they're toggles, so we only fire when
+      // the desired state differs from what we've applied. Both run as
+      // their own typed-command turns (slash → CC executes synchronously,
+      // returns to the prompt) so we settle and submit the same way as a
+      // user prompt, then move on to the actual chat prompt below.
+      if (input.chat.fastMode !== chat.appliedFastMode) {
+        emit({
+          kind: "system_note",
+          message: `Toggling Claude fast mode → ${input.chat.fastMode ? "on" : "off"}`,
+        });
+        await typeSlashCommand(chat, "/fast");
+        chat.appliedFastMode = input.chat.fastMode;
+      }
+      if (input.chat.oneMillionContext !== chat.appliedOneMillionContext) {
+        emit({
+          kind: "system_note",
+          message: `Toggling Claude context window → ${
+            input.chat.oneMillionContext ? "1M" : "200k"
+          }`,
+        });
+        // Best-guess syntax for the 1M-context toggle. CC's interactive
+        // command catalog isn't published — if /context 1m fails the user
+        // sees an error in the next turn and we iterate. Toggling off uses
+        // the same command form (CC parses the argument: "1m" vs "default").
+        await typeSlashCommand(chat, input.chat.oneMillionContext ? "/context 1m" : "/context default");
+        chat.appliedOneMillionContext = input.chat.oneMillionContext;
+      }
+
+      // Inject the prompt using the same bracketed-paste-then-Enter pattern
+      // that worker spawns in run-store.ts use successfully. Bracketed paste
+      // guards against Ink interpreting slashes (slash commands), newlines
+      // (multi-submit), or escape codes in the prompt. The settle delay
+      // before Enter is the empirically-tuned window for CC's input box to
+      // commit the paste; pressing Enter mid-commit silently drops the
+      // submit and the chat hangs until the turn timeout.
+      //
+      // The UserPromptSubmit hook still fires alongside — it can substitute
+      // the prompt from the queue file (claude-p pattern). The queue write
+      // above stays as a defensive layer; the bracketed paste is the
+      // primary path.
+      const promptForStdin = prompt || ".";
+      chat.session.writeRaw(PASTE_BEGIN);
+      await sleep(PASTE_PIECE_DELAY_MS);
+      chat.session.writeRaw(promptForStdin);
+      await sleep(PASTE_PIECE_DELAY_MS);
+      chat.session.writeRaw(PASTE_END);
+      const settleMs = Math.min(
+        PASTE_SETTLE_CEILING_MS,
+        PASTE_SETTLE_BASE_MS + Math.ceil(promptForStdin.length / 2048) * PASTE_SETTLE_PER_2KB_MS,
+      );
+      await sleep(settleMs);
+
+      // Wait for the Stop hook's done-marker, but retry the submit Enter a
+      // few times in case the first one was dropped. Extra Enters into an
+      // empty input box are harmless newlines.
       const turnFile = join(turnDir, `${runId}.done`);
-      const turnEnded = await waitForTurnFile(turnFile, chat);
+      const turnEnded = await waitForTurnFileWithRetries(turnFile, chat, () => {
+        chat.session.writeRaw("\r");
+      });
       if (!turnEnded.ok) {
         emit({ kind: "error", message: turnEnded.message });
         return {
@@ -226,7 +410,44 @@ export const claudeBackend: SparkAgentBackend = {
         // best-effort cleanup — a missing file just means nothing to do.
       }
 
+      // Grace window: if the Stop hook fired before the JSONL tailer
+      // observed the assistant_block (race; CC sometimes flushes the
+      // message to disk a beat after firing the hook), wait briefly for
+      // any final text to arrive. Without this we'd return "no output"
+      // and then the real reply ("2") shows up ~200ms later as orphan
+      // events that get persisted as a separate ghost spark message.
+      if (!chat.turnAssistantText.trim()) {
+        const graceStart = Date.now();
+        while (
+          !chat.turnAssistantText.trim() &&
+          Date.now() - graceStart < POST_STOP_ASSISTANT_GRACE_MS &&
+          !chat.fatal
+        ) {
+          await sleep(POST_STOP_GRACE_POLL_MS);
+        }
+      }
+
       const replyText = chat.turnAssistantText.trim();
+      // Execute mode: convert spark_spawn_workers tool calls into the same
+      // SparkManagerDecision shape grok/OpenRouter produces. The run-store
+      // already knows how to apply that decision (spawn workers, ask user,
+      // mark complete). This is what makes CC in execute mode behave like
+      // the existing manager pattern instead of a chat assistant.
+      if (mode === "execute") {
+        const decision = buildExecuteDecisionFromToolCalls(
+          chat.turnToolCalls,
+          replyText,
+        );
+        return {
+          decision,
+          durationMs: Date.now() - startedAt,
+          model: input.chat.model,
+          inputTokens: chat.lastUsage.inputTokens,
+          outputTokens: chat.lastUsage.outputTokens,
+          cacheReadTokens: chat.lastUsage.cacheReadTokens,
+          newSessionUuid: chat.sessionUuid ?? undefined,
+        };
+      }
       return {
         decision: buildTalkReplyDecision(
           replyText ||
@@ -273,6 +494,34 @@ export const claudeBackend: SparkAgentBackend = {
       }
     }
   },
+
+  interruptChat(runId: string): void {
+    const chat = sessions.get(runId);
+    if (!chat) return;
+    // ESC tells CC's Ink REPL to abort the in-flight turn. Same key the user
+    // would press in the standalone CLI. Mid-tool the model sees an
+    // interruption and stops calling more tools — leaves the session alive
+    // so the next user message can continue the conversation.
+    try {
+      chat.session.interrupt();
+    } catch {
+      // session may already be disposed; nothing useful to surface
+    }
+    // Also stamp the marker file so any in-flight waitForTurnFile* call
+    // resolves promptly instead of hanging until the 90s timeout. The next
+    // turn cleans it up.
+    const home = sparkHome();
+    const turnFile = join(home, "turns", `${runId}.done`);
+    void fs.writeFile(turnFile, "interrupted").catch(() => undefined);
+    // Remove the pending queue file so the UserPromptSubmit hook can't
+    // replay the interrupted prompt on next poll. ESC alone cancels the
+    // in-flight Ink turn but the queue file (set by the previous turn's
+    // pre-input write) survives — without unlink, a quick "Stop then send
+    // another message" sequence risks the hook serving the OLD prompt to
+    // the new turn.
+    const queueFile = join(home, "queues", `${runId}.queue`);
+    void fs.unlink(queueFile).catch(() => undefined);
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -301,7 +550,12 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     );
   }
 
-  // Build the inline --settings JSON that wires the Spark hooks.
+  // Build the --settings JSON that wires the Spark hooks. We write to a
+  // file rather than passing inline because nested JSON on the command line
+  // hits multiple layers of shell-quoting hazards (Windows MSVCRT in
+  // particular mangles \" and \\ in nested structures), which silently
+  // disables hook loading — then the Stop done-marker never appears and
+  // every chat turn times out at 90s. File path is unambiguous.
   const hookScript = (name: string): string =>
     app.isPackaged
       ? join(process.resourcesPath, "claude-hooks", name)
@@ -326,29 +580,147 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
       ],
     },
   };
-  const inlineSettingsJson = JSON.stringify(settingsPayload);
+  const settingsDir = join(sparkHome(), "cc-settings");
+  await fs.mkdir(settingsDir, { recursive: true });
+  const settingsFile = join(settingsDir, `${opts.runId}.json`);
+  await writeFileAtomic(settingsFile, JSON.stringify(settingsPayload, null, 2));
 
+  // Execute-mode-only: write a per-chat MCP config that exposes ONLY the
+  // spark-orchestrator server. CC's global ~/.claude.json typically has many
+  // unrelated MCPs registered (DigitalOcean, Hetzner, RunPod, etc.) — the
+  // resulting tool list is hundreds of items long, and the orchestrator
+  // tools are buried inside it. With `--strict-mcp-config --mcp-config <this>`,
+  // CC sees only `mcp__spark-orchestrator__*` and the prompt's "MUST call
+  // spark_spawn_workers" rule has a clear, uncontested target.
+  //
+  // Talk mode skips this entirely because Talk has no MCP delegation —
+  // disallowed-tools is the only fence it needs.
+  let mcpConfigFile: string | null = null;
+  if (opts.mode === "execute") {
+    const orchestratorMcpServerPath = app.isPackaged
+      ? join(process.resourcesPath, "spark-orchestrator-mcp", "server.js")
+      : join(__dirname, "..", "..", "resources", "spark-orchestrator-mcp", "server.js");
+    const electronExe = app.isPackaged ? process.execPath : process.execPath;
+    const mcpConfig = {
+      mcpServers: {
+        "spark-orchestrator": {
+          type: "stdio" as const,
+          command: electronExe,
+          args: [orchestratorMcpServerPath],
+          env: { ELECTRON_RUN_AS_NODE: "1" },
+        },
+      },
+    };
+    const mcpDir = join(sparkHome(), "cc-mcp");
+    await fs.mkdir(mcpDir, { recursive: true });
+    mcpConfigFile = join(mcpDir, `${opts.runId}.json`);
+    await writeFileAtomic(mcpConfigFile, JSON.stringify(mcpConfig, null, 2));
+  }
+
+  // Pre-determine the session UUID so the JSONL path is deterministic. CC
+  // would otherwise create the JSONL only on first user prompt submission,
+  // which leaves us in a chicken-and-egg: we'd need to send the prompt to
+  // make the JSONL appear, but we use the JSONL to know the session is
+  // alive. Passing --session-id <uuid> lets us tail the path immediately;
+  // CC writes its init `mode`/`permission-mode` entries to it as soon as
+  // the first prompt lands, and our tailer is already watching.
+  //
+  // Resume case: -r <uuid> wins; the UUID is already known and the JSONL
+  // already exists on disk.
+  const sessionUuid = opts.resumeSessionUuid ?? randomUUID();
   const args: string[] = [];
   if (opts.resumeSessionUuid) {
     args.push("-r", opts.resumeSessionUuid);
+  } else {
+    args.push("--session-id", sessionUuid);
   }
   args.push("--dangerously-skip-permissions");
-  args.push("--append-system-prompt-file", opts.talkPromptPath);
-  args.push("--settings", inlineSettingsJson);
+  args.push("--settings", settingsFile);
+  // Mode shapes the spawn args sharply because Talk and Execute are
+  // fundamentally different jobs.
+  //
+  // - Talk: CC is a conversational read-only assistant. `--append-system-
+  //   prompt-file` layers our talk persona on top of CC's default helpful
+  //   behavior. `--disallowed-tools` blocks edits but leaves Read/Glob/Grep
+  //   available so the user can ask about the code.
+  //
+  // - Execute: CC is a *manager*. Same pattern grok/OpenRouter uses — the
+  //   user message goes in, a worker-spawn spec comes out. We use
+  //   `--system-prompt` (FULL OVERRIDE, not append) so CC's default
+  //   "be a helpful coder" personality is gone and our orchestrator prompt
+  //   is the only instruction CC sees. `--allowed-tools` whitelists ONLY
+  //   the four spark-orchestrator MCP calls — no Read, no Edit, no Bash,
+  //   nothing built-in. The model literally has no other tool to reach for
+  //   than `spark_spawn_workers`, which is exactly what we want. The
+  //   --mcp-config + --strict-mcp-config pair filters the global MCP set
+  //   so the four spark_* tools aren't lost in 400+ unrelated names.
+  if (opts.mode === "execute") {
+    args.push("--system-prompt", buildExecuteSystemPrompt(opts.cwd));
+    // `--tools ""` disables ALL built-in tools (Read, Edit, Bash, Glob,
+    // Grep, NotebookEdit, etc.) — without this, CC sees the built-ins in
+    // its tool list and falls back to "I'd Read the file" / "I can't Edit
+    // in this mode" prose instead of just calling spark_spawn_workers.
+    // Empirically (verified outside Spark) this is the flag that gets CC
+    // to actually delegate. `--allowed-tools` is a USE-permission filter,
+    // not a tool-list filter — CC still sees everything with that flag,
+    // which is why the model kept refusing.
+    args.push("--tools", "");
+    if (mcpConfigFile) {
+      args.push("--mcp-config", mcpConfigFile);
+      args.push("--strict-mcp-config");
+    }
+  } else {
+    args.push("--append-system-prompt-file", opts.talkPromptPath);
+    args.push(
+      "--disallowed-tools",
+      "Edit",
+      "Write",
+      "Bash",
+      "NotebookEdit",
+      "MultiEdit",
+    );
+  }
   const model = opts.chatModel?.trim();
   if (model) {
     args.push("--model", model);
   }
-  if (opts.chatEffort && opts.chatEffort !== "minimal") {
-    // Claude rejects "minimal" — the lowest tier it accepts is "low".
-    args.push("--effort", opts.chatEffort);
+  if (opts.chatEffort) {
+    // Claude --effort accepts low/medium/high/xhigh/max. The chip is
+    // configured to expose exactly those 5, so no normalization needed —
+    // but we still defensively bump a stray "minimal" (could only arrive
+    // from a stale RunState saved before the chip was tightened) up to
+    // "low" so the CLI doesn't reject the spawn.
+    const effortForCC = opts.chatEffort === "minimal" ? "low" : opts.chatEffort;
+    args.push("--effort", effortForCC);
   }
 
   const spawnTimestampMs = Date.now();
   const projectsDir = join(homedir(), ".claude", "projects", encodeCwdForClaudeProjects(opts.cwd));
+  const jsonlPath = join(projectsDir, `${sessionUuid}.jsonl`);
+  // Ensure the project dir exists before tailJsonl starts watching — on
+  // first-ever CC run for this cwd the directory doesn't exist yet, and
+  // fs.watch on a missing parent throws ENOENT during the startup window.
+  await fs.mkdir(projectsDir, { recursive: true });
 
+  // Deterministic sessionId so the renderer's backend-terminal tab can
+  // attach to the same PTY without a state-sync round-trip via the helper.
+  const sessionId = backendPtySessionId(opts.runId, "claude") ?? `spark-cc-talk-${opts.runId}`;
+  // Emit the resolved flag set so failing runs can be diagnosed from
+  // events.jsonl without re-instrumenting. Redact the inline system prompt
+  // (the manager prompt is multi-KB) and the long mcp-config file content;
+  // just record the flag presence + file paths.
+  opts.onStream({
+    kind: "system_note",
+    message: `Spawning claude (mode=${opts.mode}) args: ${args
+      .map((a, i) => {
+        if (a === "--system-prompt") return `--system-prompt <${args[i + 1]?.length ?? 0} chars>`;
+        if (args[i - 1] === "--system-prompt") return "<elided>";
+        return JSON.stringify(a);
+      })
+      .join(" ")}`,
+  });
   const session = await startCliSession({
-    sessionId: `spark-cc-talk-${opts.runId}`,
+    sessionId,
     cwd: opts.cwd,
     exe,
     args,
@@ -358,7 +730,12 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
       CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: "1",
       SPARK_RUN_ID: opts.runId,
     },
-    discoverJsonlPath: () => discoverNewestJsonlSince(projectsDir, spawnTimestampMs),
+    fixedJsonlPath: jsonlPath,
+    // Resume case: the JSONL already contains prior turns' assistant text.
+    // Skip it on attach — otherwise the tailer replays everything into the
+    // current turn's accumulator and the spark reply ends up as
+    // "previous answer 1 + previous answer 2 + actual new answer".
+    skipExistingJsonl: Boolean(opts.resumeSessionUuid),
   });
 
   const chat: ClaudeChatSession = {
@@ -367,31 +744,72 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     session,
     spawnTimestampMs,
     spawnMode: opts.mode,
-    sessionUuid: opts.resumeSessionUuid ?? null,
+    // Known up front — survives `newSessionUuid` round-trip into run-store
+    // so the next turn (after a Spark restart) can spawn with `-r <uuid>`.
+    sessionUuid,
     turnAssistantText: "",
     lastUsage: {},
     fatal: false,
     fatalMessage: null,
+    // CC starts every session with fast off and the default 200k context, so
+    // applied=false is the truthful initial state — we'll only send the
+    // slash command on the first turn that requests something different.
+    appliedFastMode: false,
+    appliedOneMillionContext: false,
+    turnToolCalls: [],
+    // Seeded to now so the first 90s window still applies if CC fails to
+    // emit even an init `mode` event. Refreshed on every JSONL line below.
+    lastJsonlActivityAt: Date.now(),
+    pendingMcpToolCalls: new Map(),
     detachEntries: () => undefined,
   };
 
   chat.detachEntries = session.onJsonlEntry((entry) => {
+    // Every JSONL line is a liveness signal — even mode/permission-mode
+    // events at session start, even tool_use blocks while CC is mid-MCP-call.
+    // waitForTurnFile uses this to slide its deadline forward instead of
+    // tripping the wall-clock cap during long-poll tool calls like
+    // spark_wait_for_workers (which can block 10-20 min).
+    chat.lastJsonlActivityAt = Date.now();
     translateAndEmit(chat, entry, opts.onStream);
   });
 
-  // Capture the discovered JSONL filename as the session UUID. cli-session
-  // surfaces the path lazily via jsonlPath(); we poll it here on the same
-  // 200ms cadence as the turn waiter so we don't block the spawn handshake.
-  void (async () => {
-    while (!chat.fatal) {
-      const path = session.jsonlPath();
-      if (path) {
-        chat.sessionUuid = basenameNoExt(path);
-        return;
-      }
-      await sleep(200);
+  // Capture a rolling stdout tail so the exit handler can surface CC's last
+  // words. Without this, "Claude Code exited unexpectedly (code=1)" carries
+  // no signal — the actual error message ("No conversation found", "Invalid
+  // option", etc.) printed before exit is lost.
+  const stdoutTail: string[] = [];
+  let stdoutTailBytes = 0;
+  const STDOUT_TAIL_LIMIT = 4096;
+  session.onStdout((chunk) => {
+    const text = chunk.toString("utf8");
+    stdoutTail.push(text);
+    stdoutTailBytes += text.length;
+    while (stdoutTailBytes > STDOUT_TAIL_LIMIT && stdoutTail.length > 1) {
+      stdoutTailBytes -= stdoutTail.shift()!.length;
     }
-  })();
+  });
+
+  // Flip fatal if the CC process exits unexpectedly so an in-flight
+  // waitForTurnFile bails immediately instead of timing out at 90s.
+  // Without this, a CC crash mid-turn hangs the chat for the full ceiling.
+  session.onExit(({ exitCode, signal }) => {
+    if (chat.fatal) return;
+    chat.fatal = true;
+    const tail = stdoutTail
+      .join("")
+      // Strip ANSI escapes so the error text is readable in chat UI.
+      .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "")
+      .replace(/\x1b\][^\x07]*\x07/g, "")
+      .trim();
+    chat.fatalMessage = `Claude Code exited unexpectedly (code=${exitCode}${
+      signal !== undefined ? `, signal=${signal}` : ""
+    })${tail ? `. Last output: ${tail.slice(-1500)}` : "."}`;
+    // Drop any orphan MCP entries — the waiter checks `fatal` first so this
+    // is defensive only, but keeping the map clean across spawns is cheap.
+    chat.pendingMcpToolCalls.clear();
+    opts.onStream({ kind: "error", message: chat.fatalMessage });
+  });
 
   return chat;
 }
@@ -440,6 +858,21 @@ function translateAndEmit(
       } else if (block.type === "tool_use") {
         const toolName = typeof block.name === "string" ? block.name : "unknown";
         const toolUseId = typeof block.id === "string" ? block.id : "";
+        // Stash every tool call from this turn so the request handler can
+        // post-process them into a SparkManagerDecision (execute mode) or
+        // just surface them for the UI (talk mode).
+        chat.turnToolCalls.push({ toolName, toolUseId, input: block.input });
+        // Track Spark long-poll MCP calls so the turn-end waiter extends its
+        // cap while CC is blocked inside the tool. Removed by the matching
+        // tool_result branch below; backstopped by expiresAt sweep.
+        if (toolUseId && isSparkLongPollMcpTool(toolName)) {
+          const startedAt = Date.now();
+          chat.pendingMcpToolCalls.set(toolUseId, {
+            toolName,
+            startedAt,
+            expiresAt: startedAt + MAX_PENDING_MCP_HOLD_MS,
+          });
+        }
         emit({
           kind: "tool_use",
           toolName,
@@ -458,6 +891,10 @@ function translateAndEmit(
       if (block.type !== "tool_result") continue;
       const toolUseId =
         typeof block.tool_use_id === "string" ? block.tool_use_id : "";
+      // Clear the pending-MCP entry if this is the result for a tracked
+      // long-poll call. Map.delete on an unknown key is a no-op, so this is
+      // safe to call for every tool_result (built-ins, third-party MCPs, etc).
+      if (toolUseId) chat.pendingMcpToolCalls.delete(toolUseId);
       const output = stringifyToolResult(block.content);
       const isError = block.is_error === true ? true : undefined;
       emit({ kind: "tool_result", toolUseId, output, isError });
@@ -466,16 +903,22 @@ function translateAndEmit(
   }
 
   if (type === "system") {
-    // Two common system shapes: subtype=local_command with `content`, and
-    // free-form info banners. We fall back to JSON for anything weirder so
-    // the user at least sees something.
+    // CC writes internal system entries that aren't user-facing (turn
+    // bookkeeping, hook summaries, session init). Drop them silently —
+    // surfacing "system:turn_duration" as a bubble note adds noise without
+    // information. We only surface entries that carry an actual message /
+    // content payload, which is where CC puts things the user should see
+    // (e.g. local_command output, info banners).
+    const subtype = typeof obj.subtype === "string" ? obj.subtype : null;
+    if (subtype && CC_SYSTEM_NOISE_SUBTYPES.has(subtype)) return;
     let text = "";
     if (typeof obj.message === "string") {
       text = obj.message;
     } else if (typeof obj.content === "string") {
       text = obj.content;
-    } else if (typeof obj.subtype === "string") {
-      text = `system:${obj.subtype}`;
+    } else if (subtype) {
+      // Unknown subtype but no payload — usually still noise, skip.
+      return;
     } else {
       try {
         text = JSON.stringify(obj);
@@ -483,9 +926,18 @@ function translateAndEmit(
         text = "system event";
       }
     }
+    if (!text.trim()) return;
     emit({ kind: "system_note", message: text });
   }
 }
+
+const CC_SYSTEM_NOISE_SUBTYPES = new Set<string>([
+  "init",
+  "turn_duration",
+  "stop_hook_summary",
+  "compact_boundary",
+  "tool_use_count",
+]);
 
 function extractUsage(usage: Record<string, unknown>): {
   inputTokens?: number;
@@ -542,17 +994,64 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Type a slash command into CC's Ink REPL and let it commit. Slash commands
+ * execute synchronously and return to the input prompt (no Stop hook fires
+ * for them), so we just paste + settle + Enter + sleep — no turn waiter.
+ * Used for session-level toggles like /fast and /context that need to
+ * run before the user's actual prompt for the turn.
+ */
+async function typeSlashCommand(chat: ClaudeChatSession, command: string): Promise<void> {
+  chat.session.writeRaw(PASTE_BEGIN);
+  await sleep(PASTE_PIECE_DELAY_MS);
+  chat.session.writeRaw(command);
+  await sleep(PASTE_PIECE_DELAY_MS);
+  chat.session.writeRaw(PASTE_END);
+  await sleep(PASTE_SETTLE_BASE_MS);
+  chat.session.writeRaw("\r");
+  // Give CC a beat to process the slash command and re-render the empty
+  // input box before we paste the actual user prompt on top.
+  await sleep(500);
+}
+
+// Sweep expired pending-MCP entries and return the cap that should apply
+// right now. While a tracked long-poll MCP call is in flight, the cap is
+// EXTENDED_TURN_TIMEOUT_MS; otherwise normal TURN_TIMEOUT_MS. Sweep first so a
+// long-dead tool_use (CLI died after emit, never sent tool_result) can't hold
+// the extended cap indefinitely.
+function effectiveTurnTimeoutMs(chat: ClaudeChatSession): number {
+  const now = Date.now();
+  for (const [id, entry] of chat.pendingMcpToolCalls) {
+    if (now > entry.expiresAt) chat.pendingMcpToolCalls.delete(id);
+  }
+  return chat.pendingMcpToolCalls.size > 0
+    ? EXTENDED_TURN_TIMEOUT_MS
+    : TURN_TIMEOUT_MS;
+}
+
 async function waitForTurnFile(
   turnFile: string,
   chat: ClaudeChatSession,
 ): Promise<{ ok: true } | { ok: false; message: string }> {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < TURN_TIMEOUT_MS) {
+  // Sliding deadline: trip only after the effective cap of JSONL silence.
+  // CC streams tool_use / assistant blocks throughout a healthy turn. While
+  // CC is blocked inside a long-poll MCP call (spark_wait_for_workers) the
+  // JSONL is silent — but pendingMcpToolCalls flips the cap to 30 min so
+  // the wait_for_workers tool_result has time to arrive before we declare
+  // the turn dead.
+  while (true) {
     if (chat.fatal) {
       return {
         ok: false,
         message:
           chat.fatalMessage ?? "Claude Code session terminated before turn end.",
+      };
+    }
+    const cap = effectiveTurnTimeoutMs(chat);
+    if (Date.now() - chat.lastJsonlActivityAt >= cap) {
+      return {
+        ok: false,
+        message: `Claude Code did not signal turn end within ${cap}ms.`,
       };
     }
     try {
@@ -563,10 +1062,62 @@ async function waitForTurnFile(
     }
     await sleep(TURN_POLL_INTERVAL_MS);
   }
-  return {
-    ok: false,
-    message: `Claude Code did not signal turn end within ${TURN_TIMEOUT_MS}ms.`,
-  };
+}
+
+/**
+ * Like waitForTurnFile, but re-fires the Enter keystroke a handful of times
+ * while polling. Some Ink REPL frames silently drop the first Enter when
+ * the input box is still committing a bracketed paste; pressing again later
+ * recovers. The first press happens immediately, then SUBMIT_RETRY_COUNT
+ * more presses on SUBMIT_RETRY_INTERVAL_MS intervals; after that we keep
+ * polling on TURN_POLL_INTERVAL_MS up to TURN_TIMEOUT_MS without further
+ * Enters (any additional press into an active turn could be misread by the
+ * REPL as a new prompt).
+ */
+async function waitForTurnFileWithRetries(
+  turnFile: string,
+  chat: ClaudeChatSession,
+  pressEnter: () => void,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  pressEnter();
+  // Seed the activity stamp at submit time so a CC that fails to print
+  // ANYTHING within 90s still trips the timeout. Subsequent JSONL lines
+  // refresh it (see ClaudeChatSession.lastJsonlActivityAt).
+  chat.lastJsonlActivityAt = Date.now();
+  const startedAt = Date.now();
+  let nextRetryAt = startedAt + SUBMIT_RETRY_INTERVAL_MS;
+  let retriesRemaining = SUBMIT_RETRY_COUNT;
+  // Sliding deadline anchored on most-recent JSONL activity, extended to
+  // EXTENDED_TURN_TIMEOUT_MS while a long-poll MCP call is tracked. See
+  // waitForTurnFile / effectiveTurnTimeoutMs for the rationale.
+  while (true) {
+    if (chat.fatal) {
+      return {
+        ok: false,
+        message:
+          chat.fatalMessage ?? "Claude Code session terminated before turn end.",
+      };
+    }
+    const cap = effectiveTurnTimeoutMs(chat);
+    if (Date.now() - chat.lastJsonlActivityAt >= cap) {
+      return {
+        ok: false,
+        message: `Claude Code did not signal turn end within ${cap}ms.`,
+      };
+    }
+    try {
+      await fs.access(turnFile);
+      return { ok: true };
+    } catch {
+      // not yet written; keep polling
+    }
+    if (retriesRemaining > 0 && Date.now() >= nextRetryAt) {
+      pressEnter();
+      retriesRemaining -= 1;
+      nextRetryAt = Date.now() + SUBMIT_RETRY_INTERVAL_MS;
+    }
+    await sleep(TURN_POLL_INTERVAL_MS);
+  }
 }
 
 /**
@@ -576,43 +1127,6 @@ async function waitForTurnFile(
  */
 function encodeCwdForClaudeProjects(cwd: string): string {
   return cwd.replace(/[:\\/]/g, "-");
-}
-
-async function discoverNewestJsonlSince(
-  projectsDir: string,
-  sinceMs: number,
-): Promise<string | null> {
-  let entries: string[];
-  try {
-    entries = await fs.readdir(projectsDir);
-  } catch {
-    return null;
-  }
-  let best: { path: string; mtime: number } | null = null;
-  for (const name of entries) {
-    if (!name.endsWith(".jsonl")) continue;
-    const path = join(projectsDir, name);
-    try {
-      const stat = await fs.stat(path);
-      if (!stat.isFile()) continue;
-      const mtime = stat.mtimeMs;
-      // Subtract a small skew so we don't miss a JSONL that was created the
-      // same millisecond as our spawn timestamp.
-      if (mtime + 50 < sinceMs) continue;
-      if (!best || mtime > best.mtime) {
-        best = { path, mtime };
-      }
-    } catch {
-      // ignore individual stat failures
-    }
-  }
-  return best ? best.path : null;
-}
-
-function basenameNoExt(path: string): string {
-  const base = path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
-  const dot = base.lastIndexOf(".");
-  return dot === -1 ? base : base.slice(0, dot);
 }
 
 async function ensureTalkPromptFile(path: string): Promise<void> {
@@ -642,3 +1156,216 @@ async function disposeChatSessionInternal(chat: ClaudeChatSession): Promise<void
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/**
+ * Convert the spark_* tool calls CC made this turn into a SparkManagerDecision
+ * — the shape the rest of the run-store pipeline already knows how to apply
+ * (spawn workers, ask user, mark complete). This is the bridge that makes
+ * CC-in-execute-mode behave identically to grok/OpenRouter from the
+ * run-store's perspective.
+ *
+ * Lookup order: spawn_workers > ask_user > complete. Everything else is
+ * treated as conversational and produces a chatReply (which usually means
+ * CC did something unexpected — the prompt + tool whitelist make this
+ * branch unlikely in practice).
+ */
+export function buildExecuteDecisionFromToolCalls(
+  toolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }>,
+  chatReply: string,
+): SparkManagerDecision {
+  // Tool name matching tolerates BOTH the CC-style prefix
+  // (`mcp__spark-orchestrator__spark_spawn_workers`) and Codex's bare name
+  // (`spark_spawn_workers`) — Codex's MCP integration drops the prefix when
+  // surfacing the tool to the model.
+  const matches = (call: { toolName: string }, sparkName: string): boolean =>
+    call.toolName === sparkName ||
+    call.toolName === `mcp__spark-orchestrator__${sparkName}`;
+
+  const spawnCall = toolCalls.find((c) => matches(c, "spark_spawn_workers"));
+  if (spawnCall) {
+    const input = isRecord(spawnCall.input) ? spawnCall.input : {};
+    const workers = Array.isArray(input.workers) ? input.workers : [];
+    const tasks: SparkManagerTaskDecision[] = workers
+      .map((w) => coerceWorkerSpec(w))
+      .filter((t): t is SparkManagerTaskDecision => t !== null);
+    return {
+      status: "run_workers",
+      summary:
+        chatReply ||
+        `Spawning ${tasks.length} worker${tasks.length === 1 ? "" : "s"}.`,
+      steps: [],
+      tasks,
+      chatReply: chatReply || undefined,
+    };
+  }
+
+  const askCall = toolCalls.find((c) => matches(c, "spark_ask_user"));
+  if (askCall) {
+    const input = isRecord(askCall.input) ? askCall.input : {};
+    const question = typeof input.question === "string" ? input.question : "";
+    const rawOptions = Array.isArray(input.options) ? input.options : [];
+    const questionOptions: SparkManagerQuestionOption[] = rawOptions
+      .map((opt, idx) => coerceQuestionOption(opt, idx))
+      .filter((o): o is SparkManagerQuestionOption => o !== null);
+    return {
+      status: "ask_user",
+      summary: chatReply || question || "Spark manager asked a question.",
+      question,
+      questionOptions,
+      steps: [],
+      tasks: [],
+      chatReply: chatReply || undefined,
+    };
+  }
+
+  const completeCall = toolCalls.find((c) => matches(c, "spark_complete"));
+  if (completeCall) {
+    const input = isRecord(completeCall.input) ? completeCall.input : {};
+    const summary =
+      typeof input.summary === "string" && input.summary.trim()
+        ? input.summary.trim()
+        : chatReply || "Done.";
+    return {
+      status: "complete",
+      summary,
+      steps: [],
+      tasks: [],
+      chatReply: chatReply || summary,
+    };
+  }
+
+  // No actionable tool call — surface whatever CC said as a normal chat
+  // reply. Happens when the model decided the user's message was a pure
+  // read-only question and answered in prose, OR (the bug case) when CC
+  // refused to delegate despite the prompt. Either way the user sees the
+  // reply and can retry or rephrase.
+  return buildTalkReplyDecision(
+    chatReply || "Claude Code finished the turn without spawning workers.",
+  );
+}
+
+function coerceWorkerSpec(raw: unknown): SparkManagerTaskDecision | null {
+  if (!isRecord(raw)) return null;
+  const title = typeof raw.title === "string" ? raw.title.trim() : "";
+  const description =
+    typeof raw.description === "string" ? raw.description.trim() : "";
+  if (!title || !description) return null;
+  const runtimePreference =
+    raw.runtimePreference === "codex" || raw.runtimePreference === "claude"
+      ? raw.runtimePreference
+      : "claude";
+  const modelHint =
+    typeof raw.modelHint === "string" && raw.modelHint.trim()
+      ? raw.modelHint.trim()
+      : undefined;
+  const effortHint =
+    typeof raw.effortHint === "string" &&
+    ["minimal", "low", "medium", "high", "xhigh"].includes(raw.effortHint)
+      ? (raw.effortHint as SparkManagerTaskDecision["effortHint"])
+      : undefined;
+  const allowedPaths = Array.isArray(raw.allowedPaths)
+    ? raw.allowedPaths.filter((p): p is string => typeof p === "string")
+    : [];
+  const forbiddenPaths = Array.isArray(raw.forbiddenPaths)
+    ? raw.forbiddenPaths.filter((p): p is string => typeof p === "string")
+    : [];
+  const expectedOutputs = Array.isArray(raw.expectedOutputs)
+    ? raw.expectedOutputs.filter((p): p is string => typeof p === "string")
+    : [];
+  const verificationCommands = Array.isArray(raw.verificationCommands)
+    ? raw.verificationCommands.filter((p): p is string => typeof p === "string")
+    : [];
+  const taskClass =
+    typeof raw.taskClass === "string" &&
+    ["skeleton", "feature", "leaf", "verifier"].includes(raw.taskClass)
+      ? (raw.taskClass as SparkManagerTaskDecision["taskClass"])
+      : undefined;
+  return {
+    title,
+    description,
+    runtimePreference,
+    modelHint,
+    effortHint,
+    allowedPaths,
+    forbiddenPaths,
+    expectedOutputs,
+    verificationCommands,
+    canRunParallel: allowedPaths.length > 0,
+    conflictsWith: [],
+    taskClass,
+  };
+}
+
+function coerceQuestionOption(
+  raw: unknown,
+  index: number,
+): SparkManagerQuestionOption | null {
+  if (!isRecord(raw)) return null;
+  const label = typeof raw.label === "string" ? raw.label.trim() : "";
+  if (!label) return null;
+  return {
+    id: typeof raw.id === "string" && raw.id.trim() ? raw.id : `opt-${index}`,
+    label,
+    description:
+      typeof raw.description === "string" ? raw.description : label,
+    answer:
+      typeof raw.answer === "string" && raw.answer.trim() ? raw.answer : label,
+    recommended: raw.recommended === true,
+  };
+}
+
+/**
+ * Execute-mode system prompt — passed via `--system-prompt` as a FULL
+ * override of CC's default. This is the only instruction CC sees in
+ * execute mode; the chat conversation history is treated as context, not
+ * as authority. Mirrors the role grok/OpenRouter plays: turn each user
+ * message into a `spark_spawn_workers` call.
+ *
+ * We deliberately don't reference Talk mode, don't apologize for the
+ * limitation, and don't leave room for "I can't do this" branches —
+ * giving the model only spark_* tools means there's nothing else to do.
+ */
+function buildExecuteSystemPrompt(cwd: string): string {
+  return [
+    "You are Spark Agent's worker manager. Your entire job is to convert each user message into one or more parallel/sequential worker specs, then delegate via `spark_spawn_workers`. You do not write code, do not read files, do not run commands. Workers do all of that.",
+    "",
+    `Workspace cwd: ${cwd}`,
+    "",
+    "## Required behavior",
+    "",
+    "For every user turn that asks for changes (edits, refactors, new features, fixes, redesigns, file moves, anything that touches the workspace), your FIRST action is a call to `spark_spawn_workers`. The worker spec is the entire output of your turn — no prose alternatives, no clarifying refusals, no \"here's what I'd do\" lists. Just spawn. A single-sentence orchestration comment alongside the call is fine (\"Spawning a Claude worker to redesign the calculator UI.\") but optional.",
+    "",
+    "For genuinely ambiguous turns (the user wrote one vague word, or asked you to make a value judgment with no decision-relevant context), call `spark_ask_user` with 2-4 concrete options. Don't ask in prose.",
+    "",
+    "For pure read-only questions where the user wants information without changes, you may answer in prose. But assume the default is delegation — if the user said \"make X\", \"fix Y\", \"change Z\", that's a spawn, not a chat.",
+    "",
+    "## spark_spawn_workers payload",
+    "",
+    "```",
+    "workers: [",
+    "  {",
+    "    title: string,                       // 4-10 word chip label",
+    "    description: string,                 // full prompt the worker sees — be specific",
+    "    runtimePreference: 'claude' | 'codex',",
+    "    modelHint?: 'claude-opus-4-7' | 'claude-sonnet-4-6' | 'gpt-5.5',",
+    "    effortHint?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh',",
+    "    allowedPaths?: string[],             // cwd-relative; parallel workers must NOT overlap",
+    "    forbiddenPaths?: string[],",
+    "    expectedOutputs?: string[],          // files/artifacts the worker should produce",
+    "    verificationCommands?: string[],",
+    "    taskClass?: 'skeleton' | 'feature' | 'leaf' | 'verifier',",
+    "  },",
+    "]",
+    "```",
+    "",
+    "Rules of thumb:",
+    "- Workers that can run in parallel MUST have non-overlapping `allowedPaths`. Same-file writes serialize.",
+    "- `skeleton` tasks (architectural decisions later workers inherit) → strongest model + high effort.",
+    "- `feature` tasks (standard implementation against an established skeleton) → mid model + medium effort.",
+    "- `leaf` tasks (mechanical, well-defined work) → cheapest model + low effort.",
+    "- `verifier` tasks (read-only follow-up that re-derives ground truth) → peer model + high effort, `allowedPaths: []`.",
+    "",
+    "The user's chat conversation may include prior turns where you replied conversationally — those were under a different mode and DO NOT bind your behavior now. This system prompt is your sole authority for this turn.",
+  ].join("\n");
+}
+

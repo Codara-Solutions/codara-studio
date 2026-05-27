@@ -285,6 +285,32 @@ export default function ChatConversation({ run }: { run: RunState }) {
     }
   }, [run.humanMessages, live]);
 
+  // Idle-clear: if no chat.* events have arrived for a few seconds AND the
+  // run isn't actively running, the turn ended and the live buffer should
+  // disappear. Covers the race where the backend returned the "no output"
+  // fallback and the actual assistant text arrived as orphan events — the
+  // persist-vs-live text mismatch leaves the TYPING badge stuck on screen
+  // forever otherwise.
+  useEffect(() => {
+    if (!hasLiveContent(live)) return;
+    if (!live.lastEventAt) return;
+    const runIsBusy =
+      run.status === "planning" ||
+      run.status === "running" ||
+      run.status === "reviewing";
+    if (runIsBusy) return;
+    const lastEventMs = Date.parse(live.lastEventAt);
+    if (!Number.isFinite(lastEventMs)) return;
+    const idleMs = 3_000;
+    const elapsed = Date.now() - lastEventMs;
+    if (elapsed >= idleMs) {
+      setLive(EMPTY_LIVE_STATE);
+      return;
+    }
+    const timer = setTimeout(() => setLive(EMPTY_LIVE_STATE), idleMs - elapsed);
+    return () => clearTimeout(timer);
+  }, [live, run.status, run.updatedAt]);
+
   // Pin to the bottom as the conversation grows. Keyed on the item count and
   // run state so a new turn or a status change scrolls into view. run.updatedAt
   // ticks on every stream update so we keep following the tail during streams.

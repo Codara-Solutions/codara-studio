@@ -59,6 +59,18 @@ export interface ChatBackendConfig {
    *  the first call; the backend populates it onto the RunState on first
    *  spawn so subsequent calls can resume. */
   sessionUuid?: string;
+  /** Which mode the persisted `sessionUuid` was spawned under. Set in lockstep
+   *  with sessionUuid. Backends compare this to `mode` and force a fresh
+   *  session on mismatch — the persisted UUID's JSONL transcript contains
+   *  assistant replies from the OLD mode's persona, and CC/Codex anchor on
+   *  that when they resume. */
+  sessionMode?: ChatMode;
+  /** Fast-mode toggle. Claude → /fast slash command on REPL ready. Codex
+   *  → --enable/disable fast_mode arg at spawn. OpenRouter ignores. */
+  fastMode: boolean;
+  /** 1M-context toggle. Claude-only → /context 1m slash command on REPL
+   *  ready. Codex and OpenRouter ignore (no equivalent feature). */
+  oneMillionContext: boolean;
 }
 
 /**
@@ -191,6 +203,15 @@ export interface SparkAgentBackend {
    * files). Called when a chat is deleted or when the app shuts down. Idempotent.
    */
   disposeChat?(runId: string): Promise<void>;
+
+  /**
+   * Interrupt the in-flight turn for this chat without tearing the session
+   * down. Sends ESC (or the runtime's equivalent) to the live CLI so the
+   * model stops calling tools mid-turn. Called from forcePauseRun so the
+   * user's "stop" doesn't have to wait for the 90s turn timeout. No-op if
+   * the backend has no active session for this run.
+   */
+  interruptChat?(runId: string): void;
 }
 
 /**
@@ -228,6 +249,9 @@ export function resolveChatBackendConfig(
     mode,
     effort,
     sessionUuid: run.chatSessionUuid,
+    sessionMode: run.chatSessionMode,
+    fastMode: run.chatFastMode ?? false,
+    oneMillionContext: run.chat1mContext ?? false,
   };
 }
 

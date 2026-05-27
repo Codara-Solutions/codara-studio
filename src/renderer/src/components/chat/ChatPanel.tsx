@@ -1,11 +1,29 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { AddRunMessageAttachmentInput, RunState, Workspace } from "@shared/types";
+import type { AddRunMessageAttachmentInput, RunState, ShellInfo, Workspace } from "@shared/types";
+import { backendPtySessionId } from "@shared/backend-pty";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import { GridIcon, PlusIcon } from "../icons";
 import ChatConversation from "./ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
 import SwarmView from "./SwarmView";
+import { TerminalPane } from "../Terminal/TerminalPane";
 import { describeRunStatus, statusToneColor } from "./timeline";
+
+// Placeholder ShellInfo passed to TerminalPane when the underlying PTY was
+// already spawned by main-process backend code (claude-backend, codex-backend).
+// pty-manager's existing-session branch (line 143) ignores the shell when an
+// id is already registered — but the React prop is typed required. Using a
+// no-op exe avoids any chance of an accidental spawn if id-matching ever
+// breaks.
+const BACKEND_TERMINAL_SHELL: ShellInfo = {
+  id: "spark-backend-attached",
+  label: "Backend PTY",
+  exe: "noop",
+  args: [],
+  family: "other",
+};
+
+type ChatView = "chat" | "terminal";
 
 // The Spark chat panel: the workspace's chats live here, one conversation at
 // a time. The header carries the live status; a switcher bar swaps between
@@ -55,6 +73,12 @@ export default function ChatPanel({
   // Per-chat keying via run.id means a chat that has no swarm-worthy
   // workers can still flip in/out without other chats inheriting the state.
   const [swarmActive, setSwarmActive] = useState(false);
+  // Per-chat view toggle. "chat" → ChatConversation (default). "terminal" →
+  // raw xterm pane attached to the headless CC/Codex PTY this chat is
+  // driving. Lets you see exactly what the underlying CLI is rendering /
+  // submitting / printing, useful for debugging hook fires, slash-command
+  // responses, and weird interactive states.
+  const [chatView, setChatView] = useState<ChatView>("chat");
   // Drop swarm mode when there is no active chat to render workers from —
   // the swarm grid needs a RunState. Also drop it when the section is
   // collapsed: the user can't see the toggle so the only way back out
@@ -65,6 +89,55 @@ export default function ChatPanel({
   useEffect(() => {
     if (collapsed) setSwarmActive(false);
   }, [collapsed]);
+  // Reset to Chat view when switching to a different chat — the terminal
+  // tab is per-chat (each chat's PTY is keyed by run.id) and a fresh chat
+  // shouldn't inherit the previous one's view. Also reset when there's no
+  // active chat at all.
+  useEffect(() => {
+    if (!activeRun) setChatView("chat");
+  }, [activeRun?.id]);
+  // OpenRouter chats have no PTY to attach to — force back to Chat view if
+  // the backend doesn't support the terminal tab.
+  const backendSessionId = activeRun
+    ? backendPtySessionId(activeRun.id, activeRun.chatBackend)
+    : null;
+  useEffect(() => {
+    if (!backendSessionId && chatView === "terminal") setChatView("chat");
+  }, [backendSessionId, chatView]);
+
+  // Poll for the backend PTY's existence. Mounting TerminalPane before the
+  // cli-session has spawned the PTY triggers a renderer-side pty.spawn for
+  // the placeholder "noop" shell, which fails with "File not found". Three
+  // common cases where this matters:
+  //   1. Fresh chat with chip=Claude/Codex — PTY doesn't exist yet
+  //   2. After Spark restart — chatSessionUuid is persisted but the actual
+  //      in-memory PTY is gone until the next turn re-spawns it
+  //   3. Mid-chat backend switch — old PTY may still be alive, new isn't
+  // Once the PTY exists, render TerminalPane; otherwise show a placeholder.
+  const [backendPtyExists, setBackendPtyExists] = useState(false);
+  useEffect(() => {
+    if (!backendSessionId) {
+      setBackendPtyExists(false);
+      return;
+    }
+    let disposed = false;
+    const check = async () => {
+      try {
+        const exists = await window.spark.pty.exists(backendSessionId);
+        if (!disposed) setBackendPtyExists(exists);
+      } catch {
+        if (!disposed) setBackendPtyExists(false);
+      }
+    };
+    void check();
+    // 1s poll is cheap (Map.has() in main) and covers the gap between user
+    // sending the first message and the cli-session resolving its spawn.
+    const interval = window.setInterval(check, 1000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [backendSessionId]);
 
   return (
     <div
@@ -106,6 +179,9 @@ export default function ChatPanel({
             onSelectRun={onSelectRun}
             onDeleteRun={onDeleteRun}
           />
+          {activeRun && !swarmActive && backendSessionId && (
+            <ChatViewTabStrip view={chatView} onChange={setChatView} />
+          )}
           {error && <ErrorBar message={error} />}
           {swarmActive && activeRun ? (
             // Swarm grid is keyed on the run id so flipping between chats
@@ -120,12 +196,70 @@ export default function ChatPanel({
               cwd={workspace?.cwd ?? null}
             />
           ) : activeRun ? (
-            // Keyed by chat id so switching chats remounts the stream — fresh
-            // scroll position, no step-card open states carried across.
-            <ChatConversation
-              key={`conversation:${activeRun.id}`}
-              run={activeRun}
-            />
+            // Both views stack absolutely so each ALWAYS has real
+            // dimensions, even when "hidden". xterm's fit-addon measures
+            // its container at mount and on every ResizeObserver fire — if
+            // the container were display:none the measurements would be 0
+            // and CC's Ink REPL would render into a tiny dead frame in the
+            // top-left, then need a re-fit + pty.resize round-trip on tab
+            // switch (which is what the user saw as "looks bad right when
+            // I change then it looks better"). Stacking with visibility
+            // keeps both at full size at all times.
+            <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "flex",
+                  flexDirection: "column",
+                  visibility: chatView === "chat" ? "visible" : "hidden",
+                  pointerEvents: chatView === "chat" ? "auto" : "none",
+                }}
+              >
+                <ChatConversation
+                  key={`conversation:${activeRun.id}`}
+                  run={activeRun}
+                />
+              </div>
+              {backendSessionId && (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "flex",
+                    flexDirection: "column",
+                    padding: 4,
+                    background: "var(--bg-deep, #0b0b0c)",
+                    visibility: chatView === "terminal" ? "visible" : "hidden",
+                    pointerEvents: chatView === "terminal" ? "auto" : "none",
+                  }}
+                >
+                  {backendPtyExists ? (
+                    <TerminalPane
+                      // Keyed on sessionId so a backend switch (which changes
+                      // the id) remounts the pane cleanly against the new PTY
+                      // and discards xterm state from the old backend.
+                      key={`backend-term:${backendSessionId}`}
+                      sessionId={backendSessionId}
+                      shell={BACKEND_TERMINAL_SHELL}
+                      visible={chatView === "terminal"}
+                      initialCwd={workspace?.cwd}
+                      // inputBlocked (not readOnly): no keystrokes forwarded
+                      // so the user can't collide with our bracketed paste +
+                      // submit Enter, but pty.resize IS allowed so CC's Ink
+                      // REPL paints into the actual visible cols/rows
+                      // instead of staying at cli-session's tiny default
+                      // (120x40).
+                      inputBlocked
+                    />
+                  ) : (
+                    <BackendTerminalPlaceholder
+                      backend={activeRun.chatBackend ?? null}
+                    />
+                  )}
+                </div>
+              )}
+            </div>
           ) : (
             <WelcomeState />
           )}
@@ -884,6 +1018,99 @@ function WelcomeState() {
         </div>
       </div>
     </div>
+  );
+}
+
+function BackendTerminalPlaceholder({ backend }: { backend: string | null }) {
+  const label = backend === "codex" ? "Codex" : "Claude Code";
+  return (
+    <div
+      style={{
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: "var(--muted)",
+        fontSize: 11,
+        fontFamily: "var(--font-sans)",
+        textAlign: "center",
+        padding: 16,
+        lineHeight: 1.5,
+      }}
+    >
+      <div>
+        {label} hasn't been spawned for this chat yet.
+        <br />
+        Send a message to start the session — its terminal will appear here.
+      </div>
+    </div>
+  );
+}
+
+function ChatViewTabStrip({
+  view,
+  onChange,
+}: {
+  view: ChatView;
+  onChange: (view: ChatView) => void;
+}) {
+  return (
+    <div
+      role="tablist"
+      style={{
+        flex: "0 0 auto",
+        display: "flex",
+        gap: 2,
+        padding: "4px 8px",
+        borderBottom: "1px solid var(--border-soft, rgba(255,255,255,0.06))",
+        background: "var(--panel-deep, transparent)",
+      }}
+    >
+      <ChatViewTab label="Chat" active={view === "chat"} onClick={() => onChange("chat")} />
+      <ChatViewTab
+        label="Terminal"
+        active={view === "terminal"}
+        onClick={() => onChange("terminal")}
+        title="Live xterm attached to the backend Claude/Codex PTY for this chat — read-only."
+      />
+    </div>
+  );
+}
+
+function ChatViewTab({
+  label,
+  active,
+  onClick,
+  title,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  title?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      title={title ?? label}
+      style={{
+        padding: "4px 10px",
+        fontSize: 11,
+        fontFamily: "var(--font-sans)",
+        background: active
+          ? "color-mix(in oklch, var(--accent) 14%, transparent)"
+          : "transparent",
+        color: active ? "var(--accent)" : "var(--muted)",
+        border: "1px solid transparent",
+        borderRadius: 4,
+        cursor: "pointer",
+      }}
+    >
+      {label}
+    </button>
   );
 }
 

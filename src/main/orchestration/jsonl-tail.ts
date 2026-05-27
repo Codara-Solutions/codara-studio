@@ -43,6 +43,15 @@ export interface TailJsonlOptions {
    * Defaults to true.
    */
   skipUnparsable?: boolean;
+  /**
+   * When true, seek to the END of the file on first poll instead of replaying
+   * everything from offset 0. Lines already in the file are NOT delivered;
+   * only newly appended lines fire `onLine`. Use this when tailing a JSONL
+   * that an agent (CC, Codex) resumes — the file already contains prior
+   * turns' transcript and replaying them would double-count assistant text
+   * into the current turn's accumulator. Defaults to false (replay).
+   */
+  startFromEnd?: boolean;
 }
 
 /**
@@ -67,11 +76,13 @@ export function tailJsonl(
   const pollMs = options.pollMs ?? 150;
   const startupTimeoutMs = options.startupTimeoutMs ?? 10_000;
   const skipUnparsable = options.skipUnparsable ?? true;
+  const startFromEnd = options.startFromEnd ?? false;
 
   let stopped = false;
   let offset = 0;
   let buffer = "";
   let lastInode: number | null = null;
+  let initialSeekDone = false;
   const startedAt = Date.now();
   let startupErrorReported = false;
   let polling: Promise<void> | null = null;
@@ -103,6 +114,17 @@ export function tailJsonl(
       buffer = "";
     }
     lastInode = stat.ino;
+    // First time we see the file with startFromEnd: skip everything already
+    // written so we only stream NEW appends. Done once — after this poll the
+    // offset advances normally and any future inode/truncate event still
+    // resets to 0 (the user wants to see fresh content from a re-created file).
+    if (!initialSeekDone) {
+      initialSeekDone = true;
+      if (startFromEnd) {
+        offset = stat.size;
+        return;
+      }
+    }
     if (stat.size <= offset) return;
     const length = stat.size - offset;
     const handle = await fs.open(path, "r");

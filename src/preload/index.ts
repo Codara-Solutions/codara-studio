@@ -286,6 +286,8 @@ const api = {
       ipcRenderer.invoke("orchestration:pauseRunAfterCurrentWorkers", input),
     forcePauseRun: (runId: string): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:forcePauseRun", runId),
+    stopAndUndoPending: (runId: string): Promise<UndoToCheckpointResult> =>
+      ipcRenderer.invoke("orchestration:stopAndUndoPending", runId),
     resumeRun: (input: ResumeRunInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:resumeRun", input),
     addRunMessage: (input: AddRunMessageInput): Promise<RunState> =>
@@ -340,6 +342,7 @@ const api = {
     resize: (id: string, cols: number, rows: number): Promise<void> =>
       ipcRenderer.invoke("pty:resize", { id, cols, rows }),
     dispose: (id: string): Promise<void> => ipcRenderer.invoke("pty:dispose", { id }),
+    exists: (id: string): Promise<boolean> => ipcRenderer.invoke("pty:exists", { id }),
     pause: (id: string): Promise<void> => ipcRenderer.invoke("pty:pause", { id }),
     resume: (id: string): Promise<void> => ipcRenderer.invoke("pty:resume", { id }),
     onData: (id: string, handler: PtyDataHandler): (() => void) => {

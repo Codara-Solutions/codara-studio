@@ -540,6 +540,14 @@ export function registerIpc(): void {
     return forcePauseRun(runId);
   });
 
+  ipcMain.handle(
+    "orchestration:stopAndUndoPending",
+    async (_e, runId: string): Promise<UndoToCheckpointResult> => {
+      const { stopAndUndoPending } = await getRunStore();
+      return stopAndUndoPending(runId);
+    },
+  );
+
   ipcMain.handle("orchestration:resumeRun", async (_e, input: ResumeRunInput): Promise<RunState> => {
     const { resumeRun } = await getRunStore();
     return resumeRun(input);
@@ -668,6 +676,14 @@ export function registerIpc(): void {
 
   ipcMain.handle("pty:dispose", async (_e, args: { id: string }) => {
     pty.dispose(args.id);
+  });
+
+  // Probe for an existing session. Used by ChatPanel's backend-terminal tab
+  // to decide whether to mount a TerminalPane (which would try to spawn —
+  // and fail with ENOENT — if the session hasn't been spawned yet by the
+  // headless cli-session). Cheap: just a Map.has() check.
+  ipcMain.handle("pty:exists", async (_e, args: { id: string }) => {
+    return pty.exists(args.id);
   });
 
   // Pause / resume the live byte stream while the renderer-side TerminalPane
