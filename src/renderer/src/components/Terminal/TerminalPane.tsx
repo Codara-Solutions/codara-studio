@@ -111,8 +111,13 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
         ref={containerRef}
         className="xterm-host"
         style={{
+          display: "flex",
+          flex: 1,
+          alignSelf: "stretch",
           width: "100%",
           height: "100%",
+          minWidth: 0,
+          minHeight: 0,
           visibility: visible ? "visible" : "hidden",
           pointerEvents: visible ? "auto" : "none",
         }}

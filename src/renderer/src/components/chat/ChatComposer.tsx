@@ -314,13 +314,25 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     status === "complete" || status === "failed" || status === "cancelled";
 
   // Workers currently doing real work (not just queued waiting to launch).
-  // claimed = autopilot reserved the task and is spawning the PTY; running =
-  // the worker is actively executing. needs_review = worker finished and the
-  // manager is reading its report — we keep that as "manager" state, not
-  // "worker", because the user-visible activity has moved back to the manager.
-  const activeWorkers = run?.workerTasks?.filter(
-    (t) => t.status === "running" || t.status === "claimed",
-  ) ?? [];
+  // claimed = autopilot reserved the task; running = worker actively
+  // executing. needs_review = worker finished and the manager is reading
+  // its report — that's "manager" state, not "worker".
+  //
+  // Cross-check the worker_attempt status too: launchWorkerAttempt updates
+  // task.status synchronously but the renderer's debounced workspace flush
+  // (~250ms) can miss the brief claimed→running window. The attempt is
+  // updated in the same commit and persisted to the same snapshot, so
+  // checking both gives a more reliable "worker is doing work right now"
+  // signal — observed in run-mpodz3i7-fs8o7f where the pill never lit up
+  // even though the attempt ran for ~66s.
+  const activeAttemptStatuses = new Set(["prompt_ready", "launching", "running"]);
+  const activeWorkers = run?.workerTasks?.filter((t) => {
+    if (t.status === "running" || t.status === "claimed") return true;
+    const attempt = run.workerAttempts.find(
+      (a) => a.workerTaskId === t.id && activeAttemptStatuses.has(a.status),
+    );
+    return Boolean(attempt);
+  }) ?? [];
   const hasActiveWorker = activeWorkers.length > 0;
   // Pick the first active task for the status pill — multi-worker shows the
   // count and one representative title to keep the line short.

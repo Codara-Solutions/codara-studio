@@ -738,15 +738,6 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     // current turn's accumulator and the spark reply ends up as
     // "previous answer 1 + previous answer 2 + actual new answer".
     skipExistingJsonl: Boolean(opts.resumeSessionUuid),
-    // Pin CC's PTY to 120 cols regardless of what the renderer's xterm fits.
-    // CC v2.x Ink has a SIGWINCH bug (anthropics/claude-code#46462) where
-    // resize-up leaves the old narrower frame visible while the new wider
-    // frame paints alongside it — the visible "user prompt appears twice
-    // side-by-side" bug in the Terminal tab. By clamping in pty-manager,
-    // the renderer's pty.resize call is silently capped at 120 and CC never
-    // sees a resize-up. The right portion of the xterm shows as empty
-    // padding, matching how every other Ink TUI behaves in a wide pane.
-    maxCols: 120,
   });
 
   const chat: ClaudeChatSession = {
@@ -1389,4 +1380,3 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "The user's chat conversation may include prior turns where you replied conversationally — those were under a different mode and DO NOT bind your behavior now. This system prompt is your sole authority for this turn.",
   ].join("\n");
 }
-

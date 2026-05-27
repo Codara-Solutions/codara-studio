@@ -968,6 +968,35 @@ export function useTerminalSession({
       let lastH = container.current?.clientHeight ?? 0;
       let fitTimer: number | null = null;
       let ptyTimer: number | null = null;
+      let rafFits = 0;
+      let rafHandle: number | null = null;
+
+      const scheduleFitRetry = () => {
+        if (disposed || !spawned) return;
+        if (rafHandle !== null) window.cancelAnimationFrame(rafHandle);
+        rafFits = 0;
+        const tick = () => {
+          rafHandle = null;
+          if (disposed || !spawned) return;
+          try {
+            fit.fit();
+          } catch {
+            return;
+          }
+          lastAppliedCols = term.cols;
+          lastAppliedRows = term.rows;
+          if (!readOnlyRef.current && (term.cols !== lastSentCols || term.rows !== lastSentRows)) {
+            lastSentCols = term.cols;
+            lastSentRows = term.rows;
+            void window.spark.pty.resize(sessionId, term.cols, term.rows);
+          }
+          rafFits += 1;
+          if (rafFits < 3) {
+            rafHandle = window.requestAnimationFrame(tick);
+          }
+        };
+        rafHandle = window.requestAnimationFrame(tick);
+      };
 
       const el = container.current;
       const flushPtyResize = () => {
@@ -1018,13 +1047,17 @@ export function useTerminalSession({
             lastAppliedRows = term.rows;
             if (ptyTimer !== null) window.clearTimeout(ptyTimer);
             ptyTimer = window.setTimeout(flushPtyResize, PTY_RESIZE_DEBOUNCE_MS);
+            scheduleFitRetry();
           }, FIT_DEBOUNCE_MS);
         });
         observer.observe(el);
+        window.addEventListener("resize", scheduleFitRetry);
         cleanups.push(() => {
           observer.disconnect();
           if (fitTimer !== null) window.clearTimeout(fitTimer);
           if (ptyTimer !== null) window.clearTimeout(ptyTimer);
+          window.removeEventListener("resize", scheduleFitRetry);
+          if (rafHandle !== null) window.cancelAnimationFrame(rafHandle);
         });
       }
 
@@ -1036,6 +1069,7 @@ export function useTerminalSession({
       } catch {
         /* host transitioned to display:none between mount and now */
       }
+      scheduleFitRetry();
       if (
         !readOnlyRef.current &&
         (term.cols !== lastSentCols || term.rows !== lastSentRows)
@@ -1185,7 +1219,18 @@ export function useTerminalSession({
     } catch {
       /* host may be hidden during the transition */
     }
+    // The host can finish expanding one paint later when it sits inside a
+    // flex/absolute stack or a tab transition. Re-fit on the next frame so
+    // xterm doesn't stay pinned to the smaller first-pass row count.
+    const raf = window.requestAnimationFrame(() => {
+      try {
+        fitRef.current?.fit();
+      } catch {
+        /* ignore late layout churn */
+      }
+    });
     termRef.current?.focus();
+    return () => window.cancelAnimationFrame(raf);
   }, [visible]);
 
   const write = useCallback((data: string) => {

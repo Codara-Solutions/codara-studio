@@ -580,15 +580,24 @@ a { color: inherit; }
 
 /* ── xterm.js host ──────────────────────────────────────────────────────── */
 .spark-terminal-pane {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
   border-radius: var(--terminal-pane-radius);
   background: var(--bg);
 }
 
 .xterm-host {
+  position: relative;
   box-sizing: border-box;
   width: 100%;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
   padding: 4px 7px;
   overflow: hidden;
   background: var(--bg);

@@ -44,10 +44,6 @@ interface Session {
   // is fine since the in-memory xterm snapshot covers the pre-unmount era.
   detachedBacklog: Buffer[];
   detachedBacklogBytes: number;
-  // Persisted from SpawnOptions.maxCols. Resize() and the existing-session
-  // late-attach branch clamp to this when set. See SpawnOptions.maxCols for
-  // the CC v2.x SIGWINCH-bug rationale.
-  maxCols: number | null;
   // Set true synchronously by killNow before the underlying pty.kill() runs.
   // Gates the pty.onData closure: on Windows ConPTY drains stdout for up to
   // ~1 second after kill (FLUSH_DATA_INTERVAL in node-pty's windowsConoutConnection),
@@ -182,16 +178,6 @@ export interface SpawnOptions {
   // Claude/Codex panes so they don't have to wait for the renderer to type a
   // command after the prompt appears.
   startupCommand?: string;
-  // Maximum cols this PTY will ever be resized to. When set, any resize()
-  // (from the renderer's ResizeObserver or fit-addon) is clamped to this
-  // value. Reason: Claude Code v2.x's Ink TUI has a known SIGWINCH bug
-  // (anthropics/claude-code#46462) where expanding-resize doesn't clear the
-  // old frame — the previous narrower input box stays visible while the new
-  // wider one paints alongside it, producing the visible "prompt rendered
-  // twice side-by-side" symptom. Pinning CC chat sessions to 120 cols means
-  // CC never sees a resize-up event; the right portion of the xterm becomes
-  // empty padding, which matches every other Ink TUI in a wide pane.
-  maxCols?: number;
 }
 
 export async function spawn(
@@ -224,9 +210,7 @@ export async function spawn(
       }
     }
     try {
-      const cap = existing.maxCols ?? Infinity;
-      const cols = Math.max(1, Math.min(opts.cols | 0, cap));
-      existing.pty.resize(cols, Math.max(1, opts.rows | 0));
+      existing.pty.resize(Math.max(1, opts.cols | 0), Math.max(1, opts.rows | 0));
       existing.resizedAt = Date.now();
     } catch {
       /* may have exited */
@@ -440,7 +424,6 @@ function doSpawn(
     attached: true,
     detachedBacklog: [],
     detachedBacklogBytes: 0,
-    maxCols: typeof opts.maxCols === "number" && opts.maxCols > 0 ? opts.maxCols : null,
     disposed: false,
   };
 
@@ -790,12 +773,7 @@ export function resize(id: string, cols: number, rows: number): void {
   const s = sessions.get(id);
   if (!s) return;
   try {
-    // Clamp to the session's maxCols (CC v2.x SIGWINCH workaround — see
-    // SpawnOptions.maxCols). Sessions without a cap (workers, manual panes)
-    // pass through unchanged.
-    const cap = s.maxCols ?? Infinity;
-    const clampedCols = Math.max(1, Math.min(cols | 0, cap));
-    s.pty.resize(clampedCols, Math.max(1, rows | 0));
+    s.pty.resize(Math.max(1, cols | 0), Math.max(1, rows | 0));
     s.resizedAt = Date.now();
   } catch {
     /* pty may have exited */

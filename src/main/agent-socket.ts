@@ -459,6 +459,33 @@ async function handleOrchestratorSpawnWorkers(
     ? run.settingsSnapshot.workspaceCwd
     : process.cwd();
 
+  // Execute-mode workers don't belong to a planned step; the manager
+  // spawns them ad-hoc. RunGraph.tsx renders FROM run.steps, so without a
+  // step entry the graph falls through to OutcomeGraph's "No steps run"
+  // card and the worker is invisible — observed in run-mpodz3i7-fs8o7f
+  // even though the worker actually ran and edited files. Create one
+  // synthetic worker_batch step per spawn_workers RPC call so the graph
+  // can render the worker rows via the existing agentRowsForStep path.
+  const workerTitles = rawWorkers
+    .filter((r): r is Record<string, unknown> => Boolean(r) && typeof r === "object")
+    .map((r) => (typeof r.title === "string" ? r.title.trim() : ""))
+    .filter((t) => t.length > 0);
+  const stepTitle = workerTitles.length === 1
+    ? workerTitles[0]
+    : workerTitles.length > 1
+      ? `Spark workers (${workerTitles.length})`
+      : "Spark workers";
+  const stepRunState = await runStore.createStep({
+    runId,
+    title: stepTitle,
+    goal: workerTitles.length > 0 ? workerTitles.join("; ") : "Workers spawned via execute-mode manager.",
+    kind: "worker_batch",
+    plannedAgents: [],
+    acceptanceCriteria: ["All spawned worker tasks complete."],
+  });
+  const synthStep = stepRunState.steps.at(-1);
+  const synthStepId = synthStep?.id;
+
   const workerTaskIds: string[] = [];
   const attemptIdsToLaunch: string[] = [];
   for (const raw of rawWorkers) {
@@ -469,6 +496,7 @@ async function handleOrchestratorSpawnWorkers(
     const description = typeof w.description === "string" ? w.description : "";
     const updated = await runStore.createWorkerTask({
       runId,
+      stepId: synthStepId,
       title,
       description,
       runtimePreference: (w.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK) as

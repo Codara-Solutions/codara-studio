@@ -196,60 +196,31 @@ export default function ChatPanel({
               cwd={workspace?.cwd ?? null}
             />
           ) : activeRun ? (
-            // Both views stack absolutely so each ALWAYS has real
-            // dimensions, even when "hidden". xterm's fit-addon measures
-            // its container at mount and on every ResizeObserver fire — if
-            // the container were display:none the measurements would be 0
-            // and CC's Ink REPL would render into a tiny dead frame in the
-            // top-left, then need a re-fit + pty.resize round-trip on tab
-            // switch (which is what the user saw as "looks bad right when
-            // I change then it looks better"). Stacking with visibility
-            // keeps both at full size at all times.
-            <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
-              <div
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  display: "flex",
-                  flexDirection: "column",
-                  visibility: chatView === "chat" ? "visible" : "hidden",
-                  pointerEvents: chatView === "chat" ? "auto" : "none",
-                }}
-              >
+            chatView === "chat" ? (
+              <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
                 <ChatConversation
                   key={`conversation:${activeRun.id}`}
                   run={activeRun}
                 />
               </div>
-              {backendSessionId && (
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    display: "flex",
-                    flexDirection: "column",
-                    padding: 4,
-                    background: "var(--bg-deep, #0b0b0c)",
-                    visibility: chatView === "terminal" ? "visible" : "hidden",
-                    pointerEvents: chatView === "terminal" ? "auto" : "none",
-                  }}
-                >
+            ) : backendSessionId ? (
+              <div
+                style={{
+                  flex: 1,
+                  minHeight: 0,
+                  display: "flex",
+                  flexDirection: "column",
+                  background: "var(--bg-deep, #0b0b0c)",
+                }}
+              >
+                <div style={{ flex: 1, minHeight: 0, padding: 4 }}>
                   {backendPtyExists ? (
                     <TerminalPane
-                      // Keyed on sessionId so a backend switch (which changes
-                      // the id) remounts the pane cleanly against the new PTY
-                      // and discards xterm state from the old backend.
                       key={`backend-term:${backendSessionId}`}
                       sessionId={backendSessionId}
                       shell={BACKEND_TERMINAL_SHELL}
-                      visible={chatView === "terminal"}
+                      visible={true}
                       initialCwd={workspace?.cwd}
-                      // inputBlocked (not readOnly): no keystrokes forwarded
-                      // so the user can't collide with our bracketed paste +
-                      // submit Enter, but pty.resize IS allowed so CC's Ink
-                      // REPL paints into the actual visible cols/rows
-                      // instead of staying at cli-session's tiny default
-                      // (120x40).
                       inputBlocked
                     />
                   ) : (
@@ -258,8 +229,15 @@ export default function ChatPanel({
                     />
                   )}
                 </div>
-              )}
-            </div>
+              </div>
+            ) : (
+              <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+                <ChatConversation
+                  key={`conversation:${activeRun.id}`}
+                  run={activeRun}
+                />
+              </div>
+            )
           ) : (
             <WelcomeState />
           )}
