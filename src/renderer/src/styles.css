@@ -833,3 +833,27 @@ a { color: inherit; }
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+/* Model-row badges. ".composer-badge" is the neutral pill ("API" tag);
+   ".is-onem" tints it with the accent for 1M-context variants. Both sit
+   to the right of the row label and stay fixed width. */
+.composer-badge {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+  padding: 1px 4px;
+  flex: 0 0 auto;
+}
+.composer-badge.is-onem {
+  color: var(--accent);
+  border-color: var(--accent-edge);
+  background: var(--accent-soft);
+}
+.composer-model-empty {
+  padding: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}

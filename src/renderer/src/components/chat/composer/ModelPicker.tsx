@@ -1,23 +1,54 @@
 import { useEffect, useRef, useState } from "react";
-import type { ChatBackendKind } from "@shared/types";
+import type { AgentRuntimeDiagnostic, ChatBackendKind } from "@shared/types";
 import {
-  CHAT_BACKEND_GROUPS,
+  buildVisibleGroups,
+  composeModelId,
+  type ChatBackendGroup,
   type ChatModelOption,
 } from "./types";
 
 interface Props {
   activeBackend: ChatBackendKind;
   activeModelId: string;
+  activeOneMillion: boolean;
   onPick: (model: ChatModelOption) => void;
 }
 
-// The model pill + grouped dropdown menu. Pure presentation: the parent
-// (ChatComposer) owns model/backend state; this picker just renders the
-// pill and fires onPick when the user chooses a different model.
-export default function ModelPicker({ activeBackend, activeModelId, onPick }: Props) {
+// The model pill + grouped dropdown menu. Reads agents.runtimes() and
+// settings.openRouterModel to decide what to show: only enabled CLI
+// runtimes appear, and the "API" group surfaces just the single model
+// configured in settings (matching vienna's behavior). 1M-context variants
+// ride as separate dropdown rows with a "1M" badge; selecting one fires
+// onPick with isOneMillion:true so the composer can flip chat1mContext.
+export default function ModelPicker({
+  activeBackend,
+  activeModelId,
+  activeOneMillion,
+  onPick,
+}: Props) {
   const [open, setOpen] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<AgentRuntimeDiagnostic[]>([]);
+  const [openRouterModel, setOpenRouterModel] = useState<string>("");
   const rootRef = useRef<HTMLDivElement>(null);
 
+  // One-shot load of runtimes + the configured OpenRouter model. Settings
+  // can change while the user is in the bar (they hit Settings, change the
+  // OR model, come back), so we refresh on every open.
+  useEffect(() => {
+    void window.spark.agents.runtimes().then((rs) => setDiagnostics(rs ?? []));
+    void window.spark.settings
+      .load()
+      .then((s) => setOpenRouterModel((s.openRouterModel ?? "").trim()));
+  }, []);
+  useEffect(() => {
+    if (!open) return;
+    void window.spark.agents.runtimes().then((rs) => setDiagnostics(rs ?? []));
+    void window.spark.settings
+      .load()
+      .then((s) => setOpenRouterModel((s.openRouterModel ?? "").trim()));
+  }, [open]);
+
+  // Click-outside / Escape to close.
   useEffect(() => {
     if (!open) return;
     const onDoc = (event: MouseEvent) => {
@@ -36,7 +67,9 @@ export default function ModelPicker({ activeBackend, activeModelId, onPick }: Pr
     };
   }, [open]);
 
-  const activeLabel = activeModelLabel(activeBackend, activeModelId);
+  const groups: ChatBackendGroup[] = buildVisibleGroups({ diagnostics, openRouterModel });
+  const activeCompoundId = composeModelId(activeModelId, activeOneMillion);
+  const activeLabel = labelFor(groups, activeBackend, activeCompoundId, activeModelId);
 
   const select = (model: ChatModelOption) => {
     onPick(model);
@@ -56,12 +89,17 @@ export default function ModelPicker({ activeBackend, activeModelId, onPick }: Pr
       </button>
       {open && (
         <div className="composer-model-menu" role="listbox">
-          {CHAT_BACKEND_GROUPS.map((group) => (
+          {groups.length === 0 && (
+            <div className="composer-model-empty">
+              No models available — install Claude/Codex CLI or set an OpenRouter model in Settings.
+            </div>
+          )}
+          {groups.map((group) => (
             <div key={group.backend} className="composer-model-group">
               <div className="composer-model-group-label">{group.label}</div>
               {group.models.map((model) => {
                 const active =
-                  model.id === activeModelId && model.backend === activeBackend;
+                  model.id === activeCompoundId && model.backend === activeBackend;
                 return (
                   <button
                     key={`${model.backend}:${model.id}`}
@@ -70,6 +108,12 @@ export default function ModelPicker({ activeBackend, activeModelId, onPick }: Pr
                     onClick={() => select(model)}
                   >
                     <span className="composer-model-row-label">{model.label}</span>
+                    {model.isOneMillion && (
+                      <span className="composer-badge is-onem">1M</span>
+                    )}
+                    {group.backend === "openrouter" && (
+                      <span className="composer-badge">API</span>
+                    )}
                   </button>
                 );
               })}
@@ -81,11 +125,19 @@ export default function ModelPicker({ activeBackend, activeModelId, onPick }: Pr
   );
 }
 
-function activeModelLabel(backend: ChatBackendKind, modelId: string): string {
-  for (const group of CHAT_BACKEND_GROUPS) {
+function labelFor(
+  groups: ChatBackendGroup[],
+  backend: ChatBackendKind,
+  compoundId: string,
+  rawModelId: string,
+): string {
+  for (const group of groups) {
     if (group.backend !== backend) continue;
-    const hit = group.models.find((model) => model.id === modelId);
+    const hit = group.models.find((m) => m.id === compoundId);
     if (hit) return hit.label;
   }
-  return modelId || "Pick a model";
+  // No match in the current visible groups — show the raw id so the pill is
+  // still informative (typical when the configured OpenRouter model was
+  // changed since the run was created).
+  return rawModelId || "Pick a model";
 }

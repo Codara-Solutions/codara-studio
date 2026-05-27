@@ -17,15 +17,13 @@ import PlanModeToggle from "./composer/PlanModeToggle";
 import ThinkingControl from "./composer/ThinkingControl";
 import {
   ALL_EFFORTS,
-  CHAT_BACKEND_GROUPS,
   DEFAULT_CHAT_BACKEND,
   DEFAULT_CHAT_EFFORT,
   DEFAULT_CHAT_MODE,
   DEFAULT_CHAT_MODEL,
-  EFFORT_LABELS,
-  fallbackChatModel,
-  findChatModel,
-  type ChatBackendGroup,
+  decomposeModelId,
+  effortsFor,
+  findOptionInCatalog,
   type ChatModelOption,
 } from "./composer/types";
 
@@ -501,20 +499,22 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const activeChatEffort: AgentEffortLevel = run_?.chatEffort ?? draftChatEffort;
   const activeFastMode: boolean = run_?.chatFastMode ?? draftFastMode;
   const activeOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
-  const activeChatModel: ChatModelOption =
-    findChatModel(activeChatBackend, activeChatModelId) ?? fallbackChatModel(activeChatBackend);
-  // Fast mode applies to Claude (typed as /fast) and Codex (CLI feature flag).
-  // OpenRouter has no equivalent — the chip hides the toggle for it. 1M
-  // context is Claude-only (Codex's GPT-5.5 maxes at 400k; OpenRouter chooses
-  // by model id).
+  // The active model's option pulled from the STATIC catalog (Claude/Codex);
+  // null for OpenRouter (its catalog is dynamic — the configured model
+  // lives in settings). Used only to derive the available effort cycle for
+  // the thinking pill; rendering of the model name happens inside the
+  // ModelPicker which reads from the dynamic visible groups.
+  const activeChatModelOption = findOptionInCatalog(
+    activeChatBackend,
+    activeChatModelId,
+    activeOneMillionContext,
+  );
+  // Fast mode applies to Claude (typed as /fast) and Codex (CLI feature
+  // flag). OpenRouter has no equivalent. 1M context is now a model variant
+  // surfaced as separate dropdown rows (with a 1M badge) — there's no
+  // standalone 1M pill anymore.
   const fastModeAvailable = activeChatBackend === "claude" || activeChatBackend === "codex";
-  const oneMillionContextAvailable = activeChatBackend === "claude";
-  const availableEfforts: AgentEffortLevel[] =
-    activeChatBackend === "openrouter"
-      ? ALL_EFFORTS
-      : activeChatModel.effortLevels && activeChatModel.effortLevels.length > 0
-        ? activeChatModel.effortLevels
-        : ALL_EFFORTS;
+  const availableEfforts: AgentEffortLevel[] = effortsFor(activeChatModelOption);
   const visibleEffort: AgentEffortLevel = availableEfforts.includes(activeChatEffort)
     ? activeChatEffort
     : (availableEfforts[0] ?? DEFAULT_CHAT_EFFORT);
@@ -558,6 +558,10 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   };
 
   const onPickModel = (model: ChatModelOption) => {
+    // Virtual `:1m` ids decompose into (baseId, oneMillion=true). The
+    // backend only ever sees the real id; the 1M flag rides as
+    // chat1mContext in the same payload the legacy 1M pill used to write.
+    const { baseId, oneMillion } = decomposeModelId(model.id);
     const backendChanged = model.backend !== activeChatBackend;
     const nextEffortLevels =
       model.backend === "openrouter"
@@ -572,8 +576,9 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
           : (nextEffortLevels[0] ?? DEFAULT_CHAT_EFFORT));
     applyChatBackendChange({
       chatBackend: backendChanged ? model.backend : undefined,
-      chatModel: model.id,
+      chatModel: baseId,
       chatEffort: nextEffort !== activeChatEffort ? nextEffort : undefined,
+      chat1mContext: oneMillion !== activeOneMillionContext ? oneMillion : undefined,
     });
   };
 
@@ -590,10 +595,10 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     applyChatBackendChange({ chatFastMode: !activeFastMode });
   };
 
-  const onToggleOneMillionContext = () => {
-    if (!oneMillionContextAvailable) return;
-    applyChatBackendChange({ chat1mContext: !activeOneMillionContext });
-  };
+  // 1M context used to be a standalone pill; it now lives as virtual rows
+  // in the model dropdown ("Opus 4.7 1M" etc.), so onPickModel writes
+  // chat1mContext directly via applyChatBackendChange. No standalone
+  // toggle handler is needed here anymore.
 
   // Click-outside / Escape handling for the model picker lives inside the
   // ModelPicker component itself — the thinking pill is click-to-cycle and
@@ -727,6 +732,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
             <ModelPicker
               activeBackend={activeChatBackend}
               activeModelId={activeChatModelId}
+              activeOneMillion={activeOneMillionContext}
               onPick={onPickModel}
             />
             <ThinkingControl
@@ -752,21 +758,6 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
                 onClick={onToggleFastMode}
               >
                 {activeFastMode ? "Fast on" : "Fast off"}
-              </button>
-            )}
-            {oneMillionContextAvailable && (
-              <button
-                type="button"
-                className={`composer-pill${activeOneMillionContext ? " is-active" : ""}`}
-                title={
-                  activeOneMillionContext
-                    ? "1M context on — Claude session uses the 1M-token window (subscription feature). Click to revert to 200k."
-                    : "1M context off — Claude session uses the default 200k. Click to enable 1M."
-                }
-                aria-pressed={activeOneMillionContext}
-                onClick={onToggleOneMillionContext}
-              >
-                {activeOneMillionContext ? "1M ctx" : "200k ctx"}
               </button>
             )}
           </div>
@@ -819,10 +810,6 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
       </div>
     </div>
   );
-}
-
-function chatBackendLabel(backend: ChatBackendKind): string {
-  return CHAT_BACKEND_GROUPS.find((entry) => entry.backend === backend)?.label ?? backend;
 }
 
 function messageForSend(draft: string, attachmentCount: number): string {
