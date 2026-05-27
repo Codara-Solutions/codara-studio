@@ -744,7 +744,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
             {fastModeAvailable && (
               <button
                 type="button"
-                className={`composer-pill${activeFastMode ? " is-active" : ""}`}
+                className={`composer-fast${activeFastMode ? " is-active" : ""}`}
                 title={
                   activeChatBackend === "claude"
                     ? activeFastMode
@@ -754,10 +754,11 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
                       ? "Fast mode on — Codex spawns with fast_mode enabled. Click to disable."
                       : "Fast mode off — Codex spawns with fast_mode disabled. Click to enable."
                 }
+                aria-label={activeFastMode ? "Fast mode on" : "Fast mode off"}
                 aria-pressed={activeFastMode}
                 onClick={onToggleFastMode}
               >
-                {activeFastMode ? "Fast on" : "Fast off"}
+                <LightningIcon />
               </button>
             )}
           </div>
@@ -1625,6 +1626,16 @@ function ChipCaret() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+// Lightning bolt glyph for the Fast-mode toggle. Filled in the active
+// state so it reads as "on" even without a surrounding pill.
+function LightningIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 14 14" fill="currentColor" aria-hidden>
+      <path d="M8.2 0.4 L2.5 7.6 H6 L5.2 13.6 L11.2 6 H7.5 L8.2 0.4 Z" />
     </svg>
   );
 }
