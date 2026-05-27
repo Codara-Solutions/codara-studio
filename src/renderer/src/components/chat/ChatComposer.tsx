@@ -326,6 +326,28 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const isPaused = status === "paused" || status === "blocked";
   const isTerminal =
     status === "complete" || status === "failed" || status === "cancelled";
+
+  // Workers currently doing real work (not just queued waiting to launch).
+  // claimed = autopilot reserved the task and is spawning the PTY; running =
+  // the worker is actively executing. needs_review = worker finished and the
+  // manager is reading its report — we keep that as "manager" state, not
+  // "worker", because the user-visible activity has moved back to the manager.
+  const activeWorkers = run?.workerTasks?.filter(
+    (t) => t.status === "running" || t.status === "claimed",
+  ) ?? [];
+  const hasActiveWorker = activeWorkers.length > 0;
+  // Pick the first active task for the status pill — multi-worker shows the
+  // count and one representative title to keep the line short.
+  const primaryActiveWorker = activeWorkers[0] ?? null;
+  const activeWorkerRuntime = primaryActiveWorker
+    ? run?.workerAttempts?.find(
+        (a) =>
+          a.workerTaskId === primaryActiveWorker.id &&
+          a.status !== "succeeded" &&
+          a.status !== "failed" &&
+          a.status !== "cancelled",
+      )?.runtime ?? primaryActiveWorker.runtimePreference
+    : null;
   const filesForSend = collectFileReferencesForSend(draft, fileReferences, fileMentions).slice(
     0,
     Math.max(0, MAX_ATTACHMENTS - images.length),
@@ -692,7 +714,9 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
         ? "Send a follow-up. Spark picks the work back up."
         : isPaused
           ? "Add a note, then resume."
-          : "Reply, steer, or add context.";
+          : hasActiveWorker
+            ? "Type — your message queues for after the worker finishes."
+            : "Reply, steer, or add context.";
 
   return (
     <div
@@ -921,26 +945,34 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
               </ChipButton>
             )}
           </div>
-          <span
-            style={{
-              flex: 1,
-              minWidth: 0,
-              fontSize: 10,
-              color: "var(--muted)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              textAlign: "center",
-            }}
-          >
-            {busy
-              ? "Working..."
-              : pastingImages
-                ? "Adding pasted image..."
-              : isActive
-                ? "Queued for next manager decision"
-                : "Enter to send, Shift+Enter for a new line"}
-          </span>
+          {hasActiveWorker ? (
+            <WorkerActivityStatus
+              count={activeWorkers.length}
+              runtime={activeWorkerRuntime}
+              title={primaryActiveWorker?.title ?? null}
+            />
+          ) : (
+            <span
+              style={{
+                flex: 1,
+                minWidth: 0,
+                fontSize: 10,
+                color: "var(--muted)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                textAlign: "center",
+              }}
+            >
+              {busy
+                ? "Working..."
+                : pastingImages
+                  ? "Adding pasted image..."
+                : isActive
+                  ? "Queued for next manager decision"
+                  : "Enter to send, Shift+Enter for a new line"}
+            </span>
+          )}
           <TokenCounter
             used={tokensUsed}
             budget={
@@ -995,6 +1027,71 @@ function messageForSend(draft: string, attachmentCount: number): string {
   const text = draft.trim();
   if (text) return text;
   return attachmentCount > 0 ? `Use the attached reference${attachmentCount === 1 ? "" : "s"} as context.` : "";
+}
+
+// Replaces the static "Queued for next manager decision" status line whenever
+// at least one worker_task is in `running` or `claimed`. Shows: a pulsing
+// accent dot, the worker count + runtime, the task title (truncated), and an
+// explicit note that the user's next message will queue. The visual goal is
+// to let the user tell at a glance whether they're waiting on the LLM
+// manager's next decision or on a worker that's actively editing files.
+function WorkerActivityStatus({
+  count,
+  runtime,
+  title,
+}: {
+  count: number;
+  runtime: string | null;
+  title: string | null;
+}): JSX.Element {
+  const runtimeLabel = runtime === "claude" ? "claude" : runtime === "codex" ? "codex" : runtime ?? "worker";
+  const countLabel = count > 1 ? `${count} workers` : "worker";
+  return (
+    <span
+      style={{
+        flex: 1,
+        minWidth: 0,
+        fontSize: 10,
+        color: "var(--muted)",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+        textAlign: "center",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 6,
+      }}
+      title={title ?? undefined}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: "50%",
+          background: "var(--accent)",
+          animation: "spark-pulse 1.3s ease-in-out infinite",
+          flex: "0 0 auto",
+        }}
+      />
+      <span style={{ color: "var(--accent)", fontWeight: 600 }}>
+        {runtimeLabel} {countLabel} running
+      </span>
+      {title && (
+        <span
+          style={{
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            minWidth: 0,
+          }}
+        >
+          · {title}
+        </span>
+      )}
+      <span style={{ flex: "0 0 auto" }}>· replies queue</span>
+    </span>
+  );
 }
 
 function basename(path: string): string {

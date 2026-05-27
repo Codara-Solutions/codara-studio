@@ -69,6 +69,17 @@ export interface CliSessionOptions {
    */
   cols?: number;
   rows?: number;
+  /**
+   * Hard upper bound on cols. When set, any later `pty.resize` call from the
+   * renderer (when the user opens the Terminal tab to view this PTY) is
+   * clamped to this value. CC chat sessions need this because CC v2.x's Ink
+   * TUI has a SIGWINCH bug (anthropics/claude-code#46462) where resize-up
+   * doesn't clear the old frame and the previous narrower input box stays
+   * visible alongside the new wider one. Pinning to 120 makes CC's TUI behave
+   * exactly as it does at default-size terminals; the renderer xterm shows
+   * the right portion as empty padding when wider.
+   */
+  maxCols?: number;
 }
 
 export interface CliSession {
@@ -133,6 +144,7 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
     rows,
     env: opts.env,
     webContents: null, // headless — main-process drives directly
+    maxCols: opts.maxCols,
   });
 
   let jsonlPath: string | null = null;

@@ -2756,6 +2756,34 @@ async function applySparkManagerDecision(
   decision: SparkManagerDecision,
   mode: SparkCall["mode"],
 ): Promise<RunState> {
+  // Defensive: if the run already reached a terminal state, drop the decision.
+  // This guards against a race where an MCP tool call (e.g. spark_complete
+  // via handleOrchestratorComplete) flipped run.status BEFORE the same
+  // turn's tool calls were synthesized into a SparkManagerDecision and
+  // applied here. Without this guard, a stale {status:"run_workers"} decision
+  // would create phantom steps and worker tasks on top of an already-
+  // complete run — they'd sit in status="created"/"queued" forever because
+  // autopilot is already blocked, producing the "STEP 01 ... 0/1 done" UI
+  // artifact even though the user's real request finished cleanly.
+  if (
+    run.status === "complete" ||
+    run.status === "failed" ||
+    run.status === "cancelled"
+  ) {
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      type: "spark_manager.decision_dropped_run_terminal",
+      message: `Dropped ${decision.status} decision; run is already ${run.status}.`,
+      payload: {
+        runStatus: run.status,
+        decisionStatus: decision.status,
+        summary: decision.summary,
+        mode,
+      },
+    });
+    return run;
+  }
   // Surface the manager's natural-language reply to the user as a Spark chat
   // bubble before applying the structural decision. Avoids dupes by skipping
   // when the latest spark/note already matches verbatim.

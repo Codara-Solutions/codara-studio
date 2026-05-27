@@ -385,6 +385,10 @@ async function spawnSession(
     // otherwise replayed assistant blocks pile into the current turn's
     // accumulator and the reply becomes "previous answer + actual answer".
     skipExistingJsonl: Boolean(input.chat.sessionUuid),
+    // Codex's Ink TUI shares the same family as CC; the SIGWINCH bug isn't
+    // confirmed for Codex specifically but the defensive clamp costs nothing
+    // (the right portion of a wider xterm renders as empty padding either way).
+    maxCols: 120,
   });
 
   const session: CodexChatSession = {

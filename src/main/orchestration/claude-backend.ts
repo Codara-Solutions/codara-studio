@@ -362,10 +362,12 @@ export const claudeBackend: SparkAgentBackend = {
       // commit the paste; pressing Enter mid-commit silently drops the
       // submit and the chat hangs until the turn timeout.
       //
-      // The UserPromptSubmit hook still fires alongside — it can substitute
-      // the prompt from the queue file (claude-p pattern). The queue write
-      // above stays as a defensive layer; the bracketed paste is the
-      // primary path.
+      // The UserPromptSubmit hook (spark-cc-userprompt.py) fires alongside
+      // but writes nothing to stdout — its only job is to unlink the queue
+      // file so a future Stop+undo can't replay a stale prompt. If the hook
+      // also wrote the queue contents to stdout, CC would append a second
+      // copy of the prompt as an attachment block (rendering the user's
+      // prompt twice in CC's terminal and doubling the input-token cost).
       const promptForStdin = prompt || ".";
       chat.session.writeRaw(PASTE_BEGIN);
       await sleep(PASTE_PIECE_DELAY_MS);
@@ -736,6 +738,15 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     // current turn's accumulator and the spark reply ends up as
     // "previous answer 1 + previous answer 2 + actual new answer".
     skipExistingJsonl: Boolean(opts.resumeSessionUuid),
+    // Pin CC's PTY to 120 cols regardless of what the renderer's xterm fits.
+    // CC v2.x Ink has a SIGWINCH bug (anthropics/claude-code#46462) where
+    // resize-up leaves the old narrower frame visible while the new wider
+    // frame paints alongside it — the visible "user prompt appears twice
+    // side-by-side" bug in the Terminal tab. By clamping in pty-manager,
+    // the renderer's pty.resize call is silently capped at 120 and CC never
+    // sees a resize-up. The right portion of the xterm shows as empty
+    // padding, matching how every other Ink TUI behaves in a wide pane.
+    maxCols: 120,
   });
 
   const chat: ClaudeChatSession = {
@@ -1181,6 +1192,32 @@ export function buildExecuteDecisionFromToolCalls(
     call.toolName === sparkName ||
     call.toolName === `mcp__spark-orchestrator__${sparkName}`;
 
+  // spark_complete wins when present, even alongside spark_spawn_workers.
+  // The CC manager's MCP tool calls executed IN ORDER as the turn ran:
+  // spawn_workers fired early (and was already handled by handleOrchestratorSpawnWorkers
+  // when it arrived — workers are already created, launched, and possibly
+  // accepted), and spark_complete fired at the end as the manager's final
+  // intent. If we returned `run_workers` here, applySparkManagerDecision
+  // would re-create the same workers as phantom tasks on top of an already-
+  // completed run (status="created", never launched), producing the "0/1
+  // worker, marked DONE" UI bug. Checking complete first respects the
+  // manager's actual closing decision; spawn was already dispatched live.
+  const completeCall = toolCalls.find((c) => matches(c, "spark_complete"));
+  if (completeCall) {
+    const input = isRecord(completeCall.input) ? completeCall.input : {};
+    const summary =
+      typeof input.summary === "string" && input.summary.trim()
+        ? input.summary.trim()
+        : chatReply || "Done.";
+    return {
+      status: "complete",
+      summary,
+      steps: [],
+      tasks: [],
+      chatReply: chatReply || summary,
+    };
+  }
+
   const spawnCall = toolCalls.find((c) => matches(c, "spark_spawn_workers"));
   if (spawnCall) {
     const input = isRecord(spawnCall.input) ? spawnCall.input : {};
@@ -1215,22 +1252,6 @@ export function buildExecuteDecisionFromToolCalls(
       steps: [],
       tasks: [],
       chatReply: chatReply || undefined,
-    };
-  }
-
-  const completeCall = toolCalls.find((c) => matches(c, "spark_complete"));
-  if (completeCall) {
-    const input = isRecord(completeCall.input) ? completeCall.input : {};
-    const summary =
-      typeof input.summary === "string" && input.summary.trim()
-        ? input.summary.trim()
-        : chatReply || "Done.";
-    return {
-      status: "complete",
-      summary,
-      steps: [],
-      tasks: [],
-      chatReply: chatReply || summary,
     };
   }
 

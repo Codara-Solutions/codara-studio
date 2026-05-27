@@ -44,6 +44,10 @@ interface Session {
   // is fine since the in-memory xterm snapshot covers the pre-unmount era.
   detachedBacklog: Buffer[];
   detachedBacklogBytes: number;
+  // Persisted from SpawnOptions.maxCols. Resize() and the existing-session
+  // late-attach branch clamp to this when set. See SpawnOptions.maxCols for
+  // the CC v2.x SIGWINCH-bug rationale.
+  maxCols: number | null;
   // Set true synchronously by killNow before the underlying pty.kill() runs.
   // Gates the pty.onData closure: on Windows ConPTY drains stdout for up to
   // ~1 second after kill (FLUSH_DATA_INTERVAL in node-pty's windowsConoutConnection),
@@ -178,6 +182,16 @@ export interface SpawnOptions {
   // Claude/Codex panes so they don't have to wait for the renderer to type a
   // command after the prompt appears.
   startupCommand?: string;
+  // Maximum cols this PTY will ever be resized to. When set, any resize()
+  // (from the renderer's ResizeObserver or fit-addon) is clamped to this
+  // value. Reason: Claude Code v2.x's Ink TUI has a known SIGWINCH bug
+  // (anthropics/claude-code#46462) where expanding-resize doesn't clear the
+  // old frame — the previous narrower input box stays visible while the new
+  // wider one paints alongside it, producing the visible "prompt rendered
+  // twice side-by-side" symptom. Pinning CC chat sessions to 120 cols means
+  // CC never sees a resize-up event; the right portion of the xterm becomes
+  // empty padding, which matches every other Ink TUI in a wide pane.
+  maxCols?: number;
 }
 
 export async function spawn(
@@ -210,7 +224,9 @@ export async function spawn(
       }
     }
     try {
-      existing.pty.resize(Math.max(1, opts.cols | 0), Math.max(1, opts.rows | 0));
+      const cap = existing.maxCols ?? Infinity;
+      const cols = Math.max(1, Math.min(opts.cols | 0, cap));
+      existing.pty.resize(cols, Math.max(1, opts.rows | 0));
       existing.resizedAt = Date.now();
     } catch {
       /* may have exited */
@@ -424,6 +440,7 @@ function doSpawn(
     attached: true,
     detachedBacklog: [],
     detachedBacklogBytes: 0,
+    maxCols: typeof opts.maxCols === "number" && opts.maxCols > 0 ? opts.maxCols : null,
     disposed: false,
   };
 
@@ -441,11 +458,23 @@ function doSpawn(
   // killed pty's last partial Ink frame left the xterm in an inconsistent
   // state (alt-screen on, cursor parked mid-line, scroll region set, SGR
   // colors active). Without this reset, the new pty's Ink frames paint over
-  // a dirty cell grid and characters interleave with leftover glyphs.
-  // Sequence: \x1b[?1049l (exit alt-screen) + \x1bc (RIS / full reset) +
-  // \x1b[H (cursor home) + \x1b[2J (clear viewport) + \x1b[3J (clear scrollback).
+  // a dirty cell grid and characters/whole rows from the old frame remain
+  // visible (the visible "prompt twice side-by-side" symptom).
+  //
+  // Sequence ORDER matters: \x1bc (RIS, full reset) MUST come first. If we
+  // sent \x1b[?1049l first to exit alt-screen, the terminal would restore
+  // the saved main-screen content that the old CC stamped there (banner,
+  // partial transcript, etc.) — the subsequent reset clears the live screen
+  // but xterm.js in practice leaves the just-restored content visible
+  // alongside the new CC's redraw. By full-resetting first, alt-screen mode
+  // is dropped as part of the reset and the saved main-screen is discarded
+  // before anything else runs.
+  // Order: \x1bc (RIS) → \x1b[H (home) → \x1b[2J (clear viewport) →
+  // \x1b[3J (clear scrollback) → \x1b[?1049l (idempotent alt-screen-off as
+  // a final belt-and-braces against renderers that ignore the alt-screen
+  // bit in RIS).
   if (stranded && session.webContents && !session.webContents.isDestroyed()) {
-    const reset = Buffer.from("\x1b[?1049l\x1bc\x1b[H\x1b[2J\x1b[3J", "utf8");
+    const reset = Buffer.from("\x1bc\x1b[H\x1b[2J\x1b[3J\x1b[?1049l", "utf8");
     try {
       session.webContents.send(
         session.dataChannel,
@@ -761,7 +790,12 @@ export function resize(id: string, cols: number, rows: number): void {
   const s = sessions.get(id);
   if (!s) return;
   try {
-    s.pty.resize(Math.max(1, cols | 0), Math.max(1, rows | 0));
+    // Clamp to the session's maxCols (CC v2.x SIGWINCH workaround — see
+    // SpawnOptions.maxCols). Sessions without a cap (workers, manual panes)
+    // pass through unchanged.
+    const cap = s.maxCols ?? Infinity;
+    const clampedCols = Math.max(1, Math.min(cols | 0, cap));
+    s.pty.resize(clampedCols, Math.max(1, rows | 0));
     s.resizedAt = Date.now();
   } catch {
     /* pty may have exited */

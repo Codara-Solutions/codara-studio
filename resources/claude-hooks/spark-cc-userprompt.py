@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Spark Agent UserPromptSubmit hook for Claude Code (Talk mode).
+"""Spark Agent UserPromptSubmit hook for Claude Code.
 
-Claude Code invokes this script when the user submits a prompt. In Spark's
-backend-driven flow, the "user" is the Spark main process — it drops the
-prompt for this turn into <spark-home>/queues/<SPARK_RUN_ID>.queue and waits
-for CC to ingest it. This hook reads that queue file, prints its contents to
-stdout (which is how CC ingests a UserPromptSubmit hook's response — the
-stdout becomes the effective user prompt for the turn), and deletes the
-queue file so the next turn starts clean.
+Original purpose was to inject the user's prompt into CC by reading the
+queue file and writing it to stdout (CC appends UserPromptSubmit hook stdout
+to the user prompt). But Spark's claude-backend ALSO bracketed-pastes the
+prompt via PTY stdin — both paths fired on every turn, causing CC to see the
+prompt twice (once as the typed user message, once as a hook attachment).
+That double injection produced the visible "user prompt rendered twice
+side-by-side" in CC's terminal AND doubled the input-token cost.
+
+Resolution: the bracketed-paste path is the primary injection. This hook
+now serves only as a queue-file janitor: it deletes the queue file so the
+next turn starts clean. Stdout is intentionally left empty so CC does not
+append a duplicate of the prompt as an attachment block.
 
 Design constraints mirror spark-hook.py:
 - Python 3.6+ only, stdlib only.
@@ -40,36 +45,17 @@ def _queue_path() -> str | None:
 def main() -> int:
     path = _queue_path()
     if not path:
-        # No run id — nothing to inject. Stay silent rather than fail the
-        # hook; CC will fall back to whatever stdin (none) it had.
+        # No run id — nothing to do.
         return 0
 
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            content = fh.read()
-    except FileNotFoundError:
-        # Queue file not present (e.g. user ran /clear from inside CC and
-        # CC dispatched a UserPromptSubmit before Spark wrote one). Print
-        # nothing and bow out.
-        return 0
-    except Exception as err:
-        # Surface the failure to CC's stderr for diagnostics but stay exit 0
-        # so we don't block the user's prompt.
-        sys.stderr.write(f"spark-cc-userprompt: read failed: {err}\n")
-        return 0
-
-    # Stdout becomes the effective user prompt for this turn.
-    try:
-        sys.stdout.write(content)
-        sys.stdout.flush()
-    except Exception as err:
-        sys.stderr.write(f"spark-cc-userprompt: stdout write failed: {err}\n")
-
-    # Best-effort cleanup so the next turn starts clean. A failure here is
-    # harmless — Spark will overwrite the queue file on the next turn.
+    # Best-effort cleanup so the next turn starts clean. The prompt itself
+    # arrives via PTY bracketed-paste; this hook intentionally writes nothing
+    # to stdout so CC doesn't see the prompt as a duplicate attachment.
     try:
         os.unlink(path)
     except OSError:
+        # File may already be gone (e.g. interruptChat unlinked it to
+        # prevent replay after a Stop+undo). Harmless.
         pass
 
     return 0
