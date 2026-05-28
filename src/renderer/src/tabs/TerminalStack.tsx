@@ -88,6 +88,7 @@ interface Props {
   onTabZoomToggle: (tabId: TabId, paneId: string) => void;
   onPaneCwd: (tabId: TabId, paneId: string, cwd: string) => void;
   onPaneActivity: (tabId: TabId, paneId: string) => void;
+  onPaneUserInput: (tabId: TabId, paneId: string) => void;
   onPaneScrollback: (tabId: TabId, paneId: string, scrollback: string) => void;
   onPaneAgentState: (
     tabId: TabId,
@@ -112,6 +113,7 @@ type Bundle = {
   onToggleZoom: () => void;
   onCwd: (cwd: string) => void;
   onActivity: () => void;
+  onUserInput: () => void;
   onAgentState: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
 };
 
@@ -134,6 +136,7 @@ function TerminalStack({
   onTabZoomToggle,
   onPaneCwd,
   onPaneActivity,
+  onPaneUserInput,
   onPaneScrollback,
   onPaneAgentState,
 }: Props) {
@@ -159,6 +162,7 @@ function TerminalStack({
   const zoomToggleRef = useRef(onTabZoomToggle);
   const cwdRef = useRef(onPaneCwd);
   const activityRef = useRef(onPaneActivity);
+  const userInputRef = useRef(onPaneUserInput);
   const scrollbackRef = useRef(onPaneScrollback);
   const agentStateRef = useRef(onPaneAgentState);
   useEffect(() => {
@@ -173,9 +177,10 @@ function TerminalStack({
     zoomToggleRef.current = onTabZoomToggle;
     cwdRef.current = onPaneCwd;
     activityRef.current = onPaneActivity;
+    userInputRef.current = onPaneUserInput;
     scrollbackRef.current = onPaneScrollback;
     agentStateRef.current = onPaneAgentState;
-  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneScrollback, onPaneAgentState]);
+  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onPaneAgentState]);
 
   // Latest tab roots so the + smart-add button can read whichever PaneNode
   // tree is current at click time (a stale capture would split a tree that
@@ -253,6 +258,7 @@ function TerminalStack({
               snapshotScrollback(tabId, paneId);
             }
           },
+          onUserInput: () => userInputRef.current(tabId, paneId),
           onAgentState: (state) => agentStateRef.current(tabId, paneId, state),
         };
         bundles.current.set(key, b);
@@ -738,6 +744,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               onExit={bundle.onExit}
               onCwd={bundle.onCwd}
               onActivity={bundle.onActivity}
+              onUserInput={bundle.onUserInput}
               onAgentState={bundle.onAgentState}
             />
             {workerChip ? <WorkerChip worker={workerChip} /> : null}
@@ -1208,6 +1215,7 @@ function DraggedPaneMount({
         onExit={bundle.onExit}
         onCwd={bundle.onCwd}
         onActivity={bundle.onActivity}
+        onUserInput={bundle.onUserInput}
         onAgentState={bundle.onAgentState}
       />
     </div>

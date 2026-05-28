@@ -48,6 +48,7 @@ interface Props {
   onDetectedLocalUrl?: (url: string) => void;
   onSparkOpen?: (input: SparkOpenInput) => void;
   onActivity?: () => void;
+  onUserInput?: () => void;
   onAgentState?: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
 }
 
@@ -69,6 +70,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onDetectedLocalUrl,
       onSparkOpen,
       onActivity,
+      onUserInput,
       onAgentState,
     },
     ref,
@@ -92,6 +94,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onDetectedLocalUrl,
       onSparkOpen,
       onActivity,
+      onUserInput,
       onAgentState,
     });
 

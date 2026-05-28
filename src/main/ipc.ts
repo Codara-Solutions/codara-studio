@@ -319,6 +319,38 @@ export function registerIpc(): void {
     return readFileEx(path);
   });
 
+  // Existence probe for the terminal link provider's ctrl/cmd-click feature.
+  // Resolves `target` against an optional `baseDir` (the terminal pane's
+  // tracked cwd), then checks via fs.stat. Sandboxed against the same
+  // allow-list as the other read primitives so a hostile pty can't make the
+  // renderer probe arbitrary disk locations.
+  ipcMain.handle(
+    "fs:pathExists",
+    async (
+      _e,
+      args: { target: string; baseDir?: string },
+    ): Promise<{ exists: boolean; isFile: boolean; resolved: string }> => {
+      const target = typeof args?.target === "string" ? args.target : "";
+      if (!target) return { exists: false, isFile: false, resolved: "" };
+      const base =
+        typeof args?.baseDir === "string" && args.baseDir.length > 0
+          ? args.baseDir
+          : undefined;
+      const resolved = base ? join(base, target) : target;
+      try {
+        assertAllowedReadPath(resolved);
+      } catch {
+        return { exists: false, isFile: false, resolved };
+      }
+      try {
+        const stat = await fs.stat(resolved);
+        return { exists: true, isFile: stat.isFile(), resolved };
+      } catch {
+        return { exists: false, isFile: false, resolved };
+      }
+    },
+  );
+
   ipcMain.handle("fs:listMarkdownFiles", async (_e, root: string): Promise<PlanFile[]> => {
     assertAllowedReadPath(root);
     return listMarkdownFiles(root);

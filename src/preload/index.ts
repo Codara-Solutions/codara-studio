@@ -208,6 +208,16 @@ const api = {
       ipcRenderer.invoke("fs:listFiles", root),
     readText: (path: string): Promise<FsFileContent> => ipcRenderer.invoke("fs:readText", path),
     readEx: (path: string): Promise<FsReadResult> => ipcRenderer.invoke("fs:readEx", path),
+    // Existence probe used by the terminal's file-link provider. `baseDir`
+    // is the resolution base for relative targets (the tracked cwd of the
+    // pane); absolute targets ignore it. Returns `{exists:false}` for any
+    // path that fails the read sandbox so the caller can simply not light
+    // up the link.
+    pathExists: (input: { target: string; baseDir?: string }): Promise<{
+      exists: boolean;
+      isFile: boolean;
+      resolved: string;
+    }> => ipcRenderer.invoke("fs:pathExists", input),
     listMarkdownFiles: (root: string): Promise<PlanFile[]> =>
       ipcRenderer.invoke("fs:listMarkdownFiles", root),
     writeText: (path: string, content: string): Promise<FsFileContent> =>

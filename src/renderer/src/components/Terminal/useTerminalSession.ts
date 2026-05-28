@@ -7,6 +7,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import type { RuntimeState, ShellInfo } from "@shared/types";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
+import { createFileLinkProvider } from "./file-link-provider";
 import {
   registerCwdHandler,
   registerPromptTracker,
@@ -168,6 +169,12 @@ interface Options {
   // and therefore safe to take over for a worker. Throttled implicitly by
   // PTY chunk rate; consumers should still debounce if they push to React.
   onActivity?: () => void;
+  // Fires only when the user actually types into the pane (xterm onData,
+  // which is a keyboard-only signal — programmatic pty.write, clipboard
+  // paste via bracketed-paste, and the one-shot autorun all bypass it).
+  // Used by the worker keybind to recognise a fresh shell pane as "unused"
+  // and inject the launch command into it instead of splitting next to it.
+  onUserInput?: () => void;
   // Fires when the pane transitions in or out of an Ink-style TUI (claude /
   // codex). `running=true` is emitted on the first alt-screen-enter
   // (ESC[?1049h) of the session AND whenever a banner suggests a new
@@ -203,6 +210,7 @@ export function useTerminalSession({
   onDetectedLocalUrl,
   onSparkOpen,
   onActivity,
+  onUserInput,
   onAgentState,
 }: Options): TerminalSessionApi {
   // Latest-value ref so the input/resize closures (captured once per
@@ -229,6 +237,7 @@ export function useTerminalSession({
   const onSearchReadyRef = useRef(onSearchReady);
   const onSparkOpenRef = useRef(onSparkOpen);
   const onActivityRef = useRef(onActivity);
+  const onUserInputRef = useRef(onUserInput);
   const onAgentStateRef = useRef(onAgentState);
   useEffect(() => {
     onDetectedRef.current = onDetectedLocalUrl;
@@ -237,8 +246,9 @@ export function useTerminalSession({
     onSearchReadyRef.current = onSearchReady;
     onSparkOpenRef.current = onSparkOpen;
     onActivityRef.current = onActivity;
+    onUserInputRef.current = onUserInput;
     onAgentStateRef.current = onAgentState;
-  }, [onDetectedLocalUrl, onCwd, onExit, onSearchReady, onSparkOpen, onActivity, onAgentState]);
+  }, [onDetectedLocalUrl, onCwd, onExit, onSearchReady, onSparkOpen, onActivity, onUserInput, onAgentState]);
 
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -320,6 +330,40 @@ export function useTerminalSession({
           void window.spark.openExternal?.(uri);
         }),
       );
+
+      // ── Ctrl/Cmd+click on file paths → open in editor ─────────────────────
+      // Sister to the WebLinksAddon above. Detects path-shaped tokens in
+      // the buffer, verifies existence against the renderer's allowed-roots
+      // sandbox, and on activation routes through the same onSparkOpen
+      // callback the OSC 8888 `spark_open` shell command uses. Modifier
+      // gating (VS Code convention) lives in the activate handler so the
+      // link's underline still shows on hover, but plain clicks don't
+      // hijack the user's selection drag.
+      //
+      // Latest-cwd ref is updated by the OSC 7 handler below; the link
+      // provider re-reads it on every match so a `cd`'d pane resolves
+      // relatives correctly without re-registering the provider.
+      let latestCwd: string | null = initialCwd?.trim() || null;
+      const fileLinkProvider = createFileLinkProvider(term, {
+        getCwd: () => latestCwd,
+        resolveExisting: async (target, baseDir) => {
+          const result = await window.spark.fs.pathExists?.({
+            target,
+            baseDir: baseDir ?? undefined,
+          });
+          return result?.exists && result.isFile ? result.resolved : null;
+        },
+        onActivate: ({ file, event }) => {
+          // Modifier gate: Ctrl on Win/Linux, Cmd on macOS — accept either
+          // so a Mac user on an external Windows keyboard still gets the
+          // right behavior. Plain click is a no-op so xterm's selection
+          // drag continues to work over the underlined region.
+          if (!event.ctrlKey && !event.metaKey) return;
+          onSparkOpenRef.current?.({ file });
+        },
+      });
+      const linkProviderDispose = term.registerLinkProvider(fileLinkProvider);
+      cleanups.push(() => linkProviderDispose.dispose());
 
       // WebGL renderer with software fallback. The DOM renderer is xterm's
       // default; the WebGL renderer is several × faster on agent-style output
@@ -619,7 +663,14 @@ export function useTerminalSession({
 
       const prompt = registerPromptTracker(term);
       cleanups.push(
-        registerCwdHandler(term, (cwd) => onCwdRef.current?.(cwd)),
+        registerCwdHandler(term, (cwd) => {
+          // Mirror to the link-provider closure first so the very next
+          // hover-driven match resolves relatives against the freshest
+          // cwd, then forward to the parent callback (which usually drops
+          // it into tab state).
+          latestCwd = cwd;
+          onCwdRef.current?.(cwd);
+        }),
         registerSparkOpenHandler(term, (input) => onSparkOpenRef.current?.(input)),
         prompt.dispose,
       );
@@ -728,15 +779,17 @@ export function useTerminalSession({
         stateTimer = window.setInterval(tickStatePoller, STATE_POLL_MS);
       };
 
-      const setAgentRunning = (runtime: AgentRuntime) => {
+      const setAgentRunning = (runtime: AgentRuntime | null) => {
         if (agentPhase === "agent") return;
         agentPhase = "agent";
         // Coerce non-first-party runtimes down to `null` at the boundary so
         // App.tsx / TerminalStack / run-store keep seeing the existing public
         // surface ("claude" | "codex" | "cursor" | null) without growing new
         // cases for every newly detected CLI. running=true still fires so the
-        // activity indicator tracks correctly.
-        const publicRuntime = coercePublicRuntime(runtime);
+        // activity indicator tracks correctly. A null `runtime` argument
+        // means "something is interactive but we don't know what" — used by
+        // the alt-screen fallback below for unrecognised TUIs.
+        const publicRuntime = runtime ? coercePublicRuntime(runtime) : null;
         onAgentStateRef.current?.({ runtime: publicRuntime, running: true });
         // Only the three first-party runtimes have regex tables in
         // RUNTIME_PATTERNS — others rely on hook reports from E1 or no state
@@ -876,7 +929,22 @@ export function useTerminalSession({
           }
           if (agentPhase === "idle") {
             const runtime = sniffRuntime(agentTextRing);
-            if (runtime) setAgentRunning(runtime);
+            if (runtime) {
+              setAgentRunning(runtime);
+            } else if (chunkText.includes("\x1b[?1049h")) {
+              // Generic alt-screen TUI fallback. Every Ink-based CLI
+              // (Claude / Codex / Cursor) and every classic fullscreen tool
+              // (vim, less, htop, fzf) emits `ESC[?1049h` on entry. If banner
+              // detection hasn't matched, fall back to this byte signal so
+              // the pane still reports running=true. The worker keybind
+              // relies on this: without it, an unrecognised Claude build or
+              // a vim session would look "unused" and the keybind would
+              // happily inject the launch command into the running TUI's
+              // input box. The exit path (\x1b[?1049l in the else branch
+              // below) already restores idle phase, so this fallback rides
+              // the same lifecycle as banner-based detection.
+              setAgentRunning(null);
+            }
           } else {
             // In agent phase. Watch for any of these and reset:
             //   - alt-screen-leave (Codex's exit signal)
@@ -914,6 +982,7 @@ export function useTerminalSession({
         }
         void window.spark.pty.write(sessionId, data);
         onActivityRef.current?.();
+        onUserInputRef.current?.();
       });
       cleanups.push(() => inputDisposable.dispose());
 

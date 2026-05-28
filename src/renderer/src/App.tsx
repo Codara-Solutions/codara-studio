@@ -221,9 +221,23 @@ export default function App() {
   // decide whether a user pane is "doing nothing" and therefore safe to take
   // over for a new worker. Held in a ref so per-byte activity callbacks
   // don't trigger React re-renders.
-  const paneRuntimeRef = useRef<Map<string, { cwd?: string; lastActivityAt: number }>>(
-    new Map(),
-  );
+  const paneRuntimeRef = useRef<
+    Map<
+      string,
+      {
+        cwd?: string;
+        lastActivityAt: number;
+        userInputAt?: number;
+        // True while the PTY is in alt-screen mode — i.e. a TUI (any Ink-based
+        // agent CLI, vim, less, htop, fzf, …) is in the foreground. Tracked
+        // separately from `leaf.worker` so the worker keybind has a safety
+        // net even when banner-based agent detection didn't fire (custom
+        // builds, unrecognised CLIs). The keybind refuses to inject into a
+        // pane with altScreenActive=true.
+        altScreenActive?: boolean;
+      }
+    >
+  >(new Map());
   const handlePaneCwd = useCallback(
     (tabId: string, paneId: string, cwd: string) => {
       const entry = paneRuntimeRef.current.get(paneId) ?? { lastActivityAt: 0 };
@@ -238,6 +252,16 @@ export default function App() {
   const handlePaneActivity = useCallback((_tabId: string, paneId: string) => {
     const entry = paneRuntimeRef.current.get(paneId) ?? { lastActivityAt: 0 };
     entry.lastActivityAt = Date.now();
+    paneRuntimeRef.current.set(paneId, entry);
+  }, []);
+  // Distinct from onActivity, which fires for every PTY chunk (including
+  // shell output). This only fires on real user keystrokes — used by the
+  // worker keybind to decide whether the active pane is "untouched" and
+  // therefore safe to take over with an injected launch command, vs. a pane
+  // the user is in the middle of typing in.
+  const handlePaneUserInput = useCallback((_tabId: string, paneId: string) => {
+    const entry = paneRuntimeRef.current.get(paneId) ?? { lastActivityAt: 0 };
+    entry.userInputAt = Date.now();
     paneRuntimeRef.current.set(paneId, entry);
   }, []);
 
@@ -1138,6 +1162,14 @@ export default function App() {
   // Add a terminal pane that auto-launches the given CLI worker once the
   // shell prompt is ready. Worker keybinds should keep the user's current
   // terminal tab together instead of creating a separate terminal tab.
+  //
+  // If the active terminal tab's focused pane is "unused" — no worker has
+  // ever attached to it AND the user hasn't typed anything in it — we take
+  // it over by injecting the launch command into the existing PTY instead
+  // of splitting next to it. This matches the natural mental model: a fresh
+  // shell prompt is a place to run things, so the keybind runs the worker
+  // there. Touched panes (active build output, half-typed command) still
+  // get a fresh sibling pane so the user's work isn't disturbed.
   const handleNewWorkerTab = useCallback(
     (autorun: string) => {
       const active = tabs.tabs.find((t) => t.id === tabs.activeId);
@@ -1150,10 +1182,39 @@ export default function App() {
         return;
       }
 
-      const paneId = makeId("pane");
       const activeLeaf = findLeafByPaneId(target.root, target.activePaneId);
+      const runtime = paneRuntimeRef.current.get(target.activePaneId);
+      // Three independent "this pane is in use" signals, any of which is
+      // enough to skip the inject and split a fresh pane instead:
+      //   - leaf.worker:        banner-based agent detection fired
+      //   - leaf.autorun:       the leaf was originally spawned with one
+      //   - userInputAt:        the user has typed at least one keystroke
+      //   - altScreenActive:    a TUI is in the foreground (Ink / vim / less)
+      // The alt-screen signal is the safety net for the case the user
+      // hit: a Claude session whose banner regex didn't match, where
+      // banner-only checks would mis-classify the pane as fresh and the
+      // launch command would land inside the running TUI's input box.
+      const isUnusedPane =
+        activeLeaf !== null &&
+        !activeLeaf.worker &&
+        !activeLeaf.autorun &&
+        !runtime?.userInputAt &&
+        !runtime?.altScreenActive;
+      if (isUnusedPane) {
+        tabs.setActiveTab(target.id);
+        tabs.setActiveTerminalPane(target.id, target.activePaneId);
+        // Inject as a bracketed paste + submit so the existing pwsh/bash/zsh
+        // prompt receives the autorun as if the user had typed it. pty.inject
+        // is async but fire-and-forget is fine — failures (pane disposed,
+        // PTY exited) just mean nothing runs, which is recoverable by
+        // pressing the keybind again.
+        void window.spark.pty.inject(target.activePaneId, autorun, { submit: true });
+        return;
+      }
+
+      const paneId = makeId("pane");
       const cwd =
-        paneRuntimeRef.current.get(target.activePaneId)?.cwd ??
+        runtime?.cwd ??
         activeLeaf?.cwd ??
         activeWorkspace?.cwd ??
         undefined;
@@ -1419,6 +1480,16 @@ export default function App() {
       paneId: string,
       state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean },
     ) => {
+      // Mirror alt-screen / TUI activity into the pane runtime tracker so
+      // the worker keybind has a foolproof "do not take over" signal even
+      // when banner detection didn't recognise the runtime. Updated for
+      // both known (claude/codex/cursor) and unknown (runtime=null)
+      // TUIs — the moment the PTY enters alt-screen mode it's no longer
+      // safe to inject the launch command.
+      const runtimeEntry =
+        paneRuntimeRef.current.get(paneId) ?? { lastActivityAt: 0 };
+      runtimeEntry.altScreenActive = state.running;
+      paneRuntimeRef.current.set(paneId, runtimeEntry);
       const t = tabsRef.current;
       const tab = t.tabs.find((item) => item.id === tabId);
       if (!tab || tab.kind !== "terminal") return;
@@ -1435,6 +1506,10 @@ export default function App() {
           return;
         }
         if (existing && existing.source !== "manual") return;
+        // Unrecognised TUI (runtime=null) with no existing chip — the
+        // alt-screen tracker above is enough to block the keybind; don't
+        // sprout a "WORKER" badge on vim / less / fzf panes.
+        if (state.runtime === null && !existing) return;
         const runtime = state.runtime ?? existing?.runtime;
         t.setLeafWorker(tabId, paneId, {
           runtime,
@@ -1789,6 +1864,7 @@ export default function App() {
               onPreviewUrlChange={handlePreviewUrlChange}
               onPaneCwd={handlePaneCwd}
               onPaneActivity={handlePaneActivity}
+              onPaneUserInput={handlePaneUserInput}
               onPaneScrollback={handlePaneScrollback}
               onTerminalPaneAgentState={onTerminalPaneAgentState}
               onNewTerminalTab={handleNewTerminalTab}
@@ -1936,6 +2012,7 @@ interface WorkspaceProps {
   onPreviewUrlChange: (id: string, url: string) => void;
   onPaneCwd: (tabId: string, paneId: string, cwd: string) => void;
   onPaneActivity: (tabId: string, paneId: string) => void;
+  onPaneUserInput: (tabId: string, paneId: string) => void;
   onPaneScrollback: (tabId: string, paneId: string, scrollback: string) => void;
   onTerminalPaneAgentState: (
     tabId: string,
@@ -1968,6 +2045,7 @@ const Workspace = React.memo(function Workspace({
   onPreviewUrlChange,
   onPaneCwd,
   onPaneActivity,
+  onPaneUserInput,
   onPaneScrollback,
   onTerminalPaneAgentState,
   onNewTerminalTab,
@@ -2116,6 +2194,7 @@ const Workspace = React.memo(function Workspace({
           onTabZoomToggle={handlePaneZoomToggle}
           onPaneCwd={onPaneCwd}
           onPaneActivity={onPaneActivity}
+          onPaneUserInput={onPaneUserInput}
           onPaneScrollback={onPaneScrollback}
           onPaneAgentState={onTerminalPaneAgentState}
         />
