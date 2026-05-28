@@ -9,6 +9,7 @@ import type {
   Workspace,
 } from "@shared/types";
 import { makeId } from "@shared/ids";
+import { backendPtySessionId } from "@shared/backend-pty";
 import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import StatusBar from "./components/StatusBar";
@@ -22,14 +23,23 @@ import ToastHost from "./components/Toast";
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
+import InnerTabStrip from "./tabs/InnerTabStrip";
 import EditorStack from "./tabs/EditorStack";
 import TerminalStack from "./tabs/TerminalStack";
 import PreviewStack from "./tabs/PreviewStack";
 import { setOpenPreviewTabFn } from "./components/Preview/registry";
 import RunsStack from "./tabs/RunsStack";
-import { useTabs } from "./tabs/useTabs";
+import { useTabs, isDraftChatTabId } from "./tabs/useTabs";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
-import type { PaneNode, Tab, TabId, TerminalLeaf } from "./tabs/types";
+import type {
+  PaneNode,
+  PreviewTab,
+  RunsTab,
+  Tab,
+  TabId,
+  TerminalLeaf,
+  TerminalTab,
+} from "./tabs/types";
 import { basename } from "./path-utils";
 import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
@@ -297,12 +307,24 @@ export default function App() {
       setActiveRunId(run.id);
       if (workspaceId !== activeIdRef.current) return;
       const focusRuns = options.focusRuns ?? false;
+      // If the user sent their first message from a draft chat tab, repurpose
+      // that tab for this run instead of creating a sibling tab — otherwise
+      // the strip would briefly show both the orphan draft and the new
+      // run-backed tab.
+      const activeTab = tabsRef.current.activeTab;
+      const draftToPromote =
+        activeTab && activeTab.kind === "chat" && isDraftChatTabId(activeTab.id)
+          ? activeTab.id
+          : null;
+      if (draftToPromote) {
+        tabsRef.current.promoteDraftChatTab(draftToPromote, run.id, run.title);
+      }
       if (runHasWorkbench(run)) {
         tabsRef.current.openRunsTab(run.id, "Runs", focusRuns);
-        if (!focusRuns) tabsRef.current.openChatTab({ focus: true });
+        if (!focusRuns) tabsRef.current.openChatTab({ runId: run.id, focus: true });
       } else {
         tabsRef.current.hideRunsTabs();
-        tabsRef.current.openChatTab({ focus: true });
+        tabsRef.current.openChatTab({ runId: run.id, focus: true });
       }
     },
     [],
@@ -324,7 +346,7 @@ export default function App() {
       const focus = options?.focus ?? "chat";
       if (runId === null) {
         tabsRef.current.hideRunsTabs();
-        if (focus === "chat") tabsRef.current.openChatTab({ focus: true });
+        if (focus === "chat") tabsRef.current.openChatTab({ runId: null, focus: true });
         return;
       }
       const target = runsRef.current.find((r) => r.id === runId) ?? null;
@@ -335,7 +357,7 @@ export default function App() {
         tabsRef.current.hideRunsTabs();
       }
       if (focus === "chat" || (!hasWorkbench && focus === "runs")) {
-        tabsRef.current.openChatTab({ focus: true });
+        tabsRef.current.openChatTab({ runId, focus: true });
       }
     },
     [],
@@ -370,6 +392,33 @@ export default function App() {
       activeRunIdRef.current = runId;
       setActiveRunId((current) => (current === runId ? current : runId));
     }
+  }, [tabs.activeTab]);
+
+  // Sync top-strip chat tabs to the run store: add tabs for new runs,
+  // remove tabs for deleted runs, refresh titles when a run is renamed.
+  // Drafts are left alone — they hold their position until the user
+  // closes them or sends their first message (which then rekeys the draft
+  // tab id to the new run id via promoteDraftChatTab).
+  useEffect(() => {
+    tabsRef.current.syncChatTabsToRuns(
+      runs.map((run) => ({ id: run.id, title: run.title })),
+    );
+  }, [runs]);
+
+  // Clicking a chat tab in the top strip selects that run. The shape mirrors
+  // the runs-tab → chat sync above, but for the chat-tab kind.
+  useEffect(() => {
+    const tab = tabs.activeTab;
+    if (!tab || tab.kind !== "chat") return;
+    // Drafts represent a not-yet-created chat: clear the active run so the
+    // composer renders in "new chat" mode (matches the old onSelectRun(null)
+    // behavior). The first message will promote the draft via the
+    // handleStartChat callback below.
+    const runId = isDraftChatTabId(tab.id) ? null : tab.id;
+    const workspaceId = activeIdRef.current;
+    if (workspaceId) activeRunIdsByWorkspaceRef.current[workspaceId] = runId;
+    activeRunIdRef.current = runId;
+    setActiveRunId((current) => (current === runId ? current : runId));
   }, [tabs.activeTab]);
 
   // Initial load
@@ -1093,7 +1142,15 @@ export default function App() {
         tabs.setActiveTab(existing.id);
         return;
       }
-      tabs.newPreviewTab(url);
+      // Inherit the worker's runId so the chat panel can render this preview
+      // inside its inner tab strip; URLs detected on a plain (non-worker)
+      // terminal stay top-level by leaving runId undefined.
+      const sourceTab = tabs.tabs.find((t) => t.id === tabId);
+      const ownerRunId =
+        sourceTab?.kind === "terminal" && sourceTab.scope?.kind === "workers"
+          ? sourceTab.scope.runId
+          : null;
+      tabs.newPreviewTab(url, { runId: ownerRunId });
     },
     [AUTO_PREVIEW_PORTS, tabs],
   );
@@ -1181,6 +1238,67 @@ export default function App() {
     tabs.newPreviewTab("");
   }, [tabs]);
 
+  // Top tab strip "+" — append a fresh draft chat tab and focus it. The
+  // composer renders in "new chat" mode; the first message will promote the
+  // draft to a real run-backed chat tab via handleRunSnapshot.
+  const handleNewChat = useCallback(() => {
+    tabs.addDraftChatTab();
+  }, [tabs]);
+
+  // Chat-tab "×" — drafts dissolve locally; run-backed chats call the
+  // orchestration delete IPC (with a confirm when worker terminals are
+  // still running so the user does not silently kill an active swarm).
+  const handleCloseChatTab = useCallback(
+    (id: TabId) => {
+      if (isDraftChatTabId(id)) {
+        // Draft never reached the run store — just drop the tab.
+        tabs.closeChatTabForRun(id);
+        return;
+      }
+      const hasRunningWorkers = tabs.tabs.some(
+        (t) =>
+          t.kind === "terminal" &&
+          t.scope?.kind === "workers" &&
+          t.scope.runId === id &&
+          t.root &&
+          (function hasLiveWorker(node: PaneNode): boolean {
+            if (node.kind === "leaf") {
+              return Boolean(node.worker && node.worker.state === "running");
+            }
+            return hasLiveWorker(node.a) || hasLiveWorker(node.b);
+          })(t.root),
+      );
+      if (hasRunningWorkers) {
+        const ok = window.confirm(
+          "This chat still has running workers. Closing it will delete the run and kill the workers. Continue?",
+        );
+        if (!ok) return;
+      }
+      void window.spark.orchestration.deleteRun(id).catch(() => {
+        /* best-effort delete — failures surface via the run snapshot stream */
+      });
+      tabs.closeChatTabForRun(id);
+    },
+    [tabs],
+  );
+
+  // Chat-tab "✎" — rename via IPC; update the tab title locally as well so
+  // the strip reflects the change before the run snapshot round-trips.
+  const handleRenameChatTab = useCallback(
+    (id: TabId, title: string) => {
+      const trimmed = title.trim();
+      if (!trimmed) return;
+      tabs.renameChatTab(id, trimmed);
+      if (isDraftChatTabId(id)) return; // drafts have no backing run yet
+      void window.spark.orchestration
+        .renameRun({ runId: id, title: trimmed })
+        .catch(() => {
+          /* IPC failure — the local title may diverge until the next snapshot */
+        });
+    },
+    [tabs],
+  );
+
   const openInSparkBrowser = useCallback(
     (url: string) => {
       if (!isBrowserUrl(url)) return;
@@ -1212,7 +1330,12 @@ export default function App() {
   // the new tab id; the bridge then waits for PreviewStack to mount its
   // BrowserPaneHandle and drives the navigation.
   useEffect(() => {
-    setOpenPreviewTabFn((url: string) => tabs.newPreviewTab(url));
+    // MCP-driven preview spawns happen during orchestration, so the new tab
+    // inherits whichever run is currently active. Reading the ref at call
+    // time avoids rebinding the registry hook on every activeRunId change.
+    setOpenPreviewTabFn((url: string) =>
+      tabs.newPreviewTab(url, { runId: activeRunIdRef.current }),
+    );
     return () => setOpenPreviewTabFn(null);
   }, [tabs]);
 
@@ -1252,7 +1375,9 @@ export default function App() {
       },
       "session.openInspector": () => setInspectorOpen((open) => !open),
       "composer.focus": () => {
-        tabs.openChatTab({ focus: true });
+        // Composer shortcut focuses the active chat if any, otherwise opens
+        // (or creates) a draft so the user has somewhere to type.
+        tabs.openChatTab({ runId: activeRunIdRef.current, focus: true });
         window.requestAnimationFrame(() => {
           window.dispatchEvent(new CustomEvent("spark:focus-composer"));
         });
@@ -1791,6 +1916,9 @@ export default function App() {
               onNewTerminalTab={handleNewTerminalTab}
               onNewEditorTab={handleNewEditorTab}
               onNewPreviewTab={handleNewPreviewTab}
+              onNewChat={handleNewChat}
+              onRenameChat={handleRenameChatTab}
+              onCloseChat={handleCloseChatTab}
               onTerminalPaneDrop={handleTerminalPaneDropToTab}
               onReorderTab={tabs.reorderTab}
               onPinEditorTab={tabs.pinEditorTab}
@@ -1916,6 +2044,23 @@ function isTabVisibleForRun(tab: Tab, activeRunId: string | null): boolean {
   );
 }
 
+// True when a tab represents content owned by an orchestration run (worker
+// terminal, Runs canvas, orchestration-spawned preview). These render inside
+// the chat panel's inner tab strip instead of the top tab bar.
+function isRunOwnedTab(tab: Tab): boolean {
+  if (tab.kind === "terminal" && tab.scope?.kind === "workers") return true;
+  if (tab.kind === "runs") return true;
+  if (tab.kind === "preview" && tab.runId) return true;
+  return false;
+}
+
+// Filter for what the top tab strip displays. Top strip = chat + workspace
+// tabs (editors, plain user terminals, user-opened previews). Anything
+// run-owned moves inside the chat panel.
+function isTopStripTab(tab: Tab): boolean {
+  return !isRunOwnedTab(tab);
+}
+
 interface WorkspaceProps {
   tabs: ReturnType<typeof useTabs>;
   workspace: Workspace | null;
@@ -1942,6 +2087,9 @@ interface WorkspaceProps {
   onNewTerminalTab: () => void;
   onNewEditorTab: () => void;
   onNewPreviewTab: () => void;
+  onNewChat: () => void;
+  onRenameChat: (id: TabId, title: string) => void;
+  onCloseChat: (id: TabId) => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: string) => void;
   onReorderTab: (fromId: string, toId: string, position: "before" | "after") => void;
   onPinEditorTab: (id: TabId) => void;
@@ -1970,6 +2118,9 @@ const Workspace = React.memo(function Workspace({
   onNewTerminalTab,
   onNewEditorTab,
   onNewPreviewTab,
+  onNewChat,
+  onRenameChat,
+  onCloseChat,
   onTerminalPaneDrop,
   onReorderTab,
   onPinEditorTab,
@@ -2004,6 +2155,132 @@ const Workspace = React.memo(function Workspace({
     if (!effectiveActiveId || tabs.activeId === effectiveActiveId) return;
     setActiveTab(effectiveActiveId);
   }, [effectiveActiveId, tabs.activeId, setActiveTab]);
+
+  // Tabs the top strip renders: chat + workspace-level tabs only. Run-owned
+  // tabs (workers, Runs, run-tagged previews) are surfaced inside the chat
+  // panel's inner tab strip instead.
+  const topStripTabs = useMemo(
+    () => visibleTabs.filter(isTopStripTab),
+    [visibleTabs],
+  );
+
+  // Lifted from ChatPanel so the hoisted inner tab strip can drive the chat /
+  // backend-PTY view toggle without ChatPanel keeping a separate state.
+  // Resets when the active run changes (a fresh chat starts in "chat" view).
+  const [chatView, setChatView] = useState<"chat" | "terminal">("chat");
+  useEffect(() => {
+    setChatView("chat");
+  }, [activeRunId]);
+
+  // Tabs owned by the active run, grouped by kind. These power the inner tab
+  // strip: workers section, Runs section, preview entries.
+  const runOwnedTabs = useMemo(() => {
+    if (!activeRunId) {
+      return { workers: [] as TerminalTab[], runs: null as RunsTab | null, previews: [] as PreviewTab[] };
+    }
+    const workers: TerminalTab[] = [];
+    let runsTab: RunsTab | null = null;
+    const previews: PreviewTab[] = [];
+    for (const tab of tabs.tabs) {
+      if (tab.kind === "terminal" && tab.scope?.kind === "workers" && tab.scope.runId === activeRunId) {
+        workers.push(tab);
+      } else if (tab.kind === "runs" && tab.runId === activeRunId) {
+        runsTab = tab;
+      } else if (tab.kind === "preview" && tab.runId === activeRunId) {
+        previews.push(tab);
+      }
+    }
+    return { workers, runs: runsTab, previews };
+  }, [tabs.tabs, activeRunId]);
+
+  // Is there anything to show in the inner tab strip? The Chat / Terminal
+  // toggle appears once the chat has at least one message (its backend PTY
+  // session id is known). Workers / Runs / preview pills appear when the
+  // active run has spawned that artifact. When none of these is true the
+  // inner strip stays hidden.
+  //
+  // activeChatTabId is the chat tab whose run owns the current view —
+  // either the chat tab whose id matches activeRunId, or (if no run is
+  // selected and the user is on a draft) the active draft chat tab. The
+  // inner strip uses this to route "Chat" / "Terminal" pill clicks back to
+  // the right chat tab regardless of which run-owned sub-tab is active.
+  const activeChatTabId = useMemo(() => {
+    if (activeRunId) {
+      const matching = topStripTabs.find(
+        (tab) => tab.kind === "chat" && tab.id === activeRunId,
+      );
+      if (matching) return matching.id;
+    }
+    const activeTab = tabs.activeTab;
+    if (activeTab?.kind === "chat") return activeTab.id;
+    return null;
+  }, [activeRunId, topStripTabs, tabs.activeTab]);
+  const activeRunForStrip = useMemo(
+    () => (activeRunId ? runs.find((run) => run.id === activeRunId) ?? null : null),
+    [runs, activeRunId],
+  );
+  const backendSessionId = activeRunForStrip
+    ? backendPtySessionId(activeRunForStrip.id, activeRunForStrip.chatBackend)
+    : null;
+  // backendPtySessionId is a deterministic string derived from the run id
+  // and backend, so it goes truthy the moment a Claude/Codex run exists —
+  // *before* the backend has actually spawned the CLI PTY. If we showed the
+  // Terminal pill on that signal alone, clicking it would mount xterm on a
+  // ghost session and the user sees a black canvas. Poll the real existence
+  // bit so the pill (and downstream TerminalPane mount) only fire when
+  // there's a PTY to attach to.
+  const [backendPtyExists, setBackendPtyExists] = useState(false);
+  useEffect(() => {
+    if (!backendSessionId) {
+      setBackendPtyExists(false);
+      return;
+    }
+    let disposed = false;
+    const check = async () => {
+      try {
+        const exists = await window.spark.pty.exists(backendSessionId);
+        if (!disposed) setBackendPtyExists(exists);
+      } catch {
+        if (!disposed) setBackendPtyExists(false);
+      }
+    };
+    void check();
+    const interval = window.setInterval(check, 1000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [backendSessionId]);
+  const innerStripVisible =
+    Boolean(activeRunId) &&
+    (backendPtyExists ||
+      runOwnedTabs.workers.length > 0 ||
+      runOwnedTabs.runs !== null ||
+      runOwnedTabs.previews.length > 0);
+  const handleInnerChatClick = useCallback(() => {
+    if (activeChatTabId) setActiveTab(activeChatTabId);
+    setChatView("chat");
+  }, [activeChatTabId, setActiveTab]);
+  const handleInnerTerminalClick = useCallback(() => {
+    if (activeChatTabId) setActiveTab(activeChatTabId);
+    setChatView("terminal");
+  }, [activeChatTabId, setActiveTab]);
+  const handleInnerSelectTab = useCallback(
+    (id: TabId) => setActiveTab(id),
+    [setActiveTab],
+  );
+  // When the underlying active tab is run-owned, the top strip should still
+  // highlight the chat that owns it so the user keeps a "you're inside this
+  // chat" anchor while viewing a worker / Runs / preview.
+  const topStripActiveId = useMemo(() => {
+    if (!effectiveActiveId) return null;
+    const active = visibleTabs.find((tab) => tab.id === effectiveActiveId);
+    if (active && isRunOwnedTab(active)) {
+      const chatTab = topStripTabs.find((tab) => tab.kind === "chat");
+      return chatTab?.id ?? null;
+    }
+    return effectiveActiveId;
+  }, [effectiveActiveId, visibleTabs, topStripTabs]);
 
   const handleTabSelect = useCallback(
     (id: TabId) => setActiveTab(id),
@@ -2071,17 +2348,34 @@ const Workspace = React.memo(function Workspace({
       }}
     >
       <TabBar
-        tabs={visibleTabs}
-        activeId={effectiveActiveId}
+        tabs={topStripTabs}
+        activeId={topStripActiveId}
         onSelect={handleTabSelect}
         onClose={handleTabClose}
         onNewTerminal={onNewTerminalTab}
         onNewEditor={onNewEditorTab}
         onNewPreview={onNewPreviewTab}
+        onNewChat={onNewChat}
+        onRenameChat={onRenameChat}
+        onCloseChat={onCloseChat}
         onTerminalPaneDrop={onTerminalPaneDrop}
         onReorderTab={onReorderTab}
         onPinEditorTab={onPinEditorTab}
       />
+      {innerStripVisible && (
+        <InnerTabStrip
+          activeId={effectiveActiveId}
+          activeChatTabId={activeChatTabId}
+          chatView={chatView}
+          backendPtyExists={backendPtyExists}
+          workers={runOwnedTabs.workers}
+          runsTab={runOwnedTabs.runs}
+          previews={runOwnedTabs.previews}
+          onChatClick={handleInnerChatClick}
+          onTerminalClick={handleInnerTerminalClick}
+          onSelectTab={handleInnerSelectTab}
+        />
+      )}
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
         <ChatStack
           tabs={visibleTabs}
@@ -2089,6 +2383,8 @@ const Workspace = React.memo(function Workspace({
           workspace={workspace}
           runs={runs}
           activeRunId={activeRunId}
+          chatView={chatView}
+          onChatViewChange={setChatView}
           onSelectRun={onSelectRun}
           onRunSnapshot={onRunSnapshot}
         />

@@ -1262,6 +1262,11 @@ export interface MarkRunSeenInput {
   runId: string;
 }
 
+export interface RenameRunInput {
+  runId: string;
+  title: string;
+}
+
 export interface CreateStepInput {
   runId: string;
   title: string;

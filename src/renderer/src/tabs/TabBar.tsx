@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from "react";
-import type { Tab, TabId } from "./types";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { ChatTab, Tab, TabId } from "./types";
 import { CloseIcon, FileIcon, PlusIcon, SparkIcon } from "../components/icons";
 import {
   TAB_REORDER_DRAG_MIME,
@@ -39,6 +39,15 @@ interface Props {
   onNewTerminal: () => void;
   onNewPreview: () => void;
   onNewEditor: () => void;
+  // Top-level "+" button now spawns a new chat tab. Spawning a terminal /
+  // editor / preview moved to keybinds (⌘T / ⌘E / ⌘P) — workspace tab kinds
+  // are still appended through the existing onNew* callbacks for those
+  // shortcuts. The strip never opens a kind picker anymore.
+  onNewChat: () => void;
+  // Chat-tab-specific affordances: hover-revealed rename and close. Generic
+  // tabs continue to use the existing onClose path.
+  onRenameChat: (id: TabId, title: string) => void;
+  onCloseChat: (id: TabId) => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: TabId) => void;
   onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
   onPinEditorTab: (id: TabId) => void;
@@ -56,18 +65,44 @@ function TabBar({
   onNewTerminal,
   onNewPreview,
   onNewEditor,
+  onNewChat,
+  onRenameChat,
+  onCloseChat,
   onTerminalPaneDrop,
   onReorderTab,
   onPinEditorTab,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement | null>(null);
   const [terminalDropActive, setTerminalDropActive] = useState(false);
+
+  // Close the new-tab picker on outside click / Escape.
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (
+        pickerRef.current &&
+        e.target instanceof Node &&
+        !pickerRef.current.contains(e.target)
+      ) {
+        setPickerOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPickerOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [pickerOpen]);
   // Tab id that a pointer-based pane drag is currently hovering over — drives
   // hover-activate (open the tab so the user can see where they're aiming)
   // and the drop-target outline on that TabItem.
   const [paneHoverTabId, setPaneHoverTabId] = useState<TabId | null>(null);
-  const pickerRef = useRef<HTMLDivElement | null>(null);
 
   const acceptsTerminalPane = (event: React.DragEvent): boolean =>
     Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
@@ -197,29 +232,6 @@ function TabBar({
     active?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [activeId, tabs.length]);
 
-  // Close the new-tab picker on outside click / Escape.
-  useEffect(() => {
-    if (!pickerOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (
-        pickerRef.current &&
-        e.target instanceof Node &&
-        !pickerRef.current.contains(e.target)
-      ) {
-        setPickerOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPickerOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [pickerOpen]);
-
   return (
     <div
       onDragEnter={(event) => {
@@ -254,37 +266,64 @@ function TabBar({
       }
     >
       <div ref={scrollRef} className="spark-tabbar-scroll">
-        {tabs.map((t) => (
-          // onSelect/onClose are passed straight through (no per-tab inline
-          // closure) so each TabItem's props stay referentially stable and
-          // React.memo can skip the siblings of the one tab that changed.
-          // TabItem calls onSelect(tab.id) itself.
-          <TabItem
-            key={t.id}
-            tab={t}
-            active={t.id === activeId}
-            canClose={tabs.length > 1 && t.kind !== "chat"}
-            paneDragHover={t.id === paneHoverTabId}
-            onSelect={onSelect}
-            onClose={onClose}
-            onTerminalPaneDrop={onTerminalPaneDrop}
-            onReorderTab={onReorderTab}
-            onPinEditorTab={onPinEditorTab}
-          />
-        ))}
+        {tabs.map((t) =>
+          t.kind === "chat" ? (
+            <ChatTabItem
+              key={t.id}
+              tab={t}
+              active={t.id === activeId}
+              onSelect={onSelect}
+              onRename={onRenameChat}
+              onClose={onCloseChat}
+              onReorderTab={onReorderTab}
+            />
+          ) : (
+            // onSelect/onClose are passed straight through (no per-tab inline
+            // closure) so each TabItem's props stay referentially stable and
+            // React.memo can skip the siblings of the one tab that changed.
+            // TabItem calls onSelect(tab.id) itself.
+            <TabItem
+              key={t.id}
+              tab={t}
+              active={t.id === activeId}
+              canClose={tabs.length > 1}
+              paneDragHover={t.id === paneHoverTabId}
+              onSelect={onSelect}
+              onClose={onClose}
+              onTerminalPaneDrop={onTerminalPaneDrop}
+              onReorderTab={onReorderTab}
+              onPinEditorTab={onPinEditorTab}
+            />
+          ),
+        )}
       </div>
       <div ref={pickerRef} style={{ position: "relative" }}>
         <button
           type="button"
           className="spark-tabbar-new"
-          onClick={() => setPickerOpen((o) => !o)}
+          onClick={() => setPickerOpen((open) => !open)}
           title="New tab"
           aria-label="New tab"
+          aria-haspopup="menu"
+          aria-expanded={pickerOpen}
         >
           <PlusIcon size={12} />
         </button>
         {pickerOpen && (
           <div className="spark-tabbar-picker">
+            <PickerItem
+              label="New chat"
+              hint="⌘N"
+              primary
+              onClick={() => {
+                setPickerOpen(false);
+                onNewChat();
+              }}
+            />
+            <div
+              aria-hidden
+              style={{ height: 1, background: "var(--rule)", margin: "4px 2px" }}
+            />
             <PickerItem
               label="Terminal"
               hint="⌘T"
@@ -550,6 +589,240 @@ const TabItem = React.memo(function TabItem({
   );
 });
 
+// ChatTabItem: the top tab strip's chat-kind entry. Hover reveals a pencil
+// (inline rename) and an × (close chat). Idle state shows just the title and
+// kind dot so a strip of many chats reads as a clean list. Close is always
+// available — the workspace re-seeds a fresh draft chat tab if the last one
+// closes (see closeChatTabForRun).
+interface ChatTabItemProps {
+  tab: ChatTab;
+  active: boolean;
+  onSelect: (id: TabId) => void;
+  onRename: (id: TabId, title: string) => void;
+  onClose: (id: TabId) => void;
+  onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
+}
+
+const ChatTabItem = React.memo(function ChatTabItem({
+  tab,
+  active,
+  onSelect,
+  onRename,
+  onClose,
+  onReorderTab,
+}: ChatTabItemProps) {
+  const [hover, setHover] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(tab.title);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [reorderEdge, setReorderEdge] = useState<"before" | "after" | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  // Mirror title updates from the run snapshot into the draft state when the
+  // user is NOT in the middle of editing.
+  useEffect(() => {
+    if (!editing) setDraft(tab.title);
+  }, [tab.title, editing]);
+
+  // Focus + select the title text the moment the input mounts so the user
+  // can immediately type a replacement.
+  useLayoutEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  const commit = () => {
+    const next = draft.trim();
+    setEditing(false);
+    if (!next || next === tab.title) {
+      setDraft(tab.title);
+      return;
+    }
+    onRename(tab.id, next);
+  };
+  const cancel = () => {
+    setDraft(tab.title);
+    setEditing(false);
+  };
+
+  const acceptsReorderDrop = (event: React.DragEvent): boolean =>
+    Array.from(event.dataTransfer.types).includes(TAB_REORDER_DRAG_MIME);
+  const reorderPositionFor = (event: React.DragEvent): "before" | "after" => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return event.clientX < rect.left + rect.width / 2 ? "before" : "after";
+  };
+
+  const className = [
+    "spark-tab",
+    active && "spark-tab--active",
+    dragging && "spark-tab--dragging",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <div
+      role="tab"
+      aria-selected={active}
+      data-tab-id={tab.id}
+      className={className}
+      draggable={!editing}
+      onDragStart={(event) => {
+        event.dataTransfer.setData(
+          TAB_REORDER_DRAG_MIME,
+          JSON.stringify({ tabId: tab.id }),
+        );
+        event.dataTransfer.effectAllowed = "move";
+        setDragging(true);
+      }}
+      onDragEnd={() => {
+        setDragging(false);
+        setReorderEdge(null);
+      }}
+      onDragEnter={(event) => {
+        if (!acceptsReorderDrop(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setReorderEdge(reorderPositionFor(event));
+      }}
+      onDragOver={(event) => {
+        if (!acceptsReorderDrop(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = "move";
+        const next = reorderPositionFor(event);
+        setReorderEdge((curr) => (curr === next ? curr : next));
+      }}
+      onDragLeave={(event) => {
+        if (
+          event.relatedTarget instanceof Node &&
+          event.currentTarget.contains(event.relatedTarget)
+        ) {
+          return;
+        }
+        setReorderEdge(null);
+      }}
+      onDrop={(event) => {
+        const reorder = parseTabReorderDrag(event.dataTransfer);
+        if (!reorder) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const position = reorderPositionFor(event);
+        setReorderEdge(null);
+        if (reorder.tabId !== tab.id) onReorderTab(reorder.tabId, tab.id, position);
+      }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!editing) onSelect(tab.id);
+      }}
+      onAuxClick={(e) => {
+        if (e.button === 1) {
+          e.preventDefault();
+          e.stopPropagation();
+          onClose(tab.id);
+        }
+      }}
+      title={tab.title}
+    >
+      {reorderEdge && (
+        <span
+          aria-hidden
+          className={`spark-tab__reorder-edge spark-tab__reorder-edge--${reorderEdge}`}
+        />
+      )}
+      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
+        <SparkIcon size={13} />
+      </span>
+      {editing ? (
+        <input
+          ref={inputRef}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              cancel();
+            }
+          }}
+          // Stop the parent tab's onClick from intercepting a click inside
+          // the input (which would otherwise re-trigger select).
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            flex: 1,
+            minWidth: 60,
+            maxWidth: 180,
+            background: "var(--panel-2)",
+            color: "var(--ink)",
+            border: "1px solid var(--rule-strong)",
+            borderRadius: 3,
+            padding: "1px 4px",
+            font: "inherit",
+            outline: "none",
+          }}
+        />
+      ) : (
+        <span className="spark-tab__label">{tab.title}</span>
+      )}
+      {!editing && hover && (
+        <>
+          <button
+            type="button"
+            className="spark-tab__close"
+            title="Rename chat"
+            aria-label="Rename chat"
+            onClick={(e) => {
+              e.stopPropagation();
+              setEditing(true);
+            }}
+          >
+            <PencilGlyph />
+          </button>
+          <button
+            type="button"
+            className="spark-tab__close"
+            title="Close chat"
+            aria-label="Close chat"
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose(tab.id);
+            }}
+          >
+            <CloseIcon size={10} />
+          </button>
+        </>
+      )}
+    </div>
+  );
+});
+
+function PencilGlyph() {
+  return (
+    <svg
+      aria-hidden
+      width="10"
+      height="10"
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M2 12l1-3 7-7 2 2-7 7-3 1z" />
+      <path d="M9 3l2 2" />
+    </svg>
+  );
+}
+
 function KindIcon({ tab }: { tab: Tab }) {
   if (tab.kind === "chat") {
     return (
@@ -614,10 +887,12 @@ function cssEscape(value: string): string {
 function PickerItem({
   label,
   hint,
+  primary = false,
   onClick,
 }: {
   label: string;
   hint?: string;
+  primary?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -631,9 +906,10 @@ function PickerItem({
         background: "transparent",
         border: "none",
         padding: "8px 12px",
-        color: "var(--ink)",
+        color: primary ? "var(--accent)" : "var(--ink)",
         fontFamily: "var(--font-sans)",
         fontSize: 12,
+        fontWeight: primary ? 600 : 500,
         cursor: "default",
         display: "flex",
         alignItems: "center",

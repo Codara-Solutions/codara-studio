@@ -12,6 +12,7 @@ import type {
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
   PauseRunInput,
+  RenameRunInput,
   UpdateChatBackendInput,
   CancelRunInput,
   ContextPacket,
@@ -4255,6 +4256,26 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
       // combination — new system prompt + resumed transcript + inline
       // role-shift announcement — lets the user toggle mid-chat without
       // losing the chat thread. See spark-chat-mode-anchor memory.
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Rename a chat. The renderer drives this from the top tab strip's hover-
+// revealed pencil affordance; the title is shown on the tab and in any
+// stored manifest that derives from `run.title`. Empty / whitespace-only
+// titles are rejected so a chat never ends up with a blank tab label.
+export async function renameRun(input: RenameRunInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const title = input.title.trim();
+  if (!title) throw new Error("Chat title cannot be empty.");
+  if (title === run.title) return run;
+  return commitRunChange(run, {
+    type: "run.renamed",
+    message: `Run renamed to ${title}`,
+    payload: { previousTitle: run.title, title },
+    mutate: (draft, timestamp) => {
+      draft.title = title;
       draft.updatedAt = timestamp;
     },
   });

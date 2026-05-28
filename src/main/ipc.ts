@@ -75,6 +75,7 @@ import type {
   PrefKey,
   PreferencesChange,
   PrepareWorkerTaskInput,
+  RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
   PlanFile,
@@ -582,6 +583,11 @@ export function registerIpc(): void {
   ipcMain.handle("orchestration:markRunSeen", async (_e, input: MarkRunSeenInput): Promise<RunState> => {
     const { markRunSeen } = await getRunStore();
     return markRunSeen(input);
+  });
+
+  ipcMain.handle("orchestration:renameRun", async (_e, input: RenameRunInput): Promise<RunState> => {
+    const { renameRun } = await getRunStore();
+    return renameRun(input);
   });
 
   ipcMain.handle(

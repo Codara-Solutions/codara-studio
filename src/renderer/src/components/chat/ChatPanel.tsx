@@ -1,8 +1,8 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { AddRunMessageAttachmentInput, RunState, ShellInfo, Workspace } from "@shared/types";
 import { backendPtySessionId } from "@shared/backend-pty";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
-import { GridIcon, PlusIcon } from "../icons";
+import { GridIcon } from "../icons";
 import ChatConversation from "./ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
 import SwarmView from "./SwarmView";
@@ -39,8 +39,12 @@ interface Props {
   onToggleCollapse: () => void;
   collapsible?: boolean;
   headerDrag?: SectionHeaderDragProps;
-  onSelectRun: (id: string | null) => void;
-  onDeleteRun: (id: string) => void;
+  // Chat / backend-PTY view mode. Optional during the transition — when not
+  // provided, ChatPanel keeps a local state fallback and renders its own
+  // inline Chat | Terminal strip (legacy path). When the hoisted inner tab
+  // strip drives the mode, the legacy strip stays hidden.
+  chatView?: ChatView;
+  onChatViewChange?: (view: ChatView) => void;
   onStartChat: (
     message: string,
     clientMessageId: string,
@@ -59,8 +63,8 @@ export default function ChatPanel({
   onToggleCollapse,
   collapsible = true,
   headerDrag,
-  onSelectRun,
-  onDeleteRun,
+  chatView: chatViewProp,
+  onChatViewChange,
   onStartChat,
   onForcePauseRun,
 }: Props) {
@@ -73,16 +77,28 @@ export default function ChatPanel({
   const [swarmActive, setSwarmActive] = useState(false);
   // Per-chat view toggle. "chat" → ChatConversation (default). "terminal" →
   // raw xterm pane attached to the headless CC/Codex PTY this chat is
-  // driving. Lets you see exactly what the underlying CLI is rendering /
-  // submitting / printing, useful for debugging hook fires, slash-command
-  // responses, and weird interactive states.
-  const [chatView, setChatView] = useState<ChatView>("chat");
+  // driving. The hoisted inner tab strip is the source of truth when it
+  // provides chatViewProp + onChatViewChange. Local state is the fallback
+  // for callers that have not lifted the toggle (kept so the component
+  // stays usable in isolation, e.g. tests).
+  const [localChatView, setLocalChatView] = useState<ChatView>("chat");
+  const chatView = chatViewProp ?? localChatView;
+  const setChatView = useCallback(
+    (next: ChatView) => {
+      if (onChatViewChange) onChatViewChange(next);
+      else setLocalChatView(next);
+    },
+    [onChatViewChange],
+  );
+  const usingHoistedChatView = chatViewProp !== undefined;
   // A new chat starts in the normal conversation view. Swarm/terminal state
   // should not leak between runs because their PTYs/workers are run-scoped.
+  // When the parent owns chatView, the parent is also responsible for the
+  // reset — re-applying it here would race with the parent.
   useEffect(() => {
     setSwarmActive(false);
-    setChatView("chat");
-  }, [activeRun?.id]);
+    if (!usingHoistedChatView) setLocalChatView("chat");
+  }, [activeRun?.id, usingHoistedChatView]);
 
   // Drop swarm mode when the section is collapsed: the user can't see the
   // toggle, so the only way back out would be expand + toggle.
@@ -153,26 +169,17 @@ export default function ChatPanel({
         {...headerDrag}
         meta={activeRun ? <HeaderMeta run={activeRun} /> : null}
         actions={
-          <>
-            {activeRun && (
-              <SwarmToggleButton
-                active={swarmActive}
-                onClick={() => setSwarmActive((value) => !value)}
-              />
-            )}
-            <NewChatButton onClick={() => onSelectRun(null)} />
-          </>
+          activeRun ? (
+            <SwarmToggleButton
+              active={swarmActive}
+              onClick={() => setSwarmActive((value) => !value)}
+            />
+          ) : null
         }
       />
       {!collapsed && (
         <>
-          <SwitcherBar
-            runs={runs}
-            activeRun={activeRun}
-            onSelectRun={onSelectRun}
-            onDeleteRun={onDeleteRun}
-          />
-          {activeRun && !swarmActive && backendSessionId && (
+          {activeRun && !swarmActive && backendSessionId && !usingHoistedChatView && (
             <ChatViewTabStrip view={chatView} onChange={setChatView} />
           )}
           {error && <ErrorBar message={error} />}
@@ -189,31 +196,62 @@ export default function ChatPanel({
               cwd={workspace?.cwd ?? null}
             />
           ) : activeRun ? (
-            chatView === "chat" ? (
-              <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+            // Both views stack absolutely so each ALWAYS has real
+            // dimensions, even when "hidden". xterm's fit-addon measures
+            // its container at mount and on every ResizeObserver fire — if
+            // the container were display:none (or render-conditional, like
+            // the post-2d63dca origin/main version) the measurements would
+            // be 0 and CC's Ink REPL would render into a tiny dead frame
+            // in the top-left, then need a re-fit + pty.resize round-trip
+            // on tab switch. On Windows ConPTY absorbs this; on macOS/Linux
+            // POSIX PTYs leave the chat Terminal sub-tab mostly black
+            // until orchestration produces enough output to redraw the
+            // alt-screen frame. Stacking with visibility keeps both at
+            // full size at all times — this matches Spark's original (pre-
+            // 2d63dca) layout that worked cross-platform.
+            <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "flex",
+                  flexDirection: "column",
+                  visibility: chatView === "chat" ? "visible" : "hidden",
+                  pointerEvents: chatView === "chat" ? "auto" : "none",
+                }}
+              >
                 <ChatConversation
                   key={`conversation:${activeRun.id}`}
                   run={activeRun}
                 />
               </div>
-            ) : backendSessionId ? (
-              <div
-                style={{
-                  flex: 1,
-                  minHeight: 0,
-                  display: "flex",
-                  flexDirection: "column",
-                  background: "var(--bg-deep, #0b0b0c)",
-                }}
-              >
-                <div style={{ flex: 1, minHeight: 0, padding: 4 }}>
+              {backendSessionId && (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "flex",
+                    flexDirection: "column",
+                    padding: 4,
+                    background: "var(--bg-deep, #0b0b0c)",
+                    visibility: chatView === "terminal" ? "visible" : "hidden",
+                    pointerEvents: chatView === "terminal" ? "auto" : "none",
+                  }}
+                >
                   {backendPtyExists ? (
                     <TerminalPane
+                      // Keyed on sessionId so a backend switch (which changes
+                      // the id) remounts the pane cleanly against the new
+                      // PTY and discards xterm state from the old backend.
                       key={`backend-term:${backendSessionId}`}
                       sessionId={backendSessionId}
                       shell={BACKEND_TERMINAL_SHELL}
-                      visible={true}
+                      visible={chatView === "terminal"}
                       initialCwd={workspace?.cwd}
+                      // inputBlocked (not readOnly): no keystrokes forwarded
+                      // so the user can't collide with our bracketed paste +
+                      // submit Enter, but pty.resize IS allowed so CC's Ink
+                      // REPL paints into the actual visible cols/rows.
                       inputBlocked
                     />
                   ) : (
@@ -222,19 +260,12 @@ export default function ChatPanel({
                     />
                   )}
                 </div>
-              </div>
-            ) : (
-              <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
-                <ChatConversation
-                  key={`conversation:${activeRun.id}`}
-                  run={activeRun}
-                />
-              </div>
-            )
+              )}
+            </div>
           ) : (
             <WelcomeState />
           )}
-          {!swarmActive && (
+          {!swarmActive && chatView !== "terminal" && (
             <ChatComposer
               key={`composer:${activeRun?.id ?? "new-chat"}`}
               run={activeRun}
@@ -389,557 +420,7 @@ function formatCostUsd(value: number, opts: { stripDollar?: boolean } = {}): str
   return formatted.startsWith("<") ? `<$0.0001` : `$${formatted}`;
 }
 
-function SwitcherBar({
-  runs,
-  activeRun,
-  onSelectRun,
-  onDeleteRun,
-}: {
-  runs: RunState[];
-  activeRun: RunState | null;
-  onSelectRun: (id: string | null) => void;
-  onDeleteRun: (id: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
-  const barRef = useRef<HTMLDivElement>(null);
-  const activeRunId = activeRun?.id ?? null;
-  const runsKey = runs.map((run) => run.id).join("\0");
 
-  useEffect(() => {
-    setOpen(false);
-    setConfirmingDeleteId(null);
-  }, [activeRunId, runsKey]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (event: MouseEvent) => {
-      if (
-        barRef.current &&
-        event.target instanceof Node &&
-        !barRef.current.contains(event.target)
-      ) {
-        setOpen(false);
-      }
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  const activeTone = activeRun ? describeRunStatus(activeRun).tone : null;
-  const triggerColor = activeTone ? statusToneColor(activeTone) : "var(--muted)";
-  // Only true `live` tones pulse — blocked/done-unseen are urgent in their
-  // own way but should read as steady-state, not motion. Derive from the
-  // tone (not `activeRun.status`) so any future status-to-tone changes flow
-  // through automatically.
-  const pulseTrigger = activeTone === "live";
-  const doneUnseen = activeTone === "done-unseen";
-
-  const pick = (id: string | null) => {
-    setOpen(false);
-    setConfirmingDeleteId(null);
-    onSelectRun(id);
-  };
-  const requestDeleteChat = (id: string) => {
-    setConfirmingDeleteId(id);
-  };
-  const cancelDeleteChat = () => {
-    setConfirmingDeleteId(null);
-  };
-  const deleteChat = (id: string) => {
-    setOpen(false);
-    setConfirmingDeleteId(null);
-    onDeleteRun(id);
-  };
-
-  return (
-    <div
-      ref={barRef}
-      style={{
-        position: "relative",
-        flex: "0 0 auto",
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "7px 10px",
-        borderBottom: "1px solid var(--rule-soft)",
-        background: "var(--panel)",
-      }}
-    >
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        style={{
-          appearance: "none",
-          flex: 1,
-          minWidth: 0,
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          height: 28,
-          padding: "0 8px",
-          border: "none",
-          borderRadius: 7,
-          background: open ? "var(--hover-strong)" : "transparent",
-          cursor: "default",
-          transition: "background var(--motion-fast) var(--ease-out)",
-        }}
-        onMouseEnter={(e) => {
-          if (!open) e.currentTarget.style.background = "var(--hover)";
-        }}
-        onMouseLeave={(e) => {
-          if (!open) e.currentTarget.style.background = "transparent";
-        }}
-      >
-        <span
-          aria-hidden
-          style={{
-            width: 7,
-            height: 7,
-            borderRadius: 999,
-            background: triggerColor,
-            flex: "0 0 7px",
-            animation: pulseTrigger ? "spark-pulse 1.3s ease-in-out infinite" : undefined,
-          }}
-        />
-        <span
-          style={{
-            flex: 1,
-            minWidth: 0,
-            textAlign: "left",
-            fontSize: 12.5,
-            fontWeight: 600,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            color: activeRun ? "var(--ink)" : "var(--ink-dim)",
-          }}
-        >
-          {activeRun ? `Chat - ${activeRun.title}` : "New chat"}
-        </span>
-        {doneUnseen && <DoneUnseenPill />}
-        <span aria-hidden style={{ flex: "0 0 auto", color: "var(--muted)", fontSize: 9 }}>
-          ▾
-        </span>
-      </button>
-      {activeRun && <RunIdCopyChip runId={activeRun.id} />}
-      {open && (
-        <ChatList
-          runs={runs}
-          activeRunId={activeRunId}
-          confirmingDeleteId={confirmingDeleteId}
-          onPick={pick}
-          onRequestDelete={requestDeleteChat}
-          onCancelDelete={cancelDeleteChat}
-          onConfirmDelete={deleteChat}
-        />
-      )}
-    </div>
-  );
-}
-
-const DROPDOWN_STYLE: React.CSSProperties = {
-  position: "absolute",
-  top: "calc(100% + 4px)",
-  zIndex: 30,
-  border: "1px solid var(--rule-strong)",
-  borderRadius: 8,
-  background: "var(--panel-2)",
-  boxShadow: "var(--shadow-2)",
-  padding: 5,
-};
-
-function ChatList({
-  runs,
-  activeRunId,
-  confirmingDeleteId,
-  onPick,
-  onRequestDelete,
-  onCancelDelete,
-  onConfirmDelete,
-}: {
-  runs: RunState[];
-  activeRunId: string | null;
-  confirmingDeleteId: string | null;
-  onPick: (id: string | null) => void;
-  onRequestDelete: (id: string) => void;
-  onCancelDelete: () => void;
-  onConfirmDelete: (id: string) => void;
-}) {
-  return (
-    <div style={{ ...DROPDOWN_STYLE, left: 10, right: 10 }}>
-      <MenuRow onClick={() => onPick(null)}>
-        <span style={{ display: "inline-flex", color: "var(--accent)" }}>
-          <PlusIcon size={12} />
-        </span>
-        <span style={{ color: "var(--ink)", fontWeight: 600 }}>New chat</span>
-      </MenuRow>
-      {runs.length > 0 && (
-        <div style={{ height: 1, background: "var(--rule)", margin: "4px 2px" }} />
-      )}
-      <div style={{ maxHeight: 256, overflowY: "auto", display: "flex", flexDirection: "column", gap: 1 }}>
-        {runs.map((run) => (
-          <ChatRow
-            key={run.id}
-            run={run}
-            active={run.id === activeRunId}
-            confirmingDelete={run.id === confirmingDeleteId}
-            onPick={onPick}
-            onRequestDelete={onRequestDelete}
-            onCancelDelete={onCancelDelete}
-            onConfirmDelete={onConfirmDelete}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ChatRow({
-  run,
-  active,
-  confirmingDelete,
-  onPick,
-  onRequestDelete,
-  onCancelDelete,
-  onConfirmDelete,
-}: {
-  run: RunState;
-  active: boolean;
-  confirmingDelete: boolean;
-  onPick: (id: string) => void;
-  onRequestDelete: (id: string) => void;
-  onCancelDelete: () => void;
-  onConfirmDelete: (id: string) => void;
-}) {
-  const [hover, setHover] = useState(false);
-  const [trashHover, setTrashHover] = useState(false);
-  const color = statusToneColor(describeRunStatus(run).tone);
-  if (confirmingDelete) {
-    return (
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "minmax(0, 1fr) auto auto",
-          alignItems: "center",
-          gap: 6,
-          borderRadius: 6,
-          padding: "5px 5px 5px 8px",
-          background: "var(--danger-soft)",
-        }}
-      >
-        <span
-          title={`Delete ${run.title}`}
-          style={{
-            minWidth: 0,
-            color: "var(--danger)",
-            fontSize: 11.5,
-            fontWeight: 650,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          Delete this chat?
-        </span>
-        <MiniMenuButton onClick={onCancelDelete}>Cancel</MiniMenuButton>
-        <MiniMenuButton danger onClick={() => onConfirmDelete(run.id)}>
-          Delete
-        </MiniMenuButton>
-      </div>
-    );
-  }
-
-  return (
-    <div
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 4,
-        borderRadius: 6,
-        padding: "0 4px 0 8px",
-        background: active
-          ? "color-mix(in oklch, var(--accent) 20%, transparent)"
-          : hover
-            ? "var(--hover)"
-            : "transparent",
-      }}
-    >
-      <button
-        type="button"
-        onClick={() => onPick(run.id)}
-        title={run.title}
-        style={{
-          appearance: "none",
-          flex: 1,
-          minWidth: 0,
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          height: 30,
-          border: "none",
-          background: "transparent",
-          color: "inherit",
-          padding: 0,
-          cursor: "default",
-          textAlign: "left",
-        }}
-      >
-        <span
-          aria-hidden
-          style={{ width: 6, height: 6, borderRadius: 999, background: color, flex: "0 0 6px" }}
-        />
-        <span
-          style={{
-            flex: 1,
-            minWidth: 0,
-            fontSize: 12,
-            fontWeight: active ? 600 : 500,
-            color: active ? "var(--ink)" : "var(--ink-dim)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {run.title}
-        </span>
-      </button>
-      <button
-        type="button"
-        title="Delete chat"
-        onClick={(event) => {
-          event.stopPropagation();
-          onRequestDelete(run.id);
-        }}
-        onMouseEnter={() => setTrashHover(true)}
-        onMouseLeave={() => setTrashHover(false)}
-        style={{
-          appearance: "none",
-          width: 22,
-          height: 22,
-          flex: "0 0 22px",
-          border: "none",
-          borderRadius: 5,
-          background: trashHover ? "var(--danger-soft)" : "transparent",
-          color: trashHover ? "var(--danger)" : "var(--muted)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: 0,
-          cursor: "default",
-          opacity: hover ? 1 : 0,
-          transition: "opacity var(--motion-fast) var(--ease-out)",
-        }}
-      >
-        <TrashGlyph />
-      </button>
-    </div>
-  );
-}
-
-// "done · unseen" pill rendered in the SwitcherBar trigger when the active
-// chat just finished while the user was elsewhere. Disappears once they
-// focus the chat (which fires markRunSeen → tone becomes "done").
-function shortRunId(id: string): string {
-  const tail = id.split("-").pop();
-  if (!tail) return id.slice(-6);
-  return tail.slice(-6);
-}
-
-function RunIdCopyChip({ runId }: { runId: string }) {
-  const [copied, setCopied] = useState(false);
-  const [hover, setHover] = useState(false);
-  const onCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(runId);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      /* Clipboard API can fail in non-secure contexts; degrade silently. */
-    }
-  };
-  return (
-    <button
-      type="button"
-      onClick={onCopy}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      title={`Run id: ${runId}\nClick to copy.`}
-      style={{
-        appearance: "none",
-        flex: "0 0 auto",
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        height: 22,
-        padding: "0 7px",
-        background: copied
-          ? "color-mix(in oklch, var(--ok) 14%, transparent)"
-          : hover
-            ? "var(--hover)"
-            : "color-mix(in oklch, var(--panel-2) 80%, transparent)",
-        color: copied ? "var(--ok)" : "var(--muted)",
-        border: `1px solid ${
-          copied
-            ? "color-mix(in oklch, var(--ok) 45%, transparent)"
-            : hover
-              ? "var(--rule-strong)"
-              : "var(--rule-soft)"
-        }`,
-        borderRadius: 999,
-        fontFamily: "var(--font-mono)",
-        fontSize: 9.5,
-        fontWeight: 600,
-        letterSpacing: "0.04em",
-        cursor: "default",
-        transition:
-          "color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <span style={{ opacity: 0.7 }}>id</span>
-      <span style={{ color: copied ? "var(--ok)" : "var(--ink-dim)" }}>
-        #{shortRunId(runId)}
-      </span>
-      <span
-        aria-hidden
-        style={{
-          width: 11,
-          height: 11,
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        {copied ? (
-          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
-            <path
-              d="M2 6.5l2.5 2.5L10 3.5"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        ) : (
-          <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
-            <rect x="3.5" y="3.5" width="6" height="6" rx="1" stroke="currentColor" strokeWidth="1.2" />
-            <path d="M2.5 8.5V2.5h6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-          </svg>
-        )}
-      </span>
-    </button>
-  );
-}
-
-function DoneUnseenPill() {
-  return (
-    <span
-      style={{
-        flex: "0 0 auto",
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 4,
-        height: 17,
-        padding: "0 7px",
-        borderRadius: 999,
-        background: "color-mix(in oklch, var(--info) 18%, transparent)",
-        border: "1px solid color-mix(in oklch, var(--info) 45%, transparent)",
-        color: "var(--info)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 9.5,
-        fontWeight: 650,
-        letterSpacing: "0.04em",
-        textTransform: "lowercase",
-        whiteSpace: "nowrap",
-      }}
-    >
-      done · unseen
-    </span>
-  );
-}
-
-function MiniMenuButton({
-  children,
-  danger = false,
-  onClick,
-}: {
-  children: React.ReactNode;
-  danger?: boolean;
-  onClick: () => void;
-}) {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        appearance: "none",
-        height: 24,
-        border: `1px solid ${
-          danger
-            ? "color-mix(in oklch, var(--danger) 45%, transparent)"
-            : "var(--rule-soft)"
-        }`,
-        borderRadius: 6,
-        background: hover
-          ? danger
-            ? "color-mix(in oklch, var(--danger) 18%, transparent)"
-            : "var(--hover)"
-          : "transparent",
-        color: danger ? "var(--danger)" : "var(--ink-dim)",
-        padding: "0 7px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: 650,
-        cursor: "default",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function MenuRow({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        appearance: "none",
-        width: "100%",
-        display: "flex",
-        alignItems: "center",
-        gap: 9,
-        minHeight: 30,
-        border: "none",
-        borderRadius: 6,
-        background: hover ? "var(--hover)" : "transparent",
-        padding: "0 9px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 12,
-        fontWeight: 500,
-        cursor: "default",
-        textAlign: "left",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
 
 function WelcomeState() {
   return (
@@ -1103,35 +584,6 @@ function ErrorBar({ message }: { message: string }) {
   );
 }
 
-function NewChatButton({ onClick }: { onClick: () => void }) {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title="New chat"
-      aria-label="New chat"
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        appearance: "none",
-        width: 22,
-        height: 22,
-        border: "none",
-        borderRadius: 5,
-        background: hover ? "var(--hover)" : "transparent",
-        color: hover ? "var(--ink)" : "var(--ink-dim)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 0,
-        cursor: "default",
-      }}
-    >
-      <PlusIcon size={13} />
-    </button>
-  );
-}
 
 function SparkMark({ size = 13 }: { size?: number }) {
   return (
@@ -1146,24 +598,3 @@ function SparkMark({ size = 13 }: { size?: number }) {
   );
 }
 
-function TrashGlyph() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 14 14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M3 4h8" />
-      <path d="M5.5 4V2.75h3V4" />
-      <path d="M4 4l0.5 7.25a1 1 0 0 0 1 0.95h3a1 1 0 0 0 1-0.95L10 4" />
-      <path d="M6 6.25v3.5" />
-      <path d="M8 6.25v3.5" />
-    </svg>
-  );
-}

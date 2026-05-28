@@ -8,6 +8,12 @@ interface Props {
   workspace: Workspace | null;
   runs: RunState[];
   activeRunId: string | null;
+  // Chat / backend-PTY view mode — driven by the workspace's hoisted inner
+  // tab strip so the toggle survives navigating from the chat tab to a worker
+  // or back. Optional during the transition; ChatPanel falls back to its own
+  // local state when this is not provided.
+  chatView?: "chat" | "terminal";
+  onChatViewChange?: (view: "chat" | "terminal") => void;
   onSelectRun: (id: string | null) => void;
   onRunSnapshot: (
     run: RunState,
@@ -28,6 +34,8 @@ export default function OrchestrationSidebar({
   workspace,
   runs,
   activeRunId,
+  chatView,
+  onChatViewChange,
   onSelectRun,
   onRunSnapshot,
   collapsed,
@@ -220,8 +228,8 @@ export default function OrchestrationSidebar({
       onToggleCollapse={onToggleCollapse}
       collapsible={collapsible}
       headerDrag={headerDrag}
-      onSelectRun={handleSelectRun}
-      onDeleteRun={handleDeleteRun}
+      chatView={chatView}
+      onChatViewChange={onChatViewChange}
       onStartChat={startChat}
       onForcePauseRun={forcePauseRun}
     />

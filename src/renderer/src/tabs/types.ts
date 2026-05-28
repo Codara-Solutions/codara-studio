@@ -115,6 +115,12 @@ export interface TerminalTab extends BaseTab {
 export interface PreviewTab extends BaseTab {
   kind: "preview";
   url: string;
+  // When the preview was spawned by an orchestration run (URL detector inside
+  // a worker pane, or an orchestrator file-preview opener), this carries the
+  // owning run id so the chat panel can render the preview inside its inner
+  // tab strip. User-opened previews (TabBar picker, Spark browser) leave it
+  // unset and stay top-level.
+  runId?: string;
 }
 
 // Runs tabs are derived from the selected chat. `runId === null` is kept only

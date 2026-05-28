@@ -44,13 +44,16 @@ import type {
 // store's open + close pair.
 
 const STORAGE_KEY_PREFIX = "spark.tabs:";
-const CHAT_TAB_ID = "spark-chat";
-// v4: chat-scoped Runs tabs. Empty/global Runs placeholders are migrated out
-// on load so existing editor/terminal tabs survive this UX cleanup. v3 dropped the
-// removed "project"/CRM tab kind. v2 introduced the recursive PaneNode tree on
-// TerminalTab. Bumping the version discards older layouts on load — the user
-// just loses their tab strip, not any code.
-const TAB_VERSION = 4;
+// Draft chat tabs (clicked "+", no first message yet) carry a runtime-only id
+// with this prefix so the App-level sync effect can leave them alone while it
+// reconciles run-backed chat tabs.
+const DRAFT_CHAT_PREFIX = "draft:";
+// v5: chat tabs are now derived from the run store rather than persisted as a
+// singleton "spark-chat" tab. Loading v4 layouts forces a chat-tab rebuild
+// by the App sync effect — editor/terminal/preview tabs survive. v4
+// introduced chat-scoped Runs tabs. v3 dropped the removed "project"/CRM
+// tab kind. v2 introduced the recursive PaneNode tree on TerminalTab.
+const TAB_VERSION = 5;
 const MAX_TERMINAL_SCROLLBACK_CHARS = 40_000;
 
 interface PersistedShape {
@@ -174,28 +177,36 @@ function createTerminalTab(cwd?: string, autorun?: string, title = "terminals"):
   };
 }
 
-function createChatTab(): ChatTab {
+function createDraftChatTab(): ChatTab {
   return {
-    id: CHAT_TAB_ID,
+    id: `${DRAFT_CHAT_PREFIX}${makeId("chat")}`,
     kind: "chat",
-    title: "Spark",
+    title: "New chat",
   };
 }
 
-function ensureChatTab(tabs: Tab[]): Tab[] {
-  const existing = tabs.find((tab): tab is ChatTab => tab.kind === "chat");
-  if (existing) {
-    return tabs.map((tab) =>
-      tab.id === existing.id && (tab.id !== CHAT_TAB_ID || tab.title !== "Spark")
-        ? { ...tab, id: CHAT_TAB_ID, title: "Spark" }
-        : tab,
-    );
-  }
-  return [createChatTab(), ...tabs];
+function createChatTabForRun(runId: string, title: string): ChatTab {
+  return {
+    id: runId,
+    kind: "chat",
+    title: title?.trim() || "Spark",
+  };
+}
+
+export function isDraftChatTabId(id: TabId): boolean {
+  return id.startsWith(DRAFT_CHAT_PREFIX);
+}
+
+// Guarantee at least one chat tab exists. Used after persistence load and
+// after destructive ops that could leave the strip without any chat — the
+// workspace's chat-first UX assumes one is always available.
+function ensureAnyChatTab(tabs: Tab[]): Tab[] {
+  if (tabs.some((tab) => tab.kind === "chat")) return tabs;
+  return [createDraftChatTab(), ...tabs];
 }
 
 function defaultTabs(cwd?: string): Tab[] {
-  return [createChatTab(), createTerminalTab(cwd)];
+  return [createDraftChatTab(), createTerminalTab(cwd)];
 }
 
 function loadPersisted(workspaceId: string | null): PersistedShape | null {
@@ -217,11 +228,16 @@ function loadPersisted(workspaceId: string | null): PersistedShape | null {
     // Runs tabs are derived from the selected chat, not durable workspace
     // layout. Keep persisted editor/terminal/preview tabs, then recreate the
     // Runs tab only when App selects a chat.
-    parsed.tabs = ensureChatTab(
+    // Chat tabs are now derived from the run store by the App-level sync
+    // effect. Stripping them on load means the workspace always starts with
+    // at least one fresh draft chat tab (via ensureAnyChatTab) until the
+    // effect rebuilds run-backed chat tabs.
+    parsed.tabs = ensureAnyChatTab(
       normalizeTerminalTitles(
         parsed.tabs.filter(
           (tab) =>
             tab.kind !== "runs" &&
+            tab.kind !== "chat" &&
             !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
         ),
       ),
@@ -412,8 +428,32 @@ export interface UseTabsApi {
       worker?: TerminalLeafWorker | null;
     },
   ) => boolean;
-  openChatTab: (options?: { focus?: boolean }) => TabId;
-  newPreviewTab: (url: string) => TabId;
+  // Focus (or create) the chat tab for a specific run. Pass `null` to focus
+  // the most recent draft chat tab, creating a fresh one if none exists.
+  openChatTab: (input: { runId: string | null; focus?: boolean }) => TabId;
+  // Sync the chat tab set to the current run list. Adds missing run-backed
+  // chat tabs, updates titles, and removes chat tabs whose run was deleted.
+  // Drafts are left alone — they live until the user closes them or sends
+  // their first message (then promoteDraftToRun rekeys the tab).
+  syncChatTabsToRuns: (runs: Array<{ id: string; title: string }>) => void;
+  // Append a fresh draft chat tab and focus it. Used by the top tab strip's
+  // "+" affordance for "start a new chat" — the composer then drives the
+  // promote-to-run swap on first message.
+  addDraftChatTab: () => TabId;
+  // Convert a draft chat tab into a run-backed one by rekeying its id to
+  // the new run id and updating the title. If activeId was the draft, it
+  // follows the rename. No-op if `draftTabId` doesn't exist or isn't a
+  // draft.
+  promoteDraftChatTab: (draftTabId: TabId, runId: string, title: string) => void;
+  // Remove the chat tab for `runId`. If activeId was that tab, fall back to
+  // another chat tab (creating a draft if none remain).
+  closeChatTabForRun: (runId: string) => void;
+  // Rename a chat tab's title in the local store. The renderer also calls
+  // the renameRun IPC so the backend persists the new title; this method
+  // gives an immediate visual update without waiting for the run snapshot
+  // to round-trip back.
+  renameChatTab: (id: TabId, title: string) => void;
+  newPreviewTab: (url: string, options?: { runId?: string | null }) => TabId;
   // Open (or relabel) the runs tab bound to a chat. Each chat owns exactly
   // one runs tab. `focus` selects it too — true for explicit navigation,
   // false for the background "ensure the active chat has a tab" effect.
@@ -1212,24 +1252,176 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
     [],
   );
 
-  const openChatTab = useCallback((options?: { focus?: boolean }): TabId => {
-    setTabs((curr) => ensureChatTab(curr));
-    if (options?.focus !== false) setActiveId(CHAT_TAB_ID);
-    return CHAT_TAB_ID;
+  const openChatTab = useCallback(
+    (input: { runId: string | null; focus?: boolean }): TabId => {
+      const focus = input.focus !== false;
+      // Pre-batch tabsRef is stale when this runs in the same event as a
+      // preceding promoteDraftChatTab or syncChatTabsToRuns — we'd miss the
+      // just-added tab and create a duplicate. Run the existence check
+      // INSIDE setTabs's updater so we see the latest committed state, and
+      // queue setActiveId from within the same updater so the active id
+      // matches whatever the updater decided to add or reuse.
+      if (input.runId === null) {
+        const fallback = `${DRAFT_CHAT_PREFIX}${makeId("chat")}`;
+        setTabs((curr) => {
+          const existingDraft = curr.find(
+            (t): t is ChatTab => t.kind === "chat" && isDraftChatTabId(t.id),
+          );
+          if (existingDraft) {
+            if (focus) setActiveId(existingDraft.id);
+            return curr;
+          }
+          const draft: ChatTab = { id: fallback, kind: "chat", title: "New chat" };
+          if (focus) setActiveId(draft.id);
+          return [...curr, draft];
+        });
+        return fallback;
+      }
+      const runId = input.runId;
+      setTabs((curr) => {
+        const existing = curr.find(
+          (t): t is ChatTab => t.kind === "chat" && t.id === runId,
+        );
+        if (existing) {
+          if (focus) setActiveId(existing.id);
+          return curr;
+        }
+        // Run id is known but the chat tab hasn't been added yet — happens
+        // when handleSelectRun fires before the runs[]-sync effect catches
+        // up. Seed a placeholder tab; the sync effect will refresh the
+        // title.
+        const placeholder = createChatTabForRun(runId, "Spark");
+        if (focus) setActiveId(placeholder.id);
+        return [...curr, placeholder];
+      });
+      return runId;
+    },
+    [],
+  );
+
+  const syncChatTabsToRuns = useCallback(
+    (runList: Array<{ id: string; title: string }>) => {
+      setTabs((curr) => {
+        const runIds = new Set(runList.map((r) => r.id));
+        const titleByRun = new Map(runList.map((r) => [r.id, r.title?.trim() || "Spark"]));
+        let changed = false;
+        // Drop chat tabs whose run has been deleted; keep drafts.
+        const filtered = curr.filter((tab) => {
+          if (tab.kind !== "chat") return true;
+          if (isDraftChatTabId(tab.id)) return true;
+          if (runIds.has(tab.id)) return true;
+          changed = true;
+          return false;
+        });
+        // Rename in place when run titles change.
+        const renamed = filtered.map((tab) => {
+          if (tab.kind !== "chat" || isDraftChatTabId(tab.id)) return tab;
+          const nextTitle = titleByRun.get(tab.id);
+          if (!nextTitle || nextTitle === tab.title) return tab;
+          changed = true;
+          return { ...tab, title: nextTitle };
+        });
+        // Append chat tabs for runs that aren't represented yet. New runs
+        // are placed at the end so existing tab positions stay stable.
+        const have = new Set(
+          renamed.filter((t): t is ChatTab => t.kind === "chat" && !isDraftChatTabId(t.id)).map((t) => t.id),
+        );
+        const additions: ChatTab[] = [];
+        for (const run of runList) {
+          if (!have.has(run.id)) {
+            additions.push(createChatTabForRun(run.id, run.title));
+            changed = true;
+          }
+        }
+        const next = additions.length ? [...renamed, ...additions] : renamed;
+        // Workspace always shows at least one chat tab — re-seed a draft if
+        // the sync emptied them out (e.g. last run deleted on a fresh
+        // workspace with no draft).
+        const withChat = ensureAnyChatTab(next);
+        if (withChat !== next) changed = true;
+        return changed ? withChat : curr;
+      });
+    },
+    [],
+  );
+
+  const addDraftChatTab = useCallback((): TabId => {
+    const draft = createDraftChatTab();
+    setTabs((curr) => [...curr, draft]);
+    setActiveId(draft.id);
+    return draft.id;
   }, []);
 
-  const newPreviewTab = useCallback((url: string): TabId => {
-    const id = makeId("preview");
-    const tab: PreviewTab = {
-      id,
-      kind: "preview",
-      title: titleFromUrl(url),
-      url,
-    };
-    setTabs((curr) => [...curr, tab]);
-    setActiveId(id);
-    return id;
+  const promoteDraftChatTab = useCallback(
+    (draftTabId: TabId, runId: string, title: string) => {
+      setTabs((curr) => {
+        const target = curr.find(
+          (t): t is ChatTab => t.kind === "chat" && t.id === draftTabId && isDraftChatTabId(t.id),
+        );
+        if (!target) return curr;
+        // If a chat tab for this run already exists (sync effect raced
+        // ahead), drop the draft and let the existing tab represent the run.
+        const existingForRun = curr.find(
+          (t): t is ChatTab => t.kind === "chat" && t.id === runId && !isDraftChatTabId(t.id),
+        );
+        if (existingForRun) {
+          const next = curr.filter((t) => t.id !== draftTabId);
+          setActiveId((active) => (active === draftTabId ? existingForRun.id : active));
+          return next;
+        }
+        const renamedTitle = title?.trim() || target.title;
+        const next = curr.map((t) =>
+          t.id === draftTabId ? { ...(t as ChatTab), id: runId, title: renamedTitle } : t,
+        );
+        setActiveId((active) => (active === draftTabId ? runId : active));
+        return next;
+      });
+    },
+    [],
+  );
+
+  const closeChatTabForRun = useCallback((runId: string) => {
+    setTabs((curr) => {
+      const target = curr.find((t) => t.kind === "chat" && t.id === runId);
+      if (!target) return curr;
+      const next = curr.filter((t) => t.id !== runId);
+      const withChat = ensureAnyChatTab(next);
+      // Reroute active selection if the closed tab was active.
+      setActiveId((active) => {
+        if (active !== runId) return active;
+        const fallbackChat = withChat.find((t) => t.kind === "chat");
+        return fallbackChat?.id ?? withChat[0]?.id ?? null;
+      });
+      return withChat;
+    });
   }, []);
+
+  const renameChatTab = useCallback((id: TabId, title: string) => {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    setTabs((curr) => {
+      const target = curr.find((t) => t.id === id && t.kind === "chat");
+      if (!target || target.title === trimmed) return curr;
+      return curr.map((t) => (t.id === id ? { ...t, title: trimmed } : t));
+    });
+  }, []);
+
+  const newPreviewTab = useCallback(
+    (url: string, options?: { runId?: string | null }): TabId => {
+      const id = makeId("preview");
+      const tab: PreviewTab = {
+        id,
+        kind: "preview",
+        title: titleFromUrl(url),
+        url,
+        ...(options?.runId ? { runId: options.runId } : {}),
+      };
+      setTabs((curr) => [...curr, tab]);
+      setActiveId(id);
+      return id;
+    },
+    [],
+  );
 
   // Open (or relabel) the Runs tab for the selected chat. Runs tabs are
   // chat-scoped and ephemeral in the workbench: switching chats removes the
@@ -1519,6 +1711,11 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
       renameLeaf,
       addPaneInTab,
       openChatTab,
+      syncChatTabsToRuns,
+      addDraftChatTab,
+      promoteDraftChatTab,
+      closeChatTabForRun,
+      renameChatTab,
       newPreviewTab,
       openRunsTab,
       hideRunsTabs,
