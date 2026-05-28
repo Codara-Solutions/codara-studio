@@ -245,7 +245,6 @@ test("run uses the latest selected plan text instead of reusing old worker tasks
 test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
   const { userDataDir } = await prepareElectronWorkspace("spark-agent-openrouter-e2e-");
   const server = await startFakeOpenRouterServer();
-  const langSmith = await startFakeLangSmithServer();
   const workerArgs = JSON.stringify(["-e", fakeWorkerScript()]);
 
   let app: ElectronApplication | null = null;
@@ -259,11 +258,6 @@ test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
         SPARK_OPENROUTER_BASE_URL: server.baseUrl,
         SPARK_OPENROUTER_MODEL: "test/unsupported-manager",
         SPARK_OPENROUTER_STRUCTURED_FALLBACK_MODEL: "test/spark-manager",
-        LANGSMITH_API_KEY: "test-langsmith-key",
-        LANGSMITH_ENDPOINT: langSmith.baseUrl,
-        LANGSMITH_PROJECT: "spark-agent-e2e",
-        LANGSMITH_TRACING: "true",
-        LANGCHAIN_TRACING_V2: "true",
         SPARK_CLAUDE_WORKER_COMMAND: process.execPath,
         SPARK_CLAUDE_WORKER_ARGS: workerArgs,
         SPARK_CODEX_WORKER_COMMAND: process.execPath,
@@ -306,14 +300,9 @@ test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
       true,
     );
     expect(reports.every((report) => report.proof?.some((item) => item.includes("YOUR TASK")))).toBe(true);
-    expect(langSmith.posts).toHaveLength(3);
-    expect(langSmith.patches).toHaveLength(3);
-    expect(langSmith.posts.every((post) => post.session_name === "spark-agent-e2e")).toBe(true);
-    expect(langSmith.posts.every((post) => post.inputs?.provider === "openrouter")).toBe(true);
   } finally {
     await app?.close();
     await server.close();
-    await langSmith.close();
   }
 });
 
@@ -513,52 +502,6 @@ async function startFakeOpenRouterServer(): Promise<{ baseUrl: string; close: ()
   const address = server.address() as AddressInfo;
   return {
     baseUrl: `http://127.0.0.1:${address.port}/api/v1`,
-    close: () =>
-      new Promise((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()));
-      }),
-  };
-}
-
-async function startFakeLangSmithServer(): Promise<{
-  baseUrl: string;
-  posts: Array<{ session_name?: string; inputs?: { provider?: string } }>;
-  patches: Array<Record<string, unknown>>;
-  close: () => Promise<void>;
-}> {
-  const posts: Array<{ session_name?: string; inputs?: { provider?: string } }> = [];
-  const patches: Array<Record<string, unknown>> = [];
-  const server = createServer((req, res) => {
-    const isPostRun = req.method === "POST" && req.url === "/runs";
-    const isPatchRun = req.method === "PATCH" && Boolean(req.url?.startsWith("/runs/"));
-    if (!isPostRun && !isPatchRun) {
-      res.writeHead(404).end();
-      return;
-    }
-
-    let body = "";
-    req.setEncoding("utf8");
-    req.on("data", (chunk) => {
-      body += chunk;
-    });
-    req.on("end", () => {
-      const parsed = JSON.parse(body || "{}") as Record<string, unknown>;
-      if (isPostRun) {
-        posts.push(parsed as { session_name?: string; inputs?: { provider?: string } });
-        res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ id: parsed.id }));
-        return;
-      }
-      patches.push(parsed);
-      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
-    });
-  });
-
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address() as AddressInfo;
-  return {
-    baseUrl: `http://127.0.0.1:${address.port}`,
-    posts,
-    patches,
     close: () =>
       new Promise((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));

@@ -199,7 +199,7 @@ function createRunner(opts = {}) {
       // parallel, etc.) cannot collide on spark-state.json /
       // spark-settings.json / runs/<runId>. Each eval gets a fresh
       // `.SparkAgent` under its artifacts dir; the existing user
-      // settings (OpenRouter key, LangSmith config) are mirrored over
+      // settings (OpenRouter key, manager model, etc.) are mirrored over
       // so the manager can authenticate. Spark Agent already honors
       // SPARK_HOME_DIR via spark-home.ts.
       const isolatedHome = path.join(artifactsDir, ".SparkAgent");

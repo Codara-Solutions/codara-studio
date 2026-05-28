@@ -405,7 +405,7 @@ function installWorkerSpawnHandler(_planPath: string): () => void {
 // disk; affects only the running process. Returns nothing — the caches are
 // shared module state already inspected by orchestration call paths.
 async function applyVariantConfig(config: VariantConfig, configPath: string): Promise<void> {
-  // Manager model + LangSmith remain on the AppSettings struct.
+  // Manager model overrides remain on the AppSettings struct.
   const settingsOverride: Record<string, unknown> = {};
   if (config.manager?.model && config.manager.model.trim()) {
     settingsOverride.openRouterModel = config.manager.model.trim();

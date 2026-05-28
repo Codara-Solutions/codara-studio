@@ -7,17 +7,12 @@ import { sparkHome } from "./spark-home";
 const STATE_FILE = "spark-state.json";
 const SETTINGS_FILE = "spark-settings.json";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-flash-latest";
-const DEFAULT_LANGSMITH_ENDPOINT = "https://api.smith.langchain.com";
-const DEFAULT_LANGSMITH_PROJECT = "spark-agent-dev";
 
 const EMPTY: AppState = { workspaces: [], activeWorkspaceId: null };
 const EMPTY_SETTINGS: AppSettings = {
   defaultShellId: null,
   openRouterApiKey: "",
   openRouterModel: DEFAULT_OPENROUTER_MODEL,
-  langSmithApiKey: "",
-  langSmithProject: DEFAULT_LANGSMITH_PROJECT,
-  langSmithEndpoint: DEFAULT_LANGSMITH_ENDPOINT,
   agentRuntimeSelection: "auto",
   agentMcpSyncEnabled: true,
   agentSkillSyncEnabled: true,
@@ -92,16 +87,6 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
       typeof settings.openRouterModel === "string" && settings.openRouterModel.trim()
         ? settings.openRouterModel.trim()
         : DEFAULT_OPENROUTER_MODEL,
-    langSmithApiKey:
-      typeof settings.langSmithApiKey === "string" ? settings.langSmithApiKey.trim() : "",
-    langSmithProject:
-      typeof settings.langSmithProject === "string" && settings.langSmithProject.trim()
-        ? settings.langSmithProject.trim()
-        : DEFAULT_LANGSMITH_PROJECT,
-    langSmithEndpoint:
-      typeof settings.langSmithEndpoint === "string" && settings.langSmithEndpoint.trim()
-        ? settings.langSmithEndpoint.trim().replace(/\/+$/, "")
-        : DEFAULT_LANGSMITH_ENDPOINT,
     agentRuntimeSelection: normalizeAgentRuntimeSelection(settings.agentRuntimeSelection),
     agentMcpSyncEnabled: settings.agentMcpSyncEnabled !== false,
     agentSkillSyncEnabled: settings.agentSkillSyncEnabled !== false,
@@ -197,7 +182,7 @@ export async function saveSettings(settings: AppSettings): Promise<AppSettings> 
 
 // In-memory settings override used by the headless eval entry point. Loads
 // the on-disk settings, applies a partial override (variant config: manager
-// model + LangSmith tweaks), and pins the result in the module cache so
+// model tweaks), and pins the result in the module cache so
 // every subsequent `loadSettings()` returns the merged value WITHOUT
 // touching spark-settings.json on disk. Returns the merged settings object
 // for callers that want to inspect what they pinned.

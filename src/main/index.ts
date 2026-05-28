@@ -24,7 +24,7 @@ import { installPlaywrightMcp } from "./mcp-installer";
 import { registerPreviewBridge } from "./preview-bridge";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 
-// run-store is heavy (loads openrouter, langsmith, agent-sync transitively).
+// run-store is heavy (loads openrouter and agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
 // deferring the resolve until a hook actually fires. The async import is
 // cached after the first call.

@@ -109,9 +109,6 @@ export default function SettingsDialog({
         ...draft,
         openRouterApiKey: draft.openRouterApiKey.trim(),
         openRouterModel: draft.openRouterModel.trim(),
-        langSmithApiKey: draft.langSmithApiKey.trim(),
-        langSmithProject: draft.langSmithProject.trim(),
-        langSmithEndpoint: draft.langSmithEndpoint.trim().replace(/\/+$/, ""),
       });
       onClose();
     } catch (err) {
@@ -465,39 +462,6 @@ function ApiSettings({
         </Label>
       </div>
 
-      <div style={{ display: "grid", gap: 12 }}>
-        <SectionTitle
-          title="LangSmith"
-          detail="Optional tracing for Spark manager calls. OpenRouter remains the model transport."
-        />
-        <Label text="LangSmith API key">
-          <input
-            type="password"
-            value={draft.langSmithApiKey}
-            onChange={(event) => onChange({ ...draft, langSmithApiKey: event.currentTarget.value })}
-            placeholder="lsv2_..."
-            style={inputStyle}
-          />
-        </Label>
-        <Label text="Project">
-          <input
-            type="text"
-            value={draft.langSmithProject}
-            onChange={(event) => onChange({ ...draft, langSmithProject: event.currentTarget.value })}
-            placeholder="spark-agent-dev"
-            style={{ ...inputStyle, fontFamily: "var(--font-mono)", fontSize: 12 }}
-          />
-        </Label>
-        <Label text="Endpoint">
-          <input
-            type="text"
-            value={draft.langSmithEndpoint}
-            onChange={(event) => onChange({ ...draft, langSmithEndpoint: event.currentTarget.value })}
-            placeholder="https://api.smith.langchain.com"
-            style={{ ...inputStyle, fontFamily: "var(--font-mono)", fontSize: 12 }}
-          />
-        </Label>
-      </div>
     </div>
   );
 }

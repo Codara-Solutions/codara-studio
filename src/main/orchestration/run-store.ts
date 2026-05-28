@@ -75,12 +75,6 @@ import {
   restoreCheckpointCode,
   rewindShadowRef,
 } from "./checkpoints";
-import {
-  finishLangSmithManagerTrace,
-  readLangSmithConfig,
-  startLangSmithManagerTrace,
-  type LangSmithTrace,
-} from "./langsmith-tracer";
 import * as pty from "../pty-manager";
 import {
   formatStuckReason,
@@ -1106,27 +1100,6 @@ function normalizeOpenRouterManagerMode(
   return "step_planning";
 }
 
-async function safeStartLangSmithManagerTrace(
-  input: Parameters<typeof startLangSmithManagerTrace>[0],
-): Promise<LangSmithTrace | null> {
-  try {
-    return await startLangSmithManagerTrace(input);
-  } catch (err) {
-    console.warn("[langsmith] failed to start manager trace:", err);
-    return null;
-  }
-}
-
-async function safeFinishLangSmithManagerTrace(
-  input: Parameters<typeof finishLangSmithManagerTrace>[0],
-): Promise<void> {
-  try {
-    await finishLangSmithManagerTrace(input);
-  } catch (err) {
-    console.warn("[langsmith] failed to finish manager trace:", err);
-  }
-}
-
 async function createFallbackAutopilotTask(run: RunState, input: StartAutopilotInput): Promise<RunState> {
   run = await createStep({
     runId: run.id,
@@ -1240,7 +1213,7 @@ async function askOpenRouterManager(
 
   // Non-OpenRouter backends own their own request lifecycle (spawn a real
   // `claude` / `codex` CLI, tail its JSONL transcript, etc.). Dispatch and
-  // skip the OpenRouter-specific SparkCall + artifact + LangSmith pipeline
+  // skip the OpenRouter-specific SparkCall and artifact pipeline
   // below. Both backends still apply their resulting SparkManagerDecision
   // through applySparkManagerDecision so downstream worker spawns + chat
   // replies work identically.
@@ -1250,12 +1223,11 @@ async function askOpenRouterManager(
 
   const baseConfig = readOpenRouterConfig(settings);
   if (!baseConfig) return null;
-  const langSmithConfig = readLangSmithConfig(settings);
 
   // The composer chip's per-chat model override beats the global setting. We
   // shadow `config` with the resolved version so the rest of the pipeline
-  // (request body, SparkCall record, artifacts, LangSmith trace) all see the
-  // chip's selected model without a per-call-site rewrite.
+  // (request body, SparkCall record, artifacts) all see the chip's selected
+  // model without a per-call-site rewrite.
   const config: OpenRouterConfig =
     chatConfig.model && chatConfig.model !== baseConfig.model
       ? { ...baseConfig, model: chatConfig.model }
@@ -1320,8 +1292,6 @@ async function askOpenRouterManager(
     openRouterModel: config.model,
     openRouterBaseUrl: config.baseUrl,
     openRouterStructuredOutputFallbackModel: config.structuredOutputFallbackModel,
-    langSmithProject: langSmithConfig?.project,
-    langSmithEndpoint: langSmithConfig?.endpoint,
     agentRuntimeSelection: settings.agentRuntimeSelection,
     agentMcpSyncEnabled: settings.agentMcpSyncEnabled,
     agentSkillSyncEnabled: settings.agentSkillSyncEnabled,
@@ -1345,16 +1315,7 @@ async function askOpenRouterManager(
     },
   });
 
-  let langSmithTrace: LangSmithTrace | null = null;
   try {
-    langSmithTrace = await safeStartLangSmithManagerTrace({
-      config: langSmithConfig,
-      runId: run.id,
-      workspaceId: run.workspaceId,
-      sparkCallId: callId,
-      mode,
-      requestBody,
-    });
     // Transient OpenRouter / provider errors (network, 5xx, provider-routed
     // backends crashing mid-request) used to bubble straight to the catch
     // block, which returns null and exits the autopilot loop silently —
@@ -1363,19 +1324,6 @@ async function askOpenRouterManager(
     // re-throw structured-output-unsupported and other terminal errors
     // unchanged so the outer catch still routes them to the operator.
     const result = await requestManagerWithRetries(config, requestBody, managerMode);
-    await safeFinishLangSmithManagerTrace({
-      config: langSmithConfig,
-      trace: langSmithTrace,
-      output: {
-        decision: result.decision,
-        rawResponse: result.rawResponse,
-        durationMs: result.durationMs,
-        model: result.model,
-        fallbackFrom: result.fallbackFrom,
-        promptTokens: result.promptTokens,
-        completionTokens: result.completionTokens,
-      },
-    });
     await Promise.all([
       fs.writeFile(responsePath, JSON.stringify(result.rawResponse, null, 2), "utf8"),
       fs.writeFile(parsedJsonPath, JSON.stringify(result.decision, null, 2), "utf8"),
@@ -1464,11 +1412,6 @@ async function askOpenRouterManager(
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     const completedAt = new Date().toISOString();
     const error = err instanceof Error ? err.message : String(err);
-    await safeFinishLangSmithManagerTrace({
-      config: langSmithConfig,
-      trace: langSmithTrace,
-      error,
-    });
     if (targetCall) {
       targetCall.status = "failed";
       targetCall.error = error;

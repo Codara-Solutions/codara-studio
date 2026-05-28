@@ -70,9 +70,6 @@ export interface AppSettings {
   defaultShellId: string | null;
   openRouterApiKey: string;
   openRouterModel: string;
-  langSmithApiKey: string;
-  langSmithProject: string;
-  langSmithEndpoint: string;
   agentRuntimeSelection: AgentRuntimeSelection;
   agentMcpSyncEnabled: boolean;
   agentSkillSyncEnabled: boolean;
