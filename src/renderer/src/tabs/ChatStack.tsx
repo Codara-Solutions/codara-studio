@@ -9,6 +9,10 @@ interface Props {
   workspace: Workspace | null;
   runs: RunState[];
   activeRunId: string | null;
+  // Chat / backend-PTY view mode, lifted into App so the inner tab strip can
+  // drive it without ChatPanel keeping a duplicate state.
+  chatView: "chat" | "terminal";
+  onChatViewChange: (view: "chat" | "terminal") => void;
   onSelectRun: (id: string | null) => void;
   onRunSnapshot: (
     run: RunState,
@@ -22,6 +26,8 @@ function ChatStack({
   workspace,
   runs,
   activeRunId,
+  chatView,
+  onChatViewChange,
   onSelectRun,
   onRunSnapshot,
 }: Props) {
@@ -53,6 +59,8 @@ function ChatStack({
               workspace={workspace}
               runs={runs}
               activeRunId={activeRunId}
+              chatView={chatView}
+              onChatViewChange={onChatViewChange}
               onSelectRun={onSelectRun}
               onRunSnapshot={onRunSnapshot}
               collapsed={false}

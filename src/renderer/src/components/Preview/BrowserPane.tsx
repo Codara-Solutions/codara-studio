@@ -248,6 +248,10 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       setCurrentUrl(e.url);
       setCanGoBack(wv.canGoBack?.() ?? false);
       setCanGoForward(wv.canGoForward?.() ?? false);
+      // Persist main-frame in-page (SPA / pushState) navigations too, so a
+      // reload or tab restore returns to where the user actually was rather
+      // than the original entry URL.
+      if (e.url) onUrlChangeRef.current(e.url);
     };
     const onDidFailLoad = (e: {
       errorCode: number;

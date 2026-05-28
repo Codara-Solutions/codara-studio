@@ -35,6 +35,7 @@ import type {
   PrefKey,
   PreferencesChange,
   PrepareWorkerTaskInput,
+  RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
   RunArtifactPaths,
@@ -310,6 +311,8 @@ const api = {
       ipcRenderer.invoke("orchestration:updateRunStatus", input),
     markRunSeen: (input: MarkRunSeenInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:markRunSeen", input),
+    renameRun: (input: RenameRunInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:renameRun", input),
     updateChatBackend: (input: UpdateChatBackendInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:updateChatBackend", input),
     createStep: (input: CreateStepInput): Promise<RunState> =>

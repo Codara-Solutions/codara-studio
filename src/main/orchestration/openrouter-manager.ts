@@ -962,6 +962,10 @@ export function isStructuredOutputUnsupportedError(error: string): boolean {
   );
 }
 
+// Hard ceiling for a single manager HTTP request. Past this we abort and let
+// the retry layer try again rather than wedging the turn on a dead socket.
+const MANAGER_FETCH_TIMEOUT_MS = 120_000;
+
 async function performOpenRouterManagerRequest({
   config,
   requestBody,
@@ -977,16 +981,31 @@ async function performOpenRouterManagerRequest({
   model: string;
   fallbackFrom?: string;
 }): Promise<OpenRouterManagerResult> {
-  const response = await fetch(`${config.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://spark-agent.local",
-      "X-Title": "Spark Agent",
-    },
-    body: JSON.stringify(requestBody),
-  });
+  // Bound the request so a stalled connection can't hang the manager turn
+  // forever (which leaves the chat perpetually "busy" with no way to recover).
+  // A timeout surfaces as a rejected promise that isTerminalManagerError does
+  // NOT match, so requestManagerWithRetries treats it as transient and retries.
+  const ac = new AbortController();
+  const timer = setTimeout(
+    () => ac.abort(new Error("OpenRouter manager request timed out")),
+    MANAGER_FETCH_TIMEOUT_MS,
+  );
+  let response: Response;
+  try {
+    response = await fetch(`${config.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://spark-agent.local",
+        "X-Title": "Spark Agent",
+      },
+      body: JSON.stringify(requestBody),
+      signal: ac.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 
   const rawResponse = (await response.json().catch(() => ({}))) as OpenRouterResponse;
   if (!response.ok) {
@@ -1438,7 +1457,7 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
   lines.push("- manual: always available (human executes; only when automation is unsafe).");
   lines.push(
     "Tier semantics:",
-    "- Multi-model runtime (Claude): skeleton → tier=top model + highest available effort; feature → tier=mid model + medium effort; leaf → tier=mid (sonnet) at low/minimal effort. Never assign claude-opus-4-7 to a leaf task.",
+    "- Multi-model runtime (Claude): skeleton → tier=top model + highest available effort; feature → tier=mid model + medium effort; leaf → tier=mid (sonnet) at low/minimal effort. Never assign claude-opus-4-8 to a leaf task.",
     "- Single-model runtime (Codex, Cursor): the model never changes — vary EFFORT to express tier. Codex (gpt-5.5): skeleton → high/xhigh, feature → medium, leaf → minimal. Cursor (composer-2.5-fast): one effort level, treat as the cheap leaf pick.",
     "- Never pick a top tier or high/xhigh/max effort for a mechanical leaf (e.g. running a single shell command and reporting its output) — that wastes context and money for no gain.",
   );
@@ -1450,18 +1469,18 @@ function formatTaskComplexity(complexity: TaskComplexity): string {
     case "trivial":
       return [
         "trivial — single-module fix, ≤3 atomic acceptance criteria, no public API touch.",
-        "Verifier policy: ONE verifier follow-up after the implementation worker on a behavioral step. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-4-7 OR gpt-5.5; effortHint = high; allowedPaths = []; taskClass = verifier. A confident self-report is not proof — the verifier re-derives correct behavior and runs adversarial input/output probes.",
+        "Verifier policy: ONE verifier follow-up after the implementation worker on a behavioral step. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-4-8 OR gpt-5.5; effortHint = high; allowedPaths = []; taskClass = verifier. A confident self-report is not proof — the verifier re-derives correct behavior and runs adversarial input/output probes.",
         "Trivial keeps a tight step cap (max 2 worker_batch steps, no recon, no skeleton); it differs from standard only in scope, not in whether work gets verified.",
       ].join("\n");
     case "standard":
       return [
         "standard — multi-file change OR public API touch, with clear scope.",
-        "Verifier policy: ONE verifier follow-up after each implementation worker. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-4-7 OR gpt-5.5; effortHint = high; allowedPaths = []; taskClass = verifier.",
+        "Verifier policy: ONE verifier follow-up after each implementation worker. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-4-8 OR gpt-5.5; effortHint = high; allowedPaths = []; taskClass = verifier.",
       ].join("\n");
     case "complex":
       return [
         "complex — subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics.",
-        "Verifier policy: TWO peer verifiers IN PARALLEL after each implementation worker — one Claude (claude-opus-4-7@high) and one Codex (gpt-5.5@high). Both with taskClass=verifier, allowedPaths=[], canRunParallel=true. Two model families = two blind spots; peer disagreement IS the signal.",
+        "Verifier policy: TWO peer verifiers IN PARALLEL after each implementation worker — one Claude (claude-opus-4-8@high) and one Codex (gpt-5.5@high). Both with taskClass=verifier, allowedPaths=[], canRunParallel=true. Two model families = two blind spots; peer disagreement IS the signal.",
       ].join("\n");
   }
 }

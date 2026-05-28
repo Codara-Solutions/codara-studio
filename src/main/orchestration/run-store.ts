@@ -12,6 +12,7 @@ import type {
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
   PauseRunInput,
+  RenameRunInput,
   UpdateChatBackendInput,
   CancelRunInput,
   ContextPacket,
@@ -75,12 +76,6 @@ import {
   restoreCheckpointCode,
   rewindShadowRef,
 } from "./checkpoints";
-import {
-  finishLangSmithManagerTrace,
-  readLangSmithConfig,
-  startLangSmithManagerTrace,
-  type LangSmithTrace,
-} from "./langsmith-tracer";
 import * as pty from "../pty-manager";
 import {
   formatStuckReason,
@@ -1044,6 +1039,49 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
           draft.updatedAt = timestamp;
         },
       });
+      return;
+    }
+    // No queueable work and nothing capped. If nothing is actually in flight
+    // either, the run has stalled in a non-terminal state — commonly
+    // "reviewing" after the manager declined to complete but produced no new
+    // work. Leaving it inert here pins the chat composer on the Stop button
+    // forever (isActive stays true, Send never returns). Settle to "paused" so
+    // the user gets Resume/Send back. Guarded on activeWorkersForRun AND
+    // non-terminal worker tasks so we NEVER cut off workers still running —
+    // their completion re-drives this review and finds the real next step.
+    const stillInFlight =
+      activeWorkersForRun(run.id).length > 0 ||
+      run.workerTasks.some((task) =>
+        ["created", "queued", "claimed", "running", "needs_review", "retry_queued"].includes(
+          task.status,
+        ),
+      );
+    // Only the "active" statuses pin the composer on the Stop button (this
+    // matches the renderer's isActive = running|planning|reviewing). By this
+    // point earlier returns have already excluded paused/cancelled/complete;
+    // failed/blocked/idle are not stuck, so leave them be.
+    const runIsActive =
+      run.status === "running" ||
+      run.status === "planning" ||
+      run.status === "reviewing";
+    if (!stillInFlight && runIsActive) {
+      await commitRunChange(run, {
+        type: "autopilot.review_stalled",
+        message:
+          "Autopilot review found no remaining work and no workers in flight; pausing for input.",
+        payload: { previousStatus: run.status },
+        mutate: (draft, timestamp) => {
+          draft.status = "paused";
+          draft.autopilot = {
+            ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+            status: "idle",
+            lastAction: "review_no_work",
+            stopReason: "review_no_remaining_work",
+            updatedAt: timestamp,
+          };
+          draft.updatedAt = timestamp;
+        },
+      });
     }
     return;
   }
@@ -1075,6 +1113,35 @@ async function markAutopilotCycleFailed(runId: string, attemptId: string, err: u
         lastAction: "worker_cycle_failed",
         updatedAt: timestamp,
       };
+      // The run is failing — terminalize any in-flight worker attempts/tasks so
+      // a CC/Codex manager blocked in spark_wait_for_workers observes a terminal
+      // status promptly instead of waiting out the ~20-min MCP hold ceiling.
+      // Mirrors the status sets in forcePauseRun/cancelRun.
+      for (const attempt of draft.workerAttempts) {
+        if (
+          attempt.status === "preparing" ||
+          attempt.status === "prompt_ready" ||
+          attempt.status === "launching" ||
+          attempt.status === "running" ||
+          attempt.status === "finishing"
+        ) {
+          attempt.status = "failed";
+          attempt.finishedAt = attempt.finishedAt ?? timestamp;
+        }
+      }
+      for (const task of draft.workerTasks) {
+        if (
+          task.status === "created" ||
+          task.status === "queued" ||
+          task.status === "claimed" ||
+          task.status === "running" ||
+          task.status === "needs_review" ||
+          task.status === "retry_queued"
+        ) {
+          task.status = "failed";
+          task.updatedAt = timestamp;
+        }
+      }
       draft.updatedAt = timestamp;
     },
   });
@@ -1104,27 +1171,6 @@ function normalizeOpenRouterManagerMode(
   if (mode === "chat") return "chat";
   if (mode === "plan_analysis") return "plan_analysis";
   return "step_planning";
-}
-
-async function safeStartLangSmithManagerTrace(
-  input: Parameters<typeof startLangSmithManagerTrace>[0],
-): Promise<LangSmithTrace | null> {
-  try {
-    return await startLangSmithManagerTrace(input);
-  } catch (err) {
-    console.warn("[langsmith] failed to start manager trace:", err);
-    return null;
-  }
-}
-
-async function safeFinishLangSmithManagerTrace(
-  input: Parameters<typeof finishLangSmithManagerTrace>[0],
-): Promise<void> {
-  try {
-    await finishLangSmithManagerTrace(input);
-  } catch (err) {
-    console.warn("[langsmith] failed to finish manager trace:", err);
-  }
 }
 
 async function createFallbackAutopilotTask(run: RunState, input: StartAutopilotInput): Promise<RunState> {
@@ -1240,7 +1286,7 @@ async function askOpenRouterManager(
 
   // Non-OpenRouter backends own their own request lifecycle (spawn a real
   // `claude` / `codex` CLI, tail its JSONL transcript, etc.). Dispatch and
-  // skip the OpenRouter-specific SparkCall + artifact + LangSmith pipeline
+  // skip the OpenRouter-specific SparkCall and artifact pipeline
   // below. Both backends still apply their resulting SparkManagerDecision
   // through applySparkManagerDecision so downstream worker spawns + chat
   // replies work identically.
@@ -1250,12 +1296,11 @@ async function askOpenRouterManager(
 
   const baseConfig = readOpenRouterConfig(settings);
   if (!baseConfig) return null;
-  const langSmithConfig = readLangSmithConfig(settings);
 
   // The composer chip's per-chat model override beats the global setting. We
   // shadow `config` with the resolved version so the rest of the pipeline
-  // (request body, SparkCall record, artifacts, LangSmith trace) all see the
-  // chip's selected model without a per-call-site rewrite.
+  // (request body, SparkCall record, artifacts) all see the chip's selected
+  // model without a per-call-site rewrite.
   const config: OpenRouterConfig =
     chatConfig.model && chatConfig.model !== baseConfig.model
       ? { ...baseConfig, model: chatConfig.model }
@@ -1320,8 +1365,6 @@ async function askOpenRouterManager(
     openRouterModel: config.model,
     openRouterBaseUrl: config.baseUrl,
     openRouterStructuredOutputFallbackModel: config.structuredOutputFallbackModel,
-    langSmithProject: langSmithConfig?.project,
-    langSmithEndpoint: langSmithConfig?.endpoint,
     agentRuntimeSelection: settings.agentRuntimeSelection,
     agentMcpSyncEnabled: settings.agentMcpSyncEnabled,
     agentSkillSyncEnabled: settings.agentSkillSyncEnabled,
@@ -1345,16 +1388,7 @@ async function askOpenRouterManager(
     },
   });
 
-  let langSmithTrace: LangSmithTrace | null = null;
   try {
-    langSmithTrace = await safeStartLangSmithManagerTrace({
-      config: langSmithConfig,
-      runId: run.id,
-      workspaceId: run.workspaceId,
-      sparkCallId: callId,
-      mode,
-      requestBody,
-    });
     // Transient OpenRouter / provider errors (network, 5xx, provider-routed
     // backends crashing mid-request) used to bubble straight to the catch
     // block, which returns null and exits the autopilot loop silently —
@@ -1363,19 +1397,6 @@ async function askOpenRouterManager(
     // re-throw structured-output-unsupported and other terminal errors
     // unchanged so the outer catch still routes them to the operator.
     const result = await requestManagerWithRetries(config, requestBody, managerMode);
-    await safeFinishLangSmithManagerTrace({
-      config: langSmithConfig,
-      trace: langSmithTrace,
-      output: {
-        decision: result.decision,
-        rawResponse: result.rawResponse,
-        durationMs: result.durationMs,
-        model: result.model,
-        fallbackFrom: result.fallbackFrom,
-        promptTokens: result.promptTokens,
-        completionTokens: result.completionTokens,
-      },
-    });
     await Promise.all([
       fs.writeFile(responsePath, JSON.stringify(result.rawResponse, null, 2), "utf8"),
       fs.writeFile(parsedJsonPath, JSON.stringify(result.decision, null, 2), "utf8"),
@@ -1464,11 +1485,6 @@ async function askOpenRouterManager(
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     const completedAt = new Date().toISOString();
     const error = err instanceof Error ? err.message : String(err);
-    await safeFinishLangSmithManagerTrace({
-      config: langSmithConfig,
-      trace: langSmithTrace,
-      error,
-    });
     if (targetCall) {
       targetCall.status = "failed";
       targetCall.error = error;
@@ -1632,7 +1648,7 @@ async function askChatBackendNonOpenRouter(
 // runs, so the implementation worker is the only check on the work and must
 // have the stronger 'taste' that catches all distinct issues in one pass.
 const TRIVIAL_TOP_TIER_BY_RUNTIME: Record<string, { modelHint: string; effortHint: WorkerTask["effortHint"] }> = {
-  claude: { modelHint: "claude-opus-4-7", effortHint: "high" },
+  claude: { modelHint: "claude-opus-4-8", effortHint: "high" },
   codex: { modelHint: "gpt-5.5", effortHint: "high" },
 };
 
@@ -1646,7 +1662,7 @@ const TRIVIAL_TOP_TIER_BY_RUNTIME: Record<string, { modelHint: string; effortHin
 // `"claude-sonnet-4-6@medium"` as the modelHint string across runs, and an
 // allow-list keyed on raw strings silently misses the suffixed variant.
 const TOP_TIER_MODEL_BASES = new Set([
-  "claude-opus-4-7",
+  "claude-opus-4-8",
   "opus",
   "gpt-5.5",
 ]);
@@ -1664,7 +1680,7 @@ function isTopTierModel(hint: string | undefined): boolean {
 function promoteForTrivial(agent: PlannedStepAgent): PlannedStepAgent {
   // Skeleton/verifier are exempt from the floor by design; leaf is mechanical
   // work where top-tier "taste" buys nothing — running a single shell command
-  // and reporting its output does not benefit from Opus 4.7@high, and the
+  // and reporting its output does not benefit from Opus 4.8@high, and the
   // surprise cost (e.g. a chat-mode "what time is it?" worker on opus) is
   // worse than the recipe's intended cheap pick.
   if (agent.taskClass === "skeleton" || agent.taskClass === "verifier" || agent.taskClass === "leaf") return agent;
@@ -2147,7 +2163,7 @@ async function enforceUserRuntimeMandate(
     return { decision, overrides: [] };
   }
   const modelDefaults: Record<string, { modelHint?: string; effortHint?: WorkerTask["effortHint"] }> = {
-    claude: { modelHint: "claude-opus-4-7", effortHint: "high" },
+    claude: { modelHint: "claude-opus-4-8", effortHint: "high" },
     codex: { modelHint: "gpt-5.5", effortHint: "high" },
   };
   const defaults = modelDefaults[mandate] ?? { modelHint: undefined, effortHint: undefined };
@@ -3565,7 +3581,21 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
       draft.updatedAt = timestamp;
     },
   });
-  if (shouldScheduleManagerAfterResume) {
+  // Guarantee a manager driver after resume. The original gate only fired when
+  // a spark QUESTION was pending, so resuming a run paused for any other reason
+  // — e.g. the stalled-review failsafe in runAutopilotManagerReview, or a plain
+  // force-pause between cycles — left it in "running" with nothing driving it
+  // (stuck on the Stop button forever). Broaden it so any resumed autopilot run
+  // with no workers in flight gets re-driven. Skip execute-mode CLI managers:
+  // they re-drive via the resume signals sent above, not the autopilot
+  // scheduler (scheduleAutopilotReview is never used for them — see the worker
+  // cycle path). The scheduler itself dedupes, so this can't double-drive.
+  const isExecuteModeCliManager =
+    (resumed.chatBackend === "claude" || resumed.chatBackend === "codex") &&
+    resumed.chatMode === "execute";
+  const shouldScheduleDriver =
+    !isExecuteModeCliManager && activeWorkersForRun(resumed.id).length === 0;
+  if (shouldScheduleManagerAfterResume || shouldScheduleDriver) {
     if (resumed.workerAttempts.length > 0) {
       scheduleAutopilotReview(resumed.id, resumeInput.cwd);
     } else {
@@ -4312,6 +4342,26 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
       // combination — new system prompt + resumed transcript + inline
       // role-shift announcement — lets the user toggle mid-chat without
       // losing the chat thread. See spark-chat-mode-anchor memory.
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Rename a chat. The renderer drives this from the top tab strip's hover-
+// revealed pencil affordance; the title is shown on the tab and in any
+// stored manifest that derives from `run.title`. Empty / whitespace-only
+// titles are rejected so a chat never ends up with a blank tab label.
+export async function renameRun(input: RenameRunInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const title = input.title.trim();
+  if (!title) throw new Error("Chat title cannot be empty.");
+  if (title === run.title) return run;
+  return commitRunChange(run, {
+    type: "run.renamed",
+    message: `Run renamed to ${title}`,
+    payload: { previousTitle: run.title, title },
+    mutate: (draft, timestamp) => {
+      draft.title = title;
       draft.updatedAt = timestamp;
     },
   });
@@ -5647,7 +5697,7 @@ function estimateTextSections(
 }
 
 function fallbackModelHintForRuntime(runtime: WorkerRuntime): string | undefined {
-  if (runtime === "claude") return "claude-opus-4-7";
+  if (runtime === "claude") return "claude-opus-4-8";
   if (runtime === "codex") return "gpt-5.5";
   return undefined;
 }

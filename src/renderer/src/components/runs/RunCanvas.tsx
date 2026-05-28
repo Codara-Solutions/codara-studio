@@ -85,6 +85,7 @@ export default function RunCanvas({ run }: { run: RunState }) {
     startY: number;
     moved: boolean;
   } | null>(null);
+  const suppressNextNodeClickRef = useRef(false);
   const centeredRunIdRef = useRef<string | null>(null);
   const inspectorResizeRef = useRef(inspector.width);
 
@@ -274,8 +275,14 @@ export default function RunCanvas({ run }: { run: RunState }) {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
+    if (start.moved) {
+      suppressNextNodeClickRef.current = true;
+      window.setTimeout(() => {
+        suppressNextNodeClickRef.current = false;
+      }, 0);
+    }
     // A press that never moved is a click on empty canvas — clear selection.
-    if (!start.moved) {
+    else {
       setSelectedStepId(null);
       setSelectedWorkerTaskId(null);
     }
@@ -291,6 +298,10 @@ export default function RunCanvas({ run }: { run: RunState }) {
 
   const handleSelectStep = useCallback(
     (id: string) => {
+      if (suppressNextNodeClickRef.current) {
+        suppressNextNodeClickRef.current = false;
+        return;
+      }
       setSelectedWorkerTaskId(null);
       setSelectedStepId((current) => (current === id ? null : id));
       revealInspector();
@@ -300,6 +311,10 @@ export default function RunCanvas({ run }: { run: RunState }) {
 
   const handleSelectWorker = useCallback(
     (id: string) => {
+      if (suppressNextNodeClickRef.current) {
+        suppressNextNodeClickRef.current = false;
+        return;
+      }
       setSelectedStepId(null);
       setSelectedWorkerTaskId((current) => (current === id ? null : id));
       revealInspector();

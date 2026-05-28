@@ -70,9 +70,6 @@ export interface AppSettings {
   defaultShellId: string | null;
   openRouterApiKey: string;
   openRouterModel: string;
-  langSmithApiKey: string;
-  langSmithProject: string;
-  langSmithEndpoint: string;
   agentRuntimeSelection: AgentRuntimeSelection;
   agentMcpSyncEnabled: boolean;
   agentSkillSyncEnabled: boolean;
@@ -770,7 +767,7 @@ export interface RunState {
   /**
    * Model id passed to the chosen backend. For OpenRouter this is a free-form
    * provider/model slug (e.g. "google/gemini-flash-latest"); for Claude one of
-   * "claude-opus-4-7" / "claude-sonnet-4-6"; for Codex always "gpt-5.5". When
+   * "claude-opus-4-8" / "claude-sonnet-4-6"; for Codex always "gpt-5.5". When
    * undefined the backend picks its registered default.
    */
   chatModel?: string;
@@ -804,9 +801,8 @@ export interface RunState {
    */
   chatFastMode?: boolean;
   /**
-   * 1M-context toggle. Claude Code is normalized to true and applies
-   * `/context 1m` after the REPL is ready. Codex and OpenRouter normalize it
-   * to false because they do not use this toggle.
+   * 1M-context toggle. Claude Code is normalized to true. Codex and
+   * OpenRouter normalize it to false because they do not use this toggle.
    */
   chat1mContext?: boolean;
 }
@@ -1263,6 +1259,11 @@ export interface UpdateRunStatusInput {
 
 export interface MarkRunSeenInput {
   runId: string;
+}
+
+export interface RenameRunInput {
+  runId: string;
+  title: string;
 }
 
 export interface CreateStepInput {

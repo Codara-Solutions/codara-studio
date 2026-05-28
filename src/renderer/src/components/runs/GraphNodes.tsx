@@ -294,7 +294,6 @@ function WorkerBatchNode({ step, index, rows, fileCount, active, selected, onSel
         event.stopPropagation();
         onSelect();
       }}
-      onPointerDown={(event) => event.stopPropagation()}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       title={`${step.goal || step.title}\n\nClick to ${selected ? "close the inspector" : "inspect this step"}.`}
@@ -453,7 +452,6 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
         event.stopPropagation();
         onSelect();
       }}
-      onPointerDown={(event) => event.stopPropagation()}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       title={`${step.goal || step.title}\n\nCheckpoint — Spark replans here.`}
@@ -677,7 +675,6 @@ export const WorkerNode = React.memo(function WorkerNode({
         event.stopPropagation();
         if (!queued) onSelect();
       }}
-      onPointerDown={(event) => event.stopPropagation()}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       title={

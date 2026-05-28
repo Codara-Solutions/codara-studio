@@ -151,7 +151,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   // Resolve the draft default from settings + runtimes. The hardcoded
   // fallback above (OpenRouter + Gemini Flash) only matters before this
   // resolves: once we know what's actually available we land on the first
-  // visible model (Claude Opus 4.7 in the common case), so the bar never
+  // visible model (Claude Opus 4.8 in the common case), so the bar never
   // opens on a model the user can't see in the dropdown. Runs once per
   // mount; an active run uses run.chatBackend/run.chatModel and is unaffected.
   useEffect(() => {
@@ -650,24 +650,13 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     if (normalizedChanges.chatFastMode !== undefined) setDraftFastMode(normalizedChanges.chatFastMode);
     if (normalizedChanges.chat1mContext !== undefined) setDraftOneMillionContext(normalizedChanges.chat1mContext);
     if (!run_) return;
-    // IPC is wired in a follow-up patch on the main process; cast lets the
-    // renderer call it ahead of time without dragging the preload contract
-    // into this changelist. Failures fall through to the toast bar.
-    const orchestration = window.spark.orchestration as unknown as {
-      updateChatBackend?: (input: {
-        runId: string;
-        chatBackend?: ChatBackendKind;
-        chatModel?: string;
-        chatMode?: ChatMode;
-        chatEffort?: AgentEffortLevel;
-        chatFastMode?: boolean;
-        chat1mContext?: boolean;
-      }) => Promise<unknown>;
-    };
-    if (typeof orchestration.updateChatBackend !== "function") return;
-    void orchestration.updateChatBackend({ runId: run_.id, ...normalizedChanges }).catch((err: unknown) => {
-      setError((err as Error).message);
-    });
+    // Persist the chip change to the backend so the manager picks it up on its
+    // next turn. Best-effort — failures surface in the toast bar.
+    void window.spark.orchestration
+      .updateChatBackend({ runId: run_.id, ...normalizedChanges })
+      .catch((err: unknown) => {
+        setError((err as Error).message);
+      });
   };
 
   const onPickModel = (model: ChatModelOption) => {
@@ -709,7 +698,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   };
 
   // 1M context used to be a standalone pill; it now lives as virtual rows
-  // in the model dropdown ("Opus 4.7 1M" etc.), so onPickModel writes
+  // in the model dropdown ("Opus 4.8 1M" etc.), so onPickModel writes
   // chat1mContext directly via applyChatBackendChange. No standalone
   // toggle handler is needed here anymore.
 

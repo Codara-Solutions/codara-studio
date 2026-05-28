@@ -8,6 +8,12 @@ interface Props {
   workspace: Workspace | null;
   runs: RunState[];
   activeRunId: string | null;
+  // Chat / backend-PTY view mode — driven by the workspace's hoisted inner
+  // tab strip so the toggle survives navigating from the chat tab to a worker
+  // or back. Optional during the transition; ChatPanel falls back to its own
+  // local state when this is not provided.
+  chatView?: "chat" | "terminal";
+  onChatViewChange?: (view: "chat" | "terminal") => void;
   onSelectRun: (id: string | null) => void;
   onRunSnapshot: (
     run: RunState,
@@ -28,6 +34,8 @@ export default function OrchestrationSidebar({
   workspace,
   runs,
   activeRunId,
+  chatView,
+  onChatViewChange,
   onSelectRun,
   onRunSnapshot,
   collapsed,
@@ -199,7 +207,10 @@ export default function OrchestrationSidebar({
       // user-message checkpoint yet (e.g. a Stop fired in the first few ms of
       // a fresh run before checkpoint creation completed).
       const result = await window.spark.orchestration.stopAndUndoPending(activeRun.id);
-      onRunSnapshot(result.run);
+      // select:true re-selects the run and focuses its chat tab, so the
+      // prefilled "give me my message back" text lands in a VISIBLE composer
+      // even if a preview/terminal had stolen the active tab during the run.
+      onRunSnapshot(result.run, { select: true });
       if (result.restoredText != null && result.restoredText.length > 0) {
         window.dispatchEvent(
           new CustomEvent("spark:prefill-composer", {
@@ -220,10 +231,12 @@ export default function OrchestrationSidebar({
       onToggleCollapse={onToggleCollapse}
       collapsible={collapsible}
       headerDrag={headerDrag}
-      onSelectRun={handleSelectRun}
-      onDeleteRun={handleDeleteRun}
+      chatView={chatView}
+      onChatViewChange={onChatViewChange}
       onStartChat={startChat}
       onForcePauseRun={forcePauseRun}
+      onSelectChat={handleSelectRun}
+      onDeleteChat={handleDeleteRun}
     />
   );
 }

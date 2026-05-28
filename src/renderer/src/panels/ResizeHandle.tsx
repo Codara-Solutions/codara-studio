@@ -53,21 +53,33 @@ export function ResizeHandle({
 
   useEffect(() => {
     if (!dragging) return;
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      setDragging(false);
+      endRef.current?.();
+    };
     const onMove = (event: PointerEvent) => {
       const pos = isCol ? event.clientX : event.clientY;
       resizeRef.current(pos - startRef.current);
     };
-    const onUp = () => {
-      setDragging(false);
-      endRef.current?.();
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") finish();
     };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
+    window.addEventListener("pointermove", onMove, true);
+    window.addEventListener("pointerup", finish, true);
+    window.addEventListener("pointercancel", finish, true);
+    window.addEventListener("mouseup", finish, true);
+    window.addEventListener("blur", finish);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("pointermove", onMove, true);
+      window.removeEventListener("pointerup", finish, true);
+      window.removeEventListener("pointercancel", finish, true);
+      window.removeEventListener("mouseup", finish, true);
+      window.removeEventListener("blur", finish);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [dragging, isCol]);
 
