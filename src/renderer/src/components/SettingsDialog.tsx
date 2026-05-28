@@ -1630,10 +1630,8 @@ function RunsSettings({
   }, [runs, filter, workspaceNames]);
 
   const deleteRun = async (run: RunState) => {
-    const ok = window.confirm(
-      `Delete run "${run.title}"?\n\nThis is permanent. Active workers will be killed and the artifact directory will be removed.`,
-    );
-    if (!ok) return;
+    // Confirmation is handled in-app by RunRow's two-step delete button
+    // (click to arm, click again to confirm) — no native OS dialog.
     setBusyId(run.id);
     setError(null);
     try {
@@ -1751,6 +1749,9 @@ function RunRow({
   const status = run.status;
   const statusColor = runStatusColor(status);
   const created = formatRunCreated(run.createdAt);
+  // Two-step delete: first click arms, second click confirms. Disarms when the
+  // pointer leaves the button group, so a stray click never deletes a run.
+  const [armed, setArmed] = useState(false);
   return (
     <div
       style={{
@@ -1842,10 +1843,21 @@ function RunRow({
           <span style={{ marginLeft: "auto" }}>{created}</span>
         </div>
       </div>
-      <div style={{ display: "flex", gap: 6 }}>
+      <div style={{ display: "flex", gap: 6 }} onMouseLeave={() => setArmed(false)}>
         <FooterButton onClick={onOpen}>Open</FooterButton>
-        <DangerButton onClick={onDelete} disabled={busy}>
-          {busy ? "…" : "Delete"}
+        <DangerButton
+          onClick={() => {
+            if (busy) return;
+            if (!armed) {
+              setArmed(true);
+              return;
+            }
+            setArmed(false);
+            onDelete();
+          }}
+          disabled={busy}
+        >
+          {busy ? "…" : armed ? "Confirm delete" : "Delete"}
         </DangerButton>
       </div>
     </div>

@@ -306,29 +306,6 @@ export function DrawIcon({ size = 14 }: { size?: number }) {
   );
 }
 
-export function GridIcon({ size = 14 }: { size?: number }) {
-  // A 2×2 cell grid — reads as "tiled view". Used on the Swarm toggle in
-  // the chat header to switch the centre area from the standard
-  // conversation+graph layout to the swarm grid of live worker terminals.
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 14 14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <rect x="2" y="2" width="4" height="4" rx="0.6" />
-      <rect x="8" y="2" width="4" height="4" rx="0.6" />
-      <rect x="2" y="8" width="4" height="4" rx="0.6" />
-      <rect x="8" y="8" width="4" height="4" rx="0.6" />
-    </svg>
-  );
-}
-
 export function BroadcastIcon({ size = 14 }: { size?: number }) {
   // A radiating-arc transmitter — reads as "send to many". Used on the
   // Swarm header's Broadcast button: pressing it opens a textarea that
@@ -349,6 +326,28 @@ export function BroadcastIcon({ size = 14 }: { size?: number }) {
       <path d="M10 4.2 A 4 4 0 0 1 10 9.8" />
       <path d="M2.2 2.6 A 6.4 6.4 0 0 0 2.2 11.4" />
       <path d="M11.8 2.6 A 6.4 6.4 0 0 1 11.8 11.4" />
+    </svg>
+  );
+}
+
+export function HistoryIcon({ size = 14 }: { size?: number }) {
+  // A clock face with a counter-clockwise arrow — the universal "history"
+  // glyph. Used on the Spark chat header's Chats button to open the
+  // recent-chats popover.
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M2.5 6 A 4.5 4.5 0 1 0 3.6 3.2" />
+      <polyline points="2.2,2.2 2.6,5.4 5.6,5" />
+      <polyline points="7,4.4 7,7.2 9,8.4" />
     </svg>
   );
 }

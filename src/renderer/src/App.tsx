@@ -64,6 +64,12 @@ import {
   workerMenuLabel,
 } from "./routing/enumerate-open-workers";
 
+// Stable brand label for every chat tab in the top strip. The first-message-
+// derived run.title is kept on the RunState for the chat panel header and the
+// history popover; only the workspace tab strip is forced to this constant so
+// short prompts ("hello") don't surface as truncated "He..." labels.
+const CHAT_TAB_LABEL = "Spark Agent";
+
 const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
   openRouterApiKey: "",
@@ -260,6 +266,21 @@ export default function App() {
     [workspaces, activeId],
   );
 
+  // Self-heal a null/dangling active workspace id. The app renders the full
+  // Workspace UI whenever `workspaces.length > 0` (see the NoWorkspace gate in
+  // the render), but `activeWorkspace` is resolved by id — so a null or stale
+  // `activeId` (e.g. a persisted pointer to a since-removed workspace, or a
+  // transient gap) leaves the UI up with `activeWorkspace === null`, which
+  // disables the chat composer and every workspace-gated control even though a
+  // workspace plainly exists. Coerce to the first real workspace so the active
+  // workspace is never null while workspaces exist. No-op in normal operation
+  // (activeId already valid); only fires to recover from a broken pointer.
+  useEffect(() => {
+    if (!booted || workspaces.length === 0) return;
+    if (activeId && workspaces.some((w) => w.id === activeId)) return;
+    setActiveId(workspaces[0].id);
+  }, [booted, workspaces, activeId]);
+
   // Tabs are scoped per-workspace so each workspace remembers its own layout.
   // useTabs internally swaps tab lists when the workspaceId argument changes.
   const tabs = useTabs(activeId, activeWorkspace?.cwd);
@@ -317,7 +338,11 @@ export default function App() {
           ? activeTab.id
           : null;
       if (draftToPromote) {
-        tabsRef.current.promoteDraftChatTab(draftToPromote, run.id, run.title);
+        // The top-strip chat tab always reads "Spark Agent" — the first-
+        // message-derived run.title would otherwise truncate to fragments
+        // like "He..." for short prompts. The real title is still surfaced
+        // in the chat panel header and the history popover.
+        tabsRef.current.promoteDraftChatTab(draftToPromote, run.id, CHAT_TAB_LABEL);
       }
       if (runHasWorkbench(run)) {
         tabsRef.current.openRunsTab(run.id, "Runs", focusRuns);
@@ -400,8 +425,12 @@ export default function App() {
   // closes them or sends their first message (which then rekeys the draft
   // tab id to the new run id via promoteDraftChatTab).
   useEffect(() => {
+    // All chat tabs in the top strip render as "Spark Agent" — see
+    // CHAT_TAB_LABEL above. Run.title is preserved on the RunState for the
+    // chat panel header and history popover; only the tab label is forced
+    // to a stable brand so short prompts don't surface as "He...".
     tabsRef.current.syncChatTabsToRuns(
-      runs.map((run) => ({ id: run.id, title: run.title })),
+      runs.map((run) => ({ id: run.id, title: CHAT_TAB_LABEL })),
     );
   }, [runs]);
 
@@ -630,6 +659,9 @@ export default function App() {
         if (event.runId) {
           tabsRef.current.closeRunsTabFor(event.runId);
           tabsRef.current.closeWorkerTerminalTabFor(event.runId);
+          // Drop the chat tab too, so the active selection can't keep pointing
+          // at a deleted run until the debounced refresh catches up.
+          tabsRef.current.closeChatTabForRun(event.runId);
         }
         const deletedWorkspaceId = event.workspaceId;
         window.setTimeout(() => {
@@ -1132,16 +1164,14 @@ export default function App() {
       if (last && sameOrigin(last, url)) return;
       lastOpenedUrlByTerminalRef.current.set(paneId, url);
 
-      // If a preview tab already shows the same origin, focus it instead
-      // of stacking a duplicate — multi-tab parity with how editors dedupe
-      // open paths.
+      // If a preview tab already shows the same origin, do nothing — it's
+      // already in the strip. A passive stdout sniff must never reassign the
+      // active tab, or a dev server printing its URL would yank the user off
+      // their chat onto the browser (and hide the composer).
       const existing = tabs.tabs.find(
         (t) => t.kind === "preview" && sameOrigin(t.url, url),
       );
-      if (existing) {
-        tabs.setActiveTab(existing.id);
-        return;
-      }
+      if (existing) return;
       // Inherit the worker's runId so the chat panel can render this preview
       // inside its inner tab strip; URLs detected on a plain (non-worker)
       // terminal stay top-level by leaving runId undefined.
@@ -1150,7 +1180,9 @@ export default function App() {
         sourceTab?.kind === "terminal" && sourceTab.scope?.kind === "workers"
           ? sourceTab.scope.runId
           : null;
-      tabs.newPreviewTab(url, { runId: ownerRunId });
+      // focus:false — an auto-detected preview opens in the background so it
+      // doesn't steal the active tab from a chat the user is working in.
+      tabs.newPreviewTab(url, { runId: ownerRunId, focus: false });
     },
     [AUTO_PREVIEW_PORTS, tabs],
   );
@@ -1166,7 +1198,10 @@ export default function App() {
     const target =
       active?.kind === "terminal"
         ? active
-        : tabs.tabs.find((t) => t.kind === "terminal");
+        : // Exclude run-scoped worker tabs: they're hidden unless their run is
+          // active, so adding a user pane there would strand it and bounce the
+          // active tab off the chat.
+          tabs.tabs.find((t) => t.kind === "terminal" && t.scope?.kind !== "workers");
     if (!target || target.kind !== "terminal") {
       tabs.newTerminalTab(activeWorkspace?.cwd ?? undefined);
       return;
@@ -1198,7 +1233,9 @@ export default function App() {
       const target =
         active?.kind === "terminal"
           ? active
-          : tabs.tabs.find((t) => t.kind === "terminal");
+          : // Skip run-scoped worker tabs (hidden unless their run is active)
+            // so the worker pane lands in a visible top-strip terminal.
+            tabs.tabs.find((t) => t.kind === "terminal" && t.scope?.kind !== "workers");
       if (!target || target.kind !== "terminal") {
         tabs.newTerminalTab(activeWorkspace?.cwd ?? undefined, autorun);
         return;
@@ -1245,38 +1282,13 @@ export default function App() {
     tabs.addDraftChatTab();
   }, [tabs]);
 
-  // Chat-tab "×" — drafts dissolve locally; run-backed chats call the
-  // orchestration delete IPC (with a confirm when worker terminals are
-  // still running so the user does not silently kill an active swarm).
+  // Chat-tab "×" — close-only. Drafts dissolve locally; run-backed chats
+  // only have their tab removed from the top strip. The run stays on disk
+  // and shows up in the chat-history popover so the user can reopen it
+  // later. Permanent deletion is reserved for the history popover's
+  // per-row delete button.
   const handleCloseChatTab = useCallback(
     (id: TabId) => {
-      if (isDraftChatTabId(id)) {
-        // Draft never reached the run store — just drop the tab.
-        tabs.closeChatTabForRun(id);
-        return;
-      }
-      const hasRunningWorkers = tabs.tabs.some(
-        (t) =>
-          t.kind === "terminal" &&
-          t.scope?.kind === "workers" &&
-          t.scope.runId === id &&
-          t.root &&
-          (function hasLiveWorker(node: PaneNode): boolean {
-            if (node.kind === "leaf") {
-              return Boolean(node.worker && node.worker.state === "running");
-            }
-            return hasLiveWorker(node.a) || hasLiveWorker(node.b);
-          })(t.root),
-      );
-      if (hasRunningWorkers) {
-        const ok = window.confirm(
-          "This chat still has running workers. Closing it will delete the run and kill the workers. Continue?",
-        );
-        if (!ok) return;
-      }
-      void window.spark.orchestration.deleteRun(id).catch(() => {
-        /* best-effort delete — failures surface via the run snapshot stream */
-      });
       tabs.closeChatTabForRun(id);
     },
     [tabs],
@@ -1333,8 +1345,12 @@ export default function App() {
     // MCP-driven preview spawns happen during orchestration, so the new tab
     // inherits whichever run is currently active. Reading the ref at call
     // time avoids rebinding the registry hook on every activeRunId change.
+    // focus:false — an agent-driven preview spawns in the background (it
+    // surfaces in the active run's inner tab strip) instead of pulling the
+    // user off their chat mid-run. The bridge drives navigation by tab id, so
+    // the preview need not be the active tab.
     setOpenPreviewTabFn((url: string) =>
-      tabs.newPreviewTab(url, { runId: activeRunIdRef.current }),
+      tabs.newPreviewTab(url, { runId: activeRunIdRef.current, focus: false }),
     );
     return () => setOpenPreviewTabFn(null);
   }, [tabs]);
@@ -1623,7 +1639,8 @@ export default function App() {
       const target =
         active?.kind === "terminal"
           ? active
-          : t.tabs.find((tab) => tab.kind === "terminal");
+          : // Skip run-scoped worker tabs (hidden unless their run is active).
+            t.tabs.find((tab) => tab.kind === "terminal" && tab.scope?.kind !== "workers");
       if (!target || target.kind !== "terminal") {
         t.newTerminalTab(activeWorkspace?.cwd ?? undefined, autorun);
         return null;
@@ -2251,6 +2268,15 @@ const Workspace = React.memo(function Workspace({
       window.clearInterval(interval);
     };
   }, [backendSessionId]);
+  // Escape a dead Terminal view: if the backend PTY is gone (or never
+  // existed) while chatView is "terminal", the chat panel renders neither the
+  // terminal nor the composer. Fall back to the chat view so the composer is
+  // always reachable.
+  useEffect(() => {
+    if (chatView === "terminal" && (!backendSessionId || !backendPtyExists)) {
+      setChatView("chat");
+    }
+  }, [chatView, backendSessionId, backendPtyExists]);
   const innerStripVisible =
     Boolean(activeRunId) &&
     (backendPtyExists ||

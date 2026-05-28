@@ -33,6 +33,7 @@ export interface ModelPrice {
 // vendor changes prices or Spark starts using a new model.
 export const MODEL_PRICES: Record<string, ModelPrice> = {
   // Anthropic — Claude 4.x family.
+  "anthropic/claude-opus-4-8": { input: 15, output: 75, cacheRead: 1.5 },
   "anthropic/claude-opus-4-7": { input: 15, output: 75, cacheRead: 1.5 },
   "anthropic/claude-opus-4": { input: 15, output: 75, cacheRead: 1.5 },
   "anthropic/claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3 },

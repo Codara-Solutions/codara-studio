@@ -41,10 +41,16 @@ async function readFromDisk(): Promise<AppState> {
   try {
     const raw = await fs.readFile(statePath(), "utf8");
     const parsed = JSON.parse(raw) as Partial<AppState>;
-    return {
-      workspaces: Array.isArray(parsed.workspaces) ? parsed.workspaces.map(normalize) : [],
-      activeWorkspaceId: parsed.activeWorkspaceId ?? null,
-    };
+    const workspaces = Array.isArray(parsed.workspaces) ? parsed.workspaces.map(normalize) : [];
+    // Coerce a dangling activeWorkspaceId (points at a workspace that no longer
+    // exists) to a real one. Otherwise the renderer resolves the active
+    // workspace to null while workspaces still exist, which disables the chat
+    // composer (ChatPanel renders it with disabled={!workspace}).
+    const activeWorkspaceId =
+      parsed.activeWorkspaceId && workspaces.some((w) => w.id === parsed.activeWorkspaceId)
+        ? parsed.activeWorkspaceId
+        : workspaces[0]?.id ?? null;
+    return { workspaces, activeWorkspaceId };
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ...EMPTY };
     console.error("[storage] failed to read state, starting empty:", err);

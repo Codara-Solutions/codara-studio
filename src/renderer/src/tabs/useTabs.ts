@@ -80,6 +80,9 @@ function titleFromUrl(url: string): string {
 // recursive split kept equal area but produced awkward mixed columns for
 // counts like 5; rows keep the scan path predictable (5 -> 3 over 2).
 function buildPaneGrid(leaves: TerminalLeaf[]): PaneNode {
+  if (leaves.length === 0) {
+    throw new Error("Cannot build an empty terminal pane grid.");
+  }
   if (leaves.length <= 1) return leaves[0];
   const columns = Math.ceil(Math.sqrt(leaves.length));
   const rows = Math.ceil(leaves.length / columns);
@@ -234,12 +237,25 @@ function loadPersisted(workspaceId: string | null): PersistedShape | null {
     // effect rebuilds run-backed chat tabs.
     parsed.tabs = ensureAnyChatTab(
       normalizeTerminalTitles(
-        parsed.tabs.filter(
-          (tab) =>
-            tab.kind !== "runs" &&
-            tab.kind !== "chat" &&
-            !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
-        ),
+        parsed.tabs
+          .filter(
+            (tab) =>
+              tab.kind !== "runs" &&
+              tab.kind !== "chat" &&
+              !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
+          )
+          // A persisted preview's runId ties it to a run whose workbench is
+          // not selected at boot, which would hide it inside an inner tab
+          // strip with no owning run — effectively unreachable. Strip the
+          // runId so it restores as a plain, clickable top-strip preview.
+          .map((tab) =>
+            tab.kind === "preview" && tab.runId
+              ? (() => {
+                  const { runId: _runId, ...rest } = tab;
+                  return rest as Tab;
+                })()
+              : tab,
+          ),
       ),
     );
     for (const tab of parsed.tabs) {
@@ -323,10 +339,18 @@ function initialTabsState(workspaceId: string | null, defaultCwd?: string): {
 } {
   const loaded = loadPersisted(workspaceId);
   if (loaded && loaded.tabs.length > 0) {
-    const activeId =
+    let activeId =
       loaded.activeId && loaded.tabs.some((t) => t.id === loaded.activeId)
         ? loaded.activeId
         : loaded.tabs[0].id;
+    // Never boot onto a restored preview: its dev server is almost certainly
+    // dead after a restart, and landing there hides the chat composer (the
+    // center routes everything through one active id). Prefer the chat tab so
+    // the app always opens on something the user can act in.
+    const resolved = loaded.tabs.find((t) => t.id === activeId);
+    if (resolved?.kind === "preview") {
+      activeId = loaded.tabs.find((t) => t.kind === "chat")?.id ?? activeId;
+    }
     return { tabs: loaded.tabs, activeId };
   }
   const seed = defaultTabs(defaultCwd);
@@ -453,7 +477,12 @@ export interface UseTabsApi {
   // gives an immediate visual update without waiting for the run snapshot
   // to round-trip back.
   renameChatTab: (id: TabId, title: string) => void;
-  newPreviewTab: (url: string, options?: { runId?: string | null }) => TabId;
+  // Open a preview tab. `focus` defaults to true so explicit user opens
+  // ("+ New preview", openInSparkBrowser) select the new tab. Automated
+  // openers (dev-server URL auto-detect, the MCP preview bridge) pass
+  // focus:false so a preview never yanks the user off their chat — the tab
+  // still appears in the strip / inner strip to click into.
+  newPreviewTab: (url: string, options?: { runId?: string | null; focus?: boolean }) => TabId;
   // Open (or relabel) the runs tab bound to a chat. Each chat owns exactly
   // one runs tab. `focus` selects it too — true for explicit navigation,
   // false for the background "ensure the active chat has a tab" effect.
@@ -1105,7 +1134,14 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         if (dropped) {
           setActiveId((active) => {
             if (active !== tabId) return active;
-            return next[next.length - 1]?.id ?? null;
+            // Prefer a top-strip (non-run-owned) tab so closing a worker tab's
+            // last pane doesn't strand the active id on a hidden worker/runs tab.
+            const isRunOwned = (t: Tab) =>
+              (t.kind === "terminal" && t.scope?.kind === "workers") ||
+              t.kind === "runs" ||
+              (t.kind === "preview" && Boolean(t.runId));
+            const topStrip = next.filter((t) => !isRunOwned(t));
+            return topStrip[topStrip.length - 1]?.id ?? next[next.length - 1]?.id ?? null;
           });
         }
         return normalizeTerminalTitles(next);
@@ -1263,19 +1299,28 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
       // matches whatever the updater decided to add or reuse.
       if (input.runId === null) {
         const fallback = `${DRAFT_CHAT_PREFIX}${makeId("chat")}`;
+        // Return the id actually used: the reused draft's id when one already
+        // exists, else the freshly-created draft. Resolved INSIDE the updater
+        // (tabsRef is stale in the same event as promote/sync — see comment
+        // above), so the caller never gets a phantom id that was never added.
+        let resolvedId = fallback;
         setTabs((curr) => {
           const existingDraft = curr.find(
             (t): t is ChatTab => t.kind === "chat" && isDraftChatTabId(t.id),
           );
           if (existingDraft) {
+            resolvedId = existingDraft.id;
             if (focus) setActiveId(existingDraft.id);
             return curr;
           }
-          const draft: ChatTab = { id: fallback, kind: "chat", title: "New chat" };
+          // "Spark Agent" matches the stable label App.tsx forces onto every
+          // run-backed chat tab (CHAT_TAB_LABEL), so the user never sees the
+          // "New chat" → first-message truncation when a draft promotes.
+          const draft: ChatTab = { id: fallback, kind: "chat", title: "Spark Agent" };
           if (focus) setActiveId(draft.id);
           return [...curr, draft];
         });
-        return fallback;
+        return resolvedId;
       }
       const runId = input.runId;
       setTabs((curr) => {
@@ -1346,10 +1391,25 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
   );
 
   const addDraftChatTab = useCallback((): TabId => {
-    const draft = createDraftChatTab();
-    setTabs((curr) => [...curr, draft]);
-    setActiveId(draft.id);
-    return draft.id;
+    // Reuse an existing empty draft rather than stacking another "New chat"
+    // orphan. Dedup INSIDE the updater (tabsRef is stale in the same event as
+    // promote/sync), matching openChatTab's null branch.
+    let resultId: TabId = "";
+    setTabs((curr) => {
+      const existingDraft = curr.find(
+        (t): t is ChatTab => t.kind === "chat" && isDraftChatTabId(t.id),
+      );
+      if (existingDraft) {
+        resultId = existingDraft.id;
+        setActiveId(existingDraft.id);
+        return curr;
+      }
+      const draft = createDraftChatTab();
+      resultId = draft.id;
+      setActiveId(draft.id);
+      return [...curr, draft];
+    });
+    return resultId;
   }, []);
 
   const promoteDraftChatTab = useCallback(
@@ -1407,7 +1467,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
   }, []);
 
   const newPreviewTab = useCallback(
-    (url: string, options?: { runId?: string | null }): TabId => {
+    (url: string, options?: { runId?: string | null; focus?: boolean }): TabId => {
       const id = makeId("preview");
       const tab: PreviewTab = {
         id,
@@ -1417,7 +1477,10 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         ...(options?.runId ? { runId: options.runId } : {}),
       };
       setTabs((curr) => [...curr, tab]);
-      setActiveId(id);
+      // Only steal the active tab for explicit user opens. Automated openers
+      // (auto-detect, MCP bridge) pass focus:false so the preview appears in
+      // the background instead of hiding the chat composer.
+      if (options?.focus !== false) setActiveId(id);
       return id;
     },
     [],
@@ -1490,9 +1553,14 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         setActiveId(seed[0].id);
         return seed;
       }
-      setActiveId((active) =>
-        active && next.some((tab) => tab.id === active) ? active : next[0]?.id ?? null,
-      );
+      setActiveId((active) => {
+        if (active && next.some((tab) => tab.id === active)) return active;
+        // Prefer a chat tab when the active runs tab goes away, rather than
+        // next[0] (often a terminal/preview) which would strand the user
+        // off-chat.
+        const chat = next.find((tab) => tab.kind === "chat");
+        return chat?.id ?? next[0]?.id ?? null;
+      });
       return next;
     });
   }, []);

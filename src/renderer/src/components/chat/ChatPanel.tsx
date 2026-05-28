@@ -1,11 +1,10 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AddRunMessageAttachmentInput, RunState, ShellInfo, Workspace } from "@shared/types";
 import { backendPtySessionId } from "@shared/backend-pty";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
-import { GridIcon } from "../icons";
+import { CloseIcon, HistoryIcon } from "../icons";
 import ChatConversation from "./ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
-import SwarmView from "./SwarmView";
 import { TerminalPane } from "../Terminal/TerminalPane";
 import { describeRunStatus, statusToneColor } from "./timeline";
 
@@ -52,6 +51,16 @@ interface Props {
     chatConfig?: ChatComposerStartConfig,
   ) => RunState | void | Promise<RunState | void>;
   onForcePauseRun: () => void;
+  // Open a past chat from the history popover. The handler is expected to
+  // both select the run (so the conversation switches) and surface the
+  // chat tab in the top strip; OrchestrationSidebar's handleSelectRun
+  // already does both via its onSelectRun → openChatTab plumbing.
+  onSelectChat?: (runId: string) => void;
+  // Delete a past chat from the history popover. Confirmed inline before
+  // dispatching. If the deleted chat was active, the parent is responsible
+  // for clearing the active selection (OrchestrationSidebar.handleDeleteRun
+  // already does this).
+  onDeleteChat?: (runId: string) => void;
 }
 
 export default function ChatPanel({
@@ -67,14 +76,9 @@ export default function ChatPanel({
   onChatViewChange,
   onStartChat,
   onForcePauseRun,
+  onSelectChat,
+  onDeleteChat,
 }: Props) {
-  // Swarm view toggle — flips the chat body from the normal
-  // conversation+composer layout to a grid of live worker terminals. State
-  // is scoped to this panel so the toggle survives switching tabs but
-  // resets if the section is collapsed (the toolbar disappears anyway).
-  // Per-chat keying via run.id means a chat that has no swarm-worthy
-  // workers can still flip in/out without other chats inheriting the state.
-  const [swarmActive, setSwarmActive] = useState(false);
   // Per-chat view toggle. "chat" → ChatConversation (default). "terminal" →
   // raw xterm pane attached to the headless CC/Codex PTY this chat is
   // driving. The hoisted inner tab strip is the source of truth when it
@@ -91,20 +95,14 @@ export default function ChatPanel({
     [onChatViewChange],
   );
   const usingHoistedChatView = chatViewProp !== undefined;
-  // A new chat starts in the normal conversation view. Swarm/terminal state
-  // should not leak between runs because their PTYs/workers are run-scoped.
-  // When the parent owns chatView, the parent is also responsible for the
-  // reset — re-applying it here would race with the parent.
+  // A new chat starts in the normal conversation view. Terminal-view state
+  // should not leak between runs because their PTYs are run-scoped. When the
+  // parent owns chatView, the parent is also responsible for the reset —
+  // re-applying it here would race with the parent.
   useEffect(() => {
-    setSwarmActive(false);
     if (!usingHoistedChatView) setLocalChatView("chat");
   }, [activeRun?.id, usingHoistedChatView]);
 
-  // Drop swarm mode when the section is collapsed: the user can't see the
-  // toggle, so the only way back out would be expand + toggle.
-  useEffect(() => {
-    if (collapsed) setSwarmActive(false);
-  }, [collapsed]);
   // OpenRouter chats have no PTY to attach to — force back to Chat view if
   // the backend doesn't support the terminal tab.
   const backendSessionId = activeRun
@@ -169,33 +167,23 @@ export default function ChatPanel({
         {...headerDrag}
         meta={activeRun ? <HeaderMeta run={activeRun} /> : null}
         actions={
-          activeRun ? (
-            <SwarmToggleButton
-              active={swarmActive}
-              onClick={() => setSwarmActive((value) => !value)}
+          onSelectChat ? (
+            <ChatHistoryButton
+              runs={runs}
+              activeRunId={activeRun?.id ?? null}
+              onSelect={onSelectChat}
+              onDelete={onDeleteChat}
             />
           ) : null
         }
       />
       {!collapsed && (
         <>
-          {activeRun && !swarmActive && backendSessionId && !usingHoistedChatView && (
+          {activeRun && backendSessionId && !usingHoistedChatView && (
             <ChatViewTabStrip view={chatView} onChange={setChatView} />
           )}
           {error && <ErrorBar message={error} />}
-          {swarmActive && activeRun ? (
-            // Swarm grid is keyed on the run id so flipping between chats
-            // remounts the grid (and its TerminalPane instances) for the
-            // new chat's worker set. Toggling swarm off+on within the same
-            // chat reuses the same key, so xterm state survives the round
-            // trip — and the underlying PTYs stay alive regardless because
-            // useTerminalSession only disposes the renderer-side Terminal.
-            <SwarmView
-              key={`swarm:${activeRun.id}`}
-              run={activeRun}
-              cwd={workspace?.cwd ?? null}
-            />
-          ) : activeRun ? (
+          {activeRun ? (
             // Both views stack absolutely so each ALWAYS has real
             // dimensions, even when "hidden". xterm's fit-addon measures
             // its container at mount and on every ResizeObserver fire — if
@@ -265,12 +253,19 @@ export default function ChatPanel({
           ) : (
             <WelcomeState />
           )}
-          {!swarmActive && chatView !== "terminal" && (
+          {chatView !== "terminal" && (
             <ChatComposer
               key={`composer:${activeRun?.id ?? "new-chat"}`}
               run={activeRun}
               cwd={workspace?.cwd ?? null}
-              disabled={!workspace}
+              // Only block input when there's genuinely nothing to send to:
+              // no workspace AND no active run. A follow-up to an existing run
+              // goes through addRunMessage({runId}) and needs no workspace, so
+              // an open chat must stay typeable even if `workspace` momentarily
+              // resolves to null (e.g. a transient activeWorkspace gap after
+              // deleting another run from history). Only the draft/new-chat
+              // path (run === null) truly requires a workspace to start.
+              disabled={!workspace && !activeRun}
               onStartChat={onStartChat}
               onForcePauseRun={onForcePauseRun}
             />
@@ -282,9 +277,10 @@ export default function ChatPanel({
 }
 
 function HeaderMeta({ run }: { run: RunState }) {
-  // Status + cost share one row to keep the SectionHeader compact. The pill
-  // hides itself when the run hasn't recorded any cost yet (priced
-  // manager call hasn't completed).
+  // Status + cost + run-id share one row to keep the SectionHeader compact.
+  // The cost pill hides itself until the run records a priced manager call;
+  // the id chip is always shown so the user has something to copy and share
+  // for support / debugging on every chat.
   return (
     <span
       style={{
@@ -296,49 +292,473 @@ function HeaderMeta({ run }: { run: RunState }) {
     >
       <StatusMeta run={run} />
       <CostPill run={run} />
+      <RunIdChip runId={run.id} />
     </span>
   );
 }
 
-function SwarmToggleButton({
-  active,
-  onClick,
-}: {
-  active: boolean;
-  onClick: () => void;
-}) {
-  const [hover, setHover] = useState(false);
+// Copyable run-id chip. Click → writes the full id to the clipboard and
+// flips the label to "Copied" for ~1.2s. The displayed text is truncated to
+// stay narrow in the header; the tooltip carries the full id so power users
+// can still read it without copying.
+function RunIdChip({ runId }: { runId: string }) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (timerRef.current != null) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+  const short = runId.length > 12 ? `${runId.slice(0, 12)}…` : runId;
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      const writer = navigator.clipboard?.writeText?.(runId);
+      const settle = () => {
+        setCopied(true);
+        if (timerRef.current != null) window.clearTimeout(timerRef.current);
+        timerRef.current = window.setTimeout(() => setCopied(false), 1200);
+      };
+      if (writer && typeof writer.then === "function") {
+        writer.then(settle).catch(() => {
+          /* clipboard blocked — silently no-op */
+        });
+      } else {
+        settle();
+      }
+    },
+    [runId],
+  );
   return (
     <button
       type="button"
-      onClick={onClick}
-      title={active ? "Hide swarm grid" : "Show swarm grid (live worker terminals)"}
-      aria-label="Toggle swarm view"
-      aria-pressed={active}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onClick={handleClick}
+      title={copied ? "Copied run ID to clipboard" : `Copy run ID: ${runId}`}
+      aria-label="Copy run ID"
       style={{
         appearance: "none",
-        width: 22,
-        height: 22,
-        border: "none",
-        borderRadius: 5,
-        background: active
-          ? "color-mix(in oklch, var(--accent) 22%, transparent)"
-          : hover
-            ? "var(--hover)"
-            : "transparent",
-        color: active ? "var(--accent)" : hover ? "var(--ink)" : "var(--ink-dim)",
-        display: "flex",
+        display: "inline-flex",
         alignItems: "center",
-        justifyContent: "center",
-        padding: 0,
+        gap: 4,
+        height: 18,
+        padding: "0 7px",
+        borderRadius: 999,
+        border: "1px solid var(--rule-soft)",
+        background: copied
+          ? "color-mix(in oklch, var(--accent) 22%, transparent)"
+          : "var(--panel-2)",
+        color: copied ? "var(--accent)" : "var(--ink-dim)",
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        whiteSpace: "nowrap",
         cursor: "default",
       }}
     >
-      <GridIcon size={12} />
+      <span aria-hidden style={{ color: "var(--muted)" }}>id</span>
+      <span>{copied ? "copied" : short}</span>
     </button>
   );
+}
+
+// History popover: lists every persisted chat for this workspace, newest
+// first, so the user can jump back into an old one. Clicking a row calls
+// onSelect(runId) — the OrchestrationSidebar wires that to handleSelectRun,
+// which both swaps the active chat AND opens (or focuses) its tab in the
+// top strip. Resume happens implicitly: typing into the composer of the
+// reopened chat invokes resumeRun on the next turn.
+function ChatHistoryButton({
+  runs,
+  activeRunId,
+  onSelect,
+  onDelete,
+}: {
+  runs: RunState[];
+  activeRunId: string | null;
+  onSelect: (runId: string) => void;
+  onDelete?: (runId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hover, setHover] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+
+  // Close on outside click or Escape — same pattern as TabBar's "+" picker.
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const node = wrapperRef.current;
+      if (node && e.target instanceof Node && node.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const sortedRuns = useMemo(() => {
+    const score = (run: RunState) => {
+      const candidate = run.updatedAt ?? run.completedAt ?? run.createdAt;
+      const t = candidate ? Date.parse(candidate) : NaN;
+      return Number.isFinite(t) ? t : 0;
+    };
+    return [...runs].sort((a, b) => score(b) - score(a));
+  }, [runs]);
+
+  return (
+    <div ref={wrapperRef} style={{ position: "relative", display: "inline-flex" }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title="Chat history"
+        aria-label="Open chat history"
+        aria-expanded={open}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        style={{
+          appearance: "none",
+          width: 22,
+          height: 22,
+          border: "none",
+          borderRadius: 5,
+          background: open
+            ? "color-mix(in oklch, var(--accent) 22%, transparent)"
+            : hover
+              ? "var(--hover)"
+              : "transparent",
+          color: open ? "var(--accent)" : hover ? "var(--ink)" : "var(--ink-dim)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 0,
+          cursor: "default",
+        }}
+      >
+        <HistoryIcon size={12} />
+      </button>
+      {open && (
+        <ChatHistoryPopover
+          runs={sortedRuns}
+          activeRunId={activeRunId}
+          onPick={(id) => {
+            setOpen(false);
+            onSelect(id);
+          }}
+          onDelete={onDelete}
+        />
+      )}
+    </div>
+  );
+}
+
+function ChatHistoryPopover({
+  runs,
+  activeRunId,
+  onPick,
+  onDelete,
+}: {
+  runs: RunState[];
+  activeRunId: string | null;
+  onPick: (runId: string) => void;
+  onDelete?: (runId: string) => void;
+}) {
+  return (
+    <div
+      role="listbox"
+      aria-label="Recent chats"
+      style={{
+        position: "absolute",
+        top: "calc(100% + 4px)",
+        right: 0,
+        zIndex: 50,
+        width: 300,
+        maxHeight: "min(50vh, 420px)",
+        overflowY: "auto",
+        background: "var(--panel-2, var(--panel))",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: 8,
+        boxShadow: "0 8px 24px rgba(0,0,0,0.32)",
+        padding: 4,
+      }}
+    >
+      <div
+        style={{
+          padding: "6px 8px 4px",
+          fontFamily: "var(--font-mono)",
+          fontSize: 10,
+          color: "var(--muted)",
+          textTransform: "uppercase",
+          letterSpacing: 0.4,
+        }}
+      >
+        Recent chats
+      </div>
+      {runs.length === 0 ? (
+        <div
+          style={{
+            padding: "12px 8px",
+            fontSize: 11,
+            color: "var(--muted)",
+            textAlign: "center",
+          }}
+        >
+          No chats yet
+        </div>
+      ) : (
+        runs.map((run) => (
+          <ChatHistoryRow
+            key={run.id}
+            run={run}
+            active={run.id === activeRunId}
+            onClick={() => onPick(run.id)}
+            onDelete={onDelete}
+          />
+        ))
+      )}
+    </div>
+  );
+}
+
+function ChatHistoryRow({
+  run,
+  active,
+  onClick,
+  onDelete,
+}: {
+  run: RunState;
+  active: boolean;
+  onClick: () => void;
+  onDelete?: (runId: string) => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const status = describeRunStatus(run);
+  const dotColor = statusToneColor(status.tone);
+  const ts = run.updatedAt ?? run.completedAt ?? run.createdAt;
+  const relTime = ts ? formatRelativeTime(ts) : "";
+  // No native confirm dialog — the DeleteChatButton arms on the first click
+  // and only deletes on the second (in-app "double-click to delete"), so this
+  // just performs the actual removal once confirmed.
+  const confirmDelete = () => {
+    onDelete?.(run.id);
+  };
+  return (
+    <div
+      role="option"
+      aria-selected={active}
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "stretch",
+        gap: 3,
+        width: "100%",
+        padding: "7px 8px",
+        background: active
+          ? "color-mix(in oklch, var(--accent) 14%, transparent)"
+          : hover
+            ? "var(--hover)"
+            : "transparent",
+        borderRadius: 5,
+        textAlign: "left",
+        cursor: "default",
+        color: "var(--ink)",
+        outline: "none",
+        boxSizing: "border-box",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          minWidth: 0,
+        }}
+      >
+        <span
+          aria-hidden
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: 999,
+            background: dotColor,
+            flex: "0 0 6px",
+            animation:
+              status.tone === "live" ? "spark-pulse 1.3s ease-in-out infinite" : undefined,
+          }}
+        />
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            fontSize: 12,
+            color: active ? "var(--accent)" : "var(--ink)",
+          }}
+        >
+          {run.title || "Untitled chat"}
+        </span>
+        {relTime && (
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              color: "var(--muted)",
+              flex: "0 0 auto",
+            }}
+          >
+            {relTime}
+          </span>
+        )}
+        {onDelete && <DeleteChatButton visible={hover} onConfirm={confirmDelete} />}
+      </div>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          paddingLeft: 12,
+        }}
+      >
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+            color: "var(--ink-dim)",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {status.label}
+          {status.detail ? ` ${status.detail}` : ""}
+        </span>
+        <RunIdChip runId={run.id} />
+      </div>
+    </div>
+  );
+}
+
+// In-app delete confirmation (no native OS dialog). First click arms the
+// button — it turns red and reads "Delete?"; a second click within a few
+// seconds performs the delete. Moving the pointer away or waiting disarms it,
+// so an accidental single click never destroys anything.
+function DeleteChatButton({
+  visible,
+  onConfirm,
+}: {
+  visible: boolean;
+  onConfirm: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const [armed, setArmed] = useState(false);
+  const disarmTimer = useRef<number | null>(null);
+
+  // Auto-disarm so a half-finished delete doesn't stay primed indefinitely.
+  useEffect(() => {
+    if (!armed) return;
+    disarmTimer.current = window.setTimeout(() => setArmed(false), 2600);
+    return () => {
+      if (disarmTimer.current !== null) window.clearTimeout(disarmTimer.current);
+    };
+  }, [armed]);
+
+  const handleClick = (e: React.MouseEvent) => {
+    // Never let the row's onClick (which opens the chat) fire from here.
+    e.stopPropagation();
+    if (!armed) {
+      setArmed(true);
+      return;
+    }
+    setArmed(false);
+    onConfirm();
+  };
+
+  // Stay interactive while armed even if the row hover ended, so the second
+  // (confirm) click is always reachable.
+  const shown = visible || armed;
+  return (
+    <button
+      type="button"
+      title={armed ? "Click again to delete permanently" : "Delete chat"}
+      aria-label={armed ? "Confirm delete chat" : "Delete chat"}
+      onClick={handleClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => {
+        setHover(false);
+        setArmed(false);
+      }}
+      style={{
+        appearance: "none",
+        width: armed ? "auto" : 18,
+        height: 18,
+        border: "none",
+        borderRadius: 4,
+        background: armed
+          ? "var(--danger)"
+          : hover
+            ? "color-mix(in oklch, var(--danger) 22%, transparent)"
+            : "transparent",
+        color: armed ? "var(--accent-ink)" : hover ? "var(--danger)" : "var(--muted)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 4,
+        padding: armed ? "0 6px" : 0,
+        fontSize: 10,
+        fontWeight: 600,
+        whiteSpace: "nowrap",
+        cursor: "default",
+        flex: "0 0 auto",
+        opacity: shown ? 1 : 0,
+        transition: "opacity 120ms ease",
+        pointerEvents: shown ? "auto" : "none",
+      }}
+    >
+      {armed ? "Delete?" : <CloseIcon size={11} />}
+    </button>
+  );
+}
+
+// Compact "5m / 3h / 2d / 1w" formatter for the history popover. We pick the
+// largest unit that fits and drop everything below so the timestamp stays
+// glanceable in a tight row.
+function formatRelativeTime(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "";
+  const diffMs = Date.now() - t;
+  if (diffMs < 0) return "now";
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 45) return "now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d`;
+  const wk = Math.floor(day / 7);
+  if (wk < 5) return `${wk}w`;
+  const mo = Math.floor(day / 30);
+  if (mo < 12) return `${mo}mo`;
+  const yr = Math.floor(day / 365);
+  return `${yr}y`;
 }
 
 function StatusMeta({ run }: { run: RunState }) {

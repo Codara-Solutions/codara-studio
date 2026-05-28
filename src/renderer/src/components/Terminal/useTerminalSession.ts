@@ -145,11 +145,11 @@ interface Options {
   extraEnv?: Record<string, string>;
   // Mirror-pane mode. When true the xterm still attaches to the PTY's data
   // stream (so the user sees output), but the hook does NOT send pty.resize
-  // calls and does NOT forward keystrokes via pty.write. Used by SwarmView
-  // tiles where the canonical pane lives in TerminalStack — without this
-  // flag, two ResizeObservers would race and the smaller cols/rows would win,
-  // garbling the larger xterm. Explicit pty.write calls (e.g. SwarmView's
-  // broadcast button) bypass this hook entirely and still work.
+  // calls and does NOT forward keystrokes via pty.write. Use when a second
+  // xterm needs to observe the same PTY whose canonical pane lives in
+  // TerminalStack — without this flag, two ResizeObservers race and the
+  // smaller cols/rows wins, garbling the canonical pane. Explicit pty.write
+  // calls bypass this hook entirely and still work.
   readOnly?: boolean;
   // Input-only mirror: forward NO keystrokes (like readOnly) but DO send
   // pty.resize so the underlying PTY tracks this xterm's cols/rows. Used
@@ -902,12 +902,12 @@ export function useTerminalSession({
       cleanups.push(offData, offExit);
 
       const inputDisposable = term.onData((data) => {
-        // Read-only / mirror panes (e.g. SwarmView tiles) must not forward
-        // keystrokes — the canonical xterm for the same PTY lives elsewhere
-        // and accepts user input there. Activity still pings since hover/
-        // focus on the mirror tile is a meaningful "this PTY isn't idle"
-        // signal for the orchestrator. `inputBlocked` is the sole-view
-        // variant — same input-suppression, but resize stays enabled.
+        // Read-only / mirror panes must not forward keystrokes — the
+        // canonical xterm for the same PTY lives elsewhere and accepts user
+        // input there. Activity still pings since hover/focus on the mirror
+        // is a meaningful "this PTY isn't idle" signal for the orchestrator.
+        // `inputBlocked` is the sole-view variant — same input-suppression,
+        // but resize stays enabled.
         if (readOnlyRef.current || inputBlockedRef.current) {
           onActivityRef.current?.();
           return;

@@ -1039,6 +1039,49 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
           draft.updatedAt = timestamp;
         },
       });
+      return;
+    }
+    // No queueable work and nothing capped. If nothing is actually in flight
+    // either, the run has stalled in a non-terminal state — commonly
+    // "reviewing" after the manager declined to complete but produced no new
+    // work. Leaving it inert here pins the chat composer on the Stop button
+    // forever (isActive stays true, Send never returns). Settle to "paused" so
+    // the user gets Resume/Send back. Guarded on activeWorkersForRun AND
+    // non-terminal worker tasks so we NEVER cut off workers still running —
+    // their completion re-drives this review and finds the real next step.
+    const stillInFlight =
+      activeWorkersForRun(run.id).length > 0 ||
+      run.workerTasks.some((task) =>
+        ["created", "queued", "claimed", "running", "needs_review", "retry_queued"].includes(
+          task.status,
+        ),
+      );
+    // Only the "active" statuses pin the composer on the Stop button (this
+    // matches the renderer's isActive = running|planning|reviewing). By this
+    // point earlier returns have already excluded paused/cancelled/complete;
+    // failed/blocked/idle are not stuck, so leave them be.
+    const runIsActive =
+      run.status === "running" ||
+      run.status === "planning" ||
+      run.status === "reviewing";
+    if (!stillInFlight && runIsActive) {
+      await commitRunChange(run, {
+        type: "autopilot.review_stalled",
+        message:
+          "Autopilot review found no remaining work and no workers in flight; pausing for input.",
+        payload: { previousStatus: run.status },
+        mutate: (draft, timestamp) => {
+          draft.status = "paused";
+          draft.autopilot = {
+            ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+            status: "idle",
+            lastAction: "review_no_work",
+            stopReason: "review_no_remaining_work",
+            updatedAt: timestamp,
+          };
+          draft.updatedAt = timestamp;
+        },
+      });
     }
     return;
   }
@@ -1070,6 +1113,35 @@ async function markAutopilotCycleFailed(runId: string, attemptId: string, err: u
         lastAction: "worker_cycle_failed",
         updatedAt: timestamp,
       };
+      // The run is failing — terminalize any in-flight worker attempts/tasks so
+      // a CC/Codex manager blocked in spark_wait_for_workers observes a terminal
+      // status promptly instead of waiting out the ~20-min MCP hold ceiling.
+      // Mirrors the status sets in forcePauseRun/cancelRun.
+      for (const attempt of draft.workerAttempts) {
+        if (
+          attempt.status === "preparing" ||
+          attempt.status === "prompt_ready" ||
+          attempt.status === "launching" ||
+          attempt.status === "running" ||
+          attempt.status === "finishing"
+        ) {
+          attempt.status = "failed";
+          attempt.finishedAt = attempt.finishedAt ?? timestamp;
+        }
+      }
+      for (const task of draft.workerTasks) {
+        if (
+          task.status === "created" ||
+          task.status === "queued" ||
+          task.status === "claimed" ||
+          task.status === "running" ||
+          task.status === "needs_review" ||
+          task.status === "retry_queued"
+        ) {
+          task.status = "failed";
+          task.updatedAt = timestamp;
+        }
+      }
       draft.updatedAt = timestamp;
     },
   });
@@ -1576,7 +1648,7 @@ async function askChatBackendNonOpenRouter(
 // runs, so the implementation worker is the only check on the work and must
 // have the stronger 'taste' that catches all distinct issues in one pass.
 const TRIVIAL_TOP_TIER_BY_RUNTIME: Record<string, { modelHint: string; effortHint: WorkerTask["effortHint"] }> = {
-  claude: { modelHint: "claude-opus-4-7", effortHint: "high" },
+  claude: { modelHint: "claude-opus-4-8", effortHint: "high" },
   codex: { modelHint: "gpt-5.5", effortHint: "high" },
 };
 
@@ -1590,7 +1662,7 @@ const TRIVIAL_TOP_TIER_BY_RUNTIME: Record<string, { modelHint: string; effortHin
 // `"claude-sonnet-4-6@medium"` as the modelHint string across runs, and an
 // allow-list keyed on raw strings silently misses the suffixed variant.
 const TOP_TIER_MODEL_BASES = new Set([
-  "claude-opus-4-7",
+  "claude-opus-4-8",
   "opus",
   "gpt-5.5",
 ]);
@@ -1608,7 +1680,7 @@ function isTopTierModel(hint: string | undefined): boolean {
 function promoteForTrivial(agent: PlannedStepAgent): PlannedStepAgent {
   // Skeleton/verifier are exempt from the floor by design; leaf is mechanical
   // work where top-tier "taste" buys nothing — running a single shell command
-  // and reporting its output does not benefit from Opus 4.7@high, and the
+  // and reporting its output does not benefit from Opus 4.8@high, and the
   // surprise cost (e.g. a chat-mode "what time is it?" worker on opus) is
   // worse than the recipe's intended cheap pick.
   if (agent.taskClass === "skeleton" || agent.taskClass === "verifier" || agent.taskClass === "leaf") return agent;
@@ -2091,7 +2163,7 @@ async function enforceUserRuntimeMandate(
     return { decision, overrides: [] };
   }
   const modelDefaults: Record<string, { modelHint?: string; effortHint?: WorkerTask["effortHint"] }> = {
-    claude: { modelHint: "claude-opus-4-7", effortHint: "high" },
+    claude: { modelHint: "claude-opus-4-8", effortHint: "high" },
     codex: { modelHint: "gpt-5.5", effortHint: "high" },
   };
   const defaults = modelDefaults[mandate] ?? { modelHint: undefined, effortHint: undefined };
@@ -3509,7 +3581,21 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
       draft.updatedAt = timestamp;
     },
   });
-  if (shouldScheduleManagerAfterResume) {
+  // Guarantee a manager driver after resume. The original gate only fired when
+  // a spark QUESTION was pending, so resuming a run paused for any other reason
+  // — e.g. the stalled-review failsafe in runAutopilotManagerReview, or a plain
+  // force-pause between cycles — left it in "running" with nothing driving it
+  // (stuck on the Stop button forever). Broaden it so any resumed autopilot run
+  // with no workers in flight gets re-driven. Skip execute-mode CLI managers:
+  // they re-drive via the resume signals sent above, not the autopilot
+  // scheduler (scheduleAutopilotReview is never used for them — see the worker
+  // cycle path). The scheduler itself dedupes, so this can't double-drive.
+  const isExecuteModeCliManager =
+    (resumed.chatBackend === "claude" || resumed.chatBackend === "codex") &&
+    resumed.chatMode === "execute";
+  const shouldScheduleDriver =
+    !isExecuteModeCliManager && activeWorkersForRun(resumed.id).length === 0;
+  if (shouldScheduleManagerAfterResume || shouldScheduleDriver) {
     if (resumed.workerAttempts.length > 0) {
       scheduleAutopilotReview(resumed.id, resumeInput.cwd);
     } else {
@@ -5611,7 +5697,7 @@ function estimateTextSections(
 }
 
 function fallbackModelHintForRuntime(runtime: WorkerRuntime): string | undefined {
-  if (runtime === "claude") return "claude-opus-4-7";
+  if (runtime === "claude") return "claude-opus-4-8";
   if (runtime === "codex") return "gpt-5.5";
   return undefined;
 }

@@ -794,8 +794,8 @@ const overlayStyle: React.CSSProperties = {
 };
 
 const dialogStyle: React.CSSProperties = {
-  width: "min(1180px, calc(100vw - 44px))",
-  height: "min(780px, calc(100vh - 44px))",
+  width: "min(1240px, calc(100vw - 24px))",
+  height: "min(840px, calc(100vh - 24px))",
   display: "grid",
   gridTemplateRows: "auto minmax(0, 1fr) auto",
   background: "var(--panel)",
@@ -840,23 +840,24 @@ const headerAsideStyle: React.CSSProperties = {
 const mainStyle: React.CSSProperties = {
   minHeight: 0,
   overflow: "auto",
-  padding: 18,
+  padding: 16,
   display: "grid",
   gridTemplateRows: "auto auto minmax(0, 1fr)",
-  gap: 14,
+  gap: 12,
 };
 
 const summaryGridStyle: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "minmax(360px, 1.2fr) minmax(300px, 0.8fr)",
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))",
   gap: 12,
 };
 
 const capabilityGridStyle: React.CSSProperties = {
   minHeight: 0,
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr)",
-  gap: 14,
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 520px), 1fr))",
+  gridAutoRows: "minmax(0, 1fr)",
+  gap: 12,
 };
 
 const filterBarStyle: React.CSSProperties = {
@@ -908,16 +909,17 @@ const filterChipActiveStyle: React.CSSProperties = {
 const panelStyle: React.CSSProperties = {
   border: "1px solid var(--rule-soft)",
   borderRadius: 8,
-  padding: 14,
+  padding: 12,
   background: "color-mix(in oklch, var(--panel-2) 62%, var(--panel))",
   boxShadow: "inset 0 1px 0 rgba(255,255,255,0.025)",
   display: "grid",
-  gap: 12,
+  gap: 10,
 };
 
 const capabilityPanelStyle: React.CSSProperties = {
   ...panelStyle,
   minHeight: 0,
+  overflow: "hidden",
   alignContent: "start",
   gridTemplateRows: "auto minmax(0, 1fr)",
 };
@@ -949,16 +951,19 @@ const groupCountLabelStyle: React.CSSProperties = {
 
 const policyListStyle: React.CSSProperties = {
   display: "grid",
-  borderTop: "1px solid var(--rule-soft)",
+  gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+  gap: 8,
 };
 
 const policyRowStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "minmax(0, 1fr) auto",
   gap: 12,
-  alignItems: "center",
-  padding: "11px 0",
-  borderBottom: "1px solid var(--rule-soft)",
+  alignItems: "start",
+  padding: "9px 10px",
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 7,
+  background: "color-mix(in oklch, var(--bg) 22%, transparent)",
 };
 
 const policyTitleStyle: React.CSSProperties = {
@@ -969,7 +974,7 @@ const policyTitleStyle: React.CSSProperties = {
 
 const policyDetailStyle: React.CSSProperties = {
   color: "var(--muted)",
-  fontSize: 11,
+  fontSize: 10,
   lineHeight: 1.4,
   marginTop: 2,
 };
@@ -1036,9 +1041,10 @@ const tableShellStyle: React.CSSProperties = {
   borderRadius: 7,
   overflow: "auto",
   background: "color-mix(in oklch, var(--bg) 22%, transparent)",
+  scrollbarGutter: "stable",
 };
 
-const ROW_GRID = "minmax(180px, 1.3fr) minmax(140px, 1fr) minmax(140px, 1fr) minmax(140px, 1fr) 72px";
+const ROW_GRID = "minmax(150px, 1.35fr) minmax(88px, 0.85fr) minmax(88px, 0.85fr) minmax(88px, 0.85fr) 58px";
 
 const tableHeaderStyle: React.CSSProperties = {
   position: "sticky",
@@ -1046,13 +1052,13 @@ const tableHeaderStyle: React.CSSProperties = {
   zIndex: 1,
   display: "grid",
   gridTemplateColumns: ROW_GRID,
-  gap: 12,
-  padding: "8px 12px",
+  gap: 8,
+  padding: "8px 10px",
   borderBottom: "1px solid var(--rule-soft)",
   background: "color-mix(in oklch, var(--panel) 90%, var(--bg))",
-  color: "var(--muted)",
+  color: "var(--ink-dim)",
   fontFamily: "var(--font-mono)",
-  fontSize: 9,
+  fontSize: 10,
   textTransform: "uppercase",
   letterSpacing: "0.08em",
 };
@@ -1060,11 +1066,11 @@ const tableHeaderStyle: React.CSSProperties = {
 const rowStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: ROW_GRID,
-  gap: 12,
+  gap: 8,
   alignItems: "stretch",
-  padding: "12px",
+  padding: "9px 10px",
   borderBottom: "1px solid var(--rule-soft)",
-  background: "color-mix(in oklch, var(--ink) 2.4%, transparent)",
+  background: "color-mix(in oklch, var(--ink) 3.2%, transparent)",
 };
 
 const nameStyle: React.CSSProperties = {
@@ -1114,8 +1120,8 @@ const emptyCellStyle: React.CSSProperties = {
 const installChipStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 5,
-  padding: "7px 8px",
+  gap: 4,
+  padding: "6px 7px",
   borderRadius: 6,
   border: "1px solid var(--rule-soft)",
   background: "color-mix(in oklch, var(--bg) 36%, transparent)",
@@ -1159,7 +1165,7 @@ const uninstallButtonStyle: React.CSSProperties = {
   borderRadius: 6,
   background: "transparent",
   color: "var(--danger)",
-  padding: "4px 9px",
+  padding: "4px 7px",
   fontFamily: "var(--font-sans)",
   fontSize: 11,
   fontWeight: 700,

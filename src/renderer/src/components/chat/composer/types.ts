@@ -6,7 +6,7 @@ import type {
 } from "@shared/types";
 
 // Per-model option used in the model picker. Each row is either a "real" id
-// the backend understands directly (e.g. "claude-opus-4-7", "gpt-5.5") or a
+// the backend understands directly (e.g. "claude-opus-4-8", "gpt-5.5") or a
 // virtual id with the `:1m` suffix that the composer decomposes into the
 // base model id plus chat1mContext=true on pick. The backend never sees a
 // `:1m` id.
@@ -43,8 +43,8 @@ export const ALL_EFFORTS: AgentEffortLevel[] = [
 // so selecting Opus/Sonnet always sets chat1mContext=true.
 const CLAUDE_MODELS: ChatModelOption[] = [
   {
-    id: "claude-opus-4-7:1m",
-    label: "Opus 4.7 1M",
+    id: "claude-opus-4-8:1m",
+    label: "Opus 4.8 1M",
     backend: "claude",
     effortLevels: ["low", "medium", "high", "xhigh", "max"],
     isOneMillion: true,

@@ -109,7 +109,10 @@ const MAX_PENDING_MCP_HOLD_MS = 25 * 60_000;
 // in payload.name (e.g. "spark_wait_for_workers"); the mcp__server__ prefix
 // lives in payload.namespace, so name alone is the gate.
 function isSparkLongPollMcpTool(name: string): boolean {
-  return name === "spark_wait_for_workers";
+  // spark_ask_user also blocks the manager turn (up to 15 min) waiting on the
+  // human; without it the cap stays at 90s and the turn times out, force-
+  // completing the run and cancelling active workers.
+  return name === "spark_wait_for_workers" || name === "spark_ask_user";
 }
 
 const TALK_PROMPT_FILENAME = "codex-talk.md";

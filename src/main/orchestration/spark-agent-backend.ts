@@ -71,7 +71,7 @@ export interface ChatBackendConfig {
   sessionMode?: ChatMode;
   /** Fast-mode toggle. Codex-only; Claude Code and OpenRouter ignore it. */
   fastMode: boolean;
-  /** 1M-context toggle. Claude Code always runs with /context 1m. */
+  /** 1M-context toggle. Claude Code is normalized to true. */
   oneMillionContext: boolean;
 }
 
@@ -224,7 +224,7 @@ export interface SparkAgentBackend {
  * Defaults:
  *   - backend: openrouter (preserves pre-feature behaviour)
  *   - model:   backend-specific default (OpenRouter from settings,
- *              Claude=opus-4-7, Codex=gpt-5.5)
+ *              Claude=opus-4-8, Codex=gpt-5.5)
  *   - mode:    execute (the original behaviour)
  *   - effort:  medium
  */
@@ -240,7 +240,7 @@ export function resolveChatBackendConfig(
     if (backend === "openrouter") {
       model = settings.openRouterModel || "google/gemini-flash-latest";
     } else if (backend === "claude") {
-      model = "claude-opus-4-7";
+      model = "claude-opus-4-8";
     } else {
       model = "gpt-5.5";
     }

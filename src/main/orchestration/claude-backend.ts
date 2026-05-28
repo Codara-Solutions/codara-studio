@@ -78,7 +78,13 @@ const MAX_PENDING_MCP_HOLD_MS = 25 * 60_000;
 function isSparkLongPollMcpTool(name: string): boolean {
   return (
     name === "spark_wait_for_workers" ||
-    name === "mcp__spark-orchestrator__spark_wait_for_workers"
+    name === "mcp__spark-orchestrator__spark_wait_for_workers" ||
+    // spark_ask_user blocks the manager turn while it waits (up to 15 min) for
+    // the human to answer. Without this it isn't tracked in pendingMcpToolCalls,
+    // the cap stays at 90s, the turn times out, and the run is force-completed —
+    // cancelling any active workers. Treat it as a long-poll so the cap rises.
+    name === "spark_ask_user" ||
+    name === "mcp__spark-orchestrator__spark_ask_user"
   );
 }
 // CC's Stop hook fires when the assistant finishes its turn, but the JSONL
@@ -163,10 +169,6 @@ interface ClaudeChatSession {
    *  on the active turn and refuse to start more turns on this session. */
   fatal: boolean;
   fatalMessage: string | null;
-  /** 1M-context is a session-level toggle in CC, accessed via /context. We
-   *  track what's been applied so we only send the slash command when the
-   *  desired state changes. */
-  appliedOneMillionContext: boolean;
   /** Tool calls observed during the current turn — populated by the JSONL
    *  translator when CC fires `mcp__spark-orchestrator__*` (or any other
    *  tool). In Execute mode the request handler reads this after the turn
@@ -307,6 +309,15 @@ export const claudeBackend: SparkAgentBackend = {
       const queueFile = join(queueDir, `${runId}.queue`);
       await writeFileAtomic(queueFile, prompt);
 
+      // Clear any stale turn-done marker left by a between-turns Stop+undo
+      // (interruptChat writes `${runId}.done` to break an in-flight wait). If
+      // we don't, waitForTurnFileWithRetries below sees the leftover marker
+      // immediately and ends THIS turn before Claude produces any output,
+      // yielding an empty/degraded decision. The in-flight-interrupt case is
+      // unaffected: that marker is written and consumed within its own turn.
+      const turnFile = join(turnDir, `${runId}.done`);
+      await fs.unlink(turnFile).catch(() => {});
+
       // Wait for the Ink REPL to render before injecting input. node-pty
       // emits the first stdout chunk as soon as Claude prints its banner;
       // until then, keystrokes get dropped into a not-yet-listening Ink
@@ -320,23 +331,6 @@ export const claudeBackend: SparkAgentBackend = {
             err instanceof Error ? err.message : String(err)
           }`,
         });
-      }
-
-      // Apply the Claude 1M context toggle BEFORE the prompt. Fast mode is
-      // Codex-only in Spark; Claude Code always uses the normal output mode.
-      // CC exposes context as a slash command inside the interactive REPL,
-      // not as a CLI flag, and the command runs as its own typed turn.
-      const desiredOneMillionContext = true;
-      if (desiredOneMillionContext !== chat.appliedOneMillionContext) {
-        emit({
-          kind: "system_note",
-          message: "Toggling Claude context window -> 1M",
-        });
-        // Best-guess syntax for the 1M-context toggle. CC's interactive
-        // command catalog isn't published — if /context 1m fails the user
-        // sees an error in the next turn and we iterate.
-        await typeSlashCommand(chat, "/context 1m");
-        chat.appliedOneMillionContext = desiredOneMillionContext;
       }
 
       // Inject the prompt using the same bracketed-paste-then-Enter pattern
@@ -367,8 +361,8 @@ export const claudeBackend: SparkAgentBackend = {
 
       // Wait for the Stop hook's done-marker, but retry the submit Enter a
       // few times in case the first one was dropped. Extra Enters into an
-      // empty input box are harmless newlines.
-      const turnFile = join(turnDir, `${runId}.done`);
+      // empty input box are harmless newlines. (turnFile was computed and
+      // cleared of any stale marker at the top of this turn.)
       const turnEnded = await waitForTurnFileWithRetries(turnFile, chat, () => {
         chat.session.writeRaw("\r");
       });
@@ -746,9 +740,6 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     lastUsage: {},
     fatal: false,
     fatalMessage: null,
-    // CC starts every session with the default 200k context, so applied=false
-    // is the truthful initial state. Spark requests 1M for every Claude chat.
-    appliedOneMillionContext: false,
     turnToolCalls: [],
     // Seeded to now so the first 90s window still applies if CC fails to
     // emit even an init `mode` event. Refreshed on every JSONL line below.
@@ -985,26 +976,6 @@ function stringifyToolResult(content: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/**
- * Type a slash command into CC's Ink REPL and let it commit. Slash commands
- * execute synchronously and return to the input prompt (no Stop hook fires
- * for them), so we just paste + settle + Enter + sleep — no turn waiter.
- * Used for session-level commands like /context that need to run before the
- * user's actual prompt for the turn.
- */
-async function typeSlashCommand(chat: ClaudeChatSession, command: string): Promise<void> {
-  chat.session.writeRaw(PASTE_BEGIN);
-  await sleep(PASTE_PIECE_DELAY_MS);
-  chat.session.writeRaw(command);
-  await sleep(PASTE_PIECE_DELAY_MS);
-  chat.session.writeRaw(PASTE_END);
-  await sleep(PASTE_SETTLE_BASE_MS);
-  chat.session.writeRaw("\r");
-  // Give CC a beat to process the slash command and re-render the empty
-  // input box before we paste the actual user prompt on top.
-  await sleep(500);
 }
 
 // Sweep expired pending-MCP entries and return the cap that should apply
@@ -1315,7 +1286,7 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "    title: string,                       // 4-10 word chip label",
     "    description: string,                 // full prompt the worker sees — be specific",
     "    runtimePreference: 'claude' | 'codex',",
-    "    modelHint?: 'claude-opus-4-7' | 'claude-sonnet-4-6' | 'gpt-5.5',",
+    "    modelHint?: 'claude-opus-4-8' | 'claude-sonnet-4-6' | 'gpt-5.5',",
     "    effortHint?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh',",
     "    allowedPaths?: string[],             // cwd-relative; parallel workers must NOT overlap",
     "    forbiddenPaths?: string[],",
