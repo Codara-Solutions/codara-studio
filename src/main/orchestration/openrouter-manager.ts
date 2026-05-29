@@ -1284,7 +1284,14 @@ function normalizeSteps(value: unknown): SparkManagerStepDecision[] {
       step.kind === "worker_batch" && step.plannedAgents.some((agent) => agent.taskClass === "skeleton");
     if (!hasSkeleton) continue;
     const next = normalized[i + 1];
-    if (!next || next.kind === "brake") continue;
+    // Inject the brake UNLESS the next step is already a brake. The common
+    // "model forgot the brake" case is a skeleton emitted as the LAST step
+    // (next is undefined) — that is exactly when we must inject, so the run
+    // re-plans the dependent layers instead of completing after the skeleton.
+    // (Previously `!next` short-circuited here and skipped the injection, so a
+    // trailing skeleton step ran alone and the run wrongly completed — observed
+    // on the deep-chain interpreter eval: only the 4 foundation modules built.)
+    if (next && next.kind === "brake") continue;
     enforced.push({
       kind: "brake",
       title: "Verify foundation",
