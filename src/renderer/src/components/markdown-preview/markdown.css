@@ -1,0 +1,279 @@
+/* Spark markdown preview — VS Code-style rendered view for .md files.
+   All colors are token-driven so the preview reads identically against the
+   warm-tinted dark theme defined in styles.css (var(--bg)/--panel/--ink etc.).
+   Scoped under .spark-markdown so it can never leak into chat prose. */
+
+.spark-markdown {
+  color: var(--ink);
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu,
+    Cantarell, "Helvetica Neue", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  padding: 24px 32px 80px;
+  max-width: 900px;
+  margin: 0 auto;
+  word-wrap: break-word;
+}
+
+.spark-markdown > *:first-child {
+  margin-top: 0;
+}
+.spark-markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+/* Headings — VS Code-ish hierarchy. The 1px rule under h1/h2 mirrors GFM. */
+.spark-markdown h1,
+.spark-markdown h2,
+.spark-markdown h3,
+.spark-markdown h4,
+.spark-markdown h5,
+.spark-markdown h6 {
+  color: var(--ink);
+  font-weight: 600;
+  line-height: 1.25;
+  margin-top: 1.6em;
+  margin-bottom: 0.6em;
+}
+.spark-markdown h1 {
+  font-size: 2em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.spark-markdown h2 {
+  font-size: 1.5em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.spark-markdown h3 {
+  font-size: 1.25em;
+}
+.spark-markdown h4 {
+  font-size: 1em;
+}
+.spark-markdown h5 {
+  font-size: 0.875em;
+}
+.spark-markdown h6 {
+  font-size: 0.85em;
+  color: var(--muted);
+}
+
+/* Paragraphs and inline content. */
+.spark-markdown p {
+  margin: 0 0 16px;
+}
+.spark-markdown strong {
+  font-weight: 700;
+  color: var(--ink);
+}
+.spark-markdown em {
+  font-style: italic;
+}
+.spark-markdown a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.spark-markdown a:hover {
+  text-decoration: underline;
+}
+.spark-markdown hr {
+  border: 0;
+  border-top: 1px solid var(--rule-soft);
+  margin: 24px 0;
+}
+
+/* Lists. */
+.spark-markdown ul,
+.spark-markdown ol {
+  margin: 0 0 16px;
+  padding-left: 2em;
+}
+.spark-markdown li {
+  margin-bottom: 0.25em;
+}
+.spark-markdown li > p {
+  margin-bottom: 8px;
+}
+.spark-markdown li + li {
+  margin-top: 0.25em;
+}
+
+/* GFM task lists — checkbox sits in the bullet column. */
+.spark-markdown li.task-list-item {
+  list-style: none;
+  margin-left: -1.5em;
+}
+.spark-markdown li.task-list-item input[type="checkbox"] {
+  margin: 0 0.5em 0.1em -0.2em;
+  vertical-align: middle;
+}
+
+/* Blockquote — left accent rail, slightly muted ink. */
+.spark-markdown blockquote {
+  margin: 0 0 16px;
+  padding: 0 1em;
+  color: var(--ink-dim, var(--muted));
+  border-left: 0.25em solid var(--rule-soft);
+}
+.spark-markdown blockquote > :first-child {
+  margin-top: 0;
+}
+.spark-markdown blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* Inline code. */
+.spark-markdown code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: color-mix(in oklch, var(--ink) 8%, transparent);
+  padding: 0.2em 0.4em;
+  border-radius: 4px;
+  color: var(--ink);
+}
+
+/* Code blocks — own scroll, soft border. The inner <code> from
+   react-markdown carries language-* classes that rehype-highlight uses to
+   inject highlight.js token spans. */
+.spark-markdown pre {
+  margin: 0 0 16px;
+  padding: 14px 16px;
+  background: var(--bg);
+  border: 1px solid var(--rule-soft);
+  border-radius: 7px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.spark-markdown pre code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+  color: var(--ink-dim, var(--ink));
+  white-space: pre;
+}
+
+/* Tables. */
+.spark-markdown table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow: auto;
+  margin: 0 0 16px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.spark-markdown th,
+.spark-markdown td {
+  padding: 6px 13px;
+  border: 1px solid var(--rule-soft);
+}
+.spark-markdown th {
+  background: var(--panel);
+  font-weight: 600;
+  color: var(--ink);
+  text-align: left;
+}
+.spark-markdown tr:nth-child(2n) {
+  background: color-mix(in oklch, var(--panel) 50%, transparent);
+}
+
+/* Images — sit on their own line, never overflow the column. */
+.spark-markdown img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+/* Mermaid diagram container — center it and add breathing room. */
+.spark-markdown .spark-mermaid {
+  margin: 16px 0;
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--rule-soft);
+  border-radius: 8px;
+  text-align: center;
+  overflow-x: auto;
+}
+.spark-markdown .spark-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+.spark-markdown .spark-mermaid-error {
+  margin: 16px 0;
+  padding: 12px;
+  background: color-mix(in oklch, var(--danger) 8%, transparent);
+  border: 1px solid color-mix(in oklch, var(--danger) 30%, transparent);
+  border-radius: 8px;
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+/* highlight.js — minimal GitHub-dark palette adapted to OKLCH tokens.
+   We don't `@import` the full highlight.js theme because its named colors
+   clash with the warm-tinted scheme; this hand-picked set keeps tokens
+   readable while staying inside the project's palette. */
+.spark-markdown .hljs {
+  color: var(--ink-dim, var(--ink));
+  background: transparent;
+}
+.spark-markdown .hljs-comment,
+.spark-markdown .hljs-quote {
+  color: var(--muted);
+  font-style: italic;
+}
+.spark-markdown .hljs-keyword,
+.spark-markdown .hljs-selector-tag,
+.spark-markdown .hljs-literal,
+.spark-markdown .hljs-section,
+.spark-markdown .hljs-link {
+  color: #ff7b72;
+}
+.spark-markdown .hljs-built_in,
+.spark-markdown .hljs-type,
+.spark-markdown .hljs-class .hljs-title {
+  color: #ffa657;
+}
+.spark-markdown .hljs-string,
+.spark-markdown .hljs-attr,
+.spark-markdown .hljs-template-tag,
+.spark-markdown .hljs-template-variable {
+  color: #a5d6ff;
+}
+.spark-markdown .hljs-symbol,
+.spark-markdown .hljs-bullet,
+.spark-markdown .hljs-meta {
+  color: #79c0ff;
+}
+.spark-markdown .hljs-number,
+.spark-markdown .hljs-regexp,
+.spark-markdown .hljs-deletion {
+  color: #f2cc60;
+}
+.spark-markdown .hljs-name,
+.spark-markdown .hljs-attribute,
+.spark-markdown .hljs-variable,
+.spark-markdown .hljs-title.function_,
+.spark-markdown .hljs-title.class_,
+.spark-markdown .hljs-title {
+  color: #d2a8ff;
+}
+.spark-markdown .hljs-tag {
+  color: #7ee787;
+}
+.spark-markdown .hljs-addition {
+  color: #7ee787;
+  background: color-mix(in oklch, #7ee787 12%, transparent);
+}
+.spark-markdown .hljs-emphasis {
+  font-style: italic;
+}
+.spark-markdown .hljs-strong {
+  font-weight: 700;
+}

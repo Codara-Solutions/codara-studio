@@ -36,7 +36,8 @@ export type CommandId =
   | "tab.cyclePrev"
   | "worker.newClaude"
   | "worker.newCodex"
-  | "worker.newCursor";
+  | "worker.newCursor"
+  | "markdown.togglePreview";
 
 export type CommandGroup = "General" | "Navigation" | "View" | "Tabs" | "Terminal" | "Workers";
 
@@ -246,6 +247,15 @@ export const COMMANDS: Command[] = [
     label: "New Cursor worker pane",
     group: "Workers",
     defaultChords: [],
+  },
+  {
+    // Mirrors VS Code's "Markdown: Open Preview" (Cmd/Ctrl+Shift+V). Only the
+    // active editor tab reacts — App.tsx broadcasts a window event that
+    // EditorPane filters on its own `active` prop.
+    id: "markdown.togglePreview",
+    label: "Toggle markdown preview",
+    group: "View",
+    defaultChords: [mod("v", { shift: true })],
   },
 ];
 

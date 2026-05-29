@@ -56,8 +56,14 @@
     "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
     "electron-updater": "^6.8.3",
+    "highlight.js": "^11.10.0",
+    "mermaid": "^11.4.1",
     "node-pty": "^1.0.0",
-    "react-virtuoso": "^4.18.7"
+    "react-markdown": "^9.0.3",
+    "react-virtuoso": "^4.18.7",
+    "rehype-highlight": "^7.0.2",
+    "rehype-raw": "^7.0.0",
+    "remark-gfm": "^4.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
