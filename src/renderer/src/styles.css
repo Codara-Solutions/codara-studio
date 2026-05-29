@@ -660,6 +660,12 @@ a { color: inherit; }
   padding: 7px;
   position: relative;
   box-shadow: none;
+  /* Flex column so a short chat dock shrinks the textarea (which scrolls
+     internally) instead of overflowing the whole shell upward and clipping
+     the attachment chips off the top — see ChatComposer layout. */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   transition:
     border-color var(--motion-fast) var(--ease-out),
     outline-color var(--motion-fast) var(--ease-out),

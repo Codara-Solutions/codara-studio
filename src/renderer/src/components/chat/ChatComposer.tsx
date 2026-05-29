@@ -143,7 +143,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
 
   // Focus on the global composer shortcut (App broadcasts spark:focus-composer).
   useEffect(() => {
-    const handler = () => textareaRef.current?.focus();
+    const handler = () => textareaRef.current?.focus({ preventScroll: true });
     window.addEventListener("spark:focus-composer", handler);
     return () => window.removeEventListener("spark:focus-composer", handler);
   }, []);
@@ -215,7 +215,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
       window.setTimeout(() => {
         const node = textareaRef.current;
         if (!node) return;
-        node.focus();
+        node.focus({ preventScroll: true });
         const end = node.value.length;
         node.setSelectionRange(end, end);
       }, 0);
@@ -489,7 +489,10 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     setMentionQuery(null);
     suppressMentionUpdate.current = true;
     window.setTimeout(() => {
-      textareaRef.current?.focus();
+      // preventScroll: focusing must not scroll the overflow:hidden chat dock
+      // to reveal the caret — that's what used to push the freshly-added chip
+      // off the top of the composer.
+      textareaRef.current?.focus({ preventScroll: true });
       textareaRef.current?.setSelectionRange(nextCursor, nextCursor);
     }, 0);
   };
@@ -570,7 +573,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const removeFileReference = (file: FileMention) => {
     setFileReferences((current) => current.filter((item) => item.path !== file.path));
     setDraft((current) => removeMentionToken(current, file.relativePath));
-    window.setTimeout(() => textareaRef.current?.focus(), 0);
+    window.setTimeout(() => textareaRef.current?.focus({ preventScroll: true }), 0);
   };
 
   const openCapabilities = () => {
@@ -585,7 +588,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     ) {
       return;
     }
-    textareaRef.current?.focus();
+    textareaRef.current?.focus({ preventScroll: true });
   };
 
   const activeChatBackend: ChatBackendKind = run_?.chatBackend ?? draftChatBackend;
@@ -721,7 +724,15 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   return (
     <div
       style={{
-        flex: "0 0 auto",
+        // 0 1 auto (not 0 0 auto): when the chat dock is short the composer
+        // shrinks within its slot instead of overflowing past the top, which
+        // used to push the attachment chips above the panel's clip line. The
+        // textarea is the part that gives way (it scrolls internally); chips
+        // and the controls bar stay pinned and visible.
+        flex: "0 1 auto",
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
         padding: "8px 12px 10px",
         background: "var(--panel)",
         borderTop: "1px solid var(--rule-soft)",
@@ -730,6 +741,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
       {error && (
         <div
           style={{
+            flex: "0 0 auto",
             marginBottom: 8,
             padding: "6px 9px",
             borderRadius: 6,
@@ -758,6 +770,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
         {(images.length > 0 || fileReferences.length > 0) && (
           <div
             style={{
+              flex: "0 0 auto",
               display: "flex",
               flexWrap: "wrap",
               gap: 6,
@@ -802,6 +815,11 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
           placeholder={placeholder}
           rows={2}
           style={{
+            // 1 1 auto + minHeight:0 lets the textarea be the element that
+            // yields when vertical space is tight; it scrolls its own content
+            // rather than forcing the shell taller than its slot.
+            flex: "1 1 auto",
+            minHeight: 0,
             width: "100%",
             boxSizing: "border-box",
             resize: "none",
@@ -819,6 +837,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
         />
         <div
           style={{
+            flex: "0 0 auto",
             display: "flex",
             alignItems: "center",
             gap: 6,
@@ -1119,7 +1138,12 @@ function findMentionQuery(text: string, cursor: number): MentionQuery | null {
   if (at < 0) return null;
   if (at > 0 && !/[\s([{,;:]/.test(text[at - 1])) return null;
   const query = text.slice(at + 1, cursor);
-  if (/[\r\n]/.test(query)) return null;
+  // A mention token is "@" + non-whitespace (see parseMentionTokens' /@([^\s]+)/).
+  // So any whitespace between the last "@" and the cursor means the cursor has
+  // moved past a completed mention into ordinary prose — there's no active
+  // query. Without this, typing "@plan.md please" kept the popover open and
+  // searched for the literal "plan.md please" as a filename.
+  if (/\s/.test(query)) return null;
   if (query.length > 160) return null;
   return { start: at, end: cursor, query };
 }
