@@ -1,2 +1,3 @@
 Refactor pricing so money formatting is shared and invoice rendering keeps the exact behavior. Keep CommonJS exports stable.
 
+Extract the dollar formatting into a single shared helper `formatMoney(cents)` exported from `src/pricing.js`. It takes an integer number of cents and returns a dollar string, e.g. `formatMoney(5)` is `"$0.05"` and `formatMoney(123456)` is `"$1234.56"` (two decimal places, no thousands separator). Use `formatMoney` for every money rendering in both `src/pricing.js` and `src/report.js` instead of inline `toFixed` formatting. Keep the existing exports (`totalCents`, `renderInvoice`) working unchanged.
