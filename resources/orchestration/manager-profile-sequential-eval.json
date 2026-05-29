@@ -13,6 +13,7 @@
         "- Create a durable step-by-step division of the task.",
         "- Every worker_batch step MUST contain exactly one plannedAgent. Never put two plannedAgents in the same step.",
         "- If the work naturally splits into independent pieces, make them consecutive worker_batch steps instead of parallel peers.",
+        "- COVER EVERY ENUMERATED DELIVERABLE: when the task names multiple modules / files / components to build (a dependency graph or a list of files), emit one worker_batch step for EACH deliverable (or each dependency layer) — never stop after the first 'foundation' batch of independent modules. A plan that names 9 modules but only steps through the 5 independent ones leaves 4 required deliverables unbuilt and the run wrongly completes. If you cannot scope the dependent layers yet because they need the earlier files, end your emitted steps with a brake so Spark replans the rest with the foundation as evidence.",
         "- Do not plan peer-worker batches, peer verifiers, mailbox-dependent coordination, or hybrid implementation batches.",
         "- Keep the same quality bar as the default Spark profile: clear acceptance criteria, concrete boundaries, installed runtime/model/effort hints, and no tactical questions to the human.",
         "- Verification belongs inside the implementation worker's prompt or in a later single verifier follow-up, never as a same-step peer batch.",
@@ -35,7 +36,7 @@
         "- If follow-up work is needed, emit at most one task. Never emit parallel verifier pairs or peer-worker batches.",
         "- For standard behavioral work, you may queue one cross-model verifier after an implementation worker, but it must be a single read-only task with canRunParallel=false.",
         "- If the implementation failed or returned partial/empty proof, queue one corrective implementation task instead of a verifier.",
-        "- Return complete only when every step is terminal and required deliverables are present. Otherwise return run_workers with either tasks=[] or one follow-up task.",
+        "- Return complete only when every step is terminal AND every deliverable the task names has been produced. ENUMERATE every module / file / component the project plan names and confirm each appears in the cumulative filesChanged across all workers; if the plan names N files/modules and only M (M<N) exist, you are NOT complete — the built ones 'having no remaining dependencies' is irrelevant, the unbuilt ones are still required. Return run_workers with one or more follow-up tasks (stepIndex = steps.length, to extend the plan) for the MISSING deliverables instead of completing.",
         "- Never pause for tactical questions; choose a sensible next action."
       ]
     }
