@@ -812,7 +812,12 @@ function readSmallText(path: string, maxBytes: number): string | null {
 
 function extractTomlMcpNames(text: string): string[] {
   const names = new Set<string>();
-  const sectionPattern = /^\s*\[mcp_servers(?:\.(?:"([^"]+)"|'([^']+)'|([^\]\s]+)))?\]\s*$/gm;
+  // Match [mcp_servers.<name>] AND its sub-tables like [mcp_servers."name".env].
+  // The bare-key alternative excludes '.' so it never swallows a sub-table
+  // segment, and the trailing (?:\.[^\]]+)? consumes ".env" (or any sub-table)
+  // so it maps back to <name> instead of becoming a phantom "name".env server.
+  const sectionPattern =
+    /^\s*\[mcp_servers\.(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_-]+))(?:\.[^\]]+)?\]\s*$/gm;
   for (const match of text.matchAll(sectionPattern)) {
     const name = (match[1] || match[2] || match[3] || "").trim();
     if (name) names.add(name);
