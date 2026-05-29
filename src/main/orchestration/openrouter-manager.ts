@@ -691,6 +691,36 @@ function formatCompactRunState(
   const attemptCap = 12;
   const visibleTasks = run.workerTasks.slice(-taskCap);
   const visibleAttempts = run.workerAttempts.slice(-attemptCap);
+
+  // Long-run context control. Every step keeps a cheap skeleton (id / index /
+  // title / status) so the manager always sees full plan progress, but the
+  // heavy 500-char reviewSummary is carried only for the most recent steps PLUS
+  // any non-terminal step — the active frontier must never lose detail. Without
+  // this, existingSteps grew linearly with run length and was re-sent in full on
+  // every manager turn, degrading signal-to-noise and inflating token cost
+  // exactly when a run was longest. Mirrors the recentTasks / recentAttempts
+  // caps above. Older review summaries remain durable in the saved run artifact;
+  // the omitted count tells the manager that detail exists if it must recover it.
+  const STEP_REVIEW_DETAIL_CAP = 12;
+  const reviewDetailStart = Math.max(0, run.steps.length - STEP_REVIEW_DETAIL_CAP);
+  const isTerminalStepStatus = (status: string): boolean =>
+    status === "complete" || status === "failed" || status === "skipped";
+  let omittedOlderStepSummaries = 0;
+  const existingSteps = run.steps.map((step, index) => {
+    const keepReviewDetail =
+      index >= reviewDetailStart || !isTerminalStepStatus(step.status);
+    if (!keepReviewDetail && step.reviewSummary) omittedOlderStepSummaries += 1;
+    return {
+      id: step.id,
+      index: step.index,
+      title: truncate(step.title, keepReviewDetail ? 180 : 120),
+      kind: step.kind ?? "worker_batch",
+      status: step.status,
+      reviewSummary:
+        keepReviewDetail && step.reviewSummary ? truncate(step.reviewSummary, 500) : undefined,
+    };
+  });
+
   return {
     id: run.id,
     title: run.title,
@@ -705,15 +735,9 @@ function formatCompactRunState(
       managerCalls: run.sparkCalls.length,
       omittedOlderTasks: Math.max(0, run.workerTasks.length - visibleTasks.length),
       omittedOlderAttempts: Math.max(0, run.workerAttempts.length - visibleAttempts.length),
+      omittedOlderStepSummaries,
     },
-    existingSteps: run.steps.map((step) => ({
-      id: step.id,
-      index: step.index,
-      title: truncate(step.title, 180),
-      kind: step.kind ?? "worker_batch",
-      status: step.status,
-      reviewSummary: step.reviewSummary ? truncate(step.reviewSummary, 500) : undefined,
-    })),
+    existingSteps,
     recentTasks: visibleTasks.map((task) => ({
       id: task.id,
       stepId: task.stepId,
@@ -1491,7 +1515,7 @@ function formatStepDivision(run: RunState): string {
   const omitted = Math.max(0, run.steps.length - maxSteps);
   const visibleSteps = omitted > 0 ? run.steps.slice(-maxSteps) : run.steps;
   const prefix = omitted > 0
-    ? [`${omitted} older completed step(s) omitted; use RUN STATE review summaries for durable history.`]
+    ? [`${omitted} older completed step(s) omitted; RUN STATE carries review summaries for the most recent steps. The PROJECT PLAN and the workspace hold the durable record of earlier work.`]
     : [];
   return [
     ...prefix,
