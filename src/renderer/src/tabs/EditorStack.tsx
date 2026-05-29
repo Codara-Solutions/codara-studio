@@ -90,6 +90,7 @@ function EditorStack({ tabs, activeId, onDirtyChange, onClose }: Props) {
               file={t.entry}
               onDirtyChange={bundle.onDirty}
               onClose={bundle.onClose}
+              active={visible}
             />
           </div>
         );

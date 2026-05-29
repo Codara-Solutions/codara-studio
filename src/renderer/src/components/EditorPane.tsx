@@ -35,6 +35,16 @@ import {
   type InlineAutocompleteStatus,
 } from "./editor-cm/autocomplete/inlineExtension";
 import { usePreferences } from "../preferences/usePreferences";
+import MarkdownPreview from "./markdown-preview/MarkdownPreview";
+
+// Path-based detection used to decide whether to expose the "Preview" toggle
+// and listen for the markdown.togglePreview shortcut. Keeping this co-located
+// with EditorPane avoids spreading MD-awareness across the codebase.
+function isMarkdownPath(p: string): boolean {
+  return /\.(md|markdown|mdown|mkd|mkdn)$/i.test(p);
+}
+
+type ViewMode = "edit" | "preview";
 
 // Vim ex-commands (`:w`, `:q`, `:wq`, `:x`) and arrow→hjkl remaps are
 // installed once at module load. Subsequent EditorPane mounts reuse them.
@@ -60,6 +70,11 @@ interface Props {
   onDirtyChange?: (path: string, dirty: boolean) => void;
   onSaved?: (path: string) => void;
   onClose?: (path: string) => void;
+  // EditorStack mounts every editor tab and toggles visibility for the
+  // inactive ones. `active` lets MD panes decide whether to react to the
+  // global `spark:markdown.togglePreview` event — without it, every mounted
+  // MD pane would flip view mode on a single shortcut press.
+  active?: boolean;
 }
 
 function formatBytes(n: number): string {
@@ -69,10 +84,18 @@ function formatBytes(n: number): string {
 }
 
 const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
-  { file, onDirtyChange, onSaved, onClose },
+  { file, onDirtyChange, onSaved, onClose, active = true },
   ref,
 ) {
   const path = file.path;
+  const isMarkdown = useMemo(() => isMarkdownPath(path), [path]);
+
+  // View mode applies only to markdown panes. Default to "edit" to match
+  // VS Code — preview is opt-in via the toolbar button or Mod+Shift+V. Mode
+  // is intentionally NOT persisted; reopening a tab returns the user to the
+  // edit view they expect.
+  const [viewMode, setViewMode] = useState<ViewMode>("edit");
+  const [copiedAt, setCopiedAt] = useState<number | null>(null);
 
   const { doc, dirty, onChange, save, reload } = useDocument({ path, onDirtyChange });
   const reloadRef = useRef(reload);
@@ -220,6 +243,37 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     };
   }, [path, doc.status]);
 
+  // Markdown preview toggle — dispatched globally by the keyboard handler
+  // in App.tsx. Every mounted MD pane listens, but only the active tab acts;
+  // non-MD panes ignore it entirely.
+  useEffect(() => {
+    if (!isMarkdown) return;
+    const onToggle = () => {
+      if (!active) return;
+      setViewMode((m) => (m === "edit" ? "preview" : "edit"));
+    };
+    window.addEventListener("spark:markdown.togglePreview", onToggle);
+    return () =>
+      window.removeEventListener("spark:markdown.togglePreview", onToggle);
+  }, [isMarkdown, active]);
+
+  // Copy raw markdown source to the system clipboard. The 1200ms badge is
+  // long enough to confirm but short enough not to linger if the user
+  // immediately switches modes.
+  const handleCopy = useCallback(async () => {
+    if (doc.status !== "ready") return;
+    try {
+      await navigator.clipboard.writeText(doc.content);
+      setCopiedAt(Date.now());
+      window.setTimeout(() => {
+        setCopiedAt((prev) => (prev && Date.now() - prev >= 1200 ? null : prev));
+      }, 1300);
+    } catch {
+      // Clipboard may be unavailable in some Electron contexts; fail quietly
+      // rather than throwing into the React tree.
+    }
+  }, [doc]);
+
   const focusEditor = useCallback(() => {
     cmRef.current?.view?.focus();
   }, []);
@@ -286,6 +340,14 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           background: "var(--bg)",
         }}
       >
+        {isMarkdown && doc.status === "ready" && (
+          <MarkdownToolbar
+            mode={viewMode}
+            copied={copiedAt !== null}
+            onCopy={handleCopy}
+            onSetMode={setViewMode}
+          />
+        )}
         {doc.status === "loading" && <EditorMessage text="Loading file..." />}
         {doc.status === "error" && <EditorMessage text={doc.message} danger />}
         {doc.status === "binary" && (
@@ -300,7 +362,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             detail={`${formatBytes(doc.size)} exceeds the ${formatBytes(doc.limit)} editor limit.`}
           />
         )}
-        {doc.status === "ready" && (
+        {doc.status === "ready" && isMarkdown && viewMode === "preview" && (
+          <MarkdownPreview text={doc.content} basePath={path} />
+        )}
+        {doc.status === "ready" && (!isMarkdown || viewMode === "edit") && (
           <CodeMirror
             ref={cmRef}
             value={doc.content}
@@ -452,6 +517,175 @@ function AIStatusBadge({
     >
       {text}
     </span>
+  );
+}
+
+// Slim top bar shown above the markdown editor / preview area. Layout mirrors
+// the Conductor reference: copy icon + a Preview/Edit segmented control where
+// both options are visible at once and the active one is filled. Clicking an
+// already-active segment is a no-op (vs the old single-button toggle which
+// flipped on every press) — the segmented affordance signals "switch to that
+// view", not "toggle".
+function MarkdownToolbar({
+  mode,
+  copied,
+  onCopy,
+  onSetMode,
+}: {
+  mode: ViewMode;
+  copied: boolean;
+  onCopy: () => void;
+  onSetMode: (next: ViewMode) => void;
+}) {
+  return (
+    <div
+      style={{
+        flex: "0 0 32px",
+        height: 32,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "flex-end",
+        gap: 8,
+        padding: "0 10px",
+        background: "var(--panel)",
+        borderBottom: "1px solid var(--rule-soft)",
+      }}
+    >
+      <button
+        type="button"
+        onClick={onCopy}
+        title={copied ? "Copied" : "Copy markdown source"}
+        aria-label="Copy markdown source"
+        style={toolbarIconButton}
+      >
+        {copied ? <CheckIcon /> : <CopyIcon />}
+      </button>
+      <div
+        role="group"
+        aria-label="Markdown view mode"
+        style={segmentedGroup}
+      >
+        <SegmentedButton
+          active={mode === "preview"}
+          onClick={() => onSetMode("preview")}
+          title="Show rendered preview (⌘⇧V)"
+        >
+          Preview
+        </SegmentedButton>
+        <SegmentedButton
+          active={mode === "edit"}
+          onClick={() => onSetMode("edit")}
+          title="Return to editor (⌘⇧V)"
+        >
+          Edit
+        </SegmentedButton>
+      </div>
+    </div>
+  );
+}
+
+function SegmentedButton({
+  active,
+  onClick,
+  title,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-pressed={active}
+      style={{
+        ...segmentedButtonBase,
+        background: active ? "var(--panel-3, var(--panel-2))" : "transparent",
+        color: active ? "var(--ink)" : "var(--muted)",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+const toolbarIconButton: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 26,
+  height: 22,
+  background: "transparent",
+  color: "var(--muted)",
+  border: "1px solid transparent",
+  borderRadius: 5,
+  cursor: "pointer",
+  padding: 0,
+};
+
+const segmentedGroup: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "stretch",
+  height: 24,
+  padding: 2,
+  background: "var(--panel-2, var(--panel))",
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 6,
+  gap: 2,
+};
+
+const segmentedButtonBase: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  minWidth: 56,
+  padding: "0 10px",
+  border: "none",
+  borderRadius: 4,
+  cursor: "pointer",
+  fontSize: 11,
+  fontWeight: 500,
+  letterSpacing: 0.2,
+  lineHeight: 1,
+  transition: "background 120ms ease, color 120ms ease",
+};
+
+function CopyIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect
+        x="4.5"
+        y="4.5"
+        width="8"
+        height="9"
+        rx="1.5"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+      <path
+        d="M3.5 11V3.5A1.5 1.5 0 0 1 5 2h6"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M3 8.5l3 3 7-7"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
