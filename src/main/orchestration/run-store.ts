@@ -985,6 +985,18 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
     const lastAction = run.autopilot?.lastAction;
     if (lastAction !== "completion_refused") break;
   }
+  // Advance any now-fully-accepted steps before we pick the next tasks. A
+  // worker_result_review that accepts step N AND queues step N+1's task in the
+  // same turn used to leave step N non-terminal — the step-completion pass in
+  // applySparkManagerDecision only runs when the decision queues ZERO tasks.
+  // That stranded the step N+1 task: pickAutopilotStep kept returning the
+  // still-active step N, so pickAutopilotTasks (which filters by the active
+  // step) never picked the step N+1 task, and the run idled until budget
+  // exhaustion. completeAcceptedReviewingSteps only closes a step when every
+  // one of its tasks is terminal, so a same-step verifier still holds its step
+  // open — making this safe to run regardless of queued follow-ups.
+  run = await completeAcceptedReviewingSteps(run, "");
+  if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
   // Brake checkpoint: if the next active step is a brake, resolve it and
   // re-invoke plan_analysis so the manager can extend the plan with prior
   // worker reports as evidence.
@@ -8742,7 +8754,9 @@ function renderUiQualityGuidance(
   ];
   if (opts?.sparkPreviewMcpAvailable) {
     lines.push(
-      "- The `spark-preview` MCP server is available in this session. It drives the actual <preview> tab inside Spark App — same DOM the user sees, no separate browser window. Call `spark_preview_navigate` with a `file://` URL (for standalone HTML) or your dev-server URL; if no preview tab is open Spark will open one automatically. Then `spark_preview_snapshot` + `spark_preview_click` / `spark_preview_type` / `spark_preview_press_key` to exercise the primary user flow. Capture the final snapshot or `spark_preview_screenshot` evidence in `proof[]`.",
+      "- The `spark-preview` MCP server is available in this session. It drives the actual <preview> tab inside Spark App — same DOM the user sees, no separate browser window. Call `spark_preview_navigate` with a `file://` URL (for standalone HTML) or your dev-server URL; if no preview tab is open Spark will open one automatically. Capture the final snapshot or `spark_preview_screenshot` evidence in `proof[]`.",
+      "- BATCH your interaction probes with `spark_preview_run`: pass an ordered `steps` array (navigate/click/type/press_key/evaluate/wait_for/snapshot/screenshot) to drive a whole flow in ONE call. Each step fires the same real event as the single-shot tool, so you keep full fidelity but pay one round-trip instead of one per keystroke. Probe e.g. `7 / 2 =` plus a display read as a single `spark_preview_run`. A calculator should need only a handful of `spark_preview_run` calls total — NOT 50+ individual `spark_preview_press_key` calls.",
+      "- Reserve the single-shot `spark_preview_click` / `spark_preview_type` / `spark_preview_press_key` tools only for probes that must isolate ONE real key/click event (e.g. the focus double-activation guard: focus equals, press Enter once, read the display).",
       "- Do NOT substitute an inline Node VM + JSDOM probe for the spark-preview run. The whole point is that the verifier and the human see the same DOM/CSS the real browser produces.",
     );
   }
@@ -8775,7 +8789,8 @@ function renderUiVerifierGuidance(
   ];
   if (opts?.sparkPreviewMcpAvailable) {
     lines.push(
-      "- The `spark-preview` MCP server is registered in this session. You MUST use it to verify visible UI claims instead of inline Node VM + JSDOM stubs. The server drives the live <preview> tab inside Spark App — the same pixels the user sees. Call `spark_preview_navigate` with a `file://` URL (standalone HTML) or the served URL; if no preview tab is open Spark will open one automatically. Take a `spark_preview_snapshot` for the accessibility-flavored outline, and drive the primary user flow with `spark_preview_click` / `spark_preview_type` / `spark_preview_press_key`. Attach the snapshot or `spark_preview_screenshot` evidence in `proof[]` for each behavioral atomic claim.",
+      "- The `spark-preview` MCP server is registered in this session. You MUST use it to verify visible UI claims instead of inline Node VM + JSDOM stubs. The server drives the live <preview> tab inside Spark App — the same pixels the user sees. Call `spark_preview_navigate` with a `file://` URL (standalone HTML) or the served URL; if no preview tab is open Spark will open one automatically. Take a `spark_preview_snapshot` for the accessibility-flavored outline.",
+      "- BATCH verification with `spark_preview_run`: pass an ordered `steps` array (navigate/click/type/press_key/evaluate/wait_for/snapshot/screenshot) to exercise a whole flow in ONE round-trip instead of dozens of single calls. Each step fires the identical real event. Reserve single-shot `spark_preview_click` / `spark_preview_press_key` only for probes that must isolate one real key/click (e.g. focus double-activation). Attach the snapshot or `spark_preview_screenshot` evidence in `proof[]` for each behavioral atomic claim.",
       "- Treat the absence of a spark-preview snapshot for any behavioral UI claim as `unsure`, not `verified`. Static DOM grep alone cannot prove rendering, event wiring, or focus behavior.",
     );
   }
