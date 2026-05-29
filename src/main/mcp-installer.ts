@@ -54,6 +54,7 @@ const SPARK_PREVIEW_TOOLS = [
   "spark_preview_evaluate",
   "spark_preview_wait_for",
   "spark_preview_screenshot",
+  "spark_preview_run",
 ];
 
 const SPARK_ORCHESTRATOR_TOOLS = [

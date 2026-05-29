@@ -498,8 +498,32 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         if (!wv || !domReadyRef.current || !wv.capturePage) {
           throw new Error("preview tab is not ready");
         }
-        const img = await wv.capturePage();
-        return img?.toDataURL?.() ?? "";
+        // Chromium can hand back a blank / zero-size frame if capturePage
+        // fires before the guest has painted its first frame. Retry a few
+        // times, yielding a frame between tries, and fail loudly rather than
+        // returning an empty data URL — an agent reads "" as "the page
+        // rendered blank" and reports a false visual-verification result.
+        let lastReason = "capturePage returned no image";
+        for (let attempt = 0; attempt < 6; attempt++) {
+          let img: CapturedImage | undefined;
+          try {
+            img = await wv.capturePage();
+          } catch (err) {
+            lastReason = (err as Error)?.message || String(err);
+            img = undefined;
+          }
+          if (img) {
+            const size = img.getSize?.();
+            const zeroSize = Boolean(size && (size.width === 0 || size.height === 0));
+            const dataUrl = zeroSize ? "" : img.toDataURL?.() ?? "";
+            if (dataUrl && dataUrl.length > 256) return dataUrl;
+            lastReason = zeroSize
+              ? "captured a 0-size frame (page not painted yet)"
+              : "captured an empty frame";
+          }
+          await new Promise((resolveRetry) => setTimeout(resolveRetry, 150));
+        }
+        throw new Error(`preview screenshot failed after retries: ${lastReason}`);
       },
     }),
     [currentUrl, url],

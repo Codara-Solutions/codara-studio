@@ -158,6 +158,60 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "spark_preview_run",
+    description:
+      "Run an ordered BATCH of preview steps in ONE call (one MCP round-trip) instead of dozens of single click/press_key calls. Each step dispatches the exact same real input event as its individual tool, so fidelity is identical — you just stop paying a separate round-trip (and a separate agent turn) per keystroke. STRONGLY PREFER this for any multi-step verification flow: e.g. drive `7 / 2 =` and read the display as a single spark_preview_run, not seven calls. Stops at the first failing step unless continueOnError=true. Returns a per-step result array; any screenshot steps are also surfaced as image blocks.",
+    inputSchema: {
+      type: "object",
+      required: ["steps"],
+      properties: {
+        tabId: { type: "string", description: "Default tab for steps that omit their own tabId." },
+        continueOnError: {
+          type: "boolean",
+          description: "Keep running after a failing step (default false).",
+        },
+        steps: {
+          type: "array",
+          minItems: 1,
+          description:
+            "Ordered steps. Each is { action, ...args } where action is one of navigate|click|type|press_key|evaluate|wait_for|snapshot|screenshot and the remaining fields mirror the matching spark_preview_* tool — e.g. {action:'press_key', key:'7'}, {action:'click', selector:'#equals'}, {action:'evaluate', code:\"document.querySelector('#lcd').textContent\"}.",
+          items: {
+            type: "object",
+            required: ["action"],
+            properties: {
+              action: {
+                type: "string",
+                enum: [
+                  "navigate",
+                  "click",
+                  "type",
+                  "press_key",
+                  "evaluate",
+                  "wait_for",
+                  "snapshot",
+                  "screenshot",
+                ],
+              },
+              label: { type: "string", description: "Optional note echoed back in the step result." },
+              tabId: { type: "string" },
+              url: { type: "string" },
+              selector: { type: "string" },
+              text: { type: "string" },
+              clearFirst: { type: "boolean" },
+              key: { type: "string" },
+              code: { type: "string" },
+              awaitPromise: { type: "boolean" },
+              state: { type: "string" },
+              timeoutMs: { type: "number" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 const TOOL_TO_RPC = {
@@ -171,6 +225,19 @@ const TOOL_TO_RPC = {
   spark_preview_evaluate: "preview.evaluate",
   spark_preview_wait_for: "preview.wait_for",
   spark_preview_screenshot: "preview.screenshot",
+};
+
+// Step action -> RPC for the batched spark_preview_run tool. Mirrors the
+// single-shot tools so a batched step fires the identical real event.
+const STEP_ACTION_TO_RPC = {
+  navigate: "preview.navigate",
+  click: "preview.click",
+  type: "preview.type",
+  press_key: "preview.press_key",
+  evaluate: "preview.evaluate",
+  wait_for: "preview.wait_for",
+  snapshot: "preview.snapshot",
+  screenshot: "preview.screenshot",
 };
 
 function resolveSparkHome() {
@@ -337,8 +404,9 @@ async function dispatch(method, params) {
 
 async function callTool(params) {
   const name = params && typeof params.name === "string" ? params.name : null;
+  const args = params && params.arguments && typeof params.arguments === "object" ? params.arguments : {};
+  if (name === "spark_preview_run") return await callRunBatch(args);
   if (!name || !TOOL_TO_RPC[name]) throw mkErr(-32602, `unknown tool: ${name}`);
-  const args = params.arguments && typeof params.arguments === "object" ? params.arguments : {};
   try {
     const result = await postJsonRpc(TOOL_TO_RPC[name], args);
     return toToolResult(result);
@@ -348,6 +416,62 @@ async function callTool(params) {
       content: [{ type: "text", text: err.message }],
     };
   }
+}
+
+// Execute an ordered batch of preview steps in a single MCP round-trip. Each
+// step is the same RPC the single-shot tool would issue, run sequentially so
+// later steps observe the DOM the earlier ones produced. Screenshot steps are
+// surfaced as image content blocks (and their base64 stripped from the JSON
+// echo so the per-step array stays readable).
+async function callRunBatch(args) {
+  const steps = args && Array.isArray(args.steps) ? args.steps : null;
+  if (!steps || steps.length === 0) {
+    return { isError: true, content: [{ type: "text", text: "spark_preview_run requires a non-empty 'steps' array." }] };
+  }
+  const continueOnError = args.continueOnError === true;
+  const defaultTabId = typeof args.tabId === "string" ? args.tabId : undefined;
+  const results = [];
+  const images = [];
+  let sawError = false;
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i] && typeof steps[i] === "object" ? steps[i] : {};
+    const action = step.action;
+    const rpc = STEP_ACTION_TO_RPC[action];
+    if (!rpc) {
+      results.push({ index: i, action: action ?? null, ok: false, error: `unknown action '${action}'` });
+      sawError = true;
+      if (!continueOnError) break;
+      continue;
+    }
+    const { action: _omitAction, label, ...rest } = step;
+    const rpcArgs = { ...rest };
+    if (defaultTabId && rpcArgs.tabId === undefined) rpcArgs.tabId = defaultTabId;
+    const entry = { index: i, action };
+    if (label) entry.label = label;
+    try {
+      const result = await postJsonRpc(rpc, rpcArgs);
+      entry.ok = true;
+      if (action === "screenshot" && result && typeof result.dataUrl === "string") {
+        const m = /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(result.dataUrl);
+        if (m) images.push({ type: "image", mimeType: m[1], data: m[2] });
+        entry.result = { url: result.url ?? null, captured: Boolean(m) };
+      } else {
+        entry.result = result;
+      }
+      results.push(entry);
+    } catch (err) {
+      entry.ok = false;
+      entry.error = err.message;
+      results.push(entry);
+      sawError = true;
+      if (!continueOnError) break;
+    }
+  }
+  const payload = { ok: !sawError, ran: results.length, total: steps.length, steps: results };
+  return {
+    isError: sawError,
+    content: [...images, { type: "text", text: JSON.stringify(payload, null, 2) }],
+  };
 }
 
 function toToolResult(value) {
