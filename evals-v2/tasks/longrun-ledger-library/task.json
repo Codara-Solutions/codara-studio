@@ -1,0 +1,62 @@
+{
+  "id": "longrun-ledger-library",
+  "category": "long_run_dag",
+  "seed": "seed",
+  "budgetSeconds": 3000,
+  "publicGates": [
+    {
+      "id": "public-money",
+      "command": "node -e \"const m=require('./src/money'); const A=(c,k)=>{if(!c)throw new Error('money '+k)}; A(m.formatMoney(0)==='$0.00','fmt0'); A(m.formatMoney(5)==='$0.05','fmt5'); A(m.formatMoney(123456)==='$1234.56','fmtbig'); A(m.parseMoney('$0.05')===5,'p5'); A(m.parseMoney('1234.56')===123456,'pbig'); A(m.parseMoney('12')===1200,'p12');\""
+    },
+    {
+      "id": "public-dates",
+      "command": "node -e \"const d=require('./src/dates'); const A=(c,k)=>{if(!c)throw new Error('dates '+k)}; A(d.isValidDate('2026-05-29')===true,'valid'); A(d.isValidDate('2026-13-01')===false,'badmonth'); A(d.isValidDate('2026-02-30')===false,'badday'); A(d.monthKey('2026-05-29')==='2026-05','mk'); A(d.monthKey('2026-12-01T10:00:00Z')==='2026-12','mkiso'); A(d.compareDate('2026-01-05','2026-02-01')===-1,'cmp');\""
+    },
+    {
+      "id": "public-categories-validate",
+      "command": "node -e \"const c=require('./src/categories'); const v=require('./src/validate'); const A=(x,k)=>{if(!x)throw new Error('catval '+k)}; A(c.normalizeCategory('  Food  Dining ')==='food-dining','norm1'); A(c.normalizeCategory('Transport!!!')==='transport','norm2'); A(c.normalizeCategory('')==='uncategorized','norm3'); const r=v.validateTransaction({date:'2026-05-01',amount:12.5,category:'food'}); A(r.ok===true,'vok'); A(Array.isArray(r.errors),'verrarr'); A(r.errors.length===0,'verrlen');\""
+    },
+    {
+      "id": "public-csv",
+      "command": "node -e \"const cs=require('./src/csv'); const A=(c,k)=>{if(!c)throw new Error('csv '+k)}; const rows=cs.parseCsv('date,amount\\n2026-05-01,12.50\\n2026-05-02,3.00'); A(rows.length===2,'len'); A(rows[0].date==='2026-05-01','d0'); A(rows[0].amount==='12.50','a0'); A(rows[1].amount==='3.00','a1'); A(cs.toCsv([{a:'1',b:'2'}],['a','b'])==='a,b\\n1,2','tocsv'); A(cs.toCsv([{a:'1'}],['a','b'])==='a,b\\n1,','tocsvmissing');\""
+    },
+    {
+      "id": "public-transactions",
+      "command": "node -e \"const t=require('./src/transactions'); const A=(c,k)=>{if(!c)throw new Error('tx '+k)}; const x=t.createTransaction({date:'2026-05-01',amount:12.5,category:'Food'}); A(x.amountCents===1250,'amt'); A(x.category==='food','cat'); A(x.date==='2026-05-01','date'); A(x.description==='','desc'); const y=t.createTransaction({date:'2026-05-01',amount:'$3.00',category:'Dining Out'}); A(y.amountCents===300,'amt2'); A(y.category==='dining-out','cat2');\""
+    },
+    {
+      "id": "public-index-exports",
+      "command": "node -e \"const idx=require('./src/index'); const A=(c,k)=>{if(!c)throw new Error('index '+k)}; const names=['formatMoney','parseMoney','sumCents','isValidDate','monthKey','compareDate','normalizeCategory','validateTransaction','parseCsv','toCsv','createTransaction','filterByMonth','filterByCategory','sortByDate','summarizeByCategory','applyBudget','renderLedger','renderBudgetReport']; for(const n of names){A(typeof idx[n]==='function','missing '+n);}\""
+    }
+  ],
+  "hiddenGates": [
+    {
+      "id": "hidden-money-edge",
+      "command": "node -e \"const m=require('./src/money'); const A=(c,k)=>{if(!c)throw new Error('money '+k)}; A(m.formatMoney(-50)==='-$0.50','neg'); A(m.parseMoney('$1,234.56')===123456,'comma'); A(m.parseMoney('-$1.23')===-123,'negparse'); A(m.sumCents([5,10,-3])===12,'sum'); A(m.sumCents([])===0,'sum0'); A(m.formatMoney(m.parseMoney('99.99'))==='$99.99','roundtrip');\""
+    },
+    {
+      "id": "hidden-validate-order",
+      "command": "node -e \"const v=require('./src/validate'); const A=(c,k)=>{if(!c)throw new Error('validate '+k)}; const r=v.validateTransaction({date:'bad',amount:'x',category:''}); A(r.ok===false,'ok'); A(JSON.stringify(r.errors)===JSON.stringify(['invalid date','invalid amount','missing category']),'order '+JSON.stringify(r.errors)); const r2=v.validateTransaction({date:'2026-05-01',amount:'$3.00',category:'food'}); A(r2.ok===true,'strmoney'); const r3=v.validateTransaction({date:'2026-05-01',amount:5,category:'   '}); A(JSON.stringify(r3.errors)===JSON.stringify(['missing category']),'wscat '+JSON.stringify(r3.errors));\""
+    },
+    {
+      "id": "hidden-transactions-filters",
+      "command": "node -e \"const t=require('./src/transactions'); const A=(c,k)=>{if(!c)throw new Error('tx '+k)}; const txs=[t.createTransaction({date:'2026-05-02',amount:3,category:'food'}),t.createTransaction({date:'2026-04-15',amount:20,category:'transport'}),t.createTransaction({date:'2026-05-01',amount:5,category:'Food'})]; const may=t.filterByMonth(txs,'2026-05'); A(may.length===2,'month'); const food=t.filterByCategory(txs,'Food'); A(food.length===2,'cat'); const sorted=t.sortByDate(txs); A(sorted[0].date==='2026-04-15','sort0'); A(sorted[2].date==='2026-05-02','sort2'); let threw=false; try{t.createTransaction({date:'bad',amount:1,category:'x'});}catch(e){threw=true;} A(threw===true,'throws');\""
+    },
+    {
+      "id": "hidden-budget-summarize",
+      "command": "node -e \"const b=require('./src/budget'); const A=(c,k)=>{if(!c)throw new Error('budget '+k)}; const rows=b.summarizeByCategory([{category:'food',amountCents:1250},{category:'food',amountCents:300},{category:'transport',amountCents:2000}]); A(rows.length===2,'len'); A(rows[0].category==='transport','top'); A(rows[0].totalCents===2000,'toptot'); A(rows[0].count===1,'topcount'); A(rows[1].category==='food','second'); A(rows[1].totalCents===1550,'sectot'); A(rows[1].count===2,'seccount'); const tie=b.summarizeByCategory([{category:'zoo',amountCents:100},{category:'apple',amountCents:100}]); A(tie[0].category==='apple','tie');\""
+    },
+    {
+      "id": "hidden-budget-apply",
+      "command": "node -e \"const b=require('./src/budget'); const A=(c,k)=>{if(!c)throw new Error('budget '+k)}; const r=b.applyBudget([{category:'food',amountCents:1250}],{food:10}); A(r.length===1,'len'); A(r[0].spentCents===1250,'spent'); A(r[0].limitCents===1000,'limit'); A(r[0].remainingCents===-250,'rem'); A(r[0].overBudget===true,'over'); const r2=b.applyBudget([{category:'food',amountCents:500}],{food:10,transport:20}); A(r2.length===2,'union'); A(r2[0].category==='food','order0'); A(r2[1].category==='transport','order1'); A(r2[1].spentCents===0,'tspent'); A(r2[1].overBudget===false,'tover');\""
+    },
+    {
+      "id": "hidden-report",
+      "command": "node -e \"const rp=require('./src/report'); const A=(c,k)=>{if(!c)throw new Error('report '+k)}; const ledger=rp.renderLedger([{date:'2026-05-02',category:'food',amountCents:300},{date:'2026-05-01',category:'transport',amountCents:2000}]); A(ledger==='2026-05-01 transport $20.00\\n2026-05-02 food $3.00','ledger '+JSON.stringify(ledger)); const rep=rp.renderBudgetReport([{category:'food',amountCents:1250}],{food:10}); const lines=rep.split('\\n'); A(lines[0]==='food: spent $12.50 / $10.00 (OVER)','line0 '+lines[0]); A(lines[lines.length-1]==='TOTAL spent $12.50','total '+lines[lines.length-1]);\""
+    },
+    {
+      "id": "hidden-integration-index",
+      "command": "node -e \"const x=require('./src/index'); const A=(c,k)=>{if(!c)throw new Error('integration '+k)}; const raw=x.parseCsv('date,amount,category\\n2026-05-01,$12.50,Food\\n2026-04-20,3,transport\\n2026-05-03,$5.00,Food'); const txs=raw.map(r=>x.createTransaction({date:r.date,amount:r.amount,category:r.category})); A(txs.length===3,'n'); const may=x.filterByMonth(txs,'2026-05'); A(may.length===2,'may'); const sum=x.summarizeByCategory(txs); A(sum[0].category==='food','sumtop'); A(sum[0].totalCents===1750,'sumtot'); const rep=x.renderBudgetReport(txs,{food:15,transport:1}); const lines=rep.split('\\n'); A(lines[lines.length-1]==='TOTAL spent '+x.formatMoney(2050),'tot '+lines[lines.length-1]);\""
+    }
+  ]
+}
