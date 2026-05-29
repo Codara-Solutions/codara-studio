@@ -55,6 +55,11 @@ function buildScorecard(results) {
     hiddenGateRatio: round(mean(list.map((r) => r.quality.hiddenGateRatio))),
     qualityScore: round(mean(list.map((r) => r.quality.score))),
     parallelEfficiency: round(mean(list.map((r) => r.telemetry.parallelEfficiency))),
+    medianWorkerToolCalls: round(median(list.map((r) => r.telemetry.workerToolCalls || 0))),
+    medianPreviewToolCalls: round(median(list.map((r) => r.telemetry.previewToolCalls || 0))),
+    medianVerificationRoundTrips: round(
+      median(list.map((r) => r.telemetry.verificationRoundTrips || 0)),
+    ),
     medianMaxConcurrentWorkers: round(median(list.map((r) => r.telemetry.maxConcurrentWorkers))),
     meanParallelLaunchGroups: round(mean(list.map((r) => r.telemetry.parallelLaunchGroups))),
     meanPeerMessages: round(mean(list.map((r) => r.telemetry.peerMessageCount))),

@@ -102,6 +102,10 @@ async function runLiveAdapter(adapterId, input) {
     parallelLaunchGroups: isSpark ? sparkTelemetry.parallelLaunchGroups : 0,
     peerMessageCount: isSpark ? sparkTelemetry.peerMessageCount : 0,
     peerAgentCount: isSpark ? sparkTelemetry.peerAgentCount : 0,
+    workerToolCalls: isSpark ? sparkTelemetry.workerToolCalls : 0,
+    previewToolCalls: isSpark ? sparkTelemetry.previewToolCalls : 0,
+    verificationRoundTrips: isSpark ? sparkTelemetry.verificationRoundTrips : 0,
+    toolCallsByName: isSpark ? sparkTelemetry.toolCallsByName || {} : {},
     routing: isSpark ? sparkTelemetry.routing || [] : [],
     runtimeBreakdown: isSpark ? sparkTelemetry.runtimeBreakdown || {} : {},
     finalStatus: runnerResult.exitReason,
@@ -172,6 +176,10 @@ function telemetryFromSparkArtifact(artifacts) {
     parallelLaunchGroups: 0,
     peerMessageCount: 0,
     peerAgentCount: 0,
+    workerToolCalls: 0,
+    previewToolCalls: 0,
+    verificationRoundTrips: 0,
+    toolCallsByName: {},
   };
   base.routing = [];
   base.runtimeBreakdown = {};
@@ -212,6 +220,7 @@ function telemetryFromSparkArtifact(artifacts) {
       maxConcurrentWorkers: maxConcurrentIntervals(intervals),
       parallelLaunchGroups: countParallelLaunchGroups(artifacts),
       ...peerCommsTelemetry(path.dirname(runArtifact.path)),
+      ...toolCallTelemetry(artifacts, path.dirname(runArtifact.path)),
     };
   } catch {
     return base;
@@ -321,4 +330,108 @@ function peerCommsTelemetry(runDir) {
   return { peerMessageCount, peerAgentCount };
 }
 
-module.exports = { runLiveAdapter };
+// Per-worker tool-call telemetry. This is the signal that exposes the
+// verification bottleneck: a worker can write a deliverable in a handful of
+// edits, then spend most of its wall-clock driving the live preview one
+// keystroke at a time (each spark_preview_* call is a full MCP round-trip).
+// Counting those round-trips makes "fast vs slow verification" measurable.
+//
+// Primary source: hook.PreToolUse events in events.jsonl (Claude Code workers
+// emit these via Spark's PreToolUse hook). Fallback: scan the per-attempt raw
+// CC stream-json logs under the run dir for tool_use blocks, for configs where
+// the hook did not record into events.jsonl. Codex workers do not emit the
+// PreToolUse hook, so their tool calls are undercounted — the metric is most
+// meaningful for the preview-heavy Claude UI worker, which is the case we care
+// about most.
+function extractToolName(ev) {
+  const p = (ev && (ev.payload || ev)) || {};
+  const direct =
+    p.tool_name || p.toolName || (p.hookData && p.hookData.tool_name) || p.name;
+  if (typeof direct === "string" && direct) return direct;
+  const m = /"tool_name":"([^"]+)"/.exec(JSON.stringify(ev));
+  return m ? m[1] : null;
+}
+
+function toolCallTelemetry(artifacts, runDir) {
+  const byName = {};
+  let total = 0;
+  let counted = false;
+  const eventsArtifact = (artifacts || []).find((a) => a.name === "events.jsonl");
+  if (eventsArtifact && fs.existsSync(eventsArtifact.path)) {
+    const lines = fs.readFileSync(eventsArtifact.path, "utf8").split(/\r?\n/);
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let ev;
+      try {
+        ev = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (ev && ev.type === "hook.PreToolUse") {
+        const name = extractToolName(ev) || "unknown";
+        byName[name] = (byName[name] || 0) + 1;
+        total += 1;
+        counted = true;
+      }
+    }
+  }
+  if (!counted && runDir) {
+    const fromLogs = countToolCallsFromAttemptLogs(runDir);
+    if (fromLogs.total > 0) return finalizeToolCalls(fromLogs.byName, fromLogs.total);
+  }
+  return finalizeToolCalls(byName, total);
+}
+
+function finalizeToolCalls(byName, total) {
+  const previewEntries = Object.entries(byName).filter(([name]) =>
+    /spark[-_]preview/i.test(name),
+  );
+  const previewToolCalls = previewEntries.reduce((sum, [, count]) => sum + count, 0);
+  // Round-trips are the preview calls that actually drive/inspect the page —
+  // click/type/press_key/snapshot/screenshot/evaluate/wait_for. navigate/list/
+  // url are cheap setup/meta and excluded so the number reflects probe churn.
+  const verificationRoundTrips = previewEntries
+    .filter(([name]) => !/(?:_|\.)(navigate|list|url)$/i.test(name))
+    .reduce((sum, [, count]) => sum + count, 0);
+  return { workerToolCalls: total, previewToolCalls, verificationRoundTrips, toolCallsByName: byName };
+}
+
+function countToolCallsFromAttemptLogs(runDir) {
+  const byName = {};
+  let total = 0;
+  const stepsDir = path.join(runDir, "steps");
+  if (!fs.existsSync(stepsDir)) return { byName, total };
+  const logFiles = [];
+  const walk = (dir) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (/^(raw|stdout)\.log$/i.test(entry.name)) logFiles.push(full);
+    }
+  };
+  walk(stepsDir);
+  const re = /"type"\s*:\s*"tool_use"[\s\S]{0,240}?"name"\s*:\s*"([^"]+)"/g;
+  for (const file of logFiles) {
+    let text = "";
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    let match;
+    while ((match = re.exec(text))) {
+      const name = match[1];
+      byName[name] = (byName[name] || 0) + 1;
+      total += 1;
+    }
+  }
+  return { byName, total };
+}
+
+module.exports = { runLiveAdapter, toolCallTelemetry };
