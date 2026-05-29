@@ -24,6 +24,14 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import type {
+  SparkBuiltinActionResult,
+  SparkBuiltinMcpId,
+  SparkBuiltinMcpStatus,
+  SparkBuiltinRuntime,
+  SparkBuiltinRuntimeStatus,
+} from "@shared/types";
+
 import { writeFileAtomic } from "./fs-atomic";
 
 const SERVER_NAME = "spark-preview";
@@ -32,6 +40,29 @@ const SPARK_VERSION = "1";
 
 export const SPARK_ORCHESTRATOR_SERVER_NAME = "spark-orchestrator";
 const ORCHESTRATOR_SPARK_VERSION = "1";
+
+// Tool rosters kept in sync with resources/spark-*-mcp/server.js so the
+// Capability Center can show "N tools" without spawning the servers.
+const SPARK_PREVIEW_TOOLS = [
+  "spark_preview_list",
+  "spark_preview_url",
+  "spark_preview_navigate",
+  "spark_preview_snapshot",
+  "spark_preview_click",
+  "spark_preview_type",
+  "spark_preview_press_key",
+  "spark_preview_evaluate",
+  "spark_preview_wait_for",
+  "spark_preview_screenshot",
+];
+
+const SPARK_ORCHESTRATOR_TOOLS = [
+  "spark_spawn_workers",
+  "spark_ask_user",
+  "spark_complete",
+  "spark_get_worker_status",
+  "spark_wait_for_workers",
+];
 
 const CLAUDE_USER_CONFIG = join(homedir(), ".claude.json");
 const CODEX_USER_CONFIG = join(homedir(), ".codex", "config.toml");
@@ -102,32 +133,51 @@ export async function installSparkPreviewMcp(): Promise<void> {
   await Promise.all([installForClaude(), installForCodex()]);
 }
 
+// Per-runtime entry points used by the Capability Center's explicit install
+// buttons. `createIfMissing` lets a deliberate user action create the config
+// file/dir when the runtime CLI is present but hasn't written one yet — the
+// boot-time auto-installer never passes this (design rule #3: stay conservative).
+export async function installSparkPreviewMcpForClaude(createIfMissing = false): Promise<void> {
+  await installForClaude(createIfMissing);
+}
+
+export async function installSparkPreviewMcpForCodex(createIfMissing = false): Promise<void> {
+  await installForCodex(createIfMissing);
+}
+
 // ---------------------------------------------------------------------------
 // Claude (~/.claude.json)
 // ---------------------------------------------------------------------------
 
-async function installForClaude(): Promise<void> {
-  if (!existsSync(CLAUDE_USER_CONFIG)) return;
+async function installForClaude(createIfMissing = false): Promise<void> {
+  const fileExists = existsSync(CLAUDE_USER_CONFIG);
+  if (!fileExists && !createIfMissing) return;
 
-  let raw: string;
-  try {
-    raw = await fs.readFile(CLAUDE_USER_CONFIG, "utf8");
-  } catch (err) {
-    console.warn("[mcp-installer] could not read ~/.claude.json:", err);
-    return;
+  let raw = "";
+  if (fileExists) {
+    try {
+      raw = await fs.readFile(CLAUDE_USER_CONFIG, "utf8");
+    } catch (err) {
+      console.warn("[mcp-installer] could not read ~/.claude.json:", err);
+      return;
+    }
   }
 
   let parsed: Record<string, unknown>;
-  try {
-    const value = JSON.parse(raw) as unknown;
-    if (value === null || typeof value !== "object" || Array.isArray(value)) {
-      console.warn("[mcp-installer] ~/.claude.json is not a JSON object; skipping");
+  if (raw.trim()) {
+    try {
+      const value = JSON.parse(raw) as unknown;
+      if (value === null || typeof value !== "object" || Array.isArray(value)) {
+        console.warn("[mcp-installer] ~/.claude.json is not a JSON object; skipping");
+        return;
+      }
+      parsed = value as Record<string, unknown>;
+    } catch (err) {
+      console.warn("[mcp-installer] ~/.claude.json parse failed; skipping:", (err as Error).message);
       return;
     }
-    parsed = value as Record<string, unknown>;
-  } catch (err) {
-    console.warn("[mcp-installer] ~/.claude.json parse failed; skipping:", (err as Error).message);
-    return;
+  } else {
+    parsed = {};
   }
 
   const servers =
@@ -203,8 +253,17 @@ function matchesCurrent(value: unknown): boolean {
 // Codex (~/.codex/config.toml)
 // ---------------------------------------------------------------------------
 
-async function installForCodex(): Promise<void> {
-  if (!directoryExists(CODEX_DIR)) return;
+async function installForCodex(createIfMissing = false): Promise<void> {
+  const dirExists = directoryExists(CODEX_DIR);
+  if (!dirExists && !createIfMissing) return;
+  if (!dirExists) {
+    try {
+      await fs.mkdir(CODEX_DIR, { recursive: true });
+    } catch (err) {
+      console.warn("[mcp-installer] could not create ~/.codex:", err);
+      return;
+    }
+  }
 
   let existing = "";
   try {
@@ -412,31 +471,38 @@ function orchestratorMatchesCurrent(value: unknown): boolean {
   return true;
 }
 
-export async function installOrchestratorMcpForCC(): Promise<void> {
-  if (!existsSync(CLAUDE_USER_CONFIG)) return;
+export async function installOrchestratorMcpForCC(createIfMissing = false): Promise<void> {
+  const fileExists = existsSync(CLAUDE_USER_CONFIG);
+  if (!fileExists && !createIfMissing) return;
 
-  let raw: string;
-  try {
-    raw = await fs.readFile(CLAUDE_USER_CONFIG, "utf8");
-  } catch (err) {
-    console.warn("[mcp-installer] could not read ~/.claude.json:", err);
-    return;
+  let raw = "";
+  if (fileExists) {
+    try {
+      raw = await fs.readFile(CLAUDE_USER_CONFIG, "utf8");
+    } catch (err) {
+      console.warn("[mcp-installer] could not read ~/.claude.json:", err);
+      return;
+    }
   }
 
   let parsed: Record<string, unknown>;
-  try {
-    const value = JSON.parse(raw) as unknown;
-    if (value === null || typeof value !== "object" || Array.isArray(value)) {
-      console.warn("[mcp-installer] ~/.claude.json is not a JSON object; skipping orchestrator install");
+  if (raw.trim()) {
+    try {
+      const value = JSON.parse(raw) as unknown;
+      if (value === null || typeof value !== "object" || Array.isArray(value)) {
+        console.warn("[mcp-installer] ~/.claude.json is not a JSON object; skipping orchestrator install");
+        return;
+      }
+      parsed = value as Record<string, unknown>;
+    } catch (err) {
+      console.warn(
+        "[mcp-installer] ~/.claude.json parse failed; skipping orchestrator install:",
+        (err as Error).message,
+      );
       return;
     }
-    parsed = value as Record<string, unknown>;
-  } catch (err) {
-    console.warn(
-      "[mcp-installer] ~/.claude.json parse failed; skipping orchestrator install:",
-      (err as Error).message,
-    );
-    return;
+  } else {
+    parsed = {};
   }
 
   const servers =
@@ -501,8 +567,17 @@ function renderOrchestratorCodexBlock(): string {
   ].join("\n");
 }
 
-export async function installOrchestratorMcpForCodex(): Promise<void> {
-  if (!directoryExists(CODEX_DIR)) return;
+export async function installOrchestratorMcpForCodex(createIfMissing = false): Promise<void> {
+  const dirExists = directoryExists(CODEX_DIR);
+  if (!dirExists && !createIfMissing) return;
+  if (!dirExists) {
+    try {
+      await fs.mkdir(CODEX_DIR, { recursive: true });
+    } catch (err) {
+      console.warn("[mcp-installer] could not create ~/.codex (orchestrator):", err);
+      return;
+    }
+  }
 
   let existing = "";
   try {
@@ -575,6 +650,234 @@ export async function isSparkOrchestratorMcpInstalled(
     existing.includes(CODEX_ORCHESTRATOR_BLOCK_START) &&
     existing.includes(CODEX_ORCHESTRATOR_BLOCK_END)
   );
+}
+
+// ---------------------------------------------------------------------------
+// Spark built-in status + per-runtime install/uninstall (Capability Center)
+// ---------------------------------------------------------------------------
+//
+// The Capability Center renders spark-preview and spark-orchestrator in their
+// own branded section with per-runtime install controls. These functions are
+// the backend for that surface: they report where each built-in is installed
+// and let the user add/remove it from a single runtime at a time.
+
+interface SparkBuiltinMeta {
+  id: SparkBuiltinMcpId;
+  serverName: string;
+  summary: string;
+  detail: string;
+  tools: string[];
+  autoManaged: boolean;
+}
+
+function builtinMeta(autoInstallEnabled: boolean): SparkBuiltinMeta[] {
+  return [
+    {
+      id: "spark-preview",
+      serverName: SERVER_NAME,
+      summary: "Drive the live preview tab",
+      detail:
+        "Lets verifier and worker agents click, type, snapshot, screenshot, and run JS against the exact <preview> DOM the user sees inside Spark — no extra browser window.",
+      tools: SPARK_PREVIEW_TOOLS,
+      autoManaged: autoInstallEnabled,
+    },
+    {
+      id: "spark-orchestrator",
+      serverName: SPARK_ORCHESTRATOR_SERVER_NAME,
+      summary: "Spawn & steer workers in Execute mode",
+      detail:
+        "Gives the Claude/Codex CLI running in Execute mode the tools to spawn Spark workers, ask you clarifying questions, poll worker status, and mark the run complete. Installed automatically the first time you start an Execute-mode run.",
+      tools: SPARK_ORCHESTRATOR_TOOLS,
+      autoManaged: false,
+    },
+  ];
+}
+
+export async function getSparkBuiltinStatus(input: {
+  claudeRuntimeAvailable: boolean;
+  codexRuntimeAvailable: boolean;
+  autoInstallEnabled: boolean;
+}): Promise<SparkBuiltinMcpStatus[]> {
+  const metas = builtinMeta(input.autoInstallEnabled);
+  return Promise.all(
+    metas.map(async (meta) => {
+      const codexKind = meta.id === "spark-preview" ? "preview" : "orchestrator";
+      const [claude, codex] = await Promise.all([
+        detectClaudeBuiltinState(meta.serverName, input.claudeRuntimeAvailable),
+        detectCodexBuiltinState(codexKind, input.codexRuntimeAvailable),
+      ]);
+      return {
+        id: meta.id,
+        name: meta.serverName,
+        summary: meta.summary,
+        detail: meta.detail,
+        tools: meta.tools,
+        autoManaged: meta.autoManaged,
+        claude,
+        codex,
+      } satisfies SparkBuiltinMcpStatus;
+    }),
+  );
+}
+
+export async function installSparkBuiltin(
+  id: SparkBuiltinMcpId,
+  runtime: SparkBuiltinRuntime,
+): Promise<SparkBuiltinActionResult> {
+  try {
+    if (id === "spark-preview") {
+      if (runtime === "claude") await installSparkPreviewMcpForClaude(true);
+      else await installSparkPreviewMcpForCodex(true);
+    } else if (runtime === "claude") {
+      await installOrchestratorMcpForCC(true);
+    } else {
+      await installOrchestratorMcpForCodex(true);
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export async function uninstallSparkBuiltin(
+  id: SparkBuiltinMcpId,
+  runtime: SparkBuiltinRuntime,
+): Promise<SparkBuiltinActionResult> {
+  try {
+    const serverName = id === "spark-preview" ? SERVER_NAME : SPARK_ORCHESTRATOR_SERVER_NAME;
+    if (runtime === "claude") return await uninstallManagedClaudeServer(serverName);
+    return await uninstallCodexBuiltinBlock(id === "spark-preview" ? "preview" : "orchestrator");
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function detectClaudeBuiltinState(
+  serverName: string,
+  runtimeAvailable: boolean,
+): Promise<SparkBuiltinRuntimeStatus> {
+  const entry = await readClaudeServerEntry(serverName);
+  if (entry !== undefined) {
+    return {
+      state: isSparkManaged(entry) ? "installed" : "user-managed",
+      configPath: CLAUDE_USER_CONFIG,
+    };
+  }
+  return { state: runtimeAvailable ? "available" : "unavailable", configPath: CLAUDE_USER_CONFIG };
+}
+
+async function detectCodexBuiltinState(
+  kind: "preview" | "orchestrator",
+  runtimeAvailable: boolean,
+): Promise<SparkBuiltinRuntimeStatus> {
+  let existing = "";
+  if (existsSync(CODEX_USER_CONFIG)) {
+    try {
+      existing = await fs.readFile(CODEX_USER_CONFIG, "utf8");
+    } catch {
+      existing = "";
+    }
+  }
+  const hasUserSection =
+    kind === "preview" ? hasUserSparkPreviewSection(existing) : hasUserOrchestratorSection(existing);
+  if (hasUserSection) return { state: "user-managed", configPath: CODEX_USER_CONFIG };
+  const managed =
+    kind === "preview"
+      ? existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END)
+      : existing.includes(CODEX_ORCHESTRATOR_BLOCK_START) &&
+        existing.includes(CODEX_ORCHESTRATOR_BLOCK_END);
+  if (managed) return { state: "installed", configPath: CODEX_USER_CONFIG };
+  return { state: runtimeAvailable ? "available" : "unavailable", configPath: CODEX_USER_CONFIG };
+}
+
+async function readClaudeServerEntry(serverName: string): Promise<unknown | undefined> {
+  if (!existsSync(CLAUDE_USER_CONFIG)) return undefined;
+  let raw: string;
+  try {
+    raw = await fs.readFile(CLAUDE_USER_CONFIG, "utf8");
+  } catch {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const servers = (parsed as Record<string, unknown>).mcpServers;
+  if (!servers || typeof servers !== "object" || Array.isArray(servers)) return undefined;
+  return (servers as Record<string, unknown>)[serverName];
+}
+
+// Remove a Spark-managed entry from ~/.claude.json. Refuses to touch a
+// user-defined entry of the same name and treats "already absent" as success.
+async function uninstallManagedClaudeServer(serverName: string): Promise<SparkBuiltinActionResult> {
+  if (!existsSync(CLAUDE_USER_CONFIG)) return { ok: true };
+  let raw: string;
+  try {
+    raw = await fs.readFile(CLAUDE_USER_CONFIG, "utf8");
+  } catch (err) {
+    return { ok: false, error: `Could not read ~/.claude.json: ${(err as Error).message}` };
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return { ok: true };
+    parsed = value as Record<string, unknown>;
+  } catch (err) {
+    return { ok: false, error: `~/.claude.json parse failed: ${(err as Error).message}` };
+  }
+  const servers =
+    parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers)
+      ? (parsed.mcpServers as Record<string, unknown>)
+      : null;
+  if (!servers || !(serverName in servers)) return { ok: true };
+  if (!isSparkManaged(servers[serverName])) {
+    return {
+      ok: false,
+      error: `'${serverName}' is a user-defined entry in ~/.claude.json; Spark won't remove it.`,
+    };
+  }
+  delete servers[serverName];
+  parsed.mcpServers = servers;
+  try {
+    await writeFileAtomic(CLAUDE_USER_CONFIG, JSON.stringify(parsed, null, 2) + "\n");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: `Could not write ~/.claude.json: ${(err as Error).message}` };
+  }
+}
+
+// Strip the Spark-managed Codex block. Refuses when the user keeps their own
+// section outside the managed markers.
+async function uninstallCodexBuiltinBlock(
+  kind: "preview" | "orchestrator",
+): Promise<SparkBuiltinActionResult> {
+  if (!existsSync(CODEX_USER_CONFIG)) return { ok: true };
+  let existing: string;
+  try {
+    existing = await fs.readFile(CODEX_USER_CONFIG, "utf8");
+  } catch (err) {
+    return { ok: false, error: `Could not read ~/.codex/config.toml: ${(err as Error).message}` };
+  }
+  const serverName = kind === "preview" ? SERVER_NAME : SPARK_ORCHESTRATOR_SERVER_NAME;
+  const hasUserSection =
+    kind === "preview" ? hasUserSparkPreviewSection(existing) : hasUserOrchestratorSection(existing);
+  if (hasUserSection) {
+    return {
+      ok: false,
+      error: `A user-defined ${serverName} section exists in config.toml; Spark won't remove it.`,
+    };
+  }
+  const next = kind === "preview" ? stripBuiltinBlock(existing) : stripOrchestratorBlock(existing);
+  if (next === existing) return { ok: true };
+  try {
+    await fs.writeFile(CODEX_USER_CONFIG, next, "utf8");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: `Could not write ~/.codex/config.toml: ${(err as Error).message}` };
+  }
 }
 
 // Test/diagnostic surface.

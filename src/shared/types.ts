@@ -429,6 +429,65 @@ export interface AgentAssetDeleteResult {
   error?: string;
 }
 
+// Result of copying a single discovered MCP/skill into the runtime that was
+// missing it (the per-cell "Add to Claude/Codex" action in the Capability
+// Center). `installed` is the list of names actually written.
+export interface AgentAssetInstallResult {
+  ok: boolean;
+  installed: string[];
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Spark built-in MCP servers (spark-preview, spark-orchestrator)
+// ---------------------------------------------------------------------------
+// These two servers ship inside Spark App itself. The Capability Center shows
+// them in a dedicated, branded section — distinct from third-party MCPs the
+// user wires up — with per-runtime install controls.
+
+export type SparkBuiltinMcpId = "spark-preview" | "spark-orchestrator";
+export type SparkBuiltinRuntime = "claude" | "codex";
+
+// Per-runtime install state for a built-in:
+//  - "installed":    a Spark-managed entry is present (we can uninstall it).
+//  - "user-managed": the user wired up their own entry of the same name; it is
+//                    active but Spark won't touch it (uninstall disabled).
+//  - "available":    not installed, but the runtime CLI is present so we can
+//                    install on demand.
+//  - "unavailable":  the runtime CLI was not detected on this machine.
+export type SparkBuiltinInstallState =
+  | "installed"
+  | "user-managed"
+  | "available"
+  | "unavailable";
+
+export interface SparkBuiltinRuntimeStatus {
+  state: SparkBuiltinInstallState;
+  // Path of the config file Spark writes to for this runtime (for tooltips).
+  configPath: string;
+}
+
+export interface SparkBuiltinMcpStatus {
+  id: SparkBuiltinMcpId;
+  name: string;
+  // One-line headline shown under the title.
+  summary: string;
+  // Longer explanation of what the server does and when it is used.
+  detail: string;
+  // Tool names the server exposes (for the "N tools" badge + tooltip).
+  tools: string[];
+  // When true, Spark auto-installs/refreshes this server on launch (governed
+  // by the playwrightMcpAutoInstall setting). Shown as an "auto" hint.
+  autoManaged: boolean;
+  claude: SparkBuiltinRuntimeStatus;
+  codex: SparkBuiltinRuntimeStatus;
+}
+
+export interface SparkBuiltinActionResult {
+  ok: boolean;
+  error?: string;
+}
+
 export interface FsEntry {
   name: string;
   path: string;

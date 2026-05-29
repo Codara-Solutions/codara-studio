@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import type {
   AgentAssetCompatibility,
   AgentSyncResult,
@@ -10,6 +10,7 @@ import type {
 } from "@shared/types";
 import type {
   AgentAssetDeleteResult,
+  AgentAssetInstallResult,
   AgentAssetInventory,
   AgentAssetInventoryItem,
 } from "@shared/types";
@@ -146,6 +147,151 @@ export async function syncAgentAssets(input: { cwd?: string | null }): Promise<A
 
   result.completedAt = new Date().toISOString();
   return result;
+}
+
+// Copy a single discovered asset into the runtime that was missing it. Powers
+// the per-cell "Add to Claude/Codex" action in the Capability Center, so the
+// user can spread one MCP server or skill without running a full sync.
+export async function installAgentAssetToRuntime(input: {
+  id: string;
+  target: "claude" | "codex";
+}): Promise<AgentAssetInstallResult> {
+  const parsed = parseAssetId(input.id);
+  if (!parsed) return { ok: false, installed: [], error: "Invalid agent asset id." };
+  if (parsed.runtime === input.target) {
+    return { ok: false, installed: [], error: `'${parsed.name}' is already installed for ${input.target}.` };
+  }
+  try {
+    if (parsed.kind === "mcp") {
+      return await installMcpAssetToRuntime(parsed, input.target);
+    }
+    return await installSkillAssetToRuntime(parsed, input.target);
+  } catch (err) {
+    return { ok: false, installed: [], error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function blankSyncResult(): AgentSyncResult {
+  const now = new Date().toISOString();
+  return {
+    startedAt: now,
+    completedAt: now,
+    mcp: { toClaude: [], toCodex: [], skipped: [], errors: [] },
+    skills: { toClaude: [], toCodex: [], skipped: [], errors: [] },
+  };
+}
+
+async function installMcpAssetToRuntime(
+  asset: { name: string; path: string },
+  target: "claude" | "codex",
+): Promise<AgentAssetInstallResult> {
+  const server = readMcpServerByName(asset.path, asset.name);
+  if (!server) {
+    return {
+      ok: false,
+      installed: [],
+      error: `Could not read MCP server '${asset.name}' from ${asset.path}.`,
+    };
+  }
+  const result = blankSyncResult();
+  if (target === "claude") {
+    const added = await writeClaudeMcpServers(join(homedir(), ".claude.json"), [server], result);
+    if (added.length === 0) {
+      return { ok: false, installed: [], error: firstMcpMessage(result, `Could not add '${asset.name}' to Claude.`) };
+    }
+    return { ok: true, installed: added };
+  }
+  const added = await writeCodexManagedMcpServers(
+    join(homedir(), ".codex", "config.toml"),
+    [server],
+    result,
+  );
+  if (added.length === 0) {
+    return { ok: false, installed: [], error: firstMcpMessage(result, `Could not add '${asset.name}' to Codex.`) };
+  }
+  return { ok: true, installed: added };
+}
+
+async function installSkillAssetToRuntime(
+  asset: { name: string; path: string },
+  target: "claude" | "codex",
+): Promise<AgentAssetInstallResult> {
+  const sourceDir = findSkillDirByName(asset.path, asset.name);
+  if (!sourceDir) {
+    return { ok: false, installed: [], error: `Could not locate skill '${asset.name}' under ${asset.path}.` };
+  }
+  if (isSymlink(sourceDir)) {
+    return { ok: false, installed: [], error: `Skill '${asset.name}' is a symlink; copy it manually.` };
+  }
+  // Mirror the source scope: a workspace skill stays in the workspace (swap the
+  // .claude/.codex segment), a user skill lands in the target's user root.
+  const destRoot = deriveSkillDestRoot(asset.path, target);
+  const dest = join(destRoot, basename(sourceDir));
+  if (pathExists(dest)) {
+    return { ok: false, installed: [], error: `${target} already has skill '${asset.name}'.` };
+  }
+  await fs.mkdir(destRoot, { recursive: true });
+  await copyDir(sourceDir, dest);
+  return { ok: true, installed: [asset.name] };
+}
+
+function firstMcpMessage(result: AgentSyncResult, fallback: string): string {
+  return result.mcp.errors[0] ?? result.mcp.skipped[0] ?? fallback;
+}
+
+// Map a skill-root path on one runtime to the equivalent root on `target` by
+// swapping the nearest `.claude`/`.codex` segment. Falls back to the target's
+// user-scope root when the source path has no recognizable runtime segment.
+function deriveSkillDestRoot(sourceRoot: string, target: "claude" | "codex"): string {
+  const parts = sourceRoot.split(/[\\/]/);
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (parts[i] === ".claude" || parts[i] === ".codex") {
+      parts[i] = `.${target}`;
+      return parts.join(sep);
+    }
+  }
+  return join(homedir(), `.${target}`, "skills");
+}
+
+function readMcpServerByName(path: string, name: string): McpServerConfig | null {
+  const text = readSmallText(path, MAX_CONFIG_BYTES);
+  if (!text) return null;
+  if (path.toLowerCase().endsWith(".json")) {
+    return findJsonMcpServer(text, name);
+  }
+  const servers = parseCodexTomlMcpServers(stripManagedMcpBlock(text).text);
+  return servers.find((server) => server.name === name) ?? null;
+}
+
+function findJsonMcpServer(text: string, name: string): McpServerConfig | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const raw = findJsonMcpServerValue(parsed, name, 0);
+  if (raw === undefined) return null;
+  return normalizeMcpServer(name, raw);
+}
+
+function findJsonMcpServerValue(value: unknown, name: string, depth: number): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value) || depth > 5) return undefined;
+  const record = value as Record<string, unknown>;
+  for (const [key, child] of Object.entries(record)) {
+    if (
+      (key === "mcpServers" || key === "mcp_servers") &&
+      child &&
+      typeof child === "object" &&
+      !Array.isArray(child) &&
+      Object.prototype.hasOwnProperty.call(child, name)
+    ) {
+      return (child as Record<string, unknown>)[name];
+    }
+    const nested = findJsonMcpServerValue(child, name, depth + 1);
+    if (nested !== undefined) return nested;
+  }
+  return undefined;
 }
 
 function discoverMcpSources(cwd: string): SyncSource[] {

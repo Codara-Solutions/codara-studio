@@ -36,6 +36,12 @@ async function getAgentSync(): Promise<typeof import("./agent-sync")> {
   return agentSyncMod;
 }
 
+let mcpInstallerMod: typeof import("./mcp-installer") | undefined;
+async function getMcpInstaller(): Promise<typeof import("./mcp-installer")> {
+  mcpInstallerMod ??= await import("./mcp-installer");
+  return mcpInstallerMod;
+}
+
 let inlineAiMod: typeof import("./inline-ai") | undefined;
 async function getInlineAi(): Promise<typeof import("./inline-ai")> {
   inlineAiMod ??= await import("./inline-ai");
@@ -86,6 +92,8 @@ import type {
   SearchOptions,
   SearchSummary,
   ShellInfo,
+  SparkBuiltinMcpId,
+  SparkBuiltinRuntime,
   SparkEvent,
   StartAutopilotInput,
   StartSearchResponse,
@@ -167,6 +175,41 @@ export function registerIpc(): void {
     async (_e, input: { id: string }) => {
       const { deleteAgentAsset } = await getAgentSync();
       return deleteAgentAsset({ id: input.id });
+    },
+  );
+  ipcMain.handle(
+    "agents:installAsset",
+    async (_e, input: { id: string; target: "claude" | "codex" }) => {
+      const { installAgentAssetToRuntime } = await getAgentSync();
+      return installAgentAssetToRuntime({ id: input.id, target: input.target });
+    },
+  );
+  ipcMain.handle("agents:builtins", async () => {
+    const [{ getSparkBuiltinStatus }, runtimes, settings] = await Promise.all([
+      getMcpInstaller(),
+      detectAgentRuntimes(false),
+      loadSettings(),
+    ]);
+    const isAvailable = (kind: "claude" | "codex") =>
+      runtimes.some((r) => r.kind === kind && r.installed);
+    return getSparkBuiltinStatus({
+      claudeRuntimeAvailable: isAvailable("claude"),
+      codexRuntimeAvailable: isAvailable("codex"),
+      autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
+    });
+  });
+  ipcMain.handle(
+    "agents:installBuiltin",
+    async (_e, input: { id: SparkBuiltinMcpId; runtime: SparkBuiltinRuntime }) => {
+      const { installSparkBuiltin } = await getMcpInstaller();
+      return installSparkBuiltin(input.id, input.runtime);
+    },
+  );
+  ipcMain.handle(
+    "agents:uninstallBuiltin",
+    async (_e, input: { id: SparkBuiltinMcpId; runtime: SparkBuiltinRuntime }) => {
+      const { uninstallSparkBuiltin } = await getMcpInstaller();
+      return uninstallSparkBuiltin(input.id, input.runtime);
     },
   );
 

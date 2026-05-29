@@ -2,9 +2,14 @@ import { contextBridge, ipcRenderer, webFrame } from "electron";
 import type {
   AddRunMessageInput,
   AgentAssetDeleteResult,
+  AgentAssetInstallResult,
   AgentAssetInventory,
   AgentRuntimeDiagnostic,
   AgentSyncResult,
+  SparkBuiltinActionResult,
+  SparkBuiltinMcpId,
+  SparkBuiltinMcpStatus,
+  SparkBuiltinRuntime,
   AppPreferences,
   AppSettings,
   AppState,
@@ -140,6 +145,38 @@ const api = {
       ipcRenderer.invoke("agents:deleteAsset", { id }).catch((err: unknown) => {
         if (isMissingIpcHandlerError(err, "agents:deleteAsset")) {
           return { ok: false, deleted: [], error: "Restart Spark to enable agent asset deletion." };
+        }
+        throw err;
+      }),
+    installAsset: (id: string, target: "claude" | "codex"): Promise<AgentAssetInstallResult> =>
+      ipcRenderer.invoke("agents:installAsset", { id, target }).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:installAsset")) {
+          return { ok: false, installed: [], error: "Restart Spark to enable installing to another runtime." };
+        }
+        throw err;
+      }),
+    builtins: (): Promise<SparkBuiltinMcpStatus[]> =>
+      ipcRenderer.invoke("agents:builtins").catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:builtins")) return [];
+        throw err;
+      }),
+    installBuiltin: (
+      id: SparkBuiltinMcpId,
+      runtime: SparkBuiltinRuntime,
+    ): Promise<SparkBuiltinActionResult> =>
+      ipcRenderer.invoke("agents:installBuiltin", { id, runtime }).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:installBuiltin")) {
+          return { ok: false, error: "Restart Spark to enable installing built-in MCP servers." };
+        }
+        throw err;
+      }),
+    uninstallBuiltin: (
+      id: SparkBuiltinMcpId,
+      runtime: SparkBuiltinRuntime,
+    ): Promise<SparkBuiltinActionResult> =>
+      ipcRenderer.invoke("agents:uninstallBuiltin", { id, runtime }).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:uninstallBuiltin")) {
+          return { ok: false, error: "Restart Spark to enable removing built-in MCP servers." };
         }
         throw err;
       }),
