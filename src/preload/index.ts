@@ -22,12 +22,16 @@ import type {
   FsEntry,
   FsFileContent,
   FsReadResult,
+  GitBranchList,
+  GitCommitDetailResult,
   GitCommitMessageResult,
+  GitConflictSide,
   GitDiff,
   GitFileChange,
   GitLog,
   GitOpResult,
   GitSmartMergeResult,
+  GitStashList,
   GitStatus,
   InAppNotificationPayload,
   InterruptRunWithMessageInput,
@@ -296,8 +300,8 @@ const api = {
       ipcRenderer.invoke("git:unstageAll", cwd),
     discard: (cwd: string, files: GitFileChange[]): Promise<GitOpResult> =>
       ipcRenderer.invoke("git:discard", { cwd, files }),
-    commit: (cwd: string, message: string): Promise<GitOpResult> =>
-      ipcRenderer.invoke("git:commit", { cwd, message }),
+    commit: (cwd: string, message: string, amend?: boolean): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:commit", { cwd, message, amend }),
     generateCommitMessage: (cwd: string): Promise<GitCommitMessageResult> =>
       ipcRenderer.invoke("git:generateCommitMessage", cwd),
     push: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:push", cwd),
@@ -312,6 +316,68 @@ const api = {
     revert: (cwd: string, hash: string): Promise<GitOpResult> =>
       ipcRenderer.invoke("git:revert", { cwd, hash }),
     init: (cwd: string): Promise<GitOpResult> => ipcRenderer.invoke("git:init", cwd),
+
+    // Branches
+    branches: (cwd: string): Promise<GitBranchList> =>
+      ipcRenderer.invoke("git:branches", cwd),
+    checkoutBranch: (cwd: string, name: string): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:checkoutBranch", { cwd, name }),
+    createBranch: (
+      cwd: string,
+      name: string,
+      opts?: { checkout?: boolean; startPoint?: string },
+    ): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:createBranch", {
+        cwd,
+        name,
+        checkout: opts?.checkout,
+        startPoint: opts?.startPoint,
+      }),
+    renameBranch: (cwd: string, oldName: string, newName: string): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:renameBranch", { cwd, oldName, newName }),
+    deleteBranch: (cwd: string, name: string, force?: boolean): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:deleteBranch", { cwd, name, force }),
+    mergeBranch: (cwd: string, name: string): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:mergeBranch", { cwd, name }),
+
+    // Stash
+    stashes: (cwd: string): Promise<GitStashList> => ipcRenderer.invoke("git:stashes", cwd),
+    stashSave: (
+      cwd: string,
+      opts?: { message?: string; includeUntracked?: boolean },
+    ): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:stashSave", {
+        cwd,
+        message: opts?.message,
+        includeUntracked: opts?.includeUntracked,
+      }),
+    stashApply: (cwd: string, ref: string): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:stashApply", { cwd, ref }),
+    stashPop: (cwd: string, ref: string): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:stashPop", { cwd, ref }),
+    stashDrop: (cwd: string, ref: string): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:stashDrop", { cwd, ref }),
+
+    // Commit inspection
+    commitDetail: (cwd: string, hash: string): Promise<GitCommitDetailResult> =>
+      ipcRenderer.invoke("git:commitDetail", { cwd, hash }),
+    commitFileDiff: (cwd: string, hash: string, path: string): Promise<GitDiff> =>
+      ipcRenderer.invoke("git:commitFileDiff", { cwd, hash, path }),
+
+    // Partial staging + conflict resolution
+    applyPatch: (
+      cwd: string,
+      patch: string,
+      opts: { cached: boolean; reverse: boolean },
+    ): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:applyPatch", {
+        cwd,
+        patch,
+        cached: opts.cached,
+        reverse: opts.reverse,
+      }),
+    resolveConflict: (cwd: string, path: string, side: GitConflictSide): Promise<GitOpResult> =>
+      ipcRenderer.invoke("git:resolveConflict", { cwd, path, side }),
   },
   orchestration: {
     createRun: (input: CreateRunInput): Promise<RunState> =>

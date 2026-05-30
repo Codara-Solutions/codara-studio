@@ -243,7 +243,11 @@ export default function RunCanvas({ run }: { run: RunState }) {
 
   const startPanning = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
+    // NB: do not setPointerCapture here. Capturing the pointer on pointerdown
+    // makes the browser retarget the follow-up `click` to this viewport, so a
+    // node's onClick never fires and selecting a card silently does nothing.
+    // Capture is taken lazily in movePanning once a real drag passes the
+    // threshold (see below).
     stopAnimation();
     targetZRef.current = zRef.current;
     anchorRef.current = null;
@@ -263,7 +267,21 @@ export default function RunCanvas({ run }: { run: RunState }) {
     if (!start || start.pointerId !== event.pointerId) return;
     const dx = event.clientX - start.startCx;
     const dy = event.clientY - start.startCy;
-    if (!start.moved && Math.hypot(dx, dy) > 4) start.moved = true;
+    if (!start.moved && Math.hypot(dx, dy) > 4) {
+      start.moved = true;
+      // Now that it's a genuine drag (not a click), capture the pointer so the
+      // pan keeps tracking even if the cursor leaves the viewport. Deferring
+      // capture to here is what keeps plain clicks reaching the nodes.
+      if (!event.currentTarget.hasPointerCapture(event.pointerId)) {
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {
+          // Pointer already gone; in-viewport panning still works without it.
+        }
+      }
+    }
+    // Below the threshold this is still a potential click — don't pan yet.
+    if (!start.moved) return;
     xRef.current = start.startX + dx;
     yRef.current = start.startY + dy;
     applyTransform();

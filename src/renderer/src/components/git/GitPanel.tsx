@@ -11,9 +11,12 @@ import type {
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
 import ChangeRow from "./ChangeRow";
 import ChangeSection from "./ChangeSection";
+import BranchMenu from "./BranchMenu";
 import CommitComposer from "./CommitComposer";
+import CommitDetail from "./CommitDetail";
 import CommitHistory from "./CommitHistory";
 import DiffView from "./DiffView";
+import StashSection from "./StashSection";
 import { buildSmartMergePlan, requestPrepareSmartMerge, smartMergePlanTitle } from "./smart-merge";
 import {
   CommitIcon,
@@ -152,6 +155,12 @@ export default function GitPanel({
   const [diffTarget, setDiffTarget] = useState<DiffTarget | null>(null);
   const [diff, setDiff] = useState<GitDiff | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
+  // Bumped after any git mutation so the self-contained branch / stash sections
+  // re-read their own state (they don't share GitPanel's status/log).
+  const [gitVersion, setGitVersion] = useState(0);
+  // A commit selected for inspection — when set, the body shows CommitDetail
+  // (the history/inspection agent builds that view).
+  const [detailHash, setDetailHash] = useState<string | null>(null);
 
   // Refs let the timer / event callbacks and action guards read live values
   // without re-subscribing or going stale.
@@ -196,6 +205,7 @@ export default function GitPanel({
     setLog(null);
     setOpError(null);
     setDiffTarget(null);
+    setDetailHash(null);
     setMessage("");
     setSections({ staged: false, changes: false, history: false });
     if (cwd) void refresh(false);
@@ -254,7 +264,9 @@ export default function GitPanel({
     return () => {
       cancelled = true;
     };
-  }, [diffTarget, cwd]);
+    // gitVersion in deps so an open diff reloads after a partial stage / unstage
+    // / discard (the working or staged side changed underneath it).
+  }, [diffTarget, cwd, gitVersion]);
 
   // Run one git mutation: block re-entrancy, surface failures, refresh after.
   const runAction = useCallback(
@@ -270,10 +282,18 @@ export default function GitPanel({
       } finally {
         setBusy(null);
         void refresh(true);
+        setGitVersion((v) => v + 1);
       }
     },
     [refresh],
   );
+
+  // Passed to the branch / stash sections so a mutation they perform refreshes
+  // the whole panel (and bumps the version the other sections re-read on).
+  const handleGitChanged = useCallback(() => {
+    void refresh(true);
+    setGitVersion((v) => v + 1);
+  }, [refresh]);
 
   const stageOne = useCallback(
     (file: GitFileChange) => {
@@ -380,36 +400,49 @@ export default function GitPanel({
     }
   }, [cwd, refresh]);
 
-  // Commit. With nothing staged, stage everything first so the button can
-  // double as "Commit All" — matching VS Code's behaviour.
-  const handleCommit = useCallback(async (): Promise<void> => {
-    if (!cwd || busyRef.current) return;
-    const text = message.trim();
-    if (!text) return;
-    const nothingStaged = (statusRef.current?.staged.length ?? 0) === 0;
-    setBusy("commit");
-    setOpError(null);
-    try {
-      if (nothingStaged) {
-        const staged = await window.spark.git.stageAll(cwd);
-        if (!staged.ok) {
-          setOpError(staged.error);
-          return;
+  // Commit. For a normal commit with nothing staged, stage everything first so
+  // the button doubles as "Commit All" (matching VS Code). For an amend, never
+  // auto-stage — amend rewrites the last commit with exactly what's staged (or
+  // a pure reword when nothing is staged).
+  const handleCommit = useCallback(
+    async (amend: boolean): Promise<void> => {
+      if (!cwd || busyRef.current) return;
+      const text = message.trim();
+      if (!text) return;
+      const nothingStaged = (statusRef.current?.staged.length ?? 0) === 0;
+      setBusy("commit");
+      setOpError(null);
+      try {
+        if (!amend && nothingStaged) {
+          const staged = await window.spark.git.stageAll(cwd);
+          if (!staged.ok) {
+            setOpError(staged.error);
+            return;
+          }
         }
+        const result = await window.spark.git.commit(cwd, text, amend);
+        if (result.ok) setMessage("");
+        else setOpError(result.error);
+      } catch (err) {
+        setOpError((err as Error).message);
+      } finally {
+        setBusy(null);
+        void refresh(true);
+        setGitVersion((v) => v + 1);
       }
-      const result = await window.spark.git.commit(cwd, text);
-      if (result.ok) setMessage("");
-      else setOpError(result.error);
-    } catch (err) {
-      setOpError((err as Error).message);
-    } finally {
-      setBusy(null);
-      void refresh(true);
-    }
-  }, [cwd, message, refresh]);
+    },
+    [cwd, message, refresh],
+  );
 
   const openDiff = useCallback((file: GitFileChange) => {
+    setDetailHash(null);
     setDiffTarget({ path: file.path, staged: file.staged, untracked: file.untracked });
+  }, []);
+
+  // Open a commit in the inspection view (built by the history/inspection agent).
+  const openCommitDetail = useCallback((hash: string) => {
+    setDiffTarget(null);
+    setDetailHash(hash);
   }, []);
 
   const openDiffFileInEditor = useCallback(() => {
@@ -470,7 +503,7 @@ export default function GitPanel({
           style={{
             flex: 1,
             minHeight: 0,
-            overflowY: diffTarget ? "hidden" : "auto",
+            overflowY: diffTarget || detailHash ? "hidden" : "auto",
             overflowX: "hidden",
           }}
         >
@@ -480,24 +513,35 @@ export default function GitPanel({
             <DiffView
               path={diffTarget.path}
               staged={diffTarget.staged}
+              untracked={diffTarget.untracked}
+              cwd={cwd}
               diff={diff}
               loading={diffLoading}
               onBack={() => setDiffTarget(null)}
               onOpenFile={openDiffFileInEditor}
+              onChanged={handleGitChanged}
             />
+          ) : detailHash ? (
+            <CommitDetail cwd={cwd} hash={detailHash} onClose={() => setDetailHash(null)} />
           ) : status === null ? (
             <PanelMessage text="" />
           ) : !status.isRepo ? (
             <NonRepoState busy={disabled} onInit={handleInit} />
           ) : (
             <>
+              <BranchMenu
+                cwd={cwd}
+                onChanged={handleGitChanged}
+                refreshKey={gitVersion}
+                disabled={disabled}
+              />
               {displayError && (
                 <ErrorStrip text={displayError} onDismiss={() => setOpError(null)} />
               )}
               <CommitComposer
                 message={message}
                 onMessageChange={setMessage}
-                onCommit={() => void handleCommit()}
+                onCommit={(amend) => void handleCommit(amend)}
                 onGenerateMessage={() => void handleGenerateMessage()}
                 canCommit={canCommit}
                 canGenerateMessage={canGenerateMessage}
@@ -578,7 +622,15 @@ export default function GitPanel({
 
               {changeCount === 0 && <CleanState />}
 
+              <StashSection
+                cwd={cwd}
+                onChanged={handleGitChanged}
+                refreshKey={gitVersion}
+                disabled={disabled}
+              />
+
               <CommitHistory
+                cwd={cwd}
                 rows={log?.rows ?? []}
                 loading={loading && !log}
                 collapsed={sections.history}
@@ -587,6 +639,7 @@ export default function GitPanel({
                 onCheckout={handleCheckout}
                 onRevert={handleRevert}
                 onUndoLastCommit={handleUndoLastCommit}
+                onOpenCommit={openCommitDetail}
               />
             </>
           )}

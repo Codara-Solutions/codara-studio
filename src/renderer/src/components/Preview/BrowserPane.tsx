@@ -498,32 +498,74 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         if (!wv || !domReadyRef.current || !wv.capturePage) {
           throw new Error("preview tab is not ready");
         }
-        // Chromium can hand back a blank / zero-size frame if capturePage
-        // fires before the guest has painted its first frame. Retry a few
-        // times, yielding a frame between tries, and fail loudly rather than
-        // returning an empty data URL — an agent reads "" as "the page
-        // rendered blank" and reports a false visual-verification result.
-        let lastReason = "capturePage returned no image";
-        for (let attempt = 0; attempt < 6; attempt++) {
+        // One capture attempt. A 0-size frame is Chromium telling us the guest
+        // has no painted surface to read; a too-short data URL means the frame
+        // came back empty. We distinguish the two so the fallback below — and
+        // the agent — can react to the right cause.
+        const attemptCapture = async (): Promise<{
+          dataUrl: string;
+          zeroSize: boolean;
+          reason: string;
+        }> => {
           let img: CapturedImage | undefined;
           try {
-            img = await wv.capturePage();
+            img = await wv.capturePage?.();
           } catch (err) {
-            lastReason = (err as Error)?.message || String(err);
-            img = undefined;
+            return { dataUrl: "", zeroSize: false, reason: (err as Error)?.message || String(err) };
           }
-          if (img) {
-            const size = img.getSize?.();
-            const zeroSize = Boolean(size && (size.width === 0 || size.height === 0));
-            const dataUrl = zeroSize ? "" : img.toDataURL?.() ?? "";
-            if (dataUrl && dataUrl.length > 256) return dataUrl;
-            lastReason = zeroSize
+          if (!img) return { dataUrl: "", zeroSize: false, reason: "capturePage returned no image" };
+          const size = img.getSize?.();
+          const zeroSize = Boolean(size && (size.width === 0 || size.height === 0));
+          const dataUrl = zeroSize ? "" : img.toDataURL?.() ?? "";
+          if (dataUrl && dataUrl.length > 256) return { dataUrl, zeroSize: false, reason: "" };
+          return {
+            dataUrl: "",
+            zeroSize,
+            reason: zeroSize
               ? "captured a 0-size frame (page not painted yet)"
-              : "captured an empty frame";
-          }
-          await new Promise((resolveRetry) => setTimeout(resolveRetry, 150));
+              : "captured an empty frame",
+          };
+        };
+
+        let result = await attemptCapture();
+        if (result.dataUrl) return result.dataUrl;
+
+        // A blank/0-size frame usually means one of two things: the guest just
+        // navigated and hasn't painted its first frame, or — far more common in
+        // an orchestration run — THIS preview tab is hidden behind another tab,
+        // so its visibility:hidden <webview> has stopped compositing and there
+        // is nothing for capturePage to read. The fixed 6×150ms paint-timing
+        // retry this replaces could never fix the hidden-tab case. Instead,
+        // promote the webview to a painting-but-invisible state — visibility
+        // explicitly "visible" overrides the hidden host (visibility is the one
+        // property a descendant can flip back on), opacity:0 keeps it from
+        // flashing over the active tab — let the compositor produce a couple of
+        // frames, then capture once more. Styles are restored in finally so we
+        // never leave the hidden tab visible.
+        const prevVisibility = wv.style.visibility;
+        const prevOpacity = wv.style.opacity;
+        try {
+          wv.style.visibility = "visible";
+          wv.style.opacity = "0";
+          await new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          );
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          result = await attemptCapture();
+        } finally {
+          wv.style.visibility = prevVisibility;
+          wv.style.opacity = prevOpacity;
         }
-        throw new Error(`preview screenshot failed after retries: ${lastReason}`);
+        if (result.dataUrl) return result.dataUrl;
+
+        // Fail fast and actionable: tell the agent exactly why and what to do
+        // instead, so it pivots to DOM probes rather than burning round-trips
+        // (and context window) re-shooting a tab that cannot paint.
+        throw new Error(
+          result.zeroSize
+            ? "preview screenshot unavailable: this preview tab is not visible, so the browser produced no painted frame to capture (capturePage returned a 0-size image). Bring the preview tab to the foreground, or verify with spark_preview_snapshot / spark_preview_evaluate (DOM) instead of retrying the screenshot."
+            : `preview screenshot failed: ${result.reason}`,
+        );
       },
     }),
     [currentUrl, url],

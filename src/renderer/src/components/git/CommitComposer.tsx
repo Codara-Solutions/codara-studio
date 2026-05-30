@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
-  BranchIcon,
   CommitIcon,
   PullIcon,
   PushIcon,
@@ -12,7 +11,8 @@ import {
 interface Props {
   message: string;
   onMessageChange: (value: string) => void;
-  onCommit: () => void;
+  /** Commits the message; `amend` rewrites the last commit instead of adding one. */
+  onCommit: (amend: boolean) => void;
   onGenerateMessage: () => void;
   canCommit: boolean;
   canGenerateMessage: boolean;
@@ -55,6 +55,7 @@ export default function CommitComposer({
   canSmartMerge,
 }: Props): React.ReactElement {
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const [amend, setAmend] = useState(false);
   const anyBusy = busy !== null;
   const committing = busy === "commit";
   const generatingMessage = busy === "generateMessage";
@@ -87,8 +88,11 @@ export default function CommitComposer({
         borderBottom: "1px solid var(--rule-soft)",
       }}
     >
+      {/* Branch / sync row. The branch name now lives in the dedicated branch
+          control above, so the composer keeps only the detached-HEAD warning
+          (a real caution) and the push / pull / fetch controls. */}
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        {detached ? (
+        {detached && (
           <span
             title="HEAD is detached — checkout a branch to move it again"
             style={{
@@ -107,33 +111,6 @@ export default function CommitComposer({
             }}
           >
             detached @ {branch ?? "—"}
-          </span>
-        ) : (
-          <span
-            title={branch ? `On branch ${branch}` : "No branch"}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 5,
-              minWidth: 0,
-              color: "var(--ink-dim)",
-            }}
-          >
-            <span style={{ color: "var(--muted)", display: "inline-flex" }}>
-              <BranchIcon />
-            </span>
-            <span
-              style={{
-                fontFamily: "var(--font-mono)",
-                fontSize: 11,
-                fontWeight: 600,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {branch ?? "no branch"}
-            </span>
           </span>
         )}
         <span style={{ flex: 1 }} />
@@ -284,7 +261,8 @@ export default function CommitComposer({
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && canCommit && !anyBusy) {
             e.preventDefault();
-            onCommit();
+            onCommit(amend);
+            setAmend(false);
           }
         }}
         placeholder="Message  (Ctrl+Enter to commit)"
@@ -343,10 +321,18 @@ export default function CommitComposer({
         <span>{generatingMessage ? "Generating message" : "Generate Message"}</span>
       </button>
 
+      {/* Amend toggle — when on, the commit rewrites the last commit (git commit
+          --amend) instead of adding a new one. The flag is passed up through
+          onCommit(amend) and reset after each commit. */}
+      <AmendToggle checked={amend} disabled={anyBusy} onChange={setAmend} />
+
       <button
         type="button"
         disabled={!canCommit || anyBusy}
-        onClick={onCommit}
+        onClick={() => {
+          onCommit(amend);
+          setAmend(false);
+        }}
         onMouseEnter={(e) => {
           if (canCommit && !anyBusy) {
             e.currentTarget.style.background = "color-mix(in oklch, var(--accent) 26%, transparent)";
@@ -382,7 +368,7 @@ export default function CommitComposer({
         }}
       >
         {committing ? <Spinner /> : <CommitIcon />}
-        <span>{commitLabel}</span>
+        <span>{amend ? "Amend Last Commit" : commitLabel}</span>
         {stagedCount > 0 && (
           <span
             style={{
@@ -400,6 +386,81 @@ export default function CommitComposer({
         )}
       </button>
     </div>
+  );
+}
+
+// A slim, left-aligned amend control — a checkbox-style square + label. Sits
+// just above the Commit button so the relationship reads at a glance.
+function AmendToggle({
+  checked,
+  disabled,
+  onChange,
+}: {
+  checked: boolean;
+  disabled: boolean;
+  onChange: (next: boolean) => void;
+}): React.ReactElement {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      role="checkbox"
+      aria-checked={checked}
+      disabled={disabled}
+      title="Replace the last commit instead of creating a new one"
+      onClick={() => {
+        if (!disabled) onChange(!checked);
+      }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 7,
+        alignSelf: "flex-start",
+        height: 22,
+        padding: "0 8px 0 6px",
+        borderRadius: 6,
+        border: "none",
+        background: hover && !disabled ? "var(--hover)" : "transparent",
+        color: disabled ? "var(--muted-2)" : checked ? "var(--ink-dim)" : "var(--muted)",
+        cursor: "default",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        fontWeight: 600,
+        opacity: disabled ? 0.6 : 1,
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 13,
+          height: 13,
+          flex: "0 0 13px",
+          borderRadius: 4,
+          border: checked
+            ? "1px solid var(--accent-edge)"
+            : "1px solid var(--rule-strong)",
+          background: checked ? "var(--accent-soft)" : "transparent",
+          color: "var(--ink)",
+          transition:
+            "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+        }}
+      >
+        {checked && (
+          <svg width="9" height="9" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M3 7.4 6 10.4 11.2 4" />
+          </svg>
+        )}
+      </span>
+      Amend last commit
+    </button>
   );
 }
 

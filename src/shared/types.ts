@@ -653,6 +653,82 @@ export type GitSmartMergeResult =
   | { ok: true; context: GitSmartMergeContext }
   | { ok: false; error: string };
 
+// ── Branches ──────────────────────────────────────────────────────────────────
+
+export interface GitBranch {
+  /** Short name: "main", or "origin/main" for remote-tracking branches. */
+  name: string;
+  /** True for the currently checked-out branch. */
+  current: boolean;
+  /** Configured upstream (e.g. "origin/main"), local branches only. */
+  upstream?: string;
+  ahead: number;
+  behind: number;
+  isRemote: boolean;
+  lastCommitSubject?: string;
+  lastCommitRelativeDate?: string;
+}
+
+export interface GitBranchList {
+  isRepo: boolean;
+  /** Current branch name, or undefined when detached / unborn. */
+  current?: string;
+  detached: boolean;
+  local: GitBranch[];
+  remote: GitBranch[];
+  error?: string;
+}
+
+// ── Stash ──────────────────────────────────────────────────────────────────────
+
+export interface GitStashEntry {
+  /** The N in stash@{N}. */
+  index: number;
+  /** Full ref, e.g. "stash@{0}". */
+  ref: string;
+  message: string;
+  /** Branch the stash was created on, when git recorded it. */
+  branch?: string;
+  relativeDate?: string;
+}
+
+export interface GitStashList {
+  isRepo: boolean;
+  entries: GitStashEntry[];
+  error?: string;
+}
+
+// ── Commit inspection ───────────────────────────────────────────────────────────
+
+export interface GitCommitFile {
+  path: string;
+  oldPath?: string;
+  status: GitFileStatus;
+  additions: number;
+  deletions: number;
+}
+
+export interface GitCommitDetail {
+  hash: string;
+  shortHash: string;
+  subject: string;
+  body: string;
+  author: string;
+  authorEmail: string;
+  relativeDate: string;
+  isoDate: string;
+  parentHashes: string[];
+  refs: string[];
+  files: GitCommitFile[];
+}
+
+export type GitCommitDetailResult =
+  | { ok: true; detail: GitCommitDetail }
+  | { ok: false; error: string };
+
+// Which side of a merge conflict to keep when resolving a file in one click.
+export type GitConflictSide = "ours" | "theirs";
+
 export type RunStatus =
   | "idle"
   | "planning"

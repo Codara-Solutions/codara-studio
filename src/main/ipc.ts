@@ -30,6 +30,36 @@ async function getGitOps(): Promise<typeof import("./git-ops")> {
   return gitOpsMod;
 }
 
+let gitCommitMessageMod: typeof import("./git-commit-message") | undefined;
+async function getGitCommitMessage(): Promise<typeof import("./git-commit-message")> {
+  gitCommitMessageMod ??= await import("./git-commit-message");
+  return gitCommitMessageMod;
+}
+
+let gitBranchesMod: typeof import("./git-branches") | undefined;
+async function getGitBranches(): Promise<typeof import("./git-branches")> {
+  gitBranchesMod ??= await import("./git-branches");
+  return gitBranchesMod;
+}
+
+let gitStashMod: typeof import("./git-stash") | undefined;
+async function getGitStash(): Promise<typeof import("./git-stash")> {
+  gitStashMod ??= await import("./git-stash");
+  return gitStashMod;
+}
+
+let gitInspectMod: typeof import("./git-inspect") | undefined;
+async function getGitInspect(): Promise<typeof import("./git-inspect")> {
+  gitInspectMod ??= await import("./git-inspect");
+  return gitInspectMod;
+}
+
+let gitApplyMod: typeof import("./git-apply") | undefined;
+async function getGitApply(): Promise<typeof import("./git-apply")> {
+  gitApplyMod ??= await import("./git-apply");
+  return gitApplyMod;
+}
+
 let agentSyncMod: typeof import("./agent-sync") | undefined;
 async function getAgentSync(): Promise<typeof import("./agent-sync")> {
   agentSyncMod ??= await import("./agent-sync");
@@ -66,12 +96,16 @@ import type {
   FsEntry,
   FsFileContent,
   FsReadResult,
+  GitBranchList,
+  GitCommitDetailResult,
   GitCommitMessageResult,
+  GitConflictSide,
   GitDiff,
   GitFileChange,
   GitLog,
   GitOpResult,
   GitSmartMergeResult,
+  GitStashList,
   GitStatus,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
@@ -510,14 +544,17 @@ export function registerIpc(): void {
 
   ipcMain.handle(
     "git:commit",
-    async (_e, input: { cwd: string; message: string }): Promise<GitOpResult> => {
+    async (
+      _e,
+      input: { cwd: string; message: string; amend?: boolean },
+    ): Promise<GitOpResult> => {
       const { commitChanges } = await getGitOps();
-      return commitChanges(input.cwd, input.message);
+      return commitChanges(input.cwd, input.message, { amend: input.amend });
     },
   );
 
   ipcMain.handle("git:generateCommitMessage", async (_e, cwd: string): Promise<GitCommitMessageResult> => {
-    const { generateCommitMessage } = await getGitOps();
+    const { generateCommitMessage } = await getGitCommitMessage();
     return generateCommitMessage(cwd);
   });
 
@@ -566,6 +603,145 @@ export function registerIpc(): void {
     const { initRepo } = await getGitOps();
     return initRepo(cwd);
   });
+
+  // ── Branches ──────────────────────────────────────────────────────────────
+  ipcMain.handle("git:branches", async (_e, cwd: string): Promise<GitBranchList> => {
+    const { listBranches } = await getGitBranches();
+    return listBranches(cwd);
+  });
+
+  ipcMain.handle(
+    "git:checkoutBranch",
+    async (_e, input: { cwd: string; name: string }): Promise<GitOpResult> => {
+      const { checkoutBranch } = await getGitBranches();
+      return checkoutBranch(input.cwd, input.name);
+    },
+  );
+
+  ipcMain.handle(
+    "git:createBranch",
+    async (
+      _e,
+      input: { cwd: string; name: string; checkout?: boolean; startPoint?: string },
+    ): Promise<GitOpResult> => {
+      const { createBranch } = await getGitBranches();
+      return createBranch(input.cwd, input.name, {
+        checkout: input.checkout,
+        startPoint: input.startPoint,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    "git:renameBranch",
+    async (_e, input: { cwd: string; oldName: string; newName: string }): Promise<GitOpResult> => {
+      const { renameBranch } = await getGitBranches();
+      return renameBranch(input.cwd, input.oldName, input.newName);
+    },
+  );
+
+  ipcMain.handle(
+    "git:deleteBranch",
+    async (_e, input: { cwd: string; name: string; force?: boolean }): Promise<GitOpResult> => {
+      const { deleteBranch } = await getGitBranches();
+      return deleteBranch(input.cwd, input.name, { force: input.force });
+    },
+  );
+
+  ipcMain.handle(
+    "git:mergeBranch",
+    async (_e, input: { cwd: string; name: string }): Promise<GitOpResult> => {
+      const { mergeBranch } = await getGitBranches();
+      return mergeBranch(input.cwd, input.name);
+    },
+  );
+
+  // ── Stash ───────────────────────────────────────────────────────────────────
+  ipcMain.handle("git:stashes", async (_e, cwd: string): Promise<GitStashList> => {
+    const { listStashes } = await getGitStash();
+    return listStashes(cwd);
+  });
+
+  ipcMain.handle(
+    "git:stashSave",
+    async (
+      _e,
+      input: { cwd: string; message?: string; includeUntracked?: boolean },
+    ): Promise<GitOpResult> => {
+      const { saveStash } = await getGitStash();
+      return saveStash(input.cwd, {
+        message: input.message,
+        includeUntracked: input.includeUntracked,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    "git:stashApply",
+    async (_e, input: { cwd: string; ref: string }): Promise<GitOpResult> => {
+      const { applyStash } = await getGitStash();
+      return applyStash(input.cwd, input.ref);
+    },
+  );
+
+  ipcMain.handle(
+    "git:stashPop",
+    async (_e, input: { cwd: string; ref: string }): Promise<GitOpResult> => {
+      const { popStash } = await getGitStash();
+      return popStash(input.cwd, input.ref);
+    },
+  );
+
+  ipcMain.handle(
+    "git:stashDrop",
+    async (_e, input: { cwd: string; ref: string }): Promise<GitOpResult> => {
+      const { dropStash } = await getGitStash();
+      return dropStash(input.cwd, input.ref);
+    },
+  );
+
+  // ── Commit inspection ────────────────────────────────────────────────────────
+  ipcMain.handle(
+    "git:commitDetail",
+    async (_e, input: { cwd: string; hash: string }): Promise<GitCommitDetailResult> => {
+      const { getCommitDetail } = await getGitInspect();
+      return getCommitDetail(input.cwd, input.hash);
+    },
+  );
+
+  ipcMain.handle(
+    "git:commitFileDiff",
+    async (_e, input: { cwd: string; hash: string; path: string }): Promise<GitDiff> => {
+      const { getCommitFileDiff } = await getGitInspect();
+      return getCommitFileDiff(input.cwd, input.hash, input.path);
+    },
+  );
+
+  // ── Partial staging + conflict resolution ─────────────────────────────────────
+  ipcMain.handle(
+    "git:applyPatch",
+    async (
+      _e,
+      input: { cwd: string; patch: string; cached: boolean; reverse: boolean },
+    ): Promise<GitOpResult> => {
+      const { applyPatch } = await getGitApply();
+      return applyPatch(input.cwd, input.patch, {
+        cached: input.cached,
+        reverse: input.reverse,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    "git:resolveConflict",
+    async (
+      _e,
+      input: { cwd: string; path: string; side: GitConflictSide },
+    ): Promise<GitOpResult> => {
+      const { resolveConflict } = await getGitApply();
+      return resolveConflict(input.cwd, input.path, input.side);
+    },
+  );
 
   ipcMain.handle("orchestration:createRun", async (_e, input: CreateRunInput): Promise<RunState> => {
     const { createRun } = await getRunStore();
