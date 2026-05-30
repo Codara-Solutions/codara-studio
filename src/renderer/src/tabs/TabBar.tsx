@@ -103,6 +103,17 @@ function TabBar({
   // hover-activate (open the tab so the user can see where they're aiming)
   // and the drop-target outline on that TabItem.
   const [paneHoverTabId, setPaneHoverTabId] = useState<TabId | null>(null);
+  // True while a pointer-based pane drag is over the strip in a spot that would
+  // spawn a NEW terminal tab on release (empty strip space, a non-terminal tab,
+  // or the pane's own source tab) rather than merge into a hovered terminal
+  // tab. Drives the strip glow and the ghost "new tab" drop pill.
+  const [newTabDropActive, setNewTabDropActive] = useState(false);
+
+  // Latest onTerminalPaneDrop via a ref so the pointer-drag effect can fire it
+  // without listing it as a dep — that would tear down and re-add the window
+  // listeners (resetting the in-flight drag tracking) mid-gesture.
+  const onTerminalPaneDropRef = useRef(onTerminalPaneDrop);
+  onTerminalPaneDropRef.current = onTerminalPaneDrop;
 
   const acceptsTerminalPane = (event: React.DragEvent): boolean =>
     Array.from(event.dataTransfer.types).includes(TERMINAL_PANE_DRAG_MIME);
@@ -110,13 +121,27 @@ function TabBar({
   // The pane drag uses pointer events (see PaneDragHandle), so the HTML5
   // onDragEnter hover-activate on each TabItem never fires for it. We
   // subscribe to the module-level drag state instead, then run our own
-  // pointermove hit-test against each tab's bounding rect — when the user
-  // lingers over an inactive terminal tab during a drag, that tab opens so
-  // the now-visible TerminalStack can take over the drop targeting.
+  // pointermove hit-test against each tab's bounding rect. Two outcomes while
+  // the pointer is over the strip:
+  //   - over a different terminal tab → hover-activate it (so the user can
+  //     keep dragging into the now-visible TerminalStack) and, on release,
+  //     merge the pane into it;
+  //   - over empty strip space / a non-terminal tab / the pane's own tab →
+  //     show the "new tab" affordance and, on release, detach the pane into a
+  //     brand-new terminal tab.
   useEffect(() => {
     let dragActive = false;
     let hoverTimer: number | null = null;
     let hoverTargetId: TabId | null = null;
+    // Captured each pointermove so the pointerup handler can still fire the
+    // drop after the visible TerminalTabPane's own finish handler has already
+    // cleared the module-level drag via endTerminalPaneDrag().
+    let dragPayload: TerminalPaneDragPayload | null = null;
+    // Where a release right now would land: a terminal tab id to merge into,
+    // or null while `overStrip` to detach into a new tab.
+    let overStrip = false;
+    let mergeTargetId: TabId | null = null;
+
     const clearPaneHoverActivate = () => {
       if (hoverTimer !== null) {
         window.clearTimeout(hoverTimer);
@@ -124,26 +149,38 @@ function TabBar({
       }
       hoverTargetId = null;
     };
+    // Drop where-would-it-land tracking + the visual affordances back to rest.
+    const resetDropTracking = () => {
+      overStrip = false;
+      mergeTargetId = null;
+      setPaneHoverTabId((curr) => (curr === null ? curr : null));
+      setNewTabDropActive((curr) => (curr ? false : curr));
+    };
 
     // subscribeTerminalPaneDrag fires the listener synchronously on
     // registration with the current state, so the helpers above must be
     // declared first — otherwise we hit a TDZ error on the very first call.
     const unsubscribe = subscribeTerminalPaneDrag((state) => {
       dragActive = !!state;
-      if (!state) {
+      if (state) {
+        dragPayload = state.payload;
+      } else {
         clearPaneHoverActivate();
-        setPaneHoverTabId(null);
+        resetDropTracking();
+        dragPayload = null;
       }
     });
 
     const onPointerMove = (event: PointerEvent) => {
       if (!dragActive) return;
-      if (!peekTerminalPaneDrag()) return;
+      const payload = peekTerminalPaneDrag();
+      if (!payload) return;
+      dragPayload = payload;
       const scrollEl = scrollRef.current;
       if (!scrollEl) return;
       const stripRect = scrollEl.getBoundingClientRect();
       // Pointer not over the strip → cancel any pending activation and clear
-      // the drop-target highlight; the pane's own area will pick up the drop.
+      // every drop affordance; the pane's own area will pick up the drop.
       if (
         event.clientY < stripRect.top ||
         event.clientY > stripRect.bottom ||
@@ -151,9 +188,10 @@ function TabBar({
         event.clientX > stripRect.right
       ) {
         clearPaneHoverActivate();
-        setPaneHoverTabId((curr) => (curr === null ? curr : null));
+        resetDropTracking();
         return;
       }
+      overStrip = true;
       let hoveredId: TabId | null = null;
       const tabEls = scrollEl.querySelectorAll<HTMLElement>("[data-tab-id]");
       for (const el of tabEls) {
@@ -168,41 +206,67 @@ function TabBar({
           break;
         }
       }
-      if (!hoveredId) {
+      const hoveredTab = hoveredId ? tabs.find((t) => t.id === hoveredId) : null;
+      // A different terminal tab under the pointer is a merge target: give it
+      // the hover-activate + drop-target highlight. Anything else over the
+      // strip (empty space, a non-terminal tab, or the pane's own source tab)
+      // is the new-tab drop zone.
+      if (
+        hoveredTab &&
+        hoveredTab.kind === "terminal" &&
+        hoveredTab.id !== payload.tabId
+      ) {
+        const targetId = hoveredTab.id;
+        mergeTargetId = targetId;
+        setPaneHoverTabId((curr) => (curr === targetId ? curr : targetId));
+        setNewTabDropActive((curr) => (curr ? false : curr));
+        // Already the active tab — no need to schedule a switch.
+        if (targetId === activeId) {
+          clearPaneHoverActivate();
+          return;
+        }
+        // Re-arm only if the target changed, so brushing past a tab doesn't
+        // cancel an in-progress activation of the tab the user actually wants.
+        if (hoverTargetId === targetId) return;
         clearPaneHoverActivate();
-        setPaneHoverTabId((curr) => (curr === null ? curr : null));
+        hoverTargetId = targetId;
+        hoverTimer = window.setTimeout(() => {
+          hoverTimer = null;
+          hoverTargetId = null;
+          onSelect(targetId);
+        }, HOVER_ACTIVATE_MS);
         return;
       }
-      const hoveredTab = tabs.find((t) => t.id === hoveredId);
-      // Only terminal tabs are valid pane-drop destinations, so only those
-      // get the hover-activate / highlight treatment.
-      if (!hoveredTab || hoveredTab.kind !== "terminal") {
-        clearPaneHoverActivate();
-        setPaneHoverTabId((curr) => (curr === null ? curr : null));
-        return;
-      }
-      setPaneHoverTabId((curr) => (curr === hoveredId ? curr : hoveredId));
-      // Already the active tab — no need to schedule a switch.
-      if (hoveredTab.id === activeId) {
-        clearPaneHoverActivate();
-        return;
-      }
-      // Re-arm only if the target changed, so brushing past a tab doesn't
-      // cancel an in-progress activation of the tab the user actually wants.
-      if (hoverTargetId === hoveredId) return;
+      // New-tab drop zone.
+      mergeTargetId = null;
       clearPaneHoverActivate();
-      hoverTargetId = hoveredId;
-      const targetId = hoveredId;
-      hoverTimer = window.setTimeout(() => {
-        hoverTimer = null;
-        hoverTargetId = null;
-        onSelect(targetId);
-      }, HOVER_ACTIVATE_MS);
+      setPaneHoverTabId((curr) => (curr === null ? curr : null));
+      setNewTabDropActive((curr) => (curr ? curr : true));
+    };
+
+    const onPointerUp = () => {
+      if (!dragActive) return;
+      const payload = dragPayload;
+      const wasOverStrip = overStrip;
+      const target = mergeTargetId;
+      clearPaneHoverActivate();
+      resetDropTracking();
+      dragActive = false;
+      dragPayload = null;
+      if (!payload || !wasOverStrip) return;
+      // target set → merge into that terminal tab; otherwise detach into a new
+      // tab. onTerminalPaneDrop no-ops safely when the move isn't possible
+      // (e.g. detaching the only pane of a single-pane tab).
+      onTerminalPaneDropRef.current(payload, target ?? undefined);
     };
 
     window.addEventListener("pointermove", onPointerMove, true);
+    window.addEventListener("pointerup", onPointerUp, true);
+    window.addEventListener("pointercancel", onPointerUp, true);
     return () => {
       window.removeEventListener("pointermove", onPointerMove, true);
+      window.removeEventListener("pointerup", onPointerUp, true);
+      window.removeEventListener("pointercancel", onPointerUp, true);
       clearPaneHoverActivate();
       unsubscribe();
     };
@@ -262,7 +326,9 @@ function TabBar({
         onTerminalPaneDrop(payload);
       }}
       className={
-        terminalDropActive ? "spark-tabbar spark-tabbar--drop-active" : "spark-tabbar"
+        terminalDropActive || newTabDropActive
+          ? "spark-tabbar spark-tabbar--drop-active"
+          : "spark-tabbar"
       }
     >
       <div ref={scrollRef} className="spark-tabbar-scroll">
@@ -296,6 +362,7 @@ function TabBar({
             />
           ),
         )}
+        {newTabDropActive && <NewTabDropZone />}
       </div>
       <div ref={pickerRef} style={{ position: "relative" }}>
         <button
@@ -925,6 +992,31 @@ function PickerItem({
         </span>
       )}
     </button>
+  );
+}
+
+// Ghost pill shown at the end of the strip while a terminal-pane drag hovers
+// the tab area in a spot that would spawn a new tab on release (empty space, a
+// non-terminal tab, or the pane's own source tab). Pointer-events are off so it
+// never interferes with the drag's own pointer hit-testing.
+function NewTabDropZone() {
+  return (
+    <div
+      aria-hidden
+      className="spark-tab"
+      style={{
+        pointerEvents: "none",
+        flex: "0 0 auto",
+        color: "var(--accent)",
+        border: "1px dashed color-mix(in oklch, var(--accent) 55%, transparent)",
+        background: "color-mix(in oklch, var(--accent) 12%, transparent)",
+        fontSize: 11,
+        fontWeight: 600,
+      }}
+    >
+      <PlusIcon size={11} />
+      <span>New tab</span>
+    </div>
   );
 }
 
