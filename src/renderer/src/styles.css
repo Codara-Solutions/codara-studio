@@ -114,80 +114,6 @@
   --warn: #f9e2af;
 }
 
-:root[data-theme="catppuccin-latte"] {
-  color-scheme: light;
-
-  --bg: #eff1f5;
-  --panel: #e6e9ef;
-  --panel-2: #dce0e8;
-  --panel-3: #ccd0da;
-
-  --ink: #4c4f69;
-  --ink-dim: #5c5f77;
-  --muted: #6c6f85;
-  --muted-2: #7c7f93;
-
-  --rule: #bcc0cc;
-  --rule-strong: #9ca0b0;
-  --rule-soft: #dce0e8;
-
-  --danger: #d20f39;
-  --ok: #40a02b;
-  --info: #1e66f5;
-  --warn: #df8e1d;
-
-  --hover: color-mix(in oklch, var(--ink) 6%, transparent);
-  --hover-strong: color-mix(in oklch, var(--ink) 10%, transparent);
-  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.78), 0 8px 24px rgba(76, 79, 105, 0.12);
-  --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.88), 0 18px 48px rgba(76, 79, 105, 0.18);
-}
-
-:root[data-theme="gruvbox-dark"] {
-  color-scheme: dark;
-
-  --bg: #282828;
-  --panel: #32302f;
-  --panel-2: #3c3836;
-  --panel-3: #504945;
-
-  --ink: #ebdbb2;
-  --ink-dim: #d5c4a1;
-  --muted: #a89984;
-  --muted-2: #928374;
-
-  --rule: #665c54;
-  --rule-strong: #7c6f64;
-  --rule-soft: #3c3836;
-
-  --danger: #fb4934;
-  --ok: #b8bb26;
-  --info: #83a598;
-  --warn: #fabd2f;
-}
-
-:root[data-theme="solarized-dark"] {
-  color-scheme: dark;
-
-  --bg: #002b36;
-  --panel: #073642;
-  --panel-2: #0a3a44;
-  --panel-3: #134b5a;
-
-  --ink: #eee8d5;
-  --ink-dim: #d6cfb8;
-  --muted: #93a1a1;
-  --muted-2: #839496;
-
-  --rule: #164956;
-  --rule-strong: #2aa198;
-  --rule-soft: #073642;
-
-  --danger: #dc322f;
-  --ok: #859900;
-  --info: #268bd2;
-  --warn: #b58900;
-}
-
 :root[data-theme="dracula"] {
   color-scheme: dark;
 
@@ -234,73 +160,128 @@
   --warn: #e5c07b;
 }
 
-:root[data-theme="rose-pine"] {
-  color-scheme: dark;
+/* ── Light palettes ─────────────────────────────────────────────────────────
+   Each light theme re-tints --hover and rebuilds the shadow tokens: the dark
+   defaults bake in white inner highlights + heavy black drop shadows that read
+   as smudges on a bright surface. Drop shadows are tinted with the theme's own
+   ink so elevation stays in-key. --accent rides on top as the workspace color
+   (set at runtime), exactly as in the dark palettes. */
 
-  --bg: #191724;
-  --panel: #1f1d2e;
-  --panel-2: #26233a;
-  --panel-3: #403d52;
+:root[data-theme="spark-daylight"] {
+  color-scheme: light;
 
-  --ink: #e0def4;
-  --ink-dim: #c4a7e7;
-  --muted: #908caa;
-  --muted-2: #6e6a86;
+  /* Warm paper-white — the daylight sibling of Spark Classic (h ≈ 85). */
+  --bg: #faf9f5;
+  --panel: #f3f0e9;
+  --panel-2: #eae7dd;
+  --panel-3: #ddd9cc;
 
-  --rule: #403d52;
-  --rule-strong: #524f67;
-  --rule-soft: #26233a;
+  --ink: #211f1a;
+  --ink-dim: #4a473f;
+  --muted: #7a766b;
+  --muted-2: #9c978a;
 
-  --danger: #eb6f92;
-  --ok: #9ccfd8;
-  --info: #31748f;
-  --warn: #f6c177;
+  --rule: #dcd7c9;
+  --rule-strong: #c2bcab;
+  --rule-soft: #ece9e0;
+
+  --danger: #c0392b;
+  --ok: #4e8a3c;
+  --info: #2e6f9e;
+  --warn: #b8790a;
+
+  --hover: color-mix(in oklch, var(--ink) 5%, transparent);
+  --hover-strong: color-mix(in oklch, var(--ink) 9%, transparent);
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.7), 0 8px 24px rgba(33, 31, 26, 0.1);
+  --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.8), 0 18px 48px rgba(33, 31, 26, 0.16);
 }
 
-:root[data-theme="everforest"] {
-  color-scheme: dark;
+:root[data-theme="github-light"] {
+  color-scheme: light;
 
-  --bg: #2d353b;
-  --panel: #343f44;
-  --panel-2: #3d484d;
-  --panel-3: #475258;
+  /* Crisp neutral white — GitHub Primer light tokens. */
+  --bg: #ffffff;
+  --panel: #f6f8fa;
+  --panel-2: #eaeef2;
+  --panel-3: #d0d7de;
 
-  --ink: #d3c6aa;
-  --ink-dim: #c6b99d;
-  --muted: #9da9a0;
-  --muted-2: #7a8478;
+  --ink: #1f2328;
+  --ink-dim: #424a53;
+  --muted: #656d76;
+  --muted-2: #818b98;
 
-  --rule: #4f5b58;
-  --rule-strong: #66736d;
-  --rule-soft: #3d484d;
+  --rule: #d1d9e0;
+  --rule-strong: #afb8c1;
+  --rule-soft: #eaeef2;
 
-  --danger: #e67e80;
-  --ok: #a7c080;
-  --info: #7fbbb3;
-  --warn: #dbbc7f;
+  --danger: #cf222e;
+  --ok: #1a7f37;
+  --info: #0969da;
+  --warn: #9a6700;
+
+  --hover: color-mix(in oklch, var(--ink) 5%, transparent);
+  --hover-strong: color-mix(in oklch, var(--ink) 8%, transparent);
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.9), 0 8px 24px rgba(31, 35, 40, 0.08);
+  --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.95), 0 18px 48px rgba(31, 35, 40, 0.12);
 }
 
-:root[data-theme="kanagawa-wave"] {
-  color-scheme: dark;
+:root[data-theme="rose-pine-dawn"] {
+  color-scheme: light;
 
-  --bg: #1f1f28;
-  --panel: #252535;
-  --panel-2: #2a2a37;
-  --panel-3: #363646;
+  /* Warm rose paper — Rosé Pine Dawn. No true green: foam carries "ok". */
+  --bg: #faf4ed;
+  --panel: #f4ece2;
+  --panel-2: #f2e9e1;
+  --panel-3: #e4ddd5;
 
-  --ink: #dcd7ba;
-  --ink-dim: #c8c093;
-  --muted: #938aa9;
-  --muted-2: #727169;
+  --ink: #575279;
+  --ink-dim: #6e6a86;
+  --muted: #797593;
+  --muted-2: #9893a5;
 
-  --rule: #54546d;
-  --rule-strong: #6f6f93;
-  --rule-soft: #2a2a37;
+  --rule: #dfdad9;
+  --rule-strong: #cecacd;
+  --rule-soft: #f4ede8;
 
-  --danger: #c34043;
-  --ok: #76946a;
-  --info: #7e9cd8;
-  --warn: #c0a36e;
+  --danger: #b4637a;
+  --ok: #56949f;
+  --info: #286983;
+  --warn: #ea9d34;
+
+  --hover: color-mix(in oklch, var(--ink) 6%, transparent);
+  --hover-strong: color-mix(in oklch, var(--ink) 10%, transparent);
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.7), 0 8px 24px rgba(87, 82, 121, 0.1);
+  --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.8), 0 18px 48px rgba(87, 82, 121, 0.16);
+}
+
+:root[data-theme="catppuccin-latte"] {
+  color-scheme: light;
+
+  /* Cool pastel — Catppuccin Latte, the light sibling of Mocha. Base nudged
+     a touch brighter than canonical so panels read with more depth. */
+  --bg: #f3f5f8;
+  --panel: #e9ecf1;
+  --panel-2: #dce0e8;
+  --panel-3: #ccd0da;
+
+  --ink: #4c4f69;
+  --ink-dim: #5c5f77;
+  --muted: #6c6f85;
+  --muted-2: #8c8fa1;
+
+  --rule: #bcc0cc;
+  --rule-strong: #acb0be;
+  --rule-soft: #e6e9ef;
+
+  --danger: #d20f39;
+  --ok: #40a02b;
+  --info: #1e66f5;
+  --warn: #df8e1d;
+
+  --hover: color-mix(in oklch, var(--ink) 6%, transparent);
+  --hover-strong: color-mix(in oklch, var(--ink) 10%, transparent);
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.78), 0 8px 24px rgba(76, 79, 105, 0.12);
+  --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.88), 0 18px 48px rgba(76, 79, 105, 0.18);
 }
 
 * { box-sizing: border-box; }

@@ -679,7 +679,19 @@ export function useTerminalSession({
       // Keep the xterm theme in sync with Spark design tokens so theme switches
       // and accent color changes repaint the terminal chrome live.
       themeUnsubRef.current = subscribeAppTokens(() => {
-        if (termRef.current) termRef.current.options.theme = buildTerminalTheme();
+        const t = termRef.current;
+        if (!t) return;
+        t.options.theme = buildTerminalTheme();
+        // Reassigning the theme clears the WebGL glyph atlas but does NOT
+        // repaint rows already on screen — they keep their old colors until
+        // fresh output arrives. After a dark→light switch that strands the
+        // visible buffer as washed-out light-on-light text. Force every
+        // visible row to re-render with the new palette.
+        try {
+          t.refresh(0, t.rows - 1);
+        } catch {
+          /* terminal may be mid-dispose during a fast theme + unmount race */
+        }
       });
 
       // Per-session UTF-8 decoder so interleaved chunks across panes never

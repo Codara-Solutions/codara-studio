@@ -54,15 +54,47 @@ const lightAnsi = {
   brightWhite: "#24292f",
 } as const;
 
+// readAppTokens hands back resolved rgb()/rgba() strings. Pull the channels so
+// we can judge background lightness and re-alpha the accent for selection.
+function parseRgb(value: string): [number, number, number] | null {
+  const m = value.match(/-?\d+(?:\.\d+)?/g);
+  if (!m || m.length < 3) return null;
+  return [Number(m[0]), Number(m[1]), Number(m[2])];
+}
+
+// Perceived luminance (sRGB-weighted), 0..1.
+function luminance([r, g, b]: [number, number, number]): number {
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+}
+
+function withAlpha(value: string, alpha: number): string {
+  const rgb = parseRgb(value);
+  return rgb ? `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${alpha})` : value;
+}
+
 export function buildTerminalTheme(): ITheme {
   const t = readAppTokens();
-  const ansi = document.documentElement.dataset.themeMode === "light" ? lightAnsi : darkAnsi;
+  // Pick the ANSI variant from the ACTUAL terminal background rather than the
+  // <html data-theme-mode> attribute. The attribute can read stale on the first
+  // paint after a theme switch, which would leave a light surface painted with
+  // the dark palette (light-on-light = the "terminal is unreadable in white
+  // mode" report). Deriving from the resolved bg color makes the palette track
+  // the surface it's literally drawn on.
+  const bg = parseRgb(t.background);
+  const isLight = bg
+    ? luminance(bg) > 0.5
+    : document.documentElement.dataset.themeMode === "light";
+  const ansi = isLight ? lightAnsi : darkAnsi;
   return {
     background: t.background,
     foreground: t.foreground,
     cursor: t.foreground,
     cursorAccent: t.background,
-    selectionBackground: t.accent,
+    // Translucent so selected glyphs stay legible: an opaque accent (especially
+    // the bright workspace yellow over a light theme) buries the dark text
+    // underneath it. xterm keeps the original foreground and washes the accent
+    // over it.
+    selectionBackground: withAlpha(t.accent, isLight ? 0.28 : 0.4),
     ...ansi,
   };
 }

@@ -645,18 +645,6 @@ const APP_THEME_META: Readonly<
     label: "Catppuccin Mocha",
     swatches: ["#1e1e2e", "#313244", "#89b4fa", "#cdd6f4"],
   },
-  "catppuccin-latte": {
-    label: "Catppuccin Latte",
-    swatches: ["#eff1f5", "#dce0e8", "#1e66f5", "#4c4f69"],
-  },
-  "gruvbox-dark": {
-    label: "Gruvbox Dark",
-    swatches: ["#282828", "#3c3836", "#fabd2f", "#ebdbb2"],
-  },
-  "solarized-dark": {
-    label: "Solarized Dark",
-    swatches: ["#002b36", "#073642", "#268bd2", "#eee8d5"],
-  },
   dracula: {
     label: "Dracula",
     swatches: ["#282a36", "#44475a", "#bd93f9", "#f8f8f2"],
@@ -665,17 +653,21 @@ const APP_THEME_META: Readonly<
     label: "One Dark",
     swatches: ["#282c34", "#2c313a", "#61afef", "#abb2bf"],
   },
-  "rose-pine": {
-    label: "Rose Pine",
-    swatches: ["#191724", "#26233a", "#ebbcba", "#e0def4"],
+  "spark-daylight": {
+    label: "Spark Daylight",
+    swatches: ["#faf9f5", "#eae7dd", "#f0c419", "#211f1a"],
   },
-  everforest: {
-    label: "Everforest",
-    swatches: ["#2d353b", "#3d484d", "#a7c080", "#d3c6aa"],
+  "github-light": {
+    label: "GitHub Light",
+    swatches: ["#ffffff", "#eaeef2", "#0969da", "#1f2328"],
   },
-  "kanagawa-wave": {
-    label: "Kanagawa Wave",
-    swatches: ["#1f1f28", "#2a2a37", "#7e9cd8", "#dcd7ba"],
+  "rose-pine-dawn": {
+    label: "Rosé Pine Dawn",
+    swatches: ["#faf4ed", "#f2e9e1", "#d7827e", "#575279"],
+  },
+  "catppuccin-latte": {
+    label: "Catppuccin Latte",
+    swatches: ["#f3f5f8", "#dce0e8", "#1e66f5", "#4c4f69"],
   },
 };
 

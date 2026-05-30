@@ -87,42 +87,40 @@ export interface AppSettings {
 // extend this interface — additive only, every key has a default.
 export type ThemeMode = "dark" | "light";
 
+// Curated set: four dark workbench palettes plus four light ones. Dark first,
+// then light, so the settings picker reads as two clean groups. Every id maps
+// to a `:root[data-theme="…"]` block in styles.css and a swatch in
+// SettingsDialog's APP_THEME_META.
 export type ThemePref =
   | "spark-classic"
   | "catppuccin-mocha"
-  | "catppuccin-latte"
-  | "gruvbox-dark"
-  | "solarized-dark"
   | "dracula"
   | "one-dark"
-  | "rose-pine"
-  | "everforest"
-  | "kanagawa-wave";
+  | "spark-daylight"
+  | "github-light"
+  | "rose-pine-dawn"
+  | "catppuccin-latte";
 
 export const APP_THEME_IDS: readonly ThemePref[] = [
   "spark-classic",
   "catppuccin-mocha",
-  "catppuccin-latte",
-  "gruvbox-dark",
-  "solarized-dark",
   "dracula",
   "one-dark",
-  "rose-pine",
-  "everforest",
-  "kanagawa-wave",
+  "spark-daylight",
+  "github-light",
+  "rose-pine-dawn",
+  "catppuccin-latte",
 ] as const;
 
 export const APP_THEME_MODE: Readonly<Record<ThemePref, ThemeMode>> = {
   "spark-classic": "dark",
   "catppuccin-mocha": "dark",
-  "catppuccin-latte": "light",
-  "gruvbox-dark": "dark",
-  "solarized-dark": "dark",
   dracula: "dark",
   "one-dark": "dark",
-  "rose-pine": "dark",
-  everforest: "dark",
-  "kanagawa-wave": "dark",
+  "spark-daylight": "light",
+  "github-light": "light",
+  "rose-pine-dawn": "light",
+  "catppuccin-latte": "light",
 };
 
 // CodeMirror 6 editor theme ids exposed in the editor settings dropdown.

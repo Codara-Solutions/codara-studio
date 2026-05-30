@@ -39,18 +39,19 @@ function isEditorThemeId(value: unknown): value is EditorThemeId {
 function normalizeTheme(value: unknown): ThemePref {
   if (typeof value !== "string") return DEFAULT_PREFERENCES.theme;
   if ((APP_THEME_IDS as readonly string[]).includes(value)) return value as ThemePref;
+  // Legacy / removed light themes collapse to the flagship light palette.
   if (
     value === "light" ||
     value === "spark-light" ||
-    value === "github-light" ||
-    value === "catppuccin-latte" ||
     value === "paper-lantern" ||
     value === "frosted-glass" ||
     value === "sage-terminal" ||
     value === "solar-flare"
   ) {
-    return "catppuccin-latte";
+    return "spark-daylight";
   }
+  // Legacy / removed dark themes (incl. retired Gruvbox / Solarized /
+  // Rosé Pine / Everforest / Kanagawa) collapse to Spark Classic.
   if (
     value === "dark" ||
     value === "system" ||
@@ -59,6 +60,11 @@ function normalizeTheme(value: unknown): ThemePref {
     value === "tokyo-night" ||
     value === "nord" ||
     value === "monokai" ||
+    value === "gruvbox-dark" ||
+    value === "solarized-dark" ||
+    value === "rose-pine" ||
+    value === "everforest" ||
+    value === "kanagawa-wave" ||
     value === "ember-forge" ||
     value === "midnight-bloom" ||
     value === "aurora-circuit" ||
