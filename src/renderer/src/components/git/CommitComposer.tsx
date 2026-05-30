@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
+import type { ChatBackendKind } from "@shared/types";
+import { type EngineOption, useEngineOptions } from "../engine/engineOptions";
 import {
   CommitIcon,
   PullIcon,
@@ -27,7 +29,9 @@ interface Props {
   onPush: () => void;
   onPull: () => void;
   onFetch: () => void;
-  onSmartMerge: () => void;
+  // `backend` is the engine chosen from the Smart Merge caret (undefined = the
+  // default Spark / OpenRouter manager; "claude" / "codex" route to that CLI).
+  onSmartMerge: (backend?: ChatBackendKind) => void;
   canSmartMerge: boolean;
 }
 
@@ -56,6 +60,9 @@ export default function CommitComposer({
 }: Props): React.ReactElement {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [amend, setAmend] = useState(false);
+  // Engines offered by the Smart Merge caret (Spark always; Claude / Codex when
+  // their CLI is installed). One entry (just Spark) → plain button, no caret.
+  const engines = useEngineOptions();
   const anyBusy = busy !== null;
   const committing = busy === "commit";
   const generatingMessage = busy === "generateMessage";
@@ -196,63 +203,15 @@ export default function CommitComposer({
         </button>
       )}
 
-      <button
-        type="button"
-        disabled={!canSmartMerge || anyBusy}
-        onClick={onSmartMerge}
+      <SmartMergeControl
+        canSmartMerge={canSmartMerge}
+        anyBusy={anyBusy}
+        preparingSmartMerge={preparingSmartMerge}
+        behind={behind}
         title={smartMergeTitle}
-        style={{
-          appearance: "none",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 7,
-          height: 28,
-          width: "100%",
-          padding: "0 10px",
-          borderRadius: 7,
-          cursor: "default",
-          fontFamily: "var(--font-sans)",
-          fontSize: 12,
-          fontWeight: 650,
-          border:
-            canSmartMerge && !anyBusy
-              ? "1px solid color-mix(in oklch, var(--accent) 28%, var(--rule))"
-              : "1px solid var(--rule)",
-          background:
-            canSmartMerge && !anyBusy
-              ? "color-mix(in oklch, var(--accent) 8%, transparent)"
-              : "transparent",
-          color:
-            canSmartMerge && !anyBusy
-              ? "var(--ink-dim)"
-              : preparingSmartMerge
-                ? "var(--ink-dim)"
-                : "var(--muted-2)",
-          opacity: !canSmartMerge && !preparingSmartMerge ? 0.65 : 1,
-          transition:
-            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-        }}
-      >
-        {preparingSmartMerge ? <Spinner size={11} /> : <SparkleIcon />}
-        <span>{preparingSmartMerge ? "Starting merge" : "Smart Merge"}</span>
-        {behind > 0 && (
-          <span
-            style={{
-              fontFamily: "var(--font-mono)",
-              fontSize: 10,
-              fontWeight: 700,
-              fontVariantNumeric: "tabular-nums",
-              padding: "1px 6px",
-              borderRadius: 999,
-              background: "color-mix(in oklch, var(--accent) 14%, transparent)",
-              color: "var(--ink-dim)",
-            }}
-          >
-            {behind}
-          </span>
-        )}
-      </button>
+        engines={engines}
+        onSmartMerge={onSmartMerge}
+      />
 
       <textarea
         ref={taRef}
@@ -399,6 +358,250 @@ export default function CommitComposer({
         )}
       </button>
     </div>
+  );
+}
+
+// Smart Merge action. With one engine (just Spark) it's the original
+// full-width button that runs the default. With Claude / Codex also installed
+// it becomes a split button: the main face still runs the default engine, and
+// a ▾ caret opens a popover to hand the merge to a specific engine instead.
+function SmartMergeControl({
+  canSmartMerge,
+  anyBusy,
+  preparingSmartMerge,
+  behind,
+  title,
+  engines,
+  onSmartMerge,
+}: {
+  canSmartMerge: boolean;
+  anyBusy: boolean;
+  preparingSmartMerge: boolean;
+  behind: number;
+  title: string;
+  engines: EngineOption[];
+  onSmartMerge: (backend?: ChatBackendKind) => void;
+}): React.ReactElement {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const hasCaret = engines.length > 1;
+  const disabled = !canSmartMerge || anyBusy;
+  const active = canSmartMerge && !anyBusy;
+
+  // Close the engine popover on outside click or Escape.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
+
+  const baseBg = active ? "color-mix(in oklch, var(--accent) 8%, transparent)" : "transparent";
+  const baseColor = active
+    ? "var(--ink-dim)"
+    : preparingSmartMerge
+      ? "var(--ink-dim)"
+      : "var(--muted-2)";
+  const baseBorder = active
+    ? "1px solid color-mix(in oklch, var(--accent) 28%, var(--rule))"
+    : "1px solid var(--rule)";
+  const dimmed = !canSmartMerge && !preparingSmartMerge ? 0.65 : 1;
+
+  return (
+    <div ref={wrapRef} style={{ position: "relative", display: "flex", width: "100%" }}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => onSmartMerge(undefined)}
+        title={title}
+        style={{
+          appearance: "none",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 7,
+          height: 28,
+          flex: 1,
+          minWidth: 0,
+          padding: "0 10px",
+          borderRadius: hasCaret ? "7px 0 0 7px" : 7,
+          cursor: "default",
+          fontFamily: "var(--font-sans)",
+          fontSize: 12,
+          fontWeight: 650,
+          border: baseBorder,
+          borderRight: hasCaret ? "none" : undefined,
+          background: baseBg,
+          color: baseColor,
+          opacity: dimmed,
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+        }}
+      >
+        {preparingSmartMerge ? <Spinner size={11} /> : <SparkleIcon />}
+        <span>{preparingSmartMerge ? "Starting merge" : "Smart Merge"}</span>
+        {behind > 0 && (
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              fontWeight: 700,
+              fontVariantNumeric: "tabular-nums",
+              padding: "1px 6px",
+              borderRadius: 999,
+              background: "color-mix(in oklch, var(--accent) 14%, transparent)",
+              color: "var(--ink-dim)",
+            }}
+          >
+            {behind}
+          </span>
+        )}
+      </button>
+      {hasCaret && (
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => setMenuOpen((open) => !open)}
+          title="Choose merge engine"
+          aria-label="Choose merge engine"
+          style={{
+            appearance: "none",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 26,
+            height: 28,
+            flex: "0 0 26px",
+            padding: 0,
+            borderRadius: "0 7px 7px 0",
+            cursor: "default",
+            border: baseBorder,
+            borderLeft: active
+              ? "1px solid color-mix(in oklch, var(--accent) 22%, var(--rule))"
+              : "1px solid var(--rule)",
+            background: menuOpen
+              ? "color-mix(in oklch, var(--accent) 14%, transparent)"
+              : baseBg,
+            color: baseColor,
+            opacity: dimmed,
+            fontSize: 9,
+            fontWeight: 900,
+            transition:
+              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+          }}
+        >
+          ▾
+        </button>
+      )}
+      {menuOpen && hasCaret && (
+        <div
+          style={{
+            position: "absolute",
+            top: "100%",
+            right: 0,
+            marginTop: 4,
+            width: 188,
+            background: "var(--panel-2)",
+            border: "1px solid var(--rule-strong)",
+            borderRadius: 8,
+            boxShadow: "var(--shadow-2)",
+            padding: 6,
+            zIndex: 30,
+          }}
+        >
+          <div
+            style={{
+              padding: "2px 8px 6px",
+              fontFamily: "var(--font-sans)",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--muted)",
+            }}
+          >
+            Merge with
+          </div>
+          {engines.map((engine) => (
+            <EngineRow
+              key={engine.key}
+              engine={engine}
+              onClick={() => {
+                setMenuOpen(false);
+                onSmartMerge(engine.backend);
+              }}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A single engine row inside the Smart Merge popover. Spark (the default) reads
+// in the accent color; the CLI engines read as plain rows.
+function EngineRow({
+  engine,
+  onClick,
+}: {
+  engine: EngineOption;
+  onClick: () => void;
+}): React.ReactElement {
+  const [hover, setHover] = useState(false);
+  const isSpark = engine.key === "spark";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        width: "100%",
+        border: "none",
+        background: hover ? "var(--panel)" : "transparent",
+        color: isSpark ? "var(--accent)" : hover ? "var(--ink)" : "var(--ink-dim)",
+        borderRadius: 6,
+        padding: "7px 8px",
+        textAlign: "left",
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        fontWeight: 700,
+        cursor: "default",
+        display: "grid",
+        gridTemplateColumns: "20px minmax(0, 1fr)",
+        alignItems: "center",
+        gap: 8,
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 11,
+          fontWeight: 900,
+          color: isSpark ? "var(--accent)" : "var(--muted)",
+        }}
+      >
+        {engine.glyph}
+      </span>
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {isSpark ? "Spark (default)" : engine.label}
+      </span>
+    </button>
   );
 }
 

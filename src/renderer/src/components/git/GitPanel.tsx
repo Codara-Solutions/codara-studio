@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  ChatBackendKind,
   GitDiff,
   GitFileChange,
   GitLog,
@@ -332,33 +333,39 @@ export default function GitPanel({
     if (cwd) void runAction("init", () => window.spark.git.init(cwd));
   }, [cwd, runAction]);
 
-  const handleSmartMerge = useCallback(async (): Promise<void> => {
-    if (!workspace || busyRef.current) return;
-    setBusy("smartMerge");
-    setOpError(null);
-    try {
-      const result = await requestPrepareSmartMerge(workspace.cwd);
-      if (!result.ok) {
-        setOpError(result.error);
-        return;
+  const handleSmartMerge = useCallback(
+    async (backend?: ChatBackendKind): Promise<void> => {
+      if (!workspace || busyRef.current) return;
+      setBusy("smartMerge");
+      setOpError(null);
+      try {
+        const result = await requestPrepareSmartMerge(workspace.cwd);
+        if (!result.ok) {
+          setOpError(result.error);
+          return;
+        }
+        const run = await window.spark.orchestration.startAutopilot({
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          cwd: workspace.cwd,
+          planTitle: smartMergePlanTitle(result.context),
+          planText: buildSmartMergePlan(result.context),
+          // Hand the merge to the engine the user picked from the caret
+          // (undefined = the default Spark / OpenRouter manager).
+          chatBackend: backend,
+          initialUserNote:
+            "This is a smart merge. Take a look at what's coming in from the upstream below, tell me in chat what you plan to do, and ask me if anything looks risky or ambiguous before you proceed — then carry out the merge yourself. You can run git directly. Protect my local work first (a recoverable stash is fine) and don't push, force-push, or reset --hard.",
+        });
+        onRunSnapshot(run, { select: true, focusRuns: true });
+      } catch (err) {
+        setOpError((err as Error).message);
+      } finally {
+        setBusy(null);
+        void refresh(true);
       }
-      const run = await window.spark.orchestration.startAutopilot({
-        workspaceId: workspace.id,
-        workspaceName: workspace.name,
-        cwd: workspace.cwd,
-        planTitle: smartMergePlanTitle(result.context),
-        planText: buildSmartMergePlan(result.context),
-        initialUserNote:
-          "Run this as an autonomous smart merge. Do not ask me to approve routine fetch, diff review, stash preservation, merge, conflict resolution, or verification steps. Pause only for the explicit pause rules in the plan.",
-      });
-      onRunSnapshot(run, { select: true, focusRuns: true });
-    } catch (err) {
-      setOpError((err as Error).message);
-    } finally {
-      setBusy(null);
-      void refresh(true);
-    }
-  }, [workspace, onRunSnapshot, refresh]);
+    },
+    [workspace, onRunSnapshot, refresh],
+  );
 
   // History actions can move HEAD or the working tree — drop any open diff so
   // the panel does not keep showing a now-stale one.
@@ -556,7 +563,7 @@ export default function GitPanel({
                 onPush={handlePush}
                 onPull={handlePull}
                 onFetch={handleFetch}
-                onSmartMerge={() => void handleSmartMerge()}
+                onSmartMerge={(backend) => void handleSmartMerge(backend)}
                 canSmartMerge={Boolean(
                   workspace && status.isRepo && (status.behind > 0 || status.hasConflicts),
                 )}

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type {
   AppSettings,
   AppState,
+  ChatBackendKind,
   FsEntry,
   RunState,
   ShellInfo,
@@ -1113,7 +1114,7 @@ export default function App() {
   // orchestrator as the plan for a brand-new chat, then select that chat so
   // its conversation and node-graph tab come forward.
   const handleRunPlan = useCallback(
-    async (entry: FsEntry) => {
+    async (entry: FsEntry, backend?: ChatBackendKind) => {
       const ws = activeWorkspace;
       if (!ws) return;
       try {
@@ -1125,6 +1126,9 @@ export default function App() {
           planPath: entry.path,
           planTitle: entry.name,
           planText: file.content,
+          // Engine picked from the explorer's Run plan flyout (undefined = the
+          // default Spark / OpenRouter manager).
+          chatBackend: backend,
         });
         handleSelectRun(run.id);
         void refreshRunsFor(ws.id);

@@ -416,6 +416,10 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       workspaceName: input.workspaceName,
       cwd: input.cwd,
       title: chatTitleFromInput(input),
+      // Engine choice from the "Run plan" / "Smart Merge" pickers. Threading it
+      // through createRun stamps run.chatBackend so askOpenRouterManager
+      // dispatches to the Claude Code / Codex manager. Undefined → OpenRouter.
+      chatBackend: input.chatBackend,
     });
   }
 

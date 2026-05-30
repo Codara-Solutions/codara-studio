@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
-import type { FsEntry } from "@shared/types";
+import type { ChatBackendKind, FsEntry } from "@shared/types";
+import { type EngineOption, useEngineOptions } from "./engine/engineOptions";
 import { ChevronIcon } from "./icons";
 import { FileNodeIcon } from "./file-icons/FileNodeIcon";
 import { InlineInput } from "./file-icons/InlineInput";
@@ -97,6 +98,10 @@ function normalizePath(path: string): string {
 const PLAN_FILE_EXTS = new Set(["md", "markdown", "html", "htm"]);
 const PREVIEW_FILE_EXTS = new Set(["html", "htm"]);
 
+// Width of the Run plan engine flyout, shared by the edge-flip math (does it
+// fit to the right of the menu?) and the flyout panel's own style.
+const ENGINE_FLYOUT_WIDTH = 184;
+
 function isRunnablePlan(entry: FsEntry): boolean {
   return !entry.isDir && PLAN_FILE_EXTS.has((entry.ext ?? "").toLowerCase());
 }
@@ -140,7 +145,9 @@ interface Props {
   onDeleteFile?: (path: string) => void;
   onRenameFile?: (oldPath: string, entry: FsEntry) => void;
   // Right-click a .md/.html file to hand it to the orchestrator as a plan.
-  onRunPlan?: (entry: FsEntry) => void;
+  // `backend` is the engine chosen from the Run plan flyout (undefined = the
+  // default Spark / OpenRouter manager; "claude" / "codex" route to that CLI).
+  onRunPlan?: (entry: FsEntry, backend?: ChatBackendKind) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
   headerDrag?: SectionHeaderDragProps;
@@ -194,6 +201,9 @@ export default function FileTree({
   const [selectionRect, setSelectionRect] = useState<SelectionRect | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [, force] = useState(0);
+  // Engines offered by the Run plan flyout (Spark always; Claude / Codex when
+  // their CLI is installed). One entry (just Spark) → plain single action.
+  const engines = useEngineOptions();
   const rootRef = useRef(root);
   rootRef.current = root;
   const flatRef = useRef<FlatRow[]>([]);
@@ -966,12 +976,15 @@ export default function FileTree({
         <FileMenu
           menu={contextMenu}
           entries={contextMenuEntries}
-          onRunPlan={
+          runPlan={
             onRunPlan && contextMenuEntries.length === 1 && isRunnablePlan(contextMenu.entry)
-              ? () => {
-                  const entry = contextMenu.entry;
-                  setContextMenu(null);
-                  onRunPlan(entry);
+              ? {
+                  engines,
+                  onPick: (backend) => {
+                    const entry = contextMenu.entry;
+                    setContextMenu(null);
+                    onRunPlan(entry, backend);
+                  },
                 }
               : null
           }
@@ -1374,7 +1387,7 @@ const Row = React.memo(function Row({
 function FileMenu({
   menu,
   entries,
-  onRunPlan,
+  runPlan,
   onOpen,
   openLabel,
   onNewFile,
@@ -1387,7 +1400,7 @@ function FileMenu({
 }: {
   menu: FileContextMenu;
   entries: FsEntry[];
-  onRunPlan: (() => void) | null;
+  runPlan: { engines: EngineOption[]; onPick: (backend?: ChatBackendKind) => void } | null;
   onOpen: (() => void) | null;
   openLabel: string;
   onNewFile: () => void;
@@ -1401,6 +1414,9 @@ function FileMenu({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const x = Math.min(menu.x, window.innerWidth - 236);
   const y = Math.min(menu.y, window.innerHeight - 280);
+  // The Run plan engine flyout opens to the right by default, flipping left
+  // when the menu sits too close to the viewport's right edge to fit it.
+  const engineFlyoutOpensLeft = Math.max(8, x) + 228 + ENGINE_FLYOUT_WIDTH > window.innerWidth - 8;
   const multiple = entries.length > 1;
   const headerTitle = multiple ? `${entries.length} files selected` : menu.entry.name;
   const headerMeta = multiple
@@ -1429,7 +1445,8 @@ function FileMenu({
         borderRadius: 8,
         boxShadow: "var(--shadow-2)",
         padding: 6,
-        overflow: "hidden",
+        // No `overflow: hidden` here — the Run plan engine flyout is an
+        // absolutely-positioned child that extends past this menu's edge.
       }}
     >
       <div
@@ -1466,11 +1483,13 @@ function FileMenu({
           </span>
         </div>
       </div>
-      {onRunPlan && (
+      {runPlan && (
         <>
-          <MenuButton icon="▶" accent onClick={onRunPlan}>
-            Run plan
-          </MenuButton>
+          <RunPlanMenuItem
+            engines={runPlan.engines}
+            onPick={runPlan.onPick}
+            openLeft={engineFlyoutOpensLeft}
+          />
           <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
         </>
       )}
@@ -1495,6 +1514,111 @@ function FileMenu({
       >
         {confirmDelete ? "Click again to confirm" : deleteLabel}
       </MenuButton>
+    </div>
+  );
+}
+
+// The "Run plan" entry. With one engine (just Spark) it's a plain accent
+// MenuButton that runs the default. With Claude / Codex also installed it gains
+// a ▸ caret and a hover flyout listing every engine; clicking the row itself
+// still runs the default engine, matching the prior one-click behaviour.
+function RunPlanMenuItem({
+  engines,
+  onPick,
+  openLeft,
+}: {
+  engines: EngineOption[];
+  onPick: (backend?: ChatBackendKind) => void;
+  openLeft: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [hovered, setHovered] = useState(false);
+
+  if (engines.length <= 1) {
+    return (
+      <MenuButton icon="▶" accent onClick={() => onPick(undefined)}>
+        Run plan
+      </MenuButton>
+    );
+  }
+
+  return (
+    <div
+      style={{ position: "relative" }}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        onClick={() => onPick(undefined)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        style={{
+          appearance: "none",
+          width: "100%",
+          border: "none",
+          background: hovered || open ? "var(--panel)" : "transparent",
+          color: "var(--accent)",
+          borderRadius: 6,
+          padding: "7px 8px",
+          textAlign: "left",
+          fontFamily: "inherit",
+          fontSize: 11,
+          fontWeight: 700,
+          cursor: "default",
+          display: "grid",
+          gridTemplateColumns: "22px minmax(0, 1fr) auto",
+          alignItems: "center",
+          gap: 8,
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        }}
+      >
+        <span
+          style={{
+            width: 18,
+            height: 18,
+            borderRadius: 999,
+            color: "var(--accent)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 9,
+            fontWeight: 900,
+          }}
+        >
+          ▶
+        </span>
+        <span>Run plan</span>
+        <span style={{ color: "var(--muted)", fontSize: 10, fontWeight: 900 }}>▸</span>
+      </button>
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: -6,
+            [openLeft ? "right" : "left"]: "100%",
+            width: ENGINE_FLYOUT_WIDTH,
+            background: "var(--panel-2)",
+            border: "1px solid var(--rule-strong)",
+            borderRadius: 8,
+            boxShadow: "var(--shadow-2)",
+            padding: 6,
+            zIndex: 1,
+          }}
+        >
+          {engines.map((engine) => (
+            <MenuButton
+              key={engine.key}
+              icon={engine.glyph}
+              accent={engine.key === "spark"}
+              onClick={() => onPick(engine.backend)}
+            >
+              {engine.key === "spark" ? "Spark (default)" : engine.label}
+            </MenuButton>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

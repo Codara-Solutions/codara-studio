@@ -1484,6 +1484,13 @@ export interface StartAutopilotInput {
   initialUserNote?: string;
   initialUserNoteClientMessageId?: string;
   initialAttachments?: AddRunMessageAttachmentInput[];
+  // Which Spark Agent backend should drive this run. Set by the explorer's
+  // "Run plan" engine flyout and the Source Control "Smart Merge" engine
+  // picker. Only applied when startAutopilot creates the run itself (no
+  // runId) — it threads into createRun so the manager dispatches to Claude
+  // Code / Codex instead of the default OpenRouter manager. Undefined keeps
+  // the legacy OpenRouter behaviour.
+  chatBackend?: ChatBackendKind;
 }
 
 export interface PauseRunInput {

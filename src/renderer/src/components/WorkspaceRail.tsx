@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { FsEntry, RunState, Workspace } from "@shared/types";
+import type { ChatBackendKind, FsEntry, RunState, Workspace } from "@shared/types";
 import { MinusIcon, PlusIcon } from "./icons";
 import FileTree from "./FileTree";
 import GitPanel from "./git/GitPanel";
@@ -68,7 +68,7 @@ interface RailProps {
   onOpenFileEntry: (entry: FsEntry, options?: { preview?: boolean }) => void;
   onDeleteFile: (path: string) => void;
   onRenameFile: (oldPath: string, entry: FsEntry) => void;
-  onRunPlan: (entry: FsEntry) => void;
+  onRunPlan: (entry: FsEntry, backend?: ChatBackendKind) => void;
 }
 
 // Memoized: App hoists every prop to a stable reference (the `workspaces`

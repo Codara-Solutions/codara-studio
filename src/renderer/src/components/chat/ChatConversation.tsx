@@ -455,33 +455,22 @@ const MessageTurn = React.memo(function MessageTurn({
     );
   }
 
-  // Spark message: prose first, visually separate from tool activity.
+  // Spark message: an accent avatar gutter, then the speaker line and prose
+  // stacked in one column (see SparkTurn). Questions carry a "Needs you" tag;
+  // completions fold their "done" marker into the body.
   const isQuestion = item.messageKind === "question";
   const isCompletion = item.messageKind === "decision";
   const showChoices = isQuestion && item.id === openQuestionId && (item.questionOptions ?? []).length > 0;
   const displayText = cleanLegacySparkOutput(item.text);
   if (isCompletion) {
     return (
-      <div style={SPARK_TURN_STYLE}>
-        <div style={SPARK_HEADER_STYLE}>
-          <SparkMark />
-          <span style={SPEAKER_LABEL_STYLE}>Spark</span>
-          {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
-        </div>
+      <SparkTurn repeatCount={item.repeatCount}>
         <CompletionMessage text={displayText} />
-      </div>
+      </SparkTurn>
     );
   }
   return (
-    <div style={SPARK_TURN_STYLE}>
-      <div style={SPARK_HEADER_STYLE}>
-        <SparkMark />
-        <span style={SPEAKER_LABEL_STYLE}>Spark</span>
-        {isQuestion && (
-          <span style={QUESTION_TAG_STYLE}>needs you</span>
-        )}
-        {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
-      </div>
+    <SparkTurn repeatCount={item.repeatCount} tag={isQuestion ? <NeedsYouChip /> : null}>
       <div style={SPARK_BUBBLE_STYLE}>
         <Markdown text={displayText} />
         <AttachmentStrip attachments={item.attachments} align="start" />
@@ -493,7 +482,7 @@ const MessageTurn = React.memo(function MessageTurn({
         )}
       </div>
       {showDoneMarker && <DoneMarker />}
-    </div>
+    </SparkTurn>
   );
 });
 
@@ -507,12 +496,7 @@ function LiveAssistantTurn({ live }: { live: LiveStreamState }) {
   const liveText = liveTextFromState(live);
 
   return (
-    <div style={SPARK_TURN_STYLE}>
-      <div style={SPARK_HEADER_STYLE}>
-        <SparkMark />
-        <span style={SPEAKER_LABEL_STYLE}>Spark</span>
-        <LiveTypingPip />
-      </div>
+    <SparkTurn tag={<LiveTypingPip />}>
       <div style={LIVE_BUBBLE_STYLE}>
         {liveText.length > 0 ? <Markdown text={liveText} /> : <LiveEllipsis />}
         {live.toolCalls.length > 0 && (
@@ -553,7 +537,7 @@ function LiveAssistantTurn({ live }: { live: LiveStreamState }) {
           </div>
         )}
       </div>
-    </div>
+    </SparkTurn>
   );
 }
 
@@ -818,9 +802,42 @@ function QuestionChoices({ runId, options }: { runId: string; options: RunQuesti
     }
   };
 
+  // Number-key shortcuts (1–9) pick an option, mirroring the native popup's
+  // keyboard parity — but only when the user isn't typing into a field, so the
+  // custom textarea and the main composer never lose a digit to a pick. Bound
+  // at the window only while this open question is mounted.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      const active = document.activeElement as HTMLElement | null;
+      const tag = active?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || active?.isContentEditable) return;
+      const digit = Number.parseInt(event.key, 10);
+      if (!Number.isInteger(digit) || digit < 1 || digit > options.length) return;
+      event.preventDefault();
+      void submitAnswer(options[digit - 1].answer);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options, runId]);
+
+  const canSend = custom.trim().length > 0 && !busy;
+
   return (
-    <div style={QUESTION_CHOICES_STYLE}>
-      <div style={QUESTION_OPTION_LIST_STYLE}>
+    <div style={ASK_CARD_STYLE}>
+      <div style={ASK_HEAD_STYLE}>
+        <span style={ASK_EYEBROW_STYLE}>Choose an option</span>
+        <span style={ASK_HINT_STYLE}>
+          {options.map((_, index) => (
+            <span key={index} style={ASK_KBD_STYLE}>
+              {index + 1}
+            </span>
+          ))}
+          <span>or click</span>
+        </span>
+      </div>
+      <div style={ASK_OPTION_LIST_STYLE}>
         {options.map((option, index) => (
           <QuestionOptionButton
             key={option.id || index}
@@ -831,26 +848,32 @@ function QuestionChoices({ runId, options }: { runId: string; options: RunQuesti
           />
         ))}
       </div>
-      <div style={QUESTION_CUSTOM_STYLE}>
+      <div style={ASK_CUSTOM_STYLE}>
         <textarea
           value={custom}
           disabled={busy}
           onChange={(event) => setCustom(event.target.value)}
-          placeholder="Type a different answer..."
-          rows={2}
-          style={QUESTION_CUSTOM_INPUT_STYLE}
-        />
-        <button
-          type="button"
-          disabled={busy || custom.trim().length === 0}
-          onClick={() => void submitAnswer(custom)}
-          style={{
-            ...QUESTION_CUSTOM_BUTTON_STYLE,
-            opacity: busy || custom.trim().length === 0 ? 0.55 : 1,
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              void submitAnswer(custom);
+            }
           }}
-        >
-          Send custom
-        </button>
+          placeholder="Or type your own answer…"
+          rows={1}
+          style={ASK_CUSTOM_INPUT_STYLE}
+        />
+        <div style={ASK_CUSTOM_ROW_STYLE}>
+          <span style={ASK_CUSTOM_HINT_STYLE}>Enter to send · Shift+Enter for a new line</span>
+          <button
+            type="button"
+            disabled={!canSend}
+            onClick={() => void submitAnswer(custom)}
+            style={{ ...ASK_SEND_STYLE, ...(canSend ? null : ASK_SEND_OFF_STYLE) }}
+          >
+            Send
+          </button>
+        </div>
       </div>
       {error && <div style={QUESTION_ERROR_STYLE}>{error}</div>}
     </div>
@@ -869,6 +892,14 @@ function QuestionOptionButton({
   onChoose: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  const recommended = !!option.recommended;
+  const active = hover && !disabled;
+  // The backend often echoes the label as the description (e.g. "1" / "1").
+  // Rendering both just doubles the text, so only show a description that
+  // genuinely adds something.
+  const description = option.description?.trim();
+  const showDescription = !!description && description !== option.label.trim();
+
   return (
     <button
       type="button"
@@ -878,28 +909,50 @@ function QuestionOptionButton({
       onMouseLeave={() => setHover(false)}
       style={{
         ...QUESTION_OPTION_STYLE,
-        borderColor: option.recommended
-          ? "color-mix(in oklch, var(--accent) 48%, var(--rule-soft))"
-          : hover && !disabled
+        borderColor: recommended
+          ? "var(--accent-edge)"
+          : active
             ? "var(--rule)"
             : "var(--rule-soft)",
-        background: hover && !disabled
-          ? "color-mix(in oklch, var(--ink) 6%, var(--panel))"
-          : option.recommended
-            ? "color-mix(in oklch, var(--accent) 8%, var(--panel))"
-            : "color-mix(in oklch, var(--ink) 3%, transparent)",
-        opacity: disabled ? 0.65 : 1,
+        background: recommended
+          ? active
+            ? "color-mix(in oklch, var(--accent) 13%, var(--panel))"
+            : "color-mix(in oklch, var(--accent) 9%, var(--panel))"
+          : active
+            ? "color-mix(in oklch, var(--ink) 6%, transparent)"
+            : "color-mix(in oklch, var(--ink) 2%, transparent)",
+        transform: active ? "translateY(-1px)" : "none",
+        boxShadow: active ? "var(--shadow-1)" : "none",
+        opacity: disabled ? 0.6 : 1,
       }}
     >
-      <span style={QUESTION_OPTION_INDEX_STYLE}>{index + 1}</span>
-      <span style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+      <span
+        style={{
+          ...QUESTION_OPTION_KEY_STYLE,
+          ...(recommended ? QUESTION_OPTION_KEY_REC_STYLE : null),
+        }}
+      >
+        {index + 1}
+      </span>
+      <span style={QUESTION_OPTION_BODY_STYLE}>
         <span style={QUESTION_OPTION_TITLE_STYLE}>
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {option.label}
-          </span>
-          {option.recommended && <span style={QUESTION_RECOMMENDED_STYLE}>Recommended</span>}
+          <span style={QUESTION_OPTION_LABEL_STYLE}>{option.label}</span>
+          {recommended && <span style={QUESTION_RECOMMENDED_STYLE}>Recommended</span>}
         </span>
-        <span style={QUESTION_OPTION_DESCRIPTION_STYLE}>{option.description}</span>
+        {showDescription && (
+          <span style={QUESTION_OPTION_DESCRIPTION_STYLE}>{description}</span>
+        )}
+      </span>
+      <span
+        aria-hidden
+        style={{
+          ...QUESTION_OPTION_GO_STYLE,
+          color: recommended ? "var(--accent)" : "var(--muted)",
+          opacity: active ? 1 : 0,
+          transform: active ? "translateX(0)" : "translateX(-3px)",
+        }}
+      >
+        <ChevronRight />
       </span>
     </button>
   );
@@ -1597,59 +1650,144 @@ function SparkMark() {
   );
 }
 
+// The accent avatar that anchors every Spark turn's gutter.
+function SparkAvatar() {
+  return (
+    <span aria-hidden style={SPARK_AVATAR_STYLE}>
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+        <path
+          d="M8 1.25L9.35 6.05L14.15 7.4L9.35 8.75L8 13.55L6.65 8.75L1.85 7.4L6.65 6.05L8 1.25Z"
+          fill="currentColor"
+        />
+      </svg>
+    </span>
+  );
+}
+
+// One Spark turn: the avatar in a fixed gutter, then a column with the speaker
+// line (name + optional status tag) above the turn body. Prose, questions,
+// completions, and live streams all render through here so the conversation
+// keeps a single consistent rhythm.
+function SparkTurn({
+  children,
+  tag,
+  repeatCount,
+}: {
+  children: React.ReactNode;
+  tag?: React.ReactNode;
+  repeatCount?: number;
+}) {
+  return (
+    <div style={SPARK_TURN_STYLE}>
+      <SparkAvatar />
+      <div style={SPARK_MAIN_STYLE}>
+        <div style={SPARK_HEADER_STYLE}>
+          <span style={SPEAKER_LABEL_STYLE}>Spark</span>
+          {tag}
+          {repeatCount && repeatCount > 1 ? <RepeatChip count={repeatCount} /> : null}
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function NeedsYouChip() {
+  return (
+    <span style={NEEDS_YOU_CHIP_STYLE}>
+      <span aria-hidden style={NEEDS_YOU_DOT_STYLE} />
+      Needs you
+    </span>
+  );
+}
+
+function ChevronRight() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M6 4l4 4-4 4"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 const SCROLL_STYLE: React.CSSProperties = {
   flex: 1,
   minHeight: 0,
   overflowY: "auto",
   display: "block",
   background: "var(--panel)",
-  padding: "12px 12px 16px",
+  padding: "18px 16px 22px",
 };
 
 const CHAT_ITEM_STYLE: React.CSSProperties = {
-  marginBottom: 8,
+  marginBottom: 14,
 };
 
 const USER_BUBBLE_STYLE: React.CSSProperties = {
-  maxWidth: "84%",
-  background: "color-mix(in oklch, var(--accent) 9%, var(--panel-2))",
-  border: "1px solid color-mix(in oklch, var(--accent) 26%, var(--rule-soft))",
-  borderRadius: 8,
-  borderTopRightRadius: 4,
-  padding: "8px 10px",
+  maxWidth: "82%",
+  background: "color-mix(in oklch, var(--accent) 10%, var(--panel-2))",
+  border: "1px solid color-mix(in oklch, var(--accent) 22%, var(--rule-soft))",
+  borderRadius: 13,
+  borderBottomRightRadius: 5,
+  padding: "9px 13px",
   color: "var(--ink)",
   fontSize: 13,
-  lineHeight: 1.45,
+  lineHeight: 1.5,
   whiteSpace: "pre-wrap",
   wordBreak: "break-word",
+  boxShadow: "var(--shadow-1)",
 };
 
 const SPARK_TURN_STYLE: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "26px minmax(0, 1fr)",
+  columnGap: 11,
+  alignItems: "start",
+};
+
+const SPARK_AVATAR_STYLE: React.CSSProperties = {
+  flex: "0 0 auto",
+  width: 26,
+  height: 26,
+  borderRadius: 8,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  background: "var(--accent-soft)",
+  border: "1px solid var(--accent-edge)",
+  color: "var(--accent)",
+  boxShadow: "var(--lift-hi)",
+};
+
+const SPARK_MAIN_STYLE: React.CSSProperties = {
+  minWidth: 0,
   display: "flex",
-  flexDirection: "row",
-  flexWrap: "wrap",
-  alignItems: "baseline",
-  columnGap: 8,
-  rowGap: 4,
+  flexDirection: "column",
+  gap: 7,
+  paddingTop: 2,
 };
 
 const SPARK_HEADER_STYLE: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "baseline",
-  gap: 7,
-  paddingLeft: 2,
-  flex: "0 0 auto",
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  minHeight: 22,
 };
 
 const SPARK_BUBBLE_STYLE: React.CSSProperties = {
-  width: "fit-content",
-  maxWidth: "94%",
+  width: "100%",
+  maxWidth: "100%",
   boxSizing: "border-box",
   color: "var(--ink)",
   background: "transparent",
   border: "none",
   borderRadius: 0,
-  padding: "0 2px",
+  padding: 0,
   overflowWrap: "anywhere",
 };
 
@@ -1712,135 +1850,262 @@ const SYSTEM_PILL_STYLE: React.CSSProperties = {
 };
 
 const SPEAKER_LABEL_STYLE: React.CSSProperties = {
-  fontSize: 10,
+  fontSize: 12,
+  fontWeight: 650,
+  letterSpacing: "0.01em",
+  color: "var(--ink)",
+};
+
+const NEEDS_YOU_CHIP_STYLE: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 5,
+  height: 18,
+  padding: "0 8px",
+  borderRadius: 999,
+  fontSize: 9.5,
   fontWeight: 700,
-  letterSpacing: "0.13em",
+  letterSpacing: "0.06em",
+  textTransform: "uppercase",
+  color: "var(--warn)",
+  border: "1px solid color-mix(in oklch, var(--warn) 42%, transparent)",
+  background: "color-mix(in oklch, var(--warn) 12%, transparent)",
+};
+
+const NEEDS_YOU_DOT_STYLE: React.CSSProperties = {
+  width: 5,
+  height: 5,
+  borderRadius: 999,
+  background: "var(--warn)",
+  flex: "0 0 auto",
+};
+
+// ── Ask card ────────────────────────────────────────────────────────────────
+// The open-question UI: a contained card holding a header (eyebrow + keyboard
+// hints), the selectable options, and a custom-answer field. Reads as one
+// deliberate "act here" moment under the Spark question prose.
+const ASK_CARD_STYLE: React.CSSProperties = {
+  marginTop: 4,
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 13,
+  overflow: "hidden",
+  background: "color-mix(in oklch, var(--ink) 2.5%, var(--panel))",
+  boxShadow: "var(--shadow-1)",
+};
+
+const ASK_HEAD_STYLE: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 8,
+  padding: "9px 12px 8px",
+  borderBottom: "1px solid var(--rule-soft)",
+};
+
+const ASK_EYEBROW_STYLE: React.CSSProperties = {
+  fontFamily: "var(--font-mono)",
+  fontSize: 9,
+  fontWeight: 700,
+  letterSpacing: "0.16em",
   textTransform: "uppercase",
   color: "var(--muted)",
 };
 
-const QUESTION_TAG_STYLE: React.CSSProperties = {
-  fontSize: 9,
-  fontWeight: 700,
-  letterSpacing: "0.08em",
-  textTransform: "uppercase",
-  color: "var(--warn)",
-  border: "1px solid color-mix(in oklch, var(--warn) 40%, transparent)",
-  borderRadius: 999,
-  padding: "1px 6px",
+const ASK_HINT_STYLE: React.CSSProperties = {
+  marginLeft: "auto",
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  fontSize: 10,
+  color: "var(--muted-2)",
 };
 
-const QUESTION_CHOICES_STYLE: React.CSSProperties = {
-  marginTop: 10,
+const ASK_KBD_STYLE: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  minWidth: 16,
+  height: 16,
+  padding: "0 4px",
+  border: "1px solid var(--rule)",
+  borderRadius: 5,
+  background: "var(--panel-3)",
+  color: "var(--ink-dim)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 9.5,
+  boxShadow: "var(--lift-hi)",
+};
+
+const ASK_OPTION_LIST_STYLE: React.CSSProperties = {
+  padding: 8,
   display: "flex",
   flexDirection: "column",
-  gap: 8,
-};
-
-const QUESTION_OPTION_LIST_STYLE: React.CSSProperties = {
-  display: "grid",
   gap: 6,
 };
 
 const QUESTION_OPTION_STYLE: React.CSSProperties = {
   appearance: "none",
   width: "100%",
-  border: "1px solid var(--rule-soft)",
-  borderRadius: 8,
-  color: "var(--ink)",
   display: "grid",
-  gridTemplateColumns: "20px minmax(0, 1fr)",
-  gap: 8,
-  padding: "8px 9px",
+  gridTemplateColumns: "26px minmax(0, 1fr) auto",
+  alignItems: "center",
+  gap: 12,
+  padding: "9px 11px",
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 10,
+  color: "var(--ink)",
   textAlign: "left",
   cursor: "default",
   transition:
-    "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
+    "transform var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
 };
 
-const QUESTION_OPTION_INDEX_STYLE: React.CSSProperties = {
-  width: 20,
-  height: 20,
-  borderRadius: 6,
+const QUESTION_OPTION_KEY_STYLE: React.CSSProperties = {
+  width: 26,
+  height: 26,
+  borderRadius: 7,
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-  background: "color-mix(in oklch, var(--ink) 7%, transparent)",
-  color: "var(--muted)",
+  border: "1px solid var(--rule)",
+  background: "var(--panel-3)",
+  color: "var(--ink-dim)",
   fontFamily: "var(--font-mono)",
-  fontSize: 10,
+  fontSize: 12,
   fontWeight: 700,
+  boxShadow: "var(--lift-hi), var(--well)",
+};
+
+const QUESTION_OPTION_KEY_REC_STYLE: React.CSSProperties = {
+  border: "1px solid var(--accent-edge)",
+  background: "var(--accent-soft)",
+  color: "var(--accent)",
+};
+
+const QUESTION_OPTION_BODY_STYLE: React.CSSProperties = {
+  minWidth: 0,
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
 };
 
 const QUESTION_OPTION_TITLE_STYLE: React.CSSProperties = {
-  minWidth: 0,
   display: "flex",
   alignItems: "center",
-  gap: 7,
+  gap: 8,
+  minWidth: 0,
+};
+
+const QUESTION_OPTION_LABEL_STYLE: React.CSSProperties = {
+  fontSize: 13,
+  fontWeight: 650,
   color: "var(--ink)",
-  fontSize: 12.5,
-  fontWeight: 700,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
 };
 
 const QUESTION_RECOMMENDED_STYLE: React.CSSProperties = {
   flex: "0 0 auto",
-  border: "1px solid color-mix(in oklch, var(--accent) 38%, transparent)",
+  display: "inline-flex",
+  alignItems: "center",
+  height: 16,
+  padding: "0 7px",
+  border: "1px solid var(--accent-edge)",
   borderRadius: 999,
   color: "var(--accent)",
-  background: "color-mix(in oklch, var(--accent) 8%, transparent)",
-  padding: "1px 6px",
+  background: "var(--accent-soft)",
   fontFamily: "var(--font-mono)",
   fontSize: 8.5,
   fontWeight: 700,
-  letterSpacing: "0.04em",
+  letterSpacing: "0.06em",
   textTransform: "uppercase",
 };
 
 const QUESTION_OPTION_DESCRIPTION_STYLE: React.CSSProperties = {
-  color: "var(--ink-dim)",
-  fontSize: 11.5,
+  color: "var(--muted)",
+  fontSize: 12,
   lineHeight: 1.4,
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
 };
 
-const QUESTION_CUSTOM_STYLE: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) auto",
-  alignItems: "end",
-  gap: 7,
+const QUESTION_OPTION_GO_STYLE: React.CSSProperties = {
+  flex: "0 0 auto",
+  display: "inline-flex",
+  color: "var(--muted)",
+  transition:
+    "opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
 };
 
-const QUESTION_CUSTOM_INPUT_STYLE: React.CSSProperties = {
+const ASK_CUSTOM_STYLE: React.CSSProperties = {
+  padding: "10px 10px 11px",
+  borderTop: "1px solid var(--rule-soft)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 8,
+};
+
+const ASK_CUSTOM_INPUT_STYLE: React.CSSProperties = {
   width: "100%",
   boxSizing: "border-box",
-  resize: "vertical",
-  minHeight: 44,
-  maxHeight: 110,
+  resize: "none",
+  minHeight: 38,
+  maxHeight: 120,
+  overflowY: "auto",
   border: "1px solid var(--rule-soft)",
-  borderRadius: 8,
-  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+  borderRadius: 9,
+  background: "var(--bg)",
   color: "var(--ink)",
   outline: "none",
-  padding: "8px 9px",
+  padding: "9px 11px",
   fontFamily: "var(--font-sans)",
-  fontSize: 12,
-  lineHeight: 1.45,
+  fontSize: 12.5,
+  lineHeight: 1.5,
+  boxShadow: "var(--well)",
 };
 
-const QUESTION_CUSTOM_BUTTON_STYLE: React.CSSProperties = {
+const ASK_CUSTOM_ROW_STYLE: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 10,
+};
+
+const ASK_CUSTOM_HINT_STYLE: React.CSSProperties = {
+  fontSize: 10.5,
+  color: "var(--muted-2)",
+};
+
+const ASK_SEND_STYLE: React.CSSProperties = {
   appearance: "none",
-  height: 32,
-  border: "1px solid color-mix(in oklch, var(--accent) 46%, transparent)",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  height: 28,
+  padding: "0 14px",
+  border: "1px solid var(--accent-edge)",
   borderRadius: 8,
-  background: "color-mix(in oklch, var(--accent) 12%, transparent)",
-  color: "var(--accent)",
-  padding: "0 10px",
+  background: "var(--accent)",
+  color: "var(--accent-ink)",
   fontFamily: "var(--font-sans)",
-  fontSize: 11,
-  fontWeight: 700,
+  fontSize: 12,
+  fontWeight: 650,
   cursor: "default",
+  boxShadow: "var(--lift-hi)",
+  transition:
+    "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+};
+
+const ASK_SEND_OFF_STYLE: React.CSSProperties = {
+  background: "color-mix(in oklch, var(--ink) 6%, var(--panel))",
+  color: "var(--muted)",
+  borderColor: "var(--rule-soft)",
+  boxShadow: "none",
 };
 
 const QUESTION_ERROR_STYLE: React.CSSProperties = {
+  margin: "0 10px 10px",
   color: "var(--danger)",
   background: "var(--danger-soft)",
   border: "1px solid color-mix(in oklch, var(--danger) 34%, transparent)",
