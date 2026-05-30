@@ -687,7 +687,8 @@ function NonRepoState({
   const [hover, setHover] = useState(false);
   return (
     <div style={{ padding: "16px 14px", display: "flex", flexDirection: "column", gap: 6 }}>
-      <div style={{ fontSize: 12, fontWeight: 600, color: "var(--ink-dim)" }}>
+      <div className="spark-eyebrow">Source control</div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--ink-dim)" }}>
         Not a Git repository
       </div>
       <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 6, lineHeight: 1.5 }}>
@@ -713,10 +714,11 @@ function NonRepoState({
           fontWeight: 700,
           border: hover && !busy ? "1px solid var(--accent-edge)" : "1px solid var(--rule-strong)",
           background: hover && !busy ? "var(--accent-soft)" : "transparent",
+          boxShadow: hover && !busy ? "var(--lift-hi)" : "none",
           color: busy ? "var(--muted-2)" : "var(--ink-dim)",
           opacity: busy ? 0.6 : 1,
           transition:
-            "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+            "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
         }}
       >
         <InitRepoIcon />
@@ -770,13 +772,20 @@ function ErrorStrip({
         style={{
           appearance: "none",
           flex: "0 0 auto",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 18,
+          height: 18,
+          borderRadius: 5,
           border: "none",
           background: "transparent",
           color: "var(--danger)",
           cursor: "default",
-          fontSize: 13,
+          fontSize: 12,
           lineHeight: 1,
-          padding: 2,
+          padding: 0,
+          transition: "background var(--motion-fast) var(--ease-out)",
         }}
       >
         ✕

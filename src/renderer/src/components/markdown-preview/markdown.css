@@ -5,9 +5,18 @@
 
 .spark-markdown {
   color: var(--ink);
-  font-family:
-    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu,
-    Cantarell, "Helvetica Neue", sans-serif;
+  font-family: var(
+    --font-sans,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    Oxygen,
+    Ubuntu,
+    Cantarell,
+    "Helvetica Neue",
+    sans-serif
+  );
   font-size: 14px;
   line-height: 1.6;
   padding: 24px 32px 80px;
@@ -74,9 +83,17 @@
 .spark-markdown a {
   color: var(--accent);
   text-decoration: none;
+  text-underline-offset: 0.18em;
+  transition: color var(--motion-fast) var(--ease-out);
 }
 .spark-markdown a:hover {
   text-decoration: underline;
+  color: color-mix(in oklch, var(--accent) 85%, var(--ink));
+}
+.spark-markdown a:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 3px;
 }
 .spark-markdown hr {
   border: 0;
@@ -110,12 +127,15 @@
   vertical-align: middle;
 }
 
-/* Blockquote — left accent rail, slightly muted ink. */
+/* Blockquote — left rail + faint surface tint, slightly muted ink. The rail
+   uses --rule (not accent) so chroma stays rationed for live state. */
 .spark-markdown blockquote {
   margin: 0 0 16px;
-  padding: 0 1em;
+  padding: 0.4em 1em;
   color: var(--ink-dim, var(--muted));
-  border-left: 0.25em solid var(--rule-soft);
+  background: color-mix(in oklch, var(--ink) 3%, transparent);
+  border-left: 3px solid var(--rule);
+  border-radius: 0 5px 5px 0;
 }
 .spark-markdown blockquote > :first-child {
   margin-top: 0;
@@ -124,12 +144,13 @@
   margin-bottom: 0;
 }
 
-/* Inline code. */
+/* Inline code — a small mono chip with a hairline edge for definition. */
 .spark-markdown code {
   font-family: var(--font-mono);
   font-size: 0.85em;
   background: color-mix(in oklch, var(--ink) 8%, transparent);
-  padding: 0.2em 0.4em;
+  border: 1px solid var(--rule-soft);
+  padding: 0.15em 0.4em;
   border-radius: 4px;
   color: var(--ink);
 }
@@ -140,9 +161,12 @@
 .spark-markdown pre {
   margin: 0 0 16px;
   padding: 14px 16px;
-  background: var(--bg);
+  /* One step below the prose surface + a soft well so the block reads as
+     recessed code, not a floating slab. --well is re-tinted per theme. */
+  background: color-mix(in oklch, var(--ink) 3%, var(--bg));
   border: 1px solid var(--rule-soft);
   border-radius: 7px;
+  box-shadow: var(--well);
   overflow-x: auto;
   font-family: var(--font-mono);
   font-size: 13px;
@@ -150,6 +174,7 @@
 }
 .spark-markdown pre code {
   background: transparent;
+  border: 0;
   padding: 0;
   font-size: inherit;
   color: var(--ink-dim, var(--ink));
@@ -165,6 +190,8 @@
   margin: 0 0 16px;
   border-collapse: collapse;
   font-size: 13px;
+  /* Align numeric columns the way the rest of the app renders data. */
+  font-variant-numeric: tabular-nums;
 }
 .spark-markdown th,
 .spark-markdown td {
@@ -176,6 +203,9 @@
   font-weight: 600;
   color: var(--ink);
   text-align: left;
+  /* Header micro-label cue without shouting — tightened tracking. */
+  letter-spacing: 0.01em;
+  border-bottom-color: var(--rule);
 }
 .spark-markdown tr:nth-child(2n) {
   background: color-mix(in oklch, var(--panel) 50%, transparent);

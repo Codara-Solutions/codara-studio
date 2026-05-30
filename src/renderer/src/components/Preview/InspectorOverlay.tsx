@@ -44,6 +44,7 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
 
   return (
     <div
+      className="spark-fade-in"
       onClick={onCancel}
       style={{
         position: "absolute",
@@ -62,7 +63,7 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
           background: "var(--panel-2)",
           border: "1px solid var(--rule-strong)",
           borderRadius: 8,
-          boxShadow: "var(--shadow-2)",
+          boxShadow: "var(--shadow-2), var(--lift-hi)",
           width: "min(480px, 100%)",
           padding: 14,
           fontFamily: "var(--font-sans)",
@@ -72,23 +73,14 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
           gap: 10,
         }}
       >
-        <div
-          style={{
-            fontSize: 11,
-            color: "var(--muted)",
-            fontFamily: "var(--font-mono)",
-            textTransform: "uppercase",
-            letterSpacing: "0.08em",
-          }}
-        >
-          Element picked
-        </div>
+        <div className="spark-eyebrow">Element picked</div>
         <div
           style={{
             border: "1px solid var(--rule-soft)",
             borderRadius: 6,
             padding: "8px 10px",
-            background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+            background: "var(--bg)",
+            boxShadow: "var(--well)",
             fontFamily: "var(--font-mono)",
             fontSize: 11,
             display: "grid",
@@ -115,13 +107,21 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
           }}
           placeholder="Describe the change you want — Enter to pick a destination."
           rows={3}
+          onFocus={(e) => {
+            e.currentTarget.style.borderColor = "var(--accent-edge)";
+            e.currentTarget.style.boxShadow = "var(--focus-ring)";
+          }}
+          onBlur={(e) => {
+            e.currentTarget.style.borderColor = "var(--rule-soft)";
+            e.currentTarget.style.boxShadow = "var(--well)";
+          }}
           style={{
             width: "100%",
             boxSizing: "border-box",
             resize: "vertical",
             minHeight: 64,
             maxHeight: 200,
-            background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+            background: "var(--bg)",
             border: "1px solid var(--rule-soft)",
             borderRadius: 6,
             padding: "8px 10px",
@@ -129,6 +129,9 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
             fontFamily: "var(--font-sans)",
             fontSize: 12,
             outline: "none",
+            boxShadow: "var(--well)",
+            transition:
+              "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
           }}
         />
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
@@ -136,6 +139,14 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
             type="button"
             onClick={onCancel}
             style={buttonStyle({ tone: "ghost" })}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "var(--hover)";
+              e.currentTarget.style.color = "var(--ink)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+              e.currentTarget.style.color = "var(--ink-dim)";
+            }}
           >
             Cancel
           </button>
@@ -144,6 +155,8 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
             type="button"
             onClick={openMenu}
             style={buttonStyle({ tone: "accent" })}
+            onMouseEnter={(e) => (e.currentTarget.style.filter = "brightness(1.08)")}
+            onMouseLeave={(e) => (e.currentTarget.style.filter = "none")}
           >
             Send to…
           </button>
@@ -198,6 +211,8 @@ function buttonStyle({ tone }: { tone: "accent" | "ghost" }): React.CSSPropertie
       fontSize: 12,
       fontWeight: 600,
       cursor: "default",
+      boxShadow: "var(--shadow-glow)",
+      transition: "filter var(--motion-fast) var(--ease-out)",
     };
   }
   return {
@@ -211,5 +226,7 @@ function buttonStyle({ tone }: { tone: "accent" | "ghost" }): React.CSSPropertie
     fontFamily: "var(--font-sans)",
     fontSize: 12,
     cursor: "default",
+    transition:
+      "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
   };
 }

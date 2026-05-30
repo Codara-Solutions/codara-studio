@@ -146,6 +146,12 @@ export function IconButton({
       }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      onFocus={(e) => {
+        if (!disabled) e.currentTarget.style.boxShadow = "var(--focus-ring)";
+      }}
+      onBlur={(e) => {
+        e.currentTarget.style.boxShadow = "none";
+      }}
       style={{
         appearance: "none",
         width: size,
@@ -157,6 +163,7 @@ export function IconButton({
         justifyContent: "center",
         border: "none",
         borderRadius: 5,
+        outline: "none",
         cursor: "default",
         background: lit ? (danger ? "var(--danger-soft)" : "var(--hover)") : "transparent",
         color: disabled
@@ -168,7 +175,7 @@ export function IconButton({
             : "var(--muted)",
         opacity: disabled ? 0.5 : 1,
         transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       {children}

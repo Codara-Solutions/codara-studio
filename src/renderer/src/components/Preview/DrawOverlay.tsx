@@ -224,22 +224,26 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
           background: "color-mix(in oklch, var(--panel-2) 92%, transparent)",
           border: "1px solid var(--rule-strong)",
           borderRadius: 8,
-          boxShadow: "var(--shadow-2)",
+          boxShadow: "var(--shadow-2), var(--lift-hi)",
           fontFamily: "var(--font-sans)",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span
-            style={{
-              flex: 1,
-              fontSize: 11,
-              color: "var(--muted)",
-              fontFamily: "var(--font-mono)",
-              textTransform: "uppercase",
-              letterSpacing: "0.08em",
-            }}
+            className="spark-eyebrow"
+            style={{ flex: 1, display: "inline-flex", alignItems: "baseline", gap: 6 }}
           >
-            Draw mode {busy ? "Capturing..." : ""}
+            Draw mode
+            {busy ? (
+              <span
+                style={{
+                  color: "var(--accent)",
+                  animation: "spark-pulse 1.4s ease-in-out infinite",
+                }}
+              >
+                Capturing…
+              </span>
+            ) : null}
           </span>
           <div
             aria-label="Stroke color"
@@ -252,6 +256,7 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
               background: "color-mix(in oklch, var(--ink) 5%, transparent)",
               border: "1px solid var(--rule-soft)",
               borderRadius: 999,
+              boxShadow: "var(--well)",
             }}
           >
             {STROKE_COLORS.map((color) => (
@@ -274,9 +279,11 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
                   background: color,
                   boxShadow:
                     strokeColor.toLowerCase() === color.toLowerCase()
-                      ? "0 0 0 2px color-mix(in oklch, var(--accent) 35%, transparent)"
+                      ? "0 0 0 2px var(--accent-glow)"
                       : "none",
                   cursor: "default",
+                  transition:
+                    "box-shadow var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
                 }}
               />
             ))}
@@ -330,7 +337,7 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
               "linear-gradient(180deg, color-mix(in oklch, var(--panel-3) 70%, transparent), color-mix(in oklch, var(--panel-2) 92%, transparent))",
             border: "1px solid var(--rule-soft)",
             borderRadius: 6,
-            boxShadow: "inset 0 1px 0 rgba(255,255,255,0.035)",
+            boxShadow: "var(--well)",
           }}
         >
           <span
@@ -391,6 +398,15 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
               fontWeight: 600,
               fontFamily: "var(--font-sans)",
               cursor: "default",
+              boxShadow: busy || !hasStrokes ? "none" : "var(--shadow-glow)",
+              transition:
+                "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), filter var(--motion-fast) var(--ease-out)",
+            }}
+            onMouseEnter={(e) => {
+              if (!busy && hasStrokes) e.currentTarget.style.filter = "brightness(1.08)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.filter = "none";
             }}
           >
             {busy ? "Sending…" : "Send to…"}
@@ -441,6 +457,17 @@ function ToolButton({
         fontFamily: "var(--font-sans)",
         fontSize: 11,
         cursor: "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+      }}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.background = "var(--hover)";
+        e.currentTarget.style.color = "var(--ink)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "transparent";
+        e.currentTarget.style.color = disabled ? "var(--muted)" : "var(--ink-dim)";
       }}
     >
       {children}

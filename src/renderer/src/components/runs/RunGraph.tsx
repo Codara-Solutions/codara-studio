@@ -410,7 +410,7 @@ function OutcomeNode({ run }: { run: RunState }) {
         borderRadius: 12,
         border: `1px solid ${tone}`,
         background: `linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 86%, ${tone} 7%), color-mix(in oklch, var(--panel) 86%, transparent))`,
-        boxShadow: "inset 0 1px 0 color-mix(in oklch, white 5%, transparent), var(--shadow-2)",
+        boxShadow: "var(--lift-hi), var(--shadow-2)",
         padding: "14px 16px",
         display: "flex",
         flexDirection: "column",

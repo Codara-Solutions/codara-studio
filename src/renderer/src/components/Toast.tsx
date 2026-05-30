@@ -112,10 +112,10 @@ function ToastCard({
     ? {
         // Danger / "needs you". Deep red border with a faint red fill so
         // the card draws the eye without screaming.
-        border: "1px solid color-mix(in oklch, var(--danger, #d04848) 60%, var(--rule-strong))",
+        border: "1px solid color-mix(in oklch, var(--danger) 60%, var(--rule-strong))",
         background:
-          "color-mix(in oklch, var(--danger, #d04848) 14%, var(--panel))",
-        accentDot: "var(--danger, #d04848)",
+          "color-mix(in oklch, var(--danger) 14%, var(--panel))",
+        accentDot: "var(--danger)",
         title: toast.title || "Spark — needs you",
       }
     : {
@@ -131,6 +131,7 @@ function ToastCard({
 
   return (
     <div
+      className="spark-fade-in"
       role={toast.kind === "blocked" ? "alert" : "status"}
       onClick={() => {
         if (clickable && toast.runId) {
@@ -147,10 +148,17 @@ function ToastCard({
         borderRadius: 8,
         border: palette.border,
         background: palette.background,
-        boxShadow: "var(--shadow-2, 0 6px 24px rgba(0,0,0,0.35))",
+        boxShadow: "var(--shadow-2)",
         fontFamily: "var(--font-sans)",
         cursor: clickable ? "pointer" : "default",
-        transition: "transform var(--motion-fast, 120ms) var(--ease-out, ease-out)",
+        transition:
+          "transform var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+      }}
+      onMouseEnter={(e) => {
+        if (clickable) e.currentTarget.style.transform = "translateY(-1px)";
+      }}
+      onMouseLeave={(e) => {
+        if (clickable) e.currentTarget.style.transform = "translateY(0)";
       }}
     >
       <span
@@ -208,12 +216,16 @@ function ToastCard({
           padding: 4,
           marginTop: -2,
           marginRight: -4,
-          borderRadius: 4,
+          borderRadius: 5,
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
         }}
         onMouseEnter={(e) => {
+          e.currentTarget.style.background = "var(--hover)";
           e.currentTarget.style.color = "var(--ink)";
         }}
         onMouseLeave={(e) => {
+          e.currentTarget.style.background = "transparent";
           e.currentTarget.style.color = "var(--muted)";
         }}
       >

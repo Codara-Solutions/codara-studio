@@ -221,7 +221,7 @@ export default function ChatPanel({
                     display: "flex",
                     flexDirection: "column",
                     padding: 4,
-                    background: "var(--bg-deep, #0b0b0c)",
+                    background: "var(--bg)",
                     visibility: chatView === "terminal" ? "visible" : "hidden",
                     pointerEvents: chatView === "terminal" ? "auto" : "none",
                   }}
@@ -344,15 +344,15 @@ function RunIdChip({ runId }: { runId: string }) {
         height: 18,
         padding: "0 7px",
         borderRadius: 999,
-        border: "1px solid var(--rule-soft)",
-        background: copied
-          ? "color-mix(in oklch, var(--accent) 22%, transparent)"
-          : "var(--panel-2)",
+        border: copied ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
+        background: copied ? "var(--accent-soft)" : "var(--panel-2)",
         color: copied ? "var(--accent)" : "var(--ink-dim)",
         fontFamily: "var(--font-mono)",
         fontSize: 10,
         whiteSpace: "nowrap",
         cursor: "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     >
       <span aria-hidden style={{ color: "var(--muted)" }}>id</span>
@@ -425,9 +425,9 @@ function ChatHistoryButton({
           width: 22,
           height: 22,
           border: "none",
-          borderRadius: 5,
+          borderRadius: 6,
           background: open
-            ? "color-mix(in oklch, var(--accent) 22%, transparent)"
+            ? "var(--accent-soft)"
             : hover
               ? "var(--hover)"
               : "transparent",
@@ -437,6 +437,8 @@ function ChatHistoryButton({
           justifyContent: "center",
           padding: 0,
           cursor: "default",
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
         }}
       >
         <HistoryIcon size={12} />
@@ -481,19 +483,20 @@ function ChatHistoryPopover({
         overflowY: "auto",
         background: "var(--panel-2, var(--panel))",
         border: "1px solid var(--rule-soft)",
-        borderRadius: 8,
-        boxShadow: "0 8px 24px rgba(0,0,0,0.32)",
+        borderRadius: 9,
+        boxShadow: "var(--shadow-2)",
         padding: 4,
       }}
     >
       <div
         style={{
-          padding: "6px 8px 4px",
-          fontFamily: "var(--font-mono)",
+          padding: "6px 8px 5px",
+          fontFamily: "var(--font-sans)",
           fontSize: 10,
+          fontWeight: 700,
           color: "var(--muted)",
           textTransform: "uppercase",
-          letterSpacing: 0.4,
+          letterSpacing: "0.14em",
         }}
       >
         Recent chats
@@ -501,13 +504,28 @@ function ChatHistoryPopover({
       {runs.length === 0 ? (
         <div
           style={{
-            padding: "12px 8px",
-            fontSize: 11,
-            color: "var(--muted)",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 4,
+            padding: "18px 8px",
             textAlign: "center",
           }}
         >
-          No chats yet
+          <div
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              textTransform: "uppercase",
+              letterSpacing: "0.14em",
+              color: "var(--muted)",
+            }}
+          >
+            No chats yet
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted-2)", lineHeight: 1.5 }}>
+            Start one below to see it here.
+          </div>
         </div>
       ) : (
         runs.map((run) => (
@@ -568,16 +586,22 @@ function ChatHistoryRow({
         width: "100%",
         padding: "7px 8px",
         background: active
-          ? "color-mix(in oklch, var(--accent) 14%, transparent)"
+          ? "var(--accent-soft)"
           : hover
             ? "var(--hover)"
             : "transparent",
-        borderRadius: 5,
+        border: active
+          ? "1px solid var(--accent-edge)"
+          : "1px solid transparent",
+        boxShadow: active ? "var(--shadow-glow)" : "none",
+        borderRadius: 6,
         textAlign: "left",
         cursor: "default",
         color: "var(--ink)",
         outline: "none",
         boxSizing: "border-box",
+        transition:
+          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     >
       <div
@@ -714,7 +738,7 @@ function DeleteChatButton({
         background: armed
           ? "var(--danger)"
           : hover
-            ? "color-mix(in oklch, var(--danger) 22%, transparent)"
+            ? "var(--danger-soft)"
             : "transparent",
         color: armed ? "var(--accent-ink)" : hover ? "var(--danger)" : "var(--muted)",
         display: "flex",
@@ -728,7 +752,8 @@ function DeleteChatButton({
         cursor: "default",
         flex: "0 0 auto",
         opacity: shown ? 1 : 0,
-        transition: "opacity 120ms ease",
+        transition:
+          "opacity 120ms ease, background 120ms ease, color 120ms ease",
         pointerEvents: shown ? "auto" : "none",
       }}
     >
@@ -866,13 +891,25 @@ function WelcomeState() {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          background: "color-mix(in oklch, var(--accent) 14%, transparent)",
+          background: "var(--accent-soft)",
           border: "1px solid var(--accent-edge)",
+          boxShadow: "var(--lift-hi)",
         }}
       >
         <SparkMark size={20} />
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <div
+          style={{
+            fontSize: 10,
+            fontWeight: 700,
+            textTransform: "uppercase",
+            letterSpacing: "0.14em",
+            color: "var(--muted)",
+          }}
+        >
+          New chat
+        </div>
         <div style={{ fontSize: 15, fontWeight: 700, color: "var(--ink)" }}>
           Start a chat with Spark
         </div>
@@ -901,8 +938,10 @@ function BackendTerminalPlaceholder({ backend }: { backend: string | null }) {
         flex: 1,
         minHeight: 0,
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
+        gap: 6,
         color: "var(--muted)",
         fontSize: 11,
         fontFamily: "var(--font-sans)",
@@ -911,10 +950,20 @@ function BackendTerminalPlaceholder({ backend }: { backend: string | null }) {
         lineHeight: 1.5,
       }}
     >
-      <div>
-        {label} hasn't been spawned for this chat yet.
-        <br />
-        Send a message to start the session — its terminal will appear here.
+      <div
+        style={{
+          fontSize: 10,
+          fontWeight: 700,
+          textTransform: "uppercase",
+          letterSpacing: "0.14em",
+          color: "var(--muted)",
+        }}
+      >
+        Terminal idle
+      </div>
+      <div style={{ color: "var(--muted-2)", maxWidth: 260 }}>
+        {label} hasn't been spawned for this chat yet. Send a message to start
+        the session — its terminal will appear here.
       </div>
     </div>
   );
@@ -935,8 +984,8 @@ function ChatViewTabStrip({
         display: "flex",
         gap: 2,
         padding: "4px 8px",
-        borderBottom: "1px solid var(--border-soft, rgba(255,255,255,0.06))",
-        background: "var(--panel-deep, transparent)",
+        borderBottom: "1px solid var(--rule-soft)",
+        background: "transparent",
       }}
     >
       <ChatViewTab label="Chat" active={view === "chat"} onClick={() => onChange("chat")} />
@@ -961,24 +1010,33 @@ function ChatViewTab({
   onClick: () => void;
   title?: string;
 }) {
+  const [hover, setHover] = useState(false);
   return (
     <button
       type="button"
       role="tab"
       aria-selected={active}
       onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       title={title ?? label}
       style={{
+        appearance: "none",
         padding: "4px 10px",
         fontSize: 11,
+        fontWeight: active ? 600 : 500,
         fontFamily: "var(--font-sans)",
         background: active
-          ? "color-mix(in oklch, var(--accent) 14%, transparent)"
-          : "transparent",
-        color: active ? "var(--accent)" : "var(--muted)",
-        border: "1px solid transparent",
-        borderRadius: 4,
-        cursor: "pointer",
+          ? "var(--accent-soft)"
+          : hover
+            ? "var(--hover)"
+            : "transparent",
+        color: active ? "var(--accent)" : hover ? "var(--ink-dim)" : "var(--muted)",
+        border: active ? "1px solid var(--accent-edge)" : "1px solid transparent",
+        borderRadius: 6,
+        cursor: "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     >
       {label}

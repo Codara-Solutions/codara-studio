@@ -459,37 +459,9 @@ export default function RunCanvas({ run }: { run: RunState }) {
                 onClear={clearSelection}
               />
             </div>
-            <button
-              type="button"
+            <CollapseButton
               onClick={() => setInspector((prev) => ({ ...prev, collapsed: true }))}
-              title="Collapse inspector"
-              style={{
-                position: "absolute",
-                top: 9,
-                right: 10,
-                width: 24,
-                height: 24,
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                border: "1px solid var(--rule-soft)",
-                borderRadius: 6,
-                background: "var(--panel)",
-                color: "var(--muted)",
-                cursor: "pointer",
-                zIndex: 2,
-              }}
-            >
-              <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden>
-                <path
-                  d="M4.5 2 L8 6 L4.5 10"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </button>
+            />
           </div>
         </>
       )}
@@ -524,7 +496,7 @@ function ZoomControl({
         background: "var(--panel-2)",
         border: "1px solid var(--rule)",
         borderRadius: 9,
-        boxShadow: "var(--shadow-1)",
+        boxShadow: "var(--lift-hi), var(--shadow-1)",
       }}
     >
       <ZoomButton title="Zoom out" onClick={onOut}>
@@ -595,11 +567,54 @@ function ZoomButton({
         borderRadius: 6,
         background: hover ? "var(--hover-strong)" : "transparent",
         color: hover ? "var(--ink)" : "var(--ink-dim)",
-        cursor: "pointer",
+        cursor: "default",
         transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
       {children}
+    </button>
+  );
+}
+
+// Inspector collapse toggle — a quiet chrome glyph button docked top-right of
+// the inspector pane, with a coherent rest / hover state.
+function CollapseButton({ onClick }: { onClick: () => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title="Collapse inspector"
+      style={{
+        position: "absolute",
+        top: 9,
+        right: 10,
+        width: 24,
+        height: 24,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        border: `1px solid ${hover ? "var(--rule)" : "var(--rule-soft)"}`,
+        borderRadius: 6,
+        background: hover ? "var(--hover-strong)" : "var(--panel)",
+        color: hover ? "var(--ink-dim)" : "var(--muted)",
+        cursor: "default",
+        zIndex: 2,
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden>
+        <path
+          d="M4.5 2 L8 6 L4.5 10"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
     </button>
   );
 }
@@ -627,8 +642,8 @@ function CollapsedRail({ onExpand }: { onExpand: () => void }) {
         borderLeft: "1px solid var(--rule)",
         background: hover ? "color-mix(in oklch, var(--ink) 3%, var(--panel))" : "var(--panel)",
         color: hover ? "var(--ink-dim)" : "var(--muted)",
-        cursor: "pointer",
-        transition: "background var(--motion-fast) var(--ease-out)",
+        cursor: "default",
+        transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
       <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden>

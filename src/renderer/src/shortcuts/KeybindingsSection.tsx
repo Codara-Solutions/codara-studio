@@ -375,7 +375,7 @@ function Recorder({
       {conflicts.length > 0 && captured && (
         <span
           style={{
-            color: "var(--warning, #d4a23b)",
+            color: "var(--warn)",
             fontFamily: "var(--font-sans)",
             fontSize: 10,
             maxWidth: 160,
@@ -429,6 +429,7 @@ function RowButton({
         fontWeight: 600,
         cursor: disabled ? "default" : "pointer",
         opacity: disabled ? 0.5 : 1,
+        transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
       }}
     >
       {children}
@@ -464,6 +465,7 @@ function ResetAllButton({
         cursor: disabled ? "default" : "pointer",
         opacity: disabled ? 0.55 : 1,
         whiteSpace: "nowrap",
+        transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
       }}
     >
       Reset all{count > 0 ? ` (${count})` : ""}
@@ -483,12 +485,13 @@ function Kbd({ children }: { children: React.ReactNode }) {
         padding: "0 6px",
         border: "1px solid var(--rule-strong)",
         borderRadius: 5,
-        background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+        background: "var(--panel-3)",
         color: "var(--ink-dim)",
         fontFamily: "var(--font-mono)",
         fontSize: 11,
         fontWeight: 600,
-        boxShadow: "inset 0 -1px 0 rgba(0, 0, 0, 0.25)",
+        fontVariantNumeric: "tabular-nums",
+        boxShadow: "var(--lift-hi), var(--well)",
       }}
     >
       {children}

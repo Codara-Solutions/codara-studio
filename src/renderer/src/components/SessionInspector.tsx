@@ -92,10 +92,11 @@ export default function SessionInspector({ run, onClose }: SessionInspectorProps
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "rgba(0, 0, 0, 0.58)",
-        backdropFilter: "blur(4px)",
-        WebkitBackdropFilter: "blur(4px)",
+        background: "color-mix(in oklch, var(--bg) 64%, transparent)",
+        backdropFilter: "blur(2px)",
+        WebkitBackdropFilter: "blur(2px)",
         fontFamily: "var(--font-sans)",
+        animation: "spark-fade-in var(--motion-fast) var(--ease-out)",
       }}
       onMouseDown={onClose}
     >
@@ -109,9 +110,9 @@ export default function SessionInspector({ run, onClose }: SessionInspectorProps
           display: "flex",
           flexDirection: "column",
           background: "var(--panel)",
-          border: "1px solid var(--rule-soft)",
+          border: "1px solid var(--rule)",
           borderRadius: 12,
-          boxShadow: "var(--shadow-2)",
+          boxShadow: "var(--shadow-2), var(--lift-hi)",
           overflow: "hidden",
           padding: 0,
         }}
@@ -428,6 +429,7 @@ function CostsTab({ run }: { run: RunState }) {
           background: "color-mix(in oklch, var(--ink) 2%, transparent)",
           border: "1px solid var(--rule-soft)",
           borderRadius: 8,
+          boxShadow: "var(--well)",
           overflow: "hidden",
         }}
       >
@@ -514,7 +516,8 @@ function BodyCell({
         textAlign: align ?? "left",
         color: strong ? "var(--ink)" : "var(--ink-dim)",
         fontWeight: strong ? 600 : 400,
-        borderTop: strong ? "1px solid var(--rule-soft)" : undefined,
+        fontVariantNumeric: align === "right" ? "tabular-nums" : undefined,
+        borderTop: strong ? "1px solid var(--rule)" : undefined,
       }}
     >
       {children}
@@ -598,10 +601,24 @@ function EventsTab({
           fontSize: 11,
           marginBottom: 10,
           letterSpacing: "0.02em",
+          display: "flex",
+          alignItems: "baseline",
+          gap: 6,
         }}
       >
-        {rows.length.toLocaleString()} {filter === "failures" ? "failure" : "event"}
-        {rows.length === 1 ? "" : "s"} · click a row to expand
+        <span
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontVariantNumeric: "tabular-nums",
+            color: "var(--ink-dim)",
+          }}
+        >
+          {rows.length.toLocaleString()}
+        </span>
+        <span>
+          {filter === "failures" ? "failure" : "event"}
+          {rows.length === 1 ? "" : "s"} · click a row to expand
+        </span>
       </div>
       <div
         style={{
@@ -828,10 +845,20 @@ function ContextWindowTab({ run }: { run: RunState }) {
         }}
       >
         <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-          <span style={{ color: "var(--ink)", fontSize: 24, fontWeight: 600 }}>
+          <span
+            style={{
+              color: "var(--ink)",
+              fontSize: 24,
+              fontWeight: 600,
+              fontVariantNumeric: "tabular-nums",
+              letterSpacing: "0.01em",
+            }}
+          >
             {formatInt(used)}
           </span>
-          <span style={{ color: "var(--muted)" }}>
+          <span
+            style={{ color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}
+          >
             of {total > 0 ? formatInt(total) : "—"} tokens
             {total > 0 ? ` (${pct.toFixed(1)}%)` : ""}
           </span>
@@ -847,6 +874,7 @@ function ContextWindowTab({ run }: { run: RunState }) {
             height: 8,
             borderRadius: 999,
             background: "color-mix(in oklch, var(--ink) 6%, transparent)",
+            boxShadow: "var(--well)",
             overflow: "hidden",
           }}
         >
@@ -855,10 +883,20 @@ function ContextWindowTab({ run }: { run: RunState }) {
               width: `${ratio * 100}%`,
               height: "100%",
               background: barColor,
-              transition: "width var(--motion) var(--ease-out)",
+              boxShadow: "var(--lift-hi)",
+              transition:
+                "width var(--motion) var(--ease-out), background var(--motion-fast) var(--ease-out)",
             }}
           />
         </div>
+        <div
+          aria-hidden
+          style={{
+            height: 1,
+            background: "var(--rule-soft)",
+            margin: "2px 0",
+          }}
+        />
         <Detail label="Mode" value={latest.mode} />
         <Detail label="Model" value={latest.model} />
         <Detail
@@ -880,19 +918,42 @@ function Detail({
   value: string | number | null | undefined;
   mono?: boolean;
 }) {
+  const empty = value === null || value === undefined || value === "";
+  const display = empty ? "—" : String(value);
   return (
     <div
       style={{
         display: "grid",
         gridTemplateColumns: "120px 1fr",
         gap: 12,
-        fontFamily: mono ? "var(--font-mono)" : "var(--font-sans)",
         fontSize: 11,
+        alignItems: "baseline",
       }}
     >
-      <span style={{ color: "var(--muted)" }}>{label}</span>
-      <span style={{ color: "var(--ink-dim)" }}>
-        {value === null || value === undefined || value === "" ? "—" : String(value)}
+      <span
+        style={{
+          fontFamily: "var(--font-sans)",
+          color: "var(--muted)",
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
+          fontSize: 10,
+          fontWeight: 600,
+        }}
+      >
+        {label}
+      </span>
+      <span
+        title={empty ? undefined : display}
+        style={{
+          fontFamily: mono ? "var(--font-mono)" : "var(--font-sans)",
+          color: empty ? "var(--muted-2)" : "var(--ink-dim)",
+          fontVariantNumeric: mono ? "tabular-nums" : undefined,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {display}
       </span>
     </div>
   );
@@ -961,6 +1022,18 @@ function Placeholder({
           gap: 8,
         }}
       >
+        <div
+          style={{
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.16em",
+            textTransform: "uppercase",
+            color: tone === "danger" ? "var(--danger)" : "var(--muted-2)",
+          }}
+        >
+          {tone === "danger" ? "Error" : "No data"}
+        </div>
         <div
           style={{
             fontFamily: "var(--font-sans)",

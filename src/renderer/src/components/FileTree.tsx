@@ -806,8 +806,34 @@ export default function FileTree({
       {!collapsed && (
         <>
       {error && (
-        <div style={{ padding: "6px 16px", color: "var(--danger)", fontSize: 11 }}>
-          {error}
+        <div
+          role="alert"
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 2,
+            padding: "6px 16px",
+            margin: "4px 8px",
+            borderRadius: 6,
+            background: "var(--danger-soft)",
+            boxShadow: "inset 0 0 0 1px color-mix(in oklch, var(--danger) 32%, transparent)",
+          }}
+        >
+          <span
+            style={{
+              fontFamily: "var(--font-sans)",
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
+              color: "var(--danger)",
+            }}
+          >
+            Error
+          </span>
+          <span style={{ color: "var(--danger)", fontSize: 11, wordBreak: "break-word" }}>
+            {error}
+          </span>
         </div>
       )}
       {/*
@@ -873,6 +899,48 @@ export default function FileTree({
             );
           }}
         />
+        {flat.length === 0 && (
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+              padding: "0 20px",
+              pointerEvents: "none",
+              textAlign: "center",
+            }}
+          >
+            <span
+              style={{
+                fontFamily: "var(--font-sans)",
+                fontSize: 10,
+                fontWeight: 700,
+                letterSpacing: "0.14em",
+                textTransform: "uppercase",
+                color: "var(--muted)",
+              }}
+            >
+              {root.loaded ? "Empty folder" : "Loading…"}
+            </span>
+            {root.loaded && (
+              <span
+                style={{
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 11,
+                  color: "var(--muted-2)",
+                  lineHeight: 1.4,
+                }}
+              >
+                Create a file or folder to get started.
+              </span>
+            )}
+          </div>
+        )}
         {selectionRect && (
           <div
             aria-hidden
@@ -1122,6 +1190,16 @@ const PlaceholderRow = React.memo(function PlaceholderRow({
         padding: `0 8px 0 ${rowPaddingLeft}px`,
       }}
     >
+      {Array.from({ length: depth }, (_, i) => (
+        <span
+          key={i}
+          aria-hidden
+          style={{
+            ...INDENT_GUIDE_STYLE,
+            left: BASE_LEFT + i * INDENT_STEP + 4,
+          }}
+        />
+      ))}
       <span aria-hidden style={CHEVRON_CELL_STYLE} />
       <FileNodeIcon name={kind === "dir" ? "" : "untitled"} isDir={kind === "dir"} opacity={0.7} />
       <InlineInput
@@ -1349,7 +1427,7 @@ function FileMenu({
         background: "var(--panel-2)",
         border: "1px solid var(--rule-strong)",
         borderRadius: 8,
-        boxShadow: "0 18px 50px rgba(0,0,0,0.48)",
+        boxShadow: "var(--shadow-2)",
         padding: 6,
         overflow: "hidden",
       }}
@@ -1464,6 +1542,8 @@ function MenuButton({
         gridTemplateColumns: "22px minmax(0, 1fr) auto",
         alignItems: "center",
         gap: 8,
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -1524,6 +1604,8 @@ function HeaderIconButton({
         justifyContent: "center",
         padding: 0,
         cursor: "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
       {children}

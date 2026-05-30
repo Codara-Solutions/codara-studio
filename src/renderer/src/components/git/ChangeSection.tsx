@@ -39,7 +39,7 @@ export default function ChangeSection({
           height: 26,
           padding: "0 8px 0 8px",
           cursor: "default",
-          background: hover ? "color-mix(in oklch, var(--ink) 3%, transparent)" : "transparent",
+          background: hover ? "var(--hover)" : "transparent",
           transition: "background var(--motion-fast) var(--ease-out)",
         }}
       >
@@ -48,7 +48,7 @@ export default function ChangeSection({
           style={{
             fontFamily: "var(--font-sans)",
             fontSize: 10,
-            letterSpacing: "0.1em",
+            letterSpacing: "0.12em",
             fontWeight: 800,
             textTransform: "uppercase",
             color: "var(--muted)",

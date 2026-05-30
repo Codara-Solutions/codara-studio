@@ -827,13 +827,14 @@ const ChatTabItem = React.memo(function ChatTabItem({
             flex: 1,
             minWidth: 60,
             maxWidth: 180,
-            background: "var(--panel-2)",
+            background: "var(--bg)",
             color: "var(--ink)",
-            border: "1px solid var(--rule-strong)",
-            borderRadius: 3,
-            padding: "1px 4px",
+            border: "1px solid var(--accent-edge)",
+            borderRadius: 4,
+            padding: "1px 5px",
             font: "inherit",
             outline: "none",
+            boxShadow: "var(--well), var(--shadow-glow)",
           }}
         />
       ) : (

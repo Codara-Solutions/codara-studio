@@ -63,8 +63,8 @@ export default function CommitMenu({
         zIndex: 200,
         background: "var(--panel-2)",
         border: "1px solid var(--rule-strong)",
-        borderRadius: 8,
-        boxShadow: "0 18px 50px rgba(0,0,0,0.48)",
+        borderRadius: 9,
+        boxShadow: "var(--shadow-2)",
         padding: 6,
       }}
     >

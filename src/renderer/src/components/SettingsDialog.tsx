@@ -127,10 +127,11 @@ export default function SettingsDialog({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "rgba(0, 0, 0, 0.58)",
+        background: "color-mix(in oklch, var(--bg) 62%, transparent)",
         backdropFilter: "blur(4px)",
         WebkitBackdropFilter: "blur(4px)",
         fontFamily: "var(--font-sans)",
+        animation: "spark-fade-in var(--motion-fast) var(--ease-out)",
       }}
       onMouseDown={onClose}
     >
@@ -149,9 +150,10 @@ export default function SettingsDialog({
           background: "var(--panel)",
           border: "1px solid var(--rule-soft)",
           borderRadius: 12,
-          boxShadow: "var(--shadow-2)",
+          boxShadow: "var(--shadow-2), var(--lift-hi)",
           overflow: "hidden",
           padding: 0,
+          animation: "spark-fade-in var(--motion) var(--ease-out)",
         }}
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -372,7 +374,7 @@ function ShellOption({
         gap: 12,
         alignItems: "center",
         boxShadow: selected
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent), 0 8px 18px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent), var(--shadow-1), var(--lift-hi)"
           : "none",
         transition:
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
@@ -500,7 +502,7 @@ function TabButton({ label, active, onClick }: { label: string; active: boolean;
         alignItems: "center",
         gap: 8,
         boxShadow: active
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), var(--lift-hi)"
           : "none",
         transition:
           "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
@@ -1020,6 +1022,10 @@ function EditorSettings() {
                 currentInlineModelId === DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID
                   ? "color-mix(in oklch, var(--accent) 12%, transparent)"
                   : "color-mix(in oklch, var(--ink) 3%, transparent)",
+              boxShadow:
+                currentInlineModelId === DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID
+                  ? "var(--lift-hi)"
+                  : "none",
             }}
           >
             Default
@@ -1122,6 +1128,7 @@ function AgentsSettings({
           fontFamily: "var(--font-sans)",
           fontSize: 12,
           lineHeight: 1.45,
+          boxShadow: "var(--well)",
         }}
       >
         MCP servers and skills now live in the Capability Center from the Spark composer. That space is larger and gives
@@ -1234,12 +1241,15 @@ function NumberRow({
           flex: "0 0 72px",
           padding: "6px 8px",
           borderRadius: 6,
-          border: "1px solid var(--rule-strong)",
-          background: "var(--panel)",
+          border: "1px solid var(--rule-soft)",
+          background: "color-mix(in oklch, var(--ink) 3%, transparent)",
           color: "var(--ink)",
-          fontFamily: "var(--font-sans)",
+          fontFamily: "var(--font-mono)",
           fontSize: 12,
+          fontVariantNumeric: "tabular-nums",
           textAlign: "right",
+          outline: "none",
+          boxShadow: "var(--well)",
         }}
       />
     </div>
@@ -1363,11 +1373,13 @@ function RuntimeDiagnosticRow({
         background: active
           ? "color-mix(in oklch, var(--accent) 7%, transparent)"
           : "color-mix(in oklch, var(--ink) 3%, transparent)",
-        cursor: canToggle ? "pointer" : "not-allowed",
+        cursor: canToggle ? "default" : "not-allowed",
         textAlign: "left",
         font: "inherit",
         color: "inherit",
         width: "100%",
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     >
       <span
@@ -1470,10 +1482,15 @@ function RuntimeToggle({ on, disabled }: { on: boolean; disabled?: boolean }) {
         background: disabled
           ? "color-mix(in oklch, var(--ink) 8%, transparent)"
           : on
-            ? "var(--accent)"
+            ? "color-mix(in oklch, var(--accent) 32%, var(--panel))"
             : "color-mix(in oklch, var(--ink) 18%, transparent)",
+        border: on
+          ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
+          : "1px solid var(--rule-strong)",
+        boxSizing: "border-box",
         opacity: disabled ? 0.55 : 1,
-        transition: "background 120ms ease",
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     >
       <span
@@ -1484,9 +1501,10 @@ function RuntimeToggle({ on, disabled }: { on: boolean; disabled?: boolean }) {
           width: knob,
           height: knob,
           borderRadius: 999,
-          background: "var(--surface)",
-          transition: "left 120ms ease",
-          boxShadow: "0 1px 2px rgba(0,0,0,0.25)",
+          background: on ? "var(--accent)" : "var(--ink-dim)",
+          boxShadow: on ? "0 0 8px var(--accent-glow)" : "none",
+          transition:
+            "left var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
         }}
       />
     </span>
@@ -1660,6 +1678,7 @@ function RunsSettings({
             fontFamily: "var(--font-sans)",
             fontSize: 12,
             outline: "none",
+            boxShadow: "var(--well)",
           }}
         />
         <FooterButton onClick={() => void refresh()}>Refresh</FooterButton>
@@ -2032,7 +2051,7 @@ function ThemeCard({
         alignItems: "stretch",
         gap: 8,
         color: "var(--ink)",
-        cursor: "pointer",
+        cursor: "default",
         minHeight: 104,
         minWidth: 0,
         textAlign: "left",
@@ -2346,7 +2365,7 @@ function TimingPresetButton({
         gap: 2,
         minHeight: 46,
         boxShadow: active
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), var(--lift-hi)"
           : "none",
         transition:
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
@@ -2424,7 +2443,7 @@ function ModelPresetCard({
         gap: 12,
         alignItems: "center",
         boxShadow: active
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent), inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+          ? "0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent), var(--lift-hi)"
           : "none",
         transition:
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
@@ -2634,6 +2653,7 @@ const inputStyle: React.CSSProperties = {
   fontFamily: "var(--font-sans)",
   fontSize: 13,
   outline: "none",
+  boxShadow: "var(--well)",
   transition:
-    "border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
+    "border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
 };

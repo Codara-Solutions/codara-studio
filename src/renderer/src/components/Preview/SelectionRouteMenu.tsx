@@ -160,6 +160,7 @@ export default function SelectionRouteMenu({
     <div
       ref={menuRef}
       tabIndex={-1}
+      className="spark-fade-in"
       onClick={(e) => e.stopPropagation()}
       style={{
         position: "fixed",
@@ -171,7 +172,7 @@ export default function SelectionRouteMenu({
         background: "var(--panel-2)",
         border: "1px solid var(--rule-strong)",
         borderRadius: 8,
-        boxShadow: "0 18px 50px rgba(0,0,0,0.48)",
+        boxShadow: "var(--shadow-2), var(--lift-hi)",
         padding: 6,
         fontFamily: "var(--font-sans)",
         overflow: "hidden",
@@ -183,15 +184,11 @@ export default function SelectionRouteMenu({
       }}
     >
       <div
+        className="spark-eyebrow"
         style={{
           padding: "6px 8px 8px",
           borderBottom: "1px solid var(--rule)",
           marginBottom: 4,
-          color: "var(--muted)",
-          fontFamily: "var(--font-mono)",
-          fontSize: 10,
-          textTransform: "uppercase",
-          letterSpacing: "0.08em",
         }}
       >
         Send {payload.source === "draw" ? "drawing" : "selection"} to…
@@ -224,13 +221,19 @@ export default function SelectionRouteMenu({
           style={{
             marginTop: 6,
             padding: "6px 8px",
-            background: "color-mix(in oklch, var(--danger) 15%, transparent)",
+            background: "var(--danger-soft)",
             color: "var(--ink)",
             fontSize: 10,
             borderRadius: 4,
+            display: "flex",
+            flexDirection: "column",
+            gap: 3,
           }}
         >
-          {error}
+          <span className="spark-eyebrow" style={{ color: "var(--danger)" }}>
+            Failed
+          </span>
+          <span>{error}</span>
         </div>
       )}
     </div>
@@ -262,7 +265,7 @@ function Row({
         appearance: "none",
         width: "100%",
         border: "none",
-        background: hovered && !isDisabled ? "var(--panel)" : "transparent",
+        background: hovered && !isDisabled ? "var(--hover)" : "transparent",
         color: destination.disabled
           ? "var(--muted)"
           : hovered
@@ -280,20 +283,26 @@ function Row({
         gridTemplateColumns: "22px minmax(0, 1fr) auto",
         alignItems: "center",
         gap: 8,
+        transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
       <span
         style={{
           width: 18,
           height: 18,
-          border: "1px solid transparent",
-          borderRadius: 999,
-          color: "var(--muted)",
+          borderRadius: 5,
+          border: shortcut && !isDisabled ? "1px solid var(--rule-soft)" : "1px solid transparent",
+          background: shortcut && !isDisabled ? "var(--panel-3)" : "transparent",
+          boxShadow: shortcut && !isDisabled ? "var(--lift-hi)" : "none",
+          color: hovered && !isDisabled ? "var(--ink-dim)" : "var(--muted)",
+          fontFamily: "var(--font-mono)",
+          fontVariantNumeric: "tabular-nums",
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
           fontSize: 9,
-          fontWeight: 900,
+          fontWeight: 800,
+          transition: "color var(--motion-fast) var(--ease-out)",
         }}
       >
         {shortcut ?? ""}
@@ -308,7 +317,14 @@ function Row({
         {destination.label}
       </span>
       {(busy || destination.sublabel) && (
-        <span style={{ color: "var(--muted)", fontSize: 9, fontWeight: 600 }}>
+        <span
+          style={{
+            color: busy ? "var(--accent)" : "var(--muted)",
+            fontSize: 9,
+            fontWeight: 600,
+            animation: busy ? "spark-pulse 1.4s ease-in-out infinite" : undefined,
+          }}
+        >
           {busy ? "sending…" : destination.sublabel}
         </span>
       )}

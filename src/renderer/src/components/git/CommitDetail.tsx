@@ -140,19 +140,27 @@ export default function CommitDetail({ cwd, hash, onClose }: Props): React.React
             type="button"
             onClick={toggleAll}
             title={allExpanded ? "Collapse all files" : "Expand all files"}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.color = "var(--ink-dim)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.color = "var(--muted)";
+            }}
             style={{
               appearance: "none",
               flex: "0 0 auto",
               border: "none",
               background: "transparent",
               cursor: "default",
-              padding: "2px 4px",
+              padding: "2px 5px",
+              borderRadius: 5,
               fontFamily: "var(--font-sans)",
               fontSize: 9,
               fontWeight: 700,
-              letterSpacing: "0.08em",
+              letterSpacing: "0.1em",
               textTransform: "uppercase",
               color: "var(--muted)",
+              transition: "color var(--motion-fast) var(--ease-out)",
             }}
           >
             {allExpanded ? "Collapse" : "Expand"}
@@ -468,6 +476,7 @@ const FileEntry = React.memo(function FileEntry({
             maxHeight: 420,
             overflow: "auto",
             background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+            boxShadow: "var(--well)",
           }}
         >
           {loading ? (

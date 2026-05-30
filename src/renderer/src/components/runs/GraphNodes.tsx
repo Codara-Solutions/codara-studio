@@ -164,10 +164,10 @@ export const SparkNode = React.memo(function SparkNode({
         borderRadius: 13,
         border: `1px solid ${live ? "var(--accent-edge)" : failed ? "var(--danger)" : "var(--rule-strong)"}`,
         background:
-          "linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 84%, var(--accent) 8%), color-mix(in oklch, var(--panel) 78%, black 14%))",
+          "linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 84%, var(--accent) 8%), color-mix(in oklch, var(--panel) 78%, var(--bg) 22%))",
         boxShadow: live
-          ? "inset 0 1px 0 color-mix(in oklch, white 8%, transparent), 0 0 24px var(--accent-glow), var(--shadow-2)"
-          : "inset 0 1px 0 color-mix(in oklch, white 6%, transparent), var(--shadow-2)",
+          ? "var(--lift-hi), 0 0 24px var(--accent-glow), var(--shadow-2)"
+          : "var(--lift-hi), var(--shadow-2)",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
@@ -274,15 +274,15 @@ function WorkerBatchNode({ step, index, rows, fileCount, active, selected, onSel
           ? "var(--rule-strong)"
           : "var(--rule)";
   const background = attention
-    ? "linear-gradient(150deg, color-mix(in oklch, var(--panel) 88%, var(--danger) 9%), color-mix(in oklch, var(--panel) 84%, black 8%))"
+    ? "linear-gradient(150deg, color-mix(in oklch, var(--panel) 88%, var(--danger) 9%), color-mix(in oklch, var(--panel) 84%, var(--bg) 16%))"
     : live
       ? "linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 82%, var(--accent) 9%), color-mix(in oklch, var(--panel) 86%, transparent))"
-      : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 92%, white 2%), color-mix(in oklch, var(--panel) 84%, black 6%))";
+      : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 92%, var(--ink) 2%), color-mix(in oklch, var(--panel) 84%, var(--bg) 16%))";
   const shadow = [
     selected ? "0 0 0 1.5px var(--accent)" : null,
     selected || live ? "0 0 22px var(--accent-glow)" : null,
     attention ? "0 0 18px color-mix(in oklch, var(--danger) 30%, transparent)" : null,
-    "inset 0 1px 0 color-mix(in oklch, white 5%, transparent)",
+    "var(--lift-hi)",
     "var(--shadow-2)",
   ]
     .filter(Boolean)
@@ -462,7 +462,7 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
         borderRadius: 12,
         border: `1px dashed ${border}`,
         background:
-          "linear-gradient(150deg, color-mix(in oklch, var(--panel) 84%, white 1%), color-mix(in oklch, var(--panel) 80%, black 7%))",
+          "linear-gradient(150deg, color-mix(in oklch, var(--panel) 84%, var(--ink) 1%), color-mix(in oklch, var(--panel) 80%, var(--bg) 18%))",
         boxShadow: selected
           ? "0 0 0 1.5px var(--accent), 0 0 20px var(--accent-glow), var(--shadow-1)"
           : live
@@ -691,15 +691,15 @@ export const WorkerNode = React.memo(function WorkerNode({
         borderRadius: 9,
         border: `1px solid ${border}`,
         background: blocked
-          ? "linear-gradient(150deg, color-mix(in oklch, var(--panel) 88%, var(--danger) 8%), color-mix(in oklch, var(--panel) 82%, black 6%))"
+          ? "linear-gradient(150deg, color-mix(in oklch, var(--panel) 88%, var(--danger) 8%), color-mix(in oklch, var(--panel) 82%, var(--bg) 18%))"
           : running
             ? "linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 84%, var(--accent) 7%), color-mix(in oklch, var(--panel) 86%, transparent))"
-            : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 90%, white 2%), color-mix(in oklch, var(--panel) 82%, black 6%))",
+            : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 90%, var(--ink) 2%), color-mix(in oklch, var(--panel) 82%, var(--bg) 18%))",
         boxShadow: selected
           ? "0 0 0 1.5px var(--accent), 0 0 16px var(--accent-glow), var(--shadow-1)"
           : running
-            ? "0 0 14px var(--accent-glow), var(--shadow-1)"
-            : "var(--shadow-1)",
+            ? "var(--lift-hi), 0 0 14px var(--accent-glow), var(--shadow-1)"
+            : "var(--lift-hi), var(--shadow-1)",
         opacity: queued ? 0.62 : 1,
         padding: "8px 10px",
         display: "flex",
@@ -828,10 +828,10 @@ export const EndNode = React.memo(function EndNode({
           ? "linear-gradient(150deg, color-mix(in oklch, var(--ok) 16%, var(--panel)), color-mix(in oklch, var(--panel) 86%, transparent))"
           : failed
             ? "linear-gradient(150deg, color-mix(in oklch, var(--danger) 14%, var(--panel)), color-mix(in oklch, var(--panel) 86%, transparent))"
-            : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 90%, white 1%), color-mix(in oklch, var(--panel) 82%, black 6%))",
+            : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 90%, var(--ink) 1%), color-mix(in oklch, var(--panel) 82%, var(--bg) 18%))",
         boxShadow: complete
-          ? "0 0 22px color-mix(in oklch, var(--ok) 30%, transparent), var(--shadow-2)"
-          : "inset 0 1px 0 color-mix(in oklch, white 5%, transparent), var(--shadow-1)",
+          ? "var(--lift-hi), 0 0 22px color-mix(in oklch, var(--ok) 30%, transparent), var(--shadow-2)"
+          : "var(--lift-hi), var(--shadow-1)",
         display: "flex",
         flexDirection: "column",
         alignItems: "center",

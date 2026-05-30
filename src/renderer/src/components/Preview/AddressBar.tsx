@@ -166,6 +166,7 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
         flex: "0 0 auto",
         borderBottom: "1px solid var(--rule-soft)",
         background: "var(--panel)",
+        boxShadow: "var(--lift-hi)",
       }}
     >
       <div
@@ -199,17 +200,32 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
             type="button"
             onClick={() => setPortsOpen((o) => !o)}
             title="Common dev-server ports"
+            aria-pressed={portsOpen}
             style={{
               appearance: "none",
-              background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+              background: portsOpen
+                ? "var(--hover-strong)"
+                : "color-mix(in oklch, var(--ink) 2%, transparent)",
               border: "1px solid var(--rule-soft)",
-              color: "var(--ink-dim)",
+              color: portsOpen ? "var(--ink)" : "var(--ink-dim)",
               padding: "0 8px",
               height: 22,
               borderRadius: 4,
               fontFamily: "var(--font-mono)",
               fontSize: 10,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
               cursor: "default",
+              transition:
+                "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+            }}
+            onMouseEnter={(e) => {
+              if (!portsOpen) e.currentTarget.style.background = "var(--hover)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = portsOpen
+                ? "var(--hover-strong)"
+                : "color-mix(in oklch, var(--ink) 2%, transparent)";
             }}
           >
             Ports
@@ -224,51 +240,64 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
                 background: "var(--panel-2)",
                 border: "1px solid var(--rule-strong)",
                 borderRadius: 6,
-                boxShadow: "var(--shadow-2)",
+                boxShadow: "var(--shadow-2), var(--lift-hi)",
                 minWidth: 240,
                 maxHeight: 320,
                 overflow: "auto",
+                padding: 4,
               }}
             >
-              {PORT_PRESETS.map((p) => (
-                <button
-                  key={p.port}
-                  type="button"
-                  onClick={() => void tryPort(p.port)}
-                  style={{
-                    appearance: "none",
-                    width: "100%",
-                    textAlign: "left",
-                    background: "transparent",
-                    border: "none",
-                    padding: "8px 12px",
-                    color: "var(--ink)",
-                    fontFamily: "var(--font-sans)",
-                    fontSize: 12,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 10,
-                    cursor: "default",
-                  }}
-                  onMouseEnter={(e) =>
-                    (e.currentTarget.style.background = "var(--hover-strong)")
-                  }
-                  onMouseLeave={(e) =>
-                    (e.currentTarget.style.background = "transparent")
-                  }
-                >
-                  <span style={{ flex: 1 }}>{p.label}</span>
-                  <span
+              <div
+                className="spark-eyebrow"
+                style={{ padding: "6px 8px 7px" }}
+              >
+                Dev-server ports
+              </div>
+              {PORT_PRESETS.map((p) => {
+                const checking = checkingPort === p.port;
+                return (
+                  <button
+                    key={p.port}
+                    type="button"
+                    onClick={() => void tryPort(p.port)}
                     style={{
-                      color: "var(--muted)",
-                      fontFamily: "var(--font-mono)",
-                      fontSize: 10,
+                      appearance: "none",
+                      width: "100%",
+                      textAlign: "left",
+                      background: "transparent",
+                      border: "none",
+                      borderRadius: 5,
+                      padding: "7px 8px",
+                      color: "var(--ink)",
+                      fontFamily: "var(--font-sans)",
+                      fontSize: 12,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      cursor: "default",
+                      transition: "background var(--motion-fast) var(--ease-out)",
                     }}
+                    onMouseEnter={(e) =>
+                      (e.currentTarget.style.background = "var(--hover-strong)")
+                    }
+                    onMouseLeave={(e) =>
+                      (e.currentTarget.style.background = "transparent")
+                    }
                   >
-                    {checkingPort === p.port ? "checking…" : `:${p.port}`}
-                  </span>
-                </button>
-              ))}
+                    <span style={{ flex: 1 }}>{p.label}</span>
+                    <span
+                      style={{
+                        color: checking ? "var(--accent)" : "var(--muted)",
+                        fontFamily: "var(--font-mono)",
+                        fontVariantNumeric: "tabular-nums",
+                        fontSize: 10,
+                      }}
+                    >
+                      {checking ? "checking…" : `:${p.port}`}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
@@ -289,18 +318,29 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
           placeholder="http://localhost:3000"
           spellCheck={false}
           autoComplete="off"
+          onFocus={(e) => {
+            e.currentTarget.style.borderColor = "var(--accent-edge)";
+            e.currentTarget.style.boxShadow = "var(--focus-ring)";
+          }}
+          onBlur={(e) => {
+            e.currentTarget.style.borderColor = "var(--rule-soft)";
+            e.currentTarget.style.boxShadow = "var(--well)";
+          }}
           style={{
             flex: 1,
             minWidth: 0,
             height: 22,
             padding: "0 8px",
-            background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+            background: "var(--bg)",
             border: "1px solid var(--rule-soft)",
             borderRadius: 4,
             color: "var(--ink)",
             fontFamily: "var(--font-mono)",
             fontSize: 11,
             outline: "none",
+            boxShadow: "var(--well)",
+            transition:
+              "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
           }}
         />
         <ChromeButton
@@ -336,13 +376,23 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
             alignItems: "center",
             gap: 8,
             padding: "4px 12px",
-            background: "color-mix(in oklch, var(--accent) 8%, transparent)",
+            background: "var(--info-soft)",
             color: "var(--ink-dim)",
             fontFamily: "var(--font-mono)",
             fontSize: 10,
+            borderTop: "1px solid var(--rule-soft)",
           }}
         >
-          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
+          <span
+            className="spark-eyebrow"
+            style={{ color: "var(--info)", flex: "0 0 auto" }}
+          >
+            Note
+          </span>
+          <span
+            style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+            title={notice}
+          >
             {notice}
           </span>
           <button
@@ -355,7 +405,10 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
               color: "var(--muted)",
               fontSize: 10,
               cursor: "default",
+              transition: "color var(--motion-fast) var(--ease-out)",
             }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = "var(--ink)")}
+            onMouseLeave={(e) => (e.currentTarget.style.color = "var(--muted)")}
           >
             Dismiss
           </button>
@@ -383,9 +436,7 @@ function ChromeButton({
 }) {
   // `active` paints the button in accent ink + a soft accent wash so toggle
   // buttons (Inspect / Draw) read as "on" without dragging in a new component.
-  const baseBackground = active
-    ? "color-mix(in oklch, var(--accent) 22%, transparent)"
-    : "transparent";
+  const baseBackground = active ? "var(--accent-soft)" : "transparent";
   return (
     <button
       type="button"
@@ -402,14 +453,15 @@ function ChromeButton({
         alignItems: "center",
         justifyContent: "center",
         background: baseBackground,
-        border: `1px solid ${
-          active ? "color-mix(in oklch, var(--accent) 55%, transparent)" : "var(--rule-soft)"
-        }`,
+        border: `1px solid ${active ? "var(--accent-edge)" : "var(--rule-soft)"}`,
         borderRadius: 4,
         color: disabled ? "var(--muted)" : active ? "var(--accent)" : "var(--ink-dim)",
         fontFamily: "var(--font-mono)",
         fontSize: 11,
         cursor: "default",
+        boxShadow: active ? "var(--shadow-glow)" : "none",
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
       onMouseEnter={(e) => {
         if (!disabled && !active) e.currentTarget.style.background = "var(--hover)";

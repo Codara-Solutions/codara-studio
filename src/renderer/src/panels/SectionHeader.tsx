@@ -64,8 +64,11 @@ export function SectionHeader({
           : "var(--panel)",
         // 1px top highlight lifts the band; the soft downward cast gives the
         // body the recessed-well depth the Balanced direction calls for.
+        // --lift-hi keeps the highlight visible on light themes where a baked
+        // white inset would vanish; the cast is a token-mix so it never reads
+        // as soot on bright paper.
         boxShadow:
-          "inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 4px 10px -6px rgba(0, 0, 0, 0.45)",
+          "var(--lift-hi), 0 4px 10px -6px color-mix(in oklch, var(--ink) 28%, transparent)",
         transition: "background var(--motion-fast) var(--ease-out)",
         userSelect: "none",
       }}

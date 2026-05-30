@@ -1901,13 +1901,55 @@ export default function App() {
 
   if (bootError) {
     return (
-      <div style={{ padding: 20, color: "var(--danger)" }}>
-        <div>Failed to start: {bootError}</div>
+      <div
+        style={{
+          height: "100%",
+          width: "100%",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 8,
+          padding: 32,
+          background: "var(--bg)",
+          textAlign: "center",
+        }}
+      >
+        <div className="spark-eyebrow" style={{ color: "var(--danger)" }}>
+          Startup failed
+        </div>
+        <div
+          style={{
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+            lineHeight: 1.5,
+            color: "var(--ink-dim)",
+            maxWidth: 480,
+            wordBreak: "break-word",
+          }}
+        >
+          {bootError}
+        </div>
       </div>
     );
   }
   if (!booted) {
-    return <div style={{ padding: 20, color: "var(--muted)" }}>Loading…</div>;
+    return (
+      <div
+        style={{
+          height: "100%",
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "var(--bg)",
+        }}
+      >
+        <div className="spark-eyebrow" style={{ color: "var(--muted)" }}>
+          Loading
+        </div>
+      </div>
+    );
   }
 
   const terminalShell = integratedShell ?? defaultShell;
@@ -2567,8 +2609,12 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
         backgroundSize: "24px 24px",
         color: "var(--muted)",
         padding: 32,
+        textAlign: "center",
       }}
     >
+      <div className="spark-eyebrow" style={{ marginBottom: 2 }}>
+        No workspace
+      </div>
       <div
         style={{
           fontFamily: "var(--font-sans)",
@@ -2598,6 +2644,8 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
           appearance: "none",
           background: "transparent",
           border: "1px solid var(--rule-strong)",
+          borderRadius: 6,
+          boxShadow: "var(--lift-hi)",
           color: "var(--ink-dim)",
           padding: "10px 18px",
           fontFamily: "var(--font-sans)",
@@ -2606,7 +2654,7 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
           fontWeight: 600,
           cursor: "default",
           transition:
-            "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+            "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
         }}
         onMouseEnter={(e) => {
           e.currentTarget.style.background = "var(--accent-soft)";
@@ -2624,12 +2672,23 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
       <div
         style={{
           marginTop: 12,
-          fontFamily: "var(--font-mono)",
+          fontFamily: "var(--font-sans)",
           fontSize: 11,
           color: "var(--muted)",
+          display: "inline-flex",
+          alignItems: "baseline",
+          gap: 6,
         }}
       >
-        Spark stores its data in ~/.SparkAgent
+        <span>Spark stores its data in</span>
+        <span
+          style={{
+            fontFamily: "var(--font-mono)",
+            color: "var(--ink-dim)",
+          }}
+        >
+          ~/.SparkAgent
+        </span>
       </div>
     </div>
   );

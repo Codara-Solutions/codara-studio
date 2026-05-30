@@ -400,6 +400,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           background: "var(--panel)",
           color: "var(--muted)",
           fontSize: 11,
+          borderTop: "1px solid var(--rule-soft)",
+          boxShadow: "var(--lift-hi)",
         }}
       >
         {doc.status === "ready" && (
@@ -408,14 +410,53 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           </span>
         )}
         {preferences.vimMode && doc.status === "ready" && (
-          <span style={{ fontFamily: "var(--font-mono)" }}>vim</span>
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              color: "var(--muted-2)",
+            }}
+          >
+            VIM
+          </span>
         )}
         <span style={{ flex: 1 }} />
         <AIStatusFooter
           statusRef={aiStatusRef}
           enabled={preferences.inlineAutocompleteEnabled}
         />
-        {dirty && <span>Modified</span>}
+        {dirty && (
+          <span
+            title="Unsaved changes"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              color: "var(--warn)",
+            }}
+          >
+            <span
+              aria-hidden
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: "var(--warn)",
+                boxShadow: "0 0 0 3px color-mix(in oklch, var(--warn) 18%, transparent)",
+              }}
+            />
+            <span
+              style={{
+                textTransform: "uppercase",
+                letterSpacing: "0.08em",
+                fontWeight: 600,
+              }}
+            >
+              Modified
+            </span>
+          </span>
+        )}
       </div>
     </div>
   );
@@ -429,15 +470,23 @@ function EditorMessage({ text, danger = false }: { text: string; danger?: boolea
       style={{
         flex: 1,
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
+        gap: 6,
         padding: 24,
-        color: danger ? "var(--danger)" : "var(--muted)",
-        fontSize: 12,
         textAlign: "center",
       }}
     >
-      {text}
+      <div
+        className="spark-eyebrow"
+        style={{ color: danger ? "var(--danger)" : "var(--muted)" }}
+      >
+        {danger ? "Error" : "Loading"}
+      </div>
+      <div style={{ color: danger ? "var(--danger)" : "var(--ink-dim)", fontSize: 12 }}>
+        {text}
+      </div>
     </div>
   );
 }
@@ -605,6 +654,7 @@ function SegmentedButton({
         ...segmentedButtonBase,
         background: active ? "var(--panel-3, var(--panel-2))" : "transparent",
         color: active ? "var(--ink)" : "var(--muted)",
+        boxShadow: active ? "var(--lift-hi)" : "none",
       }}
     >
       {children}
@@ -622,8 +672,10 @@ const toolbarIconButton: React.CSSProperties = {
   color: "var(--muted)",
   border: "1px solid transparent",
   borderRadius: 5,
-  cursor: "pointer",
+  cursor: "default",
   padding: 0,
+  transition:
+    "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
 };
 
 const segmentedGroup: React.CSSProperties = {
@@ -635,6 +687,7 @@ const segmentedGroup: React.CSSProperties = {
   border: "1px solid var(--rule-soft)",
   borderRadius: 6,
   gap: 2,
+  boxShadow: "var(--well)",
 };
 
 const segmentedButtonBase: React.CSSProperties = {
@@ -645,12 +698,13 @@ const segmentedButtonBase: React.CSSProperties = {
   padding: "0 10px",
   border: "none",
   borderRadius: 4,
-  cursor: "pointer",
+  cursor: "default",
   fontSize: 11,
   fontWeight: 500,
   letterSpacing: 0.2,
   lineHeight: 1,
-  transition: "background 120ms ease, color 120ms ease",
+  transition:
+    "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
 };
 
 function CopyIcon() {
@@ -703,8 +757,11 @@ function EditorBanner({ title, detail }: { title: string; detail: string }) {
         textAlign: "center",
       }}
     >
+      <div className="spark-eyebrow">No preview</div>
       <div style={{ color: "var(--ink)", fontSize: 13, fontWeight: 600 }}>{title}</div>
-      <div style={{ color: "var(--muted)", fontSize: 12 }}>{detail}</div>
+      <div style={{ color: "var(--muted)", fontSize: 12, maxWidth: 320, lineHeight: 1.5 }}>
+        {detail}
+      </div>
     </div>
   );
 }

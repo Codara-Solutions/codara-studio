@@ -79,9 +79,11 @@ export default function ModelPicker({
     <div className="composer-model" ref={rootRef}>
       <button
         type="button"
-        className="composer-pill"
+        className={`composer-pill${open ? " is-active" : ""}`}
         onClick={() => setOpen((value) => !value)}
         title="Chat model"
+        aria-haspopup="listbox"
+        aria-expanded={open}
       >
         <span aria-hidden style={{ marginRight: 4 }}>☀</span>
         {activeLabel}
@@ -103,6 +105,8 @@ export default function ModelPicker({
                   <button
                     key={`${model.backend}:${model.id}`}
                     type="button"
+                    role="option"
+                    aria-selected={active}
                     className={`composer-model-row${active ? " is-active" : ""}`}
                     onClick={() => select(model)}
                   >

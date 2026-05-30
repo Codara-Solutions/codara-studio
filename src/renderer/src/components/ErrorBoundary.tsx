@@ -55,11 +55,23 @@ export default class ErrorBoundary extends React.Component<Props, State> {
           display: "flex",
           flexDirection: "column",
           padding: "48px 56px",
-          fontFamily: "system-ui, -apple-system, Segoe UI, sans-serif",
+          fontFamily: "var(--font-sans, system-ui, -apple-system, Segoe UI, sans-serif)",
           overflow: "auto",
         }}
       >
-        <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", color: "#e06c75" }}>
+        <div
+          style={{
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+            color: "var(--muted, #9ca3af)",
+            marginBottom: 8,
+          }}
+        >
+          Renderer fault
+        </div>
+        <div style={{ fontSize: 14, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase", color: "var(--danger, #e06c75)" }}>
           Something broke during render
         </div>
         <div style={{ fontSize: 13, color: "var(--muted, #9ca3af)", marginTop: 6, maxWidth: 720, lineHeight: 1.55 }}>
@@ -79,7 +91,10 @@ export default class ErrorBoundary extends React.Component<Props, State> {
               padding: "8px 14px",
               fontSize: 12,
               fontWeight: 600,
+              fontFamily: "inherit",
               cursor: "default",
+              transition:
+                "background var(--motion-fast, 120ms) var(--ease-out, ease-out), border-color var(--motion-fast, 120ms) var(--ease-out, ease-out)",
             }}
           >
             Reload
@@ -89,14 +104,17 @@ export default class ErrorBoundary extends React.Component<Props, State> {
             onClick={this.clearAndReload}
             style={{
               appearance: "none",
-              background: "color-mix(in oklch, #e06c75 14%, transparent)",
-              border: "1px solid color-mix(in oklch, #e06c75 50%, var(--rule-strong, #4b5563))",
+              background: "var(--danger-soft, color-mix(in oklch, #e06c75 14%, transparent))",
+              border: "1px solid color-mix(in oklch, var(--danger, #e06c75) 50%, var(--rule-strong, #4b5563))",
               borderRadius: 6,
               color: "var(--ink, #e5e5e5)",
               padding: "8px 14px",
               fontSize: 12,
               fontWeight: 600,
+              fontFamily: "inherit",
               cursor: "default",
+              transition:
+                "background var(--motion-fast, 120ms) var(--ease-out, ease-out), border-color var(--motion-fast, 120ms) var(--ease-out, ease-out)",
             }}
           >
             Clear state and reload
@@ -107,11 +125,16 @@ export default class ErrorBoundary extends React.Component<Props, State> {
           style={{
             marginTop: 28,
             padding: "16px 18px",
-            background: "color-mix(in oklch, #ffffff 4%, transparent)",
+            background: "var(--panel, color-mix(in oklch, #ffffff 4%, transparent))",
             border: "1px solid var(--rule-soft, #2a2a30)",
             borderRadius: 8,
+            // Recessed well so the stack trace reads as inset data, not a
+            // floating slab. --well is re-tinted per theme so it never sooty.
+            // Keep this file's defensive fallback so it still renders if the
+            // stylesheet failed to load (that is when the boundary fires).
+            boxShadow: "var(--well, inset 0 1px 2px rgba(0,0,0,0.22))",
             color: "var(--ink-dim, #9ca3af)",
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+            fontFamily: "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)",
             fontSize: 11,
             lineHeight: 1.55,
             overflow: "auto",

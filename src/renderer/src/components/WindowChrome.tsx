@@ -141,8 +141,11 @@ function ChromeButton({
   borderLeft?: boolean;
 }) {
   const [hover, setHover] = useState(false);
-  const hoverBg = danger ? "#c42b1c" : "var(--hover)";
-  const hoverFg = danger ? "#ffffff" : "var(--ink)";
+  // Close uses the Windows 11 red affordance; express it via the --danger
+  // token (color-mixed darker for a solid hover plate) and place the ink on
+  // it as a token mix so the glyph stays legible across the light themes too.
+  const hoverBg = danger ? "color-mix(in oklch, var(--danger) 78%, var(--bg))" : "var(--hover)";
+  const hoverFg = danger ? "color-mix(in oklch, var(--bg) 92%, var(--danger))" : "var(--ink)";
   return (
     <button
       type="button"
@@ -248,6 +251,7 @@ function WindowChrome({
           alignItems: "stretch",
           borderBottom: "1px solid var(--rule)",
           background: "color-mix(in oklch, var(--panel) 70%, var(--bg))",
+          boxShadow: "var(--lift-hi)",
           flex: "0 0 auto",
           userSelect: "none",
           position: "relative",
@@ -279,10 +283,11 @@ function WindowChrome({
       >
         <span
           style={{
-            color: "var(--ink-dim)",
-            fontSize: 11,
-            fontWeight: 600,
-            letterSpacing: "0",
+            color: "var(--muted)",
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
             lineHeight: 1,
           }}
         >

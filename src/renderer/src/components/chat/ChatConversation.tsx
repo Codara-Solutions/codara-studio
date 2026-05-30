@@ -1381,11 +1381,13 @@ function UndoControl({ runId, checkpoint }: { runId: string; checkpoint: Checkpo
           border: "1px solid var(--rule-soft)",
           borderRadius: 999,
           background: open ? "var(--hover)" : "transparent",
-          color: "var(--muted)",
+          color: open ? "var(--ink-dim)" : "var(--muted)",
           fontFamily: "var(--font-sans)",
           fontSize: 10.5,
           fontWeight: 600,
           cursor: "default",
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
         }}
       >
         <UndoGlyph />
@@ -1470,6 +1472,8 @@ function UndoMenuRow({
         textAlign: "left",
         cursor: "default",
         opacity: disabled ? 0.5 : 1,
+        transition:
+          "background var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
       }}
     >
       <span
@@ -1527,14 +1531,22 @@ function ConversationEmpty() {
     <div
       style={{
         margin: "auto",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 7,
         textAlign: "center",
-        color: "var(--muted)",
-        fontSize: 12,
-        lineHeight: 1.5,
-        maxWidth: 240,
+        maxWidth: 250,
+        padding: "32px 0",
       }}
     >
-      Spark is getting started. Its plan and progress will appear here.
+      <span style={{ color: "var(--accent)", opacity: 0.7 }}>
+        <SparkMark />
+      </span>
+      <span className="spark-eyebrow">Getting started</span>
+      <span style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>
+        Spark is warming up. Its plan and progress will appear here.
+      </span>
     </div>
   );
 }
@@ -1844,7 +1856,7 @@ const STEP_CARD_STYLE: React.CSSProperties = {
   background: "color-mix(in oklch, var(--bg) 42%, var(--panel))",
   overflow: "hidden",
   boxSizing: "border-box",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.02)",
+  boxShadow: "var(--lift-hi)",
 };
 
 const STEP_HEADER_STYLE: React.CSSProperties = {
@@ -2144,8 +2156,12 @@ const LIVE_BUBBLE_STYLE: React.CSSProperties = {
   flexDirection: "column",
   gap: 6,
   overflowWrap: "anywhere",
+  // Static accent halo marks this as the one live turn at a glance; no
+  // keyframe, so it's reduced-motion-safe by construction (the moving cue
+  // is the pulsing typing pip in the header).
+  boxShadow: "var(--shadow-glow)",
   transition:
-    "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+    "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
 };
 
 const LIVE_PIP_STYLE: React.CSSProperties = {

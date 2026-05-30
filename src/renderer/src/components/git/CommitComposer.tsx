@@ -265,6 +265,14 @@ export default function CommitComposer({
             setAmend(false);
           }
         }}
+        onFocus={(e) => {
+          e.currentTarget.style.borderColor = "var(--accent-edge)";
+          e.currentTarget.style.boxShadow = "var(--focus-ring)";
+        }}
+        onBlur={(e) => {
+          e.currentTarget.style.borderColor = "var(--rule)";
+          e.currentTarget.style.boxShadow = "var(--well)";
+        }}
         placeholder="Message  (Ctrl+Enter to commit)"
         spellCheck={false}
         style={{
@@ -276,11 +284,14 @@ export default function CommitComposer({
           background: "var(--bg)",
           border: "1px solid var(--rule)",
           borderRadius: 7,
+          boxShadow: "var(--well)",
           color: "var(--ink)",
           fontFamily: "var(--font-sans)",
           fontSize: 12,
           lineHeight: 1.45,
           outline: "none",
+          transition:
+            "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
         }}
       />
 
@@ -363,8 +374,9 @@ export default function CommitComposer({
               : "1px solid var(--rule)",
           background: canCommit && !anyBusy ? "var(--accent-soft)" : "transparent",
           color: canCommit && !anyBusy ? "var(--ink)" : "var(--muted-2)",
+          boxShadow: canCommit && !anyBusy ? "var(--lift-hi)" : "none",
           transition:
-            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
         }}
       >
         {committing ? <Spinner /> : <CommitIcon />}
@@ -375,6 +387,7 @@ export default function CommitComposer({
               fontFamily: "var(--font-mono)",
               fontSize: 10,
               fontWeight: 700,
+              fontVariantNumeric: "tabular-nums",
               padding: "1px 6px",
               borderRadius: 999,
               background: "color-mix(in oklch, var(--ink) 12%, transparent)",

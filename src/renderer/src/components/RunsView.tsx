@@ -108,7 +108,7 @@ function RunHeader({ run }: { run: RunState }) {
         flex: "0 0 auto",
         background: "var(--panel)",
         borderBottom: "1px solid var(--rule)",
-        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
+        boxShadow: "var(--lift-hi)",
         padding: "13px 20px 12px",
         display: "grid",
         gridTemplateColumns: "minmax(0, 1fr) auto",
@@ -219,15 +219,28 @@ function TerminalSpawnState({ run }: { run: RunState }) {
             width: 38,
             height: 38,
             borderRadius: 9,
-            border: "1px solid var(--ok)",
+            border: "1px solid color-mix(in oklch, var(--ok) 55%, var(--rule))",
             background: "var(--ok-soft)",
             color: "var(--ok)",
             display: "inline-flex",
             alignItems: "center",
             justifyContent: "center",
+            boxShadow: "var(--lift-hi)",
           }}
         >
           <TerminalGlyph />
+        </span>
+        <span
+          style={{
+            color: "var(--muted-2)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: "0.16em",
+            textTransform: "uppercase",
+          }}
+        >
+          Terminals
         </span>
         <div style={{ color: "var(--ink)", fontSize: 15, fontWeight: 700 }}>
           {terminalText}
@@ -317,7 +330,7 @@ function StatusPill({ status }: { status: RunState["status"] }) {
         alignItems: "center",
         gap: 6,
         color,
-        border: `1px solid ${color}`,
+        border: `1px solid color-mix(in oklch, ${color} 50%, var(--rule))`,
         background: `color-mix(in oklch, ${color} 11%, transparent)`,
         padding: "3px 9px",
         borderRadius: 999,
@@ -356,11 +369,23 @@ function EmptyState({ text, heading }: { text: string; heading?: string }) {
         alignItems: "center",
         justifyContent: "center",
         background: "var(--bg)",
-        gap: 7,
+        gap: 8,
         padding: 32,
         textAlign: "center",
       }}
     >
+      <span
+        style={{
+          color: "var(--muted-2)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          fontWeight: 700,
+          letterSpacing: "0.16em",
+          textTransform: "uppercase",
+        }}
+      >
+        Runs
+      </span>
       {heading && (
         <span style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 15, fontWeight: 600 }}>
           {heading}

@@ -134,7 +134,7 @@ function Header({
         minWidth: 0,
         borderBottom: "1px solid var(--rule-soft)",
         background: "var(--panel)",
-        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
+        boxShadow: "var(--lift-hi)",
       }}
     >
       <span
@@ -175,7 +175,18 @@ function Header({
             borderRadius: 6,
             background: "transparent",
             color: "var(--muted)",
-            cursor: "pointer",
+            cursor: "default",
+            transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "var(--hover)";
+            e.currentTarget.style.color = "var(--ink-dim)";
+            e.currentTarget.style.borderColor = "var(--rule)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.color = "var(--muted)";
+            e.currentTarget.style.borderColor = "var(--rule-soft)";
           }}
         >
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden>
@@ -210,13 +221,16 @@ function Crumb({ label, current, onClick }: { label: string; current?: boolean; 
         fontFamily: "var(--font-sans)",
         fontSize: 11.5,
         fontWeight: current ? 700 : 500,
-        cursor: onClick ? "pointer" : "default",
+        cursor: "default",
         whiteSpace: "nowrap",
         overflow: "hidden",
         textOverflow: "ellipsis",
         minWidth: 0,
         maxWidth: current ? 140 : 84,
+        transition: "color var(--motion-fast) var(--ease-out)",
       }}
+      onMouseEnter={onClick ? (e) => (e.currentTarget.style.color = "var(--ink)") : undefined}
+      onMouseLeave={onClick ? (e) => (e.currentTarget.style.color = "var(--ink-dim)") : undefined}
     >
       {label}
     </button>
@@ -284,7 +298,7 @@ function SnapshotCard({
         border: `1px solid color-mix(in oklch, ${tone} 42%, var(--rule))`,
         borderRadius: 9,
         background: `linear-gradient(150deg, color-mix(in oklch, ${tone} 9%, var(--panel-2)), color-mix(in oklch, var(--panel) 88%, transparent))`,
-        boxShadow: `inset 0 1px 0 color-mix(in oklch, white 5%, transparent), 0 10px 24px color-mix(in oklch, ${tone} 8%, transparent)`,
+        boxShadow: `var(--lift-hi), 0 10px 24px color-mix(in oklch, ${tone} 8%, transparent)`,
         padding: "12px 13px",
         display: "flex",
         flexDirection: "column",
@@ -564,13 +578,20 @@ function RunSummary({
               border: "1px solid var(--accent-edge)",
               borderRadius: 8,
               background: "color-mix(in oklch, var(--accent) 7%, var(--panel-2))",
-              boxShadow: "0 0 16px var(--accent-glow)",
+              boxShadow: "var(--shadow-glow)",
               padding: "11px 12px",
               display: "flex",
               flexDirection: "column",
               gap: 6,
-              cursor: "pointer",
+              cursor: "default",
+              transition: "background var(--motion-fast) var(--ease-out)",
             }}
+            onMouseEnter={(e) =>
+              (e.currentTarget.style.background = "color-mix(in oklch, var(--accent) 12%, var(--panel-2))")
+            }
+            onMouseLeave={(e) =>
+              (e.currentTarget.style.background = "color-mix(in oklch, var(--accent) 7%, var(--panel-2))")
+            }
           >
             <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
               <StatusDot status={liveStep.status} size={6} />
@@ -621,7 +642,7 @@ function RunSummary({
                   flex: 1,
                   height: 6,
                   borderRadius: 2,
-                  cursor: "pointer",
+                  cursor: "default",
                   padding: 0,
                   background:
                     step.status === "running" || step.status === "reviewing"
@@ -631,7 +652,10 @@ function RunSummary({
                     step.status === "running" || step.status === "reviewing"
                       ? "0 0 8px var(--accent-glow)"
                       : "none",
+                  transition: "opacity var(--motion-fast) var(--ease-out)",
                 }}
+                onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.8")}
+                onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
               />
             ))}
           </div>
@@ -656,10 +680,21 @@ function RunSummary({
                   alignItems: "flex-start",
                   padding: "8px 10px",
                   borderRadius: 7,
-                  border: `1px solid ${item.tone}`,
+                  border: `1px solid color-mix(in oklch, ${item.tone} 45%, var(--rule))`,
                   background: `color-mix(in oklch, ${item.tone} 9%, transparent)`,
-                  cursor: item.onClick ? "pointer" : "default",
+                  cursor: "default",
+                  transition: "background var(--motion-fast) var(--ease-out)",
                 }}
+                onMouseEnter={
+                  item.onClick
+                    ? (e) => (e.currentTarget.style.background = `color-mix(in oklch, ${item.tone} 15%, transparent)`)
+                    : undefined
+                }
+                onMouseLeave={
+                  item.onClick
+                    ? (e) => (e.currentTarget.style.background = `color-mix(in oklch, ${item.tone} 9%, transparent)`)
+                    : undefined
+                }
               >
                 <span style={{ marginTop: 1 }}>
                   <Mark kind={item.mark} />
@@ -927,7 +962,16 @@ function StepDetail({
                     display: "flex",
                     flexDirection: "column",
                     gap: 5,
-                    cursor: "pointer",
+                    cursor: "default",
+                    transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = "var(--hover)";
+                    e.currentTarget.style.borderColor = "var(--rule)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = "color-mix(in oklch, var(--ink) 2%, transparent)";
+                    e.currentTarget.style.borderColor = "var(--rule-soft)";
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0 }}>
@@ -1187,7 +1231,8 @@ function ReportView({ report, compact }: { report: WorkerReport; compact?: boole
         <span
           style={{
             color: tone,
-            border: `1px solid ${tone}`,
+            background: `color-mix(in oklch, ${tone} 12%, transparent)`,
+            border: `1px solid color-mix(in oklch, ${tone} 45%, var(--rule))`,
             borderRadius: 4,
             padding: "1px 6px",
             fontFamily: "var(--font-mono)",
@@ -1384,7 +1429,18 @@ function PromptBlock({ path }: { path: string }) {
           fontFamily: "var(--font-sans)",
           fontSize: 11,
           fontWeight: 600,
-          cursor: "pointer",
+          cursor: "default",
+          transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "var(--hover)";
+          e.currentTarget.style.borderColor = "var(--rule)";
+          e.currentTarget.style.color = "var(--ink)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "transparent";
+          e.currentTarget.style.borderColor = "var(--rule-soft)";
+          e.currentTarget.style.color = "var(--ink-dim)";
         }}
       >
         <svg

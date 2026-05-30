@@ -41,7 +41,7 @@ export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps)
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "rgba(0, 0, 0, 0.58)",
+        background: "color-mix(in oklch, var(--bg) 58%, transparent)",
         backdropFilter: "blur(4px)",
         WebkitBackdropFilter: "blur(4px)",
         fontFamily: "var(--font-sans)",
@@ -111,6 +111,7 @@ export default function ShortcutsDialog({ open, onClose }: ShortcutsDialogProps)
               fontSize: 10,
               padding: "3px 8px",
               cursor: "default",
+              transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
             }}
           >
             ESC
@@ -218,12 +219,13 @@ function Kbd({ children }: { children: React.ReactNode }) {
         padding: "0 6px",
         border: "1px solid var(--rule-strong)",
         borderRadius: 5,
-        background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+        background: "var(--panel-3)",
         color: "var(--ink-dim)",
         fontFamily: "var(--font-mono)",
         fontSize: 11,
         fontWeight: 600,
-        boxShadow: "inset 0 -1px 0 rgba(0, 0, 0, 0.25)",
+        fontVariantNumeric: "tabular-nums",
+        boxShadow: "var(--lift-hi), var(--well)",
       }}
     >
       {children}

@@ -740,11 +740,13 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     >
       {error && (
         <div
+          role="alert"
           style={{
             flex: "0 0 auto",
             marginBottom: 8,
             padding: "6px 9px",
             borderRadius: 6,
+            border: "1px solid color-mix(in oklch, var(--danger) 35%, transparent)",
             background: "var(--danger-soft)",
             color: "var(--danger)",
             fontSize: 11,
@@ -1226,7 +1228,7 @@ function MentionPopover({
         border: "1px solid var(--rule-strong)",
         borderRadius: 8,
         background: "var(--panel-2)",
-        boxShadow: "var(--shadow-2)",
+        boxShadow: "var(--shadow-2), var(--lift-hi)",
         padding: 5,
       }}
     >
@@ -1298,6 +1300,7 @@ function MentionRow({
         padding: "6px 7px",
         textAlign: "left",
         cursor: "default",
+        transition: "background var(--motion-fast) var(--ease-out)",
       }}
     >
       <span aria-hidden style={{ color: active ? "var(--accent)" : "var(--muted)", display: "inline-flex" }}>
@@ -1339,7 +1342,8 @@ function MentionEmpty({ text }: { text: string }) {
       style={{
         color: "var(--muted)",
         fontSize: 11,
-        padding: "10px 8px",
+        padding: "12px 8px",
+        textAlign: "center",
       }}
     >
       {text}
@@ -1358,6 +1362,7 @@ function AttachmentChip({
   title: string;
   onRemove: () => void;
 }) {
+  const [removeHover, setRemoveHover] = useState(false);
   return (
     <span
       title={title}
@@ -1371,12 +1376,13 @@ function AttachmentChip({
         border: "1px solid var(--rule-soft)",
         borderRadius: 6,
         background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+        boxShadow: "var(--lift-hi)",
         padding: "0 4px 0 7px",
         color: "var(--ink-dim)",
         fontSize: 11,
       }}
     >
-      <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex" }}>
+      <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex", flex: "0 0 auto" }}>
         <FileGlyph />
       </span>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -1385,6 +1391,8 @@ function AttachmentChip({
       <button
         type="button"
         onClick={onRemove}
+        onMouseEnter={() => setRemoveHover(true)}
+        onMouseLeave={() => setRemoveHover(false)}
         title={`Remove ${kind}`}
         aria-label={`Remove ${kind}`}
         style={{
@@ -1393,14 +1401,16 @@ function AttachmentChip({
           height: 18,
           border: "none",
           borderRadius: 4,
-          background: "transparent",
-          color: "var(--muted)",
+          background: removeHover ? "var(--danger-soft)" : "transparent",
+          color: removeHover ? "var(--danger)" : "var(--muted)",
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
           padding: 0,
           cursor: "default",
           flex: "0 0 auto",
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
         }}
       >
         <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden>
@@ -1440,12 +1450,15 @@ function IconButton({
         border: "1px solid var(--rule-soft)",
         borderRadius: 6,
         background: hover && !disabled ? "var(--hover)" : "transparent",
-        color: disabled ? "var(--muted-2)" : "var(--ink-dim)",
+        boxShadow: disabled ? "none" : "var(--lift-hi)",
+        color: disabled ? "var(--muted-2)" : hover ? "var(--ink)" : "var(--ink-dim)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         padding: 0,
         cursor: "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
       {children}
@@ -1480,6 +1493,7 @@ function FileGlyph() {
 
 function StopButton({ onClick }: { onClick: () => void }) {
   const [hover, setHover] = useState(false);
+  const [pressed, setPressed] = useState(false);
   return (
     <button
       type="button"
@@ -1487,7 +1501,12 @@ function StopButton({ onClick }: { onClick: () => void }) {
       title="Stop run"
       aria-label="Stop run"
       onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseLeave={() => {
+        setHover(false);
+        setPressed(false);
+      }}
+      onMouseDown={() => setPressed(true)}
+      onMouseUp={() => setPressed(false)}
       style={{
         appearance: "none",
         width: 26,
@@ -1498,13 +1517,16 @@ function StopButton({ onClick }: { onClick: () => void }) {
         background: hover
           ? "color-mix(in oklch, var(--danger) 88%, var(--ink))"
           : "var(--danger)",
+        boxShadow: pressed ? "var(--well)" : "var(--lift-hi)",
         color: "var(--accent-ink)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         padding: 0,
         cursor: "default",
-        transition: "background var(--motion-fast) var(--ease-out)",
+        transform: pressed ? "translateY(0.5px)" : "translateY(0)",
+        transition:
+          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
       }}
     >
       <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden>
@@ -1516,6 +1538,8 @@ function StopButton({ onClick }: { onClick: () => void }) {
 
 function SendButton({ onClick, disabled }: { onClick: () => void; disabled: boolean }) {
   const [hover, setHover] = useState(false);
+  const [pressed, setPressed] = useState(false);
+  const active = pressed && !disabled;
   return (
     <button
       type="button"
@@ -1524,7 +1548,12 @@ function SendButton({ onClick, disabled }: { onClick: () => void; disabled: bool
       title="Send"
       aria-label="Send"
       onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseLeave={() => {
+        setHover(false);
+        setPressed(false);
+      }}
+      onMouseDown={() => setPressed(true)}
+      onMouseUp={() => setPressed(false)}
       style={{
         appearance: "none",
         width: 26,
@@ -1537,13 +1566,22 @@ function SendButton({ onClick, disabled }: { onClick: () => void; disabled: bool
           : hover
             ? "color-mix(in oklch, var(--accent) 88%, var(--ink))"
             : "var(--accent)",
+        boxShadow: disabled
+          ? "none"
+          : active
+            ? "var(--well)"
+            : hover
+              ? "var(--shadow-glow)"
+              : "var(--lift-hi)",
         color: disabled ? "var(--muted)" : "var(--accent-ink)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         padding: 0,
         cursor: "default",
-        transition: "background var(--motion-fast) var(--ease-out)",
+        transform: active ? "translateY(0.5px)" : "translateY(0)",
+        transition:
+          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
       }}
     >
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -1571,14 +1609,21 @@ function TextButton({
   tone: "accent" | "danger";
 }) {
   const [hover, setHover] = useState(false);
+  const [pressed, setPressed] = useState(false);
   const color = tone === "danger" ? "var(--danger)" : "var(--accent)";
+  const active = pressed && !disabled;
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
       onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseLeave={() => {
+        setHover(false);
+        setPressed(false);
+      }}
+      onMouseDown={() => setPressed(true)}
+      onMouseUp={() => setPressed(false)}
       style={{
         appearance: "none",
         border: `1px solid ${
@@ -1586,6 +1631,7 @@ function TextButton({
         }`,
         borderRadius: 6,
         background: hover && !disabled ? "var(--hover)" : "transparent",
+        boxShadow: disabled ? "none" : active ? "var(--well)" : "var(--lift-hi)",
         color: disabled ? "var(--muted)" : color,
         height: 26,
         padding: "0 8px",
@@ -1594,7 +1640,9 @@ function TextButton({
         fontWeight: 600,
         cursor: "default",
         flex: "0 0 auto",
-        transition: "background var(--motion-fast) var(--ease-out)",
+        transform: active ? "translateY(0.5px)" : "translateY(0)",
+        transition:
+          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
       }}
     >
       {children}

@@ -633,15 +633,29 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         <div
           style={{
             flex: "0 0 auto",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
             padding: "6px 12px",
-            background: "color-mix(in oklch, var(--danger) 12%, transparent)",
+            background: "var(--danger-soft)",
             color: "var(--ink)",
             fontFamily: "var(--font-mono)",
             fontSize: 11,
             borderBottom: "1px solid var(--rule-soft)",
           }}
         >
-          {error}
+          <span
+            className="spark-eyebrow"
+            style={{ color: "var(--danger)", flex: "0 0 auto" }}
+          >
+            Load failed
+          </span>
+          <span
+            style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+            title={error}
+          >
+            {error}
+          </span>
         </div>
       ) : null}
       <div
@@ -663,13 +677,19 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              color: "var(--muted)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 12,
+              background: "var(--bg)",
               pointerEvents: "none",
             }}
           >
-            Loading…
+            <span
+              className="spark-eyebrow"
+              style={{
+                color: "var(--muted)",
+                animation: "spark-pulse 1.4s ease-in-out infinite",
+              }}
+            >
+              Loading
+            </span>
           </div>
         ) : null}
         <DrawOverlay
@@ -707,8 +727,18 @@ function EmptyState() {
         textAlign: "center",
       }}
     >
-      <div style={{ color: "var(--ink)", fontSize: 14, fontWeight: 600 }}>
-        Nothing to preview yet
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 6,
+        }}
+      >
+        <div className="spark-eyebrow">Preview</div>
+        <div style={{ color: "var(--ink)", fontSize: 14, fontWeight: 600 }}>
+          Nothing to preview yet
+        </div>
       </div>
       <div style={{ fontSize: 12, maxWidth: 360, lineHeight: 1.5 }}>
         Type a URL above, or open the Ports dropdown to jump straight to your

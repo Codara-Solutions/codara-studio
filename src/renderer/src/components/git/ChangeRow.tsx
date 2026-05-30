@@ -64,12 +64,12 @@ const ChangeRow = React.memo(function ChangeRow({
         height: 24,
         padding: "0 8px 0 14px",
         cursor: "default",
-        background: selected
-          ? "color-mix(in oklch, var(--accent) 14%, transparent)"
-          : hover
-            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
-            : "transparent",
-        transition: "background var(--motion-fast) var(--ease-out)",
+        background: selected ? "var(--accent-soft)" : hover ? "var(--hover)" : "transparent",
+        // Selected rows carry the app's active-row affordance: an accent edge
+        // inset on the left so the marked row reads as state, not decoration.
+        boxShadow: selected ? "inset 2px 0 0 var(--accent-edge)" : "none",
+        transition:
+          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       <FileNodeIcon name={name} isDir={false} size={14} />
@@ -87,12 +87,13 @@ const ChangeRow = React.memo(function ChangeRow({
       >
         <span
           style={{
-            color: selected ? "var(--ink)" : "var(--ink-dim)",
+            color: selected || hover ? "var(--ink)" : "var(--ink-dim)",
             fontFamily: "var(--font-sans)",
             fontSize: 12,
             flex: "0 1 auto",
             overflow: "hidden",
             textOverflow: "ellipsis",
+            transition: "color var(--motion-fast) var(--ease-out)",
           }}
         >
           {name}

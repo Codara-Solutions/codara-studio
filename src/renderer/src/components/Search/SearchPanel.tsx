@@ -276,12 +276,13 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
         display: "flex",
         alignItems: "flex-start",
         justifyContent: "center",
-        background: "rgba(0, 0, 0, 0.45)",
+        background: "color-mix(in oklch, var(--bg) 62%, transparent)",
         backdropFilter: "blur(4px)",
         WebkitBackdropFilter: "blur(4px)",
         fontFamily: "var(--font-sans)",
         padding: "60px 24px 24px",
       }}
+      className="spark-fade-in"
       onMouseDown={onClose}
     >
       <section
@@ -330,42 +331,95 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
                 flex: "0 0 7px",
               }}
             />
-            <input
-              ref={inputRef}
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  if (debounceRef.current !== null) {
-                    window.clearTimeout(debounceRef.current);
-                    debounceRef.current = null;
+            <div style={{ position: "relative", flex: 1, minWidth: 0, display: "flex" }}>
+              <input
+                ref={inputRef}
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    if (debounceRef.current !== null) {
+                      window.clearTimeout(debounceRef.current);
+                      debounceRef.current = null;
+                    }
+                    void startSearch(query);
                   }
-                  void startSearch(query);
-                }
-              }}
-              placeholder={cwd ? "Search in files…" : "Open a workspace first"}
-              spellCheck={false}
-              disabled={!cwd}
-              style={{
-                flex: 1,
-                minWidth: 0,
-                appearance: "none",
-                background: "color-mix(in oklch, var(--ink) 3%, transparent)",
-                border: "1px solid var(--rule-soft)",
-                borderRadius: 7,
-                color: "var(--ink)",
-                fontFamily: "var(--font-mono)",
-                fontSize: 13,
-                padding: "6px 10px",
-                outline: "none",
-              }}
-            />
+                }}
+                onFocus={(e) => {
+                  e.currentTarget.style.borderColor = "var(--accent-edge)";
+                  e.currentTarget.style.boxShadow = "var(--focus-ring)";
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.borderColor = "var(--rule-soft)";
+                  e.currentTarget.style.boxShadow = "var(--well)";
+                }}
+                placeholder={cwd ? "Search in files…" : "Open a workspace first"}
+                spellCheck={false}
+                disabled={!cwd}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  appearance: "none",
+                  background: "var(--bg)",
+                  border: "1px solid var(--rule-soft)",
+                  borderRadius: 7,
+                  color: "var(--ink)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 13,
+                  padding: "6px 28px 6px 10px",
+                  outline: "none",
+                  boxShadow: "var(--well)",
+                  transition:
+                    "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+                }}
+              />
+              {query.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQuery("");
+                    inputRef.current?.focus();
+                  }}
+                  title="Clear query"
+                  aria-label="Clear query"
+                  style={{
+                    position: "absolute",
+                    top: "50%",
+                    right: 6,
+                    transform: "translateY(-50%)",
+                    appearance: "none",
+                    width: 18,
+                    height: 18,
+                    border: "none",
+                    borderRadius: 5,
+                    background: "transparent",
+                    color: "var(--muted)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    cursor: "default",
+                    transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = "var(--hover)";
+                    e.currentTarget.style.color = "var(--ink-dim)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = "transparent";
+                    e.currentTarget.style.color = "var(--muted)";
+                  }}
+                >
+                  <CloseIcon size={9} />
+                </button>
+              ) : null}
+            </div>
             <button
               type="button"
               onClick={onClose}
               title="Close"
+              aria-label="Close"
               style={{
                 appearance: "none",
                 width: 26,
@@ -379,6 +433,16 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
                 justifyContent: "center",
                 cursor: "default",
                 flex: "0 0 26px",
+                transition:
+                  "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "var(--hover)";
+                e.currentTarget.style.color = "var(--ink-dim)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "transparent";
+                e.currentTarget.style.color = "var(--muted)";
               }}
             >
               <CloseIcon size={11} />
@@ -406,6 +470,9 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
                 onClick={cancel}
                 style={{
                   appearance: "none",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
                   background: "var(--danger-soft)",
                   border: "1px solid var(--danger)",
                   borderRadius: 6,
@@ -415,8 +482,19 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
                   fontWeight: 600,
                   padding: "4px 10px",
                   cursor: "default",
+                  transition: "background var(--motion-fast) var(--ease-out)",
                 }}
               >
+                <span
+                  aria-hidden
+                  style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: 999,
+                    background: "var(--danger)",
+                    animation: "spark-pulse 1.4s var(--ease-out) infinite",
+                  }}
+                />
                 Cancel
               </button>
             ) : null}
@@ -433,13 +511,17 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
           }}
         >
           {error ? (
-            <Empty text={`Search error: ${error}`} danger />
+            <Empty eyebrow="Search error" text={error} danger />
           ) : !cwd ? (
-            <Empty text="Open a workspace to search across its files." />
+            <Empty eyebrow="No workspace" text="Open a workspace to search across its files." />
           ) : query.trim().length === 0 ? (
-            <Empty text="Type to search the workspace. Click a hit to open that file." />
+            <Empty eyebrow="Find in files" text="Type to search the workspace. Click a hit to open that file." />
           ) : rows.length === 0 ? (
-            <Empty text={running ? "Searching…" : "No results."} />
+            running ? (
+              <Empty eyebrow="Searching" text="Scanning the workspace…" loading />
+            ) : (
+              <Empty eyebrow="No results" text="Nothing matched. Try a different query or adjust the filters." />
+            )
           ) : (
             <Virtuoso
               style={{ height: "100%", width: "100%" }}
@@ -479,14 +561,32 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
           }}
         >
           {running ? (
-            <span>Searching… {results.totalHits} hits in {filesCount} files</span>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <span
+                aria-hidden
+                style={{
+                  width: 5,
+                  height: 5,
+                  borderRadius: 999,
+                  background: "var(--accent)",
+                  boxShadow: "0 0 6px var(--accent-glow)",
+                  animation: "spark-pulse 1.4s var(--ease-out) infinite",
+                }}
+              />
+              <span style={{ color: "var(--ink-dim)" }}>{results.totalHits}</span> hits in{" "}
+              <span style={{ color: "var(--ink-dim)" }}>{filesCount}</span> files
+            </span>
           ) : summary ? (
             <span>
-              {summary.totalHits} hits in {filesCount} files ·{" "}
+              <span style={{ color: "var(--ink-dim)" }}>{summary.totalHits}</span> hits in{" "}
+              <span style={{ color: "var(--ink-dim)" }}>{filesCount}</span> files ·{" "}
               {(summary.durationMs / 1000).toFixed(2)}s
             </span>
           ) : (
-            <span>{results.totalHits} hits in {filesCount} files</span>
+            <span>
+              <span style={{ color: "var(--ink-dim)" }}>{results.totalHits}</span> hits in{" "}
+              <span style={{ color: "var(--ink-dim)" }}>{filesCount}</span> files
+            </span>
           )}
           <span style={{ flex: 1 }} />
           {hitCap && (
@@ -523,7 +623,7 @@ function Toggle({
         height: 24,
         padding: "0 8px",
         border: active
-          ? "1px solid color-mix(in oklch, var(--accent) 54%, var(--rule-strong))"
+          ? "1px solid var(--accent-edge)"
           : "1px solid var(--rule-soft)",
         borderRadius: 6,
         background: active ? "var(--accent-soft)" : "color-mix(in oklch, var(--ink) 2%, transparent)",
@@ -532,6 +632,21 @@ function Toggle({
         fontSize: 11,
         fontWeight: 700,
         cursor: "default",
+        boxShadow: active ? "var(--shadow-glow)" : "none",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+      }}
+      onMouseEnter={(e) => {
+        if (!active) {
+          e.currentTarget.style.background = "var(--hover)";
+          e.currentTarget.style.color = "var(--ink-dim)";
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!active) {
+          e.currentTarget.style.background = "color-mix(in oklch, var(--ink) 2%, transparent)";
+          e.currentTarget.style.color = "var(--muted)";
+        }
       }}
     >
       {label}
@@ -555,12 +670,20 @@ function GlobInput({
       onChange={(e) => onChange(e.currentTarget.value)}
       placeholder={placeholder}
       spellCheck={false}
+      onFocus={(e) => {
+        e.currentTarget.style.borderColor = "var(--accent-edge)";
+        e.currentTarget.style.boxShadow = "var(--focus-ring)";
+      }}
+      onBlur={(e) => {
+        e.currentTarget.style.borderColor = "var(--rule-soft)";
+        e.currentTarget.style.boxShadow = "var(--well)";
+      }}
       style={{
         flex: "1 1 160px",
         minWidth: 140,
         maxWidth: 220,
         appearance: "none",
-        background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+        background: "var(--bg)",
         border: "1px solid var(--rule-soft)",
         borderRadius: 6,
         color: "var(--ink-dim)",
@@ -568,6 +691,9 @@ function GlobInput({
         fontSize: 11,
         padding: "4px 8px",
         outline: "none",
+        boxShadow: "var(--well)",
+        transition:
+          "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     />
   );
@@ -603,15 +729,31 @@ function FileHeader({
         padding: "4px 14px",
         background: "var(--panel)",
         borderBottom: "1px solid var(--rule-soft)",
+        boxShadow: "var(--lift-hi)",
         color: "var(--ink-dim)",
         fontFamily: "var(--font-mono)",
         fontSize: 11,
         cursor: "default",
         position: "sticky",
         top: 0,
+        transition: "background var(--motion-fast) var(--ease-out)",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = "var(--panel-2)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "var(--panel)";
       }}
     >
-      <span style={{ width: 12, color: "var(--muted)", fontWeight: 800 }}>
+      <span
+        aria-hidden
+        style={{
+          width: 12,
+          color: "var(--muted)",
+          fontWeight: 800,
+          fontVariantNumeric: "tabular-nums",
+        }}
+      >
         {collapsed ? "▸" : "▾"}
       </span>
       <span
@@ -637,6 +779,7 @@ function FileHeader({
           color: "var(--muted)",
           fontFamily: "var(--font-mono)",
           fontSize: 10,
+          fontVariantNumeric: "tabular-nums",
         }}
       >
         {group.hits.length}
@@ -670,6 +813,7 @@ function HitRow({ hit, onClick }: { hit: SearchHit; onClick: () => void }) {
         whiteSpace: "nowrap",
         overflow: "hidden",
         textOverflow: "ellipsis",
+        transition: "background var(--motion-fast) var(--ease-out)",
       }}
       onMouseEnter={(e) => {
         e.currentTarget.style.background = "var(--hover)";
@@ -698,38 +842,83 @@ function HitRow({ hit, onClick }: { hit: SearchHit; onClick: () => void }) {
           whiteSpace: "nowrap",
         }}
       >
-        <span>{truncateLeft(hit.preMatch, 80)}</span>
+        <span style={{ color: "var(--muted)" }}>{truncateLeft(hit.preMatch, 80)}</span>
         <mark
           style={{
             background: "var(--accent-soft)",
+            boxShadow: "inset 0 0 0 1px var(--accent-edge)",
             color: "var(--ink)",
-            borderRadius: 2,
-            padding: "0 1px",
+            borderRadius: 3,
+            padding: "0 2px",
           }}
         >
           {hit.matchText}
         </mark>
-        <span>{truncateRight(hit.postMatch, 160)}</span>
+        <span style={{ color: "var(--muted)" }}>{truncateRight(hit.postMatch, 160)}</span>
       </span>
     </div>
   );
 }
 
-function Empty({ text, danger = false }: { text: string; danger?: boolean }) {
+function Empty({
+  eyebrow,
+  text,
+  danger = false,
+  loading = false,
+}: {
+  eyebrow: string;
+  text: string;
+  danger?: boolean;
+  loading?: boolean;
+}) {
   return (
     <div
+      className="spark-fade-in"
       style={{
         flex: 1,
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        padding: 24,
-        color: danger ? "var(--danger)" : "var(--muted)",
-        fontSize: 12,
+        gap: 7,
+        padding: 32,
         textAlign: "center",
       }}
     >
-      {text}
+      <span
+        className="spark-eyebrow"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 7,
+          color: danger ? "var(--danger)" : "var(--muted)",
+        }}
+      >
+        {loading ? (
+          <span
+            aria-hidden
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: 999,
+              background: "var(--accent)",
+              boxShadow: "0 0 6px var(--accent-glow)",
+              animation: "spark-pulse 1.4s var(--ease-out) infinite",
+            }}
+          />
+        ) : null}
+        {eyebrow}
+      </span>
+      <span
+        style={{
+          maxWidth: 360,
+          color: danger ? "var(--danger)" : "var(--muted-2)",
+          fontSize: 12,
+          lineHeight: 1.5,
+        }}
+      >
+        {text}
+      </span>
     </div>
   );
 }

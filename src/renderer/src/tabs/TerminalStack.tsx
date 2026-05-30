@@ -365,13 +365,25 @@ function TerminalStack({
           position: "absolute",
           inset: 0,
           display: "flex",
+          flexDirection: "column",
           alignItems: "center",
           justifyContent: "center",
-          color: "var(--muted)",
-          fontSize: 12,
+          gap: 6,
+          padding: 24,
+          textAlign: "center",
+          background: "var(--panel)",
         }}
       >
-        No shell detected.
+        <span className="spark-eyebrow">No shell</span>
+        <span
+          style={{
+            color: "var(--ink-dim)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+          }}
+        >
+          No shell detected on this system.
+        </span>
       </div>
     );
   }
@@ -722,6 +734,11 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               // the wrapper toggles back to "block", the parent
               // ResizeObserver fires and xterm reflows to the new size.
               display: isHiddenByZoom ? "none" : undefined,
+              // Resting card depth: a hairline well-edge plus a 1px top
+              // highlight so each pane reads as a deliberate macOS-like card
+              // with clear seams against its neighbours. The accent focus /
+              // zoom rings overlay this on a higher z-index.
+              boxShadow: "var(--lift-hi), 0 0 0 1px var(--rule-soft)",
               zIndex: isZoomed ? 6 : isActive ? 5 : 1,
               opacity: layoutAnimating && drag?.paneId !== leaf.paneId ? 0.94 : 1,
               transition: layoutAnimating
@@ -1239,7 +1256,7 @@ function TerminalDragGhost({ x, y }: { x: number; y: number }) {
         background: "color-mix(in oklch, var(--panel) 88%, var(--accent) 12%)",
         boxShadow: [
           "0 0 0 1px color-mix(in oklch, var(--accent) 22%, transparent)",
-          "0 14px 36px rgba(0, 0, 0, 0.38)",
+          "var(--shadow-2)",
           "0 0 28px color-mix(in oklch, var(--accent) 18%, transparent)",
         ].join(", "),
         transform: "rotate(-1.5deg) scale(1.02)",
@@ -1646,6 +1663,7 @@ function PaneToolbar({
         backdropFilter: "blur(6px)",
         WebkitBackdropFilter: "blur(6px)",
         border: "1px solid color-mix(in oklch, var(--rule-soft) 70%, transparent)",
+        boxShadow: "var(--lift-hi)",
         opacity: menuOpen ? 1 : 0.55,
         transition:
           "opacity var(--motion-fast, 120ms) var(--ease-out, ease-out), transform var(--motion-fast, 120ms) var(--ease-out, ease-out)",
@@ -1838,8 +1856,8 @@ function AddPaneMenu({ onPick }: { onPick: (kind: AddPaneKind) => void }) {
         minWidth: 238,
         background: "color-mix(in oklch, var(--panel-2, var(--panel)) 94%, transparent)",
         border: "1px solid var(--rule-strong, var(--rule))",
-        borderRadius: 7,
-        boxShadow: "0 12px 30px rgba(0,0,0,0.36), 0 1px 4px rgba(0,0,0,0.22)",
+        borderRadius: 9,
+        boxShadow: "var(--shadow-2)",
         padding: 3,
         backdropFilter: "blur(10px)",
         WebkitBackdropFilter: "blur(10px)",
@@ -2124,8 +2142,6 @@ function visibleWorkerChip(worker: TerminalLeafWorker | null | undefined): Termi
 function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
   const label = worker.runtime ? worker.runtime.toUpperCase() : "WORKER";
   const running = worker.state === "running";
-  const chipAccent = "color-mix(in oklch, var(--accent) 48%, white)";
-  const chipAccentSoft = "color-mix(in oklch, var(--accent) 32%, white)";
   return (
     <div
       style={{
@@ -2137,18 +2153,21 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
         gap: 6,
         padding: "2px 8px",
         borderRadius: 999,
-        background: "color-mix(in oklch, var(--panel) 90%, black)",
-        border: `1px solid ${chipAccent}`,
+        // Earned mild-glass chip: a panel veil over the terminal canvas so
+        // the label stays legible without baking white/black (which invert
+        // on the light themes).
+        background: "color-mix(in oklch, var(--panel-2) 82%, transparent)",
+        border: "1px solid var(--accent-edge)",
         backdropFilter: "blur(6px)",
         WebkitBackdropFilter: "blur(6px)",
-        color: chipAccent,
+        color: "var(--accent)",
         fontFamily: "var(--font-mono)",
         fontSize: 10,
         fontWeight: 600,
         letterSpacing: "0.08em",
         textTransform: "uppercase",
-        textShadow: "0 1px 2px rgba(0, 0, 0, 0.72)",
-        boxShadow: `0 0 0 1px rgba(0, 0, 0, 0.38), 0 0 14px color-mix(in oklch, var(--accent) 24%, transparent)`,
+        boxShadow:
+          "var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px var(--accent-glow)",
         pointerEvents: "none",
         zIndex: 5,
       }}
@@ -2159,8 +2178,11 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
           width: 6,
           height: 6,
           borderRadius: "50%",
-          background: running ? chipAccent : chipAccentSoft,
-          boxShadow: running ? `0 0 9px ${chipAccent}` : "none",
+          background: running
+            ? "var(--accent)"
+            : "color-mix(in oklch, var(--accent) 55%, transparent)",
+          boxShadow: running ? "0 0 9px var(--accent-glow)" : "none",
+          animation: running ? "spark-pulse 1.8s var(--ease-out) infinite" : undefined,
         }}
       />
       <span>{label}</span>

@@ -129,18 +129,35 @@ function Pill({
       style={{
         padding: "4px 10px",
         fontSize: 11,
+        fontWeight: active ? 600 : 500,
         fontFamily: "var(--font-sans)",
         background: active
-          ? "color-mix(in oklch, var(--accent) 14%, transparent)"
+          ? "var(--accent-soft)"
           : "transparent",
         color: active ? "var(--accent)" : "var(--muted)",
-        border: "1px solid transparent",
+        border: active
+          ? "1px solid var(--accent-edge)"
+          : "1px solid transparent",
         borderRadius: 4,
-        cursor: "pointer",
+        cursor: "default",
         whiteSpace: "nowrap",
         maxWidth: 200,
         overflow: "hidden",
         textOverflow: "ellipsis",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+      }}
+      onMouseEnter={(e) => {
+        if (!active) {
+          e.currentTarget.style.background = "var(--hover)";
+          e.currentTarget.style.color = "var(--ink-dim)";
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!active) {
+          e.currentTarget.style.background = "transparent";
+          e.currentTarget.style.color = "var(--muted)";
+        }
       }}
     >
       {label}
@@ -215,29 +232,43 @@ function WorkersPill({
         style={{
           padding: "4px 10px",
           fontSize: 11,
+          fontWeight: active ? 600 : 500,
           fontFamily: "var(--font-sans)",
           background: active
-            ? "color-mix(in oklch, var(--accent) 14%, transparent)"
+            ? "var(--accent-soft)"
             : open
               ? "var(--hover-strong)"
               : "transparent",
           color: active ? "var(--accent)" : "var(--muted)",
-          border: "1px solid transparent",
+          border: active
+            ? "1px solid var(--accent-edge)"
+            : "1px solid transparent",
           borderRadius: 4,
-          cursor: "pointer",
+          cursor: "default",
           display: "inline-flex",
           alignItems: "center",
           gap: 4,
+          transition:
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
         }}
       >
         <span>Workers</span>
-        <span aria-hidden style={{ fontSize: 9, opacity: 0.7 }}>
+        <span
+          aria-hidden
+          style={{
+            fontSize: 9,
+            opacity: 0.7,
+            transform: open ? "rotate(180deg)" : "none",
+            transition: "transform var(--motion-fast) var(--ease-out)",
+          }}
+        >
           ▾
         </span>
       </button>
       {open && (
         <div
           role="menu"
+          className="spark-fade-in"
           style={{
             position: "absolute",
             top: "calc(100% + 4px)",
@@ -245,9 +276,9 @@ function WorkersPill({
             zIndex: 30,
             minWidth: 180,
             border: "1px solid var(--rule-strong)",
-            borderRadius: 8,
+            borderRadius: 9,
             background: "var(--panel-2)",
-            boxShadow: "var(--shadow-2)",
+            boxShadow: "var(--shadow-2), var(--lift-hi)",
             padding: 5,
             display: "flex",
             flexDirection: "column",
@@ -269,19 +300,22 @@ function WorkersPill({
                 style={{
                   appearance: "none",
                   textAlign: "left",
-                  background: isActive
-                    ? "color-mix(in oklch, var(--accent) 14%, transparent)"
-                    : "transparent",
-                  border: "none",
-                  padding: "6px 10px",
+                  background: isActive ? "var(--accent-soft)" : "transparent",
+                  border: isActive
+                    ? "1px solid var(--accent-edge)"
+                    : "1px solid transparent",
+                  padding: "5px 9px",
                   color: isActive ? "var(--accent)" : "var(--ink)",
                   fontFamily: "var(--font-sans)",
                   fontSize: 11.5,
-                  borderRadius: 4,
+                  fontWeight: isActive ? 600 : 500,
+                  borderRadius: 5,
                   cursor: "default",
                   whiteSpace: "nowrap",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
+                  transition:
+                    "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
                 }}
                 onMouseEnter={(e) => {
                   if (!isActive) e.currentTarget.style.background = "var(--hover)";

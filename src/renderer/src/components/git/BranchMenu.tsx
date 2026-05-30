@@ -289,7 +289,7 @@ export default function BranchMenu({
             background: "var(--panel-2)",
             border: "1px solid var(--rule-strong)",
             borderRadius: 8,
-            boxShadow: "0 18px 50px rgba(0,0,0,0.48)",
+            boxShadow: "var(--shadow-2)",
             overflow: "hidden",
             display: "flex",
             flexDirection: "column",
@@ -319,6 +319,7 @@ export default function BranchMenu({
                 background: "var(--bg)",
                 border: "1px solid var(--rule)",
                 borderRadius: 6,
+                boxShadow: "var(--well)",
                 color: "var(--ink)",
                 fontFamily: "var(--font-mono)",
                 fontSize: 11,
@@ -523,7 +524,9 @@ const BranchRow = React.memo(function BranchRow({
           : hover
             ? "color-mix(in oklch, var(--ink) 5%, transparent)"
             : "transparent",
-        transition: "background var(--motion-fast) var(--ease-out)",
+        boxShadow: isCurrent ? "inset 2px 0 0 var(--accent)" : "none",
+        transition:
+          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       <span

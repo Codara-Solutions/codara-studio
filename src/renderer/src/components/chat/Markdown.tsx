@@ -200,6 +200,9 @@ const CODE_BLOCK_STYLE: React.CSSProperties = {
   background: "var(--bg)",
   border: "1px solid var(--rule-soft)",
   borderRadius: 7,
+  // Recessed well — depth via the foundation token (light-theme-safe) so the
+  // code block reads as a sunk surface rather than a flat outlined box.
+  boxShadow: "var(--well)",
   padding: "9px 11px",
   overflowX: "auto",
   color: "var(--ink-dim)",

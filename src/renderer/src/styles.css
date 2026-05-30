@@ -85,6 +85,19 @@
   --shadow-2: 0 1px 0 oklch(1 0 0 / 0.03), 0 18px 44px rgba(0, 0, 0, 0.36);
   --shadow-glow: 0 0 0 1px var(--accent-edge),
                  0 0 28px var(--accent-glow);
+
+  /* Depth — the two inline-baked literals captured as tokens so components
+     stop hardcoding white/black (which smudge on light themes).
+       --lift-hi : the 1px top inset highlight that lifts a raised band; use as
+                   a box-shadow value, e.g. box-shadow: var(--lift-hi).
+       --well    : the soft recessed cast under a header / inside a well; use as
+                   a box-shadow value, e.g. box-shadow: var(--well).
+     Dark default mirrors the existing inset 0 1px 0 rgba(255,255,255,0.03)
+     highlight and a black-tinted inner recess. Each light theme re-tints both
+     (a 3% white highlight vanishes on bright paper; black wells read as soot),
+     exactly as --shadow-1/-2 are re-tinted per light palette. */
+  --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.04);
+  --well: inset 0 1px 2px oklch(0 0 0 / 0.22);
 }
 
 :root[data-theme="spark-classic"] {
@@ -194,6 +207,8 @@
   --hover-strong: color-mix(in oklch, var(--ink) 9%, transparent);
   --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.7), 0 8px 24px rgba(33, 31, 26, 0.1);
   --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.8), 0 18px 48px rgba(33, 31, 26, 0.16);
+  --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.7);
+  --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 12%, transparent);
 }
 
 :root[data-theme="github-light"] {
@@ -223,6 +238,8 @@
   --hover-strong: color-mix(in oklch, var(--ink) 8%, transparent);
   --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.9), 0 8px 24px rgba(31, 35, 40, 0.08);
   --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.95), 0 18px 48px rgba(31, 35, 40, 0.12);
+  --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.85);
+  --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 10%, transparent);
 }
 
 :root[data-theme="rose-pine-dawn"] {
@@ -252,6 +269,8 @@
   --hover-strong: color-mix(in oklch, var(--ink) 10%, transparent);
   --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.7), 0 8px 24px rgba(87, 82, 121, 0.1);
   --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.8), 0 18px 48px rgba(87, 82, 121, 0.16);
+  --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.7);
+  --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 11%, transparent);
 }
 
 :root[data-theme="catppuccin-latte"] {
@@ -282,6 +301,8 @@
   --hover-strong: color-mix(in oklch, var(--ink) 10%, transparent);
   --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.78), 0 8px 24px rgba(76, 79, 105, 0.12);
   --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.88), 0 18px 48px rgba(76, 79, 105, 0.18);
+  --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.78);
+  --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 11%, transparent);
 }
 
 * { box-sizing: border-box; }
@@ -879,4 +900,435 @@ a { color: inherit; }
 }
 .composer-fast.is-active {
   color: var(--accent);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   Spark UI kit — opt-in utility classes (additive; inline styles still work)
+   Encodes the design language so the component layer can converge on one
+   authoring idiom: token-driven color, tint-first depth, square panel
+   containers with rounding only on interactive elements, terminal-native
+   cursor: default on chrome, and reduced-motion-safe state transitions. Every
+   interactive class carries rest / hover / active / disabled and inherits the
+   global :focus-visible ring (--focus-ring). Nothing here is required — adopt a
+   class only where it removes a duplicated inline block, never to restyle.
+   ════════════════════════════════════════════════════════════════════════════ */
+
+/* ── Button ──────────────────────────────────────────────────────────────────
+   The standard chrome button. Default is a quiet ink-tinted surface; .is-primary
+   earns the one accent (rationed — only the committing action in a cluster);
+   .is-danger reserves the destructive red. Press settles via translateY, not a
+   bounce. Pair .is-danger with the existing two-step confirm pattern — this is
+   styling only, it adds no confirmation. */
+.spark-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 11px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: color-mix(in oklch, var(--ink) 4%, var(--panel));
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: default;
+  box-shadow: var(--lift-hi);
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
+}
+.spark-btn:hover {
+  background: color-mix(in oklch, var(--ink) 9%, var(--panel));
+  border-color: var(--rule-strong);
+}
+.spark-btn:active {
+  transform: translateY(0.5px);
+  background: color-mix(in oklch, var(--ink) 12%, var(--panel));
+  box-shadow: var(--well);
+}
+.spark-btn:disabled,
+.spark-btn[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: default;
+  box-shadow: none;
+}
+.spark-btn.is-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent-edge);
+}
+.spark-btn.is-primary:hover {
+  background: color-mix(in oklch, var(--accent) 90%, var(--ink));
+}
+.spark-btn.is-primary:active {
+  background: color-mix(in oklch, var(--accent) 82%, var(--ink));
+}
+.spark-btn.is-danger {
+  color: var(--danger);
+  border-color: color-mix(in oklch, var(--danger) 40%, transparent);
+  background: color-mix(in oklch, var(--danger) 8%, var(--panel));
+}
+.spark-btn.is-danger:hover {
+  background: var(--danger-soft);
+  border-color: color-mix(in oklch, var(--danger) 55%, transparent);
+}
+
+/* ── Icon button ─────────────────────────────────────────────────────────────
+   Square glyph button for toolbars and row affordances. Transparent at rest,
+   ink-tint on hover — matches the .spark-tab__close / .composer-fast idiom.
+   Size via --spark-icon-btn-size (default 22px) for 20-26px targets. */
+.spark-icon-btn {
+  --spark-icon-btn-size: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 var(--spark-icon-btn-size);
+  width: var(--spark-icon-btn-size);
+  height: var(--spark-icon-btn-size);
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.spark-icon-btn:hover {
+  background: color-mix(in oklch, var(--ink) 9%, transparent);
+  color: var(--ink);
+}
+.spark-icon-btn:active {
+  background: color-mix(in oklch, var(--ink) 13%, transparent);
+}
+.spark-icon-btn.is-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.spark-icon-btn:disabled,
+.spark-icon-btn[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── Text input & select shells ──────────────────────────────────────────────
+   A recessed well (--well) reading as an inset field, with an accent focus
+   edge. The select keeps native chrome but normalizes the shell. */
+.spark-input,
+.spark-select {
+  height: 26px;
+  width: 100%;
+  padding: 0 9px;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1;
+  box-shadow: var(--well);
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
+}
+.spark-input::placeholder { color: var(--muted-2); }
+.spark-input:hover,
+.spark-select:hover {
+  border-color: var(--rule-strong);
+}
+.spark-input:focus,
+.spark-input:focus-visible,
+.spark-select:focus,
+.spark-select:focus-visible {
+  outline: none;
+  border-color: var(--accent-edge);
+  box-shadow: var(--focus-ring);
+}
+.spark-input:disabled,
+.spark-select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.spark-input.spark-mono { font-family: var(--font-mono); }
+
+/* ── List / menu row ─────────────────────────────────────────────────────────
+   Full-width row for lists and menus. Hover is an ink-tint; .is-selected
+   carries the accent-edge + soft fill the way active rows read across the app.
+   --row-h drives the height for vertical rhythm. */
+.spark-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: var(--row-h);
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  text-align: left;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+.spark-row:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.spark-row:active {
+  background: var(--hover-strong);
+}
+.spark-row.is-selected {
+  color: var(--ink);
+  background: var(--accent-soft);
+  border-color: var(--accent-edge);
+  box-shadow: var(--shadow-glow);
+}
+.spark-row.is-disabled,
+.spark-row:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ── Card ────────────────────────────────────────────────────────────────────
+   A raised container. Square corners by default to honor the panel-container
+   rule (round only interactive children); set a radius inline if the card is
+   itself a floating element. Depth is tint + the 1px --lift-hi top highlight,
+   not a border on everything. */
+.spark-card {
+  background: var(--panel-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: 0;
+  box-shadow: var(--lift-hi);
+}
+
+/* ── Empty state ─────────────────────────────────────────────────────────────
+   Calm centered hint for empty / first-run / error surfaces — never a blank
+   void. The eyebrow names the absent thing; an optional body line explains.
+   Add the .spark-eyebrow utility to the label element. */
+.spark-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 96px;
+  padding: 24px 20px;
+  text-align: center;
+  color: var(--muted);
+}
+.spark-empty__body {
+  max-width: 280px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted-2);
+}
+
+/* ── Status badge ────────────────────────────────────────────────────────────
+   Small inline status marker. Neutral by default; tint with .is-ok / .is-danger
+   / .is-info / .is-warn. Always paired with a label or icon (never color alone)
+   so meaning survives low color vision. Use mono + tabular for counts. */
+.spark-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 16px;
+  padding: 0 6px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 4px;
+  background: color-mix(in oklch, var(--ink) 5%, transparent);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.spark-badge.is-ok {
+  color: var(--ok);
+  border-color: color-mix(in oklch, var(--ok) 35%, transparent);
+  background: var(--ok-soft);
+}
+.spark-badge.is-danger {
+  color: var(--danger);
+  border-color: color-mix(in oklch, var(--danger) 35%, transparent);
+  background: var(--danger-soft);
+}
+.spark-badge.is-info {
+  color: var(--info);
+  border-color: color-mix(in oklch, var(--info) 35%, transparent);
+  background: var(--info-soft);
+}
+.spark-badge.is-warn {
+  color: var(--warn);
+  border-color: color-mix(in oklch, var(--warn) 35%, transparent);
+  background: color-mix(in oklch, var(--warn) 14%, transparent);
+}
+.spark-badge.is-accent {
+  color: var(--accent);
+  border-color: var(--accent-edge);
+  background: var(--accent-soft);
+}
+
+/* ── Keycap ──────────────────────────────────────────────────────────────────
+   A physical-feeling key: raised panel face with the --lift-hi top highlight
+   and a --well bottom shadow. Mono, tabular, for shortcut hints. */
+.spark-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  background: var(--panel-3);
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  box-shadow: var(--lift-hi), var(--well);
+}
+
+/* ── Segmented control ───────────────────────────────────────────────────────
+   A track of mutually-exclusive options. The track is a recessed well; the
+   selected item lifts onto a raised face with the accent text. Mark the chosen
+   item with .is-selected and aria-pressed / role="tab" + aria-selected. */
+.spark-segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: var(--well);
+}
+.spark-segmented-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+.spark-segmented-item:hover:not(.is-selected) {
+  color: var(--ink);
+  background: var(--hover);
+}
+.spark-segmented-item.is-selected {
+  color: var(--ink);
+  background: var(--panel-2);
+  box-shadow: var(--lift-hi);
+}
+.spark-segmented-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── Popover / menu surface ──────────────────────────────────────────────────
+   The standard floating surface — popover, dropdown, context menu. --panel-2
+   face, --shadow-2 (overlay-grade), 8-10px radius. Mirrors the existing
+   .composer-model-menu and .spark-tabbar-picker authoring. */
+.spark-menu {
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  background: var(--panel-2);
+  box-shadow: var(--shadow-2);
+}
+.spark-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  text-align: left;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.spark-menu-item:hover {
+  background: var(--hover);
+}
+.spark-menu-item.is-active {
+  background: var(--accent-soft);
+  color: var(--ink);
+}
+.spark-menu-item.is-danger {
+  color: var(--danger);
+}
+.spark-menu-item.is-danger:hover {
+  background: var(--danger-soft);
+}
+.spark-menu-item:disabled,
+.spark-menu-item[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── Modal scrim ─────────────────────────────────────────────────────────────
+   A translucent veil behind a dialog. A faint backdrop tint, NOT a heavy blur
+   (heavy glassmorphism is an anti-reference). The mix darkens dark themes and
+   lightens-then-darkens light ones in-key with --bg. */
+.spark-scrim {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in oklch, var(--bg) 64%, transparent);
+  animation: spark-fade-in var(--motion-fast) var(--ease-out) both;
+}
+
+/* ── Divider ─────────────────────────────────────────────────────────────────
+   A hairline rule. Horizontal by default; add .is-vertical inside a flex row. */
+.spark-divider {
+  flex: 0 0 auto;
+  border: none;
+  margin: 0;
+  align-self: stretch;
+  background: var(--rule-soft);
+}
+.spark-divider:not(.is-vertical) {
+  height: 1px;
+  width: 100%;
+}
+.spark-divider.is-vertical {
+  width: 1px;
+  min-height: 100%;
 }

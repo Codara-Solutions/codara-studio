@@ -89,9 +89,12 @@ export function InlineInput({ initial, placeholder, onCommit, onCancel }: Props)
         border: "1px solid var(--accent-edge)",
         borderRadius: 4,
         outline: "none",
+        boxShadow: "var(--well), var(--focus-ring)",
         padding: "1px 6px",
         fontFamily: "var(--font-mono)",
         fontSize: 12,
+        transition:
+          "box-shadow var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     />
   );

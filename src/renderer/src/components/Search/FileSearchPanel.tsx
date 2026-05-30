@@ -168,12 +168,13 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
         display: "flex",
         alignItems: "flex-start",
         justifyContent: "center",
-        background: "rgba(0, 0, 0, 0.45)",
+        background: "color-mix(in oklch, var(--bg) 62%, transparent)",
         backdropFilter: "blur(4px)",
         WebkitBackdropFilter: "blur(4px)",
         fontFamily: "var(--font-sans)",
         padding: "60px 24px 24px",
       }}
+      className="spark-fade-in"
       onMouseDown={onClose}
     >
       <section
@@ -215,33 +216,86 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
               flex: "0 0 7px",
             }}
           />
-          <input
-            ref={inputRef}
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.currentTarget.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={cwd ? "Open file..." : "Open a workspace first"}
-            spellCheck={false}
-            disabled={!cwd}
-            style={{
-              flex: 1,
-              minWidth: 0,
-              appearance: "none",
-              background: "color-mix(in oklch, var(--ink) 3%, transparent)",
-              border: "1px solid var(--rule-soft)",
-              borderRadius: 7,
-              color: "var(--ink)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 13,
-              padding: "6px 10px",
-              outline: "none",
-            }}
-          />
+          <div style={{ position: "relative", flex: 1, minWidth: 0, display: "flex" }}>
+            <input
+              ref={inputRef}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.currentTarget.value)}
+              onKeyDown={handleKeyDown}
+              onFocus={(e) => {
+                e.currentTarget.style.borderColor = "var(--accent-edge)";
+                e.currentTarget.style.boxShadow = "var(--focus-ring)";
+              }}
+              onBlur={(e) => {
+                e.currentTarget.style.borderColor = "var(--rule-soft)";
+                e.currentTarget.style.boxShadow = "var(--well)";
+              }}
+              placeholder={cwd ? "Open file..." : "Open a workspace first"}
+              spellCheck={false}
+              disabled={!cwd}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                appearance: "none",
+                background: "var(--bg)",
+                border: "1px solid var(--rule-soft)",
+                borderRadius: 7,
+                color: "var(--ink)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 13,
+                padding: "6px 28px 6px 10px",
+                outline: "none",
+                boxShadow: "var(--well)",
+                transition:
+                  "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+              }}
+            />
+            {query.length > 0 ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setQuery("");
+                  inputRef.current?.focus();
+                }}
+                title="Clear query"
+                aria-label="Clear query"
+                style={{
+                  position: "absolute",
+                  top: "50%",
+                  right: 6,
+                  transform: "translateY(-50%)",
+                  appearance: "none",
+                  width: 18,
+                  height: 18,
+                  border: "none",
+                  borderRadius: 5,
+                  background: "transparent",
+                  color: "var(--muted)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  cursor: "default",
+                  transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--hover)";
+                  e.currentTarget.style.color = "var(--ink-dim)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "transparent";
+                  e.currentTarget.style.color = "var(--muted)";
+                }}
+              >
+                <CloseIcon size={9} />
+              </button>
+            ) : null}
+          </div>
           <button
             type="button"
             onClick={onClose}
             title="Close"
+            aria-label="Close"
             style={{
               appearance: "none",
               width: 26,
@@ -255,6 +309,16 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
               justifyContent: "center",
               cursor: "default",
               flex: "0 0 26px",
+              transition:
+                "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "var(--hover)";
+              e.currentTarget.style.color = "var(--ink-dim)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+              e.currentTarget.style.color = "var(--muted)";
             }}
           >
             <CloseIcon size={11} />
@@ -269,13 +333,17 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
           }}
         >
           {error ? (
-            <Empty text={`File search error: ${error}`} danger />
+            <Empty eyebrow="File search error" text={error} danger />
           ) : !cwd ? (
-            <Empty text="Open a workspace to search its files." />
+            <Empty eyebrow="No workspace" text="Open a workspace to search its files." />
           ) : loading ? (
-            <Empty text="Loading files..." />
+            <Empty eyebrow="Loading" text="Indexing the workspace…" loading />
           ) : rows.length === 0 ? (
-            <Empty text={files.length === 0 ? "No files found." : "No matching files."} />
+            files.length === 0 ? (
+              <Empty eyebrow="No files" text="This workspace has no files to open." />
+            ) : (
+              <Empty eyebrow="No matches" text="Nothing matched. Try a different name or path fragment." />
+            )
           ) : (
             <Virtuoso
               ref={virtuosoRef}
@@ -313,12 +381,13 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
           }}
         >
           <span>
-            {rows.length} shown of {files.length} files
+            <span style={{ color: "var(--ink-dim)" }}>{rows.length}</span> shown of{" "}
+            <span style={{ color: "var(--ink-dim)" }}>{files.length}</span> files
           </span>
           <span style={{ flex: 1 }} />
           {truncated ? (
             <span style={{ color: "var(--warn)" }}>
-              File list capped, refine the query
+              File list capped — refine the query
             </span>
           ) : null}
         </footer>
@@ -342,6 +411,7 @@ function FileResultRow({
     <div
       role="button"
       tabIndex={-1}
+      aria-selected={active}
       onMouseEnter={onMouseEnter}
       onClick={onClick}
       title={row.entry.path}
@@ -349,11 +419,17 @@ function FileResultRow({
         display: "flex",
         alignItems: "center",
         gap: 8,
-        padding: "5px 14px",
+        padding: "5px 14px 5px 11px",
         minHeight: 28,
-        background: active ? "var(--hover)" : "transparent",
+        borderLeft: active
+          ? "3px solid var(--accent)"
+          : "3px solid transparent",
+        background: active ? "var(--accent-soft)" : "transparent",
+        boxShadow: active ? "var(--shadow-glow)" : "none",
         color: "var(--ink-dim)",
         cursor: "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       <FileNodeIcon name={row.entry.name} isDir={false} size={15} />
@@ -391,21 +467,65 @@ function FileResultRow({
   );
 }
 
-function Empty({ text, danger = false }: { text: string; danger?: boolean }) {
+function Empty({
+  eyebrow,
+  text,
+  danger = false,
+  loading = false,
+}: {
+  eyebrow: string;
+  text: string;
+  danger?: boolean;
+  loading?: boolean;
+}) {
   return (
     <div
+      className="spark-fade-in"
       style={{
         height: "100%",
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        padding: 24,
-        color: danger ? "var(--danger)" : "var(--muted)",
-        fontSize: 12,
+        gap: 7,
+        padding: 32,
         textAlign: "center",
       }}
     >
-      {text}
+      <span
+        className="spark-eyebrow"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 7,
+          color: danger ? "var(--danger)" : "var(--muted)",
+        }}
+      >
+        {loading ? (
+          <span
+            aria-hidden
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: 999,
+              background: "var(--accent)",
+              boxShadow: "0 0 6px var(--accent-glow)",
+              animation: "spark-pulse 1.4s var(--ease-out) infinite",
+            }}
+          />
+        ) : null}
+        {eyebrow}
+      </span>
+      <span
+        style={{
+          maxWidth: 360,
+          color: danger ? "var(--danger)" : "var(--muted-2)",
+          fontSize: 12,
+          lineHeight: 1.5,
+        }}
+      >
+        {text}
+      </span>
     </div>
   );
 }

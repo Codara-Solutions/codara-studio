@@ -351,12 +351,27 @@ export default function DiffView({
         <span
           style={{
             flex: "0 0 auto",
+            display: "inline-flex",
+            alignItems: "center",
+            height: 16,
+            padding: "0 6px",
+            borderRadius: 999,
             fontFamily: "var(--font-sans)",
             fontSize: 9,
             letterSpacing: "0.1em",
             fontWeight: 700,
             textTransform: "uppercase",
             color: conflicted ? "var(--danger)" : staged ? "var(--ok)" : "var(--muted)",
+            background: conflicted
+              ? "var(--danger-soft)"
+              : staged
+                ? "var(--ok-soft)"
+                : "color-mix(in oklch, var(--ink) 5%, transparent)",
+            border: conflicted
+              ? "1px solid color-mix(in oklch, var(--danger) 40%, transparent)"
+              : staged
+                ? "1px solid color-mix(in oklch, var(--ok) 40%, transparent)"
+                : "1px solid var(--rule-soft)",
           }}
         >
           {conflicted ? "Conflict" : staged ? "Staged" : "Working"}
@@ -400,11 +415,13 @@ export default function DiffView({
             <Spinner /> <span style={{ marginLeft: 8 }}>Loading diff…</span>
           </DiffHint>
         ) : !diff || diff.error ? (
-          <DiffHint danger>{diff?.error ?? "Could not load this diff."}</DiffHint>
+          <DiffHint danger eyebrow="Diff error">
+            {diff?.error ?? "Could not load this diff."}
+          </DiffHint>
         ) : diff.binary ? (
-          <DiffHint>Binary file — no inline preview.</DiffHint>
+          <DiffHint eyebrow="Binary">Binary file — no inline preview.</DiffHint>
         ) : diff.lines.length === 0 ? (
-          <DiffHint>No textual changes to show.</DiffHint>
+          <DiffHint eyebrow="No changes">No textual changes to show.</DiffHint>
         ) : (
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
             {renderLines.map((r) =>
@@ -471,7 +488,8 @@ function DiffLineRow({
           width: 12,
           textAlign: "center",
           color: "inherit",
-          opacity: sign ? 0.7 : 0.25,
+          fontWeight: sign ? 700 : 400,
+          opacity: sign ? 0.9 : 0.25,
           userSelect: "none",
         }}
       >
@@ -671,6 +689,7 @@ function FileActionBar({
         padding: "0 8px",
         borderBottom: "1px solid var(--rule-soft)",
         background: "color-mix(in oklch, var(--ink) 2.5%, transparent)",
+        boxShadow: "var(--lift-hi)",
       }}
     >
       <span
@@ -885,21 +904,42 @@ function ApplyError({ text, onDismiss }: { text: string; onDismiss: () => void }
 function DiffHint({
   children,
   danger = false,
+  eyebrow,
 }: {
   children: React.ReactNode;
   danger?: boolean;
+  eyebrow?: string;
 }): React.ReactElement {
   return (
     <div
       style={{
         display: "flex",
+        flexDirection: "column",
         alignItems: "center",
-        padding: "14px 14px",
+        justifyContent: "center",
+        gap: 6,
+        minHeight: 96,
+        padding: "28px 18px",
+        textAlign: "center",
         fontSize: 11,
         color: danger ? "var(--danger)" : "var(--muted)",
       }}
     >
-      {children}
+      {eyebrow && (
+        <span
+          style={{
+            fontFamily: "var(--font-sans)",
+            fontSize: 9,
+            fontWeight: 800,
+            letterSpacing: "0.14em",
+            textTransform: "uppercase",
+            color: danger ? "var(--danger)" : "var(--muted-2)",
+          }}
+        >
+          {eyebrow}
+        </span>
+      )}
+      <span style={{ display: "inline-flex", alignItems: "center" }}>{children}</span>
     </div>
   );
 }

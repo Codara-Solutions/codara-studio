@@ -955,7 +955,7 @@ function Switch({ checked, onChange }: { checked: boolean; onChange: (next: bool
           : "1px solid var(--rule-strong)",
         background: checked ? "color-mix(in oklch, var(--accent) 28%, var(--panel))" : "var(--panel-3)",
         padding: 0,
-        cursor: "pointer",
+        cursor: "default",
         transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     >
@@ -1156,7 +1156,7 @@ const overlayStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  background: "rgba(0,0,0,0.64)",
+  background: "color-mix(in oklch, var(--bg) 64%, transparent)",
   backdropFilter: "blur(5px)",
   WebkitBackdropFilter: "blur(5px)",
   fontFamily: "var(--font-sans)",
@@ -1248,6 +1248,8 @@ const searchInputStyle: React.CSSProperties = {
   fontFamily: "var(--font-sans)",
   fontSize: 12,
   outline: "none",
+  boxShadow: "var(--well)",
+  transition: "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
 };
 
 const filterChipsStyle: React.CSSProperties = {
@@ -1268,7 +1270,8 @@ const filterChipStyle: React.CSSProperties = {
   fontSize: 11,
   fontWeight: 700,
   letterSpacing: 0.02,
-  cursor: "pointer",
+  cursor: "default",
+  transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
 };
 
 const filterChipActiveStyle: React.CSSProperties = {
@@ -1282,7 +1285,7 @@ const panelStyle: React.CSSProperties = {
   borderRadius: 8,
   padding: 12,
   background: "color-mix(in oklch, var(--panel-2) 62%, var(--panel))",
-  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.025)",
+  boxShadow: "var(--lift-hi)",
   display: "grid",
   gap: 10,
 };
@@ -1410,6 +1413,7 @@ const tableShellStyle: React.CSSProperties = {
   borderRadius: 7,
   overflow: "auto",
   background: "color-mix(in oklch, var(--bg) 22%, transparent)",
+  boxShadow: "var(--well)",
 };
 
 const ROW_GRID = "minmax(150px, 1.35fr) minmax(88px, 0.85fr) minmax(88px, 0.85fr) minmax(88px, 0.85fr) 58px";
@@ -1497,6 +1501,7 @@ const addButtonStyle: React.CSSProperties = {
   fontSize: 11,
   fontWeight: 700,
   whiteSpace: "nowrap",
+  transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
 };
 
 // --- Spark Built-ins section ---------------------------------------------
@@ -1659,6 +1664,7 @@ const builtinActionStyle: React.CSSProperties = {
   fontSize: 11,
   fontWeight: 720,
   width: "100%",
+  transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
 };
 
 const builtinInstallButtonStyle: React.CSSProperties = {
@@ -1743,7 +1749,8 @@ const uninstallButtonStyle: React.CSSProperties = {
   fontFamily: "var(--font-sans)",
   fontSize: 11,
   fontWeight: 700,
-  cursor: "pointer",
+  cursor: "default",
+  transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
 };
 
 const uninstallConfirmStyle: React.CSSProperties = {
@@ -1800,7 +1807,8 @@ const ghostButtonStyle: React.CSSProperties = {
   fontFamily: "var(--font-sans)",
   fontSize: 12,
   fontWeight: 700,
-  cursor: "pointer",
+  cursor: "default",
+  transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
 };
 
 const primaryButtonStyle: React.CSSProperties = {

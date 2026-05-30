@@ -119,7 +119,8 @@ export default function UpdateBanner() {
             flex: 1,
             height: 4,
             background: "var(--rule-soft)",
-            borderRadius: 2,
+            boxShadow: "var(--well)",
+            borderRadius: 999,
             overflow: "hidden",
             maxWidth: 220,
           }}
@@ -129,6 +130,7 @@ export default function UpdateBanner() {
               width: `${state.percent}%`,
               height: "100%",
               background: "var(--accent)",
+              borderRadius: 999,
               transition: "width var(--motion-fast) var(--ease-out)",
             }}
           />
@@ -145,15 +147,23 @@ export default function UpdateBanner() {
           style={{
             appearance: "none",
             background: "var(--accent)",
-            color: "var(--bg)",
+            color: "var(--accent-ink)",
             border: "none",
+            boxShadow: "var(--lift-hi)",
             padding: "4px 12px",
             fontFamily: "var(--font-sans)",
             fontSize: 12,
             fontWeight: 600,
             letterSpacing: "0.02em",
-            borderRadius: 3,
+            borderRadius: 5,
             cursor: "default",
+            transition: "background var(--motion-fast) var(--ease-out)",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "color-mix(in oklch, var(--accent) 88%, var(--ink))";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "var(--accent)";
           }}
         >
           Restart and install
@@ -175,15 +185,17 @@ export default function UpdateBanner() {
   // app scrolls; full width keeps it noticeable.
   return (
     <div
+      className="spark-fade-in"
       style={{
         position: "fixed",
         top: 0,
         left: 0,
         right: 0,
         zIndex: 1000,
-        background: state.kind === "error" ? "var(--danger-soft, #5a1d1d)" : "var(--accent-soft)",
+        background: state.kind === "error" ? "var(--danger-soft)" : "var(--accent-soft)",
         color: "var(--ink)",
         borderBottom: "1px solid var(--rule-strong)",
+        boxShadow: "var(--lift-hi)",
         padding: "6px 16px",
         display: "flex",
         alignItems: "center",
@@ -209,8 +221,18 @@ export default function UpdateBanner() {
             fontFamily: "var(--font-sans)",
             fontSize: 11,
             letterSpacing: "0.02em",
-            borderRadius: 3,
+            borderRadius: 5,
             cursor: "default",
+            transition:
+              "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "var(--hover)";
+            e.currentTarget.style.color = "var(--ink)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.color = "var(--ink-dim)";
           }}
         >
           Dismiss

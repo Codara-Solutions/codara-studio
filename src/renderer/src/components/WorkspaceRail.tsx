@@ -539,7 +539,10 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
   const [hover, setHover] = useState(false);
   return (
     <div style={{ padding: "18px 6px", lineHeight: 1.55 }}>
-      <div style={{ marginBottom: 4, fontSize: 14, fontWeight: 600, color: "var(--ink)" }}>
+      <div
+        className="spark-eyebrow"
+        style={{ marginBottom: 8, color: "var(--muted)" }}
+      >
         No workspaces yet
       </div>
       <div style={{ marginBottom: 16, fontSize: 12, color: "var(--muted)" }}>
@@ -739,9 +742,9 @@ function WorkspaceRow({
             : "1px solid transparent",
         borderRadius: 7,
         boxShadow: active
-          ? `0 0 0 1px color-mix(in oklch, ${accent} 18%, transparent), 0 8px 18px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.035)`
+          ? `0 0 0 1px color-mix(in oklch, ${accent} 18%, transparent), var(--shadow-1), var(--lift-hi)`
           : rowHover || editing
-            ? "inset 0 1px 0 rgba(255, 255, 255, 0.035)"
+            ? "var(--lift-hi)"
             : "none",
         marginBottom: 5,
         transition:
@@ -855,6 +858,7 @@ function WorkspaceRow({
         ) : (
           <div style={{ display: "flex", alignItems: "center", minWidth: 0, flex: 1 }}>
             <span
+              title={ws.name}
               style={{
                 fontSize: 12,
                 fontWeight: 600,
@@ -885,13 +889,9 @@ function WorkspaceRow({
           title={editing ? "Done" : "Edit workspace"}
           style={{
             appearance: "none",
-            background: editing
-              ? "transparent"
-              : moreHover
-                ? "transparent"
-                : "transparent",
+            background: "transparent",
             border: "none",
-            borderRadius: 0,
+            borderRadius: 5,
             color: editing ? accent : moreHover || active ? "var(--ink-dim)" : "var(--muted-2)",
             width: 18,
             height: 20,

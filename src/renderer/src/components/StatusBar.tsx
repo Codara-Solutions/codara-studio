@@ -29,12 +29,24 @@ function StatusBar({ workspace, defaultShell, platform, workerCount }: Props) {
         height: 24,
         background: "var(--bg)",
         borderTop: "1px solid var(--rule)",
+        boxShadow: "var(--lift-hi)",
         display: "flex",
         alignItems: "stretch",
         color: "var(--ink-dim)",
       }}
     >
-      <div style={{ width: 6, background: workspace?.color || "var(--accent)", flex: "0 0 6px" }} />
+      <div
+        style={{
+          width: 6,
+          background: workspace?.color || "var(--accent)",
+          // Soft inner highlight so the workspace-color chip reads as a
+          // deliberate state marker, not a raw stripe. Token-mix keeps the
+          // sheen legible on light themes.
+          boxShadow: "inset 0 1px 0 color-mix(in oklch, var(--bg) 35%, transparent)",
+          flex: "0 0 6px",
+        }}
+        title={workspace?.name ? `Workspace: ${workspace.name}` : "No workspace"}
+      />
       {items.map((it, i) => (
         <div
           key={i}
@@ -50,9 +62,10 @@ function StatusBar({ workspace, defaultShell, platform, workerCount }: Props) {
           <span
             style={{
               color: "var(--muted)",
+              fontFamily: "var(--font-sans)",
               fontWeight: 600,
               fontSize: 9,
-              letterSpacing: "0.12em",
+              letterSpacing: "0.14em",
               textTransform: "uppercase",
             }}
           >
@@ -91,9 +104,10 @@ function StatusBar({ workspace, defaultShell, platform, workerCount }: Props) {
           <span
             style={{
               color: "var(--muted)",
+              fontFamily: "var(--font-sans)",
               fontWeight: 600,
               fontSize: 9,
-              letterSpacing: "0.12em",
+              letterSpacing: "0.14em",
               textTransform: "uppercase",
             }}
           >
