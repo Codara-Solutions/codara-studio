@@ -1,7 +1,7 @@
 import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard } from "electron";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
@@ -9,6 +9,7 @@ import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, listDir, listFiles, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPath, setAllowedRoots } from "./fs-sandbox";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
+import { sparkHome } from "./spark-home";
 import { detectAgentRuntimes } from "./agent-runtimes";
 import { loadPreferences, setPreference } from "./preferences-store";
 import * as pty from "./pty-manager";
@@ -60,6 +61,10 @@ async function getGitApply(): Promise<typeof import("./git-apply")> {
   return gitApplyMod;
 }
 
+async function getGitWorktrees(): Promise<typeof import("./git-worktrees")> {
+  return import("./git-worktrees");
+}
+
 let agentSyncMod: typeof import("./agent-sync") | undefined;
 async function getAgentSync(): Promise<typeof import("./agent-sync")> {
   agentSyncMod ??= await import("./agent-sync");
@@ -100,6 +105,7 @@ import type {
   GitCommitDetailResult,
   GitCommitMessageResult,
   GitConflictSide,
+  GitCopyWorktreeResult,
   GitDiff,
   GitFileChange,
   GitLog,
@@ -653,6 +659,50 @@ export function registerIpc(): void {
     async (_e, input: { cwd: string; name: string }): Promise<GitOpResult> => {
       const { mergeBranch } = await getGitBranches();
       return mergeBranch(input.cwd, input.name);
+    },
+  );
+
+  // ── Copy-branch worktrees ───────────────────────────────────────────────────
+  ipcMain.handle(
+    "git:createCopyWorktree",
+    async (
+      _e,
+      input: { repoCwd: string; baseBranch?: string; city?: string },
+    ): Promise<GitCopyWorktreeResult> => {
+      const { createCopyWorktree } = await getGitWorktrees();
+      const worktreesRoot = join(sparkHome(), "worktrees", basename(input.repoCwd));
+      const result = await createCopyWorktree({
+        repoCwd: input.repoCwd,
+        worktreesRoot,
+        baseBranch: input.baseBranch,
+        city: input.city,
+      });
+      if (result.ok) {
+        // The new branch is a shared ref — refresh the source repo's panel.
+        const { invalidateGitCache } = await getGitOps();
+        invalidateGitCache(input.repoCwd);
+      }
+      return result;
+    },
+  );
+
+  ipcMain.handle(
+    "git:removeCopyWorktree",
+    async (
+      _e,
+      input: {
+        repoCwd: string;
+        worktreePath: string;
+        branch: string;
+        force?: boolean;
+        deleteBranch?: boolean;
+      },
+    ): Promise<GitOpResult> => {
+      const { removeCopyWorktree } = await getGitWorktrees();
+      const result = await removeCopyWorktree(input);
+      const { invalidateGitCache } = await getGitOps();
+      invalidateGitCache(input.repoCwd);
+      return result;
     },
   );
 

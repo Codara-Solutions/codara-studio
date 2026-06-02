@@ -26,6 +26,7 @@ import type {
   GitCommitDetailResult,
   GitCommitMessageResult,
   GitConflictSide,
+  GitCopyWorktreeResult,
   GitDiff,
   GitFileChange,
   GitLog,
@@ -339,6 +340,24 @@ const api = {
       ipcRenderer.invoke("git:deleteBranch", { cwd, name, force }),
     mergeBranch: (cwd: string, name: string): Promise<GitOpResult> =>
       ipcRenderer.invoke("git:mergeBranch", { cwd, name }),
+
+    // Copy-branch worktrees
+    createCopyWorktree: (
+      repoCwd: string,
+      opts?: { baseBranch?: string; city?: string },
+    ): Promise<GitCopyWorktreeResult> =>
+      ipcRenderer.invoke("git:createCopyWorktree", {
+        repoCwd,
+        baseBranch: opts?.baseBranch,
+        city: opts?.city,
+      }),
+    removeCopyWorktree: (input: {
+      repoCwd: string;
+      worktreePath: string;
+      branch: string;
+      force?: boolean;
+      deleteBranch?: boolean;
+    }): Promise<GitOpResult> => ipcRenderer.invoke("git:removeCopyWorktree", input),
 
     // Stash
     stashes: (cwd: string): Promise<GitStashList> => ipcRenderer.invoke("git:stashes", cwd),
