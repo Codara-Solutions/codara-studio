@@ -9,39 +9,48 @@ import { errorText, readGitText, runGit } from "./git-exec";
 // the caller (ipc.ts). Keep this dependency-light: the integration test bundles
 // it with esbuild and the only runtime import is ./git-exec.
 
-// City slugs used to name copy-branch worktrees, à la Conductor. Lowercase,
-// hyphenated, filesystem- and branch-name-safe.
-const CITY_SLUGS = [
-  "lisbon", "porto", "madrid", "seville", "valencia", "bilbao", "granada",
-  "paris", "lyon", "marseille", "nice", "bordeaux", "nantes", "toulouse",
-  "berlin", "munich", "hamburg", "cologne", "leipzig", "dresden", "bremen",
-  "rome", "milan", "naples", "turin", "venice", "verona", "bologna", "genoa",
-  "amsterdam", "rotterdam", "utrecht", "haarlem", "leiden", "delft",
-  "vienna", "graz", "salzburg", "linz", "innsbruck",
-  "zurich", "geneva", "basel", "bern", "lausanne",
-  "oslo", "bergen", "stavanger", "tromso",
-  "stockholm", "gothenburg", "malmo", "uppsala",
-  "copenhagen", "aarhus", "odense", "aalborg",
-  "helsinki", "espoo", "tampere", "turku",
-  "dublin", "cork", "galway", "limerick",
-  "london", "manchester", "bristol", "leeds", "york", "bath", "oxford",
-  "edinburgh", "glasgow", "aberdeen", "dundee",
-  "lisbon-bay", "warsaw", "krakow", "gdansk", "wroclaw", "poznan",
-  "prague", "brno", "ostrava",
-  "budapest", "debrecen", "szeged",
-  "athens", "thessaloniki", "patras",
-  "tokyo", "osaka", "kyoto", "nagoya", "sapporo", "fukuoka", "sendai", "kobe",
-  "seoul", "busan", "incheon", "daegu",
-  "taipei", "kaohsiung", "tainan",
-  "singapore", "bangkok", "hanoi", "jakarta", "manila",
-  "sydney", "melbourne", "brisbane", "perth", "adelaide", "canberra", "hobart",
-  "auckland", "wellington", "christchurch",
-  "toronto", "montreal", "vancouver", "calgary", "ottawa", "quebec", "halifax",
-  "boston", "seattle", "portland", "austin", "denver", "chicago", "atlanta",
-  "phoenix", "dallas", "houston", "miami", "detroit", "nashville",
-  "tunis", "cairo", "casablanca", "marrakech", "nairobi", "lagos", "accra",
-  "rio", "saopaulo", "lima", "bogota", "quito", "santiago", "montevideo",
-  "reykjavik", "tallinn", "riga", "vilnius",
+// Parody pun-names of famous people used to name copy-branch worktrees, à la
+// Conductor's cities — just sillier. Lowercase, hyphenated, filesystem- and
+// branch-name-safe. Public figures across the board (politicians of every
+// stripe, world leaders, tech, historical, science, pop) are fair game; the
+// list parodies individuals, not groups.
+const PARODY_NAMES = [
+  // US politics
+  "donald-trumpeta", "donald-dump", "the-donald", "joe-bidone", "sleepy-joe",
+  "barack-obummer", "hillary-clintonne", "bernie-sandwiches", "ted-cruz-control",
+  "marco-rubiyo", "mitch-mcconman", "nancy-pelosaur", "chuck-schemer",
+  "kamala-camela", "mike-pencewise", "ron-desoto", "vivek-rampage",
+  "al-gore-rhythm", "mitt-romnoms", "john-mccainsugar", "sarah-failin",
+  "jeb-exclamation", "andrew-yangang",
+  // World leaders
+  "vladimir-putain", "dmitry-medvedka", "boris-johnsoff", "nigel-farageddon",
+  "rishi-sushi", "liz-trussed", "theresa-maybe", "tony-baloney",
+  "emmanuel-macroni", "angela-merkelwave", "olaf-scholtz", "giorgia-baloney",
+  "silvio-berluscoiny", "justin-trudough", "kim-jong-fun", "xi-jinpingpong",
+  "recep-erdogone", "bibi-netanyahoo", "narendra-moody",
+  // Tech
+  "elon-tusk", "elon-musket", "elon-muskrat", "mark-suckerberg", "the-zucc",
+  "jeff-bozos", "jeff-bezosaurus", "bill-grates", "bill-gatekeeper",
+  "steve-jobless", "steve-wozniyak", "sundar-pizzai", "tim-applesauce",
+  "jack-dorky", "sam-altmanic", "jensen-leatherjacket", "satya-nutella",
+  "larry-pagefault", "sergey-brinng", "peter-thielish", "marc-andreessing",
+  // Historical
+  "napoleon-bone-apart", "julius-caesar-salad", "alexander-the-grape",
+  "genghis-can", "attila-the-pun", "cleopatra-trick", "abraham-lincolnshire",
+  "george-washingmachine", "ben-franklinstein", "thomas-jefferspoon",
+  "teddy-bearosevelt", "winston-churchillin", "christopher-colombo", "marco-pollo",
+  // Science
+  "albert-einsteinway", "isaac-newtoff", "nikola-teslacoil", "charles-darwinning",
+  "galileo-figaro", "stephen-hawkingradar", "marie-curious", "gregor-mendelorian",
+  // Pop culture
+  "taylor-drift", "kanye-best", "snoop-doggo", "dwayne-the-pebble",
+  "leonardo-dicaprisun", "brad-pitstop", "keanu-greaves", "morgan-freebie",
+  "samuel-l-jacksonville", "arnold-schwarzenburger", "tom-cruisecontrol",
+  "will-smithereens", "beyon-slay", "lady-gigabyte", "freddie-mercurial",
+  "david-bowtie", "mick-jaggernaut",
+  // Internet / misc
+  "gordon-ramsay-spicy", "david-attenborrow", "neil-degrasse-nyson",
+  "chuck-norris-cache", "bob-rossignol", "hulk-smashed",
 ];
 
 export interface CreateCopyWorktreeInput {
@@ -124,19 +133,19 @@ async function existingWorktreeDirs(worktreesRoot: string): Promise<Set<string>>
   }
 }
 
-// Pick a city slug not already used as a local branch name or an existing
-// worktree directory for this repo. If every base slug is taken, append a
+// Pick a parody name not already used as a local branch name or an existing
+// worktree directory for this repo. If every base name is taken, append a
 // numeric suffix to a random base until one is free.
 export async function pickCity(repoCwd: string, worktreesRoot: string): Promise<string> {
   const used = new Set<string>([
     ...(await localBranchNames(repoCwd)),
     ...(await existingWorktreeDirs(worktreesRoot)),
   ]);
-  const free = CITY_SLUGS.filter((c) => !used.has(c));
+  const free = PARODY_NAMES.filter((c) => !used.has(c));
   if (free.length > 0) {
     return free[Math.floor(Math.random() * free.length)];
   }
-  const base = CITY_SLUGS[Math.floor(Math.random() * CITY_SLUGS.length)];
+  const base = PARODY_NAMES[Math.floor(Math.random() * PARODY_NAMES.length)];
   for (let n = 2; ; n += 1) {
     const candidate = `${base}-${n}`;
     if (!used.has(candidate)) return candidate;
