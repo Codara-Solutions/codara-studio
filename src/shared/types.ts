@@ -59,6 +59,16 @@ export interface Workspace {
   cwd: string;
   color: string;
   workers: Worker[];
+  // Present only on workspaces created via "Create copy branch": this
+  // workspace's cwd is a git worktree forked from `repoCwd`. Its presence is
+  // what makes delete remove the worktree instead of just dropping the row.
+  copyBranch?: {
+    repoCwd: string; // source repo the worktree was forked from
+    branch: string; // branch checked out in this worktree (== city in v1)
+    baseBranch: string; // what it forked from, e.g. "main"
+    city: string; // generated slug (directory + branch name)
+    createdAt: string; // ISO timestamp
+  };
 }
 
 export interface AppState {
@@ -192,6 +202,10 @@ export interface AppPreferences {
   // `notifications: { enabled, sounds }` blobs from older spark-preferences
   // files are read at migration time and folded into these flags.
   notificationChannels: NotificationChannelsPref;
+  // "Create copy branch" setup command, keyed by absolute repo cwd. Run live
+  // in a terminal in the new worktree after creation. Repos with no entry use
+  // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
+  copyBranchSetupCommandByRepo: Record<string, string>;
 }
 
 export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "google/gemini-3.5-flash";
@@ -269,6 +283,8 @@ export const DEFAULT_NOTIFICATION_CHANNELS: NotificationChannelsPref = {
   osCues: true,
 };
 
+export const DEFAULT_COPY_BRANCH_SETUP_COMMAND = "npm install";
+
 export const DEFAULT_PREFERENCES: AppPreferences = {
   theme: "spark-classic",
   vimMode: false,
@@ -279,6 +295,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keybindings: {},
   disableHardwareAcceleration: false,
   notificationChannels: { ...DEFAULT_NOTIFICATION_CHANNELS },
+  copyBranchSetupCommandByRepo: {},
 };
 
 // Discriminated payload for the in-app toast IPC channel. `kind` drives the
@@ -617,6 +634,11 @@ export interface GitDiff {
 
 /** Result of a git mutation — stderr is surfaced verbatim on failure. */
 export type GitOpResult = { ok: true } | { ok: false; error: string };
+
+// Result of git:createCopyWorktree. Shared so renderer + main agree on shape.
+export type GitCopyWorktreeResult =
+  | { ok: true; path: string; branch: string; city: string; baseBranch: string }
+  | { ok: false; error: string };
 
 /** Result of asking Inline AI to draft an editable commit message. */
 export type GitCommitMessageResult =
