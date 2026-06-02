@@ -32,7 +32,7 @@ const PARODY_NAMES = [
   "elon-tusk", "elon-musket", "elon-muskrat", "mark-suckerberg", "the-zucc",
   "jeff-bozos", "jeff-bezosaurus", "bill-grates", "bill-gatekeeper",
   "steve-jobless", "steve-wozniyak", "sundar-pizzai", "tim-applesauce",
-  "jack-dorky", "sam-altmanic", "jensen-leatherjacket", "satya-nutella",
+  "jack-dorky", "sam-altmaniac", "jensen-leatherjacket", "satya-nutella",
   "larry-pagefault", "sergey-brinng", "peter-thielish", "marc-andreessing",
   // Historical
   "napoleon-bone-apart", "julius-caesar-salad", "alexander-the-grape",
