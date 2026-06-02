@@ -9,6 +9,7 @@ import type {
   SparkEvent,
   Workspace,
 } from "@shared/types";
+import { DEFAULT_COPY_BRANCH_SETUP_COMMAND } from "@shared/types";
 import { makeId } from "@shared/ids";
 import { backendPtySessionId } from "@shared/backend-pty";
 import WindowChrome from "./components/WindowChrome";
@@ -21,6 +22,7 @@ import UpdateBanner from "./components/UpdateBanner";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
 import ToastHost from "./components/Toast";
+import { CopyBranchDeleteDialog, CopyBranchErrorToast } from "./components/CopyBranchDialogs";
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
@@ -175,6 +177,10 @@ export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [copyBranchError, setCopyBranchError] = useState<string | null>(null);
+  const [pendingCopyDelete, setPendingCopyDelete] = useState<Workspace | null>(null);
+  const [copyDeleteBusy, setCopyDeleteBusy] = useState(false);
+  const [copyDeleteError, setCopyDeleteError] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showLeft, setShowLeft] = useState(true);
@@ -1032,7 +1038,7 @@ export default function App() {
     document.documentElement.style.setProperty("--accent", color);
   }, []);
 
-  const deleteWs = useCallback((id: string) => {
+  const removeWorkspaceFromState = useCallback((id: string) => {
     delete activeRunIdsByWorkspaceRef.current[id];
     if (activeIdRef.current === id) {
       disposeTerminalPanesInTabs(tabsRef.current.tabs);
@@ -1041,19 +1047,32 @@ export default function App() {
     }
     setWorkspaces((ws) => {
       const next = ws.filter((w) => w.id !== id);
-      // dispose pty for any workers in deleted workspace
       const removed = ws.find((w) => w.id === id);
       if (removed) {
         for (const worker of removed.workers) {
           void window.spark.pty.dispose(worker.id);
         }
       }
-      // Adjust active
       setActiveId((prev) => (prev === id ? next[0]?.id ?? null : prev));
       return next;
     });
     setEditingId(null);
   }, []);
+
+  const deleteWs = useCallback(
+    (id: string) => {
+      const target = workspaces.find((w) => w.id === id);
+      // Copy-branch workspaces own a worktree on disk — confirm + remove it
+      // rather than orphaning the directory.
+      if (target?.copyBranch) {
+        setCopyDeleteError(null);
+        setPendingCopyDelete(target);
+        return;
+      }
+      removeWorkspaceFromState(id);
+    },
+    [workspaces, removeWorkspaceFromState],
+  );
 
   const createWs = useCallback(async () => {
     const path = await window.spark.dialog.openDirectory(activeWorkspace?.cwd || home);
@@ -1072,6 +1091,79 @@ export default function App() {
     setActiveId(ws.id);
     setEditingId(ws.id);
   }, [workspaces, activeWorkspace, home]);
+
+  const createCopyBranchWs = useCallback(
+    async (sourceWs: Workspace) => {
+      const res = await window.spark.git.createCopyWorktree(sourceWs.cwd);
+      if (!res.ok) {
+        setCopyBranchError(res.error);
+        return;
+      }
+      setWorkspaces((list) => {
+        const usedColors = new Set(list.map((w) => w.color.toLowerCase()));
+        const color =
+          WORKSPACE_COLORS.find((c) => !usedColors.has(c.toLowerCase())) ?? WORKSPACE_COLORS[0];
+        const ws: Workspace = {
+          id: makeId("ws"),
+          name: res.city,
+          cwd: res.path,
+          color,
+          workers: [],
+          copyBranch: {
+            repoCwd: sourceWs.cwd,
+            branch: res.branch,
+            baseBranch: res.baseBranch,
+            city: res.city,
+            createdAt: new Date().toISOString(),
+          },
+        };
+        activeRunIdsByWorkspaceRef.current[ws.id] = null;
+        setActiveId(ws.id);
+        // Run the per-repo setup command live in a terminal in the new worktree.
+        void window.spark.preferences.load().then((prefs) => {
+          const cmd = (
+            prefs.copyBranchSetupCommandByRepo?.[sourceWs.cwd] ??
+            DEFAULT_COPY_BRANCH_SETUP_COMMAND
+          ).trim();
+          if (cmd) tabs.newTerminalTab(res.path, cmd);
+        });
+        return [...list, ws];
+      });
+    },
+    [tabs],
+  );
+
+  const handleCreateCopyBranch = useCallback(
+    (id: string) => {
+      const ws = workspaces.find((w) => w.id === id);
+      if (ws) void createCopyBranchWs(ws);
+    },
+    [workspaces, createCopyBranchWs],
+  );
+
+  const confirmCopyDelete = useCallback(
+    async (opts: { deleteBranch: boolean; force: boolean }) => {
+      const target = pendingCopyDelete;
+      if (!target?.copyBranch) return;
+      setCopyDeleteBusy(true);
+      setCopyDeleteError(null);
+      const result = await window.spark.git.removeCopyWorktree({
+        repoCwd: target.copyBranch.repoCwd,
+        worktreePath: target.cwd,
+        branch: target.copyBranch.branch,
+        force: opts.force,
+        deleteBranch: opts.deleteBranch,
+      });
+      setCopyDeleteBusy(false);
+      if (!result.ok) {
+        setCopyDeleteError(result.error);
+        return;
+      }
+      removeWorkspaceFromState(target.id);
+      setPendingCopyDelete(null);
+    },
+    [pendingCopyDelete, removeWorkspaceFromState],
+  );
 
   // ── File / editor tab integration ──────────────────────────────────────────
 
@@ -2009,6 +2101,7 @@ export default function App() {
             onReorder={reorderWs}
             onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
+            onCreateCopyBranch={handleCreateCopyBranch}
             onSplitChange={panels.setLeftSplit}
             onToggleSection={togglePanelSection}
             onMoveSection={movePanelSection}
@@ -2108,6 +2201,7 @@ export default function App() {
             onReorder={reorderWs}
             onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
+            onCreateCopyBranch={handleCreateCopyBranch}
             onSplitChange={panels.setRightSplit}
             onToggleSection={togglePanelSection}
             onMoveSection={movePanelSection}
@@ -2169,6 +2263,25 @@ export default function App() {
         />
 
         <ToastHost onSelectRun={handleSelectRun} />
+        <CopyBranchErrorToast
+          message={copyBranchError}
+          onDismiss={() => setCopyBranchError(null)}
+        />
+        {pendingCopyDelete?.copyBranch && (
+          <CopyBranchDeleteDialog
+            workspaceName={pendingCopyDelete.name}
+            branch={pendingCopyDelete.copyBranch.branch}
+            busy={copyDeleteBusy}
+            error={copyDeleteError}
+            onCancel={() => {
+              if (!copyDeleteBusy) {
+                setPendingCopyDelete(null);
+                setCopyDeleteError(null);
+              }
+            }}
+            onConfirm={confirmCopyDelete}
+          />
+        )}
       </div>
 
       <StatusBar
