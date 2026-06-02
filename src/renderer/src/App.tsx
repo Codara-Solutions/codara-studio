@@ -2221,7 +2221,7 @@ export default function App() {
             settings={settings}
             shells={shells}
             defaultShell={defaultShell}
-            workspaceCwd={activeWorkspace?.cwd ?? null}
+            workspaceCwd={activeWorkspace?.copyBranch?.repoCwd ?? activeWorkspace?.cwd ?? null}
             onClose={closeSettings}
             onSave={handleSaveSettings}
             onOpenRun={handleSettingsOpenRun}
