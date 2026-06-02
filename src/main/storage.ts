@@ -70,7 +70,7 @@ async function readSettingsFromDisk(): Promise<AppSettings> {
 }
 
 function normalize(w: Workspace): Workspace {
-  return {
+  const normalized: Workspace = {
     id: w.id,
     name: w.name ?? "workspace",
     cwd: w.cwd ?? app.getPath("home"),
@@ -79,6 +79,28 @@ function normalize(w: Workspace): Workspace {
       ? w.workers.filter((worker) => worker.kind !== "orchestration")
       : [],
   };
+  // Carry copy-branch provenance through verbatim when it is a well-formed
+  // object; without this the field is silently dropped on every state:save and
+  // delete would no longer know to remove the worktree.
+  const cb = w.copyBranch;
+  if (
+    cb &&
+    typeof cb === "object" &&
+    typeof cb.repoCwd === "string" &&
+    typeof cb.branch === "string" &&
+    typeof cb.baseBranch === "string" &&
+    typeof cb.city === "string" &&
+    typeof cb.createdAt === "string"
+  ) {
+    normalized.copyBranch = {
+      repoCwd: cb.repoCwd,
+      branch: cb.branch,
+      baseBranch: cb.baseBranch,
+      city: cb.city,
+      createdAt: cb.createdAt,
+    };
+  }
+  return normalized;
 }
 
 function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
