@@ -989,7 +989,7 @@ function WorkspaceRow({
                 }}
               />
               <RowMenuItem
-                label="Create copy branch"
+                label="Create copy"
                 onClick={() => {
                   setMenuOpen(false);
                   onCreateCopyBranch();
