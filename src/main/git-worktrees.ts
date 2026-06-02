@@ -48,9 +48,9 @@ const PARODY_NAMES = [
   "samuel-l-jacksonville", "arnold-schwarzenburger", "tom-cruisecontrol",
   "will-smithereens", "beyon-slay", "lady-gigabyte", "freddie-mercurial",
   "david-bowtie", "mick-jaggernaut",
-  // Internet / misc
+  // Internet / misc / infamous
   "gordon-ramsay-spicy", "david-attenborrow", "neil-degrasse-nyson",
-  "chuck-norris-cache", "bob-rossignol", "hulk-smashed",
+  "chuck-norris-cache", "bob-rossignol", "hulk-smashed", "osama-bin-laughin",
 ];
 
 export interface CreateCopyWorktreeInput {
