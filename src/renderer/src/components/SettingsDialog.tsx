@@ -11,6 +11,7 @@ import type {
 } from "@shared/types";
 import {
   APP_THEME_IDS,
+  DEFAULT_COPY_BRANCH_SETUP_COMMAND,
   DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
   EDITOR_THEME_IDS,
   INLINE_AI_DELAY_PRESETS,
@@ -64,6 +65,7 @@ export default function SettingsDialog({
   settings,
   shells,
   defaultShell,
+  workspaceCwd,
   initialTab = "general",
   onClose,
   onSave,
@@ -221,7 +223,7 @@ export default function SettingsDialog({
               overflow: "auto",
             }}
           >
-            {activeTab === "general" && <GeneralSettings />}
+            {activeTab === "general" && <GeneralSettings workspaceCwd={workspaceCwd} />}
             {activeTab === "editor" && <EditorSettings />}
             {activeTab === "terminal" && (
               <TerminalSettings
@@ -678,7 +680,7 @@ const APPEARANCE = APP_THEME_IDS.map((id) => ({
   ...APP_THEME_META[id],
 }));
 
-function GeneralSettings() {
+function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
   const { theme, setTheme } = useTheme();
   const { preferences, hydrated, setPreference } = usePreferences();
   return (
@@ -795,6 +797,79 @@ function GeneralSettings() {
           />
         </div>
       ) : null}
+
+      {workspaceCwd ? <CopyBranchSetupField workspaceCwd={workspaceCwd} /> : null}
+    </div>
+  );
+}
+
+function CopyBranchSetupField({ workspaceCwd }: { workspaceCwd: string }) {
+  const { preferences, hydrated, setPreference } = usePreferences();
+  const stored = preferences.copyBranchSetupCommandByRepo?.[workspaceCwd];
+  const [text, setText] = useState<string>(stored ?? DEFAULT_COPY_BRANCH_SETUP_COMMAND);
+
+  useEffect(() => {
+    setText(
+      preferences.copyBranchSetupCommandByRepo?.[workspaceCwd] ??
+        DEFAULT_COPY_BRANCH_SETUP_COMMAND,
+    );
+  }, [workspaceCwd, preferences.copyBranchSetupCommandByRepo]);
+
+  if (!hydrated) return null;
+
+  const commit = () => {
+    const trimmed = text.trim();
+    const next = { ...(preferences.copyBranchSetupCommandByRepo ?? {}) };
+    // Store only meaningful overrides; the default is implicit.
+    if (!trimmed || trimmed === DEFAULT_COPY_BRANCH_SETUP_COMMAND) {
+      delete next[workspaceCwd];
+    } else {
+      next[workspaceCwd] = trimmed;
+    }
+    void setPreference("copyBranchSetupCommandByRepo", next);
+  };
+
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div
+        style={{
+          height: 1,
+          background: "var(--rule-soft)",
+          margin: "2px 0",
+        }}
+      />
+      <SectionTitle
+        title="Copy-branch workspaces"
+        detail="Command run in a terminal in a new copy-branch worktree, to restore deps git doesn't track. Saved for this repo."
+      />
+      <Label text="Setup command">
+        <input
+          type="text"
+          value={text}
+          spellCheck={false}
+          placeholder={DEFAULT_COPY_BRANCH_SETUP_COMMAND}
+          onChange={(e) => setText(e.currentTarget.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              commit();
+              e.currentTarget.blur();
+            }
+          }}
+          style={{
+            appearance: "none",
+            width: "100%",
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+            color: "var(--ink)",
+            background: "var(--panel)",
+            border: "1px solid var(--rule)",
+            borderRadius: 6,
+            padding: "7px 9px",
+            outline: "none",
+          }}
+        />
+      </Label>
     </div>
   );
 }
