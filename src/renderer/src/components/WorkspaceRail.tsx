@@ -51,6 +51,7 @@ interface RailProps {
   onEdit: (id: string) => void;
   onChange: (id: string, patch: Partial<Workspace>) => void;
   onPreviewColor: (id: string, color: string) => void;
+  onCreateCopyBranch: (id: string) => void;
   onDelete: (id: string) => void;
   onReorder: (fromIndex: number, toIndex: number) => void;
   onCloseEditor: () => void;
@@ -232,6 +233,8 @@ function WorkspaceRail(props: RailProps) {
                       onChange={(patch) => props.onChange(w.id, patch)}
                       onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
                       onCloseEditor={props.onCloseEditor}
+                      onCreateCopyBranch={() => props.onCreateCopyBranch(w.id)}
+                      onDelete={() => props.onDelete(w.id)}
                       onRowDragStart={(event) => {
                         event.dataTransfer.effectAllowed = "move";
                         event.dataTransfer.setData(WORKSPACE_ROW_MIME, w.id);
@@ -585,6 +588,8 @@ interface RowProps {
   onChange: (patch: Partial<Workspace>) => void;
   onPreviewColor: (color: string) => void;
   onCloseEditor: () => void;
+  onCreateCopyBranch: () => void;
+  onDelete: () => void;
   onRowDragStart: (event: React.DragEvent<HTMLDivElement>) => void;
   onRowDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
   onRowDrop: (event: React.DragEvent<HTMLDivElement>) => void;
@@ -601,6 +606,8 @@ function WorkspaceRow({
   onChange,
   onPreviewColor,
   onCloseEditor,
+  onCreateCopyBranch,
+  onDelete,
   onRowDragStart,
   onRowDragOver,
   onRowDrop,
@@ -612,6 +619,8 @@ function WorkspaceRow({
   const [name, setName] = useState(ws.name);
   const [rowHover, setRowHover] = useState(false);
   const [moreHover, setMoreHover] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuWrapRef = useRef<HTMLDivElement | null>(null);
   // In-flight color while the OS color dialog is open. The native
   // <input type="color"> streams `input` events 30-60×/sec (sometimes faster)
   // during a drag. We keep the live value here for a LOCAL preview only — just
@@ -701,6 +710,24 @@ function WorkspaceRow({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editing]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (menuWrapRef.current && e.target instanceof Node && !menuWrapRef.current.contains(e.target)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
 
   const commitName = () => {
     const v = name.trim();
@@ -873,59 +900,106 @@ function WorkspaceRow({
           </div>
         )}
 
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (editing) {
-              commitName();
-              onCloseEditor();
-            } else {
-              onEdit();
-            }
-          }}
-          onMouseEnter={() => setMoreHover(true)}
-          onMouseLeave={() => setMoreHover(false)}
-          title={editing ? "Done" : "Edit workspace"}
-          style={{
-            appearance: "none",
-            background: "transparent",
-            border: "none",
-            borderRadius: 5,
-            color: editing ? accent : moreHover || active ? "var(--ink-dim)" : "var(--muted-2)",
-            width: 18,
-            height: 20,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            cursor: "default",
-            padding: 0,
-            flex: "0 0 18px",
-            opacity: moreHover || active || editing ? 1 : 0.72,
-            transition:
-              "color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
-          }}
-        >
-          {editing ? (
-            <svg
-              width="11"
-              height="11"
-              viewBox="0 0 10 10"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="square"
+        <div ref={menuWrapRef} style={{ position: "relative", flex: "0 0 18px" }}>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (editing) {
+                commitName();
+                onCloseEditor();
+              } else {
+                setMenuOpen((o) => !o);
+              }
+            }}
+            onMouseEnter={() => setMoreHover(true)}
+            onMouseLeave={() => setMoreHover(false)}
+            title={editing ? "Done" : "Workspace actions"}
+            style={{
+              appearance: "none",
+              background: "transparent",
+              border: "none",
+              borderRadius: 5,
+              color: editing
+                ? accent
+                : menuOpen || moreHover || active
+                  ? "var(--ink-dim)"
+                  : "var(--muted-2)",
+              width: 18,
+              height: 20,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "default",
+              padding: 0,
+              opacity: menuOpen || moreHover || active || editing ? 1 : 0.72,
+              transition:
+                "color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
+            }}
+          >
+            {editing ? (
+              <svg
+                width="11"
+                height="11"
+                viewBox="0 0 10 10"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="square"
+              >
+                <polyline points="1.5,5.5 4,8 8.5,2.5" />
+              </svg>
+            ) : (
+              <svg width="12" height="12" viewBox="0 0 10 10" fill="currentColor">
+                <circle cx="2" cy="5" r="1" />
+                <circle cx="5" cy="5" r="1" />
+                <circle cx="8" cy="5" r="1" />
+              </svg>
+            )}
+          </button>
+          {menuOpen && !editing && (
+            <div
+              role="menu"
+              style={{
+                position: "absolute",
+                top: 24,
+                right: 0,
+                minWidth: 168,
+                background: "var(--panel-2)",
+                border: "1px solid var(--rule)",
+                borderRadius: 7,
+                boxShadow: "var(--shadow-2)",
+                padding: 4,
+                zIndex: 20,
+                display: "grid",
+                gap: 2,
+              }}
             >
-              <polyline points="1.5,5.5 4,8 8.5,2.5" />
-            </svg>
-          ) : (
-            <svg width="12" height="12" viewBox="0 0 10 10" fill="currentColor">
-              <circle cx="2" cy="5" r="1" />
-              <circle cx="5" cy="5" r="1" />
-              <circle cx="8" cy="5" r="1" />
-            </svg>
+              <RowMenuItem
+                label="Edit"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onEdit();
+                }}
+              />
+              <RowMenuItem
+                label="Create copy branch"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onCreateCopyBranch();
+                }}
+              />
+              <RowMenuItem
+                label="Delete"
+                danger
+                onClick={() => {
+                  setMenuOpen(false);
+                  onDelete();
+                }}
+              />
+            </div>
           )}
-        </button>
+        </div>
       </div>
     </div>
   );
@@ -936,6 +1010,51 @@ function normalizeHex(c: string): string {
   // back to a default so React doesn't warn about a non-conforming value.
   if (/^#[0-9a-fA-F]{6}$/.test(c)) return c.toLowerCase();
   return "#f0c419";
+}
+
+function RowMenuItem({
+  label,
+  onClick,
+  danger = false,
+}: {
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        textAlign: "left",
+        width: "100%",
+        fontFamily: "inherit",
+        fontSize: 12,
+        fontWeight: 500,
+        padding: "6px 9px",
+        borderRadius: 5,
+        border: "none",
+        cursor: "default",
+        color: danger ? "var(--danger)" : "var(--ink)",
+        background: hover
+          ? danger
+            ? "var(--danger-soft)"
+            : "var(--hover)"
+          : "transparent",
+        transition: "background var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      {label}
+    </button>
+  );
 }
 
 export { WORKSPACE_COLORS };
