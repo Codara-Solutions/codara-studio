@@ -757,6 +757,8 @@ function WorkspaceRow({
         display: "flex",
         alignItems: "center",
         minHeight: 32,
+        // Copy-branch rows indent so they read as a child of their parent repo.
+        marginLeft: ws.copyBranch ? 14 : 0,
         padding: editing ? "5px 7px 5px 9px" : "5px 6px 5px 9px",
         background,
         cursor: "default",
@@ -779,31 +781,35 @@ function WorkspaceRow({
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minWidth: 0 }}>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (editing) colorRef.current?.click();
-          }}
-          tabIndex={editing ? 0 : -1}
-          title={editing ? "Change color" : undefined}
-          style={{
-            appearance: "none",
-            border: "none",
-            padding: 0,
-            width: active ? 9 : 8,
-            height: active ? 9 : 8,
-            borderRadius: 999,
-            background: accent,
-            flex: `0 0 ${active ? 9 : 8}px`,
-            cursor: "default",
-            boxShadow: editing
-              ? `0 0 0 3px color-mix(in oklch, ${accent} 24%, transparent)`
-              : active
-                ? `0 0 0 3px color-mix(in oklch, ${accent} 16%, transparent), 0 0 12px color-mix(in oklch, ${accent} 42%, transparent)`
-                : "0 0 0 2px color-mix(in oklch, var(--ink) 4%, transparent)",
-          }}
-        />
+        {ws.copyBranch && !editing ? (
+          <BranchGlyph color={accent} active={active} />
+        ) : (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (editing) colorRef.current?.click();
+            }}
+            tabIndex={editing ? 0 : -1}
+            title={editing ? "Change color" : undefined}
+            style={{
+              appearance: "none",
+              border: "none",
+              padding: 0,
+              width: active ? 9 : 8,
+              height: active ? 9 : 8,
+              borderRadius: 999,
+              background: accent,
+              flex: `0 0 ${active ? 9 : 8}px`,
+              cursor: "default",
+              boxShadow: editing
+                ? `0 0 0 3px color-mix(in oklch, ${accent} 24%, transparent)`
+                : active
+                  ? `0 0 0 3px color-mix(in oklch, ${accent} 16%, transparent), 0 0 12px color-mix(in oklch, ${accent} 42%, transparent)`
+                  : "0 0 0 2px color-mix(in oklch, var(--ink) 4%, transparent)",
+            }}
+          />
+        )}
         {editing && (
           <input
             ref={colorRef}
@@ -1054,6 +1060,43 @@ function RowMenuItem({
     >
       {label}
     </button>
+  );
+}
+
+// Branch glyph shown in place of the color dot on copy-branch workspace rows,
+// tinted with the inherited (parent) color so the row reads as a branch of it.
+function BranchGlyph({ color, active }: { color: string; active: boolean }) {
+  return (
+    <span
+      aria-hidden
+      title="Copy branch"
+      style={{
+        flex: "0 0 12px",
+        display: "grid",
+        placeItems: "center",
+        width: 12,
+        height: 14,
+        filter: active
+          ? `drop-shadow(0 0 5px color-mix(in oklch, ${color} 60%, transparent))`
+          : "none",
+      }}
+    >
+      <svg
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke={color}
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <line x1="6" x2="6" y1="3" y2="15" />
+        <circle cx="18" cy="6" r="3" />
+        <circle cx="6" cy="18" r="3" />
+        <path d="M18 9a9 9 0 0 1-9 9" />
+      </svg>
+    </span>
   );
 }
 

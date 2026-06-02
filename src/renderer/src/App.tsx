@@ -1100,14 +1100,12 @@ export default function App() {
         return;
       }
       setWorkspaces((list) => {
-        const usedColors = new Set(list.map((w) => w.color.toLowerCase()));
-        const color =
-          WORKSPACE_COLORS.find((c) => !usedColors.has(c.toLowerCase())) ?? WORKSPACE_COLORS[0];
         const ws: Workspace = {
           id: makeId("ws"),
           name: res.city,
           cwd: res.path,
-          color,
+          // Inherit the parent's color so the copy reads as a branch of it.
+          color: sourceWs.color,
           workers: [],
           copyBranch: {
             repoCwd: sourceWs.cwd,
@@ -1120,6 +1118,7 @@ export default function App() {
         activeRunIdsByWorkspaceRef.current[ws.id] = null;
         setActiveId(ws.id);
         // Run the per-repo setup command live in a terminal in the new worktree.
+        // Default is empty (opt-in) — nothing runs unless this repo has one set.
         void window.spark.preferences.load().then((prefs) => {
           const cmd = (
             prefs.copyBranchSetupCommandByRepo?.[sourceWs.cwd] ??
@@ -1127,7 +1126,20 @@ export default function App() {
           ).trim();
           if (cmd) tabs.newTerminalTab(res.path, cmd);
         });
-        return [...list, ws];
+        // Insert directly below the source workspace (and any existing copy
+        // branches of it) so it reads as an indented child of its parent.
+        const parentIdx = list.findIndex((w) => w.id === sourceWs.id);
+        if (parentIdx === -1) return [...list, ws];
+        let insertAt = parentIdx + 1;
+        while (
+          insertAt < list.length &&
+          list[insertAt].copyBranch?.repoCwd === sourceWs.cwd
+        ) {
+          insertAt += 1;
+        }
+        const next = list.slice();
+        next.splice(insertAt, 0, ws);
+        return next;
       });
     },
     [tabs],
