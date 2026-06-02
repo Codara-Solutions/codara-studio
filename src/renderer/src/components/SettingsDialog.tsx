@@ -840,14 +840,14 @@ function CopyBranchSetupField({ workspaceCwd }: { workspaceCwd: string }) {
       />
       <SectionTitle
         title="Copy-branch workspaces"
-        detail="Command run in a terminal in a new copy-branch worktree, to restore deps git doesn't track. Saved for this repo."
+        detail="Optional. Command run in a terminal in a new copy-branch worktree to restore deps git doesn't track (e.g. pnpm install). Blank = no setup. Saved for this repo."
       />
       <Label text="Setup command">
         <input
           type="text"
           value={text}
           spellCheck={false}
-          placeholder={DEFAULT_COPY_BRANCH_SETUP_COMMAND}
+          placeholder="e.g. pnpm install — leave blank for none"
           onChange={(e) => setText(e.currentTarget.value)}
           onBlur={commit}
           onKeyDown={(e) => {

@@ -71,16 +71,30 @@ async function branchExists(repoCwd: string, name: string): Promise<boolean> {
   }
 }
 
-// origin/HEAD → local main → local master → current branch → "main".
+async function remoteRefExists(repoCwd: string, name: string): Promise<boolean> {
+  try {
+    await runGit(repoCwd, ["show-ref", "--verify", "--quiet", `refs/remotes/${name}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The ref a new copy-branch forks from, à la Conductor ("Branched <city> from
+// origin/main"). Prefer the REMOTE default branch so a copy reflects canonical
+// main rather than a possibly-stale or dirty local main; fall back through the
+// local default branches to the current HEAD for repos without a remote. (The
+// name is historical — it returns a start-point ref, which may be a remote one
+// like "origin/main"; git worktree add resolves it to a commit either way.)
 export async function resolveDefaultBranch(repoCwd: string): Promise<string> {
   const originHead = await readGitText(repoCwd, [
     "symbolic-ref",
     "--short",
     "refs/remotes/origin/HEAD",
   ]);
-  if (originHead.startsWith("origin/")) {
-    return originHead.slice("origin/".length);
-  }
+  if (originHead.startsWith("origin/")) return originHead; // e.g. "origin/main"
+  if (await remoteRefExists(repoCwd, "origin/main")) return "origin/main";
+  if (await remoteRefExists(repoCwd, "origin/master")) return "origin/master";
   if (await branchExists(repoCwd, "main")) return "main";
   if (await branchExists(repoCwd, "master")) return "master";
   const current = await readGitText(repoCwd, ["rev-parse", "--abbrev-ref", "HEAD"]);

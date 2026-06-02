@@ -44,13 +44,16 @@ inside Spark itself, but as an **explicit action**, not as the behaviour of the
 |---|---|
 | Worktree backing | git worktree (not full clone) |
 | Worktree location | `~/.SparkAgent/worktrees/<repo-basename>/<city>/` |
-| Base branch | repo's default branch (local `main`, see resolver) |
+| Base branch | **remote default `origin/main`** (Conductor-faithful — "Branched from origin/main"), falling back to local main → master → current HEAD when there is no remote |
 | Create flow | one-click, random city, no dialog |
 | Naming | city slug is both the directory name and the branch name in v1 |
-| Setup step | per-repo configurable command, default `npm install`, run live in a Spark terminal |
+| Setup step | per-repo configurable command, **default empty (opt-in)** — nothing auto-runs (matches Conductor's optional setup script); set e.g. `pnpm install` per-repo where wanted |
+| Row appearance | copy-branch rows **inherit the parent workspace's color**, show a **branch glyph** (not the color dot), and are **indented + inserted directly under their parent** so they read as a branch of it |
 | Delete behaviour | confirm dialog each time: remove worktree (✓), optionally delete branch (☐, safe `-d`) |
 | Merge-back | via the existing Source Control branch menu (no new button) |
 | Menu home | the per-row `⋯` button, promoted to a popover |
+
+> **Revision (2026-06-02, post-first-run):** base changed from local `main` → `origin/main`; setup default changed from `npm install` → empty (opt-in); copy-branch rows now inherit parent color + branch glyph + indent. Rationale: testing on multi-repo workspaces where `main` is a stale baseline and repos use pnpm / have no root `package.json` showed `npm install` as a default produced spurious errors, and a distinct color/icon/indent makes the parent→branch relationship legible (per Conductor's UI).
 
 ## Architecture
 

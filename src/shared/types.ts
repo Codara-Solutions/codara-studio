@@ -283,7 +283,10 @@ export const DEFAULT_NOTIFICATION_CHANNELS: NotificationChannelsPref = {
   osCues: true,
 };
 
-export const DEFAULT_COPY_BRANCH_SETUP_COMMAND = "npm install";
+// Empty = opt-in: a fresh copy-branch worktree runs NO setup command by
+// default (matching Conductor's optional setup script). Users set a per-repo
+// command (e.g. "pnpm install") in Settings where they want one.
+export const DEFAULT_COPY_BRANCH_SETUP_COMMAND = "";
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
   theme: "spark-classic",
