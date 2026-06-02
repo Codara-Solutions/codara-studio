@@ -143,6 +143,14 @@ export async function pickCity(repoCwd: string, worktreesRoot: string): Promise<
   }
 }
 
+// Count tracked files materialized into the worktree, for the chat banner's
+// "copied N files" line (Conductor shows the same).
+async function countTrackedFiles(worktreePath: string): Promise<number> {
+  const out = await readGitText(worktreePath, ["ls-files"]);
+  if (!out) return 0;
+  return out.split(/\r?\n/).filter((line) => line.trim()).length;
+}
+
 export async function createCopyWorktree(
   input: CreateCopyWorktreeInput,
 ): Promise<GitCopyWorktreeResult> {
@@ -155,7 +163,8 @@ export async function createCopyWorktree(
     }
     mkdirSync(input.worktreesRoot, { recursive: true });
     await runGit(input.repoCwd, ["worktree", "add", path, "-b", city, baseBranch]);
-    return { ok: true, path, branch: city, city, baseBranch };
+    const fileCount = await countTrackedFiles(path);
+    return { ok: true, path, branch: city, city, baseBranch, fileCount };
   } catch (err) {
     return { ok: false, error: errorText(err) };
   }

@@ -98,6 +98,7 @@ function normalize(w: Workspace): Workspace {
       baseBranch: cb.baseBranch,
       city: cb.city,
       createdAt: cb.createdAt,
+      ...(typeof cb.fileCount === "number" ? { fileCount: cb.fileCount } : {}),
     };
   }
   return normalized;

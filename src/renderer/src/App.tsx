@@ -1113,6 +1113,7 @@ export default function App() {
             baseBranch: res.baseBranch,
             city: res.city,
             createdAt: new Date().toISOString(),
+            fileCount: res.fileCount,
           },
         };
         activeRunIdsByWorkspaceRef.current[ws.id] = null;

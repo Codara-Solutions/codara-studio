@@ -5,6 +5,7 @@ import SectionHeader, { type SectionHeaderDragProps } from "../../panels/Section
 import { CloseIcon, HistoryIcon } from "../icons";
 import ChatConversation from "./ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
+import CopyBranchWelcome from "./CopyBranchWelcome";
 import { TerminalPane } from "../Terminal/TerminalPane";
 import { describeRunStatus, statusToneColor } from "./timeline";
 
@@ -250,6 +251,8 @@ export default function ChatPanel({
                 </div>
               )}
             </div>
+          ) : workspace?.copyBranch ? (
+            <CopyBranchWelcome copyBranch={workspace.copyBranch} />
           ) : (
             <WelcomeState />
           )}

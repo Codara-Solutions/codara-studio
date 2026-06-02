@@ -57,6 +57,7 @@ async function main() {
       "fresh worktree should be clean",
     );
     assert.strictEqual(r.baseBranch, "main", "baseBranch should be main");
+    assert.ok(r.fileCount >= 1, `fileCount should be >= 1, got ${r.fileCount}`);
 
     const city2 = await wt.pickCity(repo, worktreesRoot);
     assert.notStrictEqual(city2, r.city, "pickCity should not reuse the created city");

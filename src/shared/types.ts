@@ -68,6 +68,7 @@ export interface Workspace {
     baseBranch: string; // what it forked from, e.g. "main"
     city: string; // generated slug (directory + branch name)
     createdAt: string; // ISO timestamp
+    fileCount?: number; // tracked files copied into the worktree (chat banner)
   };
 }
 
@@ -640,7 +641,7 @@ export type GitOpResult = { ok: true } | { ok: false; error: string };
 
 // Result of git:createCopyWorktree. Shared so renderer + main agree on shape.
 export type GitCopyWorktreeResult =
-  | { ok: true; path: string; branch: string; city: string; baseBranch: string }
+  | { ok: true; path: string; branch: string; city: string; baseBranch: string; fileCount: number }
   | { ok: false; error: string };
 
 /** Result of asking Inline AI to draft an editable commit message. */
