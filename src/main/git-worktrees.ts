@@ -50,7 +50,7 @@ const PARODY_NAMES = [
   "david-bowtie", "mick-jaggernaut",
   // Internet / misc / infamous
   "gordon-ramsay-spicy", "david-attenborrow", "neil-degrasse-nyson",
-  "chuck-norris-cache", "bob-rossignol", "hulk-smashed", "osama-bin-laughin",
+  "chuck-norris-cache", "bob-rossignol", "hulk-smashed", "osama-bin-hidin",
 ];
 
 export interface CreateCopyWorktreeInput {
