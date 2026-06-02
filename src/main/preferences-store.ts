@@ -142,6 +142,20 @@ function normalizeNotificationChannels(
   };
 }
 
+// Validate the per-repo copy-branch setup-command map: string keys → non-empty
+// string values. Anything malformed is dropped so a hand-edited prefs file
+// cannot inject non-strings.
+function normalizeCopyBranchSetupCommands(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object") return {};
+  const out: Record<string, string> = {};
+  for (const [repo, cmd] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof repo === "string" && repo.trim() && typeof cmd === "string" && cmd.trim()) {
+      out[repo] = cmd;
+    }
+  }
+  return out;
+}
+
 function normalize(
   input: Partial<AppPreferences> | null | undefined,
   opts: { migrateLegacyInlineDefault?: boolean } = {},
@@ -174,6 +188,9 @@ function normalize(
     notificationChannels: normalizeNotificationChannels(
       src.notificationChannels,
       (src as Record<string, unknown>).notifications,
+    ),
+    copyBranchSetupCommandByRepo: normalizeCopyBranchSetupCommands(
+      src.copyBranchSetupCommandByRepo,
     ),
   };
 }
