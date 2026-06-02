@@ -18,39 +18,34 @@ const PARODY_NAMES = [
   // US politics
   "donald-trumpeta", "donald-dump", "the-donald", "joe-bidone", "sleepy-joe",
   "barack-obummer", "hillary-clintonne", "bernie-sandwiches", "ted-cruz-control",
-  "marco-rubiyo", "mitch-mcconman", "nancy-pelosaur", "chuck-schemer",
-  "kamala-camela", "mike-pencewise", "ron-desoto", "vivek-rampage",
-  "al-gore-rhythm", "mitt-romnoms", "john-mccainsugar", "sarah-failin",
-  "jeb-exclamation", "andrew-yangang",
+  "mitch-mcconman", "nancy-pelosaur", "kamala-camela", "mike-pencewise",
+  "al-gore-rhythm", "mitt-romnoms", "sarah-failin",
   // World leaders
-  "vladimir-putain", "dmitry-medvedka", "boris-johnsoff", "nigel-farageddon",
-  "rishi-sushi", "liz-trussed", "theresa-maybe", "tony-baloney",
-  "emmanuel-macroni", "angela-merkelwave", "olaf-scholtz", "giorgia-baloney",
-  "silvio-berluscoiny", "justin-trudough", "kim-jong-fun", "xi-jinpingpong",
-  "recep-erdogone", "bibi-netanyahoo", "narendra-moody",
+  "vladimir-putain", "boris-johnsoff", "nigel-farageddon", "rishi-sushi",
+  "liz-trussed", "theresa-maybe", "emmanuel-macroni", "angela-merkelwave",
+  "justin-trudough", "kim-jong-fun", "xi-jinpingpong", "recep-erdogone",
+  "bibi-netanyahoo", "narendra-moody",
   // Tech
   "elon-tusk", "elon-musket", "elon-muskrat", "mark-suckerberg", "the-zucc",
   "jeff-bozos", "jeff-bezosaurus", "bill-grates", "bill-gatekeeper",
   "steve-jobless", "steve-wozniyak", "sundar-pizzai", "tim-applesauce",
   "jack-dorky", "sam-altmaniac", "jensen-leatherjacket", "satya-nutella",
-  "larry-pagefault", "sergey-brinng", "peter-thielish", "marc-andreessing",
   // Historical
   "napoleon-bone-apart", "julius-caesar-salad", "alexander-the-grape",
-  "genghis-can", "attila-the-pun", "cleopatra-trick", "abraham-lincolnshire",
-  "george-washingmachine", "ben-franklinstein", "thomas-jefferspoon",
-  "teddy-bearosevelt", "winston-churchillin", "christopher-colombo", "marco-pollo",
+  "genghis-can", "cleopatra-trick", "abraham-lincolnshire", "george-washingmachine",
+  "ben-franklinstein", "teddy-bearosevelt", "winston-churchillin",
+  "christopher-colombo", "marco-pollo",
   // Science
   "albert-einsteinway", "isaac-newtoff", "nikola-teslacoil", "charles-darwinning",
-  "galileo-figaro", "stephen-hawkingradar", "marie-curious", "gregor-mendelorian",
+  "stephen-hawkingradar", "marie-curious",
   // Pop culture
   "taylor-drift", "kanye-best", "snoop-doggo", "dwayne-the-pebble",
   "leonardo-dicaprisun", "brad-pitstop", "keanu-greaves", "morgan-freebie",
   "samuel-l-jacksonville", "arnold-schwarzenburger", "tom-cruisecontrol",
   "will-smithereens", "beyon-slay", "lady-gigabyte", "freddie-mercurial",
   "david-bowtie", "mick-jaggernaut",
-  // Internet / misc / infamous
-  "gordon-ramsay-spicy", "david-attenborrow", "neil-degrasse-nyson",
-  "chuck-norris-cache", "bob-rossignol", "hulk-smashed", "osama-bin-hidin",
+  // Infamous
+  "gordon-ramsay-spicy", "osama-bin-hidin",
 ];
 
 export interface CreateCopyWorktreeInput {
