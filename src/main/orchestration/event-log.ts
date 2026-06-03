@@ -2,6 +2,7 @@ import { BrowserWindow } from "electron";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import type { SparkEvent } from "@shared/types";
+import { FANOUT_EVENT } from "@shared/types";
 import { makeId } from "@shared/ids";
 import { sparkHome } from "../spark-home";
 
@@ -48,6 +49,87 @@ export async function appendEvent(input: AppendEventInput): Promise<SparkEvent> 
 
   broadcast(event);
   return event;
+}
+
+// --- Fan-out event helpers --------------------------------------------------
+// Thin typed wrappers around appendEvent for the first-class parallel fan-out
+// path. They only format a human message + payload and delegate to appendEvent
+// (which persists to events.jsonl and broadcasts); no other logic. run-store.ts
+// calls these instead of writing the literal `type` strings, so the event names
+// stay centralized here + in FANOUT_EVENT (src/shared/types.ts) and remain
+// greppable.
+
+// Emitted once at the launch site (behind an autopilot guard) when
+// hasConcreteParallelScope forces pickAutopilotTasks to collapse a would-be
+// parallel batch to a single serial task.
+export async function appendFanOutDowngradedEvent(input: {
+  workspaceId: string;
+  runId: string;
+  stepId?: string;
+  workerTaskId: string;
+  taskTitle: string;
+  reason: "no_concrete_scope";
+}): Promise<SparkEvent> {
+  return appendEvent({
+    workspaceId: input.workspaceId,
+    runId: input.runId,
+    stepId: input.stepId,
+    workerTaskId: input.workerTaskId,
+    type: FANOUT_EVENT.downgradedToSerial,
+    message: `Fan-out downgraded to serial: "${input.taskTitle}" has no concrete write scope`,
+    payload: {
+      taskTitle: input.taskTitle,
+      reason: input.reason,
+      workerTaskId: input.workerTaskId,
+    },
+  });
+}
+
+// Emitted when deriveDownstreamScopesFromFilesChanged overwrites empty /
+// broad-glob allowedPaths on downstream tasks with the concrete paths taken from
+// completed workers' real filesChanged.
+export async function appendWriteScopesDerivedEvent(input: {
+  workspaceId: string;
+  runId: string;
+  derived: Array<{ taskTitle: string; from: string[]; to: string[] }>;
+  sourceTaskTitles: string[];
+}): Promise<SparkEvent> {
+  const count = input.derived.length;
+  return appendEvent({
+    workspaceId: input.workspaceId,
+    runId: input.runId,
+    type: FANOUT_EVENT.writeScopesDerived,
+    message: `Derived concrete write scopes for ${count} downstream task${
+      count === 1 ? "" : "s"
+    } from real filesChanged`,
+    payload: {
+      count,
+      derived: input.derived,
+      sourceTaskTitles: input.sourceTaskTitles,
+    },
+  });
+}
+
+// Emitted when run-store deterministically synthesizes the forced worker_batch
+// from a seeded FanOutDirective (one parallel worker per target file).
+export async function appendFanOutDirectiveForcedEvent(input: {
+  workspaceId: string;
+  runId: string;
+  targetCount: number;
+  origin: string;
+}): Promise<SparkEvent> {
+  return appendEvent({
+    workspaceId: input.workspaceId,
+    runId: input.runId,
+    type: FANOUT_EVENT.directiveForced,
+    message: `Fan-out directive forced ${input.targetCount} parallel worker${
+      input.targetCount === 1 ? "" : "s"
+    } (origin: ${input.origin})`,
+    payload: {
+      targetCount: input.targetCount,
+      origin: input.origin,
+    },
+  });
 }
 
 export async function listEvents(runId: string): Promise<SparkEvent[]> {

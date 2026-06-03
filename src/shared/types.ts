@@ -1201,6 +1201,66 @@ export interface PlannedStepAgent {
   taskClass?: PlannedStepAgentTaskClass;
 }
 
+// First-class parallel fan-out. The renderer (composer "Fan out" button or the
+// Explorer multi-select context action) builds a FanOutDirective describing one
+// worker per target file, and seeds it onto the run via startAutopilot(fanOut)
+// or addRunMessage. run-store deterministically synthesizes a single
+// worker_batch — one worker per target, allowedPaths = [that file],
+// canRunParallel = true, disjoint scopes — so correctness does not depend on the
+// LLM manager honoring prose. The manager profile is also taught the
+// FAN_OUT_DIRECTIVE_MARKER contract so a seeded note is recognized.
+export interface FanOutDirective {
+  // Absolute or repo-relative target files; one parallel worker is forced per
+  // entry, each scoped to exactly its own path.
+  targets: string[];
+  // The user's one-line ask applied to every target (e.g. "add a doc header").
+  instruction?: string;
+  // Where the directive was raised, for auditing in the run graph / events.
+  origin: "composer" | "explorer";
+}
+
+// Stable, machine-recognizable prefix for a fan-out note body. Written by the
+// renderer (formatFanOutDirective) and detected by run-store + the manager
+// prompt-profile so a seeded directive is honored deterministically.
+export const FAN_OUT_DIRECTIVE_MARKER = "[FAN OUT]";
+
+// Render a FanOutDirective into a stable note body: the marker on its own line,
+// then one target per line, then the optional instruction. Kept deterministic
+// (no timestamps / ordering churn) so detection on the receiving side is exact.
+export function formatFanOutDirective(d: FanOutDirective): string {
+  const lines: string[] = [FAN_OUT_DIRECTIVE_MARKER, ...d.targets];
+  const instruction = d.instruction?.trim();
+  if (instruction) {
+    lines.push("", instruction);
+  }
+  return lines.join("\n");
+}
+
+// Single source of truth for the new fan-out event `type` strings shared by
+// event-log.ts (typed helpers) and run-store.ts (emit sites). appendEvent takes
+// a free-form `type: string`, so these need no schema change — centralizing the
+// literals here keeps the producer and any consumers in lockstep.
+export const FANOUT_EVENT = {
+  // Emitted once at the launch site (behind an autopilot guard) when
+  // hasConcreteParallelScope forces pickAutopilotTasks to return [first],
+  // collapsing a would-be parallel batch to serial.
+  downgradedToSerial: "fanout.downgraded_to_serial",
+  // Emitted when deriveDownstreamScopesFromFilesChanged overwrites empty /
+  // broad-glob allowedPaths on downstream tasks with concrete paths taken from
+  // completed workers' real filesChanged.
+  writeScopesDerived: "fanout.write_scopes_derived",
+  // Emitted when run-store synthesizes the forced worker_batch from a seeded
+  // FanOutDirective (one worker per target).
+  directiveForced: "fanout.directive_forced",
+} as const;
+
+// Provenance for a WorkerTask's allowedPaths, surfaced in the run graph so
+// derived / forced scopes are auditable without breaking existing readers:
+//   "manager"  — scopes came straight from a manager decision (default/legacy).
+//   "derived"  — overwritten from prior workers' real filesChanged.
+//   "fan-out"  — forced by a FanOutDirective (exactly one target file).
+export type WriteScopeSource = "manager" | "derived" | "fan-out";
+
 export interface WorkerTask {
   id: string;
   runId: string;
@@ -1218,6 +1278,11 @@ export interface WorkerTask {
   canRunParallel: boolean;
   conflictsWith: string[];
   taskClass?: PlannedStepAgentTaskClass;
+  // How allowedPaths was decided. Optional + backward-compatible: undefined on
+  // existing tasks reads as manager-provided scopes. Set to "derived" when
+  // overwritten from real filesChanged and "fan-out" when forced by a
+  // FanOutDirective.
+  writeScopeSource?: WriteScopeSource;
   createdBy: "spark" | "user" | "system";
   createdAt: string;
   updatedAt: string;
@@ -1466,6 +1531,10 @@ export interface CreateWorkerTaskInput {
   canRunParallel?: boolean;
   conflictsWith?: string[];
   taskClass?: PlannedStepAgentTaskClass;
+  // Provenance for allowedPaths; threads onto the created WorkerTask. Optional
+  // so existing createWorkerTask call sites keep compiling (undefined =
+  // manager-provided scopes).
+  writeScopeSource?: WriteScopeSource;
   createdBy?: WorkerTask["createdBy"];
 }
 
@@ -1517,6 +1586,12 @@ export interface StartAutopilotInput {
   // Code / Codex instead of the default OpenRouter manager. Undefined keeps
   // the legacy OpenRouter behaviour.
   chatBackend?: ChatBackendKind;
+  // First-class parallel fan-out. When set, the explorer/composer is asking the
+  // run to fan a single instruction across explicit per-target files. startAutopilot
+  // seeds it (via initialUserNote using formatFanOutDirective) and run-store
+  // deterministically synthesizes one forced worker_batch — one parallel worker
+  // per target, each scoped to its own path — instead of relying on the manager.
+  fanOut?: FanOutDirective;
 }
 
 export interface PauseRunInput {
