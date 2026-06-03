@@ -51,7 +51,7 @@ import {
   estimateTokensFromText,
 } from "@shared/context-window";
 import { normalizeChatFeatureFlags } from "@shared/chat-policy";
-import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
+import { appendEvent, appendRegressionRevertEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
 import { writeFileAtomic } from "../fs-atomic";
 import { loadSettings } from "../storage";
 import {
@@ -4814,6 +4814,42 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   });
   await updatePeerCommsRegistry(run, launchStep, task, attempt.id, paths, "launching").catch(() => undefined);
 
+  // Pre-worker snapshot: for impl/corrective workers (anything that mutates the
+  // workspace — skip verifier/manual), capture a checkpoint of the tree BEFORE
+  // the worker runs. A later verifier verdict that regresses a previously-green
+  // claim can then auto-restore the workspace to this exact pre-mutation state.
+  // Best-effort: a failed snapshot or non-git workspace yields sha=null and just
+  // disables restore for this attempt; it must never block the launch.
+  if (taskWritesWorkspace(task)) {
+    try {
+      const cwd = workspaceCwdFromRun(run) ?? attempt.cwd;
+      const checkpoint = await createCheckpoint({
+        runId: run.id,
+        cwd,
+        kind: "pre-worker",
+        messagePointer: run.humanMessages.length,
+        label: `pre-worker ${task.title}`,
+      });
+      attempt.preWorkerCheckpointSha = checkpoint.sha;
+      run.checkpoints = [...(run.checkpoints ?? []), checkpoint];
+      run.updatedAt = new Date().toISOString();
+      await saveRun(run);
+      await appendEvent({
+        timestamp: run.updatedAt,
+        workspaceId: run.workspaceId,
+        runId: run.id,
+        stepId: task.stepId,
+        workerTaskId: task.id,
+        attemptId: attempt.id,
+        type: "run.checkpoint_created",
+        message: `Checkpoint ${checkpoint.kind} ${checkpoint.id}`,
+        payload: { checkpointId: checkpoint.id, sha: checkpoint.sha, kind: checkpoint.kind },
+      });
+    } catch {
+      // Checkpoint capture is best-effort; never let it abort the launch.
+    }
+  }
+
   const result = await runWorkerSession({
     run,
     task,
@@ -5334,6 +5370,28 @@ async function reviewWorkerReportArtifact({
   });
   if (launchFallback) return launchFallback;
 
+  // Closed-loop verifier processing. Order matters:
+  //   1. Regression auto-restore — if this verdict fails a claim that a prior
+  //      verdict marked green, a later worker broke previously-working behavior;
+  //      revert the workspace to the most recent pre-worker snapshot and emit a
+  //      loud notice before anything else looks at the verdict.
+  //   2. Record this report's newly-verified claims as green — done BEFORE the
+  //      FEEDBACK short-circuit so a partial pass isn't lost when the same report
+  //      also re-enqueues the impl with corrective feedback.
+  //   3. FEEDBACK re-enqueue — deterministically re-run the impl worker with the
+  //      verifier's corrective prompt, skipping a full manager round-trip.
+  if (report.verifier) {
+    run = (await maybeRestoreGreenClaimRegression({ run, task, attempt, report })) ?? run;
+    run = await recordGreenClaims({ run, attempt, report });
+    const feedbackRetry = await maybeQueueVerifierFeedbackRetry({
+      run,
+      task,
+      attempt,
+      report,
+    });
+    if (feedbackRetry) return feedbackRetry;
+  }
+
   const decision = decideWorkerReport(report);
   const latest = await requireRun(run.id);
   const reviewedTask = latest.workerTasks.find((item) => item.id === task.id);
@@ -5620,6 +5678,240 @@ async function maybeQueueCliLaunchFallback({
           }
           step.updatedAt = timestamp;
         }
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Normalizes a verifier atomic-claim string into a stable key so the same claim
+// phrased with incidental whitespace/case differences across attempts maps to a
+// single green-map entry.
+function normalizeClaimKey(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+const VERIFIER_FEEDBACK_HEADER = "## VERIFIER FEEDBACK";
+
+// Detects a verifier FEEDBACK verdict and deterministically re-enqueues the
+// implementation task the verifier was checking, carrying the verifier's
+// correctivePrompt (plus failed atomic-claim bullets) into the next worker's
+// prompt by appending a `## VERIFIER FEEDBACK` block to the impl task's
+// description. Mirrors maybeQueueCliLaunchFallback: returns the updated run when
+// it re-enqueues (so the caller short-circuits the normal review and the loop
+// re-runs the same worker with the corrective prompt), or null when no FEEDBACK
+// retry applies (cap reached / no target / not a FEEDBACK verdict).
+async function maybeQueueVerifierFeedbackRetry({
+  run,
+  task,
+  attempt,
+  report,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attempt: WorkerAttempt;
+  report: WorkerReport;
+}): Promise<RunState | null> {
+  const verdict = report.verifier;
+  if (!verdict || verdict.confidence !== "FEEDBACK") return null;
+  const correctivePrompt = verdict.correctivePrompt?.trim();
+  if (!correctivePrompt) return null;
+
+  // Resolve the impl task to fix. Prefer a non-verifier, non-cancelled task in
+  // the same step (the impl the verifier was checking). If the reporting task is
+  // itself the impl (no separate verifier split), target it.
+  const target =
+    task.taskClass !== "verifier" && task.status !== "cancelled"
+      ? task
+      : run.workerTasks.find(
+          (t) =>
+            t.stepId === task.stepId &&
+            t.taskClass !== "verifier" &&
+            t.status !== "cancelled",
+        );
+  if (!target) return null;
+  const retriesUsed = countWorkerAttempts(run, target.id);
+  if (retriesUsed >= MAX_WORKER_ATTEMPTS) return null;
+
+  const failedClaims = (verdict.atomicClaims ?? []).filter(
+    (claim) => claim.verdict === "failed",
+  );
+  const claimBullets = failedClaims
+    .map((claim) => {
+      const evidence = claim.evidence?.trim();
+      return evidence
+        ? `- ${claim.claim.trim()} (evidence: ${evidence})`
+        : `- ${claim.claim.trim()}`;
+    })
+    .join("\n");
+  const feedbackBlock = [
+    VERIFIER_FEEDBACK_HEADER,
+    "",
+    "A cross-engine verifier reviewed your previous attempt and found it not yet",
+    "complete. Address this feedback, then re-verify before reporting:",
+    "",
+    correctivePrompt,
+    ...(claimBullets ? ["", "Failed checks:", claimBullets] : []),
+  ].join("\n");
+
+  const targetId = target.id;
+  return commitRunChange(run, {
+    type: "autopilot.verifier_feedback_retry",
+    stepId: target.stepId,
+    workerTaskId: targetId,
+    message: `Re-queuing ${target.title} with verifier corrective feedback (attempt ${retriesUsed + 1}/${MAX_WORKER_ATTEMPTS})`,
+    payload: {
+      targetTaskId: targetId,
+      verifierAttemptId: attempt.id,
+      correctivePrompt,
+      retriesUsed,
+    },
+    mutate: (draft, timestamp) => {
+      const targetTask = draft.workerTasks.find((t) => t.id === targetId);
+      if (!targetTask) return false;
+      // De-dupe: don't stack an identical feedback block across repeated
+      // retries. Guard on both the header and the corrective text already being
+      // present in the description.
+      const alreadyHasBlock =
+        targetTask.description.includes(VERIFIER_FEEDBACK_HEADER) &&
+        targetTask.description.includes(correctivePrompt);
+      if (!alreadyHasBlock) {
+        const trimmed = targetTask.description.replace(/\s+$/, "");
+        targetTask.description = `${trimmed}\n\n${feedbackBlock}`;
+      }
+      targetTask.status = "retry_queued";
+      targetTask.updatedAt = timestamp;
+      // Re-open the target's step so pickAutopilotTasks will relaunch it.
+      const step = targetTask.stepId
+        ? draft.steps.find((s) => s.id === targetTask.stepId)
+        : undefined;
+      if (step) {
+        if (isTerminalStepStatus(step.status) || step.status === "reviewing") {
+          step.status = "queued";
+        }
+        if (!step.workerTaskIds.includes(targetTask.id)) {
+          step.workerTaskIds.push(targetTask.id);
+        }
+        step.updatedAt = timestamp;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Marks the report's newly-verified atomic claims green on the run (claim key ->
+// the attempt that verified it). Records green even when the same report also
+// triggers a FEEDBACK re-enqueue, so a partial pass isn't lost on the retry.
+async function recordGreenClaims({
+  run,
+  attempt,
+  report,
+}: {
+  run: RunState;
+  attempt: WorkerAttempt;
+  report: WorkerReport;
+}): Promise<RunState> {
+  const verified = (report.verifier?.atomicClaims ?? []).filter(
+    (claim) => claim.verdict === "verified" && claim.claim.trim().length > 0,
+  );
+  if (verified.length === 0) return run;
+  return commitRunChange(run, {
+    type: "autopilot.green_claims_recorded",
+    workerTaskId: attempt.workerTaskId,
+    message: `Recorded ${verified.length} verified claim(s) as green`,
+    payload: { attemptId: attempt.id, count: verified.length },
+    mutate: (draft, timestamp) => {
+      const greenClaims = (draft.greenClaims ??= {});
+      for (const claim of verified) {
+        greenClaims[normalizeClaimKey(claim.claim)] = attempt.id;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+// Detects regressions on previously-green claims: a verdict that marks an
+// already-green claim as `failed`. When found, restores the workspace to the
+// most recent impl pre-worker checkpoint (the latest non-null
+// preWorkerCheckpointSha) and emits a loud revert notice, then drops the now-
+// stale green entries so the next attempt re-establishes green. Returns the
+// updated run (regression restored) or null when no regression applies.
+async function maybeRestoreGreenClaimRegression({
+  run,
+  task,
+  attempt,
+  report,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attempt: WorkerAttempt;
+  report: WorkerReport;
+}): Promise<RunState | null> {
+  const green = run.greenClaims;
+  if (!green) return null;
+  const regressedKeys: string[] = [];
+  const regressedClaims: string[] = [];
+  for (const claim of report.verifier?.atomicClaims ?? []) {
+    if (claim.verdict !== "failed") continue;
+    const key = normalizeClaimKey(claim.claim);
+    if (green[key]) {
+      regressedKeys.push(key);
+      regressedClaims.push(claim.claim.trim());
+    }
+  }
+  if (regressedKeys.length === 0) return null;
+
+  // Latest impl pre-worker snapshot that predates the regressing change.
+  let restoredSha: string | null = null;
+  for (let i = run.workerAttempts.length - 1; i >= 0; i--) {
+    const sha = run.workerAttempts[i].preWorkerCheckpointSha;
+    if (sha) {
+      restoredSha = sha;
+      break;
+    }
+  }
+  const cwd = workspaceCwdFromRun(run);
+  if (!restoredSha || !cwd) {
+    // Nothing to restore to (non-git workspace or no prior snapshot). Still drop
+    // the stale green entries below so the regression isn't silently retained.
+    return commitRunChange(run, {
+      type: "autopilot.green_claim_regression_detected",
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      message: `Detected regression on ${regressedKeys.length} previously-verified claim(s); no pre-worker snapshot available to restore`,
+      payload: { claims: regressedClaims, attemptId: attempt.id },
+      mutate: (draft, timestamp) => {
+        if (draft.greenClaims) {
+          for (const key of regressedKeys) delete draft.greenClaims[key];
+        }
+        draft.updatedAt = timestamp;
+      },
+    });
+  }
+
+  await restoreCheckpointCode({ cwd, sha: restoredSha }).catch(() => undefined);
+  for (const claim of regressedClaims) {
+    await appendRegressionRevertEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId: attempt.id,
+      claim,
+      restoredSha,
+    });
+  }
+  // Drop the reverted claims from the green map so the next attempt re-verifies
+  // and re-establishes green against the restored tree.
+  return commitRunChange(run, {
+    type: "autopilot.green_claim_regression_reverted",
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    message: `Reverted regression on ${regressedKeys.length} previously-verified claim(s) to pre-worker snapshot`,
+    payload: { claims: regressedClaims, restoredSha, attemptId: attempt.id },
+    mutate: (draft, timestamp) => {
+      if (draft.greenClaims) {
+        for (const key of regressedKeys) delete draft.greenClaims[key];
       }
       draft.updatedAt = timestamp;
     },
