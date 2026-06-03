@@ -90,6 +90,14 @@ export interface AppSettings {
   workerStuckDetectEnabled: boolean;
   workerStuckIdleSeconds: number;
   workerStuckMaxAutoRetries: number;
+  // When true, autopilot/unattended workers launch inside a throwaway git
+  // worktree forked off the run checkpoint (refs/spark/runs/{runId}) and run
+  // with worktree-scoped permissions instead of full skip-permissions —
+  // Claude gets `--add-dir <worktree>` and Codex runs `-s workspace-write`.
+  // Each attempt's edits land in the isolated worktree and are merged back
+  // afterwards. Default off. Interactive / non-autopilot launches are
+  // unaffected and stay byte-identical regardless of this flag.
+  autopilotSandbox: boolean;
 }
 
 // User-facing preferences (theme, editor flags, etc.) live in a separate
@@ -1242,6 +1250,21 @@ export interface WorkerAttempt {
   workpadPath?: string;
   finalReportPath?: string;
   diffPath?: string;
+  /**
+   * Sandbox worktree fields. Set only for sandboxed unattended attempts
+   * (AppSettings.autopilotSandbox on + an autopilot caller), undefined for
+   * interactive launches and for unsandboxed runs. Together they drive
+   * merge-back of the throwaway worktree's edits into the run workspace.
+   *   - sandboxWorktreePath: absolute path of the isolated git worktree this
+   *     attempt ran inside (also the attempt's cwd).
+   *   - sandboxBranch: the throwaway branch checked out in that worktree,
+   *     forked off the run checkpoint ref.
+   *   - sandboxBaseRepo: the run workspace repo the worktree was forked from;
+   *     merge-back targets this repo.
+   */
+  sandboxWorktreePath?: string;
+  sandboxBranch?: string;
+  sandboxBaseRepo?: string;
   error?: string;
   /**
    * Latest agent state for this attempt. Two writers feed this field:
@@ -1490,6 +1513,11 @@ export interface PrepareWorkerTaskInput {
   runId: string;
   workerTaskId: string;
   cwd: string;
+  // Autopilot callers pass true so prepareWorkerTask can provision an isolated
+  // throwaway git worktree (forked off the run checkpoint) for this attempt
+  // when AppSettings.autopilotSandbox is enabled. Omitted/false for interactive
+  // launches, which keep the attempt cwd byte-identical to the provided cwd.
+  unattended?: boolean;
 }
 
 export interface LaunchWorkerAttemptInput {

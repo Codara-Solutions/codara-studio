@@ -86,6 +86,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   workerStuckDetectEnabled: true,
   workerStuckIdleSeconds: 180,
   workerStuckMaxAutoRetries: 2,
+  autopilotSandbox: false,
 };
 
 function resolveDefaultShell(
