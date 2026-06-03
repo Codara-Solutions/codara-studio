@@ -990,6 +990,14 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
   // `consecutiveCompletionRefusals` >= 2, but that path is only reached when
   // worker_result_review is invoked again. Bound the loop to a small number
   // of iterations so a model that stays stuck still gets force-landed.
+  //
+  // Verifier invariant: before the manager reviews, guarantee every changed-
+  // files impl step is covered by an independent cross-provider verifier. This
+  // is idempotent (it skips steps that already have a live verifier or a
+  // terminal verdict), so enforcing it each review hop just closes any hole the
+  // manager opened by accepting without spawning one.
+  run = await ensureVerifierCoverage(run, cwd);
+  if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
   const REVIEW_REPROMPT_CAP = 3;
   for (let attempt = 0; attempt < REVIEW_REPROMPT_CAP; attempt++) {
     run = await askOpenRouterManager(run, cwd, "worker_result_review") ?? run;
@@ -1503,7 +1511,7 @@ async function askOpenRouterManager(
       },
     });
 
-    return applySparkManagerDecision(latest, result.decision, mode);
+    return applySparkManagerDecision(latest, result.decision, mode, cwd);
   } catch (err) {
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
@@ -1640,7 +1648,7 @@ async function askChatBackendNonOpenRouter(
         payload: { backend: chatConfig.backend },
       });
     }
-    return applySparkManagerDecision(latest, result.decision, mode);
+    return applySparkManagerDecision(latest, result.decision, mode, cwd);
   } catch (err) {
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
@@ -2608,6 +2616,7 @@ async function applySparkManagerDecision(
   run: RunState,
   decision: SparkManagerDecision,
   mode: SparkCall["mode"],
+  cwd: string,
 ): Promise<RunState> {
   // Defensive: if the run already reached a terminal state, drop the decision.
   // This guards against a race where an MCP tool call (e.g. spark_complete
@@ -2697,7 +2706,7 @@ async function applySparkManagerDecision(
       ]);
       const pendingTasks = run.workerTasks.filter((task) => activeTaskStatuses.has(task.status));
       const pendingSteps = run.steps.filter(
-        (step) => !["complete", "failed", "skipped"].includes(step.status),
+        (step) => !["complete", "completed_unverified", "failed", "skipped"].includes(step.status),
       );
       if (pendingTasks.length === 0 && pendingSteps.length === 0) {
         return commitRunChange(run, {
@@ -2736,7 +2745,7 @@ async function applySparkManagerDecision(
           summary: decision.summary,
         },
         mutate: (draft, timestamp) => {
-          const terminalStepStatuses = new Set(["complete", "failed", "skipped"]);
+          const terminalStepStatuses = new Set(["complete", "completed_unverified", "failed", "skipped"]);
           for (const step of draft.steps) {
             if (terminalStepStatuses.has(step.status)) continue;
             step.status = "skipped";
@@ -2778,7 +2787,7 @@ async function applySparkManagerDecision(
     // remaining worker_batch steps, or the verifier feedback loop. Demote to a
     // no-op so the autopilot loop advances to the next pending unit instead.
     const pendingSteps = run.steps.filter(
-      (step) => !["complete", "failed", "skipped"].includes(step.status),
+      (step) => !["complete", "completed_unverified", "failed", "skipped"].includes(step.status),
     );
     const activeTaskStatuses = new Set([
       "created",
@@ -2835,6 +2844,24 @@ async function applySparkManagerDecision(
       if (nextRefusals >= 2) {
         const needsReviewTasks = pendingTasks.filter((t) => t.status === "needs_review");
         if (needsReviewTasks.length > 0) {
+          // Verifier invariant gate: this force-accept path deliberately lands
+          // the run even though the manager skipped the verifier. A changed-
+          // files step that never earned a terminal verifier verdict must NOT
+          // masquerade as a clean `complete` — it lands as `completed_unverified`
+          // instead, honestly labeling the missing cross-provider sign-off.
+          // Precompute which affected steps DID earn a terminal verdict (read
+          // from disk) before the synchronous mutate.
+          const affectedStepIdsForVerdict = new Set(
+            needsReviewTasks
+              .map((t) => t.stepId)
+              .filter((id): id is string => Boolean(id)),
+          );
+          const affectedStepIdsWithVerdict = new Set<string>();
+          for (const stepId of affectedStepIdsForVerdict) {
+            if (await stepHasTerminalVerifierVerdict(run, stepId)) {
+              affectedStepIdsWithVerdict.add(stepId);
+            }
+          }
           return commitRunChange(run, {
             type: "spark_manager.force_accepted_after_refused_completion",
             message: `Manager returned complete twice with ${needsReviewTasks.length} needs_review task(s); force-accepting so the run can land`,
@@ -2844,6 +2871,10 @@ async function applySparkManagerDecision(
               acceptedTaskTitles: needsReviewTasks.map((t) => t.title),
               acceptedTaskClasses: needsReviewTasks.map((t) => t.taskClass),
               priorRefusals,
+              unverifiedStepIds: Array.from(affectedStepIdsForVerdict).filter(
+                (id) => !affectedStepIdsWithVerdict.has(id),
+              ),
+              reason: "no_terminal_verifier_verdict",
             },
             mutate: (draft, timestamp) => {
               const acceptedIds = new Set(needsReviewTasks.map((t) => t.id));
@@ -2859,8 +2890,10 @@ async function applySparkManagerDecision(
                 }
               }
               // Mirror the worker-review accept path: promote any step whose
-              // tasks are now all accepted to status=complete, so the autopilot
-              // doesn't loop on a step stuck at "reviewing" with nothing to do.
+              // tasks are now all accepted. A changed-files step without a
+              // terminal verifier verdict lands as completed_unverified (honest
+              // label) rather than a clean complete, so the autopilot doesn't
+              // loop on a step stuck at "reviewing" with nothing to do.
               const affectedStepIds = new Set(
                 draft.workerTasks
                   .filter((t) => acceptedIds.has(t.id) && t.stepId)
@@ -2875,7 +2908,9 @@ async function applySparkManagerDecision(
                     ["accepted", "failed", "cancelled", "blocked"].includes(t.status),
                   );
                 if (allDone) {
-                  step.status = "complete";
+                  step.status = affectedStepIdsWithVerdict.has(step.id)
+                    ? "complete"
+                    : "completed_unverified";
                   step.updatedAt = timestamp;
                   if (draft.currentStepId === step.id) draft.currentStepId = undefined;
                 }
@@ -2887,7 +2922,7 @@ async function applySparkManagerDecision(
               const allStepsTerminal =
                 draft.steps.length > 0 &&
                 draft.steps.every((s) =>
-                  ["complete", "failed", "skipped"].includes(s.status),
+                  ["complete", "completed_unverified", "failed", "skipped"].includes(s.status),
                 );
               draft.autopilot = {
                 ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
@@ -3015,6 +3050,16 @@ async function applySparkManagerDecision(
         rerouted: runtimeRepair.rerouted,
       },
     });
+  }
+
+  // Cross-provider verification is a code-level invariant, not a manager habit.
+  // Before any step-completion pass below can flip a changed-files impl step to
+  // complete, guarantee it has (or will have) an independent verifier. This runs
+  // on the normalized run_workers decision and synthesizes a verifier task for
+  // any uncovered, changed-files step — so the step-completion passes (and the
+  // gating helper) see the pending verifier and keep the step reviewing.
+  if (mode === "worker_result_review") {
+    run = await ensureVerifierCoverage(run, cwd);
   }
 
   // The manager returned run_workers (or equivalent forward progress); the
@@ -3308,11 +3353,24 @@ async function applySparkManagerDecision(
     }
   }
   if (skippedStepIds.size > 0) {
+    // Verifier invariant gate: this is a force-accept path (the corrective loop
+    // hit MAX_TASKS_PER_STEP). A capped step that changed files but never earned
+    // a terminal verifier verdict must land as `completed_unverified`, not a
+    // clean `complete`. Precompute which capped steps DID earn a terminal
+    // verdict (those land as `complete`) before the synchronous mutate.
+    const cappedWithVerdict = new Set<string>();
+    for (const stepId of skippedStepIds) {
+      if (await stepHasTerminalVerifierVerdict(latest, stepId)) {
+        cappedWithVerdict.add(stepId);
+      }
+    }
     latest = await commitRunChange(latest, {
       type: "spark_manager.corrective_rounds_capped",
       message: `Step task cap (${MAX_TASKS_PER_STEP}) reached; force-accepting pending work and skipping new tasks`,
       payload: {
         cappedStepIds: Array.from(skippedStepIds),
+        cappedStepIdsWithVerifierVerdict: Array.from(cappedWithVerdict),
+        cappedStepIdsUnverified: Array.from(skippedStepIds).filter((id) => !cappedWithVerdict.has(id)),
         maxTasksPerStep: MAX_TASKS_PER_STEP,
       },
       mutate: (draft, timestamp) => {
@@ -3336,14 +3394,14 @@ async function applySparkManagerDecision(
           }
         }
         const stepTerminal = (s: typeof draft.steps[number]): boolean =>
-          ["complete", "failed", "skipped"].includes(s.status);
+          ["complete", "completed_unverified", "failed", "skipped"].includes(s.status);
         for (const step of draft.steps) {
           if (!skippedStepIds.has(step.id)) continue;
           const allDone = draft.workerTasks
             .filter((t) => t.stepId === step.id)
             .every((t) => ["accepted", "failed", "cancelled", "blocked"].includes(t.status));
           if (allDone && !stepTerminal(step)) {
-            step.status = "complete";
+            step.status = cappedWithVerdict.has(step.id) ? "complete" : "completed_unverified";
             step.updatedAt = timestamp;
           }
         }
@@ -4493,7 +4551,7 @@ export async function updateStep(input: UpdateStepInput): Promise<RunState> {
       if (input.workerTaskIds !== undefined) target.workerTaskIds = input.workerTaskIds;
       if (input.reviewSummary !== undefined) target.reviewSummary = input.reviewSummary;
       if (input.status === "running") draft.currentStepId = target.id;
-      if (draft.currentStepId === target.id && ["complete", "failed", "skipped"].includes(target.status)) {
+      if (draft.currentStepId === target.id && ["complete", "completed_unverified", "failed", "skipped"].includes(target.status)) {
         draft.currentStepId = undefined;
       }
       target.updatedAt = timestamp;
@@ -4727,7 +4785,7 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   const paths = workerArtifactPaths(run.id, task.stepId, task.id, attempt.id);
   task.status = "queued";
   task.updatedAt = timestamp;
-  if (step && !["running", "reviewing", "complete", "failed", "skipped"].includes(step.status)) {
+  if (step && !["running", "reviewing", "complete", "completed_unverified", "failed", "skipped"].includes(step.status)) {
     step.status = "ready";
     step.updatedAt = timestamp;
   }
@@ -4884,7 +4942,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   task.status = "claimed";
   task.updatedAt = launchTimestamp;
   const launchStep = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
-  if (launchStep && !["complete", "failed", "skipped"].includes(launchStep.status)) {
+  if (launchStep && !["complete", "completed_unverified", "failed", "skipped"].includes(launchStep.status)) {
     launchStep.status = "running";
     launchStep.updatedAt = launchTimestamp;
     run.currentStepId = launchStep.id;
@@ -4937,7 +4995,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   finishedTask.status = result.exitCode === 0 ? "needs_review" : "failed";
   finishedTask.updatedAt = finishedAt;
   const finishedStep = finishedTask.stepId ? run.steps.find((item) => item.id === finishedTask.stepId) : undefined;
-  if (finishedStep && !["complete", "skipped"].includes(finishedStep.status)) {
+  if (finishedStep && !["complete", "completed_unverified", "skipped"].includes(finishedStep.status)) {
     if (result.exitCode !== 0) {
       finishedStep.status = "failed";
       if (run.currentStepId === finishedStep.id) run.currentStepId = undefined;
@@ -5519,6 +5577,170 @@ function canCompleteStepImmediatelyAfterLocalReview(
   return true;
 }
 
+// The five verifier confidence rungs that count as a *terminal* cross-provider
+// verdict for invariant purposes. PERFECT/VERIFIED/PARTIAL mean an independent
+// verifier re-derived ground truth and signed off (PARTIAL = signed off with
+// caveats); FEEDBACK/FAILED demand another corrective round, so they do NOT
+// satisfy coverage. Mirrors the spec's terminal-OK set.
+const TERMINAL_OK_VERIFIER_CONFIDENCE = new Set<VerifierVerdict["confidence"]>([
+  "PERFECT",
+  "VERIFIED",
+  "PARTIAL",
+]);
+
+// Worker-task statuses that mean a verifier is still "live" (in flight or
+// awaiting review) on a step. If one of these exists we must NOT synthesize a
+// second verifier — the existing one will produce the terminal verdict.
+const LIVE_VERIFIER_TASK_STATUSES = new Set<WorkerTaskStatus>([
+  "created",
+  "queued",
+  "claimed",
+  "running",
+  "needs_review",
+  "retry_queued",
+]);
+
+// Per-step facts derived from worker reports on disk. Computed once and reused
+// by ensureVerifierCoverage (to decide whether to synthesize a verifier) and by
+// stepHasTerminalVerifierVerdict (to gate step->complete transitions).
+interface StepVerifierFacts {
+  // The step's non-verifier workers collectively reported >=1 filesChanged.
+  changedFiles: boolean;
+  // A verifier task is in flight / awaiting review on the step.
+  hasLiveVerifier: boolean;
+  // A verifier task on the step reported a terminal-OK verdict
+  // (PERFECT/VERIFIED/PARTIAL).
+  hasTerminalVerifierVerdict: boolean;
+  // Runtime of the implementer whose work changed files (claude/codex), used to
+  // pick the opposite runtime for cross-provider verification. undefined when
+  // the implementer ran on a non-agent runtime (shell/manual).
+  implementerRuntime?: WorkerRuntime;
+}
+
+// Reads the on-disk reports for a single step's worker attempts and distills the
+// facts the verifier invariant needs. Modeled on the report-reading loop in
+// maybeReconAsCompletionRefusal (iterate workerAttempts -> map to task ->
+// readWorkerReport -> inspect filesChanged / verifier verdict).
+async function computeStepVerifierFacts(
+  run: RunState,
+  stepId: string,
+): Promise<StepVerifierFacts> {
+  const stepTasks = run.workerTasks.filter((task) => task.stepId === stepId);
+  const verifierTaskIds = new Set(
+    stepTasks.filter((task) => task.taskClass === "verifier").map((task) => task.id),
+  );
+  const hasLiveVerifier = stepTasks.some(
+    (task) => task.taskClass === "verifier" && LIVE_VERIFIER_TASK_STATUSES.has(task.status),
+  );
+
+  let changedFiles = false;
+  let hasTerminalVerifierVerdict = false;
+  let implementerRuntime: WorkerRuntime | undefined;
+
+  for (const attempt of run.workerAttempts) {
+    const task = stepTasks.find((t) => t.id === attempt.workerTaskId);
+    if (!task) continue;
+    if (!attempt.finalReportPath) continue;
+    const report = await readWorkerReport(attempt.finalReportPath);
+    if (!report) continue;
+    if (verifierTaskIds.has(task.id)) {
+      const confidence = report.verifier?.confidence;
+      if (confidence && TERMINAL_OK_VERIFIER_CONFIDENCE.has(confidence)) {
+        hasTerminalVerifierVerdict = true;
+      }
+    } else if (Array.isArray(report.filesChanged) && report.filesChanged.length > 0) {
+      changedFiles = true;
+      if (
+        !implementerRuntime &&
+        (task.runtimePreference === "claude" || task.runtimePreference === "codex")
+      ) {
+        implementerRuntime = task.runtimePreference;
+      }
+    }
+  }
+
+  return { changedFiles, hasLiveVerifier, hasTerminalVerifierVerdict, implementerRuntime };
+}
+
+// Cross-provider verification as a code-level invariant. For each non-terminal
+// worker_batch step whose non-verifier workers changed files but which has
+// NEITHER a live verifier task NOR an existing terminal verifier verdict,
+// synthesize one cross-provider verifier task (opposite runtime of the
+// implementer) so the silent-verifier hole cannot reopen. Steps that changed no
+// files are skipped — identical behavior to before. Modeled on
+// maybeReconAsCompletionRefusal's report-reading loop; reuses the
+// dropVerifierTasksWithExistingPeer guard semantics (a live verifier on the step
+// short-circuits) so we never double-add.
+async function ensureVerifierCoverage(run: RunState, cwd: string): Promise<RunState> {
+  void cwd; // createWorkerTask resolves cwd at launch; accepted for call-site symmetry.
+  let latest = run;
+  for (const step of run.steps) {
+    if (isTerminalStepStatus(step.status)) continue;
+    if ((step.kind ?? "worker_batch") !== "worker_batch") continue;
+    const facts = await computeStepVerifierFacts(latest, step.id);
+    if (!facts.changedFiles) continue; // identical behavior for no-change steps
+    if (facts.hasLiveVerifier) continue; // existing verifier will produce the verdict
+    if (facts.hasTerminalVerifierVerdict) continue; // already covered
+
+    // Cross-provider: verify on the runtime opposite the implementer's. Default
+    // to claude when the implementer ran on a non-agent runtime (shell/manual).
+    const verifierRuntime: WorkerRuntime =
+      facts.implementerRuntime === "claude" ? "codex" : "claude";
+    const criteria = step.acceptanceCriteria.filter((c) => c.trim().length > 0);
+    const claims =
+      criteria.length > 0
+        ? criteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
+        : "1. The implementation matches the step goal and changed files behave as specified.";
+    const description = [
+      `Independently verify the implementation for step "${step.title}".`,
+      step.goal ? `Step goal: ${step.goal}` : "",
+      "Re-derive ground truth from the filesystem; do NOT trust the implementer's self-report.",
+      "Confirm each of these atomic claims and return a verifier verdict:",
+      claims,
+    ]
+      .filter((line) => line.length > 0)
+      .join("\n");
+
+    latest = await createWorkerTask({
+      runId: latest.id,
+      stepId: step.id,
+      title: `Verify: ${step.title}`,
+      description,
+      taskClass: "verifier",
+      allowedPaths: [],
+      runtimePreference: verifierRuntime,
+      createdBy: "spark",
+    });
+    await appendEvent({
+      workspaceId: latest.workspaceId,
+      runId: latest.id,
+      stepId: step.id,
+      type: "spark_manager.verifier_coverage_enforced",
+      message: `Synthesized a cross-provider verifier for step "${step.title}" (changed files, no terminal verifier verdict)`,
+      payload: {
+        stepId: step.id,
+        stepTitle: step.title,
+        verifierRuntime,
+        implementerRuntime: facts.implementerRuntime,
+        acceptanceCriteriaCount: criteria.length,
+      },
+    });
+  }
+  return latest;
+}
+
+// Gating helper for the THREE step->complete transitions. Returns true (the
+// step may flip to a clean `complete`) when the step changed no files, or when a
+// verifier task on the step reported a terminal-OK verdict. Returns false only
+// for a changed-files step that lacks a terminal verifier verdict — such a step
+// must stay reviewing (when a verifier is pending) or land as
+// `completed_unverified` (force-accept paths) rather than as a clean complete.
+async function stepHasTerminalVerifierVerdict(run: RunState, stepId: string): Promise<boolean> {
+  const facts = await computeStepVerifierFacts(run, stepId);
+  if (!facts.changedFiles) return true;
+  return facts.hasTerminalVerifierVerdict;
+}
+
 // Returns a refusal RunState when the manager wants to land the run with zero
 // implementation changes (recon-as-completion). Returns null when the run has
 // legitimate impl work behind it OR when the refusal counter has already hit
@@ -5590,13 +5812,27 @@ async function completeAcceptedReviewingSteps(
   run: RunState,
   summary: string,
 ): Promise<RunState> {
-  const eligibleStepIds = run.steps
+  const candidateStepIds = run.steps
     .filter((step) => !isTerminalStepStatus(step.status))
     .filter((step) => {
       const tasks = run.workerTasks.filter((task) => task.stepId === step.id);
       return tasks.length > 0 && tasks.every((task) => task.status === "accepted" || task.status === "cancelled");
     })
     .map((step) => step.id);
+
+  // Verifier invariant gate: a candidate step whose impl changed files may only
+  // flip to a clean `complete` when an independent verifier signed off
+  // (PERFECT/VERIFIED/PARTIAL). A changed-files step lacking that terminal
+  // verdict is held back here (kept reviewing) — in practice ensureVerifierCoverage
+  // has already queued a verifier whose non-terminal task status keeps the step
+  // out of `candidateStepIds` anyway, but this gate enforces the rule even if
+  // that task was cancelled. Steps that changed no files pass unchanged.
+  const eligibleStepIds: string[] = [];
+  for (const stepId of candidateStepIds) {
+    if (await stepHasTerminalVerifierVerdict(run, stepId)) {
+      eligibleStepIds.push(stepId);
+    }
+  }
 
   if (eligibleStepIds.length === 0) return run;
 
@@ -6409,7 +6645,9 @@ function completionCompletedItems(
     return [`Opened ${run.autopilot.spawnedTerminals} standing ${noun}.`];
   }
 
-  const completedSteps = run.steps.filter((step) => step.status === "complete").length;
+  const completedSteps = run.steps.filter(
+    (step) => step.status === "complete" || step.status === "completed_unverified",
+  ).length;
   if (run.steps.length > 0) {
     return [`Finished ${completedSteps}/${run.steps.length} planned step(s).`];
   }
@@ -6537,7 +6775,12 @@ function changedFields(input: object, excluded: string[]): string[] {
 }
 
 function isTerminalStepStatus(status: StepState["status"]): boolean {
-  return status === "complete" || status === "failed" || status === "skipped";
+  return (
+    status === "complete" ||
+    status === "completed_unverified" ||
+    status === "failed" ||
+    status === "skipped"
+  );
 }
 
 function isTerminalRunStatus(status: RunState["status"]): boolean {
@@ -6545,7 +6788,9 @@ function isTerminalRunStatus(status: RunState["status"]): boolean {
 }
 
 function isImmutableStepStatus(status: StepState["status"]): boolean {
-  return status === "complete" || status === "skipped";
+  return (
+    status === "complete" || status === "completed_unverified" || status === "skipped"
+  );
 }
 
 function pickPendingAutopilotStep(run: RunState): StepState | undefined {
@@ -8563,7 +8808,7 @@ async function markAttemptRunning(
   task.status = "running";
   attempt.startedAt = attempt.startedAt ?? timestamp;
   task.updatedAt = timestamp;
-  if (step && !["complete", "failed", "skipped"].includes(step.status)) {
+  if (step && !["complete", "completed_unverified", "failed", "skipped"].includes(step.status)) {
     step.status = "running";
     step.updatedAt = timestamp;
     run.currentStepId = step.id;

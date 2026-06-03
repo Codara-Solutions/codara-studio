@@ -51,6 +51,9 @@ export interface RuntimeTone {
 // members narrow out first, leaving a clean RunStatus for the delegate.
 export function statusColor(status: AnyStatus): string {
   if (status === "done") return "var(--ok)";
+  // A force-landed-without-verification step reads as caution, not a clean
+  // complete — it is terminal but flagged, so it must stay visually distinct.
+  if (status === "completed_unverified") return "var(--warn)";
   if (status === "queued" || status === "ready" || status === "skipped") return "var(--muted)";
   return runStatusColor(status);
 }
@@ -71,7 +74,13 @@ export function attemptStatusColor(status: WorkerAttempt["status"]): string {
 // True while a status is genuinely in motion. step/agent-only members can
 // never be live, so they short-circuit before the RunStatus delegate.
 export function isLiveStatus(status: AnyStatus): boolean {
-  if (status === "done" || status === "queued" || status === "ready" || status === "skipped") {
+  if (
+    status === "done" ||
+    status === "queued" ||
+    status === "ready" ||
+    status === "skipped" ||
+    status === "completed_unverified"
+  ) {
     return false;
   }
   return isRunningRunStatus(status);
@@ -88,6 +97,8 @@ export function stepStatusLabel(status: StepState["status"]): string {
       return "ready";
     case "complete":
       return "complete";
+    case "completed_unverified":
+      return "unverified";
     case "blocked":
     case "failed":
       return status;
@@ -103,7 +114,9 @@ export function stepStatusLabel(status: StepState["status"]): string {
 // A step is "attention" when it has stalled in a state only the operator can
 // clear. Drives the loud danger treatment on the node and the inspector list.
 export function stepNeedsAttention(status: StepState["status"]): boolean {
-  return status === "blocked" || status === "failed";
+  // completed_unverified is terminal but flagged — it landed without a
+  // cross-provider verifier verdict, so the operator should still see it.
+  return status === "blocked" || status === "failed" || status === "completed_unverified";
 }
 
 // Per-runtime accent. claude rides the brand accent (it is the flagship

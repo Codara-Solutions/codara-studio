@@ -789,6 +789,12 @@ export type ChatMode = "execute" | "talk";
 
 export type PlanStatus = "draft" | "imported" | "analyzed" | "active" | "complete" | "archived";
 
+// "completed_unverified" is a terminal status for a step that changed files
+// and was force-landed after the manager refused to complete it twice WITHOUT
+// a terminal cross-provider verifier verdict (PERFECT/VERIFIED/PARTIAL). It is
+// the honest replacement for the old force-accept-as-"complete" shortcut: the
+// run stops looping and lands, but the UI/timeline render it distinctly from a
+// clean "complete" so the missing verification stays visible.
 export type StepStatus =
   | "queued"
   | "planning"
@@ -796,6 +802,7 @@ export type StepStatus =
   | "running"
   | "reviewing"
   | "complete"
+  | "completed_unverified"
   | "blocked"
   | "failed"
   | "skipped";
