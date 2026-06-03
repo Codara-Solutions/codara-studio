@@ -943,6 +943,13 @@ export interface RunState {
    */
   checkpoints?: Checkpoint[];
   /**
+   * Maps normalized verifier atomic-claim text -> the attemptId that last
+   * marked it `verified`; used to detect when a previously-green claim later
+   * regresses (a subsequent verdict marks a still-green claim as failed),
+   * which triggers the pre-worker-checkpoint auto-restore.
+   */
+  greenClaims?: Record<string, string>;
+  /**
    * Which Spark Agent backend drives this chat. Undefined on legacy runs and
    * treated as "openrouter" by the dispatch layer — keeps pre-feature chats
    * working unchanged.
@@ -1055,7 +1062,14 @@ export interface WorkspaceMemoryLedger {
 
 export interface Checkpoint {
   id: string;
-  kind: "run-start" | "user-message";
+  /**
+   * What triggered this snapshot. `run-start`/`user-message` back the chat-undo
+   * popover. `pre-worker` snapshots are taken just before each
+   * implementation/corrective worker runs (in launchWorkerAttempt, before
+   * runWorkerSession) so a later regression on a previously-green verifier
+   * claim can auto-restore the workspace to the pre-mutation state.
+   */
+  kind: "run-start" | "user-message" | "pre-worker";
   /** humanMessages.length at the moment this checkpoint was created. Restoring
    * "chat only" trims humanMessages back to this count. */
   messagePointer: number;
@@ -1446,6 +1460,12 @@ export interface WorkerAttempt {
    * provenance bit existed.
    */
   runtimeStateSource?: "hook" | "regex";
+  /**
+   * Git sha of the pre-worker checkpoint captured in launchWorkerAttempt just
+   * before runWorkerSession (null when the workspace is not a git repo). The
+   * regression auto-restore reverts to the most recent non-null value.
+   */
+  preWorkerCheckpointSha?: string | null;
 }
 
 export interface WorkerTaskEnvelope {

@@ -132,6 +132,34 @@ export async function appendFanOutDirectiveForcedEvent(input: {
   });
 }
 
+// Emitted when the orchestrator detects that a previously-verified ("green")
+// claim has regressed under a later worker and rolls the workspace back to the
+// pre-worker snapshot that predated the regressing change. Surfaced loudly so
+// the user can see the self-heal happen in the timeline.
+export const REGRESSION_REVERT_EVENT_TYPE = "autopilot.regression_reverted";
+
+export async function appendRegressionRevertEvent(input: {
+  workspaceId: string;
+  runId: string;
+  stepId?: string;
+  workerTaskId?: string;
+  attemptId?: string;
+  claim: string;
+  restoredSha: string;
+}): Promise<SparkEvent> {
+  const { workspaceId, runId, stepId, workerTaskId, attemptId, claim, restoredSha } = input;
+  return appendEvent({
+    workspaceId,
+    runId,
+    stepId,
+    workerTaskId,
+    attemptId,
+    type: REGRESSION_REVERT_EVENT_TYPE,
+    message: `Reverted a regression: a previously-verified claim failed again — restored the pre-worker snapshot ("${claim}")`,
+    payload: { claim, restoredSha },
+  });
+}
+
 export async function listEvents(runId: string): Promise<SparkEvent[]> {
   try {
     const raw = await fs.readFile(eventsPath(runId), "utf8");
