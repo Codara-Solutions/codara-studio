@@ -22,6 +22,7 @@ const EMPTY_SETTINGS: AppSettings = {
   workerStuckDetectEnabled: true,
   workerStuckIdleSeconds: 180,
   workerStuckMaxAutoRetries: 2,
+  autopilotSandbox: false,
 };
 
 let cache: AppState | null = null;
@@ -125,6 +126,7 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     workerStuckDetectEnabled: settings.workerStuckDetectEnabled !== false,
     workerStuckIdleSeconds: clampInt(settings.workerStuckIdleSeconds, 60, 3600, 180),
     workerStuckMaxAutoRetries: clampInt(settings.workerStuckMaxAutoRetries, 0, 5, 2),
+    autopilotSandbox: settings.autopilotSandbox === true,
   };
 }
 

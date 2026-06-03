@@ -142,6 +142,71 @@ export function smartMergePlanTitle(context: GitSmartMergeContext): string {
   return `Smart merge ${branch} <- ${upstream}`;
 }
 
+/**
+ * Re-frames a generic Smart Merge context so the *incoming* side is a sandbox
+ * worker's worktree branch instead of the remote upstream. The run workspace
+ * repository is still the destination (`repositoryRoot`/`branch`); we only swap
+ * the upstream label so {@link smartMergePlanTitle} and {@link buildSmartMergePlan}
+ * speak in terms of the sandbox branch the agent should integrate back.
+ */
+function reframeForSandbox(
+  context: GitSmartMergeContext,
+  sandboxBranch: string,
+): GitSmartMergeContext {
+  return {
+    ...context,
+    upstream: sandboxBranch,
+    // The destination is the live workspace branch (never detached for this flow);
+    // the sandbox branch is a concrete local ref, so the target is unambiguous.
+    detached: false,
+    recommendedStrategy: recommendSmartMergeStrategy({
+      upstream: sandboxBranch,
+      detached: false,
+      ahead: context.ahead,
+      behind: context.behind,
+      hasWorkingChanges: context.hasWorkingChanges,
+      hasConflicts: context.hasConflicts,
+      overlapCount: context.overlappingFiles.length,
+    }),
+  };
+}
+
+export function sandboxMergePlanTitle(context: GitSmartMergeContext): string {
+  const branch = context.branch ?? "workspace";
+  const sandboxBranch = context.upstream ?? "sandbox branch";
+  return `Integrate sandbox ${sandboxBranch} -> ${branch}`;
+}
+
+export function buildSandboxMergePlan(context: GitSmartMergeContext): string {
+  const branch = context.branch ?? "the workspace branch";
+  const sandboxBranch = context.upstream ?? "(sandbox branch unknown)";
+
+  // Reuse the conversational generic plan verbatim, then prepend a short banner
+  // that orients the agent: the incoming work is a local sandbox worktree branch
+  // forked from this run's checkpoint, not a remote upstream.
+  return `# ${sandboxMergePlanTitle(context)}
+
+An unattended worker ran inside an isolated git worktree on the branch \`${sandboxBranch}\`, forked from this run's checkpoint. Integrate that worktree's work back into \`${branch}\` in this repository (${context.repositoryRoot}). Treat \`${sandboxBranch}\` as the incoming side wherever the preflight below mentions the upstream — fast-forward if you can, otherwise a normal merge commit; ask me only if something looks risky or ambiguous.
+
+${buildSmartMergePlan(context)}`;
+}
+
+/**
+ * Drives the existing Smart Merge preflight to integrate a sandbox worker's
+ * worktree branch back into the run workspace repository. Composes
+ * {@link requestPrepareSmartMerge} (no duplicated preflight) and re-frames the
+ * incoming side as `sandboxBranch` so the conversational Smart Merge can
+ * fast-forward / merge the worktree work back.
+ */
+export async function prepareSandboxMerge(input: {
+  repoCwd: string;
+  sandboxBranch: string;
+}): Promise<GitSmartMergeResult> {
+  const result = await requestPrepareSmartMerge(input.repoCwd);
+  if (!result.ok) return result;
+  return { ok: true, context: reframeForSandbox(result.context, input.sandboxBranch) };
+}
+
 export function buildSmartMergePlan(context: GitSmartMergeContext): string {
   const branch = context.branch ?? "detached HEAD";
   const upstream = context.upstream ?? "(no upstream configured)";

@@ -77,7 +77,11 @@ import {
   deleteRunCheckpoints,
   restoreCheckpointCode,
   rewindShadowRef,
+  runCheckpointStartPoint,
 } from "./checkpoints";
+import { createSandboxWorktree, removeSandboxWorktree } from "../git-worktrees";
+import { readGitText } from "../git-exec";
+import { sparkHome } from "../spark-home";
 import * as pty from "../pty-manager";
 import {
   formatStuckReason,
@@ -533,6 +537,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
         runId: run.id,
         workerTaskId: task.id,
         cwd: input.cwd,
+        unattended: true,
       });
       attemptId = envelope.attemptId;
       run = await requireRun(run.id);
@@ -861,6 +866,7 @@ async function maybeAutoRetryStuckAttempt(
     runId: run.id,
     workerTaskId: task.id,
     cwd: failed.cwd,
+    unattended: true,
   });
   return { attemptId: envelope.attemptId };
 }
@@ -3875,6 +3881,14 @@ function workspaceCwdFromRun(run: RunState): string | undefined {
     : undefined;
 }
 
+// True when `cwd` lives inside a git work tree. Gates sandbox-worktree
+// provisioning in prepareWorkerTask: `git worktree add` only works from a
+// repo, and a non-repo workspace must fall back to running in place.
+async function isGitWorktreeRepo(cwd: string): Promise<boolean> {
+  if (!cwd) return false;
+  return (await readGitText(cwd, ["rev-parse", "--is-inside-work-tree"])) === "true";
+}
+
 async function enrichLatestUserMessageWithMentionedFiles(run: RunState, cwd: string): Promise<RunState> {
   if (run.humanMessages.length === 0) return run;
   const latest = run.humanMessages[run.humanMessages.length - 1];
@@ -4633,6 +4647,7 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   }
   const timestamp = new Date().toISOString();
   const runtimeReroute = await rerouteSparkShellTaskToAgent(task);
+  const settings = await loadSettings();
   const attemptNumber =
     run.workerAttempts.filter((attempt) => attempt.workerTaskId === task.id).length + 1;
   const attempt: WorkerAttempt = {
@@ -4644,6 +4659,71 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
     cwd: input.cwd,
     status: "prompt_ready",
   };
+  // Filesystem-isolate unattended (autopilot) workers in a throwaway git
+  // worktree forked off the run's checkpoint, so a misbehaving agent can't
+  // touch the user's working tree. Best-effort: any failure (non-repo, no
+  // checkpoint yet, git error) falls back to input.cwd byte-identically. The
+  // worktree cwd then flows through the attempt, the rendered prompt, the
+  // envelope, codex trust, and the launch command via `effectiveCwd`.
+  let effectiveCwd = input.cwd;
+  if (input.unattended && settings.autopilotSandbox && (await isGitWorktreeRepo(input.cwd))) {
+    try {
+      const worktreesRoot = join(sparkHome(), "worktrees", basename(input.cwd), "sandbox");
+      const startPoint = (await runCheckpointStartPoint(input.cwd, run.id)) ?? undefined;
+      const created = await createSandboxWorktree({
+        repoCwd: input.cwd,
+        worktreesRoot,
+        startPoint,
+      });
+      if (created.ok) {
+        effectiveCwd = created.path;
+        attempt.cwd = created.path;
+        attempt.sandboxWorktreePath = created.path;
+        attempt.sandboxBranch = created.branch;
+        attempt.sandboxBaseRepo = input.cwd;
+        await appendEvent({
+          timestamp,
+          workspaceId: run.workspaceId,
+          runId: run.id,
+          stepId: task.stepId,
+          workerTaskId: task.id,
+          attemptId: attempt.id,
+          type: "worker_attempt.sandbox_provisioned",
+          message: `Sandboxed worker in worktree: ${created.branch}`,
+          payload: {
+            sandboxWorktreePath: created.path,
+            sandboxBranch: created.branch,
+            sandboxBaseRepo: input.cwd,
+            startPoint: startPoint ?? null,
+          },
+        });
+      } else {
+        await appendEvent({
+          timestamp,
+          workspaceId: run.workspaceId,
+          runId: run.id,
+          stepId: task.stepId,
+          workerTaskId: task.id,
+          attemptId: attempt.id,
+          type: "worker_attempt.sandbox_failed",
+          message: `Sandbox worktree provisioning failed; falling back to workspace cwd`,
+          payload: { error: created.error, cwd: input.cwd },
+        });
+      }
+    } catch (err) {
+      await appendEvent({
+        timestamp,
+        workspaceId: run.workspaceId,
+        runId: run.id,
+        stepId: task.stepId,
+        workerTaskId: task.id,
+        attemptId: attempt.id,
+        type: "worker_attempt.sandbox_failed",
+        message: `Sandbox worktree provisioning threw; falling back to workspace cwd`,
+        payload: { error: err instanceof Error ? err.message : String(err), cwd: input.cwd },
+      });
+    }
+  }
   const paths = workerArtifactPaths(run.id, task.stepId, task.id, attempt.id);
   task.status = "queued";
   task.updatedAt = timestamp;
@@ -4656,7 +4736,7 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
     workerTaskId: task.id,
     attemptId: attempt.id,
     runtime: task.runtimePreference,
-    cwd: input.cwd,
+    cwd: effectiveCwd,
     executionDisabled: true,
     task,
     step,
@@ -4667,8 +4747,7 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   if (peerCommsEnabled) {
     await ensurePeerCommsArtifacts(run, step, task, attempt.id, paths, "prompt_ready").catch(() => undefined);
   }
-  const settings = await loadSettings();
-  const prompt = renderWorkerPrompt({ cwd: input.cwd, run, step, task, paths, settings });
+  const prompt = renderWorkerPrompt({ cwd: effectiveCwd, run, step, task, paths, settings });
 
   await fs.mkdir(paths.attemptDir, { recursive: true });
   await fs.writeFile(paths.taskJson, JSON.stringify(envelope, null, 2), "utf8");
@@ -4784,7 +4863,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   if (task.runtimePreference === "codex") {
     await ensureCodexProjectTrust(attempt.cwd).catch(() => undefined);
   }
-  const launchCommand = buildLaunchCommandLine(task, attempt.cwd);
+  const launchCommand = buildLaunchCommandLine(task, attempt.cwd, {
+    sandboxDir: attempt.sandboxWorktreePath,
+  });
   const command = launchCommand
     ? `pwsh -> ${launchCommand}`
     : "pwsh (manual)";
@@ -4919,6 +5000,28 @@ export async function deleteRun(runId: string): Promise<void> {
       artifactDir: run.artifactDir,
     },
   });
+
+  // Tear down any throwaway sandbox worktrees this run provisioned for its
+  // unattended workers. Best-effort and idempotent: dedup by worktree path,
+  // and a failed removal (e.g. unmerged branch) just leaves the dir for the
+  // next worktree-prune. Workers were killed above so the dirs are released.
+  const removedSandboxPaths = new Set<string>();
+  for (const attempt of run.workerAttempts) {
+    if (
+      !attempt.sandboxWorktreePath ||
+      !attempt.sandboxBranch ||
+      !attempt.sandboxBaseRepo ||
+      removedSandboxPaths.has(attempt.sandboxWorktreePath)
+    ) {
+      continue;
+    }
+    removedSandboxPaths.add(attempt.sandboxWorktreePath);
+    await removeSandboxWorktree({
+      repoCwd: attempt.sandboxBaseRepo,
+      worktreePath: attempt.sandboxWorktreePath,
+      branch: attempt.sandboxBranch,
+    }).catch(() => undefined);
+  }
 
   // shell.trashItem on Windows can prompt the user when the recycle bin is
   // full, when a file is locked, or when sync providers (OneDrive) intercept
@@ -8490,7 +8593,20 @@ async function recordWorkerOutput(
 // Returns null for runtimes that don't auto-launch (manual / shell), in
 // which case the worker pane is just a plain pwsh and the prompt is dumped
 // as comments for the user to drive themselves.
-function buildLaunchCommandLine(task: WorkerTask, cwd: string): string | null {
+//
+// `opts.sandboxDir` is set only for unattended attempts running inside a
+// throwaway git worktree (AppSettings.autopilotSandbox). When present it
+// scopes the agent's filesystem permissions to that worktree: claude keeps
+// --dangerously-skip-permissions but adds `--add-dir <sandboxDir>`, and codex
+// swaps its blanket `--yolo` for `--sandbox workspace-write` so writes are
+// confined to the worktree. With sandboxDir undefined the output is
+// byte-identical to before (plain --yolo / no --add-dir), so interactive and
+// unsandboxed launches are unchanged.
+function buildLaunchCommandLine(
+  task: WorkerTask,
+  cwd: string,
+  opts?: { sandboxDir?: string },
+): string | null {
   // Pin the shell to the workspace directory before the agent CLI starts.
   // The pty is spawned with cwd=workspaceCwd, but the user's $PROFILE
   // (PowerShell, bash, zsh) frequently includes a `Set-Location $HOME` /
@@ -8500,9 +8616,11 @@ function buildLaunchCommandLine(task: WorkerTask, cwd: string): string | null {
   // workspace. `cd` works as an alias / built-in in pwsh, bash, zsh and cmd.
   const cdPrefix =
     cwd && cwd.trim().length > 0 ? `cd ${quoteShellArg(cwd)}; ` : "";
+  const sandboxDir = opts?.sandboxDir?.trim() || undefined;
 
   if (task.runtimePreference === "claude") {
     const args = ["claude", "--dangerously-skip-permissions"];
+    if (sandboxDir) args.push("--add-dir", quoteShellArg(sandboxDir));
     if (task.modelHint?.trim()) args.push("--model", quoteShellArg(task.modelHint.trim()));
     const claudeEffort = mapClaudeEffort(task.effortHint);
     if (claudeEffort) args.push("--effort", claudeEffort);
@@ -8513,9 +8631,15 @@ function buildLaunchCommandLine(task: WorkerTask, cwd: string): string | null {
     // override at the command line — it requires an exact-path match in the
     // saved config.toml against codex's own normalized cwd (lowercase,
     // backslash). We write that entry from launchWorkerAttempt before
-    // spawning, so by the time codex --yolo starts, the directory is already
+    // spawning, so by the time codex starts, the directory is already
     // trusted and the prompt is skipped silently.
-    const args = ["codex", "--yolo"];
+    //
+    // When sandboxed, run under `--sandbox workspace-write` (writes confined
+    // to the worktree cwd) instead of the blanket `--yolo`; otherwise keep
+    // --yolo so unsandboxed autopilot/interactive launches are unchanged.
+    const args = sandboxDir
+      ? ["codex", "--sandbox", "workspace-write"]
+      : ["codex", "--yolo"];
     if (task.modelHint?.trim()) args.push("-m", quoteShellArg(task.modelHint.trim()));
     const codexEffort = mapCodexEffort(task.effortHint);
     if (codexEffort) args.push("-c", quoteShellArg(`model_reasoning_effort=${codexEffort}`));

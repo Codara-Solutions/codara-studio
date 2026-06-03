@@ -175,6 +175,62 @@ export async function createCopyWorktree(
   }
 }
 
+// --- Sandbox worktrees for unattended/autopilot workers ---------------------
+// Same machinery as the "Create copy" action, but driven by the orchestrator
+// to filesystem-isolate each unattended worker. The fork point is the run's
+// checkpoint (refs/spark/runs/{runId}, resolved to a ref/sha by the caller)
+// passed as `startPoint`; when omitted, createCopyWorktree falls back to
+// resolveDefaultBranch. The city is picked over the SANDBOX worktreesRoot the
+// caller hands in (kept distinct from the copy-branch root). Electron-free,
+// exactly like createCopyWorktree.
+
+export interface CreateSandboxWorktreeInput {
+  repoCwd: string;
+  // Base dir for sandbox worktrees, computed by the caller from sparkHome so
+  // this module stays electron-free.
+  worktreesRoot: string;
+  // Run checkpoint ref or sha to fork from. Omit to let createCopyWorktree
+  // resolve the repo's default branch.
+  startPoint?: string;
+}
+
+export interface RemoveSandboxWorktreeInput {
+  repoCwd: string;
+  worktreePath: string;
+  branch: string;
+}
+
+export async function createSandboxWorktree(
+  input: CreateSandboxWorktreeInput,
+): Promise<GitCopyWorktreeResult> {
+  const city = await pickCity(input.repoCwd, input.worktreesRoot);
+  return createCopyWorktree({
+    repoCwd: input.repoCwd,
+    worktreesRoot: input.worktreesRoot,
+    // startPoint is the run checkpoint ref/sha; undefined => resolveDefaultBranch.
+    baseBranch: input.startPoint,
+    city,
+  });
+}
+
+// Force-remove a sandbox worktree and delete its throwaway branch on run
+// cleanup. Thin re-export of removeCopyWorktree with force + deleteBranch.
+// NOTE: deleteBranch uses git branch -d (safe delete), which refuses if the
+// branch carries unmerged commits — intended, so unmerged sandbox work isn't
+// silently dropped; callers wanting hard removal can fall back to
+// removeCopyWorktree directly.
+export async function removeSandboxWorktree(
+  input: RemoveSandboxWorktreeInput,
+): Promise<GitOpResult> {
+  return removeCopyWorktree({
+    repoCwd: input.repoCwd,
+    worktreePath: input.worktreePath,
+    branch: input.branch,
+    force: true,
+    deleteBranch: true,
+  });
+}
+
 export async function removeCopyWorktree(input: RemoveCopyWorktreeInput): Promise<GitOpResult> {
   try {
     await runGit(input.repoCwd, [
