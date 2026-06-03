@@ -408,6 +408,11 @@ function chatTitleFromInput(input: StartAutopilotInput): string {
   return `Autopilot - ${input.workspaceName}`;
 }
 
+// Daemon-split (Phase 0): headless entry the detached daemon-host reuses
+// verbatim — do not fork. The same StartAutopilotInput -> RunState contract
+// drives runHeadlessEval today; the daemon host (src/main/orchestration/daemon/)
+// dispatches its `start` request straight to this function behind a lazy import,
+// so any change here is a change to the daemon's startup path too.
 export async function startAutopilot(input: StartAutopilotInput): Promise<RunState> {
   let run = input.runId ? await requireRun(input.runId) : null;
   if (!run) {
