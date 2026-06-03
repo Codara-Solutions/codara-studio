@@ -21,6 +21,7 @@ import type {
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
+  FanOutDirective,
   PlannedStepAgent,
   PrepareWorkerTaskInput,
   RunArtifactPaths,
@@ -44,6 +45,7 @@ import type {
   WorkerReport,
   WorkerTaskEnvelope,
 } from "@shared/types";
+import { FAN_OUT_DIRECTIVE_MARKER } from "@shared/types";
 import { makeId } from "@shared/ids";
 import {
   contextWindowForModel,
@@ -51,7 +53,16 @@ import {
   estimateTokensFromText,
 } from "@shared/context-window";
 import { normalizeChatFeatureFlags } from "@shared/chat-policy";
-import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
+import {
+  appendEvent,
+  appendFanOutDirectiveForcedEvent,
+  appendFanOutDowngradedEvent,
+  appendWriteScopesDerivedEvent,
+  eventsPath,
+  listEvents,
+  runDir,
+  runsRoot,
+} from "./event-log";
 import { writeFileAtomic } from "../fs-atomic";
 import { loadSettings } from "../storage";
 import { estimateWorkerCostUsd } from "../openrouter-prices";
@@ -133,6 +144,12 @@ const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
 const activeAutopilotCycles = new Map<string, Promise<void>>();
 const activeAutopilotPlans = new Map<string, Promise<void>>();
 const activeAutopilotReviews = new Map<string, Promise<void>>();
+// Guard so the fan-out serial-downgrade event is emitted at most once per
+// (run, task): pickAutopilotTasks is a PURE selector called every autopilot
+// tick, so without this the launch site would re-emit fanout.downgraded_to_serial
+// on every loop. Keyed `${runId}:${taskId}`; lives for the process lifetime
+// (re-emitting once after a restart is harmless for an observability event).
+const emittedFanOutDowngrades = new Set<string>();
 const runMutationQueues = new Map<string, Promise<void>>();
 const runWriteQueues = new Map<string, Promise<void>>();
 const MAX_ATTACHMENTS_PER_MESSAGE = 8;
@@ -485,6 +502,13 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   // `!input.runId` mis-skipped fresh chats too whenever the caller had
   // pre-created the run via createRun() to thread chip config — which is
   // what the v1 chip flow does.
+  // First-class parallel fan-out: when the composer/explorer seeded a
+  // FanOutDirective (structured input.fanOut, or a marker-bearing initial
+  // note), run-store synthesizes the parallel batch deterministically instead
+  // of round-tripping plan_analysis. Resolve it up front so the note-handling
+  // early-returns below don't divert a fan-out into the chat/plan path.
+  const fanOutDirective = resolveFanOutDirective(input);
+
   const initialNote = input.initialUserNote?.trim();
   if (initialNote) {
     run = await addRunMessage({
@@ -495,8 +519,23 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       message: initialNote,
       attachments: input.initialAttachments,
     });
-    if (!planText) {
+    if (!planText && !fanOutDirective) {
       scheduleInitialChatDecision(run.id, input);
+      return run;
+    }
+  }
+
+  // Force the fan-out batch before the generic planning branch. On a fresh run
+  // (no steps yet) this materializes exactly one worker_batch — one parallel
+  // worker per target, each scoped to its own file — and we fall through to the
+  // launch loop below. If no usable targets survive normalization, fall back to
+  // normal planning so the user still gets a run.
+  if (fanOutDirective && run.steps.length === 0 && run.workerTasks.length === 0) {
+    const forced = await forceFanOutBatch(run, fanOutDirective);
+    if (forced) {
+      run = forced;
+    } else {
+      scheduleInitialAutopilotPlanning(run.id, input);
       return run;
     }
   }
@@ -524,6 +563,13 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   if (tasks.length === 0) {
     return askHumanQuestion(run.id, "I could not find a ready task to run. Please clarify the next goal.");
   }
+
+  // Observability: if the next batch was collapsed to a single serial task only
+  // because that task wants to run parallel but has no concrete write scope,
+  // surface it as a fanout.downgraded_to_serial event (once per run+task). This
+  // is the launch site — pickAutopilotTasks is pure and runs every tick, so the
+  // emit lives here behind the in-memory guard rather than in the selector.
+  await maybeEmitFanOutDowngrade(run);
 
   const launchQueue: Array<{ task: WorkerTask; attemptId: string }> = [];
   for (const task of tasks) {
@@ -2073,6 +2119,160 @@ async function chooseUiLogicRuntimes(): Promise<{
   return { ui, logic, integrator };
 }
 
+// --- First-class parallel fan-out -------------------------------------------
+// A FanOutDirective (seeded by the composer "Fan out" button or the Explorer
+// multi-select context action) asks the run to apply ONE instruction across an
+// explicit set of per-target files. run-store synthesizes the batch
+// deterministically — one parallel worker per target, each scoped to exactly
+// its own file — so correctness never depends on the LLM manager honoring the
+// prose [FAN OUT] contract. The manager profile is also taught the marker, but
+// this path is what actually guarantees the disjoint parallel scopes.
+
+// Distribute fan-out workers across the runtimes that are actually installed so
+// a multi-target fan-out is not single-runtime by default. Falls back to a
+// single available runtime (or "manual" when none is configured). The list is
+// stable + index-addressable so each target gets a deterministic assignment.
+async function chooseFanOutRuntimes(): Promise<WorkerRuntime[]> {
+  const diagnostics = await detectConfiguredAgentRuntimes();
+  const installed = new Set(
+    diagnostics.filter((runtime) => runtime.installed).map((runtime) => runtime.kind),
+  );
+  const ordered: WorkerRuntime[] = [];
+  if (installed.has("claude")) ordered.push("claude");
+  if (installed.has("codex")) ordered.push("codex");
+  return ordered.length > 0 ? ordered : ["manual"];
+}
+
+// Reconstruct a FanOutDirective from a seeded note body whose first line is the
+// FAN_OUT_DIRECTIVE_MARKER. Mirrors formatFanOutDirective's layout (marker on
+// line 1, then one target per line, then a blank line + optional instruction)
+// so a note seeded by the renderer round-trips even when input.fanOut was not
+// threaded (e.g. a live-run addRunMessage steer).
+function parseFanOutDirectiveFromNote(note: string): FanOutDirective | null {
+  const trimmed = note.trim();
+  if (!trimmed.startsWith(FAN_OUT_DIRECTIVE_MARKER)) return null;
+  const lines = trimmed.split(/\r?\n/);
+  // Drop the marker line.
+  lines.shift();
+  const targets: string[] = [];
+  let cursor = 0;
+  for (; cursor < lines.length; cursor++) {
+    const line = lines[cursor].trim();
+    if (line.length === 0) {
+      cursor += 1;
+      break;
+    }
+    targets.push(line);
+  }
+  const instruction = lines.slice(cursor).join("\n").trim();
+  if (targets.length === 0) return null;
+  return {
+    targets,
+    instruction: instruction.length > 0 ? instruction : undefined,
+    origin: "composer",
+  };
+}
+
+// Resolve the directive that should force a fan-out for this startAutopilot
+// call: the structured input.fanOut wins; otherwise fall back to parsing a
+// marker-bearing initial note.
+function resolveFanOutDirective(input: StartAutopilotInput): FanOutDirective | null {
+  if (input.fanOut && input.fanOut.targets.length > 0) return input.fanOut;
+  const note = input.initialUserNote?.trim();
+  if (note) return parseFanOutDirectiveFromNote(note);
+  return null;
+}
+
+// De-duplicate + normalize targets while preserving the caller's original path
+// strings for allowedPaths (normalizeTaskPath is only used for the disjointness
+// key). Empty / broad scopes are dropped — a fan-out target must be a concrete
+// file so each worker owns exactly one disjoint scope.
+function normalizeFanOutTargets(targets: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of targets) {
+    const original = raw.trim();
+    if (!original) continue;
+    if (isBroadPathScope(original)) continue;
+    const key = normalizeTaskPath(original);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(original.replace(/\\/g, "/"));
+  }
+  return out;
+}
+
+// Deterministically synthesize ONE worker_batch step plus one feature task per
+// target and create them through the same createStep/createWorkerTask path the
+// manager decisions use. Each task: allowedPaths = [its own file], forbidden =
+// [], canRunParallel = true, writeScopeSource = "fan-out", taskClass =
+// "feature". Disjoint single-file scopes mean strengthenParallelTaskScopes /
+// pickAutopilotTasks keep them parallel (no downgrade). Returns the updated run,
+// or null when no usable targets survive normalization.
+async function forceFanOutBatch(
+  run: RunState,
+  directive: FanOutDirective,
+): Promise<RunState | null> {
+  const targets = normalizeFanOutTargets(directive.targets);
+  if (targets.length === 0) return null;
+
+  const runtimes = await chooseFanOutRuntimes();
+  const instruction = directive.instruction?.trim();
+  const instructionLine = instruction && instruction.length > 0 ? instruction : "Apply the requested change";
+
+  const plannedAgents: PlannedStepAgent[] = targets.map((target, index) => ({
+    label: `worker 1.${index + 1}`,
+    summary: `${instructionLine} in ${target}; own only this file.`,
+    runtimePreference: runtimes[index % runtimes.length],
+    taskClass: "feature",
+  }));
+
+  let updated = await createStep({
+    runId: run.id,
+    title: `Fan out across ${targets.length} file${targets.length === 1 ? "" : "s"}`,
+    goal:
+      `Apply the same change to ${targets.length} target file${targets.length === 1 ? "" : "s"} in parallel, ` +
+      "one worker per file, with disjoint write scopes so the workers never collide.",
+    kind: "worker_batch",
+    plannedAgents,
+    riskLevel: "low",
+    acceptanceCriteria: targets.map(
+      (target) => `${target} reflects the requested change and the worker reports its real filesChanged.`,
+    ),
+  });
+  const stepId = updated.steps.at(-1)?.id;
+  if (!stepId) return updated;
+
+  for (let index = 0; index < targets.length; index++) {
+    const target = targets[index];
+    updated = await createWorkerTask({
+      runId: updated.id,
+      stepId,
+      title: `Fan out: ${target}`,
+      description: `${instructionLine}. Edit ONLY ${target}; this is one worker of a ${targets.length}-way parallel fan-out and the other files are owned by sibling workers.`,
+      runtimePreference: runtimes[index % runtimes.length],
+      allowedPaths: [target],
+      forbiddenPaths: [],
+      expectedOutputs: [],
+      verificationCommands: [],
+      canRunParallel: true,
+      conflictsWith: [],
+      taskClass: "feature",
+      writeScopeSource: "fan-out",
+      createdBy: "spark",
+    });
+  }
+
+  await appendFanOutDirectiveForcedEvent({
+    workspaceId: updated.workspaceId,
+    runId: updated.id,
+    targetCount: targets.length,
+    origin: directive.origin,
+  });
+
+  return requireRun(updated.id);
+}
+
 async function rerouteUnavailableAgentRuntimes(
   decision: SparkManagerDecision,
 ): Promise<{ decision: SparkManagerDecision; rerouted: RuntimeReroute[] }> {
@@ -2347,6 +2547,126 @@ function decisionTaskScopesOverlap(left: SparkManagerTaskDecision, right: SparkM
   return leftPaths.some((leftPath) =>
     rightPaths.some((rightPath) => pathScopesOverlap(leftPath, rightPath)),
   );
+}
+
+// Does this decision task write to the workspace (so it deserves a concrete
+// write scope)? Verifier-class and manual workers do not edit files, so they
+// are never scope-derived. Mirrors taskWritesWorkspace (which operates on a
+// materialized WorkerTask) for the pre-creation SparkManagerTaskDecision shape.
+function decisionTaskWritesWorkspace(task: SparkManagerTaskDecision): boolean {
+  return task.taskClass !== "verifier" && task.runtimePreference !== "manual";
+}
+
+// Collect the REAL files prior completed NON-verifier workers touched, read
+// from their final reports (attempt.finalReportPath → readWorkerReport). This
+// is the recon/skeleton lineage's actual filesystem footprint. Deduped by
+// normalized path while preserving the worker's original path string for the
+// rewritten allowedPaths. Also returns the titles of the source tasks for the
+// derived-scopes event payload.
+async function collectPriorWorkerChangedFiles(
+  run: RunState,
+): Promise<{ paths: string[]; sourceTaskTitles: string[] }> {
+  const byKey = new Map<string, string>();
+  const sourceTaskTitles = new Set<string>();
+  for (const attempt of run.workerAttempts) {
+    const task = run.workerTasks.find((t) => t.id === attempt.workerTaskId);
+    if (!task || task.taskClass === "verifier") continue;
+    if (!taskWritesWorkspace(task)) continue;
+    if (!attempt.finalReportPath) continue;
+    const report = await readWorkerReport(attempt.finalReportPath);
+    if (!report || !Array.isArray(report.filesChanged)) continue;
+    let contributed = false;
+    for (const file of report.filesChanged) {
+      const original = file.path?.trim();
+      if (!original) continue;
+      if (isBroadPathScope(original)) continue;
+      const key = normalizeTaskPath(original);
+      if (!key || byKey.has(key)) continue;
+      byKey.set(key, original.replace(/\\/g, "/"));
+      contributed = true;
+    }
+    if (contributed) sourceTaskTitles.add(task.title);
+  }
+  return {
+    paths: [...byKey.values()].sort((a, b) => a.localeCompare(b)),
+    sourceTaskTitles: [...sourceTaskTitles],
+  };
+}
+
+// After a recon/skeleton step, overwrite empty / broad-glob allowedPaths on the
+// downstream implementation tasks the manager just proposed with the CONCRETE
+// files prior workers actually changed. The manager has no filesystem access
+// and guesses these scopes; deriving them from real filesChanged makes the next
+// batch launch with disjoint, concrete scopes (so it stays parallel instead of
+// being downgraded to serial by hasConcreteParallelScope). Only rewrites tasks
+// whose concrete scope is currently EMPTY; never touches verifier/manual tasks.
+// Returns the (possibly new) decision plus a per-task from/to diff, the source
+// titles for the event, and the SET of rewritten decision-task references so
+// the creation loop can stamp writeScopeSource="derived".
+async function deriveDownstreamScopesFromFilesChanged(
+  run: RunState,
+  decision: SparkManagerDecision,
+  stepIds: string[],
+): Promise<{
+  decision: SparkManagerDecision;
+  derived: Array<{ taskTitle: string; from: string[]; to: string[] }>;
+  sourceTaskTitles: string[];
+  rewrittenTasks: Set<SparkManagerTaskDecision>;
+}> {
+  const empty = {
+    decision,
+    derived: [] as Array<{ taskTitle: string; from: string[]; to: string[] }>,
+    sourceTaskTitles: [] as string[],
+    rewrittenTasks: new Set<SparkManagerTaskDecision>(),
+  };
+  if (decision.tasks.length === 0) return empty;
+
+  // Candidates: about-to-be-created workspace-writing tasks that map onto a
+  // mutable step and whose concrete scope the manager left empty/broad.
+  const candidates = decision.tasks.filter((task) => {
+    if (!decisionTaskWritesWorkspace(task)) return false;
+    if (concreteDecisionAllowedPaths(task).length > 0) return false;
+    return Boolean(resolveTaskStepId(run, task.stepIndex, stepIds));
+  });
+  if (candidates.length === 0) return empty;
+
+  const prior = await collectPriorWorkerChangedFiles(run);
+  if (prior.paths.length === 0) return empty;
+
+  // Partition concrete paths across the candidates. A single downstream impl
+  // task owns ALL prior changed files; multiple candidates split them
+  // round-robin so each worker still gets a disjoint slice. A candidate that
+  // would receive zero paths (more candidates than files) is left untouched.
+  const assignments = new Map<SparkManagerTaskDecision, string[]>();
+  if (candidates.length === 1) {
+    assignments.set(candidates[0], [...prior.paths]);
+  } else {
+    for (let i = 0; i < prior.paths.length; i++) {
+      const candidate = candidates[i % candidates.length];
+      const list = assignments.get(candidate) ?? [];
+      list.push(prior.paths[i]);
+      assignments.set(candidate, list);
+    }
+  }
+
+  const rewrittenTasks = new Set<SparkManagerTaskDecision>();
+  const derived: Array<{ taskTitle: string; from: string[]; to: string[] }> = [];
+  const tasks = decision.tasks.map((task) => {
+    const assigned = assignments.get(task);
+    if (!assigned || assigned.length === 0) return task;
+    const rewritten: SparkManagerTaskDecision = { ...task, allowedPaths: assigned };
+    rewrittenTasks.add(rewritten);
+    derived.push({ taskTitle: task.title, from: [...task.allowedPaths], to: assigned });
+    return rewritten;
+  });
+
+  if (derived.length === 0) return empty;
+  return {
+    decision: { ...decision, tasks },
+    derived,
+    sourceTaskTitles: prior.sourceTaskTitles,
+    rewrittenTasks,
+  };
 }
 
 function dropVerifierTasksWithExistingPeer(
@@ -3330,6 +3650,25 @@ async function applySparkManagerDecision(
     });
   }
 
+  // Derive concrete downstream write scopes from prior workers' REAL
+  // filesChanged. After a recon/skeleton step finishes, the manager often hands
+  // a downstream implementation task a broad glob or empty allowedPaths because
+  // it has no filesystem access and was guessing. Overwrite those with the
+  // exact files the recon/skeleton workers actually touched so the next batch
+  // launches with disjoint, concrete scopes (and stays parallel). Tasks rewritten
+  // here are tagged writeScopeSource="derived" when created below.
+  const derivedScopes = await deriveDownstreamScopesFromFilesChanged(latest, decision, stepIds);
+  const derivedTaskRefs = derivedScopes.rewrittenTasks;
+  if (derivedScopes.derived.length > 0) {
+    decision = derivedScopes.decision;
+    await appendWriteScopesDerivedEvent({
+      workspaceId: latest.workspaceId,
+      runId: latest.id,
+      derived: derivedScopes.derived,
+      sourceTaskTitles: derivedScopes.sourceTaskTitles,
+    });
+  }
+
   // Corrective-rounds guard: count how many tasks each step already has, and
   // refuse to queue more once we exceed MAX_TASKS_PER_STEP. The verifier loop
   // can in principle ping-pong forever. With dual-verifier peer pressure each
@@ -3478,6 +3817,7 @@ async function applySparkManagerDecision(
       canRunParallel: task.canRunParallel,
       conflictsWith: task.conflictsWith,
       taskClass: task.taskClass,
+      writeScopeSource: derivedTaskRefs.has(task) ? "derived" : undefined,
       createdBy: "spark",
     });
     createdTaskCount += 1;
@@ -4626,6 +4966,7 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     canRunParallel: input.canRunParallel ?? false,
     conflictsWith: input.conflictsWith ?? [],
     taskClass: input.taskClass,
+    writeScopeSource: input.writeScopeSource,
     createdBy: input.createdBy ?? "user",
     createdAt: now,
     updatedAt: now,
@@ -6869,7 +7210,21 @@ function tasksConflictForParallelLaunch(left: WorkerTask, right: WorkerTask): bo
   return taskPathScopesConflict(left, right);
 }
 
-function pickAutopilotTasks(run: RunState): WorkerTask[] {
+// Why pickAutopilotTasks collapsed a would-be parallel batch to a single serial
+// task. Only `no_concrete_scope` (a task that wants to run parallel but has no
+// concrete write scope — exactly the fan-out anti-pattern) is surfaced to the
+// launch site as a fanout.downgraded_to_serial event; `not_parallel` (the
+// manager deliberately marked the task serial) is normal and not reported.
+type SerialDowngradeReason = "no_concrete_scope" | "not_parallel";
+
+// Pure selector with the downgrade reason exposed. pickAutopilotTasks wraps this
+// and discards the reason so its existing call sites keep their WorkerTask[]
+// semantics; only the launch site reads `downgrade` to emit an observability
+// event. Selection behaviour is byte-for-byte identical to the prior body.
+function pickAutopilotTasksWithReason(run: RunState): {
+  tasks: WorkerTask[];
+  downgrade: { task: WorkerTask; reason: SerialDowngradeReason } | null;
+} {
   const activeStep = pickAutopilotStep(run);
   const candidates = run.workerTasks.filter((task) => {
     if (!["created", "queued", "failed", "retry_queued"].includes(task.status)) return false;
@@ -6881,12 +7236,14 @@ function pickAutopilotTasks(run: RunState): WorkerTask[] {
     if (task.stepId === activeStep.id) return true;
     return false;
   });
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) return { tasks: [], downgrade: null };
 
   const cap = evalMaxParallelWorkers();
   const first = candidates[0];
-  if (!first.canRunParallel) return [first];
-  if (!hasConcreteParallelScope(first)) return [first];
+  if (!first.canRunParallel) return { tasks: [first], downgrade: { task: first, reason: "not_parallel" } };
+  if (!hasConcreteParallelScope(first)) {
+    return { tasks: [first], downgrade: { task: first, reason: "no_concrete_scope" } };
+  }
 
   const selected: WorkerTask[] = [];
   for (const task of candidates) {
@@ -6898,7 +7255,30 @@ function pickAutopilotTasks(run: RunState): WorkerTask[] {
     selected.push(task);
     if (cap && selected.length >= cap) break;
   }
-  return selected.length > 0 ? selected : [first];
+  return selected.length > 0 ? { tasks: selected, downgrade: null } : { tasks: [first], downgrade: null };
+}
+
+function pickAutopilotTasks(run: RunState): WorkerTask[] {
+  return pickAutopilotTasksWithReason(run).tasks;
+}
+
+// Emit the fan-out serial-downgrade observability event at the real launch
+// site, exactly once per (run, task). Called only where attempts are actually
+// materialized — pickAutopilotTasks itself stays pure (it runs every tick).
+async function maybeEmitFanOutDowngrade(run: RunState): Promise<void> {
+  const { downgrade } = pickAutopilotTasksWithReason(run);
+  if (!downgrade || downgrade.reason !== "no_concrete_scope") return;
+  const guardKey = `${run.id}:${downgrade.task.id}`;
+  if (emittedFanOutDowngrades.has(guardKey)) return;
+  emittedFanOutDowngrades.add(guardKey);
+  await appendFanOutDowngradedEvent({
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    stepId: downgrade.task.stepId,
+    workerTaskId: downgrade.task.id,
+    taskTitle: downgrade.task.title,
+    reason: "no_concrete_scope",
+  });
 }
 
 function evalMaxParallelWorkers(): number | null {

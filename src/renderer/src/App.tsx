@@ -3,13 +3,14 @@ import type {
   AppSettings,
   AppState,
   ChatBackendKind,
+  FanOutDirective,
   FsEntry,
   RunState,
   ShellInfo,
   SparkEvent,
   Workspace,
 } from "@shared/types";
-import { DEFAULT_COPY_BRANCH_SETUP_COMMAND } from "@shared/types";
+import { DEFAULT_COPY_BRANCH_SETUP_COMMAND, formatFanOutDirective } from "@shared/types";
 import { makeId } from "@shared/ids";
 import { backendPtySessionId } from "@shared/backend-pty";
 import WindowChrome from "./components/WindowChrome";
@@ -1364,6 +1365,39 @@ export default function App() {
     [activeWorkspace, refreshRunsFor, handleSelectRun],
   );
 
+  // Explorer multi-select "Fan out across N files": build a structured
+  // FanOutDirective (one parallel worker per selected target) and seed it onto a
+  // brand-new chat via startAutopilot(fanOut). run-store deterministically
+  // synthesizes the forced worker_batch from the directive, so correctness does
+  // not rely on the manager honoring prose. Mirrors handleRunPlan: start, then
+  // select the chat so its conversation + node-graph tab come forward.
+  const handleFanOut = useCallback(
+    async (paths: string[]) => {
+      const ws = activeWorkspace;
+      if (!ws) return;
+      const targets = paths.filter((p) => p);
+      if (targets.length === 0) return;
+      const directive: FanOutDirective = { targets, origin: "explorer" };
+      try {
+        const run = await window.spark.orchestration.startAutopilot({
+          workspaceId: ws.id,
+          workspaceName: ws.name,
+          cwd: ws.cwd,
+          fanOut: directive,
+          initialUserNote: formatFanOutDirective(directive),
+          initialUserNoteClientMessageId: makeId("client-msg"),
+        });
+        handleSelectRun(run.id);
+        void refreshRunsFor(ws.id);
+      } catch (err) {
+        // Pre-run failure is rare (the directive is built from an in-memory
+        // selection); planning failures instead surface on the run itself.
+        console.error("Fan out failed:", err);
+      }
+    },
+    [activeWorkspace, refreshRunsFor, handleSelectRun],
+  );
+
   // Open a file by absolute path. Used by the terminal's OSC 8888 handler
   // (`tp <file>` / `spark_open <file>` from a shell) and the Source Control
   // panel's "open file" action. Reads `tabs` via the ref so the callback stays
@@ -2245,6 +2279,7 @@ export default function App() {
             onDeleteFile={handleDeleteFile}
             onRenameFile={handleRenameFile}
             onRunPlan={handleRunPlan}
+            onFanOut={handleFanOut}
           />
         )}
         {showLeft && (
@@ -2346,6 +2381,7 @@ export default function App() {
             onDeleteFile={handleDeleteFile}
             onRenameFile={handleRenameFile}
             onRunPlan={handleRunPlan}
+            onFanOut={handleFanOut}
           />
         )}
 
