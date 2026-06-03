@@ -463,7 +463,12 @@ export interface ChatStatus {
 export function describeRunStatus(run: RunState): ChatStatus {
   const total = run.steps.length;
   const done = run.steps.filter(
-    (step) => step.status === "complete" || step.status === "skipped",
+    (step) =>
+      step.status === "complete" ||
+      // A force-landed-unverified step is terminal: count it toward progress so
+      // the aggregate "step X of N" doesn't treat it as still in-flight.
+      step.status === "completed_unverified" ||
+      step.status === "skipped",
   ).length;
   const stepDetail =
     total > 0 ? `step ${Math.min(done + 1, total)} of ${total}` : undefined;
@@ -563,6 +568,12 @@ export function stepStatusColor(status: StepStatus): string {
     return "var(--accent)";
   }
   if (status === "complete") return "var(--ok)";
+  // A force-landed-without-verification step is terminal but flagged — it
+  // reads as caution, not a clean complete. Mirrors run-format.ts so the same
+  // step shows the same hue in the node graph and the chat timeline, and is
+  // matched here as its own terminal beat (parallel to `complete`) so it never
+  // falls through into the running/accent branch or the muted default.
+  if (status === "completed_unverified") return "var(--warn)";
   if (status === "failed" || status === "blocked") return "var(--danger)";
   if (status === "skipped") return "var(--muted)";
   return "var(--muted-2)";
