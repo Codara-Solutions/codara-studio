@@ -19,6 +19,7 @@ import {
   loadManagerPromptProfile,
   type ManagerPromptProfile,
 } from "./prompt-profile";
+import { formatPriorRunsSection } from "./run-memory";
 
 export interface OpenRouterConfig {
   apiKey: string;
@@ -519,6 +520,10 @@ function buildManagerUserMessage(input: ManagerUserMessageInput): string {
     // platform are needed for worker prompt construction in step_planning, not
     // for breaking the plan into steps.
     lines.push("WORKSPACE CONTENTS", listWorkspaceContents(cwd), "");
+    const priorRuns = formatPriorRunsSection(run);
+    if (priorRuns) {
+      lines.push(priorRuns, "");
+    }
   } else {
     lines.push("WORKSPACE", cwd, "");
     // Re-inject the run-level complexity classification so worker_result_review

@@ -966,6 +966,68 @@ export interface RunState {
   chat1mContext?: boolean;
 }
 
+/**
+ * One distilled, persisted record of a finished run, keyed (in the ledger) by
+ * the run's workspaceId. Written best-effort on the non-complete -> complete
+ * transition and read back during a later run's plan_analysis so the manager
+ * can learn this repo's task shapes, which runtimes survived verification, and
+ * which build/test commands actually worked. Deliberately small: every list is
+ * distilled + capped by the writer so the ledger stays a compact fingerprint,
+ * not a transcript.
+ */
+export interface WorkspaceRunMemoryRecord {
+  runId: string;
+  /** run.title, truncated by the writer. */
+  title: string;
+  /** ISO timestamp; run.completedAt ?? run.updatedAt. */
+  completedAt: string;
+  /**
+   * Distinct lowercased keyword tokens distilled from step titles/goals/
+   * acceptanceCriteria plus the run title. The task-shape fingerprint the
+   * similarity ranker scores a new plan against.
+   */
+  planKeywords: string[];
+  /**
+   * Generalized globs derived from every report.filesChanged[].path
+   * (e.g. "src/main/orchestration/*.ts") so the ranker can match by area
+   * touched without storing exact file lists.
+   */
+  touchedGlobs: string[];
+  /** Complexity bucket the manager classified the run into (run.taskComplexity). */
+  complexity?: TaskComplexity;
+  /**
+   * True unless any verifier-class report recorded verifier.status === "failed".
+   * Lets a later run weigh whether the chosen complexity actually held up.
+   */
+  verificationSurvived: boolean;
+  /** Per-runtime implementation -> verifier outcomes distilled from attempts. */
+  runtimeOutcomes: WorkspaceRunMemoryRuntimeOutcome[];
+  /** Build/test commands distilled from reports that passed verification. */
+  verifiedCommands: string[];
+}
+
+/**
+ * A single runtime's role and outcome within a remembered run, so a later
+ * plan_analysis can prefer the impl/verifier pairing that worked here before.
+ */
+export interface WorkspaceRunMemoryRuntimeOutcome {
+  runtime: WorkerRuntime;
+  role: "impl" | "verifier";
+  outcome: "passed" | "failed" | "unknown";
+}
+
+/**
+ * On-disk shape of a per-workspace memory ledger (one JSON file per
+ * workspaceId under ~/.SparkAgent/memory). Records are newest-first and capped
+ * by the writer so the file never grows unbounded.
+ */
+export interface WorkspaceMemoryLedger {
+  /** Schema version, currently 1. */
+  version: number;
+  workspaceId: string;
+  records: WorkspaceRunMemoryRecord[];
+}
+
 export interface Checkpoint {
   id: string;
   kind: "run-start" | "user-message";
