@@ -1737,6 +1737,24 @@ export interface StartAutopilotInput {
   fanOut?: FanOutDirective;
 }
 
+// ── Daemon split scaffold ───────────────────────────────────────────────────
+// Cross-boundary handshake descriptor for the detached orchestration daemon
+// (docs/daemon-split-PLAN.md). The daemon host writes this JSON to
+// sparkHome()/<handshake file> on startup — the same loopback-HTTP + bearer
+// pattern agent-socket.ts uses (see writeHandshakeFile there); out-of-process
+// clients (and, in a later phase, the renderer) read it to discover the
+// 127.0.0.1 RPC endpoint and per-launch token. Shape mirrors the agent-socket
+// handshake payload exactly so the two stay swappable. Defined here (not in the
+// main-only daemon-ipc.ts seam) so the renderer can type the file it reads
+// without importing a main-process module across the @shared boundary.
+// Additive scaffold type — not yet consumed by the renderer.
+export interface DaemonHandshake {
+  url: string;
+  token: string;
+  pid: number;
+  writtenAt: string;
+}
+
 export interface PauseRunInput {
   runId: string;
   reason?: string;

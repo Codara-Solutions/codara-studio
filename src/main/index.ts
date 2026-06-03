@@ -4,6 +4,7 @@ import { registerIpc } from "./ipc";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { startAgentSocket, stopAgentSocket } from "./agent-socket";
+import { registerDaemonHostScaffold } from "./orchestration/daemon";
 import { ensureSparkHomeSync } from "./spark-home";
 import { flush, loadSettings, loadState } from "./storage";
 import { flushPreferences, getPreferenceSync } from "./preferences-store";
@@ -234,6 +235,13 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.error("[main] failed to start agent socket", err);
   }
+
+  // No-op scaffold reference for the daemon-split migration (see
+  // docs/daemon-split-PLAN.md). Mirrors the startAgentSocket() lazy-startup
+  // shape but starts no server and alters no existing flow — it exists solely
+  // so the new src/main/orchestration/daemon/ modules are reachable from the
+  // boot path while the phased extraction lands.
+  registerDaemonHostScaffold();
 
   if (isHeadlessEval) {
     // Headless eval mode: never create a BrowserWindow, never wire renderer
