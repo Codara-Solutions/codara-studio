@@ -22,6 +22,7 @@ import UpdateBanner from "./components/UpdateBanner";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
 import ToastHost from "./components/Toast";
+import RunSwitcher from "./components/RunSwitcher";
 import { CopyBranchDeleteDialog, CopyBranchErrorToast } from "./components/CopyBranchDialogs";
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar from "./tabs/TabBar";
@@ -66,6 +67,16 @@ import {
   enumerateOpenWorkers,
   workerMenuLabel,
 } from "./routing/enumerate-open-workers";
+import { useGlobalRuns } from "./lib/useGlobalRuns";
+import {
+  buildAwayDigest,
+  compareRunsByAttention,
+  describeRunStatus,
+  findOpenQuestion,
+  statusToneColor,
+  type AwayDigest,
+  type ChatStatusTone,
+} from "./components/chat/timeline";
 
 // Stable brand label for every chat tab in the top strip. The first-message-
 // derived run.title is kept on the RunState for the chat panel header and the
@@ -216,6 +227,14 @@ export default function App() {
   // context-window / failure tabs. Toggled via the `session.openInspector`
   // shortcut (Mod+Shift+I).
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  // Cmd/Ctrl-K command-palette switcher over every run across all workspaces.
+  // Sourced from the separate global-runs feed (useGlobalRuns) since the
+  // lifted `runs` state above is active-workspace-only.
+  const [runSwitcherOpen, setRunSwitcherOpen] = useState(false);
+  // Single "While you were away" digest surfaced on window focus-after-away.
+  // Holds the snapshot computed at focus time; null when nothing landed or the
+  // user dismissed it.
+  const [awayDigest, setAwayDigest] = useState<AwayDigest | null>(null);
   const [platform, setPlatform] = useState<string>("");
   const [home, setHome] = useState<string>("");
   // Side-panel layout: outer widths, internal split ratios, per-section
@@ -339,6 +358,11 @@ export default function App() {
   const runsRef = useRef(runs);
   runsRef.current = runs;
 
+  // Cross-workspace runs feed for the walk-away cockpit surfaces (run
+  // switcher, rail tone dots, focus digest). Independent of the lifted `runs`
+  // state above, which is scoped to the active workspace only.
+  const globalRuns = useGlobalRuns(booted);
+
   const handleRunSnapshot = useCallback(
     (
       run: RunState,
@@ -418,6 +442,47 @@ export default function App() {
     },
     [],
   );
+
+  // Cross-workspace run selection used by the global RunSwitcher and the
+  // focus-after-away digest. handleSelectRun is scoped to the active workspace
+  // (it early-returns when the target lives elsewhere), so switch the active
+  // workspace first when the chosen run belongs to another project. The
+  // per-workspace remembered-selection plumbing then restores this run once the
+  // new workspace's runs load.
+  const handleSelectRunAnywhere = useCallback(
+    (runId: string, workspaceId?: string) => {
+      if (workspaceId && workspaceId !== activeIdRef.current) {
+        const currentWorkspaceId = activeIdRef.current;
+        if (currentWorkspaceId) {
+          activeRunIdsByWorkspaceRef.current[currentWorkspaceId] = activeRunIdRef.current;
+        }
+        setActiveId(workspaceId);
+      }
+      handleSelectRun(runId, workspaceId);
+    },
+    [handleSelectRun],
+  );
+
+  // Per-workspace status-tone for the WorkspaceRail dots: the tone of each
+  // workspace's highest-attention run (blocked > done-unseen > live > …),
+  // sourced from the global feed so the dot reflects every project, not just
+  // the active one. null when a workspace has no runs.
+  const toneByWorkspaceId = useMemo(() => {
+    const m: Record<string, ChatStatusTone | null> = {};
+    for (const w of workspaces) {
+      const wr = globalRuns.runs.filter((r) => r.workspaceId === w.id);
+      if (wr.length === 0) {
+        m[w.id] = null;
+        continue;
+      }
+      // compareRunsByAttention sorts highest-attention first, so the head run
+      // dictates the dot. describeRunStatus(top).tone is the same tone the
+      // switcher buckets and chat rows use, so the cues can never disagree.
+      const top = wr.slice().sort(compareRunsByAttention)[0];
+      m[w.id] = describeRunStatus(top).tone;
+    }
+    return m;
+  }, [workspaces, globalRuns.runs]);
 
   // Keep the active chat's node-graph tab in existence without stealing
   // focus. Chat-only runs (no steps, no worker tasks) intentionally have NO
@@ -758,6 +823,57 @@ export default function App() {
     window.addEventListener("spark:run-snapshot", handler);
     return () => window.removeEventListener("spark:run-snapshot", handler);
   }, [handleRunSnapshot]);
+
+  // ── Focus-after-away digest + markRunSeen finalization ─────────────────────
+  //
+  // The walk-away thesis: the user delegates, leaves, and comes back. On
+  // window 'blur' we stamp when they left; on 'focus' we compute one
+  // "While you were away" digest from the global feed and surface it instead
+  // of letting unseen-complete runs silently flip seen. Showing the digest is
+  // also where markRunSeen finishes its wiring: every done-unseen run in the
+  // digest is acknowledged (seen=true) so the teal "done while you were
+  // elsewhere" cues clear deliberately, not behind the user's back.
+  const awayAtRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!booted) return undefined;
+
+    // Ignore sub-threshold focus flickers (e.g. a transient OS focus steal or
+    // an alt-tab-and-back within the same glance) — "away" means the user
+    // actually left for a beat, not every momentary blur.
+    const AWAY_THRESHOLD_MS = 60_000;
+
+    const onBlur = () => {
+      awayAtRef.current = Date.now();
+    };
+    const onFocus = () => {
+      const awayAt = awayAtRef.current;
+      awayAtRef.current = null;
+      if (awayAt === null || Date.now() - awayAt < AWAY_THRESHOLD_MS) return;
+      const digest = buildAwayDigest(globalRuns.runsRef.current);
+      if (digest.total === 0) return;
+      setAwayDigest(digest);
+      // Finish markRunSeen wiring: acknowledge every done-unseen run so the
+      // OS/unseen cues clear once surfaced. Best-effort; refresh the global
+      // feed afterward so the rail dots/switcher drop the teal immediately.
+      for (const run of digest.doneUnseen) {
+        window.spark.orchestration
+          .markRunSeen({ runId: run.id })
+          .then(() => globalRuns.refresh())
+          .catch(() => {
+            /* best-effort: a stale seen flag self-heals on the next focus */
+          });
+      }
+    };
+
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
+    };
+    // globalRuns.runsRef / refresh are stable refs; gate solely on booted.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [booted]);
 
   // Subscribe to renderer-side notification channels. The toast channel is
   // owned by <ToastHost/> below; this effect handles the embedded-sound
@@ -1555,6 +1671,7 @@ export default function App() {
   const shortcutHandlers = useMemo<ShortcutHandlers>(
     () => ({
       "shortcuts.open": () => setShortcutsOpen((open) => !open),
+      "runSwitcher.open": () => setRunSwitcherOpen((open) => !open),
       "settings.open": () => {
         setSettingsOpen(true);
         window.dispatchEvent(new CustomEvent("spark:open-settings"));
@@ -2092,6 +2209,7 @@ export default function App() {
         {showLeft && (
           <WorkspaceRail
             side="left"
+            toneByWorkspaceId={toneByWorkspaceId}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
@@ -2192,6 +2310,7 @@ export default function App() {
         {showRight && (
           <WorkspaceRail
             side="right"
+            toneByWorkspaceId={toneByWorkspaceId}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
@@ -2262,6 +2381,15 @@ export default function App() {
           onClose={closeShortcuts}
         />
 
+        <RunSwitcher
+          open={runSwitcherOpen}
+          runs={globalRuns.runs}
+          workspaces={workspaces}
+          onClose={() => setRunSwitcherOpen(false)}
+          onSelectRun={handleSelectRunAnywhere}
+          onAnswered={(run) => handleRunSnapshot(run)}
+        />
+
         <SearchPanel
           open={searchOpen}
           cwd={activeWorkspace?.cwd ?? null}
@@ -2276,7 +2404,25 @@ export default function App() {
           onOpenFile={handleSearchOpenFile}
         />
 
-        <ToastHost onSelectRun={handleSelectRun} />
+        <ToastHost
+          onSelectRun={handleSelectRunAnywhere}
+          resolveQuestion={(runId) => {
+            const run = globalRuns.runsRef.current.find((r) => r.id === runId);
+            const question = run ? findOpenQuestion(run) : null;
+            return question?.questionOptions ?? [];
+          }}
+        />
+        {awayDigest && (
+          <AwayDigestCard
+            digest={awayDigest}
+            workspaces={workspaces}
+            onSelectRun={(runId, workspaceId) => {
+              handleSelectRunAnywhere(runId, workspaceId);
+              setAwayDigest(null);
+            }}
+            onDismiss={() => setAwayDigest(null)}
+          />
+        )}
         <CopyBranchErrorToast
           message={copyBranchError}
           onDismiss={() => setCopyBranchError(null)}
@@ -2306,6 +2452,197 @@ export default function App() {
       />
     </div>
     </SelectionRoutingProvider>
+  );
+}
+
+// ── While-you-were-away digest ───────────────────────────────────────────────
+//
+// One dismissible card surfaced on focus-after-away (see the focus/blur effect
+// in App). Lists every run that needs a reply (click → jump to it, switching
+// workspace if needed) and rolls finished-unseen / still-working runs into a
+// summary line. The done-unseen runs were already acknowledged via markRunSeen
+// when this card was built, so the card is purely informational for them.
+function AwayDigestCard({
+  digest,
+  workspaces,
+  onSelectRun,
+  onDismiss,
+}: {
+  digest: AwayDigest;
+  workspaces: Workspace[];
+  onSelectRun: (runId: string, workspaceId?: string) => void;
+  onDismiss: () => void;
+}) {
+  const workspaceName = (workspaceId: string): string =>
+    workspaces.find((w) => w.id === workspaceId)?.name ?? "workspace";
+
+  const summaryBits: string[] = [];
+  if (digest.doneUnseen.length > 0) {
+    summaryBits.push(
+      `${digest.doneUnseen.length} finished`,
+    );
+  }
+  if (digest.working > 0) {
+    summaryBits.push(`${digest.working} still working`);
+  }
+
+  return (
+    <div
+      className="spark-fade-in"
+      role="status"
+      style={{
+        position: "fixed",
+        top: 48,
+        // Sit to the left of the toast column (which pins to right:16) so a
+        // needs-you toast and this digest don't overlap when both are up.
+        right: 16,
+        zIndex: 1001,
+        width: "min(360px, calc(100vw - 32px))",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+        padding: "12px 14px",
+        borderRadius: 8,
+        border: "1px solid color-mix(in oklch, var(--info) 48%, var(--rule-strong))",
+        background: "color-mix(in oklch, var(--info) 12%, var(--panel))",
+        boxShadow: "var(--shadow-2)",
+        fontFamily: "var(--font-sans)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div
+            style={{
+              fontSize: 12,
+              fontWeight: 700,
+              color: "var(--ink)",
+              letterSpacing: "0.02em",
+            }}
+          >
+            While you were away
+          </div>
+          {summaryBits.length > 0 && (
+            <div
+              style={{
+                fontSize: 12,
+                color: "var(--ink-dim, var(--muted))",
+                lineHeight: 1.4,
+                marginTop: 2,
+              }}
+            >
+              {summaryBits.join(" · ")}
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          aria-label="Dismiss digest"
+          onClick={onDismiss}
+          style={{
+            appearance: "none",
+            background: "transparent",
+            border: "none",
+            color: "var(--muted)",
+            cursor: "default",
+            fontSize: 16,
+            lineHeight: 1,
+            padding: 4,
+            marginTop: -2,
+            marginRight: -4,
+            borderRadius: 5,
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "var(--hover)";
+            e.currentTarget.style.color = "var(--ink)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.color = "var(--muted)";
+          }}
+        >
+          ×
+        </button>
+      </div>
+
+      {digest.needsYou.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <div
+            style={{
+              fontSize: 10,
+              fontWeight: 700,
+              textTransform: "uppercase",
+              letterSpacing: "0.06em",
+              color: "var(--muted)",
+            }}
+          >
+            Needs you
+          </div>
+          {digest.needsYou.map((run) => (
+            <button
+              key={run.id}
+              type="button"
+              onClick={() => onSelectRun(run.id, run.workspaceId)}
+              style={{
+                appearance: "none",
+                textAlign: "left",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "6px 8px",
+                borderRadius: 6,
+                border: "1px solid transparent",
+                background: "transparent",
+                cursor: "pointer",
+                color: "var(--ink)",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "var(--hover)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "transparent";
+              }}
+            >
+              <span
+                aria-hidden
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: 999,
+                  flex: "0 0 8px",
+                  background: statusToneColor(describeRunStatus(run).tone),
+                }}
+              />
+              <span style={{ flex: 1, minWidth: 0 }}>
+                <span
+                  style={{
+                    display: "block",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {run.title || "Untitled run"}
+                </span>
+                <span
+                  style={{
+                    display: "block",
+                    fontSize: 11,
+                    color: "var(--muted)",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {workspaceName(run.workspaceId)}
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
