@@ -71,6 +71,7 @@ import {
   type SparkManagerWorkerReportContext,
 } from "./openrouter-manager";
 import { DEFAULT_MANAGER_PROMPT_PROFILE, loadManagerPromptProfile } from "./prompt-profile";
+import { recordRunMemory } from "./run-memory";
 import {
   createCheckpoint,
   deleteRunCheckpoints,
@@ -6114,6 +6115,17 @@ async function commitRunChange(
       result = await appendCompletionSummaryMessage(run.id);
     } catch (err) {
       console.error("[run-store] failed to append completion summary", err);
+    }
+    // Distill + persist this freshly-completed run into the per-workspace
+    // orchestration memory ledger. Best-effort: recordRunMemory is itself
+    // non-throwing, but a stray write failure must never break the completion
+    // path, so it stays wrapped. Pass readWorkerReport so run-memory.ts can
+    // resolve worker reports without importing run-store (no cycle).
+    try {
+      const completedRun = result ?? (await requireRun(run.id));
+      await recordRunMemory(completedRun, readWorkerReport);
+    } catch (err) {
+      console.error("[run-store] failed to record run memory", err);
     }
   }
   // Fire desktop notifications for blocked / complete transitions. Lazy-load
