@@ -16,7 +16,9 @@ import type {
   CreateEntryInput,
   CreateStepInput,
   CreateRunInput,
+  CreateScheduledJobInput,
   CreateWorkerTaskInput,
+  EnqueueRunInput,
   FileListResult,
   FsChangeEvent,
   FsEntry,
@@ -45,12 +47,15 @@ import type {
   PrefKey,
   PreferencesChange,
   PrepareWorkerTaskInput,
+  QueuedRun,
   RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
   RunArtifactPaths,
+  RunQueueState,
   RunState,
   RuntimeState,
+  ScheduledJob,
   SearchHit,
   SearchOptions,
   SearchSummary,
@@ -458,6 +463,33 @@ const api = {
       ipcRenderer.on("orchestration:event", listener);
       return () => ipcRenderer.off("orchestration:event", listener);
     },
+  },
+  // Overnight run queue: a FIFO of pending autopilot runs drained under a
+  // concurrency cap. Channels are registered in main's IPC layer (T4) and back
+  // onto the RunQueue model in orchestration/run-queue.ts.
+  queue: {
+    list: (): Promise<RunQueueState> => ipcRenderer.invoke("queue:list"),
+    enqueue: (input: EnqueueRunInput): Promise<QueuedRun> =>
+      ipcRenderer.invoke("queue:enqueue", input),
+    dequeue: (id: string): Promise<RunQueueState> =>
+      ipcRenderer.invoke("queue:dequeue", id),
+    setConcurrency: (n: number): Promise<RunQueueState> =>
+      ipcRenderer.invoke("queue:setConcurrency", n),
+    // burnDown drains the queue in place and resolves with the post-drain
+    // snapshot (mirrors the queue:burnDown IPC handler's return).
+    burnDown: (): Promise<RunQueueState> => ipcRenderer.invoke("queue:burnDown"),
+  },
+  // Scheduler registry: cron-style jobs that enqueue autopilot runs on a
+  // schedule. Channels registered in main (T4); backed by the scheduler
+  // registry stub in orchestration/scheduler.ts.
+  scheduler: {
+    list: (): Promise<ScheduledJob[]> => ipcRenderer.invoke("scheduler:list"),
+    create: (input: CreateScheduledJobInput): Promise<ScheduledJob> =>
+      ipcRenderer.invoke("scheduler:create", input),
+    remove: (id: string): Promise<void> => ipcRenderer.invoke("scheduler:delete", id),
+    setEnabled: (id: string, enabled: boolean): Promise<ScheduledJob> =>
+      ipcRenderer.invoke("scheduler:setEnabled", { id, enabled }),
+    runNow: (id: string): Promise<RunState> => ipcRenderer.invoke("scheduler:runNow", id),
   },
   pty: {
     spawn: (args: {

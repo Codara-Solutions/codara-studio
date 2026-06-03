@@ -1613,3 +1613,80 @@ export interface SearchSummary {
 export interface StartSearchResponse {
   searchId: string;
 }
+
+// ── Overnight queue + scheduler ─────────────────────────────────────────────
+// Shared shapes for the overnight RunQueue (run-queue.ts) and the cron-style
+// scheduler registry (scheduler.ts), both living in src/main/orchestration and
+// driving the existing startAutopilot(input: StartAutopilotInput) from
+// run-store.ts. SCAFFOLD per docs/overnight-queue-PLAN.md: queue persistence is
+// a single JSON file and cron firing is stubbed (see the modules' TODOs); these
+// types are the stable contract the main process, IPC/preload bridge, and the
+// renderer Queue panel all share. Timestamps are ISO strings, matching RunState.
+
+// Lifecycle of a single queued run. Mirrors the manager run lifecycle but is
+// owned by the queue: an item is `queued` until the scheduler claims it,
+// `running` while its underlying autopilot run is live, then terminal as
+// `done` / `failed` / `cancelled`.
+export type QueuedRunStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+
+// One entry in the overnight queue. `input` is the exact StartAutopilotInput
+// that will be handed to startAutopilot when this item is dequeued; `runId` is
+// filled in once the run is actually created so the panel can link to it.
+export interface QueuedRun {
+  id: string;
+  title: string;
+  status: QueuedRunStatus;
+  input: StartAutopilotInput;
+  // Set once the queue starts the run via startAutopilot. Absent while queued.
+  runId?: string;
+  // Populated when status is `failed` with the failure reason.
+  error?: string;
+  enqueuedAt: string; // ISO timestamp
+  startedAt?: string; // ISO timestamp; set when status flips to `running`
+  finishedAt?: string; // ISO timestamp; set on a terminal status
+}
+
+// Payload the renderer sends to enqueue a run. Title is optional — the queue
+// derives one from the input (e.g. plan title) when omitted.
+export interface EnqueueRunInput {
+  title?: string;
+  input: StartAutopilotInput;
+}
+
+// Snapshot of the whole queue. A single queue instance for now (`id`), with a
+// `concurrency` cap on simultaneously-running items and a `running` flag for
+// whether the queue is actively draining. SCAFFOLD: persisted as one JSON file.
+export interface RunQueueState {
+  id: string;
+  concurrency: number;
+  running: boolean;
+  items: QueuedRun[];
+}
+
+// Scheduler ──────────────────────────────────────────────────────────────────
+// A scheduled job is idle between firings and running while its enqueued run is
+// in flight. SCAFFOLD: cron evaluation is stubbed (see scheduler.ts TODO), so
+// `running` is informational until real firing lands.
+export type ScheduledJobStatus = "idle" | "running";
+
+// A cron-style recurring job that enqueues `input` on its schedule. `cron` is a
+// standard cron expression; SCAFFOLD: it is stored but not yet parsed/fired.
+export interface ScheduledJob {
+  id: string;
+  name: string;
+  cron: string;
+  enabled: boolean;
+  input: StartAutopilotInput;
+  lastRunAt?: string; // ISO timestamp of the most recent firing
+  lastRunId?: string; // runId produced by the most recent firing
+  createdAt: string; // ISO timestamp
+}
+
+// Payload the renderer sends to register a scheduled job. `enabled` defaults to
+// true at the registry when omitted.
+export interface CreateScheduledJobInput {
+  name: string;
+  cron: string;
+  input: StartAutopilotInput;
+  enabled?: boolean;
+}

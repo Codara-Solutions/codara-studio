@@ -88,15 +88,29 @@ async function getRunStore(): Promise<typeof import("./orchestration/run-store")
   runStoreMod ??= await import("./orchestration/run-store");
   return runStoreMod;
 }
+
+let runQueueMod: typeof import("./orchestration/run-queue") | undefined;
+async function getRunQueue(): Promise<typeof import("./orchestration/run-queue")> {
+  runQueueMod ??= await import("./orchestration/run-queue");
+  return runQueueMod;
+}
+
+let schedulerMod: typeof import("./orchestration/scheduler") | undefined;
+async function getScheduler(): Promise<typeof import("./orchestration/scheduler")> {
+  schedulerMod ??= await import("./orchestration/scheduler");
+  return schedulerMod;
+}
 import type {
   AddRunMessageInput,
   AppPreferences,
   AppSettings,
   AppState,
   CreateEntryInput,
+  CreateScheduledJobInput,
   CreateStepInput,
   CreateRunInput,
   CreateWorkerTaskInput,
+  EnqueueRunInput,
   FileListResult,
   FsEntry,
   FsFileContent,
@@ -121,13 +135,16 @@ import type {
   PrefKey,
   PreferencesChange,
   PrepareWorkerTaskInput,
+  QueuedRun,
   RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
   PlanFile,
   RunArtifactPaths,
+  RunQueueState,
   RunState,
   RuntimeState,
+  ScheduledJob,
   SearchHit,
   SearchOptions,
   SearchSummary,
@@ -937,6 +954,81 @@ export function registerIpc(): void {
   ipcMain.handle("orchestration:deleteRun", async (_e, runId: string): Promise<void> => {
     const { deleteRun } = await getRunStore();
     await deleteRun(runId);
+  });
+
+  // ── Overnight queue ─────────────────────────────────────────────────────
+  // Thin IPC over the run-queue module (src/main/orchestration/run-queue.ts).
+  // The queue persists its own JSON state and drains pending runs through
+  // run-store's startAutopilot; these channels just expose CRUD + a manual
+  // burn-down trigger so the renderer Queue panel can enqueue/list. run-queue.ts
+  // imports RunQueueState/QueuedRun/EnqueueRunInput from @shared/types, so these
+  // handlers return its values directly — the shapes are the IPC contract.
+  ipcMain.handle("queue:list", async (): Promise<RunQueueState> => {
+    const { loadQueue } = await getRunQueue();
+    return loadQueue();
+  });
+
+  ipcMain.handle("queue:enqueue", async (_e, input: EnqueueRunInput): Promise<QueuedRun> => {
+    const { enqueue, burnDown } = await getRunQueue();
+    const queued = await enqueue(input);
+    // Fire-and-forget: kick the drain so a free slot starts this run without
+    // making the renderer wait on autopilot. Errors are logged, not surfaced.
+    void burnDown().catch((err: unknown) =>
+      console.error("[queue] burnDown after enqueue failed", err),
+    );
+    return queued;
+  });
+
+  ipcMain.handle("queue:dequeue", async (_e, id: string): Promise<RunQueueState> => {
+    const { dequeue } = await getRunQueue();
+    return dequeue(id);
+  });
+
+  ipcMain.handle("queue:setConcurrency", async (_e, n: number): Promise<RunQueueState> => {
+    const { setConcurrency } = await getRunQueue();
+    return setConcurrency(n);
+  });
+
+  // burnDown() drains in place and resolves with the post-drain queue snapshot,
+  // which is exactly what the renderer wants back from this channel.
+  ipcMain.handle("queue:burnDown", async (): Promise<RunQueueState> => {
+    const { burnDown } = await getRunQueue();
+    return burnDown();
+  });
+
+  // ── Scheduler ───────────────────────────────────────────────────────────
+  // Thin IPC over the scheduler registry stub (scheduler.ts). Cron firing is
+  // stubbed for the scaffold; these channels manage the job registry and let
+  // the renderer trigger a job immediately via runNow.
+  ipcMain.handle("scheduler:list", async (): Promise<ScheduledJob[]> => {
+    const { listJobs } = await getScheduler();
+    return listJobs();
+  });
+
+  ipcMain.handle(
+    "scheduler:create",
+    async (_e, input: CreateScheduledJobInput): Promise<ScheduledJob> => {
+      const { createJob } = await getScheduler();
+      return createJob(input);
+    },
+  );
+
+  ipcMain.handle("scheduler:delete", async (_e, id: string): Promise<void> => {
+    const { deleteJob } = await getScheduler();
+    await deleteJob(id);
+  });
+
+  ipcMain.handle(
+    "scheduler:setEnabled",
+    async (_e, input: { id: string; enabled: boolean }): Promise<ScheduledJob> => {
+      const { setEnabled } = await getScheduler();
+      return setEnabled(input.id, input.enabled);
+    },
+  );
+
+  ipcMain.handle("scheduler:runNow", async (_e, id: string): Promise<RunState> => {
+    const { runJobNow } = await getScheduler();
+    return runJobNow(id);
   });
 
   ipcMain.handle(
