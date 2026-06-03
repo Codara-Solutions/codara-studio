@@ -909,6 +909,16 @@ export interface RunState {
    */
   totalCostUsd?: number;
   /**
+   * Price-table ESTIMATE of worker-side LLM spend (Claude Code / Codex CLI
+   * attempts). Live per-token usage from the CLI hooks is absent today, so
+   * this is derived from the price table rather than measured — treat it as
+   * an approximation, not billed truth. Recomputed by run-store's cost rollup
+   * alongside `totalCostUsd` (which covers only the priced manager SparkCalls)
+   * and surfaced as the worker portion of the CostPill split. Stays undefined
+   * until at least one worker attempt has an estimate to contribute.
+   */
+  estimatedWorkerCostUsd?: number;
+  /**
    * Per-run checkpoint history. A checkpoint pairs a chat-history pointer
    * (humanMessages length at the time the checkpoint was created) with a git
    * commit on the hidden `refs/spark/runs/{runId}` shadow ref that captures the
@@ -1221,6 +1231,22 @@ export interface WorkerTask {
   createdBy: "spark" | "user" | "system";
   createdAt: string;
   updatedAt: string;
+  /**
+   * Set by run-store's two force-accept guards when this task was promoted to
+   * `accepted` WITHOUT a passing verifier verdict — i.e. the run-store had to
+   * break a deadlock rather than confirm the work. Lets the UI render the loud
+   * "Unverified — accepted to avoid deadlock" pill instead of the normal
+   * verified-accept treatment. Undefined on every normally-verified task.
+   */
+  forceAccepted?: boolean;
+  /**
+   * Which force-accept guard fired (only meaningful when `forceAccepted`):
+   *   - completion_refused: the worker never produced a usable completion the
+   *     verifier could judge, so acceptance was forced to avoid stalling.
+   *   - corrective_rounds_capped: corrective re-attempts hit their cap without
+   *     a passing verdict, so the latest attempt was accepted as-is.
+   */
+  forceAcceptReason?: "completion_refused" | "corrective_rounds_capped";
 }
 
 export interface WorkerAttempt {

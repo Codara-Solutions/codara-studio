@@ -15,6 +15,8 @@
 // the field name; we read it as `cache_read_input_tokens` (the Anthropic
 // shape) and `cache_discount` (their summarized rebate field) when present.
 
+import type { WorkerRuntime } from "@shared/types";
+
 export interface ModelPrice {
   /** USD per 1M input tokens (the prompt). */
   input: number;
@@ -166,4 +168,107 @@ function normalizeModelKey(model: string): string {
   if (MODEL_PRICES[withoutEffort]) return withoutEffort;
   const withoutVariant = withoutEffort.replace(/:.+$/, "");
   return withoutVariant;
+}
+
+// Map a worker runtime (+ optional model hint) to a MODEL_PRICES key. Workers
+// run inside the Claude Code / Codex CLIs, so we never see a clean OpenRouter
+// slug for them — only a runtime tag and, sometimes, a Spark-internal model
+// hint like `claude-sonnet-4-6@medium`. This bridges that gap by reconstructing
+// the provider-prefixed slug the price table is keyed on.
+//
+//   claude -> `anthropic/<base>` (base defaults to 'claude-opus-4-8')
+//   codex  -> `openai/<base>`    (base defaults to 'gpt-5.5')
+//
+// Any `@<effort>` suffix on the hint is stripped first. We return the fully
+// reconstructed key only when it exists in MODEL_PRICES; failing that we retry
+// the provider-prefixed *default* base; otherwise undefined (unknown runtimes
+// like 'shell'/'manual', or a hint we can't price). Like `priceCall`, callers
+// treat an undefined/zero result as "untracked", not an error.
+export function priceKeyForWorker(
+  runtime: WorkerRuntime,
+  modelHint?: string,
+): string | undefined {
+  let provider: string;
+  let defaultBase: string;
+  if (runtime === "claude") {
+    provider = "anthropic";
+    defaultBase = "claude-opus-4-8";
+  } else if (runtime === "codex") {
+    provider = "openai";
+    defaultBase = "gpt-5.5";
+  } else {
+    // 'shell' / 'manual' workers don't bill against a model — nothing to price.
+    return undefined;
+  }
+
+  // run-store stores hints like 'claude-sonnet-4-6@medium'; the `@effort`
+  // suffix is a Spark-internal marker, not part of any OpenRouter slug.
+  const base = (modelHint ?? "").trim().replace(/@.+$/, "") || defaultBase;
+
+  const key = `${provider}/${base}`;
+  if (MODEL_PRICES[key]) return key;
+  // Hint didn't resolve (typo, retired model, or a model we don't list) — fall
+  // back to the provider's default base so a known runtime still gets a price.
+  const defaultKey = `${provider}/${defaultBase}`;
+  if (MODEL_PRICES[defaultKey]) return defaultKey;
+  return undefined;
+}
+
+// Estimate a single worker attempt's USD cost from the price table.
+//
+// COARSE ESTIMATE — NOT A BILLING SOURCE. Worker token usage isn't captured
+// live (the work happens inside the Claude Code / Codex CLIs, out of band of
+// the OpenRouter manager loop), so unless a `usage` block is handed in we can
+// only multiply the table rate by caller-supplied token *guesses*. Treat the
+// result the same way the rest of this file treats its prices: a directional
+// number for the UI, drifting and approximate, never a ledger entry.
+//
+// When `usage` is present we price it through the exact same
+// input/output/cacheRead math as `priceCall` so the two stay consistent.
+// Otherwise we fall back to `estimatedInputTokens`/`estimatedOutputTokens`
+// (whatever defaults the caller chose). Unknown/unpriceable workers return 0.
+// Never throws.
+export function estimateWorkerCostUsd(input: {
+  runtime: WorkerRuntime;
+  modelHint?: string;
+  usage?: OpenRouterUsage | null;
+  estimatedInputTokens?: number;
+  estimatedOutputTokens?: number;
+}): number {
+  const key = priceKeyForWorker(input.runtime, input.modelHint);
+  if (!key) return 0;
+  const price = MODEL_PRICES[key];
+  if (!price) return 0;
+
+  let total: number;
+  if (input.usage) {
+    // Mirror `priceCall`: same field-name fallbacks and cache-read handling so
+    // a measured worker cost lines up with a measured manager cost.
+    const usage = input.usage;
+    const inputTokens = numberOr(usage.input_tokens, numberOr(usage.prompt_tokens, 0));
+    const outputTokens = numberOr(usage.output_tokens, numberOr(usage.completion_tokens, 0));
+    const cacheReadTokens = pickCacheReadTokens(usage);
+    const billedInputTokens =
+      cacheReadTokens !== undefined && price.cacheRead !== undefined
+        ? Math.max(0, inputTokens - cacheReadTokens)
+        : inputTokens;
+    const cacheReadCost =
+      cacheReadTokens !== undefined && price.cacheRead !== undefined
+        ? (cacheReadTokens / 1_000_000) * price.cacheRead
+        : 0;
+    const inputCost = (billedInputTokens / 1_000_000) * price.input;
+    const outputCost = (outputTokens / 1_000_000) * price.output;
+    total = inputCost + outputCost + cacheReadCost;
+  } else {
+    // No measured usage — fall back to the caller's token estimates times the
+    // table rate. No cache-read term: an estimate can't know the cache hit.
+    const inputTokens = numberOr(input.estimatedInputTokens, 0);
+    const outputTokens = numberOr(input.estimatedOutputTokens, 0);
+    const inputCost = (inputTokens / 1_000_000) * price.input;
+    const outputCost = (outputTokens / 1_000_000) * price.output;
+    total = inputCost + outputCost;
+  }
+
+  // Round to 6 decimals, matching `priceCall`'s aggregation precision.
+  return Number.isFinite(total) ? Math.round(total * 1_000_000) / 1_000_000 : 0;
 }

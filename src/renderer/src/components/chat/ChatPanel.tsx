@@ -821,17 +821,32 @@ function StatusMeta({ run }: { run: RunState }) {
   );
 }
 
-// Live total of every priced manager (OpenRouter) call on this run, sourced
-// from the run-store `totalCostUsd` rollup that recomputes after each call.
-// Worker-side LLM cost is not yet tracked — Spark only sees the manager's
-// OpenRouter usage today. Hidden until at least one priced call has landed
-// so chats that ran before the price-table existed don't surface a fake $0.
+// Cost split for this run: the exact OpenRouter manager spend (`totalCostUsd`,
+// recomputed after each priced SparkCall) alongside a price-table ESTIMATE of
+// worker-side LLM spend (`estimatedWorkerCostUsd`). Worker usage is not yet
+// measured live, so the worker segment is prefixed with `~` to signal it is an
+// approximation. Each segment is omitted when its source value is missing, and
+// the whole pill is hidden until at least one of the two has landed so chats
+// that ran before this data existed don't surface a fake $0.
 function CostPill({ run }: { run: RunState }) {
-  const total = run.totalCostUsd;
-  if (typeof total !== "number" || !Number.isFinite(total)) return null;
+  const mgr = run.totalCostUsd;
+  const work = run.estimatedWorkerCostUsd;
+  const hasMgr = typeof mgr === "number" && Number.isFinite(mgr);
+  const hasWork = typeof work === "number" && Number.isFinite(work);
+  if (!hasMgr && !hasWork) return null;
+  const title = [
+    hasMgr
+      ? `mgr = exact OpenRouter manager spend on this chat: ${formatCostUsd(mgr!)}.`
+      : null,
+    hasWork
+      ? `work = price-table estimate of worker LLM cost (live usage not yet tracked): ${formatCostUsd(work!)}.`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
     <span
-      title={`OpenRouter manager spend on this chat: ${formatCostUsd(total)}. Worker LLM cost is not tracked yet.`}
+      title={title}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -847,8 +862,16 @@ function CostPill({ run }: { run: RunState }) {
         whiteSpace: "nowrap",
       }}
     >
-      <span aria-hidden style={{ color: "var(--muted)" }}>$</span>
-      <span>{formatCostUsd(total, { stripDollar: true })}</span>
+      {hasMgr && (
+        <>
+          <span aria-hidden style={{ color: "var(--muted)" }}>$</span>
+          <span>{formatCostUsd(mgr!, { stripDollar: true })} mgr</span>
+        </>
+      )}
+      {hasMgr && hasWork && (
+        <span aria-hidden style={{ color: "var(--muted)" }}>/</span>
+      )}
+      {hasWork && <span>~{formatCostUsd(work!)} work</span>}
     </span>
   );
 }

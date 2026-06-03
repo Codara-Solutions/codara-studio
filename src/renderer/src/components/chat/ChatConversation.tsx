@@ -10,6 +10,8 @@ import {
   type ChatTimelineItem,
   type ChatWorker,
 } from "./timeline";
+import { buildRunMaps, useRunReports } from "../runs/run-format";
+import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
 import Markdown from "./Markdown";
 
 // The conversation stream for one chat. Renders human messages, Spark's own
@@ -103,6 +105,19 @@ export default function ChatConversation({ run }: { run: RunState }) {
     }
     return null;
   }, [items, run.status]);
+  // The run-level verdict that rides alongside the "done" marker on a finished
+  // run: a green VERIFIED/PERFECT when the cross-engine verifier confirmed the
+  // work, a warn PARTIAL when it found gaps, a red FAILED, or the grey
+  // "Unverified — accepted to avoid deadlock" pill when the run-store had to
+  // force-accept past verification. Computed from the SAME runVerdict +
+  // buildRunMaps + useRunReports the runs canvas uses, so the chat headline and
+  // the graph agree byte-for-byte. useRunReports is a hook, so it runs every
+  // render; the verdict derivation is memoised and gated on completion.
+  const reportByAttempt = useRunReports(run);
+  const completionVerdict = useMemo<StepVerdictKind>(() => {
+    if (run.status !== "complete") return "none";
+    return runVerdict(run, buildRunMaps(run), reportByAttempt);
+  }, [run, reportByAttempt]);
   // Undo is only ever offered on the genuinely-last user message — and only
   // once its checkpoint has actually landed. Two reasons:
   //   1. "Undo my last message" is the only mental model that doesn't
@@ -361,6 +376,7 @@ export default function ChatConversation({ run }: { run: RunState }) {
                       : null
                   }
                   showDoneMarker={doneMarkerSparkMessageId === item.id}
+                  completionVerdict={completionVerdict}
                 />
               ) : item.kind === "tool" ? (
                 <ToolActivityRow item={item} />
@@ -425,12 +441,14 @@ const MessageTurn = React.memo(function MessageTurn({
   openQuestionId,
   checkpoint,
   showDoneMarker,
+  completionVerdict,
 }: {
   item: MessageItem;
   runId: string;
   openQuestionId: string | null;
   checkpoint: Checkpoint | null;
   showDoneMarker: boolean;
+  completionVerdict: StepVerdictKind;
 }) {
   if (item.author === "system") {
     return (
@@ -481,7 +499,14 @@ const MessageTurn = React.memo(function MessageTurn({
           />
         )}
       </div>
-      {showDoneMarker && <DoneMarker />}
+      {showDoneMarker && (
+        <div style={DONE_MARKER_ROW_STYLE}>
+          <span style={{ display: "inline-flex", flex: "0 0 auto" }}>
+            <DoneMarker />
+          </span>
+          {completionVerdict !== "none" && <VerdictPill kind={completionVerdict} compact />}
+        </div>
+      )}
     </SparkTurn>
   );
 });
@@ -1803,6 +1828,17 @@ const DONE_MARKER_STYLE: React.CSSProperties = {
   fontWeight: 700,
   letterSpacing: "0.08em",
   textTransform: "uppercase",
+};
+
+// Wraps the "done" marker and the run-level verdict pill on one full-width row
+// under the final Spark bubble. flexBasis:100% breaks them onto their own line
+// within SparkTurn's flex column (mirroring the bare DoneMarker's old role);
+// the inner marker keeps its own marginTop, so this row carries none.
+const DONE_MARKER_ROW_STYLE: React.CSSProperties = {
+  flexBasis: "100%",
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
 };
 
 const DONE_MARKER_DOT_STYLE: React.CSSProperties = {

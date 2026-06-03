@@ -127,6 +127,9 @@ export default function RunGraph({
                 index={stepLayout.index}
                 rows={rows}
                 fileCount={stepFileCount(step, maps.attemptByTask, reportByAttempt)}
+                reportByAttempt={reportByAttempt}
+                attemptByTask={maps.attemptByTask}
+                tasksById={maps.taskById}
                 active={step.id === run.currentStepId}
                 selected={stepSelected}
                 onSelect={() => onSelectStep(step.id)}

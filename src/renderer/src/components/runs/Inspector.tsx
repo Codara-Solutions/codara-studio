@@ -3,6 +3,7 @@ import type {
   RunState,
   SparkCall,
   StepState,
+  VerifierVerdict,
   WorkerAttempt,
   WorkerReport,
   WorkerTask,
@@ -1244,11 +1245,7 @@ function ReportView({ report, compact }: { report: WorkerReport; compact?: boole
         >
           {report.status}
         </span>
-        {report.verifier && (
-          <span style={{ color: "var(--info)", fontFamily: "var(--font-mono)", fontSize: 9.5, fontWeight: 700 }}>
-            verifier · {report.verifier.confidence}
-          </span>
-        )}
+        {report.verifier && <VerdictPill confidence={report.verifier.confidence} />}
       </div>
       {report.summary && (
         <p style={{ margin: 0, color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 11.5, lineHeight: 1.55 }}>
@@ -1336,6 +1333,46 @@ function ReportView({ report, compact }: { report: WorkerReport; compact?: boole
         </ReportGroup>
       )}
     </div>
+  );
+}
+
+// The verifier's 5-rung confidence ladder, shown as a pill beside the worker's
+// status badge. PERFECT/VERIFIED read green, PARTIAL/FEEDBACK amber, FAILED red —
+// the same tone treatment the step card's verdict pill uses, so a verified worker
+// looks the same here in the inspector as it does on the graph node.
+function verdictTone(confidence: VerifierVerdict["confidence"]): string {
+  switch (confidence) {
+    case "PERFECT":
+    case "VERIFIED":
+      return "var(--ok)";
+    case "PARTIAL":
+    case "FEEDBACK":
+      return "var(--warn)";
+    case "FAILED":
+      return "var(--danger)";
+  }
+}
+
+function VerdictPill({ confidence }: { confidence: VerifierVerdict["confidence"] }) {
+  const tone = verdictTone(confidence);
+  return (
+    <span
+      title={`Verifier verdict: ${confidence}`}
+      style={{
+        color: tone,
+        background: `color-mix(in oklch, ${tone} 12%, transparent)`,
+        border: `1px solid color-mix(in oklch, ${tone} 45%, var(--rule))`,
+        borderRadius: 4,
+        padding: "1px 6px",
+        fontFamily: "var(--font-mono)",
+        fontSize: 9,
+        fontWeight: 700,
+        textTransform: "uppercase",
+        letterSpacing: "0.06em",
+      }}
+    >
+      verifier · {confidence}
+    </span>
   );
 }
 

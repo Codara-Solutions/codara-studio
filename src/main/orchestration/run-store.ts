@@ -54,6 +54,7 @@ import { normalizeChatFeatureFlags } from "@shared/chat-policy";
 import { appendEvent, eventsPath, listEvents, runDir, runsRoot } from "./event-log";
 import { writeFileAtomic } from "../fs-atomic";
 import { loadSettings } from "../storage";
+import { estimateWorkerCostUsd } from "../openrouter-prices";
 import {
   buildOpenRouterManagerRequest,
   isStructuredOutputUnsupportedError,
@@ -2842,6 +2843,11 @@ async function applySparkManagerDecision(
               for (const task of draft.workerTasks) {
                 if (acceptedIds.has(task.id)) {
                   task.status = "accepted";
+                  // Mark this as a deadlock-break accept (no passing verifier
+                  // verdict) so the UI can render the "Unverified — accepted to
+                  // avoid deadlock" pill instead of the normal verified treatment.
+                  task.forceAccepted = true;
+                  task.forceAcceptReason = "completion_refused";
                   task.updatedAt = timestamp;
                 }
               }
@@ -3314,6 +3320,11 @@ async function applySparkManagerDecision(
         for (const t of draft.workerTasks) {
           if (t.stepId && skippedStepIds.has(t.stepId) && activeTaskStatuses.has(t.status)) {
             t.status = "accepted";
+            // Cap-break accept (corrective re-attempts exhausted without a
+            // passing verdict) — flag it so the UI distinguishes this from a
+            // verified accept.
+            t.forceAccepted = true;
+            t.forceAcceptReason = "corrective_rounds_capped";
             t.updatedAt = timestamp;
           }
         }
@@ -5942,6 +5953,52 @@ function recomputeRunCostRollups(run: RunState): void {
     } else {
       delete step.totalCostUsd;
     }
+  }
+
+  // Worker-side cost estimate (separate from the priced manager SparkCalls
+  // above). Live per-token usage from the Claude Code / Codex CLIs isn't
+  // ingested yet, so we can only multiply the price table by conservative,
+  // hardcoded token guesses per terminal attempt. These two constants are
+  // PLACEHOLDERS — replace them with measured input/output token counts once
+  // the worker-usage pipeline lands. Until then `estimatedWorkerCostUsd` is a
+  // directional figure for the CostPill split, not billed truth.
+  const estimatedInputTokens = 12_000;
+  const estimatedOutputTokens = 4_000;
+  const tasksById = new Map<string, WorkerTask>();
+  for (const task of run.workerTasks ?? []) {
+    tasksById.set(task.id, task);
+  }
+  let runWorkerTotal = 0;
+  for (const attempt of run.workerAttempts ?? []) {
+    // Only count attempts that actually finished — `finishedAt` is set in
+    // lockstep with the terminal attempt statuses below, so a missing
+    // timestamp means the attempt is still in flight and has no cost yet.
+    if (!attempt.finishedAt) continue;
+    if (
+      attempt.status !== "succeeded" &&
+      attempt.status !== "failed" &&
+      attempt.status !== "timed_out" &&
+      attempt.status !== "cancelled"
+    ) {
+      continue;
+    }
+    const owningTask = tasksById.get(attempt.workerTaskId);
+    // The attempt carries the runtime that actually ran; the model hint only
+    // lives on the owning task. Fall back to the task's runtime preference if
+    // the attempt somehow lacks one.
+    const runtime = attempt.runtime ?? owningTask?.runtimePreference;
+    if (!runtime) continue;
+    runWorkerTotal += estimateWorkerCostUsd({
+      runtime,
+      modelHint: owningTask?.modelHint,
+      estimatedInputTokens,
+      estimatedOutputTokens,
+    });
+  }
+  if (runWorkerTotal > 0) {
+    run.estimatedWorkerCostUsd = roundCost(runWorkerTotal);
+  } else {
+    delete run.estimatedWorkerCostUsd;
   }
 }
 

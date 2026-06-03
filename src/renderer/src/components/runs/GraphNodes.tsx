@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import type { RunState, StepState, WorkerAttempt } from "@shared/types";
+import type { RunState, StepState, WorkerAttempt, WorkerReport, WorkerTask } from "@shared/types";
 import {
   type AgentRow,
   deriveAgentStatus,
@@ -144,6 +144,178 @@ function StatusTag({ label, tone }: { label: string; tone: string }) {
   );
 }
 
+// ── Verifier verdict (shared) ────────────────────────────────────────────────
+// The one place that turns a step's worker reports into a single ground-truth
+// verdict. Inspector and ChatConversation both import these so the cost+verdict
+// surfaces agree byte-for-byte rather than each re-deriving the rule.
+
+export type StepVerdictKind =
+  | "perfect"
+  | "verified"
+  | "partial"
+  | "feedback"
+  | "failed"
+  | "unverified-accepted"
+  | "none";
+
+// Confidence ladder, strongest first. A step's verdict is the WEAKEST verdict
+// among its present verifier reports — one PARTIAL claim drags the whole step
+// down to PARTIAL even if a peer said PERFECT.
+const VERDICT_RANK: Record<VerifierConfidence, number> = {
+  PERFECT: 0,
+  VERIFIED: 1,
+  PARTIAL: 2,
+  FEEDBACK: 3,
+  FAILED: 4,
+};
+
+type VerifierConfidence = "PERFECT" | "VERIFIED" | "PARTIAL" | "FEEDBACK" | "FAILED";
+
+function confidenceToKind(confidence: VerifierConfidence): StepVerdictKind {
+  switch (confidence) {
+    case "PERFECT":
+      return "perfect";
+    case "VERIFIED":
+      return "verified";
+    case "PARTIAL":
+      return "partial";
+    case "FEEDBACK":
+      return "feedback";
+    case "FAILED":
+      return "failed";
+  }
+}
+
+// Walk a step's worker tasks → latest attempt → report.verifier; pick the lowest
+// confidence among the present verdicts. With no verifier verdict at all, fall
+// back to the force-accept flag (an owning task promoted past verification to
+// break a deadlock) before settling on 'none'.
+export function stepVerdict(
+  step: StepState,
+  attemptByTask: Map<string, WorkerAttempt>,
+  reportByAttempt: ReadonlyMap<string, WorkerReport>,
+  tasksById: Map<string, WorkerTask>,
+): StepVerdictKind {
+  let worst: VerifierConfidence | null = null;
+  let forceAccepted = false;
+  for (const taskId of step.workerTaskIds) {
+    const task = tasksById.get(taskId);
+    if (task?.forceAccepted) forceAccepted = true;
+    const attempt = attemptByTask.get(taskId);
+    if (!attempt) continue;
+    const report = reportByAttempt.get(attempt.id);
+    const confidence = report?.verifier?.confidence;
+    if (!confidence) continue;
+    if (worst === null || VERDICT_RANK[confidence] > VERDICT_RANK[worst]) {
+      worst = confidence;
+    }
+  }
+  if (worst !== null) return confidenceToKind(worst);
+  if (forceAccepted) return "unverified-accepted";
+  return "none";
+}
+
+// The run's verdict is the worst step verdict across its completed steps. An
+// 'unverified-accepted' step counts only when no step carries a real (failed /
+// partial) verdict — a genuine FAILED step should win the headline.
+export function runVerdict(
+  run: RunState,
+  maps: { attemptByTask: Map<string, WorkerAttempt>; taskById: Map<string, WorkerTask> },
+  reportByAttempt: ReadonlyMap<string, WorkerReport>,
+): StepVerdictKind {
+  let worst: StepVerdictKind = "none";
+  let unverified = false;
+  for (const step of run.steps) {
+    if (step.status !== "complete" && step.status !== "skipped") continue;
+    const kind = stepVerdict(step, maps.attemptByTask, reportByAttempt, maps.taskById);
+    if (kind === "none") continue;
+    if (kind === "unverified-accepted") {
+      unverified = true;
+      continue;
+    }
+    if (worst === "none" || VERDICT_RANK[kindToConfidence(kind)] > VERDICT_RANK[kindToConfidence(worst)]) {
+      worst = kind;
+    }
+  }
+  if (worst !== "none") return worst;
+  return unverified ? "unverified-accepted" : "none";
+}
+
+// Inverse of confidenceToKind, for ranking real verdicts against each other.
+// Only the five ladder kinds are valid inputs here (callers gate the rest).
+function kindToConfidence(kind: StepVerdictKind): VerifierConfidence {
+  switch (kind) {
+    case "perfect":
+      return "PERFECT";
+    case "verified":
+      return "VERIFIED";
+    case "partial":
+      return "PARTIAL";
+    case "feedback":
+      return "FEEDBACK";
+    default:
+      return "FAILED";
+  }
+}
+
+export interface VerdictTone {
+  color: string;
+  label: string;
+  title: string;
+}
+
+export function verdictTone(kind: StepVerdictKind): VerdictTone | null {
+  switch (kind) {
+    case "perfect":
+      return { color: "var(--ok)", label: "PERFECT", title: "Verifier confirmed: perfect" };
+    case "verified":
+      return { color: "var(--ok)", label: "VERIFIED", title: "Verifier confirmed the work" };
+    case "partial":
+    case "feedback":
+      return { color: "var(--warn)", label: "PARTIAL", title: "Verifier found gaps — partial" };
+    case "failed":
+      return { color: "var(--danger)", label: "FAILED", title: "Verifier rejected the work" };
+    case "unverified-accepted":
+      return {
+        color: "var(--muted)",
+        label: "UNVERIFIED",
+        title: "Unverified — accepted to avoid deadlock",
+      };
+    case "none":
+      return null;
+  }
+}
+
+// A rounded, tinted pill speaking the verdict — same color-mix/border/mono idiom
+// as the run-graph status tags. Returns null for 'none' so callers can drop it
+// in unconditionally.
+export function VerdictPill({ kind, compact }: { kind: StepVerdictKind; compact?: boolean }) {
+  const tone = verdictTone(kind);
+  if (!tone) return null;
+  return (
+    <span
+      title={tone.title}
+      style={{
+        color: tone.color,
+        background: `color-mix(in oklch, ${tone.color} 14%, transparent)`,
+        border: `1px solid color-mix(in oklch, ${tone.color} 38%, transparent)`,
+        borderRadius: 999,
+        padding: compact ? "1px 5px" : "2px 7px",
+        fontFamily: "var(--font-mono)",
+        fontSize: 9,
+        fontWeight: 700,
+        letterSpacing: "0.09em",
+        textTransform: "uppercase",
+        whiteSpace: "nowrap",
+        flex: "0 0 auto",
+        lineHeight: 1.5,
+      }}
+    >
+      {tone.label}
+    </span>
+  );
+}
+
 // ── SPARK origin node ────────────────────────────────────────────────────────
 
 export const SparkNode = React.memo(function SparkNode({
@@ -226,6 +398,12 @@ interface StepNodeProps {
   active: boolean;
   selected: boolean;
   onSelect: () => void;
+  // Optional verdict inputs — when present, WorkerBatchNode renders the shared
+  // <VerdictPill> in its header. Left optional so existing call-sites that don't
+  // wire the maps yet keep compiling and simply omit the pill.
+  reportByAttempt?: ReadonlyMap<string, WorkerReport>;
+  attemptByTask?: Map<string, WorkerAttempt>;
+  tasksById?: Map<string, WorkerTask>;
 }
 
 export const StepNode = React.memo(function StepNode(props: StepNodeProps) {
@@ -235,10 +413,25 @@ export const StepNode = React.memo(function StepNode(props: StepNodeProps) {
   return <WorkerBatchNode {...props} />;
 });
 
-function WorkerBatchNode({ step, index, rows, fileCount, active, selected, onSelect }: StepNodeProps) {
+function WorkerBatchNode({
+  step,
+  index,
+  rows,
+  fileCount,
+  active,
+  selected,
+  onSelect,
+  reportByAttempt,
+  attemptByTask,
+  tasksById,
+}: StepNodeProps) {
   const [hover, setHover] = useState(false);
   const status = step.status;
   const tone = stepStatusColor(status);
+  const verdict =
+    reportByAttempt && attemptByTask && tasksById
+      ? stepVerdict(step, attemptByTask, reportByAttempt, tasksById)
+      : "none";
   const complete = status === "complete" || status === "skipped";
   const attention = status === "blocked" || status === "failed";
   const live = active || status === "running" || status === "reviewing";
@@ -348,7 +541,10 @@ function WorkerBatchNode({ step, index, rows, fileCount, active, selected, onSel
             {step.title}
           </span>
         </div>
-        <StatusTag label={stepStatusLabel(status)} tone={tone} />
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 6, flex: "0 0 auto" }}>
+          <StatusTag label={stepStatusLabel(status)} tone={tone} />
+          <VerdictPill kind={verdict} compact />
+        </div>
       </header>
 
       <p
