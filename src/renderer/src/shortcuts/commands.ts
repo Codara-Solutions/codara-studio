@@ -12,6 +12,7 @@ import { ctrl, mod, type Chord } from "./chord";
 
 export type CommandId =
   | "shortcuts.open"
+  | "runSwitcher.open"
   | "settings.open"
   | "session.openInspector"
   | "composer.focus"
@@ -71,6 +72,17 @@ export const COMMANDS: Command[] = [
     id: "shortcuts.open",
     label: "Show keyboard shortcuts",
     group: "General",
+    // Mod+? (Shift+/) — the keyboard cheat sheet. Mod+K now belongs to the
+    // run switcher. Shift+/ is free: composer.focus uses Mod+/ WITHOUT shift
+    // and terminal.closePane uses Mod+Shift+K.
+    defaultChords: [mod("/", { shift: true })],
+  },
+  {
+    id: "runSwitcher.open",
+    label: "Open run switcher",
+    group: "Navigation",
+    // Mod+K — command-palette-style switcher over every run across all
+    // workspaces.
     defaultChords: [mod("k")],
   },
   {

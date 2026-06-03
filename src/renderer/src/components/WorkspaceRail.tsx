@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { ChatBackendKind, FsEntry, RunState, Workspace } from "@shared/types";
+import type { ChatStatusTone } from "./chat/timeline";
+import { statusToneColor } from "./chat/timeline";
 import { MinusIcon, PlusIcon } from "./icons";
 import FileTree from "./FileTree";
 import GitPanel from "./git/GitPanel";
@@ -43,6 +45,11 @@ interface RailProps {
   editingId: string | null;
   width: number;
   activeWorkspace: Workspace | null;
+  // Per-workspace status-tone rollup (the max-attention tone across that
+  // workspace's runs). Drives the small status dot on each rail row. App
+  // passes a memoized object so this prop stays referentially stable and the
+  // rail's React.memo keeps holding off unrelated re-renders.
+  toneByWorkspaceId?: Record<string, ChatStatusTone | null>;
   // The first section's share when exactly two sections are stacked here.
   split: number;
   collapsed: Record<PanelSectionKey, boolean>;
@@ -228,6 +235,7 @@ function WorkspaceRail(props: RailProps) {
                       active={w.id === props.activeId}
                       editing={w.id === props.editingId}
                       dragging={wsDragIndex === index}
+                      tone={props.toneByWorkspaceId?.[w.id] ?? null}
                       onActivate={() => props.onActivate(w.id)}
                       onEdit={() => props.onEdit(w.id)}
                       onChange={(patch) => props.onChange(w.id, patch)}
@@ -583,6 +591,7 @@ interface RowProps {
   active: boolean;
   editing: boolean;
   dragging: boolean;
+  tone?: ChatStatusTone | null;
   onActivate: () => void;
   onEdit: () => void;
   onChange: (patch: Partial<Workspace>) => void;
@@ -601,6 +610,7 @@ function WorkspaceRow({
   active,
   editing,
   dragging,
+  tone,
   onActivate,
   onEdit,
   onChange,
@@ -810,6 +820,7 @@ function WorkspaceRow({
             }}
           />
         )}
+        <StatusDot tone={tone} />
         {editing && (
           <input
             ref={colorRef}
@@ -1060,6 +1071,32 @@ function RowMenuItem({
     >
       {label}
     </button>
+  );
+}
+
+// Small status-tone badge sitting next to the color dot / branch glyph. It is
+// the rail's at-a-glance "which workspace wants me" signal: its fill is the
+// run-status tone rolled up across the workspace's runs (blocked / done-unseen
+// / live / …). Deliberately static — no pulse — to honor the house rule that
+// blocked never animates and to keep the rail calm when nothing is happening.
+// Quiet workspaces render nothing: a null/undefined tone, or `idle` (which
+// maps to the muted token), is suppressed so only meaningful states show.
+function StatusDot({ tone }: { tone?: ChatStatusTone | null }) {
+  if (!tone || tone === "idle") return null;
+  const color = statusToneColor(tone);
+  return (
+    <span
+      aria-hidden
+      title={tone}
+      style={{
+        flex: "0 0 6px",
+        width: 6,
+        height: 6,
+        borderRadius: 999,
+        background: color,
+        boxShadow: `0 0 0 2px color-mix(in oklch, ${color} 18%, transparent)`,
+      }}
+    />
   );
 }
 

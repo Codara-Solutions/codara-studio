@@ -558,6 +558,139 @@ export function workspaceAttentionPriority(runs: RunState[]): number {
   return max;
 }
 
+// The four display buckets the global run switcher groups every run into.
+// Distinct from ChatStatusTone (seven tones): several tones collapse to one
+// bucket — e.g. `live` and `paused` are both "Working", `failed` and `idle`
+// fall into "Done" so a stalled or cancelled run is still reachable, just
+// last. The mapping mirrors ATTENTION_PRIORITY ordering.
+export type RunSwitcherToneGroup = "needs-you" | "done-unseen" | "working" | "done";
+
+// Map a run's status tone to its switcher bucket. blocked → needs-you (the
+// one bucket that wants action), done-unseen stays its own bucket so finished
+// work the user hasn't looked at pops out, live/paused → working, and
+// done/failed/idle → done. failed is still listed but is the lowest-priority
+// member of the "done" bucket (ATTENTION_PRIORITY[failed] === 0).
+export function switcherGroupForTone(tone: ChatStatusTone): RunSwitcherToneGroup {
+  switch (tone) {
+    case "blocked":
+      return "needs-you";
+    case "done-unseen":
+      return "done-unseen";
+    case "live":
+    case "paused":
+      return "working";
+    case "done":
+    case "failed":
+    case "idle":
+    default:
+      return "done";
+  }
+}
+
+// Display order of the switcher buckets, top to bottom. Matches the priority
+// ranking: act-on-it first, then finished-but-unseen, then in-flight, then
+// already-settled work.
+export const SWITCHER_GROUP_ORDER: RunSwitcherToneGroup[] = [
+  "needs-you",
+  "done-unseen",
+  "working",
+  "done",
+];
+
+export const SWITCHER_GROUP_LABEL: Record<RunSwitcherToneGroup, string> = {
+  "needs-you": "Needs you",
+  "done-unseen": "Done · unseen",
+  working: "Working",
+  done: "Done",
+};
+
+// Newest-activity timestamp for ordering runs within a bucket. Prefers
+// updatedAt (moves as the run progresses) and falls back to createdAt.
+function runActivityTime(run: RunState): number {
+  const updated = Date.parse(run.updatedAt ?? "");
+  if (Number.isFinite(updated)) return updated;
+  const created = Date.parse(run.createdAt ?? "");
+  return Number.isFinite(created) ? created : 0;
+}
+
+// Bucket every run by its status tone, drop empty buckets, and return them in
+// SWITCHER_GROUP_ORDER. Within a bucket runs are sorted by attention priority
+// (higher tone first) and then by most-recent activity, so the run most
+// deserving of a click sits at the top of each section. Uses the same
+// describeRunStatus as the rail dots, so the dot tone and the group a run
+// lands in can never disagree.
+export function groupRunsByTone(
+  runs: RunState[],
+): Array<{ group: RunSwitcherToneGroup; label: string; runs: RunState[] }> {
+  const buckets = new Map<RunSwitcherToneGroup, RunState[]>();
+  for (const run of runs) {
+    const tone = describeRunStatus(run).tone;
+    const group = switcherGroupForTone(tone);
+    const list = buckets.get(group);
+    if (list) list.push(run);
+    else buckets.set(group, [run]);
+  }
+
+  const result: Array<{ group: RunSwitcherToneGroup; label: string; runs: RunState[] }> = [];
+  for (const group of SWITCHER_GROUP_ORDER) {
+    const list = buckets.get(group);
+    if (!list || list.length === 0) continue;
+    list.sort((a, b) => {
+      const byPriority =
+        (ATTENTION_PRIORITY[describeRunStatus(b).tone] ?? 0) -
+        (ATTENTION_PRIORITY[describeRunStatus(a).tone] ?? 0);
+      if (byPriority !== 0) return byPriority;
+      return runActivityTime(b) - runActivityTime(a);
+    });
+    result.push({ group, label: SWITCHER_GROUP_LABEL[group], runs: list });
+  }
+  return result;
+}
+
+// Single comparator the switcher's flat fallback and the rail share: higher
+// attention tone first, ties broken by newest createdAt. Use this for a flat
+// sort; groupRunsByTone for the bucketed view, workspaceAttentionPriority for
+// the per-workspace rollup.
+export function compareRunsByAttention(a: RunState, b: RunState): number {
+  const byPriority =
+    (ATTENTION_PRIORITY[describeRunStatus(b).tone] ?? 0) -
+    (ATTENTION_PRIORITY[describeRunStatus(a).tone] ?? 0);
+  if (byPriority !== 0) return byPriority;
+  const aCreated = Date.parse(a.createdAt ?? "");
+  const bCreated = Date.parse(b.createdAt ?? "");
+  return (Number.isFinite(bCreated) ? bCreated : 0) - (Number.isFinite(aCreated) ? aCreated : 0);
+}
+
+// Summary of everything that changed while the user was away, for the single
+// "While you were away" digest shown on focus-after-away. needsYou and
+// doneUnseen carry the actual runs so the digest can deep-link to them;
+// working is just a count of still-in-flight runs. total counts only the two
+// actionable lists so App can skip the digest when nothing landed.
+export interface AwayDigest {
+  total: number;
+  needsYou: RunState[];
+  doneUnseen: RunState[];
+  working: number;
+}
+
+export function buildAwayDigest(runs: RunState[]): AwayDigest {
+  const needsYou: RunState[] = [];
+  const doneUnseen: RunState[] = [];
+  let working = 0;
+  for (const run of runs) {
+    const tone = describeRunStatus(run).tone;
+    if (tone === "blocked") needsYou.push(run);
+    else if (tone === "done-unseen") doneUnseen.push(run);
+    else if (tone === "live") working += 1;
+  }
+  return {
+    total: needsYou.length + doneUnseen.length,
+    needsYou,
+    doneUnseen,
+    working,
+  };
+}
+
 export function stepStatusColor(status: StepStatus): string {
   if (status === "running" || status === "planning" || status === "reviewing") {
     return "var(--accent)";

@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import type { InAppNotificationPayload } from "@shared/types";
+import { useEffect, useRef, useState } from "react";
+import type { InAppNotificationPayload, RunQuestionOption } from "@shared/types";
+import { makeId } from "@shared/ids";
 
 // In-app toast manager + renderer for the four-channel notification
 // system. Listens for "notification:in-app" payloads (sent by the main
@@ -22,9 +23,14 @@ type Toast = InAppNotificationPayload;
 
 export interface ToastHostProps {
   onSelectRun?: (runId: string, workspaceId?: string) => void;
+  // Resolve the manager's open-question options for a run so a "blocked"
+  // toast can offer one-click answers. The InAppNotificationPayload from
+  // main only carries runId — the options live in the run state, so the
+  // App resolves them in the renderer (global runs feed + findOpenQuestion).
+  resolveQuestion?: (runId: string) => RunQuestionOption[];
 }
 
-export default function ToastHost({ onSelectRun }: ToastHostProps) {
+export default function ToastHost({ onSelectRun, resolveQuestion }: ToastHostProps) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   useEffect(() => {
@@ -90,6 +96,7 @@ export default function ToastHost({ onSelectRun }: ToastHostProps) {
             setToasts((current) => current.filter((t) => t.id !== toast.id))
           }
           onSelectRun={onSelectRun}
+          resolveQuestion={resolveQuestion}
         />
       ))}
     </div>
@@ -100,11 +107,44 @@ function ToastCard({
   toast,
   onClose,
   onSelectRun,
+  resolveQuestion,
 }: {
   toast: Toast;
   onClose: () => void;
   onSelectRun?: (runId: string, workspaceId?: string) => void;
+  resolveQuestion?: (runId: string) => RunQuestionOption[];
 }) {
+  // In-flight guard so a fast double-click on an answer button (or two
+  // different options) only fires one addRunMessage+resumeRun sequence.
+  const answering = useRef(false);
+
+  // Resolve the manager's open-question options for a "blocked" toast.
+  // Only "blocked" toasts carry a pending question, and we need a runId
+  // to look it up; everything else renders no answer buttons.
+  const answerOptions: RunQuestionOption[] =
+    toast.kind === "blocked" && toast.runId && resolveQuestion
+      ? resolveQuestion(toast.runId).slice(0, 3)
+      : [];
+
+  const answerWith = async (option: RunQuestionOption) => {
+    if (!toast.runId || answering.current) return;
+    answering.current = true;
+    try {
+      await window.spark.orchestration.addRunMessage({
+        runId: toast.runId,
+        clientMessageId: makeId("client-msg"),
+        author: "user",
+        kind: "answer",
+        message: option.answer,
+      });
+      await window.spark.orchestration.resumeRun({ runId: toast.runId });
+      onClose();
+    } catch {
+      // Answering failed (run gone, IPC error) — release the guard so the
+      // user can retry or fall through to deep-linking into the chat.
+      answering.current = false;
+    }
+  };
   // Two visual treatments: blocked (danger red), complete (info teal).
   // Mirror the herdr "static red for blocked, never pulse" rule — the
   // background is solid, not animated, so the urgency reads as gravitas.
@@ -197,6 +237,61 @@ function ToastCard({
         >
           {toast.body}
         </div>
+        {answerOptions.length > 0 && (
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 6,
+              marginTop: 8,
+            }}
+          >
+            {answerOptions.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={(event) => {
+                  // Stop the card's onClick deep-link from firing too —
+                  // answering should resolve the question in place, not
+                  // also navigate the user into the chat.
+                  event.stopPropagation();
+                  void answerWith(option);
+                }}
+                style={{
+                  appearance: "none",
+                  cursor: "pointer",
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: "var(--ink)",
+                  background: "var(--hover)",
+                  border:
+                    "1px solid color-mix(in oklch, var(--accent) 40%, var(--rule-strong))",
+                  borderRadius: 6,
+                  padding: "3px 8px",
+                  maxWidth: "100%",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  transition:
+                    "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background =
+                    "color-mix(in oklch, var(--accent) 24%, var(--hover))";
+                  e.currentTarget.style.borderColor = "var(--accent)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "var(--hover)";
+                  e.currentTarget.style.borderColor =
+                    "color-mix(in oklch, var(--accent) 40%, var(--rule-strong))";
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       <button
         type="button"
