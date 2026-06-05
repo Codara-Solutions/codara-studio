@@ -900,6 +900,15 @@ a { color: inherit; }
 }
 .composer-fast.is-active {
   color: var(--accent);
+  /* A filled accent pill so the on-state is unmistakable — color alone on a
+     26px glyph reads as "nothing happened" next to the labeled Plan/Talk
+     pill. This is the "fills when active" affordance the glyph comment
+     promised but was never wired. */
+  background: color-mix(in oklch, var(--accent) 16%, transparent);
+}
+.composer-fast.is-active:hover {
+  color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 24%, transparent);
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
