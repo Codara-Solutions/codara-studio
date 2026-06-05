@@ -6,6 +6,7 @@ import {
   findOpenQuestion,
   groupRunsByTone,
   statusToneColor,
+  workspaceAttentionPriority,
 } from "./chat/timeline";
 
 // Cmd/Ctrl-K run switcher: a centered command-palette overlay that lists EVERY
@@ -63,7 +64,9 @@ export default function RunSwitcher({
     const needle = filter.trim().toLowerCase();
     if (!needle) return runs;
     return runs.filter((run) => {
-      const wsName = run.workspaceId ? workspaceById.get(run.workspaceId)?.name ?? "" : "";
+      // Match against the SAME name the row shows (map name, else cwd basename)
+      // so filtering by a visible workspace name never hides its own runs.
+      const wsName = workspaceNameForRun(run, workspaceById);
       return (
         run.title.toLowerCase().includes(needle) ||
         wsName.toLowerCase().includes(needle)
@@ -71,10 +74,23 @@ export default function RunSwitcher({
     });
   }, [runs, filter, workspaceById]);
 
-  // Grouping + ordering is owned by timeline.ts (groupRunsByTone): empty
-  // buckets are already dropped and groups arrive in SWITCHER_GROUP_ORDER with
-  // their SWITCHER_GROUP_LABEL. We only render.
-  const groups = useMemo(() => groupRunsByTone(filteredRuns), [filteredRuns]);
+  // Grouping is owned by timeline.ts: groupRunsByTone buckets every run via
+  // switcherGroupForTone, drops empty buckets, and pre-sorts each bucket's runs
+  // by attention. We then rank the buckets THEMSELVES by
+  // workspaceAttentionPriority — the max attention across the bucket's runs —
+  // so "Needs you" (blocked = 4) outranks "Working" (live = 2) outranks "Done"
+  // (done = 1, failed/idle = 0), with "Done · unseen" (3) slotting between
+  // needs-you and working. Driving the order from the shared priority helper
+  // (instead of a hard-coded list) keeps the switcher in lockstep with the rail
+  // tone dots, which roll up through the same function. The sort is stable, so
+  // buckets that tie on max-attention keep groupRunsByTone's SWITCHER_GROUP_ORDER
+  // (e.g. a paused-only "Working" still sits above a settled "Done").
+  const groups = useMemo(() => {
+    return groupRunsByTone(filteredRuns)
+      .map((entry) => ({ entry, priority: workspaceAttentionPriority(entry.runs) }))
+      .sort((a, b) => b.priority - a.priority)
+      .map(({ entry }) => entry);
+  }, [filteredRuns]);
 
   // Flatten the grouped view into the navigation order so a single highlighted
   // index can walk across group boundaries.
@@ -315,6 +331,7 @@ export default function RunSwitcher({
                       key={run.id}
                       run={run}
                       workspace={run.workspaceId ? workspaceById.get(run.workspaceId) : undefined}
+                      workspaceName={workspaceNameForRun(run, workspaceById)}
                       index={index}
                       highlighted={index === highlight}
                       onHover={() => setHighlight(index)}
@@ -336,6 +353,7 @@ export default function RunSwitcher({
 function RunRow({
   run,
   workspace,
+  workspaceName,
   index,
   highlighted,
   onHover,
@@ -345,6 +363,10 @@ function RunRow({
 }: {
   run: RunState;
   workspace: Workspace | undefined;
+  // Pre-resolved display name (see workspaceNameForRun): the registered
+  // workspace's name when known, else the run's cwd basename, so a run whose
+  // workspace left AppState still shows a real name instead of a placeholder.
+  workspaceName: string;
   index: number;
   highlighted: boolean;
   onHover: () => void;
@@ -474,7 +496,7 @@ function RunRow({
                 maxWidth: 180,
               }}
             >
-              {workspace?.name ?? "Unknown workspace"}
+              {workspaceName}
             </span>
           </span>
         </div>
@@ -587,4 +609,28 @@ function AnswerButton({
       {option.label}
     </button>
   );
+}
+
+// Resolve the workspace name to show for a run. The switcher lists EVERY run
+// across the whole fleet (the global useGlobalRuns feed), but the `workspaces`
+// prop is only the workspaces still registered in AppState — so a run whose
+// workspace was deleted, or simply isn't in the active registry, would miss the
+// map and fall back to a bare "Unknown workspace". When the map has no entry we
+// recover the real name from the run's own settingsSnapshot.workspaceCwd (the
+// absolute path captured at run creation), taking its trailing path segment —
+// e.g. ".../Documents/workspace/test" → "test". Only when even that is missing
+// do we show the placeholder. settingsSnapshot is an untyped bag, so read it
+// defensively.
+function workspaceNameForRun(
+  run: RunState,
+  workspaceById: Map<string, Workspace>,
+): string {
+  const known = run.workspaceId ? workspaceById.get(run.workspaceId) : undefined;
+  if (known) return known.name;
+  const cwd = run.settingsSnapshot?.["workspaceCwd"];
+  if (typeof cwd === "string") {
+    const segment = cwd.split(/[\\/]+/).filter(Boolean).pop();
+    if (segment) return segment;
+  }
+  return "Unknown workspace";
 }
