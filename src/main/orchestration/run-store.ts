@@ -91,7 +91,7 @@ import {
   rewindShadowRef,
   runCheckpointStartPoint,
 } from "./checkpoints";
-import { createSandboxWorktree, removeSandboxWorktree } from "../git-worktrees";
+import { createSandboxWorktree, mergeBackSandboxWorktree, removeSandboxWorktree } from "../git-worktrees";
 import { readGitText } from "../git-exec";
 import { sparkHome } from "../spark-home";
 import * as pty from "../pty-manager";
@@ -5406,6 +5406,73 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   });
   await updatePeerCommsRegistry(run, finishedStep, finishedTask, finishedAttempt.id, paths, finishedAttempt.status)
     .catch(() => undefined);
+
+  // Converge a successful sandboxed worker's edits back into the run workspace.
+  // The worker ran in an isolated worktree forked off the run checkpoint, so its
+  // changes haven't touched the workspace yet — merge them back now, before the
+  // report is reviewed, so the verdict and any follow-up see the real tree.
+  // Gated by the autopilotSandbox setting (the sandbox fields are only set when
+  // it was on; re-check it in case it was toggled off mid-run). A failure here
+  // is best-effort: it's logged/evented and never aborts the finish path, and
+  // the worktree is left intact for the user to recover. The non-sandbox path
+  // (no sandbox fields) skips this block entirely.
+  if (
+    result.exitCode === 0 &&
+    finishedAttempt.sandboxWorktreePath &&
+    finishedAttempt.sandboxBaseRepo
+  ) {
+    const settings = await loadSettings();
+    if (settings.autopilotSandbox) {
+      const mergeBack = await mergeBackSandboxWorktree({
+        repoCwd: finishedAttempt.sandboxBaseRepo,
+        worktreePath: finishedAttempt.sandboxWorktreePath,
+      });
+      const mergedAt = new Date().toISOString();
+      if (mergeBack.ok) {
+        console.log(
+          `[sandbox] merge-back ${finishedAttempt.sandboxBranch ?? "(branch)"} -> ${finishedAttempt.sandboxBaseRepo}: ${mergeBack.changed ? "applied worker edits" : "no changes to apply"}`,
+        );
+        await appendEvent({
+          timestamp: mergedAt,
+          workspaceId: run.workspaceId,
+          runId: run.id,
+          stepId: finishedTask.stepId,
+          workerTaskId: finishedTask.id,
+          attemptId: finishedAttempt.id,
+          type: "worker_attempt.sandbox_merged",
+          message: mergeBack.changed
+            ? `Merged sandbox worktree back: ${finishedAttempt.sandboxBranch ?? "(branch)"}`
+            : `Sandbox worktree had no changes to merge: ${finishedAttempt.sandboxBranch ?? "(branch)"}`,
+          payload: {
+            sandboxWorktreePath: finishedAttempt.sandboxWorktreePath,
+            sandboxBranch: finishedAttempt.sandboxBranch,
+            sandboxBaseRepo: finishedAttempt.sandboxBaseRepo,
+            changed: mergeBack.changed,
+          },
+        });
+      } else {
+        console.warn(
+          `[sandbox] merge-back failed for ${finishedAttempt.sandboxBranch ?? "(branch)"} -> ${finishedAttempt.sandboxBaseRepo}: ${mergeBack.error}`,
+        );
+        await appendEvent({
+          timestamp: mergedAt,
+          workspaceId: run.workspaceId,
+          runId: run.id,
+          stepId: finishedTask.stepId,
+          workerTaskId: finishedTask.id,
+          attemptId: finishedAttempt.id,
+          type: "worker_attempt.sandbox_merge_failed",
+          message: `Sandbox merge-back failed; worktree left intact: ${finishedAttempt.sandboxBranch ?? "(branch)"}`,
+          payload: {
+            sandboxWorktreePath: finishedAttempt.sandboxWorktreePath,
+            sandboxBranch: finishedAttempt.sandboxBranch,
+            sandboxBaseRepo: finishedAttempt.sandboxBaseRepo,
+            error: mergeBack.error,
+          },
+        });
+      }
+    }
+  }
 
   run = await reviewWorkerReportArtifact({
     run,

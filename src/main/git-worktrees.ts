@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -229,6 +230,95 @@ export async function removeSandboxWorktree(
     force: true,
     deleteBranch: true,
   });
+}
+
+// Pipe a patch to `git apply` over stdin. execFile can't stream stdin, so spawn
+// directly here with the same hardening flags as git-exec.runGit. Mirrors the
+// approach in git-apply.ts, kept local so this module stays import-light (only
+// node built-ins + ./git-exec).
+function gitApplyStdin(cwd: string, args: string[], patch: string): Promise<GitOpResult> {
+  return new Promise((resolve) => {
+    const child = spawn("git", ["-C", cwd, "-c", "credential.interactive=false", ...args], {
+      windowsHide: true,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+    let stderr = "";
+    child.stderr.on("data", (d) => {
+      stderr += d.toString();
+    });
+    child.on("error", (e) => resolve({ ok: false, error: e.message }));
+    child.on("close", (code) => {
+      if (code === 0) resolve({ ok: true });
+      else resolve({ ok: false, error: stderr.trim() || `git apply exited with code ${code}` });
+    });
+    child.stdin.on("error", () => {
+      /* ignore EPIPE if git rejected the patch before reading stdin */
+    });
+    child.stdin.end(patch.endsWith("\n") ? patch : `${patch}\n`);
+  });
+}
+
+export interface MergeBackSandboxWorktreeInput {
+  // The run workspace repo the worktree was forked from; merge-back targets
+  // this repo's working tree.
+  repoCwd: string;
+  // The sandbox worktree the unattended worker ran inside.
+  worktreePath: string;
+}
+
+export type MergeBackSandboxResult =
+  | { ok: true; changed: boolean }
+  | { ok: false; error: string };
+
+// Converge a sandboxed worker's edits back into the run workspace. Unattended
+// workers run inside an isolated worktree forked off the run checkpoint and
+// edit files in place without committing, so the worker's contribution is the
+// worktree's diff against its own HEAD (the fork point). We stage everything in
+// the worktree (`add -A`, which covers adds/mods/deletes), emit a binary-safe
+// patch of that index against HEAD, and apply it to the base repo's working
+// tree — leaving the changes unstaged for review, matching how checkpoint
+// restore surfaces work as pending changes.
+//
+// `changed:false` means the worker touched nothing (empty diff) — a no-op
+// success, not an error. The base repo's working tree is only ever appended to
+// via `git apply`; we never reset, checkout, or otherwise discard existing work
+// there, so the non-sandbox path and any concurrent state are untouched.
+export async function mergeBackSandboxWorktree(
+  input: MergeBackSandboxWorktreeInput,
+): Promise<MergeBackSandboxResult> {
+  try {
+    // Stage all worker edits in the worktree so new and deleted files are
+    // captured, not just modifications. Writes only the worktree's own index.
+    await runGit(input.worktreePath, ["add", "-A"]);
+    // Full, binary-safe patch of the worker's changes vs. the fork point.
+    // --cached compares the index (just staged) to HEAD; HEAD is the fork
+    // commit because unattended workers don't commit inside the worktree.
+    const { stdout: patch } = await runGit(input.worktreePath, [
+      "diff",
+      "--binary",
+      "--cached",
+      "HEAD",
+    ]);
+    if (!patch.trim()) {
+      return { ok: true, changed: false };
+    }
+    // Apply to the base repo's working tree (no --cached: leave it unstaged for
+    // review). Plain `git apply` validates the whole patch up front and is
+    // effectively all-or-nothing, so a patch that doesn't apply cleanly (e.g.
+    // the base drifted from the fork point) fails without half-writing or
+    // leaving conflict markers — we surface that as an error and leave the
+    // worktree intact rather than partially mutating the workspace.
+    // --whitespace=nowarn keeps the git output quiet.
+    const applied = await gitApplyStdin(
+      input.repoCwd,
+      ["apply", "--whitespace=nowarn"],
+      patch,
+    );
+    if (!applied.ok) return applied;
+    return { ok: true, changed: true };
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
 }
 
 export async function removeCopyWorktree(input: RemoveCopyWorktreeInput): Promise<GitOpResult> {
