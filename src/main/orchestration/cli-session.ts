@@ -11,9 +11,42 @@
 // tool_use entries; Codex: `type` envelope wrapping `session_meta`/`turn_context`
 // /`event_msg`/`response_item`). cli-session is intentionally schema-agnostic.
 
+import { extname } from "node:path";
+
 import type { ShellInfo } from "@shared/types";
 import * as pty from "../pty-manager";
 import { tailJsonl, type Disposable } from "./jsonl-tail";
+
+// node-pty spawns via CreateProcess on Windows, which can only launch real PE
+// images (`.exe`/`.com`). npm-installed CLIs like `codex` ship as a `.cmd`
+// batch shim (and a bare `sh` shim) with no `.exe`, so handing the resolved
+// path straight to node-pty fails with "Cannot create process, error code:
+// 193" (ERROR_BAD_EXE_FORMAT) — which is exactly why Codex-as-engine never
+// launched on Windows while Claude (a native `claude.exe`) did. Route batch
+// shims through cmd.exe and PowerShell shims through pwsh, the same way an
+// interactive shell would — and the same way the worker launch path already
+// gets for free by running the CLI inside pwsh. A real `.exe` is returned
+// unchanged, so this is a no-op for the Claude path. POSIX is untouched.
+function resolveLaunchTarget(exe: string, args: string[]): { exe: string; args: string[] } {
+  if (process.platform !== "win32") return { exe, args };
+  const ext = extname(exe).toLowerCase();
+  if (ext === ".cmd" || ext === ".bat") {
+    const comspec = process.env.ComSpec || process.env.COMSPEC || "cmd.exe";
+    // /d skips any AutoRun command, /c runs-then-exits. node-pty quotes each
+    // argv entry, so cmd.exe sees the shim path and every flag as its own
+    // token. (We avoid /s, whose whole-string quote-stripping mangles a
+    // space-containing shim path.)
+    return { exe: comspec, args: ["/d", "/c", exe, ...args] };
+  }
+  if (ext === ".ps1") {
+    const pwsh = process.platform === "win32" ? "pwsh.exe" : "pwsh";
+    return {
+      exe: pwsh,
+      args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", exe, ...args],
+    };
+  }
+  return { exe, args };
+}
 
 export interface CliSessionOptions {
   /** Pty session id. Caller picks (e.g. `spark-cc-talk-${runId}`). */
@@ -117,11 +150,14 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
 
   // Synthetic ShellInfo — pty-manager spawns whatever we hand it as exe + args.
   // family: "other" skips PowerShell-specific spawn-lock + profile probing.
+  // resolveLaunchTarget rewrites Windows `.cmd`/`.bat`/`.ps1` shims into a
+  // cmd.exe/pwsh invocation so CreateProcess can actually launch them.
+  const launch = resolveLaunchTarget(opts.exe, opts.args);
   const shell: ShellInfo = {
     id: `spark-cli-session-${opts.sessionId}`,
     label: "Spark CLI session",
-    exe: opts.exe,
-    args: opts.args,
+    exe: launch.exe,
+    args: launch.args,
     family: "other",
   };
 
