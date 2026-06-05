@@ -105,6 +105,26 @@ const EXTENDED_TURN_TIMEOUT_MS = 30 * 60_000;
 // indefinitely. 25 min covers the in-server soft ceiling plus slop.
 const MAX_PENDING_MCP_HOLD_MS = 25 * 60_000;
 
+// --- First-turn input readiness (Windows especially) -----------------------
+// startCliSession resolves as soon as the PTY spawns — NOT when Codex's TUI is
+// ready for input. On a fresh spawn we must wait for Codex to render before we
+// type, or the prompt is written into the void: no turn starts, no rollout
+// JSONL is ever created, and the discovery watchdog trips with "CLI session
+// JSONL not found within 15000ms". This is acute on Windows, where the 193
+// shim fix routes Codex through `cmd.exe /c codex.cmd → node`, adding startup
+// latency before the Ink input loop attaches. Mirrors claude-backend's
+// REPL-ready gate (waitForFirstStdout + settle, then a separate submit CR).
+const CODEX_REPL_READY_TIMEOUT_MS = 15_000;
+// After first stdout, give Codex's Ink input box a beat to mount before typing.
+const CODEX_INPUT_SETTLE_MS = 1_200;
+// Between the pasted prompt body and the submitting CR, so Codex processes the
+// text before the Enter (a single merged burst can drop the submit).
+const CODEX_SUBMIT_SETTLE_MS = 120;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Only Spark MCP long-pollers extend the cap. Codex writes the bare tool name
 // in payload.name (e.g. "spark_wait_for_workers"); the mcp__server__ prefix
 // lives in payload.namespace, so name alone is the gate.
@@ -381,7 +401,7 @@ async function spawnSession(
     exe,
     args,
     env: { SPARK_RUN_ID: input.run.id },
-    jsonlReadyTimeoutMs: 15_000,
+    jsonlReadyTimeoutMs: 30_000,
     discoverJsonlPath: () => discoverRolloutPath(spawnedAt, spawnDate),
     // Resume case: the rollout JSONL already contains prior turns. Skip the
     // existing content so the tailer only delivers fresh appended lines —
@@ -549,14 +569,18 @@ function handleEntry(
   }
 }
 
-function submitPrompt(cli: CliSession, prompt: string): void {
+async function submitPrompt(cli: CliSession, prompt: string): Promise<void> {
   if (!prompt) return;
   if (prompt.includes("\n") || prompt.includes("\r")) {
     // Bracketed paste so embedded newlines don't submit early.
-    cli.writeRaw(`\x1b[200~${prompt}\x1b[201~\r`);
+    cli.writeRaw(`\x1b[200~${prompt}\x1b[201~`);
   } else {
-    cli.writeRaw(`${prompt}\r`);
+    cli.writeRaw(prompt);
   }
+  // Send the submit CR on its own after a short settle so Codex processes the
+  // pasted body first — a single merged burst can drop the Enter under a PTY.
+  await sleep(CODEX_SUBMIT_SETTLE_MS);
+  cli.writeRaw("\r");
 }
 
 
@@ -654,9 +678,11 @@ export const codexBackend: SparkAgentBackend = {
           input.chat.sessionUuid = resumeUuid;
         }
       }
+      let freshSpawn = false;
       if (!session) {
         session = await spawnSession(input, onStream);
         SESSIONS.set(input.run.id, session);
+        freshSpawn = true;
       }
       // Snapshot cumulative usage so this turn's token-count deltas don't
       // accidentally include earlier turns' totals.
@@ -680,8 +706,13 @@ export const codexBackend: SparkAgentBackend = {
         };
       }
 
+      // Ensure Codex's TUI is actually ready before we type. On a fresh spawn
+      // its Ink input loop attaches a beat after first stdout; typing earlier
+      // drops the prompt (no turn -> no rollout -> the JSONL watchdog trips).
+      await session.cli.waitForFirstStdout(CODEX_REPL_READY_TIMEOUT_MS).catch(() => {});
+      if (freshSpawn) await sleep(CODEX_INPUT_SETTLE_MS);
       const waiter = waitForTurnEnd(session);
-      submitPrompt(session.cli, prompt);
+      await submitPrompt(session.cli, prompt);
       await waiter;
 
       const finalText =
