@@ -1812,10 +1812,10 @@ function FanOutButton({
   const label = count > 0 ? `Fan out · ${count}` : "Fan out";
   const title =
     count >= 2
-      ? `Fan out across ${count} files — one parallel worker per file. Click to edit the targets.`
+      ? `Fan out across ${count} files — Spark runs one worker per file at the same time. Click to edit the targets.`
       : count === 1
-        ? "Fan out — pick at least one more target file (2+ required)."
-        : "Fan out — pick 2+ target files to run one parallel worker per file.";
+        ? "Fan out: pick at least one more file (2+ required) — Spark runs one worker per file at the same time, e.g. rename a function across button.tsx, modal.tsx and card.tsx in parallel."
+        : "Fan out: pick several files and Spark runs one worker per file at the same time — great for the same change across many files, e.g. rename a function across button.tsx, modal.tsx and card.tsx in parallel.";
   return (
     <button
       type="button"
@@ -1938,6 +1938,16 @@ function FanOutPopover({
         <span>Fan out · one worker per file</span>
         <span>{targets.length} selected</span>
       </div>
+      <div
+        style={{
+          padding: "0 7px 7px",
+          color: "var(--ink-dim)",
+          fontSize: 11,
+          lineHeight: 1.4,
+        }}
+      >
+        Run one agent per file, all at once — pick 2+ files to split the work in parallel.
+      </div>
       {targets.length > 0 && (
         <div
           style={{
@@ -2011,7 +2021,11 @@ function FanOutPopover({
         }}
       >
         <span style={{ color: "var(--muted)", fontSize: 10 }}>
-          {targets.length < 2 ? "Pick 2+ files to fan out" : "Each file gets its own parallel worker"}
+          {targets.length === 0
+            ? "Needs 2+ files — fan-out splits the work into one parallel worker per file"
+            : targets.length === 1
+              ? "Needs 2+ files — add one more so there's work to split in parallel"
+              : "Each file gets its own parallel worker"}
         </span>
         <TextButton onClick={onConfirm} disabled={!canConfirm} tone="accent">
           {targets.length >= 2 ? `Fan out · ${targets.length} files` : "Fan out"}
