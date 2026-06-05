@@ -27,7 +27,7 @@
 import { spawn } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { extname, join } from "node:path";
 
 import { getCachedEnrichedPath, getEnrichedPath } from "./path-reconstruction";
 
@@ -41,6 +41,40 @@ const cache = new Map<string, string | null>();
 
 export function clearResolverCache(): void {
   cache.clear();
+}
+
+// On Windows, `where <name>` can return several matches for one CLI — npm, for
+// instance, installs BOTH an extensionless Unix `sh` shim and a `<name>.cmd`
+// batch shim side by side (this is exactly how `codex` lands). Not all of these
+// are launchable under a PTY: node-pty spawns via CreateProcess, which runs
+// `.exe`/`.com` directly and — via cli-session's launcher — `.cmd`/`.bat`
+// through cmd.exe and `.ps1` through PowerShell. The extensionless sh shim is
+// NOT a Win32 image, so handing it to CreateProcess fails with
+// "Cannot create process, error code: 193" (ERROR_BAD_EXE_FORMAT). Rank matches
+// so we never hand back the sh shim when a launchable sibling exists.
+const WINDOWS_LAUNCH_RANK: Record<string, number> = {
+  ".exe": 0,
+  ".com": 0,
+  ".cmd": 1,
+  ".bat": 1,
+  ".ps1": 2,
+};
+
+function pickLaunchableBinary(matches: readonly string[]): string | null {
+  if (matches.length === 0) return null;
+  if (process.platform !== "win32") return matches[0];
+  let best: string | null = null;
+  let bestRank = Number.POSITIVE_INFINITY;
+  for (const match of matches) {
+    // Unknown / extensionless ranks last (3) — still a fallback if it's the
+    // only thing `where` found, but always beaten by a real launchable form.
+    const rank = WINDOWS_LAUNCH_RANK[extname(match).toLowerCase()] ?? 3;
+    if (rank < bestRank) {
+      best = match;
+      bestRank = rank;
+    }
+  }
+  return best ?? matches[0];
 }
 
 /**
@@ -111,8 +145,8 @@ function probeWhichWhere(name: string): Promise<string | null> {
     child.on("error", () => finish(null));
     child.on("close", () => {
       const text = Buffer.concat(out).toString("utf8");
-      const first = text.split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-      finish(first ?? null);
+      const lines = text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      finish(pickLaunchableBinary(lines));
     });
     const timer = setTimeout(() => {
       try {
@@ -136,11 +170,15 @@ async function probeNpmPrefix(name: string): Promise<string | null> {
     // npm on Windows installs CLI shims as `<name>.cmd` (sometimes
     // `<name>.ps1` / `<name>.bat` too) directly under the prefix, not under
     // a `bin/` subdirectory. We probe a few extensions in turn.
+    // `.exe` first — a native image spawns directly under CreateProcess; the
+    // `.cmd`/`.bat`/`.ps1` shims need cli-session's shell wrapper, and the
+    // bare (extensionless) sh shim isn't launchable on Windows at all, so it
+    // ranks last (see pickLaunchableBinary).
     const candidates = [
+      join(prefix, `${name}.exe`),
       join(prefix, `${name}.cmd`),
       join(prefix, `${name}.bat`),
       join(prefix, `${name}.ps1`),
-      join(prefix, `${name}.exe`),
       join(prefix, name),
     ];
     return firstExisting(candidates);
@@ -227,8 +265,9 @@ async function probeCommonDirs(name: string): Promise<string | null> {
     const programFilesX86 =
       process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)";
 
-    // npm global (default prefix on Windows)
-    for (const ext of ["cmd", "bat", "ps1", "exe", ""]) {
+    // npm global (default prefix on Windows). `.exe` first so a native image
+    // beats the cmd/sh shims — the bare shim isn't launchable under node-pty.
+    for (const ext of ["exe", "cmd", "bat", "ps1", ""]) {
       const tail = ext ? `${name}.${ext}` : name;
       candidates.push(join(appData, "npm", tail));
     }
@@ -308,7 +347,7 @@ async function nvmWindowsCandidates(home: string, name: string): Promise<string[
   }
   for (const entry of entries) {
     const dir = join(root, entry);
-    for (const ext of ["cmd", "exe", "bat", "ps1", ""]) {
+    for (const ext of ["exe", "cmd", "bat", "ps1", ""]) {
       const tail = ext ? `${name}.${ext}` : name;
       out.push(join(dir, tail));
     }
@@ -373,7 +412,7 @@ async function fnmCandidatesWindows(home: string, name: string): Promise<string[
     }
     for (const entry of entries) {
       const dir = join(root, entry, "installation");
-      for (const ext of ["cmd", "exe", "bat", "ps1", ""]) {
+      for (const ext of ["exe", "cmd", "bat", "ps1", ""]) {
         const tail = ext ? `${name}.${ext}` : name;
         candidates.push(join(dir, tail));
       }
