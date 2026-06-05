@@ -55,6 +55,12 @@ interface CodexChatSession {
    *  via --enable/--disable at spawn time; flipping mid-chat requires
    *  dispose-and-respawn-with-resume just like spawnMode does. */
   spawnFastMode: boolean;
+  /** Reasoning-effort the process was launched with (codex -c
+   *  model_reasoning_effort). Baked at spawn — Codex has no scriptable
+   *  mid-session effort command (the TUI changes it via the interactive
+   *  /model picker) — so a change requires dispose-and-respawn-with-resume,
+   *  just like spawnMode / spawnFastMode. */
+  spawnEffort: string;
   /** Accumulated assistant text across the *current* turn — reset when a new
    *  turn begins so each manager call gets the reply for that turn only. */
   accumulatedText: string;
@@ -415,6 +421,7 @@ async function spawnSession(
     sessionUuid: input.chat.sessionUuid ?? null,
     spawnMode: input.chat.mode,
     spawnFastMode: input.chat.fastMode,
+    spawnEffort: input.chat.effort,
     accumulatedText: "",
     lastMessageId: null,
     pendingResolve: null,
@@ -652,16 +659,22 @@ export const codexBackend: SparkAgentBackend = {
     try {
       let session = SESSIONS.get(input.run.id);
       const fastModeChanged = session && session.spawnFastMode !== input.chat.fastMode;
-      if (session && (session.spawnMode !== input.chat.mode || fastModeChanged)) {
+      const effortChanged = session && session.spawnEffort !== input.chat.effort;
+      if (
+        session &&
+        (session.spawnMode !== input.chat.mode || fastModeChanged || effortChanged)
+      ) {
         // Mode or fast_mode flip → respawn with the new spawn args. Resume
         // via `codex resume <uuid>` brings the rollout transcript along.
         // Execute mode's `model_instructions_file` points at the manager
         // prompt that strongly redirects Codex to call spark_spawn_workers,
         // which dominates over any prior chat-mode turns in the rollout.
-        const modeChanged = session.spawnMode !== input.chat.mode;
-        const reason = modeChanged
-          ? `mode ${session.spawnMode} → ${input.chat.mode}`
-          : `fast_mode ${session.spawnFastMode ? "on" : "off"} → ${input.chat.fastMode ? "on" : "off"}`;
+        const reason =
+          session.spawnMode !== input.chat.mode
+            ? `mode ${session.spawnMode} → ${input.chat.mode}`
+            : session.spawnFastMode !== input.chat.fastMode
+              ? `fast_mode ${session.spawnFastMode ? "on" : "off"} → ${input.chat.fastMode ? "on" : "off"}`
+              : `effort ${session.spawnEffort} → ${input.chat.effort}`;
         onStream?.({
           kind: "system_note",
           message: `Respawning Codex with new ${reason}.`,

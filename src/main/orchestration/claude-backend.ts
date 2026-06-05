@@ -154,6 +154,10 @@ interface ClaudeChatSession {
    *  the mismatch and respawns the CLI with the new system-prompt file
    *  (resumed via -r so the conversation continues from the same transcript). */
   spawnMode: ChatMode;
+  /** Reasoning-effort the session was launched with (claude --effort). Baked
+   *  at spawn like spawnMode; changing the chip mid-chat respawns with -r so
+   *  the new effort takes effect while the conversation continues. */
+  spawnEffort: string;
   /** Resolved once the JSONL filename is observed; basename === session UUID. */
   sessionUuid: string | null;
   /** Accumulator for assistant text blocks emitted during the current turn.
@@ -272,6 +276,21 @@ export const claudeBackend: SparkAgentBackend = {
         emit({
           kind: "system_note",
           message: `Switched Claude Code from ${chat.spawnMode} to ${mode} mode.`,
+        });
+        const resumeUuid = chat.sessionUuid;
+        await disposeChatSessionInternal(chat);
+        sessions.delete(runId);
+        chat = undefined;
+        input.chat.sessionUuid = resumeUuid ?? input.chat.sessionUuid;
+      }
+      if (chat && chat.spawnEffort !== input.chat.effort) {
+        // Effort chip changed mid-chat. `claude --effort` is a spawn-time flag
+        // with no scriptable slash-command equivalent, so respawn with the new
+        // effort and resume via -r to keep the conversation. Mirrors the mode
+        // flip above; runs only when the mode block didn't already respawn.
+        emit({
+          kind: "system_note",
+          message: `Changed Claude Code effort from ${chat.spawnEffort} to ${input.chat.effort}.`,
         });
         const resumeUuid = chat.sessionUuid;
         await disposeChatSessionInternal(chat);
@@ -733,6 +752,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     session,
     spawnTimestampMs,
     spawnMode: opts.mode,
+    spawnEffort: opts.chatEffort,
     // Known up front — survives `newSessionUuid` round-trip into run-store
     // so the next turn (after a Spark restart) can spawn with `-r <uuid>`.
     sessionUuid,
