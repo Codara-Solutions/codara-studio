@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { GitCopyWorktreeResult, GitOpResult } from "@shared/types";
 import { errorText, readGitText, runGit } from "./git-exec";
@@ -321,7 +321,77 @@ export async function mergeBackSandboxWorktree(
   }
 }
 
-export async function removeCopyWorktree(input: RemoveCopyWorktreeInput): Promise<GitOpResult> {
+// Normalize a path for comparison: forward slashes, no trailing slash, lower
+// case. git emits worktree paths with `/` (and sometimes a different drive-
+// letter case) on Windows, while Spark hands us native `\` paths — so we can't
+// compare them raw.
+function normalizePathForCompare(p: string): string {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+// Is `worktreePath` currently a registered worktree of `repoCwd`? We parse
+// `git worktree list --porcelain` rather than matching git's error text, which
+// is locale-dependent ("is not a working tree" only in English).
+async function isRegisteredWorktree(repoCwd: string, worktreePath: string): Promise<boolean> {
+  try {
+    const out = await readGitText(repoCwd, ["worktree", "list", "--porcelain"]);
+    const target = normalizePathForCompare(worktreePath);
+    return out
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("worktree "))
+      .map((line) => normalizePathForCompare(line.slice("worktree ".length).trim()))
+      .includes(target);
+  } catch {
+    return false;
+  }
+}
+
+// Clear an orphaned worktree directory off disk. Heavily guarded: we only ever
+// delete a path that is non-empty, distinct from the repo root, and NOT an
+// ancestor of the repo (so a bad input can never wipe the repository itself).
+async function removeOrphanWorktreeDir(repoCwd: string, worktreePath: string): Promise<GitOpResult> {
+  const target = normalizePathForCompare(worktreePath);
+  const repo = normalizePathForCompare(repoCwd);
+  if (!target || target === repo || repo.startsWith(`${target}/`)) {
+    return { ok: false, error: `Refusing to remove unsafe worktree path: ${worktreePath}` };
+  }
+  try {
+    if (existsSync(worktreePath)) {
+      await rm(worktreePath, { recursive: true, force: true });
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
+}
+
+export interface RemoveCopyWorktreeHooks {
+  // Invoked once, the first time removal fails because of a transient directory
+  // lock (a process — usually a shell or agent pane — holding the worktree as
+  // its cwd, which makes Windows reject the rmdir with EBUSY). The caller uses
+  // this to tear down the worktree's PTYs before we retry. Awaited; a throw is
+  // swallowed so a faulty hook can't abort the retry loop.
+  onBusy?: () => Promise<void> | void;
+}
+
+// Path/FS error fragments that mean "momentarily locked" rather than "can't be
+// done" — almost always a live shell or editor still holding the worktree as
+// its cwd on Windows. Once that process is torn down the lock clears, so these
+// are retried rather than surfaced.
+const BUSY_FS_CODE = /\b(EBUSY|EPERM|EACCES|ENOTEMPTY|ETXTBSY)\b/i;
+const BUSY_GIT_MSG =
+  /(unable to remove|permission denied|being used by another process|directory not empty|resource busy|is locked)/i;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// One removal attempt. Returns success, or an error plus whether it's a
+// transient lock worth retrying (vs. a hard refusal like uncommitted changes
+// without --force, which must be surfaced immediately rather than looped on).
+async function tryRemoveWorktreeOnce(
+  input: RemoveCopyWorktreeInput,
+): Promise<{ ok: true } | { ok: false; error: string; retryable: boolean }> {
   try {
     await runGit(input.repoCwd, [
       "worktree",
@@ -329,9 +399,62 @@ export async function removeCopyWorktree(input: RemoveCopyWorktreeInput): Promis
       ...(input.force ? ["--force"] : []),
       input.worktreePath,
     ]);
+    return { ok: true };
   } catch (err) {
-    return { ok: false, error: errorText(err) };
+    const msg = errorText(err);
+    // Still a registered worktree? Then git declined for a concrete reason:
+    // either a transient lock (retry) or a real refusal like local
+    // modifications without --force (surface it).
+    if (await isRegisteredWorktree(input.repoCwd, input.worktreePath)) {
+      return { ok: false, error: msg, retryable: BUSY_GIT_MSG.test(msg) };
+    }
+    // Orphaned/broken copy: the linkage is gone (admin entry pruned or the
+    // worktree's own .git pointer lost), so the path is no longer a registered
+    // worktree and git fails with "is not a working tree". Clear the directory
+    // off disk directly so a broken copy is never permanently undeletable.
+    const cleanup = await removeOrphanWorktreeDir(input.repoCwd, input.worktreePath);
+    if (cleanup.ok) return { ok: true };
+    return {
+      ok: false,
+      error: cleanup.error ?? msg,
+      retryable: BUSY_FS_CODE.test(cleanup.error ?? ""),
+    };
   }
+}
+
+export async function removeCopyWorktree(
+  input: RemoveCopyWorktreeInput,
+  hooks?: RemoveCopyWorktreeHooks,
+): Promise<GitOpResult> {
+  // Retry briefly on a transient lock. On Windows a shell or agent pane whose
+  // cwd is the worktree holds the directory open, so removal fails with EBUSY
+  // / "unable to remove" until that process is gone. On the first such failure
+  // we ask the caller (via onBusy) to kill the worktree's PTYs, then keep
+  // retrying while ConPTY + taskkill tear them down asynchronously (~1s).
+  const backoffMs = [0, 150, 300, 600, 1000, 1500];
+  let lastError = "worktree removal not attempted";
+  let removed = false;
+  let askedToRelease = false;
+  for (const delayMs of backoffMs) {
+    if (delayMs) await sleep(delayMs);
+    const attempt = await tryRemoveWorktreeOnce(input);
+    if (attempt.ok) {
+      removed = true;
+      break;
+    }
+    lastError = attempt.error;
+    if (!attempt.retryable) break;
+    if (!askedToRelease && hooks?.onBusy) {
+      askedToRelease = true;
+      try {
+        await hooks.onBusy();
+      } catch {
+        /* best-effort: the caller's release hook must never abort the retry */
+      }
+    }
+  }
+  if (!removed) return { ok: false, error: lastError };
+
   // Best-effort prune of any stale admin entry left behind.
   try {
     await runGit(input.repoCwd, ["worktree", "prune"]);

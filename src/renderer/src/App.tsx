@@ -3,14 +3,13 @@ import type {
   AppSettings,
   AppState,
   ChatBackendKind,
-  FanOutDirective,
   FsEntry,
   RunState,
   ShellInfo,
   SparkEvent,
   Workspace,
 } from "@shared/types";
-import { DEFAULT_COPY_BRANCH_SETUP_COMMAND, formatFanOutDirective } from "@shared/types";
+import { DEFAULT_COPY_BRANCH_SETUP_COMMAND } from "@shared/types";
 import { makeId } from "@shared/ids";
 import { backendPtySessionId } from "@shared/backend-pty";
 import WindowChrome from "./components/WindowChrome";
@@ -34,6 +33,7 @@ import TerminalStack from "./tabs/TerminalStack";
 import PreviewStack from "./tabs/PreviewStack";
 import { setOpenPreviewTabFn } from "./components/Preview/registry";
 import RunsStack from "./tabs/RunsStack";
+import AutomationsStack from "./tabs/AutomationsStack";
 import { useTabs, isDraftChatTabId } from "./tabs/useTabs";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
 import type {
@@ -1365,39 +1365,6 @@ export default function App() {
     [activeWorkspace, refreshRunsFor, handleSelectRun],
   );
 
-  // Explorer multi-select "Fan out across N files": build a structured
-  // FanOutDirective (one parallel worker per selected target) and seed it onto a
-  // brand-new chat via startAutopilot(fanOut). run-store deterministically
-  // synthesizes the forced worker_batch from the directive, so correctness does
-  // not rely on the manager honoring prose. Mirrors handleRunPlan: start, then
-  // select the chat so its conversation + node-graph tab come forward.
-  const handleFanOut = useCallback(
-    async (paths: string[]) => {
-      const ws = activeWorkspace;
-      if (!ws) return;
-      const targets = paths.filter((p) => p);
-      if (targets.length === 0) return;
-      const directive: FanOutDirective = { targets, origin: "explorer" };
-      try {
-        const run = await window.spark.orchestration.startAutopilot({
-          workspaceId: ws.id,
-          workspaceName: ws.name,
-          cwd: ws.cwd,
-          fanOut: directive,
-          initialUserNote: formatFanOutDirective(directive),
-          initialUserNoteClientMessageId: makeId("client-msg"),
-        });
-        handleSelectRun(run.id);
-        void refreshRunsFor(ws.id);
-      } catch (err) {
-        // Pre-run failure is rare (the directive is built from an in-memory
-        // selection); planning failures instead surface on the run itself.
-        console.error("Fan out failed:", err);
-      }
-    },
-    [activeWorkspace, refreshRunsFor, handleSelectRun],
-  );
-
   // Open a file by absolute path. Used by the terminal's OSC 8888 handler
   // (`tp <file>` / `spark_open <file>` from a shell) and the Source Control
   // panel's "open file" action. Reads `tabs` via the ref so the callback stays
@@ -1601,6 +1568,12 @@ export default function App() {
   // draft to a real run-backed chat tab via handleRunSnapshot.
   const handleNewChat = useCallback(() => {
     tabs.addDraftChatTab();
+  }, [tabs]);
+
+  // Top tab strip "+" → "New automations" — focus the workspace's single
+  // Automations tab (scheduler + overnight queue), creating it if absent.
+  const handleNewAutomations = useCallback(() => {
+    tabs.openAutomationsTab();
   }, [tabs]);
 
   // Chat-tab "×" — close-only. Drafts dissolve locally; run-backed chats
@@ -2279,7 +2252,6 @@ export default function App() {
             onDeleteFile={handleDeleteFile}
             onRenameFile={handleRenameFile}
             onRunPlan={handleRunPlan}
-            onFanOut={handleFanOut}
           />
         )}
         {showLeft && (
@@ -2325,6 +2297,7 @@ export default function App() {
               onNewEditorTab={handleNewEditorTab}
               onNewPreviewTab={handleNewPreviewTab}
               onNewChat={handleNewChat}
+              onNewAutomations={handleNewAutomations}
               onRenameChat={handleRenameChatTab}
               onCloseChat={handleCloseChatTab}
               onTerminalPaneDrop={handleTerminalPaneDropToTab}
@@ -2381,7 +2354,6 @@ export default function App() {
             onDeleteFile={handleDeleteFile}
             onRenameFile={handleRenameFile}
             onRunPlan={handleRunPlan}
-            onFanOut={handleFanOut}
           />
         )}
 
@@ -2738,6 +2710,7 @@ interface WorkspaceProps {
   onNewEditorTab: () => void;
   onNewPreviewTab: () => void;
   onNewChat: () => void;
+  onNewAutomations: () => void;
   onRenameChat: (id: TabId, title: string) => void;
   onCloseChat: (id: TabId) => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: string) => void;
@@ -2770,6 +2743,7 @@ const Workspace = React.memo(function Workspace({
   onNewEditorTab,
   onNewPreviewTab,
   onNewChat,
+  onNewAutomations,
   onRenameChat,
   onCloseChat,
   onTerminalPaneDrop,
@@ -3016,6 +2990,7 @@ const Workspace = React.memo(function Workspace({
         onNewEditor={onNewEditorTab}
         onNewPreview={onNewPreviewTab}
         onNewChat={onNewChat}
+        onNewAutomations={onNewAutomations}
         onRenameChat={onRenameChat}
         onCloseChat={onCloseChat}
         onTerminalPaneDrop={onTerminalPaneDrop}
@@ -3085,6 +3060,11 @@ const Workspace = React.memo(function Workspace({
           runs={runs}
           activeRunId={activeRunId}
           onSelectRun={onSelectRun}
+        />
+        <AutomationsStack
+          tabs={visibleTabs}
+          activeId={effectiveActiveId}
+          workspace={workspace}
         />
         {/* The legacy hidden orchestration TerminalGrid was removed: worker
             PTYs now spawn inside the user-visible TerminalStack via the

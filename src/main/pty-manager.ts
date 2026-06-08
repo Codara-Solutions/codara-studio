@@ -10,6 +10,9 @@ import { getHookRpcEnvSafe } from "./hook-rpc";
 
 interface Session {
   id: string;
+  // Working directory the pty was spawned in. Lets disposeUnderCwd find and
+  // kill the shells / agent panes holding a worktree open when it's deleted.
+  cwd: string;
   pty: nodePty.IPty;
   // Renderer sink for live output. Null in headless eval mode — orchestration
   // drives workers without a BrowserWindow, so pty bytes go only to main-process
@@ -481,6 +484,7 @@ function doSpawn(
   const stranded = opts.webContents ? null : consumeStrandedBinding(opts.id);
   const session: Session = {
     id: opts.id,
+    cwd,
     pty,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
     dataChannel: `pty:data:${opts.id}`,
@@ -969,6 +973,34 @@ export function disposeForWebContents(wc: WebContents): void {
   for (const [id, s] of sessions) {
     if (s.webContents === wc) killNow(id);
   }
+}
+
+// Normalize a path for prefix comparison: forward slashes, no trailing slash,
+// lower case (Windows paths are case-insensitive and Node / git can disagree
+// on drive-letter case).
+function normalizeCwd(p: string): string {
+  return (p ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+// Hard-kill every session whose working directory is at or under `dir`. Used
+// when deleting a worktree/workspace: on Windows a shell or agent pane whose
+// cwd is inside the directory holds it open, so the rmdir fails with EBUSY
+// until the process tree is reaped. Returns the number of sessions killed.
+export function disposeUnderCwd(dir: string): number {
+  const target = normalizeCwd(dir);
+  if (!target) return 0;
+  let killed = 0;
+  // Snapshot keys first — killNow mutates the sessions map.
+  for (const id of [...sessions.keys()]) {
+    const s = sessions.get(id);
+    if (!s) continue;
+    const c = normalizeCwd(s.cwd);
+    if (c === target || c.startsWith(`${target}/`)) {
+      killNow(id);
+      killed += 1;
+    }
+  }
+  return killed;
 }
 
 export function detachForWebContents(wc: WebContents): void {

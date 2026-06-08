@@ -131,6 +131,14 @@ export interface RunsTab extends BaseTab {
   runId: string | null;
 }
 
-export type Tab = ChatTab | EditorTab | TerminalTab | PreviewTab | RunsTab;
+// Automations tabs host the workspace's scheduler + overnight-queue panel.
+// Modeled on RunsTab: a single workspace-scoped surface mounted absolutely by
+// AutomationsStack, with no per-tab payload beyond the base id/title (the panel
+// reads the active workspace's id/name/cwd from props passed down by App).
+export interface AutomationsTab extends BaseTab {
+  kind: "automations";
+}
+
+export type Tab = ChatTab | EditorTab | TerminalTab | PreviewTab | RunsTab | AutomationsTab;
 
 export type TabKind = Tab["kind"];

@@ -77,6 +77,61 @@ async function main() {
     ]).split("\n");
     assert.ok(!branches.includes(r.branch), "branch should be deleted");
 
+    // --- Regression: an orphaned/broken copy must still be removable -------
+    // Reproduces the "is not a working tree" dead-end seen in the app: a copy
+    // whose git linkage is gone (admin entry pruned) but whose directory
+    // lingers. The resilient removeCopyWorktree should clear it off disk
+    // instead of dead-ending on git's error.
+    const orphan = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot });
+    assert.ok(orphan.ok, `orphan create failed: ${orphan.ok ? "" : orphan.error}`);
+    // Deregister it: drop the parent repo's admin entry so `git worktree
+    // remove` rejects the path as "not a working tree", while the directory
+    // stays on disk — exactly the observed broken state.
+    rmSync(path.join(repo, ".git", "worktrees", orphan.city), { recursive: true, force: true });
+    const listing = git(repo, ["worktree", "list", "--porcelain"]).replace(/\\/g, "/").toLowerCase();
+    assert.ok(
+      !listing.includes(orphan.path.replace(/\\/g, "/").toLowerCase()),
+      "orphan should no longer be a registered worktree",
+    );
+    assert.ok(existsSync(orphan.path), "orphan dir should still be on disk before cleanup");
+
+    const orphanRm = await wt.removeCopyWorktree({
+      repoCwd: repo,
+      worktreePath: orphan.path,
+      branch: orphan.branch,
+      deleteBranch: true,
+    });
+    assert.ok(orphanRm.ok, `orphan remove failed: ${orphanRm.ok ? "" : orphanRm.error}`);
+    assert.ok(!existsSync(orphan.path), "orphan dir should be gone after resilient remove");
+    assert.ok(
+      !git(repo, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+        .split("\n")
+        .includes(orphan.branch),
+      "orphan branch should be deleted",
+    );
+
+    // --- Safety: a LIVE worktree git declines must NOT be silently nuked ----
+    // A real worktree with uncommitted files should surface git's refusal and
+    // stay on disk, not get force-deleted by the orphan fallback.
+    const live = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot });
+    assert.ok(live.ok, `live create failed: ${live.ok ? "" : live.error}`);
+    writeFileSync(path.join(live.path, "dirty.txt"), "uncommitted\n");
+    const liveRm = await wt.removeCopyWorktree({
+      repoCwd: repo,
+      worktreePath: live.path,
+      branch: live.branch,
+    });
+    assert.ok(!liveRm.ok, "removing a dirty live worktree (no force) should fail, not delete it");
+    assert.ok(existsSync(live.path), "dirty live worktree must remain on disk");
+    // Tidy up the live worktree for real so the temp dirs clean cleanly.
+    await wt.removeCopyWorktree({
+      repoCwd: repo,
+      worktreePath: live.path,
+      branch: live.branch,
+      force: true,
+      deleteBranch: true,
+    });
+
     console.log("PASS: git-worktrees");
   } finally {
     rmSync(repo, { recursive: true, force: true });

@@ -77,7 +77,6 @@ interface RailProps {
   onDeleteFile: (path: string) => void;
   onRenameFile: (oldPath: string, entry: FsEntry) => void;
   onRunPlan: (entry: FsEntry, backend?: ChatBackendKind) => void;
-  onFanOut: (paths: string[]) => void;
 }
 
 // Memoized: App hoists every prop to a stable reference (the `workspaces`
@@ -326,7 +325,6 @@ function WorkspaceRail(props: RailProps) {
             onDeleteFile={props.onDeleteFile}
             onRenameFile={props.onRenameFile}
             onRunPlan={props.onRunPlan}
-            onFanOut={props.onFanOut}
             collapsed={collapsed.explorer}
             onToggleCollapse={() => onToggleSection("explorer")}
             headerDrag={headerDrag("explorer")}

@@ -716,7 +716,15 @@ export function registerIpc(): void {
       },
     ): Promise<GitOpResult> => {
       const { removeCopyWorktree } = await getGitWorktrees();
-      const result = await removeCopyWorktree(input);
+      const result = await removeCopyWorktree(input, {
+        // A shell or agent pane whose cwd is the worktree holds the directory
+        // open on Windows (EBUSY). Only kill those PTYs once a lock actually
+        // blocks the removal — so an unrelated refusal (e.g. a dirty worktree)
+        // never needlessly destroys the user's terminals.
+        onBusy: () => {
+          pty.disposeUnderCwd(input.worktreePath);
+        },
+      });
       const { invalidateGitCache } = await getGitOps();
       invalidateGitCache(input.repoCwd);
       return result;

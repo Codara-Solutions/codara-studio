@@ -21,12 +21,14 @@ import type {
   EnqueueRunInput,
   QueuedRun,
   RunQueueState,
+  RunStatus,
   StartAutopilotInput,
 } from "@shared/types";
 import { makeId } from "@shared/ids";
 import { writeFileAtomic } from "../fs-atomic";
 import { sparkHome } from "../spark-home";
-import { startAutopilot } from "./run-store";
+import { subscribeToEvents } from "./event-log";
+import { getRun, startAutopilot } from "./run-store";
 
 // File name for the persisted queue, kept directly under sparkHome() next to
 // spark-state.json / spark-settings.json (NOT under runs/, which is per-run).
@@ -48,6 +50,19 @@ function queuePath(): string {
 async function persist(state: RunQueueState): Promise<void> {
   await fs.mkdir(sparkHome(), { recursive: true });
   await writeFileAtomic(queuePath(), `${JSON.stringify(state, null, 2)}\n`);
+  void emitQueueUpdated();
+}
+
+// Broadcast a queue-changed event so the renderer's Queue panel live-refreshes.
+// Uses the run event bus with no runId (so nothing is journaled); the panel
+// filters on event.type. Best-effort — a missed push just delays a refresh.
+async function emitQueueUpdated(): Promise<void> {
+  try {
+    const { appendEvent } = await import("./event-log");
+    await appendEvent({ workspaceId: "", type: "queue.updated" });
+  } catch {
+    /* best effort */
+  }
 }
 
 // Derive a human-facing title for the Queue panel from the launch payload when
@@ -139,36 +154,59 @@ function nextQueued(state: RunQueueState): QueuedRun | undefined {
   return state.items.find((item) => item.status === "queued");
 }
 
-// Stubbed process-wide guard (TODO (c)). Module-level flag only protects
-// against re-entrant burnDown() calls within this one process; it is NOT a
-// real cross-process mutex and is racy across the read-modify-write cycles
-// below. The daemon split should hold an OS file lock on run-queue.json.
+// Re-entrancy guard for burnDown within this process. (A durable cross-process
+// lock is the daemon split's job; in-app, every trigger funnels through here.)
 let burnDownInFlight = false;
 
+// Run statuses that free a queue slot. paused/blocked are deliberately NOT
+// terminal — a run waiting on the user keeps occupying its slot (you walked
+// away and it needs you; piling more runs on top wouldn't help).
+const TERMINAL_RUN_STATUS: ReadonlySet<RunStatus> = new Set<RunStatus>([
+  "complete",
+  "failed",
+  "cancelled",
+]);
+
+// runIds that already have a completion watcher (avoid double-subscribing).
+const watchedRuns = new Set<string>();
+
+// Subscribe to the run event bus and finalize a queue item only once its run
+// actually reaches a terminal state — THIS is what makes `concurrency` real.
+// startAutopilot resolves at run-*creation*, long before completion, so without
+// this the cap would be a no-op. On a terminal run we mark the item done/failed,
+// free the slot, and re-drain.
+function watchCompletion(itemId: string, runId: string): void {
+  if (watchedRuns.has(runId)) return;
+  watchedRuns.add(runId);
+  const unsubscribe = subscribeToEvents((event) => {
+    if (event.runId !== runId) return;
+    void (async () => {
+      const run = await getRun(runId).catch(() => null);
+      if (!run || !TERMINAL_RUN_STATUS.has(run.status)) return;
+      unsubscribe();
+      watchedRuns.delete(runId);
+      await transition(itemId, (item) => {
+        if (item.status !== "running") return;
+        item.status = run.status === "complete" ? "done" : "failed";
+        if (run.status !== "complete") item.error = `run ${run.status}`;
+        item.finishedAt = new Date().toISOString();
+      });
+      // A slot just freed — advance the queue.
+      void burnDown().catch((err: unknown) =>
+        console.error("[queue] re-drain after completion failed:", err),
+      );
+    })();
+  });
+}
+
 /**
- * Serial / k-at-a-time driver. While there is a 'queued' item AND the number
- * of 'running' items is below `concurrency`, claim the next queued item, mark
- * it 'running' + stamp startedAt, persist, then call startAutopilot(input).
- * On resolve the item becomes 'done' + runId, on reject 'failed' + error; the
- * state is re-loaded and persisted after each transition so a concurrent
- * enqueue/dequeue isn't clobbered. Loops until the queue is drained or the
- * concurrency ceiling is hit, then returns the final queue snapshot.
- *
- * TODO (a): real concurrency tracking. startAutopilot resolves once the
- *   RunState has been *created*, not once the run has *finished*, so awaiting
- *   it here does not actually bound in-flight work — a slot frees up almost
- *   immediately and `concurrency` becomes a no-op. The daemon split should
- *   instead subscribe to run-completion events (event-log.subscribeToEvents ->
- *   run.completed / run.failed) and only then free the slot + advance the
- *   queue. See docs/overnight-queue-PLAN.md.
- * TODO (b): crash-recovery / resume. Items left in 'running' after a crash are
- *   not reconciled on the next load; resuming in-flight items is deferred to
- *   the daemon split (which owns durable run ownership).
- * TODO (c): process-wide singleton / mutex guard — see `burnDownInFlight`
- *   above; it is a re-entrancy stub only, not a durable cross-process lock.
+ * k-at-a-time driver. While a slot is free (running items < concurrency) and a
+ * 'queued' item exists, claim it, launch it via startAutopilot, stamp its runId,
+ * and leave it 'running' until its run reaches a terminal state — watchCompletion
+ * frees the slot and re-drains then. Returns the queue snapshot after the launch
+ * pass (runs may still be in flight).
  */
 export async function burnDown(): Promise<RunQueueState> {
-  // TODO (c): stubbed singleton guard — re-entrancy only, not cross-process.
   if (burnDownInFlight) return loadQueue();
   burnDownInFlight = true;
 
@@ -179,7 +217,7 @@ export async function burnDown(): Promise<RunQueueState> {
       await persist(opening);
     }
 
-    // Drain loop: re-load each iteration so concurrent enqueue/dequeue and the
+    // Launch loop: re-load each iteration so concurrent enqueue/dequeue and the
     // status transitions written below are observed rather than clobbered.
     for (;;) {
       const state = await loadQueue();
@@ -193,11 +231,12 @@ export async function burnDown(): Promise<RunQueueState> {
 
       try {
         const run = await startAutopilot(item.input);
+        // Stamp the runId but keep status 'running' — watchCompletion flips it
+        // to done/failed when the run actually finishes.
         await transition(item.id, (claimed) => {
-          claimed.status = "done";
           claimed.runId = run.id;
-          claimed.finishedAt = new Date().toISOString();
         });
+        watchCompletion(item.id, run.id);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         await transition(item.id, (claimed) => {
@@ -209,12 +248,33 @@ export async function burnDown(): Promise<RunQueueState> {
     }
 
     const closing = await loadQueue();
-    closing.running = false;
+    closing.running = countRunning(closing) > 0;
     await persist(closing);
     return closing;
   } finally {
     burnDownInFlight = false;
   }
+}
+
+/**
+ * On boot, items left 'running' belong to runs whose in-process completion
+ * watcher died with the previous session. Reset them to 'queued' so the work
+ * resumes, then kick a drain. (Duplicate-run risk is acceptable for the in-app
+ * version; durable in-flight ownership is the daemon split's job.)
+ */
+export async function resumeQueue(): Promise<void> {
+  const state = await loadQueue();
+  let changed = false;
+  for (const item of state.items) {
+    if (item.status === "running") {
+      item.status = "queued";
+      delete item.startedAt;
+      delete item.runId;
+      changed = true;
+    }
+  }
+  if (changed) await persist(state);
+  void burnDown().catch((err: unknown) => console.error("[queue] resume drain failed:", err));
 }
 
 /**

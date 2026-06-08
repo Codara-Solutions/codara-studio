@@ -16,6 +16,7 @@ import {
   type PanePath,
 } from "./paneTree";
 import type {
+  AutomationsTab,
   ChatTab,
   EditorTab,
   PaneNode,
@@ -241,6 +242,10 @@ function loadPersisted(workspaceId: string | null): PersistedShape | null {
           .filter(
             (tab) =>
               tab.kind !== "runs" &&
+              // Automations tabs are workspace-scoped derived surfaces (like
+              // Runs), not durable layout — they re-open on demand via the "+"
+              // picker rather than restoring from a persisted blob.
+              tab.kind !== "automations" &&
               tab.kind !== "chat" &&
               !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
           )
@@ -488,6 +493,10 @@ export interface UseTabsApi {
   // false for the background "ensure the active chat has a tab" effect.
   openRunsTab: (runId: string, title: string, focus: boolean) => TabId;
   hideRunsTabs: () => void;
+  // Focus the workspace's single Automations tab if one already exists, else
+  // append a fresh one and focus it. Singleton-ish like the Runs tab — there
+  // is only ever one Automations surface per workspace.
+  openAutomationsTab: () => TabId;
   // Close the runs tab bound to a chat (used when the chat is deleted).
   closeRunsTabFor: (runId: string) => void;
   closeWorkerTerminalTabFor: (runId: string) => void;
@@ -1520,6 +1529,31 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
     [],
   );
 
+  // Open the workspace's single Automations tab. Like the Runs tab it is a
+  // singleton: focus the existing one if present, otherwise append a fresh
+  // tab. The existence check + setActiveId both run INSIDE the updater so a
+  // double-click on "+ New automations" never stacks two tabs (tabsRef can be
+  // stale in the same event as a preceding tab mutation).
+  const openAutomationsTab = useCallback((): TabId => {
+    const existingId = tabsRef.current.find(
+      (t): t is AutomationsTab => t.kind === "automations",
+    )?.id;
+    const resultId = existingId ?? makeId("automations");
+    setTabs((curr) => {
+      const existing = curr.find(
+        (t): t is AutomationsTab => t.kind === "automations",
+      );
+      if (existing) {
+        setActiveId(existing.id);
+        return curr;
+      }
+      const tab: AutomationsTab = { id: resultId, kind: "automations", title: "Automations" };
+      setActiveId(resultId);
+      return [...curr, tab];
+    });
+    return resultId;
+  }, []);
+
   const setLeafScrollback = useCallback(
     (tabId: TabId, paneId: string, scrollback: string) => {
       const trimmed =
@@ -1787,6 +1821,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
       newPreviewTab,
       openRunsTab,
       hideRunsTabs,
+      openAutomationsTab,
       closeRunsTabFor,
       closeWorkerTerminalTabFor,
       openEditorTab,

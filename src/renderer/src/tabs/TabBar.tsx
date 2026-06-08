@@ -44,6 +44,8 @@ interface Props {
   // are still appended through the existing onNew* callbacks for those
   // shortcuts. The strip never opens a kind picker anymore.
   onNewChat: () => void;
+  // Opens (or focuses) the workspace's Automations tab from the "+" dropdown.
+  onNewAutomations: () => void;
   // Chat-tab-specific affordances: hover-revealed rename and close. Generic
   // tabs continue to use the existing onClose path.
   onRenameChat: (id: TabId, title: string) => void;
@@ -66,6 +68,7 @@ function TabBar({
   onNewPreview,
   onNewEditor,
   onNewChat,
+  onNewAutomations,
   onRenameChat,
   onCloseChat,
   onTerminalPaneDrop,
@@ -413,6 +416,13 @@ function TabBar({
               onClick={() => {
                 setPickerOpen(false);
                 onNewPreview();
+              }}
+            />
+            <PickerItem
+              label="New automations"
+              onClick={() => {
+                setPickerOpen(false);
+                onNewAutomations();
               }}
             />
           </div>
@@ -908,6 +918,7 @@ function KindIcon({ tab }: { tab: Tab }) {
   }
   if (tab.kind === "terminal") return <GlyphIcon glyph="❯" color="var(--accent)" />;
   if (tab.kind === "preview") return <GlyphIcon glyph="◉" color="var(--accent)" />;
+  if (tab.kind === "automations") return <GlyphIcon glyph="◷" color="var(--accent)" />;
   return <GlyphIcon glyph="◆" color="var(--accent)" />;
 }
 
@@ -933,6 +944,7 @@ function GlyphIcon({ glyph, color }: { glyph: string; color: string }) {
 
 function labelFor(t: Tab): string {
   if (t.kind === "terminal") return t.title || "terminals";
+  if (t.kind === "automations") return t.title || "Automations";
   return t.title;
 }
 
@@ -941,6 +953,7 @@ function titleFor(t: Tab): string {
   if (t.kind === "editor") return t.path;
   if (t.kind === "preview") return t.url;
   if (t.kind === "terminal") return t.title;
+  if (t.kind === "automations") return t.title;
   return t.title;
 }
 

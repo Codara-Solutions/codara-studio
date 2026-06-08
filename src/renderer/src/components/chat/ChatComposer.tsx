@@ -4,12 +4,10 @@ import type {
   AgentEffortLevel,
   ChatBackendKind,
   ChatMode,
-  FanOutDirective,
   FsEntry,
   RunState,
   SparkEvent,
 } from "@shared/types";
-import { formatFanOutDirective } from "@shared/types";
 import { makeId } from "@shared/ids";
 import { contextWindowForModel } from "@shared/context-window";
 import {
@@ -142,14 +140,6 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   // repeat would otherwise slip through into a duplicate message.
   const inFlight = useRef(false);
   const suppressMentionUpdate = useRef(false);
-  // Fan-out popover: explicit named entry point for the orchestrator's parallel
-  // path. The user picks 2+ target files; on confirm we build a FanOutDirective
-  // and seed it (formatted note) onto the run so run-store deterministically
-  // synthesizes one parallel worker per target rather than leaving the manager
-  // to rediscover the fan-out from prose.
-  const [fanOutOpen, setFanOutOpen] = useState(false);
-  const [fanOutTargets, setFanOutTargets] = useState<string[]>([]);
-  const [fanOutQuery, setFanOutQuery] = useState("");
 
   // Focus on the global composer shortcut (App broadcasts spark:focus-composer).
   useEffect(() => {
@@ -248,14 +238,6 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     setTokensUsed(0);
   }, [run?.id]);
 
-  // Drop any half-built fan-out selection when switching chats; a stale set of
-  // targets from another workspace's run must never leak into a new directive.
-  useEffect(() => {
-    setFanOutOpen(false);
-    setFanOutTargets([]);
-    setFanOutQuery("");
-  }, [run?.id]);
-
   // Accumulate live chat.usage SparkEvents into a running per-chat total.
   // The manager fires one chat.usage event per backend call carrying that
   // call's inputTokens; summing them gives the user a feel for how much
@@ -321,16 +303,6 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const mentionSuggestions = useMemo(
     () => rankMentionSuggestions(fileMentions, mentionQuery?.query ?? "").slice(0, MAX_MENTION_RESULTS),
     [fileMentions, mentionQuery?.query],
-  );
-
-  // Fan-out picker shares the file-mention index but filters out already-chosen
-  // targets so the list only offers new files to add to the batch.
-  const fanOutSuggestions = useMemo(
-    () =>
-      rankMentionSuggestions(fileMentions, fanOutQuery)
-        .filter((file) => !fanOutTargets.includes(file.path))
-        .slice(0, MAX_MENTION_RESULTS),
-    [fileMentions, fanOutQuery, fanOutTargets],
   );
 
   useEffect(() => {
@@ -479,90 +451,6 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     setError(null);
     try {
       await window.spark.orchestration.resumeRun({ runId: run_.id });
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      inFlight.current = false;
-      setBusy(false);
-    }
-  };
-
-  const toggleFanOut = () => {
-    setFanOutOpen((open) => {
-      const next = !open;
-      if (next) {
-        setFanOutQuery("");
-        // Refresh the workspace index when opening so the picker reflects files
-        // created since mount; the mention path does the same before a send.
-        if (cwd) {
-          void collectWorkspaceFiles(cwd)
-            .then((files) => setFileMentions(files))
-            .catch(() => undefined);
-        }
-      }
-      return next;
-    });
-  };
-
-  const addFanOutTarget = (file: FileMention) => {
-    setFanOutTargets((current) =>
-      current.includes(file.path) ? current : [...current, file.path],
-    );
-    setFanOutQuery("");
-  };
-
-  const removeFanOutTarget = (path: string) => {
-    setFanOutTargets((current) => current.filter((item) => item !== path));
-  };
-
-  // Build the FanOutDirective from the chosen targets and seed it onto the run.
-  // For a live run we mirror send()'s steering path (addRunMessage note +
-  // resumeRun); for a draft we start a fresh chat with the formatted directive
-  // as the first message, reusing the same chatConfig assembly send() uses. The
-  // directive body carries the [FAN OUT] marker so run-store deterministically
-  // forces one parallel worker per target.
-  const confirmFanOut = async () => {
-    if (inFlight.current || disabled || pastingImages) return;
-    if (fanOutTargets.length < 2) return;
-    const directive: FanOutDirective = {
-      targets: [...fanOutTargets],
-      instruction: draft.trim() || undefined,
-      origin: "composer",
-    };
-    const message = formatFanOutDirective(directive);
-    const clientMessageId = makeId("client-msg");
-    inFlight.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      if (!run_) {
-        const attachments = await attachmentsForCurrentDraft();
-        const chatConfig: ChatComposerStartConfig = {
-          backend: draftChatBackend,
-          model: draftChatModel,
-          mode: draftChatMode,
-          effort: draftChatEffort,
-          fastMode: draftFastMode,
-          oneMillionContext: draftOneMillionContext,
-        };
-        await onStartChat(message, clientMessageId, attachments, chatConfig);
-      } else {
-        await window.spark.orchestration.addRunMessage({
-          runId: run_.id,
-          clientMessageId,
-          author: "user",
-          kind: "note",
-          message,
-        });
-        await window.spark.orchestration.resumeRun({ runId: run_.id });
-      }
-      setFanOutOpen(false);
-      setFanOutTargets([]);
-      setFanOutQuery("");
-      setDraft("");
-      setImages([]);
-      setFileReferences([]);
-      setMentionQuery(null);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -803,8 +691,8 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     applyChatBackendChange({ chatEffort: effort });
   };
 
-  const onToggleMode = () => {
-    applyChatBackendChange({ chatMode: activeChatMode === "execute" ? "talk" : "execute" });
+  const onSelectMode = (mode: ChatMode) => {
+    applyChatBackendChange({ chatMode: mode });
   };
 
   const onToggleFastMode = () => {
@@ -879,21 +767,6 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
             suggestions={mentionSuggestions}
             activeIndex={mentionIndex}
             onPick={insertFileMention}
-          />
-        )}
-        {fanOutOpen && (
-          <FanOutPopover
-            query={fanOutQuery}
-            loading={filesLoading}
-            suggestions={fanOutSuggestions}
-            targets={fanOutTargets}
-            fileMentions={fileMentions}
-            canConfirm={fanOutTargets.length >= 2 && !busy && !disabled && !pastingImages}
-            onQueryChange={setFanOutQuery}
-            onAdd={addFanOutTarget}
-            onRemove={removeFanOutTarget}
-            onConfirm={confirmFanOut}
-            onClose={() => setFanOutOpen(false)}
           />
         )}
         {(images.length > 0 || fileReferences.length > 0) && (
@@ -992,7 +865,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
               availableEfforts={availableEfforts}
               onCycle={onPickEffort}
             />
-            <PlanModeToggle mode={activeChatMode} onToggle={onToggleMode} />
+            <PlanModeToggle mode={activeChatMode} onSelect={onSelectMode} />
             {fastModeAvailable && (
               <button
                 type="button"
@@ -1009,12 +882,6 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
                 <LightningIcon />
               </button>
             )}
-            <FanOutButton
-              count={fanOutTargets.length}
-              open={fanOutOpen}
-              disabled={disabled || busy}
-              onClick={toggleFanOut}
-            />
           </div>
           {hasActiveWorker ? (
             <WorkerActivityStatus
@@ -1793,263 +1660,3 @@ function LightningIcon() {
   );
 }
 
-// Named entry point for the orchestrator's parallel fan-out path. Reads as a
-// labelled control (not a bare icon) so the count of chosen targets is visible
-// at a glance; styled to match the composer-fast pill so it sits naturally in
-// the controls bar. Active (accent) while the picker is open.
-function FanOutButton({
-  count,
-  open,
-  disabled,
-  onClick,
-}: {
-  count: number;
-  open: boolean;
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  const [hover, setHover] = useState(false);
-  const label = count > 0 ? `Fan out · ${count}` : "Fan out";
-  const title =
-    count >= 2
-      ? `Fan out across ${count} files — Spark runs one worker per file at the same time. Click to edit the targets.`
-      : count === 1
-        ? "Fan out: pick at least one more file (2+ required) — Spark runs one worker per file at the same time, e.g. rename a function across button.tsx, modal.tsx and card.tsx in parallel."
-        : "Fan out: pick several files and Spark runs one worker per file at the same time — great for the same change across many files, e.g. rename a function across button.tsx, modal.tsx and card.tsx in parallel.";
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      aria-label={label}
-      aria-pressed={open}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        appearance: "none",
-        height: 26,
-        flex: "0 0 auto",
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        padding: "0 8px",
-        border: `1px solid ${
-          open ? "color-mix(in oklch, var(--accent) 45%, transparent)" : "var(--rule-soft)"
-        }`,
-        borderRadius: 6,
-        background: open
-          ? "color-mix(in oklch, var(--accent) 16%, transparent)"
-          : hover && !disabled
-            ? "var(--hover)"
-            : "transparent",
-        boxShadow: disabled ? "none" : "var(--lift-hi)",
-        color: disabled
-          ? "var(--muted-2)"
-          : open
-            ? "var(--accent)"
-            : hover
-              ? "var(--ink)"
-              : "var(--ink-dim)",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: 600,
-        cursor: "default",
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <FanOutGlyph />
-      <span style={{ whiteSpace: "nowrap" }}>{label}</span>
-    </button>
-  );
-}
-
-// The fan-out target picker. Reuses the MentionPopover visual language (same
-// shell, header, rows, empty states) but is driven by its own search input and
-// keeps a running list of chosen targets as removable chips, plus a confirm
-// action that forces the parallel batch.
-function FanOutPopover({
-  query,
-  loading,
-  suggestions,
-  targets,
-  fileMentions,
-  canConfirm,
-  onQueryChange,
-  onAdd,
-  onRemove,
-  onConfirm,
-  onClose,
-}: {
-  query: string;
-  loading: boolean;
-  suggestions: FileMention[];
-  targets: string[];
-  fileMentions: FileMention[];
-  canConfirm: boolean;
-  onQueryChange: (value: string) => void;
-  onAdd: (file: FileMention) => void;
-  onRemove: (path: string) => void;
-  onConfirm: () => void;
-  onClose: () => void;
-}) {
-  const inputRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    inputRef.current?.focus({ preventScroll: true });
-  }, []);
-  const empty = !loading && suggestions.length === 0;
-  // Map each chosen absolute path back to its indexed mention so the chip shows
-  // the workspace-relative path; fall back to the basename if it's not indexed
-  // (e.g. the index hasn't refreshed yet for a brand-new file).
-  const targetLabel = (path: string): string => {
-    const match = fileMentions.find((file) => file.path === path);
-    return match?.relativePath ?? basename(path);
-  };
-  return (
-    <div
-      style={{
-        position: "absolute",
-        left: 8,
-        right: 8,
-        bottom: "calc(100% + 6px)",
-        zIndex: 50,
-        border: "1px solid var(--rule-strong)",
-        borderRadius: 8,
-        background: "var(--panel-2)",
-        boxShadow: "var(--shadow-2), var(--lift-hi)",
-        padding: 5,
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 10,
-          padding: "5px 7px 7px",
-          color: "var(--muted)",
-          fontFamily: "var(--font-mono)",
-          fontSize: 9,
-          textTransform: "uppercase",
-          letterSpacing: "0.08em",
-        }}
-      >
-        <span>Fan out · one worker per file</span>
-        <span>{targets.length} selected</span>
-      </div>
-      <div
-        style={{
-          padding: "0 7px 7px",
-          color: "var(--ink-dim)",
-          fontSize: 11,
-          lineHeight: 1.4,
-        }}
-      >
-        Run one agent per file, all at once — pick 2+ files to split the work in parallel.
-      </div>
-      {targets.length > 0 && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 6,
-            padding: "0 7px 7px",
-          }}
-        >
-          {targets.map((path) => (
-            <AttachmentChip
-              key={path}
-              kind="file"
-              name={targetLabel(path)}
-              title={path}
-              onRemove={() => onRemove(path)}
-            />
-          ))}
-        </div>
-      )}
-      <input
-        ref={inputRef}
-        value={query}
-        spellCheck={false}
-        placeholder="Search workspace files to add…"
-        onChange={(event) => onQueryChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && suggestions.length > 0) {
-            event.preventDefault();
-            onAdd(suggestions[0]);
-            return;
-          }
-          if (event.key === "Escape") {
-            event.preventDefault();
-            onClose();
-          }
-        }}
-        style={{
-          width: "100%",
-          boxSizing: "border-box",
-          height: 28,
-          border: "1px solid var(--rule-soft)",
-          borderRadius: 6,
-          background: "var(--panel)",
-          color: "var(--ink)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 12,
-          padding: "0 8px",
-          outline: "none",
-          marginBottom: 5,
-        }}
-      />
-      {loading ? (
-        <MentionEmpty text="Indexing workspace files..." />
-      ) : empty ? (
-        <MentionEmpty text={query ? "No matching files" : "All matching files are already selected"} />
-      ) : (
-        <div style={{ display: "grid", gap: 1, maxHeight: 200, overflowY: "auto" }}>
-          {suggestions.map((file) => (
-            <MentionRow key={file.path} file={file} active={false} onPick={() => onAdd(file)} />
-          ))}
-        </div>
-      )}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 10,
-          paddingTop: 7,
-        }}
-      >
-        <span style={{ color: "var(--muted)", fontSize: 10 }}>
-          {targets.length === 0
-            ? "Needs 2+ files — fan-out splits the work into one parallel worker per file"
-            : targets.length === 1
-              ? "Needs 2+ files — add one more so there's work to split in parallel"
-              : "Each file gets its own parallel worker"}
-        </span>
-        <TextButton onClick={onConfirm} disabled={!canConfirm} tone="accent">
-          {targets.length >= 2 ? `Fan out · ${targets.length} files` : "Fan out"}
-        </TextButton>
-      </div>
-    </div>
-  );
-}
-
-// Three diverging arrows — a compact visual for "one input, many parallel
-// workers." Stroked to sit alongside the other controls-bar glyphs.
-function FanOutGlyph() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
-      <path
-        d="M2 7h3M5 7l4-3.5M5 7l4 3.5"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <circle cx="2" cy="7" r="1.1" fill="currentColor" />
-      <circle cx="10" cy="3" r="1.1" fill="currentColor" />
-      <circle cx="10" cy="11" r="1.1" fill="currentColor" />
-    </svg>
-  );
-}

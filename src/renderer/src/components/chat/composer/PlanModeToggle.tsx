@@ -2,51 +2,46 @@ import type { ChatMode } from "@shared/types";
 
 interface Props {
   mode: ChatMode;
-  onToggle: () => void;
+  onSelect: (mode: ChatMode) => void;
 }
 
-// Talk / Execute toggle. The label reflects the CURRENT mode (matching
-// vienna's convention): pressing the pill flips it. Execute mode gets an
-// accent treatment because that's the "workers will spawn" state — the
-// dashed border around the whole composer shell is keyed off the same
-// state in CSS (.composer-shell.is-execute-mode).
-export default function PlanModeToggle({ mode, onToggle }: Props) {
-  const isExecute = mode === "execute";
-  const label = isExecute ? "Execute" : "Talk";
+// Manager-mode selector — a SINGLE pill that CYCLES on each press:
+//   Talk → Plan → Execute → Talk → …
+// The label shows the CURRENT mode; clicking advances to the next one. Colour
+// and the leading dot shift per mode (see .composer-mode-cycle in styles.css):
+//   Talk    — pure conversation, no workers.
+//   Plan    — Best-of-N council: top-tier Claude + Codex agents each draft a
+//             PLAN + PRD, then a judge synthesizes the best merged pair.
+//   Execute — Spark spawns workers to implement the work (the composer shell
+//             also picks up its dashed "armed" border in this mode).
+const CYCLE: ReadonlyArray<ChatMode> = ["talk", "plan", "execute"];
+
+const META: Record<ChatMode, { label: string; blurb: string }> = {
+  talk: { label: "Talk", blurb: "pure conversation, no workers" },
+  plan: {
+    label: "Plan",
+    blurb:
+      "Best-of-N council — top-tier Claude + Codex agents each draft a PLAN + PRD, then a judge synthesizes the best merged pair",
+  },
+  execute: { label: "Execute", blurb: "Spark spawns workers to do the work" },
+};
+
+export default function PlanModeToggle({ mode, onSelect }: Props) {
+  // Guard against an unknown / legacy persisted value; fall back to Talk.
+  const current: ChatMode = CYCLE.includes(mode) ? mode : CYCLE[0];
+  const next = CYCLE[(CYCLE.indexOf(current) + 1) % CYCLE.length];
+  const meta = META[current];
+  const nextMeta = META[next];
+
   return (
     <button
       type="button"
-      className={`composer-plan${isExecute ? " is-execute" : ""}`}
-      aria-pressed={isExecute}
-      title={
-        isExecute
-          ? "Execute mode — Spark spawns workers to do the work. Click to switch to Talk."
-          : "Talk mode — pure conversation, no workers. Click to switch to Execute."
-      }
-      onClick={onToggle}
+      className={`composer-mode-cycle is-${current}`}
+      title={`${meta.label} — ${meta.blurb}.\nClick to switch to ${nextMeta.label}.`}
+      aria-label={`Manager mode: ${meta.label}. Click to switch to ${nextMeta.label}.`}
+      onClick={() => onSelect(next)}
     >
-      <BookIcon />
-      <span className="composer-plan-label">{label}</span>
+      {meta.label}
     </button>
-  );
-}
-
-// Small open-book glyph borrowed from vienna. 12×12 SVG; inherits color.
-function BookIcon() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M2 3.5C3.5 3 5.5 3 8 4C10.5 3 12.5 3 14 3.5V13C12.5 12.5 10.5 12.5 8 13.5C5.5 12.5 3.5 12.5 2 13V3.5Z" />
-      <path d="M8 4V13.5" />
-    </svg>
   );
 }

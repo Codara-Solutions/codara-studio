@@ -377,6 +377,27 @@ app.whenReady().then(async () => {
   // createWindow(); this kicks off the event subscription. Idempotent.
   startNotifications();
 
+  // Arm automations (cron / interval / folder-watch triggers) and resume any
+  // queue items left mid-flight by a previous session. Deferred + fire-and-
+  // forget so the window paints first, and dynamically imported so run-store is
+  // only pulled in once an automation actually needs it (not at cold start).
+  // NOTE: these fire only while the app is open — surviving app-close is the
+  // daemon split's job (docs/daemon-split-PLAN.md).
+  void (async () => {
+    try {
+      const { startScheduler } = await import("./orchestration/scheduler");
+      await startScheduler();
+    } catch (err) {
+      console.warn("[main] scheduler failed to start:", err);
+    }
+    try {
+      const { resumeQueue } = await import("./orchestration/run-queue");
+      await resumeQueue();
+    } catch (err) {
+      console.warn("[main] queue resume failed:", err);
+    }
+  })();
+
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -412,6 +433,10 @@ app.on("before-quit", async () => {
   // loop drains. Without this an in-flight `fs.rename` to processed/ can
   // keep the process alive briefly past quit.
   await stopHookWatcher().catch(() => undefined);
+  // Tear down automation timers/watchers (cached module if it was started).
+  await import("./orchestration/scheduler")
+    .then((m) => m.stopScheduler())
+    .catch(() => undefined);
   await stopAgentSocket().catch(() => undefined);
   await flushAllStores();
 });

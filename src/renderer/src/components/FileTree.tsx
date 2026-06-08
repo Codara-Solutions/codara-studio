@@ -148,10 +148,6 @@ interface Props {
   // `backend` is the engine chosen from the Run plan flyout (undefined = the
   // default Spark / OpenRouter manager; "claude" / "codex" route to that CLI).
   onRunPlan?: (entry: FsEntry, backend?: ChatBackendKind) => void;
-  // Multi-select several files, then "Fan out across N files" to seed a
-  // structured fan-out directive (one parallel worker per file). Mirrors the
-  // onRunPlan precedent but always carries the full selected-file set.
-  onFanOut?: (paths: string[]) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
   headerDrag?: SectionHeaderDragProps;
@@ -192,7 +188,6 @@ export default function FileTree({
   onDeleteFile,
   onRenameFile,
   onRunPlan,
-  onFanOut,
   collapsed,
   onToggleCollapse,
   headerDrag,
@@ -993,20 +988,6 @@ export default function FileTree({
                 }
               : null
           }
-          fanOut={
-            onFanOut &&
-            contextMenuEntries.length > 1 &&
-            !contextMenuEntries.some((entry) => entry.isDir)
-              ? {
-                  label: `Fan out across ${contextMenuEntries.length} files`,
-                  onPick: () => {
-                    const paths = contextMenuEntries.map((entry) => entry.path);
-                    setContextMenu(null);
-                    onFanOut(paths);
-                  },
-                }
-              : null
-          }
           onOpen={
             contextMenuEntries.some((entry) => entry.isDir)
               ? null
@@ -1407,7 +1388,6 @@ function FileMenu({
   menu,
   entries,
   runPlan,
-  fanOut,
   onOpen,
   openLabel,
   onNewFile,
@@ -1421,7 +1401,6 @@ function FileMenu({
   menu: FileContextMenu;
   entries: FsEntry[];
   runPlan: { engines: EngineOption[]; onPick: (backend?: ChatBackendKind) => void } | null;
-  fanOut: { label: string; onPick: () => void } | null;
   onOpen: (() => void) | null;
   openLabel: string;
   onNewFile: () => void;
@@ -1511,14 +1490,6 @@ function FileMenu({
             onPick={runPlan.onPick}
             openLeft={engineFlyoutOpensLeft}
           />
-          <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
-        </>
-      )}
-      {fanOut && (
-        <>
-          <MenuButton icon="⋔" accent onClick={fanOut.onPick}>
-            {fanOut.label}
-          </MenuButton>
           <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
         </>
       )}

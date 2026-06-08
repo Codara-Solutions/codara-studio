@@ -822,6 +822,73 @@ a { color: inherit; }
   white-space: nowrap;
 }
 
+/* Manager-mode selector — a SINGLE pill that CYCLES on each press:
+   Talk → Plan → Execute → Talk. The label shows the current mode; the colour
+   and the leading dot shift per mode so the active state reads at a glance
+   (Talk = muted, Plan = info-blue, Execute = accent/armed). Execute also lights
+   the composer shell's dashed "armed" border (.composer-shell.is-execute-mode).
+   Replaces the old three-segment Execute/Plan/Talk pill. */
+.composer-mode-cycle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--rule-soft);
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  line-height: 1.7;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out);
+}
+/* Leading dot picks up the mode's colour via currentColor. */
+.composer-mode-cycle::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.85;
+  flex: 0 0 auto;
+}
+/* Talk — quiet/neutral. */
+.composer-mode-cycle.is-talk {
+  color: var(--muted);
+}
+.composer-mode-cycle.is-talk:hover {
+  color: var(--ink);
+  border-color: var(--rule);
+  background: color-mix(in oklch, var(--ink) 9%, transparent);
+}
+/* Plan — info-blue, distinct from Execute's gold. */
+.composer-mode-cycle.is-plan {
+  color: var(--info);
+  border-color: color-mix(in oklch, var(--info) 45%, var(--rule-soft));
+  background: var(--info-soft);
+}
+.composer-mode-cycle.is-plan:hover {
+  border-color: color-mix(in oklch, var(--info) 60%, var(--rule-soft));
+  background: color-mix(in oklch, var(--info) 22%, transparent);
+}
+/* Execute — armed; accent fill matching the shell's dashed border. */
+.composer-mode-cycle.is-execute {
+  color: var(--accent);
+  border-color: var(--accent-edge);
+  background: var(--accent-soft);
+}
+.composer-mode-cycle.is-execute:hover {
+  border-color: var(--accent);
+  background: color-mix(in oklch, var(--accent) 26%, transparent);
+}
+
 .composer-context {
   display: inline-flex;
   align-items: center;

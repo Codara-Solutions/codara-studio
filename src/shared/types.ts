@@ -784,8 +784,12 @@ export type ChatBackendKind = "openrouter" | "claude" | "codex";
 // Manager behaviour mode chosen per chat:
 //   execute — Spark spawns workers to do the work (current behaviour).
 //   talk    — no workers, pure conversational chat with the chosen backend.
-// Mode is the "Execute / Talk" toggle on the composer.
-export type ChatMode = "execute" | "talk";
+//   plan    — Best-of-N council: Spark spawns several top-tier CLI agents (a mix
+//             of Claude Code + Codex) that each independently draft a PLAN + PRD,
+//             then a judge synthesizes the best merged PLAN.md + PRD.md into the
+//             workspace. No implementation code is written.
+// Mode is the "Execute / Plan / Talk" selector on the composer.
+export type ChatMode = "execute" | "talk" | "plan";
 
 export type PlanStatus = "draft" | "imported" | "analyzed" | "active" | "complete" | "archived";
 
@@ -1320,6 +1324,22 @@ export interface FanOutDirective {
   origin: "composer" | "explorer";
 }
 
+// Plan-mode Best-of-N council. When set (or when a run's chatMode is "plan"),
+// run-store forces a worker_batch of N candidate planners — a mix of Claude Code
+// and Codex agents at top-tier models — that each write PLAN.md + PRD.md into a
+// disjoint .spark/plan-candidates/<i>/ dir, then a judge synthesizes the best
+// merged PLAN.md + PRD.md into the workspace root. Deterministic, not LLM prose.
+export interface CouncilDirective {
+  // The planning task / request the candidates each plan for.
+  task: string;
+  // How many candidate planners to spawn (default 3). Clamped to [2, 6].
+  n?: number;
+  // Optional explicit engine mix; defaults to alternating installed claude/codex.
+  engines?: WorkerRuntime[];
+  // Where the directive was raised, for auditing.
+  origin?: "composer" | "queue";
+}
+
 // Stable, machine-recognizable prefix for a fan-out note body. Written by the
 // renderer (formatFanOutDirective) and detected by run-store + the manager
 // prompt-profile so a seeded directive is honored deterministically.
@@ -1384,6 +1404,11 @@ export interface WorkerTask {
   // overwritten from real filesChanged and "fan-out" when forced by a
   // FanOutDirective.
   writeScopeSource?: WriteScopeSource;
+  // Plan-mode council: candidates of the same council share this id and each
+  // carries its 0-based candidateIndex. Undefined for normal tasks. Lets same-
+  // scope council candidates run in parallel and groups them in the run graph.
+  councilGroupId?: string;
+  candidateIndex?: number;
   createdBy: "spark" | "user" | "system";
   createdAt: string;
   updatedAt: string;
@@ -1673,6 +1698,9 @@ export interface CreateWorkerTaskInput {
   // so existing createWorkerTask call sites keep compiling (undefined =
   // manager-provided scopes).
   writeScopeSource?: WriteScopeSource;
+  // Plan-mode council grouping; threads onto the created WorkerTask.
+  councilGroupId?: string;
+  candidateIndex?: number;
   createdBy?: WorkerTask["createdBy"];
 }
 
@@ -1735,6 +1763,10 @@ export interface StartAutopilotInput {
   // deterministically synthesizes one forced worker_batch — one parallel worker
   // per target, each scoped to its own path — instead of relying on the manager.
   fanOut?: FanOutDirective;
+  // Plan-mode Best-of-N council (see CouncilDirective). When set — or when the
+  // run's chatMode is "plan" — run-store forces a council batch instead of normal
+  // planning. The composer threads this for plan-mode sends; the queue can too.
+  council?: CouncilDirective;
 }
 
 // ── Daemon split scaffold ───────────────────────────────────────────────────
@@ -1899,30 +1931,54 @@ export interface RunQueueState {
   items: QueuedRun[];
 }
 
-// Scheduler ──────────────────────────────────────────────────────────────────
+// Automations ─────────────────────────────────────────────────────────────────
+// An automation (a.k.a. scheduled job) fires its pinned StartAutopilotInput on a
+// trigger. Three trigger kinds, all firing WHILE THE APP IS OPEN (true unattended
+// firing that survives app-close is the daemon split's job):
+//   cron     — a standard cron expression, fired by `croner` in the main process.
+//   interval — a fixed loop every `everyMs` milliseconds (setInterval).
+//   folder   — fires when files are added / changed / removed in `path`.
+export type FolderTriggerEvent = "add" | "change" | "unlink";
+
+export type AutomationTrigger =
+  | { kind: "cron"; expr: string; tz?: string }
+  | { kind: "interval"; everyMs: number }
+  | {
+      kind: "folder";
+      path: string;
+      events: FolderTriggerEvent[];
+      // Optional simple glob (e.g. "*.md") matched against each file's basename.
+      // When omitted, every file in the folder matches.
+      glob?: string;
+      // Coalesce a burst of fs events into a single fire (default 400ms).
+      debounceMs?: number;
+    };
+
 // A scheduled job is idle between firings and running while its enqueued run is
-// in flight. SCAFFOLD: cron evaluation is stubbed (see scheduler.ts TODO), so
-// `running` is informational until real firing lands.
+// in flight.
 export type ScheduledJobStatus = "idle" | "running";
 
-// A cron-style recurring job that enqueues `input` on its schedule. `cron` is a
-// standard cron expression; SCAFFOLD: it is stored but not yet parsed/fired.
+// A recurring automation that enqueues `input` on its `trigger`.
 export interface ScheduledJob {
   id: string;
   name: string;
-  cron: string;
+  trigger: AutomationTrigger;
   enabled: boolean;
   input: StartAutopilotInput;
+  // Legacy: pre-trigger jobs stored a bare cron string. Kept optional so old
+  // scheduler.json files still load; normalized into `trigger` on read.
+  cron?: string;
   lastRunAt?: string; // ISO timestamp of the most recent firing
   lastRunId?: string; // runId produced by the most recent firing
+  lastFiredPath?: string; // folder triggers: the path whose change last fired it
   createdAt: string; // ISO timestamp
 }
 
-// Payload the renderer sends to register a scheduled job. `enabled` defaults to
+// Payload the renderer sends to register an automation. `enabled` defaults to
 // true at the registry when omitted.
 export interface CreateScheduledJobInput {
   name: string;
-  cron: string;
+  trigger: AutomationTrigger;
   input: StartAutopilotInput;
   enabled?: boolean;
 }
