@@ -85,7 +85,19 @@ export default function ModelPicker({
         aria-haspopup="listbox"
         aria-expanded={open}
       >
-        <span aria-hidden style={{ marginRight: 4 }}>☀</span>
+        {/* Crisp SVG spark mark at currentColor instead of the unicode ☀
+            (which rode the text baseline and rendered heavier per OS font). */}
+        <span
+          aria-hidden
+          style={{ display: "inline-flex", marginRight: 4, flex: "0 0 auto" }}
+        >
+          <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M8 1.25L9.35 6.05L14.15 7.4L9.35 8.75L8 13.55L6.65 8.75L1.85 7.4L6.65 6.05L8 1.25Z"
+              fill="currentColor"
+            />
+          </svg>
+        </span>
         {activeLabel}
       </button>
       {open && (

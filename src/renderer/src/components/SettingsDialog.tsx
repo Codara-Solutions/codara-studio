@@ -48,6 +48,155 @@ const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: "about", label: "About" },
 ];
 
+// ── Shared interaction state ─────────────────────────────────────────────────
+// Hand-rolled buttons in this dialog set inline box-shadow, which silently wins
+// over the global :focus-visible ring (the ring rule isn't !important). Each
+// custom control tracks hover / focus-visible / press locally and composes the
+// accent --focus-ring + the --press settle back into its inline box-shadow so
+// keyboard focus actually renders and every click has a tactile beat. Native
+// elements that DON'T set an inline box-shadow (e.g. .spark-* utilities) inherit
+// the global ring for free and don't need this.
+function useInteractive() {
+  const [hover, setHover] = useState(false);
+  const [focus, setFocus] = useState(false);
+  const [pressed, setPressed] = useState(false);
+  const handlers = {
+    onMouseEnter: () => setHover(true),
+    onMouseLeave: () => {
+      setHover(false);
+      setPressed(false);
+    },
+    onMouseDown: () => setPressed(true),
+    onMouseUp: () => setPressed(false),
+    onFocus: (event: React.FocusEvent) => {
+      // Only light the ring for keyboard focus, matching :focus-visible.
+      if (event.target.matches(":focus-visible")) setFocus(true);
+    },
+    onBlur: () => {
+      setFocus(false);
+      setPressed(false);
+    },
+  };
+  return { hover, focus, pressed, handlers };
+}
+
+// Compose an optional base box-shadow with the focus ring when keyboard-focused.
+// Keeps the resting shadow intact and only adds the accent ring on focus-visible.
+function withFocusRing(base: string | undefined, focus: boolean): string | undefined {
+  if (!focus) return base;
+  if (!base || base === "none") return "var(--focus-ring)";
+  return `${base}, var(--focus-ring)`;
+}
+
+// The recurring 7-8px accent selection dot + its soft glow, in one place so the
+// size, radius, and glow never drift between rows, cards, and presets.
+function AccentDot({ active, size = 8 }: { active: boolean; size?: number }) {
+  return (
+    <span
+      aria-hidden
+      style={{
+        width: size,
+        height: size,
+        flex: `0 0 ${size}px`,
+        borderRadius: 999,
+        background: active ? "var(--accent)" : "var(--rule-strong)",
+        boxShadow: active ? "0 0 8px var(--accent-glow)" : "none",
+        transition: "background var(--motion-fast) var(--ease-out)",
+      }}
+    />
+  );
+}
+
+// One crisp 16px / ~1.5px-stroke SVG per nav tab, drawn at currentColor so the
+// icon inherits the row's ink (dim when inactive, --ink when selected). Each
+// sits in a fixed 18px leading slot in TabButton so all labels share one
+// x-origin and nothing reflows on selection. Single stroke/geometry family,
+// matching the app's SVG icons — never Unicode glyphs.
+function NavIcon({ tab }: { tab: SettingsTab }) {
+  const common = {
+    width: 16,
+    height: 16,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.5,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+  switch (tab) {
+    case "general": // sliders / controls
+      return (
+        <svg {...common}>
+          <line x1="4" y1="7" x2="20" y2="7" />
+          <line x1="4" y1="17" x2="20" y2="17" />
+          <circle cx="9" cy="7" r="2" />
+          <circle cx="15" cy="17" r="2" />
+        </svg>
+      );
+    case "editor": // code / angle brackets
+      return (
+        <svg {...common}>
+          <path d="M9 8l-4 4 4 4" />
+          <path d="M15 8l4 4-4 4" />
+        </svg>
+      );
+    case "terminal": // terminal prompt ">_"
+      return (
+        <svg {...common}>
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <path d="M7 10l2.5 2L7 14" />
+          <line x1="12.5" y1="15" x2="16" y2="15" />
+        </svg>
+      );
+    case "api": // key
+      return (
+        <svg {...common}>
+          <circle cx="8" cy="8" r="3.5" />
+          <path d="M10.5 10.5L20 20" />
+          <path d="M16 16l2-2" />
+          <path d="M18.5 18.5l2-2" />
+        </svg>
+      );
+    case "agents": // spark / robot
+      return (
+        <svg {...common}>
+          <rect x="5" y="9" width="14" height="10" rx="2.5" />
+          <line x1="12" y1="5" x2="12" y2="9" />
+          <circle cx="12" cy="4" r="1.2" />
+          <circle cx="9.5" cy="14" r="1" />
+          <circle cx="14.5" cy="14" r="1" />
+        </svg>
+      );
+    case "keybindings": // command key (⌘) drawn as SVG, not a glyph
+      return (
+        <svg {...common}>
+          <path d="M9 9a2 2 0 1 1 2 2H9V9z" />
+          <path d="M15 9a2 2 0 1 0-2 2h2V9z" />
+          <path d="M9 15a2 2 0 1 0 2-2H9v2z" />
+          <path d="M15 15a2 2 0 1 1-2-2h2v2z" />
+          <rect x="9" y="9" width="6" height="6" rx="0.5" />
+        </svg>
+      );
+    case "runs": // activity / pulse
+      return (
+        <svg {...common}>
+          <path d="M3 12h4l2.5-6 4 13 2.5-7H21" />
+        </svg>
+      );
+    case "about": // info circle
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <line x1="12" y1="11" x2="12" y2="16.5" />
+          <circle cx="12" cy="7.75" r="0.6" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    default:
+      return null;
+  }
+}
+
 interface SettingsDialogProps {
   settings: AppSettings;
   shells: ShellInfo[];
@@ -129,9 +278,9 @@ export default function SettingsDialog({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "color-mix(in oklch, var(--bg) 62%, transparent)",
-        backdropFilter: "blur(4px)",
-        WebkitBackdropFilter: "blur(4px)",
+        // A calm faint --bg veil, not a heavy frosted blur — glassmorphism is
+        // an anti-reference here. Matches the .spark-scrim recipe.
+        background: "color-mix(in oklch, var(--bg) 64%, transparent)",
         fontFamily: "var(--font-sans)",
         animation: "spark-fade-in var(--motion-fast) var(--ease-out)",
       }}
@@ -144,9 +293,10 @@ export default function SettingsDialog({
         style={{
           // Fixed footprint — switching tabs (or resizing the inner content)
           // shouldn't make the dialog grow or shrink. Only the inner content
-          // pane scrolls; the dialog stays the same size.
-          width: "min(560px, calc(100vw - 44px))",
-          height: "min(720px, calc(100vh - 44px))",
+          // pane scrolls; the dialog stays the same size. Sized like macOS
+          // System Settings so the nav + content pane both breathe.
+          width: "min(860px, calc(100vw - 44px))",
+          height: "min(760px, calc(100vh - 44px))",
           display: "flex",
           flexDirection: "column",
           background: "var(--panel)",
@@ -162,31 +312,25 @@ export default function SettingsDialog({
         <header
           style={{
             flex: "0 0 auto",
-            padding: "13px 18px",
+            padding: "15px 22px",
             borderBottom: "1px solid var(--rule-soft)",
+            // A raised header band: the 1px top highlight lifts it off the body.
+            boxShadow: "var(--lift-hi)",
             display: "flex",
             alignItems: "center",
-            gap: 9,
+            gap: 10,
           }}
         >
-          <span
-            aria-hidden
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: 999,
-              background: "var(--accent)",
-              boxShadow: "0 0 9px var(--accent-glow)",
-            }}
-          />
+          <AccentDot active size={7} />
+          {/* A real System-Settings title: title case at 15px/600, not an
+              all-caps tracked eyebrow. The accent dot supplies the brand mark. */}
           <div
             style={{
               fontFamily: "var(--font-sans)",
-              fontSize: 11,
-              fontWeight: 700,
+              fontSize: 15,
+              fontWeight: 600,
               color: "var(--ink)",
-              letterSpacing: "0.14em",
-              textTransform: "uppercase",
+              letterSpacing: "-0.005em",
             }}
           >
             Settings
@@ -196,18 +340,19 @@ export default function SettingsDialog({
         <div style={{ display: "flex", minHeight: 0, flex: 1 }}>
           <nav
             style={{
-              flex: "0 0 168px",
+              flex: "0 0 200px",
               borderRight: "1px solid var(--rule-soft)",
               background: "color-mix(in oklch, var(--bg) 60%, var(--panel))",
-              padding: "12px 9px",
+              padding: "12px 10px",
               display: "flex",
               flexDirection: "column",
-              gap: 5,
+              gap: 3,
             }}
           >
             {TABS.map((tab) => (
               <TabButton
                 key={tab.id}
+                tab={tab.id}
                 label={tab.label}
                 active={activeTab === tab.id}
                 onClick={() => setActiveTab(tab.id)}
@@ -219,7 +364,7 @@ export default function SettingsDialog({
             style={{
               flex: 1,
               minWidth: 0,
-              padding: "20px 20px 24px",
+              padding: "24px 28px 30px",
               overflow: "auto",
             }}
           >
@@ -344,54 +489,48 @@ function ShellOption({
   selected: boolean;
   onSelect: () => void;
 }) {
-  const [hover, setHover] = useState(false);
+  const { hover, focus, pressed, handlers } = useInteractive();
+  // Selected carries a single soft cue: accent-soft fill + accent-edge border.
+  // No stacked ring + shadow + lift halo. Font-weight is held constant.
+  const restShadow = selected ? "var(--lift-hi)" : undefined;
   return (
     <button
       type="button"
       aria-label={`Use ${shell.label} as default terminal`}
+      aria-pressed={selected}
       onClick={onSelect}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      {...handlers}
       style={{
         appearance: "none",
         width: "100%",
         textAlign: "left",
         border: selected
-          ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
-          : hover
-            ? "1px solid var(--rule-soft)"
-            : "1px solid transparent",
-        borderRadius: 8,
+          ? "1px solid var(--accent-edge)"
+          : "1px solid var(--rule-soft)",
+        borderRadius: "var(--radius-surface, 7px)",
         background: selected
-          ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
-          : hover
-            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
-            : "color-mix(in oklch, var(--ink) 2%, transparent)",
+          ? "var(--accent-soft)"
+          : pressed
+            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            : hover
+              ? "var(--hover)"
+              : "color-mix(in oklch, var(--ink) 2%, transparent)",
         color: "var(--ink)",
-        padding: "9px 10px",
+        padding: "10px 11px",
         fontFamily: "var(--font-sans)",
+        // Terminal-native idiom: chrome controls keep the default arrow cursor,
+        // matching the .spark-* utility classes (no cursor:pointer anywhere).
         cursor: "default",
         display: "grid",
         gridTemplateColumns: "10px minmax(0, 1fr) auto",
         gap: 12,
         alignItems: "center",
-        boxShadow: selected
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent), var(--shadow-1), var(--lift-hi)"
-          : "none",
+        boxShadow: withFocusRing(restShadow, focus),
         transition:
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
-      <span
-        style={{
-          width: 8,
-          height: 8,
-          borderRadius: "50%",
-          background: selected ? "var(--accent)" : "var(--rule-strong)",
-          boxShadow: selected ? "0 0 9px var(--accent-glow)" : "none",
-          transition: "background var(--motion-fast) var(--ease-out)",
-        }}
-      />
+      <AccentDot active={selected} />
       <span style={{ minWidth: 0 }}>
         <span
           style={{
@@ -440,89 +579,102 @@ function ApiSettings({
   onChange: (settings: AppSettings) => void;
 }) {
   return (
-    <div style={{ display: "grid", gap: 20 }}>
-      <div style={{ display: "grid", gap: 12 }}>
-        <SectionTitle
-          title="OpenRouter"
-          detail="Used by Spark Agent to plan Claude, Codex, and Cursor worker tasks."
+    <div style={{ display: "grid", gap: 12 }}>
+      <SectionTitle
+        title="OpenRouter"
+        detail="Used by Spark Agent to plan Claude and Codex worker tasks."
+      />
+      <Label text="OpenRouter API key">
+        <input
+          className="spark-input"
+          type="password"
+          value={draft.openRouterApiKey}
+          onChange={(event) => onChange({ ...draft, openRouterApiKey: event.currentTarget.value })}
+          placeholder="sk-or-..."
+          style={inputShellStyle}
         />
-        <Label text="OpenRouter API key">
-          <input
-            type="password"
-            value={draft.openRouterApiKey}
-            onChange={(event) => onChange({ ...draft, openRouterApiKey: event.currentTarget.value })}
-            placeholder="sk-or-..."
-            style={inputStyle}
-          />
-        </Label>
-        <Label text="Model">
-          <input
-            type="text"
-            value={draft.openRouterModel}
-            onChange={(event) => onChange({ ...draft, openRouterModel: event.currentTarget.value })}
-            placeholder="google/gemini-flash-latest"
-            style={{ ...inputStyle, fontFamily: "var(--font-mono)", fontSize: 12 }}
-          />
-        </Label>
-      </div>
-
+      </Label>
+      <Label text="Model">
+        <input
+          className="spark-input spark-mono"
+          type="text"
+          value={draft.openRouterModel}
+          onChange={(event) => onChange({ ...draft, openRouterModel: event.currentTarget.value })}
+          placeholder="google/gemini-flash-latest"
+          style={inputShellStyle}
+        />
+      </Label>
     </div>
   );
 }
 
-function TabButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  const [hover, setHover] = useState(false);
+function TabButton({
+  tab,
+  label,
+  active,
+  onClick,
+}: {
+  tab: SettingsTab;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const { hover, focus, pressed, handlers } = useInteractive();
+  // A quiet macOS-style sidebar row: selection is a calm ink fill alone — no
+  // glow halo, no border swap. Font-weight is held constant across states
+  // (color carries selection) so the label never reflows. A 16px nav icon sits
+  // in a fixed 18px leading slot so every label shares one x-origin; the icon
+  // dims to --muted when inactive and rises to --ink when the row is selected.
+  const restShadow = active ? "var(--lift-hi)" : undefined;
   return (
     <button
       type="button"
       onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      aria-current={active ? "page" : undefined}
+      {...handlers}
       style={{
         appearance: "none",
         width: "100%",
-        border: active
-          ? "1px solid color-mix(in oklch, var(--accent) 46%, var(--rule-strong))"
-          : hover
-            ? "1px solid var(--rule-soft)"
-            : "1px solid transparent",
-        borderRadius: 999,
+        border: "1px solid transparent",
+        borderRadius: "var(--radius-control, 5px)",
         background: active
-          ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
-          : hover
-            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
-            : "transparent",
+          ? "color-mix(in oklch, var(--ink) 7%, var(--panel))"
+          : pressed
+            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            : hover
+              ? "var(--hover)"
+              : "transparent",
         color: active ? "var(--ink)" : "var(--ink-dim)",
-        padding: "7px 10px",
+        padding: "8px 10px",
         textAlign: "left",
         fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: active ? 700 : 600,
+        fontSize: 12,
+        fontWeight: 600,
         letterSpacing: "0.005em",
+        // Default arrow cursor, matching the .spark-* utility classes.
         cursor: "default",
         display: "flex",
         alignItems: "center",
-        gap: 8,
-        boxShadow: active
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), var(--lift-hi)"
-          : "none",
+        gap: 9,
+        boxShadow: withFocusRing(restShadow, focus),
         transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
-      {active && (
-        <span
-          aria-hidden
-          style={{
-            width: 7,
-            height: 7,
-            borderRadius: 999,
-            background: "var(--accent)",
-            boxShadow: "0 0 8px var(--accent-glow)",
-            flex: "0 0 7px",
-          }}
-        />
-      )}
+      <span
+        aria-hidden
+        style={{
+          flex: "0 0 18px",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "flex-start",
+          // Icon ink tracks selection: --muted at rest, --ink when current.
+          color: active ? "var(--ink)" : "var(--muted)",
+          transition: "color var(--motion-fast) var(--ease-out)",
+        }}
+      >
+        <NavIcon tab={tab} />
+      </span>
       {label}
     </button>
   );
@@ -531,16 +683,7 @@ function TabButton({ label, active, onClick }: { label: string; active: boolean;
 function SectionTitle({ title, detail }: { title: string; detail: string }) {
   return (
     <div>
-      <div
-        style={{
-          fontFamily: "var(--font-sans)",
-          fontSize: 10,
-          fontWeight: 700,
-          letterSpacing: "0.14em",
-          textTransform: "uppercase",
-          color: "var(--ink-dim)",
-        }}
-      >
+      <div className="spark-eyebrow" style={{ fontFamily: "var(--font-sans)" }}>
         {title}
       </div>
       <div
@@ -561,16 +704,7 @@ function SectionTitle({ title, detail }: { title: string; detail: string }) {
 function Label({ text, children }: { text: string; children: React.ReactNode }) {
   return (
     <label style={{ display: "grid", gap: 6 }}>
-      <span
-        style={{
-          color: "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 11,
-          fontWeight: 600,
-          letterSpacing: "0.1em",
-          textTransform: "uppercase",
-        }}
-      >
+      <span className="spark-eyebrow" style={{ fontSize: 11 }}>
         {text}
       </span>
       {children}
@@ -589,41 +723,14 @@ function FooterButton({
   children: React.ReactNode;
   primary?: boolean;
 }) {
-  const [hover, setHover] = useState(false);
-  const base: React.CSSProperties = {
-    appearance: "none",
-    border: primary
-      ? "1px solid color-mix(in oklch, var(--accent) 50%, var(--rule-strong))"
-      : "1px solid var(--rule-strong)",
-    borderRadius: 999,
-    background: primary
-      ? "color-mix(in oklch, var(--ink) 3%, transparent)"
-      : "transparent",
-    color: disabled ? "var(--muted)" : "var(--ink)",
-    padding: "7px 14px",
-    fontFamily: "var(--font-sans)",
-    fontSize: 12,
-    fontWeight: 600,
-    letterSpacing: "0.01em",
-    cursor: "default",
-    transition:
-      "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-  };
-  if (hover && !disabled) {
-    if (primary) {
-      base.background = "var(--hover)";
-    } else {
-      base.background = "var(--hover-strong)";
-    }
-  }
+  // The shared button vocabulary — consistent radius, hover, translateY+well
+  // press, disabled treatment, and the global focus-visible ring for free.
   return (
     <button
       type="button"
+      className={primary ? "spark-btn is-primary" : "spark-btn"}
       onClick={onClick}
       disabled={disabled}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={base}
     >
       {children}
     </button>
@@ -689,8 +796,10 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(132px, 1fr))",
-          gap: 8,
+          // Two roomy columns in the widened pane; the cards now breathe with a
+          // generous gap instead of feeling squeezed against the nav.
+          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+          gap: 14,
         }}
       >
         {APPEARANCE.map((opt) => (
@@ -704,13 +813,7 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
         ))}
       </div>
 
-      <div
-        style={{
-          height: 1,
-          background: "var(--rule-soft)",
-          margin: "2px 0",
-        }}
-      />
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
 
       <SectionTitle
         title="Performance"
@@ -737,13 +840,7 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
         </div>
       )}
 
-      <div
-        style={{
-          height: 1,
-          background: "var(--rule-soft)",
-          margin: "2px 0",
-        }}
-      />
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
 
       <SectionTitle
         title="Notifications"
@@ -831,19 +928,14 @@ function CopyBranchSetupField({ workspaceCwd }: { workspaceCwd: string }) {
 
   return (
     <div style={{ display: "grid", gap: 8 }}>
-      <div
-        style={{
-          height: 1,
-          background: "var(--rule-soft)",
-          margin: "2px 0",
-        }}
-      />
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
       <SectionTitle
         title="Copy-branch workspaces"
         detail="Optional. Command run in a terminal in a new copy-branch worktree to restore deps git doesn't track (e.g. pnpm install). Blank = no setup. Saved for this repo."
       />
       <Label text="Setup command">
         <input
+          className="spark-input spark-mono"
           type="text"
           value={text}
           spellCheck={false}
@@ -856,21 +948,53 @@ function CopyBranchSetupField({ workspaceCwd }: { workspaceCwd: string }) {
               e.currentTarget.blur();
             }
           }}
-          style={{
-            appearance: "none",
-            width: "100%",
-            fontFamily: "var(--font-mono)",
-            fontSize: 12,
-            color: "var(--ink)",
-            background: "var(--panel)",
-            border: "1px solid var(--rule)",
-            borderRadius: 6,
-            padding: "7px 9px",
-            outline: "none",
-          }}
+          style={inputShellStyle}
         />
       </Label>
     </div>
+  );
+}
+
+// The "reset to recommended model" button. When the field already holds the
+// default it reads as accent-lit selected; otherwise it's a quiet ghost button.
+// Press + focus-visible compose into the inline box-shadow so the click is
+// tactile and the keyboard ring renders.
+function DefaultModelButton({ active, onClick }: { active: boolean; onClick: () => void }) {
+  const { hover, focus, pressed, handlers } = useInteractive();
+  const restShadow = active ? "var(--lift-hi)" : undefined;
+  return (
+    <button
+      type="button"
+      aria-label="Use default Inline AI model"
+      aria-pressed={active}
+      onClick={onClick}
+      title="Use the recommended Inline AI model"
+      {...handlers}
+      style={{
+        ...inputStyle,
+        width: "auto",
+        padding: "8px 10px",
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: "0.1em",
+        textTransform: "uppercase",
+        color: active ? "var(--ink)" : "var(--muted)",
+        // Default arrow cursor, matching the .spark-* utility classes.
+        cursor: "default",
+        whiteSpace: "nowrap",
+        borderColor: active ? "var(--accent-edge)" : "var(--rule)",
+        background: active
+          ? "var(--accent-soft)"
+          : pressed
+            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            : hover
+              ? "var(--hover)"
+              : "var(--bg)",
+        boxShadow: withFocusRing(restShadow, focus),
+      }}
+    >
+      Default
+    </button>
   );
 }
 
@@ -928,13 +1052,7 @@ function EditorSettings() {
         />
       </Label>
 
-      <div
-        style={{
-          height: 1,
-          background: "var(--rule-soft)",
-          margin: "2px 0",
-        }}
-      />
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
 
       <SectionTitle
         title="Inline AI"
@@ -947,16 +1065,7 @@ function EditorSettings() {
         onChange={(v) => void setPreference("inlineAutocompleteEnabled", v)}
       />
       <div style={{ display: "grid", gap: 7 }}>
-        <span
-          style={{
-            color: "var(--muted)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 11,
-            fontWeight: 600,
-            letterSpacing: "0.1em",
-            textTransform: "uppercase",
-          }}
-        >
+        <span className="spark-eyebrow" style={{ fontSize: 11 }}>
           Suggestion timing
         </span>
         <div
@@ -998,7 +1107,8 @@ function EditorSettings() {
             onChange={(event) =>
               void setPreference("inlineAutocompleteDelayMs", Number(event.currentTarget.value))
             }
-            style={{ width: "100%" }}
+            // Theme the native range track/thumb so no un-tinted OS chrome shows.
+            style={{ width: "100%", accentColor: "var(--accent)" }}
           />
           <span
             style={{
@@ -1014,17 +1124,7 @@ function EditorSettings() {
         </div>
       </div>
       <div style={{ display: "grid", gap: 7 }}>
-        <span
-          id="inline-ai-model-label"
-          style={{
-            color: "var(--muted)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 11,
-            fontWeight: 600,
-            letterSpacing: "0.1em",
-            textTransform: "uppercase",
-          }}
-        >
+        <span id="inline-ai-model-label" className="spark-eyebrow" style={{ fontSize: 11 }}>
           Inline AI model
         </span>
         <div
@@ -1058,6 +1158,7 @@ function EditorSettings() {
           }}
         >
           <input
+            className="spark-input spark-mono"
             aria-labelledby="inline-ai-model-label"
             type="text"
             spellCheck={false}
@@ -1068,43 +1169,12 @@ function EditorSettings() {
             }
             onBlur={normalizeInlineModelInput}
             placeholder={DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID}
-            style={{ ...inputStyle, fontFamily: "var(--font-mono)", fontSize: 12 }}
+            style={inputShellStyle}
           />
-          <button
-            type="button"
-            aria-label="Use default Inline AI model"
+          <DefaultModelButton
+            active={currentInlineModelId === DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID}
             onClick={() => setInlineModel(DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID)}
-            title="Use the recommended Inline AI model"
-            style={{
-              ...inputStyle,
-              width: "auto",
-              padding: "8px 10px",
-              fontSize: 10,
-              fontWeight: 700,
-              letterSpacing: "0.1em",
-              textTransform: "uppercase",
-              color:
-                currentInlineModelId === DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID
-                  ? "var(--ink)"
-                  : "var(--muted)",
-              cursor: "default",
-              whiteSpace: "nowrap",
-              borderColor:
-                currentInlineModelId === DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID
-                  ? "color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
-                  : "var(--rule-soft)",
-              background:
-                currentInlineModelId === DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID
-                  ? "color-mix(in oklch, var(--accent) 12%, transparent)"
-                  : "color-mix(in oklch, var(--ink) 3%, transparent)",
-              boxShadow:
-                currentInlineModelId === DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID
-                  ? "var(--lift-hi)"
-                  : "none",
-            }}
-          >
-            Default
-          </button>
+          />
         </div>
         <div
           style={{
@@ -1196,7 +1266,7 @@ function AgentsSettings({
       <div
         style={{
           border: "1px solid var(--rule-soft)",
-          borderRadius: 8,
+          borderRadius: "var(--radius-surface, 7px)",
           padding: 12,
           background: "color-mix(in oklch, var(--ink) 3%, transparent)",
           color: "var(--muted)",
@@ -1209,6 +1279,8 @@ function AgentsSettings({
         MCP servers and skills now live in the Capability Center from the Spark composer. That space is larger and gives
         per-item activation, compatibility, deletion, and sync controls.
       </div>
+
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
 
       <div style={{ display: "grid", gap: 8 }}>
         <SectionTitle
@@ -1250,6 +1322,65 @@ function AgentsSettings({
   );
 }
 
+// The shared setting-row primitive: a left-aligned label + 11px --muted
+// description stacked on a fixed x-origin, with the trailing control held to
+// the right on one grid. ToggleRow / NumberRow / runtime rows all render
+// through this so spacing, alignment, and the disabled dim are identical.
+function SettingRow({
+  title,
+  desc,
+  control,
+  disabled,
+  htmlFor,
+}: {
+  title: string;
+  desc: string;
+  control: React.ReactNode;
+  disabled?: boolean;
+  htmlFor?: string;
+}) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 14,
+        padding: "10px 0",
+        opacity: disabled ? 0.55 : 1,
+        transition: "opacity var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <div style={{ minWidth: 0 }}>
+        <label
+          htmlFor={htmlFor}
+          style={{
+            display: "block",
+            fontFamily: "var(--font-sans)",
+            fontSize: 13,
+            fontWeight: 600,
+            color: "var(--ink)",
+          }}
+        >
+          {title}
+        </label>
+        <div
+          style={{
+            fontFamily: "var(--font-sans)",
+            fontSize: 11,
+            color: "var(--muted)",
+            lineHeight: 1.45,
+            marginTop: 2,
+          }}
+        >
+          {desc}
+        </div>
+      </div>
+      {control}
+    </div>
+  );
+}
+
 function NumberRow({
   title,
   desc,
@@ -1268,39 +1399,13 @@ function NumberRow({
   onChange: (next: number) => void;
 }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 14,
-        padding: "10px 0",
-        opacity: disabled ? 0.55 : 1,
-      }}
-    >
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontFamily: "var(--font-sans)",
-            fontSize: 13,
-            fontWeight: 600,
-            color: "var(--ink)",
-          }}
-        >
-          {title}
-        </div>
-        <div
-          style={{
-            fontFamily: "var(--font-sans)",
-            fontSize: 11,
-            color: "var(--muted)",
-            lineHeight: 1.45,
-            marginTop: 2,
-          }}
-        >
-          {desc}
-        </div>
-      </div>
+    <SettingRow
+      title={title}
+      desc={desc}
+      disabled={disabled}
+      control={
       <input
+        className="spark-input spark-mono"
         type="number"
         min={min}
         max={max}
@@ -1314,20 +1419,16 @@ function NumberRow({
         style={{
           width: 72,
           flex: "0 0 72px",
+          height: "auto",
           padding: "6px 8px",
-          borderRadius: 6,
-          border: "1px solid var(--rule-soft)",
-          background: "color-mix(in oklch, var(--ink) 3%, transparent)",
-          color: "var(--ink)",
-          fontFamily: "var(--font-mono)",
-          fontSize: 12,
+          // Tint the native number spinners so no un-themed OS chrome remains.
+          accentColor: "var(--accent)",
           fontVariantNumeric: "tabular-nums",
           textAlign: "right",
-          outline: "none",
-          boxShadow: "var(--well)",
         }}
       />
-    </div>
+      }
+    />
   );
 }
 
@@ -1342,47 +1443,27 @@ function CapabilityChip({
   tone: CapabilityChipTone;
   title?: string;
 }) {
-  const palette: Record<CapabilityChipTone, { bg: string; border: string; color: string }> = {
-    neutral: {
-      bg: "color-mix(in oklch, var(--ink) 6%, transparent)",
-      border: "var(--rule-soft)",
-      color: "var(--muted)",
-    },
-    success: {
-      bg: "color-mix(in oklch, #55d68a 12%, transparent)",
-      border: "color-mix(in oklch, #55d68a 28%, var(--rule-soft))",
-      color: "#92e8b2",
-    },
-    warning: {
-      bg: "color-mix(in oklch, #f0c419 12%, transparent)",
-      border: "color-mix(in oklch, #f0c419 30%, var(--rule-soft))",
-      color: "#f4d35e",
-    },
-    blue: {
-      bg: "color-mix(in oklch, #6ea8ff 13%, transparent)",
-      border: "color-mix(in oklch, #6ea8ff 32%, var(--rule-soft))",
-      color: "#9cc4ff",
-    },
-    violet: {
-      bg: "color-mix(in oklch, var(--accent) 13%, transparent)",
-      border: "color-mix(in oklch, var(--accent) 35%, var(--rule-soft))",
-      color: "var(--accent)",
-    },
+  // Adopt the shared .spark-badge so every status tint re-tints across the 8
+  // OKLCH palettes (the old hardcoded hex froze a color that clashed on light
+  // themes). Tones map onto the badge's token-backed modifiers: success -> ok,
+  // warning -> warn, blue -> info, violet -> accent (brand).
+  const toneClass: Record<CapabilityChipTone, string> = {
+    neutral: "",
+    success: "is-ok",
+    warning: "is-warn",
+    blue: "is-info",
+    violet: "is-accent",
   };
-  const p = palette[tone];
   return (
     <span
+      className={`spark-badge ${toneClass[tone]}`.trim()}
       title={title}
       style={{
-        border: `1px solid ${p.border}`,
-        borderRadius: 999,
-        background: p.bg,
-        color: p.color,
-        padding: "2px 6px",
+        // These tags read as lowercase code-ish identifiers, not shouted
+        // labels — keep mono + lowercase rather than the badge's uppercase.
         fontFamily: "var(--font-mono)",
-        fontSize: 9,
-        lineHeight: 1.2,
-        whiteSpace: "nowrap",
+        textTransform: "none",
+        letterSpacing: "0.02em",
       }}
     >
       {text}
@@ -1424,12 +1505,17 @@ function RuntimeDiagnosticRow({
     ? runtime.version || runtime.executablePath || "Installed"
     : runtime.installHint;
   const canToggle = runtime.installed;
+  const { hover, focus, pressed, handlers } = useInteractive();
+  const restShadow = active ? "var(--lift-hi)" : undefined;
 
   return (
     <button
       type="button"
+      role="switch"
+      aria-checked={enabled}
       onClick={canToggle ? onToggle : undefined}
       disabled={!canToggle}
+      {...handlers}
       title={
         !canToggle
           ? "Install this runtime to enable it."
@@ -1443,18 +1529,29 @@ function RuntimeDiagnosticRow({
         alignItems: "center",
         gap: 10,
         padding: "9px 10px",
-        border: "1px solid var(--rule-soft)",
-        borderRadius: 8,
+        // One soft cue for the enabled state: accent-edge border + accent-soft
+        // fill. No stacked glow halo.
+        border: active ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
+        borderRadius: "var(--radius-surface, 7px)",
         background: active
-          ? "color-mix(in oklch, var(--accent) 7%, transparent)"
-          : "color-mix(in oklch, var(--ink) 3%, transparent)",
+          ? "var(--accent-soft)"
+          : !canToggle
+            ? "color-mix(in oklch, var(--ink) 2%, transparent)"
+            : pressed
+              ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+              : hover
+                ? "var(--hover)"
+                : "color-mix(in oklch, var(--ink) 3%, transparent)",
+        // Default arrow cursor when togglable (matching the .spark-* utility
+        // classes); a not-allowed cue only when the runtime can't be enabled.
         cursor: canToggle ? "default" : "not-allowed",
         textAlign: "left",
         font: "inherit",
         color: "inherit",
         width: "100%",
+        boxShadow: withFocusRing(restShadow, focus),
         transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       <span
@@ -1473,7 +1570,7 @@ function RuntimeDiagnosticRow({
             color: "var(--ink)",
             fontFamily: "var(--font-sans)",
             fontSize: 13,
-            fontWeight: 650,
+            fontWeight: 600,
           }}
         >
           {runtime.label}
@@ -1529,7 +1626,9 @@ function RuntimeDiagnosticRow({
       >
         {status}
       </span>
-      <RuntimeToggle on={enabled} disabled={!canToggle} />
+      {/* One switch metric: the same visual track as ToggleRow, rendered as a
+          decorative indicator because the whole row is the clickable target. */}
+      <SwitchTrack checked={enabled} disabled={!canToggle} />
     </button>
   );
 }
@@ -1541,62 +1640,11 @@ const capabilityChipRowStyle: React.CSSProperties = {
   marginTop: 4,
 };
 
-function RuntimeToggle({ on, disabled }: { on: boolean; disabled?: boolean }) {
-  const width = 28;
-  const height = 16;
-  const knob = 12;
-  return (
-    <span
-      aria-hidden
-      style={{
-        display: "inline-block",
-        position: "relative",
-        width,
-        height,
-        borderRadius: 999,
-        background: disabled
-          ? "color-mix(in oklch, var(--ink) 8%, transparent)"
-          : on
-            ? "color-mix(in oklch, var(--accent) 32%, var(--panel))"
-            : "color-mix(in oklch, var(--ink) 18%, transparent)",
-        border: on
-          ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
-          : "1px solid var(--rule-strong)",
-        boxSizing: "border-box",
-        opacity: disabled ? 0.55 : 1,
-        transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      <span
-        style={{
-          position: "absolute",
-          top: (height - knob) / 2,
-          left: on ? width - knob - 2 : 2,
-          width: knob,
-          height: knob,
-          borderRadius: 999,
-          background: on ? "var(--accent)" : "var(--ink-dim)",
-          boxShadow: on ? "0 0 8px var(--accent-glow)" : "none",
-          transition:
-            "left var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
-        }}
-      />
-    </span>
-  );
-}
-
 function RuntimeDiagnosticSkeleton() {
   return (
-    <div
-      style={{
-        color: "var(--muted)",
-        fontFamily: "var(--font-sans)",
-        fontSize: 12,
-        padding: "10px 0",
-      }}
-    >
-      Checking Claude, Codex, and Cursor...
+    <div className="spark-empty" style={{ minHeight: 64, padding: "16px 12px" }}>
+      <span className="spark-eyebrow">Checking runtimes</span>
+      <span className="spark-empty__body">Detecting Claude and Codex CLIs…</span>
     </div>
   );
 }
@@ -1738,23 +1786,12 @@ function RunsSettings({
 
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <input
+          className="spark-input"
           type="text"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           placeholder="Filter by id, title, or workspace"
-          style={{
-            flex: 1,
-            appearance: "none",
-            background: "var(--bg)",
-            border: "1px solid var(--rule-soft)",
-            borderRadius: 6,
-            padding: "7px 10px",
-            color: "var(--ink)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 12,
-            outline: "none",
-            boxShadow: "var(--well)",
-          }}
+          style={{ flex: 1, width: "auto" }}
         />
         <FooterButton onClick={() => void refresh()}>Refresh</FooterButton>
       </div>
@@ -1767,7 +1804,7 @@ function RunsSettings({
             fontSize: 12,
             background: "color-mix(in oklch, var(--danger) 10%, transparent)",
             border: "1px solid color-mix(in oklch, var(--danger) 35%, transparent)",
-            borderRadius: 6,
+            borderRadius: "var(--radius-surface, 7px)",
             padding: "6px 10px",
           }}
         >
@@ -1848,7 +1885,7 @@ function RunRow({
         padding: "8px 10px",
         background: "var(--bg)",
         border: "1px solid var(--rule-soft)",
-        borderRadius: 7,
+        borderRadius: "var(--radius-surface, 7px)",
       }}
     >
       <div
@@ -1918,7 +1955,7 @@ function RunRow({
             style={{
               flex: "0 0 auto",
               padding: "1px 6px",
-              borderRadius: 4,
+              borderRadius: "var(--radius-control, 5px)",
               background: "color-mix(in oklch, var(--ink) 6%, transparent)",
               color: "var(--ink-dim)",
             }}
@@ -1959,36 +1996,14 @@ function DangerButton({
   onClick: () => void;
   disabled?: boolean;
 }) {
-  const [hover, setHover] = useState(false);
+  // The shared destructive button. The two-step arm/confirm semantics stay in
+  // the caller (RunRow); this is styling only, matching FooterButton's size.
   return (
     <button
       type="button"
+      className="spark-btn is-danger"
       onClick={onClick}
       disabled={disabled}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        appearance: "none",
-        background: disabled
-          ? "transparent"
-          : hover
-            ? "color-mix(in oklch, var(--danger) 22%, transparent)"
-            : "color-mix(in oklch, var(--danger) 10%, transparent)",
-        border: `1px solid ${
-          disabled
-            ? "var(--rule-soft)"
-            : "color-mix(in oklch, var(--danger) 45%, var(--rule-strong))"
-        }`,
-        borderRadius: 6,
-        color: disabled ? "var(--muted)" : "var(--danger)",
-        padding: "5px 10px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: 600,
-        cursor: disabled ? "not-allowed" : "default",
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-      }}
     >
       {children}
     </button>
@@ -1998,17 +2013,15 @@ function DangerButton({
 function RunsEmptyMessage({ text }: { text: string }) {
   return (
     <div
+      className="spark-empty"
       style={{
-        padding: "18px 12px",
-        textAlign: "center",
-        color: "var(--muted)",
-        fontFamily: "var(--font-sans)",
-        fontSize: 12,
+        minHeight: 72,
         border: "1px dashed var(--rule-soft)",
-        borderRadius: 7,
+        borderRadius: "var(--radius-surface, 7px)",
       }}
     >
-      {text}
+      <span className="spark-eyebrow">Runs</span>
+      <span className="spark-empty__body">{text}</span>
     </div>
   );
 }
@@ -2096,47 +2109,51 @@ function ThemeCard({
   active: boolean;
   onClick: () => void;
 }) {
-  const [hover, setHover] = useState(false);
+  const { hover, focus, pressed, handlers } = useInteractive();
+  // One soft selection cue: accent-edge border + the --lift-hi soft cue, over a
+  // calm accent-soft fill. No stacked accent ring + drop-shadow + glow halo.
+  // Border width is held at 1px in every state (color swaps transparent<->edge),
+  // so nothing reflows. The corner mark is a crisp SVG check on an accent disc —
+  // no glyph, no extra glow. Press settles the whole card by 0.5px.
+  const restShadow = active ? "var(--lift-hi)" : undefined;
   return (
     <button
       type="button"
       aria-label={`Use ${label} theme`}
       aria-pressed={active}
       onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      {...handlers}
       style={{
         appearance: "none",
         position: "relative",
         overflow: "hidden",
         border: active
-          ? "1px solid color-mix(in oklch, var(--accent) 62%, var(--rule-strong))"
-          : hover
-            ? "1px solid color-mix(in oklch, var(--ink) 16%, var(--rule-soft))"
-            : "1px solid var(--rule-soft)",
+          ? "1px solid var(--accent-edge)"
+          : "1px solid var(--rule-soft)",
         background: active
-          ? "color-mix(in oklch, var(--accent) 7%, var(--panel))"
-          : hover
-            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
-            : "color-mix(in oklch, var(--panel) 70%, transparent)",
-        borderRadius: 8,
-        padding: 8,
+          ? "var(--accent-soft)"
+          : pressed
+            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            : hover
+              ? "var(--hover)"
+              : "color-mix(in oklch, var(--panel) 70%, transparent)",
+        // Surface rung — a card sits on the 7px ladder step.
+        borderRadius: "var(--radius-surface, 7px)",
+        padding: 10,
         display: "flex",
         flexDirection: "column",
         alignItems: "stretch",
-        gap: 8,
+        gap: 9,
         color: "var(--ink)",
+        // Default arrow cursor, matching the .spark-* utility classes.
         cursor: "default",
-        minHeight: 104,
+        minHeight: 116,
         minWidth: 0,
         textAlign: "left",
-        boxShadow: active
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 18%, transparent), var(--shadow-1)"
-          : hover
-            ? "var(--shadow-1)"
-            : "none",
+        transform: pressed ? "translateY(0.5px)" : "none",
+        boxShadow: withFocusRing(restShadow, focus),
         transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
       }}
     >
       {active ? (
@@ -2146,13 +2163,29 @@ function ThemeCard({
             position: "absolute",
             top: 9,
             right: 9,
-            width: 7,
-            height: 7,
-            borderRadius: 2,
+            width: 16,
+            height: 16,
+            borderRadius: 999,
             background: "var(--accent)",
-            boxShadow: "0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent)",
+            color: "var(--accent-ink)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
           }}
-        />
+        >
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M5 12.5l4.5 4.5L19 7" />
+          </svg>
+        </span>
       ) : null}
       <span
         aria-hidden
@@ -2160,8 +2193,9 @@ function ThemeCard({
           display: "grid",
           gridTemplateRows: "12px 1fr",
           gap: 6,
-          height: 58,
-          borderRadius: 6,
+          height: 64,
+          // Inner preview nests one rung below the 7px card (control rung, 5px).
+          borderRadius: "var(--radius-control, 5px)",
           border: `1px solid color-mix(in srgb, ${swatches[1]} 72%, ${swatches[3]} 28%)`,
           background: swatches[0],
           padding: 7,
@@ -2230,6 +2264,33 @@ interface CustomSelectOption {
   label: string;
 }
 
+// A crisp 1.5px-stroke chevron at currentColor — replaces the Unicode "▾",
+// which sits on a text baseline and renders heavier/blurrier than the SVG
+// icons elsewhere in the app. Flips on open.
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      aria-hidden
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{
+        color: "var(--muted)",
+        flex: "0 0 13px",
+        transform: open ? "rotate(180deg)" : "rotate(0deg)",
+        transition: "transform var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
 // Replaces the native <select> dropdown — Chromium's OS-rendered popup on
 // Windows ignores our theme variables, so unselected options render with
 // near-zero contrast in dark mode. This in-app dropdown is an absolutely-
@@ -2245,7 +2306,7 @@ function CustomSelect({
   onChange: (next: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [hover, setHover] = useState(false);
+  const { hover, focus, pressed, handlers } = useInteractive();
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popupRef = useRef<HTMLDivElement | null>(null);
   const current = options.find((o) => o.value === value);
@@ -2283,8 +2344,7 @@ function CustomSelect({
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
+        {...handlers}
         style={{
           ...inputStyle,
           fontSize: 13,
@@ -2293,46 +2353,36 @@ function CustomSelect({
           alignItems: "center",
           justifyContent: "space-between",
           gap: 8,
+          // Default arrow cursor, matching the .spark-* utility classes.
           cursor: "default",
-          background: hover
-            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
-            : "color-mix(in oklch, var(--ink) 3%, transparent)",
-          borderColor: open
-            ? "color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
-            : "var(--rule-soft)",
+          background: pressed
+            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            : hover
+              ? "var(--hover)"
+              : "var(--bg)",
+          // Open OR keyboard-focused lights the accent edge; the focus ring is
+          // composed in so keyboard nav is visible.
+          borderColor: open || focus ? "var(--accent-edge)" : "var(--rule)",
+          boxShadow: withFocusRing("var(--well)", focus),
         }}
       >
         <span style={{ color: "var(--ink)" }}>
           {current?.label ?? value}
         </span>
-        <span
-          aria-hidden
-          style={{
-            color: "var(--muted)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            transform: open ? "rotate(180deg)" : "rotate(0deg)",
-            transition: "transform var(--motion-fast) var(--ease-out)",
-          }}
-        >
-          ▾
-        </span>
+        <ChevronIcon open={open} />
       </button>
       {open && (
         <div
           ref={popupRef}
           role="listbox"
+          className="spark-menu"
           style={{
             position: "absolute",
             top: "calc(100% + 4px)",
             left: 0,
             right: 0,
             zIndex: 10,
-            background: "var(--panel)",
-            border: "1px solid var(--rule-soft)",
-            borderRadius: 7,
-            boxShadow: "var(--shadow-2)",
-            padding: 4,
+            minWidth: 0,
             maxHeight: 240,
             overflowY: "auto",
             display: "flex",
@@ -2367,32 +2417,26 @@ function SelectOption({
   active: boolean;
   onClick: () => void;
 }) {
-  const [hover, setHover] = useState(false);
+  const { pressed, handlers } = useInteractive();
   return (
     <button
       type="button"
       role="option"
       aria-selected={active}
+      className={active ? "spark-menu-item is-active" : "spark-menu-item"}
       onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      {...handlers}
       style={{
-        appearance: "none",
-        textAlign: "left",
-        border: "none",
-        borderRadius: 5,
-        background: active
-          ? "color-mix(in oklch, var(--accent) 22%, transparent)"
-          : hover
-            ? "color-mix(in oklch, var(--ink) 6%, transparent)"
-            : "transparent",
-        color: "var(--ink)",
-        padding: "7px 10px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 12,
-        fontWeight: active ? 600 : 500,
+        // Default arrow cursor, matching the .spark-menu-item base class.
         cursor: "default",
-        transition: "background var(--motion-fast) var(--ease-out)",
+        // Font-weight is held constant across active/inactive (color +
+        // accent-soft fill carry selection) so the option never reflows.
+        fontWeight: 500,
+        // Pressed beat for rows where the .spark-btn transform would break the
+        // menu seam — a momentary darker fill instead.
+        background: pressed
+          ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+          : undefined,
       }}
     >
       {label}
@@ -2411,37 +2455,35 @@ function TimingPresetButton({
   active: boolean;
   onClick: () => void;
 }) {
-  const [hover, setHover] = useState(false);
+  const { hover, focus, pressed, handlers } = useInteractive();
+  const restShadow = active ? "var(--lift-hi)" : undefined;
   return (
     <button
       type="button"
       aria-pressed={active}
       onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      {...handlers}
       style={{
         appearance: "none",
         textAlign: "left",
-        border: active
-          ? "1px solid color-mix(in oklch, var(--accent) 46%, var(--rule-strong))"
-          : hover
-            ? "1px solid var(--rule-soft)"
-            : "1px solid transparent",
-        borderRadius: 7,
+        // Single accent cue: accent-edge border + accent-soft fill. No 1px ring.
+        border: active ? "1px solid var(--accent-edge)" : "1px solid transparent",
+        borderRadius: "var(--radius-surface, 7px)",
         background: active
-          ? "color-mix(in oklch, var(--accent) 10%, transparent)"
-          : hover
-            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
-            : "color-mix(in oklch, var(--ink) 2%, transparent)",
+          ? "var(--accent-soft)"
+          : pressed
+            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            : hover
+              ? "var(--hover)"
+              : "color-mix(in oklch, var(--ink) 2%, transparent)",
         color: "var(--ink)",
         padding: "7px 9px",
+        // Default arrow cursor, matching the .spark-* utility classes.
         cursor: "default",
         display: "grid",
         gap: 2,
         minHeight: 46,
-        boxShadow: active
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 14%, transparent), var(--lift-hi)"
-          : "none",
+        boxShadow: withFocusRing(restShadow, focus),
         transition:
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
@@ -2487,54 +2529,42 @@ function ModelPresetCard({
   active: boolean;
   onClick: () => void;
 }) {
-  const [hover, setHover] = useState(false);
+  const { hover, focus, pressed, handlers } = useInteractive();
+  const restShadow = active ? "var(--lift-hi)" : undefined;
   return (
     <button
       type="button"
       aria-pressed={active}
       aria-label={`Use ${label} for Inline AI`}
       onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      {...handlers}
       style={{
         appearance: "none",
         textAlign: "left",
-        border: active
-          ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
-          : hover
-            ? "1px solid var(--rule-soft)"
-            : "1px solid transparent",
-        borderRadius: 8,
+        // Single accent cue: accent-edge border + accent-soft fill.
+        border: active ? "1px solid var(--accent-edge)" : "1px solid transparent",
+        borderRadius: "var(--radius-surface, 7px)",
         background: active
-          ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
-          : hover
-            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
-            : "color-mix(in oklch, var(--ink) 2%, transparent)",
+          ? "var(--accent-soft)"
+          : pressed
+            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            : hover
+              ? "var(--hover)"
+              : "color-mix(in oklch, var(--ink) 2%, transparent)",
         color: "var(--ink)",
         padding: "9px 11px",
+        // Default arrow cursor, matching the .spark-* utility classes.
         cursor: "default",
         display: "grid",
         gridTemplateColumns: "10px minmax(0, 1fr)",
         gap: 12,
         alignItems: "center",
-        boxShadow: active
-          ? "0 0 0 1px color-mix(in oklch, var(--accent) 16%, transparent), var(--lift-hi)"
-          : "none",
+        boxShadow: withFocusRing(restShadow, focus),
         transition:
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
-      <span
-        aria-hidden
-        style={{
-          width: 8,
-          height: 8,
-          borderRadius: "50%",
-          background: active ? "var(--accent)" : "var(--rule-strong)",
-          boxShadow: active ? "0 0 8px var(--accent-glow)" : "none",
-          transition: "background var(--motion-fast) var(--ease-out)",
-        }}
-      />
+      <AccentDot active={active} />
       <span style={{ minWidth: 0, display: "grid", gap: 2 }}>
         <span
           style={{
@@ -2561,15 +2591,13 @@ function ModelPresetCard({
           {badge && (
             <span
               style={{
-                color: active ? "var(--ink)" : "var(--muted)",
-                border: active
-                  ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
-                  : "1px solid var(--rule-soft)",
+                color: active ? "var(--accent)" : "var(--muted)",
+                border: active ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
                 borderRadius: 999,
                 padding: "1px 6px",
                 fontFamily: "var(--font-sans)",
                 fontSize: 9,
-                fontWeight: 800,
+                fontWeight: 700,
                 letterSpacing: "0.08em",
                 textTransform: "uppercase",
                 flex: "0 0 auto",
@@ -2630,82 +2658,52 @@ function ToggleRow({
   onChange: (next: boolean) => void;
 }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 14,
-        padding: "10px 0",
-      }}
-    >
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontFamily: "var(--font-sans)",
-            fontSize: 13,
-            fontWeight: 600,
-            color: "var(--ink)",
-          }}
-        >
-          {title}
-        </div>
-        <div
-          style={{
-            fontFamily: "var(--font-sans)",
-            fontSize: 11,
-            color: "var(--muted)",
-            lineHeight: 1.45,
-            marginTop: 2,
-          }}
-        >
-          {desc}
-        </div>
-      </div>
-      <Switch checked={checked} onChange={onChange} />
-    </div>
+    <SettingRow
+      title={title}
+      desc={desc}
+      control={<Switch checked={checked} onChange={onChange} ariaLabel={title} />}
+    />
   );
 }
 
-function Switch({
-  checked,
-  onChange,
-}: {
-  checked: boolean;
-  onChange: (next: boolean) => void;
-}) {
+// One switch metric, app-wide. 34x20 track, 16px knob, 2px inset, accent fill
+// + glow when on. SwitchTrack is the pure-visual part so the same geometry can
+// be (a) an interactive role=switch button, or (b) a decorative indicator
+// nested inside a larger clickable row (RuntimeDiagnosticRow), where a nested
+// <button> would be invalid HTML.
+const SWITCH_W = 34;
+const SWITCH_H = 20;
+const SWITCH_KNOB = 16;
+
+function SwitchTrack({ checked, disabled }: { checked: boolean; disabled?: boolean }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
+    <span
+      aria-hidden
       style={{
-        appearance: "none",
+        display: "inline-block",
         position: "relative",
-        width: 34,
-        height: 20,
-        flex: "0 0 34px",
+        width: SWITCH_W,
+        height: SWITCH_H,
         borderRadius: 999,
+        boxSizing: "border-box",
         border: checked
-          ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
+          ? "1px solid var(--accent-edge)"
           : "1px solid var(--rule-strong)",
         background: checked
           ? "color-mix(in oklch, var(--accent) 32%, var(--panel))"
           : "color-mix(in oklch, var(--ink) 5%, transparent)",
-        cursor: "default",
+        opacity: disabled ? 0.55 : 1,
         transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-        padding: 0,
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
       }}
     >
       <span
-        aria-hidden
         style={{
           position: "absolute",
           top: 1,
-          left: checked ? 16 : 1,
-          width: 16,
-          height: 16,
+          left: checked ? SWITCH_W - SWITCH_KNOB - 2 : 1,
+          width: SWITCH_KNOB,
+          height: SWITCH_KNOB,
           borderRadius: "50%",
           background: checked ? "var(--accent)" : "var(--ink-dim)",
           boxShadow: checked ? "0 0 8px var(--accent-glow)" : "none",
@@ -2713,16 +2711,72 @@ function Switch({
             "left var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
         }}
       />
+    </span>
+  );
+}
+
+function Switch({
+  checked,
+  onChange,
+  ariaLabel,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  ariaLabel?: string;
+}) {
+  const { focus, pressed, handlers } = useInteractive();
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={ariaLabel}
+      onClick={() => onChange(!checked)}
+      {...handlers}
+      style={{
+        appearance: "none",
+        display: "inline-flex",
+        flex: `0 0 ${SWITCH_W}px`,
+        padding: 0,
+        border: "none",
+        borderRadius: 999,
+        background: "transparent",
+        // Default arrow cursor, matching the .spark-* utility classes.
+        cursor: "default",
+        // The press settle: a hair of downward travel, no reflow.
+        transform: pressed ? "translateY(0.5px)" : "none",
+        // Let the global focus-visible ring render — it follows the 999px radius.
+        boxShadow: withFocusRing(undefined, focus),
+        transition: "transform var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <SwitchTrack checked={checked} />
     </button>
   );
 }
 
+// Comfortable field geometry layered on top of the .spark-input class: the
+// class supplies the shared fill, border, radius, recessed --well, and the
+// global focus-visible accent ring (its CSS box-shadow isn't clobbered because
+// we set no inline box-shadow here). We only relax the class's compact 26px
+// height to the dialog's roomier rhythm. One input shell, app-consistent focus.
+const inputShellStyle: React.CSSProperties = {
+  height: "auto",
+  padding: "8px 10px",
+  fontSize: 13,
+};
+
+// Button-shaped controls that visually mimic an input field (the Default reset
+// button, the CustomSelect trigger). Not real <input>s, so they don't get the
+// .spark-input CSS — these compose the well + focus ring inline instead.
 const inputStyle: React.CSSProperties = {
   width: "100%",
   boxSizing: "border-box",
-  border: "1px solid var(--rule-soft)",
-  borderRadius: 7,
-  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+  border: "1px solid var(--rule)",
+  // Inputs sit on the 7px surface rung, matching .spark-input and the
+  // --radius-surface comment in styles.css.
+  borderRadius: "var(--radius-surface, 7px)",
+  background: "var(--bg)",
   color: "var(--ink)",
   padding: "8px 10px",
   fontFamily: "var(--font-sans)",

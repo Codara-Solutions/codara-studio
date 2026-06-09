@@ -60,13 +60,13 @@
   --font-size: 13px;
 
   /* Terminal panes — macOS-like rounded cards with a soft gutter */
-  --terminal-pane-radius: 10px;
+  --terminal-pane-radius: 13px;
   --terminal-pane-pad: 8px;
   --terminal-pane-gap: 3px;
 
   /* Tab strip — rounded tops, active tab joins the content area */
   --tabbar-h: 36px;
-  --tab-radius: 8px;
+  --tab-radius: 10px;
   --tab-pad-x: 12px;
 
   /* Motion */
@@ -98,6 +98,35 @@
      exactly as --shadow-1/-2 are re-tinted per light palette. */
   --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.04);
   --well: inset 0 1px 2px oklch(0 0 0 / 0.22);
+
+  /* ── Refinement tokens (append-only) ──────────────────────────────────────
+     One radius ladder, one seam highlight, one press tint, and the
+     notification/status vocabulary, all referenced app-wide. Small controls
+     nest at 5px inside 9px popovers; surfaces sit at 7px; the active-tab seam
+     and press beat are ink-based so they re-tint per theme. */
+  --radius-control: 7px;   /* icon buttons, chips, menu items, swatches, closes */
+  --radius-surface: 10px;  /* rows, cards, bubbles, inputs, toasts */
+  --radius-popover: 12px;  /* every menu / dropdown / popover (the .spark-menu standard) */
+
+  /* The active-tab top seam highlight — ink-based so it stays in-key on light
+     paper (a white inset smudges on bright surfaces). Re-tinted under each
+     light theme block exactly as --lift-hi is. */
+  --tab-active-hi: inset 0 1px 0 color-mix(in oklch, var(--ink) 6%, transparent);
+
+  /* The universal pressed-fill tint for surfaces/rows/tabs/pills that cannot
+     use the .spark-btn translateY+well press (a transform there would break a
+     seam). Gives every interactive element a tactile :active beat. */
+  --press: color-mix(in oklch, var(--ink) 12%, transparent);
+
+  /* Notification surface + status edge — a calm neutral popover face so "done"
+     toasts stop glowing; status is carried only by a 3px inset left rule
+     (override --accent with --ok/--info/--danger per state) + icon chip. */
+  --notify-surface: var(--panel-2);
+  --status-edge: inset 3px 0 0 var(--accent);
+
+  /* Inner radius for terminal pane chrome buttons/swatches — concentric with
+     the 10px pane and the 8px toolbar pill. */
+  --terminal-control-radius: 6px;
 }
 
 :root[data-theme="spark-classic"] {
@@ -209,6 +238,10 @@
   --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.8), 0 18px 48px rgba(33, 31, 26, 0.16);
   --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.7);
   --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 12%, transparent);
+  /* Re-tint the seam + press on bright paper: a 6% ink inset vanishes here,
+     so lean a touch stronger (as --lift-hi flips white→ink). */
+  --tab-active-hi: inset 0 1px 0 color-mix(in oklch, var(--ink) 9%, transparent);
+  --press: color-mix(in oklch, var(--ink) 10%, transparent);
 }
 
 :root[data-theme="github-light"] {
@@ -240,6 +273,8 @@
   --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.95), 0 18px 48px rgba(31, 35, 40, 0.12);
   --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.85);
   --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 10%, transparent);
+  --tab-active-hi: inset 0 1px 0 color-mix(in oklch, var(--ink) 9%, transparent);
+  --press: color-mix(in oklch, var(--ink) 9%, transparent);
 }
 
 :root[data-theme="rose-pine-dawn"] {
@@ -271,6 +306,8 @@
   --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.8), 0 18px 48px rgba(87, 82, 121, 0.16);
   --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.7);
   --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 11%, transparent);
+  --tab-active-hi: inset 0 1px 0 color-mix(in oklch, var(--ink) 9%, transparent);
+  --press: color-mix(in oklch, var(--ink) 10%, transparent);
 }
 
 :root[data-theme="catppuccin-latte"] {
@@ -303,6 +340,8 @@
   --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.88), 0 18px 48px rgba(76, 79, 105, 0.18);
   --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.78);
   --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 11%, transparent);
+  --tab-active-hi: inset 0 1px 0 color-mix(in oklch, var(--ink) 9%, transparent);
+  --press: color-mix(in oklch, var(--ink) 10%, transparent);
 }
 
 * { box-sizing: border-box; }
@@ -423,6 +462,22 @@ a { color: inherit; }
   overflow-y: hidden;
   scrollbar-width: none;
   padding-top: 4px;
+  /* Soft edge-fade so an overflowing strip dissolves at its right edge instead
+     of hard-clipping a tab glyph mid-shape. Pure paint (mask), no layout. */
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 10px,
+    #000 calc(100% - 14px),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 10px,
+    #000 calc(100% - 14px),
+    transparent 100%
+  );
 }
 
 .spark-tabbar-scroll::-webkit-scrollbar {
@@ -442,7 +497,9 @@ a { color: inherit; }
   border-bottom: none;
   border-radius: var(--tab-radius) var(--tab-radius) 0 0;
   background: color-mix(in oklch, var(--ink) 3%, var(--panel));
-  color: var(--ink-dim);
+  /* Inactive tabs rest a step dimmer (--muted) so the active tab clearly leads
+     by ink alone, without spending any color. */
+  color: var(--muted);
   font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 500;
@@ -456,6 +513,15 @@ a { color: inherit; }
 
 .spark-tab:hover:not(.spark-tab--active) {
   background: color-mix(in oklch, var(--ink) 6%, var(--panel));
+  color: var(--ink-dim);
+}
+
+/* Tactile press: a momentary darker fill only — no translateY, which would
+   break the seam where the active tab joins the content area. Composite the
+   full --press tint (ink 12%) over the panel so it reads a clear step below
+   the hover fill (ink 6%). */
+.spark-tab:active:not(.spark-tab--active) {
+  background: color-mix(in oklch, var(--ink) 12%, var(--panel));
   color: var(--ink);
 }
 
@@ -467,7 +533,7 @@ a { color: inherit; }
   color: var(--ink);
   border-color: var(--rule-soft);
   box-shadow:
-    inset 0 1px 0 color-mix(in oklch, white 6%, transparent),
+    var(--tab-active-hi),
     0 -1px 0 var(--bg);
 }
 
@@ -476,7 +542,7 @@ a { color: inherit; }
 }
 
 .spark-tab--drop-target {
-  outline: 1px solid color-mix(in oklch, var(--accent) 55%, transparent);
+  outline: 1px solid var(--accent-edge);
   outline-offset: 1px;
 }
 
@@ -520,7 +586,7 @@ a { color: inherit; }
   height: 16px;
   padding: 0;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-control, 5px);
   background: transparent;
   color: var(--muted);
   cursor: default;
@@ -536,9 +602,20 @@ a { color: inherit; }
   opacity: 1;
 }
 
+/* Keyboard parity: a focused-but-unhovered close/rename button is visible even
+   when its tab isn't hovered, so tabbing through never lands on a ghost. */
+.spark-tab__close:focus-visible {
+  opacity: 1;
+}
+
 .spark-tab__close:hover {
-  background: color-mix(in oklch, var(--ink) 10%, transparent);
+  background: var(--hover-strong);
   color: var(--ink-dim);
+}
+
+.spark-tab__close:active {
+  background: var(--press);
+  color: var(--ink);
 }
 
 .spark-tabbar-new {
@@ -561,7 +638,12 @@ a { color: inherit; }
 }
 
 .spark-tabbar-new:hover {
-  background: color-mix(in oklch, var(--ink) 9%, transparent);
+  background: var(--hover-strong);
+  color: var(--ink);
+}
+
+.spark-tabbar-new:active {
+  background: var(--press);
   color: var(--ink);
 }
 
@@ -572,12 +654,13 @@ a { color: inherit; }
   z-index: 50;
   min-width: 200px;
   overflow: hidden;
-  border-radius: 10px;
-  border: 1px solid color-mix(in oklch, var(--rule) 80%, transparent);
-  background: color-mix(in oklch, var(--panel-2) 94%, transparent);
+  /* One popover language with .spark-menu: 9px radius, --rule hairline, opaque
+     --panel-2 face, --shadow-2. (No blur — translucency is reserved for the
+     worker-chip / toolbar clusters that overlay live content.) */
+  border-radius: var(--radius-popover, 9px);
+  border: 1px solid var(--rule);
+  background: var(--panel-2);
   box-shadow: var(--shadow-2);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
 }
 
 /* ── xterm.js host ──────────────────────────────────────────────────────── */
@@ -657,7 +740,7 @@ a { color: inherit; }
   border: 2px solid transparent;
   outline: 1px solid var(--rule-soft);
   outline-offset: -1px;
-  border-radius: 8px;
+  border-radius: var(--radius-surface, 10px);
   background: color-mix(in oklch, var(--ink) 3%, var(--panel));
   padding: 7px;
   position: relative;
@@ -690,7 +773,7 @@ a { color: inherit; }
   color: var(--ink-dim);
   font-size: 11px;
   line-height: 1.2;
-  cursor: pointer;
+  cursor: default;
   white-space: nowrap;
   font-family: var(--font-sans);
   transition:
@@ -699,8 +782,11 @@ a { color: inherit; }
     border-color var(--motion-fast) var(--ease-out);
 }
 .composer-pill:hover {
-  background: color-mix(in oklch, var(--ink) 9%, transparent);
+  background: var(--hover-strong);
   color: var(--ink);
+}
+.composer-pill:active {
+  background: var(--press);
 }
 .composer-pill.is-active {
   color: var(--accent);
@@ -721,9 +807,9 @@ a { color: inherit; }
   overflow: auto;
   padding: 4px;
   background: var(--panel-2);
-  border: 1px solid var(--rule-soft);
-  border-radius: 8px;
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-popover, 9px);
+  box-shadow: var(--shadow-2);
 }
 .composer-model-group + .composer-model-group {
   margin-top: 4px;
@@ -750,11 +836,11 @@ a { color: inherit; }
   color: var(--ink);
   font-size: 12px;
   font-family: var(--font-sans);
-  cursor: pointer;
+  cursor: default;
   text-align: left;
 }
 .composer-model-row:hover {
-  background: color-mix(in oklch, var(--accent) 14%, transparent);
+  background: var(--hover);
 }
 .composer-model-row.is-active {
   background: var(--accent-soft);
@@ -778,15 +864,18 @@ a { color: inherit; }
   border: 1px solid var(--rule-soft);
   color: var(--ink-dim);
   font-size: 11px;
-  cursor: pointer;
+  cursor: default;
   font-family: var(--font-sans);
   transition:
     background var(--motion-fast) var(--ease-out),
     color var(--motion-fast) var(--ease-out);
 }
 .composer-thinking:hover {
-  background: color-mix(in oklch, var(--ink) 9%, transparent);
+  background: var(--hover-strong);
   color: var(--ink);
+}
+.composer-thinking:active {
+  background: var(--press);
 }
 .composer-thinking-label {
   white-space: nowrap;
@@ -802,7 +891,7 @@ a { color: inherit; }
   border: 1px solid var(--rule-soft);
   color: var(--ink-dim);
   font-size: 11px;
-  cursor: pointer;
+  cursor: default;
   font-family: var(--font-sans);
   transition:
     background var(--motion-fast) var(--ease-out),
@@ -810,8 +899,11 @@ a { color: inherit; }
     border-color var(--motion-fast) var(--ease-out);
 }
 .composer-plan:hover {
-  background: color-mix(in oklch, var(--ink) 9%, transparent);
+  background: var(--hover-strong);
   color: var(--ink);
+}
+.composer-plan:active {
+  background: var(--press);
 }
 .composer-plan.is-execute {
   color: var(--accent);
@@ -889,14 +981,17 @@ a { color: inherit; }
   border-radius: 6px;
   background: transparent;
   color: var(--ink-dim);
-  cursor: pointer;
+  cursor: default;
   transition:
     background var(--motion-fast) var(--ease-out),
     color var(--motion-fast) var(--ease-out);
 }
 .composer-fast:hover {
-  background: color-mix(in oklch, var(--ink) 9%, transparent);
+  background: var(--hover-strong);
   color: var(--ink);
+}
+.composer-fast:active {
+  background: var(--press);
 }
 .composer-fast.is-active {
   color: var(--accent);
@@ -927,7 +1022,9 @@ a { color: inherit; }
   height: 26px;
   padding: 0 11px;
   border: 1px solid var(--rule);
-  border-radius: 6px;
+  /* On the surface rung (7px) so a button is concentric with the .spark-input
+     fields and .spark-empty cards it sits beside — no 6px seam vs the ladder. */
+  border-radius: var(--radius-surface, 7px);
   background: color-mix(in oklch, var(--ink) 4%, var(--panel));
   color: var(--ink);
   font-family: var(--font-sans);
@@ -1028,7 +1125,9 @@ a { color: inherit; }
   width: 100%;
   padding: 0 9px;
   border: 1px solid var(--rule);
-  border-radius: 6px;
+  /* Inputs sit on the surface rung (7px) named in the --radius-surface comment,
+     so a field is concentric with the cards/rows/buttons it shares a form with. */
+  border-radius: var(--radius-surface, 7px);
   background: var(--bg);
   color: var(--ink);
   font-family: var(--font-sans);
@@ -1072,7 +1171,8 @@ a { color: inherit; }
   min-height: var(--row-h);
   padding: 0 9px;
   border: 1px solid transparent;
-  border-radius: 6px;
+  /* Rows sit on the surface rung (7px) per the --radius-surface comment. */
+  border-radius: var(--radius-surface, 7px);
   background: transparent;
   color: var(--ink-dim);
   font-family: var(--font-sans);
@@ -1150,7 +1250,7 @@ a { color: inherit; }
   height: 16px;
   padding: 0 6px;
   border: 1px solid var(--rule-soft);
-  border-radius: 4px;
+  border-radius: 6px;
   background: color-mix(in oklch, var(--ink) 5%, transparent);
   color: var(--muted);
   font-size: 9px;
@@ -1196,7 +1296,7 @@ a { color: inherit; }
   height: 18px;
   padding: 0 5px;
   border: 1px solid var(--rule);
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--panel-3);
   color: var(--ink-dim);
   font-family: var(--font-mono);
@@ -1216,7 +1316,7 @@ a { color: inherit; }
   gap: 2px;
   padding: 2px;
   border: 1px solid var(--rule-soft);
-  border-radius: 8px;
+  border-radius: var(--radius-surface, 10px);
   background: var(--bg);
   box-shadow: var(--well);
 }
@@ -1228,7 +1328,7 @@ a { color: inherit; }
   height: 22px;
   padding: 0 10px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-control, 7px);
   background: transparent;
   color: var(--muted);
   font-family: var(--font-sans);
@@ -1263,7 +1363,7 @@ a { color: inherit; }
   min-width: 180px;
   padding: 4px;
   border: 1px solid var(--rule);
-  border-radius: 9px;
+  border-radius: var(--radius-popover, 12px);
   background: var(--panel-2);
   box-shadow: var(--shadow-2);
 }
@@ -1274,7 +1374,7 @@ a { color: inherit; }
   width: 100%;
   padding: 5px 8px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--radius-control, 7px);
   background: transparent;
   color: var(--ink);
   font-family: var(--font-sans);

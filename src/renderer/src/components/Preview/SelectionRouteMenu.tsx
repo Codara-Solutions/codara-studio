@@ -160,7 +160,7 @@ export default function SelectionRouteMenu({
     <div
       ref={menuRef}
       tabIndex={-1}
-      className="spark-fade-in"
+      className="spark-menu spark-fade-in"
       onClick={(e) => e.stopPropagation()}
       style={{
         position: "fixed",
@@ -169,11 +169,6 @@ export default function SelectionRouteMenu({
         top,
         bottom,
         width: MENU_WIDTH,
-        background: "var(--panel-2)",
-        border: "1px solid var(--rule-strong)",
-        borderRadius: 8,
-        boxShadow: "var(--shadow-2), var(--lift-hi)",
-        padding: 6,
         fontFamily: "var(--font-sans)",
         overflow: "hidden",
         outline: "none",
@@ -186,8 +181,8 @@ export default function SelectionRouteMenu({
       <div
         className="spark-eyebrow"
         style={{
-          padding: "6px 8px 8px",
-          borderBottom: "1px solid var(--rule)",
+          padding: "4px 8px 8px",
+          borderBottom: "1px solid var(--rule-soft)",
           marginBottom: 4,
         }}
       >
@@ -201,7 +196,7 @@ export default function SelectionRouteMenu({
         return (
           <React.Fragment key={group}>
             {showDivider && (
-              <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
+              <div className="spark-divider" style={{ margin: "4px 0" }} />
             )}
             {items.map((destination) => (
               <Row
@@ -224,13 +219,27 @@ export default function SelectionRouteMenu({
             background: "var(--danger-soft)",
             color: "var(--ink)",
             fontSize: 10,
-            borderRadius: 4,
+            borderRadius: "var(--radius-control, 5px)",
+            // A thin danger edge + dot carries the status; the fill stays calm.
+            boxShadow: "inset 3px 0 0 var(--danger)",
             display: "flex",
             flexDirection: "column",
             gap: 3,
           }}
         >
-          <span className="spark-eyebrow" style={{ color: "var(--danger)" }}>
+          <span
+            className="spark-eyebrow"
+            style={{ color: "var(--danger)", display: "inline-flex", alignItems: "center", gap: 6 }}
+          >
+            <span
+              aria-hidden
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: 999,
+                background: "var(--danger)",
+              }}
+            />
             Failed
           </span>
           <span>{error}</span>
@@ -253,6 +262,10 @@ function Row({
 }) {
   const [hovered, setHovered] = useState(false);
   const isDisabled = destination.disabled || busy;
+  // A reserved-width leading slot holds the shortcut keycap. It renders an
+  // empty .spark-kbd-shaped box when there's no shortcut so every row shares
+  // one x-origin and the label column never shifts between rows.
+  const showKbd = Boolean(shortcut) && !isDisabled;
   return (
     <button
       type="button"
@@ -272,38 +285,30 @@ function Row({
             ? "var(--ink)"
             : "var(--ink-dim)",
         opacity: destination.disabled ? 0.6 : 1,
-        borderRadius: 6,
-        padding: "7px 8px",
+        borderRadius: "var(--radius-control, 5px)",
+        padding: "6px 8px",
         textAlign: "left",
         fontFamily: "inherit",
-        fontSize: 11,
-        fontWeight: 700,
+        // Weight held constant across hover/rest (selection/hover signalled by
+        // color + background, never weight). 600 = emphasis label.
+        fontSize: 12,
+        fontWeight: 600,
         cursor: "default",
         display: "grid",
-        gridTemplateColumns: "22px minmax(0, 1fr) auto",
+        gridTemplateColumns: "18px minmax(0, 1fr) auto",
         alignItems: "center",
         gap: 8,
         transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
     >
       <span
-        style={{
-          width: 18,
-          height: 18,
-          borderRadius: 5,
-          border: shortcut && !isDisabled ? "1px solid var(--rule-soft)" : "1px solid transparent",
-          background: shortcut && !isDisabled ? "var(--panel-3)" : "transparent",
-          boxShadow: shortcut && !isDisabled ? "var(--lift-hi)" : "none",
-          color: hovered && !isDisabled ? "var(--ink-dim)" : "var(--muted)",
-          fontFamily: "var(--font-mono)",
-          fontVariantNumeric: "tabular-nums",
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: 9,
-          fontWeight: 800,
-          transition: "color var(--motion-fast) var(--ease-out)",
-        }}
+        className={showKbd ? "spark-kbd" : undefined}
+        aria-hidden={!showKbd}
+        style={
+          showKbd
+            ? { minWidth: 18, height: 18, padding: 0 }
+            : { width: 18, height: 18, display: "inline-flex" }
+        }
       >
         {shortcut ?? ""}
       </span>

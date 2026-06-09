@@ -62,13 +62,12 @@ export function SectionHeader({
         background: hover
           ? "color-mix(in oklch, var(--ink) 3%, var(--panel))"
           : "var(--panel)",
-        // 1px top highlight lifts the band; the soft downward cast gives the
-        // body the recessed-well depth the Balanced direction calls for.
-        // --lift-hi keeps the highlight visible on light themes where a baked
-        // white inset would vanish; the cast is a token-mix so it never reads
-        // as soot on bright paper.
-        boxShadow:
-          "var(--lift-hi), 0 4px 10px -6px color-mix(in oklch, var(--ink) 28%, transparent)",
+        // 1px top highlight lifts the band; the soft recessed --well cue gives
+        // the body its sunk-below depth without a hand-rolled ink cast (the old
+        // 28% drop shadow banded where headers stacked). --lift-hi + --well are
+        // both token-driven so they re-tint per theme instead of reading as
+        // soot on bright paper.
+        boxShadow: "var(--lift-hi), var(--well)",
         transition: "background var(--motion-fast) var(--ease-out)",
         userSelect: "none",
       }}
@@ -125,25 +124,36 @@ export function SectionHeader({
           onToggleCollapse();
         }}
       >
-        {draggable && (
-          <span
-            title={`Move ${label}`}
-            aria-hidden
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: 14,
-              height: 16,
-              flex: "0 0 14px",
-              color: hover ? "var(--ink-dim)" : "var(--muted-2)",
-              cursor: "grab",
-            }}
-          >
-            <DragHandleIcon size={13} />
-          </span>
+        {/* Leading cluster — the drag handle and chevron slots are held at a
+            constant advance so the label shares one x-origin across every
+            header (a header without a drag handle still reserves its 14px so
+            stacked labels align). The handle itself fades in only when
+            draggable; the slot never collapses, so nothing reflows. */}
+        <span
+          aria-hidden={!draggable}
+          title={draggable ? `Move ${label}` : undefined}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 14,
+            height: 16,
+            flex: "0 0 14px",
+            color: hover ? "var(--ink-dim)" : "var(--muted-2)",
+            cursor: draggable ? "grab" : "inherit",
+            opacity: draggable ? 1 : 0,
+            pointerEvents: draggable ? undefined : "none",
+          }}
+        >
+          <DragHandleIcon size={13} />
+        </span>
+        {collapsible ? (
+          <Chevron collapsed={collapsed} hover={hover} />
+        ) : (
+          // Reserve the chevron's 16px advance even when not collapsible so the
+          // label x-origin is identical to a collapsible header's.
+          <span aria-hidden style={{ flex: "0 0 16px", width: 16, height: 16 }} />
         )}
-        {collapsible && <Chevron collapsed={collapsed} hover={hover} />}
         {glyph != null && (
           <span style={{ display: "inline-flex", alignItems: "center", flex: "0 0 auto" }}>
             {glyph}

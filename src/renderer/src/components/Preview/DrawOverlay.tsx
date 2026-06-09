@@ -22,6 +22,13 @@ interface Props {
 
 const STROKE_COLOR = "#ff3b30";
 const STROKE_WIDTH = 3;
+// User-painted pigments. These are the one sanctioned literal-color exception:
+// the strokes are written straight into a <canvas> 2D context
+// (ctx.strokeStyle = stroke.color), which cannot resolve CSS custom
+// properties, and the swatch must display the exact pigment it paints — so
+// these stay as literal hex rather than design tokens. The hues echo the
+// status/accent palette (red / yellow / green / blue / purple / paper) so the
+// annotation colors feel of-a-piece with the app.
 const STROKE_COLORS = ["#ff3b30", "#f0c419", "#35c759", "#2f80ed", "#af52de", "#f7f2e8"];
 
 type Stroke = { points: Array<{ x: number; y: number }>; color: string; width: number };
@@ -221,10 +228,14 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
           flexDirection: "column",
           gap: 8,
           padding: 10,
+          // Floating chrome over live content: a semi-translucent panel face
+          // with a blur, per the worker-chip reference for floating clusters.
           background: "color-mix(in oklch, var(--panel-2) 92%, transparent)",
-          border: "1px solid var(--rule-strong)",
-          borderRadius: 8,
-          boxShadow: "var(--shadow-2), var(--lift-hi)",
+          backdropFilter: "blur(6px)",
+          WebkitBackdropFilter: "blur(6px)",
+          border: "1px solid var(--rule)",
+          borderRadius: "var(--radius-popover, 9px)",
+          boxShadow: "var(--shadow-2)",
           fontFamily: "var(--font-sans)",
         }}
       >
@@ -259,34 +270,42 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
               boxShadow: "var(--well)",
             }}
           >
-            {STROKE_COLORS.map((color) => (
-              <button
-                key={color}
-                type="button"
-                aria-label={`Use ${color}`}
-                onClick={() => setStrokeColor(color)}
-                disabled={busy}
-                style={{
-                  appearance: "none",
-                  width: 16,
-                  height: 16,
-                  padding: 0,
-                  borderRadius: 999,
-                  border:
-                    strokeColor.toLowerCase() === color.toLowerCase()
-                      ? "2px solid var(--ink)"
-                      : "1px solid color-mix(in oklch, var(--ink) 25%, transparent)",
-                  background: color,
-                  boxShadow:
-                    strokeColor.toLowerCase() === color.toLowerCase()
-                      ? "0 0 0 2px var(--accent-glow)"
+            {STROKE_COLORS.map((color) => {
+              const selected = strokeColor.toLowerCase() === color.toLowerCase();
+              return (
+                <button
+                  key={color}
+                  type="button"
+                  aria-label={`Use ${color}`}
+                  aria-pressed={selected}
+                  onClick={() => setStrokeColor(color)}
+                  disabled={busy}
+                  style={{
+                    appearance: "none",
+                    width: 16,
+                    height: 16,
+                    padding: 0,
+                    borderRadius: 999,
+                    // Border width is held constant (1px) in both states so the
+                    // pigment circle never resizes on select — selection is
+                    // signalled purely by the outer ring below. (Was 1px<->2px,
+                    // which shrank the swatch: the one true layout shift.)
+                    border: "1px solid color-mix(in oklch, var(--ink) 25%, transparent)",
+                    background: color,
+                    // Selected: a crisp accent ring hugging the swatch, no
+                    // size change. The 1px panel-tinted gap separates the ring
+                    // from the pigment so it reads on dark and bright swatches
+                    // alike. Border width stays 1px in both states.
+                    boxShadow: selected
+                      ? "0 0 0 1px var(--panel-2), 0 0 0 2px var(--accent)"
                       : "none",
-                  cursor: "default",
-                  transition:
-                    "box-shadow var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-                }}
-              />
-            ))}
+                    cursor: "default",
+                    transition:
+                      "box-shadow var(--motion-fast) var(--ease-out)",
+                  }}
+                />
+              );
+            })}
             <label
               title="Custom color"
               style={{
@@ -333,24 +352,13 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
             gap: 9,
             minHeight: 34,
             padding: "4px 5px 4px 10px",
-            background:
-              "linear-gradient(180deg, color-mix(in oklch, var(--panel-3) 70%, transparent), color-mix(in oklch, var(--panel-2) 92%, transparent))",
+            background: "var(--bg)",
             border: "1px solid var(--rule-soft)",
-            borderRadius: 6,
+            borderRadius: "var(--radius-surface, 7px)",
             boxShadow: "var(--well)",
           }}
         >
-          <span
-            style={{
-              color: "var(--muted)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 9,
-              fontWeight: 700,
-              letterSpacing: "0.12em",
-              textTransform: "uppercase",
-              whiteSpace: "nowrap",
-            }}
-          >
+          <span className="spark-eyebrow" style={{ whiteSpace: "nowrap" }}>
             Note
           </span>
           <input
@@ -378,36 +386,16 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
           />
         </label>
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
+          {/* The committing action: .spark-btn.is-primary earns the one accent.
+              Disabled state is opacity-based (from the utility); hover is a
+              token color-mix, not filter:brightness. */}
           <button
             ref={sendButtonRef}
             type="button"
+            className="spark-btn is-primary"
             onClick={() => void requestSend()}
             disabled={busy || !hasStrokes}
-            style={{
-              appearance: "none",
-              border: "none",
-              borderRadius: 6,
-              background:
-                busy || !hasStrokes
-                  ? "color-mix(in oklch, var(--ink) 8%, transparent)"
-                  : "var(--accent)",
-              color: busy || !hasStrokes ? "var(--muted)" : "var(--accent-ink)",
-              padding: "0 14px",
-              height: 30,
-              fontSize: 12,
-              fontWeight: 600,
-              fontFamily: "var(--font-sans)",
-              cursor: "default",
-              boxShadow: busy || !hasStrokes ? "none" : "var(--shadow-glow)",
-              transition:
-                "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), filter var(--motion-fast) var(--ease-out)",
-            }}
-            onMouseEnter={(e) => {
-              if (!busy && hasStrokes) e.currentTarget.style.filter = "brightness(1.08)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.filter = "none";
-            }}
+            style={{ height: 30, padding: "0 14px" }}
           >
             {busy ? "Sending…" : "Send to…"}
           </button>
@@ -441,34 +429,16 @@ function ToolButton({
   onClick: () => void;
   disabled?: boolean;
 }) {
+  // Built on .spark-btn for consistent radius, tactile press (translateY +
+  // well), opacity-based disabled, and the focus-visible ring. Compacted to a
+  // 24px height + 11px text to fit the draw toolbar's dense cluster.
   return (
     <button
       type="button"
+      className="spark-btn"
       onClick={onClick}
       disabled={disabled}
-      style={{
-        appearance: "none",
-        border: "1px solid var(--rule-soft)",
-        borderRadius: 6,
-        background: "transparent",
-        color: disabled ? "var(--muted)" : "var(--ink-dim)",
-        height: 24,
-        padding: "0 8px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        cursor: "default",
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-      }}
-      onMouseEnter={(e) => {
-        if (disabled) return;
-        e.currentTarget.style.background = "var(--hover)";
-        e.currentTarget.style.color = "var(--ink)";
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = "transparent";
-        e.currentTarget.style.color = disabled ? "var(--muted)" : "var(--ink-dim)";
-      }}
+      style={{ height: 24, padding: "0 9px", fontSize: 11 }}
     >
       {children}
     </button>

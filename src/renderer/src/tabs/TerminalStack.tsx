@@ -365,25 +365,35 @@ function TerminalStack({
           position: "absolute",
           inset: 0,
           display: "flex",
-          flexDirection: "column",
           alignItems: "center",
           justifyContent: "center",
-          gap: 6,
-          padding: 24,
-          textAlign: "center",
+          padding: "var(--terminal-pane-pad)",
           background: "var(--panel)",
         }}
       >
-        <span className="spark-eyebrow">No shell</span>
-        <span
+        {/* Idle pane reads as a deliberate rounded card (matching a live pane's
+            10px radius + hairline well) rather than a blank void, with the
+            calm .spark-empty hint centered inside. */}
+        <div
+          className="spark-fade-in"
           style={{
-            color: "var(--ink-dim)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 12,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: "100%",
+            height: "100%",
+            background: "var(--bg)",
+            borderRadius: "var(--terminal-pane-radius)",
+            boxShadow: "var(--lift-hi), 0 0 0 1px var(--rule-soft)",
           }}
         >
-          No shell detected on this system.
-        </span>
+          <div className="spark-empty">
+            <span className="spark-eyebrow">No shell</span>
+            <span className="spark-empty__body">
+              No shell detected on this system.
+            </span>
+          </div>
+        </div>
       </div>
     );
   }
@@ -456,6 +466,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   onPaneDrop,
 }: TerminalTabPaneProps) {
   const tabRootRef = useRef<HTMLDivElement | null>(null);
+  const reducedMotion = usePrefersReducedMotion();
   const [dropIntent, setDropIntent] = useState<DropIntent | null>(null);
   const dropIntentRef = useRef<DropIntent | null>(null);
   const [dragState, setDragState] = useState<TerminalPaneDragState | null>(() =>
@@ -741,9 +752,12 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               boxShadow: "var(--lift-hi), 0 0 0 1px var(--rule-soft)",
               zIndex: isZoomed ? 6 : isActive ? 5 : 1,
               opacity: layoutAnimating && drag?.paneId !== leaf.paneId ? 0.94 : 1,
-              transition: layoutAnimating
-                ? "left var(--motion) var(--ease-out), top var(--motion) var(--ease-out), width var(--motion) var(--ease-out), height var(--motion) var(--ease-out), opacity var(--motion-fast) var(--ease-out)"
-                : undefined,
+              // Geometry tween while reflowing under a drag; suppressed under
+              // prefers-reduced-motion so panes snap instead of sliding.
+              transition:
+                layoutAnimating && !reducedMotion
+                  ? "left var(--motion) var(--ease-out), top var(--motion) var(--ease-out), width var(--motion) var(--ease-out), height var(--motion) var(--ease-out), opacity var(--motion-fast) var(--ease-out)"
+                  : undefined,
             }}
           >
             {isActive ? <PaneFocusRing /> : null}
@@ -786,7 +800,9 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
           setHandle={setHandle}
         />
       ) : null}
-      {dropSlotRect ? <PaneDropSlot rect={dropSlotRect} /> : null}
+      {dropSlotRect ? (
+        <PaneDropSlot rect={dropSlotRect} reducedMotion={reducedMotion} />
+      ) : null}
       {drag && ghostPos && visible ? (
         <TerminalDragGhost x={ghostPos.x} y={ghostPos.y} />
       ) : null}
@@ -859,7 +875,11 @@ interface DropIntent {
 // Invisible at rest; a soft groove appears on hover, accent while dragging.
 const HANDLE_HIT = 11;
 const INTERSECTION_GRIP = 14;
-const PANE_GAP_PX = 3;
+// Pane inset gap, sourced from the Foundation token so the rounded cards
+// breathe at exactly one value (matches --terminal-pane-gap in styles.css).
+// Referenced as a CSS var in calc() below; the numeric fallback keeps the
+// resize-snap math correct if the token is ever unresolved.
+const PANE_GAP = "var(--terminal-pane-gap, 3px)";
 const LINE_DROP_EDGE_PX = 12;
 const RESIZE_SNAP_STEP = 1 / 24;
 const RESIZE_SNAP_PX = 8;
@@ -881,6 +901,28 @@ const MAX_RATIO = 0.95;
 
 function pct(fraction: number): string {
   return `${fraction * 100}%`;
+}
+
+// Read-only reduced-motion preference, used purely to drop the inline pane /
+// drop-slot geometry transitions (those animate left/top/width/height, which a
+// CSS media query can't reach from an inline style). Affects only which
+// transition string is emitted — never any behavior, data flow, or DOM shape.
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      : false,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const mql = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const onChange = () => setReduced(mql.matches);
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, []);
+  return reduced;
 }
 
 function terminalDragPointFromClient(pointLike: {
@@ -982,13 +1024,14 @@ function handlePathKey(handle: HandleBox): string {
 }
 
 // Inset each pane slightly so rounded cards breathe (macOS split style).
+// Inset comes from the shared --terminal-pane-gap token (PANE_GAP) so every
+// pane card relates to one geometry source rather than a duplicated literal.
 function paneFrameStyle(rect: FracRect): React.CSSProperties {
-  const g = PANE_GAP_PX;
   return {
-    left: `calc(${pct(rect.left)} + ${g}px)`,
-    top: `calc(${pct(rect.top)} + ${g}px)`,
-    width: `calc(${pct(rect.width)} - ${g * 2}px)`,
-    height: `calc(${pct(rect.height)} - ${g * 2}px)`,
+    left: `calc(${pct(rect.left)} + ${PANE_GAP})`,
+    top: `calc(${pct(rect.top)} + ${PANE_GAP})`,
+    width: `calc(${pct(rect.width)} - 2 * ${PANE_GAP})`,
+    height: `calc(${pct(rect.height)} - 2 * ${PANE_GAP})`,
   };
 }
 
@@ -1133,17 +1176,20 @@ function PaneZoomedRing() {
         inset: 0,
         zIndex: 19,
         pointerEvents: "none",
-        border: "1px solid color-mix(in oklch, var(--accent) 64%, transparent)",
+        // Two cues only — an accent-edge border + one soft glow — so the zoom
+        // mark stays a quiet frame below the brighter active focus ring.
+        border: "1px solid var(--accent-edge)",
         borderRadius: "var(--terminal-pane-radius)",
-        boxShadow:
-          "0 0 0 1px color-mix(in oklch, var(--accent) 18%, transparent), 0 0 36px color-mix(in oklch, var(--accent) 12%, transparent)",
+        boxShadow: "0 0 28px color-mix(in oklch, var(--accent) 12%, transparent)",
       }}
     />
   );
 }
 
 // Accent frame drawn above the xterm canvas. Sits on a raised z-index pane so
-// every edge — including splits against a sibling — stays visible.
+// every edge — including splits against a sibling — stays visible. Two cues
+// only — an accent border plus one soft accent glow — instead of the former
+// border + 1px ring + inset-wash stack, keeping the active-pane mark precise.
 function PaneFocusRing() {
   return (
     <div
@@ -1155,10 +1201,7 @@ function PaneFocusRing() {
         pointerEvents: "none",
         border: "1px solid var(--accent)",
         borderRadius: "var(--terminal-pane-radius)",
-        boxShadow: [
-          "0 0 0 1px color-mix(in oklch, var(--accent) 24%, transparent)",
-          "inset 0 0 36px color-mix(in oklch, var(--accent) 4%, transparent)",
-        ].join(", "),
+        boxShadow: "0 0 18px var(--accent-glow)",
         transition: "box-shadow var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
     />
@@ -1166,7 +1209,17 @@ function PaneFocusRing() {
 }
 
 // Exact footprint the dragged pane will occupy after drop (from preview layout).
-function PaneDropSlot({ rect }: { rect: FracRect }) {
+// A transient drag affordance, so a touch of accent is allowed past the <10%
+// ration — but toned to read as precise guidance (a dashed accent edge + one
+// faint fill), not a light show: the outer glow and inset halo are dropped so
+// only a single soft cue remains alongside the border.
+function PaneDropSlot({
+  rect,
+  reducedMotion,
+}: {
+  rect: FracRect;
+  reducedMotion: boolean;
+}) {
   return (
     <div
       aria-hidden
@@ -1175,16 +1228,14 @@ function PaneDropSlot({ rect }: { rect: FracRect }) {
         ...paneFrameStyle(rect),
         zIndex: 8,
         pointerEvents: "none",
-        border: "2px dashed color-mix(in oklch, var(--accent) 58%, transparent)",
+        border: "1px dashed var(--accent-edge)",
         borderRadius: "var(--terminal-pane-radius)",
-        background: "color-mix(in oklch, var(--accent) 11%, transparent)",
-        boxShadow: [
-          "inset 0 0 0 1px color-mix(in oklch, var(--accent) 28%, transparent)",
-          "inset 0 0 40px color-mix(in oklch, var(--accent) 7%, transparent)",
-          "0 0 24px color-mix(in oklch, var(--accent) 16%, transparent)",
-        ].join(", "),
-        transition:
-          "left var(--motion) var(--ease-out), top var(--motion) var(--ease-out), width var(--motion) var(--ease-out), height var(--motion) var(--ease-out)",
+        background: "color-mix(in oklch, var(--accent) 8%, transparent)",
+        boxShadow:
+          "inset 0 0 0 1px color-mix(in oklch, var(--accent) 18%, transparent)",
+        transition: reducedMotion
+          ? undefined
+          : "left var(--motion) var(--ease-out), top var(--motion) var(--ease-out), width var(--motion) var(--ease-out), height var(--motion) var(--ease-out)",
       }}
     />
   );
@@ -1419,18 +1470,15 @@ function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps
 
   const showLine = dragging || hover;
   const cursor = isHorizontal ? "col-resize" : "row-resize";
-  const groove = isHorizontal
-    ? `linear-gradient(to right,
+  // Hairline groove built from the rule tokens (re-tints per theme) rather than
+  // raw ink mixes: a soft --rule core feathered to transparent edges so it
+  // reads as a recessed seam, not a hard line.
+  const grooveAxis = isHorizontal ? "to right" : "to bottom";
+  const groove = `linear-gradient(${grooveAxis},
         transparent 0%,
-        color-mix(in oklch, var(--ink) 7%, transparent) 42%,
-        color-mix(in oklch, var(--ink) 4%, transparent) 50%,
-        color-mix(in oklch, var(--ink) 7%, transparent) 58%,
-        transparent 100%)`
-    : `linear-gradient(to bottom,
-        transparent 0%,
-        color-mix(in oklch, var(--ink) 7%, transparent) 42%,
-        color-mix(in oklch, var(--ink) 4%, transparent) 50%,
-        color-mix(in oklch, var(--ink) 7%, transparent) 58%,
+        var(--rule-soft) 40%,
+        var(--rule) 50%,
+        var(--rule-soft) 60%,
         transparent 100%)`;
 
   return (
@@ -1469,8 +1517,12 @@ function ResizeHandle({ handle, getContainer, onRatioChange }: ResizeHandleProps
         style={{
           pointerEvents: "none",
           opacity: showLine ? 1 : 0,
-          transition: "opacity var(--motion-fast) var(--ease-out)",
-          ...(isHorizontal ? { width: dragging ? 2 : 3, height: "100%" } : { height: dragging ? 2 : 3, width: "100%" }),
+          // Borderless groove that signals state purely by color/glow, never by
+          // changing size — the line holds a constant 3px so the seam doesn't
+          // thin (or shift its neighbours) when a drag begins.
+          transition:
+            "opacity var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+          ...(isHorizontal ? { width: 3, height: "100%" } : { height: 3, width: "100%" }),
           ...(dragging
             ? {
                 background: "var(--accent)",
@@ -1554,7 +1606,9 @@ function ResizeIntersectionGrip({
         top: `calc(${pct(intersection.y)} - ${INTERSECTION_GRIP / 2}px)`,
         width: INTERSECTION_GRIP,
         height: INTERSECTION_GRIP,
-        borderRadius: 4,
+        // On the small-control rung (5px) so the grip nests with the toolbar
+        // chrome instead of sitting at an off-ladder 4px.
+        borderRadius: "var(--radius-control, 5px)",
         touchAction: "none",
         cursor: dragging ? "grabbing" : "grab",
         display: "grid",
@@ -1615,6 +1669,11 @@ function PaneToolbar({
 }: PaneToolbarProps) {
   const stop = (e: React.MouseEvent | React.PointerEvent) => e.stopPropagation();
   const [menuOpen, setMenuOpen] = useState(false);
+  // Declarative hover state drives the toolbar's rest/hover opacity from one
+  // React-owned source, replacing the imperative e.currentTarget.style.opacity
+  // mutation on mouseenter/leave (which bypassed React and could desync with
+  // the menuOpen state).
+  const [hovered, setHovered] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const plusRef = useRef<HTMLButtonElement | null>(null);
 
@@ -1648,6 +1707,8 @@ function PaneToolbar({
       ref={wrapRef}
       onMouseDown={stop}
       onPointerDown={stop}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={{
         position: "absolute",
         top: 6,
@@ -1655,7 +1716,10 @@ function PaneToolbar({
         display: "flex",
         gap: 2,
         padding: 2,
-        borderRadius: 7,
+        // 8px pill, concentric with the 10px pane card and the 6px chrome
+        // buttons it groups (an earned mild-glass cluster that overlays live
+        // terminal canvas, per the toolbar-cluster reference).
+        borderRadius: 8,
         // Subtle pill background so the toolbar reads as a single grouped
         // affordance instead of three loose buttons floating over the
         // terminal canvas.
@@ -1664,16 +1728,13 @@ function PaneToolbar({
         WebkitBackdropFilter: "blur(6px)",
         border: "1px solid color-mix(in oklch, var(--rule-soft) 70%, transparent)",
         boxShadow: "var(--lift-hi)",
-        opacity: menuOpen ? 1 : 0.55,
+        // Single React-owned opacity source: dim at rest, full on hover or
+        // while the add-pane menu is open. (No .spark-fade-in here — its
+        // `both` fill would lock opacity at 1 and defeat the 0.55 rest dim.)
+        opacity: hovered || menuOpen ? 1 : 0.55,
         transition:
-          "opacity var(--motion-fast, 120ms) var(--ease-out, ease-out), transform var(--motion-fast, 120ms) var(--ease-out, ease-out)",
+          "opacity var(--motion-fast, 120ms) var(--ease-out, ease-out)",
         zIndex: 5,
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.opacity = "1";
-      }}
-      onMouseLeave={(e) => {
-        if (!menuOpen) e.currentTarget.style.opacity = "0.55";
       }}
     >
       <PaneDragHandle payload={dragPayload} />
@@ -1752,9 +1813,15 @@ function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }) {
   };
 
   return (
+    // .spark-icon-btn supplies the shared rest/hover (ink-9%)/press (ink-13%)
+    // backgrounds, the global :focus-visible accent ring, and disabled idiom;
+    // the dragging state overlays the accent (color + accent-soft fill) and a
+    // grabbing cursor. Kept as a role=button span with tabIndex -1 so the drag
+    // gesture and focus semantics are unchanged.
     <span
       role="button"
       tabIndex={-1}
+      className={`spark-icon-btn${dragging ? " is-active" : ""}`}
       title="Drag pane"
       aria-label="Drag pane"
       onMouseDown={(event) => event.stopPropagation()}
@@ -1779,15 +1846,10 @@ function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }) {
       onPointerUp={finishPointerDrag}
       onPointerCancel={finishPointerDrag}
       style={{
-        width: 20,
-        height: 20,
-        borderRadius: 5,
-        color: dragging ? "var(--accent)" : "var(--ink-dim)",
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
+        // Match the 20px / 6px geometry of the sibling ToolbarButtons.
+        ["--spark-icon-btn-size" as string]: "20px",
+        borderRadius: "var(--terminal-control-radius, 6px)",
         cursor: dragging ? "grabbing" : "grab",
-        background: dragging ? "color-mix(in oklch, var(--accent) 18%, transparent)" : "transparent",
         touchAction: "none",
       }}
     >
@@ -1845,22 +1907,19 @@ function AddPaneMenu({ onPick }: { onPick: (kind: AddPaneKind) => void }) {
   ];
 
   return (
+    // The single popover language: .spark-menu (--panel-2 face, 9px radius, 1px
+    // --rule border, --shadow-2). Opaque on the tint ramp — no backdrop blur,
+    // since menus are solid surfaces, not floating-over-live chrome.
     <div
       role="menu"
       aria-label="Add terminal pane"
+      className="spark-menu spark-fade-in"
       style={{
         position: "absolute",
         top: "calc(100% + 6px)",
         right: 0,
         zIndex: 50,
         minWidth: 238,
-        background: "color-mix(in oklch, var(--panel-2, var(--panel)) 94%, transparent)",
-        border: "1px solid var(--rule-strong, var(--rule))",
-        borderRadius: 9,
-        boxShadow: "var(--shadow-2)",
-        padding: 3,
-        backdropFilter: "blur(10px)",
-        WebkitBackdropFilter: "blur(10px)",
       }}
     >
       <div style={{ display: "grid", gap: 1 }}>
@@ -1901,34 +1960,28 @@ function AddPaneMenuItem({
   const tone = menuItemTone(accent);
   const detail = command ?? "current workspace";
   return (
+    // .spark-menu-item supplies the shared 5px radius, --hover (ink-5%) hover
+    // fill, press beat, and the global :focus-visible accent ring; the inline
+    // style only re-shapes it into the richer glyph/title/detail grid. Keyboard
+    // focus also lights the --hover fill so focused and hovered rows read alike.
     <button
       type="button"
       role="menuitem"
+      className="spark-menu-item"
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       onFocus={() => setFocus(true)}
       onBlur={() => setFocus(false)}
       style={{
-        appearance: "none",
-        width: "100%",
         textAlign: "left",
-        background: active
-          ? "color-mix(in oklch, var(--ink) 6%, transparent)"
-          : "transparent",
-        border: "none",
+        ...(focus ? { background: "var(--hover)" } : null),
         padding: "6px 7px",
-        borderRadius: 5,
-        color: "var(--ink)",
-        fontFamily: "var(--font-sans)",
         cursor: "default",
         display: "grid",
         gridTemplateColumns: "22px minmax(0, 1fr) auto",
-        alignItems: "center",
         gap: 8,
         minHeight: 36,
-        transition:
-          "background var(--motion-fast, 120ms) var(--ease-out, ease-out)",
       }}
     >
       <span
@@ -1939,7 +1992,9 @@ function AddPaneMenuItem({
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          borderRadius: 5,
+          // Swatch radius on the control rung (5px), nesting concentrically
+          // inside the 9px menu.
+          borderRadius: "var(--radius-control, 5px)",
           background: tone.background,
           color: tone.color,
           border: `1px solid ${tone.border}`,
@@ -1959,7 +2014,7 @@ function AddPaneMenuItem({
           <span
             style={{
               fontSize: 13,
-              fontWeight: 650,
+              fontWeight: 600,
               lineHeight: 1.15,
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -2058,6 +2113,12 @@ function RuntimeGlyph({ letter }: { letter: string }) {
   );
 }
 
+// Built on .spark-icon-btn so every pane-chrome glyph shares the app's
+// transparent-rest / ink-9%-hover / ink-13%-press / accent-active idiom plus
+// the global :focus-visible accent ring and pointer cursor — no per-button
+// reimplementation. Sized to 20px and the 6px --terminal-control-radius so the
+// buttons nest concentrically inside the 10px pane card. Danger (close) tints
+// the close glyph with --danger, re-tinting per OKLCH theme.
 const ToolbarButton = React.forwardRef<
   HTMLButtonElement,
   {
@@ -2068,16 +2129,11 @@ const ToolbarButton = React.forwardRef<
     children: React.ReactNode;
   }
 >(function ToolbarButton({ title, onClick, danger = false, active = false, children }, ref) {
-  const [hover, setHover] = useState(false);
-  const baseColor = danger ? "var(--danger, #e06c75)" : "var(--ink-dim)";
-  const hoverBg = danger
-    ? "color-mix(in oklch, var(--danger, #e06c75) 18%, transparent)"
-    : "color-mix(in oklch, var(--ink) 12%, transparent)";
-  const activeBg = "color-mix(in oklch, var(--ink) 14%, transparent)";
   return (
     <button
       ref={ref}
       type="button"
+      className={`spark-icon-btn${active ? " is-active" : ""}`}
       title={title}
       aria-label={title}
       aria-haspopup={active !== undefined ? true : undefined}
@@ -2086,28 +2142,16 @@ const ToolbarButton = React.forwardRef<
         e.stopPropagation();
         onClick();
       }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
       style={{
-        appearance: "none",
-        background: active ? activeBg : hover ? hoverBg : "transparent",
-        border: "none",
-        color:
-          active || hover
-            ? danger
-              ? "var(--danger, #e06c75)"
-              : "var(--ink)"
-            : baseColor,
-        width: 20,
-        height: 20,
-        borderRadius: 5,
+        // 20px target + 6px radius, overriding the class defaults (22/5) so the
+        // pane toolbar stays compact and concentric with the 10px pane card.
+        ["--spark-icon-btn-size" as string]: "20px",
+        borderRadius: "var(--terminal-control-radius, 6px)",
         cursor: "default",
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 0,
-        lineHeight: 1,
-        transition: "background var(--motion-fast, 120ms) var(--ease-out, ease-out), color var(--motion-fast, 120ms) var(--ease-out, ease-out)",
+        // Danger close glyph reads red; its hover/press background still comes
+        // from the class (ink-tint) so the press beat stays identical across
+        // the cluster, and the color re-tints per theme via --danger.
+        ...(danger ? { color: "var(--danger)" } : null),
       }}
     >
       {children}
@@ -2144,6 +2188,7 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
   const running = worker.state === "running";
   return (
     <div
+      className="spark-fade-in"
       style={{
         position: "absolute",
         top: 6,
@@ -2153,23 +2198,40 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
         gap: 6,
         padding: "2px 8px",
         borderRadius: 999,
+        // Reserve the right-anchored toolbar's footprint so the chip can never
+        // reach the toolbar at minimum pane width, with a max() floor so a very
+        // narrow pane clamps the box to a sane minimum instead of 0 (which let
+        // a nowrap label overflow into the toolbar). The label span — not this
+        // container — owns the ellipsis, so the live dot's glow is never
+        // clipped.
+        maxWidth: "max(80px, calc(100% - 180px))",
+        minWidth: 0,
+        whiteSpace: "nowrap",
         // Earned mild-glass chip: a panel veil over the terminal canvas so
         // the label stays legible without baking white/black (which invert
         // on the light themes).
         background: "color-mix(in oklch, var(--panel-2) 82%, transparent)",
-        border: "1px solid var(--accent-edge)",
+        // Glows live, calms when done: a running worker carries the accent
+        // (edge + text + halo); a finished one drops to a neutral --rule
+        // border + --ink-dim text + no glow so it stops reading as live and
+        // keeps the accent ration meaningful.
+        border: running ? "1px solid var(--accent-edge)" : "1px solid var(--rule)",
         backdropFilter: "blur(6px)",
         WebkitBackdropFilter: "blur(6px)",
-        color: "var(--accent)",
+        color: running ? "var(--accent)" : "var(--ink-dim)",
         fontFamily: "var(--font-mono)",
         fontSize: 10,
         fontWeight: 600,
         letterSpacing: "0.08em",
         textTransform: "uppercase",
-        boxShadow:
-          "var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px var(--accent-glow)",
+        boxShadow: running
+          ? "var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px var(--accent-glow)"
+          : "var(--lift-hi), 0 0 0 1px var(--rule-soft)",
         pointerEvents: "none",
         zIndex: 5,
+        animationDuration: "var(--motion-fast)",
+        transition:
+          "color var(--motion) var(--ease-out), border-color var(--motion) var(--ease-out), box-shadow var(--motion) var(--ease-out)",
       }}
     >
       <span
@@ -2178,15 +2240,24 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
           width: 6,
           height: 6,
           borderRadius: "50%",
-          background: running
-            ? "var(--accent)"
-            : "color-mix(in oklch, var(--accent) 55%, transparent)",
+          background: running ? "var(--accent)" : "var(--muted-2)",
           boxShadow: running ? "0 0 9px var(--accent-glow)" : "none",
           animation: running ? "spark-pulse 1.8s var(--ease-out) infinite" : undefined,
         }}
       />
-      <span>{label}</span>
-      <span style={{ opacity: 0.78, fontWeight: 500 }}>
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+        {label}
+      </span>
+      {/* Status word as a quieter eyebrow: smaller, --muted, more tracking so
+          the runtime label leads and the state reads as a subordinate tag. */}
+      <span
+        style={{
+          fontSize: 9,
+          fontWeight: 600,
+          letterSpacing: "0.14em",
+          color: "var(--muted)",
+        }}
+      >
         {running ? "running" : "done"}
       </span>
     </div>

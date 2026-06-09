@@ -745,7 +745,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
             flex: "0 0 auto",
             marginBottom: 8,
             padding: "6px 9px",
-            borderRadius: 6,
+            borderRadius: "var(--radius-surface, 7px)",
             border: "1px solid color-mix(in oklch, var(--danger) 35%, transparent)",
             background: "var(--danger-soft)",
             color: "var(--danger)",
@@ -911,31 +911,44 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
                   : "Enter to send, Shift+Enter for a new line"}
             </span>
           )}
-          <ContextPill
-            used={tokensUsed}
-            budget={
-              activeOneMillionContext && activeChatBackend === "claude"
-                ? 1_000_000
-                : contextWindowForModel(activeChatModelId).tokens
-            }
-          />
-          <IconButton
-            title="MCP and skills"
-            disabled={false}
-            onClick={openCapabilities}
+          {/* Right cluster: context gauge | capabilities | resume | send read
+              as one group, so the bottom row resolves to [pills · status ·
+              actions] instead of a scatter. Layout grouping only — every
+              handler and ref is unchanged. */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              flex: "0 0 auto",
+            }}
           >
-            <CapabilitiesGlyph />
-          </IconButton>
-          {isPaused && (
-            <TextButton onClick={resume} disabled={busy} tone="accent">
-              Resume
-            </TextButton>
-          )}
-          {isActive ? (
-            <StopButton onClick={onForcePauseRun} />
-          ) : (
-            <SendButton onClick={send} disabled={!canSend} />
-          )}
+            <ContextPill
+              used={tokensUsed}
+              budget={
+                activeOneMillionContext && activeChatBackend === "claude"
+                  ? 1_000_000
+                  : contextWindowForModel(activeChatModelId).tokens
+              }
+            />
+            <IconButton
+              title="MCP and skills"
+              disabled={false}
+              onClick={openCapabilities}
+            >
+              <CapabilitiesGlyph />
+            </IconButton>
+            {isPaused && (
+              <TextButton onClick={resume} disabled={busy} tone="accent">
+                Resume
+              </TextButton>
+            )}
+            {isActive ? (
+              <StopButton onClick={onForcePauseRun} />
+            ) : (
+              <SendButton onClick={send} disabled={!canSend} />
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -1225,10 +1238,12 @@ function MentionPopover({
         right: 8,
         bottom: "calc(100% + 6px)",
         zIndex: 50,
-        border: "1px solid var(--rule-strong)",
-        borderRadius: 8,
+        // One popover language: --panel-2 face, 9px radius, 1px --rule border,
+        // --shadow-2 float (matches the .spark-menu standard).
+        border: "1px solid var(--rule)",
+        borderRadius: "var(--radius-popover, 9px)",
         background: "var(--panel-2)",
-        boxShadow: "var(--shadow-2), var(--lift-hi)",
+        boxShadow: "var(--shadow-2)",
         padding: 5,
       }}
     >
@@ -1290,8 +1305,10 @@ function MentionRow({
         width: "100%",
         minWidth: 0,
         border: "none",
-        borderRadius: 6,
-        background: active ? "color-mix(in oklch, var(--accent) 16%, transparent)" : "transparent",
+        borderRadius: "var(--radius-control, 5px)",
+        // Keyboard-highlighted row carries the rationed accent via the
+        // --accent-soft tint (the menu-item .is-active idiom).
+        background: active ? "var(--accent-soft)" : "transparent",
         color: "inherit",
         display: "grid",
         gridTemplateColumns: "14px minmax(0, 1fr)",
@@ -1311,7 +1328,9 @@ function MentionRow({
           style={{
             color: active ? "var(--ink)" : "var(--ink-dim)",
             fontSize: 12,
-            fontWeight: active ? 700 : 600,
+            // Weight held constant across active/inactive so selection never
+            // reflows the row; the brighter --ink color carries selection.
+            fontWeight: 600,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
@@ -1400,7 +1419,7 @@ function AttachmentChip({
           width: 18,
           height: 18,
           border: "none",
-          borderRadius: 4,
+          borderRadius: "var(--radius-control, 5px)",
           background: removeHover ? "var(--danger-soft)" : "transparent",
           color: removeHover ? "var(--danger)" : "var(--muted)",
           display: "inline-flex",
@@ -1433,6 +1452,9 @@ function IconButton({
   children?: React.ReactNode;
 }) {
   const [hover, setHover] = useState(false);
+  const [pressed, setPressed] = useState(false);
+  const [focusRing, setFocusRing] = useState(false);
+  const live = !disabled;
   return (
     <button
       type="button"
@@ -1441,24 +1463,44 @@ function IconButton({
       title={title}
       aria-label={title}
       onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseLeave={() => {
+        setHover(false);
+        setPressed(false);
+      }}
+      onMouseDown={() => setPressed(true)}
+      onMouseUp={() => setPressed(false)}
+      // Compose the global --focus-ring into the inline box-shadow on keyboard
+      // focus; an inline box-shadow would otherwise clobber the global rule.
+      onFocus={(event) => setFocusRing(event.target.matches(":focus-visible"))}
+      onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
         width: 26,
         height: 26,
         flex: "0 0 26px",
         border: "1px solid var(--rule-soft)",
-        borderRadius: 6,
-        background: hover && !disabled ? "var(--hover)" : "transparent",
-        boxShadow: disabled ? "none" : "var(--lift-hi)",
+        borderRadius: "var(--radius-control, 5px)",
+        background:
+          pressed && live
+            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            : hover && live
+              ? "var(--hover)"
+              : "transparent",
+        boxShadow: focusRing
+          ? "var(--focus-ring)"
+          : pressed && live
+            ? "var(--well)"
+            : disabled
+              ? "none"
+              : "var(--lift-hi)",
         color: disabled ? "var(--muted-2)" : hover ? "var(--ink)" : "var(--ink-dim)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         padding: 0,
-        cursor: "default",
+        cursor: live ? "pointer" : "default",
         transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       {children}
@@ -1494,6 +1536,7 @@ function FileGlyph() {
 function StopButton({ onClick }: { onClick: () => void }) {
   const [hover, setHover] = useState(false);
   const [pressed, setPressed] = useState(false);
+  const [focusRing, setFocusRing] = useState(false);
   return (
     <button
       type="button"
@@ -1507,6 +1550,8 @@ function StopButton({ onClick }: { onClick: () => void }) {
       }}
       onMouseDown={() => setPressed(true)}
       onMouseUp={() => setPressed(false)}
+      onFocus={(event) => setFocusRing(event.target.matches(":focus-visible"))}
+      onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
         width: 26,
@@ -1517,7 +1562,13 @@ function StopButton({ onClick }: { onClick: () => void }) {
         background: hover
           ? "color-mix(in oklch, var(--danger) 88%, var(--ink))"
           : "var(--danger)",
-        boxShadow: pressed ? "var(--well)" : "var(--lift-hi)",
+        // Keyboard focus restores the accent ring (the inline box-shadow would
+        // otherwise clobber the global :focus-visible rule).
+        boxShadow: focusRing
+          ? "var(--focus-ring)"
+          : pressed
+            ? "var(--well)"
+            : "var(--lift-hi)",
         color: "var(--accent-ink)",
         display: "flex",
         alignItems: "center",
@@ -1539,6 +1590,7 @@ function StopButton({ onClick }: { onClick: () => void }) {
 function SendButton({ onClick, disabled }: { onClick: () => void; disabled: boolean }) {
   const [hover, setHover] = useState(false);
   const [pressed, setPressed] = useState(false);
+  const [focusRing, setFocusRing] = useState(false);
   const active = pressed && !disabled;
   return (
     <button
@@ -1554,6 +1606,8 @@ function SendButton({ onClick, disabled }: { onClick: () => void; disabled: bool
       }}
       onMouseDown={() => setPressed(true)}
       onMouseUp={() => setPressed(false)}
+      onFocus={(event) => setFocusRing(event.target.matches(":focus-visible"))}
+      onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
         width: 26,
@@ -1566,19 +1620,23 @@ function SendButton({ onClick, disabled }: { onClick: () => void; disabled: bool
           : hover
             ? "color-mix(in oklch, var(--accent) 88%, var(--ink))"
             : "var(--accent)",
-        boxShadow: disabled
-          ? "none"
-          : active
-            ? "var(--well)"
-            : hover
-              ? "var(--shadow-glow)"
-              : "var(--lift-hi)",
+        // Keyboard focus restores the accent ring; otherwise this inline
+        // box-shadow chain silently overrides the global :focus-visible rule.
+        boxShadow: focusRing
+          ? "var(--focus-ring)"
+          : disabled
+            ? "none"
+            : active
+              ? "var(--well)"
+              : hover
+                ? "var(--shadow-glow)"
+                : "var(--lift-hi)",
         color: disabled ? "var(--muted)" : "var(--accent-ink)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         padding: 0,
-        cursor: "default",
+        cursor: disabled ? "default" : "pointer",
         transform: active ? "translateY(0.5px)" : "translateY(0)",
         transition:
           "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
@@ -1610,6 +1668,7 @@ function TextButton({
 }) {
   const [hover, setHover] = useState(false);
   const [pressed, setPressed] = useState(false);
+  const [focusRing, setFocusRing] = useState(false);
   const color = tone === "danger" ? "var(--danger)" : "var(--accent)";
   const active = pressed && !disabled;
   return (
@@ -1624,6 +1683,8 @@ function TextButton({
       }}
       onMouseDown={() => setPressed(true)}
       onMouseUp={() => setPressed(false)}
+      onFocus={(event) => setFocusRing(event.target.matches(":focus-visible"))}
+      onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
         border: `1px solid ${
@@ -1631,14 +1692,22 @@ function TextButton({
         }`,
         borderRadius: 6,
         background: hover && !disabled ? "var(--hover)" : "transparent",
-        boxShadow: disabled ? "none" : active ? "var(--well)" : "var(--lift-hi)",
+        // Keyboard focus restores the accent ring (inline box-shadow would
+        // otherwise clobber the global :focus-visible rule).
+        boxShadow: focusRing
+          ? "var(--focus-ring)"
+          : disabled
+            ? "none"
+            : active
+              ? "var(--well)"
+              : "var(--lift-hi)",
         color: disabled ? "var(--muted)" : color,
         height: 26,
         padding: "0 8px",
         fontFamily: "var(--font-sans)",
         fontSize: 11,
         fontWeight: 600,
-        cursor: "default",
+        cursor: disabled ? "default" : "pointer",
         flex: "0 0 auto",
         transform: active ? "translateY(0.5px)" : "translateY(0)",
         transition:

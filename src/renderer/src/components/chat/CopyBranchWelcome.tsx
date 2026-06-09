@@ -32,7 +32,7 @@ export default function CopyBranchWelcome({ copyBranch }: { copyBranch: CopyBran
         style={{
           background: "var(--panel-2)",
           border: "1px solid var(--rule-soft)",
-          borderRadius: 10,
+          borderRadius: "var(--radius-surface, 7px)",
           padding: "12px 14px",
           fontSize: 13,
           lineHeight: 1.5,
@@ -90,7 +90,8 @@ function Mono({ children, accent = false }: { children: React.ReactNode; accent?
         fontFamily: "var(--font-mono)",
         fontSize: "0.92em",
         padding: "1px 5px",
-        borderRadius: 5,
+        // Inline code-like chip — 4px per the radius ladder (inline code 4px).
+        borderRadius: 4,
         background: accent
           ? "color-mix(in oklch, var(--accent) 16%, transparent)"
           : "color-mix(in oklch, var(--ink) 7%, transparent)",

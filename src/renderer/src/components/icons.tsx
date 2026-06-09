@@ -352,6 +352,146 @@ export function HistoryIcon({ size = 14 }: { size?: number }) {
   );
 }
 
+export function BackIcon({ size = 14 }: { size?: number }) {
+  // A leftward arrow — browser "back" navigation. 1.5px stroke to sit in the
+  // same icon family as Inspect / Draw in the preview toolbar.
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <line x1="11" y1="7" x2="3.5" y2="7" />
+      <polyline points="6.5,3.5 3,7 6.5,10.5" />
+    </svg>
+  );
+}
+
+export function ForwardIcon({ size = 14 }: { size?: number }) {
+  // A rightward arrow — browser "forward" navigation.
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <line x1="3" y1="7" x2="10.5" y2="7" />
+      <polyline points="7.5,3.5 11,7 7.5,10.5" />
+    </svg>
+  );
+}
+
+export function ReloadIcon({ size = 14 }: { size?: number }) {
+  // A circular-arrow refresh glyph — browser "reload". The gap + arrowhead
+  // reads as the standard clockwise reload icon.
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M11 7 A 4 4 0 1 1 9.6 3.9" />
+      <polyline points="11.2,1.8 11.2,4.2 8.8,4.2" />
+    </svg>
+  );
+}
+
+export function ExternalLinkIcon({ size = 14 }: { size?: number }) {
+  // A box with an arrow escaping the top-right — "open in system browser".
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M7 3 H3.5 V10.5 H11 V7" />
+      <line x1="7" y1="7" x2="11" y2="3" />
+      <polyline points="8,3 11,3 11,6" />
+    </svg>
+  );
+}
+
+export function DevToolsIcon({ size = 14 }: { size?: number }) {
+  // Angle brackets `< >` — "open Chromium DevTools". The same code-glyph
+  // shape the old `{}` label implied, drawn as a stroked SVG.
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <polyline points="5,4 2.5,7 5,10" />
+      <polyline points="9,4 11.5,7 9,10" />
+    </svg>
+  );
+}
+
+export function GlobeIcon({ size = 14 }: { size?: number }) {
+  // A meridian-and-equator globe — the security/scheme glyph for http (no
+  // lock). Sits in the address pill's leading slot.
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="7" cy="7" r="4.5" />
+      <ellipse cx="7" cy="7" rx="2" ry="4.5" />
+      <line x1="2.5" y1="7" x2="11.5" y2="7" />
+    </svg>
+  );
+}
+
+export function LockIcon({ size = 14 }: { size?: number }) {
+  // A closed padlock — the security glyph for https. Shackle + body, drawn
+  // to match the address pill's leading slot scale.
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="3.5" y="6.5" width="7" height="5.5" rx="1" />
+      <path d="M5 6.5 V4.75 A 2 2 0 0 1 9 4.75 V6.5" />
+    </svg>
+  );
+}
+
 export function ChevronIcon({ open }: { open: boolean }) {
   return (
     <span

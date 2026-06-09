@@ -199,7 +199,7 @@ const CODE_BLOCK_STYLE: React.CSSProperties = {
   lineHeight: 1.5,
   background: "var(--bg)",
   border: "1px solid var(--rule-soft)",
-  borderRadius: 7,
+  borderRadius: "var(--radius-control, 7px)",
   // Recessed well — depth via the foundation token (light-theme-safe) so the
   // code block reads as a sunk surface rather than a flat outlined box.
   boxShadow: "var(--well)",

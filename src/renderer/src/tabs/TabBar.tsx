@@ -678,7 +678,6 @@ const ChatTabItem = React.memo(function ChatTabItem({
   onClose,
   onReorderTab,
 }: ChatTabItemProps) {
-  const [hover, setHover] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(tab.title);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -780,8 +779,6 @@ const ChatTabItem = React.memo(function ChatTabItem({
         setReorderEdge(null);
         if (reorder.tabId !== tab.id) onReorderTab(reorder.tabId, tab.id, position);
       }}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
       onClick={(e) => {
         e.stopPropagation();
         if (!editing) onSelect(tab.id);
@@ -830,7 +827,7 @@ const ChatTabItem = React.memo(function ChatTabItem({
             background: "var(--bg)",
             color: "var(--ink)",
             border: "1px solid var(--accent-edge)",
-            borderRadius: 4,
+            borderRadius: "var(--radius-control, 5px)",
             padding: "1px 5px",
             font: "inherit",
             outline: "none",
@@ -840,7 +837,11 @@ const ChatTabItem = React.memo(function ChatTabItem({
       ) : (
         <span className="spark-tab__label">{tab.title}</span>
       )}
-      {!editing && hover && (
+      {/* Rename + close are always rendered (gated only by !editing) and revealed
+          via the .spark-tab:hover .spark-tab__close opacity rule — so the tab's
+          width never changes on hover, and a keyboard-focused rename button is
+          no longer invisible (see .spark-tab__close:focus-visible). */}
+      {!editing && (
         <>
           <button
             type="button"
@@ -1009,8 +1010,8 @@ function NewTabDropZone() {
         pointerEvents: "none",
         flex: "0 0 auto",
         color: "var(--accent)",
-        border: "1px dashed color-mix(in oklch, var(--accent) 55%, transparent)",
-        background: "color-mix(in oklch, var(--accent) 12%, transparent)",
+        border: "1px dashed var(--accent-edge)",
+        background: "var(--accent-soft)",
         fontSize: 11,
         fontWeight: 600,
       }}
