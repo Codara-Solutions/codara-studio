@@ -14,6 +14,8 @@ import {
   DEFAULT_COPY_BRANCH_SETUP_COMMAND,
   DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
   EDITOR_THEME_IDS,
+  TERMINAL_SCROLLBACK_LINE_LIMIT_MAX,
+  TERMINAL_SCROLLBACK_LINE_LIMIT_MIN,
   INLINE_AI_DELAY_PRESETS,
   INLINE_AI_MODEL_PRESETS,
 } from "@shared/types";
@@ -374,8 +376,12 @@ export default function SettingsDialog({
               <TerminalSettings
                 shells={shells}
                 selectedShellId={selectedShell?.id ?? null}
+                scrollbackLineLimit={draft.terminalScrollbackLineLimit}
                 onSelect={(defaultShellId) =>
                   setDraft((current) => ({ ...current, defaultShellId }))
+                }
+                onScrollbackLineLimitChange={(terminalScrollbackLineLimit) =>
+                  setDraft((current) => ({ ...current, terminalScrollbackLineLimit }))
                 }
               />
             )}
@@ -446,11 +452,15 @@ export default function SettingsDialog({
 function TerminalSettings({
   shells,
   selectedShellId,
+  scrollbackLineLimit,
   onSelect,
+  onScrollbackLineLimitChange,
 }: {
   shells: ShellInfo[];
   selectedShellId: string | null;
+  scrollbackLineLimit: number;
   onSelect: (shellId: string) => void;
+  onScrollbackLineLimitChange: (lineLimit: number) => void;
 }) {
   return (
     <div>
@@ -475,6 +485,20 @@ function TerminalSettings({
             onSelect={() => onSelect(shell.id)}
           />
         ))}
+      </div>
+      <div style={{ marginTop: 22 }}>
+        <SectionTitle
+          title="Output history"
+          detail="Applies to manual terminals, worker panes, and chat backend terminal views."
+        />
+        <NumberRow
+          title="Scrollback lines"
+          desc={`Keep at most this many terminal output lines in memory and restored history. Range ${TERMINAL_SCROLLBACK_LINE_LIMIT_MIN.toLocaleString()}-${TERMINAL_SCROLLBACK_LINE_LIMIT_MAX.toLocaleString()} lines.`}
+          min={TERMINAL_SCROLLBACK_LINE_LIMIT_MIN}
+          max={TERMINAL_SCROLLBACK_LINE_LIMIT_MAX}
+          value={scrollbackLineLimit}
+          onChange={onScrollbackLineLimitChange}
+        />
       </div>
     </div>
   );
@@ -1398,6 +1422,24 @@ function NumberRow({
   disabled?: boolean;
   onChange: (next: number) => void;
 }) {
+  // Edit against a local draft and only parse+clamp+commit on blur/Enter —
+  // clamping every keystroke would turn a partially-typed "90" into the min
+  // (e.g. 600) and make the field impossible to clear while retyping.
+  const [draft, setDraft] = useState(String(value));
+  const [editing, setEditing] = useState(false);
+  useEffect(() => {
+    if (!editing) setDraft(String(value));
+  }, [editing, value]);
+  const commit = (raw: string) => {
+    const next = Number(raw);
+    if (raw.trim() === "" || !Number.isFinite(next)) {
+      setDraft(String(value));
+      return;
+    }
+    const clamped = Math.min(max, Math.max(min, Math.trunc(next)));
+    setDraft(String(clamped));
+    if (clamped !== value) onChange(clamped);
+  };
   return (
     <SettingRow
       title={title}
@@ -1409,12 +1451,16 @@ function NumberRow({
         type="number"
         min={min}
         max={max}
-        value={value}
+        value={draft}
         disabled={disabled}
-        onChange={(e) => {
-          const next = Number(e.target.value);
-          if (!Number.isFinite(next)) return;
-          onChange(Math.min(max, Math.max(min, Math.trunc(next))));
+        onChange={(e) => setDraft(e.target.value)}
+        onFocus={() => setEditing(true)}
+        onBlur={(e) => {
+          setEditing(false);
+          commit(e.target.value);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit(e.currentTarget.value);
         }}
         style={{
           width: 72,
@@ -1966,7 +2012,13 @@ function RunRow({
           <span style={{ marginLeft: "auto" }}>{created}</span>
         </div>
       </div>
-      <div style={{ display: "flex", gap: 6 }} onMouseLeave={() => setArmed(false)}>
+      <div
+        style={{ display: "flex", gap: 6 }}
+        onMouseLeave={() => setArmed(false)}
+        onBlur={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setArmed(false);
+        }}
+      >
         <FooterButton onClick={onOpen}>Open</FooterButton>
         <DangerButton
           onClick={() => {
@@ -2324,15 +2376,18 @@ function CustomSelect({
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        // Capture + stopPropagation so Escape dismisses just the dropdown
+        // instead of also closing the whole Settings dialog.
+        event.stopPropagation();
         setOpen(false);
         triggerRef.current?.focus();
       }
     };
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, { capture: true });
     return () => {
       document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keydown", onKey, { capture: true });
     };
   }, [open]);
 

@@ -498,6 +498,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   };
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (mentionQuery && (mentionSuggestions.length > 0 || filesLoading)) {
       if (event.key === "ArrowDown") {
         event.preventDefault();

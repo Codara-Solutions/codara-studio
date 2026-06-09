@@ -294,6 +294,10 @@ export async function getRun(runId: string): Promise<RunState | null> {
     return run;
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if (err instanceof SyntaxError) {
+      console.warn(`[run-store] Skipping corrupt run.json for run ${runId} (${runPath(runId)}):`, err);
+      return null;
+    }
     throw err;
   }
 }
@@ -788,7 +792,14 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   }
 
   const latest = await requireRun(launched.id);
-  if (latest.status === "paused") return;
+  if (
+    latest.status === "paused" ||
+    latest.status === "cancelled" ||
+    latest.status === "complete" ||
+    latest.status === "failed"
+  ) {
+    return;
+  }
   const hasOtherActiveCycles = hasOtherAutopilotCycles(runId, attemptId);
   const hasOtherActiveWorkers = activeWorkersForRun(runId).some((worker) => worker.attemptId !== attemptId);
   // For execute-mode CC/Codex chat backends, the CC/Codex manager session is
@@ -1221,6 +1232,7 @@ async function markAutopilotCycleFailed(runId: string, attemptId: string, err: u
       error,
     },
     mutate: (draft, timestamp) => {
+      if (draft.status === "cancelled" || draft.status === "complete") return false;
       draft.status = "failed";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
@@ -1666,6 +1678,8 @@ async function askChatBackendNonOpenRouter(
       sparkCallId: callId,
       type: `chat.${event.kind}`,
       payload: event as unknown as Record<string, unknown>,
+    }).catch((err) => {
+      console.warn("[run-store] appendEvent for chat stream event failed:", err);
     });
   };
 
@@ -5784,6 +5798,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     fs.writeFile(paths.stdoutLog, "", "utf8"),
     fs.writeFile(paths.stderrLog, "", "utf8"),
     fs.writeFile(paths.rawLog, "", "utf8"),
+    fs.rm(paths.finalReportJson, { force: true }),
   ]);
 
   const promptText = await readWorkerPromptForLaunch(paths);
@@ -9515,6 +9530,7 @@ async function runWorkerSession({
   let fatalErrorTimer: NodeJS.Timeout | undefined;
   let fatalErrorBuffer = "";
   let stuckWatchdog: StuckWatchdog | null = null;
+  let sessionSettled = false;
   const offRawTap = pty.tap(attemptId, (chunk) => {
     stuckWatchdog?.bumpPtyActivity();
     try {
@@ -9603,6 +9619,7 @@ async function runWorkerSession({
     const finish = (value: { exitCode: number; error?: string }) => {
       if (settled) return;
       settled = true;
+      sessionSettled = true;
       // Tear down the worker tree BEFORE resolving so callers awaiting
       // exitPromise observe a fully cleaned-up worker. killImmediate is a
       // no-op if the pty already exited via offExit, so success paths cost
@@ -9624,10 +9641,20 @@ async function runWorkerSession({
       });
     });
     const reportPoll = setInterval(() => {
+      // Finish only once the report PARSES, not merely exists. The agent CLI
+      // writes final-report.json non-atomically, and finish() kills the worker
+      // tree before resolving — a tick landing mid-write would otherwise kill
+      // the CLI and leave the file permanently truncated. Guard with the cheap
+      // existence check first (the file is absent for most of the session), then
+      // attempt the read+parse; a partially-written file fails JSON.parse and is
+      // retried on the next tick.
       void fs.access(paths.finalReportJson)
-        .then(() => finish({ exitCode: 0 }))
+        .then(() => readWorkerReport(paths.finalReportJson))
+        .then((report) => {
+          if (report) finish({ exitCode: 0 });
+        })
         .catch(() => {
-          /* not yet written */
+          /* not yet written / not yet parseable */
         });
     }, 750);
     const hardTimeout = setTimeout(() => {
@@ -9676,6 +9703,10 @@ async function runWorkerSession({
         })();
       },
     });
+    if (sessionSettled) {
+      stuckWatchdog.stop();
+      stuckWatchdog = null;
+    }
   })();
 
   // Stagger launch + prompt the same way the TEST CLAUDE button does:

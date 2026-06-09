@@ -8,6 +8,7 @@ interface Props {
   workspace: Workspace | null;
   runs: RunState[];
   activeRunId: string | null;
+  terminalScrollbackLineLimit: number;
   // Chat / backend-PTY view mode — driven by the workspace's hoisted inner
   // tab strip so the toggle survives navigating from the chat tab to a worker
   // or back. Optional during the transition; ChatPanel falls back to its own
@@ -34,6 +35,7 @@ export default function OrchestrationSidebar({
   workspace,
   runs,
   activeRunId,
+  terminalScrollbackLineLimit,
   chatView,
   onChatViewChange,
   onSelectRun,
@@ -226,6 +228,7 @@ export default function OrchestrationSidebar({
       workspace={workspace}
       runs={runs}
       activeRun={activeRun}
+      terminalScrollbackLineLimit={terminalScrollbackLineLimit}
       error={error}
       collapsed={collapsed}
       onToggleCollapse={onToggleCollapse}

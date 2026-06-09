@@ -9,7 +9,10 @@ import type {
   SparkEvent,
   Workspace,
 } from "@shared/types";
-import { DEFAULT_COPY_BRANCH_SETUP_COMMAND } from "@shared/types";
+import {
+  DEFAULT_COPY_BRANCH_SETUP_COMMAND,
+  TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
+} from "@shared/types";
 import { makeId } from "@shared/ids";
 import { backendPtySessionId } from "@shared/backend-pty";
 import WindowChrome from "./components/WindowChrome";
@@ -87,6 +90,7 @@ const CHAT_TAB_LABEL = "Spark Agent";
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
+  terminalScrollbackLineLimit: TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   openRouterApiKey: "",
   openRouterModel: "google/gemini-flash-latest",
   agentRuntimeSelection: "auto",
@@ -253,6 +257,13 @@ export default function App() {
   // fire dozens of IPC round-trips. We coalesce a burst into one refresh.
   const runRefreshTimer = useRef<number | null>(null);
   const processedSpawnTerminalEventsRef = useRef<Set<string>>(new Set());
+  // Spawn-terminal specs that arrived for a workspace that wasn't active at the
+  // time. We can't drop them into tabsRef (that's the ACTIVE workspace's tab
+  // store), so we queue them per workspace and replay when that workspace is
+  // activated — see the replay effect keyed on activeId below.
+  const pendingSpawnTerminalsRef = useRef<
+    Map<string, Array<{ command: string; runtime?: string }>>
+  >(new Map());
   // Set of workspace ids that received an orchestration event since the last
   // debounced flush — so the flush refreshes counts for exactly the affected
   // workspaces (not a blanket re-list of everything).
@@ -335,7 +346,7 @@ export default function App() {
 
   // Tabs are scoped per-workspace so each workspace remembers its own layout.
   // useTabs internally swaps tab lists when the workspaceId argument changes.
-  const tabs = useTabs(activeId, activeWorkspace?.cwd);
+  const tabs = useTabs(activeId, activeWorkspace?.cwd, settings.terminalScrollbackLineLimit);
   const visibleWorkbenchTabs = useMemo(
     () => tabs.tabs.filter((tab) => isTabVisibleForRun(tab, activeRunId)),
     [tabs.tabs, activeRunId],
@@ -659,6 +670,7 @@ export default function App() {
     }
     try {
       const next = await window.spark.orchestration.listRuns(workspaceId);
+      if (activeIdRef.current !== workspaceId) return;
       setRuns(next);
     } catch {
       /* Surface details elsewhere; this is opportunistic. */
@@ -777,11 +789,17 @@ export default function App() {
       if (event.type === "spark.spawn_terminals") {
         if (processedSpawnTerminalEventsRef.current.has(event.id)) return;
         processedSpawnTerminalEventsRef.current.add(event.id);
+        // Bound the dedup set so it can't grow forever over a long session.
+        if (processedSpawnTerminalEventsRef.current.size > 500) {
+          const ids = Array.from(processedSpawnTerminalEventsRef.current);
+          processedSpawnTerminalEventsRef.current = new Set(ids.slice(ids.length - 250));
+        }
         const payload = event.payload as
           | { terminals?: Array<{ command?: unknown; runtime?: unknown }> }
           | undefined;
+        const spawnWorkspaceId = event.workspaceId;
         const cwd = workspacesRef.current.find(
-          (w) => w.id === event.workspaceId,
+          (w) => w.id === spawnWorkspaceId,
         )?.cwd;
         const specs = (payload?.terminals ?? [])
           .map((spec) => ({
@@ -790,15 +808,43 @@ export default function App() {
           }))
           .filter((spec) => spec.command.length > 0);
         if (specs.length > 0) {
-          window.setTimeout(() => {
-            window.requestAnimationFrame(() => {
-              tabsRef.current.newTerminalGrid(cwd, specs);
-            });
-          }, 0);
+          if (spawnWorkspaceId && spawnWorkspaceId !== activeIdRef.current) {
+            // Background run: don't drop its grid into the ACTIVE workspace's
+            // tab store (that would land a cd'd-into-B terminal inside
+            // workspace A and steal focus). Queue it; the replay effect spawns
+            // it when this workspace is activated.
+            const queue = pendingSpawnTerminalsRef.current.get(spawnWorkspaceId) ?? [];
+            queue.push(...specs);
+            pendingSpawnTerminalsRef.current.set(spawnWorkspaceId, queue);
+          } else {
+            window.setTimeout(() => {
+              window.requestAnimationFrame(() => {
+                tabsRef.current.newTerminalGrid(cwd, specs);
+              });
+            }, 0);
+          }
         }
       }
     });
   }, [booted, refreshRunsFor]);
+
+  // Replay any spawn-terminal specs queued for a workspace while it was in the
+  // background. Runs whenever the active workspace changes (and once after
+  // boot): if the now-active workspace has pending specs, drop them into its
+  // tab store (which useTabs has already swapped to this workspace). The grid's
+  // cwd is re-resolved from the live workspace list at replay time.
+  useEffect(() => {
+    if (!booted || !activeId) return;
+    const queued = pendingSpawnTerminalsRef.current.get(activeId);
+    if (!queued || queued.length === 0) return;
+    pendingSpawnTerminalsRef.current.delete(activeId);
+    const cwd = workspacesRef.current.find((w) => w.id === activeId)?.cwd;
+    window.setTimeout(() => {
+      window.requestAnimationFrame(() => {
+        tabsRef.current.newTerminalGrid(cwd, queued);
+      });
+    }, 0);
+  }, [activeId, booted]);
 
   // Clear the run-refresh debounce timer on unmount so a pending flush can't
   // fire into an unmounted tree.
@@ -1162,6 +1208,11 @@ export default function App() {
       disposeTerminalPanesInTabs(tabsRef.current.tabs);
     } else {
       disposePersistedWorkspaceTerminalPanes(id);
+    }
+    try {
+      window.localStorage.removeItem(`spark.tabs:${id}`);
+    } catch {
+      /* best-effort cleanup only */
     }
     setWorkspaces((ws) => {
       const next = ws.filter((w) => w.id !== id);
@@ -2286,6 +2337,7 @@ export default function App() {
               tabs={tabs}
               workspace={activeWorkspace}
               shell={terminalShell}
+              terminalScrollbackLineLimit={settings.terminalScrollbackLineLimit}
               runs={runs}
               activeRunId={activeRunId}
               onSelectRun={handleSelectRun}
@@ -2692,6 +2744,7 @@ interface WorkspaceProps {
   tabs: ReturnType<typeof useTabs>;
   workspace: Workspace | null;
   shell: ShellInfo | null;
+  terminalScrollbackLineLimit: number;
   runs: RunState[];
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
@@ -2732,6 +2785,7 @@ const Workspace = React.memo(function Workspace({
   tabs,
   workspace,
   shell,
+  terminalScrollbackLineLimit,
   runs,
   activeRunId,
   onSelectRun,
@@ -3024,6 +3078,7 @@ const Workspace = React.memo(function Workspace({
           workspace={workspace}
           runs={runs}
           activeRunId={activeRunId}
+          terminalScrollbackLineLimit={terminalScrollbackLineLimit}
           chatView={chatView}
           onChatViewChange={setChatView}
           onSelectRun={onSelectRun}
@@ -3039,6 +3094,7 @@ const Workspace = React.memo(function Workspace({
           tabs={tabs.tabs}
           activeId={effectiveActiveId}
           shell={shell}
+          scrollbackLineLimit={terminalScrollbackLineLimit}
           onDetectedUrl={onDetectedUrl}
           onSparkOpen={handleSparkOpen}
           onPaneExit={handlePaneExit}
@@ -3052,6 +3108,7 @@ const Workspace = React.memo(function Workspace({
           onPaneActivity={onPaneActivity}
           onPaneUserInput={onPaneUserInput}
           onPaneScrollback={onPaneScrollback}
+          onFlushScrollback={tabs.flushScrollbackNow}
           onPaneAgentState={onTerminalPaneAgentState}
         />
         <PreviewStack

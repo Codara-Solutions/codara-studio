@@ -79,6 +79,30 @@ function titleFromInput(input: EnqueueRunInput): string {
   return input.input.workspaceName;
 }
 
+// Serialize every load-mutate-persist cycle. persist() atomicizes a single
+// write, but the read-modify-write spanning loadQueue→mutate→persist is not
+// atomic: two near-simultaneous mutations both load the same snapshot and the
+// second persist clobbers the first (a completion reverts an item to "running"
+// with its watcher already gone; an interleaved enqueue is dropped from disk).
+// Routing every cycle through this promise-chain mutex makes them sequential.
+//
+// REENTRANCY: the lock must be acquired exactly once per logical operation.
+// Public functions are thin locked wrappers; internal call sites that already
+// run under the lock (burnDown's per-cycle blocks) use the *Inner unlocked
+// implementations instead so the chain never waits on itself (which would
+// deadlock). burnDown does NOT hold the lock across its whole drain — each
+// discrete cycle re-acquires it, so a long startAutopilot await between cycles
+// can't block enqueue/dequeue.
+let queueOp: Promise<unknown> = Promise.resolve();
+function withQueue<T>(fn: () => Promise<T>): Promise<T> {
+  const next = queueOp.then(fn, fn);
+  queueOp = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 /**
  * Read the queue from disk, returning a fresh default ({ concurrency: 1,
  * running: false, items: [] }) when the file is missing. Any other read/parse
@@ -88,7 +112,11 @@ function titleFromInput(input: EnqueueRunInput): string {
 export async function loadQueue(): Promise<RunQueueState> {
   try {
     const raw = await fs.readFile(queuePath(), "utf8");
-    return JSON.parse(raw) as RunQueueState;
+    const parsed = JSON.parse(raw) as RunQueueState;
+    if (!parsed || !Array.isArray(parsed.items)) {
+      throw new Error(`Corrupt run queue state (missing items array): ${queuePath()}`);
+    }
+    return { ...defaultQueueState(), ...parsed };
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return defaultQueueState();
@@ -108,17 +136,19 @@ export async function getQueue(): Promise<RunQueueState> {
  * Returns the newly created QueuedRun.
  */
 export async function enqueue(input: EnqueueRunInput): Promise<QueuedRun> {
-  const state = await loadQueue();
-  const item: QueuedRun = {
-    id: makeId("queued"),
-    title: titleFromInput(input),
-    status: "queued",
-    input: input.input,
-    enqueuedAt: new Date().toISOString(),
-  };
-  state.items.push(item);
-  await persist(state);
-  return item;
+  return withQueue(async () => {
+    const state = await loadQueue();
+    const item: QueuedRun = {
+      id: makeId("queued"),
+      title: titleFromInput(input),
+      status: "queued",
+      input: input.input,
+      enqueuedAt: new Date().toISOString(),
+    };
+    state.items.push(item);
+    await persist(state);
+    return item;
+  });
 }
 
 /**
@@ -128,10 +158,12 @@ export async function enqueue(input: EnqueueRunInput): Promise<QueuedRun> {
  * queue snapshot.
  */
 export async function dequeue(id: string): Promise<RunQueueState> {
-  const state = await loadQueue();
-  state.items = state.items.filter((item) => !(item.id === id && item.status === "queued"));
-  await persist(state);
-  return state;
+  return withQueue(async () => {
+    const state = await loadQueue();
+    state.items = state.items.filter((item) => !(item.id === id && item.status === "queued"));
+    await persist(state);
+    return state;
+  });
 }
 
 /**
@@ -140,10 +172,12 @@ export async function dequeue(id: string): Promise<RunQueueState> {
  * the updated state.
  */
 export async function setConcurrency(n: number): Promise<RunQueueState> {
-  const state = await loadQueue();
-  state.concurrency = Math.max(1, Math.floor(n));
-  await persist(state);
-  return state;
+  return withQueue(async () => {
+    const state = await loadQueue();
+    state.concurrency = Math.max(1, Math.floor(n));
+    await persist(state);
+    return state;
+  });
 }
 
 function countRunning(state: RunQueueState): number {
@@ -211,35 +245,43 @@ export async function burnDown(): Promise<RunQueueState> {
   burnDownInFlight = true;
 
   try {
-    {
+    await withQueue(async () => {
       const opening = await loadQueue();
       opening.running = true;
       await persist(opening);
-    }
+    });
 
     // Launch loop: re-load each iteration so concurrent enqueue/dequeue and the
-    // status transitions written below are observed rather than clobbered.
+    // status transitions written below are observed rather than clobbered. Each
+    // discrete cycle runs under the queue lock; startAutopilot is awaited
+    // OUTSIDE the lock so a slow launch can't block enqueue/dequeue.
     for (;;) {
-      const state = await loadQueue();
-      if (countRunning(state) >= state.concurrency) break;
-      const item = nextQueued(state);
-      if (!item) break;
+      // Claim the next queued slot as one locked cycle. Returns the claimed item
+      // (so we have its id after releasing the lock) or null when the loop ends.
+      const claimedItem = await withQueue(async () => {
+        const state = await loadQueue();
+        if (countRunning(state) >= state.concurrency) return null;
+        const item = nextQueued(state);
+        if (!item) return null;
 
-      item.status = "running";
-      item.startedAt = new Date().toISOString();
-      await persist(state);
+        item.status = "running";
+        item.startedAt = new Date().toISOString();
+        await persist(state);
+        return item;
+      });
+      if (!claimedItem) break;
 
       try {
-        const run = await startAutopilot(item.input);
+        const run = await startAutopilot(claimedItem.input);
         // Stamp the runId but keep status 'running' — watchCompletion flips it
         // to done/failed when the run actually finishes.
-        await transition(item.id, (claimed) => {
+        await transition(claimedItem.id, (claimed) => {
           claimed.runId = run.id;
         });
-        watchCompletion(item.id, run.id);
+        watchCompletion(claimedItem.id, run.id);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
-        await transition(item.id, (claimed) => {
+        await transition(claimedItem.id, (claimed) => {
           claimed.status = "failed";
           claimed.error = message;
           claimed.finishedAt = new Date().toISOString();
@@ -247,10 +289,12 @@ export async function burnDown(): Promise<RunQueueState> {
       }
     }
 
-    const closing = await loadQueue();
-    closing.running = countRunning(closing) > 0;
-    await persist(closing);
-    return closing;
+    return await withQueue(async () => {
+      const closing = await loadQueue();
+      closing.running = countRunning(closing) > 0;
+      await persist(closing);
+      return closing;
+    });
   } finally {
     burnDownInFlight = false;
   }
@@ -263,17 +307,19 @@ export async function burnDown(): Promise<RunQueueState> {
  * version; durable in-flight ownership is the daemon split's job.)
  */
 export async function resumeQueue(): Promise<void> {
-  const state = await loadQueue();
-  let changed = false;
-  for (const item of state.items) {
-    if (item.status === "running") {
-      item.status = "queued";
-      delete item.startedAt;
-      delete item.runId;
-      changed = true;
+  await withQueue(async () => {
+    const state = await loadQueue();
+    let changed = false;
+    for (const item of state.items) {
+      if (item.status === "running") {
+        item.status = "queued";
+        delete item.startedAt;
+        delete item.runId;
+        changed = true;
+      }
     }
-  }
-  if (changed) await persist(state);
+    if (changed) await persist(state);
+  });
   void burnDown().catch((err: unknown) => console.error("[queue] resume drain failed:", err));
 }
 
@@ -283,6 +329,13 @@ export async function resumeQueue(): Promise<void> {
  * read-modify-write so an interleaved enqueue/dequeue is not lost.
  */
 async function transition(id: string, mutate: (item: QueuedRun) => void): Promise<void> {
+  await withQueue(() => transitionInner(id, mutate));
+}
+
+// Unlocked load-mutate-persist cycle. Callers that already hold the queue lock
+// (burnDown's per-cycle blocks run inside withQueue) call this directly to avoid
+// re-acquiring the chain and deadlocking on themselves.
+async function transitionInner(id: string, mutate: (item: QueuedRun) => void): Promise<void> {
   const state = await loadQueue();
   const item = state.items.find((candidate) => candidate.id === id);
   if (!item) return;

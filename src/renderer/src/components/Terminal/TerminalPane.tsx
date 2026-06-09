@@ -26,6 +26,7 @@ interface Props {
   sessionId: string;
   shell: ShellInfo;
   visible: boolean;
+  scrollbackLineLimit: number;
   initialCwd?: string;
   initialScrollback?: string;
   initialCommand?: string;
@@ -58,6 +59,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       sessionId,
       shell,
       visible,
+      scrollbackLineLimit,
       initialCwd,
       initialScrollback,
       initialCommand,
@@ -82,6 +84,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       visible,
       sessionId,
       shell,
+      scrollbackLineLimit,
       initialCwd,
       initialScrollback,
       initialCommand,

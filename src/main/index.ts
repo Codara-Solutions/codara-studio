@@ -422,21 +422,52 @@ app.on("window-all-closed", async () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", async () => {
-  pty.disposeAll();
-  fsWatcher.disposeAll();
-  // Close the hook RPC alongside ptys so any in-flight worker post (which
-  // can only land on 127.0.0.1) gets a clean close instead of a connection
-  // reset during shutdown.
-  await stopHookRpc().catch(() => undefined);
-  // Stop the hook file watcher so fs.watch handles release before the event
-  // loop drains. Without this an in-flight `fs.rename` to processed/ can
-  // keep the process alive briefly past quit.
-  await stopHookWatcher().catch(() => undefined);
-  // Tear down automation timers/watchers (cached module if it was started).
-  await import("./orchestration/scheduler")
-    .then((m) => m.stopScheduler())
-    .catch(() => undefined);
-  await stopAgentSocket().catch(() => undefined);
-  await flushAllStores();
+// Electron does NOT await async before-quit listeners, so everything after the
+// first await would race process teardown — dropping the final flushAllStores()
+// on macOS Cmd+Q, updater quitAndInstall, and OS-initiated quits. Use the
+// standard preventDefault pattern: cancel the first quit, run the full async
+// cleanup, then quit again (cleanQuit short-circuits the second pass).
+let cleanQuit = false;
+let cleanupRan = false;
+app.on("before-quit", (event) => {
+  if (cleanQuit) return;
+  event.preventDefault();
+  if (cleanupRan) return; // cleanup already in flight from an earlier quit attempt
+  cleanupRan = true;
+
+  // Hard-exit fallback: if cleanup hangs (e.g. a wedged fs handle), force the
+  // process to die rather than block quit forever. Mirrors the headless
+  // branch's exit-grace idiom.
+  const hardExitTimer = setTimeout(() => {
+    process.stderr.write("spark: forcing process.exit(0) after quit-cleanup grace\n");
+    process.exit(0);
+  }, 5000);
+  hardExitTimer.unref();
+
+  void (async () => {
+    try {
+      pty.disposeAll();
+      fsWatcher.disposeAll();
+      // Close the hook RPC alongside ptys so any in-flight worker post (which
+      // can only land on 127.0.0.1) gets a clean close instead of a connection
+      // reset during shutdown.
+      await stopHookRpc().catch(() => undefined);
+      // Stop the hook file watcher so fs.watch handles release before the event
+      // loop drains. Without this an in-flight `fs.rename` to processed/ can
+      // keep the process alive briefly past quit.
+      await stopHookWatcher().catch(() => undefined);
+      // Tear down automation timers/watchers (cached module if it was started).
+      await import("./orchestration/scheduler")
+        .then((m) => m.stopScheduler())
+        .catch(() => undefined);
+      await stopAgentSocket().catch(() => undefined);
+      await flushAllStores();
+    } catch (err) {
+      console.error("[main] quit cleanup failed:", err);
+    } finally {
+      clearTimeout(hardExitTimer);
+      cleanQuit = true;
+      app.quit();
+    }
+  })();
 });

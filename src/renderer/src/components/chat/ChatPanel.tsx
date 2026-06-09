@@ -34,6 +34,7 @@ interface Props {
   workspace: Workspace | null;
   runs: RunState[];
   activeRun: RunState | null;
+  terminalScrollbackLineLimit: number;
   error: string | null;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -68,6 +69,7 @@ export default function ChatPanel({
   workspace,
   runs,
   activeRun,
+  terminalScrollbackLineLimit,
   error,
   collapsed,
   onToggleCollapse,
@@ -236,6 +238,7 @@ export default function ChatPanel({
                       sessionId={backendSessionId}
                       shell={BACKEND_TERMINAL_SHELL}
                       visible={chatView === "terminal"}
+                      scrollbackLineLimit={terminalScrollbackLineLimit}
                       initialCwd={workspace?.cwd}
                       // inputBlocked (not readOnly): no keystrokes forwarded
                       // so the user can't collide with our bracketed paste +
@@ -256,7 +259,22 @@ export default function ChatPanel({
           ) : (
             <WelcomeState />
           )}
-          {chatView !== "terminal" && (
+          {/* Keep the composer MOUNTED and hide it with display:none when the
+              Terminal sub-view is active, instead of render-conditionally
+              unmounting it. Unmounting silently discarded the half-typed draft,
+              pasted images, file references, and the tokensUsed accumulator
+              (the ContextPill is rebuilt only from live usage events and can't
+              be recovered). This matches the visibility-stacking the two views
+              above use to preserve exactly this kind of in-flight state. The
+              composer's window-level listeners (focus shortcut, prefill,
+              chat.usage accumulation) are run-scoped and intentionally keep
+              running while hidden so the token total stays accurate; none of
+              them act on visible UI, so there's nothing to gate. */}
+          <div
+            style={{
+              display: chatView === "terminal" ? "none" : "contents",
+            }}
+          >
             <ChatComposer
               key={`composer:${activeRun?.id ?? "new-chat"}`}
               run={activeRun}
@@ -272,7 +290,7 @@ export default function ChatPanel({
               onStartChat={onStartChat}
               onForcePauseRun={onForcePauseRun}
             />
-          )}
+          </div>
         </>
       )}
     </div>

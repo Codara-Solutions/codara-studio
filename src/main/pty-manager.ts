@@ -106,6 +106,11 @@ function stashWebContents(id: string, s: Session): void {
     expiresAt: Date.now() + STRANDED_BINDING_TTL_MS,
     tailSnapshot: snapshot,
   });
+  const sweep = setTimeout(() => {
+    const entry = strandedBindings.get(id);
+    if (entry && entry.expiresAt <= Date.now()) strandedBindings.delete(id);
+  }, STRANDED_BINDING_TTL_MS + 250);
+  sweep.unref();
 }
 
 function consumeStrandedBinding(id: string): StrandedBinding | null {

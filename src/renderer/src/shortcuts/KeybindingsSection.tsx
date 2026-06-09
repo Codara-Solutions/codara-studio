@@ -446,18 +446,31 @@ function ResetAllButton({
   disabled: boolean;
   onClick: () => void;
 }) {
+  // Two-step reset: first click arms, second click confirms. Disarms on
+  // mouse leave / blur, so a stray click never wipes the custom bindings.
+  const [armed, setArmed] = useState(false);
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={() => {
+        if (disabled) return;
+        if (!armed) {
+          setArmed(true);
+          return;
+        }
+        setArmed(false);
+        onClick();
+      }}
+      onMouseLeave={() => setArmed(false)}
+      onBlur={() => setArmed(false)}
       disabled={disabled}
       title={disabled ? "No custom bindings" : `Reset ${count} custom binding${count === 1 ? "" : "s"}`}
       style={{
         appearance: "none",
-        border: "1px solid var(--rule-strong)",
+        border: armed ? "1px solid var(--danger)" : "1px solid var(--rule-strong)",
         borderRadius: 999,
         background: "transparent",
-        color: disabled ? "var(--muted)" : "var(--ink)",
+        color: disabled ? "var(--muted)" : armed ? "var(--danger)" : "var(--ink)",
         padding: "5px 12px",
         fontFamily: "var(--font-sans)",
         fontSize: 11,
@@ -468,7 +481,7 @@ function ResetAllButton({
         transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
       }}
     >
-      Reset all{count > 0 ? ` (${count})` : ""}
+      {armed ? "Confirm reset" : `Reset all${count > 0 ? ` (${count})` : ""}`}
     </button>
   );
 }

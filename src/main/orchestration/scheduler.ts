@@ -158,12 +158,15 @@ export async function runJobNow(id: string): Promise<RunState> {
   const { startAutopilot } = await import("./run-store");
   const run = await startAutopilot(job.input);
 
+  const freshJobs = await loadJobs();
+  const freshJob = freshJobs.find((entry) => entry.id === id);
+  if (!freshJob) return run;
   const updated: ScheduledJob = {
-    ...job,
+    ...freshJob,
     lastRunAt: new Date().toISOString(),
     lastRunId: run.id,
   };
-  await persist(jobs.map((entry) => (entry.id === id ? updated : entry)));
+  await persist(freshJobs.map((entry) => (entry.id === id ? updated : entry)));
   void emitUpdated();
   return run;
 }
@@ -189,12 +192,15 @@ async function fireJob(id: string, firedPath?: string): Promise<void> {
     return;
   }
 
+  const freshJobs = await loadJobs();
+  const freshJob = freshJobs.find((entry) => entry.id === id);
+  if (!freshJob) return;
   const updated: ScheduledJob = {
-    ...job,
+    ...freshJob,
     lastRunAt: new Date().toISOString(),
     ...(firedPath ? { lastFiredPath: firedPath } : {}),
   };
-  await persist(jobs.map((entry) => (entry.id === id ? updated : entry)));
+  await persist(freshJobs.map((entry) => (entry.id === id ? updated : entry)));
   void emitUpdated();
 }
 

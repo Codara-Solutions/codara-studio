@@ -219,7 +219,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, expected
     return;
   }
 
-  const response = await dispatch(reqObj.method, reqObj.params, id);
+  // We have an authenticated, well-formed dispatch. The 30s idle timeout
+  // installed per-connection exists only to reap stalled handshakes; the
+  // orchestrator long-poll methods (ask_user / wait_for_workers) hold this
+  // connection open for up to 20 min with zero socket traffic, so leaving
+  // the timer armed would destroy the socket mid-poll and hand the one-shot
+  // MCP client a spurious ECONNRESET. Disarm it now that real work begins.
+  req.socket.setTimeout(0);
+
+  const response = await dispatch(reqObj.method, reqObj.params, id, res);
   writeJsonRpc(res, response);
 }
 
@@ -272,6 +280,7 @@ async function dispatch(
   method: string,
   rawParams: unknown,
   id: JsonRpcId,
+  res: ServerResponse,
 ): Promise<JsonRpcResponse> {
   const params = rawParams && typeof rawParams === "object" ? (rawParams as Record<string, unknown>) : {};
 
@@ -295,13 +304,13 @@ async function dispatch(
       case "orchestrator.spawn_workers":
         return await handleOrchestratorSpawnWorkers(params, id);
       case "orchestrator.ask_user":
-        return await handleOrchestratorAskUser(params, id);
+        return await handleOrchestratorAskUser(params, id, res);
       case "orchestrator.complete":
         return await handleOrchestratorComplete(params, id);
       case "orchestrator.get_worker_status":
         return await handleOrchestratorGetWorkerStatus(params, id);
       case "orchestrator.wait_for_workers":
-        return await handleOrchestratorWaitForWorkers(params, id);
+        return await handleOrchestratorWaitForWorkers(params, id, res);
       case "tab.create":
       case "pane.split":
         // The renderer owns tab/pane state and reaching it from main requires
@@ -539,9 +548,17 @@ async function handleOrchestratorSpawnWorkers(
   return successResponse(id, { worker_task_ids: workerTaskIds });
 }
 
+// A long-poll loop should give up the moment the MCP client hangs up —
+// otherwise a dropped connection keeps the main-process loop polling blind
+// for the full 15-20 min deadline.
+function clientGone(res: ServerResponse): boolean {
+  return res.writableEnded || res.socket === null || res.socket.destroyed;
+}
+
 async function handleOrchestratorAskUser(
   params: Record<string, unknown>,
   id: JsonRpcId,
+  res: ServerResponse,
 ): Promise<JsonRpcResponse> {
   const runId = stringParam(params, "runId");
   if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
@@ -576,6 +593,10 @@ async function handleOrchestratorAskUser(
   const deadline = askedAt + ASK_USER_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, ASK_USER_POLL_MS));
+    // Client hung up — stop polling; writeJsonRpc on a dead socket is a no-op.
+    if (clientGone(res)) {
+      return errorResponse(id, ERR_INTERNAL, "ask_user aborted: client disconnected");
+    }
     const run = await runStore.getRun(runId);
     if (!run) {
       return errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-ask: ${runId}`);
@@ -626,6 +647,7 @@ const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "ca
 async function handleOrchestratorWaitForWorkers(
   params: Record<string, unknown>,
   id: JsonRpcId,
+  res: ServerResponse,
 ): Promise<JsonRpcResponse> {
   const runId = stringParam(params, "runId");
   if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
@@ -684,6 +706,10 @@ async function handleOrchestratorWaitForWorkers(
     );
   }
   while (Date.now() < deadline) {
+    // Client hung up — stop polling rather than block the loop for ~20 min.
+    if (clientGone(res)) {
+      return errorResponse(id, ERR_INTERNAL, "wait_for_workers aborted: client disconnected");
+    }
     const run = await runStore.getRun(runId);
     if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-wait: ${runId}`);
     const snapshot = snapshotWorkers(run);

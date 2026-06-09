@@ -255,6 +255,7 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
           found = null;
         }
         if (found) {
+          if (disposed) return;
           jsonlPath = found;
           tail = tailJsonl(
             found,

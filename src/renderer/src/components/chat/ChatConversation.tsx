@@ -348,7 +348,12 @@ export default function ChatConversation({ run }: { run: RunState }) {
     const node = scrollRef.current;
     if (node) node.scrollTop = node.scrollHeight;
     wasAtBottomRef.current = true;
-  }, [items.length, run.status, run.updatedAt, run.id]);
+  }, [run.id]);
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node) return;
+    if (wasAtBottomRef.current) node.scrollTop = node.scrollHeight;
+  }, [items.length, run.status, run.updatedAt]);
   useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
@@ -878,6 +883,7 @@ function QuestionChoices({ runId, options }: { runId: string; options: RunQuesti
           disabled={busy}
           onChange={(event) => setCustom(event.target.value)}
           onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
               void submitAnswer(custom);
@@ -1030,6 +1036,10 @@ function AttachmentStrip({
         <a
           key={attachment.id}
           href={fileUrl(attachment.path)}
+          onClick={(event) => {
+            event.preventDefault();
+            void window.spark.openExternal(fileUrl(attachment.path));
+          }}
           title={attachment.path}
           style={{
             display: "inline-flex",
@@ -1226,6 +1236,10 @@ function ToolDetails({ item }: { item: ToolItem }) {
             <a
               key={file.path}
               href={fileUrl(file.path)}
+              onClick={(event) => {
+                event.preventDefault();
+                void window.spark.openExternal(fileUrl(file.path));
+              }}
               title={file.path}
               style={TOOL_FILE_STYLE}
             >

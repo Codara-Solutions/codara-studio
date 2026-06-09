@@ -13,6 +13,7 @@ import {
   type PrefKey,
   type ThemePref,
 } from "@shared/types";
+import { writeFileAtomic } from "./fs-atomic";
 import { sparkHome } from "./spark-home";
 
 // Per-user UI preferences (theme + future toggles like vim mode, inline-AI
@@ -211,10 +212,7 @@ async function readFromDisk(): Promise<AppPreferences> {
 }
 
 async function writeToDisk(prefs: AppPreferences): Promise<void> {
-  const path = prefsPath();
-  const tmp = path + ".tmp";
-  await fs.writeFile(tmp, JSON.stringify(prefs, null, 2), "utf8");
-  await fs.rename(tmp, path);
+  await writeFileAtomic(prefsPath(), JSON.stringify(prefs, null, 2));
 }
 
 export async function loadPreferences(): Promise<AppPreferences> {
@@ -230,10 +228,14 @@ export async function setPreference<K extends PrefKey>(
   const current = await loadPreferences();
   const next = normalize({ ...current, [key]: value });
   cache = next;
-  writing = writing.then(() => writeToDisk(next)).catch((err) => {
+  // Dual-handle: the awaited `write` rejects to the IPC caller on disk
+  // failure so the renderer knows the toggle never persisted, while `writing`
+  // swallows the rejection so the queue chain survives for later saves.
+  const write = writing.then(() => writeToDisk(next));
+  writing = write.catch((err) => {
     console.error("[preferences] write failed:", err);
   });
-  await writing;
+  await write;
   return next;
 }
 

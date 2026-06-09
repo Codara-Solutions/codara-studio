@@ -60,6 +60,7 @@ interface Props {
   tabs: Tab[];
   activeId: TabId | null;
   shell: ShellInfo | null;
+  scrollbackLineLimit: number;
   onDetectedUrl: (tabId: TabId, paneId: string, url: string) => void;
   onSparkOpen: (input: SparkOpenInput) => void;
   onPaneExit: (tabId: TabId, paneId: string, info: { exitCode: number; signal?: number }) => void;
@@ -90,6 +91,9 @@ interface Props {
   onPaneActivity: (tabId: TabId, paneId: string) => void;
   onPaneUserInput: (tabId: TabId, paneId: string) => void;
   onPaneScrollback: (tabId: TabId, paneId: string, scrollback: string) => void;
+  // Synchronous quit-time persist: collect every pane's final buffer and write
+  // it to localStorage in one call. Routed straight to useTabs.flushScrollbackNow.
+  onFlushScrollback: (entries: Array<{ tabId: TabId; paneId: string; text: string }>) => void;
   onPaneAgentState: (
     tabId: TabId,
     paneId: string,
@@ -125,6 +129,7 @@ function TerminalStack({
   tabs,
   activeId,
   shell,
+  scrollbackLineLimit,
   onDetectedUrl,
   onSparkOpen,
   onPaneExit,
@@ -138,6 +143,7 @@ function TerminalStack({
   onPaneActivity,
   onPaneUserInput,
   onPaneScrollback,
+  onFlushScrollback,
   onPaneAgentState,
 }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
@@ -164,6 +170,7 @@ function TerminalStack({
   const activityRef = useRef(onPaneActivity);
   const userInputRef = useRef(onPaneUserInput);
   const scrollbackRef = useRef(onPaneScrollback);
+  const flushScrollbackRef = useRef(onFlushScrollback);
   const agentStateRef = useRef(onPaneAgentState);
   useEffect(() => {
     detectedRef.current = onDetectedUrl;
@@ -179,8 +186,9 @@ function TerminalStack({
     activityRef.current = onPaneActivity;
     userInputRef.current = onPaneUserInput;
     scrollbackRef.current = onPaneScrollback;
+    flushScrollbackRef.current = onFlushScrollback;
     agentStateRef.current = onPaneAgentState;
-  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onPaneAgentState]);
+  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState]);
 
   // Latest tab roots so the + smart-add button can read whichever PaneNode
   // tree is current at click time (a stale capture would split a tree that
@@ -287,10 +295,24 @@ function TerminalStack({
   }, []);
 
   useEffect(() => {
+    // Collect every pane's final buffer and persist them in ONE synchronous
+    // write. The previous version called snapshotScrollback per pane, which
+    // routed through setLeafScrollback's state updater — and React runs only
+    // the first queued updater synchronously during teardown, so all but one
+    // pane's final scrollback was lost on quit. flushScrollbackNow folds the
+    // whole batch into the tab tree and writes localStorage once, outside any
+    // updater.
     const flushAllScrollback = () => {
+      const entries: Array<{ tabId: TabId; paneId: string; text: string }> = [];
       for (const t of tabsRef.current) {
-        forEachLeaf(t.root, (leaf) => snapshotScrollback(t.id, leaf.paneId));
+        forEachLeaf(t.root, (leaf) => {
+          const buffer = handlesRef.current.get(leaf.paneId)?.getBuffer(500);
+          if (buffer && buffer.trim().length > 0) {
+            entries.push({ tabId: t.id, paneId: leaf.paneId, text: buffer });
+          }
+        });
       }
+      flushScrollbackRef.current(entries);
     };
     window.addEventListener("pagehide", flushAllScrollback);
     window.addEventListener("beforeunload", flushAllScrollback);
@@ -299,7 +321,7 @@ function TerminalStack({
       window.removeEventListener("pagehide", flushAllScrollback);
       window.removeEventListener("beforeunload", flushAllScrollback);
     };
-  }, [snapshotScrollback]);
+  }, []);
 
   // Stable split-ratio callback (routes through the latest-callback ref) so
   // TerminalTabPane can be memoized — it builds its own per-handle closures
@@ -414,6 +436,7 @@ function TerminalStack({
           tab={t}
           visible={t.id === activeId}
           shell={shell}
+          scrollbackLineLimit={scrollbackLineLimit}
           getBundle={getBundle}
           setTabRoot={setTabRoot}
           setHandle={setHandle}
@@ -432,6 +455,7 @@ interface TerminalTabPaneProps {
   tab: TerminalTab;
   visible: boolean;
   shell: ShellInfo;
+  scrollbackLineLimit: number;
   getBundle: (tabId: TabId, paneId: string) => Bundle;
   setTabRoot: (id: TabId, el: HTMLDivElement | null) => void;
   setHandle: (paneId: string, h: TerminalPaneHandle | null) => void;
@@ -458,6 +482,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   tab,
   visible,
   shell,
+  scrollbackLineLimit,
   getBundle,
   setTabRoot,
   setHandle,
@@ -637,6 +662,27 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   const draggedLeaf =
     drag?.tabId === tab.id ? findLeaf(tab.root, drag.paneId) : null;
 
+  // Size the off-screen DraggedPaneMount host to the dragged pane's LAST
+  // rendered pixel box, not a hard-coded 480x320. A mismatched host forces the
+  // live PTY to refit to a tiny ~60x16 grid on drag-start and back on drop —
+  // two SIGWINCHes + xterm dispose/recreate cycles that visibly garble a
+  // running TUI. Matching the real size makes both refits a no-op (identical
+  // cols/rows). Derived from the dragged leaf's fractional rect in the full
+  // tab layout × the live container's content box, minus the same pane gap
+  // paneFrameStyle applies.
+  const draggedPaneSize: { width: number; height: number } | null = (() => {
+    if (!draggedLeaf || !drag) return null;
+    const container = tabRootRef.current;
+    if (!container) return null;
+    const box = baseLayout.leaves.find((b) => b.leaf.paneId === drag.paneId);
+    if (!box) return null;
+    const gap = 3; // mirrors PANE_GAP fallback (--terminal-pane-gap)
+    const width = box.rect.width * container.clientWidth - 2 * gap;
+    const height = box.rect.height * container.clientHeight - 2 * gap;
+    if (!(width > 0) || !(height > 0)) return null;
+    return { width, height };
+  })();
+
   return (
     <div
       ref={setOwnTabRoot}
@@ -770,6 +816,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               initialScrollback={leaf.scrollback}
               initialCommand={leaf.autorun}
               visible={visible}
+              scrollbackLineLimit={scrollbackLineLimit}
               onDetectedLocalUrl={bundle.onDetectedUrl}
               onSparkOpen={bundle.onSparkOpen}
               onExit={bundle.onExit}
@@ -796,6 +843,8 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
           tabId={tab.id}
           leaf={draggedLeaf}
           shell={shell}
+          scrollbackLineLimit={scrollbackLineLimit}
+          size={draggedPaneSize}
           getBundle={getBundle}
           setHandle={setHandle}
         />
@@ -1246,12 +1295,20 @@ function DraggedPaneMount({
   tabId,
   leaf,
   shell,
+  scrollbackLineLimit,
+  size,
   getBundle,
   setHandle,
 }: {
   tabId: TabId;
   leaf: TerminalLeaf;
   shell: ShellInfo;
+  scrollbackLineLimit: number;
+  // The dragged pane's last on-screen pixel size. Sizing the off-screen host
+  // to this keeps cols/rows identical so the PTY resize on mount/unmount is a
+  // no-op instead of a TUI-garbling shrink-and-restore. Falls back to a
+  // reasonable box only if the size couldn't be measured.
+  size: { width: number; height: number } | null;
   getBundle: (tabId: TabId, paneId: string) => Bundle;
   setHandle: (paneId: string, h: TerminalPaneHandle | null) => void;
 }) {
@@ -1263,8 +1320,8 @@ function DraggedPaneMount({
         position: "absolute",
         left: -10000,
         top: 0,
-        width: 480,
-        height: 320,
+        width: size ? Math.round(size.width) : 480,
+        height: size ? Math.round(size.height) : 320,
         overflow: "hidden",
         opacity: 0,
         pointerEvents: "none",
@@ -1278,6 +1335,7 @@ function DraggedPaneMount({
         initialScrollback={leaf.scrollback}
         initialCommand={leaf.autorun}
         visible={false}
+        scrollbackLineLimit={scrollbackLineLimit}
         onDetectedLocalUrl={bundle.onDetectedUrl}
         onSparkOpen={bundle.onSparkOpen}
         onExit={bundle.onExit}

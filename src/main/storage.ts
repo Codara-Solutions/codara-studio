@@ -1,8 +1,17 @@
 import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
-import type { AgentRuntimeKind, AgentRuntimeSelection, AppSettings, AppState, Workspace } from "@shared/types";
+import {
+  TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
+  normalizeTerminalScrollbackLineLimit,
+  type AgentRuntimeKind,
+  type AgentRuntimeSelection,
+  type AppSettings,
+  type AppState,
+  type Workspace,
+} from "@shared/types";
 import { sparkHome } from "./spark-home";
+import { writeFileAtomic } from "./fs-atomic";
 
 const STATE_FILE = "spark-state.json";
 const SETTINGS_FILE = "spark-settings.json";
@@ -11,6 +20,7 @@ const DEFAULT_OPENROUTER_MODEL = "google/gemini-flash-latest";
 const EMPTY: AppState = { workspaces: [], activeWorkspaceId: null };
 const EMPTY_SETTINGS: AppSettings = {
   defaultShellId: null,
+  terminalScrollbackLineLimit: TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   openRouterApiKey: "",
   openRouterModel: DEFAULT_OPENROUTER_MODEL,
   agentRuntimeSelection: "auto",
@@ -111,6 +121,7 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
       typeof settings.defaultShellId === "string" && settings.defaultShellId.trim()
         ? settings.defaultShellId
         : null,
+    terminalScrollbackLineLimit: normalizeTerminalScrollbackLineLimit(settings.terminalScrollbackLineLimit),
     openRouterApiKey:
       typeof settings.openRouterApiKey === "string" ? settings.openRouterApiKey.trim() : "",
     openRouterModel:
@@ -159,8 +170,6 @@ function normalizeStringArray(value: unknown): string[] {
 }
 
 async function writeToDisk(state: AppState): Promise<void> {
-  const path = statePath();
-  const tmp = path + ".tmp";
   const persisted: AppState = {
     activeWorkspaceId: state.activeWorkspaceId,
     workspaces: state.workspaces.map((workspace) => ({
@@ -169,16 +178,12 @@ async function writeToDisk(state: AppState): Promise<void> {
     })),
   };
   const json = JSON.stringify(persisted, null, 2);
-  await fs.writeFile(tmp, json, "utf8");
-  await fs.rename(tmp, path);
+  await writeFileAtomic(statePath(), json);
 }
 
 async function writeSettingsToDisk(settings: AppSettings): Promise<void> {
-  const path = settingsPath();
-  const tmp = path + ".tmp";
   const json = JSON.stringify(normalizeSettings(settings), null, 2);
-  await fs.writeFile(tmp, json, "utf8");
-  await fs.rename(tmp, path);
+  await writeFileAtomic(settingsPath(), json);
 }
 
 export async function loadState(): Promise<AppState> {
@@ -189,11 +194,15 @@ export async function loadState(): Promise<AppState> {
 
 export async function saveState(state: AppState): Promise<void> {
   cache = state;
-  // serialize writes to avoid races
-  writing = writing.then(() => writeToDisk(state)).catch((err) => {
+  // Serialize writes to avoid races. Keep two handles on the chain: `write`
+  // (which rejects on disk failure) is awaited so the IPC caller learns the
+  // save never hit disk, while `writing` swallows the rejection so a single
+  // failure doesn't poison every subsequent queued save.
+  const write = writing.then(() => writeToDisk(state));
+  writing = write.catch((err) => {
     console.error("[storage] write failed:", err);
   });
-  await writing;
+  await write;
 }
 
 export async function loadSettings(): Promise<AppSettings> {
@@ -204,10 +213,13 @@ export async function loadSettings(): Promise<AppSettings> {
 
 export async function saveSettings(settings: AppSettings): Promise<AppSettings> {
   settingsCache = normalizeSettings(settings);
-  settingsWriting = settingsWriting.then(() => writeSettingsToDisk(settingsCache!)).catch((err) => {
+  // See saveState for the dual-handle rationale: the awaited promise rejects to
+  // the IPC caller on disk failure, the queue chain keeps going regardless.
+  const write = settingsWriting.then(() => writeSettingsToDisk(settingsCache!));
+  settingsWriting = write.catch((err) => {
     console.error("[storage] settings write failed:", err);
   });
-  await settingsWriting;
+  await write;
   return settingsCache;
 }
 

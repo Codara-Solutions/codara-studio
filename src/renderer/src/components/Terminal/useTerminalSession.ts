@@ -4,7 +4,12 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
-import type { RuntimeState, ShellInfo } from "@shared/types";
+import {
+  normalizeTerminalScrollbackLineLimit,
+  trimTerminalScrollbackLines,
+  type RuntimeState,
+  type ShellInfo,
+} from "@shared/types";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
@@ -22,6 +27,11 @@ const FONT_SIZE = 13;
 const FIT_DEBOUNCE_MS = 8;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
 const RESTORE_NOTICE = "[restored from last Spark session]";
+// After an agent turn is interrupted with Ctrl+C, Codex/Claude/Cursor often
+// keep their TUI input box open without re-emitting the launch banner or
+// alt-screen-enter sequence. Keep Shift+Enter routed as an agent newline for a
+// bounded grace window, while prompt/alt-screen exit markers clear it sooner.
+const RECENT_AGENT_INPUT_GRACE_MS = 10_000;
 
 // Internal-only union of every agent CLI we can detect from terminal output.
 // Spark's public surface (App.tsx, TerminalStack.tsx, run-store, etc.) still
@@ -109,16 +119,41 @@ const RUNTIME_BANNERS: ReadonlyArray<{ runtime: AgentRuntime; pattern: RegExp }>
 const autorunFiredSessions = new Set<string>();
 // In-memory cache of the full xterm buffer captured right before a TerminalPane
 // unmounts. Workspace switches unmount every pane of the previous workspace,
-// which disposes its xterm (and the 50K-line scrollback inside it) while the
-// PTY keeps running in main. The leaf-level `initialScrollback` persisted into
-// localStorage is capped at ~40 KB and sampled only every 2s — too small to
-// hold a Claude session's worth of output. Stashing the full buffer here on
-// unmount and replaying it on the next mount lets a workspace round-trip
-// restore the scrollback the user was looking at. One-shot per sessionId:
-// consumed by the next mount. Capped per session so a chatty PTY can't pin
-// arbitrary RAM if the user never returns to its workspace.
-const xtermBufferSnapshots = new Map<string, string>();
-const SNAPSHOT_MAX_LINES = 10_000;
+// which disposes its xterm scrollback while the PTY keeps running in main. The
+// leaf-level `initialScrollback` persisted into localStorage is capped at ~40 KB
+// and sampled only every 2s — too small to hold a Claude session's worth of
+// output. Stashing the full buffer here on unmount and replaying it on the next
+// mount lets a workspace round-trip restore the scrollback the user was looking
+// at. One-shot per sessionId: consumed by the next mount. Capped per session by
+// the user-configured scrollback line limit so a chatty PTY can't pin arbitrary
+// RAM if the user never returns to its workspace.
+const MAX_XTERM_BUFFER_SNAPSHOTS = 64;
+// A snapshot is the xterm buffer text captured at unmount PLUS any raw bytes
+// that arrived while the pane was hidden (and therefore never reached xterm,
+// so `captureXtermBuffer` by construction can't see them). On the next mount
+// the text is replayed first, then `pendingBytes` is written verbatim, then
+// pty.resume() drains main's post-pause backlog — preserving the ordering
+// pre-hide snapshot → hidden-era bytes → post-pause backlog.
+interface XtermBufferSnapshot {
+  text: string;
+  pendingBytes: Uint8Array | null;
+}
+const xtermBufferSnapshots = new Map<string, XtermBufferSnapshot>();
+
+function rememberXtermBufferSnapshot(
+  sessionId: string,
+  snapshot: XtermBufferSnapshot,
+): void {
+  // Keep the cache finite across many closed/switched panes. Each snapshot is
+  // already line-limited; this caps the number of sessions that can retain one.
+  xtermBufferSnapshots.delete(sessionId);
+  xtermBufferSnapshots.set(sessionId, snapshot);
+  while (xtermBufferSnapshots.size > MAX_XTERM_BUFFER_SNAPSHOTS) {
+    const oldest = xtermBufferSnapshots.keys().next().value;
+    if (!oldest) break;
+    xtermBufferSnapshots.delete(oldest);
+  }
+}
 // Matches dev-server-style local URLs (vite, next dev, webpack, ...). Anchors
 // on a word boundary so we do not capture substrings of longer paths. The
 // `\x1b` exclusion stops ANSI escape bytes from being absorbed when a URL
@@ -131,6 +166,7 @@ interface Options {
   visible: boolean;
   sessionId: string;
   shell: ShellInfo;
+  scrollbackLineLimit: number;
   initialCwd?: string;
   initialScrollback?: string;
   // One-shot shell command auto-typed into the PTY once the shell prompt has
@@ -179,10 +215,10 @@ interface Options {
   // codex). `running=true` is emitted on the first alt-screen-enter
   // (ESC[?1049h) of the session AND whenever a banner suggests a new
   // runtime has taken over; `running=false` is emitted on alt-screen-leave
-  // (ESC[?1049l), which fires when the user Ctrl+Cs out and the TUI
-  // restores the main screen. `runtime` is best-effort sniffed from
-  // surrounding banner text; `null` means the TUI started but we couldn't
-  // identify which one.
+  // (ESC[?1049l), prompt markers, or a forwarded Ctrl+C in a detected
+  // first-party agent pane. `runtime` is best-effort sniffed from surrounding
+  // banner text; `null` means the TUI started but we couldn't identify which
+  // one.
   onAgentState?: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
 }
 
@@ -198,6 +234,7 @@ export function useTerminalSession({
   visible,
   sessionId,
   shell,
+  scrollbackLineLimit,
   initialCwd,
   initialScrollback,
   initialCommand,
@@ -252,6 +289,13 @@ export function useTerminalSession({
 
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const normalizedScrollbackLineLimit = normalizeTerminalScrollbackLineLimit(scrollbackLineLimit);
+  const scrollbackLineLimitRef = useRef<number>(normalizedScrollbackLineLimit);
+  useEffect(() => {
+    scrollbackLineLimitRef.current = normalizedScrollbackLineLimit;
+    const term = termRef.current;
+    if (term) term.options.scrollback = normalizedScrollbackLineLimit;
+  }, [normalizedScrollbackLineLimit]);
   // Holds the unsubscribe for the theme-token observer so we can refresh the
   // xterm color palette synchronously when the user switches themes or
   // changes accent color.
@@ -269,11 +313,80 @@ export function useTerminalSession({
   // hidden is fine. They resume on the next chunk after the flush.
   const hiddenBufferRef = useRef<Uint8Array[]>([]);
   const hiddenBytesRef = useRef<number>(0);
+  const hiddenLineBreaksRef = useRef<number>(0);
   // Cap chosen to fit a few screens of dense TUI output (claude/codex full
   // redraws on ~120-col panes are ~30-60 KB each). 256 KB ≈ 4-8 redraws,
   // enough to preserve the most-recent visible state when the user flips
   // back. FIFO trim past the cap — older bytes the user can't see anyway.
   const HIDDEN_BUFFER_CAP = 256 * 1024;
+  // Hysteresis slack above the byte cap before we pay for a precise merge. The
+  // cheap FIFO path (shift whole chunks) keeps us under cap+slack amortized
+  // O(1); without slack, once a chatty hidden pane sits exactly at the cap
+  // every new chunk would re-trigger the full allocate+memcpy+rescan merge.
+  const HIDDEN_BUFFER_SLACK = 64 * 1024;
+  const trimHiddenBufferToLimits = useCallback(() => {
+    const maxLineBreaks = Math.max(0, scrollbackLineLimitRef.current);
+
+    // ── Cheap path: drop whole leading chunks while we're over the byte cap.
+    // FIFO shift is amortized O(1) per data event vs the full merge below.
+    // We only shift when there's more than one chunk so a single oversized
+    // chunk still falls through to the precise byte trim.
+    while (
+      hiddenBytesRef.current > HIDDEN_BUFFER_CAP + HIDDEN_BUFFER_SLACK &&
+      hiddenBufferRef.current.length > 1
+    ) {
+      const dropped = hiddenBufferRef.current.shift();
+      if (!dropped) break;
+      hiddenBytesRef.current -= dropped.length;
+      hiddenLineBreaksRef.current -= countLineFeeds(dropped);
+    }
+
+    if (
+      hiddenBytesRef.current <= HIDDEN_BUFFER_CAP + HIDDEN_BUFFER_SLACK &&
+      hiddenLineBreaksRef.current <= maxLineBreaks
+    ) {
+      // Within the byte hysteresis band and within the line budget — leave the
+      // chunk list alone. The precise merge only runs when the LINE limit
+      // still binds (rare) or a lone chunk overflows the hard byte cap.
+      return;
+    }
+
+    const total = hiddenBytesRef.current;
+    if (total <= 0) {
+      hiddenBufferRef.current = [];
+      hiddenBytesRef.current = 0;
+      hiddenLineBreaksRef.current = 0;
+      return;
+    }
+
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of hiddenBufferRef.current) {
+      merged.set(chunk, offset);
+      offset += chunk.length;
+    }
+
+    // Precise trim: clamp to the hard byte cap (single oversized chunk case)
+    // and back-scan for the line limit. Reached only when the cheap shift
+    // above couldn't satisfy the limits.
+    let start = Math.max(0, total - HIDDEN_BUFFER_CAP);
+    if (hiddenLineBreaksRef.current > maxLineBreaks) {
+      let seen = 0;
+      for (let i = total - 1; i >= 0; i--) {
+        if (merged[i] !== 10) continue;
+        seen += 1;
+        if (seen > maxLineBreaks) {
+          start = Math.max(start, i + 1);
+          break;
+        }
+      }
+    }
+
+    const trimmed = start > 0 ? merged.slice(start) : merged;
+    hiddenBufferRef.current = trimmed.length > 0 ? [trimmed] : [];
+    hiddenBytesRef.current = trimmed.length;
+    hiddenLineBreaksRef.current = countLineFeeds(trimmed);
+  }, []);
   // Live mirror of the latest `visible` value so the pty.onData closure
   // (which is captured once per sessionId) reads the current flag instead
   // of the stale value from mount time.
@@ -287,6 +400,11 @@ export function useTerminalSession({
     const cleanups: Array<() => void> = [];
     let spawned = false;
     let startupCommandHandled = false;
+    // True between issuing the snapshot replay term.write(...) and its write
+    // callback completing. While set, the unmount cleanup skips re-snapshotting
+    // so a mid-parse remount can't overwrite the cached full buffer with a
+    // partially-populated one (see the snapshot replay block below).
+    let replayPending = false;
 
     // Defer one tick so a strict-mode mount → unmount → mount sequence cancels
     // the first spawn before it reaches main. Without this, dev rebuilds leak
@@ -307,9 +425,9 @@ export function useTerminalSession({
         cursorBlink: false,
         cursorStyle: "bar",
         cursorInactiveStyle: "none",
-        // AI agents blow past 1K-line buffers in a single turn; 50K is the
-        // floor for reviewing what claude/codex actually did.
-        scrollback: 50_000,
+        // AI agents can emit huge transcripts; the user setting keeps xterm's
+        // retained scrollback finite so renderer memory cannot grow unbounded.
+        scrollback: scrollbackLineLimitRef.current,
         allowProposedApi: true,
         allowTransparency: true,
         convertEol: false,
@@ -553,9 +671,10 @@ export function useTerminalSession({
         //     `\x1b\r` (ESC + CR — the standard Alt+Enter / iTerm2
         //     shift-enter convention, same thing claude's `/terminal-setup`
         //     binds Shift+Enter to) as "insert newline in input box".
-        //     Sending backslash + LF here makes Claude render a literal `\`
-        //     (Codex happened to swallow the trailing `\` as a continuation,
-        //     which is what masked the bug).
+        //     Use this for actively detected and recently interrupted agent
+        //     panes because Ctrl+C can clear the running chip while leaving
+        //     the TUI input box focused. Sending backslash + LF there renders
+        //     a literal `\`.
         //   - Bare shells (bash/zsh/pwsh) treat backslash + LF as a
         //     multi-line continuation marker, which is the muscle-memory
         //     behaviour at a shell prompt.
@@ -568,7 +687,7 @@ export function useTerminalSession({
         ) {
           event.preventDefault();
           if (!readOnlyRef.current && !inputBlockedRef.current) {
-            const payload = agentPhase === "agent" ? "\x1b\r" : "\\\n";
+            const payload = shouldUseAgentNewline() ? "\x1b\r" : "\\\n";
             void window.spark.pty.write(sessionId, payload);
           }
           return false;
@@ -597,15 +716,26 @@ export function useTerminalSession({
           return false;
         }
 
-        // Plain Ctrl+{C,V}: Windows-only convenience.
-        if (!isWindows) return true;
+        // Plain Ctrl+C: Windows copies an active selection; every other
+        // no-selection path falls through as ^C / SIGINT. If a detected
+        // first-party agent is running, clear Spark's chip/state first but do
+        // not preventDefault — xterm still forwards the actual interrupt to
+        // the PTY.
         if (isC) {
-          const selection = term.getSelection();
-          if (!selection) return true; // no selection → let SIGINT through
-          event.preventDefault();
-          void window.spark.clipboard.writeText(selection);
-          return false;
+          if (isWindows) {
+            const selection = term.getSelection();
+            if (selection) {
+              event.preventDefault();
+              void window.spark.clipboard.writeText(selection);
+              return false;
+            }
+          }
+          handleAgentInterruptKey();
+          return true;
         }
+
+        // Plain Ctrl+V: Windows-only convenience.
+        if (!isWindows) return true;
         event.preventDefault();
         writePasteFromClipboard();
         return false;
@@ -643,17 +773,53 @@ export function useTerminalSession({
         /* host may be 0×0 on first paint; ResizeObserver will fix it. */
       }
       // Prefer the in-memory snapshot captured during the previous unmount —
-      // it's the full visible+scrollback buffer (up to SNAPSHOT_MAX_LINES) and
-      // exists only for workspace-switch round-trips. Falls back to the leaf's
+      // it's the full visible+scrollback buffer (capped by the configured line
+      // limit) and exists only for workspace-switch round-trips. Falls back to the leaf's
       // localStorage-persisted scrollback (smaller, sampled) for the cold-start
       // app-restart path; that one still carries the RESTORE_NOTICE so the user
       // knows the prompt below is fresh.
       const liveSnapshot = xtermBufferSnapshots.get(sessionId);
       if (liveSnapshot) {
-        xtermBufferSnapshots.delete(sessionId);
-        term.write(`${normalizeForTerminalReplay(liveSnapshot)}\r\n`);
+        // Replay the cached buffer, then any bytes that arrived while the pane
+        // was hidden during its last life (pendingBytes). Keep the cache entry
+        // until the async term.write callback fires (replayPending): if the
+        // pane unmounts mid-parse — fast drag/drop remount or workspace
+        // double-toggle — the cleanup must NOT overwrite the cache with the
+        // half-parsed buffer, or scrollback truncates a little more each cycle.
+        // The cache still holds the full original, so a skipped capture is the
+        // correct choice there.
+        const replay = trimTerminalScrollbackLines(
+          liveSnapshot.text,
+          scrollbackLineLimitRef.current,
+        ).trimEnd();
+        const pendingBytes = liveSnapshot.pendingBytes;
+        replayPending = true;
+        const finishReplay = () => {
+          replayPending = false;
+          xtermBufferSnapshots.delete(sessionId);
+        };
+        if (replay) {
+          term.write(`${normalizeForTerminalReplay(replay)}\r\n`, () => {
+            // Write the hidden-era bytes verbatim after the text replay has
+            // parsed, then clear the pending flag in the final callback so the
+            // ordering (text → hidden bytes) is preserved even under chunked
+            // parsing.
+            if (pendingBytes && pendingBytes.length > 0) {
+              term.write(pendingBytes, finishReplay);
+            } else {
+              finishReplay();
+            }
+          });
+        } else if (pendingBytes && pendingBytes.length > 0) {
+          term.write(pendingBytes, finishReplay);
+        } else {
+          finishReplay();
+        }
       } else {
-        const restoredScrollback = initialScrollback?.trimEnd();
+        const restoredScrollback = trimTerminalScrollbackLines(
+          initialScrollback?.trimEnd() ?? "",
+          scrollbackLineLimitRef.current,
+        ).trimEnd();
         if (restoredScrollback) {
           term.write(
             `${normalizeForTerminalReplay(restoredScrollback)}\r\n\x1b[2m${RESTORE_NOTICE}\x1b[0m\r\n`,
@@ -701,9 +867,10 @@ export function useTerminalSession({
       // interleave with the URL sniffer's.
       //
       // Phase machine:
-      //   "idle"  → no agent running
-      //   "agent" → a Claude / Codex CLI is in the foreground; running=true
-      //             has been emitted. We stay here until an exit signal.
+      //   "idle"  → no agent running chip/state is currently advertised
+      //   "agent" → a Claude / Codex / Cursor CLI is in the foreground;
+      //             running=true has been emitted. We stay here until an exit
+      //             signal or a forwarded Ctrl+C interrupts the active turn.
       //
       // Detection is multi-source because no single signal covers both
       // runtimes and both shell-integration states:
@@ -720,6 +887,8 @@ export function useTerminalSession({
       //   - alt-screen-leave (`ESC[?1049l`) — Codex's exit signal.
       //   - OSC 633;A (prompt start) — canonical "agent quit, pwsh prompt
       //     is back" signal. Works for any pane with integration loaded.
+      //   - local Ctrl+C keydown — clears first-party manual chips promptly
+      //     while returning true so xterm still forwards SIGINT to the PTY.
       //   - PTY exit — handled by onTerminalPaneExit in App.tsx (it nulls
       //     manual chips so they don't linger as stale "DONE" badges).
       const agentDecoder = new TextDecoder("utf-8", { fatal: false });
@@ -730,6 +899,38 @@ export function useTerminalSession({
       // only has regex tables for those three. Non-first-party runtimes still
       // fire onAgentState (running=true) but skip the poller.
       let activeRuntime: "claude" | "codex" | "cursor" | null = null;
+      // Separate input-routing memory from the chip/running phase. Ctrl+C can
+      // end the active turn (so the chip must clear) while leaving an agent TUI
+      // focused on its prompt; Shift+Enter should still insert a TUI newline
+      // there instead of a shell continuation backslash.
+      let recentAgentInputRuntime: PublicAgentRuntime | null = null;
+      let recentAgentInputUntilMs = 0;
+      const markRecentAgentInput = (runtime: PublicAgentRuntime | null) => {
+        if (!runtime) return;
+        recentAgentInputRuntime = runtime;
+        recentAgentInputUntilMs = Date.now() + RECENT_AGENT_INPUT_GRACE_MS;
+      };
+      const clearRecentAgentInput = () => {
+        recentAgentInputRuntime = null;
+        recentAgentInputUntilMs = 0;
+      };
+      const hasRecentAgentInput = () => {
+        if (!recentAgentInputRuntime) return false;
+        if (Date.now() <= recentAgentInputUntilMs) return true;
+        clearRecentAgentInput();
+        return false;
+      };
+      const shouldUseAgentNewline = () => {
+        if (agentPhase === "agent") return true;
+        if (hasRecentAgentInput()) return true;
+        const sniffedRuntime = sniffRuntime(agentTextRing);
+        const publicRuntime = sniffedRuntime ? coercePublicRuntime(sniffedRuntime) : null;
+        if (publicRuntime) {
+          markRecentAgentInput(publicRuntime);
+          return true;
+        }
+        return false;
+      };
 
       // ── Runtime state poller (the live working / blocked / idle / done
       // sniffer that drives chip tone and notifications). Polls the visible
@@ -802,29 +1003,51 @@ export function useTerminalSession({
         // means "something is interactive but we don't know what" — used by
         // the alt-screen fallback below for unrecognised TUIs.
         const publicRuntime = runtime ? coercePublicRuntime(runtime) : null;
+        markRecentAgentInput(publicRuntime);
         onAgentStateRef.current?.({ runtime: publicRuntime, running: true });
         // Only the three first-party runtimes have regex tables in
         // RUNTIME_PATTERNS — others rely on hook reports from E1 or no state
         // signal at all.
         if (publicRuntime) startStatePoller(publicRuntime);
       };
-      const resetAgentPhase = () => {
+      const resetAgentPhase = (options: { keepRecentAgentInput?: boolean } = {}) => {
+        const runtimeForRecentInput = activeRuntime ?? recentAgentInputRuntime;
         if (agentPhase === "agent") {
           onAgentStateRef.current?.({ runtime: null, running: false });
-          // The TUI just exited; flip the live state to "done" so any UI
-          // subscriber sees the transition immediately (the orchestration
-          // worker may still be writing its final report, but the agent is
-          // off-screen). The poller stops here — we don't keep scanning a
+          // The TUI just exited or the active turn was interrupted; flip the
+          // live state to "done" so any UI subscriber sees the transition
+          // immediately. The poller stops here — we don't keep scanning a
           // pwsh prompt for blocked/working patterns.
           if (confirmedState !== "done") {
             confirmedState = "done";
             reportRuntimeState("done");
           }
         }
+        if (options.keepRecentAgentInput) {
+          markRecentAgentInput(runtimeForRecentInput);
+        } else {
+          clearRecentAgentInput();
+        }
         activeRuntime = null;
         stopStatePoller();
         agentPhase = "idle";
         agentTextRing = "";
+      };
+      const handleAgentInterruptKey = () => {
+        if (readOnlyRef.current || inputBlockedRef.current) return;
+        if (agentPhase !== "agent" || !activeRuntime) return;
+        // A single Ctrl+C in Claude Code / Codex / Cursor almost never exits
+        // the TUI — it clears the input box, interrupts the current turn, or
+        // prints "press again to exit". Flipping agentPhase to idle here used
+        // to fire reportRuntimeState('done'), which run-store persisted as a
+        // false runtimeState='done' on the worker attempt with no reliable
+        // recovery (banner not reprinted, alt-screen not re-entered). So do
+        // NOT reset on keydown: the output-based exit signals (ESC[?1049l,
+        // OSC 633/133 prompt markers, pty exit) remain the only resetAgentPhase
+        // triggers. We still refresh the agent-newline grace window so a
+        // following Shift+Enter inserts a TUI newline rather than a shell
+        // continuation backslash while the interrupted prompt stays focused.
+        markRecentAgentInput(activeRuntime);
       };
       const handleOsc633 = (data: string): boolean => {
         if (data.startsWith("E;")) {
@@ -882,6 +1105,55 @@ export function useTerminalSession({
       });
       cleanups.push(() => osc133Dispose.dispose());
 
+      const processAgentChunkText = (chunkText: string) => {
+        if (!onAgentStateRef.current) return;
+        if (chunkText.length > 0) {
+          agentTextRing = (agentTextRing + chunkText).slice(-8192);
+        }
+        if (
+          agentPhase === "idle" &&
+          recentAgentInputRuntime &&
+          (chunkText.includes("\x1b[?1049l") || hasPromptMarker(chunkText))
+        ) {
+          clearRecentAgentInput();
+        }
+        if (agentPhase === "idle") {
+          const runtime = sniffOsc633CommandRuntime(agentTextRing) ?? sniffRuntime(agentTextRing);
+          if (runtime) {
+            setAgentRunning(runtime);
+          } else if (chunkText.includes("\x1b[?1049h")) {
+            // Generic alt-screen TUI fallback. Every Ink-based CLI
+            // (Claude / Codex / Cursor) and every classic fullscreen tool
+            // (vim, less, htop, fzf) emits `ESC[?1049h` on entry. If banner
+            // detection hasn't matched, fall back to this byte signal so
+            // the pane still reports running=true. The worker keybind
+            // relies on this: without it, an unrecognised Claude build or
+            // a vim session would look "unused" and the keybind would
+            // happily inject the launch command into the running TUI's
+            // input box. The exit path (\x1b[?1049l in the else branch
+            // below) already restores idle phase, so this fallback rides
+            // the same lifecycle as banner-based detection.
+            setAgentRunning(null);
+          }
+          return;
+        }
+
+        // In agent phase. Watch for any of these and reset:
+        //   - alt-screen-leave (Codex's exit signal)
+        //   - OSC 633;A / 633;D / 633;B / 633;P (spark.ps1's Prompt)
+        //   - OSC 133;A (generic FinalTerm prompt-start)
+        // Also reset on byte-level matches as a parser-bypass safety
+        // net, since xterm's OSC handler chain has caused us issues
+        // before with code 633. This path also runs while panes are hidden,
+        // where xterm parser OSC handlers intentionally do not run.
+        if (
+          chunkText.includes("\x1b[?1049l") ||
+          hasPromptMarker(chunkText)
+        ) {
+          resetAgentPhase();
+        }
+      };
+
       const offData = window.spark.pty.onData(sessionId, (data) => {
         // Main ships Uint8Array. xterm.js's parser reassembles partial ANSI
         // sequences across writes when fed Uint8Array, which is what TUIs
@@ -891,23 +1163,27 @@ export function useTerminalSession({
             ? data
             : new TextEncoder().encode(String(data));
 
+        // Keep the agent lifecycle sniffer running even while the pane is
+        // hidden. Hidden panes skip xterm.write(), so parser OSC handlers do
+        // not run; byte-level detection is what clears stale Codex/Claude chips
+        // and preserves agent Shift+Enter behavior when the user returns.
+        if (onAgentStateRef.current) {
+          processAgentChunkText(agentDecoder.decode(bytes, { stream: true }));
+        }
+
         // Hidden-pane fast path. When the pane isn't on screen, skip the
-        // entire hot path — xterm.write (DOM cell churn), URL sniff, agent
-        // sniff — and just stash the raw bytes. They'll be flushed in one
-        // write on the next visible-transition. PTY keeps streaming; only
-        // the renderer-side cost is deferred.
+        // visual hot path — xterm.write (DOM cell churn) and URL sniff — and
+        // just stash the raw bytes. They'll be flushed in one write on the
+        // next visible-transition. PTY keeps streaming; only the renderer-side
+        // rendering cost is deferred.
         if (!visibleRef.current) {
           hiddenBufferRef.current.push(bytes);
           hiddenBytesRef.current += bytes.length;
-          // FIFO trim past the cap so a long-running background agent
-          // streaming MB of output doesn't pin renderer memory.
-          while (
-            hiddenBytesRef.current > HIDDEN_BUFFER_CAP &&
-            hiddenBufferRef.current.length > 1
-          ) {
-            const dropped = hiddenBufferRef.current.shift();
-            if (dropped) hiddenBytesRef.current -= dropped.length;
-          }
+          hiddenLineBreaksRef.current += countLineFeeds(bytes);
+          // Trim by both bytes and the user line-limit so a long-running
+          // hidden pane can't pin arbitrary renderer memory or retain more
+          // hidden output lines than the terminal is configured to display.
+          trimHiddenBufferToLimits();
           onActivityRef.current?.();
           return;
         }
@@ -931,48 +1207,7 @@ export function useTerminalSession({
         }
 
         // Banner-text fallback for start detection + byte-level fallbacks
-        // for exit detection. Belt-and-braces: if xterm's parser chain
-        // doesn't dispatch our OSC 633/133 handlers for any reason, we
-        // still catch the markers by scanning the raw byte stream.
-        if (onAgentStateRef.current) {
-          const chunkText = agentDecoder.decode(bytes, { stream: true });
-          if (chunkText.length > 0) {
-            agentTextRing = (agentTextRing + chunkText).slice(-8192);
-          }
-          if (agentPhase === "idle") {
-            const runtime = sniffRuntime(agentTextRing);
-            if (runtime) {
-              setAgentRunning(runtime);
-            } else if (chunkText.includes("\x1b[?1049h")) {
-              // Generic alt-screen TUI fallback. Every Ink-based CLI
-              // (Claude / Codex / Cursor) and every classic fullscreen tool
-              // (vim, less, htop, fzf) emits `ESC[?1049h` on entry. If banner
-              // detection hasn't matched, fall back to this byte signal so
-              // the pane still reports running=true. The worker keybind
-              // relies on this: without it, an unrecognised Claude build or
-              // a vim session would look "unused" and the keybind would
-              // happily inject the launch command into the running TUI's
-              // input box. The exit path (\x1b[?1049l in the else branch
-              // below) already restores idle phase, so this fallback rides
-              // the same lifecycle as banner-based detection.
-              setAgentRunning(null);
-            }
-          } else {
-            // In agent phase. Watch for any of these and reset:
-            //   - alt-screen-leave (Codex's exit signal)
-            //   - OSC 633;A / 633;D / 633;B / 633;P (spark.ps1's Prompt)
-            //   - OSC 133;A (generic FinalTerm prompt-start)
-            // Also reset on byte-level matches as a parser-bypass safety
-            // net, since xterm's OSC handler chain has caused us issues
-            // before with code 633.
-            if (
-              chunkText.includes("\x1b[?1049l") ||
-              hasPromptMarker(chunkText)
-            ) {
-              resetAgentPhase();
-            }
-          }
-        }
+        // for exit detection ran above, before the hidden-pane early return.
       });
       const offExit = window.spark.pty.onExit(sessionId, (info) => {
         term.write(`\r\n\x1b[2m[process exited (${info.exitCode})]\x1b[0m\r\n`);
@@ -1229,11 +1464,28 @@ export function useTerminalSession({
       // instead of starting from an empty terminal plus whatever short
       // 40 KB snippet the periodic onActivity sampler last persisted.
       const dyingTerm = termRef.current;
-      if (dyingTerm) {
+      // If a snapshot replay is still mid-parse, the xterm buffer is only
+      // partially populated — capturing it now would store a truncated
+      // snapshot and progressively erode scrollback across fast remount
+      // cycles. The cache still holds the full original (we delete it only in
+      // the replay write callback), so skip re-snapshotting entirely here.
+      if (dyingTerm && !replayPending) {
         try {
-          const snapshot = captureXtermBuffer(dyingTerm, SNAPSHOT_MAX_LINES);
-          if (snapshot.length > 0) {
-            xtermBufferSnapshots.set(sessionId, snapshot);
+          const text = captureXtermBuffer(dyingTerm, scrollbackLineLimitRef.current);
+          // Bytes that streamed in while this pane was hidden never reached
+          // xterm (the hidden fast path stashes them instead), so the captured
+          // text by construction lacks them. Stash them alongside the text as
+          // pendingBytes so the next mount can replay: text → hidden bytes →
+          // post-pause backlog from main. Honor the configured scrollback line
+          // limit on the stashed combination too, reusing the same trim helper
+          // the hot path uses.
+          const pendingBytes = mergeHiddenBuffer(
+            hiddenBufferRef.current,
+            hiddenBytesRef.current,
+            scrollbackLineLimitRef.current,
+          );
+          if (text.length > 0 || (pendingBytes && pendingBytes.length > 0)) {
+            rememberXtermBufferSnapshot(sessionId, { text, pendingBytes });
           }
         } catch {
           /* best-effort; an inaccessible buffer just means no scrollback restore */
@@ -1250,11 +1502,13 @@ export function useTerminalSession({
       }
       termRef.current = null;
       fitRef.current = null;
-      // Drop any buffered hidden-pane bytes — the xterm they were destined
-      // for is gone. The PTY remains alive (see comment above); a future
-      // remount will get fresh chunks from main, not the stale prefix.
+      // The hidden-pane bytes have been folded into the snapshot's pendingBytes
+      // above (when we snapshotted); clear the live buffer now. main's pause()
+      // only preserves not-yet-flushed pendingChunks, so already-delivered
+      // hidden bytes exist nowhere else — the snapshot is their only home.
       hiddenBufferRef.current = [];
       hiddenBytesRef.current = 0;
+      hiddenLineBreaksRef.current = 0;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
@@ -1292,6 +1546,7 @@ export function useTerminalSession({
       }
       hiddenBufferRef.current = [];
       hiddenBytesRef.current = 0;
+      hiddenLineBreaksRef.current = 0;
     }
   }, [visible]);
 
@@ -1327,10 +1582,13 @@ export function useTerminalSession({
   const getBuffer = useCallback((maxLines = 200): string | null => {
     const t = termRef.current;
     if (!t) return null;
+    const requested = Number.isFinite(maxLines) ? Math.max(0, Math.trunc(maxLines)) : 200;
+    const limit = Math.min(scrollbackLineLimitRef.current, requested);
+    if (limit <= 0) return "";
     const buf = t.buffer.normal;
     const total = buf.length;
     const lines: string[] = [];
-    const start = Math.max(0, total - maxLines);
+    const start = Math.max(0, total - limit);
     for (let i = start; i < total; i++) {
       const line = buf.getLine(i);
       if (!line) continue;
@@ -1358,6 +1616,47 @@ function normalizeForTerminalReplay(value: string): string {
   return value.replace(/\r\n|\r|\n/g, "\r\n");
 }
 
+function countLineFeeds(bytes: Uint8Array): number {
+  let count = 0;
+  for (const byte of bytes) {
+    if (byte === 10) count += 1;
+  }
+  return count;
+}
+
+// Coalesce the FIFO list of hidden-pane chunks into one contiguous buffer,
+// trimmed from the front to honor the configured scrollback line limit (so the
+// stashed pendingBytes never carry more lines than the terminal would retain).
+// Returns null when there's nothing to stash. Mirrors the line-limit backward
+// scan in trimHiddenBufferToLimits — kept here so the unmount snapshot path
+// applies the same semantics as the live hot path.
+function mergeHiddenBuffer(
+  chunks: Uint8Array[],
+  totalBytes: number,
+  scrollbackLineLimit: number,
+): Uint8Array | null {
+  if (totalBytes <= 0 || chunks.length === 0) return null;
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  const maxLineBreaks = Math.max(0, scrollbackLineLimit);
+  let start = 0;
+  let seen = 0;
+  for (let i = totalBytes - 1; i >= 0; i--) {
+    if (merged[i] !== 10) continue;
+    seen += 1;
+    if (seen > maxLineBreaks) {
+      start = i + 1;
+      break;
+    }
+  }
+  const trimmed = start > 0 ? merged.slice(start) : merged;
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 // Read up to `maxLines` lines from the end of the xterm buffer (visible rows
 // + scrollback) as plain text. Wrapped logical lines are stitched back
 // together so a long Claude/Codex response that line-wrapped in the original
@@ -1366,9 +1665,11 @@ function normalizeForTerminalReplay(value: string): string {
 // pixel-perfect re-rendering of an Ink TUI's last frame. Trailing empty
 // rows are trimmed so the replayed text doesn't open with blank space.
 function captureXtermBuffer(term: Terminal, maxLines: number): string {
+  const limit = Number.isFinite(maxLines) ? Math.max(0, Math.trunc(maxLines)) : 0;
+  if (limit <= 0) return "";
   const buf = term.buffer.normal;
   const total = buf.length;
-  const start = Math.max(0, total - maxLines);
+  const start = Math.max(0, total - limit);
   const lines: string[] = [];
   for (let i = start; i < total; i++) {
     const line = buf.getLine(i);
@@ -1428,6 +1729,29 @@ function sniffRuntime(text: string): AgentRuntime | null {
   for (const entry of RUNTIME_BANNERS) {
     if (entry.pattern.test(stripped)) return entry.runtime;
   }
+  return null;
+}
+
+function sniffOsc633CommandRuntime(text: string): AgentRuntime | null {
+  const re = /\x1b\]633;E;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+  let match: RegExpExecArray | null;
+  let runtime: AgentRuntime | null = null;
+  while ((match = re.exec(text))) {
+    runtime = runtimeFromCommandLine(unescapeOsc633(match[1]));
+  }
+  return runtime;
+}
+
+function runtimeFromCommandLine(cmdLine: string): AgentRuntime | null {
+  const exe = cmdLine
+    .trim()
+    .split(/\s+/)[0]
+    ?.toLowerCase()
+    .replace(/\.exe$/, "");
+  if (!exe) return null;
+  if (exe === "claude" || exe.endsWith("/claude") || exe.endsWith("\\claude")) return "claude";
+  if (exe === "codex" || exe.endsWith("/codex") || exe.endsWith("\\codex")) return "codex";
+  if (exe === "agent" || exe.endsWith("/agent") || exe.endsWith("\\agent")) return "cursor";
   return null;
 }
 

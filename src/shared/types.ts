@@ -77,8 +77,33 @@ export interface AppState {
   activeWorkspaceId: string | null;
 }
 
+export const TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT = 10_000;
+export const TERMINAL_SCROLLBACK_LINE_LIMIT_MIN = 100;
+export const TERMINAL_SCROLLBACK_LINE_LIMIT_MAX = 50_000;
+
+export function normalizeTerminalScrollbackLineLimit(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT;
+  return Math.min(
+    TERMINAL_SCROLLBACK_LINE_LIMIT_MAX,
+    Math.max(TERMINAL_SCROLLBACK_LINE_LIMIT_MIN, Math.trunc(n)),
+  );
+}
+
+export function trimTerminalScrollbackLines(value: string, maxLines: number): string {
+  const n = typeof maxLines === "number" ? maxLines : Number(maxLines);
+  if (!Number.isFinite(n)) return "";
+  const limit = Math.max(0, Math.trunc(n));
+  if (limit <= 0) return "";
+  const normalized = value.replace(/\r\n|\r/g, "\n");
+  const lines = normalized.split("\n");
+  if (lines.length <= limit) return normalized;
+  return lines.slice(-limit).join("\n");
+}
+
 export interface AppSettings {
   defaultShellId: string | null;
+  terminalScrollbackLineLimit: number;
   openRouterApiKey: string;
   openRouterModel: string;
   agentRuntimeSelection: AgentRuntimeSelection;

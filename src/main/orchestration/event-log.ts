@@ -163,10 +163,15 @@ export async function appendRegressionRevertEvent(input: {
 export async function listEvents(runId: string): Promise<SparkEvent[]> {
   try {
     const raw = await fs.readFile(eventsPath(runId), "utf8");
-    return raw
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as SparkEvent);
+    const events: SparkEvent[] = [];
+    for (const line of raw.split(/\r?\n/).filter(Boolean)) {
+      try {
+        events.push(JSON.parse(line) as SparkEvent);
+      } catch (parseErr) {
+        console.warn(`[spark] skipping unparsable event line for run ${runId}:`, parseErr);
+      }
+    }
+    return events;
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw err;

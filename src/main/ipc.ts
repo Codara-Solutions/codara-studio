@@ -1,8 +1,8 @@
-import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard } from "electron";
+import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard, type WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
@@ -1185,7 +1185,10 @@ export function registerIpc(): void {
   // Project-wide search. The renderer kicks off a search and gets back an
   // ID; the main process then streams `search:hit:<id>` and ends with
   // `search:done:<id>`. Cancellation goes through `search:cancel`.
-  const activeSearches = new Map<string, StreamGrepHandle>();
+  const activeSearches = new Map<
+    string,
+    { handle: StreamGrepHandle; sender: WebContents; onDestroyed: () => void }
+  >();
   let searchCounter = 0;
 
   ipcMain.handle(
@@ -1205,24 +1208,28 @@ export function registerIpc(): void {
           sender.send(hitChannel, hits);
         },
         (summary: SearchSummary) => {
+          const entry = activeSearches.get(searchId);
+          if (entry) sender.removeListener("destroyed", entry.onDestroyed);
           activeSearches.delete(searchId);
           if (sender.isDestroyed()) return;
           sender.send(doneChannel, summary);
         },
       );
-      activeSearches.set(searchId, handle);
-      sender.once("destroyed", () => {
+      const onDestroyed = (): void => {
         handle.cancel();
         activeSearches.delete(searchId);
-      });
+      };
+      activeSearches.set(searchId, { handle, sender, onDestroyed });
+      sender.once("destroyed", onDestroyed);
       return { searchId };
     },
   );
 
   ipcMain.handle("search:cancel", async (_e, searchId: string): Promise<void> => {
-    const handle = activeSearches.get(searchId);
-    if (handle) {
-      handle.cancel();
+    const entry = activeSearches.get(searchId);
+    if (entry) {
+      entry.handle.cancel();
+      if (!entry.sender.isDestroyed()) entry.sender.removeListener("destroyed", entry.onDestroyed);
       activeSearches.delete(searchId);
     }
   });
@@ -1249,10 +1256,26 @@ export function registerIpc(): void {
 
   ipcMain.handle("app:openExternal", async (_e, url: string): Promise<void> => {
     if (typeof url !== "string" || url.length === 0) return;
+    // file: URLs are deliberately NOT handed to shell.openExternal — on
+    // Windows that executes the file with its default handler (e.g. a .bat),
+    // so a malicious file:// URL would be remote code execution. Instead
+    // reveal the target in the OS file manager (never run it). The preload's
+    // openExternal already routes file:// to Spark's in-app browser, so this
+    // branch only fires for callers (openInSystemBrowser) that hit the channel
+    // directly.
+    if (/^file:/i.test(url)) {
+      try {
+        const filePath = fileURLToPath(url);
+        shell.showItemInFolder(filePath);
+      } catch {
+        /* malformed file: URL — drop it rather than guess a path. */
+      }
+      return;
+    }
     // Electron's shell.openExternal accepts http(s) and a few extra schemes by
     // default; reject anything else so a malicious URL detected on the PTY
     // stream cannot launch arbitrary handlers.
-    const safe = /^(https?:|file:|mailto:)/i.test(url);
+    const safe = /^(https?:|mailto:)/i.test(url);
     if (!safe) return;
     try {
       await shell.openExternal(url);

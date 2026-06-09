@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FsEntry } from "@shared/types";
+import {
+  TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
+  normalizeTerminalScrollbackLineLimit,
+  trimTerminalScrollbackLines,
+  type FsEntry,
+} from "@shared/types";
 import { makeId } from "@shared/ids";
 import { basename } from "../path-utils";
 import {
@@ -61,6 +66,11 @@ interface PersistedShape {
   v: number;
   tabs: Tab[];
   activeId: TabId | null;
+  // Run ids the user explicitly closed from the top strip. syncChatTabsToRuns
+  // skips re-adding a chat tab for these, so a close survives the ~250ms runs
+  // refresh and app reloads (instead of being silently re-appended). Pruned to
+  // the live run set during sync so it can't grow forever.
+  closedChatRunIds?: string[];
 }
 
 function storageKey(workspaceId: string | null): string | null {
@@ -213,7 +223,7 @@ function defaultTabs(cwd?: string): Tab[] {
   return [createDraftChatTab(), createTerminalTab(cwd)];
 }
 
-function loadPersisted(workspaceId: string | null): PersistedShape | null {
+function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number): PersistedShape | null {
   const key = storageKey(workspaceId);
   if (!key) return null;
   try {
@@ -267,6 +277,7 @@ function loadPersisted(workspaceId: string | null): PersistedShape | null {
       if (tab.kind === "terminal") cleanupTransientTerminalState(tab.root);
       if (tab.kind === "runs" && (tab.title === "Runs" || tab.title === "Ops")) tab.title = "Runs";
     }
+    parsed.tabs = trimTabsScrollback(parsed.tabs, scrollbackLineLimit);
     return parsed;
   } catch {
     return null;
@@ -283,14 +294,26 @@ function cleanupTransientTerminalState(node: PaneNode): void {
   cleanupTransientTerminalState(node.b);
 }
 
-function persist(workspaceId: string | null, tabs: Tab[], activeId: TabId | null): void {
+function persist(
+  workspaceId: string | null,
+  tabs: Tab[],
+  activeId: TabId | null,
+  scrollbackLineLimit: number,
+  closedChatRunIds?: string[],
+): void {
   const key = storageKey(workspaceId);
   if (!key) return;
   try {
     const payload: PersistedShape = {
       v: TAB_VERSION,
-      tabs: stripTransientTerminalState(normalizeTerminalTitles(tabs)),
+      tabs: trimTabsScrollback(
+        stripTransientTerminalState(normalizeTerminalTitles(tabs)),
+        scrollbackLineLimit,
+      ),
       activeId,
+      ...(closedChatRunIds && closedChatRunIds.length
+        ? { closedChatRunIds }
+        : {}),
     };
     window.localStorage.setItem(key, JSON.stringify(payload));
   } catch {
@@ -325,6 +348,38 @@ function stripTransientPaneState(node: PaneNode): PaneNode {
   return a === node.a && b === node.b ? node : { ...node, a, b };
 }
 
+function trimTabsScrollback(tabs: Tab[], scrollbackLineLimit: number): Tab[] {
+  let changed = false;
+  const next = tabs.map((tab) => {
+    if (tab.kind !== "terminal") return tab;
+    const root = trimPaneScrollback(tab.root, scrollbackLineLimit);
+    if (root === tab.root) return tab;
+    changed = true;
+    return { ...tab, root };
+  });
+  return changed ? next : tabs;
+}
+
+function trimPaneScrollback(node: PaneNode, scrollbackLineLimit: number): PaneNode {
+  if (node.kind === "leaf") {
+    if (!node.scrollback) return node;
+    const trimmed = trimPersistedTerminalScrollback(node.scrollback, scrollbackLineLimit);
+    return trimmed === node.scrollback ? node : { ...node, scrollback: trimmed };
+  }
+  const a = trimPaneScrollback(node.a, scrollbackLineLimit);
+  const b = trimPaneScrollback(node.b, scrollbackLineLimit);
+  return a === node.a && b === node.b ? node : { ...node, a, b };
+}
+
+function trimPersistedTerminalScrollback(scrollback: string, scrollbackLineLimit: number): string {
+  const lineTrimmed = trimTerminalScrollbackLines(scrollback, scrollbackLineLimit);
+  const charTrimmed =
+    lineTrimmed.length > MAX_TERMINAL_SCROLLBACK_CHARS
+      ? lineTrimmed.slice(lineTrimmed.length - MAX_TERMINAL_SCROLLBACK_CHARS)
+      : lineTrimmed;
+  return trimTerminalScrollbackLines(charTrimmed, scrollbackLineLimit);
+}
+
 function disposeTerminalTabPanes(tab: Tab): void {
   if (tab.kind !== "terminal") return;
   for (const pane of collectLeaves(tab.root)) {
@@ -338,11 +393,16 @@ function disposeTerminalTabPanes(tab: Tab): void {
 // JSON.parse + a recursive transient-terminal cleanup walk) only runs once per
 // mount/switch instead of three times. Falls back to the default tab set
 // when nothing is persisted (or the persisted blob is a stale version).
-function initialTabsState(workspaceId: string | null, defaultCwd?: string): {
+function initialTabsState(
+  workspaceId: string | null,
+  defaultCwd: string | undefined,
+  scrollbackLineLimit: number,
+): {
   tabs: Tab[];
   activeId: TabId | null;
+  closedChatRunIds: string[];
 } {
-  const loaded = loadPersisted(workspaceId);
+  const loaded = loadPersisted(workspaceId, scrollbackLineLimit);
   if (loaded && loaded.tabs.length > 0) {
     let activeId =
       loaded.activeId && loaded.tabs.some((t) => t.id === loaded.activeId)
@@ -356,10 +416,16 @@ function initialTabsState(workspaceId: string | null, defaultCwd?: string): {
     if (resolved?.kind === "preview") {
       activeId = loaded.tabs.find((t) => t.kind === "chat")?.id ?? activeId;
     }
-    return { tabs: loaded.tabs, activeId };
+    return {
+      tabs: loaded.tabs,
+      activeId,
+      closedChatRunIds: Array.isArray(loaded.closedChatRunIds)
+        ? loaded.closedChatRunIds.filter((id): id is string => typeof id === "string")
+        : [],
+    };
   }
   const seed = defaultTabs(defaultCwd);
-  return { tabs: seed, activeId: seed[0].id };
+  return { tabs: seed, activeId: seed[0].id, closedChatRunIds: [] };
 }
 
 export interface UseTabsApi {
@@ -437,6 +503,10 @@ export interface UseTabsApi {
   setTerminalSplitRatio: (tabId: TabId, path: PanePath, ratio: number) => void;
   setLeafCwd: (tabId: TabId, paneId: string, cwd: string) => void;
   setLeafScrollback: (tabId: TabId, paneId: string, scrollback: string) => void;
+  // Synchronously persist a batch of final pane scrollback snapshots to
+  // localStorage in one write, bypassing the debounce. For the quit path
+  // (beforeunload/pagehide) where deferred updaters never get a render.
+  flushScrollbackNow: (entries: Array<{ tabId: TabId; paneId: string; text: string }>) => void;
   setLeafWorker: (tabId: TabId, paneId: string, worker: TerminalLeafWorker | null) => void;
   // Rename a leaf's paneId. The caller must dispose the old PTY when it is
   // intentionally replacing a live shell. The new TerminalPane mounts at the
@@ -510,7 +580,14 @@ export interface UseTabsApi {
   registerDispose: (id: TabId, fn: () => void) => void;
 }
 
-export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTabsApi {
+export function useTabs(
+  workspaceId: string | null,
+  defaultCwd?: string,
+  terminalScrollbackLineLimit = TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
+): UseTabsApi {
+  const normalizedTerminalScrollbackLineLimit = normalizeTerminalScrollbackLineLimit(
+    terminalScrollbackLineLimit,
+  );
   // Parse the persisted layout ONCE for the initial mount. The previous
   // implementation called loadPersisted from both useState initializers,
   // re-doing the JSON.parse + recursive transient-terminal cleanup walk twice; a
@@ -518,7 +595,9 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
   // that to one parse. We keep `tabs` and `activeId` as separate useState
   // cells (so the many mutating callbacks below stay untouched) and just
   // seed both from one computed snapshot.
-  const initial = useState(() => initialTabsState(workspaceId, defaultCwd))[0];
+  const initial = useState(() =>
+    initialTabsState(workspaceId, defaultCwd, normalizedTerminalScrollbackLineLimit),
+  )[0];
   const [tabs, setTabs] = useState<Tab[]>(initial.tabs);
   const [activeId, setActiveId] = useState<TabId | null>(initial.activeId);
   const defaultCwdRef = useRef(defaultCwd);
@@ -528,10 +607,36 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
   if (tabsWorkspaceIdRef.current) {
     liveWorkspaceTabsRef.current.set(tabsWorkspaceIdRef.current, { tabs, activeId });
   }
+  // Run ids the user explicitly closed from the top strip, per workspace.
+  // syncChatTabsToRuns skips re-adding chat tabs for ids in this set so a close
+  // isn't undone by the ~250ms runs refresh. Kept in a ref (not state) so
+  // updating it never triggers a render; persisted inside each workspace's tab
+  // payload and reloaded by initialTabsState.
+  const closedChatRunIdsByWorkspaceRef = useRef(new Map<string, Set<string>>());
+  if (tabsWorkspaceIdRef.current && !closedChatRunIdsByWorkspaceRef.current.has(tabsWorkspaceIdRef.current)) {
+    closedChatRunIdsByWorkspaceRef.current.set(
+      tabsWorkspaceIdRef.current,
+      new Set(initial.closedChatRunIds),
+    );
+  }
+  // The closed set for whichever workspace `tabs` currently belongs to.
+  const currentClosedChatRunIds = (): Set<string> => {
+    const ws = tabsWorkspaceIdRef.current;
+    if (!ws) return new Set();
+    let set = closedChatRunIdsByWorkspaceRef.current.get(ws);
+    if (!set) {
+      set = new Set();
+      closedChatRunIdsByWorkspaceRef.current.set(ws, set);
+    }
+    return set;
+  };
+  const closedChatRunIdsArray = (): string[] => Array.from(currentClosedChatRunIds());
   const workspaceIdRef = useRef(workspaceId);
   workspaceIdRef.current = workspaceId;
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
+  const terminalScrollbackLineLimitRef = useRef(normalizedTerminalScrollbackLineLimit);
+  terminalScrollbackLineLimitRef.current = normalizedTerminalScrollbackLineLimit;
 
   // When the workspace switches, swap tabs to that workspace's live in-memory
   // snapshot first, then fall back to its persisted layout. Persistence strips
@@ -553,8 +658,38 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
     if (previousWorkspaceId) {
       liveWorkspaceTabsRef.current.set(previousWorkspaceId, { tabs, activeId });
     }
+    // Flush (don't drop) the previous workspace's pending debounced write
+    // before swapping state. `tabs` here is still the previous workspace's
+    // layout and persistPayloadRef is keyed to it, so a layout edit made
+    // <300ms before the switch is committed instead of lost when the persist
+    // effect's cleanup clears the armed timer on the next render.
+    if (persistTimer.current !== null) {
+      window.clearTimeout(persistTimer.current);
+      persistTimer.current = null;
+      const { workspaceId: ws, tabs: t, activeId: a } = persistPayloadRef.current;
+      const closed = ws ? closedChatRunIdsByWorkspaceRef.current.get(ws) : null;
+      persist(ws, t, a, terminalScrollbackLineLimitRef.current, closed ? Array.from(closed) : undefined);
+    }
     const live = workspaceId ? liveWorkspaceTabsRef.current.get(workspaceId) : null;
-    const next = live ?? initialTabsState(workspaceId, defaultCwdRef.current);
+    if (workspaceId && !live && !closedChatRunIdsByWorkspaceRef.current.has(workspaceId)) {
+      // First time entering this workspace this session: load its persisted
+      // closed-run set alongside its layout.
+      const loadedState = initialTabsState(
+        workspaceId,
+        defaultCwdRef.current,
+        terminalScrollbackLineLimitRef.current,
+      );
+      closedChatRunIdsByWorkspaceRef.current.set(workspaceId, new Set(loadedState.closedChatRunIds));
+      tabsWorkspaceIdRef.current = workspaceId;
+      setTabs(loadedState.tabs);
+      setActiveId(loadedState.activeId);
+      return;
+    }
+    const next = live ?? initialTabsState(
+      workspaceId,
+      defaultCwdRef.current,
+      terminalScrollbackLineLimitRef.current,
+    );
     tabsWorkspaceIdRef.current = workspaceId;
     setTabs(next.tabs);
     setActiveId(next.activeId);
@@ -563,6 +698,10 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
   useEffect(() => {
     setTabs((curr) => normalizeTerminalTitles(curr));
   }, [workspaceId]);
+
+  useEffect(() => {
+    setTabs((curr) => trimTabsScrollback(curr, normalizedTerminalScrollbackLineLimit));
+  }, [normalizedTerminalScrollbackLineLimit]);
 
   // Persist on every change, but DEBOUNCED. A synchronous JSON.stringify +
   // localStorage.setItem on every `tabs` mutation is fine for clicks, but a
@@ -584,19 +723,32 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
     tabs: Tab[];
     activeId: TabId | null;
   }>({ workspaceId, tabs, activeId });
-  persistPayloadRef.current = { workspaceId, tabs, activeId };
+  // Key the mirrored payload to the workspace the CURRENT `tabs` state
+  // actually belongs to, NOT the incoming `workspaceId` prop. On the render
+  // where workspaceId flips, `tabs` still holds the PREVIOUS workspace's
+  // layout (the swap happens later, in the workspace-switch effect below), so
+  // pairing the new id with the old tabs would let the unmount flush write
+  // workspace A's layout under workspace B's storage key.
+  persistPayloadRef.current = { workspaceId: tabsWorkspaceIdRef.current, tabs, activeId };
   useEffect(() => {
     if (persistTimer.current !== null) {
       window.clearTimeout(persistTimer.current);
     }
     persistTimer.current = window.setTimeout(() => {
       persistTimer.current = null;
-      persist(workspaceId, tabs, activeId);
+      // Write through the workspace-keyed payload ref, not the lexically
+      // captured `workspaceId`: at the render where the workspace flips, this
+      // effect closes over the NEW id but the OLD `tabs`, so persisting the
+      // captured pair would land the old layout under the new key. The ref
+      // pairs `tabs` with the workspace they actually belong to.
+      const { workspaceId: ws, tabs: t, activeId: a } = persistPayloadRef.current;
+      const closed = ws ? closedChatRunIdsByWorkspaceRef.current.get(ws) : null;
+      persist(ws, t, a, normalizedTerminalScrollbackLineLimit, closed ? Array.from(closed) : undefined);
     }, 300);
     return () => {
       if (persistTimer.current !== null) window.clearTimeout(persistTimer.current);
     };
-  }, [tabs, activeId, workspaceId]);
+  }, [tabs, activeId, workspaceId, normalizedTerminalScrollbackLineLimit]);
 
   // Flush any pending persist on unmount so a layout change made just
   // before the component tears down isn't lost. Empty deps → runs only on
@@ -608,7 +760,8 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         window.clearTimeout(persistTimer.current);
         persistTimer.current = null;
         const { workspaceId: ws, tabs: t, activeId: a } = persistPayloadRef.current;
-        persist(ws, t, a);
+        const closed = ws ? closedChatRunIdsByWorkspaceRef.current.get(ws) : null;
+        persist(ws, t, a, terminalScrollbackLineLimitRef.current, closed ? Array.from(closed) : undefined);
       }
     };
   }, []);
@@ -1332,6 +1485,9 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         return resolvedId;
       }
       const runId = input.runId;
+      // Explicitly (re)opening a run clears any prior user-close, so the sync
+      // effect is free to keep its tab around again.
+      currentClosedChatRunIds().delete(runId);
       setTabs((curr) => {
         const existing = curr.find(
           (t): t is ChatTab => t.kind === "chat" && t.id === runId,
@@ -1355,8 +1511,17 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
 
   const syncChatTabsToRuns = useCallback(
     (runList: Array<{ id: string; title: string }>) => {
+      const runIds = new Set(runList.map((r) => r.id));
+      // Prune closed-run ids no longer in the run list so the set can't grow
+      // unbounded (deleted runs will never reappear, so their marker is dead
+      // weight). Done outside the updater since it mutates a ref, not state.
+      const closed = currentClosedChatRunIds();
+      if (closed.size) {
+        for (const id of Array.from(closed)) {
+          if (!runIds.has(id)) closed.delete(id);
+        }
+      }
       setTabs((curr) => {
-        const runIds = new Set(runList.map((r) => r.id));
         const titleByRun = new Map(runList.map((r) => [r.id, r.title?.trim() || "Spark"]));
         let changed = false;
         // Drop chat tabs whose run has been deleted; keep drafts.
@@ -1382,7 +1547,9 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
         );
         const additions: ChatTab[] = [];
         for (const run of runList) {
-          if (!have.has(run.id)) {
+          // Skip runs the user explicitly closed: their tab stays gone until
+          // they reopen the run (openChatTab/promoteDraftChatTab clear the id).
+          if (!have.has(run.id) && !closed.has(run.id)) {
             additions.push(createChatTabForRun(run.id, run.title));
             changed = true;
           }
@@ -1423,6 +1590,9 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
 
   const promoteDraftChatTab = useCallback(
     (draftTabId: TabId, runId: string, title: string) => {
+      // A freshly-promoted run is, by definition, open — clear any stale
+      // closed marker (e.g. a reused run id) so sync won't suppress it.
+      currentClosedChatRunIds().delete(runId);
       setTabs((curr) => {
         const target = curr.find(
           (t): t is ChatTab => t.kind === "chat" && t.id === draftTabId && isDraftChatTabId(t.id),
@@ -1450,6 +1620,11 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
   );
 
   const closeChatTabForRun = useCallback((runId: string) => {
+    // Remember this close so syncChatTabsToRuns doesn't re-add the tab on the
+    // next runs refresh (the close contract: the run stays reachable via the
+    // history popover, the tab stays gone). Drafts have no run to re-derive,
+    // so they need no tracking.
+    if (!isDraftChatTabId(runId)) currentClosedChatRunIds().add(runId);
     setTabs((curr) => {
       const target = curr.find((t) => t.kind === "chat" && t.id === runId);
       if (!target) return curr;
@@ -1556,10 +1731,17 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
 
   const setLeafScrollback = useCallback(
     (tabId: TabId, paneId: string, scrollback: string) => {
-      const trimmed =
-        scrollback.length > MAX_TERMINAL_SCROLLBACK_CHARS
-          ? scrollback.slice(scrollback.length - MAX_TERMINAL_SCROLLBACK_CHARS)
-          : scrollback;
+      const trimmed = trimPersistedTerminalScrollback(
+        scrollback,
+        terminalScrollbackLineLimitRef.current,
+      );
+      // No inline persist here: writing localStorage from inside the updater
+      // double-wrote alongside the 300ms debounced effect (and double-fired
+      // under StrictMode), and React's eager-updater optimization runs only
+      // the FIRST queued updater synchronously — so a quit-time burst of
+      // per-pane setLeafScrollback calls would persist only one pane. Steady
+      // state is handled by the debounced effect; the synchronous quit path is
+      // flushScrollbackNow below.
       setTabs((curr) => {
         let changed = false;
         const next = curr.map((t) => {
@@ -1571,9 +1753,42 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
           changed = true;
           return { ...t, root };
         });
-        if (changed) persist(workspaceIdRef.current, next, activeIdRef.current);
         return changed ? next : curr;
       });
+    },
+    [],
+  );
+
+  // Synchronous quit-time flush: fold a batch of final pane scrollback
+  // snapshots into the current tab tree and write localStorage ONCE, outside
+  // any state updater, so a beforeunload/pagehide handler can persist every
+  // pane before the window tears down. Computes the next tabs from
+  // tabsRef.current (the latest committed tree), writes to the workspace the
+  // current tabs belong to, then reconciles React state so an interrupted
+  // quit leaves the in-memory tree consistent with what was persisted.
+  const flushScrollbackNow = useCallback(
+    (entries: Array<{ tabId: TabId; paneId: string; text: string }>) => {
+      if (entries.length === 0) return;
+      const limit = terminalScrollbackLineLimitRef.current;
+      let changed = false;
+      const next = tabsRef.current.map((t) => {
+        if (t.kind !== "terminal") return t;
+        let root = t.root;
+        for (const entry of entries) {
+          if (entry.tabId !== t.id) continue;
+          const trimmed = trimPersistedTerminalScrollback(entry.text, limit);
+          const existing = findLeaf(root, entry.paneId);
+          if (!existing || existing.scrollback === trimmed) continue;
+          const nextRoot = setLeafField(root, entry.paneId, "scrollback", trimmed);
+          if (nextRoot !== root) root = nextRoot;
+        }
+        if (root === t.root) return t;
+        changed = true;
+        return { ...t, root };
+      });
+      if (!changed) return;
+      persist(tabsWorkspaceIdRef.current, next, activeIdRef.current, limit, closedChatRunIdsArray());
+      setTabs(next);
     },
     [],
   );
@@ -1809,6 +2024,7 @@ export function useTabs(workspaceId: string | null, defaultCwd?: string): UseTab
       setTerminalSplitRatio,
       setLeafCwd,
       setLeafScrollback,
+      flushScrollbackNow,
       setLeafWorker,
       renameLeaf,
       addPaneInTab,

@@ -24,10 +24,14 @@ function parseBlocks(src: string): Block[] {
       i++;
       continue;
     }
-    if (/^\s*```/.test(line)) {
+    const fenceOpen = /^\s*(`{3,})/.exec(line);
+    if (fenceOpen) {
+      const fenceLen = fenceOpen[1].length;
       const code: string[] = [];
       i++;
-      while (i < lines.length && !/^\s*```/.test(lines[i])) {
+      while (i < lines.length) {
+        const fenceClose = /^\s*(`{3,})/.exec(lines[i]);
+        if (fenceClose && fenceClose[1].length >= fenceLen) break;
         code.push(lines[i]);
         i++;
       }
