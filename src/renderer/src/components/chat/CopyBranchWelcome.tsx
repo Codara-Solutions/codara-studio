@@ -32,7 +32,7 @@ export default function CopyBranchWelcome({ copyBranch }: { copyBranch: CopyBran
         style={{
           background: "var(--panel-2)",
           border: "1px solid var(--rule-soft)",
-          borderRadius: "var(--radius-surface, 7px)",
+          borderRadius: "var(--radius-surface, 10px)",
           padding: "12px 14px",
           fontSize: 13,
           lineHeight: 1.5,
