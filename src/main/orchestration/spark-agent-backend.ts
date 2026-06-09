@@ -28,6 +28,7 @@
 // fire, it picks the backend from `run.chatBackend` (defaulting to OpenRouter
 // for legacy / unset chats) and calls one of the methods below.
 
+import { dirname, isAbsolute, join, relative } from "node:path";
 import type {
   AgentEffortLevel,
   AppSettings,
@@ -290,6 +291,112 @@ export function latestUserPromptFromRun(run: RunState): string {
     if (message.message?.trim()) return message.message;
   }
   return "";
+}
+
+// The active plan for a run: the one referenced by planId, else the most recent
+// plan still marked active.
+function activePlanForRun(run: RunState) {
+  const byId = run.planId ? run.plans.find((plan) => plan.id === run.planId) : undefined;
+  if (byId) return byId;
+  for (let i = run.plans.length - 1; i >= 0; i -= 1) {
+    if (run.plans[i].status === "active") return run.plans[i];
+  }
+  return undefined;
+}
+
+// The latest Spark-authored "Run complete." completion summary (the worker-
+// authored DONE card), which already lives on the run as a spark/decision.
+function latestCompletionSummary(run: RunState): HumanRunMessage | undefined {
+  for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
+    const message = run.humanMessages[i];
+    if (
+      message.author === "spark" &&
+      message.kind === "decision" &&
+      message.message.trim().startsWith("Run complete.")
+    ) {
+      return message;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * True when this run ran a Plan-mode Best-of-N council. That work (the candidate
+ * planners + the synthesis judge) happens in their own worker terminals, OUTSIDE
+ * the chat CLI session — so when the user later flips the SAME chat to Talk or
+ * Execute, that session never "saw" it and can't remember what was planned. This
+ * is the one case that warrants injecting run context; a normal Execute chat
+ * spawned its own workers and already has them in its transcript.
+ */
+export function runDidPlanCouncil(run: RunState): boolean {
+  return run.workerTasks.some((task) => task.councilRole !== undefined);
+}
+
+// Turn an absolute file path into a CLI `@`-mention relative to cwd when the
+// file lives under cwd (forward slashes for the agent's path parser); otherwise
+// fall back to an `@`-mention of the absolute path. Lets the agent pull the file
+// in on demand instead of us pasting its whole contents.
+function fileMention(cwd: string | undefined, absPath: string): string {
+  if (cwd) {
+    const rel = relative(cwd, absPath);
+    if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
+      return `@${rel.replace(/\\/g, "/")}`;
+    }
+  }
+  return `@${absPath.replace(/\\/g, "/")}`;
+}
+
+/**
+ * A compact, read-only snapshot of what a Plan-council run produced, for
+ * injection ahead of the user's prompt into a CLI chat session — ONCE, the first
+ * time the chat leaves Plan mode (see the backends' contextInjectedRuns guard).
+ *
+ * The chat session only ever sees its own transcript; the council's workers and
+ * the synthesized plan live outside it. Without this, Talk "what did we just
+ * do?" guesses and Execute "run the plan" doesn't know the plan exists. We
+ * surface: completed steps, the latest Spark completion summary (the worker-
+ * authored DONE card), and the plan/PRD as `@`-mentions — NOT their full text,
+ * so the paste stays small and the agent reads the files on demand.
+ *
+ * Returns "" when there's nothing useful to add.
+ */
+export function buildSparkRunContextBlock(run: RunState, cwd?: string): string {
+  const sections: string[] = [];
+
+  const doneSteps = run.steps.filter(
+    (step) => step.status === "complete" || step.status === "completed_unverified",
+  );
+  if (doneSteps.length > 0) {
+    const titles = doneSteps.slice(-6).map((step) => `- ${step.title}`);
+    sections.push(`Completed steps:\n${titles.join("\n")}`);
+  }
+
+  const summary = latestCompletionSummary(run);
+  if (summary) {
+    sections.push(`Latest run summary (Spark's record of what the workers did):\n${summary.message.trim()}`);
+  }
+
+  const plan = activePlanForRun(run);
+  if (plan?.sourceFile) {
+    const planMention = fileMention(cwd, plan.sourceFile);
+    const prdMention = fileMention(cwd, join(dirname(plan.sourceFile), "PRD.md"));
+    sections.push(
+      `Active plan${plan.title ? ` — ${plan.title}` : ""}: ${planMention}\n` +
+        `Product requirements: ${prdMention}\n` +
+        `(These files hold the full plan — read them rather than asking me to repeat their contents. ` +
+        `When the user says "run the plan", this is the plan to execute.)`,
+    );
+  }
+
+  if (sections.length === 0) return "";
+
+  return [
+    "[SPARK CONTEXT — Spark's record of this run's worker activity and plan, for your awareness. This is NOT a new instruction from the user; use it to answer accurately and to know what has already been done.]",
+    "",
+    sections.join("\n\n"),
+    "",
+    "[END SPARK CONTEXT]",
+  ].join("\n");
 }
 
 /** Re-exported for callers that want to type their HumanRunMessage walks. */

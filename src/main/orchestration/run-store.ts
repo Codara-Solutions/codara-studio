@@ -1012,7 +1012,15 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
   // Plan-mode council: all candidate planners have finished (no pending tasks,
   // no active workers). Synthesize the best merged PLAN.md + PRD.md and complete
   // the run — skip the verifier/manager review (planning docs aren't code).
-  if (isCouncilRun(run)) {
+  //
+  // Gate out chatMode === "execute": council tasks keep their councilGroupId
+  // forever, so isCouncilRun(run) stays true even after the plan is finalized.
+  // Once the user flips the SAME chat to Execute ("run the plan"), chatMode is
+  // "execute" and we must NOT re-route into council finalize — otherwise
+  // switching to Execute would re-finalize the old plan instead of spawning
+  // execute workers. Any other mode (plan, or unset for a programmatic council)
+  // still advances/finalizes the council normally.
+  if (isCouncilRun(run) && run.chatMode !== "execute") {
     await advanceCouncil(run, cwd);
     return;
   }
@@ -2306,7 +2314,7 @@ async function forceFanOutBatch(
 // A council mirrors fan-out's deterministic forcing, but instead of one worker
 // per file it spawns N candidate PLANNERS (a mix of top-tier Claude Code + Codex
 // agents) that each write PLAN.md + PRD.md into a DISJOINT
-// .spark/plan-candidates/<i>/ folder. Disjoint scopes let the existing parallel
+// .spark/<runId>/candidates/<i>/ folder. Disjoint scopes let the existing parallel
 // machinery run them concurrently with no sandbox/conflict surgery. When they all
 // finish, runAutopilotManagerReview calls synthesizePlanCouncil to judge + merge.
 
@@ -2315,10 +2323,22 @@ const COUNCIL_TOP_TIER_MODEL: Partial<Record<WorkerRuntime, string>> = {
   codex: "gpt-5.5",
 };
 
-// Folder the synthesized plan is written to. A dedicated, clearly Spark-owned
-// directory so we never clobber a user's own root-level PLAN.md / plan.md, and
-// so the result is easy to find, review, and re-run.
-const PLAN_OUTPUT_DIR = "spark-plan";
+// Plan-council scratch + output live under .spark/<runId>/ so every run owns a
+// self-contained, clearly Spark-owned folder: candidate drafts under
+// candidates/<i>/ and the synthesized result under spark-plan/. Keeping it inside
+// .spark (and namespaced by run id) means we never clobber a user's own
+// root-level PLAN.md / plan.md, runs never collide, and the result is easy to
+// find, review, and re-run.
+function councilCandidateDir(runId: string, index: number): string {
+  return `.spark/${runId}/candidates/${index}/`;
+}
+
+// Relative (POSIX) path to the synthesized-plan folder for a run — used in
+// prompts, allowedPaths and expectedOutputs. For on-disk reads/writes join the
+// segments against cwd instead (see finalizeCouncil*).
+function councilPlanDir(runId: string): string {
+  return `.spark/${runId}/spark-plan`;
+}
 
 // Distinct planning lenses so N candidates explore genuinely different angles
 // rather than producing N near-identical drafts (diversity beats redundancy).
@@ -2330,10 +2350,6 @@ const COUNCIL_CANDIDATE_ANGLES = [
   "Favor user experience and product polish; emphasize the acceptance criteria a user would feel.",
   "Favor pragmatic risk management; identify the riskiest unknowns and de-risk them first.",
 ];
-
-function councilCandidateDir(index: number): string {
-  return `.spark/plan-candidates/${index}/`;
-}
 
 // True once a run carries council candidate tasks — routes the review hop into
 // synthesis instead of the normal verifier/manager loop.
@@ -2379,7 +2395,7 @@ function resolveCouncilDirective(
 
 // Deterministically synthesize ONE worker_batch step plus N candidate planner
 // tasks. By default that's one Claude + one Codex planner (both top-tier, at
-// xhigh effort), each owning a disjoint .spark/plan-candidates/<i>/ scope and
+// xhigh effort), each owning a disjoint .spark/<runId>/candidates/<i>/ scope and
 // told to write PLAN.md + PRD.md there without touching any other file. Returns
 // the updated run, or null when the task is empty / no runtimes are available.
 async function forceCouncilBatch(
@@ -2402,7 +2418,7 @@ async function forceCouncilBatch(
 
   const plannedAgents: PlannedStepAgent[] = Array.from({ length: n }, (_unused, index) => ({
     label: `planner ${index + 1}`,
-    summary: `Independent planner #${index + 1}: drafts PLAN.md + PRD.md in ${councilCandidateDir(index)}.`,
+    summary: `Independent planner #${index + 1}: drafts PLAN.md + PRD.md in ${councilCandidateDir(run.id, index)}.`,
     runtimePreference: runtimeFor(index),
     taskClass: "feature",
   }));
@@ -2418,8 +2434,8 @@ async function forceCouncilBatch(
     plannedAgents,
     riskLevel: "low",
     acceptanceCriteria: [
-      `${n} candidate plans are produced under .spark/plan-candidates/.`,
-      `A synthesized PLAN.md and PRD.md are written to ${PLAN_OUTPUT_DIR}/.`,
+      `${n} candidate plans are produced under .spark/${run.id}/candidates/.`,
+      `A synthesized PLAN.md and PRD.md are written to ${councilPlanDir(run.id)}/.`,
     ],
   });
   const stepId = updated.steps.at(-1)?.id;
@@ -2428,9 +2444,9 @@ async function forceCouncilBatch(
   const promptFor = (index: number): string =>
     `You are candidate planner #${index + 1} of ${n} INDEPENDENT planners working on the SAME task. ` +
     `Do NOT write or modify any application code. Your ONLY job is to produce two markdown files in your own folder:\n` +
-    `  - ${councilCandidateDir(index)}PLAN.md  — a concrete, step-by-step implementation plan\n` +
-    `  - ${councilCandidateDir(index)}PRD.md   — a product requirements document (goals, users, scope, requirements, acceptance criteria)\n\n` +
-    `Create the folder ${councilCandidateDir(index)} if it does not exist and write ONLY those two files; do not touch anything outside that folder.\n\n` +
+    `  - ${councilCandidateDir(run.id, index)}PLAN.md  — a concrete, step-by-step implementation plan\n` +
+    `  - ${councilCandidateDir(run.id, index)}PRD.md   — a product requirements document (goals, users, scope, requirements, acceptance criteria)\n\n` +
+    `Create the folder ${councilCandidateDir(run.id, index)} if it does not exist and write ONLY those two files; do not touch anything outside that folder.\n\n` +
     `Planning lens for this candidate: ${COUNCIL_CANDIDATE_ANGLES[index % COUNCIL_CANDIDATE_ANGLES.length]}\n\n` +
     `# Task\n${task}`;
 
@@ -2443,11 +2459,11 @@ async function forceCouncilBatch(
       runtimePreference: runtimeFor(index),
       modelHint: COUNCIL_TOP_TIER_MODEL[runtimeFor(index)],
       effortHint: "xhigh",
-      allowedPaths: [councilCandidateDir(index)],
+      allowedPaths: [councilCandidateDir(run.id, index)],
       forbiddenPaths: [],
       expectedOutputs: [
-        `${councilCandidateDir(index)}PLAN.md`,
-        `${councilCandidateDir(index)}PRD.md`,
+        `${councilCandidateDir(run.id, index)}PLAN.md`,
+        `${councilCandidateDir(run.id, index)}PRD.md`,
       ],
       verificationCommands: [],
       canRunParallel: true,
@@ -2476,22 +2492,31 @@ async function forceCouncilBatch(
   return requireRun(updated.id);
 }
 
-async function readCandidateDoc(cwd: string, index: number, file: string): Promise<string> {
+async function readCandidateDoc(
+  cwd: string,
+  runId: string,
+  index: number,
+  file: string,
+): Promise<string> {
   try {
-    return await fs.readFile(join(cwd, ".spark", "plan-candidates", String(index), file), "utf8");
+    return await fs.readFile(
+      join(cwd, ".spark", runId, "candidates", String(index), file),
+      "utf8",
+    );
   } catch {
     return "";
   }
 }
 
-// Remove the candidate scratch folders (and .spark if it's then empty) once the
-// synthesis has consumed them. Users only care about the merged result.
-async function cleanupCouncilCandidates(cwd: string): Promise<void> {
+// Remove this run's candidate scratch folder once the synthesis has consumed it.
+// The merged result under .spark/<runId>/spark-plan/ is kept — that's what the
+// user (and a later Execute "run the plan") cares about. We intentionally do NOT
+// rmdir .spark/<runId> (it still holds spark-plan) or .spark (other runs live
+// there).
+async function cleanupCouncilCandidates(cwd: string, runId: string): Promise<void> {
   await fs
-    .rm(join(cwd, ".spark", "plan-candidates"), { recursive: true, force: true })
+    .rm(join(cwd, ".spark", runId, "candidates"), { recursive: true, force: true })
     .catch(() => undefined);
-  // Best-effort; rmdir fails harmlessly when .spark still holds other state.
-  await fs.rmdir(join(cwd, ".spark")).catch(() => undefined);
 }
 
 // Read each candidate's PLAN.md/PRD.md and return the most complete pair, or null
@@ -2507,8 +2532,8 @@ async function pickMostCompleteCandidate(
     candidates.map(async (task) => {
       const index = task.candidateIndex ?? 0;
       return {
-        plan: await readCandidateDoc(cwd, index, "PLAN.md"),
-        prd: await readCandidateDoc(cwd, index, "PRD.md"),
+        plan: await readCandidateDoc(cwd, run.id, index, "PLAN.md"),
+        prd: await readCandidateDoc(cwd, run.id, index, "PRD.md"),
       };
     }),
   );
@@ -2521,7 +2546,7 @@ async function pickMostCompleteCandidate(
 
 // Drive a council run forward at each review hop. Phase 1: the candidate planners
 // have finished — spawn ONE synthesis worker on the user's SELECTED backend (no
-// OpenRouter) that reads the drafts and writes the merged spark-plan/ itself.
+// OpenRouter) that reads the drafts and writes the merged .spark/<runId>/spark-plan/ itself.
 // Phase 2: the synthesis worker has finished — finalize the run from its files.
 async function advanceCouncil(run: RunState, cwd: string): Promise<void> {
   const synthesisTask = run.workerTasks.find((task) => task.councilRole === "synthesis");
@@ -2545,7 +2570,7 @@ async function advanceCouncil(run: RunState, cwd: string): Promise<void> {
 
 // Phase 1 → 2: mark the candidate batch accepted + close its step, then add a
 // synthesis step with one worker (on the selected backend) that reads every
-// candidate's PLAN.md/PRD.md and writes the merged best-of-all into spark-plan/.
+// candidate's PLAN.md/PRD.md and writes the merged best-of-all into .spark/<runId>/spark-plan/.
 // Returns the updated run, or null when synthesis can't run (caller falls back).
 async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunState | null> {
   const runtime = councilSynthesisRuntime(run);
@@ -2583,7 +2608,7 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
   });
 
   const candidateList = candidates
-    .map((task) => `  - ${councilCandidateDir(task.candidateIndex ?? 0)} (${task.runtimePreference})`)
+    .map((task) => `  - ${councilCandidateDir(run.id, task.candidateIndex ?? 0)} (${task.runtimePreference})`)
     .join("\n");
   const taskText = councilTaskFromRun(run);
   const synthPrompt =
@@ -2592,29 +2617,29 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
     `Read every candidate's PLAN.md and PRD.md, then produce the SINGLE BEST merged pair by taking the strongest, ` +
     `most correct and most complete ideas from across ALL candidates — resolve contradictions in favor of the ` +
     `most rigorous option and drop weak or duplicated material. Write ONLY these two files:\n` +
-    `  - ${PLAN_OUTPUT_DIR}/PLAN.md  — the merged, best-of-all implementation plan\n` +
-    `  - ${PLAN_OUTPUT_DIR}/PRD.md   — the merged, best-of-all product requirements document\n\n` +
-    `Create the ${PLAN_OUTPUT_DIR}/ folder if needed and write ONLY those two files. Do NOT write application ` +
-    `code and do NOT modify anything outside ${PLAN_OUTPUT_DIR}/.\n\n# Task\n${taskText}`;
+    `  - ${councilPlanDir(run.id)}/PLAN.md  — the merged, best-of-all implementation plan\n` +
+    `  - ${councilPlanDir(run.id)}/PRD.md   — the merged, best-of-all product requirements document\n\n` +
+    `Create the ${councilPlanDir(run.id)}/ folder if needed and write ONLY those two files. Do NOT write application ` +
+    `code and do NOT modify anything outside ${councilPlanDir(run.id)}/.\n\n# Task\n${taskText}`;
 
   updated = await createStep({
     runId: updated.id,
     title: "Plan synthesis",
     goal:
       `A single judge on the selected agent merges the ${candidates.length} candidate drafts into the best ` +
-      `PLAN.md + PRD.md and writes them to ${PLAN_OUTPUT_DIR}/.`,
+      `PLAN.md + PRD.md and writes them to ${councilPlanDir(run.id)}/.`,
     kind: "worker_batch",
     plannedAgents: [
       {
         label: "synthesis judge",
-        summary: `Merge the ${candidates.length} candidate plans into ${PLAN_OUTPUT_DIR}/PLAN.md + PRD.md.`,
+        summary: `Merge the ${candidates.length} candidate plans into ${councilPlanDir(run.id)}/PLAN.md + PRD.md.`,
         runtimePreference: runtime,
         taskClass: "feature",
       },
     ],
     riskLevel: "low",
     acceptanceCriteria: [
-      `${PLAN_OUTPUT_DIR}/PLAN.md and ${PLAN_OUTPUT_DIR}/PRD.md are written, merging the candidate drafts.`,
+      `${councilPlanDir(run.id)}/PLAN.md and ${councilPlanDir(run.id)}/PRD.md are written, merging the candidate drafts.`,
     ],
   });
   const stepId = updated.steps.at(-1)?.id;
@@ -2632,9 +2657,9 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
     // record a selection.
     modelHint: run.chatModel ?? COUNCIL_TOP_TIER_MODEL[runtime],
     effortHint: run.chatEffort ?? "high",
-    allowedPaths: [`${PLAN_OUTPUT_DIR}/`],
+    allowedPaths: [`${councilPlanDir(run.id)}/`],
     forbiddenPaths: [],
-    expectedOutputs: [`${PLAN_OUTPUT_DIR}/PLAN.md`, `${PLAN_OUTPUT_DIR}/PRD.md`],
+    expectedOutputs: [`${councilPlanDir(run.id)}/PLAN.md`, `${councilPlanDir(run.id)}/PRD.md`],
     verificationCommands: [],
     canRunParallel: false,
     conflictsWith: [],
@@ -2660,7 +2685,7 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
 // Read PLAN.md (fall back to the most complete candidate if the worker produced
 // nothing), then finalize.
 async function finalizeCouncilFromDisk(run: RunState, cwd: string): Promise<void> {
-  const planDir = join(cwd, PLAN_OUTPUT_DIR);
+  const planDir = join(cwd, ".spark", run.id, "spark-plan");
   const planFilePath = join(planDir, "PLAN.md");
   const prdFilePath = join(planDir, "PRD.md");
   let planText = await fs.readFile(planFilePath, "utf8").catch(() => "");
@@ -2681,14 +2706,14 @@ async function finalizeCouncilFromDisk(run: RunState, cwd: string): Promise<void
     }
   }
 
-  await cleanupCouncilCandidates(cwd);
+  await cleanupCouncilCandidates(cwd, run.id);
   await finalizeCouncil(run, planText, planFilePath, via);
 }
 
 // Fallback when no CLI agent is available to synthesize: pick the most complete
 // candidate draft, write it to spark-plan/, complete the run. No OpenRouter.
 async function finalizeCouncilDeterministic(run: RunState, cwd: string): Promise<void> {
-  const planDir = join(cwd, PLAN_OUTPUT_DIR);
+  const planDir = join(cwd, ".spark", run.id, "spark-plan");
   const planFilePath = join(planDir, "PLAN.md");
   const prdFilePath = join(planDir, "PRD.md");
   const best = await pickMostCompleteCandidate(run, cwd);
@@ -2702,7 +2727,7 @@ async function finalizeCouncilDeterministic(run: RunState, cwd: string): Promise
       await fs.writeFile(prdFilePath, `${best.prd.trimEnd()}\n`, "utf8").catch(() => undefined);
     }
   }
-  await cleanupCouncilCandidates(cwd);
+  await cleanupCouncilCandidates(cwd, run.id);
   await finalizeCouncil(run, planText, planFilePath, "fallback");
 }
 
@@ -2719,14 +2744,14 @@ async function finalizeCouncil(
     workspaceId: run.workspaceId,
     runId: run.id,
     type: "plan_council.synthesized",
-    message: `Plan written to ${PLAN_OUTPUT_DIR}/ (${via})`,
+    message: `Plan written to ${councilPlanDir(run.id)}/ (${via})`,
     payload: { via, planPath: planFilePath },
   });
 
   const fresh = await requireRun(run.id);
   await commitRunChange(fresh, {
     type: "plan_council.completed",
-    message: `Plan council complete — plan written to ${PLAN_OUTPUT_DIR}/`,
+    message: `Plan council complete — plan written to ${councilPlanDir(run.id)}/`,
     payload: { via },
     mutate: (draft, timestamp) => {
       for (const task of draft.workerTasks) {
@@ -5566,7 +5591,7 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   // envelope, codex trust, and the launch command via `effectiveCwd`.
   let effectiveCwd = input.cwd;
   // Plan-mode council candidates are deliberately NOT sandboxed: each writes to
-  // its own disjoint .spark/plan-candidates/<i>/ dir in the real workspace so the
+  // its own disjoint .spark/<runId>/candidates/<i>/ dir in the real workspace so the
   // synthesis judge can read every candidate's PLAN.md / PRD.md afterward.
   if (
     input.unattended &&
@@ -6333,6 +6358,19 @@ export async function stopAndUndoPending(
   runId: string,
 ): Promise<UndoToCheckpointResult> {
   const run = await requireRun(runId);
+  // Interrupt the chat backend's live CC/Codex turn FIRST, on every Stop path.
+  // The checkpoint-undo path below rolls back Spark's state and cancels workers
+  // but does NOT touch the chat CLI — so without this the claude/codex process
+  // keeps churning its turn in the terminal behind Spark after the user hit
+  // Stop. ESC aborts the in-flight turn; the session stays alive so the
+  // restored message can be resubmitted. Backends with no live session no-op.
+  for (const backendKind of ["claude", "codex"] as const) {
+    try {
+      getBackend(backendKind).interruptChat?.(run.id);
+    } catch {
+      /* never let one backend's interrupt failure block the Stop */
+    }
+  }
   // Walk humanMessages backwards to find the latest one authored by the user.
   const lastUserMessage = [...run.humanMessages].reverse().find((m) => m.author === "user");
   if (!lastUserMessage) {

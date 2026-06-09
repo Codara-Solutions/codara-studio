@@ -47,8 +47,10 @@ import type {
 } from "./openrouter-manager";
 import { startCliSession, type CliSession } from "./cli-session";
 import {
+  buildSparkRunContextBlock,
   buildTalkReplyDecision,
   latestUserPromptFromRun,
+  runDidPlanCouncil,
   type ChatStreamHandler,
   type ManagerCallResult,
   type ManagerRequestInput,
@@ -202,6 +204,13 @@ interface ClaudeChatSession {
   detachEntries: () => void;
 }
 
+// Runs whose Spark plan-context block has already been injected into the chat
+// CLI. Module-scoped (not per-session) so it survives the session respawn that a
+// mode flip triggers — the transcript keeps the block via `-r`, so we inject it
+// exactly once: the first turn after the chat leaves Plan mode. Cleared on
+// disposeChat. See buildSparkRunContextBlock / runDidPlanCouncil.
+const contextInjectedRuns = new Set<string>();
+
 const sessions = new Map<string, ClaudeChatSession>();
 
 export const claudeBackend: SparkAgentBackend = {
@@ -324,7 +333,26 @@ export const claudeBackend: SparkAgentBackend = {
       // Resolve the prompt for this turn. Empty prompts still go through:
       // the hook will hand CC an empty string which CC tolerates, but the
       // hook needs SOMETHING on disk to fire the side-channel.
-      const prompt = latestUserPromptFromRun(input.run);
+      const userPrompt = latestUserPromptFromRun(input.run);
+      // ONCE per run, when the chat leaves Plan mode, prepend a compact snapshot
+      // of what the Plan council produced (completed steps, the worker DONE card,
+      // and the plan/PRD as @-mentions). The council ran in its own worker
+      // terminals, so this chat session never saw it — Talk would otherwise guess
+      // and Execute wouldn't know the plan exists. Everything else the session
+      // already "remembers" via its own transcript, so we DON'T re-inject: the
+      // block stays in history across the -r respawn a mode flip triggers.
+      let prompt = userPrompt;
+      if (
+        mode !== "plan" &&
+        !contextInjectedRuns.has(runId) &&
+        runDidPlanCouncil(input.run)
+      ) {
+        const contextBlock = buildSparkRunContextBlock(input.run, input.cwd);
+        if (contextBlock) {
+          prompt = userPrompt ? `${contextBlock}\n\n${userPrompt}` : contextBlock;
+          contextInjectedRuns.add(runId);
+        }
+      }
       const queueFile = join(queueDir, `${runId}.queue`);
       await writeFileAtomic(queueFile, prompt);
 
@@ -478,6 +506,7 @@ export const claudeBackend: SparkAgentBackend = {
   async disposeChat(runId: string): Promise<void> {
     const chat = sessions.get(runId);
     sessions.delete(runId);
+    contextInjectedRuns.delete(runId);
     if (chat) {
       await disposeChatSessionInternal(chat);
     }

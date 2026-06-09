@@ -34,7 +34,12 @@ import type {
   ManagerRequestInput,
   SparkAgentBackend,
 } from "./spark-agent-backend";
-import { buildTalkReplyDecision, latestUserPromptFromRun } from "./spark-agent-backend";
+import {
+  buildSparkRunContextBlock,
+  buildTalkReplyDecision,
+  latestUserPromptFromRun,
+  runDidPlanCouncil,
+} from "./spark-agent-backend";
 import { buildExecuteDecisionFromToolCalls } from "./claude-backend";
 import { startCliSession, type CliSession } from "./cli-session";
 import {
@@ -99,6 +104,13 @@ interface CodexChatSession {
 
 const SESSIONS = new Map<string, CodexChatSession>();
 
+// Runs whose Spark plan-context block has already been injected into the chat
+// CLI. Module-scoped so it survives the session respawn a mode flip triggers
+// (the rollout keeps the block via `-r`), so we inject exactly once: the first
+// turn after the chat leaves Plan mode. Cleared on disposeChat. Mirrors
+// claude-backend's contextInjectedRuns.
+const contextInjectedRuns = new Set<string>();
+
 const TURN_TIMEOUT_MS = 90_000;
 // While a Spark long-poll MCP tool call is in flight (spark_wait_for_workers),
 // the rollout JSONL emits the initial function_call entry once and is then
@@ -124,8 +136,20 @@ const CODEX_REPL_READY_TIMEOUT_MS = 15_000;
 // After first stdout, give Codex's Ink input box a beat to mount before typing.
 const CODEX_INPUT_SETTLE_MS = 1_200;
 // Between the pasted prompt body and the submitting CR, so Codex processes the
-// text before the Enter (a single merged burst can drop the submit).
-const CODEX_SUBMIT_SETTLE_MS = 120;
+// text before the Enter (a single merged burst can drop the submit). Scales with
+// paste size: a large bracketed paste (e.g. the injected Spark run-context, a
+// few KB) takes the TUI longer to ingest, and an Enter sent before the paste
+// commits is dropped — leaving the prompt stuck in the input box, never
+// submitted. Mirrors claude-backend's PASTE_SETTLE_* scaling.
+const CODEX_SUBMIT_SETTLE_BASE_MS = 200;
+const CODEX_SUBMIT_SETTLE_PER_2KB_MS = 200;
+const CODEX_SUBMIT_SETTLE_CEILING_MS = 5_000;
+// After the first submit CR, re-send it a few times while the rollout shows no
+// new activity. A single dropped Enter under a PTY otherwise hangs the entire
+// turn; extra CRs after a successful submit land in an idle input and are
+// harmless. Mirrors claude-backend's submit-retry.
+const CODEX_SUBMIT_RETRY_COUNT = 4;
+const CODEX_SUBMIT_RETRY_INTERVAL_MS = 600;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -576,18 +600,34 @@ function handleEntry(
   }
 }
 
-async function submitPrompt(cli: CliSession, prompt: string): Promise<void> {
+async function submitPrompt(session: CodexChatSession, prompt: string): Promise<void> {
   if (!prompt) return;
+  const cli = session.cli;
   if (prompt.includes("\n") || prompt.includes("\r")) {
     // Bracketed paste so embedded newlines don't submit early.
     cli.writeRaw(`\x1b[200~${prompt}\x1b[201~`);
   } else {
     cli.writeRaw(prompt);
   }
-  // Send the submit CR on its own after a short settle so Codex processes the
-  // pasted body first — a single merged burst can drop the Enter under a PTY.
-  await sleep(CODEX_SUBMIT_SETTLE_MS);
+  // Settle before the submit CR, scaled to the paste size so Codex finishes
+  // ingesting a large bracketed paste before the Enter (an early Enter is
+  // dropped and the prompt stays stuck, unsubmitted).
+  const settleMs = Math.min(
+    CODEX_SUBMIT_SETTLE_CEILING_MS,
+    CODEX_SUBMIT_SETTLE_BASE_MS +
+      Math.ceil(prompt.length / 2048) * CODEX_SUBMIT_SETTLE_PER_2KB_MS,
+  );
+  await sleep(settleMs);
+  // Send the submit CR, then re-send it while the rollout JSONL shows no new
+  // activity — a dropped Enter would otherwise hang the turn forever. Once the
+  // turn starts (lastJsonlActivityAt advances past our snapshot) we stop.
+  const activityBefore = session.lastJsonlActivityAt;
   cli.writeRaw("\r");
+  for (let attempt = 0; attempt < CODEX_SUBMIT_RETRY_COUNT; attempt += 1) {
+    await sleep(CODEX_SUBMIT_RETRY_INTERVAL_MS);
+    if (session.lastJsonlActivityAt !== activityBefore) return;
+    cli.writeRaw("\r");
+  }
 }
 
 
@@ -708,8 +748,8 @@ export const codexBackend: SparkAgentBackend = {
       // previous turn's orphan would extend an unrelated turn.
       session.pendingMcpToolCalls.clear();
 
-      const prompt = latestUserPromptFromRun(input.run);
-      if (!prompt.trim()) {
+      const userPrompt = latestUserPromptFromRun(input.run);
+      if (!userPrompt.trim()) {
         return {
           decision: buildTalkReplyDecision(
             "I didn't see a user message in this turn — try sending a note again.",
@@ -718,6 +758,25 @@ export const codexBackend: SparkAgentBackend = {
           model: input.chat.model,
         };
       }
+      // ONCE per run, when the chat leaves Plan mode, prepend a compact snapshot
+      // of what the Plan council produced (completed steps, the worker DONE card,
+      // and the plan/PRD as @-mentions). The council ran in its own worker
+      // terminals, so this chat session never saw it. Everything else the session
+      // already "remembers" via its rollout, so we DON'T re-inject — the block
+      // stays in history across the -r respawn a mode flip triggers. See
+      // claude-backend for the matching logic.
+      let prompt = userPrompt;
+      if (
+        input.chat.mode !== "plan" &&
+        !contextInjectedRuns.has(input.run.id) &&
+        runDidPlanCouncil(input.run)
+      ) {
+        const contextBlock = buildSparkRunContextBlock(input.run, input.cwd);
+        if (contextBlock) {
+          prompt = `${contextBlock}\n\n${userPrompt}`;
+          contextInjectedRuns.add(input.run.id);
+        }
+      }
 
       // Ensure Codex's TUI is actually ready before we type. On a fresh spawn
       // its Ink input loop attaches a beat after first stdout; typing earlier
@@ -725,7 +784,7 @@ export const codexBackend: SparkAgentBackend = {
       await session.cli.waitForFirstStdout(CODEX_REPL_READY_TIMEOUT_MS).catch(() => {});
       if (freshSpawn) await sleep(CODEX_INPUT_SETTLE_MS);
       const waiter = waitForTurnEnd(session);
-      await submitPrompt(session.cli, prompt);
+      await submitPrompt(session, prompt);
       await waiter;
 
       const finalText =
@@ -768,6 +827,7 @@ export const codexBackend: SparkAgentBackend = {
   },
 
   async disposeChat(runId: string): Promise<void> {
+    contextInjectedRuns.delete(runId);
     const session = SESSIONS.get(runId);
     if (!session) return;
     SESSIONS.delete(runId);

@@ -1327,8 +1327,8 @@ export interface FanOutDirective {
 // Plan-mode Best-of-N council. When set (or when a run's chatMode is "plan"),
 // run-store forces a worker_batch of N candidate planners — a mix of Claude Code
 // and Codex agents at top-tier models — that each write PLAN.md + PRD.md into a
-// disjoint .spark/plan-candidates/<i>/ dir, then a judge synthesizes the best
-// merged PLAN.md + PRD.md into the workspace root. Deterministic, not LLM prose.
+// disjoint .spark/<runId>/candidates/<i>/ dir, then a judge synthesizes the best
+// merged PLAN.md + PRD.md into .spark/<runId>/spark-plan/. Deterministic, not LLM prose.
 export interface CouncilDirective {
   // The planning task / request the candidates each plan for.
   task: string;
@@ -1411,7 +1411,7 @@ export interface WorkerTask {
   candidateIndex?: number;
   // Council role: "candidate" drafts a plan in its own folder; "synthesis" is the
   // single merge worker that reads all candidate drafts and writes the final
-  // spark-plan/. Undefined for normal tasks.
+  // .spark/<runId>/spark-plan/. Undefined for normal tasks.
   councilRole?: "candidate" | "synthesis";
   createdBy: "spark" | "user" | "system";
   createdAt: string;
