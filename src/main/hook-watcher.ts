@@ -60,6 +60,42 @@ const MAX_HOOK_FILE_BYTES = 256 * 1024;
 // burst into one scan; low enough that we still feel real-time.
 const RESCAN_DEBOUNCE_MS = 50;
 
+// Concurrency cap for handleFile. The "burst rate here is small" assumption
+// above holds for a live session, but the cold-start backlog does not: the
+// hooks dir accumulates while Spark is closed (every Claude CLI session on
+// the machine drops files here), and the initial rescan once hit 11k+
+// pending files — firing an unbounded handleFile per entry exhausted the
+// process's file handles (EMFILE) and broke app launch. Slots hand off
+// directly to the next waiter so the cap is exact.
+const MAX_CONCURRENT_HANDLES = 16;
+let handleSlotsAvailable = MAX_CONCURRENT_HANDLES;
+const handleSlotWaiters: Array<() => void> = [];
+
+async function acquireHandleSlot(): Promise<void> {
+  if (handleSlotsAvailable > 0) {
+    handleSlotsAvailable--;
+    return;
+  }
+  await new Promise<void>((resolve) => handleSlotWaiters.push(resolve));
+}
+
+function releaseHandleSlot(): void {
+  const next = handleSlotWaiters.shift();
+  if (next) next();
+  // Clamp: waiters force-woken by stopHookWatcher() release a slot they were
+  // never handed; without the cap a stop with a deep queue would let the
+  // count drift past MAX for a later watcher restart.
+  else handleSlotsAvailable = Math.min(MAX_CONCURRENT_HANDLES, handleSlotsAvailable + 1);
+}
+
+// processed/ retention. Files there exist only so a restart doesn't replay
+// already-routed events; after a week they are pure dead weight (the dir was
+// once found holding 114k files, slowing every readdir of its parent).
+const PROCESSED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const PROCESSED_PRUNE_BATCH = 200;
+// Let app boot settle before spending IO on the prune.
+const PROCESSED_PRUNE_DELAY_MS = 30_000;
+
 interface WatcherState {
   hooksDir: string;
   processedDir: string;
@@ -73,6 +109,8 @@ interface WatcherState {
   stopped: boolean;
   // Rescan debounce timer for the directory-level fallback path.
   rescanTimer: NodeJS.Timeout | null;
+  // One-shot timer for the deferred processed/ retention prune.
+  pruneTimer: NodeJS.Timeout | null;
   // Lazy-resolved run-store. We use a Promise so concurrent dispatches
   // share the import.
   runStorePromise: Promise<RunStoreModule> | null;
@@ -115,6 +153,7 @@ export async function startHookWatcher(): Promise<void> {
     inFlight: new Set(),
     stopped: false,
     rescanTimer: null,
+    pruneTimer: null,
     runStorePromise: null,
   };
   active = state;
@@ -125,6 +164,15 @@ export async function startHookWatcher(): Promise<void> {
   void rescanDirectory(state).catch((err) =>
     console.warn("[hook-watcher] initial rescan failed:", err),
   );
+
+  // Retention prune for processed/, deferred past boot so the (potentially
+  // large) stat sweep never competes with startup IO.
+  state.pruneTimer = setTimeout(() => {
+    state.pruneTimer = null;
+    void pruneProcessed(state).catch((err) =>
+      console.warn("[hook-watcher] processed prune failed:", err),
+    );
+  }, PROCESSED_PRUNE_DELAY_MS);
 
   try {
     const watcher = fsWatch(hooksDir, { persistent: true }, (_eventType, filename) => {
@@ -168,6 +216,16 @@ export async function stopHookWatcher(): Promise<void> {
     clearTimeout(state.rescanTimer);
     state.rescanTimer = null;
   }
+  if (state.pruneTimer !== null) {
+    clearTimeout(state.pruneTimer);
+    state.pruneTimer = null;
+  }
+  // Wake every queued handleFile so its post-acquire stopped check runs and
+  // the pending promises settle instead of hanging past shutdown.
+  while (handleSlotWaiters.length > 0) {
+    const next = handleSlotWaiters.shift();
+    if (next) next();
+  }
   try {
     state.watcher?.close();
   } catch (err) {
@@ -209,7 +267,11 @@ async function handleFile(state: WatcherState, filename: string): Promise<void> 
   if (state.stopped) return;
   if (state.inFlight.has(filename)) return;
   state.inFlight.add(filename);
+  await acquireHandleSlot();
   try {
+    // Re-check after the (possibly long) queue wait — a stop while queued
+    // force-wakes us and the only correct move is to bail untouched.
+    if (state.stopped) return;
     const filePath = join(state.hooksDir, filename);
 
     // Race-safe read with retry. ENOENT and zero-byte reads both indicate
@@ -292,7 +354,46 @@ async function handleFile(state: WatcherState, filename: string): Promise<void> 
 
     await moveToProcessed(state, filePath, filename);
   } finally {
+    releaseHandleSlot();
     state.inFlight.delete(filename);
+  }
+}
+
+// Best-effort retention sweep of processed/. Batched stats with a yield
+// between batches so a large backlog (six figures observed) never saturates
+// the event loop or the disk; every batch re-checks stopped so shutdown
+// stays prompt.
+async function pruneProcessed(state: WatcherState): Promise<void> {
+  if (state.stopped) return;
+  let names: string[];
+  try {
+    names = await fs.readdir(state.processedDir);
+  } catch {
+    return; // dir missing — nothing to prune
+  }
+  const cutoff = Date.now() - PROCESSED_RETENTION_MS;
+  let pruned = 0;
+  for (let i = 0; i < names.length; i += PROCESSED_PRUNE_BATCH) {
+    if (state.stopped) return;
+    const batch = names.slice(i, i + PROCESSED_PRUNE_BATCH);
+    await Promise.all(
+      batch.map(async (name) => {
+        try {
+          const filePath = join(state.processedDir, name);
+          const stat = await fs.stat(filePath);
+          if (stat.isFile() && stat.mtimeMs < cutoff) {
+            await fs.unlink(filePath);
+            pruned++;
+          }
+        } catch {
+          /* best-effort; a vanished or locked file just stays for next time */
+        }
+      }),
+    );
+    await delay(10);
+  }
+  if (pruned > 0) {
+    console.log(`[hook-watcher] pruned ${pruned} processed hook files older than 7 days`);
   }
 }
 
