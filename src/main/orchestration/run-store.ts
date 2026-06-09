@@ -1013,7 +1013,7 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
   // no active workers). Synthesize the best merged PLAN.md + PRD.md and complete
   // the run — skip the verifier/manager review (planning docs aren't code).
   if (isCouncilRun(run)) {
-    await synthesizePlanCouncil(run, cwd);
+    await advanceCouncil(run, cwd);
     return;
   }
 
@@ -2315,6 +2315,11 @@ const COUNCIL_TOP_TIER_MODEL: Partial<Record<WorkerRuntime, string>> = {
   codex: "gpt-5.5",
 };
 
+// Folder the synthesized plan is written to. A dedicated, clearly Spark-owned
+// directory so we never clobber a user's own root-level PLAN.md / plan.md, and
+// so the result is easy to find, review, and re-run.
+const PLAN_OUTPUT_DIR = "spark-plan";
+
 // Distinct planning lenses so N candidates explore genuinely different angles
 // rather than producing N near-identical drafts (diversity beats redundancy).
 const COUNCIL_CANDIDATE_ANGLES = [
@@ -2346,6 +2351,17 @@ function councilTaskFromRun(run: RunState): string {
   );
 }
 
+// Map the run's SELECTED chat backend to a council worker runtime. The user's
+// choice drives the synthesis engine — they explicitly don't want the judge on
+// OpenRouter — so synthesis runs on the same agent they picked. Returns null when
+// the selection isn't a CLI agent runtime (then we fall back to a deterministic
+// pick of the most complete candidate, still no OpenRouter).
+function councilSynthesisRuntime(run: RunState): WorkerRuntime | null {
+  if (run.chatBackend === "claude") return "claude";
+  if (run.chatBackend === "codex") return "codex";
+  return null;
+}
+
 // Resolve the council directive for this startAutopilot call: an explicit
 // input.council wins; otherwise a run in chatMode "plan" treats the user's note
 // (or latest user message) as the planning task.
@@ -2362,22 +2378,24 @@ function resolveCouncilDirective(
 }
 
 // Deterministically synthesize ONE worker_batch step plus N candidate planner
-// tasks. Each candidate owns a disjoint .spark/plan-candidates/<i>/ scope, runs a
-// top-tier model at high effort, and is told to write PLAN.md + PRD.md there
-// without touching any other file. Returns the updated run, or null when the task
-// is empty / no runtimes are available.
+// tasks. By default that's one Claude + one Codex planner (both top-tier, at
+// xhigh effort), each owning a disjoint .spark/plan-candidates/<i>/ scope and
+// told to write PLAN.md + PRD.md there without touching any other file. Returns
+// the updated run, or null when the task is empty / no runtimes are available.
 async function forceCouncilBatch(
   run: RunState,
   directive: CouncilDirective,
 ): Promise<RunState | null> {
   const task = directive.task.trim();
   if (!task) return null;
-  const n = Math.min(6, Math.max(2, directive.n ?? 3));
   const runtimes =
     directive.engines && directive.engines.length > 0
       ? directive.engines
       : await chooseFanOutRuntimes();
   if (runtimes.length === 0) return null;
+  // Default: one planner per installed CLI agent (Claude + Codex → 2 candidates,
+  // one each). An explicit directive.n can override; clamp to [2, 6].
+  const n = Math.min(6, Math.max(2, directive.n ?? runtimes.length));
 
   const councilGroupId = makeId("council");
   const runtimeFor = (index: number): WorkerRuntime => runtimes[index % runtimes.length];
@@ -2401,7 +2419,7 @@ async function forceCouncilBatch(
     riskLevel: "low",
     acceptanceCriteria: [
       `${n} candidate plans are produced under .spark/plan-candidates/.`,
-      "A synthesized PLAN.md and PRD.md are written to the workspace root.",
+      `A synthesized PLAN.md and PRD.md are written to ${PLAN_OUTPUT_DIR}/.`,
     ],
   });
   const stepId = updated.steps.at(-1)?.id;
@@ -2424,7 +2442,7 @@ async function forceCouncilBatch(
       description: promptFor(index),
       runtimePreference: runtimeFor(index),
       modelHint: COUNCIL_TOP_TIER_MODEL[runtimeFor(index)],
-      effortHint: "high",
+      effortHint: "xhigh",
       allowedPaths: [councilCandidateDir(index)],
       forbiddenPaths: [],
       expectedOutputs: [
@@ -2437,6 +2455,7 @@ async function forceCouncilBatch(
       taskClass: "feature",
       councilGroupId,
       candidateIndex: index,
+      councilRole: "candidate",
       createdBy: "spark",
     });
   }
@@ -2465,58 +2484,250 @@ async function readCandidateDoc(cwd: string, index: number, file: string): Promi
   }
 }
 
-// All candidate planners have finished. Read each candidate's PLAN.md / PRD.md,
-// ask the judge to synthesize the best merged pair, write them to the workspace
-// root, surface the result as the run's active plan, and complete the run.
-async function synthesizePlanCouncil(run: RunState, cwd: string): Promise<void> {
-  const candidates = run.workerTasks
-    .filter((task) => task.councilGroupId !== undefined)
-    .sort((a, b) => (a.candidateIndex ?? 0) - (b.candidateIndex ?? 0));
+// Remove the candidate scratch folders (and .spark if it's then empty) once the
+// synthesis has consumed them. Users only care about the merged result.
+async function cleanupCouncilCandidates(cwd: string): Promise<void> {
+  await fs
+    .rm(join(cwd, ".spark", "plan-candidates"), { recursive: true, force: true })
+    .catch(() => undefined);
+  // Best-effort; rmdir fails harmlessly when .spark still holds other state.
+  await fs.rmdir(join(cwd, ".spark")).catch(() => undefined);
+}
 
+// Read each candidate's PLAN.md/PRD.md and return the most complete pair, or null
+// when none produced anything. Used by the deterministic fallback.
+async function pickMostCompleteCandidate(
+  run: RunState,
+  cwd: string,
+): Promise<{ plan: string; prd: string } | null> {
+  const candidates = run.workerTasks
+    .filter((task) => task.councilRole === "candidate")
+    .sort((a, b) => (a.candidateIndex ?? 0) - (b.candidateIndex ?? 0));
   const docs = await Promise.all(
     candidates.map(async (task) => {
       const index = task.candidateIndex ?? 0;
       return {
-        index,
-        runtime: task.runtimePreference,
         plan: await readCandidateDoc(cwd, index, "PLAN.md"),
         prd: await readCandidateDoc(cwd, index, "PRD.md"),
       };
     }),
   );
+  const usable = docs.filter((doc) => doc.plan.trim() || doc.prd.trim());
+  if (usable.length === 0) return null;
+  return usable.reduce((best, doc) =>
+    doc.plan.length + doc.prd.length > best.plan.length + best.prd.length ? doc : best,
+  );
+}
 
-  const settings = await loadSettings();
-  const { synthesizeCouncilPlan } = await import("./plan-council");
-  const merged = await synthesizeCouncilPlan({
-    task: councilTaskFromRun(run),
-    candidates: docs,
-    settings,
+// Drive a council run forward at each review hop. Phase 1: the candidate planners
+// have finished — spawn ONE synthesis worker on the user's SELECTED backend (no
+// OpenRouter) that reads the drafts and writes the merged spark-plan/ itself.
+// Phase 2: the synthesis worker has finished — finalize the run from its files.
+async function advanceCouncil(run: RunState, cwd: string): Promise<void> {
+  const synthesisTask = run.workerTasks.find((task) => task.councilRole === "synthesis");
+  if (!synthesisTask) {
+    const prepared = await prepareCouncilSynthesis(run, cwd);
+    if (!prepared) {
+      // No CLI agent selected (or every candidate failed) — fall back to a
+      // deterministic pick of the most complete draft. No OpenRouter, no agent.
+      await finalizeCouncilDeterministic(run, cwd);
+      return;
+    }
+    // Re-enter the loop to launch the synthesis worker — mirrors the pending-task
+    // deferral above (the force-council guard is steps.length===0, so no second
+    // candidate batch is spawned).
+    const input = autopilotInputFromRun(prepared);
+    await startAutopilot({ ...input, cwd: cwd || input.cwd, runId: prepared.id });
+    return;
+  }
+  await finalizeCouncilFromDisk(run, cwd);
+}
+
+// Phase 1 → 2: mark the candidate batch accepted + close its step, then add a
+// synthesis step with one worker (on the selected backend) that reads every
+// candidate's PLAN.md/PRD.md and writes the merged best-of-all into spark-plan/.
+// Returns the updated run, or null when synthesis can't run (caller falls back).
+async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunState | null> {
+  const runtime = councilSynthesisRuntime(run);
+  if (!runtime) return null;
+  const candidates = run.workerTasks
+    .filter((task) => task.councilRole === "candidate")
+    .sort((a, b) => (a.candidateIndex ?? 0) - (b.candidateIndex ?? 0));
+  if (candidates.length === 0) return null;
+  // Nothing to merge if every candidate failed — let the deterministic fallback
+  // (which writes whatever drafts exist) handle it instead of spawning a worker.
+  if (candidates.every((task) => task.status === "failed")) return null;
+  const councilGroupId = candidates[0]?.councilGroupId;
+
+  // Close out the candidate batch so the synthesis step becomes the ACTIVE step —
+  // pickAutopilotTasks only launches tasks in the active step. Complete existing
+  // steps first, THEN add the synthesis step below (which stays open).
+  let updated = await commitRunChange(run, {
+    type: "plan_council.candidates_complete",
+    message: `Plan council — ${candidates.length} candidate draft(s) ready; synthesizing on ${runtime}`,
+    mutate: (draft, timestamp) => {
+      for (const task of draft.workerTasks) {
+        if (task.councilRole === "candidate" && task.status !== "failed") {
+          task.status = "accepted";
+          task.updatedAt = timestamp;
+        }
+      }
+      for (const step of draft.steps) {
+        if (step.status !== "failed") {
+          step.status = "complete";
+          step.updatedAt = timestamp;
+        }
+      }
+      draft.updatedAt = timestamp;
+    },
   });
 
-  if (merged.plan.trim()) {
-    await fs
-      .writeFile(join(cwd, "PLAN.md"), `${merged.plan.trimEnd()}\n`, "utf8")
-      .catch((err) => console.warn("[council] failed to write PLAN.md:", err));
-  }
-  if (merged.prd.trim()) {
-    await fs
-      .writeFile(join(cwd, "PRD.md"), `${merged.prd.trimEnd()}\n`, "utf8")
-      .catch((err) => console.warn("[council] failed to write PRD.md:", err));
+  const candidateList = candidates
+    .map((task) => `  - ${councilCandidateDir(task.candidateIndex ?? 0)} (${task.runtimePreference})`)
+    .join("\n");
+  const taskText = councilTaskFromRun(run);
+  const synthPrompt =
+    `You are the SYNTHESIS judge of a Best-of-N planning council. ${candidates.length} independent agents ` +
+    `each drafted an implementation PLAN.md and a PRD.md for the SAME task, in these folders:\n${candidateList}\n\n` +
+    `Read every candidate's PLAN.md and PRD.md, then produce the SINGLE BEST merged pair by taking the strongest, ` +
+    `most correct and most complete ideas from across ALL candidates — resolve contradictions in favor of the ` +
+    `most rigorous option and drop weak or duplicated material. Write ONLY these two files:\n` +
+    `  - ${PLAN_OUTPUT_DIR}/PLAN.md  — the merged, best-of-all implementation plan\n` +
+    `  - ${PLAN_OUTPUT_DIR}/PRD.md   — the merged, best-of-all product requirements document\n\n` +
+    `Create the ${PLAN_OUTPUT_DIR}/ folder if needed and write ONLY those two files. Do NOT write application ` +
+    `code and do NOT modify anything outside ${PLAN_OUTPUT_DIR}/.\n\n# Task\n${taskText}`;
+
+  updated = await createStep({
+    runId: updated.id,
+    title: "Plan synthesis",
+    goal:
+      `A single judge on the selected agent merges the ${candidates.length} candidate drafts into the best ` +
+      `PLAN.md + PRD.md and writes them to ${PLAN_OUTPUT_DIR}/.`,
+    kind: "worker_batch",
+    plannedAgents: [
+      {
+        label: "synthesis judge",
+        summary: `Merge the ${candidates.length} candidate plans into ${PLAN_OUTPUT_DIR}/PLAN.md + PRD.md.`,
+        runtimePreference: runtime,
+        taskClass: "feature",
+      },
+    ],
+    riskLevel: "low",
+    acceptanceCriteria: [
+      `${PLAN_OUTPUT_DIR}/PLAN.md and ${PLAN_OUTPUT_DIR}/PRD.md are written, merging the candidate drafts.`,
+    ],
+  });
+  const stepId = updated.steps.at(-1)?.id;
+  if (!stepId) return null;
+
+  updated = await createWorkerTask({
+    runId: updated.id,
+    stepId,
+    title: "Synthesize best-of-all plan",
+    description: synthPrompt,
+    runtimePreference: runtime,
+    // The "main AI" judge runs on the model + effort the user picked in the
+    // composer (e.g. Opus 4.8 @ medium) — it's the one that decides what to keep
+    // from each candidate. Fall back to a top-tier default only if the run didn't
+    // record a selection.
+    modelHint: run.chatModel ?? COUNCIL_TOP_TIER_MODEL[runtime],
+    effortHint: run.chatEffort ?? "high",
+    allowedPaths: [`${PLAN_OUTPUT_DIR}/`],
+    forbiddenPaths: [],
+    expectedOutputs: [`${PLAN_OUTPUT_DIR}/PLAN.md`, `${PLAN_OUTPUT_DIR}/PRD.md`],
+    verificationCommands: [],
+    canRunParallel: false,
+    conflictsWith: [],
+    taskClass: "feature",
+    councilGroupId,
+    councilRole: "synthesis",
+    createdBy: "spark",
+  });
+
+  await appendEvent({
+    workspaceId: updated.workspaceId,
+    runId: updated.id,
+    stepId,
+    type: "plan_council.synthesis_started",
+    message: `Plan synthesis started on ${runtime}`,
+    payload: { runtime, candidateCount: candidates.length },
+  });
+
+  return requireRun(updated.id);
+}
+
+// Phase 2: the synthesis worker has written spark-plan/PLAN.md + PRD.md itself.
+// Read PLAN.md (fall back to the most complete candidate if the worker produced
+// nothing), then finalize.
+async function finalizeCouncilFromDisk(run: RunState, cwd: string): Promise<void> {
+  const planDir = join(cwd, PLAN_OUTPUT_DIR);
+  const planFilePath = join(planDir, "PLAN.md");
+  const prdFilePath = join(planDir, "PRD.md");
+  let planText = await fs.readFile(planFilePath, "utf8").catch(() => "");
+  let via: "synthesis" | "fallback" = "synthesis";
+
+  if (!planText.trim()) {
+    via = "fallback";
+    const best = await pickMostCompleteCandidate(run, cwd);
+    if (best) {
+      planText = best.plan;
+      await fs.mkdir(planDir, { recursive: true }).catch(() => undefined);
+      if (best.plan.trim()) {
+        await fs.writeFile(planFilePath, `${best.plan.trimEnd()}\n`, "utf8").catch(() => undefined);
+      }
+      if (best.prd.trim()) {
+        await fs.writeFile(prdFilePath, `${best.prd.trimEnd()}\n`, "utf8").catch(() => undefined);
+      }
+    }
   }
 
+  await cleanupCouncilCandidates(cwd);
+  await finalizeCouncil(run, planText, planFilePath, via);
+}
+
+// Fallback when no CLI agent is available to synthesize: pick the most complete
+// candidate draft, write it to spark-plan/, complete the run. No OpenRouter.
+async function finalizeCouncilDeterministic(run: RunState, cwd: string): Promise<void> {
+  const planDir = join(cwd, PLAN_OUTPUT_DIR);
+  const planFilePath = join(planDir, "PLAN.md");
+  const prdFilePath = join(planDir, "PRD.md");
+  const best = await pickMostCompleteCandidate(run, cwd);
+  const planText = best?.plan ?? "";
+  if (best && (best.plan.trim() || best.prd.trim())) {
+    await fs.mkdir(planDir, { recursive: true }).catch(() => undefined);
+    if (best.plan.trim()) {
+      await fs.writeFile(planFilePath, `${best.plan.trimEnd()}\n`, "utf8").catch(() => undefined);
+    }
+    if (best.prd.trim()) {
+      await fs.writeFile(prdFilePath, `${best.prd.trimEnd()}\n`, "utf8").catch(() => undefined);
+    }
+  }
+  await cleanupCouncilCandidates(cwd);
+  await finalizeCouncil(run, planText, planFilePath, "fallback");
+}
+
+// Shared completion: surface the plan as the run's active plan (with sourceFile so
+// Execute / "Run plan" targets the file), mark all council tasks accepted + steps
+// complete, and complete the run.
+async function finalizeCouncil(
+  run: RunState,
+  planText: string,
+  planFilePath: string,
+  via: "synthesis" | "fallback",
+): Promise<void> {
   await appendEvent({
     workspaceId: run.workspaceId,
     runId: run.id,
     type: "plan_council.synthesized",
-    message: `Synthesized PLAN.md + PRD.md from ${docs.length} candidate${docs.length === 1 ? "" : "s"} (${merged.via})`,
-    payload: { via: merged.via, rationale: merged.rationale, candidateCount: docs.length },
+    message: `Plan written to ${PLAN_OUTPUT_DIR}/ (${via})`,
+    payload: { via, planPath: planFilePath },
   });
 
   const fresh = await requireRun(run.id);
   await commitRunChange(fresh, {
     type: "plan_council.completed",
-    message: "Plan council complete — synthesized plan written to the workspace",
-    payload: { via: merged.via },
+    message: `Plan council complete — plan written to ${PLAN_OUTPUT_DIR}/`,
+    payload: { via },
     mutate: (draft, timestamp) => {
       for (const task of draft.workerTasks) {
         if (task.councilGroupId !== undefined && task.status !== "failed") {
@@ -2530,12 +2741,15 @@ async function synthesizePlanCouncil(run: RunState, cwd: string): Promise<void> 
           step.updatedAt = timestamp;
         }
       }
-      if (merged.plan.trim()) {
+      if (planText.trim()) {
         const plan = {
           id: makeId("plan"),
           workspaceId: draft.workspaceId,
           title: "Synthesized plan (council)",
-          rawContent: merged.plan,
+          // Point at the on-disk file so switching to Execute / "Run plan"
+          // targets it directly (the execute path keys off plan.sourceFile).
+          sourceFile: planFilePath,
+          rawContent: planText,
           requirements: [],
           status: "active" as const,
           createdAt: timestamp,
@@ -5252,6 +5466,7 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     writeScopeSource: input.writeScopeSource,
     councilGroupId: input.councilGroupId,
     candidateIndex: input.candidateIndex,
+    councilRole: input.councilRole,
     createdBy: input.createdBy ?? "user",
     createdAt: now,
     updatedAt: now,

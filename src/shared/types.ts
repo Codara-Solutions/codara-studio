@@ -1409,6 +1409,10 @@ export interface WorkerTask {
   // scope council candidates run in parallel and groups them in the run graph.
   councilGroupId?: string;
   candidateIndex?: number;
+  // Council role: "candidate" drafts a plan in its own folder; "synthesis" is the
+  // single merge worker that reads all candidate drafts and writes the final
+  // spark-plan/. Undefined for normal tasks.
+  councilRole?: "candidate" | "synthesis";
   createdBy: "spark" | "user" | "system";
   createdAt: string;
   updatedAt: string;
@@ -1701,6 +1705,7 @@ export interface CreateWorkerTaskInput {
   // Plan-mode council grouping; threads onto the created WorkerTask.
   councilGroupId?: string;
   candidateIndex?: number;
+  councilRole?: WorkerTask["councilRole"];
   createdBy?: WorkerTask["createdBy"];
 }
 

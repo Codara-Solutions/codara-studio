@@ -821,32 +821,19 @@ function StatusMeta({ run }: { run: RunState }) {
   );
 }
 
-// Cost split for this run: the exact OpenRouter manager spend (`totalCostUsd`,
-// recomputed after each priced SparkCall) alongside a price-table ESTIMATE of
-// worker-side LLM spend (`estimatedWorkerCostUsd`). Worker usage is not yet
-// measured live, so the worker segment is prefixed with `~` to signal it is an
-// approximation. Each segment is omitted when its source value is missing, and
-// the whole pill is hidden until at least one of the two has landed so chats
-// that ran before this data existed don't surface a fake $0.
+// Cost for this run: ONLY the real, metered OpenRouter spend (`totalCostUsd`,
+// recomputed after each priced SparkCall). Worker agents run on the user's
+// Claude Code / Codex CLI subscription, so a price-table estimate of their token
+// usage is NOT real money — surfacing it implied a CLI plan/council run "cost"
+// something when it didn't. The pill therefore appears only when OpenRouter was
+// actually used (i.e. the API model was selected), and stays hidden otherwise.
 function CostPill({ run }: { run: RunState }) {
   const mgr = run.totalCostUsd;
-  const work = run.estimatedWorkerCostUsd;
-  const hasMgr = typeof mgr === "number" && Number.isFinite(mgr);
-  const hasWork = typeof work === "number" && Number.isFinite(work);
-  if (!hasMgr && !hasWork) return null;
-  const title = [
-    hasMgr
-      ? `mgr = exact OpenRouter manager spend on this chat: ${formatCostUsd(mgr!)}.`
-      : null,
-    hasWork
-      ? `work = price-table estimate of worker LLM cost (live usage not yet tracked): ${formatCostUsd(work!)}.`
-      : null,
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const hasMgr = typeof mgr === "number" && Number.isFinite(mgr) && mgr > 0;
+  if (!hasMgr) return null;
   return (
     <span
-      title={title}
+      title={`Exact OpenRouter spend on this chat: ${formatCostUsd(mgr!)}.`}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -862,16 +849,8 @@ function CostPill({ run }: { run: RunState }) {
         whiteSpace: "nowrap",
       }}
     >
-      {hasMgr && (
-        <>
-          <span aria-hidden style={{ color: "var(--muted)" }}>$</span>
-          <span>{formatCostUsd(mgr!, { stripDollar: true })} mgr</span>
-        </>
-      )}
-      {hasMgr && hasWork && (
-        <span aria-hidden style={{ color: "var(--muted)" }}>/</span>
-      )}
-      {hasWork && <span>~{formatCostUsd(work!)} work</span>}
+      <span aria-hidden style={{ color: "var(--muted)" }}>$</span>
+      <span>{formatCostUsd(mgr!, { stripDollar: true })}</span>
     </span>
   );
 }
