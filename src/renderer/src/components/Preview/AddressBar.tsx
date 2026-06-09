@@ -5,7 +5,18 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { DrawIcon, InspectIcon } from "../icons";
+import {
+  BackIcon,
+  CloseIcon,
+  DevToolsIcon,
+  DrawIcon,
+  ExternalLinkIcon,
+  ForwardIcon,
+  GlobeIcon,
+  InspectIcon,
+  LockIcon,
+  ReloadIcon,
+} from "../icons";
 
 // AddressBar is the chrome for a preview tab: back/forward, reload, URL
 // input, ports preset dropdown, open-in-system-browser, open-devtools.
@@ -84,8 +95,18 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
   const [notice, setNotice] = useState<string | null>(null);
   const [checkingPort, setCheckingPort] = useState<number | null>(null);
   const [portsOpen, setPortsOpen] = useState(false);
+  // Drives the Safari-style address display: when unfocused we render a
+  // styled URL (dimmed scheme + emphasized host); on focus the raw editable
+  // draft is shown so the user can edit the full string.
+  const [focused, setFocused] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const portsAnchor = useRef<HTMLDivElement | null>(null);
+
+  // Parse the resting URL into scheme / host / rest so the unfocused pill can
+  // dim the scheme and emphasize the host (the Safari "emphasized domain"
+  // treatment). Falls back to the raw draft when it isn't a parseable URL.
+  const parsed = parseAddress(draft);
+  const isSecure = parsed?.scheme === "https";
 
   useEffect(() => {
     setDraft(url);
@@ -171,86 +192,74 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
     >
       <div
         style={{
-          height: 32,
+          height: 38,
           display: "flex",
           alignItems: "center",
-          gap: 4,
-          padding: "0 6px",
+          gap: 8,
+          padding: "0 8px",
         }}
       >
-        <ChromeButton
-          label="←"
-          title="Back"
-          disabled={!canGoBack}
-          onClick={onBack}
-        />
-        <ChromeButton
-          label="→"
-          title="Forward"
-          disabled={!canGoForward}
-          onClick={onForward}
-        />
-        <ChromeButton
-          label="↻"
-          title="Reload (Shift+click for hard reload, ignore cache)"
-          onClick={(e) => onReload({ ignoreCache: e.shiftKey })}
-        />
-        <div ref={portsAnchor} style={{ position: "relative" }}>
+        {/* Navigation cluster: back / forward / reload grouped inside one
+            subtly-bordered, recessed affordance so the three nav controls
+            read as a unit (Safari toolbar idiom) rather than three loose
+            boxes. */}
+        <Cluster>
+          <ChromeButton
+            label={<BackIcon size={13} />}
+            title="Back"
+            disabled={!canGoBack}
+            onClick={onBack}
+          />
+          <ChromeButton
+            label={<ForwardIcon size={13} />}
+            title="Forward"
+            disabled={!canGoForward}
+            onClick={onForward}
+          />
+          <ChromeButton
+            label={<ReloadIcon size={13} />}
+            title="Reload (Shift+click for hard reload, ignore cache)"
+            onClick={(e) => onReload({ ignoreCache: e.shiftKey })}
+          />
+        </Cluster>
+
+        <div ref={portsAnchor} style={{ position: "relative", flex: "0 0 auto" }}>
           <button
             type="button"
+            className="spark-btn"
             onClick={() => setPortsOpen((o) => !o)}
             title="Common dev-server ports"
             aria-pressed={portsOpen}
             style={{
-              appearance: "none",
-              background: portsOpen
-                ? "var(--hover-strong)"
-                : "color-mix(in oklch, var(--ink) 2%, transparent)",
-              border: "1px solid var(--rule-soft)",
-              color: portsOpen ? "var(--ink)" : "var(--ink-dim)",
-              padding: "0 8px",
-              height: 22,
-              borderRadius: 4,
+              height: 28,
+              padding: "0 10px",
               fontFamily: "var(--font-mono)",
               fontSize: 10,
-              letterSpacing: "0.04em",
+              letterSpacing: "0.06em",
               textTransform: "uppercase",
-              cursor: "default",
-              transition:
-                "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-            }}
-            onMouseEnter={(e) => {
-              if (!portsOpen) e.currentTarget.style.background = "var(--hover)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = portsOpen
-                ? "var(--hover-strong)"
-                : "color-mix(in oklch, var(--ink) 2%, transparent)";
+              // Reflect the open state with accent ink on a soft fill, matching
+              // the .spark-icon-btn.is-active idiom — no extra border/glow.
+              color: portsOpen ? "var(--accent)" : "var(--ink-dim)",
+              background: portsOpen ? "var(--accent-soft)" : undefined,
+              borderColor: portsOpen ? "var(--accent-edge)" : undefined,
             }}
           >
             Ports
           </button>
           {portsOpen && (
             <div
+              className="spark-menu spark-fade-in"
               style={{
                 position: "absolute",
-                top: 26,
+                top: 34,
                 left: 0,
                 zIndex: 50,
-                background: "var(--panel-2)",
-                border: "1px solid var(--rule-strong)",
-                borderRadius: 6,
-                boxShadow: "var(--shadow-2), var(--lift-hi)",
                 minWidth: 240,
                 maxHeight: 320,
                 overflow: "auto",
-                padding: 4,
               }}
             >
-              <div
-                className="spark-eyebrow"
-                style={{ padding: "6px 8px 7px" }}
-              >
+              <div className="spark-eyebrow" style={{ padding: "6px 8px 7px" }}>
                 Dev-server ports
               </div>
               {PORT_PRESETS.map((p) => {
@@ -259,115 +268,198 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
                   <button
                     key={p.port}
                     type="button"
+                    className="spark-menu-item"
                     onClick={() => void tryPort(p.port)}
-                    style={{
-                      appearance: "none",
-                      width: "100%",
-                      textAlign: "left",
-                      background: "transparent",
-                      border: "none",
-                      borderRadius: 5,
-                      padding: "7px 8px",
-                      color: "var(--ink)",
-                      fontFamily: "var(--font-sans)",
-                      fontSize: 12,
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 10,
-                      cursor: "default",
-                      transition: "background var(--motion-fast) var(--ease-out)",
-                    }}
-                    onMouseEnter={(e) =>
-                      (e.currentTarget.style.background = "var(--hover-strong)")
-                    }
-                    onMouseLeave={(e) =>
-                      (e.currentTarget.style.background = "transparent")
-                    }
+                    style={{ gap: 10 }}
                   >
                     <span style={{ flex: 1 }}>{p.label}</span>
-                    <span
-                      style={{
-                        color: checking ? "var(--accent)" : "var(--muted)",
-                        fontFamily: "var(--font-mono)",
-                        fontVariantNumeric: "tabular-nums",
-                        fontSize: 10,
-                      }}
-                    >
-                      {checking ? "checking…" : `:${p.port}`}
-                    </span>
+                    {checking ? (
+                      <span
+                        style={{
+                          color: "var(--accent)",
+                          fontFamily: "var(--font-mono)",
+                          fontVariantNumeric: "tabular-nums",
+                          fontSize: 10,
+                        }}
+                      >
+                        checking…
+                      </span>
+                    ) : (
+                      <span className="spark-kbd">:{p.port}</span>
+                    )}
                   </button>
                 );
               })}
             </div>
           )}
         </div>
-        <input
-          ref={inputRef}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
+
+        {/* Address pill — the single highest-leverage "reads as a browser"
+            element. Leading security glyph (lock for https, globe for http),
+            then either the styled resting URL (dimmed scheme + emphasized
+            host) or, on focus, the raw editable input. The input is always
+            mounted so width never shifts; only its opacity toggles, holding
+            zero layout shift between display and edit states. */}
+        <div
+          onMouseDown={(e) => {
+            // Clicking anywhere on the pill (the gutter, the styled overlay)
+            // focuses the real input and selects all, like a browser's
+            // address bar. Skip when the click already lands on the input.
+            if (e.target !== inputRef.current) {
               e.preventDefault();
-              submit();
-            } else if (e.key === "Escape") {
-              e.preventDefault();
-              setDraft(url);
-              inputRef.current?.blur();
+              const el = inputRef.current;
+              if (el) {
+                el.focus();
+                el.select();
+              }
             }
           }}
-          placeholder="http://localhost:3000"
-          spellCheck={false}
-          autoComplete="off"
-          onFocus={(e) => {
-            e.currentTarget.style.borderColor = "var(--accent-edge)";
-            e.currentTarget.style.boxShadow = "var(--focus-ring)";
-          }}
-          onBlur={(e) => {
-            e.currentTarget.style.borderColor = "var(--rule-soft)";
-            e.currentTarget.style.boxShadow = "var(--well)";
-          }}
           style={{
+            position: "relative",
             flex: 1,
             minWidth: 0,
-            height: 22,
-            padding: "0 8px",
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
+            height: 28,
+            padding: "0 10px",
             background: "var(--bg)",
-            border: "1px solid var(--rule-soft)",
-            borderRadius: 4,
-            color: "var(--ink)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-            outline: "none",
-            boxShadow: "var(--well)",
+            border: `1px solid ${focused ? "var(--accent-edge)" : "var(--rule-soft)"}`,
+            borderRadius: "var(--radius-surface, 7px)",
+            boxShadow: focused ? "var(--focus-ring)" : "var(--well)",
+            cursor: "text",
             transition:
               "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
           }}
-        />
-        <ChromeButton
-          label={<InspectIcon size={12} />}
-          title={inspecting ? "Stop inspecting (Esc)" : "Inspect an element"}
-          disabled={!url}
-          active={inspecting}
-          onClick={onToggleInspect}
-        />
-        <ChromeButton
-          label={<DrawIcon size={12} />}
-          title={drawing ? "Exit draw mode" : "Draw on the page"}
-          disabled={!url}
-          active={drawing}
-          onClick={onToggleDraw}
-        />
-        <ChromeButton
-          label="↗"
-          title="Open in system browser"
-          disabled={!url}
-          onClick={() => onOpenExternal(url)}
-        />
-        <ChromeButton
-          label="{}"
-          title="Open Chromium DevTools"
-          onClick={onOpenDevTools}
-        />
+        >
+          {/* Security glyph — lock (https) vs globe (http). Muted at rest so
+              it sits quietly until the host carries the eye. */}
+          <span
+            aria-hidden
+            title={
+              !draft
+                ? undefined
+                : isSecure
+                  ? "Secure connection (https)"
+                  : "Not secure (http)"
+            }
+            style={{
+              flex: "0 0 auto",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 14,
+              height: 14,
+              color: isSecure ? "var(--ok)" : "var(--muted)",
+            }}
+          >
+            {isSecure ? <LockIcon size={13} /> : <GlobeIcon size={13} />}
+          </span>
+
+          <div style={{ position: "relative", flex: 1, minWidth: 0, height: "100%" }}>
+            {/* Styled resting URL — hidden (but space-reserving) while editing
+                so there is no advance change between view and edit. */}
+            <div
+              aria-hidden
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                opacity: focused ? 0 : 1,
+                pointerEvents: "none",
+                transition: "opacity var(--motion-fast) var(--ease-out)",
+              }}
+            >
+              {parsed ? (
+                <>
+                  <span style={{ color: "var(--muted)" }}>{parsed.scheme}://</span>
+                  <span style={{ color: "var(--ink)" }}>{parsed.host}</span>
+                  <span style={{ color: "var(--muted)" }}>{parsed.rest}</span>
+                </>
+              ) : (
+                <span style={{ color: draft ? "var(--ink)" : "var(--muted-2)" }}>
+                  {draft || "http://localhost:3000"}
+                </span>
+              )}
+            </div>
+            <input
+              ref={inputRef}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  submit();
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  setDraft(url);
+                  inputRef.current?.blur();
+                }
+              }}
+              placeholder="http://localhost:3000"
+              spellCheck={false}
+              autoComplete="off"
+              onFocus={(e) => {
+                setFocused(true);
+                e.currentTarget.select();
+              }}
+              onBlur={() => setFocused(false)}
+              style={{
+                position: "absolute",
+                inset: 0,
+                width: "100%",
+                height: "100%",
+                padding: 0,
+                background: "transparent",
+                border: "none",
+                color: "var(--ink)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                outline: "none",
+                // Hidden while resting so the styled overlay above shows
+                // through; focus reveals it for editing. Caret/selection only
+                // matter when focused, so opacity is the right lever here.
+                opacity: focused ? 1 : 0,
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Tools cluster: inspect / draw toggles + open-external + devtools,
+            grouped like the nav cluster so the toolbar reads as two clean
+            affordances rather than a row of loose boxes. */}
+        <Cluster>
+          <ChromeButton
+            label={<InspectIcon size={13} />}
+            title={inspecting ? "Stop inspecting (Esc)" : "Inspect an element"}
+            disabled={!url}
+            active={inspecting}
+            onClick={onToggleInspect}
+          />
+          <ChromeButton
+            label={<DrawIcon size={13} />}
+            title={drawing ? "Exit draw mode" : "Draw on the page"}
+            disabled={!url}
+            active={drawing}
+            onClick={onToggleDraw}
+          />
+          <ChromeButton
+            label={<ExternalLinkIcon size={13} />}
+            title="Open in system browser"
+            disabled={!url}
+            onClick={() => onOpenExternal(url)}
+          />
+          <ChromeButton
+            label={<DevToolsIcon size={13} />}
+            title="Open Chromium DevTools"
+            onClick={onOpenDevTools}
+          />
+        </Cluster>
       </div>
       {notice ? (
         <div
@@ -375,14 +467,27 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
             display: "flex",
             alignItems: "center",
             gap: 8,
-            padding: "4px 12px",
+            padding: "5px 8px 5px 12px",
             background: "var(--info-soft)",
             color: "var(--ink-dim)",
             fontFamily: "var(--font-mono)",
             fontSize: 10,
             borderTop: "1px solid var(--rule-soft)",
+            // A thin info edge carries the status; the band itself stays a
+            // calm tint rather than a loud full wash.
+            boxShadow: "inset 3px 0 0 var(--info)",
           }}
         >
+          <span
+            aria-hidden
+            style={{
+              flex: "0 0 auto",
+              width: 6,
+              height: 6,
+              borderRadius: 999,
+              background: "var(--info)",
+            }}
+          />
           <span
             className="spark-eyebrow"
             style={{ color: "var(--info)", flex: "0 0 auto" }}
@@ -397,26 +502,44 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
           </span>
           <button
             type="button"
+            className="spark-icon-btn"
             onClick={() => setNotice(null)}
-            style={{
-              appearance: "none",
-              background: "transparent",
-              border: "none",
-              color: "var(--muted)",
-              fontSize: 10,
-              cursor: "default",
-              transition: "color var(--motion-fast) var(--ease-out)",
-            }}
-            onMouseEnter={(e) => (e.currentTarget.style.color = "var(--ink)")}
-            onMouseLeave={(e) => (e.currentTarget.style.color = "var(--muted)")}
+            title="Dismiss"
+            aria-label="Dismiss"
+            style={{ ["--spark-icon-btn-size" as string]: "18px" }}
           >
-            Dismiss
+            <CloseIcon size={12} />
           </button>
         </div>
       ) : null}
     </div>
   );
 });
+
+// Groups a small run of ChromeButtons into one bordered, recessed affordance —
+// the Safari "toolbar cluster" idiom. The cluster carries the single hairline
+// + well; the buttons inside stay transparent at rest, so the row reads as two
+// clean affordances instead of eight loose boxes.
+function Cluster({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        flex: "0 0 auto",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 2,
+        height: 28,
+        padding: "0 3px",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: "var(--radius-surface, 7px)",
+        background: "var(--bg)",
+        boxShadow: "var(--well)",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
 
 function ChromeButton({
   label,
@@ -434,41 +557,20 @@ function ChromeButton({
   // care can simply ignore the argument.
   onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
 }) {
-  // `active` paints the button in accent ink + a soft accent wash so toggle
-  // buttons (Inspect / Draw) read as "on" without dragging in a new component.
-  const baseBackground = active ? "var(--accent-soft)" : "transparent";
+  // Built on .spark-icon-btn: transparent at rest, ink-tint on hover, ink-13%
+  // on press, accent-soft fill + accent ink when .is-active. `active` marks
+  // toggle buttons (Inspect / Draw) as "on" without a border/glow stack. The
+  // utility brings the focus-visible ring and disabled opacity for free.
   return (
     <button
       type="button"
+      className={`spark-icon-btn${active ? " is-active" : ""}`}
       title={title}
       aria-label={title}
       aria-pressed={active ? true : undefined}
       disabled={disabled}
       onClick={onClick}
-      style={{
-        appearance: "none",
-        width: 24,
-        height: 22,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: baseBackground,
-        border: `1px solid ${active ? "var(--accent-edge)" : "var(--rule-soft)"}`,
-        borderRadius: 4,
-        color: disabled ? "var(--muted)" : active ? "var(--accent)" : "var(--ink-dim)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 11,
-        cursor: "default",
-        boxShadow: active ? "var(--shadow-glow)" : "none",
-        transition:
-          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-      }}
-      onMouseEnter={(e) => {
-        if (!disabled && !active) e.currentTarget.style.background = "var(--hover)";
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = baseBackground;
-      }}
+      style={{ ["--spark-icon-btn-size" as string]: "22px" }}
     >
       {label}
     </button>
@@ -487,6 +589,22 @@ async function probeUrl(url: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// Split a resting URL into scheme / host / rest for the Safari-style address
+// display (dimmed scheme, emphasized host, dimmed path+query). Returns null
+// for anything that isn't a parseable http(s) URL so the caller can fall back
+// to rendering the raw draft.
+function parseAddress(
+  raw: string,
+): { scheme: string; host: string; rest: string } | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const m = /^(https?):\/\/([^/?#]*)(.*)$/i.exec(trimmed);
+  if (!m) return null;
+  const [, scheme, host, rest] = m;
+  if (!host) return null;
+  return { scheme: scheme.toLowerCase(), host, rest };
 }
 
 function normalizeUrl(raw: string): string | null {

@@ -9,6 +9,7 @@ import {
 import AddressBar, { type AddressBarHandle } from "./AddressBar";
 import InspectorOverlay, { type InspectorPick } from "./InspectorOverlay";
 import DrawOverlay from "./DrawOverlay";
+import { GlobeIcon } from "../icons";
 import type { SelectionPayload } from "../../routing/SelectionRoutingContext";
 
 // BrowserPane wraps Electron's <webview> tag for preview tabs. We use
@@ -642,8 +643,20 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
             fontFamily: "var(--font-mono)",
             fontSize: 11,
             borderBottom: "1px solid var(--rule-soft)",
+            // A thin danger edge carries the status; the band tint stays calm.
+            boxShadow: "inset 3px 0 0 var(--danger)",
           }}
         >
+          <span
+            aria-hidden
+            style={{
+              flex: "0 0 auto",
+              width: 6,
+              height: 6,
+              borderRadius: 999,
+              background: "var(--danger)",
+            }}
+          />
           <span
             className="spark-eyebrow"
             style={{ color: "var(--danger)", flex: "0 0 auto" }}
@@ -666,31 +679,60 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
           minWidth: 0,
           background: "white",
           position: "relative",
+          // Recess the webview under the chrome: a 1px soft hairline along the
+          // top edge makes the dark-chrome-to-white-page seam read as
+          // intentional depth rather than a raw cut.
+          boxShadow: "inset 0 1px 0 var(--rule-soft)",
         }}
       >
-        {!url ? <EmptyState /> : null}
+        {!url ? <EmptyState onFocusAddress={() => addressRef.current?.focus()} /> : null}
         {url && !domReady && !error ? (
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "var(--bg)",
-              pointerEvents: "none",
-            }}
-          >
-            <span
-              className="spark-eyebrow"
+          <>
+            {/* Safari-style loading hairline: a 2px accent bar pinned to the
+                top seam of the webview, shimmering left-to-right while the page
+                loads. Replaces the centered pulsing "Loading" word. The
+                shimmer animation collapses to a static bar under
+                prefers-reduced-motion via the global reduced-motion rule. */}
+            <div
+              aria-hidden
               style={{
-                color: "var(--muted)",
-                animation: "spark-pulse 1.4s ease-in-out infinite",
+                position: "absolute",
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 2,
+                zIndex: 1,
+                pointerEvents: "none",
+                background:
+                  "linear-gradient(90deg, var(--accent-soft) 0%, var(--accent) 50%, var(--accent-soft) 100%)",
+                backgroundSize: "220% 100%",
+                animation: "spark-shimmer 1.1s linear infinite",
+              }}
+            />
+            <div
+              role="status"
+              aria-label="Loading"
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "var(--bg)",
+                pointerEvents: "none",
               }}
             >
-              Loading
-            </span>
-          </div>
+              <span
+                className="spark-eyebrow"
+                style={{
+                  color: "var(--muted)",
+                  animation: "spark-pulse 1.4s ease-in-out infinite",
+                }}
+              >
+                Loading
+              </span>
+            </div>
+          </>
         ) : null}
         <DrawOverlay
           active={drawing}
@@ -710,23 +752,38 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   );
 });
 
-function EmptyState() {
+function EmptyState({ onFocusAddress }: { onFocusAddress: () => void }) {
   return (
     <div
+      className="spark-empty"
       style={{
         position: "absolute",
         inset: 0,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
         justifyContent: "center",
         gap: 12,
-        color: "var(--muted)",
         background: "var(--bg)",
-        padding: 32,
-        textAlign: "center",
       }}
     >
+      {/* A quiet globe glyph anchors the empty state — the same security/scheme
+          icon family used in the address pill, reading as "the web, nothing
+          loaded yet". */}
+      <span
+        aria-hidden
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 40,
+          height: 40,
+          borderRadius: "var(--radius-surface, 7px)",
+          border: "1px solid var(--rule-soft)",
+          background: "var(--panel)",
+          color: "var(--muted)",
+          boxShadow: "var(--lift-hi)",
+        }}
+      >
+        <GlobeIcon size={20} />
+      </span>
       <div
         style={{
           display: "flex",
@@ -740,11 +797,18 @@ function EmptyState() {
           Nothing to preview yet
         </div>
       </div>
-      <div style={{ fontSize: 12, maxWidth: 360, lineHeight: 1.5 }}>
-        Type a URL above, or open the Ports dropdown to jump straight to your
-        running dev server. Detected URLs from your terminal will auto-open a
-        preview tab here.
+      <div className="spark-empty__body" style={{ maxWidth: 360 }}>
+        Type a URL or pick a dev-server port. Detected URLs from your terminal
+        auto-open a preview here.
       </div>
+      <button
+        type="button"
+        className="spark-btn"
+        onClick={onFocusAddress}
+        style={{ marginTop: 4 }}
+      >
+        Enter a URL
+      </button>
     </div>
   );
 }

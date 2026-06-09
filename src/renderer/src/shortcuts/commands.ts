@@ -16,7 +16,9 @@ export type CommandId =
   | "settings.open"
   | "session.openInspector"
   | "composer.focus"
-  | "sidebar.toggle"
+  | "chat.new"
+  | "sidebar.toggleLeft"
+  | "sidebar.toggleRight"
   | "search.open"
   | "terminal.toggle"
   | "terminal.newBalancedPane"
@@ -107,10 +109,21 @@ export const COMMANDS: Command[] = [
     defaultChords: [mod("/")],
   },
   {
-    id: "sidebar.toggle",
-    label: "Toggle sidebar",
+    id: "sidebar.toggleLeft",
+    label: "Toggle left sidebar",
     group: "View",
+    // Mod+B toggles the left rail (workspaces / source control / explorer),
+    // mirroring VS Code's primary-sidebar chord.
     defaultChords: [mod("b")],
+  },
+  {
+    id: "sidebar.toggleRight",
+    label: "Toggle right sidebar",
+    group: "View",
+    // Mod+Shift+B toggles the right panel — the "other side" of the same B
+    // mnemonic. (Previously the lone "Toggle sidebar" chord only hit the
+    // right panel; the two sides now have distinct, discoverable bindings.)
+    defaultChords: [mod("b", { shift: true })],
   },
   {
     id: "search.open",
@@ -194,6 +207,13 @@ export const COMMANDS: Command[] = [
     label: "Reset zoom",
     group: "View",
     defaultChords: [mod("0")],
+  },
+  {
+    id: "chat.new",
+    label: "New chat",
+    group: "Tabs",
+    // Mod+N opens a fresh chat tab (the top "+" picker advertises ⌘N).
+    defaultChords: [mod("n")],
   },
   {
     id: "tab.newTerminal",

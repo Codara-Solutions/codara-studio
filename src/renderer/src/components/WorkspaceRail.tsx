@@ -443,7 +443,9 @@ function RowDropIndicator({ accent }: { accent: string }) {
       aria-hidden
       style={{
         height: 2,
-        margin: "2px 4px",
+        // Left inset aligns to the row's text start (9px row padding) so the
+        // insertion line reads as landing in the list's content column.
+        margin: "2px 6px 2px 9px",
         borderRadius: 999,
         background: accent,
         boxShadow: `0 0 8px ${accent}`,
@@ -504,10 +506,12 @@ function RailIconButton({
   children: React.ReactNode;
 }) {
   const [hover, setHover] = useState(false);
+  const [focus, setFocus] = useState(false);
   const active = hover && !disabled;
   return (
     <button
       type="button"
+      className="spark-icon-btn"
       onClick={() => {
         if (!disabled) onClick();
       }}
@@ -515,15 +519,18 @@ function RailIconButton({
       title={title}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
+      onFocus={() => setFocus(true)}
+      onBlur={() => setFocus(false)}
       style={{
-        width: 20,
-        height: 20,
-        border: "1px solid var(--rule-soft)",
-        borderRadius: 4,
+        // Routed through .spark-icon-btn for shared hover/press/disabled;
+        // sized to 20px and overridden inline for the danger tint + focus
+        // ring. No unconditional border — the band reads cleaner.
+        ["--spark-icon-btn-size" as string]: "20px",
+        borderRadius: "var(--radius-control, 7px)",
         background: active
           ? danger
             ? "var(--danger-soft)"
-            : "var(--hover)"
+            : "var(--hover-strong, var(--hover))"
           : "transparent",
         color: disabled
           ? "var(--muted-2)"
@@ -532,13 +539,9 @@ function RailIconButton({
             : active
               ? "var(--ink)"
               : "var(--ink-dim)",
-        display: "grid",
-        placeItems: "center",
-        cursor: disabled ? "not-allowed" : "default",
-        padding: 0,
-        opacity: disabled ? 0.42 : 1,
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
+        boxShadow: focus
+          ? "var(--focus-ring, 0 0 0 2px var(--accent-edge))"
+          : "none",
       }}
     >
       {children}
@@ -547,40 +550,49 @@ function RailIconButton({
 }
 
 function EmptyState({ onCreate }: { onCreate: () => void }) {
-  const [hover, setHover] = useState(false);
   return (
-    <div style={{ padding: "18px 6px", lineHeight: 1.55 }}>
-      <div
-        className="spark-eyebrow"
-        style={{ marginBottom: 8, color: "var(--muted)" }}
+    // Calm centered first-run hint via .spark-empty: a faint workspace-dot
+    // glyph, the eyebrow names the absent thing, a body line explains, and the
+    // CTA is the shared .spark-btn (built-in hover / press / focus ring). The
+    // horizontal padding matches the list body so it sits where rows would.
+    <div className="spark-empty" style={{ padding: "28px 8px", gap: 8 }}>
+      <span
+        aria-hidden
+        style={{
+          display: "grid",
+          placeItems: "center",
+          width: 28,
+          height: 28,
+          marginBottom: 2,
+          borderRadius: "var(--radius-surface, 10px)",
+          color: "var(--muted-2)",
+        }}
       >
-        No workspaces yet
-      </div>
-      <div style={{ marginBottom: 16, fontSize: 12, color: "var(--muted)" }}>
+        <svg
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <rect x="3" y="4" width="18" height="6" rx="1.5" />
+          <rect x="3" y="14" width="18" height="6" rx="1.5" />
+        </svg>
+      </span>
+      <div className="spark-eyebrow">No workspaces yet</div>
+      <div className="spark-empty__body">
         Create one to start orchestrating workers.
       </div>
       <button
         type="button"
+        className="spark-btn"
         onClick={onCreate}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
-        style={{
-          appearance: "none",
-          background: hover ? "var(--hover)" : "transparent",
-          border: "1px solid var(--rule-strong)",
-          color: hover ? "var(--ink)" : "var(--ink-dim)",
-          padding: "6px 10px",
-          fontSize: 11,
-          letterSpacing: "0.08em",
-          fontWeight: 600,
-          cursor: "default",
-          fontFamily: "inherit",
-          textTransform: "uppercase",
-          transition:
-            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-        }}
+        style={{ marginTop: 4 }}
       >
-        + New workspace
+        New workspace
       </button>
     </div>
   );
@@ -628,7 +640,9 @@ function WorkspaceRow({
   const rowRef = useRef<HTMLDivElement | null>(null);
   const [name, setName] = useState(ws.name);
   const [rowHover, setRowHover] = useState(false);
+  const [rowPressed, setRowPressed] = useState(false);
   const [moreHover, setMoreHover] = useState(false);
+  const [moreFocus, setMoreFocus] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuWrapRef = useRef<HTMLDivElement | null>(null);
   // In-flight color while the OS color dialog is open. The native
@@ -744,13 +758,21 @@ function WorkspaceRow({
     if (v && v !== ws.name) onChange({ name: v });
   };
 
-  const background = active
-    ? "color-mix(in oklch, var(--ink) 4%, var(--panel))"
-    : editing
-      ? "color-mix(in oklch, var(--ink) 6%, var(--panel))"
-      : rowHover
-        ? "color-mix(in oklch, var(--ink) 5%, transparent)"
-        : "color-mix(in oklch, var(--ink) 2%, transparent)";
+  // A flat list at rest — no resting ink wash. Press is the tactile beat
+  // (--press), hover is the first tint step (--hover). The active row's
+  // identity now comes from a SOFT, ROUNDED, COLOR-TINTED FILL in the row's
+  // own color — a calm macOS-sidebar selection, not an outlined box. Editing
+  // shares that color wash (a touch lighter) so a rename never changes the
+  // surface. No left-edge bar, no stacked halo: the color carries it quietly.
+  const background = rowPressed
+    ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+    : active
+      ? `color-mix(in oklch, ${accent} 14%, var(--panel))`
+      : editing
+        ? `color-mix(in oklch, ${accent} 9%, var(--panel))`
+        : rowHover
+          ? "var(--hover, color-mix(in oklch, var(--ink) 5%, transparent))"
+          : "transparent";
 
   return (
     <div
@@ -762,30 +784,42 @@ function WorkspaceRow({
       onDragEnd={onRowDragEnd}
       onClick={editing ? undefined : onActivate}
       onMouseEnter={() => setRowHover(true)}
-      onMouseLeave={() => setRowHover(false)}
+      onMouseLeave={() => {
+        setRowHover(false);
+        setRowPressed(false);
+      }}
+      onMouseDown={() => {
+        if (!editing) setRowPressed(true);
+      }}
+      onMouseUp={() => setRowPressed(false)}
       style={{
         display: "flex",
         alignItems: "center",
         minHeight: 32,
         // Copy-branch rows indent so they read as a child of their parent repo.
         marginLeft: ws.copyBranch ? 14 : 0,
-        padding: editing ? "5px 7px 5px 9px" : "5px 6px 5px 9px",
+        // Padding is identical between resting and editing so an inline rename
+        // never reflows the row (Apple inline-rename swaps only the affordance,
+        // not the geometry).
+        padding: "5px 6px 5px 9px",
         background,
         cursor: "default",
         opacity: dragging ? 0.4 : 1,
         position: "relative",
-        border: active
-          ? `1px solid color-mix(in oklch, ${accent} 48%, var(--rule-strong))`
-          : editing
-            ? `1px solid color-mix(in oklch, ${accent} 35%, var(--rule-soft))`
-            : "1px solid transparent",
-        borderRadius: 7,
-        boxShadow: active
-          ? `0 0 0 1px color-mix(in oklch, ${accent} 18%, transparent), var(--shadow-1), var(--lift-hi)`
-          : rowHover || editing
-            ? "var(--lift-hi)"
-            : "none",
-        marginBottom: 5,
+        // Border stays 1px in every state — width never changes, so selection
+        // never shifts the box by a hair. The active row carries NO hard border
+        // (the soft color fill IS the selection); only editing keeps a faint,
+        // very soft color edge as a "this is being renamed" affordance.
+        border: editing
+          ? `1px solid color-mix(in oklch, ${accent} 24%, var(--rule-soft))`
+          : "1px solid transparent",
+        // Generous, calm rounding — de-boxed. Surfaces sit at the surface rung.
+        borderRadius: "var(--radius-surface, 10px)",
+        // ONE soft cue, per the one-hairline elevation law: the tinted fill
+        // does the work; a single faint top highlight lifts active / editing /
+        // hover. No left-edge bar, no border+ring+shadow+inset halo.
+        boxShadow: active || editing || rowHover ? "var(--lift-hi)" : "none",
+        marginBottom: 4,
         transition:
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
       }}
@@ -806,17 +840,24 @@ function WorkspaceRow({
               appearance: "none",
               border: "none",
               padding: 0,
-              width: active ? 9 : 8,
-              height: active ? 9 : 8,
+              // Constant 8px advance in every state so toggling active /
+              // editing never nudges the label. Active reads purely through
+              // the glow (box-shadow), never a size bump. BranchGlyph shares
+              // this exact 8px advance so the copy-branch swap never reflows.
+              width: 8,
+              height: 8,
               borderRadius: 999,
               background: accent,
-              flex: `0 0 ${active ? 9 : 8}px`,
+              flex: "0 0 8px",
               cursor: "default",
+              // No resting ink ring — the idle list settles flat. The active /
+              // editing dot earns a SOFT COLORED GLOW RING in its own color so
+              // the eye lands on it; the 8px advance never changes (glow only).
               boxShadow: editing
-                ? `0 0 0 3px color-mix(in oklch, ${accent} 24%, transparent)`
+                ? `0 0 0 3px color-mix(in oklch, ${accent} 26%, transparent)`
                 : active
-                  ? `0 0 0 3px color-mix(in oklch, ${accent} 16%, transparent), 0 0 12px color-mix(in oklch, ${accent} 42%, transparent)`
-                  : "0 0 0 2px color-mix(in oklch, var(--ink) 4%, transparent)",
+                  ? `0 0 0 3px color-mix(in oklch, ${accent} 22%, transparent), 0 0 10px color-mix(in oklch, ${accent} 50%, transparent)`
+                  : "none",
             }}
           />
         )}
@@ -890,12 +931,15 @@ function WorkspaceRow({
               minWidth: 0,
               background: "transparent",
               border: "none",
+              // Inline rename matches the resting label's exact size + weight,
+              // swapping only the border-bottom affordance — so entering edit
+              // mode never jumps the type (was 14px/600 -> reflow).
               borderBottom: `1px solid ${accent}`,
               color: "var(--ink)",
               fontFamily: "inherit",
-              fontSize: 14,
+              fontSize: 12,
               fontWeight: 600,
-              padding: "3px 0",
+              padding: "1px 0",
               outline: "none",
             }}
           />
@@ -931,12 +975,20 @@ function WorkspaceRow({
             }}
             onMouseEnter={() => setMoreHover(true)}
             onMouseLeave={() => setMoreHover(false)}
+            onFocus={() => setMoreFocus(true)}
+            onBlur={() => setMoreFocus(false)}
             title={editing ? "Done" : "Workspace actions"}
             style={{
               appearance: "none",
-              background: "transparent",
+              // Hover/press tint via .spark-icon-btn; color logic kept (editing
+              // -> accent, otherwise muted -> ink-dim on hover/active) and the
+              // keyboard focus ring composed inline for parity.
+              background:
+                !editing && (menuOpen || moreHover)
+                  ? "var(--hover-strong, var(--hover))"
+                  : "transparent",
               border: "none",
-              borderRadius: 5,
+              borderRadius: "var(--radius-control, 7px)",
               color: editing
                 ? accent
                 : menuOpen || moreHover || active
@@ -950,8 +1002,11 @@ function WorkspaceRow({
               cursor: "default",
               padding: 0,
               opacity: menuOpen || moreHover || active || editing ? 1 : 0.72,
+              boxShadow: moreFocus
+                ? "var(--focus-ring, 0 0 0 2px var(--accent-edge))"
+                : "none",
               transition:
-                "color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
+                "color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
             }}
           >
             {editing ? (
@@ -984,7 +1039,7 @@ function WorkspaceRow({
                 minWidth: 168,
                 background: "var(--panel-2)",
                 border: "1px solid var(--rule)",
-                borderRadius: 7,
+                borderRadius: "var(--radius-popover, 12px)",
                 boxShadow: "var(--shadow-2)",
                 padding: 4,
                 zIndex: 20,
@@ -1057,7 +1112,7 @@ function RowMenuItem({
         fontSize: 12,
         fontWeight: 500,
         padding: "6px 9px",
-        borderRadius: 5,
+        borderRadius: "var(--radius-control, 7px)",
         border: "none",
         cursor: "default",
         color: danger ? "var(--danger)" : "var(--ink)",
@@ -1108,25 +1163,33 @@ function BranchGlyph({ color, active }: { color: string; active: boolean }) {
       aria-hidden
       title="Copy branch"
       style={{
-        flex: "0 0 12px",
+        // Shares the color dot's exact 8px advance so toggling copyBranch
+        // never reflows the row's leading cluster. The 13px glyph is centered
+        // over the slot and overflows it symmetrically (visible overflow), so
+        // it reads clearly without widening the row's text origin.
+        flex: "0 0 8px",
         display: "grid",
         placeItems: "center",
-        width: 12,
-        height: 14,
+        width: 8,
+        height: 13,
+        overflow: "visible",
+        // Mirrors the color dot's active treatment: a soft glow in the row's
+        // own color so the branch glyph reads as the selected mark, no halo.
         filter: active
-          ? `drop-shadow(0 0 5px color-mix(in oklch, ${color} 60%, transparent))`
+          ? `drop-shadow(0 0 6px color-mix(in oklch, ${color} 50%, transparent))`
           : "none",
       }}
     >
       <svg
-        width="12"
-        height="12"
+        width="13"
+        height="13"
         viewBox="0 0 24 24"
         fill="none"
         stroke={color}
         strokeWidth="2.4"
         strokeLinecap="round"
         strokeLinejoin="round"
+        style={{ flex: "0 0 auto" }}
       >
         <line x1="6" x2="6" y1="3" y2="15" />
         <circle cx="18" cy="6" r="3" />

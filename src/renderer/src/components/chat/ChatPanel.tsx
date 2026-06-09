@@ -352,7 +352,9 @@ function RunIdChip({ runId }: { runId: string }) {
         color: copied ? "var(--accent)" : "var(--ink-dim)",
         fontFamily: "var(--font-mono)",
         fontSize: 10,
+        fontVariantNumeric: "tabular-nums",
         whiteSpace: "nowrap",
+        // No inline box-shadow, so the global :focus-visible ring renders.
         cursor: "default",
         transition:
           "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
@@ -383,6 +385,7 @@ function ChatHistoryButton({
 }) {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState(false);
+  const [pressed, setPressed] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
 
   // Close on outside click or Escape — same pattern as TabBar's "+" picker.
@@ -422,18 +425,26 @@ function ChatHistoryButton({
         aria-label="Open chat history"
         aria-expanded={open}
         onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
+        onMouseLeave={() => {
+          setHover(false);
+          setPressed(false);
+        }}
+        onMouseDown={() => setPressed(true)}
+        onMouseUp={() => setPressed(false)}
         style={{
           appearance: "none",
           width: 22,
           height: 22,
           border: "none",
-          borderRadius: 6,
+          borderRadius: "var(--radius-control, 7px)",
+          // No inline box-shadow, so the global :focus-visible ring renders.
           background: open
             ? "var(--accent-soft)"
-            : hover
-              ? "var(--hover)"
-              : "transparent",
+            : pressed
+              ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+              : hover
+                ? "var(--hover-strong)"
+                : "transparent",
           color: open ? "var(--accent)" : hover ? "var(--ink)" : "var(--ink-dim)",
           display: "flex",
           alignItems: "center",
@@ -484,51 +495,22 @@ function ChatHistoryPopover({
         width: 300,
         maxHeight: "min(50vh, 420px)",
         overflowY: "auto",
+        // One popover language: --panel-2 face, 12px radius, 1px --rule border,
+        // --shadow-2 float (the .spark-menu standard).
         background: "var(--panel-2, var(--panel))",
-        border: "1px solid var(--rule-soft)",
-        borderRadius: 9,
+        border: "1px solid var(--rule)",
+        borderRadius: "var(--radius-popover, 12px)",
         boxShadow: "var(--shadow-2)",
         padding: 4,
       }}
     >
-      <div
-        style={{
-          padding: "6px 8px 5px",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10,
-          fontWeight: 700,
-          color: "var(--muted)",
-          textTransform: "uppercase",
-          letterSpacing: "0.14em",
-        }}
-      >
+      <div className="spark-eyebrow" style={{ padding: "6px 8px 5px" }}>
         Recent chats
       </div>
       {runs.length === 0 ? (
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: 4,
-            padding: "18px 8px",
-            textAlign: "center",
-          }}
-        >
-          <div
-            style={{
-              fontSize: 10,
-              fontWeight: 700,
-              textTransform: "uppercase",
-              letterSpacing: "0.14em",
-              color: "var(--muted)",
-            }}
-          >
-            No chats yet
-          </div>
-          <div style={{ fontSize: 11, color: "var(--muted-2)", lineHeight: 1.5 }}>
-            Start one below to see it here.
-          </div>
+        <div className="spark-empty" style={{ minHeight: 0, padding: "18px 8px" }}>
+          <div className="spark-eyebrow">No chats yet</div>
+          <div className="spark-empty__body">Start one below to see it here.</div>
         </div>
       ) : (
         runs.map((run) => (
@@ -557,6 +539,8 @@ function ChatHistoryRow({
   onDelete?: (runId: string) => void;
 }) {
   const [hover, setHover] = useState(false);
+  const [pressed, setPressed] = useState(false);
+  const [focusRing, setFocusRing] = useState(false);
   const status = describeRunStatus(run);
   const dotColor = statusToneColor(status.tone);
   const ts = run.updatedAt ?? run.completedAt ?? run.createdAt;
@@ -580,7 +564,14 @@ function ChatHistoryRow({
         }
       }}
       onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseLeave={() => {
+        setHover(false);
+        setPressed(false);
+      }}
+      onMouseDown={() => setPressed(true)}
+      onMouseUp={() => setPressed(false)}
+      onFocus={(e) => setFocusRing(e.currentTarget.matches(":focus-visible"))}
+      onBlur={() => setFocusRing(false)}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -590,14 +581,24 @@ function ChatHistoryRow({
         padding: "7px 8px",
         background: active
           ? "var(--accent-soft)"
-          : hover
-            ? "var(--hover)"
-            : "transparent",
+          : pressed
+            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            : hover
+              ? "var(--hover)"
+              : "transparent",
         border: active
           ? "1px solid var(--accent-edge)"
           : "1px solid transparent",
-        boxShadow: active ? "var(--shadow-glow)" : "none",
-        borderRadius: 6,
+        // Selection collapses to two cues: an accent-edge border + the soft
+        // --lift-hi (not the 4-layer accent-soft + border + shadow-glow halo).
+        // outline:none would strip the keyboard ring, so we compose
+        // --focus-ring back in on :focus-visible.
+        boxShadow: focusRing
+          ? "var(--focus-ring)"
+          : active
+            ? "var(--lift-hi)"
+            : "none",
+        borderRadius: "var(--radius-control, 7px)",
         textAlign: "left",
         cursor: "default",
         color: "var(--ink)",
@@ -734,10 +735,13 @@ function DeleteChatButton({
       }}
       style={{
         appearance: "none",
+        // width/padding flip only on the armed confirmation toggle (a
+        // deliberate state, not hover/focus) so the disclosure never reflows
+        // on pointer movement.
         width: armed ? "auto" : 18,
         height: 18,
         border: "none",
-        borderRadius: 4,
+        borderRadius: "var(--radius-control, 7px)",
         background: armed
           ? "var(--danger)"
           : hover
@@ -752,6 +756,7 @@ function DeleteChatButton({
         fontSize: 10,
         fontWeight: 600,
         whiteSpace: "nowrap",
+        // No inline box-shadow, so the global :focus-visible ring renders.
         cursor: "default",
         flex: "0 0 auto",
         opacity: shown ? 1 : 0,
@@ -800,6 +805,7 @@ function StatusMeta({ run }: { run: RunState }) {
         gap: 5,
         fontFamily: "var(--font-mono)",
         fontSize: 10,
+        fontVariantNumeric: "tabular-nums",
         color: "var(--muted)",
         whiteSpace: "nowrap",
       }}
@@ -812,6 +818,12 @@ function StatusMeta({ run }: { run: RunState }) {
           borderRadius: 999,
           background: color,
           flex: "0 0 6px",
+          // The done state glows softly off only when live; everything else is
+          // a static token-colored dot (--ok for done) reading as calm meta.
+          boxShadow:
+            status.tone === "live"
+              ? `0 0 6px color-mix(in oklch, ${color} 55%, transparent)`
+              : "none",
           animation: status.tone === "live" ? "spark-pulse 1.3s ease-in-out infinite" : undefined,
         }}
       />
@@ -846,6 +858,7 @@ function CostPill({ run }: { run: RunState }) {
         color: "var(--ink-dim)",
         fontFamily: "var(--font-mono)",
         fontSize: 10,
+        fontVariantNumeric: "tabular-nums",
         whiteSpace: "nowrap",
       }}
     >
@@ -888,11 +901,15 @@ function WelcomeState() {
         textAlign: "center",
       }}
     >
+      {/* Hero accent icon tile — accent-soft fill + accent-edge hairline +
+          the --lift-hi top highlight for tint-first depth. The other chat
+          empty states (ConversationEmpty, history "No chats yet") echo this
+          rhythm at a smaller scale. */}
       <div
         style={{
           width: 44,
           height: 44,
-          borderRadius: 12,
+          borderRadius: "var(--radius-surface, 10px)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -904,17 +921,7 @@ function WelcomeState() {
         <SparkMark size={20} />
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <div
-          style={{
-            fontSize: 10,
-            fontWeight: 700,
-            textTransform: "uppercase",
-            letterSpacing: "0.14em",
-            color: "var(--muted)",
-          }}
-        >
-          New chat
-        </div>
+        <div className="spark-eyebrow">New chat</div>
         <div style={{ fontSize: 15, fontWeight: 700, color: "var(--ink)" }}>
           Start a chat with Spark
         </div>
@@ -938,35 +945,9 @@ function WelcomeState() {
 function BackendTerminalPlaceholder({ backend }: { backend: string | null }) {
   const label = backend === "codex" ? "Codex" : "Claude Code";
   return (
-    <div
-      style={{
-        flex: 1,
-        minHeight: 0,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 6,
-        color: "var(--muted)",
-        fontSize: 11,
-        fontFamily: "var(--font-sans)",
-        textAlign: "center",
-        padding: 16,
-        lineHeight: 1.5,
-      }}
-    >
-      <div
-        style={{
-          fontSize: 10,
-          fontWeight: 700,
-          textTransform: "uppercase",
-          letterSpacing: "0.14em",
-          color: "var(--muted)",
-        }}
-      >
-        Terminal idle
-      </div>
-      <div style={{ color: "var(--muted-2)", maxWidth: 260 }}>
+    <div className="spark-empty" style={{ flex: 1, minHeight: 0 }}>
+      <div className="spark-eyebrow">Terminal idle</div>
+      <div className="spark-empty__body">
         {label} hasn't been spawned for this chat yet. Send a message to start
         the session — its terminal will appear here.
       </div>
@@ -1029,7 +1010,9 @@ function ChatViewTab({
         appearance: "none",
         padding: "4px 10px",
         fontSize: 11,
-        fontWeight: active ? 600 : 500,
+        // Weight held constant across active/inactive so selection never
+        // reflows the strip; accent fill + border + color carry selection.
+        fontWeight: 600,
         fontFamily: "var(--font-sans)",
         background: active
           ? "var(--accent-soft)"
@@ -1038,7 +1021,8 @@ function ChatViewTab({
             : "transparent",
         color: active ? "var(--accent)" : hover ? "var(--ink-dim)" : "var(--muted)",
         border: active ? "1px solid var(--accent-edge)" : "1px solid transparent",
-        borderRadius: 6,
+        borderRadius: "var(--radius-control, 7px)",
+        // No inline box-shadow, so the global :focus-visible ring renders.
         cursor: "default",
         transition:
           "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",

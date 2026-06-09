@@ -613,10 +613,9 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
             : "color-mix(in oklch, var(--accent) 7%, transparent)",
       }}
     >
-      <button
-        type="button"
+      <DisclosureButton
         onClick={() => setOpen((value) => !value)}
-        style={TOOL_ROW_BUTTON_STYLE}
+        baseStyle={TOOL_ROW_BUTTON_STYLE}
         title={call.toolName}
       >
         <StatusDot color={color} pulse={!finished} size={5} />
@@ -624,7 +623,7 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
         <span style={TOOL_TITLE_STYLE}>{call.toolName}</span>
         <span style={TOOL_INLINE_DETAIL_STYLE}>{inputPreview || outputPreview}</span>
         <Caret open={open} />
-      </button>
+      </DisclosureButton>
       {open && (
         <div style={TOOL_DETAILS_STYLE}>
           {inputPreview.length > 0 && (
@@ -890,11 +889,14 @@ function QuestionChoices({ runId, options }: { runId: string; options: RunQuesti
         />
         <div style={ASK_CUSTOM_ROW_STYLE}>
           <span style={ASK_CUSTOM_HINT_STYLE}>Enter to send · Shift+Enter for a new line</span>
+          {/* .spark-btn is-primary grants the tactile press settle, accent
+              fill, disabled state, and the global focus-visible ring for free
+              (an inline box-shadow would silently clobber that ring). */}
           <button
             type="button"
+            className="spark-btn is-primary"
             disabled={!canSend}
             onClick={() => void submitAnswer(custom)}
-            style={{ ...ASK_SEND_STYLE, ...(canSend ? null : ASK_SEND_OFF_STYLE) }}
           >
             Send
           </button>
@@ -917,8 +919,11 @@ function QuestionOptionButton({
   onChoose: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  const [pressed, setPressed] = useState(false);
+  const [focusRing, setFocusRing] = useState(false);
   const recommended = !!option.recommended;
   const active = hover && !disabled;
+  const pressing = pressed && !disabled;
   // The backend often echoes the label as the description (e.g. "1" / "1").
   // Rendering both just doubles the text, so only show a description that
   // genuinely adds something.
@@ -931,7 +936,17 @@ function QuestionOptionButton({
       disabled={disabled}
       onClick={onChoose}
       onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseLeave={() => {
+        setHover(false);
+        setPressed(false);
+      }}
+      onMouseDown={() => setPressed(true)}
+      onMouseUp={() => setPressed(false)}
+      // Keyboard parity: the global :focus-visible ring is clobbered by this
+      // button's inline box-shadow, so compose --focus-ring in ourselves when
+      // focus is keyboard-driven.
+      onFocus={(event) => setFocusRing(event.target.matches(":focus-visible"))}
+      onBlur={() => setFocusRing(false)}
       style={{
         ...QUESTION_OPTION_STYLE,
         borderColor: recommended
@@ -946,8 +961,17 @@ function QuestionOptionButton({
           : active
             ? "color-mix(in oklch, var(--ink) 6%, transparent)"
             : "color-mix(in oklch, var(--ink) 2%, transparent)",
-        transform: active ? "translateY(-1px)" : "none",
-        boxShadow: active ? "var(--shadow-1)" : "none",
+        // No hover lift (it nudged every sibling option). Depth comes from a
+        // brighter fill + the --lift-hi top highlight on hover; transform is
+        // reserved for the 0.5px press settle.
+        transform: pressing ? "translateY(0.5px)" : "none",
+        boxShadow: focusRing
+          ? "var(--focus-ring)"
+          : pressing
+            ? "var(--well)"
+            : active
+              ? "var(--lift-hi)"
+              : "none",
         opacity: disabled ? 0.6 : 1,
       }}
     >
@@ -1013,7 +1037,7 @@ function AttachmentStrip({
             gap: 6,
             maxWidth: 210,
             border: "1px solid var(--rule-soft)",
-            borderRadius: 7,
+            borderRadius: "var(--radius-control, 7px)",
             background: "color-mix(in oklch, var(--ink) 5%, transparent)",
             color: "var(--ink-dim)",
             padding: "4px 7px",
@@ -1061,10 +1085,9 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
 
   return (
     <div style={STEP_CARD_STYLE}>
-      <button
-        type="button"
+      <DisclosureButton
         onClick={() => setOpen((value) => !value)}
-        style={STEP_HEADER_STYLE}
+        baseStyle={STEP_HEADER_STYLE}
         title={item.goal || item.title}
       >
         <StatusDot color={color} pulse={live} size={6} />
@@ -1077,7 +1100,7 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
           </span>
         )}
         <Caret open={open} />
-      </button>
+      </DisclosureButton>
       {open && (
         <div style={STEP_BODY_STYLE}>
           {item.goal && (
@@ -1104,10 +1127,9 @@ const ActivityGroup = React.memo(function ActivityGroup({ item }: { item: Activi
 
   return (
     <div style={ACTIVITY_GROUP_STYLE}>
-      <button
-        type="button"
+      <DisclosureButton
         onClick={() => setOpen((value) => !value)}
-        style={ACTIVITY_GROUP_HEADER_STYLE}
+        baseStyle={ACTIVITY_GROUP_HEADER_STYLE}
         title={summary.detail}
       >
         <StatusDot color="var(--muted-2)" pulse={false} size={5} />
@@ -1115,7 +1137,7 @@ const ActivityGroup = React.memo(function ActivityGroup({ item }: { item: Activi
         <span style={ACTIVITY_GROUP_TITLE_STYLE}>{summary.title}</span>
         {summary.detail && <span style={ACTIVITY_GROUP_DETAIL_STYLE}>{summary.detail}</span>}
         <Caret open={open} />
-      </button>
+      </DisclosureButton>
       {open && (
         <div style={ACTIVITY_GROUP_BODY_STYLE}>
           {item.items.map((tool) => (
@@ -1163,12 +1185,11 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
               : "transparent",
       }}
     >
-      <button
-        type="button"
+      <DisclosureButton
         onClick={() => {
           if (hasDetails) setOpen((value) => !value);
         }}
-        style={TOOL_ROW_BUTTON_STYLE}
+        baseStyle={TOOL_ROW_BUTTON_STYLE}
         title={item.detail || item.title}
       >
         <StatusDot color={color} pulse={live} size={5} />
@@ -1189,7 +1210,7 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
           </span>
         )}
         {hasDetails && <Caret open={open} />}
-      </button>
+      </DisclosureButton>
       {open && hasDetails && <ToolDetails item={item} />}
     </div>
   );
@@ -1379,6 +1400,8 @@ function UndoControl({ runId, checkpoint }: { runId: string; checkpoint: Checkpo
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hover, setHover] = useState(false);
+  const [pressed, setPressed] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -1449,17 +1472,36 @@ function UndoControl({ runId, checkpoint }: { runId: string; checkpoint: Checkpo
         title="Undo to this point"
         aria-label="Undo to this point"
         disabled={busy}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => {
+          setHover(false);
+          setPressed(false);
+        }}
+        onMouseDown={() => setPressed(true)}
+        onMouseUp={() => setPressed(false)}
         style={{
           appearance: "none",
           display: "inline-flex",
           alignItems: "center",
           gap: 4,
           height: 20,
-          padding: "0 7px",
-          border: "1px solid var(--rule-soft)",
-          borderRadius: 999,
-          background: open ? "var(--hover)" : "transparent",
-          color: open ? "var(--ink-dim)" : "var(--muted)",
+          padding: "0 8px",
+          // A quiet ghost control: no resting outline (a border made it read as
+          // a heavy box under the bubble). The affordance reveals on hover/open
+          // via the soft ink-tint fill alone; a 1px border stays only while the
+          // menu is open so the trigger anchors its popover. Borders are 1px in
+          // every state — transparent↔colored, never a width change.
+          border: open ? "1px solid var(--rule-soft)" : "1px solid transparent",
+          borderRadius: "var(--radius-control, 7px)",
+          // No inline box-shadow here, so the global :focus-visible ring still
+          // renders for keyboard users. Press gets a momentary darker fill.
+          background:
+            pressed && !busy
+              ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+              : open || hover
+                ? "var(--hover)"
+                : "transparent",
+          color: open || hover ? "var(--ink-dim)" : "var(--muted)",
           fontFamily: "var(--font-sans)",
           fontSize: 10.5,
           fontWeight: 600,
@@ -1479,8 +1521,10 @@ function UndoControl({ runId, checkpoint }: { runId: string; checkpoint: Checkpo
             right: 0,
             zIndex: 30,
             minWidth: 196,
-            border: "1px solid var(--rule-strong)",
-            borderRadius: 8,
+            // One popover language: --panel-2 face, 12px radius, 1px --rule
+            // border, --shadow-2 float (the .spark-menu standard).
+            border: "1px solid var(--rule)",
+            borderRadius: "var(--radius-popover, 12px)",
             background: "var(--panel-2)",
             boxShadow: "var(--shadow-2)",
             padding: 5,
@@ -1528,13 +1572,23 @@ function UndoMenuRow({
   onClick: () => void;
 }) {
   const [hover, setHover] = useState(false);
+  const [pressed, setPressed] = useState(false);
+  const [focusRing, setFocusRing] = useState(false);
+  const live = !disabled;
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
       onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
+      onMouseLeave={() => {
+        setHover(false);
+        setPressed(false);
+      }}
+      onMouseDown={() => setPressed(true)}
+      onMouseUp={() => setPressed(false)}
+      onFocus={(event) => setFocusRing(event.target.matches(":focus-visible"))}
+      onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
         width: "100%",
@@ -1543,15 +1597,21 @@ function UndoMenuRow({
         alignItems: "flex-start",
         gap: 1,
         border: "none",
-        borderRadius: 6,
-        background: hover && !disabled ? "var(--hover)" : "transparent",
+        borderRadius: "var(--radius-control, 7px)",
+        background:
+          pressed && live
+            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            : hover && live
+              ? "var(--hover)"
+              : "transparent",
         padding: "6px 9px",
         fontFamily: "var(--font-sans)",
         textAlign: "left",
-        cursor: "default",
+        cursor: live ? "pointer" : "default",
         opacity: disabled ? 0.5 : 1,
+        boxShadow: focusRing ? "var(--focus-ring)" : "none",
         transition:
-          "background var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
       <span
@@ -1604,25 +1664,17 @@ function RepeatChip({ count }: { count: number }) {
   );
 }
 
+// Idle conversation state — shares the one app-wide empty-state rhythm
+// (.spark-empty + .spark-eyebrow) so it reads as a smaller echo of the
+// WelcomeState hero rather than a one-off layout.
 function ConversationEmpty() {
   return (
-    <div
-      style={{
-        margin: "auto",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        gap: 7,
-        textAlign: "center",
-        maxWidth: 250,
-        padding: "32px 0",
-      }}
-    >
-      <span style={{ color: "var(--accent)", opacity: 0.7 }}>
+    <div className="spark-empty" style={{ margin: "auto", maxWidth: 250 }}>
+      <span aria-hidden style={{ color: "var(--accent)", display: "inline-flex" }}>
         <SparkMark />
       </span>
       <span className="spark-eyebrow">Getting started</span>
-      <span style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.5 }}>
+      <span className="spark-empty__body">
         Spark is warming up. Its plan and progress will appear here.
       </span>
     </div>
@@ -1645,19 +1697,83 @@ function StatusDot({ color, pulse, size = 7 }: { color: string; pulse: boolean; 
   );
 }
 
+// Shared clickable header for every collapsible row (step cards, activity
+// groups, tool rows, live-tool rows). Adds the universal hover / press / focus
+// beats the rows used to lack: a momentary --press fill on press (a transform
+// would break the row seam) and the global focus-visible ring composed back in
+// (an inline box-shadow on the button would otherwise clobber it for keyboard
+// users). Behaviour is untouched — onClick, title, and children pass straight
+// through.
+function DisclosureButton({
+  baseStyle,
+  onClick,
+  title,
+  children,
+}: {
+  baseStyle: React.CSSProperties;
+  onClick: () => void;
+  title?: string;
+  children: React.ReactNode;
+}) {
+  const [hover, setHover] = useState(false);
+  const [pressed, setPressed] = useState(false);
+  const [focusRing, setFocusRing] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => {
+        setHover(false);
+        setPressed(false);
+      }}
+      onMouseDown={() => setPressed(true)}
+      onMouseUp={() => setPressed(false)}
+      onFocus={(event) => setFocusRing(event.target.matches(":focus-visible"))}
+      onBlur={() => setFocusRing(false)}
+      style={{
+        ...baseStyle,
+        background: pressed
+          ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+          : hover
+            ? "var(--hover)"
+            : (baseStyle.background ?? "transparent"),
+        boxShadow: focusRing ? "var(--focus-ring)" : baseStyle.boxShadow,
+        transition:
+          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+// Disclosure caret — a crisp 1.5px-stroke SVG chevron sharing the in-file
+// ChevronRight geometry so every collapse/expand affordance in the stream
+// reads as one family. Rotated rather than swapped so the transform is the
+// only motion (reduced-motion-safe via the transition token).
 function Caret({ open }: { open: boolean }) {
   return (
     <span
       aria-hidden
       style={{
         flex: "0 0 auto",
+        display: "inline-flex",
         color: "var(--muted-2)",
-        fontSize: 9,
-        transform: open ? "rotate(0deg)" : "rotate(-90deg)",
+        transform: open ? "rotate(90deg)" : "rotate(0deg)",
         transition: "transform var(--motion-fast) var(--ease-out)",
       }}
     >
-      ▾
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+        <path
+          d="M6 4l4 4-4 4"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
     </span>
   );
 }
@@ -1675,11 +1791,15 @@ function SparkMark() {
   );
 }
 
-// The accent avatar that anchors every Spark turn's gutter.
+// The accent avatar that anchors every Spark turn's gutter — the brand mark
+// (the shared SparkIcon star) sitting in a soft, generously-rounded
+// accent-tinted squircle. No hard accent-edge outline: a brand mark should
+// read as identity, not as a tappable "+/add" chip. Depth is the soft tinted
+// fill alone, so it stays calm against the prose beside it.
 function SparkAvatar() {
   return (
     <span aria-hidden style={SPARK_AVATAR_STYLE}>
-      <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
         <path
           d="M8 1.25L9.35 6.05L14.15 7.4L9.35 8.75L8 13.55L6.65 8.75L1.85 7.4L6.65 6.05L8 1.25Z"
           fill="currentColor"
@@ -1753,19 +1873,29 @@ const CHAT_ITEM_STYLE: React.CSSProperties = {
   marginBottom: 14,
 };
 
+// The user bubble is a calm neutral panel-2 surface with a single hairline —
+// the accent is reserved for live / needs-you / recommended moments, not for
+// every message the user has ever sent. A subtle --lift-hi top highlight gives
+// it tint-first depth instead of a hard drop shadow.
 const USER_BUBBLE_STYLE: React.CSSProperties = {
   maxWidth: "82%",
-  background: "color-mix(in oklch, var(--accent) 10%, var(--panel-2))",
-  border: "1px solid color-mix(in oklch, var(--accent) 22%, var(--rule-soft))",
-  borderRadius: 13,
-  borderBottomRightRadius: 5,
+  background: "var(--panel-2)",
+  // One soft hairline; the recede stays on --rule-soft so the bubble reads as a
+  // calm premium surface rather than a hard-outlined box.
+  border: "1px solid var(--rule-soft)",
+  // A generously rounded bubble silhouette with an asymmetric bottom-right
+  // "tail" so a user turn still reads as a message (not a neutral system panel)
+  // even with the calm de-accented fill. The tail nests on the control rung
+  // (7px) so the corner stays concentric with the bubble's softer body.
+  borderRadius: 16,
+  borderBottomRightRadius: "var(--radius-control, 7px)",
   padding: "9px 13px",
   color: "var(--ink)",
   fontSize: 13,
   lineHeight: 1.5,
   whiteSpace: "pre-wrap",
   wordBreak: "break-word",
-  boxShadow: "var(--shadow-1)",
+  boxShadow: "var(--lift-hi)",
 };
 
 const SPARK_TURN_STYLE: React.CSSProperties = {
@@ -1779,14 +1909,17 @@ const SPARK_AVATAR_STYLE: React.CSSProperties = {
   flex: "0 0 auto",
   width: 26,
   height: 26,
-  borderRadius: 8,
+  // Squircle-ish brand tile on the surface rung (10px) — softer than a control
+  // chip, calmer than a hard bordered square. The fill is the only cue: a
+  // gentle accent wash with a faint same-hue hairline (not the full
+  // accent-edge), so the star reads as Spark's mark, not an "add" button.
+  borderRadius: "var(--radius-surface, 10px)",
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
-  background: "var(--accent-soft)",
-  border: "1px solid var(--accent-edge)",
+  background: "color-mix(in oklch, var(--accent) 14%, var(--panel-2))",
+  border: "1px solid color-mix(in oklch, var(--accent) 22%, transparent)",
   color: "var(--accent)",
-  boxShadow: "var(--lift-hi)",
 };
 
 const SPARK_MAIN_STYLE: React.CSSProperties = {
@@ -1887,7 +2020,7 @@ const SYSTEM_PILL_STYLE: React.CSSProperties = {
 
 const SPEAKER_LABEL_STYLE: React.CSSProperties = {
   fontSize: 12,
-  fontWeight: 650,
+  fontWeight: 600,
   letterSpacing: "0.01em",
   color: "var(--ink)",
 };
@@ -1923,10 +2056,12 @@ const NEEDS_YOU_DOT_STYLE: React.CSSProperties = {
 const ASK_CARD_STYLE: React.CSSProperties = {
   marginTop: 4,
   border: "1px solid var(--rule-soft)",
-  borderRadius: 13,
+  borderRadius: "var(--radius-surface, 10px)",
   overflow: "hidden",
   background: "color-mix(in oklch, var(--ink) 2.5%, var(--panel))",
-  boxShadow: "var(--shadow-1)",
+  // Raised band: tint-first depth via the --lift-hi top highlight plus the
+  // soft float shadow, not a hard outline.
+  boxShadow: "var(--lift-hi), var(--shadow-1)",
 };
 
 const ASK_HEAD_STYLE: React.CSSProperties = {
@@ -1963,11 +2098,13 @@ const ASK_KBD_STYLE: React.CSSProperties = {
   height: 16,
   padding: "0 4px",
   border: "1px solid var(--rule)",
-  borderRadius: 5,
+  // Keycap on the small-control rung — matches the .spark-kbd softening.
+  borderRadius: 6,
   background: "var(--panel-3)",
   color: "var(--ink-dim)",
   fontFamily: "var(--font-mono)",
   fontSize: 9.5,
+  fontVariantNumeric: "tabular-nums",
   boxShadow: "var(--lift-hi)",
 };
 
@@ -1987,7 +2124,7 @@ const QUESTION_OPTION_STYLE: React.CSSProperties = {
   gap: 12,
   padding: "9px 11px",
   border: "1px solid var(--rule-soft)",
-  borderRadius: 10,
+  borderRadius: "var(--radius-surface, 10px)",
   color: "var(--ink)",
   textAlign: "left",
   cursor: "default",
@@ -1998,7 +2135,7 @@ const QUESTION_OPTION_STYLE: React.CSSProperties = {
 const QUESTION_OPTION_KEY_STYLE: React.CSSProperties = {
   width: 26,
   height: 26,
-  borderRadius: 7,
+  borderRadius: "var(--radius-control, 7px)",
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
@@ -2008,6 +2145,7 @@ const QUESTION_OPTION_KEY_STYLE: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: 12,
   fontWeight: 700,
+  fontVariantNumeric: "tabular-nums",
   boxShadow: "var(--lift-hi), var(--well)",
 };
 
@@ -2033,7 +2171,7 @@ const QUESTION_OPTION_TITLE_STYLE: React.CSSProperties = {
 
 const QUESTION_OPTION_LABEL_STYLE: React.CSSProperties = {
   fontSize: 13,
-  fontWeight: 650,
+  fontWeight: 600,
   color: "var(--ink)",
   overflow: "hidden",
   textOverflow: "ellipsis",
@@ -2090,7 +2228,7 @@ const ASK_CUSTOM_INPUT_STYLE: React.CSSProperties = {
   maxHeight: 120,
   overflowY: "auto",
   border: "1px solid var(--rule-soft)",
-  borderRadius: 9,
+  borderRadius: "var(--radius-surface, 10px)",
   background: "var(--bg)",
   color: "var(--ink)",
   outline: "none",
@@ -2113,39 +2251,12 @@ const ASK_CUSTOM_HINT_STYLE: React.CSSProperties = {
   color: "var(--muted-2)",
 };
 
-const ASK_SEND_STYLE: React.CSSProperties = {
-  appearance: "none",
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  height: 28,
-  padding: "0 14px",
-  border: "1px solid var(--accent-edge)",
-  borderRadius: 8,
-  background: "var(--accent)",
-  color: "var(--accent-ink)",
-  fontFamily: "var(--font-sans)",
-  fontSize: 12,
-  fontWeight: 650,
-  cursor: "default",
-  boxShadow: "var(--lift-hi)",
-  transition:
-    "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
-};
-
-const ASK_SEND_OFF_STYLE: React.CSSProperties = {
-  background: "color-mix(in oklch, var(--ink) 6%, var(--panel))",
-  color: "var(--muted)",
-  borderColor: "var(--rule-soft)",
-  boxShadow: "none",
-};
-
 const QUESTION_ERROR_STYLE: React.CSSProperties = {
   margin: "0 10px 10px",
   color: "var(--danger)",
   background: "var(--danger-soft)",
   border: "1px solid color-mix(in oklch, var(--danger) 34%, transparent)",
-  borderRadius: 7,
+  borderRadius: "var(--radius-control, 7px)",
   padding: "6px 8px",
   fontSize: 11,
   lineHeight: 1.4,
@@ -2153,7 +2264,9 @@ const QUESTION_ERROR_STYLE: React.CSSProperties = {
 
 const STEP_CARD_STYLE: React.CSSProperties = {
   border: "1px solid color-mix(in oklch, var(--rule-soft) 78%, transparent)",
-  borderRadius: 7,
+  // Cards sit on the surface rung (10px) — softer corners, concentric with the
+  // tool rows nested inside.
+  borderRadius: "var(--radius-surface, 10px)",
   background: "color-mix(in oklch, var(--bg) 42%, var(--panel))",
   overflow: "hidden",
   boxSizing: "border-box",
@@ -2178,7 +2291,7 @@ const STEP_HEADER_STYLE: React.CSSProperties = {
 const STEP_INDEX_STYLE: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: 9,
-  fontWeight: 750,
+  fontWeight: 700,
   letterSpacing: "0.08em",
   color: "var(--muted)",
   flex: "0 0 auto",
@@ -2189,7 +2302,7 @@ const STEP_TITLE_STYLE: React.CSSProperties = {
   minWidth: 0,
   color: "var(--ink)",
   fontSize: 12,
-  fontWeight: 650,
+  fontWeight: 600,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
@@ -2222,7 +2335,7 @@ const STEP_BODY_STYLE: React.CSSProperties = {
 
 const ACTIVITY_GROUP_STYLE: React.CSSProperties = {
   margin: "1px 0",
-  borderRadius: 6,
+  borderRadius: "var(--radius-control, 7px)",
 };
 
 const ACTIVITY_GROUP_HEADER_STYLE: React.CSSProperties = {
@@ -2230,7 +2343,7 @@ const ACTIVITY_GROUP_HEADER_STYLE: React.CSSProperties = {
   width: "100%",
   minHeight: 25,
   border: "1px solid transparent",
-  borderRadius: 6,
+  borderRadius: "var(--radius-control, 7px)",
   background: "transparent",
   color: "inherit",
   display: "flex",
@@ -2275,7 +2388,7 @@ const ACTIVITY_GROUP_BODY_STYLE: React.CSSProperties = {
 const TOOL_ROW_STYLE: React.CSSProperties = {
   margin: "1px 0",
   border: "1px solid transparent",
-  borderRadius: 6,
+  borderRadius: "var(--radius-control, 7px)",
   overflow: "hidden",
   boxSizing: "border-box",
   transition:
@@ -2284,7 +2397,7 @@ const TOOL_ROW_STYLE: React.CSSProperties = {
 
 const TOOL_ROW_EMBEDDED_STYLE: React.CSSProperties = {
   margin: 0,
-  borderRadius: 5,
+  borderRadius: "var(--radius-control, 7px)",
 };
 
 const TOOL_ROW_BUTTON_STYLE: React.CSSProperties = {
@@ -2302,10 +2415,13 @@ const TOOL_ROW_BUTTON_STYLE: React.CSSProperties = {
   textAlign: "left",
 };
 
+// The KIND tag is a quiet category label — 700 muted-2 so the tool TITLE
+// beside it carries the contrast and the stream stays scannable by what
+// happened, not by the tag.
 const TOOL_KIND_STYLE: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: 8.5,
-  fontWeight: 800,
+  fontWeight: 700,
   letterSpacing: "0.08em",
   color: "var(--muted-2)",
   flex: "0 0 auto",
@@ -2314,7 +2430,7 @@ const TOOL_KIND_STYLE: React.CSSProperties = {
 const TOOL_TITLE_STYLE: React.CSSProperties = {
   color: "var(--ink-dim)",
   fontSize: 11.5,
-  fontWeight: 650,
+  fontWeight: 600,
   minWidth: 0,
   flex: "0 1 auto",
   overflow: "hidden",
@@ -2336,6 +2452,7 @@ const TOOL_STATS_STYLE: React.CSSProperties = {
   color: "var(--muted)",
   fontFamily: "var(--font-mono)",
   fontSize: 9.5,
+  fontVariantNumeric: "tabular-nums",
   flex: "0 0 auto",
   whiteSpace: "nowrap",
 };
@@ -2379,7 +2496,7 @@ const TOOL_FILE_STYLE: React.CSSProperties = {
   gap: 8,
   minHeight: 25,
   border: "1px solid var(--rule-soft)",
-  borderRadius: 5,
+  borderRadius: "var(--radius-control, 7px)",
   background: "color-mix(in oklch, var(--ink) 2%, transparent)",
   color: "var(--ink-dim)",
   padding: "0 7px",
@@ -2405,13 +2522,16 @@ const TOOL_FILE_SIZE_STYLE: React.CSSProperties = {
 const TOOL_META_GRID_STYLE: React.CSSProperties = {
   display: "flex",
   flexWrap: "wrap",
-  gap: 5,
+  // A touch more breathing room so the MODE / MODEL / DURATION pairs read as a
+  // calm, scannable meta row rather than a cramped run-on.
+  rowGap: 6,
+  columnGap: 16,
 };
 
 const TOOL_META_STYLE: React.CSSProperties = {
   display: "inline-flex",
-  alignItems: "center",
-  gap: 4,
+  alignItems: "baseline",
+  gap: 6,
   border: "none",
   borderRadius: 0,
   background: "transparent",
@@ -2424,7 +2544,7 @@ const TOOL_META_LABEL_STYLE: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: 8.5,
   fontWeight: 700,
-  letterSpacing: "0.04em",
+  letterSpacing: "0.1em",
   textTransform: "uppercase",
 };
 
@@ -2432,6 +2552,7 @@ const TOOL_META_VALUE_STYLE: React.CSSProperties = {
   color: "var(--ink-dim)",
   fontFamily: "var(--font-mono)",
   fontSize: 9.5,
+  fontVariantNumeric: "tabular-nums",
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
@@ -2448,19 +2569,22 @@ const LIVE_BUBBLE_STYLE: React.CSSProperties = {
   boxSizing: "border-box",
   color: "var(--ink)",
   background: "color-mix(in oklch, var(--accent) 5%, var(--panel-2))",
-  border: "1px solid color-mix(in oklch, var(--accent) 22%, var(--rule-soft))",
-  borderLeft: "2px solid color-mix(in oklch, var(--accent) 55%, var(--rule-strong))",
-  borderRadius: 8,
-  borderTopLeftRadius: 4,
+  border: "1px solid var(--accent-edge)",
+  borderRadius: "var(--radius-surface, 10px)",
+  borderTopLeftRadius: "var(--radius-control, 7px)",
   padding: "8px 10px",
   display: "flex",
   flexDirection: "column",
   gap: 6,
   overflowWrap: "anywhere",
-  // Static accent halo marks this as the one live turn at a glance; no
-  // keyframe, so it's reduced-motion-safe by construction (the moving cue
-  // is the pulsing typing pip in the header).
-  boxShadow: "var(--shadow-glow)",
+  // The one live turn carries the rationed accent: an accent-edge hairline
+  // plus a single accent cue — a 3px inset left status rule (--status-edge)
+  // and a soft accent glow. Borders stay 1px in every state (the left edge is
+  // an inset shadow, not a 2px border), so nothing reflows. No keyframe here,
+  // so it's reduced-motion-safe by construction (the moving cue is the
+  // pulsing typing pip in the header).
+  boxShadow:
+    "var(--status-edge, inset 3px 0 0 var(--accent)), 0 0 12px var(--accent-glow)",
   transition:
     "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
 };
@@ -2514,7 +2638,7 @@ const LIVE_TOOL_LIST_STYLE: React.CSSProperties = {
 
 const LIVE_TOOL_ROW_STYLE: React.CSSProperties = {
   border: "1px solid transparent",
-  borderRadius: 6,
+  borderRadius: "var(--radius-control, 7px)",
   overflow: "hidden",
   boxSizing: "border-box",
   transition:
@@ -2539,7 +2663,7 @@ const LIVE_TOOL_PRE_STYLE: React.CSSProperties = {
   color: "var(--ink-dim)",
   background: "color-mix(in oklch, var(--ink) 3%, transparent)",
   border: "1px solid var(--rule-soft)",
-  borderRadius: 5,
+  borderRadius: "var(--radius-control, 7px)",
   padding: "6px 8px",
   maxHeight: 180,
   overflow: "auto",
@@ -2559,7 +2683,7 @@ const LIVE_NOTE_STYLE: React.CSSProperties = {
   alignItems: "center",
   gap: 6,
   border: "1px solid var(--rule-soft)",
-  borderRadius: 6,
+  borderRadius: "var(--radius-control, 7px)",
   background: "color-mix(in oklch, var(--ink) 4%, transparent)",
   color: "var(--muted)",
   fontSize: 11,
@@ -2587,7 +2711,7 @@ const LIVE_ERROR_STYLE: React.CSSProperties = {
   color: "var(--danger)",
   background: "var(--danger-soft)",
   border: "1px solid color-mix(in oklch, var(--danger) 36%, transparent)",
-  borderRadius: 6,
+  borderRadius: "var(--radius-control, 7px)",
   padding: "6px 8px",
   fontSize: 11,
   lineHeight: 1.4,

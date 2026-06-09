@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import SelectionRouteMenu from "./SelectionRouteMenu";
 import type { SelectionPayload } from "../../routing/SelectionRoutingContext";
 
@@ -61,9 +61,9 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
         onClick={(e) => e.stopPropagation()}
         style={{
           background: "var(--panel-2)",
-          border: "1px solid var(--rule-strong)",
-          borderRadius: 8,
-          boxShadow: "var(--shadow-2), var(--lift-hi)",
+          border: "1px solid var(--rule)",
+          borderRadius: "var(--radius-popover, 9px)",
+          boxShadow: "var(--shadow-2)",
           width: "min(480px, 100%)",
           padding: 14,
           fontFamily: "var(--font-sans)",
@@ -135,28 +135,18 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
           }}
         />
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          <button
-            type="button"
-            onClick={onCancel}
-            style={buttonStyle({ tone: "ghost" })}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "var(--hover)";
-              e.currentTarget.style.color = "var(--ink)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "transparent";
-              e.currentTarget.style.color = "var(--ink-dim)";
-            }}
-          >
+          {/* Cancel = neutral .spark-btn; Send = the one accent on
+              .spark-btn.is-primary. Both share height, radius, tactile press,
+              token hover, and the focus ring from the utility — no
+              filter:brightness, no hand-rolled disabled. */}
+          <button type="button" className="spark-btn" onClick={onCancel}>
             Cancel
           </button>
           <button
             ref={sendButtonRef}
             type="button"
+            className="spark-btn is-primary"
             onClick={openMenu}
-            style={buttonStyle({ tone: "accent" })}
-            onMouseEnter={(e) => (e.currentTarget.style.filter = "brightness(1.08)")}
-            onMouseLeave={(e) => (e.currentTarget.style.filter = "none")}
           >
             Send to…
           </button>
@@ -197,36 +187,3 @@ function Row({ label, value }: { label: string; value: string }) {
   );
 }
 
-function buttonStyle({ tone }: { tone: "accent" | "ghost" }): React.CSSProperties {
-  if (tone === "accent") {
-    return {
-      appearance: "none",
-      border: "none",
-      borderRadius: 6,
-      background: "var(--accent)",
-      color: "var(--accent-ink)",
-      padding: "0 12px",
-      height: 28,
-      fontFamily: "var(--font-sans)",
-      fontSize: 12,
-      fontWeight: 600,
-      cursor: "default",
-      boxShadow: "var(--shadow-glow)",
-      transition: "filter var(--motion-fast) var(--ease-out)",
-    };
-  }
-  return {
-    appearance: "none",
-    border: "1px solid var(--rule-soft)",
-    borderRadius: 6,
-    background: "transparent",
-    color: "var(--ink-dim)",
-    padding: "0 12px",
-    height: 28,
-    fontFamily: "var(--font-sans)",
-    fontSize: 12,
-    cursor: "default",
-    transition:
-      "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-  };
-}

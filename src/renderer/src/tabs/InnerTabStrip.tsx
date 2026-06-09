@@ -129,23 +129,30 @@ function Pill({
       style={{
         padding: "4px 10px",
         fontSize: 11,
-        fontWeight: active ? 600 : 500,
+        // Constant weight across active/inactive — selection is signalled by
+        // accent text + a soft --accent-soft fill only (no border), so the pill
+        // never reflows (and never nudges its neighbors) on activation, matching
+        // the constant-weight .spark-segmented-item.
+        fontWeight: 550,
         fontFamily: "var(--font-sans)",
         background: active
           ? "var(--accent-soft)"
           : "transparent",
         color: active ? "var(--accent)" : "var(--muted)",
-        border: active
-          ? "1px solid var(--accent-edge)"
-          : "1px solid transparent",
-        borderRadius: 4,
+        // No visible border in any state — the active pill reads as a gentle
+        // tinted segment, not an outlined chip. Keep a 1px transparent border
+        // so there is never a width shift between active/inactive/hover.
+        border: "1px solid transparent",
+        // Generously rounded (the softened control radius) so the segment row
+        // reads calm and pill-like rather than boxy.
+        borderRadius: "var(--radius-control, 7px)",
         cursor: "default",
         whiteSpace: "nowrap",
         maxWidth: 200,
         overflow: "hidden",
         textOverflow: "ellipsis",
         transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
       }}
       onMouseEnter={(e) => {
         if (!active) {
@@ -158,6 +165,14 @@ function Pill({
           e.currentTarget.style.background = "transparent";
           e.currentTarget.style.color = "var(--muted)";
         }
+      }}
+      // Tactile press: a momentary darker fill (--press), no transform — pills
+      // sit in a flush strip where a translate would jitter the row.
+      onMouseDown={(e) => {
+        if (!active) e.currentTarget.style.background = "var(--press)";
+      }}
+      onMouseUp={(e) => {
+        if (!active) e.currentTarget.style.background = "var(--hover)";
       }}
     >
       {label}
@@ -217,7 +232,7 @@ function WorkersPill({
     );
   }
 
-  // Multiple workers — render as a dropdown trigger. The "▾" hints at the
+  // Multiple workers — render as a dropdown trigger. A chevron hints at the
   // menu; the menu lists each worker and selects on click.
   return (
     <div ref={ref} style={{ position: "relative" }}>
@@ -232,7 +247,8 @@ function WorkersPill({
         style={{
           padding: "4px 10px",
           fontSize: 11,
-          fontWeight: active ? 600 : 500,
+          // Constant weight — same reflow-free rule as Pill above.
+          fontWeight: 550,
           fontFamily: "var(--font-sans)",
           background: active
             ? "var(--accent-soft)"
@@ -240,46 +256,60 @@ function WorkersPill({
               ? "var(--hover-strong)"
               : "transparent",
           color: active ? "var(--accent)" : "var(--muted)",
-          border: active
-            ? "1px solid var(--accent-edge)"
-            : "1px solid transparent",
-          borderRadius: 4,
+          // Borderless like Pill — active is a soft tinted fill, never an
+          // outlined box. The 1px transparent border holds width constant
+          // across active/inactive/open.
+          border: "1px solid transparent",
+          borderRadius: "var(--radius-control, 7px)",
           cursor: "default",
           display: "inline-flex",
           alignItems: "center",
           gap: 4,
           transition:
-            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
         }}
       >
         <span>Workers</span>
+        {/* Crisp SVG chevron at currentColor (replaces the unicode "▾", which
+            sat on a text baseline and rendered heavier than the app's other
+            glyphs). Rotates to point up while the menu is open. */}
         <span
           aria-hidden
           style={{
-            fontSize: 9,
+            display: "inline-flex",
             opacity: 0.7,
             transform: open ? "rotate(180deg)" : "none",
             transition: "transform var(--motion-fast) var(--ease-out)",
           }}
         >
-          ▾
+          <svg
+            width="9"
+            height="9"
+            viewBox="0 0 12 12"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M3 4.5 6 7.5 9 4.5" />
+          </svg>
         </span>
       </button>
       {open && (
+        // One popover language: .spark-menu (--panel-2 face, 9px radius, --rule
+        // hairline, --shadow-2) + .spark-menu-item (--hover on hover,
+        // .is-active = accent text + --accent-soft fill). Replaces the
+        // hand-rolled menu (divergent --rule-strong border + extra --lift-hi)
+        // and holds item weight constant so the active worker never reflows.
         <div
           role="menu"
-          className="spark-fade-in"
+          className="spark-menu spark-fade-in"
           style={{
             position: "absolute",
             top: "calc(100% + 4px)",
             left: 0,
             zIndex: 30,
-            minWidth: 180,
-            border: "1px solid var(--rule-strong)",
-            borderRadius: 9,
-            background: "var(--panel-2)",
-            boxShadow: "var(--shadow-2), var(--lift-hi)",
-            padding: 5,
             display: "flex",
             flexDirection: "column",
             gap: 1,
@@ -292,36 +322,18 @@ function WorkersPill({
                 key={worker.id}
                 type="button"
                 role="menuitem"
+                className={isActive ? "spark-menu-item is-active" : "spark-menu-item"}
                 onClick={() => {
                   setOpen(false);
                   onSelect(worker.id);
                 }}
                 title={worker.title || "worker"}
                 style={{
-                  appearance: "none",
-                  textAlign: "left",
-                  background: isActive ? "var(--accent-soft)" : "transparent",
-                  border: isActive
-                    ? "1px solid var(--accent-edge)"
-                    : "1px solid transparent",
-                  padding: "5px 9px",
                   color: isActive ? "var(--accent)" : "var(--ink)",
-                  fontFamily: "var(--font-sans)",
                   fontSize: 11.5,
-                  fontWeight: isActive ? 600 : 500,
-                  borderRadius: 5,
-                  cursor: "default",
                   whiteSpace: "nowrap",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
-                  transition:
-                    "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-                }}
-                onMouseEnter={(e) => {
-                  if (!isActive) e.currentTarget.style.background = "var(--hover)";
-                }}
-                onMouseLeave={(e) => {
-                  if (!isActive) e.currentTarget.style.background = "transparent";
                 }}
               >
                 {worker.title || "worker"}

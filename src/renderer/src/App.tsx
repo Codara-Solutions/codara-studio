@@ -1693,10 +1693,15 @@ export default function App() {
           window.dispatchEvent(new CustomEvent("spark:focus-composer"));
         });
       },
-      "sidebar.toggle": () => {
+      "sidebar.toggleLeft": () => {
+        setShowLeft((visible) => !visible);
+        window.dispatchEvent(new CustomEvent("spark:toggle-left-sidebar"));
+      },
+      "sidebar.toggleRight": () => {
         setShowRight((visible) => !visible);
         window.dispatchEvent(new CustomEvent("spark:toggle-sidebar"));
       },
+      "chat.new": () => handleNewChat(),
       "search.open": () => {
         setFileSearchOpen(false);
         setSearchOpen(true);
@@ -1798,6 +1803,7 @@ export default function App() {
     }),
     [
       handleNewBalancedTerminalPane,
+      handleNewChat,
       handleNewEditorTab,
       handleNewPreviewTab,
       handleNewTerminalTab,

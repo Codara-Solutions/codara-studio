@@ -40,6 +40,44 @@ const RUNTIME_LABEL: Record<RuntimeColumn, string> = {
   shared: "Shared",
 };
 
+// ── Shared interaction state ─────────────────────────────────────────────────
+// Hand-rolled buttons in this dialog set an inline box-shadow, which silently
+// wins over the global :focus-visible ring (the ring rule isn't !important).
+// Each custom control tracks hover / focus-visible / press locally and composes
+// the accent --focus-ring + the --press settle back into its inline box-shadow
+// so keyboard focus actually renders and every click has a tactile beat. Native
+// elements that DON'T set an inline box-shadow (the .spark-* utilities) inherit
+// the global ring for free and don't need this. Mirrors SettingsDialog.
+function useInteractive() {
+  const [hover, setHover] = useState(false);
+  const [focus, setFocus] = useState(false);
+  const [pressed, setPressed] = useState(false);
+  const handlers = {
+    onMouseEnter: () => setHover(true),
+    onMouseLeave: () => {
+      setHover(false);
+      setPressed(false);
+    },
+    onMouseDown: () => setPressed(true),
+    onMouseUp: () => setPressed(false),
+    onFocus: (event: React.FocusEvent) => {
+      if (event.target.matches(":focus-visible")) setFocus(true);
+    },
+    onBlur: () => {
+      setFocus(false);
+      setPressed(false);
+    },
+  };
+  return { hover, focus, pressed, handlers };
+}
+
+// Compose an optional base box-shadow with the focus ring when keyboard-focused.
+function withFocusRing(base: string | undefined, focus: boolean): string | undefined {
+  if (!focus) return base;
+  if (!base || base === "none") return "var(--focus-ring)";
+  return `${base}, var(--focus-ring)`;
+}
+
 export default function AgentCapabilitiesDialog({
   settings,
   workspaceCwd,
@@ -248,17 +286,17 @@ export default function AgentCapabilitiesDialog({
       >
         <header style={headerStyle}>
           <div style={{ minWidth: 0 }}>
-            <div className="spark-eyebrow">Agent Capabilities</div>
+            <div className="spark-eyebrow" style={{ fontFamily: "var(--font-sans)" }}>
+              Agent Capabilities
+            </div>
             <div style={titleStyle}>Capability Center</div>
             <div style={ledeStyle}>
               Choose which MCP servers and skills Spark can reference in future manager and worker prompts.
             </div>
           </div>
           <div style={headerAsideStyle}>
-            <Metric label="Enabled" value={activeCount} detail={`${totalCount} total`} compact />
-            <button type="button" onClick={onClose} style={ghostButtonStyle}>
-              Close
-            </button>
+            <StatTile label="Enabled" value={activeCount} detail={`${totalCount} total`} compact />
+            <CloseButton onClick={onClose} />
           </div>
         </header>
 
@@ -272,8 +310,9 @@ export default function AgentCapabilitiesDialog({
           />
 
           <section style={summaryGridStyle}>
-            <div style={panelStyle}>
+            <div style={subsectionStyle}>
               <Section title="Session Policy" detail="Compact awareness only; full docs stay out of prompts until a task needs them." />
+              <hr className="spark-divider" />
               <div style={policyListStyle}>
                 <PolicyToggle
                   title="MCP awareness"
@@ -296,14 +335,20 @@ export default function AgentCapabilitiesDialog({
               </div>
             </div>
 
-            <div style={panelStyle}>
+            <div style={subsectionStyle}>
               <Section title="Inventory" detail="Each row shows where an MCP or skill is installed. Uninstall removes it from that runtime only." />
+              <hr className="spark-divider" />
               <div style={metricGridStyle}>
-                <Metric label="Claude installs" value={claudeInstallCount.total} detail={`${claudeInstallCount.mcp} MCP · ${claudeInstallCount.skill} skill`} />
-                <Metric label="Codex installs" value={codexInstallCount.total} detail={`${codexInstallCount.mcp} MCP · ${codexInstallCount.skill} skill`} />
+                <StatTile label="Claude installs" value={claudeInstallCount.total} detail={`${claudeInstallCount.mcp} MCP · ${claudeInstallCount.skill} skill`} />
+                <StatTile label="Codex installs" value={codexInstallCount.total} detail={`${codexInstallCount.mcp} MCP · ${codexInstallCount.skill} skill`} />
               </div>
               <div style={syncBarStyle}>
-                <button type="button" disabled={syncing} onClick={syncAssets} style={primaryButtonStyle}>
+                <button
+                  type="button"
+                  className="spark-btn"
+                  disabled={syncing}
+                  onClick={syncAssets}
+                >
                   {syncing ? "Syncing" : "Sync"}
                 </button>
                 <div style={syncCopyStyle}>Copy missing compatible entries from one runtime to the other.</div>
@@ -312,20 +357,29 @@ export default function AgentCapabilitiesDialog({
           </section>
 
           <section style={filterBarStyle}>
-            <input
-              type="search"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Filter by name or path"
-              style={searchInputStyle}
-              spellCheck={false}
-            />
-            <div style={filterChipsStyle}>
-              <FilterChip label="All" active={runtimeFilter === "all"} onClick={() => setRuntimeFilter("all")} />
-              <FilterChip label="Claude only" active={runtimeFilter === "claude"} onClick={() => setRuntimeFilter("claude")} />
-              <FilterChip label="Codex only" active={runtimeFilter === "codex"} onClick={() => setRuntimeFilter("codex")} />
-              <FilterChip label="Both" active={runtimeFilter === "both"} onClick={() => setRuntimeFilter("both")} />
-              <FilterChip label="Shared" active={runtimeFilter === "shared"} onClick={() => setRuntimeFilter("shared")} />
+            <div style={searchWrapStyle}>
+              <SearchGlyph />
+              <input
+                type="search"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Filter by name or path"
+                className="spark-input"
+                style={searchInputStyle}
+                spellCheck={false}
+              />
+            </div>
+            <div
+              className="spark-segmented"
+              role="group"
+              aria-label="Filter by runtime"
+              style={filterSegmentedStyle}
+            >
+              <FilterSegment label="All" active={runtimeFilter === "all"} onClick={() => setRuntimeFilter("all")} />
+              <FilterSegment label="Claude only" active={runtimeFilter === "claude"} onClick={() => setRuntimeFilter("claude")} />
+              <FilterSegment label="Codex only" active={runtimeFilter === "codex"} onClick={() => setRuntimeFilter("codex")} />
+              <FilterSegment label="Both" active={runtimeFilter === "both"} onClick={() => setRuntimeFilter("both")} />
+              <FilterSegment label="Shared" active={runtimeFilter === "shared"} onClick={() => setRuntimeFilter("shared")} />
             </div>
           </section>
 
@@ -374,15 +428,31 @@ export default function AgentCapabilitiesDialog({
           >
             {status ?? "Changes apply after Save. Existing running workers keep their current prompt."}
           </div>
-          <button type="button" onClick={onClose} style={ghostButtonStyle}>
+          <button type="button" className="spark-btn" onClick={onClose}>
             Cancel
           </button>
-          <button type="button" onClick={save} disabled={saving} style={primaryButtonStyle}>
+          <button type="button" className="spark-btn is-primary" onClick={save} disabled={saving}>
             {saving ? "Saving" : "Save"}
           </button>
         </footer>
       </section>
     </div>
+  );
+}
+
+// A quiet glyph button for the dialog corner: a 1.5px SVG × on the shared
+// .spark-icon-btn idiom (transparent at rest, ink-tint on hover, global ring).
+function CloseButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="spark-icon-btn"
+      aria-label="Close"
+      title="Close"
+      onClick={onClick}
+    >
+      <CloseGlyph />
+    </button>
   );
 }
 
@@ -402,7 +472,7 @@ function SparkBuiltinsSection({
   return (
     <section style={builtinSectionStyle}>
       <div style={builtinSectionHeaderStyle}>
-        <div style={builtinEyebrowStyle}>
+        <div className="spark-eyebrow" style={builtinEyebrowStyle}>
           <SparkGlyph />
           <span>Spark Built-ins</span>
         </div>
@@ -410,9 +480,13 @@ function SparkBuiltinsSection({
           MCP servers that ship inside Spark. Each is configured per runtime — install Claude and Codex separately.
         </div>
       </div>
+      <hr className="spark-divider" />
       <div style={builtinCardGridStyle}>
         {builtins === null ? (
-          <div style={emptyStateStyle}>Checking installed built-ins…</div>
+          <div className="spark-empty" style={{ minHeight: 72 }}>
+            <span className="spark-eyebrow">Checking built-ins</span>
+            <span className="spark-empty__body">Reading installed Spark MCP servers…</span>
+          </div>
         ) : (
           builtins.map((builtin) => (
             <BuiltinCard
@@ -450,12 +524,12 @@ function BuiltinCard({
       <div style={{ minWidth: 0 }}>
         <div style={builtinCardTitleRowStyle}>
           <span style={builtinNameStyle}>{builtin.name}</span>
-          <span style={builtinBadgeStyle}>Spark built-in</span>
-          <span style={builtinToolBadgeStyle} title={builtin.tools.join(", ")}>
+          <span className="spark-badge is-accent">Spark built-in</span>
+          <span className="spark-badge" title={builtin.tools.join(", ")} style={builtinCountBadgeStyle}>
             {builtin.tools.length} tools
           </span>
           {showAutoHint ? (
-            <span style={builtinAutoBadgeStyle} title="Spark re-adds this on launch while auto-install is on.">
+            <span className="spark-badge is-info" title="Spark re-adds this on launch while auto-install is on.">
               auto
             </span>
           ) : null}
@@ -529,25 +603,27 @@ function RuntimeInstallTile({
   return (
     <div style={builtinTileStyle}>
       <div style={builtinTileHeadStyle}>
-        <span style={{ ...builtinRuntimeChipStyle, ...runtimeTone(runtime) }}>{RUNTIME_LABEL[runtime]}</span>
-        <span aria-hidden style={{ ...builtinStateDotStyle, background: meta.dot }} />
-        <span style={builtinStateTextStyle}>{meta.label}</span>
+        <span className="spark-badge" style={runtimeBadgeStyle(runtime)}>
+          {RUNTIME_LABEL[runtime]}
+        </span>
+        <span style={builtinTileStatusStyle}>
+          <span aria-hidden style={{ ...builtinStateDotStyle, background: meta.dot }} />
+          <span style={builtinStateTextStyle}>{meta.label}</span>
+        </span>
       </div>
       {status.state === "installed" ? (
+        // Quiet by default: a neutral .spark-btn that only earns its danger
+        // tint once armed (the two-step confirm). Preserves the confirm timer
+        // and busy state from before.
         <button
           type="button"
+          className={confirming ? "spark-btn is-danger" : "spark-btn"}
           disabled={busy}
           onClick={handleUninstall}
           title={status.configPath}
-          style={{
-            ...builtinActionStyle,
-            ...uninstallButtonStyle,
-            ...(confirming ? uninstallConfirmStyle : null),
-            opacity: busy ? 0.6 : 1,
-            cursor: busy ? "wait" : "pointer",
-          }}
+          style={builtinActionStyle}
         >
-          {busy ? "Removing…" : confirming ? "Confirm?" : "Uninstall"}
+          {busy ? "Removing" : confirming ? "Confirm?" : "Uninstall"}
         </button>
       ) : status.state === "user-managed" ? (
         <span style={builtinManagedNoteStyle} title={status.configPath}>
@@ -556,19 +632,15 @@ function RuntimeInstallTile({
       ) : status.state === "available" ? (
         <button
           type="button"
+          className="spark-btn is-primary"
           disabled={busy}
           onClick={() => {
             if (!busy) onInstall();
           }}
           title={`Write the entry into ${status.configPath}`}
-          style={{
-            ...builtinActionStyle,
-            ...builtinInstallButtonStyle,
-            opacity: busy ? 0.6 : 1,
-            cursor: busy ? "wait" : "pointer",
-          }}
+          style={builtinActionStyle}
         >
-          {busy ? "Installing…" : "Install"}
+          {busy ? "Installing" : "Install"}
         </button>
       ) : (
         <span style={builtinUnavailableNoteStyle} title={`${RUNTIME_LABEL[runtime]} CLI not detected on this machine`}>
@@ -586,7 +658,7 @@ function builtinStateMeta(state: SparkBuiltinInstallState): { label: string; dot
     case "user-managed":
       return { label: "Active", dot: "var(--info)" };
     case "available":
-      return { label: "Not installed", dot: "var(--ink-dim)" };
+      return { label: "Not installed", dot: "var(--muted-2)" };
     case "unavailable":
     default:
       return { label: "Unavailable", dot: "var(--rule-strong)" };
@@ -600,6 +672,52 @@ function SparkGlyph() {
         d="M12 2l2.3 6.4 6.7 1.6-6.7 1.6L12 18l-2.3-6.4L3 10l6.7-1.6L12 2z"
         fill="var(--accent)"
       />
+    </svg>
+  );
+}
+
+// Shared 1.5px-stroke SVG icon family at currentColor (no unicode glyphs).
+function CloseGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round">
+      <path d="M6 6l12 12M18 6L6 18" />
+    </svg>
+  );
+}
+
+function SearchGlyph() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      aria-hidden
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      style={searchGlyphStyle}
+    >
+      <circle cx="11" cy="11" r="7" />
+      <path d="M21 21l-4.3-4.3" />
+    </svg>
+  );
+}
+
+function TrashGlyph() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12" />
+    </svg>
+  );
+}
+
+function PlusGlyph() {
+  // 14px to match the shared in-chip icon family (close / search / trash /
+  // spinner) — one geometry scale, ~1.5px stroke, currentColor.
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round">
+      <path d="M12 5v14M5 12h14" />
     </svg>
   );
 }
@@ -654,7 +772,10 @@ function CapabilityGroup({
           <span style={{ textAlign: "right" }}>Awareness</span>
         </div>
         {groups.length === 0 ? (
-          <div style={emptyStateStyle}>{emptyText}</div>
+          <div className="spark-empty" style={{ minHeight: 92 }}>
+            <span className="spark-eyebrow">{kind === "mcp" ? "No MCP servers" : "No skills"}</span>
+            <span className="spark-empty__body">{emptyText}</span>
+          </div>
         ) : (
           groups.map((group) => (
             <GroupRow
@@ -712,7 +833,7 @@ function GroupRow({
     group.any.compatibility !== (rt === "claude" ? "codex" : "claude");
 
   return (
-    <div style={{ ...rowStyle, opacity: enabled ? 1 : 0.55 }}>
+    <div style={{ ...rowStyle, opacity: enabled ? 1 : 0.5 }}>
       <div style={{ minWidth: 0 }}>
         <div style={nameStyle} title={group.name}>
           {group.name}
@@ -738,7 +859,7 @@ function GroupRow({
         />
       ))}
       <div style={rowControlsStyle}>
-        <Switch checked={enabled} onChange={(next) => onToggle(group.any, next)} />
+        <Switch checked={enabled} onChange={(next) => onToggle(group.any, next)} ariaLabel={`Awareness for ${group.name}`} />
       </div>
     </div>
   );
@@ -767,12 +888,20 @@ function RuntimeCell({
         <div style={runtimeCellStyle}>
           <button
             type="button"
+            className="spark-btn"
             disabled={installing}
             onClick={onInstall}
-            style={{ ...addButtonStyle, opacity: installing ? 0.6 : 1, cursor: installing ? "wait" : "pointer" }}
+            style={addButtonStyle}
             title={`Copy this into the ${RUNTIME_LABEL[runtime]} config`}
           >
-            {installing ? "Adding…" : `+ Add to ${RUNTIME_LABEL[runtime]}`}
+            {installing ? (
+              "Adding"
+            ) : (
+              <>
+                <PlusGlyph />
+                {RUNTIME_LABEL[runtime]}
+              </>
+            )}
           </button>
         </div>
       );
@@ -811,6 +940,7 @@ function InstallChip({
 }) {
   const [confirming, setConfirming] = useState(false);
   const timerRef = useRef<number | null>(null);
+  const { hover, focus, pressed, handlers } = useInteractive();
 
   useEffect(() => {
     return () => {
@@ -837,33 +967,77 @@ function InstallChip({
   };
 
   const scopeText = scopeShortLabel(item);
-  const tone = runtimeTone(runtime);
+  const disabledDelete = busy || !item.canDelete;
+  // Quiet delete: a glyph button that stays neutral until armed, then reveals
+  // the danger tint for the confirm step. Two-step confirm + busy preserved.
+  const deleteBg = confirming
+    ? "var(--danger-soft)"
+    : pressed && !disabledDelete
+      ? "color-mix(in oklch, var(--ink) 13%, transparent)"
+      : hover && !disabledDelete
+        ? "color-mix(in oklch, var(--ink) 9%, transparent)"
+        : "transparent";
 
   return (
     <div style={installChipStyle} title={item.path}>
       <div style={installChipMetaStyle}>
-        <span style={{ ...installScopeChipStyle, ...tone }}>{scopeText}</span>
-        {!item.syncable ? <span style={installFlagChipStyle}>native</span> : null}
-        {!item.canDelete ? <span style={installFlagChipStyle}>protected</span> : null}
+        <span className="spark-badge" style={installScopeBadgeStyle(runtime)}>
+          {scopeText}
+        </span>
+        {!item.syncable ? (
+          <span className="spark-badge is-warn" style={installFlagBadgeStyle}>
+            native
+          </span>
+        ) : null}
+        {!item.canDelete ? (
+          <span className="spark-badge is-warn" style={installFlagBadgeStyle}>
+            protected
+          </span>
+        ) : null}
       </div>
       <button
         type="button"
-        disabled={busy || !item.canDelete}
+        className="spark-icon-btn"
+        aria-label={confirming ? `Confirm uninstall ${item.name}` : `Uninstall ${item.name}`}
+        title={confirming ? "Click again to confirm" : item.canDelete ? "Uninstall" : "Protected — cannot uninstall"}
+        disabled={disabledDelete}
         onClick={handleClick}
+        {...handlers}
         style={{
-          ...uninstallButtonStyle,
-          ...(confirming ? uninstallConfirmStyle : null),
-          opacity: busy || !item.canDelete ? 0.5 : 1,
-          cursor: busy || !item.canDelete ? "not-allowed" : "pointer",
+          flex: "0 0 auto",
+          color: confirming ? "var(--danger)" : "var(--muted)",
+          background: deleteBg,
+          // When armed, a 1px danger ring (box-shadow → no reflow in the dense
+          // grid cell) makes the destructive confirm step unmistakable instead
+          // of relying on the tooltip + color shift alone.
+          boxShadow: withFocusRing(
+            confirming
+              ? "0 0 0 1px color-mix(in oklch, var(--danger) 55%, transparent)"
+              : undefined,
+            focus,
+          ),
         }}
       >
-        {busy ? "Removing…" : confirming ? "Confirm?" : "Uninstall"}
+        {busy ? <Spinner /> : <TrashGlyph />}
       </button>
     </div>
   );
 }
 
-function FilterChip({
+// A small spinner for in-flight chip/tile actions. It inherits currentColor
+// (so it reads --muted at rest, --danger once a delete is armed) rather than
+// the accent, and is reduced-motion-safe via the global spark-spin keyframe
+// collapse. Sized to match the shared 14px in-chip icon family.
+function Spinner() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden style={{ animation: "spark-spin 0.7s linear infinite" }}>
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth={2} opacity={0.25} />
+      <path d="M21 12a9 9 0 0 0-9-9" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function FilterSegment({
   label,
   active,
   onClick,
@@ -875,11 +1049,9 @@ function FilterChip({
   return (
     <button
       type="button"
+      className={active ? "spark-segmented-item is-selected" : "spark-segmented-item"}
+      aria-pressed={active}
       onClick={onClick}
-      style={{
-        ...filterChipStyle,
-        ...(active ? filterChipActiveStyle : null),
-      }}
     >
       {label}
     </button>
@@ -889,7 +1061,9 @@ function FilterChip({
 function Section({ title, detail }: { title: string; detail: string }) {
   return (
     <div style={{ minWidth: 0 }}>
-      <div style={sectionTitleStyle}>{title}</div>
+      <div className="spark-eyebrow" style={sectionTitleStyle}>
+        {title}
+      </div>
       <div style={sectionDetailStyle}>{detail}</div>
     </div>
   );
@@ -906,18 +1080,41 @@ function PolicyToggle({
   checked: boolean;
   onChange: (next: boolean) => void;
 }) {
+  const { hover, focus, pressed, handlers } = useInteractive();
   return (
-    <div style={policyRowStyle}>
-      <div style={{ minWidth: 0 }}>
-        <div style={policyTitleStyle}>{title}</div>
-        <div style={policyDetailStyle}>{detail}</div>
-      </div>
-      <Switch checked={checked} onChange={onChange} />
-    </div>
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={title}
+      onClick={() => onChange(!checked)}
+      {...handlers}
+      style={{
+        ...policyRowStyle,
+        // De-boxed full-width row: the whole strip is the hit target. Reveal
+        // affordance via an ink tint only — no border, so no reflow and no
+        // panel-in-panel nesting. The Switch sits flush at the right.
+        background: pressed
+          ? "var(--press)"
+          : hover
+            ? "var(--hover)"
+            : "transparent",
+        boxShadow: withFocusRing(undefined, focus),
+      }}
+    >
+      <span style={{ minWidth: 0 }}>
+        <span style={policyTitleStyle}>{title}</span>
+        <span style={policyDetailStyle}>{detail}</span>
+      </span>
+      <SwitchTrack checked={checked} />
+    </button>
   );
 }
 
-function Metric({
+// A clean stat tile: large mono tabular value, --muted label, one faint
+// hairline — no accent wash. Used for the header "Enabled" count and the
+// Claude/Codex inventory totals.
+function StatTile({
   label,
   value,
   detail,
@@ -929,98 +1126,126 @@ function Metric({
   compact?: boolean;
 }) {
   return (
-    <div style={compact ? compactMetricStyle : metricStyle}>
-      <div style={metricLabelStyle}>{label}</div>
-      <div style={metricValueStyle}>{value}</div>
-      <div style={metricDetailStyle}>{detail}</div>
+    <div style={compact ? compactStatTileStyle : statTileStyle}>
+      <div style={statLabelStyle}>{label}</div>
+      <div style={statValueStyle}>{value}</div>
+      <div style={statDetailStyle}>{detail}</div>
     </div>
   );
 }
 
-function Switch({ checked, onChange }: { checked: boolean; onChange: (next: boolean) => void }) {
+// ── Switch — one switch metric, app-wide. 34x20 track, 16px knob, 2px inset,
+// accent fill + glow when on. SwitchTrack is the pure-visual part so the same
+// geometry can be (a) an interactive role=switch button, or (b) a decorative
+// indicator nested inside a larger clickable row (PolicyToggle), where a
+// nested <button> would be invalid HTML. Matches SettingsDialog exactly.
+const SWITCH_W = 34;
+const SWITCH_H = 20;
+const SWITCH_KNOB = 16;
+
+function SwitchTrack({ checked, disabled }: { checked: boolean; disabled?: boolean }) {
+  return (
+    <span
+      aria-hidden
+      style={{
+        display: "inline-block",
+        position: "relative",
+        flex: `0 0 ${SWITCH_W}px`,
+        width: SWITCH_W,
+        height: SWITCH_H,
+        borderRadius: 999,
+        boxSizing: "border-box",
+        border: checked
+          ? "1px solid var(--accent-edge)"
+          : "1px solid var(--rule-strong)",
+        background: checked
+          ? "color-mix(in oklch, var(--accent) 32%, var(--panel))"
+          : "color-mix(in oklch, var(--ink) 5%, transparent)",
+        opacity: disabled ? 0.55 : 1,
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      <span
+        style={{
+          position: "absolute",
+          top: 1,
+          left: checked ? SWITCH_W - SWITCH_KNOB - 2 : 1,
+          width: SWITCH_KNOB,
+          height: SWITCH_KNOB,
+          borderRadius: "50%",
+          background: checked ? "var(--accent)" : "var(--ink-dim)",
+          boxShadow: checked ? "0 0 8px var(--accent-glow)" : "none",
+          transition:
+            "left var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
+        }}
+      />
+    </span>
+  );
+}
+
+function Switch({
+  checked,
+  onChange,
+  ariaLabel,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  ariaLabel?: string;
+}) {
+  const { focus, pressed, handlers } = useInteractive();
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={ariaLabel}
       onClick={() => onChange(!checked)}
+      {...handlers}
       style={{
         appearance: "none",
-        position: "relative",
-        width: 34,
-        height: 20,
-        borderRadius: 999,
-        border: checked
-          ? "1px solid color-mix(in oklch, var(--accent) 48%, var(--rule-strong))"
-          : "1px solid var(--rule-strong)",
-        background: checked ? "color-mix(in oklch, var(--accent) 28%, var(--panel))" : "var(--panel-3)",
+        display: "inline-flex",
+        flex: `0 0 ${SWITCH_W}px`,
         padding: 0,
+        border: "none",
+        borderRadius: 999,
+        background: "transparent",
+        // Default arrow cursor, matching the .spark-* utility classes.
         cursor: "default",
-        transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+        // The press settle: a hair of downward travel, no reflow.
+        transform: pressed ? "translateY(0.5px)" : "none",
+        boxShadow: withFocusRing(undefined, focus),
+        transition: "transform var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
-      <span
-        aria-hidden
-        style={{
-          position: "absolute",
-          top: 1,
-          left: checked ? 16 : 1,
-          width: 16,
-          height: 16,
-          borderRadius: "50%",
-          background: checked ? "var(--accent)" : "var(--ink-dim)",
-          boxShadow: checked ? "0 0 8px var(--accent-glow)" : "none",
-          transition: "left var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out)",
-        }}
-      />
+      <SwitchTrack checked={checked} />
     </button>
   );
 }
 
 type ChipTone = "neutral" | "success" | "warning" | "blue" | "violet";
 
+// Small inline tags on the row sub-line. Adopts the shared .spark-badge so
+// every tint re-tints across the 8 OKLCH palettes; tones map onto the badge's
+// token-backed modifiers (success -> ok, warning -> warn, blue -> info,
+// violet -> accent). These read as lowercase code-ish identifiers, so keep
+// mono + lowercase rather than the badge's shouted uppercase.
 function Chip({ text, tone, title }: { text: string; tone: ChipTone; title?: string }) {
-  const colors: Record<ChipTone, { bg: string; border: string; color: string }> = {
-    neutral: {
-      bg: "color-mix(in oklch, var(--ink) 5%, transparent)",
-      border: "var(--rule-soft)",
-      color: "var(--muted)",
-    },
-    success: {
-      bg: "color-mix(in oklch, var(--ok) 12%, transparent)",
-      border: "color-mix(in oklch, var(--ok) 28%, var(--rule-soft))",
-      color: "var(--ok)",
-    },
-    warning: {
-      bg: "color-mix(in oklch, var(--warn) 12%, transparent)",
-      border: "color-mix(in oklch, var(--warn) 30%, var(--rule-soft))",
-      color: "var(--warn)",
-    },
-    blue: {
-      bg: "color-mix(in oklch, var(--info) 12%, transparent)",
-      border: "color-mix(in oklch, var(--info) 30%, var(--rule-soft))",
-      color: "var(--info)",
-    },
-    violet: {
-      bg: "color-mix(in oklch, var(--accent) 11%, transparent)",
-      border: "color-mix(in oklch, var(--accent) 30%, var(--rule-soft))",
-      color: "var(--accent)",
-    },
+  const toneClass: Record<ChipTone, string> = {
+    neutral: "",
+    success: "is-ok",
+    warning: "is-warn",
+    blue: "is-info",
+    violet: "is-accent",
   };
-  const c = colors[tone];
   return (
     <span
+      className={`spark-badge ${toneClass[tone]}`.trim()}
       title={title}
       style={{
-        border: `1px solid ${c.border}`,
-        borderRadius: 999,
-        background: c.bg,
-        color: c.color,
-        padding: "2px 6px",
         fontFamily: "var(--font-mono)",
-        fontSize: 9,
-        lineHeight: 1.3,
-        whiteSpace: "nowrap",
+        textTransform: "none",
+        letterSpacing: "0.02em",
       }}
     >
       {text}
@@ -1107,24 +1332,28 @@ function scopeShortLabel(item: AgentAssetInventoryItem): string {
   return item.scope;
 }
 
-function runtimeTone(runtime: RuntimeColumn): React.CSSProperties {
+// Per-runtime accent on the scope/runtime badges: Claude rides the brand
+// accent, Codex the info blue, Shared the ok green. Token-only so each
+// re-tints across the 8 themes (no frozen hex). Layered on top of the
+// .spark-badge base which supplies geometry.
+function runtimeBadgeTone(runtime: RuntimeColumn): React.CSSProperties {
   switch (runtime) {
     case "claude":
       return {
-        background: "color-mix(in oklch, var(--accent) 14%, transparent)",
-        border: "1px solid color-mix(in oklch, var(--accent) 36%, var(--rule-soft))",
+        background: "var(--accent-soft)",
+        border: "1px solid var(--accent-edge)",
         color: "var(--accent)",
       };
     case "codex":
       return {
-        background: "color-mix(in oklch, var(--info) 14%, transparent)",
-        border: "1px solid color-mix(in oklch, var(--info) 36%, var(--rule-soft))",
+        background: "var(--info-soft)",
+        border: "1px solid color-mix(in oklch, var(--info) 35%, transparent)",
         color: "var(--info)",
       };
     case "shared":
       return {
-        background: "color-mix(in oklch, var(--ok) 12%, transparent)",
-        border: "1px solid color-mix(in oklch, var(--ok) 30%, var(--rule-soft))",
+        background: "var(--ok-soft)",
+        border: "1px solid color-mix(in oklch, var(--ok) 35%, transparent)",
         color: "var(--ok)",
       };
   }
@@ -1156,40 +1385,46 @@ const overlayStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
+  // A calm faint --bg veil, not a heavy frosted blur — glassmorphism is an
+  // anti-reference here. Matches the Settings dialog scrim / .spark-scrim.
   background: "color-mix(in oklch, var(--bg) 64%, transparent)",
-  backdropFilter: "blur(5px)",
-  WebkitBackdropFilter: "blur(5px)",
   fontFamily: "var(--font-sans)",
+  animation: "spark-fade-in var(--motion-fast) var(--ease-out)",
 };
 
 const dialogStyle: React.CSSProperties = {
-  width: "min(1240px, calc(100vw - 24px))",
-  height: "min(840px, calc(100vh - 24px))",
+  // Fixed footprint — the body scrolls internally; the dialog stays put.
+  // Frame matches the Settings dialog: --panel face, 1px --rule-soft, a soft
+  // 16px dialog-frame radius, one real overlay shadow + the 1px top highlight.
+  width: "min(1240px, calc(100vw - 44px))",
+  height: "min(840px, calc(100vh - 44px))",
   display: "grid",
   gridTemplateRows: "auto minmax(0, 1fr) auto",
   background: "var(--panel)",
-  border: "1px solid var(--rule)",
-  borderRadius: 10,
-  boxShadow: "var(--shadow-2)",
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 16,
+  boxShadow: "var(--shadow-2), var(--lift-hi)",
   overflow: "hidden",
+  animation: "spark-fade-in var(--motion) var(--ease-out)",
 };
 
 const headerStyle: React.CSSProperties = {
-  padding: "18px 20px 15px",
+  padding: "16px 18px 15px",
   borderBottom: "1px solid var(--rule-soft)",
+  // A raised header band: the 1px top highlight lifts it off the body.
+  boxShadow: "var(--lift-hi)",
   display: "grid",
   gridTemplateColumns: "minmax(0, 1fr) auto",
   gap: 18,
   alignItems: "start",
-  background: "linear-gradient(180deg, color-mix(in oklch, var(--panel-2) 88%, transparent), var(--panel))",
 };
 
 const titleStyle: React.CSSProperties = {
   color: "var(--ink)",
-  fontSize: 18,
-  fontWeight: 780,
+  fontSize: 15,
+  fontWeight: 600,
   letterSpacing: 0,
-  marginTop: 5,
+  marginTop: 6,
 };
 
 const ledeStyle: React.CSSProperties = {
@@ -1215,7 +1450,7 @@ const mainStyle: React.CSSProperties = {
   padding: 16,
   display: "flex",
   flexDirection: "column",
-  gap: 12,
+  gap: 14,
 };
 
 const summaryGridStyle: React.CSSProperties = {
@@ -1238,56 +1473,56 @@ const filterBarStyle: React.CSSProperties = {
   alignItems: "center",
 };
 
-const searchInputStyle: React.CSSProperties = {
-  appearance: "none",
-  border: "1px solid var(--rule-strong)",
-  borderRadius: 7,
-  background: "color-mix(in oklch, var(--bg) 30%, transparent)",
-  color: "var(--ink)",
-  padding: "8px 11px",
-  fontFamily: "var(--font-sans)",
-  fontSize: 12,
-  outline: "none",
-  boxShadow: "var(--well)",
-  transition: "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-};
-
-const filterChipsStyle: React.CSSProperties = {
+const searchWrapStyle: React.CSSProperties = {
+  position: "relative",
   display: "flex",
-  gap: 6,
+  alignItems: "center",
+};
+
+const searchGlyphStyle: React.CSSProperties = {
+  position: "absolute",
+  left: 9,
+  color: "var(--muted)",
+  pointerEvents: "none",
+};
+
+const searchInputStyle: React.CSSProperties = {
+  // .spark-input supplies fill / border / radius / well / focus ring; pad the
+  // left so the leading search glyph has room.
+  height: "auto",
+  padding: "8px 11px 8px 30px",
+};
+
+const filterSegmentedStyle: React.CSSProperties = {
+  display: "flex",
   flexWrap: "wrap",
-  justifyContent: "flex-end",
-};
-
-const filterChipStyle: React.CSSProperties = {
-  appearance: "none",
-  border: "1px solid var(--rule-strong)",
-  borderRadius: 999,
-  background: "transparent",
-  color: "var(--ink-dim)",
-  padding: "5px 11px",
-  fontFamily: "var(--font-sans)",
-  fontSize: 11,
-  fontWeight: 700,
-  letterSpacing: 0.02,
-  cursor: "default",
-  transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-};
-
-const filterChipActiveStyle: React.CSSProperties = {
-  border: "1px solid color-mix(in oklch, var(--accent) 50%, var(--rule-strong))",
-  background: "color-mix(in oklch, var(--accent) 16%, transparent)",
-  color: "var(--ink)",
+  justifySelf: "end",
 };
 
 const panelStyle: React.CSSProperties = {
+  // One hairline + one soft cue (the top-highlight). No accent wash. Softened
+  // to the surface rung so the card reads calm, not boxy.
   border: "1px solid var(--rule-soft)",
-  borderRadius: 8,
-  padding: 12,
-  background: "color-mix(in oklch, var(--panel-2) 62%, var(--panel))",
+  borderRadius: "var(--radius-surface, 10px)",
+  padding: 14,
+  background: "var(--panel-2)",
   boxShadow: "var(--lift-hi)",
   display: "grid",
   gap: 10,
+};
+
+// De-boxed grouping for Session Policy / Inventory: an eyebrow header, ONE
+// --rule-soft hairline, then content. Tint-first — a soft raised --panel-2
+// fill carries the grouping with NO hard outline and NO shadow, so we drop the
+// old panel-inside-panel outline. Generously rounded to match the softened
+// surface rung.
+const subsectionStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 10,
+  alignContent: "start",
+  padding: 14,
+  borderRadius: "var(--radius-surface, 10px)",
+  background: "color-mix(in oklch, var(--panel-2) 60%, transparent)",
 };
 
 const capabilityPanelStyle: React.CSSProperties = {
@@ -1307,12 +1542,13 @@ const groupCountStyle: React.CSSProperties = {
   alignItems: "baseline",
   gap: 4,
   fontFamily: "var(--font-mono)",
+  fontVariantNumeric: "tabular-nums",
   color: "var(--ink)",
 };
 
 const groupCountNumberStyle: React.CSSProperties = {
   fontSize: 18,
-  fontWeight: 780,
+  fontWeight: 600,
 };
 
 const groupCountLabelStyle: React.CSSProperties = {
@@ -1321,32 +1557,48 @@ const groupCountLabelStyle: React.CSSProperties = {
 };
 
 const policyListStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
-  gap: 8,
+  // Vertical stack of full-width toggle rows (the Settings ToggleRow rhythm) —
+  // replaces the old 3-up card grid, which forced the long third title to wrap
+  // and left the toggles at uneven heights.
+  display: "flex",
+  flexDirection: "column",
+  // -8px gutters so the row hover tint bleeds to the subsection edge while the
+  // text stays aligned with the eyebrow above.
+  marginInline: -8,
 };
 
 const policyRowStyle: React.CSSProperties = {
+  appearance: "none",
   display: "grid",
   gridTemplateColumns: "minmax(0, 1fr) auto",
-  gap: 12,
-  alignItems: "start",
-  padding: "9px 10px",
-  border: "1px solid var(--rule-soft)",
-  borderRadius: 7,
-  background: "color-mix(in oklch, var(--bg) 22%, transparent)",
+  gap: 14,
+  alignItems: "center",
+  textAlign: "left",
+  width: "100%",
+  padding: "10px 8px",
+  border: "none",
+  // Soft surface rounding so the hover/press tint reads as a calm rounded
+  // strip, not a boxy block.
+  borderRadius: "var(--radius-surface, 10px)",
+  color: "inherit",
+  font: "inherit",
+  cursor: "default",
+  transition:
+    "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
 };
 
 const policyTitleStyle: React.CSSProperties = {
+  display: "block",
   color: "var(--ink)",
   fontSize: 13,
-  fontWeight: 720,
+  fontWeight: 600,
 };
 
 const policyDetailStyle: React.CSSProperties = {
+  display: "block",
   color: "var(--muted)",
-  fontSize: 10,
-  lineHeight: 1.4,
+  fontSize: 11,
+  lineHeight: 1.45,
   marginTop: 2,
 };
 
@@ -1356,20 +1608,20 @@ const metricGridStyle: React.CSSProperties = {
   gap: 8,
 };
 
-const metricStyle: React.CSSProperties = {
+const statTileStyle: React.CSSProperties = {
   border: "1px solid var(--rule-soft)",
-  borderRadius: 7,
-  padding: "9px 10px",
+  borderRadius: "var(--radius-surface, 10px)",
+  padding: "10px 11px",
   background: "color-mix(in oklch, var(--bg) 30%, transparent)",
 };
 
-const compactMetricStyle: React.CSSProperties = {
-  ...metricStyle,
+const compactStatTileStyle: React.CSSProperties = {
+  ...statTileStyle,
   minWidth: 96,
   padding: "7px 9px",
 };
 
-const metricLabelStyle: React.CSSProperties = {
+const statLabelStyle: React.CSSProperties = {
   color: "var(--muted)",
   fontFamily: "var(--font-mono)",
   fontSize: 9,
@@ -1377,16 +1629,17 @@ const metricLabelStyle: React.CSSProperties = {
   letterSpacing: "0.08em",
 };
 
-const metricValueStyle: React.CSSProperties = {
+const statValueStyle: React.CSSProperties = {
   color: "var(--ink)",
   fontFamily: "var(--font-mono)",
+  fontVariantNumeric: "tabular-nums",
   fontSize: 22,
   lineHeight: 1.05,
-  fontWeight: 820,
+  fontWeight: 600,
   marginTop: 5,
 };
 
-const metricDetailStyle: React.CSSProperties = {
+const statDetailStyle: React.CSSProperties = {
   color: "var(--muted)",
   fontSize: 10,
   marginTop: 3,
@@ -1408,9 +1661,10 @@ const syncCopyStyle: React.CSSProperties = {
 
 const tableShellStyle: React.CSSProperties = {
   // No height constraint → grows to content, so the page scroller (main)
-  // handles vertical scroll. overflow:auto only guards a too-wide row.
+  // handles vertical scroll. overflow:auto only guards a too-wide row. Sits a
+  // rung below the 10px panel it nests in so the corners read concentric.
   border: "1px solid var(--rule-soft)",
-  borderRadius: 7,
+  borderRadius: "var(--radius-control, 7px)",
   overflow: "auto",
   background: "color-mix(in oklch, var(--bg) 22%, transparent)",
   boxShadow: "var(--well)",
@@ -1428,7 +1682,7 @@ const tableHeaderStyle: React.CSSProperties = {
   padding: "8px 10px",
   borderBottom: "1px solid var(--rule-soft)",
   background: "color-mix(in oklch, var(--panel) 90%, var(--bg))",
-  color: "var(--ink-dim)",
+  color: "var(--muted)",
   fontFamily: "var(--font-mono)",
   fontSize: 10,
   textTransform: "uppercase",
@@ -1442,13 +1696,13 @@ const rowStyle: React.CSSProperties = {
   alignItems: "stretch",
   padding: "9px 10px",
   borderBottom: "1px solid var(--rule-soft)",
-  background: "color-mix(in oklch, var(--ink) 3.2%, transparent)",
+  transition: "opacity var(--motion-fast) var(--ease-out)",
 };
 
 const nameStyle: React.CSSProperties = {
   color: "var(--ink)",
   fontSize: 13,
-  fontWeight: 720,
+  fontWeight: 600,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
@@ -1483,35 +1737,23 @@ const runtimeCellStyle: React.CSSProperties = {
 };
 
 const emptyCellStyle: React.CSSProperties = {
-  color: "var(--ink-dim)",
+  color: "var(--muted-2)",
   fontFamily: "var(--font-mono)",
   fontSize: 12,
-  opacity: 0.6,
 };
 
 const addButtonStyle: React.CSSProperties = {
-  appearance: "none",
   alignSelf: "flex-start",
-  border: "1px dashed color-mix(in oklch, var(--accent) 45%, var(--rule-strong))",
-  borderRadius: 6,
-  background: "color-mix(in oklch, var(--accent) 8%, transparent)",
-  color: "var(--accent)",
+  height: "auto",
   padding: "4px 8px",
-  fontFamily: "var(--font-sans)",
   fontSize: 11,
-  fontWeight: 700,
-  whiteSpace: "nowrap",
-  transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
 };
 
 // --- Spark Built-ins section ---------------------------------------------
 
 const builtinSectionStyle: React.CSSProperties = {
-  border: "1px solid color-mix(in oklch, var(--accent) 34%, var(--rule))",
-  borderRadius: 9,
-  padding: 13,
-  background:
-    "linear-gradient(180deg, color-mix(in oklch, var(--accent) 8%, var(--panel-2)), color-mix(in oklch, var(--accent) 3%, var(--panel)))",
+  // De-nested: a calm section on the plain surface, NOT a purple-tinted panel.
+  // The accent shows only on the SparkGlyph + the "SPARK BUILT-IN" badge.
   display: "grid",
   gap: 11,
 };
@@ -1527,9 +1769,6 @@ const builtinEyebrowStyle: React.CSSProperties = {
   alignItems: "center",
   gap: 6,
   color: "var(--ink)",
-  fontSize: 13,
-  fontWeight: 820,
-  letterSpacing: 0.01,
 };
 
 const builtinCardGridStyle: React.CSSProperties = {
@@ -1539,12 +1778,16 @@ const builtinCardGridStyle: React.CSSProperties = {
 };
 
 const builtinCardStyle: React.CSSProperties = {
+  // One hairline + one soft cue (the top-highlight), calm panel-2 surface,
+  // softened to the surface rung. Tighter internal rhythm so the two built-in
+  // cards read breathable rather than dense.
   border: "1px solid var(--rule-soft)",
-  borderRadius: 8,
-  padding: 12,
-  background: "color-mix(in oklch, var(--panel) 88%, var(--bg))",
+  borderRadius: "var(--radius-surface, 10px)",
+  padding: 14,
+  background: "var(--panel-2)",
+  boxShadow: "var(--lift-hi)",
   display: "grid",
-  gap: 9,
+  gap: 10,
   alignContent: "start",
 };
 
@@ -1559,48 +1802,20 @@ const builtinNameStyle: React.CSSProperties = {
   color: "var(--ink)",
   fontFamily: "var(--font-mono)",
   fontSize: 14,
-  fontWeight: 760,
+  fontWeight: 600,
 };
 
-const builtinBadgeStyle: React.CSSProperties = {
-  border: "1px solid color-mix(in oklch, var(--accent) 40%, var(--rule-soft))",
-  borderRadius: 999,
-  background: "color-mix(in oklch, var(--accent) 16%, transparent)",
-  color: "var(--accent)",
-  padding: "2px 8px",
-  fontSize: 9,
-  fontWeight: 800,
-  letterSpacing: "0.06em",
-  textTransform: "uppercase",
-  whiteSpace: "nowrap",
-};
-
-const builtinToolBadgeStyle: React.CSSProperties = {
-  border: "1px solid var(--rule-soft)",
-  borderRadius: 999,
-  background: "color-mix(in oklch, var(--ink) 5%, transparent)",
-  color: "var(--muted)",
-  padding: "2px 7px",
+const builtinCountBadgeStyle: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
-  fontSize: 9,
-  whiteSpace: "nowrap",
-};
-
-const builtinAutoBadgeStyle: React.CSSProperties = {
-  border: "1px solid color-mix(in oklch, var(--info) 32%, var(--rule-soft))",
-  borderRadius: 999,
-  background: "color-mix(in oklch, var(--info) 12%, transparent)",
-  color: "var(--info)",
-  padding: "2px 7px",
-  fontFamily: "var(--font-mono)",
-  fontSize: 9,
-  whiteSpace: "nowrap",
+  fontVariantNumeric: "tabular-nums",
+  textTransform: "none",
+  letterSpacing: "0.02em",
 };
 
 const builtinSummaryStyle: React.CSSProperties = {
   color: "var(--ink-dim)",
   fontSize: 12,
-  fontWeight: 650,
+  fontWeight: 500,
   marginTop: 5,
 };
 
@@ -1617,8 +1832,9 @@ const builtinRuntimeGridStyle: React.CSSProperties = {
 };
 
 const builtinTileStyle: React.CSSProperties = {
+  // A 7px inner control nested concentrically inside the 10px card.
   border: "1px solid var(--rule-soft)",
-  borderRadius: 7,
+  borderRadius: "var(--radius-control, 7px)",
   padding: "9px 10px",
   background: "color-mix(in oklch, var(--bg) 30%, transparent)",
   display: "grid",
@@ -1628,17 +1844,16 @@ const builtinTileStyle: React.CSSProperties = {
 const builtinTileHeadStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
+  justifyContent: "space-between",
   gap: 6,
   minWidth: 0,
 };
 
-const builtinRuntimeChipStyle: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 10,
-  fontWeight: 720,
-  padding: "2px 7px",
-  borderRadius: 999,
-  whiteSpace: "nowrap",
+const builtinTileStatusStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 5,
+  minWidth: 0,
 };
 
 const builtinStateDotStyle: React.CSSProperties = {
@@ -1646,45 +1861,34 @@ const builtinStateDotStyle: React.CSSProperties = {
   height: 7,
   borderRadius: "50%",
   flex: "0 0 auto",
-  marginLeft: "auto",
 };
 
 const builtinStateTextStyle: React.CSSProperties = {
   color: "var(--muted)",
   fontSize: 11,
-  fontWeight: 650,
+  fontWeight: 500,
   whiteSpace: "nowrap",
 };
 
 const builtinActionStyle: React.CSSProperties = {
-  appearance: "none",
-  borderRadius: 6,
-  padding: "5px 9px",
-  fontFamily: "var(--font-sans)",
-  fontSize: 11,
-  fontWeight: 720,
   width: "100%",
-  transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-};
-
-const builtinInstallButtonStyle: React.CSSProperties = {
-  border: "1px solid color-mix(in oklch, var(--accent) 50%, var(--rule-strong))",
-  background: "color-mix(in oklch, var(--accent) 18%, transparent)",
-  color: "var(--ink)",
+  height: "auto",
+  padding: "5px 9px",
+  fontSize: 11,
 };
 
 const builtinManagedNoteStyle: React.CSSProperties = {
   color: "var(--info)",
   fontSize: 11,
-  fontWeight: 650,
+  fontWeight: 500,
   textAlign: "center",
   padding: "5px 0",
 };
 
 const builtinUnavailableNoteStyle: React.CSSProperties = {
-  color: "var(--ink-dim)",
+  color: "var(--muted)",
   fontSize: 11,
-  fontWeight: 650,
+  fontWeight: 500,
   textAlign: "center",
   padding: "5px 0",
 };
@@ -1697,12 +1901,22 @@ const builtinFootnoteStyle: React.CSSProperties = {
   paddingTop: 8,
 };
 
+function runtimeBadgeStyle(runtime: RuntimeColumn): React.CSSProperties {
+  return {
+    ...runtimeBadgeTone(runtime),
+    fontFamily: "var(--font-mono)",
+    textTransform: "none",
+    letterSpacing: "0.02em",
+  };
+}
+
 const installChipStyle: React.CSSProperties = {
   display: "flex",
-  flexDirection: "column",
-  gap: 4,
-  padding: "6px 7px",
-  borderRadius: 6,
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 6,
+  padding: "5px 6px 5px 7px",
+  borderRadius: "var(--radius-control, 7px)",
   border: "1px solid var(--rule-soft)",
   background: "color-mix(in oklch, var(--bg) 36%, transparent)",
   minWidth: 0,
@@ -1713,65 +1927,27 @@ const installChipMetaStyle: React.CSSProperties = {
   flexWrap: "wrap",
   gap: 4,
   alignItems: "center",
+  minWidth: 0,
 };
 
-const installScopeChipStyle: React.CSSProperties = {
+function installScopeBadgeStyle(runtime: RuntimeColumn): React.CSSProperties {
+  return {
+    ...runtimeBadgeTone(runtime),
+    fontFamily: "var(--font-mono)",
+    textTransform: "none",
+    letterSpacing: "0.02em",
+  };
+}
+
+const installFlagBadgeStyle: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
-  fontSize: 10,
-  fontWeight: 720,
-  padding: "2px 7px",
-  borderRadius: 999,
-  border: "1px solid var(--rule-soft)",
-  background: "color-mix(in oklch, var(--ink) 5%, transparent)",
-  color: "var(--muted)",
-  whiteSpace: "nowrap",
-};
-
-const installFlagChipStyle: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 9,
-  padding: "1px 6px",
-  borderRadius: 999,
-  border: "1px solid color-mix(in oklch, var(--warn) 30%, var(--rule-soft))",
-  background: "color-mix(in oklch, var(--warn) 10%, transparent)",
-  color: "var(--warn)",
-  whiteSpace: "nowrap",
-};
-
-const uninstallButtonStyle: React.CSSProperties = {
-  appearance: "none",
-  alignSelf: "flex-start",
-  border: "1px solid color-mix(in oklch, var(--danger) 40%, var(--rule-strong))",
-  borderRadius: 6,
-  background: "transparent",
-  color: "var(--danger)",
-  padding: "4px 7px",
-  fontFamily: "var(--font-sans)",
-  fontSize: 11,
-  fontWeight: 700,
-  cursor: "default",
-  transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-};
-
-const uninstallConfirmStyle: React.CSSProperties = {
-  background: "color-mix(in oklch, var(--danger) 16%, transparent)",
-  border: "1px solid color-mix(in oklch, var(--danger) 70%, var(--rule-strong))",
-  color: "var(--ink)",
-};
-
-const emptyStateStyle: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 12,
-  padding: "28px 10px",
-  textAlign: "center",
+  textTransform: "none",
+  letterSpacing: "0.02em",
 };
 
 const sectionTitleStyle: React.CSSProperties = {
-  color: "var(--ink-dim)",
-  fontSize: 10,
-  fontWeight: 800,
-  letterSpacing: "0.14em",
-  textTransform: "uppercase",
+  fontFamily: "var(--font-sans)",
+  color: "var(--muted)",
 };
 
 const sectionDetailStyle: React.CSSProperties = {
@@ -1786,7 +1962,7 @@ const footerStyle: React.CSSProperties = {
   padding: "12px 18px",
   display: "flex",
   alignItems: "center",
-  gap: 10,
+  gap: 8,
   background: "var(--panel)",
 };
 
@@ -1795,24 +1971,4 @@ const statusStyle: React.CSSProperties = {
   fontSize: 11,
   lineHeight: 1.45,
   overflowWrap: "anywhere",
-};
-
-const ghostButtonStyle: React.CSSProperties = {
-  appearance: "none",
-  border: "1px solid var(--rule-strong)",
-  borderRadius: 999,
-  background: "transparent",
-  color: "var(--ink)",
-  padding: "7px 13px",
-  fontFamily: "var(--font-sans)",
-  fontSize: 12,
-  fontWeight: 700,
-  cursor: "default",
-  transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-};
-
-const primaryButtonStyle: React.CSSProperties = {
-  ...ghostButtonStyle,
-  border: "1px solid color-mix(in oklch, var(--accent) 50%, var(--rule-strong))",
-  background: "color-mix(in oklch, var(--accent) 12%, transparent)",
 };
