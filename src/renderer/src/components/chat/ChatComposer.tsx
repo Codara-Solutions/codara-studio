@@ -745,7 +745,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
             flex: "0 0 auto",
             marginBottom: 8,
             padding: "6px 9px",
-            borderRadius: "var(--radius-surface, 7px)",
+            borderRadius: "var(--radius-surface, 10px)",
             border: "1px solid color-mix(in oklch, var(--danger) 35%, transparent)",
             background: "var(--danger-soft)",
             color: "var(--danger)",
@@ -1238,10 +1238,10 @@ function MentionPopover({
         right: 8,
         bottom: "calc(100% + 6px)",
         zIndex: 50,
-        // One popover language: --panel-2 face, 9px radius, 1px --rule border,
+        // One popover language: --panel-2 face, 12px radius, 1px --rule border,
         // --shadow-2 float (matches the .spark-menu standard).
         border: "1px solid var(--rule)",
-        borderRadius: "var(--radius-popover, 9px)",
+        borderRadius: "var(--radius-popover, 12px)",
         background: "var(--panel-2)",
         boxShadow: "var(--shadow-2)",
         padding: 5,
@@ -1305,7 +1305,7 @@ function MentionRow({
         width: "100%",
         minWidth: 0,
         border: "none",
-        borderRadius: "var(--radius-control, 5px)",
+        borderRadius: "var(--radius-control, 7px)",
         // Keyboard-highlighted row carries the rationed accent via the
         // --accent-soft tint (the menu-item .is-active idiom).
         background: active ? "var(--accent-soft)" : "transparent",
@@ -1393,7 +1393,7 @@ function AttachmentChip({
         maxWidth: "100%",
         height: 24,
         border: "1px solid var(--rule-soft)",
-        borderRadius: 6,
+        borderRadius: "var(--radius-control, 7px)",
         background: "color-mix(in oklch, var(--ink) 4%, transparent)",
         boxShadow: "var(--lift-hi)",
         padding: "0 4px 0 7px",
@@ -1419,7 +1419,7 @@ function AttachmentChip({
           width: 18,
           height: 18,
           border: "none",
-          borderRadius: "var(--radius-control, 5px)",
+          borderRadius: "var(--radius-control, 7px)",
           background: removeHover ? "var(--danger-soft)" : "transparent",
           color: removeHover ? "var(--danger)" : "var(--muted)",
           display: "inline-flex",
@@ -1479,7 +1479,7 @@ function IconButton({
         height: 26,
         flex: "0 0 26px",
         border: "1px solid var(--rule-soft)",
-        borderRadius: "var(--radius-control, 5px)",
+        borderRadius: "var(--radius-control, 7px)",
         background:
           pressed && live
             ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
@@ -1558,7 +1558,7 @@ function StopButton({ onClick }: { onClick: () => void }) {
         height: 26,
         flex: "0 0 26px",
         border: "none",
-        borderRadius: 7,
+        borderRadius: "var(--radius-control, 7px)",
         background: hover
           ? "color-mix(in oklch, var(--danger) 88%, var(--ink))"
           : "var(--danger)",
@@ -1614,7 +1614,7 @@ function SendButton({ onClick, disabled }: { onClick: () => void; disabled: bool
         height: 26,
         flex: "0 0 26px",
         border: "none",
-        borderRadius: 7,
+        borderRadius: "var(--radius-control, 7px)",
         background: disabled
           ? "color-mix(in oklch, var(--ink) 7%, transparent)"
           : hover
@@ -1690,7 +1690,7 @@ function TextButton({
         border: `1px solid ${
           disabled ? "var(--rule-soft)" : "color-mix(in oklch, " + color + " 45%, transparent)"
         }`,
-        borderRadius: 6,
+        borderRadius: "var(--radius-control, 7px)",
         background: hover && !disabled ? "var(--hover)" : "transparent",
         // Keyboard focus restores the accent ring (inline box-shadow would
         // otherwise clobber the global :focus-visible rule).
