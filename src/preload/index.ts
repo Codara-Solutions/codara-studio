@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, webFrame } from "electron";
+import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 import type {
   AddRunMessageInput,
   AgentAssetDeleteResult,
@@ -279,6 +279,17 @@ const api = {
       ipcRenderer.invoke("fs:createFile", input),
     createFolder: (input: CreateEntryInput): Promise<FsEntry> =>
       ipcRenderer.invoke("fs:createFolder", input),
+    // Copy externally-dropped files/folders into a workspace directory.
+    importEntries: (input: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> =>
+      ipcRenderer.invoke("fs:importEntries", input),
+    // Resolve the absolute path of a File obtained from a drop/paste event.
+    // Electron 32 removed `File.path`; `webUtils.getPathForFile` is the
+    // supported replacement and is safe to call across the context bridge.
+    getPathForFile: (file: File): string => webUtils.getPathForFile(file),
+    // Begin a native OS drag-out of the given workspace paths so the user can
+    // drop them onto the desktop or another app. Fire-and-forget: the main
+    // process owns the drag session via webContents.startDrag.
+    startDrag: (paths: string[]): void => ipcRenderer.send("fs:startDrag", paths),
     setWatchRoot: (root: string | null): Promise<void> =>
       ipcRenderer.invoke("fs:setWatchRoot", root),
     revealInOS: (path: string): Promise<void> => ipcRenderer.invoke("fs:revealInOS", path),

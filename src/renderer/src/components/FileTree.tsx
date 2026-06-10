@@ -199,6 +199,10 @@ export default function FileTree({
   const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(() => new Set());
   const [selectionAnchorPath, setSelectionAnchorPath] = useState<string | null>(null);
   const [selectionRect, setSelectionRect] = useState<SelectionRect | null>(null);
+  // The directory an in-flight external-file drag would copy into, or null when
+  // no file drag is hovering the Explorer. Equal to `cwd` for a drop onto empty
+  // space (highlights the whole list); a subfolder path highlights that row.
+  const [externalDropDir, setExternalDropDir] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [, force] = useState(0);
   // Engines offered by the Run plan flyout (Spark always; Claude / Codex when
@@ -535,6 +539,103 @@ export default function FileTree({
     [onDeleteFile, refreshDir],
   );
 
+  // External file drag-and-drop ---------------------------------------------
+  // Copy OS files/folders dropped onto the Explorer into `destDir`. Electron 32
+  // removed `File.path`, so each File's real path comes from the preload-exposed
+  // `getPathForFile`. After the copy we reveal the destination (expand it if
+  // it's a subfolder) and refresh so the new entries appear immediately.
+  const importExternalFiles = useCallback(
+    async (destDir: string, fileList: FileList) => {
+      const sourcePaths: string[] = [];
+      for (const file of Array.from(fileList)) {
+        try {
+          const resolved = window.spark.fs.getPathForFile(file);
+          if (resolved) sourcePaths.push(resolved);
+        } catch {
+          // Non-file drag payloads (text, internal MIME) have no path — skip.
+        }
+      }
+      if (sourcePaths.length === 0) return;
+      try {
+        await window.spark.fs.importEntries({ destDir, sourcePaths });
+        if (destDir !== cwd) {
+          const node = findDir(rootRef.current, destDir);
+          if (node) await expandDir(node);
+        }
+        await refreshDir(destDir);
+        setError(null);
+      } catch (err) {
+        setError((err as Error).message);
+      }
+    },
+    [cwd, expandDir, refreshDir],
+  );
+
+  // Resolve which directory a pointer position would drop into: the nearest
+  // directory row under the cursor, else the workspace root. Uses the live DOM
+  // (rows carry `data-fs-dir-path`) so it works with the virtualized list.
+  const dropDirForPoint = useCallback(
+    (clientX: number, clientY: number): string => {
+      const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+      const dirPath = el?.closest<HTMLElement>("[data-fs-dir-path]")?.dataset.fsDirPath;
+      return dirPath && dirPath.length > 0 ? dirPath : cwd;
+    },
+    [cwd],
+  );
+
+  const handleExternalDragOver = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+      // preventDefault marks the Explorer as a valid drop target; without it the
+      // browser refuses the drop and shows a "no-drop" cursor.
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      const dir = dropDirForPoint(event.clientX, event.clientY);
+      setExternalDropDir((prev) => (prev === dir ? prev : dir));
+    },
+    [dropDirForPoint],
+  );
+
+  const handleExternalDragLeave = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      // dragleave fires when moving across child rows too; only clear the
+      // highlight when the cursor actually leaves the viewport.
+      const viewport = listViewportRef.current;
+      // `Node` is shadowed by this module's tree-node type, so cast to the DOM
+      // element type for the containment check.
+      const next = event.relatedTarget as HTMLElement | null;
+      if (viewport && next && viewport.contains(next)) return;
+      setExternalDropDir(null);
+    },
+    [],
+  );
+
+  const handleExternalDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+      event.preventDefault();
+      const dir = dropDirForPoint(event.clientX, event.clientY);
+      setExternalDropDir(null);
+      void importExternalFiles(dir, event.dataTransfer.files);
+    },
+    [dropDirForPoint, importExternalFiles],
+  );
+
+  // Native OS drag-OUT of a row. If the grabbed row is part of a multi-file
+  // selection, drag the whole selection; otherwise just this entry. We
+  // preventDefault to suppress the default HTML5 drag and let the main process
+  // own the drag via webContents.startDrag.
+  const handleRowDragStart = useCallback((node: Node, event: React.DragEvent) => {
+    const path = node.entry.path;
+    const selected = selectedFilePathsRef.current;
+    const paths =
+      !node.entry.isDir && selected.has(path) && selected.size > 1
+        ? Array.from(selected)
+        : [path];
+    event.preventDefault();
+    window.spark.fs.startDrag(paths);
+  }, []);
+
   // Stable per-row handlers --------------------------------------------------
   // Every visible node renders one `<Row>`. `Row` is wrapped in `React.memo`,
   // but memo only pays off if its props are referentially stable across
@@ -618,6 +719,12 @@ export default function FileTree({
       ) {
         return;
       }
+      // Pressing on a row begins a potential native drag-out (rows are
+      // `draggable`); starting a marquee here would both fight the drag and
+      // leak its window listeners (a native drag fires `dragend`, not the
+      // `mouseup` the marquee waits for). Rubber-band selection starts from
+      // empty space only — clicks on rows still select via the row's onClick.
+      if (target?.closest("[data-fs-row]")) return;
       setContextMenu(null);
       marqueeSelectionRef.current = {
         startX: event.clientX,
@@ -859,12 +966,26 @@ export default function FileTree({
       <div
         ref={listViewportRef}
         onMouseDown={handleListMouseDown}
+        onDragOver={handleExternalDragOver}
+        onDragLeave={handleExternalDragLeave}
+        onDrop={handleExternalDrop}
         style={{
           flex: 1,
           minHeight: 0,
           position: "relative",
           overflow: "hidden",
           userSelect: selectionRect ? "none" : undefined,
+          // Whole-list ring when an external drag targets the workspace root
+          // (a subfolder target highlights its own row instead).
+          boxShadow:
+            externalDropDir === cwd
+              ? "inset 0 0 0 2px color-mix(in oklch, var(--accent) 55%, transparent)"
+              : undefined,
+          background:
+            externalDropDir === cwd
+              ? "color-mix(in oklch, var(--accent) 6%, transparent)"
+              : undefined,
+          transition: "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
         }}
       >
         <Virtuoso
@@ -900,11 +1021,13 @@ export default function FileTree({
                 dirLoaded={Boolean(dirNode?.loaded)}
                 dirError={dirNode?.error}
                 renaming={renamingPath === row.node.entry.path}
+                isDropTarget={dirNode != null && externalDropDir === row.node.entry.path}
                 onRowClick={handleRowClick}
                 onRowElement={updateRowElement}
                 onContextMenu={handleContextMenu}
                 onCommitRename={handleCommitRename}
                 onCancelRename={cancelRename}
+                onRowDragStart={handleRowDragStart}
               />
             );
           }}
@@ -968,6 +1091,38 @@ export default function FileTree({
               pointerEvents: "none",
             }}
           />
+        )}
+        {externalDropDir && (
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              left: 8,
+              right: 8,
+              bottom: 8,
+              zIndex: 25,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "5px 10px",
+              borderRadius: 6,
+              background: "var(--accent)",
+              color: "var(--on-accent, #fff)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 11,
+              fontWeight: 700,
+              boxShadow: "var(--shadow-2)",
+              pointerEvents: "none",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            <DropIcon />
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
+              Copy to {externalDropDir === cwd ? basename(cwd) : basename(externalDropDir)}
+            </span>
+          </div>
         )}
       </div>
         </>
@@ -1237,11 +1392,15 @@ interface RowProps {
   dirLoaded: boolean;
   dirError?: string;
   renaming: boolean;
+  // True when an in-flight external file drag is hovering this (directory) row,
+  // so it should paint the drop-target ring.
+  isDropTarget: boolean;
   onRowClick: (node: Node, event: React.MouseEvent) => void;
   onRowElement: (path: string, element: HTMLDivElement | null) => void;
   onContextMenu: (entry: FsEntry, x: number, y: number) => void;
   onCommitRename: (path: string, value: string) => void;
   onCancelRename: () => void;
+  onRowDragStart: (node: Node, event: React.DragEvent) => void;
 }
 
 // Custom equality for `Row`'s `React.memo`.
@@ -1262,11 +1421,13 @@ function rowPropsEqual(prev: RowProps, next: RowProps): boolean {
     prev.dirLoaded !== next.dirLoaded ||
     prev.dirError !== next.dirError ||
     prev.renaming !== next.renaming ||
+    prev.isDropTarget !== next.isDropTarget ||
     prev.onRowClick !== next.onRowClick ||
     prev.onRowElement !== next.onRowElement ||
     prev.onContextMenu !== next.onContextMenu ||
     prev.onCommitRename !== next.onCommitRename ||
-    prev.onCancelRename !== next.onCancelRename
+    prev.onCancelRename !== next.onCancelRename ||
+    prev.onRowDragStart !== next.onRowDragStart
   );
 }
 
@@ -1284,29 +1445,35 @@ const Row = React.memo(function Row({
   dirOpen,
   dirLoading,
   renaming,
+  isDropTarget,
   onRowClick,
   onRowElement,
   onContextMenu,
   onCommitRename,
   onCancelRename,
+  onRowDragStart,
 }: RowProps) {
   const isDir = node.kind === "dir";
   const [hover, setHover] = useState(false);
   const rowPaddingLeft = BASE_LEFT + depth * INDENT_STEP;
-  const background = selected
-    ? active
-      ? "color-mix(in oklch, var(--accent) 18%, transparent)"
-      : "color-mix(in oklch, var(--accent) 12%, transparent)"
-    : active
-      ? "color-mix(in oklch, var(--ink) 9%, transparent)"
-      : hover
-        ? "color-mix(in oklch, var(--ink) 4%, transparent)"
-        : "transparent";
-  const rowShadow = selected
-    ? "inset 0 0 0 1px color-mix(in oklch, var(--accent) 38%, transparent)"
-    : active
-      ? "inset 0 0 0 1px color-mix(in oklch, var(--ink) 10%, transparent)"
-      : "none";
+  const background = isDropTarget
+    ? "color-mix(in oklch, var(--accent) 16%, transparent)"
+    : selected
+      ? active
+        ? "color-mix(in oklch, var(--accent) 18%, transparent)"
+        : "color-mix(in oklch, var(--accent) 12%, transparent)"
+      : active
+        ? "color-mix(in oklch, var(--ink) 9%, transparent)"
+        : hover
+          ? "color-mix(in oklch, var(--ink) 4%, transparent)"
+          : "transparent";
+  const rowShadow = isDropTarget
+    ? "inset 0 0 0 1px color-mix(in oklch, var(--accent) 55%, transparent)"
+    : selected
+      ? "inset 0 0 0 1px color-mix(in oklch, var(--accent) 38%, transparent)"
+      : active
+        ? "inset 0 0 0 1px color-mix(in oklch, var(--ink) 10%, transparent)"
+        : "none";
 
   // Stable wrappers so this row invokes the shared parent handlers with its
   // own node / path. These close over `node`, so they change only when this
@@ -1327,9 +1494,17 @@ const Row = React.memo(function Row({
   };
   const handleCommitRename = (value: string) => onCommitRename(node.entry.path, value);
 
+  const handleDragStart = renaming
+    ? undefined
+    : (event: React.DragEvent) => onRowDragStart(node, event);
+
   return (
     <div
       ref={handleRowRef}
+      data-fs-row=""
+      data-fs-dir-path={isDir ? node.entry.path : undefined}
+      draggable={!renaming}
+      onDragStart={handleDragStart}
       onClick={handleClick}
       onContextMenu={handleContextMenu}
       onMouseEnter={handleMouseEnter}
@@ -1768,6 +1943,15 @@ function RevealIcon() {
         strokeLinejoin="round"
         fill="none"
       />
+    </svg>
+  );
+}
+
+function DropIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
+      <path d="M7 1.5 V8.5 M4 5.5 L7 8.5 L10 5.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M2.5 10.5 V12 H11.5 V10.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
