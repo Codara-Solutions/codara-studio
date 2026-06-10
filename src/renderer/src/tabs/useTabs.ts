@@ -432,6 +432,9 @@ export interface UseTabsApi {
   tabs: Tab[];
   activeId: TabId | null;
   activeTab: Tab | null;
+  // Workspace id the current `tabs` array belongs to. Lags App's activeId by
+  // one render during a workspace switch — see the note at the useMemo.
+  tabsWorkspaceId: string | null;
   setActiveTab: (id: TabId) => void;
   closeTab: (id: TabId) => void;
   closeOthers: (id: TabId) => void;
@@ -2001,6 +2004,13 @@ export function useTabs(
       tabs,
       activeId,
       activeTab,
+      // The workspace the CURRENT `tabs` state belongs to. On the render
+      // where the workspaceId prop flips, `tabs` still holds the previous
+      // workspace's layout (the swap happens in the workspace-switch effect),
+      // so consumers that pair tabs with a workspace id (e.g. the
+      // terminal-agent notify registry sync in App) must read this instead
+      // of App's activeId.
+      tabsWorkspaceId: tabsWorkspaceIdRef.current,
       setActiveTab,
       closeTab,
       closeOthers,

@@ -868,13 +868,13 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
 
       <SectionTitle
         title="Notifications"
-        detail="Pick which channels fire when a run is blocked or finishes while you're away. The 3-rule policy gates all channels — they never fire when you're already watching the chat that finished."
+        detail="Pick which channels fire when a run — or a Claude/Codex CLI you ran in a terminal — is blocked or finishes while you're away. Turn off Native OS notification to stop Windows toasts, or Embedded sound clip to silence the chime. Alerts never fire when you're already watching that chat or terminal tab; the workspace rail still shows a quiet dot until you visit it."
       />
       {hydrated ? (
         <div style={{ display: "grid", gap: 6 }}>
           <ToggleRow
             title="In-app toast"
-            desc="Stacked top-right card. Click to jump to the chat that needs you."
+            desc="Stacked top-right card. Click to jump to the chat or terminal that needs you."
             checked={preferences.notificationChannels.inApp}
             onChange={(v) =>
               void setPreference("notificationChannels", {

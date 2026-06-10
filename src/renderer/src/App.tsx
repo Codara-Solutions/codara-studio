@@ -4,9 +4,11 @@ import type {
   AppState,
   ChatBackendKind,
   FsEntry,
+  InAppNotificationKind,
   RunState,
   ShellInfo,
   SparkEvent,
+  TerminalAgentTarget,
   Workspace,
 } from "@shared/types";
 import {
@@ -174,6 +176,15 @@ function disposePersistedWorkspaceTerminalPanes(workspaceId: string): void {
 function findLeafByPaneId(node: PaneNode, paneId: string): TerminalLeaf | null {
   if (node.kind === "leaf") return node.paneId === paneId ? node : null;
   return findLeafByPaneId(node.a, paneId) ?? findLeafByPaneId(node.b, paneId);
+}
+
+function forEachTerminalLeaf(node: PaneNode, fn: (leaf: TerminalLeaf) => void): void {
+  if (node.kind === "leaf") {
+    fn(node);
+    return;
+  }
+  forEachTerminalLeaf(node.a, fn);
+  forEachTerminalLeaf(node.b, fn);
 }
 
 function countRunningWorkerLeaves(node: PaneNode): number {
@@ -476,26 +487,55 @@ export default function App() {
     [handleSelectRun],
   );
 
+  // Unseen terminal-agent alerts, keyed workspace → pane. Set when main
+  // fires a terminal alert (event arrives even with all notification
+  // channels muted); cleared when the user visits the pane's tab. This is
+  // what keeps the workspace rail showing "something in there wants you"
+  // after the transient toast/native notification is gone.
+  const [terminalAttention, setTerminalAttention] = useState<
+    Record<string, Record<string, { tabId: string; kind: InAppNotificationKind }>>
+  >({});
+
   // Per-workspace status-tone for the WorkspaceRail dots: the tone of each
   // workspace's highest-attention run (blocked > done-unseen > live > …),
   // sourced from the global feed so the dot reflects every project, not just
-  // the active one. null when a workspace has no runs.
+  // the active one. Unseen terminal-agent alerts fold into the same dot —
+  // blocked terminals rank like blocked runs, finished ones like done-unseen
+  // — so the rail has ONE attention cue, not two competing ones.
   const toneByWorkspaceId = useMemo(() => {
+    const rank: Record<ChatStatusTone, number> = {
+      blocked: 6,
+      failed: 5,
+      "done-unseen": 4,
+      live: 3,
+      paused: 2,
+      done: 1,
+      idle: 0,
+    };
     const m: Record<string, ChatStatusTone | null> = {};
     for (const w of workspaces) {
+      let tone: ChatStatusTone | null = null;
       const wr = globalRuns.runs.filter((r) => r.workspaceId === w.id);
-      if (wr.length === 0) {
-        m[w.id] = null;
-        continue;
+      if (wr.length > 0) {
+        // compareRunsByAttention sorts highest-attention first, so the head
+        // run dictates the dot. describeRunStatus(top).tone is the same tone
+        // the switcher buckets and chat rows use, so the cues never disagree.
+        const top = wr.slice().sort(compareRunsByAttention)[0];
+        tone = describeRunStatus(top).tone;
       }
-      // compareRunsByAttention sorts highest-attention first, so the head run
-      // dictates the dot. describeRunStatus(top).tone is the same tone the
-      // switcher buckets and chat rows use, so the cues can never disagree.
-      const top = wr.slice().sort(compareRunsByAttention)[0];
-      m[w.id] = describeRunStatus(top).tone;
+      const attention = terminalAttention[w.id];
+      if (attention && Object.keys(attention).length > 0) {
+        const termTone: ChatStatusTone = Object.values(attention).some(
+          (a) => a.kind === "blocked",
+        )
+          ? "blocked"
+          : "done-unseen";
+        if (tone === null || rank[termTone] > rank[tone]) tone = termTone;
+      }
+      m[w.id] = tone;
     }
     return m;
-  }, [workspaces, globalRuns.runs]);
+  }, [workspaces, globalRuns.runs, terminalAttention]);
 
   // Keep the active chat's node-graph tab in existence without stealing
   // focus. Chat-only runs (no steps, no worker tasks) intentionally have NO
@@ -1047,6 +1087,196 @@ export default function App() {
       handleAttemptFinished(event);
     });
   }, [booted]);
+
+  // ── Terminal-agent notifications (manual claude/codex panes) ──────────────
+  //
+  // The main-process watcher (terminal-agent-notify.ts) taps the raw pty
+  // streams of user-facing terminal panes and alerts when a Claude/Codex/
+  // Cursor CLI finishes a turn or stops for permission while the user isn't
+  // looking at that tab. The renderer owns three pieces of the loop:
+  //
+  //   1. The pane registry — which pty sessions are user terminal panes, and
+  //      which workspace/tab each lives in (for routing the click back).
+  //      Spark-orchestrated worker panes register excluded: run-store events
+  //      already alert for those.
+  //   2. The active context — which workspace + tab is on screen, so main
+  //      can apply the "never ping me about the tab I'm watching" rule.
+  //   3. Click navigation — native-notification and toast clicks both land
+  //      in focusTerminalTarget, which switches workspace if needed (queue +
+  //      replay, same pattern as pendingSpawnTerminalsRef) and then activates
+  //      the tab + pane.
+  useEffect(() => {
+    if (!booted) return;
+    const workspaceId = tabs.tabsWorkspaceId;
+    if (!workspaceId) return;
+    const panes: Array<{ paneId: string; tabId: string; tabTitle: string; excluded: boolean }> =
+      [];
+    for (const tab of tabs.tabs) {
+      if (tab.kind !== "terminal") continue;
+      const workersTab = tab.scope?.kind === "workers";
+      forEachTerminalLeaf(tab.root, (leaf) => {
+        panes.push({
+          paneId: leaf.paneId,
+          tabId: tab.id,
+          tabTitle: tab.title,
+          // Spark-orchestrated panes are excluded only while their worker is
+          // RUNNING (run-store events already alert that lifecycle). Once the
+          // attempt is done the pane is an ordinary terminal again — a manual
+          // `claude` run in it must notify like any other pane.
+          excluded:
+            workersTab ||
+            (leaf.worker?.source === "spark" && leaf.worker.state === "running"),
+        });
+      });
+    }
+    // Optional chaining: during dev HMR the renderer can be newer than the
+    // preload of a long-lived instance; degrade to no-op instead of throwing
+    // inside the effect.
+    const workspaceName = workspaces.find((w) => w.id === workspaceId)?.name ?? "";
+    window.spark.terminalNotify
+      ?.sync?.({ workspaceId, workspaceName, panes })
+      ?.catch(() => {
+        /* registry sync is best-effort; the next layout change retries */
+      });
+  }, [booted, tabs.tabs, tabs.tabsWorkspaceId, workspaces]);
+
+  useEffect(() => {
+    if (!booted) return;
+    // Report the (workspace, tab) pair the current tabs state belongs to —
+    // always internally consistent, even on the one render where a workspace
+    // switch has flipped activeId but tabs still hold the previous layout.
+    window.spark.ui
+      .setActiveTerminalContext?.({
+        workspaceId: tabs.tabsWorkspaceId,
+        tabId: tabs.activeId,
+      })
+      ?.catch(() => {
+        /* suppression context is best-effort */
+      });
+  }, [booted, tabs.tabsWorkspaceId, tabs.activeId]);
+
+  // ── Terminal-agent attention (rail dot) ─────────────────────────────────
+  useEffect(() => {
+    const off = window.spark.terminalNotify?.onAttention?.((payload) => {
+      const target = payload?.target;
+      if (!target?.workspaceId || !target.tabId || !target.paneId) return;
+      setTerminalAttention((current) => ({
+        ...current,
+        [target.workspaceId]: {
+          ...(current[target.workspaceId] ?? {}),
+          [target.paneId]: { tabId: target.tabId, kind: payload.kind },
+        },
+      }));
+    });
+    return () => off?.();
+  }, []);
+
+  // Attention is "seen" once the user lands on the pane's tab — also prune
+  // entries whose tab no longer exists so a closed tab can't pin the dot
+  // forever. Reads tabsRef so the focus listener below can reuse it.
+  const clearSeenTerminalAttention = useCallback(() => {
+    const t = tabsRef.current;
+    const wsId = t.tabsWorkspaceId;
+    if (!wsId) return;
+    setTerminalAttention((current) => {
+      const entries = current[wsId];
+      if (!entries) return current;
+      const liveTabIds = new Set(t.tabs.map((tab) => tab.id));
+      let changed = false;
+      const kept: typeof entries = {};
+      for (const [paneId, info] of Object.entries(entries)) {
+        if (info.tabId === t.activeId || !liveTabIds.has(info.tabId)) {
+          changed = true;
+          continue;
+        }
+        kept[paneId] = info;
+      }
+      if (!changed) return current;
+      const next = { ...current };
+      if (Object.keys(kept).length === 0) delete next[wsId];
+      else next[wsId] = kept;
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    clearSeenTerminalAttention();
+  }, [tabs.tabsWorkspaceId, tabs.activeId, tabs.tabs, clearSeenTerminalAttention]);
+
+  // An alert can fire for the very tab the user has open in an UNFOCUSED
+  // window (not watching by the suppression rule). Landing back on the
+  // window means they see the pane — clear it then too.
+  useEffect(() => {
+    window.addEventListener("focus", clearSeenTerminalAttention);
+    return () => window.removeEventListener("focus", clearSeenTerminalAttention);
+  }, [clearSeenTerminalAttention]);
+
+  const pendingFocusTerminalRef = useRef<TerminalAgentTarget | null>(null);
+
+  const applyTerminalFocus = useCallback((target: TerminalAgentTarget) => {
+    const t = tabsRef.current;
+    let tab: TerminalTab | undefined;
+    const byId = t.tabs.find((item) => item.id === target.tabId);
+    if (byId?.kind === "terminal" && findLeafByPaneId(byId.root, target.paneId)) {
+      tab = byId;
+    } else {
+      // The pane may have been dragged to a different tab (or its tab
+      // closed) after the alert fired — locate it by paneId instead.
+      tab = t.tabs.find(
+        (item): item is TerminalTab =>
+          item.kind === "terminal" && findLeafByPaneId(item.root, target.paneId) !== null,
+      );
+    }
+    if (!tab) return;
+    t.setActiveTab(tab.id);
+    t.setActiveTerminalPane(tab.id, target.paneId);
+  }, []);
+
+  const focusTerminalTarget = useCallback(
+    (target: TerminalAgentTarget) => {
+      if (!target?.workspaceId || !target.paneId) return;
+      if (activeIdRef.current !== target.workspaceId) {
+        if (!workspacesRef.current.some((w) => w.id === target.workspaceId)) return;
+        // Cross-workspace: switch first; the replay effect below applies the
+        // tab/pane focus once useTabs has swapped in that workspace's layout.
+        pendingFocusTerminalRef.current = target;
+        setActiveId(target.workspaceId);
+        return;
+      }
+      if (tabsRef.current.tabsWorkspaceId !== target.workspaceId) {
+        // The workspace is already active but the tabs swap is still in
+        // flight (one-render lag after a switch) — queue for the replay
+        // effect instead of poking the previous workspace's layout.
+        pendingFocusTerminalRef.current = target;
+        return;
+      }
+      applyTerminalFocus(target);
+    },
+    [applyTerminalFocus],
+  );
+
+  // Replay a queued cross-workspace focus once the target workspace's tab
+  // layout is actually loaded (tabsWorkspaceId catches up with activeId one
+  // render after a switch). setTimeout + rAF mirrors the spawn-terminal
+  // replay above and lets the swap commit paint before we move focus.
+  useEffect(() => {
+    if (!booted) return;
+    const pending = pendingFocusTerminalRef.current;
+    if (!pending || pending.workspaceId !== tabs.tabsWorkspaceId) return;
+    pendingFocusTerminalRef.current = null;
+    window.setTimeout(() => {
+      window.requestAnimationFrame(() => {
+        applyTerminalFocus(pending);
+      });
+    }, 0);
+  }, [booted, tabs.tabsWorkspaceId, applyTerminalFocus]);
+
+  useEffect(() => {
+    if (!booted) return;
+    return window.spark.terminalNotify?.onFocusPane?.((target) => {
+      focusTerminalTarget(target);
+    });
+  }, [booted, focusTerminalTarget]);
 
   // WorkspaceRail prop callbacks. `setActiveId` / `setEditingId` are stable
   // React setters, so these can carry empty dep arrays and stay referentially
@@ -2473,6 +2703,7 @@ export default function App() {
 
         <ToastHost
           onSelectRun={handleSelectRunAnywhere}
+          onSelectTerminal={focusTerminalTarget}
           resolveQuestion={(runId) => {
             const run = globalRuns.runsRef.current.find((r) => r.id === runId);
             const question = run ? findOpenQuestion(run) : null;

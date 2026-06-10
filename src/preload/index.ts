@@ -63,6 +63,8 @@ import type {
   SparkEvent,
   StartAutopilotInput,
   StartSearchResponse,
+  TerminalAgentAttentionPayload,
+  TerminalAgentTarget,
   UndoToCheckpointInput,
   UndoToCheckpointResult,
   UpdateRunStatusInput,
@@ -542,6 +544,37 @@ const api = {
     report: (input: { paneId: string; state: RuntimeState }): Promise<void> =>
       ipcRenderer.invoke("terminalState:report", input),
   },
+  // Terminal-agent notifier (main-process watcher over manual claude/codex
+  // panes). `sync` ships the active workspace's full terminal-pane registry;
+  // `onFocusPane` fires when the user clicks a terminal alert (native
+  // notification or via App's toast handler) and the renderer should
+  // navigate to that workspace + tab + pane.
+  terminalNotify: {
+    sync: (input: {
+      workspaceId: string;
+      workspaceName?: string;
+      panes: Array<{ paneId: string; tabId: string; tabTitle: string; excluded: boolean }>;
+    }): Promise<void> => ipcRenderer.invoke("terminalNotify:sync", input),
+    onFocusPane: (handler: (target: TerminalAgentTarget) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, target: TerminalAgentTarget) =>
+        handler(target);
+      ipcRenderer.on("terminal-agent:focus", listener);
+      return () => ipcRenderer.off("terminal-agent:focus", listener);
+    },
+    // Fires alongside every terminal-agent alert (regardless of channel
+    // settings) so the workspace rail can mark the owning workspace as
+    // needing attention until the user visits the pane's tab.
+    onAttention: (
+      handler: (payload: TerminalAgentAttentionPayload) => void,
+    ): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        payload: TerminalAgentAttentionPayload,
+      ) => handler(payload);
+      ipcRenderer.on("terminal-agent:attention", listener);
+      return () => ipcRenderer.off("terminal-agent:attention", listener);
+    },
+  },
   windowControls: {
     minimize: (): Promise<void> => ipcRenderer.invoke("window:minimize"),
     toggleMaximize: (): Promise<boolean> => ipcRenderer.invoke("window:toggleMaximize"),
@@ -572,6 +605,12 @@ const api = {
     // Null = no run selected (e.g. the new-chat draft composer).
     setActiveRun: (id: string | null): Promise<void> =>
       ipcRenderer.invoke("ui:setActiveRun", id),
+    // Tells main which workspace + tab the user is looking at so the
+    // terminal-agent notifier can suppress alerts for the visible tab.
+    setActiveTerminalContext: (ctx: {
+      workspaceId: string | null;
+      tabId: string | null;
+    }): Promise<void> => ipcRenderer.invoke("ui:setActiveTerminalContext", ctx),
   },
   clipboard: {
     readText: (): Promise<string> => ipcRenderer.invoke("clipboard:readText"),

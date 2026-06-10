@@ -6,6 +6,7 @@ import type {
   NotificationSoundKind,
   RunStatus,
   SparkEvent,
+  TerminalAgentTarget,
 } from "@shared/types";
 import { subscribeToEvents } from "./orchestration/event-log";
 import { loadPreferences } from "./preferences-store";
@@ -137,6 +138,11 @@ function fanout(
     runId?: string;
     workspaceId?: string;
     soundKind: NotificationSoundKind;
+    // Terminal-agent alerts carry a navigation target instead of a runId.
+    // The toast click (renderer) and native-notification click (here) both
+    // route to the terminal tab + pane that raised the alert.
+    terminal?: TerminalAgentTarget;
+    onNativeClick?: () => void;
   },
 ): void {
   const win = activeWindow();
@@ -148,6 +154,7 @@ function fanout(
     runId: alert.runId,
     workspaceId: alert.workspaceId,
     createdAt: new Date().toISOString(),
+    terminal: alert.terminal,
   };
 
   if (channels.inApp && win) {
@@ -171,6 +178,15 @@ function fanout(
           // of notification. Our embedded sound clip is a SEPARATE
           // channel toggled independently.
         });
+        if (alert.onNativeClick) {
+          n.on("click", () => {
+            try {
+              alert.onNativeClick?.();
+            } catch (err) {
+              console.warn("[notifications] native click handler failed:", err);
+            }
+          });
+        }
         n.show();
       }
     } catch (err) {
@@ -381,5 +397,63 @@ export function _resetNotificationStateForTests(): void {
 // module's private state.
 export function markRunSeen(runId: string): void {
   lastAlertedStatus.delete(runId);
+}
+
+// ── Terminal-agent alerts ────────────────────────────────────────────────
+//
+// Fired by src/main/terminal-agent-notify.ts when a claude/codex/cursor CLI
+// the user ran in a normal terminal pane finishes its turn or stops to ask
+// for permission. The caller has already applied the visibility policy
+// (suppress when the user is looking at that exact terminal tab in a focused
+// window) — this function only does the channel-gated delivery, reusing the
+// same four channels as run alerts. Clicking either surface (in-app toast or
+// native notification) routes back to the terminal pane: the toast handles
+// it renderer-side via the payload's `terminal` target; the native click is
+// handled here by focusing the window and sending "terminal-agent:focus".
+export async function fireTerminalAgentAlert(alert: {
+  kind: "blocked" | "complete";
+  title: string;
+  body: string;
+  target: TerminalAgentTarget;
+  soundKind: NotificationSoundKind;
+}): Promise<void> {
+  // Persistent attention marker for the workspace rail — sent BEFORE the
+  // channel gate on purpose: even with every notification channel muted,
+  // the rail dot should still record that a terminal wants the user.
+  try {
+    getMainWindow()?.webContents.send("terminal-agent:attention", {
+      target: alert.target,
+      kind: alert.kind,
+    });
+  } catch {
+    /* best-effort */
+  }
+  const prefs = await loadPreferences();
+  const channels = prefs.notificationChannels;
+  if (!channels.inApp && !channels.native && !channels.sound && !channels.osCues) {
+    return;
+  }
+  fanout(channels, {
+    kind: alert.kind,
+    title: alert.title,
+    body: alert.body,
+    workspaceId: alert.target.workspaceId,
+    soundKind: alert.soundKind,
+    terminal: alert.target,
+    onNativeClick: () => focusTerminalTarget(alert.target),
+  });
+}
+
+function focusTerminalTarget(target: TerminalAgentTarget): void {
+  const win = activeWindow();
+  if (!win) return;
+  try {
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    win.webContents.send("terminal-agent:focus", target);
+  } catch (err) {
+    console.warn("[notifications] terminal focus routing failed:", err);
+  }
 }
 

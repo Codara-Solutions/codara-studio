@@ -17,6 +17,11 @@ import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import { listEvents } from "./orchestration/event-log";
 import { setActiveRunId } from "./notifications";
+import {
+  setActiveTerminalContext,
+  syncTerminalNotifyPanes,
+  type TerminalNotifyPaneEntry,
+} from "./terminal-agent-notify";
 import type {
   InlineAiCompletionRequest,
   InlineAiCompletionResponse,
@@ -1116,6 +1121,33 @@ export function registerIpc(): void {
       if (!input?.paneId || !input.state) return;
       const store = await getRunStore();
       await store.reportTerminalState(input.paneId, input.state);
+    },
+  );
+
+  // Terminal-agent notifier registry. The renderer ships the full pane set
+  // for a workspace whenever its terminal layout changes; main reconciles
+  // watchers against it (see terminal-agent-notify.ts). Cheap enough to call
+  // on every layout change — the per-pane upsert is a Map write.
+  ipcMain.handle(
+    "terminalNotify:sync",
+    async (
+      _e,
+      input: { workspaceId: string; workspaceName?: string; panes: TerminalNotifyPaneEntry[] },
+    ) => {
+      syncTerminalNotifyPanes(input);
+    },
+  );
+
+  // Renderer reports the active workspace + tab so the terminal-agent
+  // notifier can suppress alerts for the pane the user is already watching
+  // (the "don't ping me about the tab I'm looking at" rule).
+  ipcMain.handle(
+    "ui:setActiveTerminalContext",
+    async (
+      _e,
+      ctx: { workspaceId: string | null; tabId: string | null },
+    ): Promise<void> => {
+      setActiveTerminalContext(ctx ?? { workspaceId: null, tabId: null });
     },
   );
 

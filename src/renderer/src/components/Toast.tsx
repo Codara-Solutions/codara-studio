@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import type { InAppNotificationPayload, RunQuestionOption } from "@shared/types";
+import type {
+  InAppNotificationPayload,
+  RunQuestionOption,
+  TerminalAgentTarget,
+} from "@shared/types";
 import { makeId } from "@shared/ids";
 
 // In-app toast manager + renderer for the four-channel notification
@@ -23,6 +27,10 @@ type Toast = InAppNotificationPayload;
 
 export interface ToastHostProps {
   onSelectRun?: (runId: string, workspaceId?: string) => void;
+  // Terminal-agent toasts (manual claude/codex panes) carry a terminal
+  // target instead of a runId; clicking routes to that workspace + tab +
+  // pane via App's focusTerminalTarget.
+  onSelectTerminal?: (target: TerminalAgentTarget) => void;
   // Resolve the manager's open-question options for a run so a "blocked"
   // toast can offer one-click answers. The InAppNotificationPayload from
   // main only carries runId — the options live in the run state, so the
@@ -30,8 +38,25 @@ export interface ToastHostProps {
   resolveQuestion?: (runId: string) => RunQuestionOption[];
 }
 
-export default function ToastHost({ onSelectRun, resolveQuestion }: ToastHostProps) {
+export default function ToastHost({ onSelectRun, onSelectTerminal, resolveQuestion }: ToastHostProps) {
   const [toasts, setToasts] = useState<Toast[]>([]);
+  // Auto-dismiss only counts down while the window is focused. The whole
+  // point of several alerts (terminal-agent "finished", run completions) is
+  // to be seen by a user who is in ANOTHER app — burning the 6s window into
+  // an unfocused surface guarantees they return to nothing. Held toasts get
+  // a fresh window when focus comes back.
+  const [focused, setFocused] = useState(() => document.hasFocus());
+
+  useEffect(() => {
+    const onFocus = () => setFocused(true);
+    const onBlur = () => setFocused(false);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+    };
+  }, []);
 
   useEffect(() => {
     const off = window.spark.notifications.onInAppNotification((payload) => {
@@ -53,7 +78,7 @@ export default function ToastHost({ onSelectRun, resolveQuestion }: ToastHostPro
   }, []);
 
   useEffect(() => {
-    if (toasts.length === 0) return undefined;
+    if (toasts.length === 0 || !focused) return undefined;
     // One timer per toast so each gets its own AUTO_DISMISS_MS window.
     // Using setTimeout per toast (instead of a single rolling timer)
     // keeps the dismissal independent of when other toasts arrive.
@@ -65,7 +90,7 @@ export default function ToastHost({ onSelectRun, resolveQuestion }: ToastHostPro
     return () => {
       for (const id of timers) window.clearTimeout(id);
     };
-  }, [toasts]);
+  }, [toasts, focused]);
 
   if (toasts.length === 0) return null;
 
@@ -101,6 +126,7 @@ export default function ToastHost({ onSelectRun, resolveQuestion }: ToastHostPro
             setToasts((current) => current.filter((t) => t.id !== toast.id))
           }
           onSelectRun={onSelectRun}
+          onSelectTerminal={onSelectTerminal}
           resolveQuestion={resolveQuestion}
         />
       ))}
@@ -113,12 +139,14 @@ function ToastCard({
   depth,
   onClose,
   onSelectRun,
+  onSelectTerminal,
   resolveQuestion,
 }: {
   toast: Toast;
   depth: number;
   onClose: () => void;
   onSelectRun?: (runId: string, workspaceId?: string) => void;
+  onSelectTerminal?: (target: TerminalAgentTarget) => void;
   resolveQuestion?: (runId: string) => RunQuestionOption[];
 }) {
   // In-flight guard so a fast double-click on an answer button (or two
@@ -184,17 +212,22 @@ function ToastCard({
           title: toast.title || "Spark — done",
         };
 
-  const clickable = Boolean(toast.runId && onSelectRun);
+  const clickable = Boolean(
+    (toast.runId && onSelectRun) || (toast.terminal && onSelectTerminal),
+  );
 
   return (
     <div
       className="spark-fade-in"
       role={toast.kind === "blocked" ? "alert" : "status"}
       onClick={() => {
-        if (clickable && toast.runId) {
+        if (!clickable) return;
+        if (toast.terminal && onSelectTerminal) {
+          onSelectTerminal(toast.terminal);
+        } else if (toast.runId) {
           onSelectRun?.(toast.runId, toast.workspaceId);
-          onClose();
         }
+        onClose();
       }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}

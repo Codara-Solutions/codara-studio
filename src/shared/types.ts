@@ -349,6 +349,28 @@ export interface InAppNotificationPayload {
   runId?: string;
   workspaceId?: string;
   createdAt: string;
+  // Set when the alert came from a terminal agent (a claude/codex/cursor CLI
+  // the user ran in a normal terminal pane) instead of an orchestration run.
+  // Click routes to the owning terminal tab + pane rather than a chat.
+  terminal?: TerminalAgentTarget;
+}
+
+// Where a terminal-agent notification should navigate on click. paneId is the
+// pty session id (same id used for pty:spawn); tabId is the terminal tab that
+// hosted the pane when the alert fired.
+export interface TerminalAgentTarget {
+  workspaceId: string;
+  tabId: string;
+  paneId: string;
+}
+
+// Sent to the renderer whenever a terminal-agent alert fires (independent of
+// which notification channels are enabled) so the workspace rail can show a
+// persistent needs-attention dot after the transient toast is gone. Cleared
+// renderer-side when the user visits the pane's tab.
+export interface TerminalAgentAttentionPayload {
+  target: TerminalAgentTarget;
+  kind: InAppNotificationKind;
 }
 
 export type NotificationSoundKind = "needs-you" | "done";

@@ -75,7 +75,12 @@ if (process.env.SPARK_USER_DATA_DIR) {
   app.setPath("userData", process.env.SPARK_USER_DATA_DIR);
 }
 if (process.platform === "win32") {
-  app.setAppUserModelId("com.spark.agent");
+  // Windows only displays native toasts for an AppUserModelID it can resolve
+  // (registered Start-Menu shortcut). "com.spark.agent" is only registered by
+  // the packaged installer — in an unpackaged dev run Windows silently drops
+  // every Notification.show() under that id, so fall back to the exe path,
+  // which Electron's docs prescribe for development.
+  app.setAppUserModelId(app.isPackaged ? "com.spark.agent" : process.execPath);
 }
 
 // Headless eval mode kicks in only when --eval-plan is on argv. Otherwise

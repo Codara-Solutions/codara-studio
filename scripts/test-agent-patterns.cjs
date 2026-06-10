@@ -1,0 +1,206 @@
+// Sanity harness for src/shared/agent-patterns.ts — simulates the byte
+// streams Claude Code / Codex paint while working, blocked, and idle, and
+// asserts the classification the main-process terminal-agent notifier and
+// the renderer state poller both depend on.
+//   node scripts/test-agent-patterns.cjs
+// Compiles the shared module to a temp dir on each run (tsc, ~2s) so the
+// assertions always exercise the current source.
+const path = require("node:path");
+const os = require("node:os");
+const { execFileSync } = require("node:child_process");
+
+const repoRoot = path.join(__dirname, "..");
+const outDir = path.join(os.tmpdir(), "spark-ap-test");
+// Resolve the local TypeScript compiler directly instead of shelling out to
+// npx — avoids Windows shell quoting entirely.
+const tscJs = require.resolve("typescript/bin/tsc", { paths: [repoRoot] });
+execFileSync(
+  process.execPath,
+  [
+    tscJs,
+    path.join("src", "shared", "agent-patterns.ts"),
+    "--outDir", outDir,
+    "--module", "commonjs",
+    "--target", "es2020",
+    "--skipLibCheck",
+  ],
+  { cwd: repoRoot, stdio: "inherit" },
+);
+const ap = require(path.join(outDir, "agent-patterns.js"));
+
+let failures = 0;
+function check(name, actual, expected) {
+  const ok = actual === expected;
+  if (!ok) failures += 1;
+  console.log(`${ok ? "PASS" : "FAIL"} ${name} → ${JSON.stringify(actual)} (want ${JSON.stringify(expected)})`);
+}
+
+// ── classifyTail: working footers, with Ink-style cursor moves interleaved ──
+check(
+  "claude working footer",
+  ap.classifyTail("claude", "\x1b[2K\x1b[G* Cogitating… (12s · \x1b[38;5;214m4.2k tokens\x1b[39m · esc to interrupt)"),
+  "working",
+);
+check(
+  "claude working footer split by CSI between chars",
+  ap.classifyTail("claude", "e\x1b[1Cs\x1b[1Cc\x1b[1C \x1b[1Ct\x1b[1Co\x1b[1C \x1b[1Ci\x1b[1Cn\x1b[1Ct\x1b[1Ce\x1b[1Cr\x1b[1Cr\x1b[1Cu\x1b[1Cp\x1b[1Ct"),
+  "working",
+);
+check(
+  "codex working footer",
+  ap.classifyTail("codex", "\x1b[2K▌ Working (32s • Esc to interrupt)"),
+  "working",
+);
+check(
+  "claude permission prompt beats working footer",
+  ap.classifyTail(
+    "claude",
+    "Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n(esc to interrupt)",
+  ),
+  "blocked",
+);
+check(
+  "codex approval prompt",
+  ap.classifyTail("codex", "Approve shell command?\n  rm -rf node_modules"),
+  "blocked",
+);
+check("idle claude input box is unclassified", ap.classifyTail("claude", "> \n? for shortcuts"), null);
+check("plain shell output is unclassified", ap.classifyTail("claude", "$ ls\nsrc package.json README.md"), null);
+
+// ── banner sniffing ──
+check("claude banner", ap.sniffRuntime("✻ Welcome!  Claude Code v2.1.139"), "claude");
+check("codex banner", ap.sniffRuntime(">_ OpenAI Codex (v0.130.0)"), "codex");
+check("banner with interleaved CSI", ap.sniffRuntime("C\x1b[1mlaude Code v\x1b[0m2.1.139"), "claude");
+check("ls output is not a banner", ap.sniffRuntime("docs claude-notes.md codex_setup.txt"), null);
+
+// ── OSC 633;E command-line runtime sniff ──
+check(
+  "633;E claude command",
+  ap.sniffOsc633CommandRuntime("\x1b]633;E;claude --continue\x07"),
+  "claude",
+);
+check(
+  "633;E codex.exe path",
+  ap.runtimeFromCommandLine("C:\\Users\\me\\AppData\\npm\\codex.exe resume"),
+  "codex",
+);
+check("633;E plain shell command", ap.sniffOsc633CommandRuntime("\x1b]633;E;git status\x07"), null);
+
+// ── prompt-back markers ──
+check("OSC 633;A marks prompt", ap.hasPromptMarker("\x1b]633;A\x07"), true);
+check("OSC 133;A marks prompt", ap.hasPromptMarker("\x1b]133;A\x07"), true);
+check("OSC 633;E does NOT mark prompt", ap.hasPromptMarker("\x1b]633;E;claude\x07"), false);
+check("OSC 633;C does NOT mark prompt", ap.hasPromptMarker("\x1b]633;C\x07"), false);
+
+// ── REAL Claude Code v2.1.170 frames (live pty capture, 2026-06-10) ──
+// The v2.1.17x footer dropped "esc to interrupt" entirely; the reliable
+// working signal is the stats group "(3s · ↓ 1 tokens)". Ink also encodes
+// inter-word spacing as cursor-forward moves (\x1b[1C), so stripped text can
+// have NO spaces between words — patterns must be whitespace-elastic.
+check(
+  "v2.1.170 banner with cursor-move word gaps",
+  ap.sniffRuntime("\x1b[1m\x1b[3CClaude\x1b[1CCode\x1b[38;2;153;153;153m\x1b[22m\x1b[1Cv2.1.170\x1b[38;2;215;119;87m"),
+  "claude",
+);
+check(
+  "v2.1.170 stats footer frame (counter repaint)",
+  ap.classifyTail("claude", "\x1b[?25l\x1b[38;2;215;119;87m\x1b[11;1H✽\x1b[38;2;153;153;153m\x1b[11C(3s · ↓\x1b[1C1 tokens)\x1b[14;3H\x1b[?25h"),
+  "working",
+);
+check(
+  "v2.1.170 full footer with verb",
+  ap.classifyTail("claude", "\x1b[38;2;215;119;87m\x1b[13;1H✽ Pouncing… \x1b[38;2;153;153;153m(3s · ↓ 1 tokens)\x1b[K"),
+  "working",
+);
+check(
+  "v2.1.170 hook-runner footer",
+  ap.classifyTail("claude", "\x1b[13;3HPouncing…\x1b[38;2;153;153;153m\x1b[2Crunning s\x1b[2Cp hooks… 0/2 · 3s · ↓\x1b[1C1 tokens)\x1b[16;3H"),
+  "working",
+);
+check(
+  "v2.1.170 idle UI (hints + statusline + usage bar) is unclassified",
+  ap.classifyTail(
+    "claude",
+    "❯ \n⏵⏵ auto\x1b[1Cmode\x1b[1Con (shift+tab\x1b[1Cto\x1b[1Ccycle) · ← for agents\n󱙺 Sonnet\x1b[1C4.6 ╱ _staging ╱ staging ╱ no\x1b[1Cctx\n█▋ 17% 34k/200k ╱ 5h 12% · 7d 2%",
+  ),
+  null,
+);
+check(
+  "v2.1.170 token footer with k-suffix",
+  ap.classifyTail("claude", "✶ Deliberating… (114s · ↑ 4.2k tokens)"),
+  "working",
+);
+check(
+  "v2.1.170 verb-only spinner frame (turn start, no stats yet)",
+  ap.classifyTail("claude", "\x1b[K\x1b[38;2;215;119;87m\r\n✻ Pouncing…\x1b[K\x1b[m"),
+  "working",
+);
+check(
+  "prose gerund without spinner glyph is unclassified",
+  ap.classifyTail("claude", "I suggest Refactoring… the parser, then testing."),
+  null,
+);
+
+// ── REAL Codex v0.138.0 frames (live pty capture, 2026-06-10) ──
+check(
+  "codex v0.138 working footer",
+  ap.classifyTail("codex", "•\x1b[m \x1b[38;2;204;204;204m\x1b[1mWorking\x1b[m \x1b[2m(0s • esc to interrupt)\x1b[22m"),
+  "working",
+);
+check(
+  "codex shimmer-only repaint is unclassified (sustain covers it)",
+  ap.classifyTail("codex", "\x1b[20;3HW\x1b[38;2;47;47;47mo\x1b[38;2;31;31;31mr\x1b[38;2;47;47;47mk\x1b[38;2;90;90;90mi\x1b[38;2;144;144;144mn\x1b[38;2;187;187;187mg\x1b[m"),
+  null,
+);
+check(
+  "codex boxed banner line",
+  ap.sniffRuntime("│ >_ OpenAI Codex (v0.138.0)                          │"),
+  "codex",
+);
+check(
+  "codex sandbox dialog is blocked",
+  ap.classifyTail("codex", "› 1. Set up default sandbox (requires Administrator permissions)\n  2. Use non-admin sandbox\n  3. Quit\n  Press enter to confirm or esc to go back"),
+  "blocked",
+);
+
+// ── Claude AskUserQuestion selector (user-reported, v2.1.170 screenshot) ──
+check(
+  "claude AskUserQuestion dialog is blocked",
+  ap.classifyTail(
+    "claude",
+    "What would you like to work on?\n❯ 1. 1\n   Option number one\n  2. 2\n   Option number two\n 5. Chat about this\n\nEnter to select · ↑/↓ to navigate · Esc to cancel",
+  ),
+  "blocked",
+);
+check(
+  "Enter-to-select footer alone is blocked",
+  ap.classifyTail("claude", "Enter to select · ↑/↓ to navigate · Esc to cancel"),
+  "blocked",
+);
+check(
+  "plain numbered list without selector caret is unclassified",
+  ap.classifyTail("claude", "Here are the steps:\n 1. Install deps\n 2. Run the build"),
+  null,
+);
+
+// ── freshFrom guard: stale carry must not re-assert working ──
+const STALE_CARRY = "✽ Pouncing… (3s · ↓ 1 tokens)";
+const IDLE_REPAINT = "󱙺 Sonnet 4.6 ╱ _staging ╱ staging ╱ no ctx";
+check(
+  "stale footer in carry + idle repaint is unclassified",
+  ap.classifyTail("claude", STALE_CARRY + IDLE_REPAINT, ap.stripAnsi(STALE_CARRY).length),
+  null,
+);
+check(
+  "footer split across carry/chunk boundary still matches",
+  ap.classifyTail("claude", "✽ Pouncing… (3s · ↓ 1 tok" + "ens)", ap.stripAnsi("✽ Pouncing… (3s · ↓ 1 tok").length),
+  "working",
+);
+check(
+  "fresh footer painted entirely in the new chunk matches",
+  ap.classifyTail("claude", IDLE_REPAINT + STALE_CARRY, ap.stripAnsi(IDLE_REPAINT).length),
+  "working",
+);
+
+process.exitCode = failures === 0 ? 0 : 1;
+console.log(failures === 0 ? "\nAll agent-pattern checks passed." : `\n${failures} check(s) FAILED.`);
