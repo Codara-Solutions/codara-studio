@@ -36,9 +36,19 @@ export interface ToastHostProps {
   // main only carries runId — the options live in the run state, so the
   // App resolves them in the renderer (global runs feed + findOpenQuestion).
   resolveQuestion?: (runId: string) => RunQuestionOption[];
+  // Whether answering should also resumeRun (default true). Loom-owned runs
+  // must NOT be resumed from here: resume re-runs the direct-run finalizer
+  // against the already-blocked report (re-asking the question), while the
+  // loop driver's answer seam consumes the recorded message on its own.
+  shouldResumeOnAnswer?: (runId: string) => boolean;
 }
 
-export default function ToastHost({ onSelectRun, onSelectTerminal, resolveQuestion }: ToastHostProps) {
+export default function ToastHost({
+  onSelectRun,
+  onSelectTerminal,
+  resolveQuestion,
+  shouldResumeOnAnswer,
+}: ToastHostProps) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   // Auto-dismiss only counts down while the window is focused. The whole
   // point of several alerts (terminal-agent "finished", run completions) is
@@ -128,6 +138,7 @@ export default function ToastHost({ onSelectRun, onSelectTerminal, resolveQuesti
           onSelectRun={onSelectRun}
           onSelectTerminal={onSelectTerminal}
           resolveQuestion={resolveQuestion}
+          shouldResumeOnAnswer={shouldResumeOnAnswer}
         />
       ))}
     </div>
@@ -141,6 +152,7 @@ function ToastCard({
   onSelectRun,
   onSelectTerminal,
   resolveQuestion,
+  shouldResumeOnAnswer,
 }: {
   toast: Toast;
   depth: number;
@@ -148,6 +160,7 @@ function ToastCard({
   onSelectRun?: (runId: string, workspaceId?: string) => void;
   onSelectTerminal?: (target: TerminalAgentTarget) => void;
   resolveQuestion?: (runId: string) => RunQuestionOption[];
+  shouldResumeOnAnswer?: (runId: string) => boolean;
 }) {
   // In-flight guard so a fast double-click on an answer button (or two
   // different options) only fires one addRunMessage+resumeRun sequence.
@@ -181,7 +194,9 @@ function ToastCard({
         kind: "answer",
         message: option.answer,
       });
-      await window.spark.orchestration.resumeRun({ runId: toast.runId });
+      if (shouldResumeOnAnswer?.(toast.runId) ?? true) {
+        await window.spark.orchestration.resumeRun({ runId: toast.runId });
+      }
       onClose();
     } catch {
       // Answering failed (run gone, IPC error) — release the guard so the

@@ -1,13 +1,20 @@
 import { promises as fs, createWriteStream } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 import type {
+  AddDirectIterationInput,
   AddRunMessageInput,
+  AgentEffortLevel,
   AgentRuntimeDiagnostic,
   Checkpoint,
   UndoToCheckpointInput,
   UndoToCheckpointResult,
   AgentRuntimeModel,
   AppSettings,
+  LoomEngine,
+  LoomWorkerConfig,
+  RunStatus,
+  StartDirectWorkerRunInput,
+  WorkerAttemptStatus,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
@@ -84,6 +91,22 @@ import {
   type SparkManagerWorkerReportContext,
 } from "./openrouter-manager";
 import { DEFAULT_MANAGER_PROMPT_PROFILE, loadManagerPromptProfile } from "./prompt-profile";
+import {
+  backEdgesToFire,
+  computeSkips,
+  forwardDescendants,
+  isPassComplete,
+  MAX_BACK_EDGE_VISIT_CAP,
+  mergeOutput,
+  nextReadyWave,
+  readyGuardNodes,
+  readyMergeNodes,
+  renderNodePrompt,
+  retryDisposition,
+  upstreamOf,
+} from "./loom-graph";
+import { evaluateGuardPredicate } from "./loom-predicates";
+import type { LoomGraph, LoomNodeDef } from "@shared/types";
 import { recordRunMemory } from "./run-memory";
 import {
   createCheckpoint,
@@ -119,6 +142,18 @@ const HUMAN_INPUT_PAUSE_REASON = "Spark needs human input before continuing.";
 // "unbounded" because users reported the runs/ tree growing into GB of pty
 // raw.log + worker artifacts after a few weeks of heavy use.
 const RUN_RETENTION_KEEP = 50;
+
+// SLICE 6 (bounded loop-back cycles) — the SECOND, independent termination bound.
+// Beyond each back-edge's per-edge visitCap (loom-graph.effectiveVisitCap), this
+// caps the TOTAL worker-node activations across a single loom pass: the sum of
+// loomPass.nodeStates[*].activations (every worker launch + every retry/loop
+// re-launch bumps a node's activations by 1). If a wave would push the running
+// total over this cap, finalizeDirectRun terminalizes the pass as "failed" with a
+// clear message INSTEAD of launching — so even a pathological multi-back-edge
+// graph (or a mis-set visitCap that slipped the per-edge clamp) can never spin
+// forever. Sized well above any realistic loom (10 back-edges × cap 10 × a few
+// body nodes), so it only trips on genuine runaways.
+const MAX_PASS_ACTIVATIONS = 500;
 
 // Lightweight handle for a running worker. The pty itself lives in
 // pty-manager (same place user-spawned terminals live); this just remembers
@@ -249,6 +284,10 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     chatEffort: input.chatEffort,
     chatFastMode: initialChatFlags.chatFastMode,
     chat1mContext: initialChatFlags.chat1mContext,
+    // Looms v2: ownership + execution mode are stamped at creation (not
+    // patched after) so the run.created event itself already carries them.
+    automationId: input.automationId,
+    executionMode: input.executionMode,
   };
   run.artifactDir = runDir(run.id);
 
@@ -263,6 +302,8 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
       cwd: input.cwd,
       workspaceName: input.workspaceName,
       artifactDir: run.artifactDir,
+      automationId: run.automationId,
+      executionMode: run.executionMode,
     },
   });
 
@@ -450,10 +491,15 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       workspaceName: input.workspaceName,
       cwd: input.cwd,
       title: chatTitleFromInput(input),
-      // Engine choice from the "Run plan" / "Smart Merge" pickers. Threading it
-      // through createRun stamps run.chatBackend so askOpenRouterManager
-      // dispatches to the Claude Code / Codex manager. Undefined → OpenRouter.
+      // Engine choice from the "Run plan" / "Smart Merge" pickers and from
+      // per-automation loop config. Threading these through createRun stamps
+      // run.chatBackend/chatModel/chatMode/chatEffort so askOpenRouterManager
+      // dispatches to the Claude Code / Codex manager with the right model.
+      // Undefined → OpenRouter + backend defaults.
       chatBackend: input.chatBackend,
+      chatModel: input.chatModel,
+      chatMode: input.chatMode,
+      chatEffort: input.chatEffort,
     });
   }
 
@@ -647,6 +693,1560 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   scheduleAutopilotCycles(run.id, scheduledAttemptIds);
 
   return scheduledAttemptIds.length > 0 ? await requireRun(run.id) : run;
+}
+
+// ── Looms v2: direct-worker runs ────────────────────────────────────────────
+// An automation iteration runs ONE CLI worker (claude/codex) with the rendered
+// loop prompt — no manager LLM anywhere in the path. Direct runs reuse the
+// hardened worker pipeline unchanged (prepareWorkerTask → autopilot cycle →
+// final-report.json) and finalizeDirectRun replaces the manager review as the
+// terminal hop (see the executionMode seam in runAutopilotManagerReview).
+
+const DIRECT_ATTEMPT_TERMINAL = new Set<WorkerAttemptStatus>([
+  "succeeded",
+  "failed",
+  "timed_out",
+  "cancelled",
+]);
+
+// LoomWorkerConfig.effort is the full AgentEffortLevel ("max" included);
+// WorkerTask.effortHint tops out at "xhigh" — clamp rather than drop.
+function loomEffortToWorkerEffort(
+  effort: AgentEffortLevel | undefined,
+): WorkerTask["effortHint"] {
+  if (!effort) return undefined;
+  return effort === "max" ? "xhigh" : effort;
+}
+
+export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Promise<RunState> {
+  let run = await createRun({
+    workspaceId: input.workspaceId,
+    workspaceName: input.workspaceName ?? "workspace",
+    cwd: input.cwd,
+    title: input.title,
+    automationId: input.automationId,
+    executionMode: "direct",
+  });
+  run = await commitRunChange(run, {
+    type: "direct_run.started",
+    message: "Loom direct-worker run started",
+    payload: { automationId: input.automationId, engine: input.engine, model: input.model ?? null },
+    mutate: (draft, timestamp) => {
+      draft.status = "running";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "started",
+        startedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+  // MULTI-NODE entry seam: the loop driver may hand the WHOLE layer-0 frontier
+  // (≥2 entry nodes) as `nodes`. Each entry's prompt was already var-substituted
+  // by the driver, so we note + launch them as ONE wave (one task/attempt each,
+  // pendingNodeIds seeded for all). The degenerate single-node path (no `nodes`)
+  // is preserved byte-identically below.
+  if (input.nodes && input.nodes.length > 0) {
+    for (const node of input.nodes) {
+      run = await addRunMessage({
+        runId: run.id,
+        clientMessageId: `loom-entry-${node.nodeId}`,
+        author: "user",
+        kind: "note",
+        message: node.template,
+      });
+    }
+    return launchDirectNodeTasks(run.id, input.cwd, 1, input.nodes, {
+      vars: input.vars,
+      freshPass: input.freshPass,
+    });
+  }
+  // The prompt lands as a user note so history detail, {{lastOutput}}
+  // provenance, and the spark_ask_user long-poll all see a normal transcript.
+  run = await addRunMessage({
+    runId: run.id,
+    author: "user",
+    kind: "note",
+    message: input.prompt,
+  });
+  return launchDirectIterationTask({
+    runId: run.id,
+    cwd: input.cwd,
+    passNumber: 1,
+    prompt: input.prompt,
+    engine: input.engine,
+    model: input.model,
+    effort: input.effort,
+    loomNodeId: input.loomNodeId,
+    vars: input.vars,
+    freshPass: input.freshPass,
+  });
+}
+
+// Same-run chaining (loop.isolate === false): iteration N+1 reuses the run so
+// cost accumulates and the transcript carries across passes. The engine/model
+// may differ per pass — buildLaunchCommandLine reads them per task.
+export async function addDirectIteration(input: AddDirectIterationInput): Promise<RunState> {
+  let run = await requireRun(input.runId);
+  if (run.executionMode !== "direct") {
+    throw new Error(`addDirectIteration requires a direct-mode run: ${input.runId}`);
+  }
+  // Race defense: never stack two live CLI workers on one loom run. The loop
+  // driver already HOLDs on non-terminal runs; this is the engine-side bound.
+  if (run.workerAttempts.some((a) => !DIRECT_ATTEMPT_TERMINAL.has(a.status))) {
+    return run;
+  }
+  // MULTI-NODE entry seam (same-run pass-chaining): the loop driver may chain a
+  // fresh PASS whose layer 0 is the WHOLE entry frontier (≥2 nodes). Note each
+  // already-rendered entry prompt, then launch them as ONE wave. freshPass is
+  // set TRUE on this pass-chaining call so launchDirectNodeTasks rebuilds the
+  // loomPass from scratch (the previous pass's downstream/loop state must NOT
+  // carry over). The single-node / answer-resume path below is unchanged.
+  if (input.nodes && input.nodes.length > 0) {
+    const cwdMulti = workspaceCwdFromRun(run);
+    if (!cwdMulti) throw new Error(`Direct run has no workspace cwd: ${input.runId}`);
+    for (let i = 0; i < input.nodes.length; i += 1) {
+      run = await addRunMessage({
+        runId: run.id,
+        clientMessageId: `${input.clientMessageId ?? "loom-entry"}-${input.nodes[i].nodeId}-${i}`,
+        author: "user",
+        kind: "note",
+        message: input.nodes[i].template,
+      });
+    }
+    const passNumberMulti = run.steps.length + 1;
+    run = await commitRunChange(run, {
+      type: "direct_run.iteration_started",
+      message: `Loom iteration ${passNumberMulti} started`,
+      payload: { engine: input.engine, model: input.model ?? null, effort: input.effort ?? null },
+      mutate: (draft, timestamp) => {
+        draft.status = "running";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+          status: "running",
+          lastAction: "direct_iteration_started",
+          stopReason: undefined,
+          resumedAt: timestamp,
+          updatedAt: timestamp,
+        };
+        draft.updatedAt = timestamp;
+      },
+    });
+    return launchDirectNodeTasks(run.id, cwdMulti, passNumberMulti, input.nodes, {
+      vars: input.vars,
+      freshPass: input.freshPass,
+    });
+  }
+  run = await addRunMessage({
+    runId: run.id,
+    clientMessageId: input.clientMessageId,
+    author: "user",
+    kind: "note",
+    message: input.prompt,
+  });
+  const passNumber = run.steps.length + 1;
+  run = await commitRunChange(run, {
+    type: "direct_run.iteration_started",
+    message: `Loom iteration ${passNumber} started`,
+    payload: { engine: input.engine, model: input.model ?? null, effort: input.effort ?? null },
+    mutate: (draft, timestamp) => {
+      draft.status = "running";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "direct_iteration_started",
+        stopReason: undefined,
+        resumedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+  const cwd = workspaceCwdFromRun(run);
+  if (!cwd) throw new Error(`Direct run has no workspace cwd: ${input.runId}`);
+  return launchDirectIterationTask({
+    runId: run.id,
+    cwd,
+    passNumber,
+    prompt: input.prompt,
+    engine: input.engine,
+    model: input.model,
+    effort: input.effort,
+    loomNodeId: input.loomNodeId,
+    vars: input.vars,
+    freshPass: input.freshPass,
+  });
+}
+
+// One node to launch within a loom-pass wave. The `template` is rendered through
+// loom-graph.renderNodePrompt against the pass vars + the settled upstream
+// outputs; `incoming` is this node's forward-edge parent ids (computed by the
+// caller via the pure upstreamOf), whose outputs feed the {{incoming}} token.
+// For the ENTRY (layer-0) wave the "template" is the prompt automation-loop
+// already assembled (var-substituted + firedPath note + agent footer) with no
+// remaining tokens, so the re-render is a no-op and the launched string is
+// byte-identical to the pre-graph single-node launch.
+interface DirectNodeLaunch {
+  nodeId: string;
+  template: string;
+  worker: LoomWorkerConfig;
+  incoming?: string[]; // forward-parent node ids (empty/omitted for entry nodes)
+  isolate?: boolean; // per-node isolation; reserved (run-level isolate stays in the loop)
+}
+
+// Single-node delegate kept under its original name so its sole callers
+// (startDirectWorkerRun / addDirectIteration) and the surrounding mental model
+// don't churn: it forwards to launchDirectNodeTasks with one node. For ONE node
+// the wave is behaviorally identical to the pre-graph single-task launch — the
+// prompt is the already-assembled entry string, rendered with empty upstream
+// context (renderNodePrompt no-op).
+async function launchDirectIterationTask(opts: {
+  runId: string;
+  cwd: string;
+  passNumber: number; // 1-based
+  prompt: string;
+  engine: LoomEngine;
+  model?: string;
+  effort?: AgentEffortLevel;
+  loomNodeId?: string;
+  vars?: Record<string, string>;
+  freshPass?: boolean;
+}): Promise<RunState> {
+  return launchDirectNodeTasks(
+    opts.runId,
+    opts.cwd,
+    opts.passNumber,
+    [
+      {
+        nodeId: opts.loomNodeId ?? "w0",
+        template: opts.prompt,
+        worker: { engine: opts.engine, model: opts.model, effort: opts.effort },
+      },
+    ],
+    { vars: opts.vars, freshPass: opts.freshPass },
+  );
+}
+
+// Shared tail of both direct entry points: synthesize ONE step for the wave,
+// one worker task PER NODE (each stamped with workerTask.loomNodeId), wait for
+// the checkpoint queue, prepare every node's attempt, seed/advance
+// RunState.loomPass for this layer, then hand ALL attempt ids to the autopilot
+// cycle machinery in ONE scheduleAutopilotCycles call so the autopilot join
+// barrier is the wave boundary. Modeled on forceFanOutBatch's manager-less task
+// creation. For a single node this is behaviorally identical to the pre-graph
+// launchDirectIterationTask (one step, one task, one attempt, one cycle).
+async function launchDirectNodeTasks(
+  runId: string,
+  cwd: string,
+  passNumber: number, // 1-based
+  nodes: DirectNodeLaunch[],
+  _opts?: {
+    layer?: number;
+    // The pass-level {{var}} snapshot — seeded onto loomPass.vars on the entry
+    // wave, re-read (off the run) for later waves.
+    vars?: Record<string, string>;
+    // Outputs of already-settled nodes, keyed by node id; feeds {{node:<id>}}
+    // and each launching node's {{incoming}} (its forward parents' outputs).
+    nodeOutputs?: Record<string, string>;
+    // Add each rendered node prompt as a user note (provenance/transcript). The
+    // entry points already note their prompt, so this is set only for the later
+    // waves finalizeDirectRun launches.
+    addPromptNotes?: boolean;
+    // PASS BOUNDARY: when true, rebuild loomPass FROM SCRATCH (only this wave's
+    // nodes, activations 1, fresh attemptIds, no carried back-edge budget) — the
+    // loop driver's same-run pass-chaining launch sets this so pass 2+ of a
+    // multi-node loom re-runs downstream nodes and re-arms loops. Absent/false on
+    // a mid-pass answer-resume AND on finalizeDirectRun's intra-pass advance/
+    // relaunch launches (those MUST keep the merge/preserve behavior so a wave
+    // join and a bounded loop see the prior pass state). Single-node: the reset
+    // re-seeds the one running node = today's behavior.
+    freshPass?: boolean;
+  },
+): Promise<RunState> {
+  if (nodes.length === 0) throw new Error("launchDirectNodeTasks requires at least one node.");
+  const layer = _opts?.layer ?? 0;
+  const vars = _opts?.vars ?? {};
+  const nodeOutputs = _opts?.nodeOutputs ?? {};
+  const freshPass = _opts?.freshPass === true;
+
+  // FIX 7: resolve a node's "auto" engine against the INSTALLED set (claude-then-
+  // codex, mirroring resolveWorker) — NOT a hard-coded "claude". The entry wave
+  // already passes a concrete engine (automation-loop resolved it), but advance/
+  // relaunch waves carry the node's raw "auto", which on a Codex-only host would
+  // otherwise pin a missing Claude CLI and fail the pass. Detect ONCE per wave,
+  // and only when some node is actually "auto" (no extra probe on legacy paths).
+  let resolveAuto: (engine: LoomEngine | "auto") => LoomEngine = (engine) =>
+    engine === "auto" ? "claude" : engine;
+  if (nodes.some((n) => n.worker.engine === "auto")) {
+    const { detectAgentRuntimes } = await import("../agent-runtimes");
+    const runtimes = await detectAgentRuntimes();
+    const installed = new Set(
+      runtimes
+        .filter((r) => (r.kind === "claude" || r.kind === "codex") && r.installed && !r.disabledBySettings)
+        .map((r) => r.kind),
+    );
+    resolveAuto = (engine) =>
+      engine !== "auto"
+        ? engine
+        : installed.has("claude")
+          ? "claude"
+          : installed.has("codex")
+            ? "codex"
+            : "claude";
+  }
+
+  // Render every launching node's prompt from its template through the pure
+  // renderNodePrompt: pass vars + the {{node:<id>}} outputs map + this node's
+  // {{incoming}} (its forward parents' outputs). For the entry wave the template
+  // is already fully assembled and carries no tokens, so this is a no-op and the
+  // launched string is byte-identical to the pre-graph single-node launch.
+  const rendered = nodes.map((node) =>
+    renderNodePrompt(node.template, {
+      vars,
+      nodeOutputs,
+      incoming: (node.incoming ?? []).map((id) => nodeOutputs[id] ?? ""),
+    }),
+  );
+
+  let run = await requireRun(runId);
+  // Later waves get a user note per node so the transcript shows what each
+  // downstream worker was asked (the entry points already noted layer 0).
+  if (_opts?.addPromptNotes) {
+    for (let i = 0; i < nodes.length; i += 1) {
+      run = await addRunMessage({
+        runId: run.id,
+        clientMessageId: `loom-node-${nodes[i].nodeId}-${run.workerAttempts.length}-${i}`,
+        author: "user",
+        kind: "note",
+        message: rendered[i],
+      });
+    }
+  }
+
+  run = await createStep({
+    runId,
+    title: `Loom pass ${passNumber}`,
+    goal: "Run one automation-loop iteration: execute the instruction below and write the final report.",
+    kind: "worker_batch",
+    riskLevel: "low",
+    plannedAgents: nodes.map((node, i) => ({
+      label: `worker ${passNumber}.${i + 1}`,
+      summary: rendered[i].length > 200 ? `${rendered[i].slice(0, 200)}…` : rendered[i],
+      runtimePreference: resolveAuto(node.worker.engine),
+      taskClass: "feature",
+    })),
+    acceptanceCriteria: [
+      "The worker executed the iteration's instruction and reported its real results in final-report.json.",
+    ],
+  });
+  const stepId = run.steps.at(-1)?.id;
+
+  // One worker task per node, each stamped with its graph node id.
+  const taskIds: Array<{ nodeId: string; taskId: string }> = [];
+  for (let i = 0; i < nodes.length; i += 1) {
+    const node = nodes[i];
+    run = await createWorkerTask({
+      runId: run.id,
+      stepId,
+      title: `Loom pass ${passNumber}`,
+      description: rendered[i],
+      runtimePreference: resolveAuto(node.worker.engine),
+      modelHint: node.worker.model,
+      effortHint: loomEffortToWorkerEffort(node.worker.effort),
+      allowedPaths: [],
+      forbiddenPaths: [],
+      expectedOutputs: [],
+      verificationCommands: [],
+      canRunParallel: nodes.length > 1,
+      conflictsWith: [],
+      taskClass: "feature",
+      createdBy: "spark",
+      loomNodeId: node.nodeId,
+    });
+    const taskId = run.workerTasks.at(-1)?.id;
+    if (!taskId) throw new Error("Direct worker task creation failed.");
+    taskIds.push({ nodeId: node.nodeId, taskId });
+  }
+
+  // The sandbox fork point is the run's shadow-ref checkpoint, but checkpoints
+  // land through a background queue (createRun's baseline + the prompt note
+  // above are both still in flight here — managed runs hide this behind
+  // manager-planning latency; direct runs have none). Wait for the queue so
+  // the worktree forks from the CURRENT tree: without this, pass 1 forks from
+  // the default branch (empty shadow ref → resolveDefaultBranch) and chained
+  // passes fork one pass stale, stranding the previous pass's merged work.
+  await (checkpointTaskQueue.get(runId) ?? Promise.resolve());
+
+  // unattended:true so the user's autopilotSandbox setting applies exactly as
+  // it does for managed unattended workers (worktree isolation + merge-back
+  // on success are both handled inside the worker pipeline, not the manager).
+  const attempts: Array<{ nodeId: string; attemptId: string }> = [];
+  for (const { nodeId, taskId } of taskIds) {
+    const envelope = await prepareWorkerTask({
+      runId: run.id,
+      workerTaskId: taskId,
+      cwd,
+      unattended: true,
+    });
+    attempts.push({ nodeId, attemptId: envelope.attemptId });
+  }
+
+  // Seed / advance RunState.loomPass for this wave: every launched node becomes
+  // "running" at its layer, its attempt id recorded; pendingNodeIds is the set
+  // of node ids in this wave (the join barrier finalizeDirectRun waits on).
+  //
+  // FIX 2 — PASS BOUNDARY vs MID-PASS. This commit rebuilds loomPass wholesale,
+  // so it is the seam where pass state either carries forward (mid-pass joins +
+  // bounded loops) or resets (a brand-new pass). `freshPass` distinguishes them:
+  //   • freshPass (the loop driver's same-run pass-chaining launch): rebuild FROM
+  //     SCRATCH — only THIS wave's nodes, activations 1, fresh attemptIds, no
+  //     carried output/back-edge budget, vars from the new pass snapshot. Without
+  //     this, pass 2+ of a multi-node loom would leave downstream nodes
+  //     "succeeded" (never relaunched), back-edges exhausted (loops never
+  //     re-fire), and activations as lifetime (not per-pass) counts. Single-node:
+  //     the reset re-seeds the one running node = today's behavior exactly.
+  //   • NOT freshPass (finalizeDirectRun's intra-pass advance/relaunch, AND a
+  //     mid-pass answer-resume): MERGE into the existing loomPass — preserve
+  //     prior node outputs/activations/back-edge budget so a within-pass wave
+  //     join and a bounded loop settle correctly.
+  run = await requireRun(run.id);
+  await commitRunChange(run, {
+    type: "direct_run.node_wave_launched",
+    message: `Loom pass ${passNumber} wave launched (${attempts.length} node${attempts.length === 1 ? "" : "s"})`,
+    payload: { passNumber, layer, nodeIds: attempts.map((a) => a.nodeId), freshPass },
+    mutate: (draft, timestamp) => {
+      const prior = draft.loomPass;
+      // freshPass starts from an EMPTY state (the previous pass is discarded);
+      // otherwise we merge into the prior node states.
+      const nodeStates = freshPass ? {} : { ...(prior?.nodeStates ?? {}) };
+      for (const { nodeId, attemptId } of attempts) {
+        const existing = freshPass ? undefined : nodeStates[nodeId];
+        nodeStates[nodeId] = {
+          status: "running",
+          attemptIds: freshPass ? [attemptId] : [...(existing?.attemptIds ?? []), attemptId],
+          output: existing?.output,
+          layer,
+          activations: (existing?.activations ?? 0) + 1,
+        };
+      }
+      // FIX 3(a) — pendingNodeIds is the join barrier. On a MID-PASS launch we
+      // UNION the new wave with any node still recorded "blocked" that we are NOT
+      // relaunching: a single-node answer-resume otherwise replaces pendingNodeIds
+      // with just the resumed node, so when it succeeds the wave aggregate reads
+      // "complete" and a co-blocked sibling's question is silently abandoned.
+      // Keeping the still-blocked siblings pending re-enters them at the next
+      // finalize. For freshPass (and single-node) this reduces to exactly the new
+      // wave (a fresh pass has no prior blocked node; one node has no sibling).
+      const launchSet = new Set(attempts.map((a) => a.nodeId));
+      const stillBlocked = freshPass
+        ? []
+        : (prior?.pendingNodeIds ?? []).filter(
+            (id) => !launchSet.has(id) && nodeStates[id]?.status === "blocked",
+          );
+      draft.loomPass = {
+        graphVersion: 1,
+        nodeStates,
+        layerCursor: layer,
+        pendingNodeIds: [...attempts.map((a) => a.nodeId), ...stillBlocked],
+        // Seed the pass var snapshot on the entry wave; on a mid-pass wave preserve
+        // the one the entry stored (`vars` is {} when not passed). freshPass takes
+        // the NEW pass snapshot (the prior pass's vars are discarded with it).
+        vars: freshPass
+          ? Object.keys(vars).length > 0
+            ? vars
+            : undefined
+          : (prior?.vars ?? (Object.keys(vars).length > 0 ? vars : undefined)),
+        // SLICE 6: carry the per-back-edge fire budget across MID-PASS waves so a
+        // loop's remaining-fire counters survive each wholesale rebuild. freshPass
+        // drops it (undefined) so a new pass re-arms every loop from a clean slate.
+        backEdgeVisits: freshPass ? undefined : prior?.backEdgeVisits,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+
+  scheduleAutopilotCycles(run.id, attempts.map((a) => a.attemptId));
+  return requireRun(run.id);
+}
+
+// Force-fail a live (or stuck-preparing) attempt. Used by the automation-loop
+// watchdog (per-iteration timeout), the direct-worker spawn handler (pty spawn
+// threw — fail fast instead of eating the 30s waitForSpawn timeout), and boot
+// recovery. Ends with finalizeDirectRun so the loop driver sees a terminal run.
+export async function failWorkerAttempt(
+  runId: string,
+  attemptId: string,
+  error: string,
+): Promise<RunState> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((a) => a.id === attemptId);
+  if (!attempt) throw new Error(`Worker attempt not found: ${attemptId}`);
+  if (!DIRECT_ATTEMPT_TERMINAL.has(attempt.status)) {
+    await commitRunChange(run, {
+      type: "worker_attempt.force_failed",
+      message: `Worker attempt force-failed: ${error}`,
+      payload: { attemptId, error },
+      mutate: (draft, timestamp) => {
+        const a = draft.workerAttempts.find((x) => x.id === attemptId);
+        if (!a || DIRECT_ATTEMPT_TERMINAL.has(a.status)) return false;
+        a.status = "failed";
+        a.error = error;
+        a.finishedAt = a.finishedAt ?? timestamp;
+        const t = draft.workerTasks.find((x) => x.id === a.workerTaskId);
+        if (t && !["accepted", "failed", "cancelled"].includes(t.status)) {
+          t.status = "failed";
+          t.updatedAt = timestamp;
+        }
+        const s = t?.stepId ? draft.steps.find((x) => x.id === t.stepId) : undefined;
+        if (s && !["complete", "completed_unverified", "failed", "skipped"].includes(s.status)) {
+          s.status = "failed";
+          s.updatedAt = timestamp;
+          if (draft.currentStepId === s.id) draft.currentStepId = undefined;
+        }
+        draft.updatedAt = timestamp;
+      },
+    });
+    // Kill the CLI process under the attempt's pty, if it is still alive.
+    try {
+      pty.dispose(attemptId);
+    } catch {
+      /* already gone */
+    }
+  }
+  const latest = await requireRun(runId);
+  if (latest.executionMode === "direct") await finalizeDirectRun(runId);
+  return requireRun(runId);
+}
+
+// Boot-recovery: the app quit while this direct attempt was non-terminal, but
+// the worker DID finish — its final-report.json is on disk. Settle the attempt
+// as succeeded (never re-run completed work), converge any sandboxed edits the
+// crashed process never merged back, and finalize from the report.
+export async function settleRecoveredDirectAttempt(
+  runId: string,
+  attemptId: string,
+): Promise<void> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((a) => a.id === attemptId);
+  if (!attempt) return;
+  if (!DIRECT_ATTEMPT_TERMINAL.has(attempt.status)) {
+    await commitRunChange(run, {
+      type: "direct_run.attempt_recovered",
+      message: "Direct worker attempt recovered from on-disk final report after restart",
+      payload: { attemptId },
+      mutate: (draft, timestamp) => {
+        const a = draft.workerAttempts.find((x) => x.id === attemptId);
+        if (!a || DIRECT_ATTEMPT_TERMINAL.has(a.status)) return false;
+        a.status = "succeeded";
+        a.finishedAt = a.finishedAt ?? timestamp;
+        draft.updatedAt = timestamp;
+      },
+    });
+  }
+  // The in-process merge-back lives in launchWorkerAttempt's finish path — a
+  // quit between the worker finishing and that merge strands the pass's edits
+  // in the worktree while the loop records the pass complete (and runs its
+  // untilGitClean/untilTestsPass checks against a tree that never got the
+  // work). Mirror the finish path's gates here; best-effort, never throws.
+  await mergeBackRecoveredSandbox(runId, attemptId).catch(() => undefined);
+  await finalizeDirectRun(runId);
+}
+
+// Converge EVERY succeeded-but-unmerged sandbox attempt of a recovered run, not
+// just the one the recovery table named. A crash mid-wave can strand several
+// parallel siblings unmerged at once; each is its own worktree that must land in
+// the base repo before the loop driver records the pass. We loop over a snapshot
+// of attempt ids (each merge re-reads the run, so a fresh `requireRun` per pass
+// sees the prior merge's sandboxMergedBack flag and skips it). attemptId is kept
+// in the signature for call-site symmetry but no longer singles out one attempt.
+async function mergeBackRecoveredSandbox(runId: string, _attemptId: string): Promise<void> {
+  const settings = await loadSettings();
+  if (!settings.autopilotSandbox) return;
+  const initial = await requireRun(runId);
+  const candidateIds = initial.workerAttempts
+    .filter(
+      (a) =>
+        a.status === "succeeded" &&
+        !a.sandboxMergedBack &&
+        a.sandboxWorktreePath &&
+        a.sandboxBaseRepo,
+    )
+    .map((a) => a.id);
+  for (const id of candidateIds) {
+    await mergeBackOneRecoveredAttempt(runId, id);
+  }
+}
+
+// Merge ONE recovered attempt's worktree back into its base repo, serialized per
+// base repo so two stranded siblings merging into the same tree can't interleave.
+async function mergeBackOneRecoveredAttempt(runId: string, attemptId: string): Promise<void> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((a) => a.id === attemptId);
+  if (
+    !attempt ||
+    attempt.status !== "succeeded" || // failed work is never auto-converged
+    attempt.sandboxMergedBack || // already applied by the finish path / a prior pass
+    !attempt.sandboxWorktreePath ||
+    !attempt.sandboxBaseRepo
+  ) {
+    return;
+  }
+  const baseRepo = attempt.sandboxBaseRepo;
+  const worktreePath = attempt.sandboxWorktreePath;
+  const mergeBack = await withMergeBackLock(baseRepo, () =>
+    mergeBackSandboxWorktree({ repoCwd: baseRepo, worktreePath }),
+  );
+  const mergedAt = new Date().toISOString();
+  if (mergeBack.ok) {
+    await commitRunChange(run, {
+      type: "worker_attempt.sandbox_merged",
+      message: `Merged recovered sandbox worktree back: ${attempt.sandboxBranch ?? "(branch)"}`,
+      payload: {
+        attemptId,
+        sandboxWorktreePath: attempt.sandboxWorktreePath,
+        sandboxBranch: attempt.sandboxBranch,
+        sandboxBaseRepo: attempt.sandboxBaseRepo,
+        changed: mergeBack.changed,
+        recovered: true,
+      },
+      mutate: (draft, timestamp) => {
+        const a = draft.workerAttempts.find((x) => x.id === attemptId);
+        if (a) a.sandboxMergedBack = true;
+        draft.updatedAt = timestamp;
+      },
+    });
+  } else {
+    await appendEvent({
+      timestamp: mergedAt,
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      attemptId,
+      type: "worker_attempt.sandbox_merge_failed",
+      message: `Recovered sandbox merge-back failed; worktree left intact: ${attempt.sandboxBranch ?? "(branch)"}`,
+      payload: {
+        sandboxWorktreePath: attempt.sandboxWorktreePath,
+        sandboxBranch: attempt.sandboxBranch,
+        sandboxBaseRepo: attempt.sandboxBaseRepo,
+        error: mergeBack.error,
+        recovered: true,
+      },
+    }).catch(() => undefined);
+  }
+}
+
+// Boot-recovery: the app quit mid-iteration and no report exists. Fail the
+// orphaned attempt, reset its task/step, and launch ONE fresh attempt for the
+// same task in place (the loop's iteration record keeps its number — retries
+// are attempt-level, not iteration-level). Returns the new attemptId, or null
+// when the run/task is no longer in a relaunchable state.
+export async function relaunchDirectAttempt(
+  runId: string,
+  attemptId: string,
+): Promise<string | null> {
+  const run = await requireRun(runId);
+  if (run.executionMode !== "direct") return null;
+  if (run.status === "paused" || run.status === "cancelled" || isTerminalRunStatus(run.status)) {
+    return null;
+  }
+  const attempt = run.workerAttempts.find((a) => a.id === attemptId);
+  if (!attempt) return null;
+  const task = run.workerTasks.find((t) => t.id === attempt.workerTaskId);
+  if (!task) return null;
+
+  await commitRunChange(run, {
+    type: "direct_run.attempt_relaunched",
+    message: "Relaunching direct worker attempt after app restart",
+    payload: { staleAttemptId: attemptId, workerTaskId: task.id },
+    mutate: (draft, timestamp) => {
+      const a = draft.workerAttempts.find((x) => x.id === attemptId);
+      if (a && !DIRECT_ATTEMPT_TERMINAL.has(a.status)) {
+        a.status = "failed";
+        a.error = "app restarted mid-iteration";
+        a.finishedAt = a.finishedAt ?? timestamp;
+      }
+      const t = draft.workerTasks.find((x) => x.id === task.id);
+      if (t) {
+        t.status = "queued";
+        t.updatedAt = timestamp;
+      }
+      const s = t?.stepId ? draft.steps.find((x) => x.id === t.stepId) : undefined;
+      if (s && !["complete", "completed_unverified", "skipped"].includes(s.status)) {
+        s.status = "ready";
+        s.updatedAt = timestamp;
+      }
+      draft.status = "running";
+      draft.updatedAt = timestamp;
+    },
+  });
+
+  const cwd = workspaceCwdFromRun(await requireRun(runId));
+  if (!cwd) return null;
+  const envelope = await prepareWorkerTask({
+    runId,
+    workerTaskId: task.id,
+    cwd,
+    unattended: true,
+  });
+  scheduleAutopilotCycles(runId, [envelope.attemptId]);
+  return envelope.attemptId;
+}
+
+// Strip ANSI escapes + control noise so a raw TUI tail reads as plain text in
+// the summary ladder. Mirrors the cleanup claude-backend applies to CC's
+// last words on unexpected exit.
+function stripAnsiForDirectSummary(text: string): string {
+  return text
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+    .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, "")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
+}
+
+// Newest worker attempt belonging to a given loom graph node, identified by the
+// node id stamped on the node's worker task. Pre-graph direct runs (no
+// loomNodeId on any task) fall through to the run's newest attempt — which, for
+// the single-task-per-pass shape they always had, is exactly that node's
+// attempt. Returns undefined when the node has no attempt yet.
+export function newestAttemptForNode(run: RunState, nodeId: string): WorkerAttempt | undefined {
+  const taskIds = new Set(
+    run.workerTasks.filter((t) => t.loomNodeId === nodeId).map((t) => t.id),
+  );
+  if (taskIds.size === 0) return run.workerAttempts.at(-1);
+  for (let i = run.workerAttempts.length - 1; i >= 0; i -= 1) {
+    if (taskIds.has(run.workerAttempts[i].workerTaskId)) return run.workerAttempts[i];
+  }
+  return undefined;
+}
+
+// Derive an attempt's iteration summary (the loop's sentinel/untilPhrase
+// contract). Ladder: report.summary → cleaned pty tail → raw-log tail → honest
+// placeholder. Sentinels (SPARK_LOOP_CONTINUE/DONE) survive every rung. The pty
+// rung only helps in the force-fail window (runWorkerSession kills the pty
+// before this review is even scheduled, and boot recovery runs in a fresh
+// process) — the raw byte log persists the same stream, so its tail covers
+// every normal exit.
+async function deriveAttemptSummary(
+  attempt: WorkerAttempt,
+  report: WorkerReport | null,
+): Promise<string> {
+  let summary = report?.summary?.trim() ?? "";
+  if (!summary) {
+    const tail = pty.readTail(attempt.id, 64 * 1024);
+    let rawText = tail ? tail.toString("utf8") : null;
+    if (!rawText && attempt.rawLogPath) {
+      rawText = await readFileTailUtf8(attempt.rawLogPath, 64 * 1024);
+    }
+    if (rawText) {
+      const lines = stripAnsiForDirectSummary(rawText)
+        .split(/\r?\n/)
+        .map((line) => line.trimEnd())
+        .filter((line) => line.trim().length > 0);
+      summary = lines.slice(-40).join("\n").trim();
+    }
+  }
+  if (!summary) summary = `Worker exited (status ${attempt.status}) and produced no report.`;
+  return summary;
+}
+
+// Map a single node's report/attempt outcome onto a run status. A blocked report
+// holds the run open for the user; it is never coerced to complete. No report +
+// clean exit counts as success (the CLI may have answered a trivial pass without
+// writing the report).
+function mapDirectOutcome(
+  reportStatus: WorkerReport["status"] | undefined,
+  attemptStatus: WorkerAttemptStatus,
+): RunStatus {
+  if (reportStatus === "blocked") return "blocked";
+  if (reportStatus === "complete" || reportStatus === "partial") return "complete";
+  if (reportStatus === "failed") return "failed";
+  return attemptStatus === "succeeded" ? "complete" : "failed";
+}
+
+// Fetch the loom's node graph for this direct run (via its automationId). Returns
+// undefined for pre-graph runs / unknown jobs / non-loom runs — the caller then
+// keeps the degenerate single-wave terminalize behavior, so single-node looms
+// (and pre-graph runs) are unaffected. Lazily imports scheduler to avoid a static
+// cycle (scheduler already lazy-imports run-store), matching direct-worker.ts.
+async function loomGraphForRun(run: RunState): Promise<LoomGraph | undefined> {
+  if (!run.automationId) return undefined;
+  try {
+    const { getJob } = await import("./scheduler");
+    const job = await getJob(run.automationId);
+    return job?.graph;
+  } catch {
+    return undefined;
+  }
+}
+
+// The direct-run replacement for the manager review: read each settled wave
+// node's final report, derive its summary, map the outcome, and either ADVANCE
+// the pass to the next ready wave (sequential chains) or TERMINALIZE the run.
+// Runs through commitRunChange so the complete-transition plumbing (seen bit,
+// run memory, notifications) fires identically to a managed completion.
+//
+// Looms v2.5: a loom PASS executes its graph node-by-node as worker attempts in
+// THIS one run, layer by layer, with the autopilot join barrier as the wave
+// boundary. finalizeDirectRun is the join: it only settles once EVERY node in
+// the current wave (loomPass.pendingNodeIds) has its newest attempt terminal.
+// For a single-node loom a pass has exactly ONE node, so "every pending node's
+// newest attempt is terminal" reduces to "workerAttempts.at(-1) is terminal" —
+// byte-identical to the pre-graph behavior. (Pre-graph direct runs with no
+// loomPass fall through to the same single-attempt path.)
+async function finalizeDirectRun(runId: string): Promise<void> {
+  const run = await requireRun(runId);
+  if (run.executionMode !== "direct") return;
+  // paused/cancelled are user decisions; blocked/terminal mean this iteration
+  // was already decided (idempotency under watchdog + cycle double-fires).
+  if (run.status === "paused" || run.status === "cancelled" || run.status === "blocked") return;
+  if (isTerminalRunStatus(run.status)) return;
+
+  // The wave's pending nodes (the join barrier). When loomPass is present, the
+  // pass's current layer; otherwise the degenerate single-node case keyed off
+  // the newest attempt, exactly as before.
+  const pendingNodeIds =
+    run.loomPass && run.loomPass.pendingNodeIds.length > 0
+      ? run.loomPass.pendingNodeIds
+      : undefined;
+
+  // Map each pending node to its newest attempt; bail unless they are ALL
+  // terminal (the join hasn't completed yet). For one pending node this is the
+  // same `workerAttempts.at(-1)` terminal check as the pre-graph code.
+  const waveAttempts: Array<{ nodeId: string; attempt: WorkerAttempt }> = [];
+  if (pendingNodeIds) {
+    // ADVANCE idempotency: while terminalizing flips the run terminal (so a
+    // re-entry early-returns on isTerminalRunStatus above), ADVANCING leaves the
+    // run "running". A re-entry in the narrow window between the settle commit
+    // (which marks the wave's nodes succeeded) and the next-wave seed would see
+    // the SAME pending nodes with terminal attempts and try to settle/advance
+    // them again — a duplicate wave. Guard on the recorded node status: once a
+    // pending node is no longer "running"/"pending" in loomPass, this wave was
+    // already processed, so bail. (A still-"running" node means a genuinely
+    // fresh join.) A RELAUNCH (retry) leaves its node "running" but re-launches
+    // it WITHIN this same finalizeDirectRun call — by the time any re-entry could
+    // fire (the review is single-flight per run), the fresh retry attempt is the
+    // node's newest and is non-terminal, so the per-node terminal check below
+    // bails; relaunch needs no separate idempotency flag here.
+    const recorded = run.loomPass?.nodeStates;
+    if (recorded && pendingNodeIds.every((id) => {
+      const st = recorded[id]?.status;
+      return st !== undefined && st !== "running" && st !== "pending";
+    })) {
+      return;
+    }
+    for (const nodeId of pendingNodeIds) {
+      const a = newestAttemptForNode(run, nodeId);
+      if (!a || !DIRECT_ATTEMPT_TERMINAL.has(a.status)) return; // wave not joined yet
+      waveAttempts.push({ nodeId, attempt: a });
+    }
+  } else {
+    const a = run.workerAttempts.at(-1);
+    if (!a || !DIRECT_ATTEMPT_TERMINAL.has(a.status)) return;
+    waveAttempts.push({ nodeId: run.loomPass?.pendingNodeIds[0] ?? "w0", attempt: a });
+  }
+
+  // The loom's node graph (via automationId). Needed up-front this slice for
+  // BOTH per-node worker retry (read node.retry) and guard resolution. Undefined
+  // for pre-graph / non-loom runs — those keep the degenerate single-wave path.
+  const graph: LoomGraph | undefined = run.loomPass ? await loomGraphForRun(run) : undefined;
+  const nodeById = new Map<string, LoomNodeDef>((graph?.nodes ?? []).map((n) => [n.id, n]));
+  // cwd for predicate evaluation (retry-until + guard predicates) — shared with
+  // the advance launch below. Undefined-safe: predicates that need a shell never
+  // run with an empty cwd (the advance/relaunch re-checks cwd before launching).
+  const predicateCwd = workspaceCwdFromRun(run) ?? "";
+
+  // Settle EVERY wave node: derive its summary + per-node outcome. For a
+  // sequential chain the wave is one node, so this loops once.
+  const settled: Array<{
+    nodeId: string;
+    attempt: WorkerAttempt;
+    summary: string;
+    reportStatus: WorkerReport["status"] | undefined;
+    nodeStatus: "succeeded" | "failed" | "blocked";
+  }> = [];
+  for (const { nodeId, attempt } of waveAttempts) {
+    const report = attempt.finalReportPath ? await readWorkerReport(attempt.finalReportPath) : null;
+    const summary = await deriveAttemptSummary(attempt, report);
+    const outcome = mapDirectOutcome(report?.status, attempt.status);
+    settled.push({
+      nodeId,
+      attempt,
+      summary,
+      reportStatus: report?.status,
+      nodeStatus: outcome === "complete" ? "succeeded" : outcome === "blocked" ? "blocked" : "failed",
+    });
+  }
+
+  // ── SLICE 5: per-node worker RETRY ────────────────────────────────────────
+  // BEFORE treating a settled WORKER node as succeeded/failed, honor a retry
+  // clause: the node is "satisfied" iff it succeeded AND (no retry.until OR the
+  // until-predicate holds against its OWN just-produced output). When not
+  // satisfied and activations remain, the node RE-LAUNCHES as a fresh single-
+  // node wave (the run stays RUNNING — we neither advance nor fail). When not
+  // satisfied and activations are exhausted, it has failed (fails the pass as
+  // today). A blocked node never retries (blocked holds the pass). A worker with
+  // no retry behaves EXACTLY as today (effective === its nodeStatus). This is a
+  // bounded self-retry, NOT a graph back-edge.
+  const effective: Array<{
+    nodeId: string;
+    effectiveStatus: "succeeded" | "failed" | "blocked" | "relaunch";
+  }> = [];
+  for (const s of settled) {
+    const node = nodeById.get(s.nodeId);
+    const retry = node && node.kind === "worker" ? node.retry : undefined;
+    if (!retry || retry.maxAttempts <= 0 || s.nodeStatus === "blocked") {
+      effective.push({ nodeId: s.nodeId, effectiveStatus: s.nodeStatus });
+      continue;
+    }
+    const succeeded = s.nodeStatus === "succeeded";
+    // until held? No until ⇒ true; else evaluate against this node's own output
+    // (the worker's just-produced summary) + its forward-parents' outputs.
+    let untilHeld = true;
+    if (succeeded && retry.until) {
+      const incomingOutputs: Record<string, string> = {};
+      if (graph) {
+        for (const pid of upstreamOf(graph, s.nodeId)) {
+          const out = run.loomPass?.nodeStates[pid]?.output;
+          if (out !== undefined) incomingOutputs[pid] = out;
+        }
+      }
+      untilHeld = await evaluateGuardPredicate(retry.until, {
+        cwd: predicateCwd,
+        sourceOutput: s.summary,
+        incomingOutputs,
+      });
+    } else if (!succeeded) {
+      untilHeld = false;
+    }
+    const activations = run.loomPass?.nodeStates[s.nodeId]?.activations ?? 0;
+    const disposition = retryDisposition({
+      succeeded,
+      untilHeld,
+      activations,
+      maxAttempts: retry.maxAttempts,
+    });
+    effective.push({
+      nodeId: s.nodeId,
+      effectiveStatus:
+        disposition === "satisfied" ? "succeeded" : disposition === "relaunch" ? "relaunch" : "failed",
+    });
+  }
+  const effOf = (nodeId: string) =>
+    effective.find((e) => e.nodeId === nodeId)?.effectiveStatus ?? "succeeded";
+  const relaunchNodeIds = effective.filter((e) => e.effectiveStatus === "relaunch").map((e) => e.nodeId);
+
+  // Aggregate wave outcome (retry-aware). Precedence: any blocked node blocks the
+  // pass (holds for the user); else any failed/exhausted node fails the pass;
+  // else any node wants to RELAUNCH (the pass continues running, no advance);
+  // else the wave fully succeeded and we advance/terminalize. Blocked and
+  // failure are checked BEFORE relaunch so a hard failure/hold in the same wave
+  // wins over a sibling's pending re-attempt (matching "any failed node fails").
+  const aggregate: RunStatus = effective.some((e) => e.effectiveStatus === "blocked")
+    ? "blocked"
+    : effective.some((e) => e.effectiveStatus === "failed")
+      ? "failed"
+      : "complete";
+  const relaunching = aggregate === "complete" && relaunchNodeIds.length > 0;
+
+  // ── SLICE 4/5: decide ADVANCE vs TERMINALIZE (inline merge + guard join) ──
+  // Only a fully-succeeded wave (and one with no pending retry relaunch) can
+  // advance. Project the just-settled worker nodes onto the pass's nodeStates,
+  // then run the INLINE-RESOLUTION LOOP that — each turn — resolves every ready
+  // MERGE (its output is the labeled concat of its succeeded parents) AND every
+  // ready GUARD (await its predicate; record branchResult pass/fail), then prunes
+  // the now-dead-only branches to "skipped" (computeSkips), feeding all of it back
+  // into the projection. Repeat until stable, so a chain of merges/guards/skips
+  // collapses in ONE finalize. THEN ask the pure walk for the next WORKER wave.
+  // If it is all-worker we keep the run RUNNING and launch it; if empty AND the
+  // pass is complete we terminalize; if it still contains a non-worker node we
+  // terminalize cleanly rather than dropping it. A failed/blocked wave (or a
+  // relaunch) never advances. A single-node loom (or any sink wave) resolves
+  // nothing, nextReadyWave is [] and it terminalizes — identical to slice 3.
+  let nextWaveNodeIds: string[] = [];
+  let nextWaveNodes: LoomNodeDef[] = [];
+  // Merge nodes resolved inline by the loop below: their status flips to
+  // "succeeded" with the joined output, persisted in the SAME advance commit so
+  // {{node:<mergeId>}} / {{incoming}} downstream and boot recovery see them.
+  const resolvedMerges: Array<{ nodeId: string; output: string }> = [];
+  // Guard nodes resolved inline (status succeeded + which branch they routed) and
+  // the nodes pruned dead by those routes (status skipped). Both are persisted in
+  // the SAME advance commit; neither launches an attempt nor pushes a note.
+  const resolvedGuards: Array<{ nodeId: string; branch: "pass" | "fail"; output: string }> = [];
+  const skippedNodeIds = new Set<string>();
+  // ── SLICE 6: bounded loop-back state for this advance ──────────────────────
+  // The per-edge fire counters carried into this advance (defaults {} for an
+  // acyclic / pre-slice-6 pass). `workingVisits` is a mutable copy bumped each
+  // time a back-edge fires below; it is persisted in the advance commit so the
+  // remaining-fire budget survives a restart mid-cycle. `resetByBackEdge`
+  // collects every node a fired back-edge flips back to "pending" so the commit
+  // re-applies the reset to the durable nodeStates. `backEdgeFired` flags that at
+  // least one loop re-opened (drives the commit message + the activation-cap
+  // bookkeeping). `activationCapHit` short-circuits to a failed terminalization
+  // (the second, per-pass termination bound) when re-launching would run away.
+  const workingVisits: Record<string, number> = { ...(run.loomPass?.backEdgeVisits ?? {}) };
+  const resetByBackEdge = new Set<string>();
+  let backEdgeFired = false;
+  let activationCapHit = false;
+  if (aggregate === "complete" && !relaunching && run.loomPass && graph) {
+    // Local projection of the pass's node states: status + output + branchResult.
+    // Seeded from the recorded states, then the just-settled worker nodes'
+    // summaries are layered on top (relaunch nodes are excluded by the
+    // !relaunching guard above, so every settled node here is succeeded).
+    const projected: Record<
+      string,
+      {
+        status: "pending" | "skipped" | "running" | "succeeded" | "failed" | "blocked";
+        output?: string;
+        branchResult?: "pass" | "fail";
+      }
+    > = {};
+    for (const [id, ns] of Object.entries(run.loomPass.nodeStates)) {
+      projected[id] = { status: ns.status, output: ns.output, branchResult: ns.branchResult };
+    }
+    for (const s of settled) projected[s.nodeId] = { status: "succeeded", output: s.summary };
+
+    // Cumulative worker-node activations across the whole pass so far — the input
+    // to the per-pass activation backstop (bound 2). Every launch/relaunch/loop
+    // re-launch bumped a node's activations by 1, so this sum monotonically grows.
+    const totalActivations = (): number =>
+      Object.values(run.loomPass!.nodeStates).reduce((sum, ns) => sum + (ns.activations ?? 0), 0);
+
+    // Reset one back-edge's loop body in the projection: every body node flips
+    // back to "pending" with output/branchResult cleared (a fresh re-run), so the
+    // body re-enters readiness. CRUCIALLY also un-skip every node FORWARD-REACHABLE
+    // from the body — the loop-EXIT branch a body guard pruned to "skipped" on the
+    // prior fail-turn (e.g. the "DONE" sink past a fix-until guard) must become
+    // "pending" again so a later turn's guard routing can re-reach it; otherwise a
+    // loop could never exit to its sink. computeSkips re-prunes from the fresh
+    // routing on the next stabilization turn, so un-skipping never wrongly runs a
+    // node — it only restores eligibility. Body nodes (which actually re-run) and
+    // descendant exits (which become eligible) both persist as "pending".
+    const resetCycleBody = (resetNodes: string[]) => {
+      const widen = new Set<string>(resetNodes);
+      for (const id of forwardDescendants(graph!, resetNodes)) widen.add(id);
+      for (const id of widen) {
+        projected[id] = { status: "pending" };
+        resetByBackEdge.add(id);
+        // A node re-opened by a loop is no longer a settled skip; drop any stale
+        // skip record so the persisted state matches the live re-run.
+        skippedNodeIds.delete(id);
+      }
+    };
+
+    // OUTER loop: stabilize merges/guards/skips, THEN fire any armed+firable
+    // back-edges (which re-open loop bodies), THEN re-stabilize — repeating until
+    // a turn neither resolves anything NOR fires a back-edge. Bounded by the
+    // per-edge visitCap (an exhausted edge stops firing) AND, defensively, by an
+    // iteration cap derived from the total fire budget so a malformed graph can't
+    // spin even before the activation backstop trips. computeSkips/merge/guard are
+    // monotonic within a stabilization; a back-edge reset is the only thing that
+    // re-opens them, and each fire consumes one unit of an edge's bounded budget.
+    const maxBackEdgeFires =
+      graph.edges.filter((e) => e.backEdge === true).length * MAX_BACK_EDGE_VISIT_CAP + 1;
+    for (let outer = maxBackEdgeFires; outer >= 0; outer -= 1) {
+      // Inline-resolution loop: resolve ready merges + guards, then prune. Each
+      // resolved merge/guard feeds the projection so a downstream merge/guard can
+      // become ready next turn; pruning a branch can in turn ready a merge whose
+      // skipped parents now let "any"/"all" settle. Bounded by the node count + 1
+      // (each merge/guard resolves at most once — it only leaves "pending" when
+      // picked up here, and skips are monotonic).
+      for (let bound = graph.nodes.length + 1; bound >= 0; bound -= 1) {
+        let progressed = false;
+        // Merges first (pure): a guard downstream of a merge reads the joined output.
+        for (const mergeId of readyMergeNodes(graph, projected)) {
+          const output = mergeOutput(graph, mergeId, projected);
+          projected[mergeId] = { status: "succeeded", output };
+          resolvedMerges.push({ nodeId: mergeId, output });
+          progressed = true;
+        }
+        // Guards (impure: await the predicate). The guard's source output is its
+        // single forward parent's output; incomingOutputs maps every forward parent.
+        for (const guardId of readyGuardNodes(graph, projected)) {
+          const parents = upstreamOf(graph, guardId);
+          const incomingOutputs: Record<string, string> = {};
+          for (const pid of parents) {
+            const out = projected[pid]?.output;
+            if (out !== undefined) incomingOutputs[pid] = out;
+          }
+          const sourceOutput = parents.length > 0 ? (projected[parents[0]]?.output ?? "") : "";
+          const node = nodeById.get(guardId);
+          const predicate = node && node.kind === "guard" ? node.predicate : undefined;
+          const passed = predicate
+            ? await evaluateGuardPredicate(predicate, {
+                cwd: predicateCwd,
+                sourceOutput,
+                incomingOutputs,
+              })
+            : false;
+          const branch: "pass" | "fail" = passed ? "pass" : "fail";
+          const output = `guard: ${branch}`;
+          projected[guardId] = { status: "succeeded", output, branchResult: branch };
+          resolvedGuards.push({ nodeId: guardId, branch, output });
+          progressed = true;
+        }
+        // Prune branches whose every path just went dead (transitive closure).
+        const skips = computeSkips(graph, projected);
+        for (const id of skips) {
+          projected[id] = { ...(projected[id] ?? { status: "pending" }), status: "skipped" };
+          skippedNodeIds.add(id);
+          progressed = true;
+        }
+        if (!progressed) break;
+      }
+
+      // The stabilized projection is settled for this turn. Now fire any armed +
+      // firable back-edges: an armed back-edge whose source ROUTED to it AND whose
+      // per-edge visit budget remains. Firing resets its loop body to "pending"
+      // (re-opening readiness) and consumes one unit of its budget. An exhausted
+      // (or un-armed) back-edge does NOT fire — the loop EXITS and flow falls
+      // through (the guard's other branch / downstream of the body). Acyclic
+      // graphs have no back-edge, so this is [] and the outer loop runs once.
+      const firing = backEdgesToFire(graph, projected, workingVisits);
+      if (firing.length === 0) break;
+      for (const { edge, resetNodes } of firing) {
+        workingVisits[edge.id] = (workingVisits[edge.id] ?? 0) + 1;
+        resetCycleBody(resetNodes);
+        backEdgeFired = true;
+      }
+      // Re-stabilize on the next outer iteration (the reset re-opened the body).
+    }
+
+    if (!isPassComplete(graph, projected, workingVisits)) {
+      const ready = nextReadyWave(graph, projected);
+      nextWaveNodes = ready.map((id) => nodeById.get(id)).filter((n): n is LoomNodeDef => Boolean(n));
+      // Only WORKER nodes are launchable as a wave. Merges + guards were already
+      // resolved inline above (so neither can appear here); if the ready wave
+      // still contains any non-worker node, do NOT advance: terminalize cleanly
+      // rather than dropping it.
+      if (nextWaveNodes.length === ready.length && nextWaveNodes.every((n) => n.kind === "worker")) {
+        // ── Bound 2: per-pass activation backstop. Launching this wave bumps each
+        // of its nodes' activations by 1; if that would push the pass's cumulative
+        // worker activations over MAX_PASS_ACTIVATIONS, do NOT advance — fail the
+        // pass with a clear cap message. This is the independent backstop that
+        // guarantees termination even if a back-edge's visitCap were mis-set or
+        // many back-edges interleaved. Acyclic / normally-bounded passes never
+        // approach the cap, so this is inert for every slice-1..5 graph.
+        if (totalActivations() + ready.length > MAX_PASS_ACTIVATIONS) {
+          activationCapHit = true;
+          nextWaveNodeIds = [];
+          nextWaveNodes = [];
+        } else {
+          nextWaveNodeIds = ready;
+        }
+      } else {
+        nextWaveNodeIds = [];
+        nextWaveNodes = [];
+      }
+    }
+  }
+  const advancing = nextWaveNodeIds.length > 0;
+
+  // SLICE 6: the per-pass activation backstop tripped — the loom kept re-opening
+  // loop bodies past the safe cap. Terminalize the pass as FAILED with a clear,
+  // self-explaining summary (recorded as the pass's last spark note below). This
+  // never coincides with advancing/relaunching (the cap check only fires when we
+  // would otherwise advance, and zeroes nextWaveNodeIds), so the run terminalizes.
+  const activationCapSummary =
+    "Loom graph exceeded the per-pass activation cap " +
+    `(${MAX_PASS_ACTIVATIONS}); a loop-back never terminated. Pass failed.`;
+
+  // The run status this commit lands on: keep RUNNING when advancing (the next
+  // wave is about to launch) OR relaunching (a retry node re-runs in place),
+  // else the aggregate terminal status — UNLESS the activation backstop tripped,
+  // in which case the pass fails outright. advancing and relaunching are mutually
+  // exclusive: relaunching short-circuits the advance block (its !relaunching
+  // guard leaves nextWaveNodeIds empty).
+  const stayingLive = advancing || relaunching;
+  let committedStatus: RunStatus = activationCapHit
+    ? "failed"
+    : stayingLive
+      ? "running"
+      : aggregate;
+
+  // FIX 3(b) — co-blocked sibling backstop. Before terminalizing a non-staying-
+  // live "complete" run, scan the WHOLE pass for any node still recorded
+  // "blocked" whose newest attempt is terminal (a report-blocked node from an
+  // earlier wave whose question is still unanswered). A single-node answer-resume
+  // that succeeds would otherwise let the wave aggregate read "complete" while a
+  // sibling node is still blocked — terminalizing the run and abandoning the
+  // sibling's question. Forcing "blocked" re-enters the run blocked so
+  // maybeResumeAnsweredPass re-fires for the sibling. Settled-this-wave nodes are
+  // excluded (their fresh status is in `settled`, not yet in nodeStates). For a
+  // single-node loom / pre-graph run there is no sibling, so this never fires.
+  if (!stayingLive && !activationCapHit && committedStatus === "complete" && run.loomPass) {
+    const settledThisWave = new Set(settled.map((s) => s.nodeId));
+    const hasBlockedSibling = Object.entries(run.loomPass.nodeStates).some(([nodeId, ns]) => {
+      if (ns.status !== "blocked" || settledThisWave.has(nodeId)) return false;
+      const att = newestAttemptForNode(run, nodeId);
+      return Boolean(att && DIRECT_ATTEMPT_TERMINAL.has(att.status));
+    });
+    if (hasBlockedSibling) committedStatus = "blocked";
+  }
+
+  // Captured BEFORE the commit below: `run` is the shared cache object the
+  // commit mutates in place, so reading run.status afterwards would yield the
+  // post-flip value (and the blocked re-emit would self-suppress as a no-op
+  // blocked→blocked transition in the notification policy).
+  const previousStatus = run.status;
+
+  // FIX 3(c) — duplicate-question dedupe. A node that settles "blocked" again
+  // with the SAME question (e.g. an idempotent finalize re-entry, or a co-blocked
+  // sibling whose state is re-walked) must NOT push a second identical question
+  // note (it would spam the Hub and confuse answerForBlockedNode's newest-question
+  // scan). Captured PRE-commit: for each node that will settle blocked, its prior
+  // recorded status and the newest question message it already left. The mutate
+  // skips the push only when the node is ALREADY recorded blocked with an
+  // identical message; a new or changed question is always pushed.
+  const priorBlockedNote = new Map<string, { status: string | undefined; message: string | undefined }>();
+  for (const s of settled) {
+    if (s.nodeStatus !== "blocked") continue;
+    const recorded = run.loomPass?.nodeStates[s.nodeId]?.status;
+    let lastQuestion: string | undefined;
+    for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
+      const m = run.humanMessages[i];
+      if (m.author === "spark" && m.kind === "question" && m.loomNodeId === s.nodeId) {
+        lastQuestion = m.message;
+        break;
+      }
+    }
+    priorBlockedNote.set(s.nodeId, { status: recorded, message: lastQuestion });
+  }
+
+  await commitRunChange(run, {
+    type: "direct_run.finalized",
+    message: activationCapHit
+      ? `Loom pass failed: per-pass activation cap (${MAX_PASS_ACTIVATIONS}) exceeded`
+      : advancing
+        ? backEdgeFired
+          ? `Loom wave settled; looping back to ${nextWaveNodeIds.join(", ")}`
+          : `Loom wave settled; advancing to ${nextWaveNodeIds.join(", ")}`
+        : relaunching
+          ? `Loom wave settled; retrying ${relaunchNodeIds.join(", ")}`
+          : `Loom iteration finalized: ${aggregate}`,
+    payload: {
+      attemptIds: settled.map((s) => s.attempt.id),
+      reportStatuses: settled.map((s) => s.reportStatus ?? null),
+      nextStatus: committedStatus,
+      settledNodeIds: settled.map((s) => s.nodeId),
+      advancingTo: advancing ? nextWaveNodeIds : null,
+      retryingNodeIds: relaunching ? relaunchNodeIds : null,
+      resolvedMergeNodeIds: resolvedMerges.length > 0 ? resolvedMerges.map((m) => m.nodeId) : null,
+      resolvedGuardNodeIds: resolvedGuards.length > 0 ? resolvedGuards.map((g) => g.nodeId) : null,
+      skippedNodeIds: skippedNodeIds.size > 0 ? [...skippedNodeIds] : null,
+      // SLICE 6: which loop bodies a back-edge re-opened this advance, and the
+      // updated per-edge fire budget (observability + boot-recovery audit trail).
+      loopBackResetNodeIds: backEdgeFired ? [...resetByBackEdge] : null,
+      backEdgeVisits: backEdgeFired ? { ...workingVisits } : null,
+      activationCapExceeded: activationCapHit ? true : null,
+    },
+    mutate: (draft, timestamp) => {
+      if (draft.status === "paused" || draft.status === "cancelled" || draft.status === "blocked") {
+        return false;
+      }
+      if (isTerminalRunStatus(draft.status)) return false;
+      for (const s of settled) {
+        // A node electing to RELAUNCH (bounded retry) is NOT settled here: it
+        // stays running and is re-launched right after this commit (which bumps
+        // its activations + appends a fresh attempt). Skipping it leaves its
+        // task/step/nodeState untouched and pushes NO spark note (the re-launch
+        // owns the next attempt's transcript).
+        const eff = effOf(s.nodeId);
+        if (eff === "relaunch") continue;
+        const t = draft.workerTasks.find((x) => x.id === s.attempt.workerTaskId);
+        if (t) {
+          t.status = eff === "succeeded" ? "accepted" : eff === "blocked" ? "blocked" : "failed";
+          t.updatedAt = timestamp;
+        }
+        const step = t?.stepId ? draft.steps.find((x) => x.id === t.stepId) : undefined;
+        if (step && eff !== "blocked") {
+          step.status = eff === "succeeded" ? "complete" : "failed";
+          step.updatedAt = timestamp;
+          if (draft.currentStepId === step.id) draft.currentStepId = undefined;
+        }
+        // Record the settled node's outcome + output into the loom pass, keyed
+        // by node id so the advance walk (and later slices) read per-node
+        // results. The advance launch below feeds these as {{node:<id>}} /
+        // {{incoming}} to the next wave. (Uses the retry-effective status so an
+        // exhausted retry records "failed".)
+        if (draft.loomPass) {
+          const ns = draft.loomPass.nodeStates[s.nodeId];
+          if (ns) {
+            ns.status = eff;
+            ns.output = s.summary;
+          }
+        }
+        // The summary message IS the loop contract: automation-loop scans the
+        // LAST spark note for sentinels/untilPhrase and renders it in history.
+        // Pushed in the SAME commit that flips status so the completion-summary
+        // suppressor sees it and never appends a templated duplicate after it.
+        // Stamped with the node id so per-node attribution survives in the
+        // transcript. When terminalizing a chain, the sink node settles last, so
+        // its note is the LAST spark note — exactly the pass-level summary
+        // onTerminal reads. (undefined-safe for pre-graph runs.)
+        //
+        // FIX 3(c): a node re-settling blocked with the SAME question it already
+        // asked must not push a duplicate question note (the Hub would show it
+        // twice and answerForBlockedNode's newest-question scan would re-pair it).
+        // Only suppress when the node was ALREADY recorded blocked with an
+        // identical message; a new/changed question still pushes.
+        const priorNote = priorBlockedNote.get(s.nodeId);
+        const isDuplicateQuestion =
+          eff === "blocked" && priorNote?.status === "blocked" && priorNote.message === s.summary;
+        if (!isDuplicateQuestion) {
+          draft.humanMessages.push({
+            id: makeId("msg"),
+            runId: draft.id,
+            author: "spark",
+            kind: eff === "blocked" ? "question" : "note",
+            message: s.summary,
+            attachments: [],
+            createdAt: timestamp,
+            loomNodeId: s.nodeId,
+          });
+        }
+      }
+      // Persist every inline-resolved MERGE node's status="succeeded" + joined
+      // output into loomPass.nodeStates in the SAME commit, so the advance launch
+      // below feeds {{node:<mergeId>}} / {{incoming}} from it AND boot recovery
+      // re-derives the same frontier. A merge launches NO worker, so it gets no
+      // task/step transition and pushes NO humanMessages note (it is not a worker
+      // and must not become the pass's last spark note). Merge nodes are absent
+      // from nodeStates (launchDirectNodeTasks only seeds launched nodes), so the
+      // entry is CREATED here with an empty attemptIds list, layer = the next
+      // layer above the current cursor (it resolves between waves).
+      if (draft.loomPass) {
+        const mergeLayer = (draft.loomPass.layerCursor ?? 0) + 1;
+        for (const m of resolvedMerges) {
+          const existing = draft.loomPass.nodeStates[m.nodeId];
+          draft.loomPass.nodeStates[m.nodeId] = {
+            status: "succeeded",
+            attemptIds: existing?.attemptIds ?? [],
+            output: m.output,
+            layer: existing?.layer ?? mergeLayer,
+            activations: existing?.activations,
+          };
+        }
+        // Persist every inline-resolved GUARD: status="succeeded" + branchResult
+        // (which branch it routed) + a short "guard: pass/fail" output. Like a
+        // merge it launches NO worker, gets no task/step transition and pushes NO
+        // note. Created here if absent (guards aren't seeded by the launcher).
+        // edgeIsLive reads branchResult to prune the un-taken branch.
+        const guardLayer = (draft.loomPass.layerCursor ?? 0) + 1;
+        for (const g of resolvedGuards) {
+          const existing = draft.loomPass.nodeStates[g.nodeId];
+          draft.loomPass.nodeStates[g.nodeId] = {
+            status: "succeeded",
+            attemptIds: existing?.attemptIds ?? [],
+            output: g.output,
+            layer: existing?.layer ?? guardLayer,
+            activations: existing?.activations,
+            branchResult: g.branch,
+          };
+        }
+        // Persist every pruned node as "skipped" so the walk treats it as settled
+        // (never launched, never waited on) and boot recovery re-derives the same
+        // dead frontier. A skipped node launches no worker and pushes no note.
+        const skipLayer = (draft.loomPass.layerCursor ?? 0) + 1;
+        for (const id of skippedNodeIds) {
+          const existing = draft.loomPass.nodeStates[id];
+          draft.loomPass.nodeStates[id] = {
+            status: "skipped",
+            attemptIds: existing?.attemptIds ?? [],
+            output: existing?.output,
+            layer: existing?.layer ?? skipLayer,
+            activations: existing?.activations,
+            branchResult: existing?.branchResult,
+          };
+        }
+        // ── SLICE 6: reset every fired-back-edge loop-body node to "pending" ──
+        // Applied LAST so it OVERRIDES the settled/merge/guard/skip persistence
+        // above for any node a back-edge re-opened: clear status→pending,
+        // output→undefined, branchResult→undefined; PRESERVE attemptIds history
+        // (the prior attempts happened) and activations (the activation backstop
+        // counts cumulative launches across the whole pass — never decremented).
+        // The just-settled worker's completion note was still pushed above (the
+        // attempt really ran); the RESET itself pushes NO note — only the node's
+        // NEXT re-run attempt will, when it settles. nextReadyWave then re-surfaces
+        // the re-opened body as the next worker wave (launched after this commit).
+        for (const id of resetByBackEdge) {
+          const existing = draft.loomPass.nodeStates[id];
+          draft.loomPass.nodeStates[id] = {
+            status: "pending",
+            attemptIds: existing?.attemptIds ?? [],
+            output: undefined,
+            layer: existing?.layer ?? (draft.loomPass.layerCursor ?? 0),
+            activations: existing?.activations,
+            branchResult: undefined,
+          };
+        }
+        // Persist the updated per-back-edge fire budget so a restart mid-cycle
+        // resumes with the same remaining fires (recoverDirectRuns re-derives the
+        // wave from pendingNodeIds; the durable backEdgeVisits gate the next fire).
+        // Only written when a back-edge actually fired (acyclic passes leave it
+        // undefined — byte-identical to slice 1..5).
+        if (backEdgeFired) draft.loomPass.backEdgeVisits = { ...workingVisits };
+      }
+      // SLICE 6: the per-pass activation backstop tripped — terminalize FAILED.
+      // Push the cap summary as the LAST spark note so onTerminal surfaces the
+      // reason (mirrors a settled worker's note being the pass-level summary). No
+      // node settled into a note this turn when the cap trips at a fresh advance,
+      // so this note is the pass's terminal summary.
+      if (activationCapHit) {
+        draft.humanMessages.push({
+          id: makeId("msg"),
+          runId: draft.id,
+          author: "spark",
+          kind: "note",
+          message: activationCapSummary,
+          attachments: [],
+          createdAt: timestamp,
+        });
+      }
+      // ADVANCE (chain continues) / RELAUNCH (retry in place): leave the run
+      // RUNNING — the next wave (or the retry attempt) is launched right after
+      // this commit. TERMINALIZE (sink reached / failed / blocked): flip to the
+      // aggregate terminal status as the pre-graph code did.
+      draft.status = committedStatus;
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: stayingLive
+          ? "running"
+          : committedStatus === "complete"
+            ? "idle"
+            : committedStatus === "blocked"
+              ? "blocked"
+              : "failed",
+        lastAction: advancing
+          ? "direct_run_wave_advanced"
+          : relaunching
+            ? "direct_run_node_retried"
+            : "direct_run_finalized",
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+
+  // RELAUNCH: a bounded per-node retry — re-run the unsatisfied node(s) IN PLACE
+  // at the SAME layer (not a graph advance). The commit above left the run
+  // RUNNING and did NOT settle these nodes; launchDirectNodeTasks appends a fresh
+  // attempt, bumps activations, flips them back to "running", and resets
+  // pendingNodeIds to exactly the retry nodes — so the next finalize re-evaluates
+  // only them against this same projection. Re-render the node's ORIGINAL prompt
+  // against current vars + upstream outputs (a retry is a fresh attempt of the
+  // same instruction, not a continuation).
+  if (relaunching && graph) {
+    const fresh = await requireRun(runId);
+    if (fresh.status !== "running") return;
+    const cwd = workspaceCwdFromRun(fresh);
+    if (!cwd) return;
+    const vars = fresh.loomPass?.vars ?? {};
+    const nodeOutputs: Record<string, string> = {};
+    for (const [id, ns] of Object.entries(fresh.loomPass?.nodeStates ?? {})) {
+      if (ns.output !== undefined) nodeOutputs[id] = ns.output;
+    }
+    const passNumber = fresh.steps.length + 1;
+    const retryLayer = fresh.loomPass?.layerCursor ?? 0; // SAME layer (retry in place)
+    const retryNodes = relaunchNodeIds
+      .map((id) => nodeById.get(id))
+      .filter((n): n is Extract<LoomNodeDef, { kind: "worker" }> => n?.kind === "worker");
+    await launchDirectNodeTasks(
+      runId,
+      cwd,
+      passNumber,
+      retryNodes.map((wn) => ({
+        nodeId: wn.id,
+        template: wn.prompt,
+        worker: wn.worker,
+        incoming: upstreamOf(graph!, wn.id),
+      })),
+      { layer: retryLayer, vars, nodeOutputs, addPromptNotes: true },
+    );
+    return; // run stays live; the retry's finalize will decide again
+  }
+
+  // ADVANCE: launch the next ready wave in the SAME run. The commit above left
+  // the run RUNNING and recorded the upstream outputs; build the launch
+  // descriptors (template = node.prompt, incoming = forward parents) and hand
+  // them to launchDirectNodeTasks, which renders each via renderNodePrompt
+  // against the pass vars + those outputs. No terminal status was pushed, so
+  // the loop driver keeps holding until the SINK wave finalizes.
+  if (advancing && graph) {
+    const fresh = await requireRun(runId);
+    // Re-check: a pause/cancel/block could have landed between the commit and
+    // here (the mutate bails on those, but the cache could still have flipped).
+    if (fresh.status !== "running") return;
+    const cwd = workspaceCwdFromRun(fresh);
+    if (!cwd) return;
+    const vars = fresh.loomPass?.vars ?? {};
+    const nodeOutputs: Record<string, string> = {};
+    for (const [id, ns] of Object.entries(fresh.loomPass?.nodeStates ?? {})) {
+      if (ns.output !== undefined) nodeOutputs[id] = ns.output;
+    }
+    const passNumber = fresh.steps.length + 1;
+    const nextLayer = (fresh.loomPass?.layerCursor ?? 0) + 1;
+    await launchDirectNodeTasks(
+      runId,
+      cwd,
+      passNumber,
+      nextWaveNodes.map((node) => {
+        const wn = node as Extract<LoomNodeDef, { kind: "worker" }>;
+        return {
+          nodeId: wn.id,
+          template: wn.prompt,
+          worker: wn.worker,
+          incoming: upstreamOf(graph!, wn.id),
+        };
+      }),
+      { layer: nextLayer, vars, nodeOutputs, addPromptNotes: true },
+    );
+    return; // run stays live; the next wave's finalize will decide again
+  }
+
+  // The worker exited DECLARING itself blocked — the run now waits on the
+  // user. Re-emit the canonical status signal so the notifier's "needs you"
+  // path fires (the finalize commit above is typed direct_run.finalized,
+  // which the notification policy deliberately ignores; per-iteration
+  // complete/failed staying silent there is what keeps loops from spamming).
+  // previousStatus can never be "blocked" here (the entry guard early-returns
+  // on blocked runs), so the payload is always a real transition. Gated on the
+  // commit having actually flipped the run (the mutator bails on pause/cancel
+  // landing mid-queue) so a stale running→blocked never fires. (We only reach
+  // here when NOT advancing, so committedStatus === aggregate.)
+  if (aggregate === "blocked") {
+    const latest = await getRun(runId);
+    if (latest?.status === "blocked") {
+      const blockedSummary =
+        settled.find((s) => s.nodeStatus === "blocked")?.summary ?? "Loom worker is blocked";
+      await appendEvent({
+        workspaceId: run.workspaceId,
+        runId: run.id,
+        type: "run.status_updated",
+        message: blockedSummary.split(/\r?\n/, 1)[0] ?? "Loom worker is blocked",
+        payload: { previousStatus, status: "blocked" },
+      }).catch(() => undefined);
+    }
+  }
+}
+
+// Positioned tail read of a (possibly large) log file — never the whole file.
+async function readFileTailUtf8(path: string, maxBytes: number): Promise<string | null> {
+  try {
+    const { open } = await import("node:fs/promises");
+    const handle = await open(path, "r");
+    try {
+      const stat = await handle.stat();
+      const length = Math.min(stat.size, maxBytes);
+      if (length <= 0) return null;
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, stat.size - length);
+      return buffer.toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
 }
 
 function scheduleInitialAutopilotPlanning(
@@ -997,6 +2597,13 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
   let run = await requireRun(runId);
   if (run.status === "paused" || run.status === "cancelled") return;
   if (hasAutopilotCycles(runId) || activeWorkersForRun(runId).length > 0) return;
+
+  // Looms v2: direct runs never consult a manager — the worker's final report
+  // is the verdict. This is THE seam that replaces review for automations.
+  if (run.executionMode === "direct") {
+    await finalizeDirectRun(runId);
+    return;
+  }
 
   const pendingLaunchTasks = pickAutopilotTasks(run);
   if (pendingLaunchTasks.length > 0) {
@@ -1408,6 +3015,19 @@ async function askOpenRouterManager(
   cwd: string,
   mode: SparkCall["mode"],
 ): Promise<RunState | null> {
+  // Defense in depth: a direct (loom) run must never reach a manager LLM. If
+  // a code path gets here anyway, surface it loudly instead of silently
+  // spending API tokens the user explicitly opted out of.
+  if (run.executionMode === "direct") {
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      type: "direct_run.manager_call_suppressed",
+      message: `Manager call suppressed on direct run (mode=${mode})`,
+      payload: { mode },
+    });
+    return null;
+  }
   const settings = await loadSettings();
   const chatConfig = resolveChatBackendConfig(run, settings);
 
@@ -4702,7 +6322,9 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
       // planning state so the autopilot loop wakes up and the run badge shifts
       // off "complete" while the manager replans. Keep the prior terminal as
       // last_status if downstream code wants to know.
-      if (input.author === "user" && wasTerminal) {
+      // Direct (loom) runs are exempt: addDirectIteration owns their status
+      // transitions, and a stray user note must never wake a manager.
+      if (input.author === "user" && wasTerminal && run.executionMode !== "direct") {
         draft.status = "planning";
         draft.autopilot = {
           ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
@@ -4721,7 +6343,8 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
   // Re-engage the manager when the user chatted into a terminal run. Terminal
   // follow-ups begin in chat-decision mode so Spark can either answer directly
   // from context or choose worker orchestration when tools are useful.
-  if (input.author === "user" && wasTerminal) {
+  // Never for direct (loom) runs — the loop driver decides what runs next.
+  if (input.author === "user" && wasTerminal && run.executionMode !== "direct") {
     const autopilotInput = autopilotInputFromRun(updated);
     scheduleInitialChatDecision(updated.id, autopilotInput, { afterCurrent: true });
   }
@@ -4755,6 +6378,43 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
 // "newer" user-message commit). Serializing here keeps the git graph in the
 // same order the chat events fired.
 const checkpointTaskQueue = new Map<string, Promise<unknown>>();
+
+// Per-baseRepo merge-back chain (Looms v4 parallel fan-out). Two SAME-WAVE
+// sibling workers each ran in their OWN sandbox worktree forked off the run
+// checkpoint, and on success each `git apply`s its diff back into the SAME base
+// repo working tree. Two such applies interleaving can corrupt the tree (a
+// partially-applied patch, a racing `git add -A`). Serialize them with a
+// promise chain keyed by the RESOLVED base-repo path, exactly mirroring
+// checkpointTaskQueue. The mutex wraps ONLY the merge git ops (mergeBack…
+// + the success bookkeeping), never the whole worker attempt, so independent
+// base repos run in parallel and a managed parallel batch (no shared base repo
+// to contend on) is never serialized. A failing merge still releases the lock
+// (finally) and keeps its fail-and-strand behavior — conflicts are never auto-
+// resolved here.
+const mergeBackQueue = new Map<string, Promise<unknown>>();
+
+// Run `fn` under the merge-back mutex for `baseRepo`: it chains after any
+// in-flight merge into the SAME repo and releases as soon as the body settles —
+// the chain tail swallows the body's error (a failed merge must not poison the
+// next sibling), while the caller still receives the body's real result/throw.
+// The body MUST be only the merge git ops (never the whole attempt) so distinct
+// base repos run fully in parallel — a managed parallel batch sharing no base
+// repo never contends, so this can't deadlock it. Self-pruning: when this body
+// is still the chain tail after it settles, the entry is dropped so the map
+// doesn't grow across many one-off base repos.
+async function withMergeBackLock<T>(baseRepo: string, fn: () => Promise<T>): Promise<T> {
+  const prior = mergeBackQueue.get(baseRepo) ?? Promise.resolve();
+  // `body` runs after any prior merge into this repo (its own errors swallowed
+  // so they never poison the chain) and is what the CALLER awaits — it carries
+  // the real result/throw. The error-swallowing `tail` is what later siblings
+  // wait on, and it self-prunes the map entry once it is the chain's end.
+  const body = prior.catch(() => undefined).then(() => fn());
+  const tail = body.catch(() => undefined).then(() => {
+    if (mergeBackQueue.get(baseRepo) === tail) mergeBackQueue.delete(baseRepo);
+  });
+  mergeBackQueue.set(baseRepo, tail);
+  return body;
+}
 
 function recordCheckpointInBackground(input: {
   runId: string;
@@ -5507,6 +7167,7 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     candidateIndex: input.candidateIndex,
     councilRole: input.councilRole,
     createdBy: input.createdBy ?? "user",
+    loomNodeId: input.loomNodeId,
     createdAt: now,
     updatedAt: now,
   };
@@ -5718,6 +7379,11 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
       executionDisabled: true,
       attemptId: attempt.id,
       paths,
+      // Looms v2: lets the renderer suppress the workers tab (and the
+      // direct-worker spawn handler claim the pty) synchronously from the
+      // event payload, with no getRun round-trip race.
+      automationId: run.automationId,
+      executionMode: run.executionMode,
     },
   });
   if (runtimeReroute) {
@@ -5965,15 +7631,27 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   ) {
     const settings = await loadSettings();
     if (settings.autopilotSandbox) {
-      const mergeBack = await mergeBackSandboxWorktree({
-        repoCwd: finishedAttempt.sandboxBaseRepo,
-        worktreePath: finishedAttempt.sandboxWorktreePath,
-      });
+      // Serialize the merge into THIS base repo: same-wave sibling workers (Looms
+      // parallel fan-out) each apply their diff into the same tree, and two
+      // interleaved `git add -A` + `git apply` would corrupt it. The lock wraps
+      // only the merge git op (not the surrounding bookkeeping/eventing), so
+      // distinct base repos still merge in parallel. A throw here still releases
+      // the lock (withMergeBackLock's finally-equivalent tail).
+      const baseRepo = finishedAttempt.sandboxBaseRepo;
+      const worktreePath = finishedAttempt.sandboxWorktreePath;
+      const mergeBack = await withMergeBackLock(baseRepo, () =>
+        mergeBackSandboxWorktree({ repoCwd: baseRepo, worktreePath }),
+      );
       const mergedAt = new Date().toISOString();
       if (mergeBack.ok) {
         console.log(
           `[sandbox] merge-back ${finishedAttempt.sandboxBranch ?? "(branch)"} -> ${finishedAttempt.sandboxBaseRepo}: ${mergeBack.changed ? "applied worker edits" : "no changes to apply"}`,
         );
+        // Persisted so boot recovery never re-applies an already-merged patch
+        // (the second all-or-nothing `git apply` would fail spuriously).
+        finishedAttempt.sandboxMergedBack = true;
+        run.updatedAt = mergedAt;
+        await saveRun(run);
         await appendEvent({
           timestamp: mergedAt,
           workspaceId: run.workspaceId,

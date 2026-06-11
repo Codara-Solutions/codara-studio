@@ -14,6 +14,7 @@ export type CommandId =
   | "shortcuts.open"
   | "runSwitcher.open"
   | "settings.open"
+  | "automations.open"
   | "session.openInspector"
   | "composer.focus"
   | "chat.new"
@@ -74,9 +75,8 @@ export const COMMANDS: Command[] = [
     id: "shortcuts.open",
     label: "Show keyboard shortcuts",
     group: "General",
-    // Mod+? (Shift+/) — the keyboard cheat sheet. Mod+K now belongs to the
-    // run switcher. Shift+/ is free: composer.focus uses Mod+/ WITHOUT shift
-    // and terminal.closePane uses Mod+Shift+K.
+    // Mod+? (Shift+/) — the keyboard cheat sheet. Mod+K belongs to the run
+    // switcher; Mod+/ is free again (composer.focus moved to Mod+L).
     defaultChords: [mod("/", { shift: true })],
   },
   {
@@ -94,6 +94,15 @@ export const COMMANDS: Command[] = [
     defaultChords: [mod(",")],
   },
   {
+    id: "automations.open",
+    label: "Open Automations",
+    group: "Navigation",
+    // Mod+Shift+A — jump to the Automations Hub. Free chord (no built-in or
+    // browser binding collides with it). The same view is reachable from the
+    // tray menu and a matching global accelerator in main.
+    defaultChords: [mod("a", { shift: true })],
+  },
+  {
     id: "session.openInspector",
     label: "Open session inspector",
     group: "General",
@@ -106,7 +115,9 @@ export const COMMANDS: Command[] = [
     id: "composer.focus",
     label: "Focus chat composer",
     group: "Navigation",
-    defaultChords: [mod("/")],
+    // Mod+L — the "focus AI chat" convention (Cursor, Windsurf). Frees Mod+/
+    // for the universal Toggle Line Comment chord that editors expect.
+    defaultChords: [mod("l")],
   },
   {
     id: "sidebar.toggleLeft",
@@ -120,10 +131,10 @@ export const COMMANDS: Command[] = [
     id: "sidebar.toggleRight",
     label: "Toggle right sidebar",
     group: "View",
-    // Mod+Shift+B toggles the right panel — the "other side" of the same B
-    // mnemonic. (Previously the lone "Toggle sidebar" chord only hit the
-    // right panel; the two sides now have distinct, discoverable bindings.)
-    defaultChords: [mod("b", { shift: true })],
+    // Mod+Alt+B toggles the right panel — VS Code's "Toggle Secondary Side
+    // Bar" chord (Cmd+Opt+B / Ctrl+Alt+B). Frees Mod+Shift+B (VS Code's Run
+    // Build Task muscle memory).
+    defaultChords: [mod("b", { alt: true })],
   },
   {
     id: "search.open",
@@ -135,13 +146,17 @@ export const COMMANDS: Command[] = [
     id: "terminal.toggle",
     label: "Toggle terminal",
     group: "View",
-    defaultChords: [mod("`")],
+    // Physical Ctrl+` on every platform — VS Code's terminal-toggle chord.
+    // Cmd+` on macOS is the OS "next window" shortcut, so we avoid Mod here.
+    defaultChords: [ctrl("`")],
   },
   {
     id: "terminal.newBalancedPane",
     label: "New terminal pane (equal sizes)",
     group: "Terminal",
-    defaultChords: [mod("t", { shift: true })],
+    // Mod+Alt+D — Windows Terminal's "split pane, automatic". Frees Mod+Shift+T
+    // (Reopen Closed Tab in Chrome/VS Code, New Tab in Windows Terminal).
+    defaultChords: [mod("d", { alt: true })],
   },
   {
     id: "terminal.splitRight",
@@ -161,18 +176,19 @@ export const COMMANDS: Command[] = [
     id: "terminal.closePane",
     label: "Close active terminal pane",
     group: "Terminal",
-    // Mod+Shift+W is already tab.closeOthers; Mod+W closes the whole tab.
-    // Mod+Shift+K mirrors VS Code's "kill terminal" chord and stays clear
-    // of shell readline (Ctrl+K).
-    defaultChords: [mod("k", { shift: true })],
+    // Mod+Shift+W — Windows Terminal's "Close pane". (Mod+W closes the whole
+    // tab.) Frees Mod+Shift+K, which is Delete Line in VS Code — the previous
+    // comment's claim that it mirrored VS Code's kill-terminal was wrong (that
+    // command ships unbound). tab.closeOthers moved to Mod+Alt+T.
+    defaultChords: [mod("w", { shift: true })],
   },
   {
     id: "terminal.toggleZoom",
     label: "Toggle terminal pane zoom",
     group: "Terminal",
-    // Mod+Shift+Z mirrors the tmux/iTerm "zoom pane" convention; stays out
-    // of the way of the shell's literal Ctrl+Z (suspend).
-    defaultChords: [mod("z", { shift: true })],
+    // Mod+Shift+Enter — iTerm2's "Toggle Maximize Pane". Frees Mod+Shift+Z,
+    // which is the universal Redo chord an editor must not consume.
+    defaultChords: [mod("Enter", { shift: true })],
   },
   {
     id: "view.selectByIndex",
@@ -225,13 +241,15 @@ export const COMMANDS: Command[] = [
     id: "tab.newEditor",
     label: "Open file (search)",
     group: "Tabs",
-    defaultChords: [mod("e")],
+    // Mod+P — the dominant "Go to File / quick open" chord (VS Code, Sublime).
+    defaultChords: [mod("p")],
   },
   {
     id: "tab.newPreview",
     label: "New preview tab",
     group: "Tabs",
-    defaultChords: [mod("p")],
+    // Mod+E — swapped with Open File (which took the standard Mod+P quick-open).
+    defaultChords: [mod("e")],
   },
   {
     id: "tab.close",
@@ -243,7 +261,9 @@ export const COMMANDS: Command[] = [
     id: "tab.closeOthers",
     label: "Close other tabs",
     group: "Tabs",
-    defaultChords: [mod("w", { shift: true })],
+    // Mod+Alt+T — VS Code mac "Close Other Editors". Vacates Mod+Shift+W for
+    // terminal.closePane (Windows Terminal's Close-pane chord).
+    defaultChords: [mod("t", { alt: true })],
   },
   {
     id: "tab.cycleNext",

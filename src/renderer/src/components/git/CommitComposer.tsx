@@ -361,10 +361,11 @@ export default function CommitComposer({
   );
 }
 
-// Smart Merge action. With one engine (just Spark) it's the original
-// full-width button that runs the default. With Claude / Codex also installed
-// it becomes a split button: the main face still runs the default engine, and
-// a ▾ caret opens a popover to hand the merge to a specific engine instead.
+// Smart Merge action. With one engine (just API) it's the original full-width
+// button that runs it. With Claude / Codex installed it becomes a split
+// button: the main face runs the FIRST (recommended CLI) engine, and a ▾
+// caret opens a popover to hand the merge to a specific engine instead — the
+// demoted API manager only runs when picked explicitly.
 function SmartMergeControl({
   canSmartMerge,
   anyBusy,
@@ -421,7 +422,7 @@ function SmartMergeControl({
       <button
         type="button"
         disabled={disabled}
-        onClick={() => onSmartMerge(undefined)}
+        onClick={() => onSmartMerge(engines[0]?.backend)}
         title={title}
         style={{
           appearance: "none",
@@ -547,8 +548,9 @@ function SmartMergeControl({
   );
 }
 
-// A single engine row inside the Smart Merge popover. Spark (the default) reads
-// in the accent color; the CLI engines read as plain rows.
+// A single engine row inside the Smart Merge popover. The CLI agents lead and
+// read as plain rows; the API manager (key "spark", demoted to last) gets no
+// special treatment anymore.
 function EngineRow({
   engine,
   onClick,
@@ -557,7 +559,6 @@ function EngineRow({
   onClick: () => void;
 }): React.ReactElement {
   const [hover, setHover] = useState(false);
-  const isSpark = engine.key === "spark";
   return (
     <button
       type="button"
@@ -569,7 +570,7 @@ function EngineRow({
         width: "100%",
         border: "none",
         background: hover ? "var(--panel)" : "transparent",
-        color: isSpark ? "var(--accent)" : hover ? "var(--ink)" : "var(--ink-dim)",
+        color: hover ? "var(--ink)" : "var(--ink-dim)",
         borderRadius: 6,
         padding: "7px 8px",
         textAlign: "left",
@@ -593,13 +594,13 @@ function EngineRow({
           justifyContent: "center",
           fontSize: 11,
           fontWeight: 900,
-          color: isSpark ? "var(--accent)" : "var(--muted)",
+          color: "var(--muted)",
         }}
       >
         {engine.glyph}
       </span>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {isSpark ? "Spark (default)" : engine.label}
+        {engine.label}
       </span>
     </button>
   );

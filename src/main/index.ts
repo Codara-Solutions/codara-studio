@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, Tray, Menu, globalShortcut } from "electron";
 import { join } from "node:path";
 import { registerIpc } from "./ipc";
 import * as pty from "./pty-manager";
@@ -7,7 +7,12 @@ import { startAgentSocket, stopAgentSocket } from "./agent-socket";
 import { registerDaemonHostScaffold } from "./orchestration/daemon";
 import { ensureSparkHomeSync } from "./spark-home";
 import { flush, loadSettings, loadState } from "./storage";
-import { flushPreferences, getPreferenceSync } from "./preferences-store";
+import {
+  flushPreferences,
+  getPreferenceCached,
+  getPreferenceSync,
+  loadPreferences,
+} from "./preferences-store";
 import { registerMainWindow, startNotifications } from "./notifications";
 import { setSeededRoots } from "./fs-sandbox";
 import { getEnrichedPath } from "./path-reconstruction";
@@ -95,12 +100,63 @@ const windowIcon = app.isPackaged
   : join(__dirname, "../../build/icon.ico");
 
 let mainWindow: BrowserWindow | null = null;
+// Tray + background-running state (Feature: "close to tray"). `isQuitting`
+// flips true only on an explicit Quit (tray menu / before-quit) so the window
+// `close` handler knows to actually close instead of hiding to the tray.
+let isQuitting = false;
+let tray: Tray | null = null;
 
 function sendWindowState(win: BrowserWindow): void {
   if (win.webContents.isDestroyed()) return;
   win.webContents.send("window:state-changed", {
     maximized: win.isMaximized(),
   });
+}
+
+// Bring the main window back from the tray (or recreate it if it was somehow
+// destroyed). On Windows we re-show the taskbar button that hide-to-tray hid.
+function showMainWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  mainWindow.show();
+  if (process.platform === "win32") mainWindow.setSkipTaskbar(false);
+  mainWindow.focus();
+}
+
+// Create the system tray icon + menu so the app stays reachable while running
+// in the background. Idempotent and best-effort: tray creation can throw on
+// some Linux setups (no system tray), so a failure is logged and never blocks
+// boot — the app simply runs without a tray there.
+function ensureTray(): void {
+  if (tray) return;
+  try {
+    tray = new Tray(windowIcon);
+    tray.setToolTip("Spark App");
+    const menu = Menu.buildFromTemplate([
+      { label: "Show Spark", click: showMainWindow },
+      {
+        label: "Open Automations",
+        click: () => {
+          showMainWindow();
+          mainWindow?.webContents.send("window:open-automations");
+        },
+      },
+      { type: "separator" },
+      {
+        label: "Quit Spark",
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      },
+    ]);
+    tray.setContextMenu(menu);
+    tray.on("click", showMainWindow);
+  } catch (err) {
+    console.warn("[main] failed to create tray:", err);
+  }
 }
 
 function createWindow(): void {
@@ -148,6 +204,18 @@ function createWindow(): void {
   registerMainWindow(windowForEvents);
 
   mainWindow.on("ready-to-show", () => mainWindow?.show());
+
+  // Close-to-tray: while background running is enabled (default) and the user
+  // hasn't asked to quit, intercept the window close and hide instead so
+  // main-process automation timers keep firing. On Windows we also drop the
+  // taskbar button so the hidden window doesn't linger there.
+  mainWindow.on("close", (e) => {
+    if (!isQuitting && getPreferenceCached("keepRunningInBackground")) {
+      e.preventDefault();
+      mainWindow?.hide();
+      if (process.platform === "win32") mainWindow?.setSkipTaskbar(true);
+    }
+  });
 
   const openBrowserUrlInSpark = (url: string) => {
     mainWindow?.webContents.send("app:open-browser-url", url);
@@ -346,8 +414,25 @@ app.whenReady().then(async () => {
     console.warn("[main] hook watcher failed to start:", err);
   }
 
+  // Warm the async preferences cache so the window `close` handler can read
+  // keepRunningInBackground synchronously via getPreferenceCached(). Awaited
+  // (best-effort) so the value is live before the window can be closed.
+  await loadPreferences().catch(() => undefined);
+
   createWindow();
   if (mainWindow) registerAutoUpdater(mainWindow);
+
+  // System tray so the app stays reachable while running in the background
+  // (close-to-tray). Best-effort — ensureTray() swallows its own failures.
+  ensureTray();
+
+  // Global accelerator to jump straight to the Automations view, even when
+  // Spark is hidden in the tray. Mirrors the tray menu's "Open Automations".
+  const ok = globalShortcut.register("CommandOrControl+Shift+A", () => {
+    showMainWindow();
+    mainWindow?.webContents.send("window:open-automations");
+  });
+  if (!ok) console.warn("[main] failed to register global automations shortcut");
 
   // Forward chord keystrokes (Ctrl/Cmd/Alt/Meta + key) from any <webview>
   // guest back to its host renderer so app-wide shortcuts (Ctrl+1, Ctrl+P,
@@ -390,6 +475,16 @@ app.whenReady().then(async () => {
   // daemon split's job (docs/daemon-split-PLAN.md).
   void (async () => {
     try {
+      // Looms v2: claim direct-run worker ptys in main (no renderer tab) and
+      // settle any direct runs orphaned by the previous session BEFORE the
+      // scheduler's resumeLoops re-attaches loop drivers to them.
+      const dw = await import("./orchestration/direct-worker");
+      dw.installAutomationWorkerSpawnHandler();
+      await dw.recoverDirectRuns();
+    } catch (err) {
+      console.warn("[main] direct-worker recovery failed:", err);
+    }
+    try {
       const { startScheduler } = await import("./orchestration/scheduler");
       await startScheduler();
     } catch (err) {
@@ -421,6 +516,11 @@ app.on("window-all-closed", async () => {
   // headless branch; this guard prevents a stray window-all-closed handler
   // from triggering a quit before the summary is flushed.
   if (isHeadlessEval) return;
+  // Close-to-tray: while background running is enabled and we're not quitting,
+  // never dispose/quit on window-all-closed. The window `close` handler hides
+  // rather than closes, so this rarely fires — keep it as defense in depth so
+  // automation timers survive even if a close path slips past the hide.
+  if (!isQuitting && getPreferenceCached("keepRunningInBackground")) return;
   pty.disposeAll();
   fsWatcher.disposeAll();
   await flushAllStores();
@@ -466,6 +566,11 @@ app.on("before-quit", (event) => {
         .then((m) => m.stopScheduler())
         .catch(() => undefined);
       await stopAgentSocket().catch(() => undefined);
+      // Release the global accelerator and tear down the tray icon (best-effort)
+      // so no handles linger past quit.
+      globalShortcut.unregisterAll();
+      tray?.destroy();
+      tray = null;
       await flushAllStores();
     } catch (err) {
       console.error("[main] quit cleanup failed:", err);

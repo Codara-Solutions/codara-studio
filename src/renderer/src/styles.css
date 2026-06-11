@@ -1396,6 +1396,18 @@ a { color: inherit; }
   background: var(--bg);
   box-shadow: var(--well);
 }
+/* Wrapping variant for narrow surfaces (e.g. the 360px node panel): the control
+   spans the available width and items flow onto multiple rows instead of
+   clipping a 5+ option set. */
+.spark-segmented.is-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.spark-segmented.is-wrap .spark-segmented-item {
+  flex: 1 1 auto;
+  white-space: normal;
+}
 .spark-segmented-item {
   display: inline-flex;
   align-items: center;
@@ -1507,4 +1519,96 @@ a { color: inherit; }
 .spark-divider.is-vertical {
   width: 1px;
   min-height: 100%;
+}
+
+/* ── Loom node-flow canvas (@xyflow/react) ────────────────────────────────────
+   Retint ReactFlow's default chrome to Spark's dark palette. The default
+   style.css is imported once by the editor; these scoped rules override it so
+   no n8n purple ships. Everything is scoped under .loom-flow. */
+.loom-flow {
+  --xy-background-color: var(--bg);
+  --xy-edge-stroke: var(--rule-strong);
+  --xy-edge-stroke-selected: var(--accent);
+  --xy-connectionline-stroke: var(--accent);
+  --xy-attribution-background-color: transparent;
+}
+.loom-flow .react-flow__attribution {
+  display: none;
+}
+.loom-flow .react-flow__background {
+  background: var(--bg);
+}
+/* Controls + minimap surfaces match the panel ladder. */
+.loom-flow .react-flow__controls {
+  box-shadow: var(--shadow-1);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+.loom-flow .react-flow__controls-button {
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--rule-soft);
+  color: var(--ink-dim);
+  width: 24px;
+  height: 24px;
+}
+.loom-flow .react-flow__controls-button:hover {
+  background: var(--panel-3);
+}
+.loom-flow .react-flow__controls-button svg {
+  fill: var(--ink-dim);
+}
+.loom-flow .react-flow__minimap {
+  background: var(--panel);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-control);
+}
+.loom-flow .react-flow__minimap-mask {
+  fill: color-mix(in oklch, var(--bg) 62%, transparent);
+}
+/* Selected edge / connection-in-progress use the accent, never purple. */
+.loom-flow .react-flow__edge-path {
+  stroke: var(--rule-strong);
+}
+.loom-flow .react-flow__edge.selected .react-flow__edge-path,
+.loom-flow .react-flow__edge:focus .react-flow__edge-path {
+  stroke: var(--accent);
+}
+.loom-flow .react-flow__connectionline path {
+  stroke: var(--accent);
+}
+.loom-flow .react-flow__handle {
+  border-radius: 50%;
+}
+.loom-flow .react-flow__handle.connectionindicator:hover {
+  background: var(--accent);
+  border-color: var(--accent-edge);
+}
+/* Node selection ring is drawn by the node itself; suppress the default. */
+.loom-flow .react-flow__node.selected {
+  outline: none;
+}
+.loom-flow .react-flow__node:focus,
+.loom-flow .react-flow__node:focus-visible {
+  outline: none;
+}
+/* Loom node card base + hover. The unselected border/shadow live here (NOT
+   inline) so :hover can lift them; the selected ring is applied inline and
+   always wins. Backgrounds stay on the panel ladder. */
+.loom-flow .loom-node {
+  background: var(--panel);
+  border: 1px solid var(--rule-soft);
+  box-shadow: var(--shadow-1);
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
+}
+.loom-flow .react-flow__node:hover .loom-node {
+  border-color: var(--rule-strong);
+  box-shadow: var(--lift-hi), var(--shadow-2);
+}
+/* Source handles read clearly against the canvas; accent on hover. */
+.loom-flow .react-flow__handle:hover {
+  background: var(--accent);
+  border-color: var(--accent-edge);
 }

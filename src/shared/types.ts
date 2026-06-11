@@ -236,6 +236,10 @@ export interface AppPreferences {
   // `notifications: { enabled, sounds }` blobs from older spark-preferences
   // files are read at migration time and folded into these flags.
   notificationChannels: NotificationChannelsPref;
+  // When true (default), closing the main window hides it to the system tray
+  // and keeps the process alive so main-process timers (automations / loops)
+  // keep firing instead of quitting. Quit explicitly from the tray menu.
+  keepRunningInBackground?: boolean;
   // "Create copy branch" setup command, keyed by absolute repo cwd. Run live
   // in a terminal in the new worktree after creation. Repos with no entry use
   // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
@@ -332,6 +336,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keybindings: {},
   disableHardwareAcceleration: false,
   notificationChannels: { ...DEFAULT_NOTIFICATION_CHANNELS },
+  keepRunningInBackground: true,
   copyBranchSetupCommandByRepo: {},
 };
 
@@ -1047,6 +1052,72 @@ export interface RunState {
    * OpenRouter normalize it to false because they do not use this toggle.
    */
   chat1mContext?: boolean;
+  /**
+   * Set when this run is owned by an automation (Loom). The renderer
+   * suppresses auto-opened tabs for these and filters them from the lifted
+   * runs list — they live inside the Automations tab instead.
+   */
+  automationId?: string;
+  /**
+   * undefined/"managed" = manager-LLM orchestration (the normal Spark run).
+   * "direct" = Looms v2: a single CLI worker per iteration, no manager ever;
+   * finalizeDirectRun replaces the manager review.
+   */
+  executionMode?: "managed" | "direct";
+  /**
+   * Looms v2.5: the live state of ONE loom PASS over the node graph. Seeded by
+   * automation-loop.startIteration from the job's graph (every node "pending"
+   * with its topological layer index), advanced layer-by-layer as the autopilot
+   * join barrier settles each wave. The single-node executor in this slice
+   * seeds it with one node and terminalizes after that node settles; advancing
+   * across layers (multi-node graphs) is a later slice. Undefined on managed
+   * runs and on direct runs created before this field existed.
+   */
+  loomPass?: {
+    graphVersion: 1;
+    nodeStates: Record<
+      string,
+      {
+        status: "pending" | "skipped" | "running" | "succeeded" | "failed" | "blocked";
+        attemptIds: string[];
+        output?: string;
+        layer: number;
+        activations?: number;
+        /**
+         * Looms v2.6 (guard nodes): which branch a settled GUARD routed flow
+         * down — "pass" when its predicate held, "fail" otherwise. Drives
+         * edgeIsLive: a guard edge whose `branch` differs from the recorded
+         * branchResult is dead, so the un-taken branch's nodes are pruned
+         * ("skipped"). Only set on guard nodes; undefined on workers/merges.
+         */
+        branchResult?: "pass" | "fail";
+      }
+    >;
+    layerCursor: number;
+    pendingNodeIds: string[];
+    /**
+     * Looms v2.5 (sequential chains): the per-PASS variable snapshot
+     * ({{iteration}} {{lastOutput}} {{file}} {{date}} {{name}} + the
+     * {{lastSummary}} alias), computed ONCE by automation-loop.startIteration and
+     * threaded onto the run so a downstream wave launched LATER by
+     * finalizeDirectRun renders its node prompts against the same values the
+     * entry wave used (a pass is one consistent snapshot, not re-sampled per
+     * wave). Seeded at the layer-0 launch; read by launchDirectNodeTasks when it
+     * renders a later wave's node templates via renderNodePrompt.
+     */
+    vars?: Record<string, string>;
+    /**
+     * Looms v2.7 (bounded loop-back cycles): per-back-edge fire counter, keyed by
+     * LoomEdgeDef.id. finalizeDirectRun increments an edge's count each time it
+     * FIRES (re-activates a loop body) and stops firing once the count reaches the
+     * edge's clamped visitCap (loom-graph.effectiveVisitCap) — the per-edge half of
+     * the always-escapable invariant. Persisted in the advance commit so a restart
+     * mid-cycle resumes with the same remaining-fire budget. Absent on acyclic
+     * looms (no back-edge ever fires), so it stays undefined for every slice-1..6
+     * acyclic pass — byte-identical to before.
+     */
+    backEdgeVisits?: Record<string, number>;
+  };
 }
 
 /**
@@ -1271,6 +1342,13 @@ export interface HumanRunMessage {
   questionOptions?: RunQuestionOption[];
   attachments?: RunMessageAttachment[];
   createdAt: string;
+  /**
+   * Looms v2.5: when this message is the iteration summary a graph node's
+   * worker produced (pushed by finalizeDirectRun in the same commit that flips
+   * run status), the node id it came from. Lets later slices attribute per-node
+   * output. Undefined on every non-loom message and pre-graph direct runs.
+   */
+  loomNodeId?: string;
 }
 
 export interface RunArtifactPaths {
@@ -1479,6 +1557,13 @@ export interface WorkerTask {
    *     a passing verdict, so the latest attempt was accepted as-is.
    */
   forceAcceptReason?: "completion_refused" | "corrective_rounds_capped";
+  /**
+   * Looms v2.5: which graph node (LoomNodeDef.id) this task executes within a
+   * loom pass. Stamped by run-store's node launcher; undefined on managed runs
+   * and on pre-graph direct runs. For a degenerate single-node loom this is the
+   * sole node id ("w0").
+   */
+  loomNodeId?: string;
 }
 
 export interface WorkerAttempt {
@@ -1515,6 +1600,9 @@ export interface WorkerAttempt {
   sandboxWorktreePath?: string;
   sandboxBranch?: string;
   sandboxBaseRepo?: string;
+  /** Set once the worktree's edits were applied back to sandboxBaseRepo —
+   *  boot recovery checks it to avoid double-applying the patch. */
+  sandboxMergedBack?: boolean;
   error?: string;
   /**
    * Latest agent state for this attempt. Two writers feed this field:
@@ -1687,6 +1775,10 @@ export interface CreateRunInput {
   chatEffort?: AgentEffortLevel;
   chatFastMode?: boolean;
   chat1mContext?: boolean;
+  // Looms v2: stamp automation ownership + direct execution at creation so
+  // the renderer can suppress tabs synchronously from the very first event.
+  automationId?: string;
+  executionMode?: "managed" | "direct";
 }
 
 export interface UpdateRunStatusInput {
@@ -1754,6 +1846,9 @@ export interface CreateWorkerTaskInput {
   candidateIndex?: number;
   councilRole?: WorkerTask["councilRole"];
   createdBy?: WorkerTask["createdBy"];
+  // Looms v2.5: the graph node this task executes within a loom pass; threads
+  // onto the created WorkerTask. Undefined for managed/non-loom tasks.
+  loomNodeId?: string;
 }
 
 export interface UpdateWorkerTaskInput {
@@ -1809,6 +1904,13 @@ export interface StartAutopilotInput {
   // Code / Codex instead of the default OpenRouter manager. Undefined keeps
   // the legacy OpenRouter behaviour.
   chatBackend?: ChatBackendKind;
+  // Per-automation engine selection. An automation pins these so each iteration
+  // (when it creates a fresh run via isolate / first launch) runs on the chosen
+  // model / mode / effort. Forwarded into createRun, which already stamps them
+  // onto the run. Undefined leaves the backend defaults.
+  chatModel?: string;
+  chatMode?: ChatMode;
+  chatEffort?: AgentEffortLevel;
   // First-class parallel fan-out. When set, the explorer/composer is asking the
   // run to fan a single instruction across explicit per-target files. startAutopilot
   // seeds it (via initialUserNote using formatFanOutDirective) and run-store
@@ -1984,12 +2086,23 @@ export interface RunQueueState {
 }
 
 // Automations ─────────────────────────────────────────────────────────────────
-// An automation (a.k.a. scheduled job) fires its pinned StartAutopilotInput on a
-// trigger. Three trigger kinds, all firing WHILE THE APP IS OPEN (true unattended
-// firing that survives app-close is the daemon split's job):
-//   cron     — a standard cron expression, fired by `croner` in the main process.
-//   interval — a fixed loop every `everyMs` milliseconds (setInterval).
-//   folder   — fires when files are added / changed / removed in `path`.
+// "Looms": an automation = a TRIGGER (when to start) + a LOOP (how it repeats)
+// + a per-iteration prompt + per-automation engine + user-written stop
+// conditions. Everything fires WHILE THE APP IS OPEN (true unattended firing
+// that survives app-close is the daemon split's job). The on-disk envelope
+// stays { jobs: ScheduledJob[] }; ScheduledJob is a strict superset of the old
+// shape and `normalizeJob` backfills the new fields on read, so old
+// scheduler.json files keep loading and loop:{kind:"once"} reproduces the old
+// one-shot behaviour exactly.
+//
+// TRIGGER kinds — when an automation STARTS its loop:
+//   cron        — a standard cron expression, fired by `croner` in main.
+//   interval    — a fixed loop every `everyMs` milliseconds (setInterval).
+//   folder      — fires when files are added / changed / removed in `path`.
+//   manual      — never armed; only "Run now" (or as another loom's chain head).
+//   continuous  — starts iteration 0 immediately at arm time (a forever loop,
+//                 bounded by its stop conditions).
+//   onFinishOf  — chains: starts when another automation's loop finalizes.
 export type FolderTriggerEvent = "add" | "change" | "unlink";
 
 export type AutomationTrigger =
@@ -2004,19 +2117,388 @@ export type AutomationTrigger =
       glob?: string;
       // Coalesce a burst of fs events into a single fire (default 400ms).
       debounceMs?: number;
-    };
+    }
+  | { kind: "manual" }
+  | { kind: "continuous" }
+  | { kind: "onFinishOf"; automationId: string };
+
+// LOOP kinds — how an automation REPEATS once started:
+//   once        — a single iteration (legacy behaviour).
+//   count       — exactly stop.maxIterations passes.
+//   cadence     — a new iteration every loop.everyMs (gap between starts).
+//   until       — repeat until a stop predicate is satisfied.
+//   continuous  — repeat back-to-back forever (bounded by hard caps).
+//   agent       — the MODEL decides whether to continue each pass (bounded by
+//                 hard caps); "I write loops that prompt Claude".
+export type AutomationLoopKind =
+  | "once"
+  | "count"
+  | "cadence"
+  | "until"
+  | "continuous"
+  | "agent";
+
+// User-written boundaries. Stopping = OR of the until-predicates (first
+// satisfied wins), AND-ed with the hard caps (maxIterations, budgetUsd) which
+// are ALWAYS enforced engine-side — even for agent/continuous loops, so an
+// "infinite" loop is always escapable.
+export interface StopConditions {
+  // Hard cap on iterations. For "agent"/"continuous" loops the engine defaults
+  // it to DEFAULT_AGENT_MAX_ITERATIONS when the user leaves it blank.
+  maxIterations?: number;
+  // Est. spend cap in USD, compared against the accumulated
+  // (run.totalCostUsd + run.estimatedWorkerCostUsd) across iterations.
+  // Approximate — labelled "est." in the UI.
+  budgetUsd?: number;
+  untilTestsPass?: boolean; // `testCommand` exits 0
+  untilGitClean?: boolean; // `git status --porcelain` empty in the run cwd
+  untilPhrase?: string; // case-insensitive substring in the iteration summary
+  untilCommand?: string; // arbitrary shell; exit 0 == satisfied
+  // Command used for untilTestsPass (default "npm test"); bounded by
+  // SHELL_CHECK_TIMEOUT_MS.
+  testCommand?: string;
+}
+
+export interface AutomationLoop {
+  kind: AutomationLoopKind;
+  // cadence: the gap BETWEEN iteration starts, floored to 1000ms like interval.
+  everyMs?: number;
+  stop: StopConditions;
+  // false (default) = chain iterations IN THE SAME run (carry context, via
+  // addRunMessage). true = a fresh run per iteration (isolation; per-automation
+  // model re-applies each pass). Same-run loops pin the engine at run creation.
+  isolate?: boolean;
+}
+
+// A per-iteration prompt template. When present it overrides
+// input.initialUserNote each pass. Supports {{iteration}} {{lastOutput}}
+// {{lastSummary}} {{file}} {{date}} {{name}}.
+export interface AutomationPrompt {
+  template: string;
+}
+
+// ── Looms v2: direct-worker execution ──────────────────────────────────────
+// Automations no longer launch manager-orchestrated runs. Each iteration runs
+// ONE claude/codex CLI worker directly (RunState.executionMode === "direct").
+
+/** Engines an automation may run. OpenRouter is intentionally NOT a member —
+ *  the API backend is for utilities (commit messages, inline edit), not looms. */
+export type LoomEngine = "claude" | "codex";
+
+/** Per-loom worker configuration (the Worker node in the flow editor). */
+export interface LoomWorkerConfig {
+  /** "auto" = the agent finishing iteration N picks N+1's engine/model via
+   *  spark_request_next_iteration; validated against installed runtimes.
+   *  Auto's first pass resolves claude-if-installed, else codex. */
+  engine: LoomEngine | "auto";
+  /** Engine-native model id (AgentRuntimeModel.id). Undefined = CLI default. */
+  model?: string;
+  effort?: AgentEffortLevel;
+  /** Hard per-iteration wall-clock ceiling enforced by the loop watchdog,
+   *  in minutes. Default DEFAULT_ITERATION_TIMEOUT_MINUTES. */
+  timeoutMinutes?: number;
+}
+
+// ── Looms v2.5: the loom node graph ─────────────────────────────────────────
+// A loom is evolving from a fixed linear Trigger→Loop→Worker pipeline into an
+// arbitrary node graph (multiple worker nodes, guard/branch nodes, fan-out/
+// merge, and later bounded loop-back cycles). The execution model: ONE RunState
+// per loom PASS; graph nodes execute as worker ATTEMPTS within that one run; the
+// autopilot join barrier is the wave/layer boundary; state.currentRunId stays
+// SCALAR. Whole-graph repetition stays in the existing loop kinds (once/count/
+// cadence/until/continuous/agent).
+//
+// The full data model is defined here NOW (forward-compatible). The executor
+// today walks only the degenerate SINGLE-NODE case (one "worker" node, no
+// edges) — multi-node execution, guards, merge, fan-out, and cycles are owned
+// by later slices.
+
+/** A predicate a guard node (or a worker node's retry-until clause) evaluates.
+ *  Defined now; only the executor of later slices reads them. */
+export type GuardPredicate =
+  | { type: "phrase"; phrase: string; source?: string }
+  | { type: "tests"; command?: string }
+  | { type: "gitClean" }
+  | { type: "command"; command: string }
+  | { type: "agentSignal"; want: "continue" | "done" };
+
+/** A node that runs ONE CLI worker (the legacy Worker). For a degenerate
+ *  single-node loom this is `w0`, whose `prompt` equals the legacy template so
+ *  rendering it yields the same launched string as the pre-graph driver. */
+export interface LoomWorkerNode {
+  id: string;
+  kind: "worker";
+  label?: string;
+  ui?: { x: number; y: number };
+  worker: LoomWorkerConfig;
+  prompt: string;
+  /** true = run this node in a fresh sandbox/run lineage (per-node isolation). */
+  isolate?: boolean;
+  /** Bounded per-node retry: re-attempt up to maxAttempts until the predicate
+   *  holds. Reserved for a later slice — defined now, not executed. */
+  retry?: { maxAttempts: number; until?: GuardPredicate };
+}
+
+/** A node that evaluates a predicate and routes flow down its pass/fail edges.
+ *  Reserved for a later slice — defined now, not executed. */
+export interface LoomGuardNode {
+  id: string;
+  kind: "guard";
+  label?: string;
+  ui?: { x: number; y: number };
+  predicate: GuardPredicate;
+}
+
+/** A node that joins multiple inbound branches before continuing.
+ *  Reserved for a later slice — defined now, not executed. */
+export interface LoomMergeNode {
+  id: string;
+  kind: "merge";
+  label?: string;
+  ui?: { x: number; y: number };
+  joinMode: "all" | "any";
+}
+
+export type LoomNodeDef = LoomWorkerNode | LoomGuardNode | LoomMergeNode;
+
+/** A directed edge between two nodes. `branch` is only meaningful on edges
+ *  whose source is a guard node (pass/fail routing). `backEdge`+`visitCap` are
+ *  reserved for the later bounded-cycles slice — defined now, NOT executed
+ *  (planLoomLayers ignores backEdge===true edges). */
+export interface LoomEdgeDef {
+  id: string;
+  from: string;
+  to: string;
+  branch?: "pass" | "fail";
+  backEdge?: boolean;
+  visitCap?: number;
+}
+
+/** The loom's node graph. Backfilled by scheduler.normalizeJob from the flat
+ *  worker/prompt/loop fields when absent (a single `w0` worker node, no edges)
+ *  so every loom — legacy or new — has a graph post-normalize. */
+export interface LoomGraph {
+  version: 1;
+  nodes: LoomNodeDef[];
+  edges: LoomEdgeDef[];
+  entryNodeIds: string[];
+}
+
+/** Structured continuation intent (MCP tool OR sentinel), widened with the
+ *  auto-handoff fields. Handoff fields are pre-validated by agent-socket
+ *  against installed runtimes before they ever reach the loop driver. */
+export interface AgentLoopSignal {
+  continue: boolean;
+  prompt?: string;
+  nextEngine?: LoomEngine;
+  nextModel?: string;
+  nextEffort?: AgentEffortLevel;
+  /**
+   * Slice 7 (multi-node passes): which loom graph node the calling worker was
+   * executing (captured from SPARK_NODE_ID / the attempt's task loomNodeId).
+   * Lets the pass-level "agent" loop read ONLY the SINK node's signal when a
+   * wave has several workers. Undefined for a single-node loom (no node
+   * attribution available) — the legacy unstamped read path then applies, so
+   * single-node "agent" loop behaviour is identical.
+   */
+  nodeId?: string;
+}
+
+/** Live automation worker descriptor for the Hub's Workers sub-tab. */
+export interface AutomationWorkerInfo {
+  automationId: string;
+  automationName: string;
+  runId: string;
+  workerTaskId: string;
+  /** Doubles as the pty sessionId — TerminalPane attaches to it directly. */
+  attemptId: string;
+  iteration: number; // 0-based
+  engine: LoomEngine;
+  model?: string;
+  effort?: AgentEffortLevel;
+  cwd: string;
+  startedAt?: string;
+  status: WorkerAttemptStatus;
+  blocked: boolean; // run.status === "blocked"
+  question?: string; // pending question text when blocked
+  /** Looms v2.5: which graph node this worker is executing (and its label).
+   *  Fields only — population is a later slice (the single-node executor here
+   *  leaves them undefined, which renders identically to today). */
+  nodeId?: string;
+  nodeLabel?: string;
+}
+
+/** SparkEvent "automation.worker" payload (broadcast-only, not journaled —
+ *  same pattern as "automation.iteration"). */
+export interface AutomationWorkerEventPayload {
+  phase: "spawned" | "blocked" | "unblocked" | "exited";
+  worker: AutomationWorkerInfo;
+}
+
+/** run-store.startDirectWorkerRun input — first iteration / isolate mode. */
+export interface StartDirectWorkerRunInput {
+  workspaceId: string;
+  workspaceName?: string;
+  cwd: string;
+  automationId: string;
+  title: string; // `Loom: ${name} — pass ${n}`
+  prompt: string; // fully rendered loop prompt
+  engine: LoomEngine; // already resolved — never "auto" here
+  model?: string;
+  effort?: AgentEffortLevel;
+  /** Looms v2.5: the graph node this pass's single worker executes (its prompt
+   *  IS the rendered `prompt` above). Defaults to "w0" when omitted, so a
+   *  pre-graph caller still seeds a coherent single-node loomPass. The launcher
+   *  stamps it onto the workerTask and seeds RunState.loomPass from it. */
+  loomNodeId?: string;
+  /** Looms v2.5 (sequential chains): the per-pass {{var}} snapshot, seeded onto
+   *  RunState.loomPass.vars so a later wave (launched by finalizeDirectRun)
+   *  renders its node templates against the same values. Omitted by pre-graph
+   *  callers; single-node looms run identically either way. */
+  vars?: Record<string, string>;
+  /** Looms v2.5 (multi-node entry seam): the whole layer-0 frontier launched as
+   *  ONE wave. When present, the launcher creates one task/attempt per node and
+   *  seeds loomPass.pendingNodeIds with all of them. When absent, the single
+   *  `prompt`/`engine`/`model`/`effort`/`loomNodeId` above launch one node — the
+   *  byte-identical legacy single-node path. */
+  nodes?: DirectNodeLaunch[];
+  /** Looms v2.5 (pass boundary): TRUE only on a same-run pass-chaining launch
+   *  (the loop driver starting a fresh PASS). When true the launcher rebuilds
+   *  loomPass FROM SCRATCH (only the launched wave's nodes, activations 1, fresh
+   *  attempt ids, no carried back-edge budget) so pass 2+ of a multi-node loom
+   *  re-runs downstream nodes and re-arms loops. Absent/false on an answer-resume
+   *  (mid-pass) so in-flight pass state is preserved. Single-node: the reset
+   *  re-seeds the one running node = today's behavior. */
+  freshPass?: boolean;
+}
+
+/** One node to launch within a loom-pass wave (the multi-node entry seam +
+ *  finalizeDirectRun advance both build these). `template` is rendered through
+ *  loom-graph.renderNodePrompt against the pass vars + settled upstream outputs;
+ *  `incoming` is this node's forward-parent ids. For the entry wave the template
+ *  is the already-assembled, fully-substituted prompt (no remaining tokens). */
+export interface DirectNodeLaunch {
+  nodeId: string;
+  template: string;
+  worker: LoomWorkerConfig;
+  /** Forward-parent node ids (empty/omitted for entry nodes). */
+  incoming?: string[];
+}
+
+/** run-store.addDirectIteration input — same-run chaining (isolate=false). */
+export interface AddDirectIterationInput {
+  runId: string;
+  prompt: string;
+  engine: LoomEngine;
+  model?: string;
+  effort?: AgentEffortLevel;
+  /** `loom-${jobId}-${iter}` — reuses addRunMessage's dedupe machinery. */
+  clientMessageId?: string;
+  /** Looms v2.5: the graph node this chained pass's worker executes. See
+   *  StartDirectWorkerRunInput.loomNodeId. Defaults to "w0" when omitted. */
+  loomNodeId?: string;
+  /** Looms v2.5 (sequential chains): the per-pass {{var}} snapshot. See
+   *  StartDirectWorkerRunInput.vars. */
+  vars?: Record<string, string>;
+  /** Looms v2.5 (multi-node entry seam): the whole layer-0 frontier as ONE wave.
+   *  See StartDirectWorkerRunInput.nodes. */
+  nodes?: DirectNodeLaunch[];
+  /** Looms v2.5 (pass boundary): rebuild loomPass from scratch. See
+   *  StartDirectWorkerRunInput.freshPass. */
+  freshPass?: boolean;
+}
+
+// Live lifecycle of an automation's loop.
+export type AutomationStatus =
+  | "idle" // armed, between fires; or never run
+  | "running" // an iteration is in flight
+  | "paused" // loop disarmed by the user; trigger may still be armed
+  | "stopped" // loop finalized (reached a bound / user-stopped)
+  | "blocked"; // current iteration is awaiting the user (a question)
+
+// Why a loop finalized — drives the Hub's "stopped: …" badge.
+export type AutomationStopReason =
+  | "agent-done"
+  | "agent-no-signal"
+  | "max-iterations"
+  | "budget"
+  | "phrase"
+  | "tests-pass"
+  | "git-clean"
+  | "until-command"
+  | "once"
+  | "iteration-failed"
+  | "user-stop"
+  // Looms v2: the loom's engine (or every engine, for "auto") is not
+  // installed/enabled — the Hub renders the runtime's installHint.
+  | "engine-missing";
+
+// What caused an iteration to start (for the history timeline).
+export type AutomationContinuationSource =
+  | "manual"
+  | "trigger"
+  | "count"
+  | "cadence"
+  | "until"
+  | "continuous"
+  | "agent";
+
+// One iteration in an automation's history.
+export interface AutomationRunRecord {
+  iteration: number; // 0-based
+  runId: string;
+  startedAt: string;
+  finishedAt?: string;
+  status: RunStatus; // terminal status of the iteration (or "running" while live)
+  summary?: string; // last spark message / review summary; drives {{lastOutput}}
+  costUsd?: number; // (totalCostUsd + estimatedWorkerCostUsd) delta for this pass
+  stopReason?: AutomationStopReason; // set only on the final record when stopping
+  continuationSource?: AutomationContinuationSource;
+}
+
+// Persisted live state of an automation's loop.
+export interface AutomationState {
+  status: AutomationStatus;
+  iteration: number; // count of iterations STARTED
+  currentRunId?: string; // THE live worker the Hub resolves -> getRun
+  spentUsd?: number; // running est. budget tally
+  nextFireAt?: string; // cadence/cron: ISO; drives the left-list sub-line
+  lastStopReason?: AutomationStopReason;
+  pendingNextPrompt?: string; // agent-supplied next instruction (from the tool)
+  /** Validated agent handoff for the next iteration; honored only when
+   *  worker.engine === "auto" (a pinned engine always wins). Consumed once.
+   *  `engine` may be absent for an effort-only handoff — auto resolution still
+   *  picks the engine, the steering only pins effort/model. */
+  pendingNextWorker?: { engine?: LoomEngine; model?: string; effort?: AgentEffortLevel };
+  /** Persisted mirror of the in-memory agent signal — survives a restart
+   *  that lands between worker-finish and onTerminal. Read-once. */
+  pendingAgentSignal?: AgentLoopSignal;
+}
 
 // A scheduled job is idle between firings and running while its enqueued run is
-// in flight.
+// in flight. (Superseded by AutomationState.status; kept for back-compat.)
 export type ScheduledJobStatus = "idle" | "running";
 
-// A recurring automation that enqueues `input` on its `trigger`.
+// An "automation" / loom. ScheduledJob's field set is a strict superset of the
+// legacy shape — loop/prompt/state/history are backfilled by normalizeJob.
 export interface ScheduledJob {
   id: string;
   name: string;
   trigger: AutomationTrigger;
   enabled: boolean;
-  input: StartAutopilotInput;
+  input: StartAutopilotInput; // pinned workspace/cwd payload (legacy chat* fields unread)
+  loop: AutomationLoop; // backfilled to {kind:"once",stop:{}} on read
+  prompt?: AutomationPrompt; // template overrides input.initialUserNote per iter
+  /** Looms v2 worker config. Backfilled by scheduler.normalizeJob (legacy
+   *  chatBackend claude/codex carries over; openrouter/undefined → "auto").
+   *  Required post-normalize, like loop/state/history. */
+  worker: LoomWorkerConfig;
+  /** Looms v2.5 node graph. Backfilled by scheduler.normalizeJob from the flat
+   *  worker/prompt/loop fields (a single `w0` worker node) when absent, so it is
+   *  required post-normalize like loop/state/history/worker. */
+  graph?: LoomGraph;
+  state: AutomationState; // backfilled to {status:"idle",iteration:0}
+  history: AutomationRunRecord[]; // capped to AUTOMATION_HISTORY_CAP; backfilled []
   // Legacy: pre-trigger jobs stored a bare cron string. Kept optional so old
   // scheduler.json files still load; normalized into `trigger` on read.
   cron?: string;
@@ -2027,10 +2509,55 @@ export interface ScheduledJob {
 }
 
 // Payload the renderer sends to register an automation. `enabled` defaults to
-// true at the registry when omitted.
+// true and `loop` defaults to {kind:"once",stop:{}} at the registry when omitted.
 export interface CreateScheduledJobInput {
   name: string;
   trigger: AutomationTrigger;
   input: StartAutopilotInput;
+  loop?: AutomationLoop;
+  prompt?: AutomationPrompt;
+  worker?: LoomWorkerConfig; // defaulted from input.chatBackend mapping when omitted
+  graph?: LoomGraph; // backfilled by normalizeJob when omitted (single w0 node)
   enabled?: boolean;
 }
+
+// Edit payload (scheduler:update). Partial; id required. enabled/state/history
+// are not settable here (use setEnabled / pause / stop / the engine).
+export interface UpdateScheduledJobInput {
+  id: string;
+  name?: string;
+  trigger?: AutomationTrigger;
+  input?: StartAutopilotInput;
+  loop?: AutomationLoop;
+  prompt?: AutomationPrompt;
+  worker?: LoomWorkerConfig;
+  graph?: LoomGraph;
+}
+
+// scheduler:getDetail response: the automation + its resolved live run.
+export interface AutomationDetail {
+  job: ScheduledJob;
+  liveRun: RunState | null; // resolved from state.currentRunId, or null
+}
+
+// Broadcast-only live ping (rides SparkEvent; not journaled — same pattern as
+// "automation.updated"). Lets the Hub do fine-grained per-iteration refreshes.
+export interface AutomationIterationEventPayload {
+  automationId: string;
+  iteration: number;
+  runId?: string;
+  status: AutomationStatus;
+}
+
+// Engine constants (exported so the test harness + UI can reference them).
+export const DEFAULT_AGENT_MAX_ITERATIONS = 20;
+export const AUTOMATION_HISTORY_CAP = 50;
+export const SHELL_CHECK_TIMEOUT_MS = 120_000;
+// Per-iteration wall-clock ceiling for direct workers (LoomWorkerConfig
+// .timeoutMinutes default) — the loop watchdog fails the attempt past this.
+export const DEFAULT_ITERATION_TIMEOUT_MINUTES = 60;
+// Sentinel tokens for the zero-instrumentation agent-driven fallback: the
+// model writes one of these as the LAST line of its final summary to drive the
+// loop even before the spark_request_next_iteration tool is available.
+export const SPARK_LOOP_CONTINUE = "SPARK_LOOP_CONTINUE";
+export const SPARK_LOOP_DONE = "SPARK_LOOP_DONE";

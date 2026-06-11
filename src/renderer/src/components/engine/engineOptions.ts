@@ -12,10 +12,11 @@ export interface EngineOption {
   glyph: string;
 }
 
-// Spark is always available — it's the built-in OpenRouter manager and needs no
-// external CLI. Claude / Codex are appended only when their runtime is
-// installed and not disabled (same gate the composer's model picker uses).
-const SPARK_OPTION: EngineOption = { key: "spark", label: "Spark", glyph: "✦" };
+// The built-in OpenRouter manager. Demoted to LAST and labeled "API": the CLI
+// agents (Claude / Codex) are the primary engines; the API manager remains for
+// users who explicitly want it (its key stays "spark" so existing callers and
+// persisted picks keep working).
+const SPARK_OPTION: EngineOption = { key: "spark", label: "API", glyph: "✦" };
 
 function isAvailable(
   diagnostics: AgentRuntimeDiagnostic[],
@@ -35,12 +36,12 @@ function labelFor(
   return diagnostics.find((d) => d.kind === kind)?.label ?? fallback;
 }
 
-// Build the visible engine list from runtime diagnostics. Spark is always
-// first; Claude / Codex follow when installed. A single-element result (just
-// Spark) signals callers to render their plain single-action affordance with
-// no engine submenu.
+// Build the visible engine list from runtime diagnostics. Claude / Codex lead
+// when installed; the API manager is always last. A single-element result
+// (just API — nothing installed) signals callers to render their plain
+// single-action affordance with no engine submenu.
 export function buildEngineOptions(diagnostics: AgentRuntimeDiagnostic[]): EngineOption[] {
-  const options: EngineOption[] = [SPARK_OPTION];
+  const options: EngineOption[] = [];
   if (isAvailable(diagnostics, "claude")) {
     options.push({
       key: "claude",
@@ -57,6 +58,7 @@ export function buildEngineOptions(diagnostics: AgentRuntimeDiagnostic[]): Engin
       glyph: "◆",
     });
   }
+  options.push(SPARK_OPTION);
   return options;
 }
 

@@ -39,7 +39,9 @@ const LEGACY_SERVER_NAME = "playwright";
 const SPARK_VERSION = "1";
 
 export const SPARK_ORCHESTRATOR_SERVER_NAME = "spark-orchestrator";
-const ORCHESTRATOR_SPARK_VERSION = "1";
+// v2: spark_request_next_iteration gained nextEngine/nextModel/nextEffort
+// (Looms v2 auto-handoff) — bump forces a re-install of the managed entry.
+const ORCHESTRATOR_SPARK_VERSION = "2";
 
 // Tool rosters kept in sync with resources/spark-*-mcp/server.js so the
 // Capability Center can show "N tools" without spawning the servers.
@@ -61,6 +63,7 @@ const SPARK_ORCHESTRATOR_TOOLS = [
   "spark_spawn_workers",
   "spark_ask_user",
   "spark_complete",
+  "spark_request_next_iteration",
   "spark_get_worker_status",
   "spark_wait_for_workers",
 ];

@@ -60,14 +60,48 @@ export default defineConfig({
         output: {
           manualChunks(id: string) {
             if (!id.includes("node_modules")) return undefined;
-            if (id.includes("react-dom") || id.match(/[\\/]react[\\/]/)) return "react-vendor";
+            // react-vendor must stay a leaf chunk (no imports back into "vendor",
+            // which would make the chunk graph circular), so react-dom's runtime
+            // helpers ride along with it.
+            // Anchor to node_modules/react(-dom)/ — a bare /react/ segment also
+            // matches @xyflow/react's own source, which would yank the flow
+            // editor into react-vendor and create a flow-vendor <-> react-vendor
+            // cycle.
             if (
-              id.includes("@codemirror") ||
+              /[\\/]node_modules[\\/](react|react-dom)[\\/]/.test(id) ||
+              /[\\/]node_modules[\\/](scheduler|loose-envify|js-tokens|use-sync-external-store)[\\/]/.test(
+                id,
+              )
+            )
+              return "react-vendor";
+            // Anything codemirror-shaped (@codemirror/*, @uiw/react-codemirror,
+            // @replit/codemirror-vim, the `codemirror` meta-package) plus the
+            // micro-helpers only codemirror imports — splitting any of these out
+            // creates a vendor <-> codemirror-vendor cycle.
+            if (
+              id.includes("codemirror") ||
               id.includes("@lezer") ||
-              id.includes("@uiw/codemirror")
+              id.includes("@uiw/") ||
+              /[\\/]node_modules[\\/](crelt|style-mod|w3c-keyname|@marijn)[\\/]/.test(id)
             )
               return "codemirror-vendor";
             if (id.includes("@xterm")) return "xterm-vendor";
+            // @xyflow/react (the node-graph editor) + its deps. Isolated so it
+            // doesn't bloat the generic vendor chunk; it only imports React
+            // (the leaf react-vendor), so no vendor <-> flow-vendor cycle.
+            // zustand rides here too (@xyflow is its only consumer); leaving it
+            // in the generic "vendor" chunk creates a vendor <-> react-vendor
+            // cycle via its use-sync-external-store dep, which we keep pinned to
+            // the leaf react-vendor (it's a React-runtime helper).
+            if (
+              id.includes("@xyflow") ||
+              id.includes("classcat") ||
+              /[\\/]node_modules[\\/]zustand[\\/]/.test(id) ||
+              /[\\/]node_modules[\\/]d3-(drag|zoom|selection|transition|color|dispatch|ease|interpolate|timer)[\\/]/.test(
+                id,
+              )
+            )
+              return "flow-vendor";
             if (id.includes("react-virtuoso")) return "virtuoso-vendor";
             if (id.includes("@iconify")) return "icons-vendor";
             return "vendor";

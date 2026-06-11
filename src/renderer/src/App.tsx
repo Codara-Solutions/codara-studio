@@ -30,7 +30,7 @@ import ToastHost from "./components/Toast";
 import RunSwitcher from "./components/RunSwitcher";
 import { CopyBranchDeleteDialog, CopyBranchErrorToast } from "./components/CopyBranchDialogs";
 import { playNotificationSound } from "./components/notification-sounds";
-import TabBar from "./tabs/TabBar";
+import TabBar, { type PickerHints } from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
 import InnerTabStrip from "./tabs/InnerTabStrip";
 import EditorStack from "./tabs/EditorStack";
@@ -53,7 +53,9 @@ import type {
 import { basename } from "./path-utils";
 import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
-import { buildBindingTable } from "./shortcuts/bindings";
+import { buildBindingTable, type BindingTable } from "./shortcuts/bindings";
+import { chordToHint } from "./shortcuts/chord";
+import type { CommandId } from "./shortcuts/commands";
 import { isRecording } from "./shortcuts/recording";
 import { usePreferences } from "./preferences/usePreferences";
 import {
@@ -129,6 +131,15 @@ function sameOrigin(a: string, b: string): boolean {
   } catch {
     return a === b;
   }
+}
+
+// Resolve a single inline keybind hint string for a command id from the
+// effective binding table. Uses the first/primary chord; returns undefined
+// when the command is unbound (the picker then renders no hint at all).
+function hintForCommand(table: BindingTable, id: CommandId): string | undefined {
+  const binding = table.find((b) => b.command.id === id);
+  const chord = binding?.chords[0];
+  return chord ? chordToHint(chord) : undefined;
 }
 
 function isBrowserUrl(url: string): boolean {
@@ -392,6 +403,9 @@ export default function App() {
       run: RunState,
       options?: { select?: boolean; focusRuns?: boolean },
     ) => {
+      // Loom-owned runs never enter the lifted chat state (defensive — the
+      // listRuns filter is the primary gate).
+      if (run.automationId) return;
       setRuns((current) => {
         if (run.workspaceId !== activeIdRef.current) return current;
         const withoutRun = current.filter((item) => item.id !== run.id);
@@ -482,9 +496,18 @@ export default function App() {
         }
         setActiveId(workspaceId);
       }
+      // Loom-owned runs have no chat surface anywhere (the lifted list filters
+      // them, so handleSelectRun would dead-end in an empty chat tab) — their
+      // home is the Automations Hub. Route a blocked-loom toast/digest click
+      // there instead.
+      const target = globalRuns.runsRef.current.find((r) => r.id === runId);
+      if (target?.automationId) {
+        tabsRef.current.openAutomationsTab();
+        return;
+      }
       handleSelectRun(runId, workspaceId);
     },
-    [handleSelectRun],
+    [handleSelectRun, globalRuns.runsRef],
   );
 
   // Unseen terminal-agent alerts, keyed workspace → pane. Set when main
@@ -515,7 +538,12 @@ export default function App() {
     const m: Record<string, ChatStatusTone | null> = {};
     for (const w of workspaces) {
       let tone: ChatStatusTone | null = null;
-      const wr = globalRuns.runs.filter((r) => r.workspaceId === w.id);
+      // Loom passes count only while blocked ("needs you" must light the dot);
+      // their completions are per-iteration noise — and since no chat tab ever
+      // views a loom run, an unfiltered feed would pin "done-unseen" forever.
+      const wr = globalRuns.runs.filter(
+        (r) => r.workspaceId === w.id && (!r.automationId || r.status === "blocked"),
+      );
       if (wr.length > 0) {
         // compareRunsByAttention sorts highest-attention first, so the head
         // run dictates the dot. describeRunStatus(top).tone is the same tone
@@ -711,7 +739,10 @@ export default function App() {
     try {
       const next = await window.spark.orchestration.listRuns(workspaceId);
       if (activeIdRef.current !== workspaceId) return;
-      setRuns(next);
+      // Loom-owned runs live inside the Automations tab (Workers sub-tab +
+      // per-loom history) — keeping them out of the lifted list is what keeps
+      // chat tabs / RunsStack rows from materializing for them.
+      setRuns(next.filter((run) => !run.automationId));
     } catch {
       /* Surface details elsewhere; this is opportunistic. */
     }
@@ -937,7 +968,12 @@ export default function App() {
       const awayAt = awayAtRef.current;
       awayAtRef.current = null;
       if (awayAt === null || Date.now() - awayAt < AWAY_THRESHOLD_MS) return;
-      const digest = buildAwayDigest(globalRuns.runsRef.current);
+      // Same cockpit rule as the rail dots: loom runs surface only while
+      // blocked (clicks route to the Automations Hub); their per-pass
+      // completions never enter done-unseen.
+      const digest = buildAwayDigest(
+        globalRuns.runsRef.current.filter((r) => !r.automationId || r.status === "blocked"),
+      );
       if (digest.total === 0) return;
       setAwayDigest(digest);
       // Finish markRunSeen wiring: acknowledge every done-unseen run so the
@@ -972,6 +1008,16 @@ export default function App() {
   useEffect(() => {
     const off = window.spark.notifications.onNotificationSound(({ kind }) => {
       playNotificationSound(kind);
+    });
+    return () => off();
+  }, []);
+
+  // Open the Automations Hub when main asks for it — fired by the tray menu's
+  // "Open Automations" item and the global CommandOrControl+Shift+A
+  // accelerator. tabsRef keeps the subscription stable across tab-state churn.
+  useEffect(() => {
+    const off = window.spark.windowControls.onOpenAutomations(() => {
+      tabsRef.current.openAutomationsTab();
     });
     return () => off();
   }, []);
@@ -1015,6 +1061,12 @@ export default function App() {
       if (event.type !== "worker_task.envelope_prepared") return;
       if (!event.runId || !event.workerTaskId || !event.attemptId) return;
       if (!event.workspaceId) return;
+      // Loom workers: main owns their pty (direct-worker.ts) and the
+      // Automations Hub renders them — never open a workers terminal tab.
+      // Payload check is synchronous; a missing stamp falls through (fail-open
+      // to the visible tab rather than an invisible worker).
+      const payload = event.payload as Record<string, unknown> | undefined;
+      if (payload?.automationId) return;
 
       const ws = workspacesRef.current.find((w) => w.id === event.workspaceId);
       if (!ws) return;
@@ -1966,6 +2018,7 @@ export default function App() {
         window.dispatchEvent(new CustomEvent("spark:open-settings"));
       },
       "session.openInspector": () => setInspectorOpen((open) => !open),
+      "automations.open": () => tabs.openAutomationsTab(),
       "composer.focus": () => {
         // Composer shortcut focuses the active chat if any, otherwise opens
         // (or creates) a draft so the user has somewhere to type.
@@ -2106,6 +2159,23 @@ export default function App() {
     // instead of triggering their currently bound command.
     isDisabled: () => isRecording(),
   });
+
+  // Resolved keybind hints for the tab-strip "+" picker. Derived from the
+  // effective binding table so the menu always shows the user's actual chord
+  // (rebinds included) with the right platform glyphs, and shows nothing when
+  // a command is unbound. Memoized on bindingTable so TabBar's React.memo
+  // identity holds across unrelated App renders. Each picker row maps to the
+  // command that performs the SAME action as its onNew* handler.
+  const pickerHints = useMemo<PickerHints>(
+    () => ({
+      newChat: hintForCommand(bindingTable, "chat.new"),
+      terminal: hintForCommand(bindingTable, "tab.newTerminal"),
+      openFile: hintForCommand(bindingTable, "tab.newEditor"),
+      preview: hintForCommand(bindingTable, "tab.newPreview"),
+      automations: hintForCommand(bindingTable, "automations.open"),
+    }),
+    [bindingTable],
+  );
 
   // Dispose PTYs when terminal panes exit. The renderer-side TerminalPane
   // already calls pty.dispose on unmount, so this handler is intentionally
@@ -2591,6 +2661,7 @@ export default function App() {
               onTerminalPaneDrop={handleTerminalPaneDropToTab}
               onReorderTab={tabs.reorderTab}
               onPinEditorTab={tabs.pinEditorTab}
+              pickerHints={pickerHints}
             />
           )}
         </main>
@@ -2680,7 +2751,7 @@ export default function App() {
 
         <RunSwitcher
           open={runSwitcherOpen}
-          runs={globalRuns.runs}
+          runs={globalRuns.runs.filter((r) => !r.automationId || r.status === "blocked")}
           workspaces={workspaces}
           onClose={() => setRunSwitcherOpen(false)}
           onSelectRun={handleSelectRunAnywhere}
@@ -2709,6 +2780,11 @@ export default function App() {
             const question = run ? findOpenQuestion(run) : null;
             return question?.questionOptions ?? [];
           }}
+          shouldResumeOnAnswer={(runId) =>
+            // Loom runs: the loop driver's answer seam consumes the message;
+            // resumeRun would re-finalize the stale blocked report instead.
+            !globalRuns.runsRef.current.find((r) => r.id === runId)?.automationId
+          }
         />
         {awayDigest && (
           <AwayDigestCard
@@ -3006,6 +3082,9 @@ interface WorkspaceProps {
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: string) => void;
   onReorderTab: (fromId: string, toId: string, position: "before" | "after") => void;
   onPinEditorTab: (id: TabId) => void;
+  // Resolved "+" picker keybind hints, memoized in App so this stays
+  // referentially stable across unrelated renders (keeps the memo intact).
+  pickerHints: PickerHints;
 }
 
 // Memoized: every prop is either referentially stable (the `tabs` object,
@@ -3040,6 +3119,7 @@ const Workspace = React.memo(function Workspace({
   onTerminalPaneDrop,
   onReorderTab,
   onPinEditorTab,
+  pickerHints,
 }: WorkspaceProps) {
   // Destructure the tabs methods we need. useTabs returns a memoized API whose
   // methods are stable for the hook's lifetime, so destructuring here gives us
@@ -3287,6 +3367,7 @@ const Workspace = React.memo(function Workspace({
         onTerminalPaneDrop={onTerminalPaneDrop}
         onReorderTab={onReorderTab}
         onPinEditorTab={onPinEditorTab}
+        pickerHints={pickerHints}
       />
       {innerStripVisible && (
         <InnerTabStrip
@@ -3359,6 +3440,7 @@ const Workspace = React.memo(function Workspace({
           tabs={visibleTabs}
           activeId={effectiveActiveId}
           workspace={workspace}
+          terminalScrollbackLineLimit={terminalScrollbackLineLimit}
         />
         {/* The legacy hidden orchestration TerminalGrid was removed: worker
             PTYs now spawn inside the user-visible TerminalStack via the

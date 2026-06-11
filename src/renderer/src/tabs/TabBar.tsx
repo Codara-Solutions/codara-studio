@@ -40,9 +40,10 @@ interface Props {
   onNewPreview: () => void;
   onNewEditor: () => void;
   // Top-level "+" button now spawns a new chat tab. Spawning a terminal /
-  // editor / preview moved to keybinds (⌘T / ⌘E / ⌘P) — workspace tab kinds
-  // are still appended through the existing onNew* callbacks for those
-  // shortcuts. The strip never opens a kind picker anymore.
+  // editor / preview moved to keybinds — workspace tab kinds are still
+  // appended through the existing onNew* callbacks for those shortcuts. The
+  // strip's "+" dropdown advertises each action's resolved keybind via
+  // pickerHints (see below) instead of the old hard-coded mac glyphs.
   onNewChat: () => void;
   // Opens (or focuses) the workspace's Automations tab from the "+" dropdown.
   onNewAutomations: () => void;
@@ -53,6 +54,20 @@ interface Props {
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: TabId) => void;
   onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
   onPinEditorTab: (id: TabId) => void;
+  // Resolved keybinding hints for the "+" picker rows, derived in App from the
+  // effective binding table so they reflect the user's actual (possibly
+  // rebound) chords and the right platform glyphs. A field is undefined when
+  // the corresponding command has no binding — the row then renders no hint.
+  // Memoized upstream so it doesn't break TabBar's React.memo identity check.
+  pickerHints?: PickerHints;
+}
+
+export interface PickerHints {
+  newChat?: string;
+  terminal?: string;
+  openFile?: string;
+  preview?: string;
+  automations?: string;
 }
 
 // React.memo: TabBar's props from App.tsx are referentially stable (the
@@ -74,6 +89,7 @@ function TabBar({
   onTerminalPaneDrop,
   onReorderTab,
   onPinEditorTab,
+  pickerHints,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -383,7 +399,7 @@ function TabBar({
           <div className="spark-tabbar-picker">
             <PickerItem
               label="New chat"
-              hint="⌘N"
+              hint={pickerHints?.newChat}
               primary
               onClick={() => {
                 setPickerOpen(false);
@@ -396,7 +412,7 @@ function TabBar({
             />
             <PickerItem
               label="Terminal"
-              hint="⌘T"
+              hint={pickerHints?.terminal}
               onClick={() => {
                 setPickerOpen(false);
                 onNewTerminal();
@@ -404,7 +420,7 @@ function TabBar({
             />
             <PickerItem
               label="Open file…"
-              hint="⌘E"
+              hint={pickerHints?.openFile}
               onClick={() => {
                 setPickerOpen(false);
                 onNewEditor();
@@ -412,7 +428,7 @@ function TabBar({
             />
             <PickerItem
               label="Preview"
-              hint="⌘P"
+              hint={pickerHints?.preview}
               onClick={() => {
                 setPickerOpen(false);
                 onNewPreview();
@@ -420,6 +436,7 @@ function TabBar({
             />
             <PickerItem
               label="New automations"
+              hint={pickerHints?.automations}
               onClick={() => {
                 setPickerOpen(false);
                 onNewAutomations();

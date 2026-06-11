@@ -1518,10 +1518,10 @@ function FileMenu({
   );
 }
 
-// The "Run plan" entry. With one engine (just Spark) it's a plain accent
-// MenuButton that runs the default. With Claude / Codex also installed it gains
-// a ▸ caret and a hover flyout listing every engine; clicking the row itself
-// still runs the default engine, matching the prior one-click behaviour.
+// The "Run plan" entry. With one engine (just API) it's a plain accent
+// MenuButton that runs it. With Claude / Codex installed they LEAD the list
+// and clicking the row itself runs the first (recommended) engine — the
+// demoted API manager only runs when picked explicitly from the flyout.
 function RunPlanMenuItem({
   engines,
   onPick,
@@ -1550,7 +1550,7 @@ function RunPlanMenuItem({
     >
       <button
         type="button"
-        onClick={() => onPick(undefined)}
+        onClick={() => onPick(engines[0]?.backend)}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         style={{
@@ -1607,14 +1607,15 @@ function RunPlanMenuItem({
             zIndex: 1,
           }}
         >
-          {engines.map((engine) => (
+          {engines.map((engine, index) => (
             <MenuButton
               key={engine.key}
               icon={engine.glyph}
-              accent={engine.key === "spark"}
+              // The CLI agents lead; the first row is the recommended pick.
+              accent={index === 0}
               onClick={() => onPick(engine.backend)}
             >
-              {engine.key === "spark" ? "Spark (default)" : engine.label}
+              {engine.label}
             </MenuButton>
           ))}
         </div>

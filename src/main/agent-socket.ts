@@ -307,6 +307,8 @@ async function dispatch(
         return await handleOrchestratorAskUser(params, id, res);
       case "orchestrator.complete":
         return await handleOrchestratorComplete(params, id);
+      case "orchestrator.request_next_iteration":
+        return await handleOrchestratorRequestNextIteration(params, id);
       case "orchestrator.get_worker_status":
         return await handleOrchestratorGetWorkerStatus(params, id);
       case "orchestrator.wait_for_workers":
@@ -589,12 +591,40 @@ async function handleOrchestratorAskUser(
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }
 
+  // Looms v2: a direct worker asking mid-session surfaces as a BLOCKED run.
+  // That one status flip drives everything downstream — the Hub's question
+  // card + "needs you" badge, the loop driver's blocked HOLD, and the desktop
+  // notification (run.status_updated is the notifier's canonical signal).
+  // Managed runs are untouched: their manager pipeline owns blocked status.
+  let flippedBlocked = false;
+  try {
+    const run = await runStore.getRun(runId);
+    if (run?.executionMode === "direct" && run.status === "running") {
+      await runStore.updateRunStatus({ runId, status: "blocked" });
+      flippedBlocked = true;
+    }
+  } catch {
+    /* the ask still works without the status cue */
+  }
+  const restoreRunning = async (): Promise<void> => {
+    if (!flippedBlocked) return;
+    try {
+      const run = await runStore.getRun(runId);
+      if (run?.status === "blocked") {
+        await runStore.updateRunStatus({ runId, status: "running" });
+      }
+    } catch {
+      /* watchTerminal's non-terminal reset clears any stale blocked cue */
+    }
+  };
+
   const askedAt = Date.now();
   const deadline = askedAt + ASK_USER_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, ASK_USER_POLL_MS));
     // Client hung up — stop polling; writeJsonRpc on a dead socket is a no-op.
     if (clientGone(res)) {
+      await restoreRunning();
       return errorResponse(id, ERR_INTERNAL, "ask_user aborted: client disconnected");
     }
     const run = await runStore.getRun(runId);
@@ -609,9 +639,11 @@ async function handleOrchestratorAskUser(
         Date.parse(m.createdAt) > askedAt,
       );
     if (answer) {
+      await restoreRunning();
       return successResponse(id, { answer: answer.message, kind: answer.kind });
     }
   }
+  await restoreRunning();
   return errorResponse(id, ERR_INTERNAL, "ask_user timed out waiting for human response");
 }
 
@@ -636,6 +668,90 @@ async function handleOrchestratorComplete(
     return successResponse(id, { ok: true });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+// Agent-driven automation loops: the orchestrator records whether the loop
+// should run another iteration. The loop driver reads this in onTerminal. Has
+// no effect on a normal (non-automation) run — the signal is simply unread.
+async function handleOrchestratorRequestNextIteration(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const done = params.done === true;
+  const prompt = stringParam(params, "prompt") ?? undefined;
+  // Slice 7: which loom node this worker executes (SPARK_NODE_ID, auto-injected
+  // by the MCP server). Used by the loop driver to read only the SINK node's
+  // signal in a multi-node wave; undefined for single-node looms.
+  const nodeId = stringParam(params, "nodeId") ?? undefined;
+
+  // Looms v2 auto-handoff: the agent may steer the NEXT pass's worker. Invalid
+  // fields are dropped (never an error response — the continue/stop signal must
+  // always be recorded; killing the loop over a typo'd model id would be worse
+  // than ignoring the steering). Whatever survives validation is honored only
+  // by auto-engine looms; the loop driver re-checks the pin.
+  const requestedEngine = stringParam(params, "nextEngine") ?? undefined;
+  const requestedModel = stringParam(params, "nextModel") ?? undefined;
+  const requestedEffort = stringParam(params, "nextEffort") ?? undefined;
+  let nextEngine: "claude" | "codex" | undefined;
+  let nextModel: string | undefined;
+  let nextEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined;
+  let warning: string | undefined;
+  if (requestedEngine !== undefined || requestedModel !== undefined || requestedEffort !== undefined) {
+    try {
+      const { detectAgentRuntimes } = await import("./agent-runtimes");
+      const runtimes = await detectAgentRuntimes();
+      if (requestedEngine === "claude" || requestedEngine === "codex") {
+        const runtime = runtimes.find((r) => r.kind === requestedEngine);
+        if (runtime?.installed && !runtime.disabledBySettings) {
+          nextEngine = requestedEngine;
+          if (requestedModel) {
+            const known = runtime.models.map((m) => m.id);
+            if (known.length === 0 || known.includes(requestedModel)) {
+              nextModel = requestedModel;
+            } else {
+              warning = `nextModel "${requestedModel}" is not a known ${requestedEngine} model id — the CLI default will be used.`;
+            }
+          }
+        } else {
+          warning = `nextEngine "${requestedEngine}" is not installed/enabled — keeping the current engine.`;
+        }
+      } else if (requestedEngine !== undefined) {
+        warning = `nextEngine must be "claude" or "codex" — got "${requestedEngine}".`;
+      } else if (requestedModel) {
+        warning = "nextModel requires nextEngine — ignored.";
+      }
+      if (["minimal", "low", "medium", "high", "xhigh", "max"].includes(requestedEffort ?? "")) {
+        nextEffort = requestedEffort as typeof nextEffort;
+      } else if (requestedEffort !== undefined) {
+        warning = warning ?? `nextEffort "${requestedEffort}" is not a valid effort level — ignored.`;
+      }
+      if (warning) {
+        const { appendEvent } = await import("./orchestration/event-log");
+        await appendEvent({
+          workspaceId: "",
+          type: "automation.handoff_rejected",
+          payload: { runId, requestedEngine, requestedModel, requestedEffort, warning },
+        }).catch(() => undefined);
+      }
+    } catch {
+      // Validation failing must never block the continue signal.
+      nextEngine = undefined;
+      nextModel = undefined;
+      nextEffort = undefined;
+    }
+  }
+
+  try {
+    const { recordAgentSignal } = await import("./orchestration/automation-loop");
+    recordAgentSignal(runId, { continue: !done, prompt, nextEngine, nextModel, nextEffort, nodeId });
+    const accepted =
+      nextEngine || nextModel || nextEffort ? { nextEngine, nextModel, nextEffort } : undefined;
+    return successResponse(id, { ok: true, continue: !done, accepted, warning });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, (err as Error).message);
   }
 }
 

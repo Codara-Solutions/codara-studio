@@ -840,6 +840,23 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
       <hr className="spark-divider" style={{ margin: "2px 0" }} />
 
       <SectionTitle
+        title="Window"
+        detail="Control what happens when you close the main window."
+      />
+      {hydrated ? (
+        <div style={{ display: "grid", gap: 6 }}>
+          <ToggleRow
+            title="Keep running in the background when the window is closed"
+            desc="Closing the window hides Spark to the system tray instead of quitting, so automations keep running. Quit from the tray menu."
+            checked={preferences.keepRunningInBackground !== false}
+            onChange={(v) => void setPreference("keepRunningInBackground", v)}
+          />
+        </div>
+      ) : null}
+
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+
+      <SectionTitle
         title="Performance"
         detail="Tune renderer resource usage. Some flags only apply after restart."
       />

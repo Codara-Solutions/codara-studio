@@ -190,6 +190,10 @@ function normalize(
       src.notificationChannels,
       (src as Record<string, unknown>).notifications,
     ),
+    keepRunningInBackground:
+      typeof src.keepRunningInBackground === "boolean"
+        ? src.keepRunningInBackground
+        : DEFAULT_PREFERENCES.keepRunningInBackground,
     copyBranchSetupCommandByRepo: normalizeCopyBranchSetupCommands(
       src.copyBranchSetupCommandByRepo,
     ),
@@ -267,5 +271,17 @@ export function getPreferenceSync<K extends PrefKey>(key: K): AppPreferences[K] 
     syncCache = readFromDiskSync();
   }
   const value = syncCache[key];
+  return value === undefined ? DEFAULT_PREFERENCES[key] : value;
+}
+
+// Synchronously read a single preference from the LIVE async cache — the same
+// `cache` that loadPreferences() fills and setPreference() updates on every
+// toggle. Unlike getPreferenceSync (whose separate syncCache never invalidates
+// after the first read), this reflects in-session changes immediately. Returns
+// the default when the cache hasn't been warmed yet (call loadPreferences()
+// during boot to warm it) so callers always get a sensible value.
+export function getPreferenceCached<K extends PrefKey>(key: K): AppPreferences[K] {
+  if (!cache) return DEFAULT_PREFERENCES[key];
+  const value = cache[key];
   return value === undefined ? DEFAULT_PREFERENCES[key] : value;
 }

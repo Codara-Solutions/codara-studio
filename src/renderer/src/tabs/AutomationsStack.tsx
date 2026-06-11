@@ -1,24 +1,25 @@
 import React, { useMemo } from "react";
-import AutomationsPanel from "../components/runs/AutomationsPanel";
+import AutomationsHub from "../components/automations/AutomationsHub";
 import type { Workspace } from "@shared/types";
 import type { AutomationsTab, Tab, TabId } from "./types";
 
-// AutomationsStack mirrors RunsStack: a single AutomationsPanel mounted
+// AutomationsStack mirrors RunsStack: a single AutomationsHub mounted
 // absolutely at inset 0 per automations tab (there is generally only one). We
 // keep the same mount-always / visibility-toggle contract as the other stacks
-// so the panel's local state (create-form drafts, armed delete rows) survives
-// tab switches instead of being torn down and rebuilt.
+// so the hub's local state (selection, create/edit drafts, live worker panes)
+// survives tab switches instead of being torn down and rebuilt.
 
 interface Props {
   tabs: Tab[];
   activeId: TabId | null;
   workspace: Workspace | null;
+  terminalScrollbackLineLimit: number;
 }
 
 // React.memo so AutomationsStack only re-renders when its real inputs change
 // (tab list, active id, workspace). With the useTabs API object memoized, an
 // unrelated App state change no longer drags the panel through a re-render.
-function AutomationsStack({ tabs, activeId, workspace }: Props) {
+function AutomationsStack({ tabs, activeId, workspace, terminalScrollbackLineLimit }: Props) {
   // Memoize the filtered list so it isn't reallocated on every render.
   const automationsTabs = useMemo(
     () => tabs.filter((t): t is AutomationsTab => t.kind === "automations"),
@@ -46,10 +47,12 @@ function AutomationsStack({ tabs, activeId, workspace }: Props) {
             }}
           >
             {workspace ? (
-              <AutomationsPanel
+              <AutomationsHub
                 workspaceId={workspace.id}
                 workspaceName={workspace.name}
                 cwd={workspace.cwd}
+                active={visible}
+                terminalScrollbackLineLimit={terminalScrollbackLineLimit}
               />
             ) : (
               <div

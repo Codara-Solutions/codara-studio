@@ -165,6 +165,47 @@ const TOOLS = [
     },
   },
   {
+    name: "spark_request_next_iteration",
+    description:
+      "For Spark AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextEngine/nextModel/nextEffort — honored only when the automation's engine is set to Auto, and only for installed engines (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runId: {
+          type: "string",
+          description:
+            "Spark run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+        },
+        done: {
+          type: "boolean",
+          description: "true = stop the loop now; false = run another iteration. Defaults to false (continue).",
+        },
+        prompt: {
+          type: "string",
+          description:
+            "Optional instruction for the NEXT iteration. When omitted, the automation's prompt template is used for the next pass.",
+        },
+        nextEngine: {
+          type: "string",
+          enum: ["claude", "codex"],
+          description:
+            "Optional: which CLI agent runs the NEXT iteration. Honored only for Auto-engine automations; ignored (with a warning) when the engine is pinned or not installed.",
+        },
+        nextModel: {
+          type: "string",
+          description:
+            "Optional engine-native model id for the NEXT iteration (e.g. claude-opus-4-8, gpt-5.5). Requires nextEngine; unknown ids fall back to the CLI default.",
+        },
+        nextEffort: {
+          type: "string",
+          enum: ["minimal", "low", "medium", "high", "xhigh", "max"],
+          description: "Optional reasoning-effort level for the NEXT iteration.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "spark_get_worker_status",
     description:
       "One-shot snapshot of a worker task's current status — use sparingly for ad-hoc spot checks. For waiting on completion, prefer spark_wait_for_workers, which long-polls and returns when workers reach a terminal state. Returns worker_task_id, task_status, the latest attempt's status / runtime / timestamps, and the final_report_path if the worker has finished.",
@@ -224,6 +265,7 @@ const TOOL_TO_RPC = {
   spark_spawn_workers: "orchestrator.spawn_workers",
   spark_ask_user: "orchestrator.ask_user",
   spark_complete: "orchestrator.complete",
+  spark_request_next_iteration: "orchestrator.request_next_iteration",
   spark_get_worker_status: "orchestrator.get_worker_status",
   spark_wait_for_workers: "orchestrator.wait_for_workers",
 };
@@ -402,6 +444,21 @@ async function callTool(params) {
     const envRunId = process.env.SPARK_RUN_ID;
     if (envRunId && envRunId.trim().length > 0) {
       args.runId = envRunId.trim();
+    }
+  }
+  // Slice 7: stamp the calling worker's loom node id (SPARK_NODE_ID, exported
+  // by direct-worker's headless spawn) onto the continuation signal so the
+  // pass-level "agent" loop can read ONLY the SINK node's decision in a
+  // multi-node wave. Auto-injected for request_next_iteration only; harmless
+  // (ignored) for single-node looms where the env var is absent. Caller-
+  // supplied nodeId always wins.
+  if (
+    name === "spark_request_next_iteration" &&
+    (typeof args.nodeId !== "string" || args.nodeId.trim().length === 0)
+  ) {
+    const envNodeId = process.env.SPARK_NODE_ID;
+    if (envNodeId && envNodeId.trim().length > 0) {
+      args.nodeId = envNodeId.trim();
     }
   }
   try {

@@ -13,6 +13,8 @@ import type {
   AppPreferences,
   AppSettings,
   AppState,
+  AutomationDetail,
+  AutomationWorkerInfo,
   CreateEntryInput,
   CreateStepInput,
   CreateRunInput,
@@ -68,6 +70,7 @@ import type {
   UndoToCheckpointInput,
   UndoToCheckpointResult,
   UpdateRunStatusInput,
+  UpdateScheduledJobInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
   WorkerReport,
@@ -492,6 +495,20 @@ const api = {
     setEnabled: (id: string, enabled: boolean): Promise<ScheduledJob> =>
       ipcRenderer.invoke("scheduler:setEnabled", { id, enabled }),
     runNow: (id: string): Promise<RunState> => ipcRenderer.invoke("scheduler:runNow", id),
+    // Loop-aware controls (see automation-loop.ts).
+    update: (input: UpdateScheduledJobInput): Promise<ScheduledJob> =>
+      ipcRenderer.invoke("scheduler:update", input),
+    pause: (id: string): Promise<ScheduledJob | undefined> =>
+      ipcRenderer.invoke("scheduler:pause", id),
+    resume: (id: string): Promise<ScheduledJob | undefined> =>
+      ipcRenderer.invoke("scheduler:resume", id),
+    stop: (id: string): Promise<ScheduledJob | undefined> =>
+      ipcRenderer.invoke("scheduler:stop", id),
+    getDetail: (id: string): Promise<AutomationDetail | null> =>
+      ipcRenderer.invoke("scheduler:getDetail", id),
+    // Looms v2: live direct-worker inventory for the Hub's Workers sub-tab.
+    listActiveWorkers: (): Promise<AutomationWorkerInfo[]> =>
+      ipcRenderer.invoke("automations:listActiveWorkers"),
   },
   pty: {
     spawn: (args: {
@@ -580,12 +597,22 @@ const api = {
     toggleMaximize: (): Promise<boolean> => ipcRenderer.invoke("window:toggleMaximize"),
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke("window:isMaximized"),
     close: (): Promise<void> => ipcRenderer.invoke("window:close"),
+    // Hide the window to the system tray without quitting (close-to-tray).
+    hideToTray: (): Promise<void> => ipcRenderer.invoke("window:hide-to-tray"),
     setTitleBarTheme: (theme: { color: string; symbolColor: string }): Promise<void> =>
       ipcRenderer.invoke("window:setTitleBarTheme", theme),
     onStateChanged: (handler: WindowStateHandler): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, state: { maximized: boolean }) => handler(state);
       ipcRenderer.on("window:state-changed", listener);
       return () => ipcRenderer.off("window:state-changed", listener);
+    },
+    // Fired by the tray menu's "Open Automations" item and the global
+    // CommandOrControl+Shift+A accelerator so the renderer can switch to the
+    // Automations view. Returns an unsubscribe function.
+    onOpenAutomations: (handler: () => void): (() => void) => {
+      const listener = () => handler();
+      ipcRenderer.on("window:open-automations", listener);
+      return () => ipcRenderer.off("window:open-automations", listener);
     },
   },
   app: {

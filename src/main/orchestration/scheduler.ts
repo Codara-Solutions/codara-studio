@@ -2,12 +2,18 @@ import { promises as fs, watch as fsWatch, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
 import { Cron } from "croner";
 import type {
+  AutomationDetail,
+  AutomationRunRecord,
+  AutomationState,
   AutomationTrigger,
   CreateScheduledJobInput,
+  LoomWorkerConfig,
   RunState,
   ScheduledJob,
   StartAutopilotInput,
+  UpdateScheduledJobInput,
 } from "@shared/types";
+import { AUTOMATION_HISTORY_CAP } from "@shared/types";
 import { makeId } from "@shared/ids";
 import { writeFileAtomic } from "../fs-atomic";
 import { sparkHome } from "../spark-home";
@@ -46,13 +52,71 @@ function schedulerPath(): string {
   return join(sparkHome(), SCHEDULER_FILE);
 }
 
-// Tolerate legacy jobs that stored a bare `cron` string before the trigger union
-// existed: synthesize a cron trigger so they keep firing after the upgrade.
+// Read-time migration seam. Tolerates (1) legacy jobs that stored a bare `cron`
+// string before the trigger union existed, and (2) pre-loop jobs that lack the
+// loop / state / history fields. Backfilling here means the cache always holds
+// the current shape, and a loop:{kind:"once"} backfill reproduces the old
+// one-shot firing behaviour exactly.
 function normalizeJob(job: ScheduledJob): ScheduledJob {
-  if (!job.trigger && job.cron) {
-    return { ...job, trigger: { kind: "cron", expr: job.cron } };
+  let next = job;
+  if (!next.trigger && next.cron) {
+    next = { ...next, trigger: { kind: "cron", expr: next.cron } };
   }
-  return job;
+  if (!next.loop) {
+    next = { ...next, loop: { kind: "once", stop: {} } };
+  }
+  if (!next.state) {
+    next = { ...next, state: { status: "idle", iteration: 0 } };
+  }
+  if (!Array.isArray(next.history)) {
+    next = { ...next, history: [] };
+  }
+  if (!next.worker) {
+    next = { ...next, worker: backfillWorker(next) };
+  }
+  // Looms v2.5: backfill the node graph LAST — after worker is guaranteed
+  // defined — from the flat trigger/loop/prompt/worker fields. A pre-graph loom
+  // becomes a single `w0` worker node with no edges, so planLoomLayers yields
+  // {layers:[["w0"]]} and the executor's degenerate single-node path reproduces
+  // the legacy linear pipeline byte-for-byte. The flat fields are NOT mutated:
+  // the driver still reads loop/prompt/worker directly; the graph is additive.
+  if (!next.graph) {
+    next = {
+      ...next,
+      graph: {
+        version: 1,
+        nodes: [
+          {
+            id: "w0",
+            kind: "worker",
+            worker: next.worker,
+            prompt: next.prompt?.template ?? next.input?.initialUserNote ?? "",
+            isolate: next.loop?.isolate,
+          },
+        ],
+        edges: [],
+        entryNodeIds: ["w0"],
+      },
+    };
+  }
+  return next;
+}
+
+// Looms v2 migration: pre-worker jobs pinned an engine via input.chatBackend.
+// claude/codex carry over with their model/effort; openrouter (the removed API
+// manager) and undefined become "auto" — resolves to claude-when-installed but
+// survives codex-only machines instead of dying engine-missing. The legacy
+// chat* fields stay on the pinned input untouched (the driver never reads them).
+function backfillWorker(job: ScheduledJob): LoomWorkerConfig {
+  const legacy = job.input?.chatBackend;
+  if (legacy === "claude" || legacy === "codex") {
+    return {
+      engine: legacy,
+      model: job.input.chatModel?.trim() || undefined,
+      effort: job.input.chatEffort,
+    };
+  }
+  return { engine: "auto" };
 }
 
 async function readFromDisk(): Promise<ScheduledJob[]> {
@@ -105,30 +169,169 @@ export async function listJobs(): Promise<ScheduledJob[]> {
 
 export async function createJob(input: CreateScheduledJobInput): Promise<ScheduledJob> {
   const jobs = await loadJobs();
-  const job: ScheduledJob = {
+  let job: ScheduledJob = {
     id: makeId("job"),
     name: input.name,
     trigger: input.trigger,
     // Default to enabled when the caller omits the flag.
     enabled: input.enabled ?? true,
     input: input.input,
+    // A bare automation with no loop reproduces the legacy one-shot fire.
+    loop: input.loop ?? { kind: "once", stop: {} },
+    prompt: input.prompt,
+    // Carry the caller's graph through; normalizeJob below backfills a single
+    // w0 node when it is absent, so the cached job always has a graph (the loop
+    // driver assumes job.graph is present post-normalize).
+    graph: input.graph,
+    state: { status: "idle", iteration: 0 },
+    history: [],
     createdAt: new Date().toISOString(),
+    worker: input.worker ?? { engine: "auto" },
   };
+  if (!input.worker) job.worker = backfillWorker(job);
+  // Re-normalize so a freshly created job lands in the cache with the same
+  // backfilled shape it would have after a disk round-trip (graph in
+  // particular). Idempotent for the already-set fields above.
+  job = normalizeJob(job);
   await persist([...jobs, job]);
   armJob(job);
   void emitUpdated();
   return job;
 }
 
+// Edit an automation's definition (name / trigger / input / loop / prompt). Live
+// state + history are NOT touched here. Re-arms when the trigger or enabled flag
+// is affected so a changed schedule takes effect immediately.
+export async function updateJob(input: UpdateScheduledJobInput): Promise<ScheduledJob> {
+  const jobs = await loadJobs();
+  const target = jobs.find((job) => job.id === input.id);
+  if (!target) throw new Error(`Scheduled job not found: ${input.id}`);
+  const updated: ScheduledJob = {
+    ...target,
+    ...(input.name !== undefined ? { name: input.name } : {}),
+    ...(input.trigger !== undefined ? { trigger: input.trigger } : {}),
+    ...(input.input !== undefined ? { input: input.input } : {}),
+    ...(input.loop !== undefined ? { loop: input.loop } : {}),
+    ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
+    ...(input.worker !== undefined ? { worker: input.worker } : {}),
+    ...(input.graph !== undefined ? { graph: input.graph } : {}),
+  };
+  await persist(jobs.map((job) => (job.id === input.id ? updated : job)));
+  // Re-arm so a changed trigger schedule takes effect now.
+  if (updated.enabled) armJob(updated);
+  else disarmJob(updated.id);
+  void emitUpdated();
+  return updated;
+}
+
+// Loop-driver support: fetch a single job (fresh from cache).
+export async function getJob(id: string): Promise<ScheduledJob | undefined> {
+  const jobs = await loadJobs();
+  return jobs.find((job) => job.id === id);
+}
+
+// Loop-driver support: read-modify-write a single job through the persist mutex
+// so the cache + atomic write stay authoritative. `fn` receives the current job
+// and returns its replacement. No-op when the id is unknown.
+export async function patchJob(
+  id: string,
+  fn: (job: ScheduledJob) => ScheduledJob,
+): Promise<ScheduledJob | undefined> {
+  const jobs = await loadJobs();
+  const target = jobs.find((job) => job.id === id);
+  if (!target) return undefined;
+  const next = fn(target);
+  await persist(jobs.map((job) => (job.id === id ? next : job)));
+  void emitUpdated();
+  return next;
+}
+
+// Loop-driver support: append/replace a history record (matched by runId +
+// iteration — iteration alone collides across loop cycles, since "Run now" and
+// trigger re-fires reset the counter while history is retained) and set live
+// state in one persisted write. Caps history length.
+export async function appendHistory(
+  id: string,
+  record: AutomationRunRecord,
+  state: Partial<AutomationState>,
+): Promise<void> {
+  await patchJob(id, (job) => {
+    const history = [...job.history];
+    const existing = history.findIndex(
+      (r) => r.runId === record.runId && r.iteration === record.iteration,
+    );
+    if (existing >= 0) history[existing] = { ...history[existing], ...record };
+    else history.push(record);
+    // Newest-kept cap: drop oldest first.
+    const capped = history.length > AUTOMATION_HISTORY_CAP ? history.slice(-AUTOMATION_HISTORY_CAP) : history;
+    return { ...job, state: { ...job.state, ...state }, history: capped };
+  });
+}
+
+// Resolve an automation + its live worker run for the Hub's detail pane.
+export async function getDetail(id: string): Promise<AutomationDetail | null> {
+  const job = await getJob(id);
+  if (!job) return null;
+  let liveRun: RunState | null = null;
+  if (job.state.currentRunId) {
+    try {
+      const { getRun } = await import("./run-store");
+      liveRun = await getRun(job.state.currentRunId);
+    } catch {
+      liveRun = null;
+    }
+  }
+  return { job, liveRun };
+}
+
+// Pause an automation's LOOP without disarming its trigger: the loop won't
+// advance and trigger fires hold while paused; once the user resumes (or the
+// loop stops), the next trigger fire starts a fresh cycle.
+export async function pauseJob(id: string): Promise<ScheduledJob | undefined> {
+  const { pauseLoop } = await import("./automation-loop");
+  await pauseLoop(id);
+  return getJob(id);
+}
+
+// Resume a paused loop: flip back to idle, then RE-DRIVE it (the in-flight run
+// may have finished during the pause, or still be live). Without the re-drive a
+// manual/continuous/agent loom would be silently dead after pause+resume.
+export async function resumeJob(id: string): Promise<ScheduledJob | undefined> {
+  await patchJob(id, (job) => ({
+    ...job,
+    state: { ...job.state, status: job.state.status === "paused" ? "idle" : job.state.status },
+  }));
+  const { resumeLoop } = await import("./automation-loop");
+  await resumeLoop(id);
+  return getJob(id);
+}
+
+// Stop an automation's loop now (finalize + force-pause the live run).
+export async function stopJob(id: string): Promise<ScheduledJob | undefined> {
+  const { stopLoop } = await import("./automation-loop");
+  await stopLoop(id);
+  return getJob(id);
+}
+
 export async function deleteJob(id: string): Promise<void> {
   const jobs = await loadJobs();
-  const next = jobs.filter((job) => job.id !== id);
-  // No-op (but still persist) when the id is unknown — keeps the call idempotent.
-  if (next.length !== jobs.length) {
-    disarmJob(id);
-    await persist(next);
-    void emitUpdated();
+  if (!jobs.some((job) => job.id === id)) return; // idempotent
+  disarmJob(id);
+  // Stop the live worker BEFORE removing the job: stopLoop resolves the run
+  // through getJob (it must run while the registry still holds the record),
+  // and deleting first would orphan a headless CLI worker that keeps editing
+  // the workspace with every UI surface that could see or stop it gone.
+  // fireDependents:false — deleting loom A must not kick off onFinishOf(A).
+  try {
+    const { stopLoop } = await import("./automation-loop");
+    await stopLoop(id, { fireDependents: false });
+  } catch {
+    /* best-effort — never block deletion on a stop failure */
   }
+  // Re-read: stopLoop's finalize re-persists the registry; filtering the
+  // pre-stop snapshot would clobber that write (and any concurrent patch).
+  await persist((await loadJobs()).filter((job) => job.id !== id));
+  void emitUpdated();
 }
 
 export async function setEnabled(id: string, enabled: boolean): Promise<ScheduledJob> {
@@ -145,66 +348,37 @@ export async function setEnabled(id: string, enabled: boolean): Promise<Schedule
   return updated;
 }
 
-// Fire a job by hand right now, immediately and directly (bypasses the queue so
-// the caller gets a RunState back). Used by the "Run now" button. Loads the job,
-// hands its pinned input to startAutopilot, then stamps lastRunAt / lastRunId.
+// "Run now": start (or restart) the automation's loop by hand immediately, and
+// return the live RunState so the caller can jump to it. Delegates to the loop
+// driver, which resets the loop's iteration counter for a fresh manual pass.
 export async function runJobNow(id: string): Promise<RunState> {
-  const jobs = await loadJobs();
-  const job = jobs.find((entry) => entry.id === id);
-  if (!job) {
-    throw new Error(`Scheduled job not found: ${id}`);
-  }
-
-  const { startAutopilot } = await import("./run-store");
-  const run = await startAutopilot(job.input);
-
-  const freshJobs = await loadJobs();
-  const freshJob = freshJobs.find((entry) => entry.id === id);
-  if (!freshJob) return run;
-  const updated: ScheduledJob = {
-    ...freshJob,
-    lastRunAt: new Date().toISOString(),
-    lastRunId: run.id,
-  };
-  await persist(freshJobs.map((entry) => (entry.id === id ? updated : entry)));
-  void emitUpdated();
-  return run;
+  const { runNow } = await import("./automation-loop");
+  return runNow(id);
 }
 
-// Automatic firing path (cron tick / interval loop / folder change): route the
-// job's input through the overnight queue (enqueue + burnDown) so the queue's
-// concurrency cap stays authoritative, then stamp lastRunAt. For folder triggers
-// we inject the changed path into the run's note so the agent knows what fired.
-async function fireJob(id: string, firedPath?: string): Promise<void> {
-  const jobs = await loadJobs();
-  const job = jobs.find((entry) => entry.id === id);
-  if (!job || !job.enabled) return;
+// One firing path now: every trigger (cron tick / interval loop / folder change
+// / continuous arm / chain) hands off to the loop driver, which owns iterations
+// 1..N, stop conditions, and history. Kept exported under the old name so any
+// stray caller still works.
+export async function fireJob(id: string, firedPath?: string): Promise<void> {
+  await startIterationViaDriver(id, { source: "trigger", firedPath });
+}
 
-  const input = firedPath ? injectTriggerNote(job.input, firedPath) : job.input;
+async function startIterationViaDriver(
+  id: string,
+  opts: { source: "trigger" | "continuous" | "manual"; firedPath?: string },
+): Promise<void> {
   try {
-    const { enqueue, burnDown } = await import("./run-queue");
-    await enqueue({ title: job.name, input });
-    void burnDown().catch((err: unknown) =>
-      console.error("[scheduler] burnDown after fire failed:", err),
-    );
+    const { startIteration } = await import("./automation-loop");
+    await startIteration(id, opts);
   } catch (err) {
-    console.error(`[scheduler] failed to fire job ${id}:`, err);
-    return;
+    console.error(`[scheduler] failed to start loop iteration for ${id}:`, err);
   }
-
-  const freshJobs = await loadJobs();
-  const freshJob = freshJobs.find((entry) => entry.id === id);
-  if (!freshJob) return;
-  const updated: ScheduledJob = {
-    ...freshJob,
-    lastRunAt: new Date().toISOString(),
-    ...(firedPath ? { lastFiredPath: firedPath } : {}),
-  };
-  await persist(freshJobs.map((entry) => (entry.id === id ? updated : entry)));
-  void emitUpdated();
 }
 
-function injectTriggerNote(input: StartAutopilotInput, firedPath: string): StartAutopilotInput {
+// Merge a folder trigger's changed path into the run note so the agent knows
+// what fired. Exported for the loop driver's prompt rendering.
+export function injectTriggerNote(input: StartAutopilotInput, firedPath: string): StartAutopilotInput {
   const prefix = input.initialUserNote ? `${input.initialUserNote}\n\n` : "";
   return {
     ...input,
@@ -220,22 +394,50 @@ function armJob(job: ScheduledJob): void {
   if (!job.enabled) return;
   const trigger = job.trigger;
   try {
-    if (trigger.kind === "cron") {
-      const cron = new Cron(trigger.expr, trigger.tz ? { timezone: trigger.tz } : {}, () => {
-        void fireJob(job.id);
-      });
-      armed.set(job.id, () => cron.stop());
-    } else if (trigger.kind === "interval") {
-      const everyMs = Math.max(1000, Math.floor(trigger.everyMs));
-      const handle = setInterval(() => {
-        void fireJob(job.id);
-      }, everyMs);
-      armed.set(job.id, () => clearInterval(handle));
-    } else {
-      const stop = watchFolder(trigger, (path) => {
-        void fireJob(job.id, path);
-      });
-      armed.set(job.id, stop);
+    switch (trigger.kind) {
+      case "cron": {
+        const cron = new Cron(trigger.expr, trigger.tz ? { timezone: trigger.tz } : {}, () => {
+          void startIterationViaDriver(job.id, { source: "trigger" });
+        });
+        armed.set(job.id, () => cron.stop());
+        break;
+      }
+      case "interval": {
+        const everyMs = Math.max(1000, Math.floor(trigger.everyMs));
+        const handle = setInterval(() => {
+          void startIterationViaDriver(job.id, { source: "trigger" });
+        }, everyMs);
+        armed.set(job.id, () => clearInterval(handle));
+        break;
+      }
+      case "folder": {
+        const stop = watchFolder(trigger, (path) => {
+          void startIterationViaDriver(job.id, { source: "trigger", firedPath: path });
+        });
+        armed.set(job.id, stop);
+        break;
+      }
+      case "manual": {
+        // Never armed — only "Run now" (or a chain head) starts a manual loom.
+        break;
+      }
+      case "continuous": {
+        // Start iteration 0 immediately on a microtask so arming stays sync.
+        armed.set(job.id, () => {});
+        queueMicrotask(() => {
+          void startIterationViaDriver(job.id, { source: "continuous" });
+        });
+        break;
+      }
+      case "onFinishOf": {
+        // Register the dependency with the driver; disarm unregisters it.
+        const sourceId = trigger.automationId;
+        void import("./automation-loop").then((m) => m.registerOnFinishOf(sourceId, job.id));
+        armed.set(job.id, () => {
+          void import("./automation-loop").then((m) => m.unregisterOnFinishOf(sourceId, job.id));
+        });
+        break;
+      }
     }
   } catch (err) {
     console.warn(`[scheduler] failed to arm job ${job.id}:`, err);
@@ -257,6 +459,13 @@ function disarmJob(id: string): void {
 export async function startScheduler(): Promise<void> {
   const jobs = await loadJobs();
   for (const job of jobs) armJob(job);
+  // Re-attach to / re-decide any loops that were mid-flight when the app closed.
+  try {
+    const { resumeLoops } = await import("./automation-loop");
+    await resumeLoops();
+  } catch (err) {
+    console.error("[scheduler] resumeLoops failed:", err);
+  }
 }
 
 export function stopScheduler(): void {
@@ -268,6 +477,10 @@ export function stopScheduler(): void {
     }
   }
   armed.clear();
+  // Tear down loop watchers/timers too (best-effort; fire-and-forget on quit).
+  void import("./automation-loop")
+    .then((m) => m.teardownAllLoops())
+    .catch(() => {});
 }
 
 // ── Folder watching ──────────────────────────────────────────────────────────

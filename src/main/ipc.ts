@@ -111,6 +111,8 @@ import type {
   AppSettings,
   AppState,
   CreateEntryInput,
+  AutomationDetail,
+  AutomationWorkerInfo,
   CreateScheduledJobInput,
   CreateStepInput,
   CreateRunInput,
@@ -162,6 +164,7 @@ import type {
   UndoToCheckpointInput,
   UndoToCheckpointResult,
   UpdateRunStatusInput,
+  UpdateScheduledJobInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
 } from "@shared/types";
@@ -1044,6 +1047,45 @@ export function registerIpc(): void {
     return runJobNow(id);
   });
 
+  // Edit an automation's definition (name / trigger / input / loop / prompt).
+  ipcMain.handle(
+    "scheduler:update",
+    async (_e, input: UpdateScheduledJobInput): Promise<ScheduledJob> => {
+      const { updateJob } = await getScheduler();
+      return updateJob(input);
+    },
+  );
+
+  // Pause an automation's loop (trigger stays armed).
+  ipcMain.handle("scheduler:pause", async (_e, id: string): Promise<ScheduledJob | undefined> => {
+    const { pauseJob } = await getScheduler();
+    return pauseJob(id);
+  });
+
+  // Resume a paused loop.
+  ipcMain.handle("scheduler:resume", async (_e, id: string): Promise<ScheduledJob | undefined> => {
+    const { resumeJob } = await getScheduler();
+    return resumeJob(id);
+  });
+
+  // Stop an automation's loop now (finalize + force-pause the live run).
+  ipcMain.handle("scheduler:stop", async (_e, id: string): Promise<ScheduledJob | undefined> => {
+    const { stopJob } = await getScheduler();
+    return stopJob(id);
+  });
+
+  // Resolve an automation + its live worker run for the Hub detail pane.
+  ipcMain.handle("scheduler:getDetail", async (_e, id: string): Promise<AutomationDetail | null> => {
+    const { getDetail } = await getScheduler();
+    return getDetail(id);
+  });
+
+  // Looms v2: live direct-worker inventory for the Hub's Workers sub-tab.
+  ipcMain.handle("automations:listActiveWorkers", async (): Promise<AutomationWorkerInfo[]> => {
+    const { listActiveAutomationWorkers } = await import("./orchestration/direct-worker");
+    return listActiveAutomationWorkers();
+  });
+
   ipcMain.handle(
     "pty:spawn",
     async (
@@ -1172,6 +1214,16 @@ export function registerIpc(): void {
 
   ipcMain.handle("window:close", async (e): Promise<void> => {
     BrowserWindow.fromWebContents(e.sender)?.close();
+  });
+
+  // Hide the window to the system tray (close-to-tray) without quitting. On
+  // win32 we also drop the taskbar button so the hidden window doesn't linger
+  // there — mirrors the close-to-tray path in main's window `close` handler.
+  ipcMain.handle("window:hide-to-tray", async (e): Promise<void> => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win) return;
+    win.hide();
+    if (process.platform === "win32") win.setSkipTaskbar(true);
   });
 
   ipcMain.handle(

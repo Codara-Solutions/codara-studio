@@ -192,6 +192,13 @@ export function chordToDisplay(chord: Chord): string[] {
   return parts;
 }
 
+// Single-string hint for inline affordances (menu rows, button tooltips):
+// mac glyphs are concatenated tight ("⌘⇧A"), other platforms join the parts
+// with "+" ("Ctrl+Shift+A") — matching the KEY_SEP convention in platform.ts.
+export function chordToHint(chord: Chord): string {
+  return chordToDisplay(chord).join(IS_MAC ? "" : "+");
+}
+
 // Constructor helpers used by the command registry to declare defaults.
 // `mod()` resolves to Cmd on Mac and Ctrl elsewhere — the standard
 // "CommandOrControl" abstraction. `ctrl()` is always physical Ctrl,
