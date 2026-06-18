@@ -7,7 +7,16 @@ import * as pty from "./pty-manager";
 import { sparkHome } from "./spark-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
-import type { RunState } from "@shared/types";
+import type {
+  AutomationLoop,
+  AutomationTrigger,
+  CreateScheduledJobInput,
+  LoomGraph,
+  LoomWorkerConfig,
+  RunState,
+  ScheduledJob,
+  UpdateScheduledJobInput,
+} from "@shared/types";
 
 const HANDSHAKE_FILE = "agent-socket.json";
 
@@ -68,6 +77,16 @@ let runStoreMod: typeof import("./orchestration/run-store") | undefined;
 async function getRunStore(): Promise<typeof import("./orchestration/run-store")> {
   runStoreMod ??= await import("./orchestration/run-store");
   return runStoreMod;
+}
+
+// Same lazy-load trick for the scheduler — the Automation-mode architect's
+// automation.* RPCs proxy straight into these. createJob/updateJob/deleteJob/
+// setEnabled already emit the `automation.updated` event from inside scheduler,
+// so the Automations Hub refreshes live without us re-emitting here.
+let schedulerMod: typeof import("./orchestration/scheduler") | undefined;
+async function getScheduler(): Promise<typeof import("./orchestration/scheduler")> {
+  schedulerMod ??= await import("./orchestration/scheduler");
+  return schedulerMod;
 }
 
 interface ServerHandle {
@@ -313,6 +332,28 @@ async function dispatch(
         return await handleOrchestratorGetWorkerStatus(params, id);
       case "orchestrator.wait_for_workers":
         return await handleOrchestratorWaitForWorkers(params, id, res);
+      case "automation.list":
+        return await handleAutomationList(params, id);
+      case "automation.get":
+        return await handleAutomationGet(params, id);
+      case "automation.create":
+        return await handleAutomationCreate(params, id);
+      case "automation.update":
+        return await handleAutomationUpdate(params, id);
+      case "automation.run_now":
+        return await handleAutomationRunNow(params, id);
+      case "automation.wait":
+        return await handleAutomationWait(params, id, res);
+      case "automation.set_enabled":
+        return await handleAutomationSetEnabled(params, id);
+      case "automation.pause":
+        return await handleAutomationPause(params, id);
+      case "automation.resume":
+        return await handleAutomationResume(params, id);
+      case "automation.stop":
+        return await handleAutomationStop(params, id);
+      case "automation.delete":
+        return await handleAutomationDelete(params, id);
       case "tab.create":
       case "pane.split":
         // The renderer owns tab/pane state and reaching it from main requires
@@ -466,6 +507,8 @@ async function handleOrchestratorSpawnWorkers(
   if (!run) {
     return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   }
+  const blocked = rejectIfAutomationRun(run, id, "spark_spawn_workers");
+  if (blocked) return blocked;
   const cwd = typeof run.settingsSnapshot?.workspaceCwd === "string"
     ? run.settingsSnapshot.workspaceCwd
     : process.cwd();
@@ -499,12 +542,21 @@ async function handleOrchestratorSpawnWorkers(
 
   const workerTaskIds: string[] = [];
   const attemptIdsToLaunch: string[] = [];
+  // Fable 5 is reserved for the main chat and automations — Spark-spawned
+  // workers must never run it. Downgrade any fable modelHint the manager emits
+  // to Opus 4.8 here (the spawn chokepoint) and remember the titles so we can
+  // surface ONE visible system note after the loop.
+  const downgradedFableTitles: string[] = [];
   for (const raw of rawWorkers) {
     if (!raw || typeof raw !== "object") continue;
     const w = raw as Record<string, unknown> & OrchestratorWorkerInput;
     const title = typeof w.title === "string" ? w.title.trim() : "";
     if (!title) continue;
     const description = typeof w.description === "string" ? w.description : "";
+    const sanitizedModel = runStore.sanitizeWorkerModelHint(
+      typeof w.modelHint === "string" ? w.modelHint : undefined,
+    );
+    if (sanitizedModel.downgraded) downgradedFableTitles.push(title);
     const updated = await runStore.createWorkerTask({
       runId,
       stepId: synthStepId,
@@ -512,7 +564,7 @@ async function handleOrchestratorSpawnWorkers(
       description,
       runtimePreference: (w.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK) as
         | "claude" | "codex" | "shell" | "manual",
-      modelHint: typeof w.modelHint === "string" ? w.modelHint : undefined,
+      modelHint: sanitizedModel.hint,
       effortHint: w.effortHint,
       allowedPaths: Array.isArray(w.allowedPaths) ? w.allowedPaths.filter((p): p is string => typeof p === "string") : [],
       forbiddenPaths: Array.isArray(w.forbiddenPaths) ? w.forbiddenPaths.filter((p): p is string => typeof p === "string") : [],
@@ -544,10 +596,37 @@ async function handleOrchestratorSpawnWorkers(
       // worker stays in 'created' state and the autopilot will retry.
     }
   }
+  if (downgradedFableTitles.length > 0) {
+    const list = downgradedFableTitles.map((t) => `"${t}"`).join(", ");
+    const note =
+      `Fable 5 (claude-fable-5) is reserved for the main chat session and automations — ` +
+      `it is not available to Spark-spawned workers. ` +
+      `Downgraded ${downgradedFableTitles.length === 1 ? "worker" : "workers"} ${list} to Opus 4.8 (claude-opus-4-8).`;
+    try {
+      await runStore.addRunMessage({
+        runId,
+        author: "system",
+        kind: "note",
+        message: note,
+      });
+    } catch {
+      /* the note is advisory — never block the spawn on it */
+    }
+  }
   if (attemptIdsToLaunch.length > 0) {
     runStore.scheduleAutopilotCycles(runId, attemptIdsToLaunch);
   }
-  return successResponse(id, { worker_task_ids: workerTaskIds });
+  // Echo the downgrade back to the manager LLM so it doesn't try to re-pin
+  // fable on the next turn (it never sees the run's system note).
+  return successResponse(
+    id,
+    downgradedFableTitles.length > 0
+      ? {
+          worker_task_ids: workerTaskIds,
+          note: `Fable 5 is reserved for the main chat and automations; ${downgradedFableTitles.length} worker model hint(s) were downgraded to claude-opus-4-8. Do not request claude-fable-5 for workers.`,
+        }
+      : { worker_task_ids: workerTaskIds },
+  );
 }
 
 // A long-poll loop should give up the moment the MCP client hangs up —
@@ -655,6 +734,10 @@ async function handleOrchestratorComplete(
   if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
   const summary = stringParam(params, "summary") ?? "";
   const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  const blocked = rejectIfAutomationRun(run, id, "spark_complete");
+  if (blocked) return blocked;
   try {
     if (summary) {
       await runStore.addRunMessage({
@@ -811,6 +894,8 @@ async function handleOrchestratorWaitForWorkers(
     });
   const firstRun = await runStore.getRun(runId);
   if (!firstRun) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  const blocked = rejectIfAutomationRun(firstRun, id, "spark_wait_for_workers");
+  if (blocked) return blocked;
   const unknownIds = workerTaskIds.filter(
     (wtid) => !firstRun.workerTasks.some((wt) => wt.id === wtid),
   );
@@ -865,6 +950,8 @@ async function handleOrchestratorGetWorkerStatus(
   if (!run) {
     return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   }
+  const blocked = rejectIfAutomationRun(run, id, "spark_get_worker_status");
+  if (blocked) return blocked;
   try {
     const task = run.workerTasks.find((wt) => wt.id === workerTaskId);
     if (!task) {
@@ -882,6 +969,706 @@ async function handleOrchestratorGetWorkerStatus(
       finished_at: lastAttempt?.finishedAt ?? null,
       final_report_path: lastAttempt?.finalReportPath ?? null,
     });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Automation (loom) architect handlers — reachable only from an Automation-mode
+// chat. The MCP server proxies spark_*_automation tools to these automation.*
+// RPCs. Defense in depth: EVERY handler loads the run by runId and rejects
+// unless run.chatMode === "automation", so even if a stray socket caller hits
+// these verbs they can't mutate the scheduler from a non-automation chat.
+// ---------------------------------------------------------------------------
+
+const AUTOMATION_WAIT_POLL_MS = 2000;
+const AUTOMATION_WAIT_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min
+// 19 min, deliberately UNDER the MCP server's 20-min transport timeout in
+// postJsonRpc — so a max-length wait still returns a clean reason:"timeout"
+// snapshot instead of the client tearing the socket down first.
+const AUTOMATION_WAIT_MAX_TIMEOUT_MS = 19 * 60 * 1000;
+
+/**
+ * Whether an automation has reached a state worth returning to a waiting
+ * architect. "stopped"/"blocked" are unambiguously terminal. "idle" is
+ * overloaded — it is BOTH the pre-run resting state (iteration 0, never fired)
+ * AND the between-iterations parking state of a cadence loop (nextFireAt
+ * armed). We must only treat "idle" as "this run settled" when at least one
+ * iteration has completed AND the loop is not waiting to fire again, otherwise
+ * the waiter would report a not-yet-started automation, or a mid-cadence pause,
+ * as a finished run.
+ */
+function isAutomationSettled(job: ScheduledJob): boolean {
+  const status = job.state?.status ?? "idle";
+  if (status === "stopped" || status === "blocked") return true;
+  if (status === "idle") {
+    const ranAtLeastOnce = (job.state?.iteration ?? 0) > 0;
+    const waitingToFireAgain = Boolean(job.state?.nextFireAt);
+    // currentRunId is cleared by finalize() but still set during the brief
+    // resumeJob() paused→idle flip that precedes resumeLoop's re-decide, so
+    // requiring it absent avoids reporting an about-to-relaunch loop as done.
+    const hasLiveRun = Boolean(job.state?.currentRunId);
+    return ranAtLeastOnce && !waitingToFireAgain && !hasLiveRun;
+  }
+  return false;
+}
+
+/**
+ * Symmetric guard for the worker-orchestration RPCs (spawn/complete/wait/
+ * get_status). Automation mode is sold as read-only on the workspace — it may
+ * only manage automations — so a chat in that mode must not be able to spawn,
+ * complete, or steer execute-mode workers. On the Codex backend the globally-
+ * installed MCP has no per-run env, so a Codex automation chat still SEES the
+ * execute roster; this is the enforcement boundary for it (Claude automation
+ * chats never see these tools — their per-run MCP config is mode-scoped).
+ * Returns an error response to short-circuit, or null when the run may proceed.
+ */
+function rejectIfAutomationRun(
+  run: RunState,
+  id: JsonRpcId,
+  toolName: string,
+): JsonRpcResponse | null {
+  if (run.chatMode !== "automation") return null;
+  return errorResponse(
+    id,
+    ERR_INVALID_PARAMS,
+    `${toolName} is not available in Automation mode (this chat is read-only on the workspace and may only manage automations). Switch the chat to Execute mode to drive workers.`,
+  );
+}
+
+/**
+ * Shared guard for every automation.* handler. Resolves the run and enforces
+ * that the calling chat is in Automation mode. Returns the loaded run on
+ * success, or a ready-to-return error response.
+ */
+async function requireAutomationRun(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<{ run: RunState } | { error: JsonRpcResponse }> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return { error: errorResponse(id, ERR_INVALID_PARAMS, "runId is required") };
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return { error: errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`) };
+  if (run.chatMode !== "automation") {
+    return {
+      error: errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "Automation tools are only available when the chat is in Automation mode. Ask the user to switch the composer mode pill to \"Automation\" and try again.",
+      ),
+    };
+  }
+  return { run };
+}
+
+function summarizeTrigger(t: AutomationTrigger): string {
+  switch (t.kind) {
+    case "cron":
+      return `cron(${t.expr}${t.tz ? ` ${t.tz}` : ""})`;
+    case "interval":
+      return `interval(${t.everyMs}ms)`;
+    case "folder":
+      return `folder(${t.path}${t.glob ? ` ${t.glob}` : ""} [${(t.events ?? []).join(",")}])`;
+    case "manual":
+      return "manual";
+    case "continuous":
+      return "continuous";
+    case "onFinishOf":
+      return `onFinishOf(${t.automationId})`;
+    default:
+      return "unknown";
+  }
+}
+
+function summarizeLoop(l: AutomationLoop): string {
+  const caps: string[] = [];
+  const s = l.stop ?? {};
+  if (typeof s.maxIterations === "number") caps.push(`max=${s.maxIterations}`);
+  if (typeof s.budgetUsd === "number") caps.push(`budget=$${s.budgetUsd}`);
+  if (s.untilTestsPass) caps.push("untilTestsPass");
+  if (s.untilGitClean) caps.push("untilGitClean");
+  if (s.untilPhrase) caps.push(`untilPhrase="${s.untilPhrase}"`);
+  if (s.untilCommand) caps.push("untilCommand");
+  const cadence = l.kind === "cadence" && typeof l.everyMs === "number" ? ` every ${l.everyMs}ms` : "";
+  return `${l.kind}${cadence}${caps.length ? ` [${caps.join(", ")}]` : ""}`;
+}
+
+function summarizeJob(job: ScheduledJob): Record<string, unknown> {
+  const history = Array.isArray(job.history) ? job.history : [];
+  return {
+    id: job.id,
+    name: job.name,
+    enabled: job.enabled,
+    trigger: summarizeTrigger(job.trigger),
+    loop: summarizeLoop(job.loop),
+    worker: job.worker,
+    nodeCount: job.graph?.nodes?.length ?? 0,
+    edgeCount: job.graph?.edges?.length ?? 0,
+    status: job.state?.status ?? "idle",
+    iteration: job.state?.iteration ?? 0,
+    lastRunAt: job.lastRunAt ?? null,
+    history: history.slice(-3).map((h) => ({
+      iteration: h.iteration,
+      status: h.status,
+      stopReason: h.stopReason ?? null,
+      costUsd: h.costUsd ?? null,
+    })),
+  };
+}
+
+/**
+ * Structural validation of an architect-supplied graph BEFORE it reaches the
+ * scheduler, so a malformed graph comes back as a fixable error message rather
+ * than crashing the loop driver later. Returns null when valid, or an error
+ * string the LLM can act on.
+ */
+function validateGraph(graph: LoomGraph): string | null {
+  if (!graph || typeof graph !== "object") return "graph must be an object";
+  if (!Array.isArray(graph.nodes) || graph.nodes.length === 0) {
+    return "graph.nodes must be a non-empty array";
+  }
+  if (!Array.isArray(graph.edges)) return "graph.edges must be an array";
+  if (!Array.isArray(graph.entryNodeIds) || graph.entryNodeIds.length === 0) {
+    return "graph.entryNodeIds must be a non-empty array when a graph is provided";
+  }
+  const GUARD_PREDICATE_TYPES = new Set(["phrase", "tests", "gitClean", "command", "agentSignal"]);
+  const ENGINES = new Set(["auto", "claude", "codex"]);
+  const ids = new Set<string>();
+  const guardIds = new Set<string>();
+  for (const rawNode of graph.nodes) {
+    // The graph arrives from an untrusted LLM, so validate against a loose
+    // shape rather than the LoomNodeDef union (which TS would treat as already
+    // exhaustive and narrow `kind` to never after the checks below).
+    const node = rawNode as {
+      id?: unknown;
+      kind?: unknown;
+      predicate?: { type?: unknown; phrase?: unknown; command?: unknown; want?: unknown };
+      prompt?: unknown;
+      worker?: { engine?: unknown };
+    };
+    if (!node || typeof node.id !== "string" || node.id.trim().length === 0) {
+      return "every graph node needs a non-empty string id";
+    }
+    if (ids.has(node.id)) return `duplicate node id: ${node.id}`;
+    ids.add(node.id);
+    if (node.kind !== "worker" && node.kind !== "guard" && node.kind !== "merge") {
+      return `node ${node.id} has invalid kind '${String(node.kind)}' (expected worker|guard|merge)`;
+    }
+    if (node.kind === "guard") {
+      guardIds.add(node.id);
+      if (!node.predicate || typeof node.predicate !== "object") {
+        return `guard node ${node.id} requires a predicate`;
+      }
+      const ptype = node.predicate.type;
+      if (typeof ptype !== "string" || !GUARD_PREDICATE_TYPES.has(ptype)) {
+        return `guard node ${node.id} has invalid predicate.type '${String(ptype)}' (expected phrase|tests|gitClean|command|agentSignal)`;
+      }
+      // Per-type required payload — the engine dereferences these directly, so a
+      // missing field (e.g. a "phrase" predicate with no `phrase`) crashes guard
+      // evaluation mid-pass. Catch it here as a fixable error instead.
+      if (ptype === "phrase" && (typeof node.predicate.phrase !== "string" || node.predicate.phrase.length === 0)) {
+        return `guard node ${node.id}: predicate type 'phrase' requires a non-empty 'phrase' string`;
+      }
+      if (ptype === "command" && (typeof node.predicate.command !== "string" || node.predicate.command.length === 0)) {
+        return `guard node ${node.id}: predicate type 'command' requires a non-empty 'command' string`;
+      }
+      if (ptype === "agentSignal" && node.predicate.want !== "continue" && node.predicate.want !== "done") {
+        return `guard node ${node.id}: predicate type 'agentSignal' requires want to be 'continue' or 'done'`;
+      }
+    }
+    if (node.kind === "worker") {
+      if (typeof node.prompt !== "string" || node.prompt.trim().length === 0) {
+        // Graph worker nodes run node.prompt verbatim (the job's prompt_template
+        // is NOT inherited per-node), so an empty prompt is a real defect.
+        return `worker node ${node.id} requires a non-empty prompt`;
+      }
+      // node.worker is dereferenced (n.worker.engine) by advance/relaunch waves;
+      // a missing/garbage worker crashes the pass mid-flight. Require it.
+      if (!node.worker || typeof node.worker !== "object") {
+        return `worker node ${node.id} requires a worker config (with an 'engine')`;
+      }
+      if (typeof node.worker.engine !== "string" || !ENGINES.has(node.worker.engine)) {
+        return `worker node ${node.id} has invalid worker.engine '${String(node.worker.engine)}' (expected auto|claude|codex)`;
+      }
+    }
+  }
+  for (const entry of graph.entryNodeIds) {
+    if (!ids.has(entry)) return `entryNodeIds references unknown node: ${entry}`;
+  }
+  const edgeIds = new Set<string>();
+  for (const edge of graph.edges) {
+    if (!edge || typeof edge.id !== "string" || edge.id.trim().length === 0) {
+      return "every graph edge needs a non-empty string id";
+    }
+    if (edgeIds.has(edge.id)) return `duplicate edge id: ${edge.id} (back-edge visit counters key off edge id)`;
+    edgeIds.add(edge.id);
+    if (!ids.has(edge.from)) return `edge ${edge.id} 'from' references unknown node: ${edge.from}`;
+    if (!ids.has(edge.to)) return `edge ${edge.id} 'to' references unknown node: ${edge.to}`;
+    if (edge.branch !== undefined) {
+      if (edge.branch !== "pass" && edge.branch !== "fail") {
+        return `edge ${edge.id} has invalid branch '${edge.branch}' (expected pass|fail)`;
+      }
+      // A pass/fail branch is only meaningful leaving a guard node.
+      if (!guardIds.has(edge.from)) {
+        return `edge ${edge.id} sets branch '${edge.branch}' but its source node ${edge.from} is not a guard`;
+      }
+    }
+    if (edge.backEdge) {
+      if (typeof edge.visitCap !== "number" || !Number.isInteger(edge.visitCap) || edge.visitCap < 1) {
+        return `edge ${edge.id} is a backEdge and must declare a positive integer visitCap`;
+      }
+      // A back-edge leaving a guard can only ever arm on a pass/fail branch;
+      // without one it is a dead loop edge that never fires.
+      if (guardIds.has(edge.from) && edge.branch === undefined) {
+        return `edge ${edge.id} is a backEdge from guard ${edge.from} and must set branch 'pass' or 'fail'`;
+      }
+    }
+  }
+  return null;
+}
+
+// Floor the scheduler enforces on interval/cadence (setInterval is armed with
+// Math.max(1000, ...)). We reject anything below it (or non-finite) up front so
+// a NaN everyMs can't become setInterval(fn, NaN) ≈ a 1ms hot loop persisted
+// across reboots (scheduler.ts arms `Math.max(1000, Math.floor(everyMs))`,
+// and Math.floor(NaN) is NaN, which Math.max passes straight through).
+const MIN_TRIGGER_EVERY_MS = 1000;
+
+/**
+ * Structural validation of an architect-supplied trigger/loop/worker. Shared by
+ * create (where all three are required) and update (where each is optional, so
+ * the caller only validates the fields actually present). Async because the
+ * onFinishOf check and cron-expr parse touch the scheduler. Returns null when
+ * valid (or absent), or a fixable error string.
+ */
+async function validateTriggerLoopWorker(opts: {
+  trigger?: AutomationTrigger;
+  loop?: AutomationLoop;
+  worker?: LoomWorkerConfig;
+}): Promise<string | null> {
+  const TRIGGER_KINDS = new Set(["cron", "interval", "folder", "manual", "continuous", "onFinishOf"]);
+  const LOOP_KINDS = new Set(["once", "count", "cadence", "until", "continuous", "agent"]);
+  const ENGINES = new Set(["auto", "claude", "codex"]);
+  if (opts.trigger !== undefined) {
+    const t = opts.trigger as AutomationTrigger & {
+      kind?: unknown;
+      expr?: unknown;
+      everyMs?: unknown;
+      path?: unknown;
+      automationId?: unknown;
+    };
+    if (typeof t.kind !== "string" || !TRIGGER_KINDS.has(t.kind)) {
+      return `trigger.kind '${String(t.kind)}' is invalid (expected cron|interval|folder|manual|continuous|onFinishOf)`;
+    }
+    // Per-kind required payload — the scheduler arms these directly, so a bad
+    // payload becomes a hot loop / crash at arm time rather than a fixable error.
+    if (t.kind === "interval") {
+      if (typeof t.everyMs !== "number" || !Number.isFinite(t.everyMs) || t.everyMs < MIN_TRIGGER_EVERY_MS) {
+        return `trigger kind 'interval' requires a finite numeric everyMs >= ${MIN_TRIGGER_EVERY_MS} (got ${String(t.everyMs)})`;
+      }
+    } else if (t.kind === "cron") {
+      if (typeof t.expr !== "string" || t.expr.trim().length === 0) {
+        return "trigger kind 'cron' requires a non-empty 'expr' (a cron expression)";
+      }
+      // Validate the expression actually parses with the same library the
+      // scheduler arms with (croner). An unparseable expr would throw at arm
+      // time inside scheduler.armJob's try/catch and silently never fire.
+      try {
+        const { Cron } = await import("croner");
+        // paused:true so constructing it doesn't schedule anything; we only want
+        // the parse/validation side effect.
+        new Cron(t.expr, { paused: true });
+      } catch (err) {
+        return `trigger.expr is not a valid cron expression: ${(err as Error).message}`;
+      }
+    } else if (t.kind === "folder") {
+      if (typeof t.path !== "string" || t.path.trim().length === 0) {
+        return "trigger kind 'folder' requires a non-empty 'path' to watch";
+      }
+    } else if (t.kind === "onFinishOf") {
+      if (typeof t.automationId !== "string" || t.automationId.trim().length === 0) {
+        return "trigger kind 'onFinishOf' requires an 'automationId' to chain after";
+      }
+      const { listJobs } = await getScheduler();
+      const jobs = await listJobs();
+      if (!jobs.some((j) => j.id === t.automationId)) {
+        return `trigger.automationId '${t.automationId}' does not match any existing automation (call spark_list_automations to find a valid id)`;
+      }
+    }
+  }
+  if (opts.loop !== undefined) {
+    const l = opts.loop as AutomationLoop & { kind?: unknown; everyMs?: unknown };
+    if (typeof l.kind !== "string" || !LOOP_KINDS.has(l.kind)) {
+      return `loop.kind '${String(l.kind)}' is invalid (expected once|count|cadence|until|continuous|agent)`;
+    }
+    if (!l.stop || typeof l.stop !== "object") {
+      return "loop.stop is required (use {} to rely on engine defaults)";
+    }
+    // cadence floors everyMs the same way the interval trigger does.
+    if (l.kind === "cadence") {
+      if (typeof l.everyMs !== "number" || !Number.isFinite(l.everyMs) || l.everyMs < MIN_TRIGGER_EVERY_MS) {
+        return `loop kind 'cadence' requires a finite numeric everyMs >= ${MIN_TRIGGER_EVERY_MS} (got ${String(l.everyMs)})`;
+      }
+    }
+  }
+  if (opts.worker !== undefined) {
+    if (typeof opts.worker.engine !== "string" || !ENGINES.has(opts.worker.engine)) {
+      return `worker.engine '${String(opts.worker.engine)}' is invalid (expected auto|claude|codex)`;
+    }
+  }
+  return null;
+}
+
+/** Coerce the loosely-typed RPC params into a CreateScheduledJobInput field. */
+function paramTrigger(params: Record<string, unknown>): AutomationTrigger | undefined {
+  const t = params.trigger;
+  return t && typeof t === "object" ? (t as AutomationTrigger) : undefined;
+}
+function paramLoop(params: Record<string, unknown>): AutomationLoop | undefined {
+  const l = params.loop;
+  return l && typeof l === "object" ? (l as AutomationLoop) : undefined;
+}
+function paramWorker(params: Record<string, unknown>): LoomWorkerConfig | undefined {
+  const w = params.worker;
+  return w && typeof w === "object" ? (w as LoomWorkerConfig) : undefined;
+}
+function paramGraph(params: Record<string, unknown>): LoomGraph | undefined {
+  const g = params.graph;
+  return g && typeof g === "object" ? (g as LoomGraph) : undefined;
+}
+
+async function handleAutomationList(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const guard = await requireAutomationRun(params, id);
+  if ("error" in guard) return guard.error;
+  try {
+    const { listJobs } = await getScheduler();
+    const jobs = await listJobs();
+    return successResponse(id, { automations: jobs.map(summarizeJob) });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, (err as Error).message);
+  }
+}
+
+async function handleAutomationGet(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const guard = await requireAutomationRun(params, id);
+  if ("error" in guard) return guard.error;
+  const automationId = stringParam(params, "automation_id");
+  if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  try {
+    const { getJob } = await getScheduler();
+    const job = await getJob(automationId);
+    if (!job) return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
+    // Return the full job (trigger/loop/prompt/worker/graph/state) plus the
+    // history tail so the architect can patch precisely.
+    return successResponse(id, {
+      ...job,
+      history: (Array.isArray(job.history) ? job.history : []).slice(-5),
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, (err as Error).message);
+  }
+}
+
+async function handleAutomationCreate(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const guard = await requireAutomationRun(params, id);
+  if ("error" in guard) return guard.error;
+  const { run } = guard;
+  const name = stringParam(params, "name");
+  if (!name) return errorResponse(id, ERR_INVALID_PARAMS, "name is required");
+  const trigger = paramTrigger(params);
+  if (!trigger) return errorResponse(id, ERR_INVALID_PARAMS, "trigger (with a 'kind') is required");
+  const loop = paramLoop(params);
+  if (!loop) return errorResponse(id, ERR_INVALID_PARAMS, "loop (with a 'kind' and 'stop') is required");
+  if (!loop.stop || typeof loop.stop !== "object") {
+    // Normalize a missing stop block to an empty cap set rather than rejecting —
+    // the scheduler treats {} as "rely on engine defaults".
+    loop.stop = {};
+  }
+  const worker = paramWorker(params);
+  if (!worker) return errorResponse(id, ERR_INVALID_PARAMS, "worker (with an 'engine') is required");
+  const tlwErr = await validateTriggerLoopWorker({ trigger, loop, worker });
+  if (tlwErr) return errorResponse(id, ERR_INVALID_PARAMS, tlwErr);
+  const promptTemplate = stringParam(params, "prompt_template");
+  if (!promptTemplate) return errorResponse(id, ERR_INVALID_PARAMS, "prompt_template is required");
+  const graph = paramGraph(params);
+  if (graph) {
+    const graphErr = validateGraph(graph);
+    if (graphErr) return errorResponse(id, ERR_INVALID_PARAMS, `invalid graph: ${graphErr}`);
+  }
+  // Resolve workspace binding server-side from the calling run. The architect
+  // never supplies paths — the automation runs in the same workspace as the
+  // chat that created it. Unlike the one-shot spawn_workers analog we do NOT
+  // fall back to process.cwd(): this cwd is persisted into a RECURRING job, and
+  // a guessed path (process.cwd() is "/" in a packaged macOS app) would silently
+  // bind the loom to the wrong directory. createRun always stamps
+  // settingsSnapshot.workspaceCwd, so a missing value is a real anomaly — fail
+  // loudly with a message the architect can relay.
+  const cwd =
+    typeof run.settingsSnapshot?.workspaceCwd === "string"
+      ? (run.settingsSnapshot.workspaceCwd as string)
+      : null;
+  if (!cwd) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      "Could not resolve this chat's workspace directory; cannot bind an automation. The chat may be missing its workspace context.",
+    );
+  }
+  // Prefer an explicit snapshot name; otherwise strip the run-title prefix the
+  // run-store adds ("Autopilot - <ws>" / "Run - <ws>").
+  const snapshotName =
+    typeof run.settingsSnapshot?.workspaceName === "string"
+      ? (run.settingsSnapshot.workspaceName as string).trim()
+      : "";
+  const workspaceName =
+    snapshotName || run.title.replace(/^(Autopilot|Run)\s*-\s*/i, "").trim() || "workspace";
+  const createInput: CreateScheduledJobInput = {
+    name,
+    trigger,
+    loop,
+    prompt: { template: promptTemplate },
+    worker,
+    graph,
+    input: {
+      workspaceId: run.workspaceId,
+      workspaceName,
+      cwd,
+      initialUserNote: promptTemplate,
+    },
+  };
+  try {
+    const { createJob } = await getScheduler();
+    const job = await createJob(createInput);
+    return successResponse(id, { created: summarizeJob(job) });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleAutomationUpdate(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const guard = await requireAutomationRun(params, id);
+  if ("error" in guard) return guard.error;
+  const automationId = stringParam(params, "automation_id");
+  if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  const graph = paramGraph(params);
+  if (graph) {
+    const graphErr = validateGraph(graph);
+    if (graphErr) return errorResponse(id, ERR_INVALID_PARAMS, `invalid graph: ${graphErr}`);
+  }
+  // Validate ONLY the structural fields actually supplied — update is a patch,
+  // so an omitted trigger/loop/worker keeps the existing one. This matches the
+  // strictness create applies, so a bad patch is rejected, not persisted.
+  const tlwErr = await validateTriggerLoopWorker({
+    trigger: paramTrigger(params),
+    loop: paramLoop(params),
+    worker: paramWorker(params),
+  });
+  if (tlwErr) return errorResponse(id, ERR_INVALID_PARAMS, tlwErr);
+  const name = stringParam(params, "name");
+  const promptTemplate = stringParam(params, "prompt_template");
+  const update: UpdateScheduledJobInput = {
+    id: automationId,
+    ...(name ? { name } : {}),
+    ...(paramTrigger(params) ? { trigger: paramTrigger(params) } : {}),
+    ...(paramLoop(params) ? { loop: paramLoop(params) } : {}),
+    ...(promptTemplate ? { prompt: { template: promptTemplate } } : {}),
+    ...(paramWorker(params) ? { worker: paramWorker(params) } : {}),
+    ...(graph ? { graph } : {}),
+  };
+  try {
+    const { getJob, updateJob } = await getScheduler();
+    if (!(await getJob(automationId))) {
+      return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
+    }
+    const job = await updateJob(update);
+    return successResponse(id, { updated: summarizeJob(job) });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleAutomationRunNow(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const guard = await requireAutomationRun(params, id);
+  if ("error" in guard) return guard.error;
+  const automationId = stringParam(params, "automation_id");
+  if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  try {
+    const { getJob, runJobNow } = await getScheduler();
+    if (!(await getJob(automationId))) {
+      return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
+    }
+    const runState = await runJobNow(automationId);
+    return successResponse(id, { run_id: runState.id, status: runState.status });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleAutomationWait(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const guard = await requireAutomationRun(params, id);
+  if ("error" in guard) return guard.error;
+  const automationId = stringParam(params, "automation_id");
+  if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  const requested = optionalNumberParam(params, "timeout_ms");
+  const timeoutMs =
+    requested && requested > 0
+      ? Math.min(requested, AUTOMATION_WAIT_MAX_TIMEOUT_MS)
+      : AUTOMATION_WAIT_DEFAULT_TIMEOUT_MS;
+  const { getJob } = await getScheduler();
+  if (!(await getJob(automationId))) {
+    return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
+  }
+  const deadline = Date.now() + timeoutMs;
+  const snapshot = (job: ScheduledJob, reason: string): JsonRpcResponse => {
+    const history = Array.isArray(job.history) ? job.history : [];
+    const last = history.length > 0 ? history[history.length - 1] : undefined;
+    const summary = last?.summary ?? job.state?.pendingNextPrompt ?? null;
+    return successResponse(id, {
+      automation_id: job.id,
+      reason,
+      status: job.state?.status ?? "idle",
+      stop_reason: last?.stopReason ?? job.state?.lastStopReason ?? null,
+      iteration: job.state?.iteration ?? 0,
+      cost_usd: last?.costUsd ?? job.state?.spentUsd ?? null,
+      // next_fire_at distinguishes a still-armed cadence/cron loop (the loop
+      // continues) from a fully-finalized run, and lastRunAt gives the model a
+      // concrete "did it ever run" signal.
+      next_fire_at: job.state?.nextFireAt ?? null,
+      last_run_at: job.lastRunAt ?? null,
+      last_output: typeof summary === "string" ? summary.slice(0, 2000) : null,
+    });
+  };
+  while (Date.now() < deadline) {
+    if (clientGone(res)) {
+      return errorResponse(id, ERR_INTERNAL, "wait_for_automation aborted: client disconnected");
+    }
+    const job = await getJob(automationId);
+    if (!job) return errorResponse(id, ERR_INVALID_PARAMS, `automation vanished mid-wait: ${automationId}`);
+    if (isAutomationSettled(job)) {
+      return snapshot(job, (job.state?.status ?? "idle") === "blocked" ? "blocked" : "terminal");
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, AUTOMATION_WAIT_POLL_MS));
+  }
+  const finalJob = await getJob(automationId);
+  if (!finalJob) return errorResponse(id, ERR_INVALID_PARAMS, `automation vanished mid-wait: ${automationId}`);
+  return snapshot(finalJob, "timeout");
+}
+
+async function handleAutomationSetEnabled(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const guard = await requireAutomationRun(params, id);
+  if ("error" in guard) return guard.error;
+  const automationId = stringParam(params, "automation_id");
+  if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  if (typeof params.enabled !== "boolean") {
+    return errorResponse(id, ERR_INVALID_PARAMS, "enabled (boolean) is required");
+  }
+  try {
+    const { setEnabled } = await getScheduler();
+    const job = await setEnabled(automationId, params.enabled);
+    return successResponse(id, { updated: summarizeJob(job) });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleAutomationPause(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const guard = await requireAutomationRun(params, id);
+  if ("error" in guard) return guard.error;
+  const automationId = stringParam(params, "automation_id");
+  if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  try {
+    const { getJob, pauseJob } = await getScheduler();
+    if (!(await getJob(automationId))) {
+      return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
+    }
+    const job = await pauseJob(automationId);
+    return successResponse(id, { updated: job ? summarizeJob(job) : null });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleAutomationResume(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const guard = await requireAutomationRun(params, id);
+  if ("error" in guard) return guard.error;
+  const automationId = stringParam(params, "automation_id");
+  if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  try {
+    const { getJob, resumeJob } = await getScheduler();
+    if (!(await getJob(automationId))) {
+      return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
+    }
+    const job = await resumeJob(automationId);
+    return successResponse(id, { updated: job ? summarizeJob(job) : null });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleAutomationStop(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const guard = await requireAutomationRun(params, id);
+  if ("error" in guard) return guard.error;
+  const automationId = stringParam(params, "automation_id");
+  if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  try {
+    const { getJob, stopJob } = await getScheduler();
+    if (!(await getJob(automationId))) {
+      return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
+    }
+    const job = await stopJob(automationId);
+    return successResponse(id, { updated: job ? summarizeJob(job) : null });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleAutomationDelete(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const guard = await requireAutomationRun(params, id);
+  if ("error" in guard) return guard.error;
+  const automationId = stringParam(params, "automation_id");
+  if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  try {
+    const { getJob, deleteJob } = await getScheduler();
+    const existing = await getJob(automationId);
+    if (!existing) return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
+    await deleteJob(automationId);
+    return successResponse(id, { deleted: true, id: automationId, name: existing.name });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }

@@ -6,6 +6,7 @@ import type {
   FsEntry,
   InAppNotificationKind,
   RunState,
+  RuntimeState,
   ShellInfo,
   SparkEvent,
   TerminalAgentTarget,
@@ -365,6 +366,34 @@ export default function App() {
     if (activeId && workspaces.some((w) => w.id === activeId)) return;
     setActiveId(workspaces[0].id);
   }, [booted, workspaces, activeId]);
+
+  // App-wide last-line guard against navigating the whole webContents to a
+  // dropped file:// URL. The main-process will-navigate handler deliberately
+  // allows file:// through, so a Finder file dropped on bare DOM that has no
+  // drop handler — the terminal pane's 8px padding gutter, the 3px split-pane
+  // gap, or any dead space — would otherwise replace the entire app (every tab,
+  // terminal, and chat) with the file's raw contents.
+  //
+  // preventDefault here only cancels the browser's default navigation action;
+  // it does NOT stop element-level handlers from running. The terminal drop
+  // handler and the chat composer's attachment drop-zone are deeper targets, so
+  // their handlers still fire first (bubble order target -> window) and do their
+  // work. Gating on types.includes("Files") means text drags into inputs and
+  // the internal pane-reorder drag (a custom MIME, not "Files") are untouched,
+  // so nothing that relies on native drop behavior regresses.
+  useEffect(() => {
+    const guard = (event: DragEvent) => {
+      if (Array.from(event.dataTransfer?.types ?? []).includes("Files")) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("dragover", guard);
+    window.addEventListener("drop", guard);
+    return () => {
+      window.removeEventListener("dragover", guard);
+      window.removeEventListener("drop", guard);
+    };
+  }, []);
 
   // Tabs are scoped per-workspace so each workspace remembers its own layout.
   // useTabs internally swaps tab lists when the workspaceId argument changes.
@@ -2275,6 +2304,36 @@ export default function App() {
     [],
   );
 
+  // Finer live agent state (working / blocked / idle) from the per-pane
+  // terminal poller. The binary onTerminalPaneAgentState above owns chip
+  // CREATE/TEARDOWN (it sprouts the manual chip on alt-screen enter and clears
+  // it on exit); this handler only refreshes the runtimeState field on an
+  // ALREADY-existing leaf worker so the chip can show "working" / "waiting for
+  // you" / "idle" without us minting a chip on a bare pane the poller happens
+  // to classify. Skipped when no worker is attached.
+  //
+  // "done" is deliberately ignored here: the poller emits it from the same
+  // resetAgentPhase that fires onAgentState(running:false) — which removes the
+  // manual chip / clears agentRunning on a Spark chip — and that callback runs
+  // FIRST in the same synchronous stack. Writing runtimeState:"done" afterward
+  // would resurrect the just-removed manual worker (a stale DONE chip), since
+  // both setLeafWorker updaters are queued against the same pre-removal tab
+  // tree. The chip's "done" look is already driven by the worker lifecycle.
+  const onTerminalPaneRuntimeState = useCallback(
+    (tabId: string, paneId: string, state: RuntimeState) => {
+      if (state === "done") return;
+      const t = tabsRef.current;
+      const tab = t.tabs.find((item) => item.id === tabId);
+      if (!tab || tab.kind !== "terminal") return;
+      const leaf = findLeafByPaneId(tab.root, paneId);
+      const existing = leaf?.worker;
+      if (!existing) return;
+      if (existing.runtimeState === state) return;
+      t.setLeafWorker(tabId, paneId, { ...existing, runtimeState: state });
+    },
+    [],
+  );
+
   // Total live worker count for the status bar. `countRunningTerminalWorkers`
   // is a recursive walk of every terminal tab's pane tree — memoize it so a
   // status-bar repaint isn't triggered (and the walk isn't re-run) on every
@@ -2651,6 +2710,7 @@ export default function App() {
               onPaneUserInput={handlePaneUserInput}
               onPaneScrollback={handlePaneScrollback}
               onTerminalPaneAgentState={onTerminalPaneAgentState}
+              onTerminalPaneRuntimeState={onTerminalPaneRuntimeState}
               onNewTerminalTab={handleNewTerminalTab}
               onNewEditorTab={handleNewEditorTab}
               onNewPreviewTab={handleNewPreviewTab}
@@ -3072,6 +3132,7 @@ interface WorkspaceProps {
     paneId: string,
     state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean },
   ) => void;
+  onTerminalPaneRuntimeState: (tabId: string, paneId: string, state: RuntimeState) => void;
   onNewTerminalTab: () => void;
   onNewEditorTab: () => void;
   onNewPreviewTab: () => void;
@@ -3109,6 +3170,7 @@ const Workspace = React.memo(function Workspace({
   onPaneUserInput,
   onPaneScrollback,
   onTerminalPaneAgentState,
+  onTerminalPaneRuntimeState,
   onNewTerminalTab,
   onNewEditorTab,
   onNewPreviewTab,
@@ -3422,6 +3484,7 @@ const Workspace = React.memo(function Workspace({
           onPaneScrollback={onPaneScrollback}
           onFlushScrollback={tabs.flushScrollbackNow}
           onPaneAgentState={onTerminalPaneAgentState}
+          onPaneRuntimeState={onTerminalPaneRuntimeState}
         />
         <PreviewStack
           tabs={visibleTabs}

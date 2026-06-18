@@ -36,6 +36,7 @@ Each worker object:
 ```
 
 Rules for task decomposition:
+- `claude-fable-5` (Fable 5) is **NOT allowed** as a worker `modelHint` — it is reserved for the main chat session and automations. Spark silently downgrades any fable hint to `claude-opus-4-8`, so do not emit it; pick `claude-opus-4-8` for the strongest worker model.
 - Workers that can run **in parallel** MUST have non-overlapping `allowedPaths`. Same-file writes serialize.
 - `skeleton` tasks (architectural decisions later workers inherit) → strongest model + highest effort.
 - `feature` tasks (standard implementation against an established skeleton) → mid model + medium effort.

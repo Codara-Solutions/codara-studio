@@ -336,19 +336,33 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keybindings: {},
   disableHardwareAcceleration: false,
   notificationChannels: { ...DEFAULT_NOTIFICATION_CHANNELS },
-  keepRunningInBackground: true,
+  keepRunningInBackground: false,
   copyBranchSetupCommandByRepo: {},
 };
 
 // Discriminated payload for the in-app toast IPC channel. `kind` drives the
-// toast colour: blocked → danger red, complete → success/info teal. `runId`
+// toast's icon + click routing; `tone` (when set) drives the colour. `runId`
 // lets the renderer route a click to "select run" so the user can jump
 // straight to the chat that needs them.
 export type InAppNotificationKind = "blocked" | "complete";
 
+// Visual urgency of a notification, decoupled from `kind`. `kind` "blocked"
+// collapses two very different situations — an agent stalled/failed vs an agent
+// asking for input — so the colour can't be derived from kind alone:
+//   success → green (--ok): a run finished cleanly.
+//   warning → amber (--warn): the agent needs you / is asking a question. Not
+//             an error, so it must not read as red.
+//   danger  → red (--danger): a genuine failure (run failed / hard error).
+// Optional for backwards compatibility: when unset the renderer derives a tone
+// from `kind` (blocked → warning, complete → success).
+export type InAppNotificationTone = "success" | "warning" | "danger";
+
 export interface InAppNotificationPayload {
   id: string;
   kind: InAppNotificationKind;
+  // Colour intent. Optional so older/unmigrated emitters still render; the
+  // renderer falls back to a kind-derived tone when absent.
+  tone?: InAppNotificationTone;
   title: string;
   body: string;
   runId?: string;
@@ -841,7 +855,7 @@ export type ChatBackendKind = "openrouter" | "claude" | "codex";
 //             then a judge synthesizes the best merged PLAN.md + PRD.md into the
 //             workspace. No implementation code is written.
 // Mode is the "Execute / Plan / Talk" selector on the composer.
-export type ChatMode = "execute" | "talk" | "plan";
+export type ChatMode = "execute" | "talk" | "plan" | "automation";
 
 export type PlanStatus = "draft" | "imported" | "analyzed" | "active" | "complete" | "archived";
 

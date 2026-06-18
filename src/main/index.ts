@@ -1,6 +1,6 @@
-import { app, BrowserWindow, Tray, Menu, globalShortcut } from "electron";
+import { app, BrowserWindow, Tray, Menu, globalShortcut, nativeImage } from "electron";
 import { join } from "node:path";
-import { registerIpc } from "./ipc";
+import { registerIpc, setTrayHook } from "./ipc";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { startAgentSocket, stopAgentSocket } from "./agent-socket";
@@ -95,9 +95,12 @@ const headlessArgs = readHeadlessEvalArgs(process.argv);
 const isHeadlessEval = headlessArgs.enabled && Boolean(headlessArgs.args);
 
 const isDev = !app.isPackaged;
+// On win32 use the .ico; on macOS/Linux use .png — icon.ico fails to load on
+// macOS in dev, which would prevent Tray creation and strand the process.
+const iconFile = process.platform === "win32" ? "icon.ico" : "icon.png";
 const windowIcon = app.isPackaged
-  ? join(process.resourcesPath, "build/icon.ico")
-  : join(__dirname, "../../build/icon.ico");
+  ? join(process.resourcesPath, `build/${iconFile}`)
+  : join(__dirname, `../../build/${iconFile}`);
 
 let mainWindow: BrowserWindow | null = null;
 // Tray + background-running state (Feature: "close to tray"). `isQuitting`
@@ -125,6 +128,13 @@ function showMainWindow(): void {
   mainWindow.focus();
 }
 
+// Remove the tray icon entirely (called when keepRunningInBackground is toggled
+// off). Safe to call even when no tray exists.
+function destroyTray(): void {
+  tray?.destroy();
+  tray = null;
+}
+
 // Create the system tray icon + menu so the app stays reachable while running
 // in the background. Idempotent and best-effort: tray creation can throw on
 // some Linux setups (no system tray), so a failure is logged and never blocks
@@ -132,7 +142,16 @@ function showMainWindow(): void {
 function ensureTray(): void {
   if (tray) return;
   try {
-    tray = new Tray(windowIcon);
+    // Build a properly-sized tray image. The raw icon.png is the full app icon
+    // (1024×1024 on macOS), which the system tries to scale itself — resulting
+    // in blurry or oversized rendering. Explicitly resize to 18×18 for the
+    // macOS menu bar (Win32 uses the path directly; the taskbar notification
+    // area handles DPI scaling on its own).
+    let trayImage = nativeImage.createFromPath(windowIcon);
+    if (process.platform !== "win32") {
+      trayImage = trayImage.resize({ width: 18, height: 18 });
+    }
+    tray = new Tray(trayImage);
     tray.setToolTip("Spark App");
     const menu = Menu.buildFromTemplate([
       { label: "Show Spark", click: showMainWindow },
@@ -205,12 +224,14 @@ function createWindow(): void {
 
   mainWindow.on("ready-to-show", () => mainWindow?.show());
 
-  // Close-to-tray: while background running is enabled (default) and the user
-  // hasn't asked to quit, intercept the window close and hide instead so
-  // main-process automation timers keep firing. On Windows we also drop the
-  // taskbar button so the hidden window doesn't linger there.
+  // Close-to-tray: only hide when the tray actually exists AND the user has
+  // opted into background running. Without a live tray the user has no way to
+  // reach the hidden window (observed on macOS when icon.ico fails to load),
+  // which strands an unreachable background process — so tray is a precondition.
+  // On Windows we also drop the taskbar button so the hidden window doesn't
+  // linger there.
   mainWindow.on("close", (e) => {
-    if (!isQuitting && getPreferenceCached("keepRunningInBackground")) {
+    if (!isQuitting && tray && getPreferenceCached("keepRunningInBackground")) {
       e.preventDefault();
       mainWindow?.hide();
       if (process.platform === "win32") mainWindow?.setSkipTaskbar(true);
@@ -375,6 +396,11 @@ app.whenReady().then(async () => {
   }
 
   registerIpc();
+  // Give the IPC layer a handle on ensureTray/destroyTray so the
+  // preferences:set handler can react to keepRunningInBackground changes
+  // without creating a circular import (index → ipc is safe; ipc → index
+  // would cycle).
+  setTrayHook({ ensure: ensureTray, destroy: destroyTray });
   registerPreviewBridge();
 
   // Hook RPC server for sub-agents (big-bet "Hook contract for sub-agents to
@@ -423,8 +449,10 @@ app.whenReady().then(async () => {
   if (mainWindow) registerAutoUpdater(mainWindow);
 
   // System tray so the app stays reachable while running in the background
-  // (close-to-tray). Best-effort — ensureTray() swallows its own failures.
-  ensureTray();
+  // (close-to-tray). Only created when the user has opted into background
+  // running — without it the tray is just menu-bar clutter with no escape
+  // hatch needed. Best-effort — ensureTray() swallows its own failures.
+  if (getPreferenceCached("keepRunningInBackground")) ensureTray();
 
   // Global accelerator to jump straight to the Automations view, even when
   // Spark is hidden in the tray. Mirrors the tray menu's "Open Automations".
@@ -524,7 +552,11 @@ app.on("window-all-closed", async () => {
   pty.disposeAll();
   fsWatcher.disposeAll();
   await flushAllStores();
-  if (process.platform !== "darwin") app.quit();
+  // Quit on all platforms. The close-to-tray early-return above already
+  // protects the background-running case; if we reach this line the user closed
+  // the last window with background-running off, and a lingering macOS process
+  // with no window or tray is exactly what we're avoiding.
+  app.quit();
 });
 
 // Electron does NOT await async before-quit listeners, so everything after the

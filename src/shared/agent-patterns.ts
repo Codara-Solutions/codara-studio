@@ -339,9 +339,134 @@ export function unescapeOsc633(value: string): string {
 
 // Detects any "shell is back at a prompt" boundary marker — both VS Code
 // OSC 633 (A/B/D/P; deliberately NOT E or C which fire DURING command
-// execution) and FinalTerm OSC 133;A. Matches the raw text so it works
-// even if xterm's OSC handler chain dropped the dispatch on the floor.
-export const PROMPT_MARKER_RE = /\x1b\]633;[ABDP](?:;|\x07)|\x1b\]133;A(?:\x07|\x1b\\)/;
+// execution) and FinalTerm OSC 133;A / 133;D. Matches the raw text so it
+// works even if xterm's OSC handler chain dropped the dispatch on the floor.
+//
+// Terminator handling: a 633 marker can be closed by `;` (more params
+// follow), BEL (`\x07`), or the 7-bit ST (`\x1b\\`). Some shells emit the
+// ST form — accepting it here means a `633;A`/`633;D` that arrives with an
+// ESC-backslash terminator (instead of BEL) is still recognised as a prompt
+// boundary. FinalTerm 133;D (command finished) is treated as a prompt-return
+// signal alongside 133;A (prompt start): some shells emit D, not A, when the
+// foreground program exits and control returns to the read-line state.
+//
+// GUARD-RAIL — why 133;D is safe to treat as "agent exited": today an agent CLI
+// holds the shell's foreground for the whole session, so the shell's
+// precmd/preexec integration is suspended while the agent runs and only resumes
+// (emitting 133;A/D) once the agent has actually exited and control is back at
+// the read-line state. There is therefore no mid-session 133;D. This assumption
+// BREAKS if a future feature runs a NESTED INTERACTIVE shell INSIDE an agent
+// pane (e.g. the agent spawns a child shell that inherits ZDOTDIR / the bash
+// integration): that child would emit 133;A/D on every one of ITS prompts,
+// which this regex would read as the agent exiting and falsely reset the chip.
+// If that ever ships, re-gate 133;D (e.g. require it only when no agent-UI
+// chrome is present, or scope it to the top-level shell's integration).
+export const PROMPT_MARKER_RE = /\x1b\]633;[ABDP](?:;|\x07|\x1b\\)|\x1b\]133;[AD](?:\x07|\x1b\\)/;
 export function hasPromptMarker(text: string): boolean {
   return PROMPT_MARKER_RE.test(text);
+}
+
+// ── Persistent agent-UI chrome detector ───────────────────────────────────
+// Returns true when the agent's PERSISTENT TUI chrome (the input box, footer
+// hint line, and statusline that frame the agent whether it is working OR
+// idle) is visible in `tail`. This is the "is the agent still on screen at
+// all" signal, distinct from classifyTail's "what is the agent doing right
+// now" — it stays true through an idle Claude box (between turns, or after a
+// Ctrl+C turn-interrupt) and goes false only once the agent's TUI is gone and
+// the plain shell prompt has returned.
+//
+// Used by the renderer poller / Ctrl+C path to clear a manual chip after the
+// agent EXITS, in environments where no alt-screen-leave or OSC prompt marker
+// arrives (inline-rendering Claude Code v2, "no-flicker" mode). It deliberately
+// errs toward TRUE: a false "UI gone" would wrongly clear a live agent, so we
+// only return false when NONE of the persistent anchors are present. A live
+// agent — working or idle — reliably keeps at least its footer hint line or
+// statusline on the bottom rows that the tail covers.
+//
+// Anchors (CSI/OSC-stripped, whitespace-elastic for Ink cursor-move gaps):
+//   Claude Code v2: the footer mode/hint line ("⏵⏵ auto mode on (shift+tab to
+//     cycle) · ← for agents", "▶▶ bypass permissions on …", "accept edits
+//     on …"), the universal "? for shortcuts" hint, the "← for agents" /
+//     "shift+tab to cycle" fragments, and the live launch banner. These are
+//     painted by Ink as a pinned bottom region and persist across the whole
+//     session, idle or busy.
+//   Codex: its boxed banner chrome and the same generic shortcut-hint footer.
+//     (Codex also emits alt-screen-leave on exit, so its chip clears via that
+//     path too — this detector is mainly the inline-Claude backstop.)
+//   Cursor: shortcut-hint footer / banner, same generic anchors.
+const AGENT_UI_ANCHORS: Record<"claude" | "codex" | "cursor", RegExp[]> = {
+  claude: [
+    // Footer mode + hint line. The mode word varies (auto mode / bypass
+    // permissions / accept edits / plan mode) but "(shift+tab to cycle)" and
+    // "← for agents" are stable across modes and versions. The double
+    // fast-forward glyph leads the line: ⏵⏵ (U+23F5) or ▶▶ (U+25B6).
+    /shift\s*\+?\s*tab\s*to\s*cycle/i,
+    /←\s*for\s*agents|\bfor\s*agents\b/i,
+    /[⏵▶]\s*[⏵▶]\s*(?:auto|bypass|accept|plan)/i,
+    // Universal shortcut hint shown under the idle input box.
+    /\?\s*for\s*shortcuts/i,
+    // Live launch banner still on screen (early session, before the user has
+    // scrolled it away).
+    /Claude\s*Code\s*v?\d/,
+  ],
+  codex: [
+    /OpenAI\s*Codex\s*\(?v?\d/,
+    /\?\s*for\s*shortcuts/i,
+    /shift\s*\+?\s*tab/i,
+    /ctrl\s*\+?\s*c\s*to\s*(?:quit|exit|interrupt)/i,
+    /esc\s*to\s*interrupt/i,
+  ],
+  cursor: [
+    /Cursor\s*(?:Agent|CLI)/i,
+    /\?\s*for\s*shortcuts/i,
+    /shift\s*\+?\s*tab/i,
+  ],
+};
+
+export function agentUiPresent(
+  runtime: "claude" | "codex" | "cursor",
+  tail: string,
+): boolean {
+  const anchors = AGENT_UI_ANCHORS[runtime];
+  if (!anchors) return false;
+  const stripped = stripAnsi(tail);
+  for (const re of anchors) {
+    if (re.test(stripped)) return true;
+  }
+  return false;
+}
+
+// Whether it is SAFE to clear an agent's chip purely because agentUiPresent()
+// went false (i.e. anchor-absence alone, with no positive exit signal). This is
+// true ONLY for runtimes whose IDLE chrome anchors have been verified against a
+// real idle frame — otherwise a false "UI gone" on a live-but-idle agent would
+// wrongly kill its chip.
+//
+//   claude: VERIFIED. The idle footer ("⏵⏵/▶▶ <mode> on (shift+tab to cycle) ·
+//           ← for agents", "? for shortcuts") and statusline are captured in the
+//           harness (scripts/test-agent-patterns.cjs) from real v2.1.17x/v2.1.181
+//           frames and are reliably last-painted. Claude v2 also renders inline
+//           with no alt-screen-leave on Ctrl+C exit, so absence-based detection
+//           is the ONLY general backstop — keep it aggressive here.
+//   codex / cursor: NOT VERIFIED. A 2026-06-18 live capture of Codex CLI
+//           (v0.125.0 → v0.141.0) confirmed Codex now renders INLINE too (no
+//           ESC[?1049h alt-screen enter/leave), but a clean idle-composer frame
+//           could not be captured, so its persistent idle hint/footer anchors
+//           above are best-effort guesses, not ground truth. If they don't match
+//           the real idle composer, an idle Codex would read as "UI gone" and an
+//           absence-based reset would clear a LIVE agent's chip after ~1.2s —
+//           the exact "chip vanishes while alive" failure. FAIL-SAFE: do NOT let
+//           anchor-absence alone clear Codex/Cursor chips. They still clear
+//           promptly via POSITIVE signals (OSC 633/133 prompt markers — present
+//           whenever shell integration is loaded — alt-screen-leave if a future
+//           build re-enters the alt screen, and pty exit). Worst case without a
+//           positive signal is an occasional stuck idle chip (self-healing on
+//           the next prompt marker / pty exit), which is strictly better than
+//           killing a live agent's chip. Re-enable once a real idle Codex frame
+//           is captured and added as a regression test.
+const ABSENCE_RESET_SAFE: ReadonlySet<"claude" | "codex" | "cursor"> = new Set([
+  "claude",
+]);
+export function absenceResetSafe(runtime: "claude" | "codex" | "cursor"): boolean {
+  return ABSENCE_RESET_SAFE.has(runtime);
 }

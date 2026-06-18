@@ -86,7 +86,14 @@ function isSparkLongPollMcpTool(name: string): boolean {
     // the cap stays at 90s, the turn times out, and the run is force-completed —
     // cancelling any active workers. Treat it as a long-poll so the cap rises.
     name === "spark_ask_user" ||
-    name === "mcp__spark-orchestrator__spark_ask_user"
+    name === "mcp__spark-orchestrator__spark_ask_user" ||
+    // spark_wait_for_automation (Automation mode) long-polls the scheduler for
+    // an automation run to settle — default 10 min, cap 19 min. Same hazard as
+    // spark_wait_for_workers: untracked, the 90s turn cap fires mid-wait.
+    // (spark_run_automation is NOT here: it returns as soon as the iteration
+    // STARTS, not when it finishes, so it never blocks long.)
+    name === "spark_wait_for_automation" ||
+    name === "mcp__spark-orchestrator__spark_wait_for_automation"
   );
 }
 // CC's Stop hook fires when the assistant finishes its turn, but the JSONL
@@ -135,6 +142,7 @@ You are in **Talk mode**. You can read code, search files, and answer questions 
 Free-form prose replies are the primary output. Use Read, Glob, and Grep for exploration when a question requires it.
 `;
 const EXECUTE_PROMPT_RESOURCE_FILENAME = "cc-execute-prompt.md";
+const AUTOMATION_PROMPT_RESOURCE_FILENAME = "cc-automation-prompt.md";
 
 // Resolve the Execute-mode orchestrator prompt shipped under
 // `resources/orchestration/`. Packaged build: read straight from
@@ -144,6 +152,14 @@ function resolveExecutePromptPath(): string {
   return app.isPackaged
     ? join(process.resourcesPath, "orchestration", EXECUTE_PROMPT_RESOURCE_FILENAME)
     : join(__dirname, "..", "..", "resources", "orchestration", EXECUTE_PROMPT_RESOURCE_FILENAME);
+}
+
+// Resolve the Automation-mode architect prompt — same packaged/dev resolution
+// as the Execute prompt above.
+function resolveAutomationPromptPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "orchestration", AUTOMATION_PROMPT_RESOURCE_FILENAME)
+    : join(__dirname, "..", "..", "resources", "orchestration", AUTOMATION_PROMPT_RESOURCE_FILENAME);
 }
 
 interface ClaudeChatSession {
@@ -244,13 +260,31 @@ export const claudeBackend: SparkAgentBackend = {
       const mode: ChatMode = input.chat.mode;
       // Pick the right system prompt for the active mode. Talk uses the
       // lazy-created lightweight default; Execute uses the shipped
-      // orchestrator prompt that teaches the LLM to call spark.* MCP tools.
+      // orchestrator prompt that teaches the LLM to call spark.* MCP tools;
+      // Automation uses the shipped automation-architect prompt and, like
+      // Execute, needs the spark-orchestrator MCP installed (it proxies the
+      // automation.* RPCs that create/run/test looms).
       let systemPromptPath: string;
       if (mode === "execute") {
         systemPromptPath = resolveExecutePromptPath();
         // Idempotent — installs spark-orchestrator into ~/.claude.json the
         // first time, no-ops thereafter. We skip the work when the entry is
         // already in place to avoid touching the file on every turn.
+        if (!(await isSparkOrchestratorMcpInstalled("claude"))) {
+          await installOrchestratorMcpForCC().catch((err) => {
+            emit({
+              kind: "system_note",
+              message: `Could not install spark-orchestrator MCP for Claude: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            });
+          });
+        }
+      } else if (mode === "automation") {
+        systemPromptPath = resolveAutomationPromptPath();
+        // Same idempotent global install as Execute — the per-run MCP config
+        // written in spawnChatSession scopes the visible tools, but the global
+        // entry still needs to exist for CC to spawn the server.
         if (!(await isSparkOrchestratorMcpInstalled("claude"))) {
           await installOrchestratorMcpForCC().catch((err) => {
             emit({
@@ -632,19 +666,30 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   //
   // Talk mode skips this entirely because Talk has no MCP delegation —
   // disallowed-tools is the only fence it needs.
+  //
+  // Automation mode uses the SAME per-run MCP config, but stamps
+  // SPARK_MCP_MODE=automation into the server's env so the server exposes the
+  // automation architect tool set (list/create/run/test looms) instead of the
+  // Execute worker-spawning roster. The globally-installed user-scope entry
+  // has no env, so automation-loop workers calling spark_request_next_iteration
+  // keep seeing the legacy 6-tool roster.
   let mcpConfigFile: string | null = null;
-  if (opts.mode === "execute") {
+  if (opts.mode === "execute" || opts.mode === "automation") {
     const orchestratorMcpServerPath = app.isPackaged
       ? join(process.resourcesPath, "spark-orchestrator-mcp", "server.js")
       : join(__dirname, "..", "..", "resources", "spark-orchestrator-mcp", "server.js");
     const electronExe = app.isPackaged ? process.execPath : process.execPath;
+    const serverEnv: Record<string, string> =
+      opts.mode === "automation"
+        ? { ELECTRON_RUN_AS_NODE: "1", SPARK_MCP_MODE: "automation" }
+        : { ELECTRON_RUN_AS_NODE: "1" };
     const mcpConfig = {
       mcpServers: {
         "spark-orchestrator": {
           type: "stdio" as const,
           command: electronExe,
           args: [orchestratorMcpServerPath],
-          env: { ELECTRON_RUN_AS_NODE: "1" },
+          env: serverEnv,
         },
       },
     };
@@ -702,6 +747,28 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     // not a tool-list filter — CC still sees everything with that flag,
     // which is why the model kept refusing.
     args.push("--tools", "");
+    if (mcpConfigFile) {
+      args.push("--mcp-config", mcpConfigFile);
+      args.push("--strict-mcp-config");
+    }
+  } else if (opts.mode === "automation") {
+    // Automation is a conversational ARCHITECT mode: CC talks to the user,
+    // reads the workspace (read-only), and drives looms through the
+    // spark_*_automation MCP tools. Unlike Execute we APPEND the prompt (CC
+    // keeps its helpful conversational persona) and leave the read-only
+    // built-ins (Read/Glob/Grep) available so it can inspect the workspace
+    // while designing automations. We block the mutating built-ins —
+    // automations are the only thing this mode should change, and those
+    // changes flow exclusively through the scoped spark-orchestrator MCP.
+    args.push("--append-system-prompt-file", opts.talkPromptPath);
+    args.push(
+      "--disallowed-tools",
+      "Edit",
+      "Write",
+      "Bash",
+      "NotebookEdit",
+      "MultiEdit",
+    );
     if (mcpConfigFile) {
       args.push("--mcp-config", mcpConfigFile);
       args.push("--strict-mcp-config");

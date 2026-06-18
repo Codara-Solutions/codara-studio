@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, webFrame } from "electron";
+import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 import type {
   AddRunMessageInput,
   AgentAssetDeleteResult,
@@ -261,6 +261,11 @@ const api = {
       ipcRenderer.invoke("fs:listFiles", root),
     readText: (path: string): Promise<FsFileContent> => ipcRenderer.invoke("fs:readText", path),
     readEx: (path: string): Promise<FsReadResult> => ipcRenderer.invoke("fs:readEx", path),
+    // Resolve a dropped File's absolute filesystem path. `File.path` was removed
+    // under the sandbox in Electron 32; webUtils.getPathForFile is the supported
+    // replacement (Electron 30+, synchronous, callable from a sandboxed preload).
+    // Used by the terminal's Finder drag-and-drop (iTerm2-style path insertion).
+    getPathForFile: (file: File): string => webUtils.getPathForFile(file),
     // Existence probe used by the terminal's file-link provider. `baseDir`
     // is the resolution base for relative targets (the tracked cwd of the
     // pane); absolute targets ignore it. Returns `{exists:false}` for any

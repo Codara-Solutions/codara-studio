@@ -178,6 +178,16 @@ const PASTED_IMAGE_EXTENSIONS = new Map([
   ["image/bmp", ".bmp"],
 ]);
 
+// Callback registered by index.ts so the IPC handler can manipulate the tray
+// without creating a circular import (index → ipc is fine; ipc → index would
+// cycle). index.ts calls setTrayHook() once after defining ensureTray /
+// destroyTray; the handler calls them on keepRunningInBackground changes.
+type TrayHook = { ensure: () => void; destroy: () => void };
+let _trayHook: TrayHook | null = null;
+export function setTrayHook(hook: TrayHook): void {
+  _trayHook = hook;
+}
+
 // Fan a preferences change out to every live webContents so the main window
 // and the settings window stay in sync regardless of which one wrote.
 function broadcastPreferencesChanged<K extends PrefKey>(
@@ -290,6 +300,17 @@ export function registerIpc(): void {
     ): Promise<AppPreferences> => {
       const next = await setPreference(args.key, args.value);
       broadcastPreferencesChanged({ key: args.key, value: next[args.key] });
+      // Reflect keepRunningInBackground changes in the tray immediately so the
+      // user doesn't have to restart the app to see the menu-bar icon appear or
+      // disappear. The hook is registered by index.ts after ensureTray /
+      // destroyTray are defined; it's null if somehow called before that.
+      if (args.key === "keepRunningInBackground" && _trayHook) {
+        if (args.value) {
+          _trayHook.ensure();
+        } else {
+          _trayHook.destroy();
+        }
+      }
       return next;
     },
   );

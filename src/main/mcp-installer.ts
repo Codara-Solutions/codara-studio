@@ -41,7 +41,10 @@ const SPARK_VERSION = "1";
 export const SPARK_ORCHESTRATOR_SERVER_NAME = "spark-orchestrator";
 // v2: spark_request_next_iteration gained nextEngine/nextModel/nextEffort
 // (Looms v2 auto-handoff) — bump forces a re-install of the managed entry.
-const ORCHESTRATOR_SPARK_VERSION = "2";
+// v3: Automation-mode architect tool set (spark_*_automation) added behind the
+// per-run SPARK_MCP_MODE=automation gate — bump reinstalls managed config
+// entries so the Capability Center roster count picks up the new tools.
+const ORCHESTRATOR_SPARK_VERSION = "3";
 
 // Tool rosters kept in sync with resources/spark-*-mcp/server.js so the
 // Capability Center can show "N tools" without spawning the servers.
@@ -60,12 +63,26 @@ const SPARK_PREVIEW_TOOLS = [
 ];
 
 const SPARK_ORCHESTRATOR_TOOLS = [
+  // Execute-mode roster (the globally-installed entry exposes exactly these).
   "spark_spawn_workers",
   "spark_ask_user",
   "spark_complete",
   "spark_request_next_iteration",
   "spark_get_worker_status",
   "spark_wait_for_workers",
+  // Automation-mode architect roster (exposed only behind the per-run
+  // SPARK_MCP_MODE=automation gate; listed here for the Capability Center count).
+  "spark_list_automations",
+  "spark_get_automation",
+  "spark_create_automation",
+  "spark_update_automation",
+  "spark_run_automation",
+  "spark_wait_for_automation",
+  "spark_set_automation_enabled",
+  "spark_pause_automation",
+  "spark_resume_automation",
+  "spark_stop_automation",
+  "spark_delete_automation",
 ];
 
 const CLAUDE_USER_CONFIG = join(homedir(), ".claude.json");
@@ -649,11 +666,17 @@ export async function isSparkOrchestratorMcpInstalled(
     return false;
   }
   if (hasUserOrchestratorSection(existing)) return true;
-  // Managed block present?
-  return (
-    existing.includes(CODEX_ORCHESTRATOR_BLOCK_START) &&
-    existing.includes(CODEX_ORCHESTRATOR_BLOCK_END)
-  );
+  // Managed block present AND at the current version? The block embeds a
+  // `# Version: <n>` line; if it's missing or stale, report "not installed" so
+  // the caller reinstalls the block (picking up roster/env changes from the
+  // version bump). Without the version gate the v2→v3 bump would never refresh
+  // the codex block. We scope the version match to WITHIN the orchestrator
+  // block so it can't false-positive on the preview block's own `# Version:`.
+  const blockStart = existing.indexOf(CODEX_ORCHESTRATOR_BLOCK_START);
+  const blockEnd = existing.indexOf(CODEX_ORCHESTRATOR_BLOCK_END);
+  if (blockStart < 0 || blockEnd < 0 || blockEnd < blockStart) return false;
+  const block = existing.slice(blockStart, blockEnd + CODEX_ORCHESTRATOR_BLOCK_END.length);
+  return block.includes(`# Version: ${ORCHESTRATOR_SPARK_VERSION}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -688,9 +711,9 @@ function builtinMeta(autoInstallEnabled: boolean): SparkBuiltinMeta[] {
     {
       id: "spark-orchestrator",
       serverName: SPARK_ORCHESTRATOR_SERVER_NAME,
-      summary: "Spawn & steer workers in Execute mode",
+      summary: "Spawn & steer workers in Execute mode; build looms in Automation mode",
       detail:
-        "Gives the Claude/Codex CLI running in Execute mode the tools to spawn Spark workers, ask you clarifying questions, poll worker status, and mark the run complete. Installed automatically the first time you start an Execute-mode run.",
+        "Gives the Claude/Codex CLI running in Execute mode the tools to spawn Spark workers, ask you clarifying questions, poll worker status, and mark the run complete. In Automation mode it instead exposes the automation architect tools to list, create, update, run, test, and manage Spark automations (looms). Installed automatically the first time you start an Execute- or Automation-mode run.",
       tools: SPARK_ORCHESTRATOR_TOOLS,
       autoManaged: false,
     },

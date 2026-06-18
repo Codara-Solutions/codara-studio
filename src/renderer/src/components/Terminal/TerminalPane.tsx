@@ -1,6 +1,6 @@
 import type { SearchAddon } from "@xterm/addon-search";
 import { forwardRef, useImperativeHandle, useRef } from "react";
-import type { ShellInfo } from "@shared/types";
+import type { RuntimeState, ShellInfo } from "@shared/types";
 import {
   useTerminalSession,
   type SparkOpenInput,
@@ -51,6 +51,10 @@ interface Props {
   onActivity?: () => void;
   onUserInput?: () => void;
   onAgentState?: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
+  // Forwarded straight to useTerminalSession: fires when the live-state poller
+  // confirms a new RuntimeState (working / blocked / idle / done) for the
+  // foreground agent. Lets the owning stack surface the finer state on a chip.
+  onRuntimeState?: (state: RuntimeState) => void;
 }
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
@@ -74,6 +78,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onActivity,
       onUserInput,
       onAgentState,
+      onRuntimeState,
     },
     ref,
   ) {
@@ -99,6 +104,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onActivity,
       onUserInput,
       onAgentState,
+      onRuntimeState,
     });
 
     useImperativeHandle(

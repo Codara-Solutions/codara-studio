@@ -110,6 +110,14 @@ interface PaneWatcher {
   lastOscNotifyAt: number;
   lastAlertAt: number;
   lastAlertKind: "done" | "blocked" | null;
+  // Bug 1 (Path B) — terminal-completion dedup. True once this pane has
+  // alerted a "done" turn-complete and no new working phase has begun since.
+  // While set, a subsequent "blocked" alert is suppressed: it is the same
+  // turn's tail (a late footer flap / prompt-back marker) rather than a fresh
+  // permission prompt. Cleared in enterWorking() the moment real new activity
+  // resumes, so a genuine "needs you" after the user sends a new prompt still
+  // alerts. Mirrors alertedTerminalCompletion in notifications.ts.
+  alertedTerminalDone: boolean;
 }
 
 const watchers = new Map<string, PaneWatcher>();
@@ -214,6 +222,7 @@ export function syncTerminalNotifyPanes(input: {
       lastOscNotifyAt: 0,
       lastAlertAt: 0,
       lastAlertKind: null,
+      alertedTerminalDone: false,
     };
     watchers.set(entry.paneId, watcher);
     attach(watcher);
@@ -331,8 +340,13 @@ const OSC9_PROGRESS_G = /\x1b\]9;4(?:;(\d*))?(?:;\d*)?(?:\x07|\x1b\\)/g;
 // the heuristic when the user has it enabled.
 const OSC21337_G = /\x1b\]21337;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 // Same prompt-back markers the renderer keys off (OSC 633 A/B/D/P + OSC
-// 133;A), made global so matches can be position-checked against the carry.
-const PROMPT_MARKER_G = /\x1b\]633;[ABDP](?:;|\x07)|\x1b\]133;A(?:\x07|\x1b\\)/g;
+// 133;A / 133;D), made global so matches can be position-checked against the
+// carry. Kept byte-for-byte in sync with the shared PROMPT_MARKER_RE: accepts
+// the ST (`\x1b\\`) terminator after 633 markers and treats 133;D (command
+// finished) as a prompt-return signal alongside 133;A. The carry-aware scan
+// (`text = w.carry + decoded`, CARRY_MAX=1024) already bridges a marker split
+// across PTY chunk boundaries, so no further carry change is needed here.
+const PROMPT_MARKER_G = /\x1b\]633;[ABDP](?:;|\x07|\x1b\\)|\x1b\]133;[AD](?:\x07|\x1b\\)/g;
 const ALT_SCREEN_LEAVE = "\x1b[?1049l";
 
 // Collect regex matches that END inside the newly arrived text (index >=
@@ -356,6 +370,10 @@ function enterWorking(w: PaneWatcher, now: number): void {
   if (w.state !== "working") {
     w.workingSince = now;
     tanLog(`pane=${w.paneId} state -> working (was ${w.state})`);
+    // Real new activity resumed — re-arm the blocked alert (Bug 1, Path B).
+    // A "blocked" after this working phase is a fresh permission prompt the
+    // user should hear about, not the previous turn's tail.
+    w.alertedTerminalDone = false;
   }
   w.state = "working";
   w.lastWorkingAt = now;
@@ -529,6 +547,12 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
   const kind = /approv|permission|review|waiting|needs|input|attention|confirm/i.test(message)
     ? ("blocked" as const)
     : ("done" as const);
+  // An explicit OSC notification is the program authoritatively announcing its
+  // current state — it is never the previous turn's heuristic footer tail. So
+  // stand the terminal-completion guard down here; otherwise a real "approval
+  // requested" emitted right after a turn-complete (no intervening detected
+  // working phase) would be wrongly swallowed by the deliver() dedup.
+  w.alertedTerminalDone = false;
   deliver(w, kind, message.length > 0 ? message : null);
 }
 
@@ -556,6 +580,16 @@ function deliver(w: PaneWatcher, kind: "done" | "blocked", body: string | null):
     tanLog(`pane=${w.paneId} alert suppressed (user watching ws=${w.workspaceId} tab=${w.tabId}) kind=${kind}`);
     return;
   }
+  // Bug 1 (Path B) — terminal-completion dedup. A "blocked" that arrives after
+  // we already told the user the turn finished, with no intervening working
+  // phase to re-arm us, is the previous turn's tail (a footer flap or a
+  // prompt-back marker re-firing), not a fresh permission prompt. Swallow it;
+  // enterWorking() clears the flag the moment real new activity resumes so a
+  // genuine "needs you" still gets through.
+  if (kind === "blocked" && w.alertedTerminalDone) {
+    tanLog(`pane=${w.paneId} alert suppressed (terminal-completion guard) kind=${kind}`);
+    return;
+  }
   const now = Date.now();
   if (w.lastAlertKind === kind && now - w.lastAlertAt < ALERT_COOLDOWN_MS) {
     tanLog(`pane=${w.paneId} alert suppressed (cooldown) kind=${kind}`);
@@ -563,12 +597,20 @@ function deliver(w: PaneWatcher, kind: "done" | "blocked", body: string | null):
   }
   w.lastAlertAt = now;
   w.lastAlertKind = kind;
+  // Remember a terminal completion so a later blocked is deduped until the pane
+  // re-enters working (see enterWorking()).
+  if (kind === "done") w.alertedTerminalDone = true;
   tanLog(`pane=${w.paneId} ALERT kind=${kind} runtime=${w.runtime} ws=${w.workspaceId} tab=${w.tabId}`);
   const label = runtimeLabel(w.runtime);
   const where = w.tabTitle ? `“${w.tabTitle}”` : "a terminal";
   const inWorkspace = w.workspaceName ? ` in workspace “${w.workspaceName}”` : "";
   void fireTerminalAgentAlert({
     kind: kind === "done" ? "complete" : "blocked",
+    // Bug 2 — a blocked terminal agent is asking for input, not failing, so it
+    // reads amber (warning); a finished turn reads green (success). The
+    // terminal heuristic never produces a genuine "failure", so danger is
+    // reserved for orchestration run failures only.
+    tone: kind === "done" ? "success" : "warning",
     title: kind === "done" ? `${label} — finished` : `${label} — needs you`,
     body: body
       ? w.workspaceName

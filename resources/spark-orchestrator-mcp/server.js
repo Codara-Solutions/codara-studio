@@ -30,7 +30,323 @@ const http = require("node:http");
 const HANDSHAKE_FILE = "agent-socket.json";
 const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".SparkAgent");
 
-const TOOLS = [
+// Mode gating. When SPARK_MCP_MODE === "automation" (set by the per-run
+// MCP config the Claude backend writes for Automation-mode chats) the server
+// exposes ONLY the automation architect tool set + spark_ask_user. Anything
+// else (unset / "execute" / the globally-installed user-scope entry that has
+// no env at all) keeps the original 6-tool Execute roster, byte-for-byte
+// backwards-compatible so automation-loop workers calling
+// spark_request_next_iteration are unaffected.
+const SPARK_MCP_MODE = (process.env.SPARK_MCP_MODE || "").trim().toLowerCase();
+const IS_AUTOMATION_MODE = SPARK_MCP_MODE === "automation";
+
+// ---------------------------------------------------------------------------
+// Shared JSON-schema fragments for the automation tool set. Kept verbose and
+// LLM-friendly: every enum + token is spelled out so the architect model can
+// author triggers / loops / workers / graphs without guessing the shape.
+// ---------------------------------------------------------------------------
+const TRIGGER_SCHEMA = {
+  type: "object",
+  description:
+    "How the automation fires. Exactly one kind, each with its OWN required fields: " +
+    "cron REQUIRES a valid `expr` (validated server-side). " +
+    "interval REQUIRES a finite numeric `everyMs` >= 1000. " +
+    "folder REQUIRES a `path` to watch. " +
+    "onFinishOf REQUIRES an `automationId` that references an EXISTING automation (call spark_list_automations first). " +
+    "manual only fires via spark_run_automation or the Hub. " +
+    "continuous re-fires immediately after each run finishes.",
+  required: ["kind"],
+  properties: {
+    kind: {
+      type: "string",
+      enum: ["cron", "interval", "folder", "manual", "continuous", "onFinishOf"],
+    },
+    expr: { type: "string", description: "cron (REQUIRED): valid 5/6-field cron expression, e.g. '0 9 * * 1-5'." },
+    tz: { type: "string", description: "cron only: optional IANA timezone, e.g. 'America/New_York'." },
+    everyMs: { type: "number", description: "interval (REQUIRED): gap between fires in ms; must be finite and >= 1000." },
+    path: { type: "string", description: "folder (REQUIRED): absolute folder path to watch." },
+    events: {
+      type: "array",
+      description: "folder only: which fs events fire the trigger.",
+      items: { type: "string", enum: ["add", "change", "unlink"] },
+    },
+    glob: { type: "string", description: "folder only: optional basename glob, e.g. '*.md'. Omit to match every file." },
+    debounceMs: { type: "number", description: "folder only: coalesce a burst of events into one fire (default 400)." },
+    automationId: { type: "string", description: "onFinishOf (REQUIRED): id of an EXISTING automation to chain after." },
+  },
+  additionalProperties: false,
+};
+
+const LOOP_SCHEMA = {
+  type: "object",
+  description:
+    "How many times / how long the automation iterates per fire. once: a single pass. count: a fixed number (use stop.maxIterations). cadence: re-run every everyMs until a stop condition. until: loop until a stop condition holds. agent: the worker itself decides each pass via spark_request_next_iteration. continuous: loop with no natural end (rely on stop caps).",
+  required: ["kind", "stop"],
+  properties: {
+    kind: { type: "string", enum: ["once", "count", "cadence", "until", "continuous", "agent"] },
+    everyMs: { type: "number", description: "cadence (REQUIRED for kind 'cadence'): gap BETWEEN iteration starts in ms; must be finite and >= 1000." },
+    isolate: {
+      type: "boolean",
+      description:
+        "false (default) = iterations chain in the SAME run carrying context. true = a fresh run per iteration (isolation).",
+    },
+    stop: {
+      type: "object",
+      description: "Safety caps. ALWAYS provide maxIterations for non-once loops.",
+      properties: {
+        maxIterations: { type: "number", description: "Hard iteration cap (default 20 for agent/continuous loops)." },
+        budgetUsd: { type: "number", description: "Approx. USD spend cap across iterations." },
+        untilTestsPass: { type: "boolean", description: "Stop once testCommand exits 0." },
+        untilGitClean: { type: "boolean", description: "Stop once `git status --porcelain` is empty in the run cwd." },
+        untilPhrase: { type: "string", description: "Stop when this case-insensitive substring appears in an iteration summary." },
+        untilCommand: { type: "string", description: "Arbitrary shell; stop when it exits 0." },
+        testCommand: { type: "string", description: "Command for untilTestsPass (default 'npm test')." },
+      },
+      additionalProperties: false,
+    },
+  },
+  additionalProperties: false,
+};
+
+const WORKER_SCHEMA = {
+  type: "object",
+  description:
+    "Per-iteration worker (CLI agent) config. engine 'auto' lets the finishing agent pick the next engine/model via spark_request_next_iteration; 'claude'/'codex' pin it.",
+  required: ["engine"],
+  properties: {
+    engine: { type: "string", enum: ["auto", "claude", "codex"] },
+    model: {
+      type: "string",
+      description:
+        "Engine-native model id (e.g. claude-opus-4-8, gpt-5.5). Omit for the CLI default. NOTE: 'claude-fable-5' (Fable 5, top-tier) is permitted ONLY when the user explicitly asked for it.",
+    },
+    effort: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh", "max"] },
+    timeoutMinutes: { type: "number", description: "Hard per-iteration wall-clock ceiling in minutes." },
+  },
+  additionalProperties: false,
+};
+
+const GUARD_PREDICATE_SCHEMA = {
+  type: "object",
+  description:
+    "A guard's pass/fail test. phrase: substring in the upstream worker's output (optional source). tests: testCommand exits 0. gitClean: working tree clean. command: arbitrary shell exits 0. agentSignal: the upstream worker's spark_request_next_iteration signal matched `want`.",
+  required: ["type"],
+  properties: {
+    type: { type: "string", enum: ["phrase", "tests", "gitClean", "command", "agentSignal"] },
+    phrase: { type: "string", description: "phrase only: substring to look for." },
+    source: { type: "string", description: "phrase only: optional output source hint." },
+    command: { type: "string", description: "tests/command: shell command (tests defaults to 'npm test')." },
+    want: { type: "string", enum: ["continue", "done"], description: "agentSignal only: which signal counts as pass." },
+  },
+  additionalProperties: false,
+};
+
+const GRAPH_SCHEMA = {
+  type: "object",
+  description:
+    "Optional node graph for multi-step looms. Omit for a simple single-worker loom (one node is synthesized from prompt_template + worker). Nodes: 'worker' runs a CLI agent on a prompt; 'guard' evaluates a predicate and routes pass/fail; 'merge' joins parallel branches. Edges connect nodes; branch 'pass'/'fail' selects a guard's outgoing path; backEdge:true + visitCap:N forms a bounded retry loop. Prompt template tokens: {{var}} (a named variable), {{node:id}} (a named node's last output), {{incoming}} (the merged output of all inbound edges).",
+  required: ["version", "nodes", "edges", "entryNodeIds"],
+  properties: {
+    version: { type: "number", enum: [1] },
+    nodes: {
+      type: "array",
+      minItems: 1,
+      items: {
+        type: "object",
+        required: ["id", "kind"],
+        properties: {
+          id: { type: "string", description: "Unique node id within the graph." },
+          kind: { type: "string", enum: ["worker", "guard", "merge"] },
+          label: { type: "string" },
+          worker: WORKER_SCHEMA,
+          prompt: { type: "string", description: "worker only: the prompt template for this node (supports {{var}}/{{node:id}}/{{incoming}})." },
+          isolate: { type: "boolean", description: "worker only: run this node in a fresh run lineage." },
+          predicate: GUARD_PREDICATE_SCHEMA,
+          joinMode: { type: "string", enum: ["all", "any"], description: "merge only: wait for ALL inbound branches or ANY." },
+        },
+        additionalProperties: false,
+      },
+    },
+    edges: {
+      type: "array",
+      items: {
+        type: "object",
+        required: ["id", "from", "to"],
+        properties: {
+          id: { type: "string", description: "Unique edge id." },
+          from: { type: "string", description: "Source node id (must exist in nodes)." },
+          to: { type: "string", description: "Target node id (must exist in nodes)." },
+          branch: { type: "string", enum: ["pass", "fail"], description: "For edges leaving a guard: which outcome this edge follows." },
+          backEdge: { type: "boolean", description: "true = a retry/loop-back edge (must be paired with visitCap)." },
+          visitCap: { type: "number", description: "Max times the backEdge may be traversed before giving up." },
+        },
+        additionalProperties: false,
+      },
+    },
+    entryNodeIds: {
+      type: "array",
+      minItems: 1,
+      items: { type: "string" },
+      description: "Node ids that start execution (must reference existing nodes).",
+    },
+  },
+  additionalProperties: false,
+};
+
+const runIdProp = {
+  runId: {
+    type: "string",
+    description: "Spark run id. Defaults to process.env.SPARK_RUN_ID (the chat this architect was spawned for) when omitted.",
+  },
+};
+
+// Automation architect tool roster (Automation chat mode only).
+const AUTOMATION_TOOLS = [
+  {
+    name: "spark_list_automations",
+    description:
+      "List all Spark automations (\"looms\"): id, name, enabled, a trigger/loop summary, worker config, node/edge counts, current state.status, lastRunAt, and the last 3 history records (status/stopReason/costUsd). Call this FIRST when the user asks about automations so you can reference what already exists.",
+    inputSchema: { type: "object", properties: { ...runIdProp }, additionalProperties: false },
+  },
+  {
+    name: "spark_get_automation",
+    description:
+      "Fetch one automation's full definition (trigger, loop, prompt, worker, graph, state, recent history) by id. Use before updating so you can patch only what changes.",
+    inputSchema: {
+      type: "object",
+      required: ["automation_id"],
+      properties: { ...runIdProp, automation_id: { type: "string", description: "The automation id from spark_list_automations." } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_create_automation",
+    description:
+      "Create a new automation bound to THIS chat's workspace (Spark resolves the workspace/cwd from the run — never supply paths). Provide name, trigger, loop, prompt_template, worker, and optionally a node graph. Returns the created automation id + summary. Recommended workflow: list existing automations, summarize your plan to the user in prose, THEN create.",
+    inputSchema: {
+      type: "object",
+      required: ["name", "trigger", "loop", "prompt_template", "worker"],
+      properties: {
+        ...runIdProp,
+        name: { type: "string", description: "Human-readable automation name." },
+        trigger: TRIGGER_SCHEMA,
+        loop: LOOP_SCHEMA,
+        prompt_template: {
+          type: "string",
+          description: "The instruction each iteration's worker runs. Supports {{var}}/{{node:id}}/{{incoming}} tokens.",
+        },
+        worker: WORKER_SCHEMA,
+        graph: GRAPH_SCHEMA,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_update_automation",
+    description:
+      "Update an existing automation. Only the fields you pass are changed; omit the rest. Same field shapes as spark_create_automation.",
+    inputSchema: {
+      type: "object",
+      required: ["automation_id"],
+      properties: {
+        ...runIdProp,
+        automation_id: { type: "string" },
+        name: { type: "string" },
+        trigger: TRIGGER_SCHEMA,
+        loop: LOOP_SCHEMA,
+        prompt_template: { type: "string" },
+        worker: WORKER_SCHEMA,
+        graph: GRAPH_SCHEMA,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_run_automation",
+    description:
+      "Run an automation immediately (a manual fire), independent of its trigger. Returns the created run id. Pair with spark_wait_for_automation to observe the result.",
+    inputSchema: {
+      type: "object",
+      required: ["automation_id"],
+      properties: { ...runIdProp, automation_id: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_wait_for_automation",
+    description:
+      "Long-poll until an automation's current run/iteration reaches a terminal state (idle/stopped/blocked) or timeout_ms elapses. Returns final status, stopReason, iteration count, costUsd, and a snippet of the last iteration's summary. Use after spark_run_automation to report results to the user.",
+    inputSchema: {
+      type: "object",
+      required: ["automation_id"],
+      properties: {
+        ...runIdProp,
+        automation_id: { type: "string" },
+        timeout_ms: {
+          type: "number",
+          description: "Max wait in ms. Default 600000 (10 min). Capped at 1140000 (19 min). On timeout returns the latest state with reason='timeout'.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_set_automation_enabled",
+    description: "Enable or disable an automation's trigger without deleting it.",
+    inputSchema: {
+      type: "object",
+      required: ["automation_id", "enabled"],
+      properties: { ...runIdProp, automation_id: { type: "string" }, enabled: { type: "boolean" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_pause_automation",
+    description: "Pause a running automation loop (it can be resumed later). The trigger may still be armed.",
+    inputSchema: {
+      type: "object",
+      required: ["automation_id"],
+      properties: { ...runIdProp, automation_id: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_resume_automation",
+    description: "Resume a paused automation loop.",
+    inputSchema: {
+      type: "object",
+      required: ["automation_id"],
+      properties: { ...runIdProp, automation_id: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_stop_automation",
+    description: "Stop an automation's current loop now (finalizes the live iteration). The automation remains and can be run again.",
+    inputSchema: {
+      type: "object",
+      required: ["automation_id"],
+      properties: { ...runIdProp, automation_id: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_delete_automation",
+    description:
+      "Permanently delete an automation. DESTRUCTIVE: you MUST confirm with the user in conversation before calling this — never delete an automation the user did not explicitly ask to remove.",
+    inputSchema: {
+      type: "object",
+      required: ["automation_id"],
+      properties: { ...runIdProp, automation_id: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+];
+
+// spark_ask_user is shared between rosters (its definition lives in
+// EXECUTE_TOOLS below); the automation roster appends it after that array is
+// defined. See `const TOOLS = ...` near the dispatch table.
+const EXECUTE_TOOLS = [
   {
     name: "spark_spawn_workers",
     description:
@@ -261,7 +577,31 @@ const TOOLS = [
   },
 ];
 
-const TOOL_TO_RPC = {
+// spark_ask_user is shared by both rosters. Pull its canonical definition out
+// of EXECUTE_TOOLS so the automation roster can reuse the exact same schema.
+const ASK_USER_TOOL = EXECUTE_TOOLS.find((t) => t.name === "spark_ask_user");
+
+// The live roster + RPC map are selected once, at startup, by SPARK_MCP_MODE.
+const TOOLS = IS_AUTOMATION_MODE
+  ? [...AUTOMATION_TOOLS, ...(ASK_USER_TOOL ? [ASK_USER_TOOL] : [])]
+  : EXECUTE_TOOLS;
+
+const AUTOMATION_TOOL_TO_RPC = {
+  spark_list_automations: "automation.list",
+  spark_get_automation: "automation.get",
+  spark_create_automation: "automation.create",
+  spark_update_automation: "automation.update",
+  spark_run_automation: "automation.run_now",
+  spark_wait_for_automation: "automation.wait",
+  spark_set_automation_enabled: "automation.set_enabled",
+  spark_pause_automation: "automation.pause",
+  spark_resume_automation: "automation.resume",
+  spark_stop_automation: "automation.stop",
+  spark_delete_automation: "automation.delete",
+  spark_ask_user: "orchestrator.ask_user",
+};
+
+const EXECUTE_TOOL_TO_RPC = {
   spark_spawn_workers: "orchestrator.spawn_workers",
   spark_ask_user: "orchestrator.ask_user",
   spark_complete: "orchestrator.complete",
@@ -269,6 +609,8 @@ const TOOL_TO_RPC = {
   spark_get_worker_status: "orchestrator.get_worker_status",
   spark_wait_for_workers: "orchestrator.wait_for_workers",
 };
+
+const TOOL_TO_RPC = IS_AUTOMATION_MODE ? AUTOMATION_TOOL_TO_RPC : EXECUTE_TOOL_TO_RPC;
 
 function resolveSparkHome() {
   const override = process.env.SPARK_HOME_DIR || process.env.SPARK_USER_DATA_DIR;

@@ -91,6 +91,89 @@ check("OSC 633;A marks prompt", ap.hasPromptMarker("\x1b]633;A\x07"), true);
 check("OSC 133;A marks prompt", ap.hasPromptMarker("\x1b]133;A\x07"), true);
 check("OSC 633;E does NOT mark prompt", ap.hasPromptMarker("\x1b]633;E;claude\x07"), false);
 check("OSC 633;C does NOT mark prompt", ap.hasPromptMarker("\x1b]633;C\x07"), false);
+// Hardened terminators / subcodes (Bug A, fix 4b/4c):
+check("OSC 633;A with ST terminator marks prompt", ap.hasPromptMarker("\x1b]633;A\x1b\\"), true);
+check("OSC 633;D with ST terminator marks prompt", ap.hasPromptMarker("\x1b]633;D\x1b\\"), true);
+check("OSC 133;D (command finished) marks prompt", ap.hasPromptMarker("\x1b]133;D\x07"), true);
+check("OSC 133;D with ST terminator marks prompt", ap.hasPromptMarker("\x1b]133;D\x1b\\"), true);
+check("OSC 133;B does NOT mark prompt", ap.hasPromptMarker("\x1b]133;B\x07"), false);
+
+// ── agentUiPresent: persistent TUI chrome vs returned-to-shell (Bug A) ──
+// Idle Claude box: footer hint line + statusline present → UI present (true).
+check(
+  "claude idle box (auto-mode footer) is UI-present",
+  ap.agentUiPresent(
+    "claude",
+    "❯ \n⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n󱙺 Sonnet 4.6 ╱ _staging ╱ staging ╱ no ctx",
+  ),
+  true,
+);
+// User-reported screenshot variant: bypass-permissions mode + ▶▶ glyph.
+check(
+  "claude idle box (bypass-permissions, ▶▶ glyph) is UI-present",
+  ap.agentUiPresent(
+    "claude",
+    "› \n▶▶ bypass permissions on (shift+tab to cycle) · ← for agents\nOpus 4.8 ╱ spark-agent ╱ main ╱ no ctx",
+  ),
+  true,
+);
+// Working footer co-exists with chrome → still UI-present.
+check(
+  "claude working footer is UI-present",
+  ap.agentUiPresent("claude", "✽ Pouncing… (3s · ↓ 1 tokens)\n⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"),
+  true,
+);
+// "? for shortcuts" hint alone (minimal idle box) → UI-present.
+check(
+  "claude '? for shortcuts' hint is UI-present",
+  ap.agentUiPresent("claude", "› \n? for shortcuts"),
+  true,
+);
+// Live banner still on screen early in the session → UI-present.
+check(
+  "claude banner on screen is UI-present",
+  ap.agentUiPresent("claude", "✻ Welcome!  Claude Code v2.1.181"),
+  true,
+);
+// Plain shell prompt back (powerlevel10k-ish), agent gone → UI ABSENT (false).
+check(
+  "plain shell prompt (agent exited) is NOT UI-present",
+  ap.agentUiPresent("claude", "user@host ~/spark-agent main ❯ \n$ ls\nsrc package.json README.md"),
+  false,
+);
+check(
+  "empty/quiet shell tail is NOT UI-present",
+  ap.agentUiPresent("claude", "\n\n"),
+  false,
+);
+// Codex chrome anchors.
+check(
+  "codex banner is UI-present",
+  ap.agentUiPresent("codex", "│ >_ OpenAI Codex (v0.138.0)                          │"),
+  true,
+);
+check(
+  "codex working footer (esc to interrupt) is UI-present",
+  ap.agentUiPresent("codex", "▌ Working (32s • Esc to interrupt)"),
+  true,
+);
+check(
+  "plain shell (no codex chrome) is NOT UI-present",
+  ap.agentUiPresent("codex", "$ git status\nnothing to commit"),
+  false,
+);
+
+// ── absenceResetSafe: fail-safe gate for anchor-absence-only chip clearing ──
+// Only Claude's IDLE chrome is verified against real frames, so only Claude may
+// have its chip cleared by agentUiPresent()===false alone. Codex/Cursor idle
+// anchors are unverified (a 2026-06-18 live capture confirmed Codex renders
+// inline like Claude — no alt-screen — but a clean idle composer frame could not
+// be captured), so they must clear via POSITIVE exit signals only. If a real
+// idle Codex frame is ever captured and asserted UI-present here, codex can be
+// promoted into ABSENCE_RESET_SAFE and this expectation flipped to true.
+check("absenceResetSafe(claude) — verified idle chrome", ap.absenceResetSafe("claude"), true);
+check("absenceResetSafe(codex) — UNVERIFIED, fail-safe off", ap.absenceResetSafe("codex"), false);
+check("absenceResetSafe(cursor) — UNVERIFIED, fail-safe off", ap.absenceResetSafe("cursor"), false);
 
 // ── REAL Claude Code v2.1.170 frames (live pty capture, 2026-06-10) ──
 // The v2.1.17x footer dropped "esc to interrupt" entirely; the reliable

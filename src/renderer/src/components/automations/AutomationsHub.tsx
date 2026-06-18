@@ -360,8 +360,12 @@ export default function AutomationsHub({
               inset: 0,
               display: "flex",
               flexDirection: "column",
-              visibility: subTab === "looms" ? "visible" : "hidden",
-              pointerEvents: subTab === "looms" ? "auto" : "none",
+              // "inherit", not "visible"/"auto": an explicit visible/auto child
+              // punches through the visibility:hidden + pointer-events:none the
+              // tab stack puts on this hub when another top-level tab is active,
+              // leaking the editor's floating controls over that tab.
+              visibility: subTab === "looms" ? "inherit" : "hidden",
+              pointerEvents: subTab === "looms" ? "inherit" : "none",
             }}
           >
             <NodeFlowEditor

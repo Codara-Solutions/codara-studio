@@ -11,6 +11,8 @@ import {
   type ShellInfo,
 } from "@shared/types";
 import {
+  absenceResetSafe,
+  agentUiPresent,
   classifyTail,
   coercePublicRuntime,
   hasPromptMarker,
@@ -37,6 +39,29 @@ const FONT_SIZE = 13;
 const FIT_DEBOUNCE_MS = 8;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
 const RESTORE_NOTICE = "[restored from last Spark session]";
+
+// Shell-escape a dropped file path for insertion at the terminal cursor,
+// replicating iTerm2's default drag-and-drop behavior.
+//
+// POSIX (macOS/Linux): backslash-escape every character outside a conservative
+// safe set, matching iTerm2's default "escape special characters" mode. This
+// turns `/Users/x/My Photos/a b.png` into `/Users/x/My\ Photos/a\ b.png` and
+// escapes quotes, parens, `$`, `&`, `;`, `*`, etc.
+//
+// Windows (win32): backslash is the path separator, so backslash-escaping would
+// corrupt the path. Wrap the whole path in double quotes instead and double any
+// embedded `"` (rare in Windows paths). cmd.exe and PowerShell both accept a
+// double-quoted path.
+function shellEscapePath(path: string, isWindows: boolean): string {
+  if (!path) return "";
+  if (isWindows) {
+    return `"${path.replace(/"/g, '""')}"`;
+  }
+  // POSIX: wrap the whole path in single quotes (iTerm-style) so it reads as one
+  // literal token regardless of spaces/metacharacters. An embedded single quote
+  // is closed, escaped, and reopened: ' -> '\''.
+  return `'${path.replace(/'/g, "'\\''")}'`;
+}
 // After an agent turn is interrupted with Ctrl+C, Codex/Claude/Cursor often
 // keep their TUI input box open without re-emitting the launch banner or
 // alt-screen-enter sequence. Keep Shift+Enter routed as an agent newline for a
@@ -155,6 +180,14 @@ interface Options {
   // banner text; `null` means the TUI started but we couldn't identify which
   // one.
   onAgentState?: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
+  // Fires whenever the live-state poller confirms a new RuntimeState for the
+  // foreground agent (working / blocked / idle / done). This is the SAME value
+  // the hook reports to main via window.spark.terminalState.report — surfaced
+  // to the renderer so a manual pane's worker chip can show the finer state
+  // (e.g. "waiting for you" when the agent printed a permission/input prompt)
+  // instead of a binary running/done. `blocked` means the agent is waiting on
+  // the user. Reuses the poller's debounced output — no second detector.
+  onRuntimeState?: (state: RuntimeState) => void;
 }
 
 export interface TerminalSessionApi {
@@ -184,6 +217,7 @@ export function useTerminalSession({
   onActivity,
   onUserInput,
   onAgentState,
+  onRuntimeState,
 }: Options): TerminalSessionApi {
   // Latest-value ref so the input/resize closures (captured once per
   // sessionId) see the freshest readOnly flag without re-running the
@@ -211,6 +245,7 @@ export function useTerminalSession({
   const onActivityRef = useRef(onActivity);
   const onUserInputRef = useRef(onUserInput);
   const onAgentStateRef = useRef(onAgentState);
+  const onRuntimeStateRef = useRef(onRuntimeState);
   useEffect(() => {
     onDetectedRef.current = onDetectedLocalUrl;
     onCwdRef.current = onCwd;
@@ -220,7 +255,8 @@ export function useTerminalSession({
     onActivityRef.current = onActivity;
     onUserInputRef.current = onUserInput;
     onAgentStateRef.current = onAgentState;
-  }, [onDetectedLocalUrl, onCwd, onExit, onSearchReady, onSparkOpen, onActivity, onUserInput, onAgentState]);
+    onRuntimeStateRef.current = onRuntimeState;
+  }, [onDetectedLocalUrl, onCwd, onExit, onSearchReady, onSparkOpen, onActivity, onUserInput, onAgentState, onRuntimeState]);
 
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -699,6 +735,61 @@ export function useTerminalSession({
         cleanups.push(() => {
           host.removeEventListener("contextmenu", handleContextMenu);
         });
+
+        // iTerm2-style Finder drag-and-drop: dropping files from Finder onto a
+        // terminal pane inserts their shell-escaped absolute paths at the cursor
+        // (space-separated for multiple files). Scoped strictly to this terminal
+        // `host` element so the chat composer's own image drop-zone (a different
+        // component) is untouched.
+        const dragContainsFiles = (event: DragEvent): boolean =>
+          Array.from(event.dataTransfer?.types ?? []).includes("Files");
+
+        // preventDefault on dragenter/dragover is REQUIRED both to mark the
+        // element a valid drop target and to stop Electron from navigating the
+        // webContents to the dropped file:// URL.
+        const handleDragOver = (event: DragEvent) => {
+          if (!dragContainsFiles(event)) return;
+          event.preventDefault();
+          if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+        };
+
+        const handleDrop = (event: DragEvent) => {
+          // No files dropped (e.g. selected text drag): don't preventDefault so
+          // xterm / the browser handle the text drop normally.
+          if (!event.dataTransfer || event.dataTransfer.files.length === 0) return;
+          event.preventDefault();
+          event.stopPropagation();
+          // Read-only / mirror panes must not write into the PTY — mirror the
+          // onData input gate exactly. Activity still pings (the drop is a real
+          // "not idle" signal) but nothing is forwarded.
+          if (readOnlyRef.current || inputBlockedRef.current) {
+            onActivityRef.current?.();
+            return;
+          }
+          const paths = Array.from(event.dataTransfer.files)
+            .map((file) => window.spark.fs.getPathForFile(file))
+            .filter((path) => path && path.length > 0);
+          if (paths.length === 0) return;
+          // Escape each path and join with a single space. No leading/trailing
+          // space (iTerm parity). Written raw (not bracketed-paste) so it lands
+          // at the cursor exactly like typed input.
+          const payload = paths
+            .map((path) => shellEscapePath(path, isWindows))
+            .join(" ");
+          void window.spark.pty.write(sessionId, payload);
+          onActivityRef.current?.();
+          onUserInputRef.current?.();
+          termRef.current?.focus();
+        };
+
+        host.addEventListener("dragenter", handleDragOver);
+        host.addEventListener("dragover", handleDragOver);
+        host.addEventListener("drop", handleDrop);
+        cleanups.push(() => {
+          host.removeEventListener("dragenter", handleDragOver);
+          host.removeEventListener("dragover", handleDragOver);
+          host.removeEventListener("drop", handleDrop);
+        });
       }
 
       term.open(container.current);
@@ -828,6 +919,15 @@ export function useTerminalSession({
       //     manual chips so they don't linger as stale "DONE" badges).
       const agentDecoder = new TextDecoder("utf-8", { fatal: false });
       let agentTextRing = "";
+      // Tail of the previous PTY chunk's decoded text, prepended to the next
+      // chunk before scanning for prompt / alt-screen markers. spark.ps1's OSC
+      // 633;A / 133;A sequences (and `ESC[?1049l`) can land split across two
+      // PTY chunks; testing the lone chunk would miss a marker whose ESC opener
+      // arrived in the previous chunk and whose terminator arrives in this one.
+      // 64 bytes comfortably spans any single OSC prompt marker or the 8-byte
+      // alt-screen-leave sequence. Mirrors the main-process notifier's carry.
+      let agentMarkerCarry = "";
+      const MARKER_CARRY_MAX = 64;
       let agentPhase: "idle" | "agent" = "idle";
       // Tracks the first-party runtime ("claude"|"codex"|"cursor") if the
       // detected runtime maps to one — drives the state poller below, which
@@ -876,8 +976,39 @@ export function useTerminalSession({
       let pendingState: RuntimeState | null = null;
       let confirmedState: RuntimeState | null = null;
       let idleSinceMs: number | null = null;
+      // Bug B (baseline idle): a launched-but-never-worked agent (the user
+      // typed `claude`, the idle box is up, nothing run yet) classifies as
+      // null forever, so confirmedState stays null and the chip would fall
+      // back to a pulsing "running" tone. Once null has held for the debounce
+      // window with no prior working confirmation, resolve to a calm "idle".
+      let baselineIdleSinceMs: number | null = null;
+      // Bug A (poller-driven exit detection): how many consecutive ticks the
+      // persistent agent UI chrome has been ABSENT from the visible tail. Inline
+      // Claude Code v2 renders no alt-screen and may emit no prompt marker on a
+      // Ctrl+C exit, so the only reliable "agent is gone" signal left is its UI
+      // chrome disappearing and the shell prompt returning. Requires several
+      // consecutive absent ticks (UI_GONE_TICKS) to ride out scroll/redraw
+      // flicker; an idle Claude box keeps the chrome present so it never trips.
+      let uiGoneTicks = 0;
+      // Bug A (Ctrl+C fast path): one-shot timer armed on a forwarded Ctrl+C in
+      // an active agent pane. When it fires we reset ONLY if the agent UI is
+      // truly gone (a real exit) — a mere turn-interrupt leaves the idle box up,
+      // so agentUiPresent stays true and we leave the chip alone. Tracked here
+      // so a fresh working signal or unmount can cancel it.
+      let ctrlCExitTimer: number | null = null;
+      const clearCtrlCExitTimer = () => {
+        if (ctrlCExitTimer !== null) {
+          window.clearTimeout(ctrlCExitTimer);
+          ctrlCExitTimer = null;
+        }
+      };
       const reportRuntimeState = (state: RuntimeState) => {
         void window.spark.terminalState?.report?.({ paneId: sessionId, state });
+        // Surface the same debounced state to the renderer so a manual pane's
+        // worker chip can render the finer label/tone. Main still gets the
+        // report above (used for Spark-owned attempts / notifications); this is
+        // purely the renderer-side mirror.
+        onRuntimeStateRef.current?.(state);
       };
       const stopStatePoller = () => {
         if (stateTimer !== null) {
@@ -887,6 +1018,9 @@ export function useTerminalSession({
         pendingState = null;
         confirmedState = null;
         idleSinceMs = null;
+        baselineIdleSinceMs = null;
+        uiGoneTicks = 0;
+        clearCtrlCExitTimer();
       };
       const tickStatePoller = () => {
         const t = termRef.current;
@@ -894,6 +1028,43 @@ export function useTerminalSession({
         const tail = readTerminalTail(t, STATE_TAIL_ROWS);
         const raw = classifyTail(activeRuntime, tail);
         const now = Date.now();
+
+        // Bug A — poller-driven exit detection. The agent's persistent UI
+        // chrome (input box / footer hints / statusline) stays on screen the
+        // whole time the TUI is up, idle OR working; it vanishes only once the
+        // agent has exited and the plain shell prompt is back. Inline Claude
+        // Code v2 emits neither an alt-screen-leave nor (reliably) an OSC
+        // prompt marker on a Ctrl+C exit, so a sustained chrome-absence is the
+        // backstop "agent is gone" signal. Require several consecutive absent
+        // ticks to ride out scroll/redraw flicker, and only reset when nothing
+        // is actively classifying as working/blocked — a still-running turn (or
+        // a permission prompt) must never be torn down. An idle Claude box keeps
+        // the chrome present, so a turn-interrupt that leaves the box up never
+        // trips this. NOTE the poller is frozen while the pane is hidden (no
+        // visible xterm to read); a pane that exits while hidden is cleared by
+        // the carry-aware byte-level prompt-marker / alt-screen-leave path in
+        // processAgentChunkText instead, and otherwise resolves once refocused.
+        //
+        // FAIL-SAFE: this pure-absence reset only runs for runtimes whose IDLE
+        // chrome is VERIFIED (absenceResetSafe — Claude only today). For Codex /
+        // Cursor, whose idle-composer anchors are unverified, anchor-absence
+        // alone must NOT clear the chip: an idle agent with mismatched anchors
+        // would otherwise be killed ~1.2s after a turn. Those clear via positive
+        // signals (OSC prompt markers, alt-screen-leave, pty exit) instead.
+        if (
+          absenceResetSafe(activeRuntime) &&
+          raw === null &&
+          !agentUiPresent(activeRuntime, tail)
+        ) {
+          uiGoneTicks += 1;
+          if (uiGoneTicks >= UI_GONE_TICKS) {
+            resetAgentPhase();
+            return;
+          }
+        } else {
+          uiGoneTicks = 0;
+        }
+
         if (confirmedState === "working" && raw === null) {
           if (idleSinceMs === null) idleSinceMs = now;
           if (now - idleSinceMs >= IDLE_DEBOUNCE_MS) {
@@ -907,14 +1078,37 @@ export function useTerminalSession({
         idleSinceMs = null;
         if (raw === null) {
           pendingState = null;
+          // Bug B — baseline idle. A launched-but-never-worked agent (idle box
+          // up, nothing run yet) classifies as null indefinitely, so without
+          // this it would stay runtimeState=undefined and the chip would render
+          // the pulsing "running" fallback. Once null has held for the debounce
+          // window with no prior working confirmation, resolve it to a calm
+          // "idle" so the chip reads as a present-but-quiet agent. The UI-gone
+          // branch above runs first, so a vanished agent is reset rather than
+          // reported idle here. After the first real working confirmation this
+          // branch is inert (confirmedState !== null); the working→idle debounce
+          // above owns the idle transition from then on.
+          if (confirmedState === null) {
+            if (baselineIdleSinceMs === null) baselineIdleSinceMs = now;
+            if (now - baselineIdleSinceMs >= IDLE_DEBOUNCE_MS) {
+              confirmedState = "idle";
+              baselineIdleSinceMs = null;
+              reportRuntimeState("idle");
+            }
+          }
           return;
         }
+        baselineIdleSinceMs = null;
         if (pendingState !== raw) {
           pendingState = raw;
           return;
         }
         if (confirmedState !== raw) {
           confirmedState = raw;
+          // A confirmed working/blocked signal means the agent is alive and
+          // active — stand down the Ctrl+C exit one-shot so it can't fire after
+          // a new turn started post-interrupt.
+          if (raw === "working" || raw === "blocked") clearCtrlCExitTimer();
           reportRuntimeState(raw);
         }
       };
@@ -923,6 +1117,9 @@ export function useTerminalSession({
         pendingState = null;
         confirmedState = null;
         idleSinceMs = null;
+        baselineIdleSinceMs = null;
+        uiGoneTicks = 0;
+        clearCtrlCExitTimer();
         if (stateTimer !== null) window.clearInterval(stateTimer);
         stateTimer = window.setInterval(tickStatePoller, STATE_POLL_MS);
       };
@@ -930,6 +1127,16 @@ export function useTerminalSession({
       const setAgentRunning = (runtime: AgentRuntime | null) => {
         if (agentPhase === "agent") return;
         agentPhase = "agent";
+        // Start agent-phase marker scanning from a clean carry. The carry is
+        // advanced on every chunk INCLUDING the idle-phase chunks before launch,
+        // so its up-to-64-byte tail can still hold the pre-launch shell prompt's
+        // own OSC 133;A / 633;A marker. Without this reset, the very next chunk's
+        // `markerScan = agentMarkerCarry + chunkText` would re-match that stale
+        // prompt marker and immediately fire resetAgentPhase() — killing the
+        // just-launched agent's chip one chunk after launch. Most reproducible
+        // when the runtime is detected from a tiny 633;E command chunk while the
+        // carry still holds the idle prompt's marker.
+        agentMarkerCarry = "";
         // Coerce non-first-party runtimes down to `null` at the boundary so
         // App.tsx / TerminalStack / run-store keep seeing the existing public
         // surface ("claude" | "codex" | "cursor" | null) without growing new
@@ -967,6 +1174,7 @@ export function useTerminalSession({
         stopStatePoller();
         agentPhase = "idle";
         agentTextRing = "";
+        agentMarkerCarry = "";
       };
       const handleAgentInterruptKey = () => {
         if (readOnlyRef.current || inputBlockedRef.current) return;
@@ -978,11 +1186,43 @@ export function useTerminalSession({
         // false runtimeState='done' on the worker attempt with no reliable
         // recovery (banner not reprinted, alt-screen not re-entered). So do
         // NOT reset on keydown: the output-based exit signals (ESC[?1049l,
-        // OSC 633/133 prompt markers, pty exit) remain the only resetAgentPhase
-        // triggers. We still refresh the agent-newline grace window so a
-        // following Shift+Enter inserts a TUI newline rather than a shell
-        // continuation backslash while the interrupted prompt stays focused.
+        // OSC 633/133 prompt markers, pty exit) and the poller's UI-gone
+        // backstop are the resetAgentPhase triggers. We still refresh the
+        // agent-newline grace window so a following Shift+Enter inserts a TUI
+        // newline rather than a shell continuation backslash while the
+        // interrupted prompt stays focused.
         markRecentAgentInput(activeRuntime);
+        // Bug A — Ctrl+C-armed, UI-gated confirmation (fast path). A single
+        // Ctrl+C usually only interrupts the turn (idle box stays up) but it is
+        // ALSO how the user exits the agent back to the shell — twice in quick
+        // succession, or once when the input box is already empty. Arm a bounded
+        // one-shot: when it fires, reset ONLY if the agent's UI chrome is gone
+        // by then (a real exit). A turn-interrupt leaves the idle box up →
+        // agentUiPresent stays true → we leave the chip alone. This clears the
+        // chip a beat after a real Ctrl+C exit; the poller's UI-gone debounce is
+        // the backstop if the timer's single sample lands mid-teardown. Re-arm
+        // on each Ctrl+C so a double-tap measures from the last press.
+        //
+        // FAIL-SAFE: this fires resetAgentPhase off an agentUiPresent===false
+        // sample, so it carries the same "unverified idle anchors → false UI
+        // gone → kill a live agent" risk as the poller path. Only arm it for
+        // runtimes whose idle chrome is verified (absenceResetSafe — Claude).
+        // Codex / Cursor clear via positive exit signals only.
+        if (!absenceResetSafe(activeRuntime)) return;
+        clearCtrlCExitTimer();
+        ctrlCExitTimer = window.setTimeout(() => {
+          ctrlCExitTimer = null;
+          if (agentPhase !== "agent" || !activeRuntime) return;
+          const term = termRef.current;
+          if (!term) return;
+          const tail = readTerminalTail(term, STATE_TAIL_ROWS);
+          // Gate strictly on UI-absent: a still-present box (turn-interrupt)
+          // must never reset. A live working footer also keeps us out — if the
+          // agent resumed a turn after the interrupt, its chrome/footer is back.
+          if (agentUiPresent(activeRuntime, tail)) return;
+          if (classifyTail(activeRuntime, tail) !== null) return;
+          resetAgentPhase();
+        }, CTRL_C_EXIT_PROBE_MS);
       };
       const handleOsc633 = (data: string): boolean => {
         if (data.startsWith("E;")) {
@@ -1045,10 +1285,21 @@ export function useTerminalSession({
         if (chunkText.length > 0) {
           agentTextRing = (agentTextRing + chunkText).slice(-8192);
         }
+        // Carry-aware marker scan: prepend the previous chunk's tail so a
+        // prompt marker / alt-screen-leave split across the PTY chunk boundary
+        // is still caught. Using just `chunkText` would miss a `633;A`/`133;A`
+        // whose ESC opener arrived last chunk and terminator arrives this one
+        // (and vice-versa). The carry is updated at the end of this function.
+        const markerScan = agentMarkerCarry + chunkText;
+        // Advance the carry now (before any early return) so the next chunk
+        // always sees this chunk's tail, regardless of which branch we exit by.
+        agentMarkerCarry = markerScan.slice(-MARKER_CARRY_MAX);
+        const sawAltScreenLeave = markerScan.includes("\x1b[?1049l");
+        const sawPromptMarker = hasPromptMarker(markerScan);
         if (
           agentPhase === "idle" &&
           recentAgentInputRuntime &&
-          (chunkText.includes("\x1b[?1049l") || hasPromptMarker(chunkText))
+          (sawAltScreenLeave || sawPromptMarker)
         ) {
           clearRecentAgentInput();
         }
@@ -1076,15 +1327,12 @@ export function useTerminalSession({
         // In agent phase. Watch for any of these and reset:
         //   - alt-screen-leave (Codex's exit signal)
         //   - OSC 633;A / 633;D / 633;B / 633;P (spark.ps1's Prompt)
-        //   - OSC 133;A (generic FinalTerm prompt-start)
+        //   - OSC 133;A / 133;D (generic FinalTerm prompt-start / command-done)
         // Also reset on byte-level matches as a parser-bypass safety
         // net, since xterm's OSC handler chain has caused us issues
         // before with code 633. This path also runs while panes are hidden,
         // where xterm parser OSC handlers intentionally do not run.
-        if (
-          chunkText.includes("\x1b[?1049l") ||
-          hasPromptMarker(chunkText)
-        ) {
+        if (sawAltScreenLeave || sawPromptMarker) {
           resetAgentPhase();
         }
       };
@@ -1677,5 +1925,20 @@ const STATE_TAIL_ROWS = 40;
 // other transition is also applied (one tick is the minimum to debounce the
 // occasional regex bounce when the TUI is mid-redraw).
 const IDLE_DEBOUNCE_MS = 1_200;
+// Bug A — consecutive poller ticks the persistent agent UI chrome must be
+// ABSENT from the visible tail before we treat the agent as exited and clear
+// the chip. At STATE_POLL_MS (300 ms) this is 4 × 300 = 1.2 s of sustained
+// absence — long enough to ride out a full-screen redraw or a fast scroll that
+// momentarily pushes the footer/statusline out of the 40-row tail, short enough
+// that a Ctrl+C exit clears the chip within ~1.5 s of the prompt returning.
+// Conservative by design: a false "UI gone" would wrongly clear a live agent,
+// so we err toward keeping the chip a little longer than strictly necessary.
+const UI_GONE_TICKS = 4;
+// Bug A — delay before the Ctrl+C-armed one-shot samples the tail to decide
+// whether the agent actually exited. Long enough for Claude/Codex to finish
+// tearing down their TUI and the shell prompt to repaint after a real exit,
+// short enough to feel snappy. If this single sample lands mid-teardown the
+// UI_GONE_TICKS poller debounce is the backstop.
+const CTRL_C_EXIT_PROBE_MS = 2_000;
 
 // unescapeOsc633 / hasPromptMarker now come from @shared/agent-patterns.

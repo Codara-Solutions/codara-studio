@@ -161,12 +161,21 @@ function sleep(ms: number): Promise<void> {
 function isSparkLongPollMcpTool(name: string): boolean {
   // spark_ask_user also blocks the manager turn (up to 15 min) waiting on the
   // human; without it the cap stays at 90s and the turn times out, force-
-  // completing the run and cancelling active workers.
-  return name === "spark_wait_for_workers" || name === "spark_ask_user";
+  // completing the run and cancelling active workers. spark_wait_for_automation
+  // (Automation mode) long-polls the scheduler up to 19 min; same hazard.
+  return (
+    name === "spark_wait_for_workers" ||
+    name === "spark_ask_user" ||
+    name === "spark_wait_for_automation"
+  );
 }
 
 const TALK_PROMPT_FILENAME = "codex-talk.md";
 const EXECUTE_PROMPT_RESOURCE_FILENAME = "codex-execute-prompt.md";
+// Automation mode reuses the Claude automation architect prompt (engine-neutral
+// guidance about looms + the spark_*_automation tools). Shipped under the same
+// resources/orchestration dir.
+const AUTOMATION_PROMPT_RESOURCE_FILENAME = "cc-automation-prompt.md";
 
 // Resolve the Execute-mode orchestrator prompt shipped under
 // `resources/orchestration/`. Mirrors the CC backend's resolveExecutePromptPath.
@@ -174,6 +183,13 @@ function resolveExecutePromptPath(): string {
   return app.isPackaged
     ? join(process.resourcesPath, "orchestration", EXECUTE_PROMPT_RESOURCE_FILENAME)
     : join(__dirname, "..", "..", "resources", "orchestration", EXECUTE_PROMPT_RESOURCE_FILENAME);
+}
+
+// Resolve the Automation-mode architect prompt (shared with the CC backend).
+function resolveAutomationPromptPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "orchestration", AUTOMATION_PROMPT_RESOURCE_FILENAME)
+    : join(__dirname, "..", "..", "resources", "orchestration", AUTOMATION_PROMPT_RESOURCE_FILENAME);
 }
 
 const DEFAULT_TALK_PROMPT = `You are running inside Spark Agent's Talk mode. The user is chatting with you conversationally; respond as a helpful, terse engineering collaborator.
@@ -375,6 +391,16 @@ function buildArgs(input: ManagerRequestInput, promptPath: string): string[] {
   // caller picks the right `promptPath` based on `chat.mode`.
   args.push("-c", `model_instructions_file="${promptPath}"`);
   args.push("-c", "project_doc_max_bytes=0");
+  // Automation mode: Codex has no per-run MCP CONFIG file like Claude, but it
+  // DOES accept dotted `-c` overrides of the global config, including the
+  // managed spark-orchestrator server's env. Override SPARK_MCP_MODE for this
+  // invocation so the orchestrator server exposes the AUTOMATION tool roster
+  // (spark_*_automation) instead of the Execute worker-spawning roster. Verified
+  // codex v0.125 accepts `-c mcp_servers."spark-orchestrator".env.KEY="val"`.
+  // The server name must be TOML-quoted because it contains a hyphen.
+  if (chat.mode === "automation") {
+    args.push("-c", `mcp_servers."spark-orchestrator".env.SPARK_MCP_MODE="automation"`);
+  }
   // Sandbox enforcement. Both modes use read-only:
   // - Talk: user is asking questions, no writes expected.
   // - Execute: Codex is a *manager* — it delegates ALL file changes to
@@ -397,12 +423,28 @@ async function spawnSession(
     );
   }
   // Choose Talk (lazy-created lightweight default) vs Execute (shipped
-  // orchestrator prompt teaching the LLM to call spark.* MCP tools).
+  // orchestrator prompt teaching the LLM to call spark.* MCP tools) vs
+  // Automation (the architect prompt for building looms via spark_*_automation).
   const promptPath =
     input.chat.mode === "execute"
       ? resolveExecutePromptPath()
-      : await ensureTalkPromptFile();
-  if (input.chat.mode === "execute" && !(await isSparkOrchestratorMcpInstalled("codex"))) {
+      : input.chat.mode === "automation"
+        ? resolveAutomationPromptPath()
+        : await ensureTalkPromptFile();
+  // Execute and Automation both proxy through the spark-orchestrator MCP, so
+  // both ensure it is installed (once, globally, in ~/.codex/config.toml).
+  // Unlike the Claude backend, Codex has no per-run MCP CONFIG file, but it DOES
+  // honor per-invocation `-c mcp_servers."spark-orchestrator".env.*` overrides
+  // (added in buildArgs for automation mode), so a Codex automation chat gets
+  // the SPARK_MCP_MODE=automation env and therefore the real spark_*_automation
+  // roster — Codex automation mode is fully functional. The socket-side
+  // run.chatMode guards (automation.* require automation mode; the worker-
+  // orchestration RPCs reject automation mode) remain the defense-in-depth
+  // backstop regardless of which roster the CLI happens to see.
+  if (
+    (input.chat.mode === "execute" || input.chat.mode === "automation") &&
+    !(await isSparkOrchestratorMcpInstalled("codex"))
+  ) {
     await installOrchestratorMcpForCodex().catch((err) => {
       onStream?.({
         kind: "system_note",

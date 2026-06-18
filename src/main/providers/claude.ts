@@ -26,10 +26,26 @@ import { resolveBinary } from "../binary-resolver";
 
 import type { CliProvider, ResumeOpts, SpawnOpts } from "./types";
 
-// Claude --effort accepts low/medium/high/xhigh/max — NOT minimal. Both
-// Opus 4.8 and Sonnet 4.6 share the same 5-tier ladder; tier sizing affects
+// Claude --effort accepts low/medium/high/xhigh/max — NOT minimal. Fable 5,
+// Opus 4.8, and Sonnet 4.6 share the same 5-tier ladder; tier sizing affects
 // throughput/latency, not the available knobs.
+//
+// Fable 5 is Anthropic's top-tier model (above Opus 4.8). It is allowed as a
+// main chat-session model and as an opt-in automation (loom) worker model — the
+// automation engine validates pinned/handoff models against THIS list, so its
+// presence here is what unblocks `worker.model = "claude-fable-5"`. Opus 4.8
+// stays the default (isDefault) so nothing silently upgrades to fable. Workers
+// that Spark itself spawns (execute-mode spark_spawn_workers, plan-council,
+// autopilot) must NEVER run fable — that block lives at the spawn chokepoints
+// (agent-socket handleOrchestratorSpawnWorkers) plus a buildLaunchCommandLine
+// backstop, not here; see sanitizeWorkerModelHint in run-store.ts.
 const CLAUDE_MODELS: AgentRuntimeModel[] = [
+  {
+    id: "claude-fable-5",
+    label: "Fable 5",
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+    tier: "top",
+  },
   {
     id: "claude-opus-4-8",
     label: "Opus 4.8",

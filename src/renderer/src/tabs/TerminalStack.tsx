@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
-import type { ShellInfo } from "@shared/types";
+import type { RuntimeState, ShellInfo } from "@shared/types";
 import type { SparkOpenInput } from "../components/Terminal/useTerminalSession";
 import {
   findLeaf,
@@ -99,6 +99,10 @@ interface Props {
     paneId: string,
     state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean },
   ) => void;
+  // Finer live agent state (working / blocked / idle / done) from the
+  // per-pane runtime poller, used to colour + label the worker chip. Distinct
+  // from onPaneAgentState, which carries the binary running/runtime lifecycle.
+  onPaneRuntimeState: (tabId: TabId, paneId: string, state: RuntimeState) => void;
 }
 
 // Per-pane bundle of stable callbacks. Cached per `tabId:paneId` so a
@@ -119,6 +123,7 @@ type Bundle = {
   onActivity: () => void;
   onUserInput: () => void;
   onAgentState: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
+  onRuntimeState: (state: RuntimeState) => void;
 };
 
 // React.memo: with the useTabs API object now memoized, TerminalStack's
@@ -145,6 +150,7 @@ function TerminalStack({
   onPaneScrollback,
   onFlushScrollback,
   onPaneAgentState,
+  onPaneRuntimeState,
 }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
   // unrelated tab kind mutates, and so the bundle-GC effect (keyed on
@@ -172,6 +178,7 @@ function TerminalStack({
   const scrollbackRef = useRef(onPaneScrollback);
   const flushScrollbackRef = useRef(onFlushScrollback);
   const agentStateRef = useRef(onPaneAgentState);
+  const runtimeStateRef = useRef(onPaneRuntimeState);
   useEffect(() => {
     detectedRef.current = onDetectedUrl;
     sparkOpenRef.current = onSparkOpen;
@@ -188,7 +195,8 @@ function TerminalStack({
     scrollbackRef.current = onPaneScrollback;
     flushScrollbackRef.current = onFlushScrollback;
     agentStateRef.current = onPaneAgentState;
-  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState]);
+    runtimeStateRef.current = onPaneRuntimeState;
+  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState]);
 
   // Latest tab roots so the + smart-add button can read whichever PaneNode
   // tree is current at click time (a stale capture would split a tree that
@@ -268,6 +276,7 @@ function TerminalStack({
           },
           onUserInput: () => userInputRef.current(tabId, paneId),
           onAgentState: (state) => agentStateRef.current(tabId, paneId, state),
+          onRuntimeState: (state) => runtimeStateRef.current(tabId, paneId, state),
         };
         bundles.current.set(key, b);
       }
@@ -648,30 +657,37 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
       ? tab.zoomedPaneId
       : null;
 
-  const orderedFlowLeaves = useMemo(() => {
-    const activeId = tab.activePaneId;
-    return [...flowLeaves]
-      .filter((box) => !(hideDraggedPane && drag && box.leaf.paneId === drag.paneId))
-      .sort((a, b) => {
-        if (a.leaf.paneId === activeId) return 1;
-        if (b.leaf.paneId === activeId) return -1;
-        return 0;
-      });
-  }, [flowLeaves, tab.activePaneId, hideDraggedPane, drag]);
+  // paneId → current flow rect for this render. Built from `flowLeaves`
+  // (which derives from displayRoot, i.e. layoutRoot or the live drop
+  // preview), so a pane that's mid-reflow under a drag reads its animated
+  // target rect here. A pane absent from the flow (the dragged-and-hidden
+  // leaf, removed from layoutRoot so its siblings expand) has no entry and is
+  // parked off-screen below instead.
+  const flowRectById = useMemo(() => {
+    const map = new Map<string, FracRect>();
+    for (const box of flowLeaves) map.set(box.leaf.paneId, box.rect);
+    return map;
+  }, [flowLeaves]);
 
-  const draggedLeaf =
-    drag?.tabId === tab.id ? findLeaf(tab.root, drag.paneId) : null;
+  // Stable render list: EVERY leaf in tab.root, in tree order, on every
+  // render — including the one being dragged. This is what keeps a dragged
+  // pane mounted in place: it never leaves the React tree (no re-parent into a
+  // separate off-screen mount), so its <TerminalPane> instance — and the live
+  // colored / alt-screen xterm behind it — survives the whole drag instead of
+  // being disposed, lossily snapshotted, and replayed as monochrome stale
+  // text. Active-pane stacking is handled by z-index below, so a fixed
+  // tree-order keeps every pane's React key/position stable across the drag.
+  const renderLeaves = baseLayout.leaves;
 
-  // Size the off-screen DraggedPaneMount host to the dragged pane's LAST
-  // rendered pixel box, not a hard-coded 480x320. A mismatched host forces the
-  // live PTY to refit to a tiny ~60x16 grid on drag-start and back on drop —
-  // two SIGWINCHes + xterm dispose/recreate cycles that visibly garble a
-  // running TUI. Matching the real size makes both refits a no-op (identical
-  // cols/rows). Derived from the dragged leaf's fractional rect in the full
-  // tab layout × the live container's content box, minus the same pane gap
-  // paneFrameStyle applies.
+  // Size the off-screen park slot for the dragged pane to its LAST rendered
+  // pixel box, not a hard-coded 480x320. A mismatched box forces the live PTY
+  // to refit to a tiny ~60x16 grid on drag-start and back on drop — two
+  // SIGWINCHes that visibly garble a running TUI. Matching the real size keeps
+  // both refits a no-op (identical cols/rows). Derived from the dragged leaf's
+  // fractional rect in the full tab layout × the live container's content box,
+  // minus the same pane gap paneFrameStyle applies.
   const draggedPaneSize: { width: number; height: number } | null = (() => {
-    if (!draggedLeaf || !drag) return null;
+    if (!drag || drag.tabId !== tab.id) return null;
     const container = tabRootRef.current;
     if (!container) return null;
     const box = baseLayout.leaves.find((b) => b.leaf.paneId === drag.paneId);
@@ -713,19 +729,44 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
         background: "var(--panel)",
       }}
     >
-      {orderedFlowLeaves.map(({ leaf, rect }) => {
+      {renderLeaves.map(({ leaf }) => {
         const bundle = getBundle(tab.id, leaf.paneId);
         const isActive = tab.activePaneId === leaf.paneId;
         const workerChip = visibleWorkerChip(leaf.worker);
         const isZoomed = zoomedPaneId === leaf.paneId;
         const isHiddenByZoom = zoomedPaneId !== null && !isZoomed;
+        // This leaf is the one being dragged within THIS tab and the layout is
+        // currently hiding it (siblings reflowed into its slot, or a drop
+        // preview is showing). Instead of unmounting it into a separate
+        // off-screen host — which would dispose + recreate its xterm and
+        // reprint stale monochrome text — we keep it mounted right here and
+        // just park its wrapper off-screen at its last on-screen pixel size.
+        // The live colored / alt-screen buffer is untouched; a dashed
+        // PaneDropSlot below marks where it will land.
+        const isParkedDragged =
+          hideDraggedPane &&
+          !!drag &&
+          drag.tabId === tab.id &&
+          drag.paneId === leaf.paneId;
+        const flowRect = flowRectById.get(leaf.paneId);
+        // A non-dragged pane with no flow rect can't happen (every tab.root
+        // leaf is in displayRoot unless it's the removed drag source); guard
+        // anyway so a transient mismatch parks rather than throws.
+        const placeOffScreen = isParkedDragged || (!flowRect && !isZoomed);
         // Zoomed pane occupies the full tab area; everything else stays
         // mounted but is hidden so its xterm/PTY survives the toggle.
-        const renderRect = isZoomed ? FULL_RECT : rect;
+        const renderRect = isZoomed ? FULL_RECT : (flowRect ?? FULL_RECT);
+        const offScreenStyle: React.CSSProperties = {
+          left: -10000,
+          top: 0,
+          width: draggedPaneSize ? Math.round(draggedPaneSize.width) : 480,
+          height: draggedPaneSize ? Math.round(draggedPaneSize.height) : 320,
+        };
         return (
           <div
             key={leaf.paneId}
             data-terminal-pane-id={leaf.paneId}
+            aria-hidden={placeOffScreen ? true : undefined}
             onMouseDown={bundle.onActivate}
             onDragEnter={(event) => {
               if (!acceptsTerminalPane(event)) return;
@@ -785,7 +826,19 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
             className="spark-terminal-pane"
             style={{
               position: "absolute",
-              ...paneFrameStyle(renderRect),
+              // Parked dragged pane: pull the wrapper off-screen (kept mounted
+              // so the live xterm survives) and suppress pointer/animation. A
+              // normal pane positions to its flow rect.
+              ...(placeOffScreen
+                ? offScreenStyle
+                : paneFrameStyle(renderRect)),
+              overflow: placeOffScreen ? "hidden" : undefined,
+              opacity: placeOffScreen
+                ? 0
+                : layoutAnimating && drag?.paneId !== leaf.paneId
+                  ? 0.94
+                  : 1,
+              pointerEvents: placeOffScreen ? "none" : undefined,
               // display:none keeps the React subtree (and the xterm canvas /
               // PTY behind it) mounted while removing it from layout. When
               // the wrapper toggles back to "block", the parent
@@ -795,19 +848,21 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               // highlight so each pane reads as a deliberate macOS-like card
               // with clear seams against its neighbours. The accent focus /
               // zoom rings overlay this on a higher z-index.
-              boxShadow: "var(--lift-hi), 0 0 0 1px var(--rule-soft)",
+              boxShadow: placeOffScreen
+                ? undefined
+                : "var(--lift-hi), 0 0 0 1px var(--rule-soft)",
               zIndex: isZoomed ? 6 : isActive ? 5 : 1,
-              opacity: layoutAnimating && drag?.paneId !== leaf.paneId ? 0.94 : 1,
               // Geometry tween while reflowing under a drag; suppressed under
-              // prefers-reduced-motion so panes snap instead of sliding.
+              // prefers-reduced-motion so panes snap instead of sliding, and on
+              // the parked pane itself so it doesn't slide off-screen visibly.
               transition:
-                layoutAnimating && !reducedMotion
+                layoutAnimating && !reducedMotion && !placeOffScreen
                   ? "left var(--motion) var(--ease-out), top var(--motion) var(--ease-out), width var(--motion) var(--ease-out), height var(--motion) var(--ease-out), opacity var(--motion-fast) var(--ease-out)"
                   : undefined,
             }}
           >
-            {isActive ? <PaneFocusRing /> : null}
-            {isZoomed ? <PaneZoomedRing /> : null}
+            {!placeOffScreen && isActive ? <PaneFocusRing /> : null}
+            {!placeOffScreen && isZoomed ? <PaneZoomedRing /> : null}
             <TerminalPane
               ref={(h) => setHandle(leaf.paneId, h)}
               sessionId={leaf.paneId}
@@ -815,7 +870,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               initialCwd={leaf.cwd}
               initialScrollback={leaf.scrollback}
               initialCommand={leaf.autorun}
-              visible={visible}
+              visible={visible && !placeOffScreen}
               scrollbackLineLimit={scrollbackLineLimit}
               onDetectedLocalUrl={bundle.onDetectedUrl}
               onSparkOpen={bundle.onSparkOpen}
@@ -824,31 +879,23 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               onActivity={bundle.onActivity}
               onUserInput={bundle.onUserInput}
               onAgentState={bundle.onAgentState}
+              onRuntimeState={bundle.onRuntimeState}
             />
-            {workerChip ? <WorkerChip worker={workerChip} /> : null}
-            <PaneToolbar
-              dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
-              onSmartAdd={bundle.onSmartAdd}
-              onSplitRight={bundle.onSplitRight}
-              onSplitDown={bundle.onSplitDown}
-              onClose={bundle.onClose}
-              onToggleZoom={bundle.onToggleZoom}
-              isZoomed={isZoomed}
-            />
+            {!placeOffScreen && workerChip ? <WorkerChip worker={workerChip} /> : null}
+            {!placeOffScreen ? (
+              <PaneToolbar
+                dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
+                onSmartAdd={bundle.onSmartAdd}
+                onSplitRight={bundle.onSplitRight}
+                onSplitDown={bundle.onSplitDown}
+                onClose={bundle.onClose}
+                onToggleZoom={bundle.onToggleZoom}
+                isZoomed={isZoomed}
+              />
+            ) : null}
           </div>
         );
       })}
-      {draggedLeaf && drag ? (
-        <DraggedPaneMount
-          tabId={tab.id}
-          leaf={draggedLeaf}
-          shell={shell}
-          scrollbackLineLimit={scrollbackLineLimit}
-          size={draggedPaneSize}
-          getBundle={getBundle}
-          setHandle={setHandle}
-        />
-      ) : null}
       {dropSlotRect ? (
         <PaneDropSlot rect={dropSlotRect} reducedMotion={reducedMotion} />
       ) : null}
@@ -1290,63 +1337,12 @@ function PaneDropSlot({
   );
 }
 
-// Keeps the PTY mounted but off-screen while the visible layout omits this pane.
-function DraggedPaneMount({
-  tabId,
-  leaf,
-  shell,
-  scrollbackLineLimit,
-  size,
-  getBundle,
-  setHandle,
-}: {
-  tabId: TabId;
-  leaf: TerminalLeaf;
-  shell: ShellInfo;
-  scrollbackLineLimit: number;
-  // The dragged pane's last on-screen pixel size. Sizing the off-screen host
-  // to this keeps cols/rows identical so the PTY resize on mount/unmount is a
-  // no-op instead of a TUI-garbling shrink-and-restore. Falls back to a
-  // reasonable box only if the size couldn't be measured.
-  size: { width: number; height: number } | null;
-  getBundle: (tabId: TabId, paneId: string) => Bundle;
-  setHandle: (paneId: string, h: TerminalPaneHandle | null) => void;
-}) {
-  const bundle = getBundle(tabId, leaf.paneId);
-  return (
-    <div
-      aria-hidden
-      style={{
-        position: "absolute",
-        left: -10000,
-        top: 0,
-        width: size ? Math.round(size.width) : 480,
-        height: size ? Math.round(size.height) : 320,
-        overflow: "hidden",
-        opacity: 0,
-        pointerEvents: "none",
-      }}
-    >
-      <TerminalPane
-        ref={(h) => setHandle(leaf.paneId, h)}
-        sessionId={leaf.paneId}
-        shell={shell}
-        initialCwd={leaf.cwd}
-        initialScrollback={leaf.scrollback}
-        initialCommand={leaf.autorun}
-        visible={false}
-        scrollbackLineLimit={scrollbackLineLimit}
-        onDetectedLocalUrl={bundle.onDetectedUrl}
-        onSparkOpen={bundle.onSparkOpen}
-        onExit={bundle.onExit}
-        onCwd={bundle.onCwd}
-        onActivity={bundle.onActivity}
-        onUserInput={bundle.onUserInput}
-        onAgentState={bundle.onAgentState}
-      />
-    </div>
-  );
-}
+// NOTE: the dragged pane is no longer torn out into a separate off-screen
+// mount. It now stays at its stable position in the per-leaf render map (see
+// TerminalTabPane's renderLeaves loop) and is simply parked off-screen via the
+// wrapper style during a drag, so its live xterm — colors, alt-screen TUI
+// frame, scrollback — survives the drag instead of being disposed and replayed
+// as monochrome stale text. The old DraggedPaneMount component lived here.
 
 function TerminalDragGhost({ x, y }: { x: number; y: number }) {
   return (
@@ -2226,6 +2222,13 @@ function forEachLeaf(node: PaneNode, fn: (l: TerminalLeaf) => void): void {
   forEachLeaf(node.b, fn);
 }
 
+// A runtimeState that means the agent is still live in the pane (vs "done",
+// which is the post-exit terminal state). Used so the chip stays visible
+// through working / blocked / idle, not just while state==="running".
+function isLiveRuntimeState(state: RuntimeState | undefined): boolean {
+  return state === "working" || state === "blocked" || state === "idle";
+}
+
 function visibleWorkerChip(worker: TerminalLeafWorker | null | undefined): TerminalLeafWorker | null {
   if (!worker) return null;
   if (worker.source === "spark") {
@@ -2233,17 +2236,139 @@ function visibleWorkerChip(worker: TerminalLeafWorker | null | undefined): Termi
     if (worker.state === "done" && worker.agentRunning !== true) return null;
     return worker;
   }
-  if (worker.source === "manual") return worker.state === "running" ? worker : null;
+  if (worker.source === "manual") {
+    // Manual chips live for the duration of the foreground TUI. Show through
+    // every live runtime tone (working / blocked / idle), not only the
+    // lifecycle "running" flag — the poller can report idle while the attempt
+    // lifecycle is still "running" and the user should still see the pane is
+    // hosting an agent that's waiting on them.
+    return worker.state === "running" || isLiveRuntimeState(worker.runtimeState)
+      ? worker
+      : null;
+  }
   return null;
 }
 
+// Resolved visual treatment for a worker chip, derived from the finer
+// runtimeState (working / blocked / idle / done) when the poller has reported
+// one, falling back to the lifecycle `state` (running / done) before then.
+interface ChipTone {
+  // Secondary status eyebrow text.
+  status: string;
+  // Dot fill + halo, and whether the dot pulses. "blocked" deliberately uses a
+  // STEADY amber dot (no pulse) so "waiting for you" reads as a calm, standing
+  // request for input rather than busy motion.
+  dot: string;
+  dotGlow: string;
+  pulse: boolean;
+  // Chip frame: accent for actively-working, amber for needs-you (blocked),
+  // calm neutral for idle / done.
+  frame: "accent" | "warn" | "calm";
+}
+
+function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
+  const runtime = worker.runtimeState;
+  if (runtime === "working") {
+    return {
+      status: "working",
+      dot: "var(--accent)",
+      dotGlow: "0 0 9px var(--accent-glow)",
+      pulse: true,
+      frame: "accent",
+    };
+  }
+  if (runtime === "blocked") {
+    return {
+      status: "waiting for you",
+      dot: "var(--warn)",
+      dotGlow: "0 0 9px color-mix(in oklch, var(--warn) 45%, transparent)",
+      pulse: false,
+      frame: "warn",
+    };
+  }
+  if (runtime === "idle") {
+    return {
+      status: "idle",
+      dot: "var(--muted-2)",
+      dotGlow: "none",
+      pulse: false,
+      frame: "calm",
+    };
+  }
+  if (runtime === "done") {
+    return {
+      status: "done",
+      dot: "var(--muted-2)",
+      dotGlow: "none",
+      pulse: false,
+      frame: "calm",
+    };
+  }
+  // No runtimeState yet — fall back to the attempt lifecycle.
+  const running = worker.state === "running";
+  // Manual chips (the user ran `claude`/`codex` in a shell): the pulsing accent
+  // "working" look is reserved STRICTLY for a confirmed runtimeState==="working"
+  // above. The binary `running` lifecycle flag controls only whether the chip
+  // EXISTS, never whether it pulses — a freshly launched agent sitting at its
+  // idle input box (nothing run yet) lands here before the poller's first
+  // report, and must read CALM ("ready"), not imply the agent is busy. The
+  // poller resolves it to a real working/idle/blocked tone within a tick or two.
+  if (worker.source === "manual") {
+    return {
+      status: running ? "ready" : "done",
+      dot: "var(--muted-2)",
+      dotGlow: "none",
+      pulse: false,
+      frame: "calm",
+    };
+  }
+  // Spark-owned attempts: a running attempt is genuinely working from the
+  // moment it spawns (the orchestrator drove the launch), so keep the pulsing
+  // "running" accent until the poller refines it — same as before.
+  return running
+    ? {
+        status: "running",
+        dot: "var(--accent)",
+        dotGlow: "0 0 9px var(--accent-glow)",
+        pulse: true,
+        frame: "accent",
+      }
+    : {
+        status: "done",
+        dot: "var(--muted-2)",
+        dotGlow: "none",
+        pulse: false,
+        frame: "calm",
+      };
+}
+
 // Small overlay chip rendered on a pane that's hosting a live manual agent or
-// a Spark-owned worker attempt. Manual chips are visible only while running;
-// Spark chips can go static as "done" after the attempt-finished event, then
-// disappear once the foreground agent has returned to the shell prompt.
+// a Spark-owned worker attempt. Manual chips are visible while the foreground
+// agent is live (through working / blocked / idle); Spark chips can go static
+// as "done" after the attempt-finished event, then disappear once the
+// foreground agent has returned to the shell prompt.
 function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
   const label = worker.runtime ? worker.runtime.toUpperCase() : "WORKER";
-  const running = worker.state === "running";
+  const tone = deriveChipTone(worker);
+  const accent = tone.frame === "accent";
+  const warn = tone.frame === "warn";
+  // Border / text colour by frame: accent (working), amber (needs-you), or a
+  // calm neutral (idle / done).
+  const frameColor = accent
+    ? "var(--accent)"
+    : warn
+      ? "var(--warn)"
+      : "var(--ink-dim)";
+  const frameEdge = accent
+    ? "var(--accent-edge)"
+    : warn
+      ? "color-mix(in oklch, var(--warn) 40%, transparent)"
+      : "var(--rule)";
+  const frameGlow = accent
+    ? "var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px var(--accent-glow)"
+    : warn
+      ? "var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px color-mix(in oklch, var(--warn) 30%, transparent)"
+      : "var(--lift-hi), 0 0 0 1px var(--rule-soft)";
   return (
     <div
       className="spark-fade-in"
@@ -2269,22 +2394,20 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
         // the label stays legible without baking white/black (which invert
         // on the light themes).
         background: "color-mix(in oklch, var(--panel-2) 82%, transparent)",
-        // Glows live, calms when done: a running worker carries the accent
-        // (edge + text + halo); a finished one drops to a neutral --rule
-        // border + --ink-dim text + no glow so it stops reading as live and
-        // keeps the accent ration meaningful.
-        border: running ? "1px solid var(--accent-edge)" : "1px solid var(--rule)",
+        // Glows live, calms when done: a working worker carries the accent
+        // (edge + text + halo), a blocked one carries amber to flag it needs
+        // you, and an idle / finished one drops to a neutral --rule border +
+        // --ink-dim text + no glow so it stops reading as live.
+        border: `1px solid ${frameEdge}`,
         backdropFilter: "blur(6px)",
         WebkitBackdropFilter: "blur(6px)",
-        color: running ? "var(--accent)" : "var(--ink-dim)",
+        color: frameColor,
         fontFamily: "var(--font-mono)",
         fontSize: 10,
         fontWeight: 600,
         letterSpacing: "0.08em",
         textTransform: "uppercase",
-        boxShadow: running
-          ? "var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px var(--accent-glow)"
-          : "var(--lift-hi), 0 0 0 1px var(--rule-soft)",
+        boxShadow: frameGlow,
         pointerEvents: "none",
         zIndex: 5,
         animationDuration: "var(--motion-fast)",
@@ -2298,25 +2421,30 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
           width: 6,
           height: 6,
           borderRadius: "50%",
-          background: running ? "var(--accent)" : "var(--muted-2)",
-          boxShadow: running ? "0 0 9px var(--accent-glow)" : "none",
-          animation: running ? "spark-pulse 1.8s var(--ease-out) infinite" : undefined,
+          flex: "0 0 auto",
+          background: tone.dot,
+          boxShadow: tone.dotGlow,
+          animation: tone.pulse ? "spark-pulse 1.8s var(--ease-out) infinite" : undefined,
         }}
       />
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
         {label}
       </span>
-      {/* Status word as a quieter eyebrow: smaller, --muted, more tracking so
-          the runtime label leads and the state reads as a subordinate tag. */}
+      {/* Status word as a quieter eyebrow: smaller, more tracking so the
+          runtime label leads and the state reads as a subordinate tag. Inherits
+          the frame colour on accent / warn so "waiting for you" pops amber. */}
       <span
         style={{
           fontSize: 9,
           fontWeight: 600,
           letterSpacing: "0.14em",
-          color: "var(--muted)",
+          color: accent || warn ? "currentcolor" : "var(--muted)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          minWidth: 0,
         }}
       >
-        {running ? "running" : "done"}
+        {tone.status}
       </span>
     </div>
   );

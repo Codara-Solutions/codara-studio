@@ -980,6 +980,18 @@ a { color: inherit; }
   border-color: var(--accent);
   background: color-mix(in oklch, var(--accent) 26%, transparent);
 }
+/* Automation — violet; the "architect" mode that builds looms, distinct from
+   Plan's blue and Execute's gold. Uses a fixed violet so it reads as its own
+   thing even where no --violet token exists. */
+.composer-mode-cycle.is-automation {
+  color: oklch(0.62 0.19 295);
+  border-color: color-mix(in oklch, oklch(0.62 0.19 295) 45%, var(--rule-soft));
+  background: color-mix(in oklch, oklch(0.62 0.19 295) 14%, transparent);
+}
+.composer-mode-cycle.is-automation:hover {
+  border-color: color-mix(in oklch, oklch(0.62 0.19 295) 60%, var(--rule-soft));
+  background: color-mix(in oklch, oklch(0.62 0.19 295) 24%, transparent);
+}
 
 .composer-context {
   display: inline-flex;
@@ -1611,4 +1623,31 @@ a { color: inherit; }
 .loom-flow .react-flow__handle:hover {
   background: var(--accent);
   border-color: var(--accent-edge);
+}
+/* Cross-tab / cross-sub-tab bleed guard. The editor is kept MOUNTED while
+   hidden (Workers sub-tab, or another top-level tab active) so ReactFlow keeps
+   its measured canvas — we hide it via an inherited visibility:hidden on an
+   ancestor wrapper (AutomationsStack per-tab wrapper; AutomationsHub editor
+   wrapper), both of which also set aria-hidden="true" in lockstep. The catch:
+   ReactFlow writes an INLINE visibility:visible on each measured .react-flow__node
+   (and the edge-label group) with NO !important, and visibility is the one
+   inherited property a descendant can flip back on — so the node (and everything
+   nested in it: handles, the loom-node card, the '+' PlusButtons) re-paints
+   over the hidden tab. An author rule marked !important outranks a non-important
+   inline style in the cascade, so this force-hides every RF visual sub-element
+   whenever any ancestor is aria-hidden. Scoped under .loom-flow (the only
+   ReactFlow instance in the app) so unrelated UI is untouched. It is INACTIVE in
+   the legitimate visible state (active tab + looms sub-tab), where no ancestor is
+   aria-hidden. */
+[aria-hidden="true"] .loom-flow .react-flow__node,
+[aria-hidden="true"] .loom-flow .react-flow__handle,
+[aria-hidden="true"] .loom-flow .react-flow__edges,
+[aria-hidden="true"] .loom-flow .react-flow__edge,
+[aria-hidden="true"] .loom-flow .react-flow__edge-textwrapper,
+[aria-hidden="true"] .loom-flow .react-flow__panel,
+[aria-hidden="true"] .loom-flow .react-flow__controls,
+[aria-hidden="true"] .loom-flow .react-flow__minimap,
+[aria-hidden="true"] .loom-flow .react-flow__attribution,
+[aria-hidden="true"] .loom-flow .loom-node {
+  visibility: hidden !important;
 }

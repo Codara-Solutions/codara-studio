@@ -3041,6 +3041,22 @@ async function askOpenRouterManager(
     return await askChatBackendNonOpenRouter(run, cwd, mode, chatConfig, settings);
   }
 
+  // Automation mode is a CLI-architect feature: it drives the spark_*_automation
+  // MCP tools, which only the Claude Code / Codex CLI backends can reach. The
+  // OpenRouter manager has no such tools — if we fell through here it would run
+  // the normal worker-spawning manager path and mutate the workspace, which is
+  // exactly what Automation mode must NOT do. Short-circuit with a conversational
+  // note telling the user to switch backends, and do nothing else.
+  if (run.chatMode === "automation") {
+    return await addRunMessage({
+      runId: run.id,
+      author: "spark",
+      kind: "note",
+      message:
+        "Automation mode requires the Claude Code or Codex CLI backend — the OpenRouter backend can't manage automations. Switch this chat's model to a Claude Code or Codex option to design, create, and run automations here.",
+    });
+  }
+
   const baseConfig = readOpenRouterConfig(settings);
   if (!baseConfig) return null;
 
@@ -3424,6 +3440,25 @@ function normalizeModelHint(hint: string | undefined): string {
 
 function isTopTierModel(hint: string | undefined): boolean {
   return TOP_TIER_MODEL_BASES.has(normalizeModelHint(hint));
+}
+
+// Fable 5 (`claude-fable-5`) is Anthropic's top-tier model. It is reserved for
+// the main chat session and for opt-in automation (loom) workers — workers that
+// Spark itself spawns (execute-mode spark_spawn_workers, plan-council workers,
+// autopilot worker tasks) must NEVER run fable. A manager LLM may nonetheless
+// emit a fable modelHint; this helper downgrades any such hint to Opus 4.8.
+// Case-insensitive substring match on "fable" so suffixed/aliased variants
+// (e.g. "claude-fable-5@high", "Claude-Fable-5") are caught too. The model id
+// itself (`claude-fable-5`) is the canonical string used everywhere else.
+const SPARK_WORKER_FABLE_FALLBACK = "claude-opus-4-8" as const;
+
+export function sanitizeWorkerModelHint(
+  hint: string | undefined,
+): { hint: string | undefined; downgraded: boolean } {
+  if (hint && /fable/i.test(hint)) {
+    return { hint: SPARK_WORKER_FABLE_FALLBACK, downgraded: true };
+  }
+  return { hint, downgraded: false };
 }
 
 function promoteForTrivial(agent: PlannedStepAgent): PlannedStepAgent {
@@ -4279,17 +4314,31 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
   const stepId = updated.steps.at(-1)?.id;
   if (!stepId) return null;
 
+  // The "main AI" judge runs on the model + effort the user picked in the
+  // composer (e.g. Opus 4.8 @ medium) — it's the one that decides what to keep
+  // from each candidate. Fall back to a top-tier default only if the run didn't
+  // record a selection. The judge is a Spark-spawned WORKER, so Fable is not
+  // permitted (reserved for the main chat + automations): sanitize the hint and
+  // surface the downgrade so it isn't a silent swap by the launch-command
+  // backstop.
+  const judgeModel = sanitizeWorkerModelHint(run.chatModel ?? COUNCIL_TOP_TIER_MODEL[runtime]);
+  if (judgeModel.downgraded) {
+    updated = await addRunMessage({
+      runId: updated.id,
+      author: "spark",
+      kind: "note",
+      message:
+        "Fable is reserved for the main chat and automations; the plan-council synthesis judge runs on Opus 4.8 instead.",
+    });
+  }
+
   updated = await createWorkerTask({
     runId: updated.id,
     stepId,
     title: "Synthesize best-of-all plan",
     description: synthPrompt,
     runtimePreference: runtime,
-    // The "main AI" judge runs on the model + effort the user picked in the
-    // composer (e.g. Opus 4.8 @ medium) — it's the one that decides what to keep
-    // from each candidate. Fall back to a top-tier default only if the run didn't
-    // record a selection.
-    modelHint: run.chatModel ?? COUNCIL_TOP_TIER_MODEL[runtime],
+    modelHint: judgeModel.hint,
     effortHint: run.chatEffort ?? "high",
     allowedPaths: [`${councilPlanDir(run.id)}/`],
     forbiddenPaths: [],
@@ -7476,8 +7525,13 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   if (task.runtimePreference === "codex") {
     await ensureCodexProjectTrust(attempt.cwd).catch(() => undefined);
   }
+  // Automation (loom) workers are allowed fable; the fable backstop in
+  // buildLaunchCommandLine only fires for Spark-spawned workers. A direct run
+  // bound to an automationId is the automation worker path.
+  const isAutomationLaunch = run.executionMode === "direct" && Boolean(run.automationId);
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd, {
     sandboxDir: attempt.sandboxWorktreePath,
+    isAutomation: isAutomationLaunch,
   });
   const command = launchCommand
     ? `pwsh -> ${launchCommand}`
@@ -11844,7 +11898,7 @@ async function recordWorkerOutput(
 function buildLaunchCommandLine(
   task: WorkerTask,
   cwd: string,
-  opts?: { sandboxDir?: string },
+  opts?: { sandboxDir?: string; isAutomation?: boolean },
 ): string | null {
   // Pin the shell to the workspace directory before the agent CLI starts.
   // The pty is spawned with cwd=workspaceCwd, but the user's $PROFILE
@@ -11860,7 +11914,17 @@ function buildLaunchCommandLine(
   if (task.runtimePreference === "claude") {
     const args = ["claude", "--dangerously-skip-permissions"];
     if (sandboxDir) args.push("--add-dir", quoteShellArg(sandboxDir));
-    if (task.modelHint?.trim()) args.push("--model", quoteShellArg(task.modelHint.trim()));
+    // Fable 5 backstop. Automation (loom) workers are ALLOWED fable, so skip
+    // the guard for automation-originated launches; for every other claude
+    // worker (the Spark-spawned execute/council/autopilot path) silently
+    // downgrade a fable hint to Opus 4.8. The visible note is emitted earlier
+    // at the spawn chokepoint (agent-socket); this is a defence-in-depth catch
+    // that should normally never fire.
+    const rawModel = task.modelHint?.trim();
+    const launchModel = opts?.isAutomation
+      ? rawModel
+      : sanitizeWorkerModelHint(rawModel).hint;
+    if (launchModel) args.push("--model", quoteShellArg(launchModel));
     const claudeEffort = mapClaudeEffort(task.effortHint);
     if (claudeEffort) args.push("--effort", claudeEffort);
     return cdPrefix + args.join(" ");

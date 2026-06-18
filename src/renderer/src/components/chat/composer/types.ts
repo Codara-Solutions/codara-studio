@@ -43,6 +43,17 @@ export const ALL_EFFORTS: AgentEffortLevel[] = [
 // so selecting Opus/Sonnet always sets chat1mContext=true.
 const CLAUDE_MODELS: ChatModelOption[] = [
   {
+    // Fable 5 (Anthropic's top-tier model) is offered as a plain row — no `:1m`
+    // virtual suffix, since we don't yet know fable supports the 1M-context
+    // beta. findOptionInCatalog / decomposeModelId already handle non-1m rows
+    // (gpt-5.5 is one), so the picker resolves this row by its bare id and the
+    // composer never sets chat1mContext for it.
+    id: "claude-fable-5",
+    label: "Fable 5",
+    backend: "claude",
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+  },
+  {
     id: "claude-opus-4-8:1m",
     label: "Opus 4.8 1M",
     backend: "claude",

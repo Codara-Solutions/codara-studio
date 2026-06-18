@@ -2,6 +2,7 @@ import { app, BrowserWindow, Notification } from "electron";
 import { makeId } from "@shared/ids";
 import type {
   InAppNotificationPayload,
+  InAppNotificationTone,
   NotificationChannelsPref,
   NotificationSoundKind,
   RunStatus,
@@ -40,6 +41,25 @@ import { loadPreferences } from "./preferences-store";
 // "blocked" because of two consecutive worker failures would alert
 // twice.
 const lastAlertedStatus = new Map<string, RunStatus>();
+
+// Terminal-completion dedup guard (Bug 1). Once a run has alerted a terminal
+// completion (complete / failed), a later "blocked" for the SAME run is
+// suppressed — it is almost always a loom co-blocked-sibling re-emit or a
+// settle race firing after the user was already told the run finished, ~2 min
+// later with nothing actually happening. We only re-arm (allow a fresh blocked
+// alert) once the run is observed passing back through an active/working state
+// (running / planning / reviewing), i.e. real new work began. A run id lives in
+// this set iff its most recent alert was a terminal completion and no active
+// transition has been seen since.
+const alertedTerminalCompletion = new Set<string>();
+
+// Statuses that count as "real new activity" for the dedup guards. paused/idle
+// are intentionally excluded: a paused run (manager question via askHumanQuestion
+// → pauseRun) is a quiescent wait, not resumed work, so it must NOT re-arm the
+// blocked alert. Mirrors the per-pane "working" re-arm in terminal-agent-notify.
+function isActiveStatus(status: RunStatus): boolean {
+  return status === "running" || status === "planning" || status === "reviewing";
+}
 
 // Unseen alert counter. macOS dock badges and Windows taskbar flashes
 // stay set until the user focuses Spark, at which point we clear both.
@@ -133,6 +153,10 @@ function fanout(
   channels: NotificationChannelsPref,
   alert: {
     kind: "blocked" | "complete";
+    // Colour intent for the in-app toast. Decoupled from kind so a "blocked"
+    // needs-you reads amber (warning) while a genuine failure reads red
+    // (danger); see InAppNotificationTone.
+    tone?: InAppNotificationTone;
     title: string;
     body: string;
     runId?: string;
@@ -149,6 +173,7 @@ function fanout(
   const payload: InAppNotificationPayload = {
     id: makeId("toast"),
     kind: alert.kind,
+    tone: alert.tone,
     title: alert.title,
     body: alert.body,
     runId: alert.runId,
@@ -248,6 +273,7 @@ function attachFocusClear(win: BrowserWindow): void {
 // trivial to verify by reading the rules above.
 function policyDecision(event: SparkEvent): {
   kind: "blocked" | "complete";
+  tone: InAppNotificationTone;
   title: string;
   body: string;
   runId: string;
@@ -291,12 +317,28 @@ function policyDecision(event: SparkEvent): {
     status === "idle"
   ) {
     lastAlertedStatus.delete(runId);
+    // Re-arm the terminal-completion guard ONLY on genuine active work
+    // (running / planning / reviewing). A bare paused/idle is a quiescent
+    // wait — not the "real new activity" that should let a post-completion
+    // blocked alert through (Bug 1).
+    if (isActiveStatus(status)) {
+      alertedTerminalCompletion.delete(runId);
+    }
     return null;
   }
 
   const workspaceId = event.workspaceId;
 
   if (status === "blocked") {
+    // Bug 1 — terminal-completion dedup. If we already told the user this run
+    // finished (complete/failed) and no active work has happened since, swallow
+    // the blocked alert: it is the loom co-blocked-sibling re-emit / settle race
+    // firing minutes later with nothing actually new. The guard is cleared the
+    // moment the run re-enters an active state (see above), so a real second
+    // stall after resumed work still alerts.
+    if (alertedTerminalCompletion.has(runId)) {
+      return null;
+    }
     // Rule 1: always alert when an agent gets stuck. Even if the user is
     // staring at the chat, surface the "needs you" cue — the renderer
     // toast manager dedupes when the chat is already open by suppressing
@@ -305,6 +347,9 @@ function policyDecision(event: SparkEvent): {
     lastAlertedStatus.set(runId, status);
     return {
       kind: "blocked",
+      // Bug 2 — a blocked run is the agent asking for you, not a failure;
+      // colour it amber (warning), not red.
+      tone: "warning",
       title: "Spark — needs you",
       body: event.message?.trim() || "A run is blocked and needs your attention.",
       runId,
@@ -322,12 +367,22 @@ function policyDecision(event: SparkEvent): {
       // Still mark the status so we don't fire later when the same run
       // re-emits the same status during a state replay.
       lastAlertedStatus.set(runId, status);
+      // Even when the toast is suppressed (user watching), arm the dedup
+      // guard: the user has seen the terminal state, so a later co-blocked
+      // re-emit should still be swallowed until real new work happens.
+      alertedTerminalCompletion.add(runId);
       return null;
     }
     lastAlertedStatus.set(runId, status);
+    // Bug 1 — remember this run reached a terminal completion so a later
+    // blocked re-emit is suppressed until active work resumes.
+    alertedTerminalCompletion.add(runId);
     const ok = status === "complete";
     return {
       kind: "complete",
+      // Bug 2 — only a genuine failure is red (danger); a clean finish is
+      // green (success).
+      tone: ok ? "success" : "danger",
       title: ok ? "Spark — done" : "Spark — failed",
       body:
         event.message?.trim() ||
@@ -387,6 +442,7 @@ async function handleEvent(event: SparkEvent): Promise<void> {
 // process. Not exported on the IPC surface — main-process use only.
 export function _resetNotificationStateForTests(): void {
   lastAlertedStatus.clear();
+  alertedTerminalCompletion.clear();
   unseenAlertCount = 0;
 }
 
@@ -397,6 +453,9 @@ export function _resetNotificationStateForTests(): void {
 // module's private state.
 export function markRunSeen(runId: string): void {
   lastAlertedStatus.delete(runId);
+  // Opening the run is an explicit acknowledgement, so drop the dedup guard
+  // too — the next genuine blocked/needs-you for this run should alert.
+  alertedTerminalCompletion.delete(runId);
 }
 
 // ── Terminal-agent alerts ────────────────────────────────────────────────
@@ -412,6 +471,11 @@ export function markRunSeen(runId: string): void {
 // handled here by focusing the window and sending "terminal-agent:focus".
 export async function fireTerminalAgentAlert(alert: {
   kind: "blocked" | "complete";
+  // Colour intent (Bug 2). When a terminal agent stops to ask for input the
+  // caller passes "warning" (amber); "complete" finishes pass "success".
+  // Optional so a caller that doesn't classify falls back to the kind-derived
+  // tone renderer-side.
+  tone?: InAppNotificationTone;
   title: string;
   body: string;
   target: TerminalAgentTarget;
@@ -435,6 +499,7 @@ export async function fireTerminalAgentAlert(alert: {
   }
   fanout(channels, {
     kind: alert.kind,
+    tone: alert.tone,
     title: alert.title,
     body: alert.body,
     workspaceId: alert.target.workspaceId,

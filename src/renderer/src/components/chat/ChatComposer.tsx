@@ -567,6 +567,23 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     void attachPastedImages(files);
   };
 
+  const onComposerDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    // During dragover the dragged File objects aren't readable yet (getAsFile
+    // returns null), so gate on the item type metadata instead. Only claim the
+    // drop — and suppress the textarea's default text insert — when an image is
+    // actually being dragged; otherwise let normal behavior happen.
+    if (!dragHasImageItems(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+
+  const onComposerDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    const files = imageFilesFromClipboard(event.dataTransfer);
+    if (files.length === 0) return;
+    event.preventDefault();
+    void attachPastedImages(files);
+  };
+
   const removeImage = (sourcePath: string) => {
     setImages((current) => current.filter((image) => image.sourcePath !== sourcePath));
   };
@@ -760,6 +777,8 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
       <div
         className={`composer-shell${activeChatMode === "execute" ? " is-execute-mode" : ""}`}
         onMouseDown={focusComposerShell}
+        onDragOver={onComposerDragOver}
+        onDrop={onComposerDrop}
       >
         {mentionQuery && (
           <MentionPopover
@@ -1038,6 +1057,15 @@ function imageFilesFromClipboard(data: DataTransfer): File[] {
     .filter((file): file is File => Boolean(file));
   if (itemFiles.length > 0) return itemFiles;
   return Array.from(data.files).filter((file) => SUPPORTED_PASTED_IMAGE_TYPES.has(file.type));
+}
+
+function dragHasImageItems(data: DataTransfer): boolean {
+  // The dragover phase exposes item kind/type but not the File payloads, so we
+  // inspect the metadata to decide whether to claim the drop. The actual files
+  // are read from the drop event via imageFilesFromClipboard.
+  return Array.from(data.items).some(
+    (item) => item.kind === "file" && SUPPORTED_PASTED_IMAGE_TYPES.has(item.type),
+  );
 }
 
 function pastedImageName(file: File, index: number): string {

@@ -7,7 +7,7 @@
 // owns the active id. Mounting is the contract that keeps editor cursors,
 // terminal PTYs, and dev-server iframes alive across tab switches.
 
-import type { FsEntry } from "@shared/types";
+import type { FsEntry, RuntimeState } from "@shared/types";
 
 export type TabId = string;
 
@@ -77,6 +77,13 @@ export interface TerminalLeafWorker {
   // stream. Spark can finish the attempt before the user exits the TUI; once
   // the shell prompt is back, the pane should stop showing an agent chip.
   agentRunning?: boolean;
+  // Finer-grained live state of the foreground agent, polled from the visible
+  // xterm buffer by useTerminalSession's state poller (working / blocked /
+  // idle / done). Distinct from `state` (which is the attempt LIFECYCLE):
+  // `runtimeState` drives the chip's label + dot tone so a pane can read
+  // "working" (pulsing accent), "waiting for you" (steady amber, a permission/
+  // input prompt is up), "idle", or "done". Undefined until the poller reports.
+  runtimeState?: RuntimeState;
 }
 
 export interface TerminalSplit {

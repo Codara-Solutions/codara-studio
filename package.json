@@ -102,6 +102,7 @@
     ],
     "extraResources": [
       "build/icon.ico",
+      "build/icon.png",
       {
         "from": "resources/shell-integration",
         "to": "shell-integration"

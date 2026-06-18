@@ -205,27 +205,29 @@ function ToastCard({
     }
   };
 
-  // Two semantic treatments. A "done"/complete toast is SUCCESS (--ok),
-  // a "blocked"/needs-you toast is DANGER (--danger) — neither glows with
-  // the workspace accent, so the brand stays rationed. The neutral
-  // --notify-surface body carries the card; status lives only in a 3px
-  // left status rule (--status-edge) plus a ~14%-tinted rounded icon chip.
-  // Mirror the herdr "static, never pulse" rule — the surface is solid so
-  // urgency reads as gravitas, not a generic spinner.
-  const palette =
-    toast.kind === "blocked"
-      ? {
-          status: "var(--danger)",
-          chipFill: "color-mix(in oklch, var(--danger) 14%, var(--panel))",
-          chipBorder: "color-mix(in oklch, var(--danger) 32%, transparent)",
-          title: toast.title || "Spark — needs you",
-        }
-      : {
-          status: "var(--ok)",
-          chipFill: "color-mix(in oklch, var(--ok) 14%, var(--panel))",
-          chipBorder: "color-mix(in oklch, var(--ok) 32%, transparent)",
-          title: toast.title || "Spark — done",
-        };
+  // Three semantic treatments, driven by `tone` (not `kind`): the single
+  // "blocked" kind collapses an agent ASKING for input (warning, amber) and a
+  // genuine FAILURE (danger, red), which must not look alike. `tone` is
+  // optional, so derive a sensible fallback from `kind` when the main process
+  // didn't tag it: blocked → warning, complete → success. None of the three
+  // glow with the workspace accent, so the brand stays rationed. The neutral
+  // --notify-surface body carries the card; status lives only in a 3px left
+  // status rule plus a ~14%-tinted rounded icon chip. Mirror the herdr
+  // "static, never pulse" rule — the surface is solid so urgency reads as
+  // gravitas, not a generic spinner.
+  const tone: NonNullable<Toast["tone"]> =
+    toast.tone ?? (toast.kind === "blocked" ? "warning" : "success");
+  // Theme token the tone maps to (all three exist in every theme in
+  // styles.css — we never mint a new one).
+  const toneVar =
+    tone === "danger" ? "var(--danger)" : tone === "warning" ? "var(--warn)" : "var(--ok)";
+  const palette = {
+    status: toneVar,
+    chipFill: `color-mix(in oklch, ${toneVar} 14%, var(--panel))`,
+    chipBorder: `color-mix(in oklch, ${toneVar} 32%, transparent)`,
+    title:
+      toast.title || (toast.kind === "blocked" ? "Spark — needs you" : "Spark — done"),
+  };
 
   const clickable = Boolean(
     (toast.runId && onSelectRun) || (toast.terminal && onSelectTerminal),
@@ -234,7 +236,10 @@ function ToastCard({
   return (
     <div
       className="spark-fade-in"
-      role={toast.kind === "blocked" ? "alert" : "status"}
+      // Only a genuine failure (danger) is an assertive "alert"; a needs-you /
+      // success toast is the calmer "status" live region so a question doesn't
+      // shout like an error to assistive tech.
+      role={tone === "danger" ? "alert" : "status"}
       onClick={() => {
         if (!clickable) return;
         if (toast.terminal && onSelectTerminal) {
@@ -270,11 +275,9 @@ function ToastCard({
         // inline transform would fight the running entrance animation. Older
         // cards recede slightly (deck depth) using box-shadow / opacity, not
         // a transform, for the same reason.
-        boxShadow: `${
-          toast.kind === "blocked"
-            ? "inset 3px 0 0 var(--danger)"
-            : "inset 3px 0 0 var(--ok)"
-        }, ${hover && clickable ? "var(--shadow-2)" : "var(--shadow-1)"}`,
+        boxShadow: `inset 3px 0 0 ${toneVar}, ${
+          hover && clickable ? "var(--shadow-2)" : "var(--shadow-1)"
+        }`,
         // Deck recede only after the entrance finishes (see `entered`), so the
         // fade-in's final opacity:1 keyframe never overrides it.
         opacity: !entered || depth === 0 ? 1 : depth === 1 ? 0.92 : 0.82,
