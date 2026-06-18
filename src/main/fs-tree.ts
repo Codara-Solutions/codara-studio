@@ -1,6 +1,6 @@
 import { shell } from "electron";
 import { promises as fs } from "node:fs";
-import { basename, dirname, extname, join, relative } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative } from "node:path";
 import type { FileListResult, FsEntry, FsFileContent, FsReadResult, PlanFile } from "@shared/types";
 import { FS_READ_TEXT_LIMIT_BYTES } from "@shared/types";
 import { writeFileAtomic } from "./fs-atomic";
@@ -153,6 +153,77 @@ export async function renameFile(path: string, newName: string): Promise<FsEntry
 export async function deleteFile(path: string): Promise<void> {
   // Allow trashing both files and directories.
   await shell.trashItem(path);
+}
+
+// Copy a set of external paths (files or folders) into `destDir`, the way an
+// OS drag-and-drop "copy" works. Each source keeps its own basename; a name
+// collision inside the destination is resolved by appending " (1)", " (2)", …
+// before the extension rather than overwriting. Directories are copied
+// recursively. Returns an FsEntry for every entry actually created so the
+// renderer can refresh / reveal them.
+export async function importEntries(destDir: string, sourcePaths: string[]): Promise<FsEntry[]> {
+  const destStat = await fs.stat(destDir);
+  if (!destStat.isDirectory()) {
+    throw new Error("Drop target is not a folder.");
+  }
+
+  const created: FsEntry[] = [];
+  for (const src of sourcePaths) {
+    if (typeof src !== "string" || src.length === 0) continue;
+
+    let srcStat: import("node:fs").Stats;
+    try {
+      srcStat = await fs.stat(src);
+    } catch {
+      // Source vanished between drop and copy — skip it rather than abort the
+      // whole batch.
+      continue;
+    }
+
+    const isDir = srcStat.isDirectory();
+    const name = basename(src);
+    if (!name) continue;
+
+    const target = await uniqueDestPath(destDir, name);
+
+    // Refuse to copy a folder into itself or one of its own descendants — that
+    // recurses forever (and `fs.cp` would error mid-copy, leaving a partial
+    // tree behind).
+    if (isDir) {
+      const rel = relative(src, target);
+      if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+        throw new Error("Cannot copy a folder into itself.");
+      }
+    }
+
+    await fs.cp(src, target, { recursive: true, errorOnExist: false, force: false });
+    created.push(await makeEntry(target, isDir));
+  }
+  return created;
+}
+
+// Pick a non-colliding path inside `destDir` for `name`. Returns `destDir/name`
+// when free, else inserts a " (n)" suffix before the extension.
+async function uniqueDestPath(destDir: string, name: string): Promise<string> {
+  const direct = join(destDir, name);
+  if (!(await pathExists(direct))) return direct;
+
+  const ext = extname(name);
+  const stem = ext ? name.slice(0, -ext.length) : name;
+  for (let i = 1; i < 1000; i++) {
+    const candidate = join(destDir, `${stem} (${i})${ext}`);
+    if (!(await pathExists(candidate))) return candidate;
+  }
+  throw new Error(`Too many files named like "${name}" already exist here.`);
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function createFile(parentPath: string, name: string): Promise<FsEntry> {

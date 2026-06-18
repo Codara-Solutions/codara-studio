@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard, type WebContents } from "electron";
+import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard, nativeImage, type WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, join } from "node:path";
@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
-import { createFile, createFolder, deleteFile, listDir, listFiles, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
+import { createFile, createFolder, deleteFile, importEntries, listDir, listFiles, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPath, setAllowedRoots } from "./fs-sandbox";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { sparkHome } from "./spark-home";
@@ -168,6 +168,17 @@ import type {
   UpdateStepInput,
   UpdateWorkerTaskInput,
 } from "@shared/types";
+
+// A small document glyph used as the drag image for `webContents.startDrag`.
+// Windows rejects an empty icon ("Must specify non-empty 'icon' option"), so
+// we ship a tiny generated PNG and build the NativeImage once, lazily.
+const DRAG_ICON_DATA_URL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAcUlEQVR4nO3RMQrAIAyFYc/p1FM59ZjStU4BESpRiz/EPHiLqHwkIXg8ncR4vdr27i8Bcn5UlTft+XZAi0AANQIDCAIFyB8oYCkjgK9um4B9QEr3UO0B8BXgAHwFOABfAQ7QjtwuAF/BuYA/Og3wHJECBKtIBObIWvMAAAAASUVORK5CYII=";
+let dragIcon: Electron.NativeImage | null = null;
+function getDragIcon(): Electron.NativeImage {
+  dragIcon ??= nativeImage.createFromDataURL(DRAG_ICON_DATA_URL);
+  return dragIcon;
+}
 
 const MAX_PASTED_IMAGE_BYTES = 12 * 1024 * 1024;
 const PASTED_IMAGE_EXTENSIONS = new Map([
@@ -504,6 +515,49 @@ export function registerIpc(): void {
 
   ipcMain.handle("fs:createFolder", async (_e, args: CreateEntryInput): Promise<FsEntry> => {
     return createFolder(args.parentPath, args.name);
+  });
+
+  // Import external files/folders dropped onto the Explorer. The DESTINATION
+  // is gated by the read sandbox so a hostile renderer can't make Spark write
+  // a copy outside the open workspaces; the sources can live anywhere on disk
+  // (that's the whole point of importing them in).
+  ipcMain.handle(
+    "fs:importEntries",
+    async (_e, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
+      const destDir = typeof args?.destDir === "string" ? args.destDir : "";
+      if (!destDir) throw new Error("Missing import destination.");
+      assertAllowedReadPath(destDir);
+      const sourcePaths = Array.isArray(args?.sourcePaths)
+        ? args.sourcePaths.filter((p): p is string => typeof p === "string" && p.length > 0)
+        : [];
+      if (sourcePaths.length === 0) return [];
+      return importEntries(destDir, sourcePaths);
+    },
+  );
+
+  // Native OS drag-out: the renderer's `dragstart` on an Explorer row sends the
+  // selected file paths here, and we hand them to Chromium's drag machinery so
+  // the user can drop them onto the desktop, another app, etc. Fire-and-forget
+  // (`ipcMain.on`) because `webContents.startDrag` returns nothing and must run
+  // on the sender's own contents while the drag gesture is live.
+  ipcMain.on("fs:startDrag", (e, paths: unknown) => {
+    const files = Array.isArray(paths)
+      ? paths.filter((p): p is string => typeof p === "string" && p.length > 0)
+      : typeof paths === "string" && paths.length > 0
+        ? [paths]
+        : [];
+    if (files.length === 0) return;
+    try {
+      e.sender.startDrag({
+        // `file` is the legacy single-path field some platforms still read;
+        // `files` carries the full (possibly multi-) selection.
+        file: files[0],
+        files,
+        icon: getDragIcon(),
+      });
+    } catch (err) {
+      console.warn("[main] fs:startDrag failed:", err);
+    }
   });
 
   ipcMain.handle("fs:setWatchRoot", async (e, root: string | null): Promise<void> => {
