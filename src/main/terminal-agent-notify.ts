@@ -12,7 +12,8 @@ import {
   type PublicAgentRuntime,
 } from "@shared/agent-patterns";
 import * as pty from "./pty-manager";
-import { fireTerminalAgentAlert } from "./notifications";
+import { emitTerminalAgentState, fireTerminalAgentAlert } from "./notifications";
+import type { RuntimeState } from "@shared/types";
 
 // Terminal-agent notifier: tells the user when a Claude / Codex / Cursor CLI
 // they ran in a NORMAL terminal pane stops working — finished a turn, or
@@ -118,6 +119,12 @@ interface PaneWatcher {
   // resumes, so a genuine "needs you" after the user sends a new prompt still
   // alerts. Mirrors alertedTerminalCompletion in notifications.ts.
   alertedTerminalDone: boolean;
+  // Last RuntimeState pushed to the renderer chip via emitPaneState. Distinct
+  // from `state` (the 3-value notifier vocabulary idle/working/blocked) — this
+  // is the translated chip RuntimeState and exists purely to dedup the chip
+  // channel so identical states aren't re-sent every chunk. null = nothing
+  // emitted yet.
+  lastEmittedState: RuntimeState | null;
 }
 
 const watchers = new Map<string, PaneWatcher>();
@@ -223,6 +230,7 @@ export function syncTerminalNotifyPanes(input: {
       lastAlertAt: 0,
       lastAlertKind: null,
       alertedTerminalDone: false,
+      lastEmittedState: null,
     };
     watchers.set(entry.paneId, watcher);
     attach(watcher);
@@ -269,7 +277,18 @@ function attach(w: PaneWatcher): void {
       console.warn("[terminal-agent-notify] chunk handler failed:", err);
     }
   });
-  w.offExit = pty.onExit(w.paneId, () => removeWatcher(w.paneId));
+  w.offExit = pty.onExit(w.paneId, () => {
+    // The pty process itself died. We deliberately do NOT emit a chip state
+    // here: the renderer receives its own `pty:exit:${id}` for this pane and
+    // routes it through onTerminalPaneExit, which is the authoritative handler
+    // for a pty death — it has the EXIT CODE, so it can distinguish a clean
+    // teardown (remove the chip) from a crash (keep a red "error" chip). A
+    // "done" emit from here would race that handler over a separate IPC message
+    // and could tear an "error" chip back down. The chip-relevant exit cases
+    // the notifier owns (agent TUI left but pty alive) are handled by the
+    // prompt-marker / alt-screen-leave `exited` block in onChunk instead.
+    removeWatcher(w.paneId);
+  });
   w.attached = true;
 }
 
@@ -310,6 +329,12 @@ function ensureSweep(): void {
       if (now - w.lastWorkingAt < TURN_QUIET_MS) continue;
       w.state = "idle";
       tanLog(`pane=${w.paneId} turn finished (quiet window elapsed, worked ${w.lastWorkingAt - w.workingSince}ms)`);
+      // The turn ended (no working repaints for the quiet window) → chip ready.
+      // Emit BEFORE the workedLongEnough/OSC-mute toast gates below: those gate
+      // the toast (a boot blip shouldn't ping the user), but the chip should
+      // still flip off "working" the instant the stream goes quiet — this is
+      // the core fix for the stuck-on-WORKING banner when the pane is hidden.
+      emitPaneState(w, "idle");
       if (!workedLongEnough(w)) continue;
       if (now - w.lastOscNotifyAt < OSC_NOTIFY_MUTE_MS) continue;
       deliver(w, "done", null);
@@ -374,6 +399,9 @@ function enterWorking(w: PaneWatcher, now: number): void {
     // A "blocked" after this working phase is a fresh permission prompt the
     // user should hear about, not the previous turn's tail.
     w.alertedTerminalDone = false;
+    // Push the working chip state on the transition only (emitPaneState dedups
+    // repeats anyway, so the per-chunk lastWorkingAt sustain below is cheap).
+    emitPaneState(w, "working");
   }
   w.state = "working";
   w.lastWorkingAt = now;
@@ -425,6 +453,10 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       w.workingSince = 0;
       w.lastWorkingAt = 0;
       tanLog(`pane=${w.paneId} runtime sniffed: ${sniffed}`);
+      // An agent was just detected but no working/idle pattern has classified
+      // yet — show the chip as "starting" until the first real signal. The
+      // first enterWorking / blocked / idle below promotes it within a beat.
+      emitPaneState(w, "launching");
     }
   }
 
@@ -451,6 +483,9 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
           deliver(w, "done", null);
         }
         if (w.state === "working") w.state = "idle";
+        // Turn done = ready for input → chip "idle". Emit regardless of the
+        // toast gate; the chip is focus-independent.
+        emitPaneState(w, "idle");
       } else {
         enterWorking(w, now);
       }
@@ -464,11 +499,13 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
           deliver(w, "blocked", null);
         }
         w.state = "blocked";
+        emitPaneState(w, "blocked");
       } else if (/idle/i.test(status)) {
         if (w.state === "working" && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
           deliver(w, "done", null);
         }
         w.state = "idle";
+        emitPaneState(w, "idle");
       }
     }
 
@@ -491,6 +528,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
         deliver(w, "blocked", null);
       }
       w.state = "blocked";
+      emitPaneState(w, "blocked");
     } else if (cls === "working") {
       enterWorking(w, now);
     } else if (cls === "done") {
@@ -504,6 +542,9 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
         deliver(w, "done", null);
       }
       w.state = "idle";
+      // Turn complete (positive done line) → chip ready, not exited. The TUI is
+      // still up; the real "done" (TUI gone) is the exited block below.
+      emitPaneState(w, "idle");
     }
 
     // Agent exit: the shell prompt is back (spark.ps1's OSC 633/133 markers)
@@ -523,6 +564,13 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       ) {
         deliver(w, "done", null);
       }
+      // The foreground TUI handed control back to the shell → chip "done".
+      // Emit while w.runtime is still set so the payload names the agent, then
+      // reset lastEmittedState so a fresh agent re-launched in this same pane
+      // re-emits "launching"/"working" rather than being deduped against the
+      // stale value.
+      emitPaneState(w, "done");
+      w.lastEmittedState = null;
       w.runtime = null;
       w.state = "idle";
       w.workingSince = 0;
@@ -547,6 +595,11 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
   const kind = /approv|permission|review|waiting|needs|input|attention|confirm/i.test(message)
     ? ("blocked" as const)
     : ("done" as const);
+  // Chip state mirrors the announced state, focus-independent: an explicit
+  // "done" notification means the turn finished and the agent is ready for
+  // input → "idle"; an "approval/permission" announcement → "blocked". The TUI
+  // is still up (this is not a process exit), so we never emit "done" here.
+  emitPaneState(w, kind === "blocked" ? "blocked" : "idle");
   // An explicit OSC notification is the program authoritatively announcing its
   // current state — it is never the previous turn's heuristic footer tail. So
   // stand the terminal-completion guard down here; otherwise a real "approval
@@ -572,6 +625,29 @@ function runtimeLabel(runtime: PublicAgentRuntime | null): string {
   if (runtime === "codex") return "Codex";
   if (runtime === "cursor") return "Cursor";
   return "Terminal";
+}
+
+// Push a translated chip RuntimeState to the renderer, focus-independent. This
+// is the SEPARATE-from-alert path the chip needs: deliver() (the toast/rail dot)
+// is gated by isUserWatchingPane, but the chip must update even while the user
+// is looking elsewhere — that hidden case is exactly when the renderer's own
+// visible-buffer poller is frozen and the banner gets stuck on "working". We
+// dedup on lastEmittedState so a repeated state (e.g. "working" re-asserted by
+// every footer repaint) doesn't spam IPC. Excluded panes (Spark workers) carry
+// their own run-store-driven chip and are skipped. Note we deliberately do NOT
+// emit for the worker-pane case; manual panes are the audience.
+function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
+  if (w.excluded) return;
+  if (w.lastEmittedState === chipState) return;
+  w.lastEmittedState = chipState;
+  tanLog(`pane=${w.paneId} chip-state -> ${chipState} (runtime=${w.runtime})`);
+  emitTerminalAgentState({
+    workspaceId: w.workspaceId,
+    tabId: w.tabId,
+    paneId: w.paneId,
+    runtime: w.runtime,
+    state: chipState,
+  });
 }
 
 function deliver(w: PaneWatcher, kind: "done" | "blocked", body: string | null): void {

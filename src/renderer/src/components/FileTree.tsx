@@ -301,8 +301,13 @@ export default function FileTree({
     marqueeSelectionRef.current = null;
     rowElementsRef.current.clear();
     (async () => {
-      const children = await loadDir(cwd);
-      if (cancelled) return;
+      // A freshly-created workspace can race the main-process read sandbox:
+      // this effect runs before App finishes registering `cwd` as an allowed
+      // root, so the first `fs:list` may reject with "Path not allowed". Retry
+      // with a short bounded backoff so the panel self-heals once the root
+      // lands in the allowlist a tick later, instead of sitting at "Loading…".
+      const children = await loadDirWithRetry(cwd, () => cancelled);
+      if (cancelled || children === null) return;
       next.children = children;
       next.loaded = true;
       next.loading = false;
@@ -368,7 +373,31 @@ export default function FileTree({
   // Watch the workspace for filesystem changes and refresh affected dirs.
   useEffect(() => {
     let cancelled = false;
-    void window.spark.fs.setWatchRoot(cwd);
+    // Arm the watcher with the same bounded backoff as the initial list: a
+    // freshly-created workspace can reach this effect before its root is in
+    // the main-process sandbox allowlist, so `setWatchRoot` may reject with
+    // "Path not allowed" — without a retry NO watcher would ever be installed
+    // for that workspace. Once it resolves, do ONE reconciling reload of the
+    // root: the first paint came from loadDir and the macOS FSEvents recursive
+    // watcher has a warm-up window where early changes are missed, so this
+    // makes the visible tree match on-disk state once watching is actually
+    // live. Both steps bail if the cwd changed / the component unmounted.
+    void (async () => {
+      // `setWatchRoot` resolves to `undefined` on success; `callWithRetry`
+      // returns `null` only when cancelled or every attempt failed, so test
+      // against `null` (not falsiness) to detect a genuine failure.
+      const armed = await callWithRetry(
+        () => window.spark.fs.setWatchRoot(cwd),
+        () => cancelled,
+      );
+      if (cancelled || armed === null) return;
+      try {
+        await reloadDirInPlace(rootRef.current);
+        if (!cancelled) force((n) => n + 1);
+      } catch {
+        // Non-fatal: the watcher is armed, so subsequent changes still refresh.
+      }
+    })();
     const unsub = window.spark.fs.onChanged((event) => {
       if (cancelled || event.root !== cwd) return;
       const changed = new Set(event.dirs.map(normalizePath));
@@ -1306,6 +1335,45 @@ async function loadDir(path: string): Promise<Node[]> {
   return entries.map((e): Node =>
     e.isDir ? makeDir(e, false) : { kind: "file", entry: e },
   );
+}
+
+// Bounded retry/backoff shared by the workspace-switch reload and the watcher
+// arming. A brand-new workspace's root lands in the main-process read sandbox a
+// React tick after FileTree's child effects run, so the first IPC call can
+// reject with "Path not allowed". We retry over ~1-2s (6 attempts, 150→900ms)
+// so the panel self-heals once the root is allowed, but stop immediately when
+// `isCancelled` flips (cwd change / unmount) so a stale retry never writes.
+const RETRY_DELAYS_MS = [150, 250, 350, 500, 700, 900];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
+// Run an IPC call with bounded retries. Returns the resolved value, or null if
+// every attempt failed or the caller cancelled mid-flight.
+async function callWithRetry<T>(
+  fn: () => Promise<T>,
+  isCancelled: () => boolean,
+): Promise<T | null> {
+  for (let attempt = 0; ; attempt++) {
+    if (isCancelled()) return null;
+    try {
+      return await fn();
+    } catch {
+      if (attempt >= RETRY_DELAYS_MS.length) return null;
+      await sleep(RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
+
+// Load a directory's children with the bounded backoff above. Returns null when
+// cancelled or after exhausting retries (the panel then stays at "Loading…",
+// the same terminal state as before, rather than throwing uncaught).
+function loadDirWithRetry(
+  path: string,
+  isCancelled: () => boolean,
+): Promise<Node[] | null> {
+  return callWithRetry(() => loadDir(path), isCancelled);
 }
 
 // Re-list a directory while preserving DirNode identity (and thus `open` /

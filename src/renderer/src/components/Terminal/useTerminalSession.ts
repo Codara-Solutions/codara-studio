@@ -955,9 +955,63 @@ export function useTerminalSession({
         clearRecentAgentInput();
         return false;
       };
+      // The three first-party runtimes the chrome detector / state poller have
+      // anchors for. Iterated by the live-presence checks below (Fix 1
+      // re-detection and Fix 3 Shift+Enter) so a still-visible idle agent is
+      // recognised even when agentPhase has (wrongly or after a remount) lapsed
+      // back to "idle" and activeRuntime is therefore null.
+      const KNOWN_RUNTIMES = ["claude", "codex", "cursor"] as const;
+      // Which first-party runtime's persistent chrome is currently visible in
+      // `tail` (the BOTTOM rows), if any. Returns null when no agent chrome is
+      // on the bottom of the screen. Deliberately checks the bottom tail only:
+      // a stale footer sitting up in scrollback after a REAL exit (shell prompt
+      // now at the bottom) must NOT read as a live agent.
+      const liveRuntimeFromTail = (tail: string): PublicAgentRuntime | null => {
+        for (const runtime of KNOWN_RUNTIMES) {
+          if (agentUiPresent(runtime, tail)) return runtime;
+        }
+        return null;
+      };
+      // Fix 1 guard — a LATCH (not a timer) that suppresses level-triggered
+      // re-detection after a POSITIVE exit. Set only when resetAgentPhase fired
+      // on a positive exit signal (OSC prompt marker, alt-screen-leave, or the
+      // UI-verified Ctrl+C exit probe — i.e. the agent really left). On a real
+      // exit the agent's last footer frame lingers in the bottom tail far longer
+      // than any fixed timer would cover: a returning shell prompt is only 1-2
+      // lines, so a ~5-8-line Claude footer stays inside the bottom
+      // STATE_TAIL_ROWS for a long time (potentially forever on an idle shell).
+      // A wall-clock window therefore can't tell "stale footer after a real
+      // exit" from "live footer of a still-running agent" — so we instead stay
+      // suppressed until agentUiPresent has gone false AT LEAST ONCE since the
+      // exit (the footer actually left the bottom tail). The poller's
+      // ABSENCE-reset deliberately does NOT set this — and since that reset only
+      // ever fires when agentUiPresent is ALREADY false, the latch it would set
+      // is immediately satisfied, so a FALSE teardown still self-heals the
+      // instant the footer reappears (the whole point of Fix 1).
+      let redetectSuppressedAfterExit = false;
       const shouldUseAgentNewline = () => {
         if (agentPhase === "agent") return true;
         if (hasRecentAgentInput()) return true;
+        // Fix 3 — gate on LIVE on-screen presence, not just lapsing phase/grace
+        // state. If an agent's persistent footer chrome is visible on the bottom
+        // rows RIGHT NOW, a Shift+Enter must insert the clean TUI newline
+        // (\x1b\r) regardless of whether agentPhase happened to lapse back to
+        // "idle" or the 10 s grace window expired. This decouples Shift+Enter
+        // correctness from the fragile phase + grace state so a still-visible
+        // idle Claude (e.g. paused 30 s+ between turns) never gets the literal
+        // backslash. Reads the same bottom tail the poller uses so a stale
+        // footer in scrollback (shell prompt back at the bottom) does NOT count.
+        // Skip while post-exit-suppressed: right after a real `/exit` the agent's
+        // footer can still sit in the bottom tail, and matching it here would send
+        // the TUI newline at a bare shell prompt instead of the `\` continuation.
+        const term = termRef.current;
+        if (term && !redetectSuppressedAfterExit) {
+          const liveRuntime = liveRuntimeFromTail(readTerminalTail(term, STATE_TAIL_ROWS));
+          if (liveRuntime) {
+            markRecentAgentInput(liveRuntime);
+            return true;
+          }
+        }
         const sniffedRuntime = sniffRuntime(agentTextRing);
         const publicRuntime = sniffedRuntime ? coercePublicRuntime(sniffedRuntime) : null;
         if (publicRuntime) {
@@ -976,6 +1030,17 @@ export function useTerminalSession({
       let pendingState: RuntimeState | null = null;
       let confirmedState: RuntimeState | null = null;
       let idleSinceMs: number | null = null;
+      // D4 (stale-footer false "working"): Claude/Codex leave their last footer
+      // frame frozen on screen after a turn ends; classifyTail keeps matching
+      // "working" off that static frame, so the working→idle debounce (gated on
+      // raw===null) never arms and the chip stays stuck on "working" even while
+      // the pane is visible. We remember the tail the poller last saw and, once
+      // confirmedState==="working", only TREAT a "working" classification as
+      // live if the tail actually CHANGED since last tick — a live turn repaints
+      // its ticking-seconds footer every ~second, a finished one is byte-static.
+      // A byte-identical tail is coerced to null so the existing idle debounce
+      // arms promptly. Reset across agent enter/exit so a new turn starts clean.
+      let lastWorkingTail: string | null = null;
       // Bug B (baseline idle): a launched-but-never-worked agent (the user
       // typed `claude`, the idle box is up, nothing run yet) classifies as
       // null forever, so confirmedState stays null and the chip would fall
@@ -1020,6 +1085,7 @@ export function useTerminalSession({
         idleSinceMs = null;
         baselineIdleSinceMs = null;
         uiGoneTicks = 0;
+        lastWorkingTail = null;
         clearCtrlCExitTimer();
       };
       const tickStatePoller = () => {
@@ -1028,6 +1094,42 @@ export function useTerminalSession({
         const tail = readTerminalTail(t, STATE_TAIL_ROWS);
         const raw = classifyTail(activeRuntime, tail);
         const now = Date.now();
+
+        // D4 (stale-footer false "working"). Once a turn is confirmed working,
+        // a live turn keeps repainting its footer (the ticking elapsed-seconds
+        // counter) so the tail changes every tick; a FINISHED turn leaves the
+        // last footer frame frozen on screen, and classifyTail keeps matching
+        // "working" off that static frame forever. Downgrade such a frozen-frame
+        // "working" to null so the working→idle debounce below can arm and the
+        // visible chip flips to "ready" promptly. Only kicks in once we're
+        // already confirmed working — a fresh, not-yet-confirmed turn is left to
+        // the pendingState confirm path untouched. We compare against the tail
+        // captured on the previous tick; the UI-gone / exit-detection block keeps
+        // using the unmodified `raw` so its semantics are unchanged.
+        //
+        // CLAUDE ONLY. Claude repaints its footer's elapsed-seconds counter at
+        // least once a second while working, so a live turn's tail always changes
+        // within the 1.2s idle debounce — a byte-identical tail reliably means the
+        // turn finished. Codex/Cursor repaint their footer RARELY (Codex only
+        // shimmers the word "Working" between full repaints; see the note in
+        // terminal-agent-notify.ts), so a quiet 20-30s tool call would go
+        // byte-identical mid-turn and false-flip to "ready". For those runtimes we
+        // do NOT use absence-of-tail-change as an idle signal — the focus-
+        // independent notifier (emitPaneState) drives their turn-complete instead.
+        let effectiveRaw = raw;
+        if (activeRuntime === "claude" && confirmedState === "working" && raw === "working") {
+          if (lastWorkingTail !== null && tail === lastWorkingTail) {
+            // Byte-identical footer for a full tick → not live working anymore.
+            effectiveRaw = null;
+          }
+        }
+        // Remember the current tail whenever working is in play so the next tick
+        // can detect a frozen footer. Cleared elsewhere on agent enter/exit.
+        if (raw === "working" || confirmedState === "working") {
+          lastWorkingTail = tail;
+        } else {
+          lastWorkingTail = null;
+        }
 
         // Bug A — poller-driven exit detection. The agent's persistent UI
         // chrome (input box / footer hints / statusline) stays on screen the
@@ -1051,8 +1153,35 @@ export function useTerminalSession({
         // alone must NOT clear the chip: an idle agent with mismatched anchors
         // would otherwise be killed ~1.2s after a turn. Those clear via positive
         // signals (OSC prompt markers, alt-screen-leave, pty exit) instead.
+        //
+        // Fix 2 — this absence backstop is deliberately PATIENT and only runs on
+        // a VISIBLE pane, because firing it early is the root cause of the
+        // "chip vanishes while the agent is still alive" bug:
+        //   • VISIBLE-ONLY: the poller runs on its interval even while hidden,
+        //     but a hidden pane skips term.write so its xterm buffer is FROZEN —
+        //     reading that stale tail can show no chrome and falsely trip the
+        //     reset. A pane that genuinely exits while hidden is cleared by the
+        //     carry-aware byte-level prompt-marker / alt-screen-leave path in
+        //     processAgentChunkText, and otherwise resolves once refocused.
+        //   • PATIENT THRESHOLD: a single anchor dropout — a full-screen redraw,
+        //     a brief user scroll, a split/resize reflow, or a quiet idle frame
+        //     that pushes the footer out of the 40-row tail — must not tear down
+        //     a live agent. UI_GONE_TICKS is therefore several SECONDS of
+        //     SUSTAINED absence, not ~1s. The only cost of waiting longer is a
+        //     slightly late chip-clear on a marker-less real exit (e.g. typed
+        //     `exit` / `/exit`); the cost of firing early is the reported
+        //     vanishing-while-alive bug, so we bias strongly toward patience.
+        //   • SELF-HEALING: even if this does fire a false reset, Fix 1's
+        //     level-triggered re-detection restores the chip on the very next
+        //     footer repaint, so the two fixes together are robust.
+        // The FAST positive exit signals stay authoritative and prompt: the
+        // Ctrl+C-armed exit probe (CTRL_C_EXIT_PROBE_MS, gated on
+        // agentUiPresent===false) and the OSC prompt-marker / alt-screen-leave
+        // resets handle real exits within ~2s. This absence reset is only the
+        // slow backstop for exits that emit no marker at all.
         if (
           absenceResetSafe(activeRuntime) &&
+          visibleRef.current &&
           raw === null &&
           !agentUiPresent(activeRuntime, tail)
         ) {
@@ -1062,21 +1191,25 @@ export function useTerminalSession({
             return;
           }
         } else {
+          // Any classifiable state, returned chrome, or a hidden pane resets the
+          // counter to 0 so absence must be SUSTAINED and uninterrupted before
+          // the backstop can fire — a transient dropout never accumulates.
           uiGoneTicks = 0;
         }
 
-        if (confirmedState === "working" && raw === null) {
+        if (confirmedState === "working" && effectiveRaw === null) {
           if (idleSinceMs === null) idleSinceMs = now;
           if (now - idleSinceMs >= IDLE_DEBOUNCE_MS) {
             confirmedState = "idle";
             pendingState = null;
             idleSinceMs = null;
+            lastWorkingTail = null;
             reportRuntimeState("idle");
           }
           return;
         }
         idleSinceMs = null;
-        if (raw === null) {
+        if (effectiveRaw === null) {
           pendingState = null;
           // Bug B — baseline idle. A launched-but-never-worked agent (idle box
           // up, nothing run yet) classifies as null indefinitely, so without
@@ -1099,17 +1232,17 @@ export function useTerminalSession({
           return;
         }
         baselineIdleSinceMs = null;
-        if (pendingState !== raw) {
-          pendingState = raw;
+        if (pendingState !== effectiveRaw) {
+          pendingState = effectiveRaw;
           return;
         }
-        if (confirmedState !== raw) {
-          confirmedState = raw;
+        if (confirmedState !== effectiveRaw) {
+          confirmedState = effectiveRaw;
           // A confirmed working/blocked signal means the agent is alive and
           // active — stand down the Ctrl+C exit one-shot so it can't fire after
           // a new turn started post-interrupt.
-          if (raw === "working" || raw === "blocked") clearCtrlCExitTimer();
-          reportRuntimeState(raw);
+          if (effectiveRaw === "working" || effectiveRaw === "blocked") clearCtrlCExitTimer();
+          reportRuntimeState(effectiveRaw);
         }
       };
       const startStatePoller = (runtime: "claude" | "codex" | "cursor") => {
@@ -1119,6 +1252,7 @@ export function useTerminalSession({
         idleSinceMs = null;
         baselineIdleSinceMs = null;
         uiGoneTicks = 0;
+        lastWorkingTail = null;
         clearCtrlCExitTimer();
         if (stateTimer !== null) window.clearInterval(stateTimer);
         stateTimer = window.setInterval(tickStatePoller, STATE_POLL_MS);
@@ -1127,6 +1261,9 @@ export function useTerminalSession({
       const setAgentRunning = (runtime: AgentRuntime | null) => {
         if (agentPhase === "agent") return;
         agentPhase = "agent";
+        // A fresh launch/relaunch re-arms re-detection: any prior post-exit
+        // suppression latch is now stale.
+        redetectSuppressedAfterExit = false;
         // Start agent-phase marker scanning from a clean carry. The carry is
         // advanced on every chunk INCLUDING the idle-phase chunks before launch,
         // so its up-to-64-byte tail can still hold the pre-launch shell prompt's
@@ -1150,9 +1287,29 @@ export function useTerminalSession({
         // Only the three first-party runtimes have regex tables in
         // RUNTIME_PATTERNS — others rely on hook reports from E1 or no state
         // signal at all.
-        if (publicRuntime) startStatePoller(publicRuntime);
+        if (publicRuntime) {
+          startStatePoller(publicRuntime);
+          // D5 (launching). The agent was just detected but the poller hasn't
+          // classified working/idle yet (confirmedState is null after the
+          // startStatePoller reset). Report "launching" so the chip reads
+          // "starting" rather than falling back to the lifecycle-derived tone.
+          // We do NOT set confirmedState, so the baseline-idle path in
+          // tickStatePoller still resolves this to "idle" once the agent settles
+          // at its input box, and a real working signal still overrides it.
+          reportRuntimeState("launching");
+        }
       };
-      const resetAgentPhase = (options: { keepRecentAgentInput?: boolean } = {}) => {
+      const resetAgentPhase = (
+        options: { keepRecentAgentInput?: boolean; exitSignal?: boolean } = {},
+      ) => {
+        // A POSITIVE exit signal (prompt marker / alt-screen-leave / UI-verified
+        // Ctrl+C exit) means the agent genuinely left — briefly suppress Fix 1's
+        // re-detection so a footer frame still lingering in the bottom tail can't
+        // resurrect the chip. Absence-poller teardowns omit this flag so they
+        // stay freely self-healing.
+        if (options.exitSignal) {
+          redetectSuppressedAfterExit = true;
+        }
         const runtimeForRecentInput = activeRuntime ?? recentAgentInputRuntime;
         if (agentPhase === "agent") {
           onAgentStateRef.current?.({ runtime: null, running: false });
@@ -1221,7 +1378,8 @@ export function useTerminalSession({
           // agent resumed a turn after the interrupt, its chrome/footer is back.
           if (agentUiPresent(activeRuntime, tail)) return;
           if (classifyTail(activeRuntime, tail) !== null) return;
-          resetAgentPhase();
+          // Positive exit (UI verified gone) — suppress re-detection briefly.
+          resetAgentPhase({ exitSignal: true });
         }, CTRL_C_EXIT_PROBE_MS);
       };
       const handleOsc633 = (data: string): boolean => {
@@ -1259,7 +1417,9 @@ export function useTerminalSession({
         // state. So if we're in "agent" phase and ANY of these arrive, the
         // agent has quit and the shell prompt is showing again.
         if (data && !data.startsWith("C") && !data.startsWith("E")) {
-          resetAgentPhase();
+          // Positive prompt-return marker — suppress re-detection briefly so a
+          // lingering footer frame can't resurrect the just-cleared chip.
+          resetAgentPhase({ exitSignal: true });
         }
         return false;
       };
@@ -1275,7 +1435,7 @@ export function useTerminalSession({
       // missed or out-of-order 633 sequence doesn't strand the chip in
       // "running" forever.
       const osc133Dispose = term.parser.registerOscHandler(133, (data) => {
-        if (data.startsWith("A")) resetAgentPhase();
+        if (data.startsWith("A")) resetAgentPhase({ exitSignal: true });
         return false;
       });
       cleanups.push(() => osc133Dispose.dispose());
@@ -1320,6 +1480,60 @@ export function useTerminalSession({
             // below) already restores idle phase, so this fallback rides
             // the same lifecycle as banner-based detection.
             setAgentRunning(null);
+          } else if (
+            !sawAltScreenLeave &&
+            !sawPromptMarker &&
+            visibleRef.current
+          ) {
+            // Fix 1 (linchpin) — self-healing, LEVEL-triggered re-detection.
+            // The signals above (launch banner, 633;E command line,
+            // alt-screen-enter) are EDGE-triggered: they only fire on a fresh
+            // launch. So if a still-running agent's chip was ever torn down —
+            // by the poller's absence-reset firing early on a transient anchor
+            // dropout, or by any pane remount that reset agentPhase to "idle" —
+            // it would never recover, leaving the chip gone and Shift+Enter
+            // sending a literal backslash. Re-detect an already-running agent
+            // from its PERSISTENT footer chrome: if the bottom tail still shows
+            // a known runtime's chrome, re-enter agent phase. setAgentRunning
+            // early-returns once agentPhase==="agent", so this only fires from
+            // idle and won't re-trigger every chunk.
+            //
+            // Guards:
+            //  - BOTTOM tail only (readTerminalTail → last STATE_TAIL_ROWS rows,
+            //    same as the poller). A stale footer sitting up in scrollback
+            //    after a REAL exit — shell prompt now at the bottom — reads as
+            //    UI-absent, so a genuinely-exited agent is NOT resurrected.
+            //  - Skip when this chunk carried a prompt-marker / alt-screen-leave:
+            //    those are exit signals, and re-detecting on the same chunk that
+            //    a real exit arrived on would immediately undo the reset.
+            //  - Post-exit LATCH (set only by a POSITIVE exit signal): right
+            //    after a real `/exit`/`exit` the agent's footer lingers in the
+            //    bottom tail far longer than any timer — a 1-2 line shell prompt
+            //    barely pushes a 5-8 line footer up, so it stays inside the tail
+            //    (forever on an idle shell). So we stay suppressed until the
+            //    footer has left the tail at least once (liveRuntime === null),
+            //    then re-arm. Absence-poller teardowns omit the flag AND only
+            //    fire when the UI was already absent, so a FALSE teardown
+            //    self-heals immediately when the footer reappears.
+            //  - VISIBLE panes only: a hidden pane's xterm buffer is frozen
+            //    (hidden panes skip term.write), so its tail is stale and could
+            //    re-detect against an old frame.
+            const term = termRef.current;
+            if (term) {
+              const liveRuntime = liveRuntimeFromTail(
+                readTerminalTail(term, STATE_TAIL_ROWS),
+              );
+              if (!liveRuntime) {
+                // Agent chrome is gone from the bottom tail — a real exit's
+                // stale footer has finally scrolled out (or a false teardown was
+                // already UI-absent). Re-arm: future repaints may re-detect.
+                redetectSuppressedAfterExit = false;
+              } else if (!redetectSuppressedAfterExit) {
+                setAgentRunning(liveRuntime);
+              }
+              // else: footer present but still post-exit-suppressed (lingering
+              // stale frame) → do nothing until it leaves the tail once.
+            }
           }
           return;
         }
@@ -1333,7 +1547,9 @@ export function useTerminalSession({
         // before with code 633. This path also runs while panes are hidden,
         // where xterm parser OSC handlers intentionally do not run.
         if (sawAltScreenLeave || sawPromptMarker) {
-          resetAgentPhase();
+          // Positive byte-level exit signal — suppress re-detection briefly so a
+          // lingering footer frame can't resurrect the just-cleared chip.
+          resetAgentPhase({ exitSignal: true });
         }
       };
 
@@ -1925,15 +2141,24 @@ const STATE_TAIL_ROWS = 40;
 // other transition is also applied (one tick is the minimum to debounce the
 // occasional regex bounce when the TUI is mid-redraw).
 const IDLE_DEBOUNCE_MS = 1_200;
-// Bug A — consecutive poller ticks the persistent agent UI chrome must be
-// ABSENT from the visible tail before we treat the agent as exited and clear
-// the chip. At STATE_POLL_MS (300 ms) this is 4 × 300 = 1.2 s of sustained
-// absence — long enough to ride out a full-screen redraw or a fast scroll that
-// momentarily pushes the footer/statusline out of the 40-row tail, short enough
-// that a Ctrl+C exit clears the chip within ~1.5 s of the prompt returning.
-// Conservative by design: a false "UI gone" would wrongly clear a live agent,
-// so we err toward keeping the chip a little longer than strictly necessary.
-const UI_GONE_TICKS = 4;
+// Bug A / Fix 2 — consecutive poller ticks the persistent agent UI chrome must
+// be ABSENT from the VISIBLE tail before this slow backstop treats the agent as
+// exited and clears the chip. At STATE_POLL_MS (300 ms) this is 14 × 300 ≈
+// 4.2 s of SUSTAINED, uninterrupted absence.
+//
+// Raised from 4 (~1.2 s) because the old window fired falsely whenever an idle
+// (still-running) Claude's footer briefly drifted out of the 40-row tail — a
+// long response on screen, a user scroll, or a split/resize reflow — tearing
+// down a LIVE agent's chip after ~1.2 s (the reported "chip vanishes while
+// alive" bug) and flipping Shift+Enter to the literal-backslash path. The
+// backstop only needs to catch marker-less exits (typed `exit` / `/exit`),
+// which are not latency-sensitive, so we bias strongly toward patience: the
+// downside of waiting longer is a slightly late chip-clear on those rare exits;
+// the downside of firing early is killing a live agent. The fast positive exit
+// signals (Ctrl+C exit probe, OSC prompt markers, alt-screen-leave, pty exit)
+// still clear real exits within ~2 s, and Fix 1's level-triggered re-detection
+// self-heals any residual false reset on the next footer repaint.
+const UI_GONE_TICKS = 14;
 // Bug A — delay before the Ctrl+C-armed one-shot samples the tail to decide
 // whether the agent actually exited. Long enough for Claude/Codex to finish
 // tearing down their TUI and the shell prompt to repaint after a real exit,

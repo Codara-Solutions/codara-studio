@@ -66,6 +66,7 @@ import type {
   StartAutopilotInput,
   StartSearchResponse,
   TerminalAgentAttentionPayload,
+  TerminalAgentStatePayload,
   TerminalAgentTarget,
   UndoToCheckpointInput,
   UndoToCheckpointResult,
@@ -602,6 +603,22 @@ const api = {
       ) => handler(payload);
       ipcRenderer.on("terminal-agent:attention", listener);
       return () => ipcRenderer.off("terminal-agent:attention", listener);
+    },
+    // Focus-independent live chip state from the main-process notifier. Fires
+    // on every turn-boundary transition the notifier detects on the raw pty
+    // stream — including while the pane is hidden, which is exactly when the
+    // renderer's own visible-buffer poller is frozen and the chip would
+    // otherwise stay stuck on "working". The renderer routes `state` onto the
+    // matching leaf.worker.runtimeState (never minting a worker).
+    onState: (
+      handler: (payload: TerminalAgentStatePayload) => void,
+    ): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        payload: TerminalAgentStatePayload,
+      ) => handler(payload);
+      ipcRenderer.on("terminal-agent:state", listener);
+      return () => ipcRenderer.off("terminal-agent:state", listener);
     },
   },
   windowControls: {

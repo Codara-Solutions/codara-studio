@@ -225,11 +225,17 @@ function createWindow(): void {
   mainWindow.on("ready-to-show", () => mainWindow?.show());
 
   // Close-to-tray: only hide when the tray actually exists AND the user has
-  // opted into background running. Without a live tray the user has no way to
-  // reach the hidden window (observed on macOS when icon.ico fails to load),
-  // which strands an unreachable background process — so tray is a precondition.
-  // On Windows we also drop the taskbar button so the hidden window doesn't
-  // linger there.
+  // opted into background running. The live-tray precondition is a deliberate
+  // safety gate: without a tray the user has no escape hatch to the hidden
+  // window (observed on macOS when icon.ico fails to load, and on Linux setups
+  // with no system tray, where ensureTray() throws and leaves `tray` null). In
+  // that case we intentionally do NOT preventDefault — the window closes for
+  // real and falls through to window-all-closed, which (when no tray exists)
+  // performs a normal quit rather than stranding an invisible, unreachable
+  // headless process. The global shortcut + dock activate paths can re-create a
+  // window, but a tray is the reliable always-visible re-entry point, so we
+  // require it before going headless. On Windows we also drop the taskbar
+  // button so the hidden window doesn't linger there.
   mainWindow.on("close", (e) => {
     if (!isQuitting && tray && getPreferenceCached("keepRunningInBackground")) {
       e.preventDefault();
@@ -526,8 +532,18 @@ app.whenReady().then(async () => {
     }
   })();
 
+  // macOS dock-click / app re-activation. In background mode the window still
+  // EXISTS while hidden to the tray, so the old "create only if no windows"
+  // check did nothing on dock-click — the hidden window stayed hidden. Always
+  // re-reveal an existing (possibly hidden) window via showMainWindow(); fall
+  // back to creating one if it was genuinely destroyed or never existed. This
+  // is the primary "reopen on demand" path on macOS.
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      showMainWindow();
+    } else if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    }
   });
 });
 
@@ -545,10 +561,16 @@ app.on("window-all-closed", async () => {
   // from triggering a quit before the summary is flushed.
   if (isHeadlessEval) return;
   // Close-to-tray: while background running is enabled and we're not quitting,
-  // never dispose/quit on window-all-closed. The window `close` handler hides
-  // rather than closes, so this rarely fires — keep it as defense in depth so
-  // automation timers survive even if a close path slips past the hide.
-  if (!isQuitting && getPreferenceCached("keepRunningInBackground")) return;
+  // never dispose/quit on window-all-closed — but ONLY when a tray actually
+  // exists. The window `close` handler hides rather than closes, so this rarely
+  // fires; keep it as defense in depth so automation timers survive even if a
+  // close path slips past the hide. The `tray` precondition mirrors the close
+  // handler: if the tray failed to create (Linux no-tray, icon load failure)
+  // the user has no way back to a hidden/headless process, so we fall through
+  // and quit normally rather than stranding it.
+  if (!isQuitting && tray && getPreferenceCached("keepRunningInBackground")) {
+    return;
+  }
   pty.disposeAll();
   fsWatcher.disposeAll();
   await flushAllStores();
@@ -568,6 +590,13 @@ let cleanQuit = false;
 let cleanupRan = false;
 app.on("before-quit", (event) => {
   if (cleanQuit) return;
+  // Flag the quit BEFORE anything else. Otherwise the async cleanup below
+  // preventDefault()s this quit, then later re-calls app.quit() — and on that
+  // second pass the window `close` handler would still see isQuitting === false
+  // and hide-to-tray instead of letting the window close, so the quit would
+  // never complete in background mode. Setting it here makes every subsequent
+  // window `close` (and the window-all-closed guard) take the real-quit path.
+  isQuitting = true;
   event.preventDefault();
   if (cleanupRan) return; // cleanup already in flight from an earlier quit attempt
   cleanupRan = true;

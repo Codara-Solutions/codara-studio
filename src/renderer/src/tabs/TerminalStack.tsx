@@ -2222,11 +2222,19 @@ function forEachLeaf(node: PaneNode, fn: (l: TerminalLeaf) => void): void {
   forEachLeaf(node.b, fn);
 }
 
-// A runtimeState that means the agent is still live in the pane (vs "done",
-// which is the post-exit terminal state). Used so the chip stays visible
-// through working / blocked / idle, not just while state==="running".
+// A runtimeState that means the agent's chip should stay visible in the pane
+// (vs "done", which is the post-exit terminal state that lets the chip be torn
+// down by lifecycle). Covers the live states (launching / working / blocked /
+// idle) plus "error" — a crashed pane must keep showing its red "exited" chip
+// until the user closes the pane, not silently drop the badge.
 function isLiveRuntimeState(state: RuntimeState | undefined): boolean {
-  return state === "working" || state === "blocked" || state === "idle";
+  return (
+    state === "launching" ||
+    state === "working" ||
+    state === "blocked" ||
+    state === "idle" ||
+    state === "error"
+  );
 }
 
 function visibleWorkerChip(worker: TerminalLeafWorker | null | undefined): TerminalLeafWorker | null {
@@ -2257,17 +2265,30 @@ interface ChipTone {
   status: string;
   // Dot fill + halo, and whether the dot pulses. "blocked" deliberately uses a
   // STEADY amber dot (no pulse) so "waiting for you" reads as a calm, standing
-  // request for input rather than busy motion.
+  // request for input rather than busy motion. "ready" (a finished turn) uses a
+  // calm GREEN dot so it reads as "your turn", distinct from the grey "done".
   dot: string;
   dotGlow: string;
   pulse: boolean;
   // Chip frame: accent for actively-working, amber for needs-you (blocked),
-  // calm neutral for idle / done.
-  frame: "accent" | "warn" | "calm";
+  // success for a finished/ready turn, danger for a crash, calm neutral for
+  // launching / idle-pre-poll / done.
+  frame: "accent" | "warn" | "success" | "danger" | "calm";
 }
 
 function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
   const runtime = worker.runtimeState;
+  if (runtime === "launching") {
+    // Freshly detected agent, booting — calm/neutral steady dot, no pulse. Reads
+    // as "starting" so a just-launched agent doesn't imply it's already busy.
+    return {
+      status: "starting",
+      dot: "var(--muted-2)",
+      dotGlow: "none",
+      pulse: false,
+      frame: "calm",
+    };
+  }
   if (runtime === "working") {
     return {
       status: "working",
@@ -2279,7 +2300,7 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
   }
   if (runtime === "blocked") {
     return {
-      status: "waiting for you",
+      status: "needs you",
       dot: "var(--warn)",
       dotGlow: "0 0 9px color-mix(in oklch, var(--warn) 45%, transparent)",
       pulse: false,
@@ -2287,12 +2308,26 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
     };
   }
   if (runtime === "idle") {
+    // The WIRE "idle" means turn complete / your turn. Render it as a calm GREEN
+    // "ready" — distinct from the grey "done" so a finished turn reads as "ready
+    // for you", the key visual of the super-state-aware banner.
     return {
-      status: "idle",
-      dot: "var(--muted-2)",
-      dotGlow: "none",
+      status: "ready",
+      dot: "var(--ok)",
+      dotGlow: "0 0 9px color-mix(in oklch, var(--ok) 45%, transparent)",
       pulse: false,
-      frame: "calm",
+      frame: "success",
+    };
+  }
+  if (runtime === "error") {
+    // Non-zero pty exit / spawn failure — the agent crashed. Red danger frame
+    // with a steady dot; the chip stays visible until the pane is closed.
+    return {
+      status: "exited",
+      dot: "var(--danger)",
+      dotGlow: "0 0 9px color-mix(in oklch, var(--danger) 45%, transparent)",
+      pulse: false,
+      frame: "danger",
     };
   }
   if (runtime === "done") {
@@ -2352,23 +2387,42 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
   const tone = deriveChipTone(worker);
   const accent = tone.frame === "accent";
   const warn = tone.frame === "warn";
-  // Border / text colour by frame: accent (working), amber (needs-you), or a
-  // calm neutral (idle / done).
+  const success = tone.frame === "success";
+  const danger = tone.frame === "danger";
+  // The eyebrow/status text inherits the frame colour on any toned frame
+  // (accent / warn / success / danger) so the state word pops; a calm frame
+  // keeps the muted eyebrow.
+  const toned = accent || warn || success || danger;
+  // Border / text colour by frame: accent (working), amber (needs-you), green
+  // (ready/your turn), red (crashed), or a calm neutral (launching / idle-pre-
+  // poll / done).
   const frameColor = accent
     ? "var(--accent)"
     : warn
       ? "var(--warn)"
-      : "var(--ink-dim)";
+      : success
+        ? "var(--ok)"
+        : danger
+          ? "var(--danger)"
+          : "var(--ink-dim)";
   const frameEdge = accent
     ? "var(--accent-edge)"
     : warn
       ? "color-mix(in oklch, var(--warn) 40%, transparent)"
-      : "var(--rule)";
+      : success
+        ? "color-mix(in oklch, var(--ok) 40%, transparent)"
+        : danger
+          ? "color-mix(in oklch, var(--danger) 40%, transparent)"
+          : "var(--rule)";
   const frameGlow = accent
     ? "var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px var(--accent-glow)"
     : warn
       ? "var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px color-mix(in oklch, var(--warn) 30%, transparent)"
-      : "var(--lift-hi), 0 0 0 1px var(--rule-soft)";
+      : success
+        ? "var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px color-mix(in oklch, var(--ok) 30%, transparent)"
+        : danger
+          ? "var(--lift-hi), 0 0 0 1px var(--rule-soft), 0 0 14px color-mix(in oklch, var(--danger) 30%, transparent)"
+          : "var(--lift-hi), 0 0 0 1px var(--rule-soft)";
   return (
     <div
       className="spark-fade-in"
@@ -2438,7 +2492,7 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
           fontSize: 9,
           fontWeight: 600,
           letterSpacing: "0.14em",
-          color: accent || warn ? "currentcolor" : "var(--muted)",
+          color: toned ? "currentcolor" : "var(--muted)",
           overflow: "hidden",
           textOverflow: "ellipsis",
           minWidth: 0,

@@ -6,7 +6,9 @@ import type {
   NotificationChannelsPref,
   NotificationSoundKind,
   RunStatus,
+  RuntimeState,
   SparkEvent,
+  TerminalAgentStatePayload,
   TerminalAgentTarget,
 } from "@shared/types";
 import { subscribeToEvents } from "./orchestration/event-log";
@@ -507,6 +509,36 @@ export async function fireTerminalAgentAlert(alert: {
     terminal: alert.target,
     onNativeClick: () => focusTerminalTarget(alert.target),
   });
+}
+
+// Focus-independent live-state push for the terminal-agent worker chip. Sent
+// by terminal-agent-notify.ts on every turn-boundary transition it detects on
+// the RAW pty stream, SEPARATE from fireTerminalAgentAlert (the toast/rail dot)
+// and — crucially — NOT gated by the suppress-while-watching policy: the chip
+// must reflect "working → ready" even while the pane is hidden, which is the
+// one case the renderer's visible-buffer poller can't cover (it's frozen). We
+// reuse the same window getter the attention send uses (getMainWindow) so the
+// channel reaches the renderer through the live main window. Pure send — no
+// preference gate, no channel fanout; the chip is not a notification.
+export function emitTerminalAgentState(payload: {
+  workspaceId: string;
+  tabId: string;
+  paneId: string;
+  runtime: "claude" | "codex" | "cursor" | null;
+  state: RuntimeState;
+}): void {
+  try {
+    const wire: TerminalAgentStatePayload = {
+      workspaceId: payload.workspaceId,
+      tabId: payload.tabId,
+      paneId: payload.paneId,
+      runtime: payload.runtime,
+      state: payload.state,
+    };
+    getMainWindow()?.webContents.send("terminal-agent:state", wire);
+  } catch {
+    /* best-effort: chip update is non-critical */
+  }
 }
 
 function focusTerminalTarget(target: TerminalAgentTarget): void {

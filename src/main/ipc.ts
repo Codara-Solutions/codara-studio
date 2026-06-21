@@ -564,7 +564,7 @@ export function registerIpc(): void {
     // Gate only the root path here; downstream watcher events do not need a
     // per-event check (they all fire inside the gated root).
     if (root !== null) assertAllowedReadPath(root);
-    fsWatcher.setWatchRoot(e.sender, root);
+    await fsWatcher.setWatchRoot(e.sender, root);
   });
 
   // The renderer is authoritative about which workspaces are open, but the

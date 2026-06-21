@@ -319,6 +319,11 @@ function WorkspaceRail(props: RailProps) {
         }
         return (
           <FileTree
+            // Remount on workspace switch so Virtuoso scroll/cache state and any
+            // half-applied in-place tree mutation are fully reset; the reload
+            // effect already resets internal state, this just guarantees no
+            // stale scroll or partial mutation survives a fast switch.
+            key={cwd}
             cwd={cwd}
             activePath={props.activePath}
             onOpenFile={props.onOpenFileEntry}

@@ -77,12 +77,15 @@ export interface TerminalLeafWorker {
   // stream. Spark can finish the attempt before the user exits the TUI; once
   // the shell prompt is back, the pane should stop showing an agent chip.
   agentRunning?: boolean;
-  // Finer-grained live state of the foreground agent, polled from the visible
-  // xterm buffer by useTerminalSession's state poller (working / blocked /
-  // idle / done). Distinct from `state` (which is the attempt LIFECYCLE):
-  // `runtimeState` drives the chip's label + dot tone so a pane can read
-  // "working" (pulsing accent), "waiting for you" (steady amber, a permission/
-  // input prompt is up), "idle", or "done". Undefined until the poller reports.
+  // Finer-grained live state of the foreground agent. Two writers feed it: the
+  // visible-buffer poller in useTerminalSession (fast, freezes when the pane is
+  // hidden) and the focus-independent main-process notifier
+  // (terminal-agent-notify.ts → terminal-agent:state → App's onState effect),
+  // which covers the hidden case where a turn finishes off-screen. Distinct from
+  // `state` (the attempt LIFECYCLE): `runtimeState` drives the chip's label +
+  // dot tone — "launching" (calm "starting"), "working" (pulsing accent),
+  // "blocked" (steady amber "needs you"), "idle" (calm green "ready" — your
+  // turn), "error" (red "exited"), or "done". Undefined until the first report.
   runtimeState?: RuntimeState;
 }
 

@@ -211,14 +211,11 @@ export function isDraftChatTabId(id: TabId): boolean {
   return id.startsWith(DRAFT_CHAT_PREFIX);
 }
 
-// Guarantee at least one chat tab exists. Used after persistence load and
-// after destructive ops that could leave the strip without any chat — the
-// workspace's chat-first UX assumes one is always available.
-function ensureAnyChatTab(tabs: Tab[]): Tab[] {
-  if (tabs.some((tab) => tab.kind === "chat")) return tabs;
-  return [createDraftChatTab(), ...tabs];
-}
-
+// First-run seed for a brand-new workspace (nothing persisted): one draft
+// Spark Agent chat tab plus one terminal. Chat tabs are otherwise derived from
+// the run store, so this seed only ever applies on the very first launch of a
+// workspace — once any tab state is persisted, restores honor exactly what was
+// saved (including zero chat tabs after the user closes them).
 function defaultTabs(cwd?: string): Tab[] {
   return [createDraftChatTab(), createTerminalTab(cwd)];
 }
@@ -243,35 +240,37 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
     // layout. Keep persisted editor/terminal/preview tabs, then recreate the
     // Runs tab only when App selects a chat.
     // Chat tabs are now derived from the run store by the App-level sync
-    // effect. Stripping them on load means the workspace always starts with
-    // at least one fresh draft chat tab (via ensureAnyChatTab) until the
-    // effect rebuilds run-backed chat tabs.
-    parsed.tabs = ensureAnyChatTab(
-      normalizeTerminalTitles(
-        parsed.tabs
-          .filter(
-            (tab) =>
-              tab.kind !== "runs" &&
-              // Automations tabs are workspace-scoped derived surfaces (like
-              // Runs), not durable layout — they re-open on demand via the "+"
-              // picker rather than restoring from a persisted blob.
-              tab.kind !== "automations" &&
-              tab.kind !== "chat" &&
-              !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
-          )
-          // A persisted preview's runId ties it to a run whose workbench is
-          // not selected at boot, which would hide it inside an inner tab
-          // strip with no owning run — effectively unreachable. Strip the
-          // runId so it restores as a plain, clickable top-strip preview.
-          .map((tab) =>
-            tab.kind === "preview" && tab.runId
-              ? (() => {
-                  const { runId: _runId, ...rest } = tab;
-                  return rest as Tab;
-                })()
-              : tab,
-          ),
-      ),
+    // effect (syncChatTabsToRuns), so they are stripped here and rebuilt for
+    // every run NOT in closedChatRunIds once the runs load. We deliberately do
+    // NOT force-seed a chat tab on restore: a workspace whose user closed the
+    // Spark Agent tab restores with zero chat tabs and stays that way (the
+    // closed run stays reachable via the chat-history popover). First-run
+    // seeding of a draft chat tab happens only when there is NO persisted
+    // state at all — see initialTabsState's defaultTabs fallback.
+    parsed.tabs = normalizeTerminalTitles(
+      parsed.tabs
+        .filter(
+          (tab) =>
+            tab.kind !== "runs" &&
+            // Automations tabs are workspace-scoped derived surfaces (like
+            // Runs), not durable layout — they re-open on demand via the "+"
+            // picker rather than restoring from a persisted blob.
+            tab.kind !== "automations" &&
+            tab.kind !== "chat" &&
+            !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
+        )
+        // A persisted preview's runId ties it to a run whose workbench is
+        // not selected at boot, which would hide it inside an inner tab
+        // strip with no owning run — effectively unreachable. Strip the
+        // runId so it restores as a plain, clickable top-strip preview.
+        .map((tab) =>
+          tab.kind === "preview" && tab.runId
+            ? (() => {
+                const { runId: _runId, ...rest } = tab;
+                return rest as Tab;
+              })()
+            : tab,
+        ),
     );
     for (const tab of parsed.tabs) {
       if (tab.kind === "terminal") cleanupTransientTerminalState(tab.root);
@@ -403,16 +402,23 @@ function initialTabsState(
   closedChatRunIds: string[];
 } {
   const loaded = loadPersisted(workspaceId, scrollbackLineLimit);
-  if (loaded && loaded.tabs.length > 0) {
+  // A non-null `loaded` means this workspace HAS persisted tab state — even
+  // when its stripped tab list is empty (the user closed every tab, including
+  // the Spark Agent chat). Restore exactly that, with no forced chat tab: the
+  // App-level sync effect re-derives chat tabs for runs not in
+  // closedChatRunIds, and an intentionally empty workspace stays empty. Only a
+  // genuine FIRST RUN — loadPersisted returned null (nothing persisted, or a
+  // stale-version blob) — gets the defaultTabs seed (draft chat + terminal).
+  if (loaded) {
     let activeId =
       loaded.activeId && loaded.tabs.some((t) => t.id === loaded.activeId)
         ? loaded.activeId
-        : loaded.tabs[0].id;
+        : loaded.tabs[0]?.id ?? null;
     // Never boot onto a restored preview: its dev server is almost certainly
     // dead after a restart, and landing there hides the chat composer (the
     // center routes everything through one active id). Prefer the chat tab so
     // the app always opens on something the user can act in.
-    const resolved = loaded.tabs.find((t) => t.id === activeId);
+    const resolved = activeId ? loaded.tabs.find((t) => t.id === activeId) : null;
     if (resolved?.kind === "preview") {
       activeId = loaded.tabs.find((t) => t.kind === "chat")?.id ?? activeId;
     }
@@ -795,15 +801,25 @@ export function useTabs(
   const closeTab = useCallback(
     (id: TabId) => {
       setTabs((curr) => {
-        if (curr.length <= 1) return curr;
         const idx = curr.findIndex((t) => t.id === id);
         if (idx === -1) return curr;
+        // Chat tabs are NEVER closed through here. Their × routes through
+        // closeChatTabForRun, which is the only path that records the
+        // closedChatRunIds marker — without that marker syncChatTabsToRuns
+        // would resurrect the tab on the next runs refresh. closeTab removing a
+        // chat tab would silently break "close sticks", so it stays a no-op.
         if (curr[idx].kind === "chat") return curr;
+        // No length<=1 floor: a workspace is allowed to be emptied to zero
+        // tabs (the content area then renders the empty-workspace state with
+        // New chat / New terminal actions). The seed-a-tab fallbacks for
+        // worker/runs/pane closures elsewhere are intentional UX for those
+        // run-owned surfaces; the user-driven generic close honors the user.
         disposeTerminalTabPanes(curr[idx]);
         const next = curr.filter((t) => t.id !== id);
         setActiveId((active) => {
           if (active !== id) return active;
-          // Prefer the tab to the left, fall back to the first.
+          // Prefer the tab to the left, fall back to the first, else null
+          // (no tabs left → empty-workspace state).
           return next[Math.max(0, idx - 1)]?.id ?? next[0]?.id ?? null;
         });
         fireDispose(id);
@@ -1290,11 +1306,15 @@ export function useTabs(
           next.push({ ...t, root, activePaneId, zoomedPaneId });
         }
         if (next.length === 0) {
-          // Restoring the seed tab keeps the workbench from rendering an
-          // empty stack; matches closeTab's invariant.
-          const seed = defaultTabs(defaultCwdRef.current);
-          setActiveId(seed[0].id);
-          return seed;
+          // Closing the last pane of the workspace's last tab: reseed a single
+          // FRESH TERMINAL (not defaultTabs, which would also resurrect a chat
+          // tab the user may have deliberately closed). "Close the last pane →
+          // get a fresh shell" is the expected terminal UX, and it keeps the
+          // no-forced-chat invariant intact. The user can still empty fully to
+          // the empty-workspace state by closing tabs via the tab strip.
+          const seed = createTerminalTab(defaultCwdRef.current);
+          setActiveId(seed.id);
+          return [seed];
         }
         if (dropped) {
           setActiveId((active) => {
@@ -1518,8 +1538,18 @@ export function useTabs(
       // Prune closed-run ids no longer in the run list so the set can't grow
       // unbounded (deleted runs will never reappear, so their marker is dead
       // weight). Done outside the updater since it mutates a ref, not state.
+      //
+      // CRITICAL: only prune against a NON-EMPTY run list. The App sync effect
+      // fires with runs=[] on the very first render (before refreshRunsFor
+      // resolves) and on workspace switches. An empty list can't distinguish
+      // "this workspace genuinely has no runs" from "runs haven't loaded yet",
+      // so pruning then would wipe the closed markers and let the next
+      // non-empty sync resurrect a chat tab the user closed — defeating
+      // "close survives restart". Keeping a stale marker is harmless (worst
+      // case a few dead ids in the persisted array, cleared on the next
+      // non-empty sync); resurrecting a dismissed tab is not.
       const closed = currentClosedChatRunIds();
-      if (closed.size) {
+      if (closed.size && runList.length > 0) {
         for (const id of Array.from(closed)) {
           if (!runIds.has(id)) closed.delete(id);
         }
@@ -1557,13 +1587,12 @@ export function useTabs(
             changed = true;
           }
         }
+        // No forced chat tab here: a workspace whose chat tabs were all closed
+        // (or whose only runs are in the closed set) legitimately syncs to zero
+        // chat tabs and stays that way. The empty-workspace state + the "New
+        // chat" affordance in the top strip's "+" picker are the reopen path.
         const next = additions.length ? [...renamed, ...additions] : renamed;
-        // Workspace always shows at least one chat tab — re-seed a draft if
-        // the sync emptied them out (e.g. last run deleted on a fresh
-        // workspace with no draft).
-        const withChat = ensureAnyChatTab(next);
-        if (withChat !== next) changed = true;
-        return changed ? withChat : curr;
+        return changed ? next : curr;
       });
     },
     [],
@@ -1627,19 +1656,43 @@ export function useTabs(
     // next runs refresh (the close contract: the run stays reachable via the
     // history popover, the tab stays gone). Drafts have no run to re-derive,
     // so they need no tracking.
-    if (!isDraftChatTabId(runId)) currentClosedChatRunIds().add(runId);
+    if (!isDraftChatTabId(runId)) {
+      currentClosedChatRunIds().add(runId);
+      // Persist the dismissed-run marker SYNCHRONOUSLY, not just via the 300ms
+      // debounce. The debounced write (and the unmount flush) can be lost if
+      // the user closes the chat and immediately quits — React doesn't unmount
+      // on a hard quit, and the beforeunload scrollback flush early-returns
+      // when no pane scrollback changed, so it would never carry this marker.
+      // Writing here (tabs deliberately UNCHANGED — chat tabs are stripped on
+      // load regardless; the debounce re-persists the filtered list shortly)
+      // guarantees the close survives an instant relaunch. Best-effort: persist
+      // swallows storage errors internally.
+      persist(
+        tabsWorkspaceIdRef.current,
+        tabsRef.current,
+        activeIdRef.current,
+        terminalScrollbackLineLimitRef.current,
+        closedChatRunIdsArray(),
+      );
+    }
     setTabs((curr) => {
       const target = curr.find((t) => t.kind === "chat" && t.id === runId);
       if (!target) return curr;
+      // Close-only and it STICKS: no ensureAnyChatTab re-seed. Closing the last
+      // chat tab leaves the workspace with only its other tabs (terminals,
+      // editors, previews) — or zero tabs, which renders the empty-workspace
+      // state. The run stays on disk and reachable via the chat-history
+      // popover; the closedChatRunIds marker added above keeps
+      // syncChatTabsToRuns from resurrecting the tab on the next runs refresh.
       const next = curr.filter((t) => t.id !== runId);
-      const withChat = ensureAnyChatTab(next);
-      // Reroute active selection if the closed tab was active.
+      // Reroute active selection if the closed tab was active: prefer another
+      // chat tab, then any remaining tab, else null (→ empty state).
       setActiveId((active) => {
         if (active !== runId) return active;
-        const fallbackChat = withChat.find((t) => t.kind === "chat");
-        return fallbackChat?.id ?? withChat[0]?.id ?? null;
+        const fallbackChat = next.find((t) => t.kind === "chat");
+        return fallbackChat?.id ?? next[0]?.id ?? null;
       });
-      return withChat;
+      return next;
     });
   }, []);
 
@@ -1801,9 +1854,12 @@ export function useTabs(
       const next = curr.filter((t) => t.kind !== "runs");
       if (next.length === curr.length) return curr;
       if (next.length === 0) {
-        const seed = defaultTabs(defaultCwdRef.current);
-        setActiveId(seed[0].id);
-        return seed;
+        // Reseed a bare terminal, NOT defaultTabs (chat + terminal): a chat tab
+        // here could resurrect one the user deliberately closed. (Reaching this
+        // branch requires a workspace holding only runs tabs, which is rare.)
+        const seed = createTerminalTab(defaultCwdRef.current);
+        setActiveId(seed.id);
+        return [seed];
       }
       setActiveId((active) => {
         if (active && next.some((tab) => tab.id === active)) return active;
@@ -1818,8 +1874,9 @@ export function useTabs(
   }, []);
 
   // Close the runs tab bound to `runId` (called when a chat is deleted). If
-  // it is the only tab, seed a terminal tab instead — the workbench never
-  // shows an empty global Runs placeholder.
+  // it is the only tab, seed a bare terminal tab instead — the workbench never
+  // shows an empty global Runs placeholder, but we must NOT reseed a chat tab
+  // (defaultTabs) here, which would resurrect one the user closed.
   const closeRunsTabFor = useCallback(
     (runId: string) => {
       setTabs((curr) => {
@@ -1829,10 +1886,10 @@ export function useTabs(
         if (idx === -1) return curr;
         const tabId = curr[idx].id;
         if (curr.length <= 1) {
-          const seed = defaultTabs(defaultCwdRef.current);
-          setActiveId(seed[0].id);
+          const seed = createTerminalTab(defaultCwdRef.current);
+          setActiveId(seed.id);
           fireDispose(tabId);
-          return seed;
+          return [seed];
         }
         const next = curr.filter((_, i) => i !== idx);
         setActiveId((active) =>
@@ -1856,9 +1913,12 @@ export function useTabs(
       const tabId = curr[idx].id;
       disposeTerminalTabPanes(curr[idx]);
       if (curr.length <= 1) {
-        const seed = defaultTabs(defaultCwdRef.current);
-        setActiveId(seed[0].id);
-        return seed;
+        // Reseed a bare terminal, NOT defaultTabs (chat + terminal): on a run
+        // deletion that empties the workspace, a reseeded chat tab would
+        // resurrect one the user previously closed.
+        const seed = createTerminalTab(defaultCwdRef.current);
+        setActiveId(seed.id);
+        return [seed];
       }
       const next = curr.filter((_, i) => i !== idx);
       setActiveId((active) =>

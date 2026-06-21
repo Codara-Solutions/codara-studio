@@ -272,6 +272,13 @@ export default function App() {
   const panels = usePanelLayout();
   const panelsRef = useRef(panels);
   panelsRef.current = panels;
+  // User preferences, hoisted to the top of App so callbacks defined before the
+  // shortcuts wiring (e.g. handleDetectedUrl, ~auto-preview gating) can read the
+  // latest values via the ref without re-subscribing. The shortcuts block below
+  // reuses this same `preferences` object.
+  const { preferences } = usePreferences();
+  const preferencesRef = useRef(preferences);
+  preferencesRef.current = preferences;
   const [draggingPanelSection, setDraggingPanelSection] = useState<PanelSectionKey | null>(null);
   const saveTimer = useRef<number | null>(null);
   // Trailing-debounce timer for the orchestration-event → listRuns refresh.
@@ -870,8 +877,15 @@ export default function App() {
           tabsRef.current.closeRunsTabFor(event.runId);
           tabsRef.current.closeWorkerTerminalTabFor(event.runId);
           // Drop the chat tab too, so the active selection can't keep pointing
-          // at a deleted run until the debounced refresh catches up.
-          tabsRef.current.closeChatTabForRun(event.runId);
+          // at a deleted run until the debounced refresh catches up. Unlike the
+          // two calls above (which only mutate the active workspace's setTabs and
+          // no-op for foreign runs), closeChatTabForRun writes the active
+          // workspace's persisted closedChatRunIds set as a side-effect — so gate
+          // it to the owning workspace, else a background workspace's deletion
+          // leaks a dead id into the active workspace's dismissed-set.
+          if (event.workspaceId === activeIdRef.current) {
+            tabsRef.current.closeChatTabForRun(event.runId);
+          }
         }
         const deletedWorkspaceId = event.workspaceId;
         window.setTimeout(() => {
@@ -1252,6 +1266,69 @@ export default function App() {
     return () => off?.();
   }, []);
 
+  // ── Terminal-agent live chip state (focus-independent) ──────────────────
+  // The main-process notifier derives working/blocked/idle/done turn boundaries
+  // from the RAW pty stream, so this fires even while the pane is hidden/
+  // unfocused — exactly when the renderer's own visible-buffer poller is frozen
+  // and the chip would otherwise stay stuck on "working". We write the state
+  // onto the matching leaf.worker.runtimeState the same way
+  // onTerminalPaneRuntimeState does, with two differences:
+  //   1. We accept EVERY RuntimeState (incl. "idle"/"done"/"launching"). Unlike
+  //      the synchronous poller path, this is a separate IPC turn — it is not in
+  //      the resurrection-hazard stack onTerminalPaneRuntimeState guards against
+  //      (where a same-tick "done" would re-mint a just-removed chip).
+  //   2. We NEVER mint a worker (guard `if (!existing) return`). A late
+  //      "done"/"idle" arriving after the manual chip was already removed (by
+  //      onTerminalPaneAgentState running:false, or onTerminalPaneExit) must
+  //      no-op rather than resurrect a dead chip.
+  // Reconciliation with the visible poller: both writers just set runtimeState.
+  // When the pane is visible the fast poller dominates (300ms ticks); when
+  // hidden these notifier events are the only updates arriving. Neither
+  // resurrects a removed worker, so they coexist without precedence logic.
+  useEffect(() => {
+    const off = window.spark.terminalNotify?.onState?.((payload) => {
+      if (!payload?.tabId || !payload.paneId || !payload.state) return;
+      const t = tabsRef.current;
+      const tab = t.tabs.find((item) => item.id === payload.tabId);
+      if (!tab || tab.kind !== "terminal") return;
+      const leaf = findLeafByPaneId(tab.root, payload.paneId);
+      const existing = leaf?.worker;
+      // Never mint a worker — a late event after the chip was removed no-ops.
+      if (!existing) return;
+      // A pane already flipped to "error" is showing a crash (non-zero pty
+      // exit, set by onTerminalPaneExit, which owns the pty-death case because
+      // it has the exit code). That red "exited" chip must persist until the
+      // user closes the pane, so ignore ANY later notifier state event for it —
+      // a notifier "exited"-block "done" arriving on the same teardown must not
+      // race in and tear the error chip back down.
+      if (existing.runtimeState === "error") return;
+      // "done" = the foreground TUI exited. Mirror onTerminalPaneAgentState's
+      // running:false teardown rather than writing runtimeState:"done" onto a
+      // live chip (which `visibleWorkerChip` would keep showing as a stale grey
+      // badge while the lifecycle `state` is still "running"). Manual chips have
+      // no lifecycle outside the pane → clear them; Spark chips keep their run
+      // metadata but drop agentRunning so the run store owns completion.
+      if (payload.state === "done") {
+        if (existing.source === "spark") {
+          if (existing.agentRunning === false) return;
+          t.setLeafWorker(payload.tabId, payload.paneId, {
+            ...existing,
+            agentRunning: false,
+          });
+        } else {
+          t.setLeafWorker(payload.tabId, payload.paneId, null);
+        }
+        return;
+      }
+      if (existing.runtimeState === payload.state) return;
+      t.setLeafWorker(payload.tabId, payload.paneId, {
+        ...existing,
+        runtimeState: payload.state,
+      });
+    });
+    return () => off?.();
+  }, []);
+
   // Attention is "seen" once the user lands on the pane's tab — also prune
   // entries whose tab no longer exists so a closed tab can't pin the dot
   // forever. Reads tabsRef so the focus listener below can reuse it.
@@ -1566,6 +1643,20 @@ export default function App() {
       color,
       workers: [],
     };
+    // Part A — push the new root onto the main read-sandbox allowlist BEFORE we
+    // make the workspace active. Otherwise FileTree mounts and fires
+    // fs:list / fs:setWatchRoot for the new cwd before the parent effect (~752)
+    // gets a chance to re-send the allowed roots — child effects run before
+    // parent effects — so those calls throw "Path not allowed" and the watcher
+    // is never armed. Awaiting the same setAllowedRoots call the parent effect
+    // uses (current workspace cwds + the new one) closes that race. Best-effort:
+    // a failure only restricts reads, and the parent effect re-sends anyway.
+    const existingCwds = workspaces
+      .map((w) => w.cwd)
+      .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
+    await window.spark.ui?.setAllowedRoots([...existingCwds, ws.cwd]).catch(() => {
+      /* sandbox push is best-effort; the parent effect re-sends on state change */
+    });
     setWorkspaces((list) => [...list, ws]);
     activeRunIdsByWorkspaceRef.current[ws.id] = null;
     setActiveId(ws.id);
@@ -1770,6 +1861,27 @@ export default function App() {
       }
       if (port === null || !AUTO_PREVIEW_PORTS.has(port)) return;
 
+      // Part C — auto-open is opt-in. When the user hasn't enabled it, stop
+      // here: the detected-URL chip above already ran (setDetectedUrl +
+      // broadcast), so the user can click to open the preview, but Spark never
+      // yanks a preview tab open on its own.
+      if (preferencesRef.current.autoOpenPreview !== true) return;
+
+      // Belt-and-suspenders (Part C3): never auto-open from an agent/worker
+      // pane, even with the pref on — an agent's own dev server must not spawn a
+      // preview. A pane is "agent-owned" if its tab is a Spark workers-scoped
+      // terminal tab OR the source leaf currently hosts a worker chip (manual
+      // claude/codex panes are exactly this case). Those still get the click-to-
+      // open chip; they just never auto-open.
+      const sourceTab = tabs.tabs.find((t) => t.id === tabId);
+      const isWorkerScopedTab =
+        sourceTab?.kind === "terminal" && sourceTab.scope?.kind === "workers";
+      const sourceLeaf =
+        sourceTab?.kind === "terminal"
+          ? findLeafByPaneId(sourceTab.root, paneId)
+          : null;
+      if (isWorkerScopedTab || sourceLeaf?.worker) return;
+
       // Suppress repeats for this pane pointing at the same origin — keyed
       // by paneId, not tabId, so two split panes running different dev
       // servers each get their own auto-preview.
@@ -1787,8 +1899,9 @@ export default function App() {
       if (existing) return;
       // Inherit the worker's runId so the chat panel can render this preview
       // inside its inner tab strip; URLs detected on a plain (non-worker)
-      // terminal stay top-level by leaving runId undefined.
-      const sourceTab = tabs.tabs.find((t) => t.id === tabId);
+      // terminal stay top-level by leaving runId undefined. (Worker panes are
+      // excluded above, so ownerRunId is always null here today — kept for the
+      // shape the chat panel expects.)
       const ownerRunId =
         sourceTab?.kind === "terminal" && sourceTab.scope?.kind === "workers"
           ? sourceTab.scope.runId
@@ -1938,13 +2051,28 @@ export default function App() {
     tabs.openAutomationsTab();
   }, [tabs]);
 
-  // Chat-tab "×" — close-only. Drafts dissolve locally; run-backed chats
-  // only have their tab removed from the top strip. The run stays on disk
-  // and shows up in the chat-history popover so the user can reopen it
-  // later. Permanent deletion is reserved for the history popover's
-  // per-row delete button.
+  // Chat-tab "×" — close-only, and it STICKS (no auto-respawn). Drafts dissolve
+  // locally; run-backed chats only have their top-strip tab removed and a
+  // closedChatRunIds marker recorded so the runs-sync effect won't resurrect
+  // them. The run stays on disk and shows up in the chat-history popover so the
+  // user can reopen it later (which clears the marker). Permanent deletion is
+  // reserved for the history popover's per-row delete button.
   const handleCloseChatTab = useCallback(
     (id: TabId) => {
+      // If the closed chat is the active run, also clear the run selection and
+      // collapse its inner-strip artifacts (Runs canvas, worker/preview pills).
+      // Their PTYs keep running — isTabVisibleForRun just hides worker tabs once
+      // they no longer match activeRunId — so this is still close-only: nothing
+      // is disposed, and reopening the run from history brings the artifacts
+      // back. Without this, closing the chat would strand a Runs/worker inner
+      // strip under no chat panel.
+      if (!isDraftChatTabId(id) && activeRunIdRef.current === id) {
+        const workspaceId = activeIdRef.current;
+        if (workspaceId) activeRunIdsByWorkspaceRef.current[workspaceId] = null;
+        activeRunIdRef.current = null;
+        setActiveRunId(null);
+        tabs.hideRunsTabs();
+      }
       tabs.closeChatTabForRun(id);
     },
     [tabs],
@@ -2112,7 +2240,20 @@ export default function App() {
       "worker.newCodex": () => handleNewWorkerTab(CODEX_LAUNCH_COMMAND),
       "worker.newCursor": () => handleNewWorkerTab(CURSOR_LAUNCH_COMMAND),
       "tab.close": () => {
-        if (activeVisibleTabId) tabs.closeTab(activeVisibleTabId);
+        if (!activeVisibleTabId) return;
+        const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
+        // Chat tabs close-and-stick through handleCloseChatTab — the SAME path
+        // as the tab's × button — so the dismissed-run marker is recorded AND
+        // the active run / inner-strip artifacts are cleared. Routing straight
+        // to closeChatTabForRun here would skip that activeRunId cleanup and
+        // strand the run's Runs/worker inner strip under no chat panel.
+        // closeTab no-ops on chat tabs by design. Everything else closes
+        // through the generic path.
+        if (active?.kind === "chat") {
+          handleCloseChatTab(active.id);
+        } else {
+          tabs.closeTab(activeVisibleTabId);
+        }
       },
       "tab.closeOthers": () => {
         if (activeVisibleTabId) tabs.closeOthers(activeVisibleTabId);
@@ -2171,13 +2312,14 @@ export default function App() {
       handleNewPreviewTab,
       handleNewTerminalTab,
       handleNewWorkerTab,
+      handleCloseChatTab,
       activeVisibleTabId,
       tabs,
       visibleWorkbenchTabs,
     ],
   );
 
-  const { preferences: shortcutPreferences } = usePreferences();
+  const shortcutPreferences = preferences;
   const bindingTable = useMemo(
     () => buildBindingTable(shortcutPreferences.keybindings),
     [shortcutPreferences.keybindings],
@@ -2210,25 +2352,50 @@ export default function App() {
   // already calls pty.dispose on unmount, so this handler is intentionally
   // a no-op for unmount cases — but we keep the seam so future "exited
   // pane → auto-close" UX can hook in here without touching every call site.
-  const onTerminalPaneExit = useCallback((tabId: string, paneId: string) => {
-    paneRuntimeRef.current.delete(paneId);
-    const t = tabsRef.current;
-    const tab = t.tabs.find((item) => item.id === tabId);
-    if (!tab || tab.kind !== "terminal") return;
-    const leaf = findLeafByPaneId(tab.root, paneId);
-    if (!leaf?.worker) return;
-    // Manual chips (user-typed claude/codex, or AddPane menu launches) and
-    // legacy chips without an explicit source have no lifecycle outside the
-    // pane. Clear them outright when the PTY dies so an idle shell never keeps
-    // displaying a stale "DONE" badge after the agent quits.
-    if (leaf.worker.source !== "spark") {
-      t.setLeafWorker(tabId, paneId, null);
-      return;
-    }
-    // A PTY exit is not the worker completion signal. Spark-owned panes move
-    // to "done" only when orchestration emits worker_attempt.finished.
-    t.setLeafWorker(tabId, paneId, { ...leaf.worker, agentRunning: false });
-  }, []);
+  const onTerminalPaneExit = useCallback(
+    (tabId: string, paneId: string, info?: { exitCode: number; signal?: number }) => {
+      paneRuntimeRef.current.delete(paneId);
+      const t = tabsRef.current;
+      const tab = t.tabs.find((item) => item.id === tabId);
+      if (!tab || tab.kind !== "terminal") return;
+      const leaf = findLeafByPaneId(tab.root, paneId);
+      if (!leaf?.worker) return;
+      // D5 (error). A non-zero pty exit is a crash, not a clean finish. Keep
+      // the chip visible so the user sees "exited(N)" in red rather than the
+      // pane silently dropping its badge. Applies to manual chips (a Spark-owned
+      // attempt that crashed is surfaced through the run-store lifecycle, so we
+      // only flip its agentRunning bit below as before). Treat a non-zero code
+      // OR a terminating signal as a crash; exit code 0 is a normal teardown.
+      const crashed =
+        !!info && (info.exitCode !== 0 || (typeof info.signal === "number" && info.signal !== 0));
+      // Manual chips (user-typed claude/codex, or AddPane menu launches) and
+      // legacy chips without an explicit source have no lifecycle outside the
+      // pane. Clear them outright when the PTY dies so an idle shell never keeps
+      // displaying a stale "DONE" badge after the agent quits — UNLESS it
+      // crashed, in which case we surface the error state instead of hiding it.
+      if (leaf.worker.source !== "spark") {
+        if (crashed) {
+          t.setLeafWorker(tabId, paneId, {
+            ...leaf.worker,
+            agentRunning: false,
+            runtimeState: "error",
+          });
+          return;
+        }
+        t.setLeafWorker(tabId, paneId, null);
+        return;
+      }
+      // A PTY exit is not the worker completion signal. Spark-owned panes move
+      // to "done" only when orchestration emits worker_attempt.finished. A crash
+      // still surfaces "error" on the chip so the pane doesn't read as healthy.
+      t.setLeafWorker(tabId, paneId, {
+        ...leaf.worker,
+        agentRunning: false,
+        ...(crashed ? { runtimeState: "error" as const } : {}),
+      });
+    },
+    [],
+  );
 
   // useTerminalSession sniffs the PTY byte stream for the alt-screen toggle
   // every Ink TUI (claude / codex) emits and tells us when one enters or
@@ -3121,7 +3288,11 @@ interface WorkspaceProps {
   ) => void;
   onDetectedUrl: (tabId: string, paneId: string, url: string) => void;
   onSparkOpenFile: (path: string) => void;
-  onTerminalPaneExit: (tabId: string, paneId: string) => void;
+  onTerminalPaneExit: (
+    tabId: string,
+    paneId: string,
+    info?: { exitCode: number; signal?: number },
+  ) => void;
   onPreviewUrlChange: (id: string, url: string) => void;
   onPaneCwd: (tabId: string, paneId: string, cwd: string) => void;
   onPaneActivity: (tabId: string, paneId: string) => void;
@@ -3366,7 +3537,8 @@ const Workspace = React.memo(function Workspace({
     [onSparkOpenFile],
   );
   const handlePaneExit = useCallback(
-    (tabId: string, paneId: string) => onTerminalPaneExit(tabId, paneId),
+    (tabId: string, paneId: string, info: { exitCode: number; signal?: number }) =>
+      onTerminalPaneExit(tabId, paneId, info),
     [onTerminalPaneExit],
   );
   const handleActivatePane = useCallback(
@@ -3446,6 +3618,9 @@ const Workspace = React.memo(function Workspace({
         />
       )}
       <div style={{ flex: 1, position: "relative", minWidth: 0, minHeight: 0 }}>
+        {visibleTabs.length === 0 && (
+          <EmptyWorkbench onNewChat={onNewChat} onNewTerminal={onNewTerminalTab} />
+        )}
         <ChatStack
           tabs={visibleTabs}
           activeId={effectiveActiveId}
@@ -3613,6 +3788,120 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
         >
           ~/.SparkAgent
         </span>
+      </div>
+    </div>
+  );
+});
+
+// Centered empty state for a workspace whose tab strip has been emptied — e.g.
+// the user closed the Spark Agent chat and every terminal. The close STICKS
+// (no tab is auto-respawned), so this is a legitimate resting state, not an
+// error; it gives the user the two obvious ways back in. The "+" picker in the
+// top strip offers the same actions plus Open file / Preview / Automations.
+const EmptyWorkbench = React.memo(function EmptyWorkbench({
+  onNewChat,
+  onNewTerminal,
+}: {
+  onNewChat: () => void;
+  onNewTerminal: () => void;
+}) {
+  const buttonStyle: React.CSSProperties = {
+    appearance: "none",
+    background: "transparent",
+    border: "1px solid var(--rule-strong)",
+    borderRadius: 6,
+    boxShadow: "var(--lift-hi)",
+    color: "var(--ink-dim)",
+    padding: "10px 18px",
+    fontFamily: "var(--font-sans)",
+    fontSize: 12,
+    letterSpacing: "0.04em",
+    fontWeight: 600,
+    cursor: "default",
+    transition:
+      "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+  };
+  const onEnter = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.currentTarget.style.background = "var(--accent-soft)";
+    e.currentTarget.style.borderColor = "var(--accent-edge)";
+    e.currentTarget.style.color = "var(--ink)";
+  };
+  const onLeave = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.currentTarget.style.background = "transparent";
+    e.currentTarget.style.borderColor = "var(--rule-strong)";
+    e.currentTarget.style.color = "var(--ink-dim)";
+  };
+  return (
+    <div
+      style={{
+        position: "absolute",
+        inset: 0,
+        // Above the (null-or-hidden) tab stacks so the buttons are always
+        // clickable even if a worker terminal pane stays mounted-but-hidden.
+        zIndex: 2,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 12,
+        background: "var(--bg)",
+        backgroundImage:
+          "radial-gradient(circle, var(--rule-soft) 1px, transparent 1px)",
+        backgroundSize: "24px 24px",
+        color: "var(--muted)",
+        padding: 32,
+        textAlign: "center",
+      }}
+    >
+      <div className="spark-eyebrow" style={{ marginBottom: 2 }}>
+        No tabs open
+      </div>
+      <div
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 24,
+          fontWeight: 700,
+          color: "var(--ink)",
+          letterSpacing: "-0.005em",
+        }}
+      >
+        Nothing open here
+      </div>
+      <div
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 13,
+          fontWeight: 400,
+          color: "var(--ink-dim)",
+          marginBottom: 8,
+        }}
+      >
+        Start a new chat with Spark, or open a terminal. Past chats are still in
+        the history popover.
+      </div>
+      <div style={{ display: "inline-flex", gap: 10 }}>
+        <button
+          type="button"
+          onClick={onNewChat}
+          style={{ ...buttonStyle, color: "var(--accent)", borderColor: "var(--accent-edge)" }}
+          onMouseEnter={onEnter}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = "transparent";
+            e.currentTarget.style.borderColor = "var(--accent-edge)";
+            e.currentTarget.style.color = "var(--accent)";
+          }}
+        >
+          + New chat
+        </button>
+        <button
+          type="button"
+          onClick={onNewTerminal}
+          style={buttonStyle}
+          onMouseEnter={onEnter}
+          onMouseLeave={onLeave}
+        >
+          + New terminal
+        </button>
       </div>
     </div>
   );

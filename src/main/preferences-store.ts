@@ -194,6 +194,10 @@ function normalize(
       typeof src.keepRunningInBackground === "boolean"
         ? src.keepRunningInBackground
         : DEFAULT_PREFERENCES.keepRunningInBackground,
+    autoOpenPreview:
+      typeof src.autoOpenPreview === "boolean"
+        ? src.autoOpenPreview
+        : DEFAULT_PREFERENCES.autoOpenPreview,
     copyBranchSetupCommandByRepo: normalizeCopyBranchSetupCommands(
       src.copyBranchSetupCommandByRepo,
     ),

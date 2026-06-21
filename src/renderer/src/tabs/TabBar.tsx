@@ -27,8 +27,9 @@ const HOVER_ACTIVATE_MS = 350;
 //     a single-axis wheel mouse to navigate when many tabs are open.
 //   - The active tab is scrolled into view on every selection change.
 //   - The "+" button opens a small dropdown with kinds the user can spawn.
-//   - Closing the last tab is a no-op on the store side; we still render
-//     the close button for kinds with len > 1.
+//   - Every tab is closable down to zero: a workspace may end up with only
+//     terminal tabs, or none at all (the content area then shows the
+//     empty-workspace state). Chat tabs close-and-stick via closeChatTabForRun.
 //   - Middle-click closes a tab (mouseup button === 1).
 
 interface Props {
@@ -371,7 +372,12 @@ function TabBar({
               key={t.id}
               tab={t}
               active={t.id === activeId}
-              canClose={tabs.length > 1}
+              // Always closable: a workspace is now allowed to empty to zero
+              // tabs (→ the empty-workspace state with New chat / New terminal).
+              // The old `tabs.length > 1` floor would hide the × / block
+              // middle-click on the last top-strip tab, making the empty state
+              // unreachable by clicking. closeTab no longer enforces a floor.
+              canClose
               paneDragHover={t.id === paneHoverTabId}
               onSelect={onSelect}
               onClose={onClose}
@@ -686,8 +692,10 @@ const TabItem = React.memo(function TabItem({
 // ChatTabItem: the top tab strip's chat-kind entry. Hover reveals a pencil
 // (inline rename) and an × (close chat). Idle state shows just the title and
 // kind dot so a strip of many chats reads as a clean list. Close is always
-// available — the workspace re-seeds a fresh draft chat tab if the last one
-// closes (see closeChatTabForRun).
+// available and STICKS: closing the last chat tab does not re-seed one — the
+// workspace can hold only terminal tabs, or none (the empty-workspace state
+// then offers "New chat"). The run stays reachable via the history popover;
+// see closeChatTabForRun + the closedChatRunIds dismissed set in useTabs.
 interface ChatTabItemProps {
   tab: ChatTab;
   active: boolean;

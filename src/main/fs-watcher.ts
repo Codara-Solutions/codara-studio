@@ -1,4 +1,4 @@
-import { watch, readdirSync, FSWatcher } from "node:fs";
+import { watch, readdirSync, promises as fsp, FSWatcher } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { WebContents } from "electron";
 import type { FsChangeEvent } from "@shared/types";
@@ -85,7 +85,16 @@ function watchTopLevelDir(
   return true;
 }
 
-export function setWatchRoot(webContents: WebContents, root: string | null): void {
+// How many top-level directory watchers to install before yielding the event
+// loop. Enumerating a large repo's root is cheap, but spinning up dozens of
+// recursive watchers in one synchronous burst can still stall; batching with a
+// setImmediate yield between chunks keeps the main thread responsive.
+const WATCH_INSTALL_BATCH = 16;
+
+export async function setWatchRoot(
+  webContents: WebContents,
+  root: string | null,
+): Promise<void> {
   const id = webContents.id;
   const existing = byContents.get(id);
   if (existing) {
@@ -146,20 +155,43 @@ export function setWatchRoot(webContents: WebContents, root: string | null): voi
   });
   state.watchers.set(root, rootWatcher);
 
+  // Register the state synchronously (with the root watcher already armed) so
+  // the caller's await resolves once top-level activity is observable, and so a
+  // rapid subsequent setWatchRoot call sees this state to tear it down. The
+  // per-directory recursive watchers are then installed asynchronously below.
+  byContents.set(id, state);
+
   // Enumerate the root's immediate entries and spin up one recursive watcher
-  // per non-ignored top-level directory. Failures here are non-fatal: the root
-  // watcher above still observes top-level activity.
+  // per non-ignored top-level directory. This was a synchronous readdirSync +
+  // a burst of recursive fs.watch calls, which froze the main thread when
+  // opening a large workspace. Do it with async fs.promises.readdir and batch
+  // the watcher installs (yielding via setImmediate between chunks) so opening
+  // a big repo doesn't block. Failures are non-fatal: the root watcher above
+  // still observes top-level activity.
+  let entries: import("node:fs").Dirent[];
   try {
-    for (const entry of readdirSync(root, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      if (IGNORED_TOP_LEVEL.has(entry.name)) continue;
-      watchTopLevelDir(state, webContents, resolve(root, entry.name));
-    }
+    entries = await fsp.readdir(root, { withFileTypes: true });
   } catch (err) {
     console.warn("[fs-watcher] failed to enumerate", root, err);
+    return;
   }
 
-  byContents.set(id, state);
+  // Bail if this watcher state was superseded (another setWatchRoot ran, or the
+  // root was cleared) or its webContents was destroyed while we awaited the
+  // readdir — installing watchers now would leak handles onto a dead state.
+  if (byContents.get(id) !== state || webContents.isDestroyed()) return;
+
+  let installed = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (IGNORED_TOP_LEVEL.has(entry.name)) continue;
+    watchTopLevelDir(state, webContents, resolve(root, entry.name));
+    if (++installed % WATCH_INSTALL_BATCH === 0) {
+      await new Promise<void>((res) => setImmediate(res));
+      // Re-check supersession after each yield for the same reason as above.
+      if (byContents.get(id) !== state || webContents.isDestroyed()) return;
+    }
+  }
 }
 
 export function disposeForWebContents(webContents: WebContents): void {

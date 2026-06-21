@@ -240,6 +240,11 @@ export interface AppPreferences {
   // and keeps the process alive so main-process timers (automations / loops)
   // keep firing instead of quitting. Quit explicitly from the tray menu.
   keepRunningInBackground?: boolean;
+  // When true, a localhost dev URL sniffed from any terminal pane's stdout
+  // auto-opens a preview tab. Default false: the detected-URL chip still shows
+  // so the user can click to open, but Spark never yanks a tab open on its own
+  // (and agent/worker panes never auto-open a preview regardless of this flag).
+  autoOpenPreview?: boolean;
   // "Create copy branch" setup command, keyed by absolute repo cwd. Run live
   // in a terminal in the new worktree after creation. Repos with no entry use
   // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
@@ -336,7 +341,8 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keybindings: {},
   disableHardwareAcceleration: false,
   notificationChannels: { ...DEFAULT_NOTIFICATION_CHANNELS },
-  keepRunningInBackground: false,
+  keepRunningInBackground: true,
+  autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},
 };
 
@@ -390,6 +396,24 @@ export interface TerminalAgentTarget {
 export interface TerminalAgentAttentionPayload {
   target: TerminalAgentTarget;
   kind: InAppNotificationKind;
+}
+
+// Focus-independent live-state push from the main-process terminal-agent
+// notifier (terminal-agent-notify.ts) to the renderer's worker chip. Unlike
+// TerminalAgentAttentionPayload (the rail dot, which is gated by the
+// suppress-while-watching policy), this fires on EVERY turn-boundary transition
+// regardless of whether the user is looking at the pane — the chip must update
+// even while the pane is hidden, which is exactly when the renderer's own
+// visible-buffer poller is frozen and can't. The renderer routes `state` onto
+// the matching leaf.worker.runtimeState (it never mints a new worker — a late
+// event after the chip was removed no-ops). `runtime` is best-effort; null
+// means the notifier hasn't identified the CLI.
+export interface TerminalAgentStatePayload {
+  workspaceId: string;
+  tabId: string;
+  paneId: string;
+  runtime: "claude" | "codex" | "cursor" | null;
+  state: RuntimeState;
 }
 
 export type NotificationSoundKind = "needs-you" | "done";
@@ -907,22 +931,34 @@ export type WorkerAttemptStatus =
   | "timed_out"
   | "cancelled";
 
-// Live agent state, sniffed by the renderer-side terminal poller (300ms tick,
-// 2-tick confirm). Orthogonal to WorkerAttemptStatus — that lifecycle is owned
-// by orchestration, this one mirrors what the agent's TUI is doing right now
-// inside its pane. Used to drive the worker chip tone (live spinner vs steady
-// red vs unseen-done) and to trigger downstream notifications.
+// Live agent state. Two writers feed it: (1) the renderer-side terminal poller
+// (300ms tick, 2-tick confirm) over the VISIBLE xterm buffer, which freezes the
+// moment a pane is hidden/unfocused or its workspace is switched away; and (2)
+// the main-process notifier (terminal-agent-notify.ts) reading the RAW pty
+// stream, which is focus-independent and is the only writer that arrives while
+// the pane is hidden — exactly when a turn completes off-screen. Orthogonal to
+// WorkerAttemptStatus — that lifecycle is owned by orchestration, this one
+// mirrors what the agent's TUI is doing right now inside its pane. Drives the
+// worker chip tone (pulsing accent vs steady amber vs ready-green vs done) and
+// downstream notifications.
+//   - "launching": an agent has just been detected / is booting; reported
+//                  before the first working/idle classification resolves so a
+//                  freshly-launched agent reads as "starting", not busy.
 //   - "working" : the agent is actively thinking / streaming tokens.
 //   - "blocked" : the agent is waiting for the user (permission prompt,
 //                 confirmation, "do you want to proceed?").
-//   - "idle"    : no working/blocked patterns seen for the debounce window.
-//                 We're between turns or the prompt is back.
+//   - "idle"    : the WIRE name for "turn complete / waiting for your input /
+//                 ready". No working/blocked patterns for the debounce window,
+//                 or the notifier observed the turn boundary. The chip relabels
+//                 this as "ready" (your turn) — a finished turn reads green.
 //   - "done"    : the foreground TUI has exited; the shell prompt is showing.
 //                 The orchestration attempt may still be in flight (the worker
 //                 might be writing its final report), but the agent itself
 //                 has handed control back.
+//   - "error"   : the pty exited non-zero / the spawn failed — the agent
+//                 crashed rather than finishing cleanly. Chip reads red.
 // null means "no detection has fired yet" — treat as unknown.
-export type RuntimeState = "working" | "blocked" | "idle" | "done";
+export type RuntimeState = "launching" | "working" | "blocked" | "idle" | "done" | "error";
 
 export type ReviewDecisionType =
   | "accept"
