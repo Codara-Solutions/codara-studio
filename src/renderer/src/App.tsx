@@ -2889,6 +2889,7 @@ export default function App() {
               onReorderTab={tabs.reorderTab}
               onPinEditorTab={tabs.pinEditorTab}
               pickerHints={pickerHints}
+              closeTabsOnMiddleClick={shortcutPreferences.closeTabsOnMiddleClick}
             />
           )}
         </main>
@@ -3317,6 +3318,11 @@ interface WorkspaceProps {
   // Resolved "+" picker keybind hints, memoized in App so this stays
   // referentially stable across unrelated renders (keeps the memo intact).
   pickerHints: PickerHints;
+  // Mirrors the closeTabsOnMiddleClick preference; threaded down to TabBar so a
+  // middle-click on a tab closes it. Kept as a plain boolean prop (rather than
+  // reading usePreferences inside Workspace) so the memo only re-renders when
+  // this value actually flips.
+  closeTabsOnMiddleClick: boolean;
 }
 
 // Memoized: every prop is either referentially stable (the `tabs` object,
@@ -3353,6 +3359,7 @@ const Workspace = React.memo(function Workspace({
   onReorderTab,
   onPinEditorTab,
   pickerHints,
+  closeTabsOnMiddleClick,
 }: WorkspaceProps) {
   // Destructure the tabs methods we need. useTabs returns a memoized API whose
   // methods are stable for the hook's lifetime, so destructuring here gives us
@@ -3602,6 +3609,7 @@ const Workspace = React.memo(function Workspace({
         onReorderTab={onReorderTab}
         onPinEditorTab={onPinEditorTab}
         pickerHints={pickerHints}
+        closeOnMiddleClick={closeTabsOnMiddleClick}
       />
       {innerStripVisible && (
         <InnerTabStrip

@@ -231,6 +231,10 @@ export interface AppPreferences {
   // with integrated GPUs. Requires restart because Chromium only checks the
   // flag once during process startup.
   disableHardwareAcceleration?: boolean;
+  // When true, middle-clicking (mouse wheel button) on a tab in the strip
+  // closes it — same effect as clicking the tab's × button. Applies to every
+  // tab kind (chat, terminal, editor, preview, automations). Defaults on.
+  closeTabsOnMiddleClick: boolean;
   // Per-channel notification toggles. Source of truth for which channels
   // fire when an orchestration event matches the alert policy. Legacy
   // `notifications: { enabled, sounds }` blobs from older spark-preferences
@@ -340,6 +344,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   inlineAutocompleteModelId: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
   keybindings: {},
   disableHardwareAcceleration: false,
+  closeTabsOnMiddleClick: true,
   notificationChannels: { ...DEFAULT_NOTIFICATION_CHANNELS },
   keepRunningInBackground: true,
   autoOpenPreview: false,

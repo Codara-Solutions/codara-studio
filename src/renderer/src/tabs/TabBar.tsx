@@ -61,6 +61,9 @@ interface Props {
   // the corresponding command has no binding — the row then renders no hint.
   // Memoized upstream so it doesn't break TabBar's React.memo identity check.
   pickerHints?: PickerHints;
+  // When true, a middle-click (mouse wheel button) anywhere on a tab closes
+  // it. User-configurable via Settings → General (closeTabsOnMiddleClick pref).
+  closeOnMiddleClick: boolean;
 }
 
 export interface PickerHints {
@@ -91,6 +94,7 @@ function TabBar({
   onReorderTab,
   onPinEditorTab,
   pickerHints,
+  closeOnMiddleClick,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -362,6 +366,7 @@ function TabBar({
               onRename={onRenameChat}
               onClose={onCloseChat}
               onReorderTab={onReorderTab}
+              closeOnMiddleClick={closeOnMiddleClick}
             />
           ) : (
             // onSelect/onClose are passed straight through (no per-tab inline
@@ -384,6 +389,7 @@ function TabBar({
               onTerminalPaneDrop={onTerminalPaneDrop}
               onReorderTab={onReorderTab}
               onPinEditorTab={onPinEditorTab}
+              closeOnMiddleClick={closeOnMiddleClick}
             />
           ),
         )}
@@ -472,6 +478,7 @@ interface TabItemProps {
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId: TabId) => void;
   onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
   onPinEditorTab: (id: TabId) => void;
+  closeOnMiddleClick: boolean;
 }
 
 // React.memo so only the tab whose props actually changed (active flag
@@ -487,6 +494,7 @@ const TabItem = React.memo(function TabItem({
   onTerminalPaneDrop,
   onReorderTab,
   onPinEditorTab,
+  closeOnMiddleClick,
 }: TabItemProps) {
   const [closeHover, setCloseHover] = useState(false);
   const [dropActive, setDropActive] = useState(false);
@@ -633,7 +641,7 @@ const TabItem = React.memo(function TabItem({
         if (tab.kind === "editor") onPinEditorTab(tab.id);
       }}
       onAuxClick={(e) => {
-        if (e.button === 1 && canClose) {
+        if (e.button === 1 && canClose && closeOnMiddleClick) {
           e.preventDefault();
           e.stopPropagation();
           onClose(tab.id);
@@ -703,6 +711,7 @@ interface ChatTabItemProps {
   onRename: (id: TabId, title: string) => void;
   onClose: (id: TabId) => void;
   onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
+  closeOnMiddleClick: boolean;
 }
 
 const ChatTabItem = React.memo(function ChatTabItem({
@@ -712,6 +721,7 @@ const ChatTabItem = React.memo(function ChatTabItem({
   onRename,
   onClose,
   onReorderTab,
+  closeOnMiddleClick,
 }: ChatTabItemProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(tab.title);
@@ -819,7 +829,7 @@ const ChatTabItem = React.memo(function ChatTabItem({
         if (!editing) onSelect(tab.id);
       }}
       onAuxClick={(e) => {
-        if (e.button === 1) {
+        if (e.button === 1 && closeOnMiddleClick) {
           e.preventDefault();
           e.stopPropagation();
           onClose(tab.id);

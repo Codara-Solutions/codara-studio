@@ -503,8 +503,18 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
 
         <div
           style={{
-            flex: 1,
-            minHeight: 0,
+            // Give the results area a DEFINITE height. react-virtuoso measures
+            // its scroller against the parent's resolved height; a bare
+            // `flex: 1` here collapses to ~0 because the overlay uses
+            // `align-items: flex-start` (so the section is content-sized, not
+            // stretched) and the section only sets `maxHeight`. With a
+            // zero-height viewport the virtualized rows never render even
+            // though hits were found — the empty-state text still showed
+            // because it has real content height. Mirrors FileSearchPanel,
+            // which sizes its list the same way. The larger viewport
+            // subtraction accounts for this panel's taller two-row header.
+            height: "min(520px, calc(100vh - 210px))",
+            minHeight: 180,
             display: "flex",
             flexDirection: "column",
             background: "var(--bg)",
