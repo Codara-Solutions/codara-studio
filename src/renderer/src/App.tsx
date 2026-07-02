@@ -1484,6 +1484,25 @@ export default function App() {
   );
   useNotifyFocusRouting(navigateToNotifyTarget, booted);
 
+  // Shared by the toast cards and the notification center: resolve a blocked
+  // run's open-question options for inline answers, and decide whether an
+  // answer should resumeRun (loom-owned runs must not — the loop driver's
+  // answer seam consumes the recorded message). runsRef is a stable ref, so
+  // both callbacks stay referentially stable for WindowChrome's memo.
+  const resolveRunQuestion = useCallback(
+    (runId: string) => {
+      const run = globalRuns.runsRef.current.find((r) => r.id === runId);
+      const question = run ? findOpenQuestion(run) : null;
+      return question?.questionOptions ?? [];
+    },
+    [globalRuns.runsRef],
+  );
+  const shouldResumeOnAnswer = useCallback(
+    (runId: string) =>
+      !globalRuns.runsRef.current.find((r) => r.id === runId)?.automationId,
+    [globalRuns.runsRef],
+  );
+
   // WorkspaceRail prop callbacks. `setActiveId` / `setEditingId` are stable
   // React setters, so these can carry empty dep arrays and stay referentially
   // stable for the lifetime of the component — which lets the React.memo on
@@ -2842,6 +2861,9 @@ export default function App() {
         onToggleLeft={handleToggleLeft}
         onToggleRight={handleToggleRight}
         onOpenSettings={handleOpenSettings}
+        notifyNavigateTo={navigateToNotifyTarget}
+        notifyResolveQuestion={resolveRunQuestion}
+        notifyShouldResumeOnAnswer={shouldResumeOnAnswer}
       />
 
       <div style={{ flex: 1, display: "flex", minHeight: 0, position: "relative" }}>
@@ -3050,16 +3072,8 @@ export default function App() {
 
         <ToastHost
           navigateTo={navigateToNotifyTarget}
-          resolveQuestion={(runId) => {
-            const run = globalRuns.runsRef.current.find((r) => r.id === runId);
-            const question = run ? findOpenQuestion(run) : null;
-            return question?.questionOptions ?? [];
-          }}
-          shouldResumeOnAnswer={(runId) =>
-            // Loom runs: the loop driver's answer seam consumes the message;
-            // resumeRun would re-finalize the stale blocked report instead.
-            !globalRuns.runsRef.current.find((r) => r.id === runId)?.automationId
-          }
+          resolveQuestion={resolveRunQuestion}
+          shouldResumeOnAnswer={shouldResumeOnAnswer}
         />
         {awayDigest && (
           <AwayDigestCard

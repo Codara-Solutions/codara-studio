@@ -1,4 +1,7 @@
 import React, { useEffect, useState } from "react";
+import type { RunQuestionOption } from "@shared/types";
+import NotificationCenter from "../notifications/NotificationCenter";
+import type { NavigateTo } from "../notifications/routing";
 
 type AppRegionStyle = React.CSSProperties & {
   WebkitAppRegion?: "drag" | "no-drag";
@@ -186,6 +189,10 @@ interface Props {
   onToggleLeft: () => void;
   onToggleRight: () => void;
   onOpenSettings?: () => void;
+  // Notification-center wiring (bell + popover in the right-side controls).
+  notifyNavigateTo?: NavigateTo;
+  notifyResolveQuestion?: (runId: string) => RunQuestionOption[];
+  notifyShouldResumeOnAnswer?: (runId: string) => boolean;
 }
 
 // Memoized: App passes the `platform` state value, the two visibility
@@ -198,6 +205,9 @@ function WindowChrome({
   onToggleLeft,
   onToggleRight,
   onOpenSettings,
+  notifyNavigateTo,
+  notifyResolveQuestion,
+  notifyShouldResumeOnAnswer,
 }: Props) {
   const isWin = platform === "win32";
   const [maximized, setMaximized] = useState(false);
@@ -306,6 +316,11 @@ function WindowChrome({
         }}
       >
         <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" edge="right" />
+        <NotificationCenter
+          navigateTo={notifyNavigateTo}
+          resolveQuestion={notifyResolveQuestion}
+          shouldResumeOnAnswer={notifyShouldResumeOnAnswer}
+        />
         <ChromeButton title="Settings" onClick={() => onOpenSettings?.()} borderLeft>
           <GearIcon size={12} />
         </ChromeButton>
