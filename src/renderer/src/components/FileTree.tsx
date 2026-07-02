@@ -1835,13 +1835,21 @@ function RunPlanMenuItem({
       </button>
       {open && (
         <div
-          className="spark-glass"
           style={{
             position: "absolute",
             top: -6,
             [openLeft ? "right" : "left"]: "100%",
             width: ENGINE_FLYOUT_WIDTH,
+            // Deliberately NOT glass: this flyout is a descendant of the
+            // backdrop-filtered FileMenu, and a filtered ancestor forms a
+            // backdrop root — the part of the flyout that overhangs the menu
+            // would sample an EMPTY backdrop and render as an unfrosted film
+            // over the file tree. Opaque panel instead (see styles.css
+            // "one level of glass only").
+            background: "var(--panel-2)",
+            border: "1px solid var(--rule-strong)",
             borderRadius: 8,
+            boxShadow: "var(--shadow-2)",
             padding: 6,
             zIndex: 1,
           }}

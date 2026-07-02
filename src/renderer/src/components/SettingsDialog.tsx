@@ -883,6 +883,9 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
               <GlassSliderRow
                 label="Tint"
                 hint="Surface tint strength — lower is clearer"
+                // Floor at 10%: veil 0 + blur 0 leaves menus as border-only
+                // outlines over live content, which reads as a rendering bug.
+                min={10}
                 value={preferences.glassVeil ?? 100}
                 onChange={(v) => void setPreference("glassVeil", v)}
               />
@@ -2802,11 +2805,13 @@ function ModelPresetCard({
 function GlassSliderRow({
   label,
   hint,
+  min = 0,
   value,
   onChange,
 }: {
   label: string;
   hint: string;
+  min?: number;
   value: number;
   onChange: (next: number) => void;
 }) {
@@ -2825,7 +2830,7 @@ function GlassSliderRow({
       <input
         aria-label={`${label} — ${hint}`}
         type="range"
-        min={0}
+        min={min}
         max={200}
         step={5}
         value={value}

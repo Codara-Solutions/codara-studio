@@ -92,20 +92,22 @@ export default function SessionInspector({ run, onClose }: SessionInspectorProps
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "color-mix(in oklch, var(--bg) 64%, transparent)",
-        backdropFilter: "blur(2px)",
-        WebkitBackdropFilter: "blur(2px)",
         fontFamily: "var(--font-sans)",
         animation: "spark-fade-in var(--motion-fast) var(--ease-out)",
       }}
       onMouseDown={onClose}
     >
+      {/* Scrim is a SIBLING of the dialog, never a filtered wrapper: a
+          backdrop-filtered ancestor would form a backdrop root and the
+          dialog's own glass would sample only the scrim's flat tint. */}
+      <div className="spark-scrim" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Session inspector"
         className="spark-glass--strong"
         style={{
+          zIndex: 1,
           width: "min(880px, calc(100vw - 44px))",
           height: "min(720px, calc(100vh - 44px))",
           display: "flex",

@@ -276,19 +276,21 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
         display: "flex",
         alignItems: "flex-start",
         justifyContent: "center",
-        background: "color-mix(in oklch, var(--bg) 62%, transparent)",
-        backdropFilter: "blur(4px)",
-        WebkitBackdropFilter: "blur(4px)",
         fontFamily: "var(--font-sans)",
         padding: "60px 24px 24px",
       }}
       className="spark-fade-in"
       onMouseDown={onClose}
     >
+      {/* Scrim + dialog face come from the shared glass classes (frosted in
+          glass mode, opaque panel look otherwise) so both honor the
+          data-glass kill switch, reduced-transparency, and the user tuning. */}
+      <div className="spark-scrim" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Search in files"
+        className="spark-glass--strong"
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           if (e.key === "Escape") {
@@ -298,14 +300,12 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
           }
         }}
         style={{
+          zIndex: 1,
           width: "min(720px, calc(100vw - 44px))",
           maxHeight: "calc(100vh - 88px)",
           display: "flex",
           flexDirection: "column",
-          background: "var(--panel)",
-          border: "1px solid var(--rule-soft)",
           borderRadius: 12,
-          boxShadow: "var(--shadow-2)",
           overflow: "hidden",
         }}
       >

@@ -179,15 +179,14 @@ export default function RunSwitcher({
         display: "flex",
         alignItems: "flex-start",
         justifyContent: "center",
-        background: "color-mix(in oklch, var(--bg) 62%, transparent)",
-        backdropFilter: "blur(4px)",
-        WebkitBackdropFilter: "blur(4px)",
         fontFamily: "var(--font-sans)",
         padding: "72px 24px 24px",
       }}
       className="spark-fade-in"
       onMouseDown={onClose}
     >
+      {/* Sibling scrim, not a filtered wrapper — see SessionInspector. */}
+      <div className="spark-scrim" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
@@ -196,6 +195,7 @@ export default function RunSwitcher({
         onMouseDown={(event) => event.stopPropagation()}
         onKeyDown={onKeyDown}
         style={{
+          zIndex: 1,
           width: "min(640px, calc(100vw - 44px))",
           maxHeight: "calc(100vh - 112px)",
           display: "flex",

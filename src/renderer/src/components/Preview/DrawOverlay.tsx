@@ -218,7 +218,6 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
         }}
       />
       <div
-        className="spark-glass"
         style={{
           position: "absolute",
           left: 12,
@@ -229,7 +228,16 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
           flexDirection: "column",
           gap: 8,
           padding: 10,
+          // Floating chrome over the live preview <webview>. Deliberately NOT
+          // on the .spark-glass material: the page behind is arbitrary,
+          // uncontrolled content (often white), and a thin tunable veil can
+          // leave dark-theme labels sitting on a light backdrop — or vanish
+          // entirely at low user tint settings. Readability exception: keep a
+          // near-opaque panel face.
+          background: "color-mix(in oklch, var(--panel-2) 92%, transparent)",
+          border: "1px solid var(--rule)",
           borderRadius: "var(--radius-popover, 9px)",
+          boxShadow: "var(--shadow-2)",
           fontFamily: "var(--font-sans)",
         }}
       >

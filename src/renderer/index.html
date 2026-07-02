@@ -58,9 +58,12 @@
         <feImage href="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256'%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0.115' stop-color='%23000000'/%3E%3Cstop offset='0.215' stop-color='%23808080'/%3E%3Cstop offset='0.785' stop-color='%23808080'/%3E%3Cstop offset='0.885' stop-color='%23ffffff'/%3E%3C/linearGradient%3E%3Crect width='256' height='256' fill='url(%23g)'/%3E%3C/svg%3E" preserveAspectRatio="none" result="ym0" />
         <feColorMatrix in="ym0" type="matrix" values="0 0 0 0 0  1 0 0 0 0  0 0 0 0 0  0 0 0 0 1" result="ym" />
         <feComposite in="xm" in2="ym" operator="arithmetic" k1="0" k2="1" k3="1" k4="0" result="map" />
-        <feDisplacementMap in="SourceGraphic" in2="map" scale="72" xChannelSelector="R" yChannelSelector="G" result="dr" />
+        <!-- 58 ± 13 — must match ThemeProvider's applyGlassTuning (center 58,
+             spread 13 at the 100% defaults) so the pre-hydration frame equals
+             the post-hydration one. -->
+        <feDisplacementMap in="SourceGraphic" in2="map" scale="71" xChannelSelector="R" yChannelSelector="G" result="dr" />
         <feDisplacementMap in="SourceGraphic" in2="map" scale="58" xChannelSelector="R" yChannelSelector="G" result="dg" />
-        <feDisplacementMap in="SourceGraphic" in2="map" scale="46" xChannelSelector="R" yChannelSelector="G" result="db" />
+        <feDisplacementMap in="SourceGraphic" in2="map" scale="45" xChannelSelector="R" yChannelSelector="G" result="db" />
         <!-- Alpha must stay 1 on all three legs: arithmetic compositing is
              premultiplied, so a zero-alpha leg contributes nothing. Summing
              clamps alpha back to 1. -->
