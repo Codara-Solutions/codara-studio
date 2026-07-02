@@ -424,6 +424,23 @@ export function useTerminalSession({
       fitRef.current = fit;
       term.loadAddon(fit);
 
+      // [TUI-OVERFLOW-PROBE] throwaway debug seam — remove before finalizing.
+      // Exposes the live Terminal + FitAddon keyed by sessionId so an e2e probe
+      // can read term.cols / renderer dimensions / fit.proposeDimensions and
+      // compare the rendered content right-edge against the visible host box.
+      try {
+        const g = globalThis as unknown as {
+          __sparkTerms?: Map<string, { term: Terminal; fit: FitAddon; host: HTMLElement | null }>;
+        };
+        (g.__sparkTerms ??= new Map()).set(sessionId, {
+          term,
+          fit,
+          host: container.current,
+        });
+      } catch {
+        /* ignore */
+      }
+
       const search = new SearchAddon();
       term.loadAddon(search);
 

@@ -236,6 +236,9 @@ export interface AppPreferences {
   // `notifications: { enabled, sounds }` blobs from older spark-preferences
   // files are read at migration time and folded into these flags.
   notificationChannels: NotificationChannelsPref;
+  // Do Not Disturb: when true, the notify policy mutes delivery on every
+  // channel but still records events to the notification center as unread.
+  notificationsDnd?: boolean;
   // When true (default), closing the main window hides it to the system tray
   // and keeps the process alive so main-process timers (automations / loops)
   // keep firing instead of quitting. Quit explicitly from the tray menu.
@@ -341,6 +344,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keybindings: {},
   disableHardwareAcceleration: false,
   notificationChannels: { ...DEFAULT_NOTIFICATION_CHANNELS },
+  notificationsDnd: false,
   keepRunningInBackground: true,
   autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},
@@ -417,6 +421,70 @@ export interface TerminalAgentStatePayload {
 }
 
 export type NotificationSoundKind = "needs-you" | "done";
+
+// ── Unified notifications pipeline (src/main/notify) ────────────────────────
+
+// Every alert the pipeline can emit. "app.update-ready" is reserved for the
+// auto-updater; nothing publishes it yet.
+export type NotifyKind =
+  | "run.blocked"
+  | "run.complete"
+  | "run.failed"
+  | "terminal.agent.needs-input"
+  | "terminal.agent.done"
+  | "automation.finished"
+  | "automation.failed"
+  | "app.update-ready";
+
+// Where clicking a notification (toast card, native notification, center
+// entry) navigates. Terminal targets reuse the TerminalAgentTarget shape.
+export type NavigationTarget =
+  | { type: "run"; runId: string; workspaceId?: string }
+  | { type: "terminal"; workspaceId: string; tabId: string; paneId: string }
+  | { type: "automation"; jobId: string; runId?: string };
+
+// The one event shape every producer publishes and every surface consumes:
+// the in-app toast payload ("notification:in-app"), the native-notification
+// click routing ("notify:focus" carries `target`), and the center-store
+// entry all derive from it. `sourceKey` identifies the emitting entity
+// ("run:<id>" / "pane:<id>" / "automation:<id>") for the policy's
+// per-source dedup + rearm bookkeeping.
+export interface NotifyEvent {
+  id: string;
+  kind: NotifyKind;
+  sourceKey: string;
+  title: string;
+  body: string;
+  tone: InAppNotificationTone;
+  soundKind: NotificationSoundKind;
+  target: NavigationTarget;
+  createdAt: string;
+}
+
+// A NotifyEvent as persisted in the notification center's ring buffer.
+// `suppressed` records WHY delivery was skipped (e.g. "watching", "dnd")
+// while the entry still lands in the history.
+export interface NotificationCenterEntry extends NotifyEvent {
+  read: boolean;
+  suppressed?: string;
+}
+
+// Pushed on "notify:center-updated" whenever the center's contents change,
+// so the renderer bell badge tracks unread without refetching the list.
+export interface NotificationCenterSummary {
+  unread: number;
+}
+
+// The renderer's report of what the user is looking at, sent on every
+// relevant change via "ui:setAttention". Feeds the suppress-while-watching
+// policy for both run and terminal alerts.
+export interface UiAttentionSnapshot {
+  focused: boolean;
+  workspaceId: string | null;
+  tabId: string | null;
+  runId: string | null;
+  paneId: string | null;
+}
 
 export type PrefKey = keyof AppPreferences;
 

@@ -190,6 +190,10 @@ function normalize(
       src.notificationChannels,
       (src as Record<string, unknown>).notifications,
     ),
+    notificationsDnd:
+      typeof src.notificationsDnd === "boolean"
+        ? src.notificationsDnd
+        : DEFAULT_PREFERENCES.notificationsDnd,
     keepRunningInBackground:
       typeof src.keepRunningInBackground === "boolean"
         ? src.keepRunningInBackground
