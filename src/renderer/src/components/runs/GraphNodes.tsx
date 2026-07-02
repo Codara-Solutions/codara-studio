@@ -328,7 +328,7 @@ export const SparkNode = React.memo(function SparkNode({
   const tone = failed ? "var(--danger)" : live ? "var(--accent)" : "var(--ink-dim)";
   return (
     <div
-      title="Spark — the orchestration manager"
+      title="Cora — the orchestration manager"
       style={{
         width: "100%",
         height: "100%",
@@ -650,7 +650,7 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
       }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      title={`${step.goal || step.title}\n\nCheckpoint — Spark replans here.`}
+      title={`${step.goal || step.title}\n\nCheckpoint — Cora replans here.`}
       style={{
         width: "100%",
         height: "100%",
@@ -732,7 +732,7 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
           WebkitBoxOrient: "vertical",
         }}
       >
-        {step.goal || "Spark pauses here to replan downstream steps."}
+        {step.goal || "Cora pauses here to replan downstream steps."}
       </p>
       <div style={{ marginTop: "auto", display: "flex", alignItems: "center", gap: 7 }}>
         <StatusDot status={status} size={6} />
@@ -831,7 +831,7 @@ export const WorkerNode = React.memo(function WorkerNode({
 }: WorkerNodeProps) {
   const [hover, setHover] = useState(false);
   const { agent, task, attempt } = row;
-  const queued = !task; // a planned agent Spark has not spawned yet
+  const queued = !task; // a planned agent Cora has not spawned yet
   const status = deriveAgentStatus(task, attempt, stepStatus);
   // The badge must reflect the runtime that actually ran the worker, not just
   // the manager's original plan. Manager rewrites and rerouteUnavailableAgent-
@@ -875,7 +875,7 @@ export const WorkerNode = React.memo(function WorkerNode({
       onMouseLeave={() => setHover(false)}
       title={
         queued
-          ? `${label}\n\nQueued — Spark has not spawned this worker yet.`
+          ? `${label}\n\nQueued — Cora has not spawned this worker yet.`
           : `${label}\n\nClick to inspect this worker.`
       }
       style={{

@@ -30,7 +30,7 @@ interface Props {
   onPull: () => void;
   onFetch: () => void;
   // `backend` is the engine chosen from the Smart Merge caret (undefined = the
-  // default Spark / OpenRouter manager; "claude" / "codex" route to that CLI).
+  // default Cora / OpenRouter manager; "claude" / "codex" route to that CLI).
   onSmartMerge: (backend?: ChatBackendKind) => void;
   canSmartMerge: boolean;
 }
@@ -60,8 +60,8 @@ export default function CommitComposer({
 }: Props): React.ReactElement {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [amend, setAmend] = useState(false);
-  // Engines offered by the Smart Merge caret (Spark always; Claude / Codex when
-  // their CLI is installed). One entry (just Spark) → plain button, no caret.
+  // Engines offered by the Smart Merge caret (Cora always; Claude / Codex when
+  // their CLI is installed). One entry (just Cora) → plain button, no caret.
   const engines = useEngineOptions();
   const anyBusy = busy !== null;
   const committing = busy === "commit";
@@ -70,7 +70,7 @@ export default function CommitComposer({
   const fetching = busy === "fetch";
   const showFetchBubble = Boolean(upstream && !detached && behind === 0);
   const smartMergeTitle = canSmartMerge
-    ? "Fetch remote refs and let Spark merge safely"
+    ? "Fetch remote refs and let Cora merge safely"
     : detached
       ? "Checkout a branch before using Smart Merge"
       : behind <= 0

@@ -397,11 +397,11 @@ function OutcomeNode({ run }: { run: RunState }) {
   const title = spawned ? "Standing terminals" : failed ? "Run failed" : "No steps run";
   const detail = spawned
     ? count > 0
-      ? `Spark opened ${count} interactive ${count === 1 ? "terminal" : "terminals"} in the workbench for you to drive.`
-      : "Spark opened standing terminals in the workbench for you to drive."
+      ? `Cora opened ${count} interactive ${count === 1 ? "terminal" : "terminals"} in the workbench for you to drive.`
+      : "Cora opened standing terminals in the workbench for you to drive."
     : failed
-      ? "Spark stopped before running any worker steps."
-      : "Spark finished this chat without running any worker steps.";
+      ? "Cora stopped before running any worker steps."
+      : "Cora finished this chat without running any worker steps.";
 
   return (
     <div

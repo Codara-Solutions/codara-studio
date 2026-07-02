@@ -38,7 +38,7 @@ export type { SparkOpenInput };
 const FONT_SIZE = 13;
 const FIT_DEBOUNCE_MS = 8;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
-const RESTORE_NOTICE = "[restored from last Spark session]";
+const RESTORE_NOTICE = "[restored from last Cora session]";
 
 // Shell-escape a dropped file path for insertion at the terminal cursor,
 // replicating iTerm2's default drag-and-drop behavior.
@@ -757,7 +757,7 @@ export function useTerminalSession({
 
         // Plain Ctrl+C: Windows copies an active selection; every other
         // no-selection path falls through as ^C / SIGINT. If a detected
-        // first-party agent is running, clear Spark's chip/state first but do
+        // first-party agent is running, clear Cora's chip/state first but do
         // not preventDefault — xterm still forwards the actual interrupt to
         // the PTY.
         if (isC) {
@@ -984,7 +984,7 @@ export function useTerminalSession({
       );
       onSearchReadyRef.current?.(search);
 
-      // Keep the xterm theme in sync with Spark design tokens so theme switches
+      // Keep the xterm theme in sync with Cora design tokens so theme switches
       // and accent color changes repaint the terminal chrome live.
       themeUnsubRef.current = subscribeAppTokens(() => {
         const t = termRef.current;
@@ -1187,7 +1187,7 @@ export function useTerminalSession({
         void window.spark.terminalState?.report?.({ paneId: sessionId, state });
         // Surface the same debounced state to the renderer so a manual pane's
         // worker chip can render the finer label/tone. Main still gets the
-        // report above (used for Spark-owned attempts / notifications); this is
+        // report above (used for Cora-owned attempts / notifications); this is
         // purely the renderer-side mirror.
         onRuntimeStateRef.current?.(state);
       };

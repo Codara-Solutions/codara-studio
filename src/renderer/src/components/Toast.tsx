@@ -211,7 +211,7 @@ function ToastCard({
     status: toneVar,
     chipFill: `color-mix(in oklch, ${toneVar} 14%, var(--panel))`,
     chipBorder: `color-mix(in oklch, ${toneVar} 32%, transparent)`,
-    title: toast.title || `Spark — ${meta.label.toLowerCase()}`,
+    title: toast.title || `Cora — ${meta.label.toLowerCase()}`,
   };
 
   const clickable = Boolean(navigateTo);

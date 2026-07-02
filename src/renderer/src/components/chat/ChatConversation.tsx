@@ -14,7 +14,7 @@ import { buildRunMaps, useRunReports } from "../runs/run-format";
 import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
 import Markdown from "./Markdown";
 
-// The conversation stream for one chat. Renders human messages, Spark's own
+// The conversation stream for one chat. Renders human messages, Cora's own
 // model/context activity, and worker steps as one ordered chat timeline.
 
 type MessageItem = Extract<ChatTimelineItem, { kind: "message" }>;
@@ -90,7 +90,7 @@ function liveTextFromState(state: LiveStreamState): string {
 export default function ChatConversation({ run }: { run: RunState }) {
   const items = useMemo(() => groupCompletedActivity(buildChatTimeline(run)), [run]);
   const openQuestion = useMemo(() => findOpenQuestion(run), [run]);
-  // On a completed run, stamp a tiny "done" marker under the LAST Spark prose
+  // On a completed run, stamp a tiny "done" marker under the LAST Cora prose
   // message so the user sees the run finished without a separate completion
   // turn duplicating the answer. The id-matching keys the marker to that one
   // bubble; everything else renders unchanged.
@@ -478,7 +478,7 @@ const MessageTurn = React.memo(function MessageTurn({
     );
   }
 
-  // Spark message: an accent avatar gutter, then the speaker line and prose
+  // Cora message: an accent avatar gutter, then the speaker line and prose
   // stacked in one column (see SparkTurn). Questions carry a "Needs you" tag;
   // completions fold their "done" marker into the body.
   const isQuestion = item.messageKind === "question";
@@ -1689,7 +1689,7 @@ function ConversationEmpty() {
       </span>
       <span className="spark-eyebrow">Getting started</span>
       <span className="spark-empty__body">
-        Spark is warming up. Its plan and progress will appear here.
+        Cora is warming up. Its plan and progress will appear here.
       </span>
     </div>
   );
@@ -1805,7 +1805,7 @@ function SparkMark() {
   );
 }
 
-// The accent avatar that anchors every Spark turn's gutter — the brand mark
+// The accent avatar that anchors every Cora turn's gutter — the brand mark
 // (the shared SparkIcon star) sitting in a soft, generously-rounded
 // accent-tinted squircle. No hard accent-edge outline: a brand mark should
 // read as identity, not as a tappable "+/add" chip. Depth is the soft tinted
@@ -1823,7 +1823,7 @@ function SparkAvatar() {
   );
 }
 
-// One Spark turn: the avatar in a fixed gutter, then a column with the speaker
+// One Cora turn: the avatar in a fixed gutter, then a column with the speaker
 // line (name + optional status tag) above the turn body. Prose, questions,
 // completions, and live streams all render through here so the conversation
 // keeps a single consistent rhythm.
@@ -1841,7 +1841,7 @@ function SparkTurn({
       <SparkAvatar />
       <div style={SPARK_MAIN_STYLE}>
         <div style={SPARK_HEADER_STYLE}>
-          <span style={SPEAKER_LABEL_STYLE}>Spark</span>
+          <span style={SPEAKER_LABEL_STYLE}>Cora</span>
           {tag}
           {repeatCount && repeatCount > 1 ? <RepeatChip count={repeatCount} /> : null}
         </div>
@@ -1926,7 +1926,7 @@ const SPARK_AVATAR_STYLE: React.CSSProperties = {
   // Squircle-ish brand tile on the surface rung (10px) — softer than a control
   // chip, calmer than a hard bordered square. The fill is the only cue: a
   // gentle accent wash with a faint same-hue hairline (not the full
-  // accent-edge), so the star reads as Spark's mark, not an "add" button.
+  // accent-edge), so the star reads as Cora's mark, not an "add" button.
   borderRadius: "var(--radius-surface, 10px)",
   display: "inline-flex",
   alignItems: "center",
@@ -1978,7 +1978,7 @@ const DONE_MARKER_STYLE: React.CSSProperties = {
 };
 
 // Wraps the "done" marker and the run-level verdict pill on one full-width row
-// under the final Spark bubble. flexBasis:100% breaks them onto their own line
+// under the final Cora bubble. flexBasis:100% breaks them onto their own line
 // within SparkTurn's flex column (mirroring the bare DoneMarker's old role);
 // the inner marker keeps its own marginTop, so this row carries none.
 const DONE_MARKER_ROW_STYLE: React.CSSProperties = {
@@ -2066,7 +2066,7 @@ const NEEDS_YOU_DOT_STYLE: React.CSSProperties = {
 // ── Ask card ────────────────────────────────────────────────────────────────
 // The open-question UI: a contained card holding a header (eyebrow + keyboard
 // hints), the selectable options, and a custom-answer field. Reads as one
-// deliberate "act here" moment under the Spark question prose.
+// deliberate "act here" moment under the Cora question prose.
 const ASK_CARD_STYLE: React.CSSProperties = {
   marginTop: 4,
   border: "1px solid var(--rule-soft)",

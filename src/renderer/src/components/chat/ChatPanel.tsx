@@ -25,7 +25,7 @@ const BACKEND_TERMINAL_SHELL: ShellInfo = {
 
 type ChatView = "chat" | "terminal";
 
-// The Spark chat panel: the workspace's chats live here, one conversation at
+// The Cora chat panel: the workspace's chats live here, one conversation at
 // a time. The header carries the live status; a switcher bar swaps between
 // chats and starts new ones; the conversation and composer fill the rest.
 // Each chat is a RunState; its node-graph view lives in a workbench tab.
@@ -120,7 +120,7 @@ export default function ChatPanel({
   // the placeholder "noop" shell, which fails with "File not found". Three
   // common cases where this matters:
   //   1. Fresh chat with chip=Claude/Codex — PTY doesn't exist yet
-  //   2. After Spark restart — chatSessionUuid is persisted but the actual
+  //   2. After Cora restart — chatSessionUuid is persisted but the actual
   //      in-memory PTY is gone until the next turn re-spawns it
   //   3. Mid-chat backend switch — old PTY may still be alive, new isn't
   // Once the PTY exists, render TerminalPane; otherwise show a placeholder.
@@ -162,7 +162,7 @@ export default function ChatPanel({
       }}
     >
       <SectionHeader
-        label="Spark"
+        label="Cora"
         glyph={<SparkMark size={13} />}
         collapsed={collapsed}
         onToggleCollapse={onToggleCollapse}
@@ -198,7 +198,7 @@ export default function ChatPanel({
             // POSIX PTYs leave the chat Terminal sub-tab mostly black
             // until orchestration produces enough output to redraw the
             // alt-screen frame. Stacking with visibility keeps both at
-            // full size at all times — this matches Spark's original (pre-
+            // full size at all times — this matches Cora's original (pre-
             // 2d63dca) layout that worked cross-platform.
             <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
               <div
@@ -941,7 +941,7 @@ function WelcomeState() {
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <div className="spark-eyebrow">New chat</div>
         <div style={{ fontSize: 15, fontWeight: 700, color: "var(--ink)" }}>
-          Start a chat with Spark
+          Start a chat with Cora
         </div>
         <div
           style={{
@@ -951,7 +951,7 @@ function WelcomeState() {
             maxWidth: 268,
           }}
         >
-          Describe a task. Spark plans it, spawns Claude, Codex, and Cursor
+          Describe a task. Cora plans it, spawns Claude, Codex, and Cursor
           workers, and reports back. Or right-click a plan file in the explorer
           to run it.
         </div>

@@ -36,7 +36,7 @@ import type {
 } from "./types";
 
 // useTabs is the in-memory tabs store for the workspace pane. We keep it as
-// a plain React hook (no zustand dependency) since the rest of Spark uses
+// a plain React hook (no zustand dependency) since the rest of Cora uses
 // React state for everything else; a context provider in App.tsx hands it
 // down to TabBar and the per-kind stacks.
 //
@@ -203,7 +203,7 @@ function createChatTabForRun(runId: string, title: string): ChatTab {
   return {
     id: runId,
     kind: "chat",
-    title: title?.trim() || "Spark",
+    title: title?.trim() || "Cora",
   };
 }
 
@@ -212,7 +212,7 @@ export function isDraftChatTabId(id: TabId): boolean {
 }
 
 // First-run seed for a brand-new workspace (nothing persisted): one draft
-// Spark Agent chat tab plus one terminal. Chat tabs are otherwise derived from
+// Cora chat tab plus one terminal. Chat tabs are otherwise derived from
 // the run store, so this seed only ever applies on the very first launch of a
 // workspace — once any tab state is persisted, restores honor exactly what was
 // saved (including zero chat tabs after the user closes them).
@@ -232,7 +232,7 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
     }
     // Drop terminal-worker metadata from persisted layouts. Worker chips are
     // live-session state: manual Claude/Codex chips disappear as soon as the
-    // agent returns to the shell, and Spark-owned "done" chips are shown only
+    // agent returns to the shell, and Cora-owned "done" chips are shown only
     // right after a real worker attempt finishes in this app session. Restored
     // panes are fresh shells, so carrying old badges forward makes idle panes
     // look like they still belong to Claude/Codex.
@@ -243,7 +243,7 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
     // effect (syncChatTabsToRuns), so they are stripped here and rebuilt for
     // every run NOT in closedChatRunIds once the runs load. We deliberately do
     // NOT force-seed a chat tab on restore: a workspace whose user closed the
-    // Spark Agent tab restores with zero chat tabs and stays that way (the
+    // Cora tab restores with zero chat tabs and stays that way (the
     // closed run stays reachable via the chat-history popover). First-run
     // seeding of a draft chat tab happens only when there is NO persisted
     // state at all — see initialTabsState's defaultTabs fallback.
@@ -404,7 +404,7 @@ function initialTabsState(
   const loaded = loadPersisted(workspaceId, scrollbackLineLimit);
   // A non-null `loaded` means this workspace HAS persisted tab state — even
   // when its stripped tab list is empty (the user closed every tab, including
-  // the Spark Agent chat). Restore exactly that, with no forced chat tab: the
+  // the Cora chat). Restore exactly that, with no forced chat tab: the
   // App-level sync effect re-derives chat tabs for runs not in
   // closedChatRunIds, and an intentionally empty workspace stays empty. Only a
   // genuine FIRST RUN — loadPersisted returned null (nothing persisted, or a
@@ -474,7 +474,7 @@ export interface UseTabsApi {
   setDirty: (id: TabId, dirty: boolean) => void;
   setDetectedUrl: (tabId: TabId, paneId: string, url: string) => void;
   newTerminalTab: (cwd?: string, autorun?: string, options?: { focus?: boolean }) => TabId;
-  // Open ONE terminal tab whose panes are split into a grid — used when Spark
+  // Open ONE terminal tab whose panes are split into a grid — used when Cora
   // spawns a batch of standing agent terminals, so the user sees them all at
   // once. One pane per spec, each autorunning its agent command.
   newTerminalGrid: (
@@ -482,7 +482,7 @@ export interface UseTabsApi {
     specs: Array<{ command: string; runtime?: string }>,
   ) => TabId;
   // Add a batch of agent panes into an EXISTING terminal tab as a grid,
-  // alongside whatever panes that tab already holds. Used when Spark spawns
+  // alongside whatever panes that tab already holds. Used when Cora spawns
   // standing terminals and the user already has a terminal tab open.
   addAgentGridToTab: (
     tabId: TabId,
@@ -1555,10 +1555,10 @@ export function useTabs(
             if (focus) setActiveId(existingDraft.id);
             return curr;
           }
-          // "Spark Agent" matches the stable label App.tsx forces onto every
+          // "Cora" matches the stable label App.tsx forces onto every
           // run-backed chat tab (CHAT_TAB_LABEL), so the user never sees the
           // "New chat" → first-message truncation when a draft promotes.
-          const draft: ChatTab = { id: fallback, kind: "chat", title: "Spark Agent" };
+          const draft: ChatTab = { id: fallback, kind: "chat", title: "Cora" };
           if (focus) setActiveId(draft.id);
           return [...curr, draft];
         });
@@ -1580,7 +1580,7 @@ export function useTabs(
         // when handleSelectRun fires before the runs[]-sync effect catches
         // up. Seed a placeholder tab; the sync effect will refresh the
         // title.
-        const placeholder = createChatTabForRun(runId, "Spark");
+        const placeholder = createChatTabForRun(runId, "Cora");
         if (focus) setActiveId(placeholder.id);
         return [...curr, placeholder];
       });
@@ -1612,7 +1612,7 @@ export function useTabs(
         }
       }
       setTabs((curr) => {
-        const titleByRun = new Map(runList.map((r) => [r.id, r.title?.trim() || "Spark"]));
+        const titleByRun = new Map(runList.map((r) => [r.id, r.title?.trim() || "Cora"]));
         let changed = false;
         // Drop chat tabs whose run has been deleted; keep drafts.
         const filtered = curr.filter((tab) => {

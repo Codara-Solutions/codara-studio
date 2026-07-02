@@ -12,7 +12,7 @@ import RunCanvas from "./runs/RunCanvas";
 interface Props {
   workspace: Workspace | null;
   // Lifted state from App — the runs list and selection are owned upstream so
-  // this canvas and the Spark chat tab always agree.
+  // this canvas and the Cora chat tab always agree.
   runs: RunState[];
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
@@ -31,12 +31,12 @@ export default function RunsView({ workspace, runs, activeRunId }: Props) {
     return (
       <EmptyState
         heading="No runs yet"
-        text="Start a chat in the Spark tab, or right-click a plan file in the explorer."
+        text="Start a chat in the Cora tab, or right-click a plan file in the explorer."
       />
     );
   }
   if (!activeRun) {
-    return <EmptyState heading="No run selected" text="Pick a chat from the Spark tab." />;
+    return <EmptyState heading="No run selected" text="Pick a chat from the Cora tab." />;
   }
   if (isTerminalSpawnRun(activeRun)) {
     return (
@@ -100,7 +100,7 @@ function RunHeader({ run }: { run: RunState }) {
     ? `Step ${String(activeStepNumber).padStart(2, "0")} — ${activeStep.title}`
     : run.status === "complete"
       ? "Run complete"
-      : "Waiting for Spark to plan the first step";
+      : "Waiting for Cora to plan the first step";
 
   return (
     <header
@@ -120,7 +120,7 @@ function RunHeader({ run }: { run: RunState }) {
         <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
           <StatusDot status={run.status} size={8} />
           <span
-            title={isTerminalSpawnRun(run) ? "Spark terminals" : run.title}
+            title={isTerminalSpawnRun(run) ? "Cora terminals" : run.title}
             style={{
               minWidth: 0,
               overflow: "hidden",
@@ -133,7 +133,7 @@ function RunHeader({ run }: { run: RunState }) {
               letterSpacing: "-0.006em",
             }}
           >
-            {isTerminalSpawnRun(run) ? "Spark terminals" : run.title}
+            {isTerminalSpawnRun(run) ? "Cora terminals" : run.title}
           </span>
           <StatusPill status={run.status} />
         </div>

@@ -26,7 +26,7 @@ interface Props {
   headerDrag?: SectionHeaderDragProps;
 }
 
-// Controller for the Spark chat panel. A "chat" is a RunState — its
+// Controller for the Cora chat panel. A "chat" is a RunState — its
 // humanMessages are the conversation, its steps and workers are the work.
 // This owns the "new chat" draft toggle and the run-mutation calls (start /
 // delete / pause); the conversation and composer talk to the orchestration

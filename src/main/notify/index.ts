@@ -161,7 +161,7 @@ function handleRunEvent(event: SparkEvent): void {
       sourceKey,
       // A blocked run is the agent asking for you, not a failure — amber.
       tone: "warning",
-      title: "Spark — needs you",
+      title: "Cora — needs you",
       body: event.message?.trim() || "A run is blocked and needs your attention.",
       soundKind: "needs-you",
       target: { type: "run", runId, workspaceId },
@@ -186,7 +186,7 @@ function handleRunEvent(event: SparkEvent): void {
       kind: ok ? "run.complete" : "run.failed",
       sourceKey,
       tone: ok ? "success" : "danger",
-      title: ok ? "Spark — done" : "Spark — failed",
+      title: ok ? "Cora — done" : "Cora — failed",
       body,
       soundKind: "done",
       target: { type: "run", runId, workspaceId },

@@ -301,7 +301,7 @@ function WindowChrome({
             lineHeight: 1,
           }}
         >
-          Spark App
+          Cora
         </span>
       </div>
       <div style={{ flex: 1 }} />

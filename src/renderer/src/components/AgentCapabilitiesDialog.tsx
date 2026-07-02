@@ -9,7 +9,7 @@ import type {
   SparkBuiltinRuntime,
 } from "@shared/types";
 
-// spark-preview + spark-orchestrator ship inside Spark itself. We surface them
+// spark-preview + spark-orchestrator ship inside Cora itself. We surface them
 // in their own branded section and hide them from the generic inventory below
 // so they read as first-class built-ins, not third-party connectors.
 const SPARK_BUILTIN_NAMES = new Set(["spark-preview", "spark-orchestrator"]);
@@ -134,7 +134,7 @@ export default function AgentCapabilitiesDialog({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Hide the Spark built-ins from the generic MCP list — they get their own
+  // Hide the Cora built-ins from the generic MCP list — they get their own
   // branded section above so they don't read as third-party connectors.
   const mcp = useMemo(
     () => (assets?.mcp ?? []).filter((item) => !SPARK_BUILTIN_NAMES.has(item.name.toLowerCase())),
@@ -291,7 +291,7 @@ export default function AgentCapabilitiesDialog({
             </div>
             <div style={titleStyle}>Capability Center</div>
             <div style={ledeStyle}>
-              Choose which MCP servers and skills Spark can reference in future manager and worker prompts.
+              Choose which MCP servers and skills Cora can reference in future manager and worker prompts.
             </div>
           </div>
           <div style={headerAsideStyle}>
@@ -316,7 +316,7 @@ export default function AgentCapabilitiesDialog({
               <div style={policyListStyle}>
                 <PolicyToggle
                   title="MCP awareness"
-                  detail="Let Spark mention available MCP server names during agent planning."
+                  detail="Let Cora mention available MCP server names during agent planning."
                   checked={draft.agentMcpSyncEnabled}
                   onChange={(agentMcpSyncEnabled) => setDraft((d) => ({ ...d, agentMcpSyncEnabled }))}
                 />
@@ -327,8 +327,8 @@ export default function AgentCapabilitiesDialog({
                   onChange={(agentSkillSyncEnabled) => setDraft((d) => ({ ...d, agentSkillSyncEnabled }))}
                 />
                 <PolicyToggle
-                  title="Auto-install Spark Preview MCP"
-                  detail="Register the spark-preview MCP so verifiers can drive the live <preview> tab inside Spark — same DOM the user sees, no extra browser window."
+                  title="Auto-install Cora Preview MCP"
+                  detail="Register the spark-preview MCP so verifiers can drive the live <preview> tab inside Cora — same DOM the user sees, no extra browser window."
                   checked={draft.playwrightMcpAutoInstall}
                   onChange={(playwrightMcpAutoInstall) => setDraft((d) => ({ ...d, playwrightMcpAutoInstall }))}
                 />
@@ -474,10 +474,10 @@ function SparkBuiltinsSection({
       <div style={builtinSectionHeaderStyle}>
         <div className="spark-eyebrow" style={builtinEyebrowStyle}>
           <SparkGlyph />
-          <span>Spark Built-ins</span>
+          <span>Cora Built-ins</span>
         </div>
         <div style={sectionDetailStyle}>
-          MCP servers that ship inside Spark. Each is configured per runtime — install Claude and Codex separately.
+          MCP servers that ship inside Cora. Each is configured per runtime — install Claude and Codex separately.
         </div>
       </div>
       <hr className="spark-divider" />
@@ -485,7 +485,7 @@ function SparkBuiltinsSection({
         {builtins === null ? (
           <div className="spark-empty" style={{ minHeight: 72 }}>
             <span className="spark-eyebrow">Checking built-ins</span>
-            <span className="spark-empty__body">Reading installed Spark MCP servers…</span>
+            <span className="spark-empty__body">Reading installed Cora MCP servers…</span>
           </div>
         ) : (
           builtins.map((builtin) => (
@@ -524,12 +524,12 @@ function BuiltinCard({
       <div style={{ minWidth: 0 }}>
         <div style={builtinCardTitleRowStyle}>
           <span style={builtinNameStyle}>{builtin.name}</span>
-          <span className="spark-badge is-accent">Spark built-in</span>
+          <span className="spark-badge is-accent">Cora built-in</span>
           <span className="spark-badge" title={builtin.tools.join(", ")} style={builtinCountBadgeStyle}>
             {builtin.tools.length} tools
           </span>
           {showAutoHint ? (
-            <span className="spark-badge is-info" title="Spark re-adds this on launch while auto-install is on.">
+            <span className="spark-badge is-info" title="Cora re-adds this on launch while auto-install is on.">
               auto
             </span>
           ) : null}
@@ -551,7 +551,7 @@ function BuiltinCard({
       </div>
       {showAutoHint ? (
         <div style={builtinFootnoteStyle}>
-          Auto-install keeps spark-preview present on launch. Turn off “Auto-install Spark Preview MCP” below to
+          Auto-install keeps spark-preview present on launch. Turn off “Auto-install Cora Preview MCP” below to
           make a manual uninstall stick.
         </div>
       ) : null}
@@ -1749,7 +1749,7 @@ const addButtonStyle: React.CSSProperties = {
   fontSize: 11,
 };
 
-// --- Spark Built-ins section ---------------------------------------------
+// --- Cora Built-ins section ---------------------------------------------
 
 const builtinSectionStyle: React.CSSProperties = {
   // De-nested: a calm section on the plain surface, NOT a purple-tinted panel.

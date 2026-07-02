@@ -12,7 +12,7 @@ import type {
 
 // Timeline model for the chat conversation. A chat is a RunState: its
 // humanMessages are the back-and-forth, and its sparkCalls, worker attempts,
-// steps, and attachments are the work Spark did between turns.
+// steps, and attachments are the work Cora did between turns.
 // buildChatTimeline merges them into one ordered stream so the conversation
 // reads the way it happened.
 
@@ -80,9 +80,9 @@ export type ChatTimelineItem =
       at: string;
     };
 
-// Merge the human conversation and Spark activity into one ordered stream.
+// Merge the human conversation and Cora activity into one ordered stream.
 // Every item carries an ISO timestamp, so a single sort interleaves "you said
-// X" with "Spark read context", "Spark called the manager", and worker runs in
+// X" with "Cora read context", "Cora called the manager", and worker runs in
 // real order.
 export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
   const items: ChatTimelineItem[] = [];
@@ -307,7 +307,7 @@ function formatAttemptDuration(attempt: WorkerAttempt): string | null {
 function managerModeTitle(mode: SparkCall["mode"]): string {
   switch (mode) {
     case "chat":
-      return "Spark decision";
+      return "Cora decision";
     case "plan_analysis":
       return "Plan analysis";
     case "step_planning":
@@ -429,7 +429,7 @@ function attachmentSignature(
   return (attachments ?? []).map((attachment) => attachment.id || attachment.path).join("|");
 }
 
-// The most recent question Spark asked that the user has not yet answered.
+// The most recent question Cora asked that the user has not yet answered.
 // Drives the composer's "answer and resume" behaviour.
 export function findOpenQuestion(run: RunState): HumanRunMessage | null {
   for (let i = run.humanMessages.length - 1; i >= 0; i--) {

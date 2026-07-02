@@ -618,7 +618,7 @@ function RunSummary({
             {run.status === "complete"
               ? "Run complete. Every step finished."
               : run.status === "planning"
-                ? "Spark is reading the plan and shaping the first steps."
+                ? "Cora is reading the plan and shaping the first steps."
                 : run.status === "failed" || run.status === "blocked"
                   ? "Run stopped. See what needs you below."
                   : "No step is running right now."}
@@ -628,7 +628,7 @@ function RunSummary({
 
       <Section title="Progress" meta={<MetaCount value={`${completeCount}/${steps.length || 0}`} />}>
         {steps.length === 0 ? (
-          <MutedNote>Steps appear here once Spark plans them.</MutedNote>
+          <MutedNote>Steps appear here once Cora plans them.</MutedNote>
         ) : (
           <div style={{ display: "flex", gap: 3 }}>
             {steps.map((step, i) => (
@@ -941,7 +941,7 @@ function StepDetail({
 
       <Section title="Workers" meta={<MetaCount value={tasks.length} />}>
         {tasks.length === 0 ? (
-          <MutedNote>No worker tasks yet. Spark queues them as the step runs.</MutedNote>
+          <MutedNote>No worker tasks yet. Cora queues them as the step runs.</MutedNote>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
             {tasks.map((task) => {
@@ -1531,7 +1531,7 @@ function friendlyRunLine(run: RunState, liveStep: StepState | undefined, attenti
     return `Working on ${liveStep.title}.`;
   }
   if (run.status === "complete") return "Everything finished. The reports below show what changed.";
-  if (run.status === "planning") return "Spark is planning the next useful step.";
+  if (run.status === "planning") return "Cora is planning the next useful step.";
   if (run.status === "paused") return run.autopilot?.stopReason || "Paused until you resume it.";
   if (run.status === "cancelled") return "This run was cancelled.";
   if (run.status === "failed" || run.status === "blocked") return "The run stopped before completion.";
@@ -1547,10 +1547,10 @@ function friendlyStepLine(step: StepState, totalWorkers: number, doneWorkers: nu
   if (step.status === "running" || step.status === "reviewing") {
     return totalWorkers > 0
       ? `${doneWorkers} of ${totalWorkers} workers are done; the rest are still moving.`
-      : "Spark is preparing workers for this step.";
+      : "Cora is preparing workers for this step.";
   }
   if (step.status === "blocked" || step.status === "failed") return "This step needs attention before the run continues.";
-  if (step.status === "planning") return "Spark is shaping the worker tasks for this step.";
+  if (step.status === "planning") return "Cora is shaping the worker tasks for this step.";
   return totalWorkers > 0 ? "Ready for workers to run." : "No workers have been queued yet.";
 }
 
@@ -1567,7 +1567,7 @@ function friendlyWorkerLine(
     return "Finished. Review the report and proof below for details.";
   }
   if (task.status === "retry_queued") return "Queued for another attempt.";
-  return "Queued and waiting for Spark to launch it.";
+  return "Queued and waiting for Cora to launch it.";
 }
 
 function pad(value: number): string {
@@ -1613,7 +1613,7 @@ function collectAttention(
   if (run.status === "paused") {
     items.push({
       title: "Run paused",
-      detail: run.autopilot?.stopReason || "Resume it from the Spark tab.",
+      detail: run.autopilot?.stopReason || "Resume it from the Cora tab.",
       tone: "var(--info)",
       mark: "pending",
     });
@@ -1642,7 +1642,7 @@ function collectAttention(
   const lastMessage = run.humanMessages[run.humanMessages.length - 1];
   if (lastMessage && lastMessage.author === "spark" && lastMessage.kind === "question") {
     items.push({
-      title: "Spark asked a question",
+      title: "Cora asked a question",
       detail: lastMessage.message,
       tone: "var(--accent)",
       mark: "running",
@@ -1726,7 +1726,7 @@ function recentActivity(run: RunState): ActivityItem[] {
     const stamp = call.completedAt ?? call.createdAt;
     items.push({
       when: formatClock(stamp),
-      label: `Spark · ${call.mode.replace(/_/g, " ")}`,
+      label: `Cora · ${call.mode.replace(/_/g, " ")}`,
       state: call.status,
       tone:
         call.status === "failed"

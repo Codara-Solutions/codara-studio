@@ -92,7 +92,7 @@ import {
 // derived run.title is kept on the RunState for the chat panel header and the
 // history popover; only the workspace tab strip is forced to this constant so
 // short prompts ("hello") don't surface as truncated "He..." labels.
-const CHAT_TAB_LABEL = "Spark Agent";
+const CHAT_TAB_LABEL = "Cora";
 
 const DEFAULT_SETTINGS: AppSettings = {
   defaultShellId: null,
@@ -491,7 +491,7 @@ export default function App() {
           ? activeTab.id
           : null;
       if (draftToPromote) {
-        // The top-strip chat tab always reads "Spark Agent" — the first-
+        // The top-strip chat tab always reads "Cora" — the first-
         // message-derived run.title would otherwise truncate to fragments
         // like "He..." for short prompts. The real title is still surfaced
         // in the chat panel header and the history popover.
@@ -2666,7 +2666,7 @@ export default function App() {
     list.push({
       id: "chat-new",
       kind: "chat-new",
-      label: "New Spark chat",
+      label: "New Cora chat",
       group: "chat",
       disabled: !activeWorkspace,
       disabledReason: activeWorkspace ? undefined : "Open a workspace first.",
@@ -3911,7 +3911,7 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
           gap: 6,
         }}
       >
-        <span>Spark stores its data in</span>
+        <span>Cora stores its data in</span>
         <span
           style={{
             fontFamily: "var(--font-mono)",
@@ -4008,7 +4008,7 @@ const EmptyWorkbench = React.memo(function EmptyWorkbench({
           marginBottom: 8,
         }}
       >
-        Start a new chat with Spark, or open a terminal. Past chats are still in
+        Start a new chat with Cora, or open a terminal. Past chats are still in
         the history popover.
       </div>
       <div style={{ display: "inline-flex", gap: 10 }}>

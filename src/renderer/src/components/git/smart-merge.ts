@@ -223,7 +223,7 @@ export function buildSmartMergePlan(context: GitSmartMergeContext): string {
 
 I've already run \`git fetch --prune\`. Below is where this branch stands against ${upstream}. Read it over, tell me in a sentence or two what merging will involve, and ask me if anything looks ambiguous or risky before you act — otherwise go ahead and do the merge yourself. You can run git directly.
 
-## Where things stand (Spark preflight)
+## Where things stand (Cora preflight)
 - Repository: ${context.repositoryRoot}
 - Fetched: git fetch --prune at ${context.fetchedAt}
 - Branch: ${branch}

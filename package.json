@@ -1,7 +1,7 @@
 {
   "name": "spark-agent",
   "version": "0.1.0",
-  "description": "Spark Agent — cross-platform terminal multiplexer",
+  "description": "Cora — Codara's cross-platform terminal multiplexer and agent cockpit",
   "main": "out/main/index.js",
   "author": "Etienne",
   "private": true,
@@ -86,7 +86,7 @@
   },
   "build": {
     "appId": "com.spark.agent",
-    "productName": "Spark Agent",
+    "productName": "Cora",
     "files": [
       "out/**/*",
       "package.json",
@@ -151,8 +151,8 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "TODO-github-owner",
-      "repo": "TODO-github-repo"
+      "owner": "Ed3scomb3s",
+      "repo": "spark-agent"
     }
   }
 }

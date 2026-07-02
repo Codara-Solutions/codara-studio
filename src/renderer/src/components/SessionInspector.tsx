@@ -135,7 +135,7 @@ export default function SessionInspector({ run, onClose }: SessionInspectorProps
           }}
         >
           {run === null ? (
-            <EmptyState message="No active run. Pick a chat in the Spark tab to inspect it." />
+            <EmptyState message="No active run. Pick a chat in the Cora tab to inspect it." />
           ) : activeTab === "costs" ? (
             <CostsTab run={run} />
           ) : activeTab === "events" ? (

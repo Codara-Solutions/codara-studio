@@ -606,7 +606,7 @@ function ApiSettings({
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
         title="OpenRouter"
-        detail="Used by Spark Agent to plan Claude and Codex worker tasks."
+        detail="Used by Cora to plan Claude and Codex worker tasks."
       />
       <Label text="OpenRouter API key">
         <input
@@ -773,7 +773,7 @@ const APP_THEME_META: Readonly<
   >
 > = {
   "spark-classic": {
-    label: "Spark Classic",
+    label: "Cora Classic",
     swatches: ["#191914", "#25241f", "#f0c419", "#f5f2e9"],
   },
   "catppuccin-mocha": {
@@ -789,7 +789,7 @@ const APP_THEME_META: Readonly<
     swatches: ["#282c34", "#2c313a", "#61afef", "#abb2bf"],
   },
   "spark-daylight": {
-    label: "Spark Daylight",
+    label: "Cora Daylight",
     swatches: ["#faf9f5", "#eae7dd", "#f0c419", "#211f1a"],
   },
   "github-light": {
@@ -847,7 +847,7 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
         <div style={{ display: "grid", gap: 6 }}>
           <ToggleRow
             title="Keep running in the background when the window is closed"
-            desc="Closing the window hides Spark to the system tray instead of quitting, so automations keep running. Quit from the tray menu."
+            desc="Closing the window hides Cora to the system tray instead of quitting, so automations keep running. Quit from the tray menu."
             checked={preferences.keepRunningInBackground !== false}
             onChange={(v) => void setPreference("keepRunningInBackground", v)}
           />
@@ -930,7 +930,7 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
           />
           <ToggleRow
             title="OS-specific cues"
-            desc="macOS dock badge / Windows taskbar flash. Clears when you focus Spark."
+            desc="macOS dock badge / Windows taskbar flash. Clears when you focus Cora."
             checked={preferences.notificationChannels.osCues}
             onChange={(v) =>
               void setPreference("notificationChannels", {
@@ -1289,7 +1289,7 @@ function AgentsSettings({
       <div style={{ display: "grid", gap: 12 }}>
         <SectionTitle
           title="Agent runtimes"
-          detail="Pick which local agent CLIs Spark may dispatch workers to. Each runtime can be toggled independently — deselect any that you do not want Spark to spawn."
+          detail="Pick which local agent CLIs Cora may dispatch workers to. Each runtime can be toggled independently — deselect any that you do not want Cora to spawn."
         />
         <div style={{ display: "grid", gap: 8 }}>
           {diagnostics?.map((runtime) => (
@@ -1323,7 +1323,7 @@ function AgentsSettings({
           boxShadow: "var(--well)",
         }}
       >
-        MCP servers and skills now live in the Capability Center from the Spark composer. That space is larger and gives
+        MCP servers and skills now live in the Capability Center from the Cora composer. That space is larger and gives
         per-item activation, compatibility, deletion, and sync controls.
       </div>
 
@@ -1355,7 +1355,7 @@ function AgentsSettings({
         />
         <NumberRow
           title="Max auto-retries per task"
-          desc="After this many stuck-fails on the same task, Spark stops auto-retrying and surfaces it to the planner instead. 0 disables auto-retry (kill only). Default 2."
+          desc="After this many stuck-fails on the same task, Cora stops auto-retrying and surfaces it to the planner instead. 0 disables auto-retry (kill only). Default 2."
           min={0}
           max={5}
           value={draft.workerStuckMaxAutoRetries}
@@ -1850,7 +1850,7 @@ function RunsSettings({
     <div style={{ display: "grid", gap: 12 }}>
       <SectionTitle
         title="All runs"
-        detail="Every run Spark has on disk, across every workspace. Open to inspect, Delete to remove the artifact directory."
+        detail="Every run Cora has on disk, across every workspace. Open to inspect, Delete to remove the artifact directory."
       />
 
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2126,7 +2126,7 @@ function AboutSettings() {
     <div style={{ display: "grid", gap: 14 }}>
       <SectionTitle
         title="About"
-        detail="Spark Agent — terminal multiplexer with orchestration."
+        detail="Cora — Codara's terminal multiplexer with agent orchestration."
       />
       <dl
         style={{

@@ -728,11 +728,11 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   // has no popover, so no global listener is needed here anymore.
 
   const placeholder = !run_
-    ? "Tell Spark what to build, or describe a task."
+    ? "Tell Cora what to build, or describe a task."
     : openQuestion
-      ? "Answer Spark, and it keeps going."
+      ? "Answer Cora, and it keeps going."
       : isTerminal
-        ? "Send a follow-up. Spark picks the work back up."
+        ? "Send a follow-up. Cora picks the work back up."
         : isPaused
           ? "Add a note, then resume."
           : hasActiveWorker
