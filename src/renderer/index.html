@@ -39,6 +39,18 @@
   </head>
   <body>
     <div id="root"><div id="spark-boot">Cora</div></div>
+    <!-- Liquid-glass lens: referenced from CSS as backdrop-filter: url(#cora-glass-lens).
+         Low-frequency turbulence displaces the backdrop so glass surfaces refract
+         what's behind them instead of only blurring it. Chromium-only backdrop-filter
+         feature, which is all Electron needs. Lives outside #root so React never
+         unmounts it. -->
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+      <filter id="cora-glass-lens" x="-12%" y="-12%" width="124%" height="124%" color-interpolation-filters="sRGB">
+        <feTurbulence type="fractalNoise" baseFrequency="0.011 0.016" numOctaves="2" seed="7" result="noise" />
+        <feGaussianBlur in="noise" stdDeviation="1.5" result="soft" />
+        <feDisplacementMap in="SourceGraphic" in2="soft" scale="52" xChannelSelector="R" yChannelSelector="G" />
+      </filter>
+    </svg>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

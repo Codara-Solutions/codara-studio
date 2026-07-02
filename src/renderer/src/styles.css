@@ -143,29 +143,63 @@
      Kill switch: html[data-glass="off"] (user pref) reverts every glass
      surface to the opaque panel look; prefers-reduced-transparency does the
      same at the media-query level. */
-  --glass-bg: color-mix(in oklch, var(--panel-2) 62%, transparent);
-  --glass-bg-strong: color-mix(in oklch, var(--panel-2) 78%, transparent);
-  --glass-bg-faint: color-mix(in oklch, var(--panel) 40%, transparent);
-  --glass-blur: 18px;
-  --glass-blur-strong: 28px;
+  --glass-bg: color-mix(in oklch, var(--panel-2) 42%, transparent);
+  --glass-bg-strong: color-mix(in oklch, var(--panel-2) 58%, transparent);
+  --glass-bg-faint: color-mix(in oklch, var(--panel) 30%, transparent);
+  --glass-blur: 12px;
+  --glass-blur-strong: 16px;
   --glass-blur-faint: 10px;
-  --glass-saturate: 1.4;
-  --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.10);
-  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.18);
-  --glass-border: color-mix(in oklch, var(--ink) 14%, transparent);
+  --glass-saturate: 1.7;
+  /* Specular ring: lit top-left edge, shaded bottom-right edge, faint inner
+     bloom — this is what sells "glass" over a flat backdrop. Painted as inset
+     box-shadows (not a pseudo-element) so it stays pinned on scrollable
+     surfaces like tall menus. */
+  --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.22), inset 1px 0 0 oklch(1 0 0 / 0.08);
+  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.28), inset -1px 0 0 oklch(0 0 0 / 0.12);
+  --glass-bloom: inset 0 0 24px oklch(1 0 0 / 0.045);
+  /* Diagonal sheen swept across the surface, over the tint, under content. */
+  --glass-sheen: linear-gradient(
+    115deg,
+    oklch(1 0 0 / 0.09),
+    oklch(1 0 0 / 0.02) 34%,
+    transparent 55%,
+    oklch(1 0 0 / 0.05) 100%
+  );
+  --glass-border: color-mix(in oklch, var(--ink) 20%, transparent);
   --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.45), 0 2px 8px oklch(0 0 0 / 0.25);
+  /* Refraction lens (SVG feDisplacementMap in index.html). Chromium applies
+     it inside backdrop-filter; kept as a token so surfaces can opt out. */
+  --glass-lens: url(#cora-glass-lens);
+  /* Chrome band fills (title bar / workspace rail / status bar) — opaque by
+     default, re-declared translucent in the glass block so the #root aurora
+     shows through. Layout bands own their space (only #root is behind them),
+     so translucency here costs nothing — no backdrop-filter involved. */
+  --chrome-top: color-mix(in oklch, var(--panel) 70%, var(--bg));
+  --chrome-rail: var(--panel);
+  --chrome-status: var(--bg);
+  /* App-shell fill behind the chrome bands (App.tsx root div): opaque here,
+     transparent in the glass block so the #root aurora reaches the bands. */
+  --shell-bg: var(--bg);
 }
 
 /* Light glass: higher fill opacity (thin white glass goes milky, not smoky),
    a bright specular top edge, hairline border, and much softer shadows —
    mirrors how --lift-hi / --shadow-1 are re-tinted per light palette. */
 :root[data-theme-mode="light"] {
-  --glass-bg: color-mix(in oklch, var(--panel-2) 72%, transparent);
-  --glass-bg-strong: color-mix(in oklch, var(--panel-2) 85%, transparent);
-  --glass-bg-faint: color-mix(in oklch, var(--panel) 55%, transparent);
-  --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.60);
-  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.08);
-  --glass-border: color-mix(in oklch, var(--ink) 10%, transparent);
+  --glass-bg: color-mix(in oklch, var(--panel-2) 56%, transparent);
+  --glass-bg-strong: color-mix(in oklch, var(--panel-2) 70%, transparent);
+  --glass-bg-faint: color-mix(in oklch, var(--panel) 42%, transparent);
+  --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.75), inset 1px 0 0 oklch(1 0 0 / 0.35);
+  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.10), inset -1px 0 0 oklch(0 0 0 / 0.05);
+  --glass-bloom: inset 0 0 24px oklch(1 0 0 / 0.30);
+  --glass-sheen: linear-gradient(
+    115deg,
+    oklch(1 0 0 / 0.55),
+    oklch(1 0 0 / 0.14) 34%,
+    transparent 55%,
+    oklch(1 0 0 / 0.25) 100%
+  );
+  --glass-border: color-mix(in oklch, var(--ink) 12%, transparent);
   --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
 }
 
@@ -1583,24 +1617,52 @@ a { color: inherit; }
 @media not (prefers-reduced-transparency: reduce) {
   html:not([data-glass="off"]) {
     /* Toast fill: Toast paints --notify-surface inline, so the translucent
-       fill rides the token; the blur comes from .spark-backdrop-glass. */
-    --notify-surface: var(--glass-bg);
+       fill rides the token; the blur comes from .spark-backdrop-glass.
+       Strong fill — toasts land over busy terminals and must stay readable. */
+    --notify-surface: var(--glass-bg-strong);
+    --chrome-top: color-mix(in oklch, var(--panel) 46%, transparent);
+    --chrome-rail: color-mix(in oklch, var(--panel) 46%, transparent);
+    --chrome-status: color-mix(in oklch, var(--bg) 38%, transparent);
+    --shell-bg: transparent;
+  }
+  /* Ambient aurora: two huge accent-tinted radials painted on #root, behind
+     every panel. Glass surfaces refract and saturate it, translucent chrome
+     lets a whisper of it through — without it, glass over a flat panel is
+     indistinguishable from a translucent rectangle. Terminals and the editor
+     stay opaque on top of it. */
+  html:not([data-glass="off"]) #root {
+    background-image:
+      radial-gradient(
+        120vw 90vh at 10% -14%,
+        color-mix(in oklch, var(--accent) 48%, transparent),
+        transparent 62%
+      ),
+      radial-gradient(
+        95vw 80vh at 106% 114%,
+        color-mix(in oklch, var(--accent) 32%, transparent),
+        transparent 60%
+      ),
+      radial-gradient(70vw 55vh at 88% -10%, oklch(0.62 0.1 300 / 0.22), transparent 55%);
   }
   html:not([data-glass="off"]) .spark-glass,
   html:not([data-glass="off"]) .spark-menu {
-    background: var(--glass-bg);
-    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    background-color: var(--glass-bg);
+    background-image: var(--glass-sheen);
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur)) saturate(var(--glass-saturate));
     border: 1px solid var(--glass-border);
-    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-shadow);
+    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
   }
   html:not([data-glass="off"]) .spark-glass--strong {
-    background: var(--glass-bg-strong);
-    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    background-color: var(--glass-bg-strong);
+    background-image: var(--glass-sheen);
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
     border: 1px solid var(--glass-border);
-    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-shadow);
+    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
   }
+  /* Chrome bands: plain frost, no lens — they're large and always on screen,
+     and a refracting title bar reads as a rendering bug, not a material. */
   html:not([data-glass="off"]) .spark-glass--faint {
     background: var(--glass-bg-faint);
     -webkit-backdrop-filter: blur(var(--glass-blur-faint)) saturate(var(--glass-saturate));
@@ -1610,10 +1672,13 @@ a { color: inherit; }
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
   }
+  /* Scrim blur stays light: the dialog's own lens+blur does the frosting, and
+     a heavy scrim would pre-flatten the backdrop so the glass has nothing
+     left to refract. */
   html:not([data-glass="off"]) .spark-scrim {
-    background: color-mix(in oklch, var(--bg) 42%, transparent);
-    -webkit-backdrop-filter: blur(8px) saturate(1.15);
-    backdrop-filter: blur(8px) saturate(1.15);
+    background: color-mix(in oklch, var(--bg) 32%, transparent);
+    -webkit-backdrop-filter: blur(3px) saturate(1.1);
+    backdrop-filter: blur(3px) saturate(1.1);
   }
 }
 

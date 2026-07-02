@@ -260,7 +260,7 @@ function WindowChrome({
           display: "flex",
           alignItems: "stretch",
           borderBottom: "1px solid var(--rule)",
-          background: "color-mix(in oklch, var(--panel) 70%, var(--bg))",
+          background: "var(--chrome-top)",
           boxShadow: "var(--lift-hi)",
           flex: "0 0 auto",
           userSelect: "none",

@@ -27,7 +27,7 @@ function StatusBar({ workspace, defaultShell, platform, workerCount }: Props) {
       style={{
         flex: "0 0 auto",
         height: 24,
-        background: "var(--bg)",
+        background: "var(--chrome-status)",
         borderTop: "1px solid var(--rule)",
         boxShadow: "var(--lift-hi)",
         display: "flex",
