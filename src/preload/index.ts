@@ -38,11 +38,14 @@ import type {
   GitSmartMergeResult,
   GitStashList,
   GitStatus,
-  InAppNotificationPayload,
   InterruptRunWithMessageInput,
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
+  NavigationTarget,
+  NotificationCenterEntry,
+  NotificationCenterSummary,
   NotificationSoundKind,
+  NotifyEvent,
   UpdateChatBackendInput,
   PauseRunInput,
   PlanFile,
@@ -67,7 +70,7 @@ import type {
   StartSearchResponse,
   TerminalAgentAttentionPayload,
   TerminalAgentStatePayload,
-  TerminalAgentTarget,
+  UiAttentionSnapshot,
   UndoToCheckpointInput,
   UndoToCheckpointResult,
   UpdateRunStatusInput,
@@ -84,7 +87,7 @@ type OrchestrationEventHandler = (event: SparkEvent) => void;
 type FsChangeHandler = (event: FsChangeEvent) => void;
 type WindowStateHandler = (state: { maximized: boolean }) => void;
 type PreferencesChangeHandler = (change: PreferencesChange) => void;
-type InAppNotificationHandler = (payload: InAppNotificationPayload) => void;
+type InAppNotificationHandler = (payload: NotifyEvent) => void;
 type NotificationSoundHandler = (info: { kind: NotificationSoundKind }) => void;
 // Hits arrive batched (one IPC message per ~100 hits or per ~24ms) — see
 // `streamGrep` in the main process. The handler receives the whole batch.
@@ -210,15 +213,15 @@ const api = {
       return () => ipcRenderer.off("preferences:changed", listener);
     },
   },
-  // Renderer subscriptions for the four-channel notification system.
-  // Two channels are renderer-side (in-app toast + embedded sound clip);
-  // the other two (native Notification, OS dock badge / taskbar flash)
-  // live entirely in main and don't surface here.
+  // Renderer surface of the unified notifications pipeline: the two
+  // renderer-side delivery channels (in-app toast + embedded sound clip),
+  // the click-routing target push ("notify:focus", fired by native
+  // notification clicks for every kind), and the notification-center store.
   notifications: {
     onInAppNotification: (handler: InAppNotificationHandler): (() => void) => {
       const listener = (
         _e: Electron.IpcRendererEvent,
-        payload: InAppNotificationPayload,
+        payload: NotifyEvent,
       ) => handler(payload);
       ipcRenderer.on("notification:in-app", listener);
       return () => ipcRenderer.off("notification:in-app", listener);
@@ -230,6 +233,30 @@ const api = {
       ) => handler(info);
       ipcRenderer.on("notification:sound", listener);
       return () => ipcRenderer.off("notification:sound", listener);
+    },
+    // Where a clicked notification should navigate. Main sends this after
+    // focusing the window (native-notification clicks); the renderer's
+    // single routing listener dispatches on the target type.
+    onFocusTarget: (handler: (target: NavigationTarget) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, target: NavigationTarget) =>
+        handler(target);
+      ipcRenderer.on("notify:focus", listener);
+      return () => ipcRenderer.off("notify:focus", listener);
+    },
+    // Notification-center history (persisted main-side, capped at 200).
+    list: (): Promise<NotificationCenterEntry[]> => ipcRenderer.invoke("notify:list"),
+    markRead: (id: string): Promise<void> => ipcRenderer.invoke("notify:markRead", id),
+    markAllRead: (): Promise<void> => ipcRenderer.invoke("notify:markAllRead"),
+    clear: (): Promise<void> => ipcRenderer.invoke("notify:clear"),
+    onCenterUpdated: (
+      handler: (summary: NotificationCenterSummary) => void,
+    ): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        summary: NotificationCenterSummary,
+      ) => handler(summary);
+      ipcRenderer.on("notify:center-updated", listener);
+      return () => ipcRenderer.off("notify:center-updated", listener);
     },
   },
   shells: {
@@ -575,22 +602,14 @@ const api = {
       ipcRenderer.invoke("terminalState:report", input),
   },
   // Terminal-agent notifier (main-process watcher over manual claude/codex
-  // panes). `sync` ships the active workspace's full terminal-pane registry;
-  // `onFocusPane` fires when the user clicks a terminal alert (native
-  // notification or via App's toast handler) and the renderer should
-  // navigate to that workspace + tab + pane.
+  // panes). `sync` ships the active workspace's full terminal-pane registry.
+  // Alert click navigation now arrives via notifications.onFocusTarget.
   terminalNotify: {
     sync: (input: {
       workspaceId: string;
       workspaceName?: string;
       panes: Array<{ paneId: string; tabId: string; tabTitle: string; excluded: boolean }>;
     }): Promise<void> => ipcRenderer.invoke("terminalNotify:sync", input),
-    onFocusPane: (handler: (target: TerminalAgentTarget) => void): (() => void) => {
-      const listener = (_e: Electron.IpcRendererEvent, target: TerminalAgentTarget) =>
-        handler(target);
-      ipcRenderer.on("terminal-agent:focus", listener);
-      return () => ipcRenderer.off("terminal-agent:focus", listener);
-    },
     // Fires alongside every terminal-agent alert (regardless of channel
     // settings) so the workspace rail can mark the owning workspace as
     // needing attention until the user visits the pane's tab.
@@ -656,17 +675,11 @@ const api = {
     // call it on boot and whenever the workspace list changes.
     setAllowedRoots: (roots: string[]): Promise<void> =>
       ipcRenderer.invoke("ui:setAllowedRoots", roots),
-    // Tells main which run the user is currently looking at so the
-    // notification module can suppress "run complete" alerts for that run.
-    // Null = no run selected (e.g. the new-chat draft composer).
-    setActiveRun: (id: string | null): Promise<void> =>
-      ipcRenderer.invoke("ui:setActiveRun", id),
-    // Tells main which workspace + tab the user is looking at so the
-    // terminal-agent notifier can suppress alerts for the visible tab.
-    setActiveTerminalContext: (ctx: {
-      workspaceId: string | null;
-      tabId: string | null;
-    }): Promise<void> => ipcRenderer.invoke("ui:setActiveTerminalContext", ctx),
+    // Tells main what the user is looking at — window focus + active
+    // workspace/tab/run/pane in one snapshot — so the notify policy can
+    // suppress alerts for the surface already on screen.
+    setAttention: (snapshot: UiAttentionSnapshot): Promise<void> =>
+      ipcRenderer.invoke("ui:setAttention", snapshot),
   },
   clipboard: {
     readText: (): Promise<string> => ipcRenderer.invoke("clipboard:readText"),

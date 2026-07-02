@@ -60,14 +60,8 @@ export default function OrchestrationSidebar({
     if (activeRunId) setCreatingNewRun(false);
   }, [activeRunId]);
 
-  // Keep the main process in sync with whatever the user is looking at so
-  // notification suppression works even when the selection changes externally
-  // (e.g. workbench tab sync, right-click Run plan) or on first mount.
-  // Drafting a new chat counts as "looking at nothing", so report null.
-  useEffect(() => {
-    const id = creatingNewRun ? null : activeRunId;
-    void window.spark.ui?.setActiveRun(id);
-  }, [activeRunId, creatingNewRun]);
+  // Notification suppression context now flows through App's unified
+  // ui:setAttention snapshot (which tracks the same activeRunId).
 
   // Defensive: if a chat lands as active without going through
   // `handleSelectRun` (e.g. workbench tab sync, deep-link), still flip the

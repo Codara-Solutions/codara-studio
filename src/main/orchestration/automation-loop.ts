@@ -18,6 +18,7 @@ import {
   SPARK_LOOP_DONE,
 } from "@shared/types";
 import { appendHistory, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
+import { automationSourceKey, publish, rearm } from "../notify";
 import { planLoomLayers, renderNodePrompt, sinkNodeIds } from "./loom-graph";
 // Shell-check / git-clean probes live in loom-predicates so guard nodes (run-store)
 // and these StopConditions settle identically without a run-store↔automation-loop
@@ -241,6 +242,10 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       await finalize(id, "budget");
       return;
     }
+
+    // A new iteration is real new activity — re-arm the notify policy so the
+    // loop's eventual finish/failure alert delivers even after a prior one.
+    rearm(automationSourceKey(id));
 
     const passIter = job.state.iteration; // 0-based index of THIS pass
     const lastRecord = job.history[job.history.length - 1];
@@ -1335,7 +1340,28 @@ async function finalize(
       },
     };
   });
-  void emitIteration(id, (await getJob(id))?.state.iteration ?? 0, undefined, "stopped");
+  const finalJob = await getJob(id);
+  void emitIteration(id, finalJob?.state.iteration ?? 0, undefined, "stopped");
+
+  // Loop-level completion alert — once per finalize, never per iteration.
+  // user-stop is skipped: the user clicked stop themselves; pinging them
+  // about their own action is noise.
+  if (finalJob && reason !== "user-stop") {
+    const failed = reason === "iteration-failed" || reason === "engine-missing";
+    const iterations = finalJob.state.iteration;
+    const passes = `${iterations} iteration${iterations === 1 ? "" : "s"}`;
+    publish({
+      kind: failed ? "automation.failed" : "automation.finished",
+      sourceKey: automationSourceKey(id),
+      tone: failed ? "danger" : "success",
+      title: failed ? "Loom — failed" : "Loom — finished",
+      body: failed
+        ? `“${finalJob.name}” stopped after ${passes} (${reason}).`
+        : `“${finalJob.name}” finished after ${passes} (${reason}).`,
+      soundKind: failed ? "needs-you" : "done",
+      target: { type: "automation", jobId: id, runId: finalizedRunId },
+    });
+  }
 
   // Fire onFinishOf dependents (cycle-guarded). Suppressed for delete-driven
   // stops — removing loom A must not kick off loom B.

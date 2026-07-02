@@ -275,6 +275,11 @@ export function useTerminalSession({
 
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // Bridge to the effect-local `scheduleFitRetry` (defined once the PTY is
+  // spawned) so the WebGL onContextLoss handler — which is created much earlier
+  // in the same effect — can trigger a re-fit + pty.resize after xterm falls
+  // back to the DOM renderer. See the onContextLoss handler for why.
+  const refitAfterRendererSwapRef = useRef<(() => void) | null>(null);
   const normalizedScrollbackLineLimit = normalizeTerminalScrollbackLineLimit(scrollbackLineLimit);
   const scrollbackLineLimitRef = useRef<number>(normalizedScrollbackLineLimit);
   useEffect(() => {
@@ -424,23 +429,6 @@ export function useTerminalSession({
       fitRef.current = fit;
       term.loadAddon(fit);
 
-      // [TUI-OVERFLOW-PROBE] throwaway debug seam — remove before finalizing.
-      // Exposes the live Terminal + FitAddon keyed by sessionId so an e2e probe
-      // can read term.cols / renderer dimensions / fit.proposeDimensions and
-      // compare the rendered content right-edge against the visible host box.
-      try {
-        const g = globalThis as unknown as {
-          __sparkTerms?: Map<string, { term: Terminal; fit: FitAddon; host: HTMLElement | null }>;
-        };
-        (g.__sparkTerms ??= new Map()).set(sessionId, {
-          term,
-          fit,
-          host: container.current,
-        });
-      } catch {
-        /* ignore */
-      }
-
       const search = new SearchAddon();
       term.loadAddon(search);
 
@@ -501,6 +489,18 @@ export function useTerminalSession({
             /* ignore */
           }
           webgl = null;
+          // Disposing the WebGL addon makes xterm fall back to the DOM renderer.
+          // The DOM renderer derives a WIDER css cell width than WebGL (it does
+          // NOT floor device char width the way WebglRenderer does), and the
+          // fallback resizes the row grid to the CURRENT `cols` without re-running
+          // FitAddon. The grid therefore becomes wider than the pane and the
+          // rightmost columns — a TUI's right border, right-aligned statusline
+          // items — get clipped by .xterm-host's overflow:hidden (an Ink/Claude
+          // Code box appears to "overflow" the pane's right edge). The host size
+          // is unchanged so the ResizeObserver never fires on its own. Re-fit
+          // explicitly so cols is recomputed for the new cell metrics and the new
+          // size is pushed to the pty (SIGWINCH → the TUI repaints to fit).
+          refitAfterRendererSwapRef.current?.();
         });
         term.loadAddon(webgl);
       } catch {
@@ -1828,6 +1828,12 @@ export function useTerminalSession({
         };
         rafHandle = window.requestAnimationFrame(tick);
       };
+      // Expose the re-fit path to the WebGL onContextLoss handler (created
+      // earlier in this effect). On a GPU context loss xterm swaps to the DOM
+      // renderer, whose wider cell metrics leave the grid overflowing the pane
+      // unless we re-fit; scheduleFitRetry recomputes cols and pushes the new
+      // size to the pty.
+      refitAfterRendererSwapRef.current = scheduleFitRetry;
 
       const el = container.current;
       const flushPtyResize = () => {

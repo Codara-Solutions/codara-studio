@@ -2,8 +2,11 @@
 //
 // Mirrors scripts/test-automations.cjs: esbuild-bundles the REAL
 // src/main/terminal-agent-notify.ts and drives it with synthetic pty chunks,
-// stubbing electron / pty-manager / notifications so we can observe alert
-// delivery without booting the app. Simulates a Claude Code session the way
+// stubbing electron / pty-manager / the notify pipeline so we can observe
+// alert delivery without booting the app. The ./notify stub runs the REAL
+// policy (src/main/notify/policy.ts) with a scripted attention context, so
+// suppression/dedup behavior is asserted end to end. Simulates a Claude
+// Code session the way
 // it actually arrives on the wire: OSC 633;E command marker, banner, footer
 // repaints with ANSI interleaving, permission dialogs, prompt-back markers,
 // and explicit OSC 9 notifications.
@@ -31,13 +34,13 @@ const harnessPlugin = {
     build.onResolve({ filter: /^@shared\// }, (args) => ({
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
-    build.onResolve({ filter: /^(electron|\.\/pty-manager|\.\/notifications)$/ }, (args) => ({
+    build.onResolve({ filter: /^(electron|\.\/pty-manager|\.\/notify)$/ }, (args) => ({
       path: args.path,
       namespace: "stub",
     }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
       const init =
-        "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), alerts: [], focusedWindow: null };\n";
+        "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), alerts: [], chips: [], focusedWindow: null, activeContext: { workspaceId: null, tabId: null } };\n";
       if (args.path === "electron") {
         return {
           contents:
@@ -57,12 +60,28 @@ const harnessPlugin = {
           loader: "js",
         };
       }
-      // ./notifications
+      // ./notify — the REAL policy driven by the scripted attention context;
+      // delivered events land in __TAN.alerts with the legacy shape the
+      // scenario checks assert against.
       return {
         contents:
           init +
-          "export async function fireTerminalAgentAlert(alert){ globalThis.__TAN.alerts.push(alert); }\n",
+          'import { createPolicyState, decide, rearm as policyRearm } from "./policy";\n' +
+          "const state = createPolicyState();\n" +
+          "export const paneSourceKey = (paneId) => `pane:${paneId}`;\n" +
+          "export function rearm(sourceKey){ policyRearm(state, sourceKey); }\n" +
+          "export function emitTerminalAgentState(payload){ globalThis.__TAN.chips.push(payload); }\n" +
+          "export function publish(event){\n" +
+          "  const T = globalThis.__TAN;\n" +
+          "  const t = event.target;\n" +
+          "  const watching = T.focusedWindow !== null && t.type === 'terminal' &&\n" +
+          "    T.activeContext.workspaceId === t.workspaceId && T.activeContext.tabId === t.tabId;\n" +
+          "  const d = decide({ kind: event.kind, sourceKey: event.sourceKey }, { watching, dnd: false }, state);\n" +
+          "  if (!d.deliver) return;\n" +
+          "  T.alerts.push({ kind: event.kind === 'terminal.agent.done' ? 'complete' : 'blocked', title: event.title, body: event.body, target: t });\n" +
+          "}\n",
         loader: "js",
+        resolveDir: path.join(ROOT, "src", "main", "notify"),
       };
     });
   },
@@ -114,7 +133,7 @@ async function main() {
 
   // ── Scenario 1: turn finishes while the user is on ANOTHER tab ──
   // User is in the same workspace but looking at a chat tab; window focused.
-  mod.setActiveTerminalContext({ workspaceId: "ws1", tabId: "chat-tab" });
+  T.activeContext = { workspaceId: "ws1", tabId: "chat-tab" };
   T.focusedWindow = {};
   feed("p1", "\x1b]633;E;claude\x07");
   // v2.1.170 banner: word gaps are cursor-forward moves, not spaces.
@@ -142,7 +161,7 @@ async function main() {
   check("alert body names the workspace", /Fleet/.test(T.alerts[0].body));
 
   // ── Scenario 2: same flow, but the user IS watching that tab → suppressed ──
-  mod.setActiveTerminalContext({ workspaceId: "ws1", tabId: "t1" });
+  T.activeContext = { workspaceId: "ws1", tabId: "t1" };
   feed("p1", "\x1b[2K\x1b[G✻ Reticulating… (2s · ↓ 312 tokens)");
   await sleep(1700);
   feed("p1", "\x1b[2K\x1b[G✻ Reticulating… (4s · ↓ 312 tokens)");
@@ -154,7 +173,7 @@ async function main() {
   // The AskUserQuestion selector (live-observed v2.1.170) arrives right after
   // a SHORT working burst — blocked alerts are deliberately NOT gated on
   // MIN_WORK_MS, so this must fire even though the turn just started.
-  mod.setActiveTerminalContext({ workspaceId: "ws2", tabId: "elsewhere" });
+  T.activeContext = { workspaceId: "ws2", tabId: "elsewhere" };
   feed("p1", "\x1b[2K\x1b[G✻ Pondering… (1s · ↑ 312 tokens)");
   feed(
     "p1",

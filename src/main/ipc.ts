@@ -16,9 +16,14 @@ import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import { listEvents } from "./orchestration/event-log";
-import { setActiveRunId } from "./notifications";
 import {
-  setActiveTerminalContext,
+  clearCenter,
+  listCenterEntries,
+  markCenterAllRead,
+  markCenterRead,
+  setAttention,
+} from "./notify";
+import {
   syncTerminalNotifyPanes,
   type TerminalNotifyPaneEntry,
 } from "./terminal-agent-notify";
@@ -142,6 +147,7 @@ import type {
   PrefKey,
   PreferencesChange,
   PrepareWorkerTaskInput,
+  NotificationCenterEntry,
   QueuedRun,
   RenameRunInput,
   ResumeRunInput,
@@ -161,6 +167,7 @@ import type {
   SparkEvent,
   StartAutopilotInput,
   StartSearchResponse,
+  UiAttentionSnapshot,
   UndoToCheckpointInput,
   UndoToCheckpointResult,
   UpdateRunStatusInput,
@@ -1255,18 +1262,30 @@ export function registerIpc(): void {
     },
   );
 
-  // Renderer reports the active workspace + tab so the terminal-agent
-  // notifier can suppress alerts for the pane the user is already watching
-  // (the "don't ping me about the tab I'm looking at" rule).
+  // Renderer reports what the user is looking at (focus + active workspace/
+  // tab/run/pane) in one snapshot; the notify policy suppresses alerts for
+  // the surface the user is already watching.
   ipcMain.handle(
-    "ui:setActiveTerminalContext",
-    async (
-      _e,
-      ctx: { workspaceId: string | null; tabId: string | null },
-    ): Promise<void> => {
-      setActiveTerminalContext(ctx ?? { workspaceId: null, tabId: null });
+    "ui:setAttention",
+    async (_e, snapshot: Partial<UiAttentionSnapshot> | null): Promise<void> => {
+      setAttention(snapshot);
     },
   );
+
+  // Notification center (src/main/notify/center-store).
+  ipcMain.handle(
+    "notify:list",
+    async (): Promise<NotificationCenterEntry[]> => listCenterEntries(),
+  );
+  ipcMain.handle("notify:markRead", async (_e, id: string): Promise<void> => {
+    if (typeof id === "string") await markCenterRead(id);
+  });
+  ipcMain.handle("notify:markAllRead", async (): Promise<void> => {
+    await markCenterAllRead();
+  });
+  ipcMain.handle("notify:clear", async (): Promise<void> => {
+    await clearCenter();
+  });
 
   ipcMain.handle("window:minimize", async (e): Promise<void> => {
     BrowserWindow.fromWebContents(e.sender)?.minimize();
@@ -1320,14 +1339,6 @@ export function registerIpc(): void {
       }
     },
   );
-
-  // Renderer reports which run is currently selected so main can suppress
-  // "run complete" notifications for the run the user is already looking at.
-  // Passing null clears the selection (e.g. when the user opens the "new
-  // chat" draft composer).
-  ipcMain.handle("ui:setActiveRun", async (_e, runId: string | null): Promise<void> => {
-    setActiveRunId(typeof runId === "string" ? runId : null);
-  });
 
   ipcMain.handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);
   ipcMain.handle("app:home", async (): Promise<string> => app.getPath("home"));

@@ -13,7 +13,7 @@ import {
   getPreferenceSync,
   loadPreferences,
 } from "./preferences-store";
-import { registerMainWindow, startNotifications } from "./notifications";
+import { flushNotificationCenter, registerMainWindow, startNotifications } from "./notify";
 import { setSeededRoots } from "./fs-sandbox";
 import { getEnrichedPath } from "./path-reconstruction";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
@@ -552,7 +552,7 @@ app.whenReady().then(async () => {
 // its own independent async write-queue that nothing else flushes — without
 // this await a quit can drop the last preference toggle.
 async function flushAllStores(): Promise<void> {
-  await Promise.all([flush(), flushPreferences()]);
+  await Promise.all([flush(), flushPreferences(), flushNotificationCenter()]);
 }
 
 app.on("window-all-closed", async () => {

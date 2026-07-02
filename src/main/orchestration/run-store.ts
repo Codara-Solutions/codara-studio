@@ -9451,20 +9451,6 @@ async function commitRunChange(
       console.error("[run-store] failed to record run memory", err);
     }
   }
-  // Fire desktop notifications for blocked / complete transitions. Lazy-load
-  // the module so the run-store cold path doesn't pull in the Electron
-  // Notification API on every import — matches the deferred-load pattern used
-  // for heavy modules in ipc.ts.
-  if (persisted && result && prevStatus !== nextStatus && nextStatus !== null) {
-    void (async () => {
-      try {
-        const mod = await import("../notifications");
-        mod.notifyRunStateTransition(result!, prevStatus, nextStatus!);
-      } catch {
-        /* notification delivery is best-effort */
-      }
-    })();
-  }
   return result ?? (await requireRun(run.id));
 }
 

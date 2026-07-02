@@ -1,21 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import type {
-  InAppNotificationPayload,
-  RunQuestionOption,
-  TerminalAgentTarget,
-} from "@shared/types";
-import { makeId } from "@shared/ids";
+import type { NotifyEvent, RunQuestionOption } from "@shared/types";
+import { kindMeta, type NotifyGlyph } from "../notifications/kinds";
+import { answerRunQuestion } from "../notifications/answers";
+import type { NavigateTo } from "../notifications/routing";
 
-// In-app toast manager + renderer for the four-channel notification
-// system. Listens for "notification:in-app" payloads (sent by the main
-// process whenever the 3-rule policy fires) and surfaces them as a
-// stacked top-right column of cards.
+// In-app toast manager + renderer for the unified notifications pipeline.
+// Listens for "notification:in-app" NotifyEvents (sent by the main process
+// whenever the notify policy fires) and surfaces them as a stacked
+// top-right column of cards.
 //
 // Each toast auto-dismisses after AUTO_DISMISS_MS, the user can also
 // click the close button to drop it early. Click anywhere else on the
-// card selects the corresponding run if the parent provided an
-// onSelectRun handler — this lets a "needs you" alert deep-link the
-// user straight to the chat that needs them.
+// card routes the event's NavigationTarget through navigateTo — this lets
+// a "needs you" alert deep-link the user straight to the chat, terminal
+// pane, or loom that needs them.
 
 const AUTO_DISMISS_MS = 6_000;
 // Cap simultaneous toasts so a misbehaving run that fires many alerts
@@ -23,18 +21,15 @@ const AUTO_DISMISS_MS = 6_000;
 // stack while keeping the most recent visible.
 const MAX_VISIBLE = 5;
 
-type Toast = InAppNotificationPayload;
+type Toast = NotifyEvent;
 
 export interface ToastHostProps {
-  onSelectRun?: (runId: string, workspaceId?: string) => void;
-  // Terminal-agent toasts (manual claude/codex panes) carry a terminal
-  // target instead of a runId; clicking routes to that workspace + tab +
-  // pane via App's focusTerminalTarget.
-  onSelectTerminal?: (target: TerminalAgentTarget) => void;
-  // Resolve the manager's open-question options for a run so a "blocked"
-  // toast can offer one-click answers. The InAppNotificationPayload from
-  // main only carries runId — the options live in the run state, so the
-  // App resolves them in the renderer (global runs feed + findOpenQuestion).
+  // Routes a clicked card to its target (run chat / terminal pane / loom).
+  navigateTo?: NavigateTo;
+  // Resolve the manager's open-question options for a run so a "run.blocked"
+  // toast can offer one-click answers. The NotifyEvent from main only
+  // carries the runId — the options live in the run state, so the App
+  // resolves them in the renderer (global runs feed + findOpenQuestion).
   resolveQuestion?: (runId: string) => RunQuestionOption[];
   // Whether answering should also resumeRun (default true). Loom-owned runs
   // must NOT be resumed from here: resume re-runs the direct-run finalizer
@@ -44,8 +39,7 @@ export interface ToastHostProps {
 }
 
 export default function ToastHost({
-  onSelectRun,
-  onSelectTerminal,
+  navigateTo,
   resolveQuestion,
   shouldResumeOnAnswer,
 }: ToastHostProps) {
@@ -135,8 +129,7 @@ export default function ToastHost({
           onClose={() =>
             setToasts((current) => current.filter((t) => t.id !== toast.id))
           }
-          onSelectRun={onSelectRun}
-          onSelectTerminal={onSelectTerminal}
+          navigateTo={navigateTo}
           resolveQuestion={resolveQuestion}
           shouldResumeOnAnswer={shouldResumeOnAnswer}
         />
@@ -149,16 +142,14 @@ function ToastCard({
   toast,
   depth,
   onClose,
-  onSelectRun,
-  onSelectTerminal,
+  navigateTo,
   resolveQuestion,
   shouldResumeOnAnswer,
 }: {
   toast: Toast;
   depth: number;
   onClose: () => void;
-  onSelectRun?: (runId: string, workspaceId?: string) => void;
-  onSelectTerminal?: (target: TerminalAgentTarget) => void;
+  navigateTo?: NavigateTo;
   resolveQuestion?: (runId: string) => RunQuestionOption[];
   shouldResumeOnAnswer?: (runId: string) => boolean;
 }) {
@@ -175,28 +166,26 @@ function ToastCard({
   // fights it; until then the entering card is fully forward.
   const [entered, setEntered] = useState(false);
 
-  // Resolve the manager's open-question options for a "blocked" toast.
-  // Only "blocked" toasts carry a pending question, and we need a runId
-  // to look it up; everything else renders no answer buttons.
+  const meta = kindMeta(toast.kind);
+  // Resolve the manager's open-question options for a blocked-run toast.
+  // Only "run.blocked" events carry a pending question, and the runId lives
+  // on the navigation target; everything else renders no answer buttons.
+  const questionRunId =
+    toast.kind === "run.blocked" && toast.target.type === "run"
+      ? toast.target.runId
+      : null;
   const answerOptions: RunQuestionOption[] =
-    toast.kind === "blocked" && toast.runId && resolveQuestion
-      ? resolveQuestion(toast.runId).slice(0, 3)
-      : [];
+    questionRunId && resolveQuestion ? resolveQuestion(questionRunId).slice(0, 3) : [];
 
   const answerWith = async (option: RunQuestionOption) => {
-    if (!toast.runId || answering.current) return;
+    if (!questionRunId || answering.current) return;
     answering.current = true;
     try {
-      await window.spark.orchestration.addRunMessage({
-        runId: toast.runId,
-        clientMessageId: makeId("client-msg"),
-        author: "user",
-        kind: "answer",
-        message: option.answer,
-      });
-      if (shouldResumeOnAnswer?.(toast.runId) ?? true) {
-        await window.spark.orchestration.resumeRun({ runId: toast.runId });
-      }
+      await answerRunQuestion(
+        questionRunId,
+        option,
+        shouldResumeOnAnswer?.(questionRunId) ?? true,
+      );
       onClose();
     } catch {
       // Answering failed (run gone, IPC error) — release the guard so the
@@ -205,18 +194,15 @@ function ToastCard({
     }
   };
 
-  // Three semantic treatments, driven by `tone` (not `kind`): the single
-  // "blocked" kind collapses an agent ASKING for input (warning, amber) and a
-  // genuine FAILURE (danger, red), which must not look alike. `tone` is
-  // optional, so derive a sensible fallback from `kind` when the main process
-  // didn't tag it: blocked → warning, complete → success. None of the three
-  // glow with the workspace accent, so the brand stays rationed. The neutral
-  // --notify-surface body carries the card; status lives only in a 3px left
-  // status rule plus a ~14%-tinted rounded icon chip. Mirror the herdr
-  // "static, never pulse" rule — the surface is solid so urgency reads as
-  // gravitas, not a generic spinner.
-  const tone: NonNullable<Toast["tone"]> =
-    toast.tone ?? (toast.kind === "blocked" ? "warning" : "success");
+  // Three semantic treatments, driven by `tone`: an agent ASKING for input
+  // (warning, amber) and a genuine FAILURE (danger, red) must not look
+  // alike. Falls back to the kind-derived tone for entries missing one.
+  // None of the three glow with the workspace accent, so the brand stays
+  // rationed. The neutral --notify-surface body carries the card; status
+  // lives only in a 3px left status rule plus a ~14%-tinted rounded icon
+  // chip. Mirror the herdr "static, never pulse" rule — the surface is solid
+  // so urgency reads as gravitas, not a generic spinner.
+  const tone = toast.tone ?? meta.tone;
   // Theme token the tone maps to (all three exist in every theme in
   // styles.css — we never mint a new one).
   const toneVar =
@@ -225,13 +211,10 @@ function ToastCard({
     status: toneVar,
     chipFill: `color-mix(in oklch, ${toneVar} 14%, var(--panel))`,
     chipBorder: `color-mix(in oklch, ${toneVar} 32%, transparent)`,
-    title:
-      toast.title || (toast.kind === "blocked" ? "Spark — needs you" : "Spark — done"),
+    title: toast.title || `Spark — ${meta.label.toLowerCase()}`,
   };
 
-  const clickable = Boolean(
-    (toast.runId && onSelectRun) || (toast.terminal && onSelectTerminal),
-  );
+  const clickable = Boolean(navigateTo);
 
   return (
     <div
@@ -242,11 +225,7 @@ function ToastCard({
       role={tone === "danger" ? "alert" : "status"}
       onClick={() => {
         if (!clickable) return;
-        if (toast.terminal && onSelectTerminal) {
-          onSelectTerminal(toast.terminal);
-        } else if (toast.runId) {
-          onSelectRun?.(toast.runId, toast.workspaceId);
-        }
+        navigateTo?.(toast.target);
         onClose();
       }}
       onMouseEnter={() => setHover(true)}
@@ -304,7 +283,7 @@ function ToastCard({
           }}
         />
       )}
-      <ToastIcon kind={toast.kind} color={palette.status} fill={palette.chipFill} border={palette.chipBorder} />
+      <ToastIcon glyph={meta.glyph} color={palette.status} fill={palette.chipFill} border={palette.chipBorder} />
       <div style={{ flex: 1, minWidth: 0, paddingTop: 1 }}>
         <div
           style={{
@@ -429,15 +408,15 @@ function ToastCard({
 }
 
 // The status icon chip: a ~20px rounded square tinted ~14% over the panel,
-// holding a 1.5px-stroke glyph derived from the toast kind — a check for
-// "done"/complete (success), an alert triangle for "blocked"/needs-you.
+// holding a 1.5px-stroke glyph from the kind's metadata — check for
+// finishes, alert triangle for needs-input, cross for failures.
 function ToastIcon({
-  kind,
+  glyph,
   color,
   fill,
   border,
 }: {
-  kind: Toast["kind"];
+  glyph: NotifyGlyph;
   color: string;
   fill: string;
   border: string;
@@ -460,35 +439,43 @@ function ToastIcon({
         color,
       }}
     >
-      {kind === "blocked" ? (
-        <svg
-          width="13"
-          height="13"
-          viewBox="0 0 14 14"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
+      <NotifyGlyphSvg glyph={glyph} />
+    </span>
+  );
+}
+
+export function NotifyGlyphSvg({ glyph, size = 13 }: { glyph: NotifyGlyph; size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      {glyph === "alert" ? (
+        <>
           <path d="M7 2.5 L12.5 12 H1.5 Z" />
           <path d="M7 6 V8.5" />
           <path d="M7 10.5 V10.6" />
-        </svg>
+        </>
+      ) : glyph === "cross" ? (
+        <>
+          <path d="M3.5 3.5 L10.5 10.5" />
+          <path d="M10.5 3.5 L3.5 10.5" />
+        </>
+      ) : glyph === "bell" ? (
+        <>
+          <path d="M7 2 a3.4 3.4 0 0 1 3.4 3.4 c0 2.6 1 3.4 1 3.4 H2.6 s1 -0.8 1 -3.4 A3.4 3.4 0 0 1 7 2 Z" />
+          <path d="M5.9 11.2 a1.2 1.2 0 0 0 2.2 0" />
+        </>
       ) : (
-        <svg
-          width="13"
-          height="13"
-          viewBox="0 0 14 14"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M3 7.5 L6 10.5 L11 4" />
-        </svg>
+        <path d="M3 7.5 L6 10.5 L11 4" />
       )}
-    </span>
+    </svg>
   );
 }

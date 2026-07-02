@@ -41,6 +41,7 @@ import { setOpenPreviewTabFn } from "./components/Preview/registry";
 import RunsStack from "./tabs/RunsStack";
 import AutomationsStack from "./tabs/AutomationsStack";
 import { useTabs, isDraftChatTabId } from "./tabs/useTabs";
+import { createNavigateTo, useNotifyFocusRouting } from "./notifications/routing";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
 import type {
   PaneNode,
@@ -1260,18 +1261,36 @@ export default function App() {
 
   useEffect(() => {
     if (!booted) return;
-    // Report the (workspace, tab) pair the current tabs state belongs to —
-    // always internally consistent, even on the one render where a workspace
-    // switch has flipped activeId but tabs still hold the previous layout.
-    window.spark.ui
-      .setActiveTerminalContext?.({
-        workspaceId: tabs.tabsWorkspaceId,
-        tabId: tabs.activeId,
-      })
-      ?.catch(() => {
-        /* suppression context is best-effort */
-      });
-  }, [booted, tabs.tabsWorkspaceId, tabs.activeId]);
+    // Report the unified attention snapshot — window focus plus the
+    // (workspace, tab, run, pane) the user is looking at — so the notify
+    // policy can suppress alerts for the surface already on screen. The
+    // (workspace, tab) pair comes from the tabs state itself so it stays
+    // internally consistent even on the one render where a workspace switch
+    // has flipped activeId but tabs still hold the previous layout.
+    const activeTab = tabs.tabs.find((t) => t.id === tabs.activeId);
+    const send = () => {
+      window.spark.ui
+        .setAttention?.({
+          focused: document.hasFocus(),
+          workspaceId: tabs.tabsWorkspaceId,
+          tabId: tabs.activeId,
+          runId: activeRunId,
+          paneId: activeTab?.kind === "terminal" ? activeTab.activePaneId : null,
+        })
+        ?.catch(() => {
+          /* suppression context is best-effort */
+        });
+    };
+    send();
+    // Re-send on focus/blur so the `focused` bit tracks alt-tab (main also
+    // queries live window focus; this keeps the snapshot honest).
+    window.addEventListener("focus", send);
+    window.addEventListener("blur", send);
+    return () => {
+      window.removeEventListener("focus", send);
+      window.removeEventListener("blur", send);
+    };
+  }, [booted, tabs.tabs, tabs.tabsWorkspaceId, tabs.activeId, activeRunId]);
 
   // ── Terminal-agent attention (rail dot) ─────────────────────────────────
   useEffect(() => {
@@ -1452,12 +1471,18 @@ export default function App() {
     }, 0);
   }, [booted, tabs.tabsWorkspaceId, applyTerminalFocus]);
 
-  useEffect(() => {
-    if (!booted) return;
-    return window.spark.terminalNotify?.onFocusPane?.((target) => {
-      focusTerminalTarget(target);
-    });
-  }, [booted, focusTerminalTarget]);
+  // One navigation entry point for every notification surface (toast cards,
+  // native-notification clicks via "notify:focus", the notification center).
+  const navigateToNotifyTarget = useMemo(
+    () =>
+      createNavigateTo({
+        selectRun: handleSelectRunAnywhere,
+        focusTerminal: focusTerminalTarget,
+        openAutomations: () => tabsRef.current.openAutomationsTab(),
+      }),
+    [handleSelectRunAnywhere, focusTerminalTarget],
+  );
+  useNotifyFocusRouting(navigateToNotifyTarget, booted);
 
   // WorkspaceRail prop callbacks. `setActiveId` / `setEditingId` are stable
   // React setters, so these can carry empty dep arrays and stay referentially
@@ -3024,8 +3049,7 @@ export default function App() {
         />
 
         <ToastHost
-          onSelectRun={handleSelectRunAnywhere}
-          onSelectTerminal={focusTerminalTarget}
+          navigateTo={navigateToNotifyTarget}
           resolveQuestion={(runId) => {
             const run = globalRuns.runsRef.current.find((r) => r.id === runId);
             const question = run ? findOpenQuestion(run) : null;

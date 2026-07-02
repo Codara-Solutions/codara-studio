@@ -33,7 +33,7 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve(
-      { filter: /^(\.\/(run-queue|run-store|event-log)|\.\.\/(spark-home|fs-atomic|agent-runtimes|pty-manager))$/ },
+      { filter: /^(\.\/(run-queue|run-store|event-log)|\.\.\/(spark-home|fs-atomic|agent-runtimes|pty-manager|notify))$/ },
       (args) => ({ path: args.path.replace(/^\.\.?\//, ""), namespace: "stub" }),
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
@@ -49,6 +49,17 @@ const harnessPlugin = {
       if (args.path === "fs-atomic") {
         return {
           contents: "const fs = require('node:fs');\nexport async function writeFileAtomic(p, c){ fs.writeFileSync(p, c); }\n",
+          loader: "js",
+        };
+      }
+      if (args.path === "notify") {
+        // Unified notify pipeline: record publishes/rearms for assertions.
+        return {
+          contents:
+            "globalThis.__NOTIFY ??= { published: [], rearms: [] };\n" +
+            "export const automationSourceKey = (id) => `automation:${id}`;\n" +
+            "export function publish(e){ globalThis.__NOTIFY.published.push(e); }\n" +
+            "export function rearm(k){ globalThis.__NOTIFY.rearms.push(k); }\n",
           loader: "js",
         };
       }

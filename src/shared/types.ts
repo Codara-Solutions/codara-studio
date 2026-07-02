@@ -350,15 +350,14 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   copyBranchSetupCommandByRepo: {},
 };
 
-// Discriminated payload for the in-app toast IPC channel. `kind` drives the
-// toast's icon + click routing; `tone` (when set) drives the colour. `runId`
-// lets the renderer route a click to "select run" so the user can jump
-// straight to the chat that needs them.
+// Coarse needs-you-vs-finished classification, still carried by the
+// terminal rail-dot attention payload. Toast/center kinds are the richer
+// NotifyKind below.
 export type InAppNotificationKind = "blocked" | "complete";
 
-// Visual urgency of a notification, decoupled from `kind`. `kind` "blocked"
-// collapses two very different situations — an agent stalled/failed vs an agent
-// asking for input — so the colour can't be derived from kind alone:
+// Visual urgency of a notification, decoupled from kind. A "blocked"-style
+// kind collapses two very different situations — an agent stalled/failed vs
+// an agent asking for input — so the colour can't be derived from kind alone:
 //   success → green (--ok): a run finished cleanly.
 //   warning → amber (--warn): the agent needs you / is asking a question. Not
 //             an error, so it must not read as red.
@@ -366,23 +365,6 @@ export type InAppNotificationKind = "blocked" | "complete";
 // Optional for backwards compatibility: when unset the renderer derives a tone
 // from `kind` (blocked → warning, complete → success).
 export type InAppNotificationTone = "success" | "warning" | "danger";
-
-export interface InAppNotificationPayload {
-  id: string;
-  kind: InAppNotificationKind;
-  // Colour intent. Optional so older/unmigrated emitters still render; the
-  // renderer falls back to a kind-derived tone when absent.
-  tone?: InAppNotificationTone;
-  title: string;
-  body: string;
-  runId?: string;
-  workspaceId?: string;
-  createdAt: string;
-  // Set when the alert came from a terminal agent (a claude/codex/cursor CLI
-  // the user ran in a normal terminal pane) instead of an orchestration run.
-  // Click routes to the owning terminal tab + pane rather than a chat.
-  terminal?: TerminalAgentTarget;
-}
 
 // Where a terminal-agent notification should navigate on click. paneId is the
 // pty session id (same id used for pty:spawn); tabId is the terminal tab that

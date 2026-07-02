@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { BrowserWindow } from "electron";
 import {
   classifyTail,
   coercePublicRuntime,
@@ -12,7 +11,7 @@ import {
   type PublicAgentRuntime,
 } from "@shared/agent-patterns";
 import * as pty from "./pty-manager";
-import { emitTerminalAgentState, fireTerminalAgentAlert } from "./notifications";
+import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify";
 import type { RuntimeState } from "@shared/types";
 
 // Terminal-agent notifier: tells the user when a Claude / Codex / Cursor CLI
@@ -47,7 +46,9 @@ import type { RuntimeState } from "@shared/types";
 // Suppression policy (the WezTerm `SuppressFromFocusedTab` model, per the
 // user's ask): an alert is dropped iff the app window is focused AND the
 // pane's workspace + tab are the active ones the renderer last reported.
-// Everything else — other tab, other workspace, app in background — alerts.
+// That rule — plus the same-kind dedup and terminal-completion guard — now
+// lives in the unified notify policy (src/main/notify); this module only
+// detects turn boundaries and calls publish()/rearm().
 
 const RING_MAX = 8_192;
 // Raw-text carry bridging escape sequences / footer phrases split across
@@ -70,10 +71,6 @@ const SWEEP_MS = 1_000;
 // to Claude sustains working for ~2.3s. Explicit OSC 9/777 notifications
 // are NOT gated — the program announced the stop itself.
 const MIN_WORK_MS = 1_500;
-// Per-pane same-kind alert cooldown. A user who isn't at the terminal isn't
-// sending new prompts, so genuine repeat alerts inside this window are rare;
-// the cooldown mostly guards against pattern flapping mid-frame.
-const ALERT_COOLDOWN_MS = 15_000;
 // After an explicit OSC 9/777 notification (Codex announces its own turn
 // completion), mute the stream heuristic for a while so the same turn end
 // can't alert twice.
@@ -109,16 +106,6 @@ interface PaneWatcher {
   workingSince: number;
   lastWorkingAt: number;
   lastOscNotifyAt: number;
-  lastAlertAt: number;
-  lastAlertKind: "done" | "blocked" | null;
-  // Bug 1 (Path B) — terminal-completion dedup. True once this pane has
-  // alerted a "done" turn-complete and no new working phase has begun since.
-  // While set, a subsequent "blocked" alert is suppressed: it is the same
-  // turn's tail (a late footer flap / prompt-back marker) rather than a fresh
-  // permission prompt. Cleared in enterWorking() the moment real new activity
-  // resumes, so a genuine "needs you" after the user sends a new prompt still
-  // alerts. Mirrors alertedTerminalCompletion in notifications.ts.
-  alertedTerminalDone: boolean;
   // Last RuntimeState pushed to the renderer chip via emitPaneState. Distinct
   // from `state` (the 3-value notifier vocabulary idle/working/blocked) — this
   // is the translated chip RuntimeState and exists purely to dedup the chip
@@ -156,26 +143,6 @@ function tanLog(msg: string): void {
   } catch {
     /* ignore */
   }
-}
-
-// What the user is currently looking at, as reported by the renderer
-// (ui:setActiveTerminalContext). tabId is the active tab of the ACTIVE
-// workspace — chat tabs count too, which is what makes "agent finished in a
-// terminal tab while I read a chat" alert correctly.
-let activeContext: { workspaceId: string | null; tabId: string | null } = {
-  workspaceId: null,
-  tabId: null,
-};
-
-export function setActiveTerminalContext(ctx: {
-  workspaceId: string | null;
-  tabId: string | null;
-}): void {
-  activeContext = {
-    workspaceId: typeof ctx.workspaceId === "string" ? ctx.workspaceId : null,
-    tabId: typeof ctx.tabId === "string" ? ctx.tabId : null,
-  };
-  tanLog(`context ws=${activeContext.workspaceId} tab=${activeContext.tabId}`);
 }
 
 export interface TerminalNotifyPaneEntry {
@@ -231,9 +198,6 @@ export function syncTerminalNotifyPanes(input: {
       workingSince: 0,
       lastWorkingAt: 0,
       lastOscNotifyAt: 0,
-      lastAlertAt: 0,
-      lastAlertKind: null,
-      alertedTerminalDone: false,
       lastEmittedState: null,
     };
     watchers.set(entry.paneId, watcher);
@@ -301,6 +265,8 @@ function removeWatcher(paneId: string): void {
   if (!w) return;
   tanLog(`pane=${paneId} watcher removed`);
   watchers.delete(paneId);
+  // Free the notify policy's per-source dedup state for the dead pane.
+  rearm(paneSourceKey(paneId));
   try {
     w.untap?.();
   } catch {
@@ -399,10 +365,10 @@ function enterWorking(w: PaneWatcher, now: number): void {
   if (w.state !== "working") {
     w.workingSince = now;
     tanLog(`pane=${w.paneId} state -> working (was ${w.state})`);
-    // Real new activity resumed — re-arm the blocked alert (Bug 1, Path B).
-    // A "blocked" after this working phase is a fresh permission prompt the
-    // user should hear about, not the previous turn's tail.
-    w.alertedTerminalDone = false;
+    // Real new activity resumed — re-arm the notify policy for this pane so
+    // the next done/blocked alert is a fresh event, not the previous turn's
+    // tail (Bug 1, Path B).
+    rearm(paneSourceKey(w.paneId));
     // Push the working chip state on the transition only (emitPaneState dedups
     // repeats anyway, so the per-chunk lastWorkingAt sustain below is cheap).
     emitPaneState(w, "working");
@@ -606,22 +572,11 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
   emitPaneState(w, kind === "blocked" ? "blocked" : "idle");
   // An explicit OSC notification is the program authoritatively announcing its
   // current state — it is never the previous turn's heuristic footer tail. So
-  // stand the terminal-completion guard down here; otherwise a real "approval
+  // stand the policy's completion guard down here; otherwise a real "approval
   // requested" emitted right after a turn-complete (no intervening detected
-  // working phase) would be wrongly swallowed by the deliver() dedup.
-  w.alertedTerminalDone = false;
+  // working phase) would be wrongly swallowed by the dedup.
+  rearm(paneSourceKey(w.paneId));
   deliver(w, kind, message.length > 0 ? message : null);
-}
-
-// True when the user is — right now — looking at the tab that hosts this
-// pane: app window focused AND the pane's workspace and tab are both the
-// active ones. This is the only suppression rule; everything else alerts.
-function isUserWatchingPane(w: PaneWatcher): boolean {
-  if (BrowserWindow.getFocusedWindow() === null) return false;
-  return (
-    activeContext.workspaceId === w.workspaceId &&
-    activeContext.tabId === w.tabId
-  );
 }
 
 function runtimeLabel(runtime: PublicAgentRuntime | null): string {
@@ -654,38 +609,19 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
   });
 }
 
+// Publish a turn-boundary alert into the unified pipeline. Suppression
+// (user watching this tab, same-kind re-emits, the terminal-completion
+// guard) is the notify policy's job; enterWorking()/handleExplicitNotify()
+// rearm the pane's sourceKey where real new activity begins.
 function deliver(w: PaneWatcher, kind: "done" | "blocked", body: string | null): void {
   if (w.excluded) return;
-  if (isUserWatchingPane(w)) {
-    tanLog(`pane=${w.paneId} alert suppressed (user watching ws=${w.workspaceId} tab=${w.tabId}) kind=${kind}`);
-    return;
-  }
-  // Bug 1 (Path B) — terminal-completion dedup. A "blocked" that arrives after
-  // we already told the user the turn finished, with no intervening working
-  // phase to re-arm us, is the previous turn's tail (a footer flap or a
-  // prompt-back marker re-firing), not a fresh permission prompt. Swallow it;
-  // enterWorking() clears the flag the moment real new activity resumes so a
-  // genuine "needs you" still gets through.
-  if (kind === "blocked" && w.alertedTerminalDone) {
-    tanLog(`pane=${w.paneId} alert suppressed (terminal-completion guard) kind=${kind}`);
-    return;
-  }
-  const now = Date.now();
-  if (w.lastAlertKind === kind && now - w.lastAlertAt < ALERT_COOLDOWN_MS) {
-    tanLog(`pane=${w.paneId} alert suppressed (cooldown) kind=${kind}`);
-    return;
-  }
-  w.lastAlertAt = now;
-  w.lastAlertKind = kind;
-  // Remember a terminal completion so a later blocked is deduped until the pane
-  // re-enters working (see enterWorking()).
-  if (kind === "done") w.alertedTerminalDone = true;
   tanLog(`pane=${w.paneId} ALERT kind=${kind} runtime=${w.runtime} ws=${w.workspaceId} tab=${w.tabId}`);
   const label = runtimeLabel(w.runtime);
   const where = w.tabTitle ? `“${w.tabTitle}”` : "a terminal";
   const inWorkspace = w.workspaceName ? ` in workspace “${w.workspaceName}”` : "";
-  void fireTerminalAgentAlert({
-    kind: kind === "done" ? "complete" : "blocked",
+  publish({
+    kind: kind === "done" ? "terminal.agent.done" : "terminal.agent.needs-input",
+    sourceKey: paneSourceKey(w.paneId),
     // Bug 2 — a blocked terminal agent is asking for input, not failing, so it
     // reads amber (warning); a finished turn reads green (success). The
     // terminal heuristic never produces a genuine "failure", so danger is
@@ -699,10 +635,8 @@ function deliver(w: PaneWatcher, kind: "done" | "blocked", body: string | null):
       : kind === "done"
         ? `Finished working in ${where}${inWorkspace}. Click to jump to the terminal.`
         : `Waiting for your input in ${where}${inWorkspace}. Click to jump to the terminal.`,
-    target: { workspaceId: w.workspaceId, tabId: w.tabId, paneId: w.paneId },
     soundKind: kind === "done" ? "done" : "needs-you",
-  }).catch((err) => {
-    console.warn("[terminal-agent-notify] alert delivery failed:", err);
+    target: { type: "terminal", workspaceId: w.workspaceId, tabId: w.tabId, paneId: w.paneId },
   });
 }
 
