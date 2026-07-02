@@ -57,16 +57,25 @@ function shellEscapePath(path: string, isWindows: boolean): string {
   if (isWindows) {
     return `"${path.replace(/"/g, '""')}"`;
   }
-  // POSIX: backslash-escape every character outside a conservative safe set,
-  // exactly like iTerm2's default drag-and-drop "escape special characters"
-  // mode. `/Users/x/My Photos/a b.png` becomes `/Users/x/My\ Photos/a\ b.png`,
-  // and spaces, quotes, parens, `$`, `&`, `;`, `*`, etc. all get a leading
-  // backslash. A backslash before an ordinary shell character is a harmless
-  // no-op, so escaping conservatively is always safe. This matches the
-  // iTerm2-verified form Claude Code's image-path detection expects (backslash-
-  // escaped path ending in an image extension), and it still lands as one
-  // usable token at a plain shell prompt.
-  return path.replace(/[^A-Za-z0-9_./-]/g, "\\$&");
+  // A backslash cannot escape a control character: backslash-newline is shell
+  // LINE CONTINUATION (the newline is deleted), so a CR/LF-bearing filename
+  // would silently round-trip to a different path. Single quotes preserve
+  // control characters literally — fall back to quote-wrapping for those.
+  if (/[\r\n]/.test(path)) {
+    return `'${path.replace(/'/g, "'\\''")}'`;
+  }
+  // POSIX: backslash-escape ASCII shell specials only, exactly like iTerm2's
+  // drag-and-drop "escape special characters" mode. `/Users/x/My Photos/a
+  // b.png` becomes `/Users/x/My\ Photos/a\ b.png` — spaces, quotes, parens,
+  // `$`, `&`, `;`, `*`, etc. get a leading backslash. Everything non-ASCII
+  // (é, CJK, emoji) stays BARE, also matching iTerm2: bash/zsh don't need it
+  // escaped, and Claude Code's image-path unescaper is only known to strip
+  // backslashes before ASCII specials.
+  //
+  // The `u` flag keeps the class matching whole code points (belt-and-braces;
+  // the \u{0080}-\u{10FFFF} carve-out already exempts all multi-byte characters,
+  // so no backslash can land between surrogate halves).
+  return path.replace(/[^A-Za-z0-9_./\-\u{0080}-\u{10FFFF}]/gu, "\\$&");
 }
 // After an agent turn is interrupted with Ctrl+C, Codex/Claude/Cursor often
 // keep their TUI input box open without re-emitting the launch banner or
@@ -530,20 +539,28 @@ export function useTerminalSession({
         void (async () => {
           const text = await window.spark.clipboard.readText();
           const sanitized = (text ?? "").replace(/\x00/g, "");
+          const pasteText = () => {
+            void window.spark.pty.write(sessionId, `\x1b[200~${sanitized}\x1b[201~`);
+          };
           if (sanitized.trim()) {
             // Usable text on the clipboard → paste it as a bracketed block, the
             // long-standing behavior for text paste (unchanged).
-            const payload = `\x1b[200~${sanitized}\x1b[201~`;
-            void window.spark.pty.write(sessionId, payload);
+            pasteText();
             return;
           }
-          // No usable text — the clipboard may hold an image (a screenshot,
+          // No meaningful text — the clipboard may hold an image (a screenshot,
           // "copy image"). Materialise it to a temp PNG in main and paste its
           // shell-escaped path so an agent TUI turns it into an `[Image #N]`
           // chip. Mode-aware, same as a Finder drag-drop.
           const imagePath = await window.spark.clipboard.readImageAsTempFile?.();
-          if (!imagePath) return;
-          writeTokenRespectingBracketMode(shellEscapePath(imagePath, isWindows));
+          if (imagePath) {
+            writeTokenRespectingBracketMode(shellEscapePath(imagePath, isWindows));
+            return;
+          }
+          // No image either. If the clipboard held whitespace-only text (e.g.
+          // copied indentation), still paste it — preserving the prior "paste
+          // any non-empty text" behavior for the explicit paste shortcuts.
+          if (sanitized) pasteText();
         })();
       };
 
@@ -842,6 +859,10 @@ export function useTerminalSession({
         // against — we only ever consume image-only pastes here).
         const handlePaste = (event: ClipboardEvent) => {
           if (readOnlyRef.current || inputBlockedRef.current) return;
+          // The Cmd/Ctrl+F find-overlay input lives inside this same `host`, so
+          // its paste events bubble through this capture listener. Never divert
+          // a paste aimed at the find box into the PTY — let it paste normally.
+          if (searchInput && event.target === searchInput) return;
           const data = event.clipboardData;
           if (!data) return;
           // Any usable text on the clipboard → defer to xterm's native paste.
