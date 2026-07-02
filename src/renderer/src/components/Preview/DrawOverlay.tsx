@@ -218,6 +218,7 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
         }}
       />
       <div
+        className="spark-glass"
         style={{
           position: "absolute",
           left: 12,
@@ -228,14 +229,7 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
           flexDirection: "column",
           gap: 8,
           padding: 10,
-          // Floating chrome over live content: a semi-translucent panel face
-          // with a blur, per the worker-chip reference for floating clusters.
-          background: "color-mix(in oklch, var(--panel-2) 92%, transparent)",
-          backdropFilter: "blur(6px)",
-          WebkitBackdropFilter: "blur(6px)",
-          border: "1px solid var(--rule)",
           borderRadius: "var(--radius-popover, 9px)",
-          boxShadow: "var(--shadow-2)",
           fontFamily: "var(--font-sans)",
         }}
       >

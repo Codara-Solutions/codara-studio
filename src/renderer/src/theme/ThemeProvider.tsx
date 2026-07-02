@@ -108,6 +108,38 @@ function applyGlassAttr(enabled: boolean): void {
   document.documentElement.dataset.glass = enabled ? "on" : "off";
 }
 
+// Liquid-glass tuning (Settings → Appearance), percentages of the design
+// default. Veil/blur ride CSS scale vars consumed by the --glass-* tokens;
+// refraction/chroma become the scale attributes of the three per-channel
+// feDisplacementMap primitives in #cora-glass-lens (index.html): center bend
+// 58px at 100%, ±13px channel spread for the chromatic fringe.
+const GLASS_TUNING_KEYS = ["glassVeil", "glassBlur", "glassRefraction", "glassChroma"] as const;
+type GlassTuningKey = (typeof GLASS_TUNING_KEYS)[number];
+const glassTuning: Record<GlassTuningKey, number> = {
+  glassVeil: 100,
+  glassBlur: 100,
+  glassRefraction: 100,
+  glassChroma: 100,
+};
+
+function asGlassFactor(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(200, value)) / 100
+    : 1;
+}
+
+function applyGlassTuning(): void {
+  const style = document.documentElement.style;
+  style.setProperty("--glass-veil-scale", String(asGlassFactor(glassTuning.glassVeil)));
+  style.setProperty("--glass-blur-scale", String(asGlassFactor(glassTuning.glassBlur)));
+  const center = 58 * asGlassFactor(glassTuning.glassRefraction);
+  const spread = center > 0 ? 13 * asGlassFactor(glassTuning.glassChroma) : 0;
+  const scales = [center + spread, center, Math.max(0, center - spread)];
+  document
+    .querySelectorAll("#cora-glass-lens feDisplacementMap")
+    .forEach((node, i) => node.setAttribute("scale", String(scales[i] ?? center)));
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => readFastShadow());
 
@@ -120,10 +152,23 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       setThemeState(next);
       writeFastShadow(next);
       applyGlassAttr(p.glassEffects !== false);
+      for (const key of GLASS_TUNING_KEYS) {
+        const v = p[key];
+        if (typeof v === "number" && Number.isFinite(v)) glassTuning[key] = v;
+      }
+      applyGlassTuning();
     });
     const off = window.spark.preferences.onChanged((change) => {
       if (change.key === "glassEffects") {
         applyGlassAttr(change.value !== false);
+        return;
+      }
+      if ((GLASS_TUNING_KEYS as readonly string[]).includes(change.key)) {
+        const v = change.value;
+        if (typeof v === "number" && Number.isFinite(v)) {
+          glassTuning[change.key as GlassTuningKey] = v;
+          applyGlassTuning();
+        }
         return;
       }
       if (change.key !== "theme") return;

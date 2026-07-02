@@ -1677,16 +1677,14 @@ function FileMenu({
       onMouseLeave={() => {
         if (confirmDelete) setTimeout(() => setConfirmDelete(false), 1500);
       }}
+      className="spark-glass"
       style={{
         position: "fixed",
         zIndex: 100,
         left: Math.max(8, x),
         top: Math.max(8, y),
         width: 228,
-        background: "var(--panel-2)",
-        border: "1px solid var(--rule-strong)",
         borderRadius: 8,
-        boxShadow: "var(--shadow-2)",
         padding: 6,
         // No `overflow: hidden` here — the Run plan engine flyout is an
         // absolutely-positioned child that extends past this menu's edge.
@@ -1837,15 +1835,13 @@ function RunPlanMenuItem({
       </button>
       {open && (
         <div
+          className="spark-glass"
           style={{
             position: "absolute",
             top: -6,
             [openLeft ? "right" : "left"]: "100%",
             width: ENGINE_FLYOUT_WIDTH,
-            background: "var(--panel-2)",
-            border: "1px solid var(--rule-strong)",
             borderRadius: 8,
-            boxShadow: "var(--shadow-2)",
             padding: 6,
             zIndex: 1,
           }}

@@ -50,6 +50,7 @@ export default function CommitMenu({
 
   return (
     <div
+      className="spark-menu"
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -61,10 +62,7 @@ export default function CommitMenu({
         top,
         width: MENU_WIDTH,
         zIndex: 200,
-        background: "var(--panel-2)",
-        border: "1px solid var(--rule-strong)",
         borderRadius: 9,
-        boxShadow: "var(--shadow-2)",
         padding: 6,
       }}
     >

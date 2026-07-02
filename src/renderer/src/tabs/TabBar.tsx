@@ -402,7 +402,7 @@ function TabBar({
           <PlusIcon size={12} />
         </button>
         {pickerOpen && (
-          <div className="spark-tabbar-picker">
+          <div className="spark-tabbar-picker spark-glass">
             <PickerItem
               label="New chat"
               hint={pickerHints?.newChat}

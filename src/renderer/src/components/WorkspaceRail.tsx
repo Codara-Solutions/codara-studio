@@ -1037,15 +1037,12 @@ function WorkspaceRow({
           {menuOpen && !editing && (
             <div
               role="menu"
+              className="spark-menu"
               style={{
                 position: "absolute",
                 top: 24,
                 right: 0,
                 minWidth: 168,
-                background: "var(--panel-2)",
-                border: "1px solid var(--rule)",
-                borderRadius: "var(--radius-popover, 12px)",
-                boxShadow: "var(--shadow-2)",
                 padding: 4,
                 zIndex: 20,
                 display: "grid",

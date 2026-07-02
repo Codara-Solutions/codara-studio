@@ -484,6 +484,7 @@ function ZoomControl({
 }) {
   return (
     <div
+      className="spark-glass"
       style={{
         position: "absolute",
         left: 14,
@@ -493,10 +494,7 @@ function ZoomControl({
         alignItems: "center",
         gap: 2,
         padding: 3,
-        background: "var(--panel-2)",
-        border: "1px solid var(--rule)",
         borderRadius: 9,
-        boxShadow: "var(--lift-hi), var(--shadow-1)",
       }}
     >
       <ZoomButton title="Zoom out" onClick={onOut}>

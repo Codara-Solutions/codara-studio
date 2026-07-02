@@ -280,16 +280,14 @@ export default function BranchMenu({
 
       {open && (
         <div
+          className="spark-glass"
           style={{
             position: "absolute",
             top: "calc(100% + 4px)",
             left: 6,
             right: 6,
             zIndex: 60,
-            background: "var(--panel-2)",
-            border: "1px solid var(--rule-strong)",
             borderRadius: 8,
-            boxShadow: "var(--shadow-2)",
             overflow: "hidden",
             display: "flex",
             flexDirection: "column",

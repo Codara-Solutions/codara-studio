@@ -98,6 +98,14 @@ function normalizeKeybindings(value: unknown): AppPreferences["keybindings"] {
   return out;
 }
 
+// Liquid-glass tuning percentages: 0–200% of the design default. 200 is also
+// the ceiling the veil can take before color-mix percentages would exceed
+// 100% in styles.css.
+function normalizeGlassPct(value: unknown, fallback: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback ?? 100;
+  return Math.max(0, Math.min(200, Math.round(value)));
+}
+
 function normalizeInlineDelay(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS;
@@ -202,6 +210,13 @@ function normalize(
       typeof src.glassEffects === "boolean"
         ? src.glassEffects
         : DEFAULT_PREFERENCES.glassEffects,
+    glassVeil: normalizeGlassPct(src.glassVeil, DEFAULT_PREFERENCES.glassVeil),
+    glassBlur: normalizeGlassPct(src.glassBlur, DEFAULT_PREFERENCES.glassBlur),
+    glassRefraction: normalizeGlassPct(
+      src.glassRefraction,
+      DEFAULT_PREFERENCES.glassRefraction,
+    ),
+    glassChroma: normalizeGlassPct(src.glassChroma, DEFAULT_PREFERENCES.glassChroma),
     keepRunningInBackground:
       typeof src.keepRunningInBackground === "boolean"
         ? src.keepRunningInBackground

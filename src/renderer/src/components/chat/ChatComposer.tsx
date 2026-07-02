@@ -1261,19 +1261,15 @@ function MentionPopover({
   const empty = !loading && suggestions.length === 0;
   return (
     <div
+      className="spark-glass"
       style={{
         position: "absolute",
         left: 8,
         right: 8,
         bottom: "calc(100% + 6px)",
         zIndex: 50,
-        // One popover language: --panel-2 face, 12px radius, 1px --rule border,
-        // --shadow-2 float (matches the .spark-menu standard).
-        border: "1px solid var(--rule)",
-        borderRadius: "var(--radius-popover, 12px)",
-        background: "var(--panel-2)",
-        boxShadow: "var(--shadow-2)",
         padding: 5,
+        borderRadius: "var(--radius-popover, 12px)",
       }}
     >
       <div

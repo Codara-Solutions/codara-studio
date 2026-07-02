@@ -838,12 +838,75 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
       </div>
 
       {hydrated ? (
-        <ToggleRow
-          title="Liquid glass surfaces"
-          desc="Frosted, translucent popovers, toasts, and dialogs. Turn off for fully opaque surfaces (also forced off by the OS reduced-transparency setting)."
-          checked={preferences.glassEffects !== false}
-          onChange={(v) => void setPreference("glassEffects", v)}
-        />
+        <>
+          <ToggleRow
+            title="Liquid glass surfaces"
+            desc="Frosted, translucent popovers, toasts, and dialogs. Turn off for fully opaque surfaces (also forced off by the OS reduced-transparency setting)."
+            checked={preferences.glassEffects !== false}
+            onChange={(v) => void setPreference("glassEffects", v)}
+          />
+          {preferences.glassEffects !== false && (
+            <div
+              style={{
+                display: "grid",
+                gap: 10,
+                padding: "10px 12px",
+                border: "1px solid var(--rule-soft)",
+                borderRadius: 8,
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                }}
+              >
+                <span className="spark-eyebrow" style={{ fontSize: 11 }}>
+                  Glass tuning
+                </span>
+                <button
+                  type="button"
+                  className="spark-menu-item"
+                  style={{ width: "auto", fontSize: 11, color: "var(--muted)" }}
+                  onClick={() => {
+                    void setPreference("glassVeil", 100);
+                    void setPreference("glassBlur", 100);
+                    void setPreference("glassRefraction", 100);
+                    void setPreference("glassChroma", 100);
+                  }}
+                >
+                  Reset
+                </button>
+              </div>
+              <GlassSliderRow
+                label="Tint"
+                hint="Surface tint strength — lower is clearer"
+                value={preferences.glassVeil ?? 100}
+                onChange={(v) => void setPreference("glassVeil", v)}
+              />
+              <GlassSliderRow
+                label="Blur"
+                hint="Backdrop blur behind the surface"
+                value={preferences.glassBlur ?? 100}
+                onChange={(v) => void setPreference("glassBlur", v)}
+              />
+              <GlassSliderRow
+                label="Refraction"
+                hint="How much the edges bend what's behind"
+                value={preferences.glassRefraction ?? 100}
+                onChange={(v) => void setPreference("glassRefraction", v)}
+              />
+              <GlassSliderRow
+                label="Chromatic fringe"
+                hint="Color split along the refracting rim"
+                value={preferences.glassChroma ?? 100}
+                onChange={(v) => void setPreference("glassChroma", v)}
+              />
+            </div>
+          )}
+        </>
       ) : null}
 
       <hr className="spark-divider" style={{ margin: "2px 0" }} />
@@ -2730,6 +2793,57 @@ function ModelPresetCard({
         </span>
       </span>
     </button>
+  );
+}
+
+// One liquid-glass tuning slider: 0–200% of the design default. Lives right
+// under the glass toggle; changes apply live (ThemeProvider maps the pref to
+// CSS scale vars / SVG lens attributes), so the dialog itself is the preview.
+function GlassSliderRow({
+  label,
+  hint,
+  value,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  value: number;
+  onChange: (next: number) => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "130px minmax(0, 1fr) auto",
+        gap: 10,
+        alignItems: "center",
+      }}
+    >
+      <span style={{ fontSize: 12, color: "var(--ink)" }} title={hint}>
+        {label}
+      </span>
+      <input
+        aria-label={`${label} — ${hint}`}
+        type="range"
+        min={0}
+        max={200}
+        step={5}
+        value={value}
+        onChange={(event) => onChange(Number(event.currentTarget.value))}
+        style={{ width: "100%", accentColor: "var(--accent)" }}
+      />
+      <span
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+          minWidth: 40,
+          textAlign: "right",
+        }}
+      >
+        {value}%
+      </span>
+    </div>
   );
 }
 

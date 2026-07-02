@@ -104,15 +104,13 @@ export default function SessionInspector({ run, onClose }: SessionInspectorProps
         role="dialog"
         aria-modal="true"
         aria-label="Session inspector"
+        className="spark-glass--strong"
         style={{
           width: "min(880px, calc(100vw - 44px))",
           height: "min(720px, calc(100vh - 44px))",
           display: "flex",
           flexDirection: "column",
-          background: "var(--panel)",
-          border: "1px solid var(--rule)",
           borderRadius: 12,
-          boxShadow: "var(--shadow-2), var(--lift-hi)",
           overflow: "hidden",
           padding: 0,
         }}

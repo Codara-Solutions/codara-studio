@@ -147,12 +147,15 @@
      SEE-THROUGH — a thin theme-bg veil + tiny blur keeps the backdrop legible
      through the core; the glass reads from the rim (lens refraction via
      --glass-lens + the fresnel ring below), not from fill opacity. */
-  --glass-bg: color-mix(in oklch, var(--bg) 34%, transparent);
-  --glass-bg-strong: color-mix(in oklch, var(--bg) 48%, transparent);
-  --glass-bg-faint: color-mix(in oklch, var(--bg) 25%, transparent);
-  --glass-blur: 3px;
-  --glass-blur-strong: 7px;
-  --glass-blur-faint: 3px;
+  /* --glass-veil-scale / --glass-blur-scale are user tuning knobs (Settings →
+     Appearance), set on <html> by ThemeProvider as factors of 1; the lens
+     bend/chroma knobs live on the SVG filter's scale attributes. */
+  --glass-bg: color-mix(in oklch, var(--bg) min(calc(34% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-strong: color-mix(in oklch, var(--bg) min(calc(48% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-faint: color-mix(in oklch, var(--bg) min(calc(25% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-blur: calc(3px * var(--glass-blur-scale, 1));
+  --glass-blur-strong: calc(7px * var(--glass-blur-scale, 1));
+  --glass-blur-faint: calc(3px * var(--glass-blur-scale, 1));
   --glass-saturate: 1.12;
   /* Fresnel rim: cool 1px ring all around + warm top-biased highlight —
      painted as inset box-shadows (not a pseudo-element) so it stays pinned
@@ -175,9 +178,9 @@
    a bright specular top edge, hairline border, and much softer shadows —
    mirrors how --lift-hi / --shadow-1 are re-tinted per light palette. */
 :root[data-theme-mode="light"] {
-  --glass-bg: color-mix(in oklch, var(--panel) 38%, transparent);
-  --glass-bg-strong: color-mix(in oklch, var(--panel) 54%, transparent);
-  --glass-bg-faint: color-mix(in oklch, var(--panel) 28%, transparent);
+  --glass-bg: color-mix(in oklch, var(--panel) min(calc(38% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-strong: color-mix(in oklch, var(--panel) min(calc(54% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-faint: color-mix(in oklch, var(--panel) min(calc(28% * var(--glass-veil-scale, 1)), 98%), transparent);
   --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.85), inset 0 0 0 1px oklch(1 0 0 / 0.30);
   --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.08);
   --glass-bloom: inset 0 0 20px oklch(1 0 0 / 0.15);

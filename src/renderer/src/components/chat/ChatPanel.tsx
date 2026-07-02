@@ -505,6 +505,7 @@ function ChatHistoryPopover({
     <div
       role="listbox"
       aria-label="Recent chats"
+      className="spark-menu"
       style={{
         position: "absolute",
         top: "calc(100% + 4px)",
@@ -513,12 +514,6 @@ function ChatHistoryPopover({
         width: 300,
         maxHeight: "min(50vh, 420px)",
         overflowY: "auto",
-        // One popover language: --panel-2 face, 12px radius, 1px --rule border,
-        // --shadow-2 float (the .spark-menu standard).
-        background: "var(--panel-2, var(--panel))",
-        border: "1px solid var(--rule)",
-        borderRadius: "var(--radius-popover, 12px)",
-        boxShadow: "var(--shadow-2)",
         padding: 4,
       }}
     >

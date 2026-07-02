@@ -192,6 +192,7 @@ export default function RunSwitcher({
         role="dialog"
         aria-modal="true"
         aria-label="Switch run"
+        className="spark-glass--strong"
         onMouseDown={(event) => event.stopPropagation()}
         onKeyDown={onKeyDown}
         style={{
@@ -199,10 +200,7 @@ export default function RunSwitcher({
           maxHeight: "calc(100vh - 112px)",
           display: "flex",
           flexDirection: "column",
-          background: "var(--panel-2)",
-          border: "1px solid var(--rule)",
           borderRadius: 12,
-          boxShadow: "var(--shadow-2), var(--lift-hi)",
           overflow: "hidden",
         }}
       >

@@ -1529,18 +1529,13 @@ function UndoControl({ runId, checkpoint }: { runId: string; checkpoint: Checkpo
       </button>
       {open && (
         <div
+          className="spark-menu"
           style={{
             position: "absolute",
             top: "calc(100% + 4px)",
             right: 0,
             zIndex: 30,
             minWidth: 196,
-            // One popover language: --panel-2 face, 12px radius, 1px --rule
-            // border, --shadow-2 float (the .spark-menu standard).
-            border: "1px solid var(--rule)",
-            borderRadius: "var(--radius-popover, 12px)",
-            background: "var(--panel-2)",
-            boxShadow: "var(--shadow-2)",
             padding: 5,
           }}
         >

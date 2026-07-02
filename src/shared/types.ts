@@ -243,6 +243,14 @@ export interface AppPreferences {
   // Off reverts every glass surface to the opaque panel look — also forced
   // off by the OS prefers-reduced-transparency setting.
   glassEffects?: boolean;
+  // Liquid-glass tuning, each a percentage of the design default (100).
+  // veil = surface tint opacity, blur = backdrop blur, refraction = rim lens
+  // bend, chroma = chromatic fringe at the rim. ThemeProvider applies them as
+  // CSS scale vars + scale attributes on the #cora-glass-lens SVG filter.
+  glassVeil?: number;
+  glassBlur?: number;
+  glassRefraction?: number;
+  glassChroma?: number;
   // When true (default), closing the main window hides it to the system tray
   // and keeps the process alive so main-process timers (automations / loops)
   // keep firing instead of quitting. Quit explicitly from the tray menu.
@@ -350,6 +358,10 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   notificationChannels: { ...DEFAULT_NOTIFICATION_CHANNELS },
   notificationsDnd: false,
   glassEffects: true,
+  glassVeil: 100,
+  glassBlur: 100,
+  glassRefraction: 100,
+  glassChroma: 100,
   keepRunningInBackground: true,
   autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},

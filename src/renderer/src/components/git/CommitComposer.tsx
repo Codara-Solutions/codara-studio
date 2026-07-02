@@ -505,16 +505,14 @@ function SmartMergeControl({
       )}
       {menuOpen && hasCaret && (
         <div
+          className="spark-menu"
           style={{
             position: "absolute",
             top: "100%",
             right: 0,
             marginTop: 4,
             width: 188,
-            background: "var(--panel-2)",
-            border: "1px solid var(--rule-strong)",
             borderRadius: 8,
-            boxShadow: "var(--shadow-2)",
             padding: 6,
             zIndex: 30,
           }}

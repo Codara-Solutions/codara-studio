@@ -58,12 +58,10 @@ export default function InspectorOverlay({ pick, buildPayload, onCancel }: Props
       }}
     >
       <div
+        className="spark-glass"
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: "var(--panel-2)",
-          border: "1px solid var(--rule)",
           borderRadius: "var(--radius-popover, 9px)",
-          boxShadow: "var(--shadow-2)",
           width: "min(480px, 100%)",
           padding: 14,
           fontFamily: "var(--font-sans)",
