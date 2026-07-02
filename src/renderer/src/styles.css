@@ -25,9 +25,10 @@
   --rule-strong: #5a5853;
   --rule-soft: #242320;
 
-  /* Brand accent — overwritten at runtime to the active workspace color.
-     Soft variants are low-chroma derivatives for backgrounds and tints. */
-  --accent: #F0C419;
+  /* Brand accent — Codara teal by default, overwritten at runtime to the
+     active workspace color. Soft variants are low-chroma derivatives for
+     backgrounds and tints. */
+  --accent: #2AA298;
   --accent-ink: #14110d;
   --accent-soft: color-mix(in oklch, var(--accent) 18%, transparent);
   --accent-edge: color-mix(in oklch, var(--accent) 40%, transparent);
@@ -127,6 +128,45 @@
   /* Inner radius for terminal pane chrome buttons/swatches — concentric with
      the 10px pane and the 8px toolbar pill. */
   --terminal-control-radius: 6px;
+
+  /* ── Liquid glass (append-only) ──────────────────────────────────────────
+     The floating-surface material. Fills derive from each theme's own panel
+     tokens via color-mix, so every palette gets in-key glass for free; the
+     light-mode block below re-tints opacity/edges for bright paper.
+     Rules that keep it fast and readable (do not relitigate per-surface):
+       - one level of glass only — never nest a glass surface inside another
+         (the inner backdrop-filter re-samples the outer, doubling cost)
+       - chrome bands use --faint (blur ≤ 10-12px); popovers --glass-blur;
+         only dialogs/scrims may use --strong
+       - animate opacity/transform on glass elements, never backdrop-filter
+       - terminal panes and the editor stay opaque (readability + xterm WebGL)
+     Kill switch: html[data-glass="off"] (user pref) reverts every glass
+     surface to the opaque panel look; prefers-reduced-transparency does the
+     same at the media-query level. */
+  --glass-bg: color-mix(in oklch, var(--panel-2) 62%, transparent);
+  --glass-bg-strong: color-mix(in oklch, var(--panel-2) 78%, transparent);
+  --glass-bg-faint: color-mix(in oklch, var(--panel) 40%, transparent);
+  --glass-blur: 18px;
+  --glass-blur-strong: 28px;
+  --glass-blur-faint: 10px;
+  --glass-saturate: 1.4;
+  --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.10);
+  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.18);
+  --glass-border: color-mix(in oklch, var(--ink) 14%, transparent);
+  --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.45), 0 2px 8px oklch(0 0 0 / 0.25);
+}
+
+/* Light glass: higher fill opacity (thin white glass goes milky, not smoky),
+   a bright specular top edge, hairline border, and much softer shadows —
+   mirrors how --lift-hi / --shadow-1 are re-tinted per light palette. */
+:root[data-theme-mode="light"] {
+  --glass-bg: color-mix(in oklch, var(--panel-2) 72%, transparent);
+  --glass-bg-strong: color-mix(in oklch, var(--panel-2) 85%, transparent);
+  --glass-bg-faint: color-mix(in oklch, var(--panel) 55%, transparent);
+  --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.60);
+  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.08);
+  --glass-border: color-mix(in oklch, var(--ink) 10%, transparent);
+  --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
 }
 
 :root[data-theme="spark-classic"] {
@@ -1505,14 +1545,76 @@ a { color: inherit; }
 }
 
 /* ── Modal scrim ─────────────────────────────────────────────────────────────
-   A translucent veil behind a dialog. A faint backdrop tint, NOT a heavy blur
-   (heavy glassmorphism is an anti-reference). The mix darkens dark themes and
-   lightens-then-darkens light ones in-key with --bg. */
+   A translucent veil behind a dialog. The opaque-mode fallback is a plain
+   tint; in glass mode (below) it gains a light blur so the dialog reads as
+   the only sharp layer. The mix darkens dark themes and lightens-then-darkens
+   light ones in-key with --bg. */
 .spark-scrim {
   position: absolute;
   inset: 0;
   background: color-mix(in oklch, var(--bg) 64%, transparent);
   animation: spark-fade-in var(--motion-fast) var(--ease-out) both;
+}
+
+/* ── Liquid glass materials ──────────────────────────────────────────────────
+   The frosted floating-surface material (see the --glass-* token block for
+   the usage rules: one glass level, faint on chrome, opacity/transform-only
+   animation, terminals/editor stay opaque). .spark-glass / --strong / --faint
+   are opt-in classes for one-off surfaces; .spark-menu, .spark-scrim, and
+   toasts (via --notify-surface) pick the material up automatically. All of it
+   reverts to the opaque look under html[data-glass="off"] (user preference)
+   or the OS reduced-transparency setting. */
+
+/* Opaque fallbacks — what a glass-classed surface looks like when glass is
+   off. .spark-glass mirrors the popover recipe, --strong the dialog recipe. */
+.spark-glass {
+  background: var(--panel-2);
+  border: 1px solid var(--rule);
+  box-shadow: var(--shadow-2);
+}
+.spark-glass--strong {
+  background: var(--panel);
+  border: 1px solid var(--rule-soft);
+  box-shadow: var(--shadow-2), var(--lift-hi);
+}
+.spark-glass--faint {
+  background: var(--panel);
+}
+@media not (prefers-reduced-transparency: reduce) {
+  html:not([data-glass="off"]) {
+    /* Toast fill: Toast paints --notify-surface inline, so the translucent
+       fill rides the token; the blur comes from .spark-backdrop-glass. */
+    --notify-surface: var(--glass-bg);
+  }
+  html:not([data-glass="off"]) .spark-glass,
+  html:not([data-glass="off"]) .spark-menu {
+    background: var(--glass-bg);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-shadow);
+  }
+  html:not([data-glass="off"]) .spark-glass--strong {
+    background: var(--glass-bg-strong);
+    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-shadow);
+  }
+  html:not([data-glass="off"]) .spark-glass--faint {
+    background: var(--glass-bg-faint);
+    -webkit-backdrop-filter: blur(var(--glass-blur-faint)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur-faint)) saturate(var(--glass-saturate));
+  }
+  html:not([data-glass="off"]) .spark-backdrop-glass {
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  }
+  html:not([data-glass="off"]) .spark-scrim {
+    background: color-mix(in oklch, var(--bg) 42%, transparent);
+    -webkit-backdrop-filter: blur(8px) saturate(1.15);
+    backdrop-filter: blur(8px) saturate(1.15);
+  }
 }
 
 /* ── Divider ─────────────────────────────────────────────────────────────────

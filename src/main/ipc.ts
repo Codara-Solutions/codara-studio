@@ -1323,19 +1323,26 @@ export function registerIpc(): void {
   ipcMain.handle(
     "window:setTitleBarTheme",
     async (e, theme: { color?: unknown; symbolColor?: unknown }): Promise<void> => {
-      if (process.platform !== "win32") return;
       const win = BrowserWindow.fromWebContents(e.sender);
       if (!win) return;
       const color = typeof theme?.color === "string" && theme.color ? theme.color : "#171513";
+      try {
+        // All platforms: keep the window's own background in key with the
+        // active theme so resize exposes theme-colored (not hardcoded-dark)
+        // pixels — the BrowserWindow is created with the classic dark color.
+        win.setBackgroundColor(color);
+      } catch {
+        /* Unsupported color strings should not break theme switches. */
+      }
+      if (process.platform !== "win32") return;
       const symbolColor =
         typeof theme?.symbolColor === "string" && theme.symbolColor
           ? theme.symbolColor
           : "#bdbcb8";
       try {
-        win.setBackgroundColor(color);
         win.setTitleBarOverlay({ color, symbolColor, height: 30 });
       } catch {
-        /* Unsupported color strings or platform quirks should not break theme switches. */
+        /* Platform quirks should not break theme switches. */
       }
     },
   );

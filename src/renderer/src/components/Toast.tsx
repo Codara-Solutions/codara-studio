@@ -218,7 +218,7 @@ function ToastCard({
 
   return (
     <div
-      className="spark-fade-in"
+      className="spark-fade-in spark-backdrop-glass"
       // Only a genuine failure (danger) is an assertive "alert"; a needs-you /
       // success toast is the calmer "status" live region so a question doesn't
       // shout like an error to assistive tech.

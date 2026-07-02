@@ -85,7 +85,7 @@ function normalize(w: Workspace): Workspace {
     id: w.id,
     name: w.name ?? "workspace",
     cwd: w.cwd ?? app.getPath("home"),
-    color: w.color ?? "#F0C419",
+    color: w.color ?? "#2AA298",
     workers: Array.isArray(w.workers)
       ? w.workers.filter((worker) => worker.kind !== "orchestration")
       : [],

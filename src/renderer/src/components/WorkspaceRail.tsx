@@ -17,7 +17,7 @@ import ResizeHandle from "../panels/ResizeHandle";
 import SectionHeader from "../panels/SectionHeader";
 
 const WORKSPACE_COLORS = [
-  "#F0C419",
+  "#2AA298",
   "#7FB3FF",
   "#5BD68F",
   "#FF5C2B",

@@ -194,6 +194,10 @@ function normalize(
       typeof src.notificationsDnd === "boolean"
         ? src.notificationsDnd
         : DEFAULT_PREFERENCES.notificationsDnd,
+    glassEffects:
+      typeof src.glassEffects === "boolean"
+        ? src.glassEffects
+        : DEFAULT_PREFERENCES.glassEffects,
     keepRunningInBackground:
       typeof src.keepRunningInBackground === "boolean"
         ? src.keepRunningInBackground

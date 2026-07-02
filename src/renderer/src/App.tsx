@@ -1092,7 +1092,7 @@ export default function App() {
   // Theme the entire UI with the active workspace's color. Falls back to the
   // default yellow when nothing is active.
   useEffect(() => {
-    const accent = activeWorkspace?.color || "#F0C419";
+    const accent = activeWorkspace?.color || "#2AA298";
     document.documentElement.style.setProperty("--accent", accent);
   }, [activeWorkspace?.color]);
 

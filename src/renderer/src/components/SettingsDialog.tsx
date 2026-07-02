@@ -280,19 +280,20 @@ export default function SettingsDialog({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        // A calm faint --bg veil, not a heavy frosted blur — glassmorphism is
-        // an anti-reference here. Matches the .spark-scrim recipe.
-        background: "color-mix(in oklch, var(--bg) 64%, transparent)",
         fontFamily: "var(--font-sans)",
-        animation: "spark-fade-in var(--motion-fast) var(--ease-out)",
       }}
       onMouseDown={onClose}
     >
+      {/* Scrim + dialog face come from the shared glass classes (frosted in
+          glass mode, opaque panel look otherwise). */}
+      <div className="spark-scrim" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
+        className="spark-glass--strong"
         style={{
+          zIndex: 1,
           // Fixed footprint — switching tabs (or resizing the inner content)
           // shouldn't make the dialog grow or shrink. Only the inner content
           // pane scrolls; the dialog stays the same size. Sized like macOS
@@ -301,10 +302,7 @@ export default function SettingsDialog({
           height: "min(760px, calc(100vh - 44px))",
           display: "flex",
           flexDirection: "column",
-          background: "var(--panel)",
-          border: "1px solid var(--rule-soft)",
           borderRadius: 12,
-          boxShadow: "var(--shadow-2), var(--lift-hi)",
           overflow: "hidden",
           padding: 0,
           animation: "spark-fade-in var(--motion) var(--ease-out)",
@@ -344,7 +342,9 @@ export default function SettingsDialog({
             style={{
               flex: "0 0 200px",
               borderRight: "1px solid var(--rule-soft)",
-              background: "color-mix(in oklch, var(--bg) 60%, var(--panel))",
+              // Translucent so the dialog's glass face shows through; over the
+              // opaque fallback face it reads like the old --bg/--panel mix.
+              background: "color-mix(in oklch, var(--bg) 45%, transparent)",
               padding: "12px 10px",
               display: "flex",
               flexDirection: "column",
@@ -836,6 +836,15 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
           />
         ))}
       </div>
+
+      {hydrated ? (
+        <ToggleRow
+          title="Liquid glass surfaces"
+          desc="Frosted, translucent popovers, toasts, and dialogs. Turn off for fully opaque surfaces (also forced off by the OS reduced-transparency setting)."
+          checked={preferences.glassEffects !== false}
+          onChange={(v) => void setPreference("glassEffects", v)}
+        />
+      ) : null}
 
       <hr className="spark-divider" style={{ margin: "2px 0" }} />
 

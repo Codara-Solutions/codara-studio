@@ -239,6 +239,10 @@ export interface AppPreferences {
   // Do Not Disturb: when true, the notify policy mutes delivery on every
   // channel but still records events to the notification center as unread.
   notificationsDnd?: boolean;
+  // Liquid-glass surfaces (backdrop-filter on popovers/toasts/dialogs/chrome).
+  // Off reverts every glass surface to the opaque panel look — also forced
+  // off by the OS prefers-reduced-transparency setting.
+  glassEffects?: boolean;
   // When true (default), closing the main window hides it to the system tray
   // and keeps the process alive so main-process timers (automations / loops)
   // keep firing instead of quitting. Quit explicitly from the tray menu.
@@ -345,6 +349,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   disableHardwareAcceleration: false,
   notificationChannels: { ...DEFAULT_NOTIFICATION_CHANNELS },
   notificationsDnd: false,
+  glassEffects: true,
   keepRunningInBackground: true,
   autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},

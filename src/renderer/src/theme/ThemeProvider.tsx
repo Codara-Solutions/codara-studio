@@ -97,6 +97,13 @@ function writeFastShadow(t: Theme): void {
   }
 }
 
+// Liquid-glass kill switch: every glass rule in styles.css is gated on
+// html:not([data-glass="off"]), so flipping the attribute reverts the whole
+// app to opaque surfaces without touching component styles.
+function applyGlassAttr(enabled: boolean): void {
+  document.documentElement.dataset.glass = enabled ? "on" : "off";
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => readFastShadow());
 
@@ -108,8 +115,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       const next = normalizeTheme(p.theme);
       setThemeState(next);
       writeFastShadow(next);
+      applyGlassAttr(p.glassEffects !== false);
     });
     const off = window.spark.preferences.onChanged((change) => {
+      if (change.key === "glassEffects") {
+        applyGlassAttr(change.value !== false);
+        return;
+      }
       if (change.key !== "theme") return;
       const next = normalizeTheme(change.value);
       setThemeState(next);

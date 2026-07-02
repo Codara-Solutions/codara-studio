@@ -277,10 +277,14 @@ export default function AgentCapabilitiesDialog({
 
   return (
     <div style={overlayStyle} onMouseDown={onClose}>
+      {/* Scrim + dialog face come from the shared glass classes (frosted in
+          glass mode, opaque panel look otherwise). */}
+      <div className="spark-scrim" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Capability Center"
+        className="spark-glass--strong"
         style={dialogStyle}
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -1385,25 +1389,19 @@ const overlayStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
-  // A calm faint --bg veil, not a heavy frosted blur — glassmorphism is an
-  // anti-reference here. Matches the Settings dialog scrim / .spark-scrim.
-  background: "color-mix(in oklch, var(--bg) 64%, transparent)",
   fontFamily: "var(--font-sans)",
-  animation: "spark-fade-in var(--motion-fast) var(--ease-out)",
 };
 
 const dialogStyle: React.CSSProperties = {
   // Fixed footprint — the body scrolls internally; the dialog stays put.
-  // Frame matches the Settings dialog: --panel face, 1px --rule-soft, a soft
-  // 16px dialog-frame radius, one real overlay shadow + the 1px top highlight.
+  // Face/border/shadow come from .spark-glass--strong (frosted in glass mode,
+  // the old --panel dialog recipe otherwise).
+  zIndex: 1,
   width: "min(1240px, calc(100vw - 44px))",
   height: "min(840px, calc(100vh - 44px))",
   display: "grid",
   gridTemplateRows: "auto minmax(0, 1fr) auto",
-  background: "var(--panel)",
-  border: "1px solid var(--rule-soft)",
   borderRadius: 16,
-  boxShadow: "var(--shadow-2), var(--lift-hi)",
   overflow: "hidden",
   animation: "spark-fade-in var(--motion) var(--ease-out)",
 };
