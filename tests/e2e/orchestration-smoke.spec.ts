@@ -23,7 +23,7 @@ test("autopilot runs from a selected markdown plan", async () => {
     });
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
-    await expect(page.getByText("SPARK AGENT")).toBeVisible();
+    await expect(page.getByText("Cora", { exact: true }).first()).toBeVisible();
     await expect(page.getByText("workspace").first()).toBeVisible();
 
     await expectSelectedPlan(page, /PLAN\.md$/);
@@ -88,9 +88,9 @@ test("spark chat renders as a workbench tab", async () => {
     const page = await app.firstWindow();
     await page.setViewportSize({ width: 900, height: 747 });
     await page.waitForLoadState("domcontentloaded");
-    await expect(page.getByText("Spark App")).toBeVisible();
+    await expect(page.getByText("Cora", { exact: true }).first()).toBeVisible();
 
-    await expect(page.getByRole("tab", { name: /Spark/ })).toBeVisible();
+    await expect(page.getByRole("tab", { name: /Cora/ })).toBeVisible();
     await expect(page.getByRole("tab", { name: /terminals/ })).toBeVisible();
     await expect(page.getByRole("button", { name: "Explorer workspace" })).toBeVisible();
   } finally {

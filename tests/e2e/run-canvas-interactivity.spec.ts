@@ -19,7 +19,7 @@ test("run graph can be dragged and zoomed from the node surface", async () => {
     const page = await app.firstWindow();
     await page.setViewportSize({ width: 1200, height: 780 });
     await page.waitForLoadState("domcontentloaded");
-    await expect(page.getByText("Spark App")).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByText("Cora", { exact: true }).first()).toBeVisible({ timeout: 20_000 });
 
     await seedWorkbenchRun(page, workspaceDir);
     await page.getByRole("button", { name: /New chat|Chat -/ }).click();

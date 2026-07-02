@@ -21,7 +21,7 @@
 import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type {
@@ -64,9 +64,14 @@ const ORCHESTRATOR_SPARK_VERSION = "4";
 // a sandboxed boot once baked its temp SPARK_HOME_DIR into ~/.claude.json,
 // pointing every external CLI at a dead handshake path.
 function isSandboxedHome(): boolean {
-  return Boolean(
-    process.env.CORA_HOME_DIR ?? process.env.SPARK_HOME_DIR ?? process.env.SPARK_USER_DATA_DIR,
-  );
+  const override =
+    process.env.CORA_HOME_DIR ?? process.env.SPARK_HOME_DIR ?? process.env.SPARK_USER_DATA_DIR;
+  if (!override || !override.trim()) return false;
+  // Only temp-dir homes count as sandboxes. A persistent custom home (a user
+  // who deliberately relocated ~/.Cora) still gets managed MCP entries — the
+  // baked SPARK_HOME_DIR in the entry env keeps external CLIs pointed right.
+  const tmp = tmpdir();
+  return override.startsWith(tmp) || override.startsWith("/tmp/") || override.startsWith("/private/tmp/");
 }
 
 // Tool rosters kept in sync with resources/spark-*-mcp/server.js so the
@@ -417,15 +422,21 @@ function stripManagedCodexRegions(
 ): string {
   const lines = text.split("\n");
   const kept: string[] = [];
+  // An orphaned START (no END anywhere after it) must not swallow the rest of
+  // the file — treat such a START as a stray marker line instead of a block
+  // opener, so user content below survives.
+  const endsAfter = (idx: number): boolean =>
+    lines.some((l, i) => i > idx && l.trim() === endMarker);
   let inBlock = false;
   let inLegacySection = false;
   const legacyHeader = new RegExp(
     `^\\s*\\[mcp_servers\\.(?:"${legacyName}"|'${legacyName}'|${legacyName})(?:\\.env)?\\]\\s*$`,
   );
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     const trimmed = line.trim();
     if (trimmed === startMarker) {
-      inBlock = true;
+      if (endsAfter(i)) inBlock = true;
       inLegacySection = false;
       continue;
     }
@@ -445,7 +456,9 @@ function stripManagedCodexRegions(
     }
     kept.push(line);
   }
-  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+  // No global blank-line squeeze: a user's multiline TOML string may contain
+  // legitimate blank runs. Only the trailing edge is normalized.
+  return kept.join("\n").trimEnd() + "\n";
 }
 
 function renderCodexBlock(): string {

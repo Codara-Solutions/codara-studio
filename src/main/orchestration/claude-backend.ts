@@ -685,7 +685,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
         : { ELECTRON_RUN_AS_NODE: "1" };
     const mcpConfig = {
       mcpServers: {
-        "spark-orchestrator": {
+        "cora-orchestrator": {
           type: "stdio" as const,
           command: electronExe,
           args: [orchestratorMcpServerPath],
@@ -833,6 +833,10 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
       CLAUDE_CODE_HIDE_CWD: "1",
       CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: "1",
       SPARK_RUN_ID: opts.runId,
+      // The shipped hooks resolve the app home from this (falling back to
+      // ~/.Cora); inject it so hook-written turn markers always land where
+      // waitForTurnFileWithRetries looks, whatever home the app runs under.
+      SPARK_HOME_DIR: sparkHome(),
     },
     fixedJsonlPath: jsonlPath,
     // Resume case: the JSONL already contains prior turns' assistant text.

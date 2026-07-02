@@ -28,7 +28,7 @@ test("user flow launches real manager-selected worker terminals from the test wo
 
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
-    await expect(page.getByText("SPARK AGENT")).toBeVisible();
+    await expect(page.getByText("Cora", { exact: true }).first()).toBeVisible();
     await expect(page.getByText("test").first()).toBeVisible();
 
     await selectPlanByName(page, USER_FLOW_PLAN);
@@ -60,7 +60,7 @@ test("user flow launches real manager-selected worker terminals from the test wo
       .toBeGreaterThanOrEqual(plannedRun.workerAttempts.length);
     await expect(page.getByText("WORKERS").first()).toBeVisible();
     await expect(page.getByText(/PowerShell|Command Prompt|pwsh|cmd/i).first()).toBeVisible();
-    await expect(page.getByText("SPARK DECISION")).toBeVisible();
+    await expect(page.getByText("Cora decision", { exact: true }).first()).toBeVisible();
 
     await page.getByPlaceholder("Plan, instruction, correction, or answer...").fill("Stop after launch verification.");
     await clickButton(page, "STOP");

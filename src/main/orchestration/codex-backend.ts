@@ -393,13 +393,13 @@ function buildArgs(input: ManagerRequestInput, promptPath: string): string[] {
   args.push("-c", "project_doc_max_bytes=0");
   // Automation mode: Codex has no per-run MCP CONFIG file like Claude, but it
   // DOES accept dotted `-c` overrides of the global config, including the
-  // managed spark-orchestrator server's env. Override SPARK_MCP_MODE for this
+  // managed cora-orchestrator server's env. Override SPARK_MCP_MODE for this
   // invocation so the orchestrator server exposes the AUTOMATION tool roster
   // (spark_*_automation) instead of the Execute worker-spawning roster. Verified
-  // codex v0.125 accepts `-c mcp_servers."spark-orchestrator".env.KEY="val"`.
+  // codex v0.125 accepts `-c mcp_servers."cora-orchestrator".env.KEY="val"`.
   // The server name must be TOML-quoted because it contains a hyphen.
   if (chat.mode === "automation") {
-    args.push("-c", `mcp_servers."spark-orchestrator".env.SPARK_MCP_MODE="automation"`);
+    args.push("-c", `mcp_servers."cora-orchestrator".env.SPARK_MCP_MODE="automation"`);
   }
   // Sandbox enforcement. Both modes use read-only:
   // - Talk: user is asking questions, no writes expected.
@@ -431,10 +431,10 @@ async function spawnSession(
       : input.chat.mode === "automation"
         ? resolveAutomationPromptPath()
         : await ensureTalkPromptFile();
-  // Execute and Automation both proxy through the spark-orchestrator MCP, so
+  // Execute and Automation both proxy through the cora-orchestrator MCP, so
   // both ensure it is installed (once, globally, in ~/.codex/config.toml).
   // Unlike the Claude backend, Codex has no per-run MCP CONFIG file, but it DOES
-  // honor per-invocation `-c mcp_servers."spark-orchestrator".env.*` overrides
+  // honor per-invocation `-c mcp_servers."cora-orchestrator".env.*` overrides
   // (added in buildArgs for automation mode), so a Codex automation chat gets
   // the SPARK_MCP_MODE=automation env and therefore the real spark_*_automation
   // roster — Codex automation mode is fully functional. The socket-side
@@ -448,7 +448,7 @@ async function spawnSession(
     await installOrchestratorMcpForCodex().catch((err) => {
       onStream?.({
         kind: "system_note",
-        message: `Could not install spark-orchestrator MCP for Codex: ${
+        message: `Could not install cora-orchestrator MCP for Codex: ${
           err instanceof Error ? err.message : String(err)
         }`,
       });

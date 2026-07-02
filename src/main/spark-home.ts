@@ -34,6 +34,11 @@ export function ensureSparkHomeSync(): void {
   const marker = path.join(dir, MIGRATION_MARKER);
   if (existsSync(marker)) return;
 
+  // Marker is only written after a clean pass — a mid-loop copy failure
+  // leaves it absent so the next boot retries (migrateIfMissing skips
+  // whatever already landed).
+  let migrationFailed = false;
+
   // Leg 1: ~/.SparkAgent → ~/.Cora (the app rename). Whole-content copy so
   // runs/, prefs, and settings survive; skipped when the app runs under an
   // explicit home override that IS the legacy dir.
@@ -54,7 +59,12 @@ export function ensureSparkHomeSync(): void {
         "cc-settings",
         "cc-mcp",
       ]) {
-        migrateIfMissing(path.join(legacyHome, entry), path.join(dir, entry));
+        try {
+          migrateIfMissing(path.join(legacyHome, entry), path.join(dir, entry));
+        } catch (err) {
+          migrationFailed = true;
+          console.error(`[spark-home] could not migrate ${entry} from ~/.SparkAgent:`, err);
+        }
       }
       // Deliberately NOT copied: worktrees/ (git registers their absolute
       // paths in the source repos — existing ones keep working from the old
@@ -76,6 +86,7 @@ export function ensureSparkHomeSync(): void {
     console.error("[spark-home] migration from legacy userData failed:", err);
   }
 
+  if (migrationFailed) return;
   try {
     writeFileSync(marker, new Date().toISOString(), "utf8");
   } catch (err) {

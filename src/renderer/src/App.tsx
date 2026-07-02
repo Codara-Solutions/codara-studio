@@ -3918,7 +3918,7 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
             color: "var(--ink-dim)",
           }}
         >
-          ~/.SparkAgent
+          ~/.Cora
         </span>
       </div>
     </div>

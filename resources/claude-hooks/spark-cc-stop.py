@@ -9,7 +9,7 @@ durable filesystem signal rather than scraping the JSONL.
 Design constraints mirror spark-hook.py:
 - Python 3.6+ only, stdlib only.
 - Resolve SPARK_HOME_DIR / SPARK_USER_DATA_DIR exactly like
-  src/main/spark-home.ts; fall back to ~/.SparkAgent.
+  src/main/spark-home.ts; fall back to ~/.Cora (or the legacy ~/.SparkAgent when ~/.Cora does not exist yet).
 - Atomic-ish writes: write to a tmp sibling then os.replace.
 - Always exit 0 — a non-zero exit fails the hook and blocks CC.
 """
@@ -22,9 +22,12 @@ from datetime import datetime, timezone
 
 def _spark_home() -> str:
     """Mirror src/main/spark-home.ts resolution order."""
-    override = os.environ.get("SPARK_HOME_DIR") or os.environ.get("SPARK_USER_DATA_DIR")
+    override = os.environ.get("CORA_HOME_DIR") or os.environ.get("SPARK_HOME_DIR") or os.environ.get("SPARK_USER_DATA_DIR")
     if override and override.strip():
         return override
+    cora = os.path.join(os.path.expanduser("~"), ".Cora")
+    if os.path.isdir(cora):
+        return cora
     return os.path.join(os.path.expanduser("~"), ".SparkAgent")
 
 
