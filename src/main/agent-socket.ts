@@ -501,11 +501,9 @@ async function handleChatAppend(
 // mark the run complete. Each call carries `runId` (the MCP server forwards
 // `process.env.SPARK_RUN_ID` that pty-manager injected at spawn time).
 //
-// v0 implementation queues workers via createWorkerTask + prepareWorkerTask
-// and relies on the existing autopilot loop (or the next plan_analysis tick)
-// to pick them up. Full end-to-end launch from this call site is a Phase 2
-// concern — at that point we'll add an explicit launchWorkerAttempt + result
-// wait so the LLM can `await` worker completion synchronously.
+// Workers are queued via createWorkerTask + prepareWorkerTask and launched
+// end-to-end from this call site through scheduleAutopilotCycles; the manager
+// can `await` completion via spark_wait_for_workers.
 
 const ASK_USER_POLL_MS = 500;
 const ASK_USER_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — covers the user being AFK
@@ -623,9 +621,14 @@ async function handleOrchestratorSpawnWorkers(
       // spark_wait_for_workers until the 90s turn timeout fires, and
       // reports back "Worker was cancelled before execution."
       attemptIdsToLaunch.push(envelope.attemptId);
-    } catch {
+    } catch (err) {
       // prepareWorkerTask failures shouldn't block subsequent queueings; the
-      // worker stays in 'created' state and the autopilot will retry.
+      // worker stays in 'created' state and the autopilot will retry. Not
+      // silent though — a stuck-in-created worker is otherwise undiagnosable.
+      console.warn(
+        `[agent-socket] prepareWorkerTask failed for ${created.id} (run ${runId}); autopilot will retry:`,
+        err instanceof Error ? err.message : err,
+      );
     }
   }
   if (downgradedFableTitles.length > 0) {
@@ -1342,6 +1345,16 @@ async function validateTriggerLoopWorker(opts: {
     if (l.kind === "cadence") {
       if (typeof l.everyMs !== "number" || !Number.isFinite(l.everyMs) || l.everyMs < MIN_TRIGGER_EVERY_MS) {
         return `loop kind 'cadence' requires a finite numeric everyMs >= ${MIN_TRIGGER_EVERY_MS} (got ${String(l.everyMs)})`;
+      }
+    }
+    // A count loop's iteration target IS stop.maxIterations; without it the
+    // engine's hardCap silently collapses the loop to a single pass — reject
+    // instead so the architect fixes the config rather than shipping a
+    // one-shot "loop".
+    if (l.kind === "count") {
+      const m = (l.stop as { maxIterations?: unknown }).maxIterations;
+      if (typeof m !== "number" || !Number.isFinite(m) || m < 1) {
+        return "loop kind 'count' requires stop.maxIterations >= 1 (that number IS the loop count; without it the loop would run exactly once)";
       }
     }
   }
