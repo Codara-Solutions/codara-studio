@@ -434,6 +434,18 @@ function initialTabsState(
   return { tabs: seed, activeId: seed[0].id, closedChatRunIds: [] };
 }
 
+// One workspace's terminal layout, surfaced so the workbench can keep every
+// visited workspace's TerminalStack mounted (hidden) instead of unmounting it
+// on a workspace switch. Unmounting is what disposed the live xterm and forced
+// the lossy gray-text snapshot/replay; keeping the stack mounted preserves the
+// real colored / alt-screen buffer and scrollback. See App's
+// terminalWorkspaceLayers.
+export interface WorkspaceTerminalLayout {
+  workspaceId: string;
+  tabs: Tab[];
+  activeId: TabId | null;
+}
+
 export interface UseTabsApi {
   tabs: Tab[];
   activeId: TabId | null;
@@ -441,6 +453,14 @@ export interface UseTabsApi {
   // Workspace id the current `tabs` array belongs to. Lags App's activeId by
   // one render during a workspace switch — see the note at the useMemo.
   tabsWorkspaceId: string | null;
+  // Frozen layouts for every visited workspace that is NOT currently active.
+  // The active workspace is driven by `tabs`/`activeId` above; these let the
+  // workbench render a mounted-but-hidden TerminalStack per inactive workspace
+  // so its panes (and the live PTYs behind them) survive a workspace switch.
+  inactiveWorkspaceLayouts: ReadonlyArray<WorkspaceTerminalLayout>;
+  // Drop frozen layouts for workspaces that no longer exist (see the callback
+  // for why the switch effect alone can't catch every deletion).
+  pruneWorkspaceLayouts: (validWorkspaceIds: ReadonlySet<string>) => void;
   setActiveTab: (id: TabId) => void;
   closeTab: (id: TabId) => void;
   closeOthers: (id: TabId) => void;
@@ -616,6 +636,26 @@ export function useTabs(
   if (tabsWorkspaceIdRef.current) {
     liveWorkspaceTabsRef.current.set(tabsWorkspaceIdRef.current, { tabs, activeId });
   }
+  // Render-driving mirror of the inactive-workspace layouts (the ref above
+  // can't trigger a render). Updated ONLY on a workspace switch — low frequency
+  // — so the active workspace's per-keystroke tab edits never churn it. The
+  // active workspace is intentionally excluded (it's driven by live `tabs`).
+  const [inactiveWorkspaceLayouts, setInactiveWorkspaceLayouts] = useState<
+    ReadonlyArray<WorkspaceTerminalLayout>
+  >([]);
+  // Drop frozen layouts for workspaces that no longer exist. The switch effect
+  // only ever removes the entering/leaving workspaces, so a workspace deleted
+  // while it is neither (an inactive workspace closed with no subsequent
+  // switch) would otherwise keep its frozen tabs — including retained
+  // scrollback — in this array for the rest of the session. The workbench calls
+  // this when the workspace set changes. No-ops when nothing is stale so it
+  // can't drive a render loop.
+  const pruneWorkspaceLayouts = useCallback((validWorkspaceIds: ReadonlySet<string>) => {
+    setInactiveWorkspaceLayouts((prev) => {
+      const next = prev.filter((layout) => validWorkspaceIds.has(layout.workspaceId));
+      return next.length === prev.length ? prev : next;
+    });
+  }, []);
   // Run ids the user explicitly closed from the top strip, per workspace.
   // syncChatTabsToRuns skips re-adding chat tabs for ids in this set so a close
   // isn't undone by the ~250ms runs refresh. Kept in a ref (not state) so
@@ -679,6 +719,23 @@ export function useTabs(
       const closed = ws ? closedChatRunIdsByWorkspaceRef.current.get(ws) : null;
       persist(ws, t, a, terminalScrollbackLineLimitRef.current, closed ? Array.from(closed) : undefined);
     }
+    // Keep the inactive-layout mirror in sync with this switch: the workspace
+    // we're LEAVING (with its final live tabs) becomes a hidden mounted stack,
+    // and the workspace we're ENTERING becomes the active live stack — so drop
+    // any entry for it. `tabs`/`activeId` here still hold the leaving
+    // workspace's layout (the swap happens below), which is exactly what we
+    // want to freeze.
+    setInactiveWorkspaceLayouts((prev) => {
+      const filtered = prev.filter(
+        (layout) =>
+          layout.workspaceId !== workspaceId &&
+          layout.workspaceId !== previousWorkspaceId,
+      );
+      if (previousWorkspaceId && previousWorkspaceId !== workspaceId) {
+        return [...filtered, { workspaceId: previousWorkspaceId, tabs, activeId }];
+      }
+      return filtered;
+    });
     const live = workspaceId ? liveWorkspaceTabsRef.current.get(workspaceId) : null;
     if (workspaceId && !live && !closedChatRunIdsByWorkspaceRef.current.has(workspaceId)) {
       // First time entering this workspace this session: load its persisted
@@ -2071,6 +2128,8 @@ export function useTabs(
       // terminal-agent notify registry sync in App) must read this instead
       // of App's activeId.
       tabsWorkspaceId: tabsWorkspaceIdRef.current,
+      inactiveWorkspaceLayouts,
+      pruneWorkspaceLayouts,
       setActiveTab,
       closeTab,
       closeOthers,
@@ -2120,8 +2179,8 @@ export function useTabs(
       registerDispose,
     }),
     // The callbacks are stable for this hook instance's lifetime; only the
-    // three data fields can change, so they're the sole real dependencies.
+    // data fields can change, so they're the sole real dependencies.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tabs, activeId, activeTab],
+    [tabs, activeId, activeTab, inactiveWorkspaceLayouts],
   );
 }

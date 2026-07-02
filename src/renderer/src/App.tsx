@@ -359,6 +359,18 @@ export default function App() {
     [workspaces, activeId],
   );
 
+  // Stable set of existing workspace ids. Its identity changes ONLY when a
+  // workspace is added/removed — not on a color/name edit — so handing it to
+  // the memoized <Workspace> doesn't defeat that memo (e.g. during a live
+  // workspace-color drag). It's used there to prune deleted workspaces from the
+  // mounted-but-hidden terminal stacks.
+  const workspaceIdsKey = workspaces.map((w) => w.id).join(",");
+  const validWorkspaceIds = useMemo(
+    () => new Set(workspaces.map((w) => w.id)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [workspaceIdsKey],
+  );
+
   // Self-heal a null/dangling active workspace id. The app renders the full
   // Workspace UI whenever `workspaces.length > 0` (see the NoWorkspace gate in
   // the render), but `activeWorkspace` is resolved by id — so a null or stale
@@ -405,6 +417,17 @@ export default function App() {
   // Tabs are scoped per-workspace so each workspace remembers its own layout.
   // useTabs internally swaps tab lists when the workspaceId argument changes.
   const tabs = useTabs(activeId, activeWorkspace?.cwd, settings.terminalScrollbackLineLimit);
+
+  // Evict frozen terminal layouts for deleted workspaces so they don't linger
+  // in state. Render already prunes them (the validWorkspaceIds gate in
+  // terminalWorkspaceLayers), but useTabs' switch effect alone can't catch an
+  // inactive workspace closed without a subsequent switch. Runs only when the
+  // workspace-id set changes; the callback no-ops when nothing is stale. Fires
+  // after useTabs' own switch effect (registered earlier in this component), so
+  // a just-appended leaving workspace is correctly pruned in the same pass.
+  useEffect(() => {
+    tabs.pruneWorkspaceLayouts(validWorkspaceIds);
+  }, [validWorkspaceIds, tabs.pruneWorkspaceLayouts]);
   const visibleWorkbenchTabs = useMemo(
     () => tabs.tabs.filter((tab) => isTabVisibleForRun(tab, activeRunId)),
     [tabs.tabs, activeRunId],
@@ -2862,6 +2885,7 @@ export default function App() {
             <Workspace
               tabs={tabs}
               workspace={activeWorkspace}
+              validWorkspaceIds={validWorkspaceIds}
               shell={terminalShell}
               terminalScrollbackLineLimit={settings.terminalScrollbackLineLimit}
               runs={runs}
@@ -3277,6 +3301,9 @@ function isTopStripTab(tab: Tab): boolean {
 interface WorkspaceProps {
   tabs: ReturnType<typeof useTabs>;
   workspace: Workspace | null;
+  // Ids of all existing workspaces — used to prune deleted workspaces from the
+  // mounted-but-hidden terminal stacks (see terminalWorkspaceLayers).
+  validWorkspaceIds: ReadonlySet<string>;
   shell: ShellInfo | null;
   terminalScrollbackLineLimit: number;
   runs: RunState[];
@@ -3326,6 +3353,7 @@ interface WorkspaceProps {
 const Workspace = React.memo(function Workspace({
   tabs,
   workspace,
+  validWorkspaceIds,
   shell,
   terminalScrollbackLineLimit,
   runs,
@@ -3384,6 +3412,50 @@ const Workspace = React.memo(function Workspace({
     if (!effectiveActiveId || tabs.activeId === effectiveActiveId) return;
     setActiveTab(effectiveActiveId);
   }, [effectiveActiveId, tabs.activeId, setActiveTab]);
+
+  // Stable no-op for the mounted-but-hidden workspace stacks. Their pane
+  // write-backs (exit / cwd / agent-state / scrollback / …) must NOT reach the
+  // live tab store, which belongs to the ACTIVE workspace — routing a hidden
+  // workspace's pane event there would corrupt the wrong workspace. None of
+  // that metadata is visible while hidden, and most re-syncs on return: cwd
+  // from the buffered OSCs flushed on the visible transition, and a still-
+  // running agent's worker chip via the level-triggered re-detection on the
+  // next footer repaint. The one gap (pre-existing — an unmounted workspace had
+  // it too): an agent that EXITS while its workspace is hidden can leave a
+  // stale "running" chip until the next launch, since re-detection only
+  // re-detects a PRESENT agent. Routing exit-while-hidden correctly would mean
+  // per-workspace write-backs — deliberately out of scope here.
+  const noopTerminalCb = useCallback(() => {}, []);
+
+  // One terminal layer per kept-alive workspace: the ACTIVE workspace driven by
+  // the live tab store, plus every visited-but-inactive workspace driven by its
+  // frozen layout. Rendering them all mounted (only the active one visible) is
+  // what keeps each workspace's xterm — colors, alt-screen TUI frame, real
+  // scrollback — alive across a switch, instead of disposing it and replaying a
+  // lossy gray text snapshot. Keyed AND sorted by workspaceId so React
+  // preserves each stack's instance (and its live PTYs) as it moves between the
+  // active and hidden roles. The active layer is keyed off `tabsWorkspaceId`
+  // (not App's activeId) so its key always agrees with `tabs.tabs`, which lags
+  // by one render during a switch.
+  const terminalWorkspaceLayers = useMemo(() => {
+    const layers: Array<{ workspaceId: string; active: boolean; tabs: Tab[] }> = [];
+    const seen = new Set<string>();
+    const activeWorkspaceId = tabs.tabsWorkspaceId;
+    if (activeWorkspaceId) {
+      layers.push({ workspaceId: activeWorkspaceId, active: true, tabs: tabs.tabs });
+      seen.add(activeWorkspaceId);
+    }
+    for (const layout of tabs.inactiveWorkspaceLayouts) {
+      if (seen.has(layout.workspaceId)) continue;
+      if (!validWorkspaceIds.has(layout.workspaceId)) continue; // pruned: deleted
+      layers.push({ workspaceId: layout.workspaceId, active: false, tabs: layout.tabs });
+      seen.add(layout.workspaceId);
+    }
+    layers.sort((a, b) =>
+      a.workspaceId < b.workspaceId ? -1 : a.workspaceId > b.workspaceId ? 1 : 0,
+    );
+    return layers;
+  }, [tabs.tabsWorkspaceId, tabs.tabs, tabs.inactiveWorkspaceLayouts, validWorkspaceIds]);
 
   // Tabs the top strip renders: chat + workspace-level tabs only. Run-owned
   // tabs (workers, Runs, run-tagged previews) are surfaced inside the chat
@@ -3639,28 +3711,50 @@ const Workspace = React.memo(function Workspace({
           onDirtyChange={handleEditorDirty}
           onClose={handleTabClose}
         />
-        <TerminalStack
-          tabs={tabs.tabs}
-          activeId={effectiveActiveId}
-          shell={shell}
-          scrollbackLineLimit={terminalScrollbackLineLimit}
-          onDetectedUrl={onDetectedUrl}
-          onSparkOpen={handleSparkOpen}
-          onPaneExit={handlePaneExit}
-          onActivatePane={handleActivatePane}
-          onSplitRatioChange={handleSplitRatioChange}
-          onSplitPane={handleSplitPane}
-          onMovePane={handleMovePane}
-          onClosePane={handleClosePane}
-          onTabZoomToggle={handlePaneZoomToggle}
-          onPaneCwd={onPaneCwd}
-          onPaneActivity={onPaneActivity}
-          onPaneUserInput={onPaneUserInput}
-          onPaneScrollback={onPaneScrollback}
-          onFlushScrollback={tabs.flushScrollbackNow}
-          onPaneAgentState={onTerminalPaneAgentState}
-          onPaneRuntimeState={onTerminalPaneRuntimeState}
-        />
+        {/* One mounted TerminalStack per kept-alive workspace. Only the active
+            one is visible/interactive; the rest stay mounted-but-hidden so
+            their live xterms + PTYs survive a workspace switch (no dispose, no
+            lossy gray snapshot/replay). Hidden stacks get null activeId (every
+            pane hidden → buffering) and no-op write-backs so they can't corrupt
+            the active workspace's tab store. */}
+        {terminalWorkspaceLayers.map((layer) => {
+          const isActive = layer.active;
+          return (
+            <div
+              key={layer.workspaceId}
+              style={{
+                position: "absolute",
+                inset: 0,
+                visibility: isActive ? "visible" : "hidden",
+                pointerEvents: isActive ? "auto" : "none",
+              }}
+            >
+              <TerminalStack
+                tabs={layer.tabs}
+                activeId={isActive ? effectiveActiveId : null}
+                workspaceVisible={isActive}
+                shell={shell}
+                scrollbackLineLimit={terminalScrollbackLineLimit}
+                onDetectedUrl={isActive ? onDetectedUrl : noopTerminalCb}
+                onSparkOpen={isActive ? handleSparkOpen : noopTerminalCb}
+                onPaneExit={isActive ? handlePaneExit : noopTerminalCb}
+                onActivatePane={isActive ? handleActivatePane : noopTerminalCb}
+                onSplitRatioChange={isActive ? handleSplitRatioChange : noopTerminalCb}
+                onSplitPane={isActive ? handleSplitPane : noopTerminalCb}
+                onMovePane={isActive ? handleMovePane : noopTerminalCb}
+                onClosePane={isActive ? handleClosePane : noopTerminalCb}
+                onTabZoomToggle={isActive ? handlePaneZoomToggle : noopTerminalCb}
+                onPaneCwd={isActive ? onPaneCwd : noopTerminalCb}
+                onPaneActivity={isActive ? onPaneActivity : noopTerminalCb}
+                onPaneUserInput={isActive ? onPaneUserInput : noopTerminalCb}
+                onPaneScrollback={isActive ? onPaneScrollback : noopTerminalCb}
+                onFlushScrollback={isActive ? tabs.flushScrollbackNow : noopTerminalCb}
+                onPaneAgentState={isActive ? onTerminalPaneAgentState : noopTerminalCb}
+                onPaneRuntimeState={isActive ? onTerminalPaneRuntimeState : noopTerminalCb}
+              />
+            </div>
+          );
+        })}
         <PreviewStack
           tabs={visibleTabs}
           activeId={effectiveActiveId}

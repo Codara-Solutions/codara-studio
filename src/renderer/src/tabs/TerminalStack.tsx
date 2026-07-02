@@ -59,6 +59,11 @@ import {
 interface Props {
   tabs: Tab[];
   activeId: TabId | null;
+  // False when this stack belongs to a workspace that is mounted-but-hidden
+  // (kept alive across a workspace switch). Defaults to true. Gates the
+  // window-level drag listeners so only the visible workspace's stack reacts to
+  // a pane drag — N mounted stacks must not each handle the same global drag.
+  workspaceVisible?: boolean;
   shell: ShellInfo | null;
   scrollbackLineLimit: number;
   onDetectedUrl: (tabId: TabId, paneId: string, url: string) => void;
@@ -133,6 +138,7 @@ type Bundle = {
 function TerminalStack({
   tabs,
   activeId,
+  workspaceVisible = true,
   shell,
   scrollbackLineLimit,
   onDetectedUrl,
@@ -367,6 +373,10 @@ function TerminalStack({
   );
 
   useEffect(() => {
+    // Only the visible workspace's stack owns the global drag listeners.
+    // Hidden (kept-alive) workspace stacks skip them so a single pane drag
+    // isn't processed once per mounted stack.
+    if (!workspaceVisible) return;
     const updatePosition = (event: DragEvent) => {
       if (!peekTerminalPaneDrag()) return;
       updateTerminalDragPositionFromPoint(event);
@@ -386,7 +396,7 @@ function TerminalStack({
       window.removeEventListener("drop", finishTerminalDrag);
       window.removeEventListener("dragend", finishTerminalDrag);
     };
-  }, []);
+  }, [workspaceVisible]);
 
   if (terminals.length === 0) return null;
   if (!shell) {
