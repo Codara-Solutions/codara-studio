@@ -1412,6 +1412,30 @@ export function registerIpc(): void {
       /* best-effort */
     }
   });
+  // Image paste bridge for terminal panes. Agent CLIs (Claude Code) accept an
+  // image by its file path — dragging or pasting an image into their TUI turns
+  // into an `[Image #N]` chip when they see a bracketed-paste of a path ending
+  // in an image extension. The system clipboard, however, holds the image as
+  // raw pixels, not a path. So when the clipboard carries an image (and no
+  // usable text), materialise it as a PNG in the OS temp dir and return that
+  // path for the renderer to shell-escape and bracketed-paste. Returns null
+  // when the clipboard has no image, so the caller can fall back cleanly.
+  ipcMain.handle("clipboard:readImageAsTempFile", async (): Promise<string | null> => {
+    try {
+      const image = clipboard.readImage();
+      if (!image || image.isEmpty()) return null;
+      const png = image.toPNG();
+      if (!png || png.length === 0) return null;
+      const filePath = join(
+        app.getPath("temp"),
+        `spark-paste-${Date.now()}-${randomUUID().slice(0, 8)}.png`,
+      );
+      await fs.writeFile(filePath, png);
+      return filePath;
+    } catch {
+      return null;
+    }
+  });
 
   ipcMain.handle("app:openExternal", async (_e, url: string): Promise<void> => {
     if (typeof url !== "string" || url.length === 0) return;

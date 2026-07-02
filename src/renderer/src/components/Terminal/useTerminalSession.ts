@@ -57,10 +57,16 @@ function shellEscapePath(path: string, isWindows: boolean): string {
   if (isWindows) {
     return `"${path.replace(/"/g, '""')}"`;
   }
-  // POSIX: wrap the whole path in single quotes (iTerm-style) so it reads as one
-  // literal token regardless of spaces/metacharacters. An embedded single quote
-  // is closed, escaped, and reopened: ' -> '\''.
-  return `'${path.replace(/'/g, "'\\''")}'`;
+  // POSIX: backslash-escape every character outside a conservative safe set,
+  // exactly like iTerm2's default drag-and-drop "escape special characters"
+  // mode. `/Users/x/My Photos/a b.png` becomes `/Users/x/My\ Photos/a\ b.png`,
+  // and spaces, quotes, parens, `$`, `&`, `;`, `*`, etc. all get a leading
+  // backslash. A backslash before an ordinary shell character is a harmless
+  // no-op, so escaping conservatively is always safe. This matches the
+  // iTerm2-verified form Claude Code's image-path detection expects (backslash-
+  // escaped path ending in an image extension), and it still lands as one
+  // usable token at a plain shell prompt.
+  return path.replace(/[^A-Za-z0-9_./-]/g, "\\$&");
 }
 // After an agent turn is interrupted with Ctrl+C, Codex/Claude/Cursor often
 // keep their TUI input box open without re-emitting the launch banner or
@@ -498,6 +504,24 @@ export function useTerminalSession({
       // every embedded newline. Null bytes are stripped because most shells
       // reject them and ConPTY can corrupt the byte stream around them.
       const isWindows = /Windows/i.test(navigator.userAgent);
+      // Deliver a token (a shell-escaped file path, or a dropped-paths list) to
+      // the PTY, framing it as a bracketed paste ONLY when the foreground app
+      // has bracketed-paste mode (DECSET 2004) enabled. iTerm2 does exactly
+      // this: a drag-dropped filename is wrapped in `\x1b[200~ … \x1b[201~`
+      // when the app requested the mode, and Claude Code's image-path detection
+      // keys on precisely that bracketed-paste framing to emit an `[Image #N]`
+      // chip. A plain shell that has NOT enabled the mode (e.g. a bare command
+      // line, or one mid-typing) gets the raw bytes so the token still lands at
+      // the cursor like typed input. Null bytes are stripped because shells
+      // reject them and ConPTY can corrupt the stream around them.
+      const writeTokenRespectingBracketMode = (raw: string) => {
+        if (readOnlyRef.current || inputBlockedRef.current) return;
+        const sanitized = raw.replace(/\x00/g, "");
+        if (!sanitized) return;
+        const bracketed = termRef.current?.modes.bracketedPasteMode ?? false;
+        const payload = bracketed ? `\x1b[200~${sanitized}\x1b[201~` : sanitized;
+        void window.spark.pty.write(sessionId, payload);
+      };
       const writePasteFromClipboard = () => {
         // Read-only mirror panes must not paste into the PTY — the canonical
         // pane owns input. Clipboard read is also skipped so a paste shortcut
@@ -505,11 +529,21 @@ export function useTerminalSession({
         if (readOnlyRef.current || inputBlockedRef.current) return;
         void (async () => {
           const text = await window.spark.clipboard.readText();
-          if (!text) return;
-          const sanitized = text.replace(/\x00/g, "");
-          if (!sanitized) return;
-          const payload = `\x1b[200~${sanitized}\x1b[201~`;
-          void window.spark.pty.write(sessionId, payload);
+          const sanitized = (text ?? "").replace(/\x00/g, "");
+          if (sanitized.trim()) {
+            // Usable text on the clipboard → paste it as a bracketed block, the
+            // long-standing behavior for text paste (unchanged).
+            const payload = `\x1b[200~${sanitized}\x1b[201~`;
+            void window.spark.pty.write(sessionId, payload);
+            return;
+          }
+          // No usable text — the clipboard may hold an image (a screenshot,
+          // "copy image"). Materialise it to a temp PNG in main and paste its
+          // shell-escaped path so an agent TUI turns it into an `[Image #N]`
+          // chip. Mode-aware, same as a Finder drag-drop.
+          const imagePath = await window.spark.clipboard.readImageAsTempFile?.();
+          if (!imagePath) return;
+          writeTokenRespectingBracketMode(shellEscapePath(imagePath, isWindows));
         })();
       };
 
@@ -771,12 +805,16 @@ export function useTerminalSession({
             .filter((path) => path && path.length > 0);
           if (paths.length === 0) return;
           // Escape each path and join with a single space. No leading/trailing
-          // space (iTerm parity). Written raw (not bracketed-paste) so it lands
-          // at the cursor exactly like typed input.
+          // space (iTerm parity). Framed as a bracketed paste when the app has
+          // bracketed-paste mode enabled — that's what iTerm2 does, and it's the
+          // signal Claude Code (and Codex) use to detect a dropped image path
+          // and turn it into an `[Image #N]` chip. A plain shell without the
+          // mode enabled receives the raw escaped path at the cursor, exactly
+          // like typed input.
           const payload = paths
             .map((path) => shellEscapePath(path, isWindows))
             .join(" ");
-          void window.spark.pty.write(sessionId, payload);
+          writeTokenRespectingBracketMode(payload);
           onActivityRef.current?.();
           onUserInputRef.current?.();
           termRef.current?.focus();
@@ -789,6 +827,46 @@ export function useTerminalSession({
           host.removeEventListener("dragenter", handleDragOver);
           host.removeEventListener("dragover", handleDragOver);
           host.removeEventListener("drop", handleDrop);
+        });
+
+        // Image-only clipboard paste (macOS Cmd+V, Linux Ctrl+V). Those paths
+        // bypass the custom key handler (the metaKey early-return, and the
+        // Linux `!isWindows` fall-through) and hit xterm's native textarea
+        // paste — which is text-only, so an image-only clipboard produces
+        // nothing (xterm's onData never fires). Intercept the DOM `paste` event
+        // in the capture phase: if the clipboard carries an image but no usable
+        // text, preventDefault and run the same temp-file → escaped-path →
+        // bracketed-paste flow so Claude Code shows an `[Image #N]` chip. When
+        // there IS text we do nothing and let xterm handle the paste normally
+        // (which also avoids the double-paste the Ctrl+Shift+V branch guards
+        // against — we only ever consume image-only pastes here).
+        const handlePaste = (event: ClipboardEvent) => {
+          if (readOnlyRef.current || inputBlockedRef.current) return;
+          const data = event.clipboardData;
+          if (!data) return;
+          // Any usable text on the clipboard → defer to xterm's native paste.
+          if (data.getData("text")?.trim()) return;
+          const hasImage =
+            Array.from(data.items ?? []).some(
+              (item) => item.kind === "file" && item.type.startsWith("image/"),
+            ) ||
+            Array.from(data.files ?? []).some((file) =>
+              file.type.startsWith("image/"),
+            );
+          if (!hasImage) return;
+          event.preventDefault();
+          event.stopPropagation();
+          void (async () => {
+            const imagePath = await window.spark.clipboard.readImageAsTempFile?.();
+            if (!imagePath) return;
+            writeTokenRespectingBracketMode(shellEscapePath(imagePath, isWindows));
+            onActivityRef.current?.();
+            onUserInputRef.current?.();
+          })();
+        };
+        host.addEventListener("paste", handlePaste, true);
+        cleanups.push(() => {
+          host.removeEventListener("paste", handlePaste, true);
         });
       }
 

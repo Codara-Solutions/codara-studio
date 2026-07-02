@@ -672,6 +672,12 @@ const api = {
     readText: (): Promise<string> => ipcRenderer.invoke("clipboard:readText"),
     writeText: (text: string): Promise<void> =>
       ipcRenderer.invoke("clipboard:writeText", text),
+    // When the system clipboard holds an image, write it to a PNG in the OS
+    // temp dir and return its absolute path (null if the clipboard has no
+    // image). Used by the terminal paste path so agent CLIs receive an image
+    // file path they can turn into an `[Image #N]` chip.
+    readImageAsTempFile: (): Promise<string | null> =>
+      ipcRenderer.invoke("clipboard:readImageAsTempFile"),
   },
   // Spark-preview MCP bridge: main forwards preview-tool requests here, the
   // renderer dispatches against the picked preview tab and sends a response
