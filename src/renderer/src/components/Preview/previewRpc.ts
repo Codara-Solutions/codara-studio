@@ -21,7 +21,9 @@ type PreviewOpName =
   | "press_key"
   | "wait_for"
   | "screenshot"
-  | "url";
+  | "url"
+  | "resize"
+  | "get_web_contents_id";
 
 interface BridgeRequest {
   reqId: string;
@@ -84,6 +86,10 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return waitFor(req.params);
     case "screenshot":
       return screenshot(req.params);
+    case "resize":
+      return resize(req.params);
+    case "get_web_contents_id":
+      return getWebContentsId(req.params);
     default:
       throw new Error(`unknown preview op: ${(req.op as string) ?? "?"}`);
   }
@@ -188,6 +194,46 @@ async function screenshot(params: Record<string, unknown>): Promise<unknown> {
   const tab = requireTab(params);
   const dataUrl = await tab.handle.capturePngDataUrl();
   return { dataUrl, url: tab.handle.getURL() };
+}
+
+async function resize(params: Record<string, unknown>): Promise<unknown> {
+  const width = readNumber(params, "width");
+  const height = readNumber(params, "height");
+  if (!width || !height) throw new Error("resize requires numeric 'width' and 'height'");
+  const tab = requireTab(params);
+  const applied = tab.handle.resizeViewport(width, height);
+  return { ok: true, ...applied, tabId: tab.id };
+}
+
+// Internal — only the main-side computer-use executor calls this. Resolves the
+// picked tab's guest webContents id plus viewport metrics so trusted-input
+// coordinates can be mapped against capturePage screenshots.
+async function getWebContentsId(params: Record<string, unknown>): Promise<unknown> {
+  const tab = requireTab(params);
+  const webContentsId = tab.handle.getWebContentsId();
+  if (webContentsId === null) {
+    throw new Error("preview tab is not ready (no web contents id yet)");
+  }
+  let viewport: { width: number; height: number } | null = null;
+  let devicePixelRatio = 1;
+  try {
+    const metrics = (await tab.handle.executeJavaScript(
+      "({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio })",
+    )) as { width: number; height: number; dpr: number } | null;
+    if (metrics) {
+      viewport = { width: metrics.width, height: metrics.height };
+      devicePixelRatio = metrics.dpr || 1;
+    }
+  } catch {
+    /* viewport metrics are best-effort; trusted input works without them */
+  }
+  return {
+    webContentsId,
+    tabId: tab.id,
+    url: tab.handle.getURL(),
+    viewport,
+    devicePixelRatio,
+  };
 }
 
 async function waitDomReady(handle: { isReady: () => boolean }, timeoutMs: number): Promise<void> {

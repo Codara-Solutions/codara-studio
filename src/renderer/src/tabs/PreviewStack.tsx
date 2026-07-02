@@ -137,6 +137,9 @@ function PreviewStack({ tabs, activeId, onUrlChange }: Props) {
               url={t.url}
               visible={visible}
               onUrlChange={getUrlCallback(t.id)}
+              onReady={(webContentsId) =>
+                window.spark.previewBridge.announce?.({ tabId: t.id, webContentsId })
+              }
             />
           </div>
         );

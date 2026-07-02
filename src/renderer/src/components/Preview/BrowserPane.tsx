@@ -51,6 +51,7 @@ type WebviewMethods = {
   send: (channel: string, ...args: unknown[]) => void;
   capturePage: () => Promise<CapturedImage>;
   executeJavaScript: (code: string, userGesture?: boolean) => Promise<unknown>;
+  getWebContentsId: () => number;
 };
 
 type WebviewElement = HTMLElement &
@@ -90,16 +91,25 @@ export interface BrowserPaneHandle {
   isReady: () => boolean;
   executeJavaScript: (code: string) => Promise<unknown>;
   capturePngDataUrl: () => Promise<string>;
+  // The guest webContents id, used by the main-side computer-use executor to
+  // drive trusted input against this exact <webview>. Null until dom-ready.
+  getWebContentsId: () => number | null;
+  // Resize the webview element (and therefore the guest viewport) to explicit
+  // CSS pixels. Returns the applied size.
+  resizeViewport: (width: number, height: number) => { width: number; height: number };
 }
 
 interface Props {
   url: string;
   visible: boolean;
   onUrlChange: (url: string) => void;
+  // Fires once the guest is dom-ready and its webContents id is known, so the
+  // host can announce the tab to main (wiring console capture early).
+  onReady?: (webContentsId: number) => void;
 }
 
 const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
-  { url, visible, onUrlChange },
+  { url, visible, onUrlChange, onReady },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -128,6 +138,10 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   useEffect(() => {
     onUrlChangeRef.current = onUrlChange;
   }, [onUrlChange]);
+  const onReadyRef = useRef(onReady);
+  useEffect(() => {
+    onReadyRef.current = onReady;
+  }, [onReady]);
 
   // The latest url prop, readable from the create-once listeners (which are
   // attached before any navigation and would otherwise capture the initial
@@ -236,6 +250,14 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         setCurrentUrl(urlRef.current);
       }
       setError(null);
+      // Announce the guest webContents id so main can wire computer-use console
+      // capture from first paint. Best-effort; fires again on every full load.
+      try {
+        const wcId = wv.getWebContentsId?.();
+        if (typeof wcId === "number") onReadyRef.current?.(wcId);
+      } catch {
+        /* getWebContentsId throws before attach — ignore */
+      }
     };
     const onDidNavigate = (e: { url: string }) => {
       setCurrentUrl(e.url);
@@ -487,6 +509,23 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         }
       },
       isReady: () => domReadyRef.current,
+      getWebContentsId: () => {
+        try {
+          const id = webviewRef.current?.getWebContentsId?.();
+          return typeof id === "number" ? id : null;
+        } catch {
+          return null;
+        }
+      },
+      resizeViewport: (width: number, height: number) => {
+        const wv = webviewRef.current;
+        if (!wv) throw new Error("preview tab is not ready");
+        const w = Math.max(1, Math.round(width));
+        const h = Math.max(1, Math.round(height));
+        wv.style.width = `${w}px`;
+        wv.style.height = `${h}px`;
+        return { width: w, height: h };
+      },
       executeJavaScript: async (code: string) => {
         const wv = webviewRef.current;
         if (!wv || !domReadyRef.current || !wv.executeJavaScript) {

@@ -36,7 +36,13 @@ export type PreviewOpName =
   | "press_key"
   | "wait_for"
   | "screenshot"
-  | "url";
+  | "url"
+  // Renderer-side webview-element resize (changes the guest viewport).
+  | "resize"
+  // Internal: resolve the picked tab's guest webContents id (+ viewport/dpr)
+  // so the main-side computer-use executor can drive it directly. Not an MCP
+  // tool — only preview-input.ts calls it.
+  | "get_web_contents_id";
 
 export interface PreviewOpParams {
   tabId?: string | null;

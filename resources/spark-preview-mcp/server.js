@@ -159,6 +159,155 @@ const TOOLS = [
     },
   },
   {
+    name: "spark_preview_mouse",
+    description:
+      "Trusted mouse input at a CSS selector's center or explicit coordinates — indistinguishable from a real user's click (event.isTrusted=true), unlike spark_preview_click's synthetic DOM events. Actions: click, dblclick, rightclick, down, up. Coordinates are CSS pixels relative to the page viewport (top-left origin); if you measured a point on a spark_preview_screenshot, divide by the screenshot's scale (screenshot width ÷ viewport width) first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string" },
+        action: { type: "string", enum: ["click", "dblclick", "rightclick", "down", "up"], description: "Default 'click'." },
+        selector: { type: "string", description: "Click the element's center (scrolled into view first)." },
+        x: { type: "number", description: "CSS-pixel viewport X (alternative to selector)." },
+        y: { type: "number", description: "CSS-pixel viewport Y (alternative to selector)." },
+        modifiers: { type: "array", items: { type: "string" }, description: "e.g. ['shift','meta','control','alt']" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_scroll",
+    description:
+      "Scroll the page with a trusted mouse-wheel event at a selector's center or explicit CSS-pixel coordinates. Positive deltaY scrolls down, negative up.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string" },
+        selector: { type: "string" },
+        x: { type: "number" },
+        y: { type: "number" },
+        deltaX: { type: "number" },
+        deltaY: { type: "number" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_hover",
+    description:
+      "Move the mouse over a selector's center or explicit CSS-pixel coordinates with a trusted mouseMove — triggers real :hover styles, tooltips, and mouseenter handlers.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string" },
+        selector: { type: "string" },
+        x: { type: "number" },
+        y: { type: "number" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_drag",
+    description:
+      "Trusted drag: mouseDown at 'from', interpolated mouseMove steps, mouseUp at 'to'. Each endpoint is { selector } or { x, y } in CSS pixels.",
+    inputSchema: {
+      type: "object",
+      required: ["from", "to"],
+      properties: {
+        tabId: { type: "string" },
+        from: {
+          type: "object",
+          properties: { selector: { type: "string" }, x: { type: "number" }, y: { type: "number" } },
+          additionalProperties: false,
+        },
+        to: {
+          type: "object",
+          properties: { selector: { type: "string" }, x: { type: "number" }, y: { type: "number" } },
+          additionalProperties: false,
+        },
+        steps: { type: "number", description: "Interpolated move events between endpoints (default 12, max 100)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_key",
+    description:
+      "Trusted keyboard input to the focused element: named keys (Enter, Escape, Tab, Backspace, ArrowDown, …) or a single character, with optional modifiers. For typing whole strings into a field prefer spark_preview_type.",
+    inputSchema: {
+      type: "object",
+      required: ["key"],
+      properties: {
+        tabId: { type: "string" },
+        key: { type: "string" },
+        text: { type: "string", description: "Printable text for the char event when it differs from 'key'." },
+        modifiers: { type: "array", items: { type: "string" } },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_upload",
+    description:
+      "Set the files of an <input type=file> via the DevTools protocol (the only reliable way to script a file upload). 'paths' are absolute paths on this machine.",
+    inputSchema: {
+      type: "object",
+      required: ["selector", "paths"],
+      properties: {
+        tabId: { type: "string" },
+        selector: { type: "string" },
+        paths: { type: "array", minItems: 1, items: { type: "string" } },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_console",
+    description:
+      "Read the preview tab's captured console messages (ring buffer, newest last, cap 500). Filter with level=debug|info|warning|error, trim with limit, or clear=true to reset. Capture starts when the tab loads, so messages from before this build opened the tab may be missing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string" },
+        limit: { type: "number", description: "Default 100, max 500." },
+        level: { type: "string", enum: ["debug", "info", "warning", "error"] },
+        clear: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_network",
+    description:
+      "Read the preview tab's captured network requests (url, method, status, mimeType, failures; ring buffer cap 500). Capture attaches on first call — issue one spark_preview_network before the interaction you want to observe, then again after. filter substring-matches the URL; clear=true resets.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string" },
+        limit: { type: "number", description: "Default 100, max 500." },
+        filter: { type: "string" },
+        clear: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_resize",
+    description:
+      "Resize the preview viewport to explicit CSS-pixel dimensions (e.g. 375×667 to test a mobile layout). Returns the applied size.",
+    inputSchema: {
+      type: "object",
+      required: ["width", "height"],
+      properties: {
+        tabId: { type: "string" },
+        width: { type: "number" },
+        height: { type: "number" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "spark_preview_run",
     description:
       "Run an ordered BATCH of preview steps in ONE call (one MCP round-trip) instead of dozens of single click/press_key calls. Each step dispatches the exact same real input event as its individual tool, so fidelity is identical — you just stop paying a separate round-trip (and a separate agent turn) per keystroke. STRONGLY PREFER this for any multi-step verification flow: e.g. drive `7 / 2 =` and read the display as a single spark_preview_run, not seven calls. Stops at the first failing step unless continueOnError=true. Returns a per-step result array; any screenshot steps are also surfaced as image blocks.",
@@ -191,6 +340,10 @@ const TOOLS = [
                   "wait_for",
                   "snapshot",
                   "screenshot",
+                  "scroll",
+                  "hover",
+                  "key",
+                  "resize",
                 ],
               },
               label: { type: "string", description: "Optional note echoed back in the step result." },
@@ -204,6 +357,13 @@ const TOOLS = [
               awaitPromise: { type: "boolean" },
               state: { type: "string" },
               timeoutMs: { type: "number" },
+              x: { type: "number" },
+              y: { type: "number" },
+              deltaX: { type: "number" },
+              deltaY: { type: "number" },
+              width: { type: "number" },
+              height: { type: "number" },
+              modifiers: { type: "array", items: { type: "string" } },
             },
             additionalProperties: false,
           },
@@ -225,6 +385,15 @@ const TOOL_TO_RPC = {
   spark_preview_evaluate: "preview.evaluate",
   spark_preview_wait_for: "preview.wait_for",
   spark_preview_screenshot: "preview.screenshot",
+  spark_preview_mouse: "preview.mouse",
+  spark_preview_scroll: "preview.scroll",
+  spark_preview_hover: "preview.hover",
+  spark_preview_drag: "preview.drag",
+  spark_preview_key: "preview.key",
+  spark_preview_upload: "preview.upload",
+  spark_preview_console: "preview.console",
+  spark_preview_network: "preview.network",
+  spark_preview_resize: "preview.resize",
 };
 
 // Step action -> RPC for the batched spark_preview_run tool. Mirrors the
@@ -238,6 +407,12 @@ const STEP_ACTION_TO_RPC = {
   wait_for: "preview.wait_for",
   snapshot: "preview.snapshot",
   screenshot: "preview.screenshot",
+  // Trusted-input steps (drag/upload/console/network stay single-shot tools:
+  // drag's nested from/to and the read-tools' outputs don't batch cleanly).
+  scroll: "preview.scroll",
+  hover: "preview.hover",
+  key: "preview.key",
+  resize: "preview.resize",
 };
 
 function resolveSparkHome() {

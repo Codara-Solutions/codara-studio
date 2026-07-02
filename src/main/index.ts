@@ -28,6 +28,7 @@ import { startHookRpc, stopHookRpc } from "./hook-rpc";
 import { installClaudeHooks } from "./hook-installer";
 import { installSparkPreviewMcpAtBoot } from "./mcp-installer";
 import { registerPreviewBridge } from "./preview-bridge";
+import { registerPreviewInput } from "./preview-input";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 
 // run-store is heavy (loads openrouter and agent-sync transitively).
@@ -410,6 +411,9 @@ app.whenReady().then(async () => {
   // would cycle).
   setTrayHook({ ensure: ensureTray, destroy: destroyTray });
   registerPreviewBridge();
+  // Main-side computer-use executor for the preview tab: listens for tab
+  // announcements so console capture starts at dom-ready.
+  registerPreviewInput();
 
   // Hook RPC server for sub-agents (big-bet "Hook contract for sub-agents to
   // self-report"). Starts before createWindow so the very first worker pty

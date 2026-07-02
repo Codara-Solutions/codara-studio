@@ -7,6 +7,7 @@ import * as pty from "./pty-manager";
 import { sparkHome } from "./spark-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
+import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import type {
   AutomationLoop,
   AutomationTrigger,
@@ -316,10 +317,26 @@ async function dispatch(
       case "preview.evaluate":
       case "preview.click":
       case "preview.type":
-      case "preview.press_key":
       case "preview.wait_for":
       case "preview.screenshot":
+      case "preview.resize":
+        // Renderer-side ops: DOM probes, capture, and the webview-element
+        // resize all run in the renderer against the picked preview tab.
         return await handlePreviewOp(method, params, id);
+      case "preview.scroll":
+      case "preview.hover":
+      case "preview.mouse":
+      case "preview.drag":
+      case "preview.upload":
+      case "preview.console":
+      case "preview.network":
+      case "preview.key":
+      case "preview.press_key":
+        // Computer-use ops: main drives the guest webContents directly with
+        // trusted input (sendInputEvent) + CDP. press_key lives here too so it
+        // uses trusted input when a guest resolves (and falls back to the
+        // renderer probe when it can't).
+        return await handlePreviewInputRpc(method, params, id);
       case "orchestrator.spawn_workers":
         return await handleOrchestratorSpawnWorkers(params, id);
       case "orchestrator.ask_user":
@@ -417,6 +434,21 @@ async function handlePreviewOp(
   const previewParams: PreviewOpParams = { ...params };
   try {
     const result = await requestPreviewOp(op, previewParams);
+    return successResponse(id, result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return errorResponse(id, ERR_INTERNAL, message);
+  }
+}
+
+async function handlePreviewInputRpc(
+  method: string,
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const op = method.replace(/^preview\./, "") as PreviewInputOp;
+  try {
+    const result = await handlePreviewInputOp(op, params);
     return successResponse(id, result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

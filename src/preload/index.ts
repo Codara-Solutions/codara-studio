@@ -709,6 +709,12 @@ const api = {
     sendResponse: (response: { reqId: string; ok: boolean; result?: unknown; error?: string }): void => {
       ipcRenderer.send("preview-bridge:response", response);
     },
+    // Announce a preview tab's guest webContents id (fired at dom-ready) so
+    // main's computer-use executor can wire console capture before the
+    // agent's first op.
+    announce: (payload: { tabId: string; webContentsId: number }): void => {
+      ipcRenderer.send("preview-bridge:announce", payload);
+    },
   },
   updater: {
     // Subscribe to electron-updater lifecycle events. The returned function
