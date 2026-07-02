@@ -26,7 +26,7 @@ import {
 import { registerAutoUpdater } from "./auto-updater";
 import { startHookRpc, stopHookRpc } from "./hook-rpc";
 import { installClaudeHooks } from "./hook-installer";
-import { installPlaywrightMcp } from "./mcp-installer";
+import { installSparkPreviewMcpAtBoot } from "./mcp-installer";
 import { registerPreviewBridge } from "./preview-bridge";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 
@@ -301,17 +301,19 @@ app.whenReady().then(async () => {
     console.warn("[main] hook installer failed:", err),
   );
 
-  // Auto-install the Playwright MCP server in the user's Claude / Codex
-  // configs so verifier passes can drive a real browser instead of falling
-  // back to inline DOM stubs. Guarded by a setting (default on) and gated
-  // by file/dir existence — does nothing for users without those runtimes.
+  // Auto-install the spark-preview MCP server in the user's Claude / Codex
+  // configs so manually-run and orchestrated agents can drive the live
+  // <preview> tab (browser-use / computer-use). Guarded by a setting
+  // (default on). Unlike the older behavior, this createIfMissing's the config
+  // when the corresponding CLI binary resolves on disk — so a user with
+  // `claude`/`codex` installed but never launched still gets the entry.
   void (async () => {
     try {
       const settings = await loadSettings();
       if (settings.playwrightMcpAutoInstall === false) return;
-      await installPlaywrightMcp();
+      await installSparkPreviewMcpAtBoot();
     } catch (err) {
-      console.warn("[main] playwright mcp installer failed:", err);
+      console.warn("[main] spark-preview mcp installer failed:", err);
     }
   })();
 

@@ -32,11 +32,18 @@ import type {
   SparkBuiltinRuntimeStatus,
 } from "@shared/types";
 
+import { resolveBinary } from "./binary-resolver";
 import { writeFileAtomic } from "./fs-atomic";
+import { sparkHome } from "./spark-home";
 
 const SERVER_NAME = "spark-preview";
 const LEGACY_SERVER_NAME = "playwright";
-const SPARK_VERSION = "1";
+// v2: the managed entry now injects SPARK_HOME_DIR into the server's env so an
+// externally-spawned MCP child (Claude Code / Codex, which do NOT inherit
+// Spark's pty env) can find the agent-socket handshake even when the user runs
+// Spark under a custom SPARK_HOME_DIR. Bump forces matchesCurrent to rewrite
+// the older env-less entry.
+const SPARK_VERSION = "2";
 
 export const SPARK_ORCHESTRATOR_SERVER_NAME = "spark-orchestrator";
 // v2: spark_request_next_iteration gained nextEngine/nextModel/nextEffort
@@ -131,7 +138,11 @@ function buildServerArgs(): string[] {
 }
 
 function buildServerEnv(): Record<string, string> {
-  return { ELECTRON_RUN_AS_NODE: "1" };
+  // SPARK_HOME_DIR points the MCP server at the handshake file
+  // (<spark-home>/agent-socket.json). The server defaults to ~/.SparkAgent
+  // when it's unset, so injecting it only matters for custom homes — but we
+  // always write it so the entry is explicit and self-describing.
+  return { ELECTRON_RUN_AS_NODE: "1", SPARK_HOME_DIR: sparkHome() };
 }
 
 function buildOrchestratorServerArgs(): string[] {
@@ -152,6 +163,25 @@ export async function installPlaywrightMcp(): Promise<void> {
 
 export async function installSparkPreviewMcp(): Promise<void> {
   await Promise.all([installForClaude(), installForCodex()]);
+}
+
+// Boot-time installer. Design rule #3 (stay conservative) says the auto-
+// installer never CREATES a foreign config in a clean homedir — but that also
+// meant a user who has `claude`/`codex` on PATH yet has never launched it (so
+// ~/.claude.json / ~/.codex don't exist yet) silently got no spark-preview
+// entry, and the browser-use surface just didn't work for them. Split the
+// difference: probe for the actual CLI binary and, only when it resolves, allow
+// createIfMissing so the entry lands the first time. The never-overwrite-a-
+// user-entry guards inside installForClaude/installForCodex still hold.
+export async function installSparkPreviewMcpAtBoot(): Promise<void> {
+  const [claudeBin, codexBin] = await Promise.all([
+    resolveBinary("claude").catch(() => null),
+    resolveBinary("codex").catch(() => null),
+  ]);
+  await Promise.all([
+    installForClaude(Boolean(claudeBin)),
+    installForCodex(Boolean(codexBin)),
+  ]);
 }
 
 // Per-runtime entry points used by the Capability Center's explicit install
@@ -267,6 +297,9 @@ function matchesCurrent(value: unknown): boolean {
   if (!args.every((arg, i) => arg === expectedArgs[i])) return false;
   const env = entry.env as Record<string, unknown> | undefined;
   if (!env || env.ELECTRON_RUN_AS_NODE !== "1") return false;
+  // A stale SPARK_HOME_DIR (user relaunched Spark under a different home) must
+  // force a rewrite so the MCP child dials the right handshake file.
+  if (env.SPARK_HOME_DIR !== sparkHome()) return false;
   return true;
 }
 
@@ -352,6 +385,7 @@ function renderCodexBlock(): string {
     "",
     `[mcp_servers."${SERVER_NAME}".env]`,
     `ELECTRON_RUN_AS_NODE = "1"`,
+    `SPARK_HOME_DIR = ${tomlString(sparkHome())}`,
     CODEX_BLOCK_END,
   ].join("\n");
 }
