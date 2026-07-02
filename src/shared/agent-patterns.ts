@@ -108,6 +108,40 @@ export function stripAnsi(text: string): string {
   return text.replace(CSI_RE, "").replace(OSC_RE, "");
 }
 
+// ── run-store strippers ──────────────────────────────────────────────────
+//
+// Two run-store call sites need slightly different ANSI cleanup than the
+// canonical stripAnsi above. Both are consolidated here so there is a single
+// home for escape-stripping. Their regexes are intentionally NOT the same as
+// stripAnsi's — each preserves the exact behavior of the run-store local it
+// replaced (this is a refactor, not a fix), so do not "unify" them without
+// re-checking the affected outputs.
+
+// Direct-summary cleanup (was run-store's stripAnsiForDirectSummary). Strips
+// ANSI escapes AND C0 control noise so a raw TUI tail reads as plain text in
+// the summary ladder. Note the looser CSI form (`[0-9;?]*[a-zA-Z]`) and the
+// OSC form accepting BEL *or* ST termination, then a final control-char pass.
+const DIRECT_CSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]/g;
+const DIRECT_OSC_RE = /\x1b\][^\x07]*(\x07|\x1b\\)/g;
+const C0_CONTROL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
+export function stripAnsiAndControls(text: string): string {
+  return text
+    .replace(DIRECT_CSI_RE, "")
+    .replace(DIRECT_OSC_RE, "")
+    .replace(C0_CONTROL_RE, "");
+}
+
+// Worker pty-tap stripper (was run-store's local stripAnsi at the worker
+// spawn path). Runs on every data chunk across N concurrent workers, so the
+// regexes are hoisted to module scope to avoid per-chunk recompilation.
+// Behaviorally distinct from the canonical stripAnsi: OSC is BEL-terminated
+// only (no ST), and it does NOT strip control characters.
+const WORKER_CSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const WORKER_OSC_RE = /\x1b\][^\x07]*\x07/g;
+export function stripAnsiWorkerTap(text: string): string {
+  return text.replace(WORKER_CSI_RE, "").replace(WORKER_OSC_RE, "");
+}
+
 // Identify which agent CLI is running by scanning a short rolling buffer of
 // recent visible text against the RUNTIME_BANNERS table above. Patterns are
 // specific enough to live launch banners / first-prompt boilerplate that

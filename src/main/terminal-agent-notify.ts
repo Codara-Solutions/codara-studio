@@ -137,6 +137,10 @@ let sweepTimer: NodeJS.Timeout | null = null;
 const LOG_PATH = path.join(os.tmpdir(), "spark-terminal-notify.log");
 let logChecked = false;
 function tanLog(msg: string): void {
+  // Off by default: the flight recorder only writes when explicitly opted in
+  // via SPARK_TERMINAL_NOTIFY_LOG. Call sites stay unconditional; this is a
+  // no-op unless the env var is set (truthy).
+  if (!process.env.SPARK_TERMINAL_NOTIFY_LOG) return;
   try {
     if (!logChecked) {
       logChecked = true;

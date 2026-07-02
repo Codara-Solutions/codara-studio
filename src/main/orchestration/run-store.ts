@@ -55,6 +55,7 @@ import type {
 } from "@shared/types";
 import { FAN_OUT_DIRECTIVE_MARKER } from "@shared/types";
 import { makeId } from "@shared/ids";
+import { stripAnsiAndControls, stripAnsiWorkerTap } from "@shared/agent-patterns";
 import {
   contextWindowForModel,
   estimateImageTokens,
@@ -1393,16 +1394,6 @@ export async function relaunchDirectAttempt(
   return envelope.attemptId;
 }
 
-// Strip ANSI escapes + control noise so a raw TUI tail reads as plain text in
-// the summary ladder. Mirrors the cleanup claude-backend applies to CC's
-// last words on unexpected exit.
-function stripAnsiForDirectSummary(text: string): string {
-  return text
-    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
-    .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, "")
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
-}
-
 // Newest worker attempt belonging to a given loom graph node, identified by the
 // node id stamped on the node's worker task. Pre-graph direct runs (no
 // loomNodeId on any task) fall through to the run's newest attempt — which, for
@@ -1438,7 +1429,7 @@ async function deriveAttemptSummary(
       rawText = await readFileTailUtf8(attempt.rawLogPath, 64 * 1024);
     }
     if (rawText) {
-      const lines = stripAnsiForDirectSummary(rawText)
+      const lines = stripAnsiAndControls(rawText)
         .split(/\r?\n/)
         .map((line) => line.trimEnd())
         .filter((line) => line.trim().length > 0);
@@ -11503,16 +11494,6 @@ async function runWorkerSession({
   return result;
 }
 
-// Pre-compiled ANSI escape strippers. Worker pty taps run these on every
-// data chunk (multiple taps per worker × up to N concurrent workers × tens
-// of chunks/sec). Hoisting the regex literals out of the hot path saves the
-// per-chunk recompilation cost.
-const ANSI_CSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
-const ANSI_OSC_RE = /\x1b\][^\x07]*\x07/g;
-function stripAnsi(text: string): string {
-  return text.replace(ANSI_CSI_RE, "").replace(ANSI_OSC_RE, "");
-}
-
 // Sniff the pty output stream for an agent-TUI marker so we know the launch
 // command actually became the foreground process. If we don't see one inside
 // the budget, the launch failed — pwsh is back at its prompt and pasting the
@@ -11597,7 +11578,7 @@ async function waitForAgentTui(
       // ]633;E;<command> doesn't false-positive against marker text like
       // "claude-haiku" — the model name appears in the typed command and
       // would otherwise look identical to the TUI banner.
-      const visible = stripAnsi(buffer);
+      const visible = stripAnsiWorkerTap(buffer);
       for (const marker of markers) {
         if (visible.includes(marker)) {
           finish({ ok: true });
@@ -11664,7 +11645,7 @@ async function waitForCodexInputReady(attemptId: string): Promise<void> {
     const offTap = pty.tap(attemptId, (chunk) => {
       // Check THIS chunk for the MCP line — once it stops being repainted,
       // lastMcpSeen stops advancing and the poll below detects quiescence.
-      const text = stripAnsi(chunk.toString("utf8"));
+      const text = stripAnsiWorkerTap(chunk.toString("utf8"));
       if (/Starting MCP servers/i.test(text)) {
         sawMcpStartup = true;
         lastMcpSeen = Date.now();
@@ -11695,7 +11676,7 @@ function detectFatalWorkerRuntimeError(
   runtime: WorkerTask["runtimePreference"],
 ): string | null {
   if (runtime !== "claude" && runtime !== "codex") return null;
-  const visible = stripAnsi(buffer);
+  const visible = stripAnsiWorkerTap(buffer);
   const checks: Array<[RegExp, string]> = [
     [/API Error:.*socket connection was closed unexpectedly/i, "runtime API error: socket connection closed unexpectedly"],
     [/API Error:/i, "runtime API error before final report"],
@@ -11766,7 +11747,7 @@ async function pasteAndSubmit(
     // startup phase is captured.
     let visible = "";
     const offTap = pty.tap(attemptId, (chunk) => {
-      visible = (visible + stripAnsi(chunk.toString("utf8"))).slice(-6000);
+      visible = (visible + stripAnsiWorkerTap(chunk.toString("utf8"))).slice(-6000);
     });
     const startedTurn = (): boolean => {
       // Codex's MCP-startup spinner prints "(Ns • esc to interrupt)" too, so

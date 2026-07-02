@@ -76,7 +76,7 @@ let unseenAlertCount = 0;
 // notifier.
 let getMainWindow: () => BrowserWindow | null = () => null;
 
-export function setMainWindowGetter(getter: () => BrowserWindow | null): void {
+function setMainWindowGetter(getter: () => BrowserWindow | null): void {
   getMainWindow = getter;
 }
 
@@ -437,27 +437,6 @@ async function handleEvent(event: SparkEvent): Promise<void> {
   }
 
   fanout(channels, decision);
-}
-
-// Test-surface escape hatch. Allows the headless eval / a future unit
-// test to clear remembered state between runs without restarting the
-// process. Not exported on the IPC surface — main-process use only.
-export function _resetNotificationStateForTests(): void {
-  lastAlertedStatus.clear();
-  alertedTerminalCompletion.clear();
-  unseenAlertCount = 0;
-}
-
-// Mark that the user has explicitly seen / opened a run, allowing the
-// notifier to alert again the next time it transitions into the same
-// terminal status. Reserved for the future "seen flag" rollup work; not
-// currently wired but exported so callers don't have to reach into the
-// module's private state.
-export function markRunSeen(runId: string): void {
-  lastAlertedStatus.delete(runId);
-  // Opening the run is an explicit acknowledgement, so drop the dedup guard
-  // too — the next genuine blocked/needs-you for this run should alert.
-  alertedTerminalCompletion.delete(runId);
 }
 
 // ── Terminal-agent alerts ────────────────────────────────────────────────
