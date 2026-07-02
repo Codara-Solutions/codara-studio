@@ -85,7 +85,7 @@
     "vite": "^5.4.0"
   },
   "build": {
-    "appId": "com.spark.agent",
+    "appId": "com.codara.cora",
     "productName": "Cora",
     "files": [
       "out/**/*",
@@ -116,12 +116,12 @@
         "to": "claude-hooks"
       },
       {
-        "from": "resources/spark-preview-mcp",
-        "to": "spark-preview-mcp"
+        "from": "resources/cora-preview-mcp",
+        "to": "cora-preview-mcp"
       },
       {
-        "from": "resources/spark-orchestrator-mcp",
-        "to": "spark-orchestrator-mcp"
+        "from": "resources/cora-orchestrator-mcp",
+        "to": "cora-orchestrator-mcp"
       },
       {
         "from": "resources/sounds",

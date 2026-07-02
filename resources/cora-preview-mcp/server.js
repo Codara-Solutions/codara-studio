@@ -25,7 +25,7 @@ const path = require("node:path");
 const http = require("node:http");
 
 const HANDSHAKE_FILE = "agent-socket.json";
-const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".SparkAgent");
+const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".Cora");
 
 const TOOLS = [
   {
@@ -416,7 +416,7 @@ const STEP_ACTION_TO_RPC = {
 };
 
 function resolveSparkHome() {
-  const override = process.env.SPARK_HOME_DIR || process.env.SPARK_USER_DATA_DIR;
+  const override = process.env.CORA_HOME_DIR || process.env.SPARK_HOME_DIR || process.env.SPARK_USER_DATA_DIR;
   if (override && override.trim()) return override;
   return DEFAULT_SPARK_HOME;
 }
@@ -561,7 +561,7 @@ async function dispatch(method, params) {
       return {
         protocolVersion: "2024-11-05",
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "spark-preview", version: "0.1.0" },
+        serverInfo: { name: "cora-preview", version: "0.1.0" },
       };
     case "notifications/initialized":
     case "initialized":

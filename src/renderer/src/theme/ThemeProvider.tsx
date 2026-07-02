@@ -40,23 +40,27 @@ const FAST_PATH_KEY = "spark-ui-theme-shadow";
 function normalizeTheme(value: unknown): Theme {
   if (typeof value !== "string") return DEFAULT_PREFERENCES.theme;
   if ((APP_THEME_IDS as readonly string[]).includes(value)) return value as Theme;
-  // Legacy / removed light themes collapse to the flagship light palette.
+  // Legacy / removed light themes (incl. the pre-rename spark-daylight id)
+  // collapse to the flagship light palette.
   if (
     value === "light" ||
     value === "spark-light" ||
+    value === "spark-daylight" ||
     value === "paper-lantern" ||
     value === "frosted-glass" ||
     value === "sage-terminal" ||
     value === "solar-flare"
   ) {
-    return "spark-daylight";
+    return "cora-daylight";
   }
-  // Legacy / removed dark themes (incl. retired Gruvbox / Solarized /
-  // Rosé Pine / Everforest / Kanagawa) collapse to Spark Classic.
+  // Legacy / removed dark themes (incl. the pre-rename spark-classic id and
+  // retired Gruvbox / Solarized / Rosé Pine / Everforest / Kanagawa) collapse
+  // to Cora Classic.
   if (
     value === "dark" ||
     value === "system" ||
     value === "spark-dark" ||
+    value === "spark-classic" ||
     value === "github-dark" ||
     value === "tokyo-night" ||
     value === "nord" ||
@@ -73,7 +77,7 @@ function normalizeTheme(value: unknown): Theme {
     value === "neon-orchard" ||
     value === "velvet-dusk"
   ) {
-    return "spark-classic";
+    return "cora-classic";
   }
   return DEFAULT_PREFERENCES.theme;
 }

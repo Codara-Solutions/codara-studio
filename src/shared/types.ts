@@ -136,32 +136,32 @@ export type ThemeMode = "dark" | "light";
 // to a `:root[data-theme="…"]` block in styles.css and a swatch in
 // SettingsDialog's APP_THEME_META.
 export type ThemePref =
-  | "spark-classic"
+  | "cora-classic"
   | "catppuccin-mocha"
   | "dracula"
   | "one-dark"
-  | "spark-daylight"
+  | "cora-daylight"
   | "github-light"
   | "rose-pine-dawn"
   | "catppuccin-latte";
 
 export const APP_THEME_IDS: readonly ThemePref[] = [
-  "spark-classic",
+  "cora-classic",
   "catppuccin-mocha",
   "dracula",
   "one-dark",
-  "spark-daylight",
+  "cora-daylight",
   "github-light",
   "rose-pine-dawn",
   "catppuccin-latte",
 ] as const;
 
 export const APP_THEME_MODE: Readonly<Record<ThemePref, ThemeMode>> = {
-  "spark-classic": "dark",
+  "cora-classic": "dark",
   "catppuccin-mocha": "dark",
   dracula: "dark",
   "one-dark": "dark",
-  "spark-daylight": "light",
+  "cora-daylight": "light",
   "github-light": "light",
   "rose-pine-dawn": "light",
   "catppuccin-latte": "light",
@@ -339,7 +339,7 @@ export const DEFAULT_NOTIFICATION_CHANNELS: NotificationChannelsPref = {
 export const DEFAULT_COPY_BRANCH_SETUP_COMMAND = "";
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
-  theme: "spark-classic",
+  theme: "cora-classic",
   vimMode: false,
   editorTheme: "github-dark",
   inlineAutocompleteEnabled: true,

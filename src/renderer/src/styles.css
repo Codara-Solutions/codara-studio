@@ -169,7 +169,7 @@
   --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
 }
 
-:root[data-theme="spark-classic"] {
+:root[data-theme="cora-classic"] {
   color-scheme: dark;
 }
 
@@ -249,7 +249,7 @@
    ink so elevation stays in-key. --accent rides on top as the workspace color
    (set at runtime), exactly as in the dark palettes. */
 
-:root[data-theme="spark-daylight"] {
+:root[data-theme="cora-daylight"] {
   color-scheme: light;
 
   /* Warm paper-white — the daylight sibling of Spark Classic (h ≈ 85). */

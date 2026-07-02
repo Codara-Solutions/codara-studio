@@ -772,7 +772,7 @@ const APP_THEME_META: Readonly<
     }
   >
 > = {
-  "spark-classic": {
+  "cora-classic": {
     label: "Cora Classic",
     swatches: ["#191914", "#25241f", "#f0c419", "#f5f2e9"],
   },
@@ -788,7 +788,7 @@ const APP_THEME_META: Readonly<
     label: "One Dark",
     swatches: ["#282c34", "#2c313a", "#61afef", "#abb2bf"],
   },
-  "spark-daylight": {
+  "cora-daylight": {
     label: "Cora Daylight",
     swatches: ["#faf9f5", "#eae7dd", "#f0c419", "#211f1a"],
   },
@@ -2150,7 +2150,7 @@ function AboutSettings() {
       >
         <MetaRow label="Version" value={`v${version}`} mono />
         <MetaRow label="Platform" value={platform || "—"} mono />
-        <MetaRow label="App ID" value="com.spark.agent" mono />
+        <MetaRow label="App ID" value="com.codara.cora" mono />
       </dl>
     </div>
   );

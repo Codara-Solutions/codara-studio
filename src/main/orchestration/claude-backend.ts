@@ -80,20 +80,20 @@ const MAX_PENDING_MCP_HOLD_MS = 25 * 60_000;
 function isSparkLongPollMcpTool(name: string): boolean {
   return (
     name === "spark_wait_for_workers" ||
-    name === "mcp__spark-orchestrator__spark_wait_for_workers" ||
+    name === "mcp__cora-orchestrator__spark_wait_for_workers" ||
     // spark_ask_user blocks the manager turn while it waits (up to 15 min) for
     // the human to answer. Without this it isn't tracked in pendingMcpToolCalls,
     // the cap stays at 90s, the turn times out, and the run is force-completed —
     // cancelling any active workers. Treat it as a long-poll so the cap rises.
     name === "spark_ask_user" ||
-    name === "mcp__spark-orchestrator__spark_ask_user" ||
+    name === "mcp__cora-orchestrator__spark_ask_user" ||
     // spark_wait_for_automation (Automation mode) long-polls the scheduler for
     // an automation run to settle — default 10 min, cap 19 min. Same hazard as
     // spark_wait_for_workers: untracked, the 90s turn cap fires mid-wait.
     // (spark_run_automation is NOT here: it returns as soon as the iteration
     // STARTS, not when it finishes, so it never blocks long.)
     name === "spark_wait_for_automation" ||
-    name === "mcp__spark-orchestrator__spark_wait_for_automation"
+    name === "mcp__cora-orchestrator__spark_wait_for_automation"
   );
 }
 // CC's Stop hook fires when the assistant finishes its turn, but the JSONL
@@ -192,7 +192,7 @@ interface ClaudeChatSession {
   fatal: boolean;
   fatalMessage: string | null;
   /** Tool calls observed during the current turn — populated by the JSONL
-   *  translator when CC fires `mcp__spark-orchestrator__*` (or any other
+   *  translator when CC fires `mcp__cora-orchestrator__*` (or any other
    *  tool). In Execute mode the request handler reads this after the turn
    *  ends to convert spark_spawn_workers calls into a SparkManagerDecision
    *  that the run-store can act on, exactly like grok/OpenRouter does. */
@@ -661,7 +661,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   // unrelated MCPs registered (DigitalOcean, Hetzner, RunPod, etc.) — the
   // resulting tool list is hundreds of items long, and the orchestrator
   // tools are buried inside it. With `--strict-mcp-config --mcp-config <this>`,
-  // CC sees only `mcp__spark-orchestrator__*` and the prompt's "MUST call
+  // CC sees only `mcp__cora-orchestrator__*` and the prompt's "MUST call
   // spark_spawn_workers" rule has a clear, uncontested target.
   //
   // Talk mode skips this entirely because Talk has no MCP delegation —
@@ -676,8 +676,8 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   let mcpConfigFile: string | null = null;
   if (opts.mode === "execute" || opts.mode === "automation") {
     const orchestratorMcpServerPath = app.isPackaged
-      ? join(process.resourcesPath, "spark-orchestrator-mcp", "server.js")
-      : join(__dirname, "..", "..", "resources", "spark-orchestrator-mcp", "server.js");
+      ? join(process.resourcesPath, "cora-orchestrator-mcp", "server.js")
+      : join(__dirname, "..", "..", "resources", "cora-orchestrator-mcp", "server.js");
     const electronExe = app.isPackaged ? process.execPath : process.execPath;
     const serverEnv: Record<string, string> =
       opts.mode === "automation"
@@ -1219,12 +1219,12 @@ export function buildExecuteDecisionFromToolCalls(
   chatReply: string,
 ): SparkManagerDecision {
   // Tool name matching tolerates BOTH the CC-style prefix
-  // (`mcp__spark-orchestrator__spark_spawn_workers`) and Codex's bare name
+  // (`mcp__cora-orchestrator__spark_spawn_workers`) and Codex's bare name
   // (`spark_spawn_workers`) — Codex's MCP integration drops the prefix when
   // surfacing the tool to the model.
   const matches = (call: { toolName: string }, sparkName: string): boolean =>
     call.toolName === sparkName ||
-    call.toolName === `mcp__spark-orchestrator__${sparkName}`;
+    call.toolName === `mcp__cora-orchestrator__${sparkName}`;
 
   // spark_complete wins when present, even alongside spark_spawn_workers.
   // The CC manager's MCP tool calls executed IN ORDER as the turn ran:

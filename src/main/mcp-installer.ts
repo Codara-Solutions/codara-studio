@@ -1,7 +1,7 @@
 // spark-preview MCP auto-installer — registers a tiny stdio MCP server in
 // the user-scope Claude and Codex configs so every sub-agent Spark spawns
 // (including verifier passes) can drive the actual <preview> tab inside
-// Spark App. The server lives at resources/spark-preview-mcp/server.js
+// Spark App. The server lives at resources/cora-preview-mcp/server.js
 // and proxies JSON-RPC calls back to Spark's agent-socket loopback HTTP
 // channel. See preview-bridge.ts + previewRpc.ts for the round-trip.
 //
@@ -9,7 +9,7 @@
 // 1. Idempotent. JSON entries are tagged `_sparkManaged: true` + version;
 //    Codex TOML insertion lives in a dedicated managed block (`SPARK_AGENT_
 //    BUILTIN_MCP`) so it never fights the agent-sync managed block.
-// 2. Non-destructive. If the user already has a non-Spark `spark-preview`
+// 2. Non-destructive. If the user already has a non-Cora `cora-preview`
 //    entry, we leave it alone. We never touch user-owned `playwright`
 //    entries (the user may have installed Playwright MCP separately).
 // 3. Conservative. We only touch a config file if it (or its parent dir)
@@ -36,22 +36,38 @@ import { resolveBinary } from "./binary-resolver";
 import { writeFileAtomic } from "./fs-atomic";
 import { sparkHome } from "./spark-home";
 
-const SERVER_NAME = "spark-preview";
-const LEGACY_SERVER_NAME = "playwright";
+const SERVER_NAME = "cora-preview";
+// Pre-rename managed entries cleaned up on every launch (never user-owned
+// ones): the original Playwright experiment and the pre-Cora spark-* name.
+const LEGACY_SERVER_NAMES = ["playwright", "spark-preview"] as const;
 // v2: the managed entry now injects SPARK_HOME_DIR into the server's env so an
 // externally-spawned MCP child (Claude Code / Codex, which do NOT inherit
 // Spark's pty env) can find the agent-socket handshake even when the user runs
 // Spark under a custom SPARK_HOME_DIR. Bump forces matchesCurrent to rewrite
 // the older env-less entry.
-const SPARK_VERSION = "2";
+// v3: server renamed spark-preview → cora-preview (Cora rebrand) + the trusted
+// computer-use tool roster.
+const SPARK_VERSION = "3";
 
-export const SPARK_ORCHESTRATOR_SERVER_NAME = "spark-orchestrator";
+export const SPARK_ORCHESTRATOR_SERVER_NAME = "cora-orchestrator";
+const LEGACY_ORCHESTRATOR_SERVER_NAMES = ["spark-orchestrator"] as const;
 // v2: spark_request_next_iteration gained nextEngine/nextModel/nextEffort
 // (Looms v2 auto-handoff) — bump forces a re-install of the managed entry.
 // v3: Automation-mode architect tool set (spark_*_automation) added behind the
 // per-run SPARK_MCP_MODE=automation gate — bump reinstalls managed config
 // entries so the Capability Center roster count picks up the new tools.
-const ORCHESTRATOR_SPARK_VERSION = "3";
+// v4: server renamed spark-orchestrator → cora-orchestrator (Cora rebrand).
+const ORCHESTRATOR_SPARK_VERSION = "4";
+
+// Instances running under an explicit home override (tests, dev harnesses,
+// side-by-side profiles) must never manage the user's global agent configs —
+// a sandboxed boot once baked its temp SPARK_HOME_DIR into ~/.claude.json,
+// pointing every external CLI at a dead handshake path.
+function isSandboxedHome(): boolean {
+  return Boolean(
+    process.env.CORA_HOME_DIR ?? process.env.SPARK_HOME_DIR ?? process.env.SPARK_USER_DATA_DIR,
+  );
+}
 
 // Tool rosters kept in sync with resources/spark-*-mcp/server.js so the
 // Capability Center can show "N tools" without spawning the servers.
@@ -113,16 +129,16 @@ interface ManagedClaudeMcpServer {
 
 function resolveServerScript(): string {
   if (app.isPackaged) {
-    return join(process.resourcesPath, "spark-preview-mcp", "server.js");
+    return join(process.resourcesPath, "cora-preview-mcp", "server.js");
   }
-  return join(__dirname, "..", "..", "resources", "spark-preview-mcp", "server.js");
+  return join(__dirname, "..", "..", "resources", "cora-preview-mcp", "server.js");
 }
 
 function resolveOrchestratorServerScript(): string {
   if (app.isPackaged) {
-    return join(process.resourcesPath, "spark-orchestrator-mcp", "server.js");
+    return join(process.resourcesPath, "cora-orchestrator-mcp", "server.js");
   }
-  return join(__dirname, "..", "..", "resources", "spark-orchestrator-mcp", "server.js");
+  return join(__dirname, "..", "..", "resources", "cora-orchestrator-mcp", "server.js");
 }
 
 function resolveNodeCommand(): string {
@@ -201,6 +217,7 @@ export async function installSparkPreviewMcpForCodex(createIfMissing = false): P
 // ---------------------------------------------------------------------------
 
 async function installForClaude(createIfMissing = false): Promise<void> {
+  if (isSandboxedHome()) return;
   const fileExists = existsSync(CLAUDE_USER_CONFIG);
   if (!fileExists && !createIfMissing) return;
 
@@ -238,11 +255,16 @@ async function installForClaude(createIfMissing = false): Promise<void> {
 
   let changed = false;
 
-  // Cleanup: remove a Spark-managed legacy `playwright` entry if present.
-  // Never touch a user-owned playwright entry.
-  if (servers[LEGACY_SERVER_NAME] && isSparkManaged(servers[LEGACY_SERVER_NAME])) {
-    delete servers[LEGACY_SERVER_NAME];
-    changed = true;
+  // Cleanup: remove managed entries under retired names (the Playwright
+  // experiment, the pre-Cora spark-*). The orchestrator's legacy name is
+  // included because its own installer only runs at Execute-mode spawn —
+  // without this a stale spark-orchestrator entry would linger until the
+  // next orchestration. Never touch user-owned entries.
+  for (const legacy of [...LEGACY_SERVER_NAMES, ...LEGACY_ORCHESTRATOR_SERVER_NAMES]) {
+    if (servers[legacy] && isSparkManaged(servers[legacy])) {
+      delete servers[legacy];
+      changed = true;
+    }
   }
 
   const existing = servers[SERVER_NAME];
@@ -308,6 +330,7 @@ function matchesCurrent(value: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 async function installForCodex(createIfMissing = false): Promise<void> {
+  if (isSandboxedHome()) return;
   const dirExists = directoryExists(CODEX_DIR);
   if (!dirExists && !createIfMissing) return;
   if (!dirExists) {
@@ -329,14 +352,27 @@ async function installForCodex(createIfMissing = false): Promise<void> {
     }
   }
 
-  // If the user has a non-Spark `spark-preview` server defined outside our
+  // If the user has a non-Cora `cora-preview` server defined outside our
   // managed block, leave the file alone.
   if (hasUserSparkPreviewSection(existing)) return;
 
   const stripped = stripBuiltinBlock(existing);
   const block = renderCodexBlock();
   const base = stripped.trimEnd();
-  const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
+  let next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
+
+  // Boot-time cleanup of a LEGACY orchestrator block too — its own installer
+  // only runs at Execute-mode spawn, which would leave a stale
+  // spark-orchestrator block (pointing at a deleted resource dir) lingering
+  // until the next orchestration. A current cora-orchestrator block is
+  // re-rendered in place rather than dropped.
+  const withoutOrchestrator = stripOrchestratorBlock(next);
+  if (withoutOrchestrator !== next) {
+    const hadCurrent = next.includes(`[mcp_servers."${SPARK_ORCHESTRATOR_SERVER_NAME}"]`);
+    next = withoutOrchestrator.trimEnd();
+    if (hadCurrent) next = `${next}\n\n${renderOrchestratorCodexBlock()}`;
+    next += "\n";
+  }
   if (next === existing) return;
 
   try {
@@ -356,23 +392,67 @@ function directoryExists(path: string): boolean {
 
 function hasUserSparkPreviewSection(text: string): boolean {
   const withoutBuiltin = stripBuiltinBlock(text);
-  const pattern = /^\s*\[mcp_servers\.(?:"spark-preview"|'spark-preview'|spark-preview)\]\s*$/m;
+  const pattern = /^\s*\[mcp_servers\.(?:"cora-preview"|'cora-preview'|cora-preview)\]\s*$/m;
   return pattern.test(withoutBuiltin);
 }
 
 function stripBuiltinBlock(text: string): string {
-  const start = text.indexOf(CODEX_BLOCK_START);
-  const end = text.indexOf(CODEX_BLOCK_END);
-  if (start === -1 || end === -1 || end < start) return text;
-  const after = end + CODEX_BLOCK_END.length;
-  return `${text.slice(0, start).trimEnd()}\n${text.slice(after).trimStart()}`.trimEnd() + "\n";
+  return stripManagedCodexRegions(text, CODEX_BLOCK_START, CODEX_BLOCK_END, "spark-preview");
+}
+
+// Remove every managed marker region plus any stray legacy-named tables.
+// Line-based on purpose: real user configs have been seen with a lost START
+// marker (an orphaned block tail with only the END line), which the previous
+// index-of implementation refused to touch — the stale block then survived
+// forever and the freshly appended one made the user-ownership check trip.
+// Orphan marker lines are consumed; sections named after the RETIRED server
+// (which post-rename can only be our broken leftovers) are dropped whether or
+// not markers survive around them. Current-name sections outside markers are
+// left alone — those are genuinely user-owned.
+function stripManagedCodexRegions(
+  text: string,
+  startMarker: string,
+  endMarker: string,
+  legacyName: string,
+): string {
+  const lines = text.split("\n");
+  const kept: string[] = [];
+  let inBlock = false;
+  let inLegacySection = false;
+  const legacyHeader = new RegExp(
+    `^\\s*\\[mcp_servers\\.(?:"${legacyName}"|'${legacyName}'|${legacyName})(?:\\.env)?\\]\\s*$`,
+  );
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === startMarker) {
+      inBlock = true;
+      inLegacySection = false;
+      continue;
+    }
+    if (trimmed === endMarker) {
+      inBlock = false;
+      inLegacySection = false;
+      continue;
+    }
+    if (inBlock) continue;
+    if (legacyHeader.test(line)) {
+      inLegacySection = true;
+      continue;
+    }
+    if (inLegacySection) {
+      if (/^\s*\[/.test(line)) inLegacySection = false;
+      else continue;
+    }
+    kept.push(line);
+  }
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
 
 function renderCodexBlock(): string {
   const args = buildServerArgs();
   return [
     CODEX_BLOCK_START,
-    `# Managed by Spark App. Auto-installs the spark-preview MCP so verifier`,
+    `# Managed by Cora. Auto-installs the cora-preview MCP so verifier`,
     `# passes can drive the live <preview> tab inside Spark. Disable via`,
     `# Settings > Capabilities or delete this block (Spark will re-add it on`,
     `# next launch unless the auto-install toggle is off).`,
@@ -527,6 +607,7 @@ function orchestratorMatchesCurrent(value: unknown): boolean {
 }
 
 export async function installOrchestratorMcpForCC(createIfMissing = false): Promise<void> {
+  if (isSandboxedHome()) return;
   const fileExists = existsSync(CLAUDE_USER_CONFIG);
   if (!fileExists && !createIfMissing) return;
 
@@ -565,16 +646,24 @@ export async function installOrchestratorMcpForCC(createIfMissing = false): Prom
       ? (parsed.mcpServers as Record<string, unknown>)
       : {};
 
-  const existing = servers[SPARK_ORCHESTRATOR_SERVER_NAME];
-  if (existing && !isSparkManaged(existing)) {
-    // User owns this entry — never overwrite.
-    return;
-  }
-  if (existing && orchestratorMatchesCurrent(existing)) {
-    return;
+  // Cleanup: drop managed entries under the retired spark-orchestrator name.
+  let cleaned = false;
+  for (const legacy of LEGACY_ORCHESTRATOR_SERVER_NAMES) {
+    if (servers[legacy] && isSparkManaged(servers[legacy])) {
+      delete servers[legacy];
+      cleaned = true;
+    }
   }
 
-  servers[SPARK_ORCHESTRATOR_SERVER_NAME] = renderOrchestratorClaudeEntry();
+  const existing = servers[SPARK_ORCHESTRATOR_SERVER_NAME];
+  if (existing && !isSparkManaged(existing)) {
+    // User owns this entry — never overwrite (but persist any cleanup).
+    if (!cleaned) return;
+  } else if (!existing || !orchestratorMatchesCurrent(existing)) {
+    servers[SPARK_ORCHESTRATOR_SERVER_NAME] = renderOrchestratorClaudeEntry();
+  } else if (!cleaned) {
+    return;
+  }
   parsed.mcpServers = servers;
   try {
     const payload = JSON.stringify(parsed, null, 2) + "\n";
@@ -588,23 +677,24 @@ export async function installOrchestratorMcpForCC(createIfMissing = false): Prom
 function hasUserOrchestratorSection(text: string): boolean {
   const withoutManaged = stripOrchestratorBlock(text);
   const pattern =
-    /^\s*\[mcp_servers\.(?:"spark-orchestrator"|'spark-orchestrator'|spark-orchestrator)\]\s*$/m;
+    /^\s*\[mcp_servers\.(?:"cora-orchestrator"|'cora-orchestrator'|cora-orchestrator)\]\s*$/m;
   return pattern.test(withoutManaged);
 }
 
 function stripOrchestratorBlock(text: string): string {
-  const start = text.indexOf(CODEX_ORCHESTRATOR_BLOCK_START);
-  const end = text.indexOf(CODEX_ORCHESTRATOR_BLOCK_END);
-  if (start === -1 || end === -1 || end < start) return text;
-  const after = end + CODEX_ORCHESTRATOR_BLOCK_END.length;
-  return `${text.slice(0, start).trimEnd()}\n${text.slice(after).trimStart()}`.trimEnd() + "\n";
+  return stripManagedCodexRegions(
+    text,
+    CODEX_ORCHESTRATOR_BLOCK_START,
+    CODEX_ORCHESTRATOR_BLOCK_END,
+    "spark-orchestrator",
+  );
 }
 
 function renderOrchestratorCodexBlock(): string {
   const args = buildOrchestratorServerArgs();
   return [
     CODEX_ORCHESTRATOR_BLOCK_START,
-    `# Managed by Spark App. Auto-installs the spark-orchestrator MCP so the`,
+    `# Managed by Cora. Auto-installs the cora-orchestrator MCP so the`,
     `# Codex CLI running in Execute mode can spawn Spark workers, ask the user`,
     `# clarifying questions, and mark the run complete. Disable via Settings >`,
     `# Capabilities or delete this block (Spark will re-add it on the next`,
@@ -623,6 +713,7 @@ function renderOrchestratorCodexBlock(): string {
 }
 
 export async function installOrchestratorMcpForCodex(createIfMissing = false): Promise<void> {
+  if (isSandboxedHome()) return;
   const dirExists = directoryExists(CODEX_DIR);
   if (!dirExists && !createIfMissing) return;
   if (!dirExists) {
@@ -644,7 +735,7 @@ export async function installOrchestratorMcpForCodex(createIfMissing = false): P
     }
   }
 
-  // If the user has a non-Spark `spark-orchestrator` server defined outside
+  // If the user has a non-Cora `cora-orchestrator` server defined outside
   // our managed block, leave the file alone.
   if (hasUserOrchestratorSection(existing)) return;
 
@@ -944,7 +1035,7 @@ async function uninstallCodexBuiltinBlock(
 // Test/diagnostic surface.
 export const __test = {
   SERVER_NAME,
-  LEGACY_SERVER_NAME,
+  LEGACY_SERVER_NAMES,
   SPARK_VERSION,
   CLAUDE_USER_CONFIG,
   CODEX_USER_CONFIG,

@@ -9,7 +9,7 @@
 // of Spark's manager; these tools let it spawn Spark workers,
 // ask the user clarifying questions, and mark the run complete.
 //
-// Design rules (mirrored from spark-preview-mcp/server.js):
+// Design rules (mirrored from cora-preview-mcp/server.js):
 //   - Zero npm deps. Pure Node stdlib. Bundled with Spark App's
 //     extraResources. Runs under any modern Node (>= 18).
 //   - Late-binding: Spark may not be running yet when this script
@@ -28,7 +28,7 @@ const path = require("node:path");
 const http = require("node:http");
 
 const HANDSHAKE_FILE = "agent-socket.json";
-const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".SparkAgent");
+const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".Cora");
 
 // Mode gating. When SPARK_MCP_MODE === "automation" (set by the per-run
 // MCP config the Claude backend writes for Automation-mode chats) the server
@@ -613,7 +613,7 @@ const EXECUTE_TOOL_TO_RPC = {
 const TOOL_TO_RPC = IS_AUTOMATION_MODE ? AUTOMATION_TOOL_TO_RPC : EXECUTE_TOOL_TO_RPC;
 
 function resolveSparkHome() {
-  const override = process.env.SPARK_HOME_DIR || process.env.SPARK_USER_DATA_DIR;
+  const override = process.env.CORA_HOME_DIR || process.env.SPARK_HOME_DIR || process.env.SPARK_USER_DATA_DIR;
   if (override && override.trim()) return override;
   return DEFAULT_SPARK_HOME;
 }
@@ -759,7 +759,7 @@ async function dispatch(method, params) {
       return {
         protocolVersion: "2024-11-05",
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "spark-orchestrator", version: "0.1.0" },
+        serverInfo: { name: "cora-orchestrator", version: "0.1.0" },
       };
     case "notifications/initialized":
     case "initialized":
