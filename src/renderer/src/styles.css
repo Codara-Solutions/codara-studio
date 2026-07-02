@@ -143,62 +143,45 @@
      Kill switch: html[data-glass="off"] (user pref) reverts every glass
      surface to the opaque panel look; prefers-reduced-transparency does the
      same at the media-query level. */
-  --glass-bg: color-mix(in oklch, var(--panel-2) 42%, transparent);
-  --glass-bg-strong: color-mix(in oklch, var(--panel-2) 58%, transparent);
-  --glass-bg-faint: color-mix(in oklch, var(--panel) 30%, transparent);
-  --glass-blur: 12px;
-  --glass-blur-strong: 16px;
-  --glass-blur-faint: 10px;
-  --glass-saturate: 1.7;
-  /* Specular ring: lit top-left edge, shaded bottom-right edge, faint inner
-     bloom — this is what sells "glass" over a flat backdrop. Painted as inset
-     box-shadows (not a pseudo-element) so it stays pinned on scrollable
-     surfaces like tall menus. */
-  --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.22), inset 1px 0 0 oklch(1 0 0 / 0.08);
-  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.28), inset -1px 0 0 oklch(0 0 0 / 0.12);
-  --glass-bloom: inset 0 0 24px oklch(1 0 0 / 0.045);
-  /* Diagonal sheen swept across the surface, over the tint, under content. */
-  --glass-sheen: linear-gradient(
-    115deg,
-    oklch(1 0 0 / 0.09),
-    oklch(1 0 0 / 0.02) 34%,
-    transparent 55%,
-    oklch(1 0 0 / 0.05) 100%
-  );
+  /* Values port the liquidglass-oss "dark"/"frosted" presets: the material is
+     SEE-THROUGH — a thin theme-bg veil + tiny blur keeps the backdrop legible
+     through the core; the glass reads from the rim (lens refraction via
+     --glass-lens + the fresnel ring below), not from fill opacity. */
+  --glass-bg: color-mix(in oklch, var(--bg) 34%, transparent);
+  --glass-bg-strong: color-mix(in oklch, var(--bg) 48%, transparent);
+  --glass-bg-faint: color-mix(in oklch, var(--bg) 25%, transparent);
+  --glass-blur: 3px;
+  --glass-blur-strong: 7px;
+  --glass-blur-faint: 3px;
+  --glass-saturate: 1.12;
+  /* Fresnel rim: cool 1px ring all around + warm top-biased highlight —
+     painted as inset box-shadows (not a pseudo-element) so it stays pinned
+     on scrollable surfaces like tall menus. */
+  --glass-edge-hi: inset 0 1px 0 oklch(1 0.008 90 / 0.32), inset 0 0 0 1px oklch(0.92 0.02 250 / 0.10);
+  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.22);
+  --glass-bloom: inset 0 0 20px oklch(1 0 0 / 0.03);
+  /* Whisper of top sheen (shader's topSheen ≈ 0.055) — must stay faint or the
+     core stops reading as clear glass. */
+  --glass-sheen: linear-gradient(180deg, oklch(1 0 0 / 0.05), transparent 30%);
   --glass-border: color-mix(in oklch, var(--ink) 20%, transparent);
   --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.45), 0 2px 8px oklch(0 0 0 / 0.25);
-  /* Refraction lens (SVG feDisplacementMap in index.html). Chromium applies
-     it inside backdrop-filter; kept as a token so surfaces can opt out. */
+  /* Refraction lens (SVG feDisplacementMap chain in index.html): bends the
+     backdrop at the rim only, with a chromatic fringe. Kept as a token so
+     surfaces can opt out. */
   --glass-lens: url(#cora-glass-lens);
-  /* Chrome band fills (title bar / workspace rail / status bar) — opaque by
-     default, re-declared translucent in the glass block so the #root aurora
-     shows through. Layout bands own their space (only #root is behind them),
-     so translucency here costs nothing — no backdrop-filter involved. */
-  --chrome-top: color-mix(in oklch, var(--panel) 70%, var(--bg));
-  --chrome-rail: var(--panel);
-  --chrome-status: var(--bg);
-  /* App-shell fill behind the chrome bands (App.tsx root div): opaque here,
-     transparent in the glass block so the #root aurora reaches the bands. */
-  --shell-bg: var(--bg);
 }
 
 /* Light glass: higher fill opacity (thin white glass goes milky, not smoky),
    a bright specular top edge, hairline border, and much softer shadows —
    mirrors how --lift-hi / --shadow-1 are re-tinted per light palette. */
 :root[data-theme-mode="light"] {
-  --glass-bg: color-mix(in oklch, var(--panel-2) 56%, transparent);
-  --glass-bg-strong: color-mix(in oklch, var(--panel-2) 70%, transparent);
-  --glass-bg-faint: color-mix(in oklch, var(--panel) 42%, transparent);
-  --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.75), inset 1px 0 0 oklch(1 0 0 / 0.35);
-  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.10), inset -1px 0 0 oklch(0 0 0 / 0.05);
-  --glass-bloom: inset 0 0 24px oklch(1 0 0 / 0.30);
-  --glass-sheen: linear-gradient(
-    115deg,
-    oklch(1 0 0 / 0.55),
-    oklch(1 0 0 / 0.14) 34%,
-    transparent 55%,
-    oklch(1 0 0 / 0.25) 100%
-  );
+  --glass-bg: color-mix(in oklch, var(--panel) 38%, transparent);
+  --glass-bg-strong: color-mix(in oklch, var(--panel) 54%, transparent);
+  --glass-bg-faint: color-mix(in oklch, var(--panel) 28%, transparent);
+  --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.85), inset 0 0 0 1px oklch(1 0 0 / 0.30);
+  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.08);
+  --glass-bloom: inset 0 0 20px oklch(1 0 0 / 0.15);
+  --glass-sheen: linear-gradient(180deg, oklch(1 0 0 / 0.30), transparent 30%);
   --glass-border: color-mix(in oklch, var(--ink) 12%, transparent);
   --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
 }
@@ -1620,29 +1603,6 @@ a { color: inherit; }
        fill rides the token; the blur comes from .spark-backdrop-glass.
        Strong fill — toasts land over busy terminals and must stay readable. */
     --notify-surface: var(--glass-bg-strong);
-    --chrome-top: color-mix(in oklch, var(--panel) 46%, transparent);
-    --chrome-rail: color-mix(in oklch, var(--panel) 46%, transparent);
-    --chrome-status: color-mix(in oklch, var(--bg) 38%, transparent);
-    --shell-bg: transparent;
-  }
-  /* Ambient aurora: two huge accent-tinted radials painted on #root, behind
-     every panel. Glass surfaces refract and saturate it, translucent chrome
-     lets a whisper of it through — without it, glass over a flat panel is
-     indistinguishable from a translucent rectangle. Terminals and the editor
-     stay opaque on top of it. */
-  html:not([data-glass="off"]) #root {
-    background-image:
-      radial-gradient(
-        120vw 90vh at 10% -14%,
-        color-mix(in oklch, var(--accent) 48%, transparent),
-        transparent 62%
-      ),
-      radial-gradient(
-        95vw 80vh at 106% 114%,
-        color-mix(in oklch, var(--accent) 32%, transparent),
-        transparent 60%
-      ),
-      radial-gradient(70vw 55vh at 88% -10%, oklch(0.62 0.1 300 / 0.22), transparent 55%);
   }
   html:not([data-glass="off"]) .spark-glass,
   html:not([data-glass="off"]) .spark-menu {

@@ -355,7 +355,7 @@ function WorkspaceRail(props: RailProps) {
       style={{
         width,
         flex: `0 0 ${width}px`,
-        background: "var(--chrome-rail)",
+        background: "var(--panel)",
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",

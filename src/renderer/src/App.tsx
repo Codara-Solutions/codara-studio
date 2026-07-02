@@ -2846,9 +2846,7 @@ export default function App() {
         width: "100%",
         display: "flex",
         flexDirection: "column",
-        // --shell-bg goes transparent in glass mode so the #root aurora shows
-        // through the translucent chrome bands; opaque var(--bg) otherwise.
-        background: "var(--shell-bg)",
+        background: "var(--bg)",
       }}
     >
       {/* Auto-updater banner — position:fixed so the banner sits above

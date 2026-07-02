@@ -68,7 +68,7 @@ export default function InnerTabStrip({
         gap: 4,
         padding: "4px 10px",
         borderBottom: "1px solid var(--rule-soft)",
-        background: "var(--chrome-rail)",
+        background: "var(--panel)",
       }}
     >
       <Pill label="Chat" active={chatActive} onClick={onChatClick} />
