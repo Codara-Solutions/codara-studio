@@ -1661,8 +1661,10 @@ a { color: inherit; }
     border: 1px solid var(--glass-border);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
   }
-  /* Chrome bands: plain frost, no lens — they're large and always on screen,
-     and a refracting title bar reads as a rendering bug, not a material. */
+  /* Opt-in faint frost, no lens — for one-off large/always-visible surfaces
+     where refraction would read as a rendering bug. (The chrome bands
+     themselves don't use this class; they ride the --chrome-* tokens above,
+     plain translucency with no backdrop-filter at all.) */
   html:not([data-glass="off"]) .spark-glass--faint {
     background: var(--glass-bg-faint);
     -webkit-backdrop-filter: blur(var(--glass-blur-faint)) saturate(var(--glass-saturate));
