@@ -214,7 +214,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       // Sandboxed safety: keep contextIsolation on for the embedded site.
       // backgroundThrottling=no keeps timers, animations, and websocket
       // heartbeats running at full speed when the preview tab is hidden
-      // behind another Spark tab — without this, dev servers (Vite, webpack)
+      // behind another Codara tab — without this, dev servers (Vite, webpack)
       // drop their HMR socket on Chromium's throttle and trigger a refresh
       // when the user comes back.
       webview.setAttribute(
@@ -389,7 +389,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
 
   // Compose an inspector pick + the user's note into a SelectionPayload.
   // The routing menu (opened by InspectorOverlay) decides where the payload
-  // lands — chat composer, a new Spark chat, or an open CLI worker.
+  // lands — chat composer, a new Codara chat, or an open CLI worker.
   const buildInspectorPayload = useCallback(
     (pick: InspectorPick, note: string): SelectionPayload => {
       const url = pick.url || currentUrl || urlRef.current;

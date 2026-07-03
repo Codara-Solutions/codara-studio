@@ -2367,7 +2367,7 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
       frame: "calm",
     };
   }
-  // Spark-owned attempts: a running attempt is genuinely working from the
+  // Codara-owned attempts: a running attempt is genuinely working from the
   // moment it spawns (the orchestrator drove the launch), so keep the pulsing
   // "running" accent until the poller refines it — same as before.
   return running
@@ -2388,8 +2388,8 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
 }
 
 // Small overlay chip rendered on a pane that's hosting a live manual agent or
-// a Spark-owned worker attempt. Manual chips are visible while the foreground
-// agent is live (through working / blocked / idle); Spark chips can go static
+// a Codara-owned worker attempt. Manual chips are visible while the foreground
+// agent is live (through working / blocked / idle); Codara chips can go static
 // as "done" after the attempt-finished event, then disappear once the
 // foreground agent has returned to the shell prompt.
 function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {

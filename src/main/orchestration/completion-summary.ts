@@ -151,7 +151,7 @@ function completionCompletedItems(
     return [`Finished ${completedSteps}/${run.steps.length} planned step(s).`];
   }
 
-  return ["Spark answered the chat."];
+  return ["Cora answered the chat."];
 }
 
 function completionChangedFiles(

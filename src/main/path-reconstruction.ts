@@ -5,7 +5,7 @@
 // the directories the user's interactive shell normally adds — Homebrew,
 // nvm, volta, scoop, npm-global, pyenv, /usr/local/bin, ~/.local/bin, and so
 // on. The first user-visible symptom: `claude --version` works in the
-// terminal but Spark reports "claude not installed" because spawn("claude")
+// terminal but Codara reports "claude not installed" because spawn("claude")
 // uses the sparse PATH.
 //
 // Strategy:
@@ -22,7 +22,7 @@
 //     additions (like nvm's session shim) survive.
 //
 // The result is memoized: the first call kicks off the lookup, every later
-// call returns the cached value. The expectation is that Spark calls
+// call returns the cached value. The expectation is that Codara calls
 // getEnrichedPath() once at app startup so PTY spawns can read the value
 // synchronously from `getCachedEnrichedPath()` without awaiting anything.
 //

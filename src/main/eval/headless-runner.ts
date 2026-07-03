@@ -1,6 +1,6 @@
 // Headless eval runner.
 //
-// Spark normally orchestrates worker subprocesses (claude / codex CLI) for
+// Codara normally orchestrates worker subprocesses (claude / codex CLI) for
 // an Electron BrowserWindow renderer that mounts a TerminalView per worker.
 // In headless mode there is no renderer, so this module:
 //
@@ -41,7 +41,7 @@ import type { HeadlessEvalArgs } from "./headless-args";
 // Variant config schema mirrored loosely from evals/lib/variant-config.js.
 // We only consume the fields headless mode actually applies — everything
 // else is ignored so a future field addition does not break interactive
-// Spark.
+// Codara.
 interface VariantConfig {
   variantId?: string;
   agent?: string;
@@ -305,7 +305,7 @@ async function waitForTerminalStatus(
 function installEventStreamer(): () => void {
   const unsubscribe = subscribeToEvents((event: SparkEvent) => {
     // Re-emit a small subset of high-signal types as our own structured
-    // events so the adapter can advance progress without parsing every Spark
+    // events so the adapter can advance progress without parsing every Codara
     // internal event.
     if (event.type === "worker_task.envelope_prepared") {
       emitEvent("worker_envelope_prepared", {
@@ -460,7 +460,7 @@ async function applyVariantConfig(config: VariantConfig, configPath: string): Pr
     });
   }
 
-  // Pool + perRoleOverrides aren't enforced inside Spark today: the manager
+  // Pool + perRoleOverrides aren't enforced inside Codara today: the manager
   // emits worker assignments via runtimePreference + modelHint, which the
   // CLIs honor directly. We pre-warm runtime detection so plan_analysis sees
   // an accurate INSTALLED list and the manager picks workers from the pool's
@@ -489,7 +489,7 @@ function resolveExistingPath(input: string): string | null {
 // Walk up from `start` looking for a `.git` directory (or file — submodules
 // store .git as a gitfile). Used to anchor variant-config relative paths
 // like "resources/orchestration/manager-profile.json" against the original
-// Spark repo root rather than the seed repo's cwd. Returns null when no
+// Codara repo root rather than the seed repo's cwd. Returns null when no
 // repo root is found within a reasonable depth.
 function findRepoRoot(start: string): string | null {
   let cur = start;

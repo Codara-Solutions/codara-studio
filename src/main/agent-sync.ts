@@ -61,7 +61,7 @@ export function renderAgentSyncPromptLines(input: {
   if (mcpSources.length === 0 && skillSources.length === 0) return [];
 
   const lines = [
-    "Spark synced only compact MCP/skill awareness into this prompt so your context window stays focused.",
+    "Codara synced only compact MCP/skill awareness into this prompt so your context window stays focused.",
     "- Treat the names below as capability hints, not full documentation.",
     "- Inspect full runtime config or skill docs only when they materially help this task; summarize findings instead of pasting large config/tool output back into your working context.",
     "- If a listed MCP server or skill is not available in your current runtime session, continue with normal filesystem and terminal tools.",
@@ -864,7 +864,7 @@ function escapeRegExp(value: string): string {
 function renderCodexManagedBlock(servers: McpServerConfig[]): string {
   return [
     MCP_SYNC_START,
-    "# Managed by Spark Agent Settings > Agents sync. Edit the source .mcp.json or remove this block to reset.",
+    "# Managed by Codara Settings > Agents sync. Edit the source .mcp.json or remove this block to reset.",
     ...servers.flatMap((server) => renderCodexMcpServer(server)),
     MCP_SYNC_END,
   ].join("\n");

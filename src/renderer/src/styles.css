@@ -1,5 +1,5 @@
 /* ──────────────────────────────────────────────────────────────────────────
-   Spark Agent — design tokens
+   Codara — design tokens
    Terminal-native workbench themes. Two type families: a humanist sans for
    chrome and a monospace for code, data, timestamps. Tokens are append-only:
    every name that existed before still exists with the same semantics.
@@ -171,7 +171,7 @@
   /* Refraction lens (SVG feDisplacementMap chain in index.html): bends the
      backdrop at the rim only, with a chromatic fringe. Kept as a token so
      surfaces can opt out. */
-  --glass-lens: url(#cora-glass-lens);
+  --glass-lens: url(#codara-glass-lens);
 }
 
 /* Light glass: higher fill opacity (thin white glass goes milky, not smoky),
@@ -189,7 +189,7 @@
   --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
 }
 
-:root[data-theme="cora-classic"] {
+:root[data-theme="codara-classic"] {
   color-scheme: dark;
 }
 
@@ -269,10 +269,10 @@
    ink so elevation stays in-key. --accent rides on top as the workspace color
    (set at runtime), exactly as in the dark palettes. */
 
-:root[data-theme="cora-daylight"] {
+:root[data-theme="codara-daylight"] {
   color-scheme: light;
 
-  /* Warm paper-white — the daylight sibling of Spark Classic (h ≈ 85). */
+  /* Warm paper-white — the daylight sibling of Codara Classic (h ≈ 85). */
   --bg: #faf9f5;
   --panel: #f3f0e9;
   --panel-2: #eae7dd;
@@ -1146,7 +1146,7 @@ a { color: inherit; }
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
-   Spark UI kit — opt-in utility classes (additive; inline styles still work)
+   Codara UI kit — opt-in utility classes (additive; inline styles still work)
    Encodes the design language so the component layer can converge on one
    authoring idiom: token-driven color, tint-first depth, square panel
    containers with rounding only on interactive elements, terminal-native
@@ -1666,7 +1666,7 @@ a { color: inherit; }
 }
 
 /* ── Loom node-flow canvas (@xyflow/react) ────────────────────────────────────
-   Retint ReactFlow's default chrome to Spark's dark palette. The default
+   Retint ReactFlow's default chrome to Codara's dark palette. The default
    style.css is imported once by the editor; these scoped rules override it so
    no n8n purple ships. Everything is scoped under .loom-flow. */
 .loom-flow {

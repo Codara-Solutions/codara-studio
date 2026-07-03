@@ -1,6 +1,6 @@
 import React from "react";
 
-// Minimal markdown renderer for chat prose. Spark's assistant turns are short
+// Minimal markdown renderer for chat prose. Codara's assistant turns are short
 // plain-English replies plus the occasional structured summary, so this
 // covers paragraphs, headings, fenced + inline code, bullet / ordered lists,
 // bold text, and links. No tables, blockquotes, or images by design — a real

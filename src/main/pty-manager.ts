@@ -138,7 +138,7 @@ const DETACHED_BACKLOG_BYTES = 2 * 1024 * 1024;
 // Env vars that agent-socket asks pty-manager to inject into every spawned
 // pty. Populated from src/main/index.ts via setAgentSocketEnv() once the
 // socket server is listening; sub-agent CLIs running inside the pty read
-// these to dial back into Spark over JSON-RPC.
+// these to dial back into Codara over JSON-RPC.
 let agentSocketEnv: { url: string; token: string } | null = null;
 
 /** Called by agent-socket once its HTTP server is listening. */
@@ -149,7 +149,7 @@ export function setAgentSocketEnv(env: { url: string; token: string } | null): v
 // Some shells run user-profile work that writes shared on-disk caches at
 // startup (Terminal-Icons calls Export-Clixml on its theme files every time
 // `Import-Module Terminal-Icons` runs, in $PROFILE). Spawning two pwsh
-// processes in parallel — which Spark does on app launch when restoring
+// processes in parallel — which Codara does on app launch when restoring
 // multiple terminals — makes them race those writes and corrupt the file,
 // after which the next pwsh start fails Import-Clixml. Serialize spawns
 // per shell-family so each shell's $PROFILE completes before the next starts.
@@ -404,7 +404,7 @@ function doSpawn(
   // Per-shell env overrides (e.g. integrated strip shells set ZDOTDIR /
   // SPARK_USER_ZDOTDIR so the bundled zshrc loads the user's existing
   // config, and SPARK_TERMINAL=1 so subprocesses can detect they're in a
-  // Spark pane). Kept after the base env so shell config wins.
+  // Codara pane). Kept after the base env so shell config wins.
   if (opts.shell.env) {
     for (const [k, v] of Object.entries(opts.shell.env)) {
       if (typeof v === "string") env[k] = v;
@@ -432,13 +432,13 @@ function doSpawn(
     env.SPARK_PANE_ID = hookEnv.SPARK_PANE_ID;
   }
   // Keep hook scripts and MCP children agreeing with the app about where the
-  // home dir lives (hooks fall back to ~/.Cora when unset; an app running
+  // home dir lives (hooks fall back to ~/.Codara when unset; an app running
   // under any override would otherwise write markers the app never sees).
   if (!env.SPARK_HOME_DIR) env.SPARK_HOME_DIR = sparkHome();
 
   // Agent-socket handshake. Every pty we spawn — user panes and worker panes
   // alike — gets SPARK_AGENT_SOCKET + SPARK_AGENT_TOKEN so any sub-agent CLI
-  // running inside the pty can dial back into Spark over JSON-RPC. The
+  // running inside the pty can dial back into Codara over JSON-RPC. The
   // socket is localhost-only and token-protected (see src/main/agent-socket.ts),
   // so exposing the env vars to user panes does not widen the trust surface
   // beyond "any local process the user already trusted with a shell prompt".

@@ -34,7 +34,7 @@ const HANDSHAKE_FILE = "agent-socket.json";
 // to /rpc with Authorization: Bearer <token> and get the matching response back.
 //
 // The server only binds 127.0.0.1 and uses a constant-time token comparison so a
-// hostile process on the local machine still cannot trivially shape Spark's
+// hostile process on the local machine still cannot trivially shape Codara's
 // workspace without knowing the per-launch secret.
 
 // JSON-RPC 2.0 error codes per https://www.jsonrpc.org/specification#error_object.
@@ -164,7 +164,7 @@ export async function startAgentSocket(): Promise<ServerHandle> {
   currentHandle = { server, url, token };
   pty.setAgentSocketEnv({ url, token });
   // Persist a handshake file so MCP servers spawned by external runtimes
-  // (Claude Code, Codex) — which do not inherit Spark's pty env — can pick
+  // (Claude Code, Codex) — which do not inherit Codara's pty env — can pick
   // up the current URL + token. Best-effort: a failed write only means the
   // spark-preview MCP server has to back off and retry.
   void writeHandshakeFile({ url, token }).catch((err) =>
@@ -179,8 +179,8 @@ export async function stopAgentSocket(): Promise<void> {
   if (!handle) return;
   currentHandle = null;
   pty.setAgentSocketEnv(null);
-  // Remove the handshake file so any MCP server child that survived Spark's
-  // shutdown returns "Spark offline" on next call instead of speaking to a
+  // Remove the handshake file so any MCP server child that survived Codara's
+  // shutdown returns "Codara offline" on next call instead of speaking to a
   // closed port.
   await fsp.rm(handshakeFilePath(), { force: true }).catch(() => undefined);
   await new Promise<void>((resolve) => {
@@ -526,11 +526,11 @@ async function handleChatAppend(
 // exercised and observed from a terminal without a Playwright harness.
 // Everything except app.info is dev-gated: always available in unpackaged
 // builds (npm run dev / npm start), and in packaged builds only when
-// CORA_DEV_TOOLS=1 — a shipped app's socket must not let another local
+// CODARA_DEV_TOOLS=1 — a shipped app's socket must not let another local
 // process screenshot the user's terminals or rewrite their preferences.
 
 function devToolsEnabled(): boolean {
-  return !app.isPackaged || process.env.CORA_DEV_TOOLS === "1";
+  return !app.isPackaged || process.env.CODARA_DEV_TOOLS === "1";
 }
 
 function requireDevTools(id: JsonRpcId): JsonRpcResponse | null {
@@ -538,7 +538,7 @@ function requireDevTools(id: JsonRpcId): JsonRpcResponse | null {
   return errorResponse(
     id,
     ERR_FORBIDDEN,
-    "app.* dev tools are disabled in packaged builds (launch with CORA_DEV_TOOLS=1 to enable)",
+    "app.* dev tools are disabled in packaged builds (launch with CODARA_DEV_TOOLS=1 to enable)",
   );
 }
 
@@ -731,8 +731,8 @@ async function handleAppPrefsSet(
 }
 
 // ── orchestrator.* — Execute-mode tools called by Claude/Codex via the
-// spark-orchestrator MCP server. The CLI is acting as Spark's manager; these
-// tools let it spawn Spark workers, ask the user a clarifying question, and
+// spark-orchestrator MCP server. The CLI is acting as Codara's manager; these
+// tools let it spawn Cora workers, ask the user a clarifying question, and
 // mark the run complete. Each call carries `runId` (the MCP server forwards
 // `process.env.SPARK_RUN_ID` that pty-manager injected at spawn time).
 //
@@ -792,8 +792,8 @@ async function handleOrchestratorSpawnWorkers(
   const stepTitle = workerTitles.length === 1
     ? workerTitles[0]
     : workerTitles.length > 1
-      ? `Spark workers (${workerTitles.length})`
-      : "Spark workers";
+      ? `Cora workers (${workerTitles.length})`
+      : "Cora workers";
   const stepRunState = await runStore.createStep({
     runId,
     title: stepTitle,
@@ -807,7 +807,7 @@ async function handleOrchestratorSpawnWorkers(
 
   const workerTaskIds: string[] = [];
   const attemptIdsToLaunch: string[] = [];
-  // Fable 5 is reserved for the main chat and automations — Spark-spawned
+  // Fable 5 is reserved for the main chat and automations — Cora-spawned
   // workers must never run it. Downgrade any fable modelHint the manager emits
   // to Opus 4.8 here (the spawn chokepoint) and remember the titles so we can
   // surface ONE visible system note after the loop.
@@ -870,7 +870,7 @@ async function handleOrchestratorSpawnWorkers(
     const list = downgradedFableTitles.map((t) => `"${t}"`).join(", ");
     const note =
       `Fable 5 (claude-fable-5) is reserved for the main chat session and automations — ` +
-      `it is not available to Spark-spawned workers. ` +
+      `it is not available to Cora-spawned workers. ` +
       `Downgraded ${downgradedFableTitles.length === 1 ? "worker" : "workers"} ${list} to Opus 4.8 (claude-opus-4-8).`;
     try {
       await runStore.addRunMessage({

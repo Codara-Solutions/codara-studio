@@ -151,7 +151,7 @@ function normalizeAgentRuntimeSelection(value: unknown): AgentRuntimeSelection {
   const allKinds: AgentRuntimeKind[] = ["claude", "codex"];
   // Legacy single-string formats migrate to the array form so the rest of
   // the app only has to handle one shape. The "cursor" string is silently
-  // dropped — Spark App only supports Claude + Codex now.
+  // dropped — Codara only supports Claude + Codex now.
   if (value === "claude") return ["claude"];
   if (value === "codex") return ["codex"];
   if (value === "cursor") return [...allKinds];

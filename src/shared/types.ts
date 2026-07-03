@@ -136,32 +136,32 @@ export type ThemeMode = "dark" | "light";
 // to a `:root[data-theme="…"]` block in styles.css and a swatch in
 // SettingsDialog's APP_THEME_META.
 export type ThemePref =
-  | "cora-classic"
+  | "codara-classic"
   | "catppuccin-mocha"
   | "dracula"
   | "one-dark"
-  | "cora-daylight"
+  | "codara-daylight"
   | "github-light"
   | "rose-pine-dawn"
   | "catppuccin-latte";
 
 export const APP_THEME_IDS: readonly ThemePref[] = [
-  "cora-classic",
+  "codara-classic",
   "catppuccin-mocha",
   "dracula",
   "one-dark",
-  "cora-daylight",
+  "codara-daylight",
   "github-light",
   "rose-pine-dawn",
   "catppuccin-latte",
 ] as const;
 
 export const APP_THEME_MODE: Readonly<Record<ThemePref, ThemeMode>> = {
-  "cora-classic": "dark",
+  "codara-classic": "dark",
   "catppuccin-mocha": "dark",
   dracula: "dark",
   "one-dark": "dark",
-  "cora-daylight": "light",
+  "codara-daylight": "light",
   "github-light": "light",
   "rose-pine-dawn": "light",
   "catppuccin-latte": "light",
@@ -246,7 +246,7 @@ export interface AppPreferences {
   // Liquid-glass tuning, each a percentage of the design default (100).
   // veil = surface tint opacity, blur = backdrop blur, refraction = rim lens
   // bend, chroma = chromatic fringe at the rim. ThemeProvider applies them as
-  // CSS scale vars + scale attributes on the #cora-glass-lens SVG filter.
+  // CSS scale vars + scale attributes on the #codara-glass-lens SVG filter.
   glassVeil?: number;
   glassBlur?: number;
   glassRefraction?: number;
@@ -257,7 +257,7 @@ export interface AppPreferences {
   keepRunningInBackground?: boolean;
   // When true, a localhost dev URL sniffed from any terminal pane's stdout
   // auto-opens a preview tab. Default false: the detected-URL chip still shows
-  // so the user can click to open, but Spark never yanks a tab open on its own
+  // so the user can click to open, but Codara never yanks a tab open on its own
   // (and agent/worker panes never auto-open a preview regardless of this flag).
   autoOpenPreview?: boolean;
   // "Create copy branch" setup command, keyed by absolute repo cwd. Run live
@@ -286,7 +286,7 @@ export const INLINE_AI_MODEL_PRESETS: ReadonlyArray<{
     id: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
     label: "Gemini 3.5 Flash",
     hint: "Recommended for ghost text and commit-message drafts.",
-    detail: "Flash latency, 1M context, minimal thinking in Spark.",
+    detail: "Flash latency, 1M context, minimal thinking in Codara.",
     badge: "Default",
   },
   {
@@ -347,7 +347,7 @@ export const DEFAULT_NOTIFICATION_CHANNELS: NotificationChannelsPref = {
 export const DEFAULT_COPY_BRANCH_SETUP_COMMAND = "";
 
 export const DEFAULT_PREFERENCES: AppPreferences = {
-  theme: "cora-classic",
+  theme: "codara-classic",
   vimMode: false,
   editorTheme: "github-dark",
   inlineAutocompleteEnabled: true,
@@ -494,13 +494,13 @@ export interface PreferencesChange<K extends PrefKey = PrefKey> {
 
 export type AgentRuntimeKind = "claude" | "codex";
 
-// "auto" means "use every installed runtime" (Spark detects what is on PATH).
+// "auto" means "use every installed runtime" (Codara detects what is on PATH).
 // An array enumerates the exact runtimes the user opted in to — deselecting a
-// runtime in Settings removes it from this array so Spark will not spawn
+// runtime in Settings removes it from this array so Codara will not spawn
 // workers on it even if the CLI is installed. The legacy string variants
 // ("both", "claude", "codex", "cursor") are accepted on read for migration
 // from earlier settings files; writes always use the array form. "cursor"
-// is silently dropped on read — Spark App only supports Claude + Codex now.
+// is silently dropped on read — Codara only supports Claude + Codex now.
 export type AgentRuntimeSelection =
   | "auto"
   | "both"
@@ -623,9 +623,9 @@ export interface AgentAssetInstallResult {
 }
 
 // ---------------------------------------------------------------------------
-// Spark built-in MCP servers (spark-preview, spark-orchestrator)
+// Codara built-in MCP servers (spark-preview, spark-orchestrator)
 // ---------------------------------------------------------------------------
-// These two servers ship inside Spark App itself. The Capability Center shows
+// These two servers ship inside Codara itself. The Capability Center shows
 // them in a dedicated, branded section — distinct from third-party MCPs the
 // user wires up — with per-runtime install controls.
 
@@ -633,9 +633,9 @@ export type SparkBuiltinMcpId = "spark-preview" | "spark-orchestrator";
 export type SparkBuiltinRuntime = "claude" | "codex";
 
 // Per-runtime install state for a built-in:
-//  - "installed":    a Spark-managed entry is present (we can uninstall it).
+//  - "installed":    a Codara-managed entry is present (we can uninstall it).
 //  - "user-managed": the user wired up their own entry of the same name; it is
-//                    active but Spark won't touch it (uninstall disabled).
+//                    active but Codara won't touch it (uninstall disabled).
 //  - "available":    not installed, but the runtime CLI is present so we can
 //                    install on demand.
 //  - "unavailable":  the runtime CLI was not detected on this machine.
@@ -647,7 +647,7 @@ export type SparkBuiltinInstallState =
 
 export interface SparkBuiltinRuntimeStatus {
   state: SparkBuiltinInstallState;
-  // Path of the config file Spark writes to for this runtime (for tooltips).
+  // Path of the config file Codara writes to for this runtime (for tooltips).
   configPath: string;
 }
 
@@ -660,7 +660,7 @@ export interface SparkBuiltinMcpStatus {
   detail: string;
   // Tool names the server exposes (for the "N tools" badge + tooltip).
   tools: string[];
-  // When true, Spark auto-installs/refreshes this server on launch (governed
+  // When true, Codara auto-installs/refreshes this server on launch (governed
   // by the playwrightMcpAutoInstall setting). Shown as an "auto" hint.
   autoManaged: boolean;
   claude: SparkBuiltinRuntimeStatus;
@@ -929,7 +929,7 @@ export type RunStatus =
   | "failed"
   | "cancelled";
 
-// Which "Spark Agent" backend drives this chat's manager decisions and (in Talk
+// Which Cora manager backend drives this chat's manager decisions and (in Talk
 // mode) chat replies. Today this is OpenRouter via fetch() to an LLM API; the
 // two CLI options spawn a real `claude` or `codex` process under node-pty and
 // drive it for the chat surface (uses the user's paid Claude/Codex
@@ -939,9 +939,9 @@ export type RunStatus =
 export type ChatBackendKind = "openrouter" | "claude" | "codex";
 
 // Manager behaviour mode chosen per chat:
-//   execute — Spark spawns workers to do the work (current behaviour).
+//   execute — Codara spawns workers to do the work (current behaviour).
 //   talk    — no workers, pure conversational chat with the chosen backend.
-//   plan    — Best-of-N council: Spark spawns several top-tier CLI agents (a mix
+//   plan    — Best-of-N council: Codara spawns several top-tier CLI agents (a mix
 //             of Claude Code + Codex) that each independently draft a PLAN + PRD,
 //             then a judge synthesizes the best merged PLAN.md + PRD.md into the
 //             workspace. No implementation code is written.
@@ -1123,7 +1123,7 @@ export interface RunState {
    */
   greenClaims?: Record<string, string>;
   /**
-   * Which Spark Agent backend drives this chat. Undefined on legacy runs and
+   * Which Cora manager backend drives this chat. Undefined on legacy runs and
    * treated as "openrouter" by the dispatch layer — keeps pre-feature chats
    * working unchanged.
    */
@@ -1135,7 +1135,7 @@ export interface RunState {
    * undefined the backend picks its registered default.
    */
   chatModel?: string;
-  /** Execute = Spark spawns workers; Talk = pure conversational backend chat. */
+  /** Execute = Codara spawns workers; Talk = pure conversational backend chat. */
   chatMode?: ChatMode;
   /** Reasoning-effort level forwarded to the backend (Claude `--effort`, Codex
    * `-c model_reasoning_effort=...`). Undefined leaves it at the CLI default. */
@@ -1176,7 +1176,7 @@ export interface RunState {
    */
   automationId?: string;
   /**
-   * undefined/"managed" = manager-LLM orchestration (the normal Spark run).
+   * undefined/"managed" = manager-LLM orchestration (the normal Codara run).
    * "direct" = Looms v2: a single CLI worker per iteration, no manager ever;
    * finalizeDirectRun replaces the manager review.
    */
@@ -1508,7 +1508,7 @@ export interface StepState {
   /**
    * Per-step roll-up of manager-call USD cost. Computed from the SparkCall
    * records that name this step (via the next-active-step pointer at call
-   * time). Worker-side LLM cost is not yet tracked — Spark only sees the
+   * time). Worker-side LLM cost is not yet tracked — Codara only sees the
    * manager's OpenRouter usage today.
    */
   totalCostUsd?: number;
@@ -2014,7 +2014,7 @@ export interface StartAutopilotInput {
   initialUserNote?: string;
   initialUserNoteClientMessageId?: string;
   initialAttachments?: AddRunMessageAttachmentInput[];
-  // Which Spark Agent backend should drive this run. Set by the explorer's
+  // Which Cora manager backend should drive this run. Set by the explorer's
   // "Run plan" engine flyout and the Source Control "Smart Merge" engine
   // picker. Only applied when startAutopilot creates the run itself (no
   // runId) — it threads into createRun so the manager dispatches to Claude

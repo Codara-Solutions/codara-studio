@@ -73,7 +73,7 @@ export async function ensurePreviewTab(url: string): Promise<RegistryEntry> {
   if (existing) return existing;
   if (!openPreviewTabFn) {
     throw new Error(
-      "Spark App is not ready to open preview tabs yet (renderer not mounted). Retry in a moment.",
+      "Codara is not ready to open preview tabs yet (renderer not mounted). Retry in a moment.",
     );
   }
   const id = await Promise.resolve(openPreviewTabFn(url));

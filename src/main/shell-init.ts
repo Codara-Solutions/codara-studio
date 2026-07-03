@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { homedir, platform } from "node:os";
 import { app } from "electron";
 
-// Materializes Spark's shell-integration scripts into a stable on-disk
+// Materializes Codara's shell-integration scripts into a stable on-disk
 // location (`~/.cache/spark/shell-integration/`) and returns the path so a
 // shell can dot-source it on startup. Atomic write (tmp + rename) keeps a
 // half-written file from being sourced if two pwsh shells start in parallel.

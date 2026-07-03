@@ -1,4 +1,4 @@
-# Spark Agent shell integration for PowerShell.
+# Codara shell integration for PowerShell.
 #
 # Emits FinalTerm OSC 133 + VS Code OSC 633 boundary markers around each
 # prompt and command so the renderer can group output into per-command
@@ -115,7 +115,7 @@ function Global:Prompt {
         $cwd = $loc.ProviderPath
         $out += __Spark-Osc ('633;P;Cwd=' + (__Spark-Esc $cwd))
         # OSC 7: classic cwd reporting consumed by VS Code, iTerm2, kitty,
-        # and the Spark renderer's TerminalStrip. Forward-slashed and
+        # and the Codara renderer's TerminalStrip. Forward-slashed and
         # leading-slashed for Windows so the URL parses as a real `file://`.
         $cwdNorm = $cwd -replace '\\','/'
         if ($cwdNorm -match '^[A-Za-z]:') { $cwdNorm = "/$cwdNorm" }

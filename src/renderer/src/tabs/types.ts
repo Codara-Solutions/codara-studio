@@ -74,7 +74,7 @@ export interface TerminalLeafWorker {
   // agent exits and the shell prompt is back.
   state: "running" | "done";
   // Foreground Claude/Codex process state as sniffed from the terminal
-  // stream. Spark can finish the attempt before the user exits the TUI; once
+  // stream. Codara can finish the attempt before the user exits the TUI; once
   // the shell prompt is back, the pane should stop showing an agent chip.
   agentRunning?: boolean;
   // Finer-grained live state of the foreground agent. Two writers feed it: the
@@ -128,7 +128,7 @@ export interface PreviewTab extends BaseTab {
   // When the preview was spawned by an orchestration run (URL detector inside
   // a worker pane, or an orchestrator file-preview opener), this carries the
   // owning run id so the chat panel can render the preview inside its inner
-  // tab strip. User-opened previews (TabBar picker, Spark browser) leave it
+  // tab strip. User-opened previews (TabBar picker, Codara browser) leave it
   // unset and stay top-level.
   runId?: string;
 }

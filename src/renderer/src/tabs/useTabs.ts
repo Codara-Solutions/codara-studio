@@ -36,7 +36,7 @@ import type {
 } from "./types";
 
 // useTabs is the in-memory tabs store for the workspace pane. We keep it as
-// a plain React hook (no zustand dependency) since the rest of Cora uses
+// a plain React hook (no zustand dependency) since the rest of Codara uses
 // React state for everything else; a context provider in App.tsx hands it
 // down to TabBar and the per-kind stacks.
 //

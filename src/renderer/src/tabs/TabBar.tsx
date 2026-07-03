@@ -19,7 +19,7 @@ const HOVER_ACTIVATE_MS = 350;
 
 // TabBar is the strip at the top of the workspace pane. Visually similar
 // to a code editor's tab strip but with a kind-icon-prefixed label so it's
-// obvious at a glance that you're switching between Spark chat, an editor,
+// obvious at a glance that you're switching between Codara chat, an editor,
 // a terminal, a preview window, and a runs canvas.
 //
 // Behavior worth calling out:

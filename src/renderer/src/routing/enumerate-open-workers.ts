@@ -2,12 +2,12 @@ import type { RunState } from "@shared/types";
 import type { PaneNode, Tab } from "../tabs/types";
 
 // A live worker pane that the routing menu can address by paneId via
-// pty.inject. Includes both Spark-orchestrated workers (which carry a
+// pty.inject. Includes both Cora-orchestrated workers (which carry a
 // runId pointing at the parent chat) and manually-launched claude/codex
 // panes (no parent chat, label falls back to "Manual <Runtime>").
 
 export interface OpenWorker {
-  // The id we hand to pty.inject. For Spark workers this is the attemptId
+  // The id we hand to pty.inject. For Cora workers this is the attemptId
   // (== pty session id); for manual panes it is the leaf paneId. Both are
   // registered with main as the same key, so the call site is uniform.
   injectId: string;
@@ -70,7 +70,7 @@ export function enumerateOpenWorkers(tabs: Tab[], runs: RunState[]): OpenWorker[
   for (const tab of tabs) {
     if (tab.kind === "terminal") walkLeaves(tab.root, result, runs);
   }
-  // Stable ordering: Spark-owned panes first (they have richer context),
+  // Stable ordering: Codara-owned panes first (they have richer context),
   // then manual panes; within each, group by runtime, then by label.
   result.sort((a, b) => {
     if (a.source !== b.source) return a.source === "spark" ? -1 : 1;

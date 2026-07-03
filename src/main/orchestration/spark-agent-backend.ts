@@ -1,10 +1,10 @@
-// Spark Agent backend abstraction.
+// Cora manager backend abstraction.
 //
 // One TypeScript interface per "manager" the chat composer can target. Today
 // there are three implementations:
 //
 //   - OpenRouter   (src/main/orchestration/openrouter-backend.ts)
-//       The original Spark Agent. Calls an LLM over HTTPS with a strict
+//       The original built-in manager. Calls an LLM over HTTPS with a strict
 //       json_schema response_format and produces a SparkManagerDecision the
 //       run-store consumes directly. Execute and Talk modes are both
 //       structured-output calls.
@@ -98,7 +98,7 @@ export interface ManagerRequestInput {
  * Result shape every backend returns from `requestManagerDecision`. Identical
  * to the OpenRouter manager's existing OpenRouterManagerResult so run-store
  * doesn't need to branch on backend after the call. The `decision` is the
- * canonical Spark structured output; non-OpenRouter backends synthesize a
+ * canonical Codara structured output; non-OpenRouter backends synthesize a
  * decision (typically status=complete + chatReply for Talk mode, or a parsed
  * MCP-tool-call payload for Execute mode).
  */
@@ -136,7 +136,7 @@ export interface ManagerCallResult {
  * place as they arrive — without waiting for the full manager-decision
  * result.
  *
- * Naming convention is snake_case-after-dot to match Spark's existing
+ * Naming convention is snake_case-after-dot to match Codara's existing
  * SparkEvent type vocabulary (`spark_call.completed`, `run.status_updated`).
  */
 export type ChatStreamEvent =
@@ -304,7 +304,7 @@ function activePlanForRun(run: RunState) {
   return undefined;
 }
 
-// The latest Spark-authored "Run complete." completion summary (the worker-
+// The latest Codara-authored "Run complete." completion summary (the worker-
 // authored DONE card), which already lives on the run as a spark/decision.
 function latestCompletionSummary(run: RunState): HumanRunMessage | undefined {
   for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
@@ -354,7 +354,7 @@ function fileMention(cwd: string | undefined, absPath: string): string {
  * The chat session only ever sees its own transcript; the council's workers and
  * the synthesized plan live outside it. Without this, Talk "what did we just
  * do?" guesses and Execute "run the plan" doesn't know the plan exists. We
- * surface: completed steps, the latest Spark completion summary (the worker-
+ * surface: completed steps, the latest Codara completion summary (the worker-
  * authored DONE card), and the plan/PRD as `@`-mentions — NOT their full text,
  * so the paste stays small and the agent reads the files on demand.
  *
@@ -373,7 +373,7 @@ export function buildSparkRunContextBlock(run: RunState, cwd?: string): string {
 
   const summary = latestCompletionSummary(run);
   if (summary) {
-    sections.push(`Latest run summary (Spark's record of what the workers did):\n${summary.message.trim()}`);
+    sections.push(`Latest run summary (Codara's record of what the workers did):\n${summary.message.trim()}`);
   }
 
   const plan = activePlanForRun(run);
@@ -391,7 +391,7 @@ export function buildSparkRunContextBlock(run: RunState, cwd?: string): string {
   if (sections.length === 0) return "";
 
   return [
-    "[SPARK CONTEXT — Spark's record of this run's worker activity and plan, for your awareness. This is NOT a new instruction from the user; use it to answer accurately and to know what has already been done.]",
+    "[SPARK CONTEXT — Codara's record of this run's worker activity and plan, for your awareness. This is NOT a new instruction from the user; use it to answer accurately and to know what has already been done.]",
     "",
     sections.join("\n\n"),
     "",

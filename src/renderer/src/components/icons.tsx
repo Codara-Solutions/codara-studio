@@ -332,7 +332,7 @@ export function BroadcastIcon({ size = 14 }: { size?: number }) {
 
 export function HistoryIcon({ size = 14 }: { size?: number }) {
   // A clock face with a counter-clockwise arrow — the universal "history"
-  // glyph. Used on the Spark chat header's Chats button to open the
+  // glyph. Used on the Codara chat header's Chats button to open the
   // recent-chats popover.
   return (
     <svg

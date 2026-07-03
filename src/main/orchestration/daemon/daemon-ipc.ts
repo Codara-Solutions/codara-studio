@@ -18,7 +18,7 @@ import type { SparkEvent, StartAutopilotInput } from "@shared/types";
 
 // ── Handshake / transport constants ─────────────────────────────────────────
 // agent-socket.ts persists agent-socket.json under sparkHome() so MCP children
-// that don't inherit Spark's pty env can discover the live url + token. The
+// that don't inherit Codara's pty env can discover the live url + token. The
 // daemon host writes its own handshake file in the same spot; daemon-client.ts
 // reads it the way out-of-process MCP children read agent-socket.json.
 export const DAEMON_HANDSHAKE_FILE = "daemon-host.json";

@@ -9,7 +9,7 @@
 // Lifecycle per chat (keyed by run.id):
 //   1. First turn: spawn `claude --dangerously-skip-permissions
 //      --append-system-prompt-file <talk.md> --settings <inline-json>` with the
-//      Spark hook config. Drop the prompt into <spark-home>/queues/<runId>.queue
+//      Codara hook config. Drop the prompt into <spark-home>/queues/<runId>.queue
 //      so the spark-cc-userprompt.py hook can hand it to CC via stdout.
 //   2. Subsequent turns: reuse the same CliSession (resumed via `-r <uuid>`
 //      on spawn; the in-process session is already live so no respawn needed).
@@ -59,7 +59,7 @@ import {
 
 const TURN_POLL_INTERVAL_MS = 200;
 const TURN_TIMEOUT_MS = 90_000;
-// When a Spark long-poll MCP tool call is in flight (currently only
+// When a Codara long-poll MCP tool call is in flight (currently only
 // spark_wait_for_workers — see isSparkLongPollMcpTool below), the turn-end
 // waiter extends its cap to this value. spark_wait_for_workers can block for
 // 10-20 minutes while workers run, and the CC JSONL is silent during the wait
@@ -75,7 +75,7 @@ const EXTENDED_TURN_TIMEOUT_MS = 30 * 60_000;
 // entry is swept and the regular TURN_TIMEOUT_MS reasserts.
 const MAX_PENDING_MCP_HOLD_MS = 25 * 60_000;
 
-// Only Spark MCP long-pollers extend the cap — every other MCP tool returns
+// Only Codara MCP long-pollers extend the cap — every other MCP tool returns
 // quickly and tracking them would broaden the "ignore 90s" surface unnecessarily.
 function isSparkLongPollMcpTool(name: string): boolean {
   return (
@@ -137,7 +137,7 @@ const SUBMIT_RETRY_INTERVAL_MS = 2_200;
 const TALK_SYSTEM_PROMPT_FILENAME = "cc-talk.md";
 const TALK_SYSTEM_PROMPT_DEFAULT = `You are a helpful coding assistant in a chat with the user. Stay concise.
 
-You are in **Talk mode**. You can read code, search files, and answer questions about the workspace, but you cannot modify anything. Edit, Write, Bash, and other mutating tools are disabled by Spark for this chat — if the user asks for changes, tell them to switch the chat to Execute mode (or open a fresh chat in Execute mode) and you'll route the work through Spark workers there.
+You are in **Talk mode**. You can read code, search files, and answer questions about the workspace, but you cannot modify anything. Edit, Write, Bash, and other mutating tools are disabled by Codara for this chat — if the user asks for changes, tell them to switch the chat to Execute mode (or open a fresh chat in Execute mode) and you'll route the work through Cora workers there.
 
 Free-form prose replies are the primary output. Use Read, Glob, and Grep for exploration when a question requires it.
 `;
@@ -206,7 +206,7 @@ interface ClaudeChatSession {
    *  perfectly healthy — and the resulting "turn timeout → status:complete"
    *  fast-path cancels every queued worker task (run-store.ts:2841). */
   lastJsonlActivityAt: number;
-  /** Spark MCP long-poll tool calls (currently only spark_wait_for_workers)
+  /** Codara MCP long-poll tool calls (currently only spark_wait_for_workers)
    *  that are in flight: tool_use emitted, no matching tool_result yet. When
    *  non-empty the turn-end waiter swaps its cap to EXTENDED_TURN_TIMEOUT_MS
    *  so the inner blocking wait (10-20 min) doesn't trip the wall-clock 90s.
@@ -220,7 +220,7 @@ interface ClaudeChatSession {
   detachEntries: () => void;
 }
 
-// Runs whose Spark plan-context block has already been injected into the chat
+// Runs whose Codara plan-context block has already been injected into the chat
 // CLI. Module-scoped (not per-session) so it survives the session respawn that a
 // mode flip triggers — the transcript keeps the block via `-r`, so we inject it
 // exactly once: the first turn after the chat leaves Plan mode. Cleared on
@@ -613,7 +613,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     );
   }
 
-  // Build the --settings JSON that wires the Spark hooks. We write to a
+  // Build the --settings JSON that wires the Codara hooks. We write to a
   // file rather than passing inline because nested JSON on the command line
   // hits multiple layers of shell-quoting hazards (Windows MSVCRT in
   // particular mangles \" and \\ in nested structures), which silently
@@ -742,7 +742,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     // Grep, NotebookEdit, etc.) — without this, CC sees the built-ins in
     // its tool list and falls back to "I'd Read the file" / "I can't Edit
     // in this mode" prose instead of just calling spark_spawn_workers.
-    // Empirically (verified outside Spark) this is the flag that gets CC
+    // Empirically (verified outside Codara) this is the flag that gets CC
     // to actually delegate. `--allowed-tools` is a USE-permission filter,
     // not a tool-list filter — CC still sees everything with that flag,
     // which is why the model kept refusing.
@@ -834,7 +834,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
       CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: "1",
       SPARK_RUN_ID: opts.runId,
       // The shipped hooks resolve the app home from this (falling back to
-      // ~/.Cora); inject it so hook-written turn markers always land where
+      // ~/.Codara); inject it so hook-written turn markers always land where
       // waitForTurnFileWithRetries looks, whatever home the app runs under.
       SPARK_HOME_DIR: sparkHome(),
     },
@@ -854,7 +854,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     spawnMode: opts.mode,
     spawnEffort: opts.chatEffort,
     // Known up front — survives `newSessionUuid` round-trip into run-store
-    // so the next turn (after a Spark restart) can spawn with `-r <uuid>`.
+    // so the next turn (after a Codara restart) can spawn with `-r <uuid>`.
     sessionUuid,
     turnAssistantText: "",
     lastUsage: {},
@@ -966,7 +966,7 @@ function translateAndEmit(
         // post-process them into a SparkManagerDecision (execute mode) or
         // just surface them for the UI (talk mode).
         chat.turnToolCalls.push({ toolName, toolUseId, input: block.input });
-        // Track Spark long-poll MCP calls so the turn-end waiter extends its
+        // Track Codara long-poll MCP calls so the turn-end waiter extends its
         // cap while CC is blocked inside the tool. Removed by the matching
         // tool_result branch below; backstopped by expiresAt sweep.
         if (toolUseId && isSparkLongPollMcpTool(toolName)) {
@@ -1171,8 +1171,8 @@ async function waitForTurnFileWithRetries(
 
 /**
  * Mirror CC's project-dir naming: full absolute path with `:`, `\`, and `/`
- * collapsed to `-`. E.g. `C:\Users\Etienne\Documents\Project\Spark-Agent` →
- * `C--Users-Etienne-Documents-Project-Spark-Agent`.
+ * collapsed to `-`. E.g. `C:\Users\Etienne\Documents\Project\Codara-Agent` →
+ * `C--Users-Etienne-Documents-Project-Codara-Agent`.
  */
 function encodeCwdForClaudeProjects(cwd: string): string {
   return cwd.replace(/[:\\/]/g, "-");
@@ -1284,7 +1284,7 @@ export function buildExecuteDecisionFromToolCalls(
       .filter((o): o is SparkManagerQuestionOption => o !== null);
     return {
       status: "ask_user",
-      summary: chatReply || question || "Spark manager asked a question.",
+      summary: chatReply || question || "Cora asked a question.",
       question,
       questionOptions,
       steps: [],
@@ -1386,7 +1386,7 @@ function coerceQuestionOption(
  */
 function buildExecuteSystemPrompt(cwd: string): string {
   return [
-    "You are Spark Agent's worker manager. Your entire job is to convert each user message into one or more parallel/sequential worker specs, then delegate via `spark_spawn_workers`. You do not write code, do not read files, do not run commands. Workers do all of that.",
+    "You are Cora's worker manager. Your entire job is to convert each user message into one or more parallel/sequential worker specs, then delegate via `spark_spawn_workers`. You do not write code, do not read files, do not run commands. Workers do all of that.",
     "",
     `Workspace cwd: ${cwd}`,
     "",

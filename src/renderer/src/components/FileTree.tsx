@@ -92,7 +92,7 @@ function normalizePath(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
-// File extensions Spark can run as a plan via the explorer's right-click
+// File extensions Codara can run as a plan via the explorer's right-click
 // "Run plan" action. A plan is just text handed to the manager, so markdown
 // and rendered HTML docs both qualify.
 const PLAN_FILE_EXTS = new Set(["md", "markdown", "html", "htm"]);
@@ -146,7 +146,7 @@ interface Props {
   onRenameFile?: (oldPath: string, entry: FsEntry) => void;
   // Right-click a .md/.html file to hand it to the orchestrator as a plan.
   // `backend` is the engine chosen from the Run plan flyout (undefined = the
-  // default Spark / OpenRouter manager; "claude" / "codex" route to that CLI).
+  // default Codara / OpenRouter manager; "claude" / "codex" route to that CLI).
   onRunPlan?: (entry: FsEntry, backend?: ChatBackendKind) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -205,8 +205,8 @@ export default function FileTree({
   const [externalDropDir, setExternalDropDir] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [, force] = useState(0);
-  // Engines offered by the Run plan flyout (Spark always; Claude / Codex when
-  // their CLI is installed). One entry (just Spark) → plain single action.
+  // Engines offered by the Run plan flyout (Codara always; Claude / Codex when
+  // their CLI is installed). One entry (just Codara) → plain single action.
   const engines = useEngineOptions();
   const rootRef = useRef(root);
   rootRef.current = root;

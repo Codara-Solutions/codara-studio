@@ -2,20 +2,20 @@
 // spark-orchestrator MCP server (stdio, zero deps)
 // ---------------------------------------------------------------
 // This script is spawned by Claude Code / Codex CLIs running in
-// Spark's Execute mode as a child MCP process. It speaks MCP's
+// Codara's Execute mode as a child MCP process. It speaks MCP's
 // stdio transport (newline-delimited JSON-RPC 2.0) and proxies
-// orchestrator tool calls to the running Spark App via its agent
+// orchestrator tool calls to the running Codara via its agent
 // socket (loopback HTTP + bearer token). The CLI plays the role
-// of Spark's manager; these tools let it spawn Spark workers,
+// of Codara's manager; these tools let it spawn Cora workers,
 // ask the user clarifying questions, and mark the run complete.
 //
 // Design rules (mirrored from cora-preview-mcp/server.js):
-//   - Zero npm deps. Pure Node stdlib. Bundled with Spark App's
+//   - Zero npm deps. Pure Node stdlib. Bundled with Codara's
 //     extraResources. Runs under any modern Node (>= 18).
-//   - Late-binding: Spark may not be running yet when this script
+//   - Late-binding: Codara may not be running yet when this script
 //     is spawned. Read the handshake file on EVERY call and surface
-//     "Spark is not running" cleanly.
-//   - Read the handshake file every call so a Spark restart with a
+//     "Codara is not running" cleanly.
+//   - Read the handshake file every call so a Codara restart with a
 //     new token doesn't permanently break the MCP server child.
 //   - Auto-inject runId from process.env.SPARK_RUN_ID so the
 //     orchestrator prompt doesn't have to know its own run id.
@@ -28,7 +28,7 @@ const path = require("node:path");
 const http = require("node:http");
 
 const HANDSHAKE_FILE = "agent-socket.json";
-const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".Cora");
+const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".Codara");
 
 // Mode gating. When SPARK_MCP_MODE === "automation" (set by the per-run
 // MCP config the Claude backend writes for Automation-mode chats) the server
@@ -196,7 +196,7 @@ const GRAPH_SCHEMA = {
 const runIdProp = {
   runId: {
     type: "string",
-    description: "Spark run id. Defaults to process.env.SPARK_RUN_ID (the chat this architect was spawned for) when omitted.",
+    description: "Codara run id. Defaults to process.env.SPARK_RUN_ID (the chat this architect was spawned for) when omitted.",
   },
 };
 
@@ -205,7 +205,7 @@ const AUTOMATION_TOOLS = [
   {
     name: "spark_list_automations",
     description:
-      "List all Spark automations (\"looms\"): id, name, enabled, a trigger/loop summary, worker config, node/edge counts, current state.status, lastRunAt, and the last 3 history records (status/stopReason/costUsd). Call this FIRST when the user asks about automations so you can reference what already exists.",
+      "List all Cora automations (\"looms\"): id, name, enabled, a trigger/loop summary, worker config, node/edge counts, current state.status, lastRunAt, and the last 3 history records (status/stopReason/costUsd). Call this FIRST when the user asks about automations so you can reference what already exists.",
     inputSchema: { type: "object", properties: { ...runIdProp }, additionalProperties: false },
   },
   {
@@ -222,7 +222,7 @@ const AUTOMATION_TOOLS = [
   {
     name: "spark_create_automation",
     description:
-      "Create a new automation bound to THIS chat's workspace (Spark resolves the workspace/cwd from the run — never supply paths). Provide name, trigger, loop, prompt_template, worker, and optionally a node graph. Returns the created automation id + summary. Recommended workflow: list existing automations, summarize your plan to the user in prose, THEN create.",
+      "Create a new automation bound to THIS chat's workspace (Codara resolves the workspace/cwd from the run — never supply paths). Provide name, trigger, loop, prompt_template, worker, and optionally a node graph. Returns the created automation id + summary. Recommended workflow: list existing automations, summarize your plan to the user in prose, THEN create.",
     inputSchema: {
       type: "object",
       required: ["name", "trigger", "loop", "prompt_template", "worker"],
@@ -350,7 +350,7 @@ const EXECUTE_TOOLS = [
   {
     name: "spark_spawn_workers",
     description:
-      "Delegate one or more focused tasks to Spark workers (claude/codex subagents). Each worker entry needs a title and description; runtime/model/effort hints and path scoping are optional. Returns worker_task_ids that can be queried via spark_get_worker_status. Call this whenever you want to fan work out instead of doing it yourself in the orchestrator turn.",
+      "Delegate one or more focused tasks to Cora workers (claude/codex subagents). Each worker entry needs a title and description; runtime/model/effort hints and path scoping are optional. Returns worker_task_ids that can be queried via spark_get_worker_status. Call this whenever you want to fan work out instead of doing it yourself in the orchestrator turn.",
     inputSchema: {
       type: "object",
       required: ["workers"],
@@ -358,17 +358,17 @@ const EXECUTE_TOOLS = [
         runId: {
           type: "string",
           description:
-            "Spark run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
         },
         workers: {
           type: "array",
           minItems: 1,
-          description: "Worker tasks to queue. Each becomes its own Spark workerTask + initial attempt.",
+          description: "Worker tasks to queue. Each becomes its own Codara workerTask + initial attempt.",
           items: {
             type: "object",
             required: ["title", "description"],
             properties: {
-              title: { type: "string", description: "Short worker title (shown in the Spark run UI)." },
+              title: { type: "string", description: "Short worker title (shown in the Codara run UI)." },
               description: {
                 type: "string",
                 description: "Full task brief for the worker, including success criteria.",
@@ -428,11 +428,11 @@ const EXECUTE_TOOLS = [
         runId: {
           type: "string",
           description:
-            "Spark run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
         },
         question: {
           type: "string",
-          description: "The question to surface in the Spark chat panel.",
+          description: "The question to surface in the Codara chat panel.",
         },
         options: {
           type: "array",
@@ -463,14 +463,14 @@ const EXECUTE_TOOLS = [
   {
     name: "spark_complete",
     description:
-      "Mark the Spark run as complete. Optionally include a short summary of what was accomplished — it is posted as a system note in the chat. Call this exactly once at the very end of the orchestrator turn after all work has settled.",
+      "Mark the Codara run as complete. Optionally include a short summary of what was accomplished — it is posted as a system note in the chat. Call this exactly once at the very end of the orchestrator turn after all work has settled.",
     inputSchema: {
       type: "object",
       properties: {
         runId: {
           type: "string",
           description:
-            "Spark run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
         },
         summary: {
           type: "string",
@@ -483,14 +483,14 @@ const EXECUTE_TOOLS = [
   {
     name: "spark_request_next_iteration",
     description:
-      "For Spark AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextEngine/nextModel/nextEffort — honored only when the automation's engine is set to Auto, and only for installed engines (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
+      "For Codara AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextEngine/nextModel/nextEffort — honored only when the automation's engine is set to Auto, and only for installed engines (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
     inputSchema: {
       type: "object",
       properties: {
         runId: {
           type: "string",
           description:
-            "Spark run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
         },
         done: {
           type: "boolean",
@@ -532,7 +532,7 @@ const EXECUTE_TOOLS = [
         runId: {
           type: "string",
           description:
-            "Spark run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
         },
         worker_task_id: {
           type: "string",
@@ -553,7 +553,7 @@ const EXECUTE_TOOLS = [
         runId: {
           type: "string",
           description:
-            "Spark run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
         },
         worker_task_ids: {
           type: "array",
@@ -613,7 +613,7 @@ const EXECUTE_TOOL_TO_RPC = {
 const TOOL_TO_RPC = IS_AUTOMATION_MODE ? AUTOMATION_TOOL_TO_RPC : EXECUTE_TOOL_TO_RPC;
 
 function resolveSparkHome() {
-  const override = process.env.CORA_HOME_DIR || process.env.SPARK_HOME_DIR || process.env.SPARK_USER_DATA_DIR;
+  const override = process.env.CODARA_HOME_DIR || process.env.SPARK_HOME_DIR || process.env.SPARK_USER_DATA_DIR;
   if (override && override.trim()) return override;
   return DEFAULT_SPARK_HOME;
 }
@@ -629,7 +629,7 @@ function readHandshake() {
     return { url: parsed.url, token: parsed.token };
   } catch (err) {
     const e = new Error(
-      `Spark App appears to be offline (could not read ${file}). Open Spark App and try again. Cause: ${err.message}`,
+      `Codara appears to be offline (could not read ${file}). Open Codara and try again. Cause: ${err.message}`,
     );
     e.code = "SPARK_OFFLINE";
     throw e;
@@ -671,7 +671,7 @@ function postJsonRpc(method, params) {
         res.on("end", () => {
           const text = Buffer.concat(chunks).toString("utf8");
           if (res.statusCode !== 200) {
-            reject(new Error(`Spark agent socket returned ${res.statusCode}: ${text.slice(0, 200)}`));
+            reject(new Error(`Codara agent socket returned ${res.statusCode}: ${text.slice(0, 200)}`));
             return;
           }
           try {
@@ -683,15 +683,15 @@ function postJsonRpc(method, params) {
             }
             resolve(parsed && Object.prototype.hasOwnProperty.call(parsed, "result") ? parsed.result : null);
           } catch (err) {
-            reject(new Error(`Spark agent socket returned non-JSON: ${err.message}`));
+            reject(new Error(`Codara agent socket returned non-JSON: ${err.message}`));
           }
         });
       },
     );
-    req.on("error", (err) => reject(new Error(`Spark agent socket unreachable: ${err.message}`)));
+    req.on("error", (err) => reject(new Error(`Codara agent socket unreachable: ${err.message}`)));
     // ask_user can block up to 15 min waiting on a human, so allow plenty of headroom.
     req.setTimeout(20 * 60_000, () => {
-      req.destroy(new Error("Spark agent socket timeout"));
+      req.destroy(new Error("Codara agent socket timeout"));
     });
     req.write(body);
     req.end();

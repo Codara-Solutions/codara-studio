@@ -1,6 +1,6 @@
 // Platform detection for keyboard-shortcut display + dispatch.
 //
-// Spark runs in an Electron renderer, so `navigator.platform` is reliable
+// Codara runs in an Electron renderer, so `navigator.platform` is reliable
 // enough to choose between macOS-style glyphs (⌘ ⌃ ⇧ ⌥ ↵ ⇥) and the cross-
 // platform `Ctrl/Alt/Shift/Tab/Enter` words used elsewhere. We export the
 // glyph constants used by the shortcuts table so the cheat-sheet renders

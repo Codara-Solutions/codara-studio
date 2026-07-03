@@ -240,7 +240,7 @@ export function formatPriorRunsSection(run: RunState): string | null {
     .slice(0, TOP_K);
 
   const lines = [
-    "PRIOR RUNS IN THIS WORKSPACE (most similar first; distilled from past Spark runs — use as soft prior, not gospel)",
+    "PRIOR RUNS IN THIS WORKSPACE (most similar first; distilled from past Codara runs — use as soft prior, not gospel)",
     ...ranked.map(({ record }) => renderRecordEntry(record)),
   ];
   return lines.join("\n");

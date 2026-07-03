@@ -8,7 +8,7 @@
  * omitted it, which made paused runs render with the wrong dot color).
  *
  * The returned strings are CSS custom-property references resolved against
- * Spark's design tokens (see styles.css).
+ * Codara's design tokens (see styles.css).
  */
 import type { RunStatus } from "@shared/types";
 

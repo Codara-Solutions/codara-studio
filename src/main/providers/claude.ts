@@ -6,7 +6,7 @@
 //
 // Notes
 // -----
-// Spark always launches Claude with `--dangerously-skip-permissions` because
+// Codara always launches Claude with `--dangerously-skip-permissions` because
 // it owns the pty and there is no human present to click "approve". `--model`
 // and `--effort` are appended only when callers pass them; the CLI falls back
 // to its own defaults otherwise.
@@ -35,7 +35,7 @@ import type { CliProvider, ResumeOpts, SpawnOpts } from "./types";
 // automation engine validates pinned/handoff models against THIS list, so its
 // presence here is what unblocks `worker.model = "claude-fable-5"`. Opus 4.8
 // stays the default (isDefault) so nothing silently upgrades to fable. Workers
-// that Spark itself spawns (execute-mode spark_spawn_workers, plan-council,
+// that Codara itself spawns (execute-mode spark_spawn_workers, plan-council,
 // autopilot) must NEVER run fable — that block lives at the spawn chokepoints
 // (agent-socket handleOrchestratorSpawnWorkers) plus a buildLaunchCommandLine
 // backstop, not here; see sanitizeWorkerModelHint in run-store.ts.

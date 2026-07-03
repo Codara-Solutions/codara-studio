@@ -18,7 +18,7 @@ import {
 import type { StartAutopilotInput } from "@shared/types";
 
 // ── DaemonClient ────────────────────────────────────────────────────────────
-// The renderer-side (or any in-Spark caller's) view of the detached
+// The renderer-side (or any in-Codara caller's) view of the detached
 // orchestration daemon. It is the *remote* half of the seam: it speaks the
 // loopback HTTP + bearer-token JSON contract that daemon-host.ts serves, and
 // deliberately imports NOTHING from run-store/event-log — all orchestration
@@ -181,7 +181,7 @@ function parseHandshake(value: unknown): DaemonHandshake | null {
 function offlineError(file: string, cause: unknown): Error & { code: string } {
   const causeMsg = cause instanceof Error ? cause.message : String(cause);
   const err = new Error(
-    `Spark daemon appears to be offline (could not read ${file}). Cause: ${causeMsg}`,
+    `Codara daemon appears to be offline (could not read ${file}). Cause: ${causeMsg}`,
   ) as Error & { code: string };
   err.code = DAEMON_OFFLINE_CODE;
   return err;

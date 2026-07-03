@@ -221,7 +221,7 @@ export async function runInlineAiChatCompletion(
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
         "HTTP-Referer": "https://spark-agent.local",
-        "X-Title": "Spark Agent",
+        "X-Title": "Codara",
       },
       body: JSON.stringify(body),
       signal: controller.signal,

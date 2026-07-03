@@ -1,4 +1,4 @@
-// Hook installer — drops Spark's Python hook script into the user's Claude
+// Hook installer — drops Codara's Python hook script into the user's Claude
 // settings (`~/.claude/settings.json`) so every Claude Code session pipes
 // SessionStart / PreToolUse / PostToolUse / UserPromptSubmit / Stop /
 // Notification / PreCompact events into a JSON file under
@@ -25,9 +25,9 @@
 //    install paths (very common on Windows / macOS) work. Hook name is a
 //    static identifier so it doesn't need quoting.
 //
-// The installer is fire-and-forget: failures don't block Spark startup;
+// The installer is fire-and-forget: failures don't block Codara startup;
 // users without Claude installed (or who have hooks disabled) just lose
-// the free observability — every other part of Spark keeps working.
+// the free observability — every other part of Codara keeps working.
 
 import { app } from "electron";
 import { promises as fs } from "node:fs";
@@ -218,7 +218,7 @@ function alreadyInstalled(hooks: ClaudeHookMap | undefined, scriptPath: string):
     const cmd = ours.hooks.find((c) => c?._sparkManaged === true);
     if (!cmd) return false;
     // Verify the command still references the current script path so we
-    // re-install if Spark moved (dev → packaged install, etc).
+    // re-install if Codara moved (dev → packaged install, etc).
     if (typeof cmd.command !== "string" || !cmd.command.includes(scriptPath)) {
       return false;
     }

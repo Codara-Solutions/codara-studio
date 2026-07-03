@@ -29,7 +29,7 @@ export async function readWorkerPromptForLaunch(paths: WorkerArtifactPaths): Pro
     return await fs.readFile(paths.promptMd, "utf8");
   } catch {
     return [
-      "You are a Spark worker. The prepared prompt could not be read at launch.",
+      "You are a Cora worker. The prepared prompt could not be read at launch.",
       `Read it now: ${paths.promptMd}`,
       `Then complete the task and write the final JSON report to ${paths.finalReportJson}.`,
     ].join("\n");
@@ -114,9 +114,9 @@ function renderRuntimeDelegationGuidance(task: WorkerTask): string[] {
 
   if (task.runtimePreference === "claude") {
     const lines = [
-      "Spark is the top-level orchestrator. You may use Claude Code native subagents, agent teams, or worktrees only when they materially reduce your context load or improve independent checking.",
+      "Cora is the top-level orchestrator. You may use Claude Code native subagents, agent teams, or worktrees only when they materially reduce your context load or improve independent checking.",
       "- Good uses: bounded read-heavy exploration, test/log triage, summarizing large files, or independent review probes with a clear return format.",
-      "- Do not create a nested implementation team for ordinary write work. Spark owns cross-worker coordination and parallel write planning.",
+      "- Do not create a nested implementation team for ordinary write work. Cora owns cross-worker coordination and parallel write planning.",
       "- Keep delegated results compact: ask for distilled findings, file/line references, commands run, and uncertainties. Do not paste raw logs back into your own context.",
       "- If you use subagents, agent teams, or worktrees, your final report must list each one's purpose, scope, and distilled findings.",
     ];
@@ -134,11 +134,11 @@ function renderRuntimeDelegationGuidance(task: WorkerTask): string[] {
 
   if (task.runtimePreference === "codex") {
     const lines = [
-      "Spark explicitly permits Codex subagents for this task when they are bounded, useful, and mostly read-only.",
+      "Cora explicitly permits Codex subagents for this task when they are bounded, useful, and mostly read-only.",
       "- Good uses: codebase exploration, tests/log triage, independent review, summarizing large files, or checking a narrow hypothesis.",
       "- Give each subagent a concrete job, clear limits, and the exact return format you need. Wait for the result and synthesize disagreements yourself.",
       "- Do not spawn subagents for every small task. Keep the main path local when the next action depends on the answer.",
-      "- Avoid write-heavy parallel subagents unless scopes are isolated and disjoint. Spark owns top-level parallelism and cross-worker coordination.",
+      "- Avoid write-heavy parallel subagents unless scopes are isolated and disjoint. Cora owns top-level parallelism and cross-worker coordination.",
       "- If you use subagents, your final report must list each subagent's purpose, scope, and distilled findings.",
     ];
     if (isVerifier) {
@@ -156,7 +156,7 @@ function renderPeerCommsGuidance(task: WorkerTask, paths: WorkerArtifactPaths): 
   const dir = quotePwshString(paths.peerCommsDir);
   const self = quotePwshString(task.id);
   return [
-    "Spark may be running several Claude/Codex/Cursor workers for this same step. Use this mailbox when direct peer coordination would prevent duplicated work, clarify an interface, share a narrow finding, or ask for a second opinion.",
+    "Cora may be running several Claude/Codex/Cursor workers for this same step. Use this mailbox when direct peer coordination would prevent duplicated work, clarify an interface, share a narrow finding, or ask for a second opinion.",
     "This is a run artifact mailbox, not the project source tree; using it is allowed even for read-only verifier tasks.",
     "If your task defines or consumes a shared interface/contract that another peer may depend on, send one short contract note to `all` before editing and check your inbox once before finalizing.",
     `List peers: node ${script} list --dir ${dir}`,
@@ -228,7 +228,7 @@ function renderUiQualityGuidance(
   ];
   if (opts?.sparkPreviewMcpAvailable) {
     lines.push(
-      "- The `spark-preview` MCP server is available in this session. It drives the actual <preview> tab inside Spark App — same DOM the user sees, no separate browser window. Call `spark_preview_navigate` with a `file://` URL (for standalone HTML) or your dev-server URL; if no preview tab is open Spark will open one automatically. Capture the final snapshot or `spark_preview_screenshot` evidence in `proof[]`.",
+      "- The `spark-preview` MCP server is available in this session. It drives the actual <preview> tab inside Codara — same DOM the user sees, no separate browser window. Call `spark_preview_navigate` with a `file://` URL (for standalone HTML) or your dev-server URL; if no preview tab is open Codara will open one automatically. Capture the final snapshot or `spark_preview_screenshot` evidence in `proof[]`.",
       "- BATCH your interaction probes with `spark_preview_run`: pass an ordered `steps` array (navigate/click/type/press_key/evaluate/wait_for/snapshot/screenshot) to drive a whole flow in ONE call. Each step fires the same real event as the single-shot tool, so you keep full fidelity but pay one round-trip instead of one per keystroke. Probe e.g. `7 / 2 =` plus a display read as a single `spark_preview_run`. A calculator should need only a handful of `spark_preview_run` calls total — NOT 50+ individual `spark_preview_press_key` calls.",
       "- Reserve the single-shot `spark_preview_click` / `spark_preview_type` / `spark_preview_press_key` tools only for probes that must isolate ONE real key/click event (e.g. the focus double-activation guard: focus equals, press Enter once, read the display).",
       "- Do NOT substitute an inline Node VM + JSDOM probe for the spark-preview run. The whole point is that the verifier and the human see the same DOM/CSS the real browser produces.",
@@ -264,7 +264,7 @@ function renderUiVerifierGuidance(
   ];
   if (opts?.sparkPreviewMcpAvailable) {
     lines.push(
-      "- The `spark-preview` MCP server is registered in this session. You MUST use it to verify visible UI claims instead of inline Node VM + JSDOM stubs. The server drives the live <preview> tab inside Spark App — the same pixels the user sees. Call `spark_preview_navigate` with a `file://` URL (standalone HTML) or the served URL; if no preview tab is open Spark will open one automatically. Take a `spark_preview_snapshot` for the accessibility-flavored outline.",
+      "- The `spark-preview` MCP server is registered in this session. You MUST use it to verify visible UI claims instead of inline Node VM + JSDOM stubs. The server drives the live <preview> tab inside Codara — the same pixels the user sees. Call `spark_preview_navigate` with a `file://` URL (standalone HTML) or the served URL; if no preview tab is open Codara will open one automatically. Take a `spark_preview_snapshot` for the accessibility-flavored outline.",
       "- BATCH verification with `spark_preview_run`: pass an ordered `steps` array (navigate/click/type/press_key/evaluate/wait_for/snapshot/screenshot) to exercise a whole flow in ONE round-trip instead of dozens of single calls. Each step fires the identical real event. Reserve single-shot `spark_preview_click` / `spark_preview_press_key` only for probes that must isolate one real key/click (e.g. focus double-activation). Attach the snapshot or `spark_preview_screenshot` evidence in `proof[]` for each behavioral atomic claim.",
       "- Treat the absence of a spark-preview snapshot for any behavioral UI claim as `unsure`, not `verified`. Static DOM grep alone cannot prove rendering, event wiring, or focus behavior.",
       "- If `spark_preview_screenshot` errors or returns a 0-size/blank frame, the preview tab simply isn't foregrounded — do not retry it repeatedly. Base the visual verdict on `spark_preview_snapshot` + `spark_preview_evaluate` (computed styles, geometry, text) and record that pixels were unavailable; do not mark a claim failed solely because a screenshot could not be captured.",
@@ -535,7 +535,7 @@ function renderVerifierWorkerPrompt({
     "",
     "## TOOL DISCIPLINE",
     peerCommsGuidance.length
-      ? "Read-only tools only. Do not Write, Edit, or run any command that mutates project state (>, >>, tee, rm, mv, chmod, npm install, git commit, git push, destructive SQL). The Spark peer mailbox commands above are the only allowed write outside the project tree."
+      ? "Read-only tools only. Do not Write, Edit, or run any command that mutates project state (>, >>, tee, rm, mv, chmod, npm install, git commit, git push, destructive SQL). The Cora peer mailbox commands above are the only allowed write outside the project tree."
       : "Read-only tools only. Do not Write, Edit, or run any command that mutates project state (>, >>, tee, rm, mv, chmod, npm install, git commit, git push, destructive SQL).",
     "If you cannot verify a claim because the verification harness or fixture is missing, set verdict=unsure for that claim and explain WHAT is missing in `missing_oracle`. Do NOT create the fixture yourself.",
     "",
@@ -577,12 +577,12 @@ function renderVerifierWorkerPrompt({
       2,
     ),
     "",
-    "Confidence ladder (Spark uses this to decide what to do next):",
-    "- PERFECT: every atomic claim verified with strong evidence; no missing oracle. Spark accepts the implementation.",
-    "- VERIFIED: every atomic claim verified; minor gaps not load-bearing. Spark accepts.",
-    "- PARTIAL: some atomic claims verified, some unverifiable, none failed. Spark may accept-with-risk or queue a follow-up.",
-    "- FEEDBACK: at least one atomic claim FAILED with a fixable, specific corrective_prompt. Spark retries the implementation worker with your corrective_prompt.",
-    "- FAILED: implementation is broken in ways no narrow corrective prompt fixes (architectural error, wrong file modified, wrong approach). Spark may escalate to the human.",
+    "Confidence ladder (Cora uses this to decide what to do next):",
+    "- PERFECT: every atomic claim verified with strong evidence; no missing oracle. Codara accepts the implementation.",
+    "- VERIFIED: every atomic claim verified; minor gaps not load-bearing. Codara accepts.",
+    "- PARTIAL: some atomic claims verified, some unverifiable, none failed. Codara may accept-with-risk or queue a follow-up.",
+    "- FEEDBACK: at least one atomic claim FAILED with a fixable, specific corrective_prompt. Codara retries the implementation worker with your corrective_prompt.",
+    "- FAILED: implementation is broken in ways no narrow corrective prompt fixes (architectural error, wrong file modified, wrong approach). Codara may escalate to the human.",
   );
 
   return lines.join("\n");

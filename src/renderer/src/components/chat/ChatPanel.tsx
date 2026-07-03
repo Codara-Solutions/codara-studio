@@ -120,7 +120,7 @@ export default function ChatPanel({
   // the placeholder "noop" shell, which fails with "File not found". Three
   // common cases where this matters:
   //   1. Fresh chat with chip=Claude/Codex — PTY doesn't exist yet
-  //   2. After Cora restart — chatSessionUuid is persisted but the actual
+  //   2. After Codara restart — chatSessionUuid is persisted but the actual
   //      in-memory PTY is gone until the next turn re-spawns it
   //   3. Mid-chat backend switch — old PTY may still be alive, new isn't
   // Once the PTY exists, render TerminalPane; otherwise show a placeholder.
@@ -198,7 +198,7 @@ export default function ChatPanel({
             // POSIX PTYs leave the chat Terminal sub-tab mostly black
             // until orchestration produces enough output to redraw the
             // alt-screen frame. Stacking with visibility keeps both at
-            // full size at all times — this matches Cora's original (pre-
+            // full size at all times — this matches Codara's original (pre-
             // 2d63dca) layout that worked cross-platform.
             <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
               <div

@@ -9,7 +9,7 @@ import type {
   SparkBuiltinRuntime,
 } from "@shared/types";
 
-// spark-preview + spark-orchestrator ship inside Cora itself. We surface them
+// cora-preview + cora-orchestrator ship inside Codara itself. We surface them
 // in their own branded section and hide them from the generic inventory below
 // so they read as first-class built-ins, not third-party connectors.
 const SPARK_BUILTIN_NAMES = new Set(["spark-preview", "spark-orchestrator"]);
@@ -134,7 +134,7 @@ export default function AgentCapabilitiesDialog({
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Hide the Cora built-ins from the generic MCP list — they get their own
+  // Hide the Codara built-ins from the generic MCP list — they get their own
   // branded section above so they don't read as third-party connectors.
   const mcp = useMemo(
     () => (assets?.mcp ?? []).filter((item) => !SPARK_BUILTIN_NAMES.has(item.name.toLowerCase())),
@@ -332,7 +332,7 @@ export default function AgentCapabilitiesDialog({
                 />
                 <PolicyToggle
                   title="Auto-install Cora Preview MCP"
-                  detail="Register the spark-preview MCP so verifiers can drive the live <preview> tab inside Cora — same DOM the user sees, no extra browser window."
+                  detail="Register the cora-preview MCP so verifiers can drive the live <preview> tab inside Codara — same DOM the user sees, no extra browser window."
                   checked={draft.playwrightMcpAutoInstall}
                   onChange={(playwrightMcpAutoInstall) => setDraft((d) => ({ ...d, playwrightMcpAutoInstall }))}
                 />
@@ -478,10 +478,10 @@ function SparkBuiltinsSection({
       <div style={builtinSectionHeaderStyle}>
         <div className="spark-eyebrow" style={builtinEyebrowStyle}>
           <SparkGlyph />
-          <span>Cora Built-ins</span>
+          <span>Codara Built-ins</span>
         </div>
         <div style={sectionDetailStyle}>
-          MCP servers that ship inside Cora. Each is configured per runtime — install Claude and Codex separately.
+          MCP servers that ship inside Codara. Each is configured per runtime — install Claude and Codex separately.
         </div>
       </div>
       <hr className="spark-divider" />
@@ -489,7 +489,7 @@ function SparkBuiltinsSection({
         {builtins === null ? (
           <div className="spark-empty" style={{ minHeight: 72 }}>
             <span className="spark-eyebrow">Checking built-ins</span>
-            <span className="spark-empty__body">Reading installed Cora MCP servers…</span>
+            <span className="spark-empty__body">Reading installed Codara MCP servers…</span>
           </div>
         ) : (
           builtins.map((builtin) => (
@@ -528,12 +528,12 @@ function BuiltinCard({
       <div style={{ minWidth: 0 }}>
         <div style={builtinCardTitleRowStyle}>
           <span style={builtinNameStyle}>{builtin.name}</span>
-          <span className="spark-badge is-accent">Cora built-in</span>
+          <span className="spark-badge is-accent">Codara built-in</span>
           <span className="spark-badge" title={builtin.tools.join(", ")} style={builtinCountBadgeStyle}>
             {builtin.tools.length} tools
           </span>
           {showAutoHint ? (
-            <span className="spark-badge is-info" title="Cora re-adds this on launch while auto-install is on.">
+            <span className="spark-badge is-info" title="Codara re-adds this on launch while auto-install is on.">
               auto
             </span>
           ) : null}
@@ -555,7 +555,7 @@ function BuiltinCard({
       </div>
       {showAutoHint ? (
         <div style={builtinFootnoteStyle}>
-          Auto-install keeps spark-preview present on launch. Turn off “Auto-install Cora Preview MCP” below to
+          Auto-install keeps cora-preview present on launch. Turn off “Auto-install Cora Preview MCP” below to
           make a manual uninstall stick.
         </div>
       ) : null}
@@ -1747,7 +1747,7 @@ const addButtonStyle: React.CSSProperties = {
   fontSize: 11,
 };
 
-// --- Cora Built-ins section ---------------------------------------------
+// --- Codara Built-ins section ---------------------------------------------
 
 const builtinSectionStyle: React.CSSProperties = {
   // De-nested: a calm section on the plain surface, NOT a purple-tinted panel.

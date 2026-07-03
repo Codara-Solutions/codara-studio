@@ -29,7 +29,7 @@ function main() {
           console.error(`  ${run.dir}`);
         }
       } else {
-        console.error("No run folders were found in the usual Spark Agent data locations.");
+        console.error("No run folders were found in the usual Codara data locations.");
       }
       process.exitCode = 1;
       return;
@@ -115,7 +115,7 @@ function printUsage() {
     "  npm run inspect-run -- <run-id> --stdout",
     "  npm run inspect-run -- <run-id> --root <runs-or-user-data-dir>",
     "",
-    "Creates a complete markdown dump of a Spark Agent run: run.json, events,",
+    "Creates a complete markdown dump of a Codara run: run.json, events,",
     "manager calls, worker prompts, stdout/stderr/raw logs, workpads, and final reports.",
   ].join("\n"));
 }
@@ -179,7 +179,7 @@ function candidateRunRoots(explicitRoots) {
 
   const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
   const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-  const names = ["Spark Agent", "spark-agent", "Electron"];
+  const names = ["Codara", "Cora", "Spark Agent", "spark-agent", "Electron"];
   roots.push(path.join(os.homedir(), ".SparkAgent", "runs"));
   for (const base of [appData, localAppData]) {
     for (const name of names) roots.push(path.join(base, name, "runs"));
@@ -305,7 +305,7 @@ function buildReport(located) {
   const generatedAt = new Date().toISOString();
   const lines = [];
 
-  lines.push("# Spark Run Inspection");
+  lines.push("# Codara Run Inspection");
   lines.push("");
   lines.push(`Generated: ${generatedAt}`);
   lines.push(`Run id: ${located.runId}`);
@@ -375,7 +375,7 @@ function addRunSummary(lines, run) {
 
 function addHumanMessages(lines, run) {
   const messages = Array.isArray(run.humanMessages) ? run.humanMessages : [];
-  lines.push("## Human And Spark Messages");
+  lines.push("## Human And Codara Messages");
   lines.push("");
   if (messages.length === 0) {
     lines.push("No messages recorded.");

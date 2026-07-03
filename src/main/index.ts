@@ -41,9 +41,9 @@ async function getRunStore(): Promise<typeof import("./orchestration/run-store")
   return runStoreMod;
 }
 
-app.setName("Cora");
+app.setName("Codara");
 
-// Chromium feature flags Spark never uses. Disabling them at startup saves
+// Chromium feature flags Codara never uses. Disabling them at startup saves
 // ~25-40 MB of idle RAM by preventing background services from spinning up:
 //   CalculateNativeWinOcclusion — Win32 occlusion polling for hidden windows
 //   HardwareMediaKeyHandling    — global media-key listener
@@ -82,15 +82,15 @@ if (process.env.SPARK_USER_DATA_DIR) {
 }
 if (process.platform === "win32") {
   // Windows only displays native toasts for an AppUserModelID it can resolve
-  // (registered Start-Menu shortcut). "com.codara.cora" is only registered by
+  // (registered Start-Menu shortcut). "com.codara.app" is only registered by
   // the packaged installer — in an unpackaged dev run Windows silently drops
   // every Notification.show() under that id, so fall back to the exe path,
   // which Electron's docs prescribe for development.
-  app.setAppUserModelId(app.isPackaged ? "com.codara.cora" : process.execPath);
+  app.setAppUserModelId(app.isPackaged ? "com.codara.app" : process.execPath);
 }
 
 // Headless eval mode kicks in only when --eval-plan is on argv. Otherwise
-// Spark boots normally. We read this BEFORE app.whenReady() so the headless
+// Codara boots normally. We read this BEFORE app.whenReady() so the headless
 // branch can skip BrowserWindow + IPC setup entirely.
 const headlessArgs = readHeadlessEvalArgs(process.argv);
 const isHeadlessEval = headlessArgs.enabled && Boolean(headlessArgs.args);
@@ -153,9 +153,9 @@ function ensureTray(): void {
       trayImage = trayImage.resize({ width: 18, height: 18 });
     }
     tray = new Tray(trayImage);
-    tray.setToolTip("Cora");
+    tray.setToolTip("Codara");
     const menu = Menu.buildFromTemplate([
-      { label: "Show Cora", click: showMainWindow },
+      { label: "Show Codara", click: showMainWindow },
       {
         label: "Open Automations",
         click: () => {
@@ -165,7 +165,7 @@ function ensureTray(): void {
       },
       { type: "separator" },
       {
-        label: "Quit Cora",
+        label: "Quit Codara",
         click: () => {
           isQuitting = true;
           app.quit();
@@ -188,7 +188,7 @@ function createWindow(): void {
     show: false,
     autoHideMenuBar: true,
     backgroundColor: "#0e0d0b",
-    title: "Cora",
+    title: "Codara",
     icon: windowIcon,
     // `titleBarStyle: "hidden"` removes the OS-painted frame so we can draw
     // our own chrome. We used to pair this with `titleBarOverlay` to paint
@@ -292,7 +292,7 @@ function createWindow(): void {
 app.whenReady().then(async () => {
   ensureSparkHomeSync();
 
-  // Install Spark's Python hooks into ~/.claude/settings.json so every
+  // Install Codara's Python hooks into ~/.claude/settings.json so every
   // Claude Code session pipes SessionStart / PreToolUse / Notification / Stop
   // / ... events into <spark-home>/hooks/ for the watcher to ingest below.
   // This is the "CLI hook ingestion (free observability)" big-bet's installer
@@ -331,7 +331,7 @@ app.whenReady().then(async () => {
 
   // Start the JSON-RPC agent socket as early as possible so its env vars are
   // populated before pty-manager spawns its first session (user terminal or
-  // worker pane). Failures here are non-fatal — Spark itself works without
+  // worker pane). Failures here are non-fatal — Codara itself works without
   // the socket; sub-agents just won't be able to dial back in.
   try {
     await startAgentSocket();
@@ -362,7 +362,7 @@ app.whenReady().then(async () => {
       await flush();
       // Schedule a hard process.exit() fallback before app.exit(): on Windows,
       // node-pty's conPTY teardown can leave non-daemon worker handles that
-      // keep the Electron event loop alive even after every Spark resource
+      // keep the Electron event loop alive even after every Codara resource
       // is disposed. Pilot runs were observed hanging 30+ minutes post-
       // status=complete because of this. The grace gives Electron a real
       // chance to exit cleanly (preserves stdout flush, atexit, etc.); the
@@ -467,7 +467,7 @@ app.whenReady().then(async () => {
   if (getPreferenceCached("keepRunningInBackground")) ensureTray();
 
   // Global accelerator to jump straight to the Automations view, even when
-  // Spark is hidden in the tray. Mirrors the tray menu's "Open Automations".
+  // Codara is hidden in the tray. Mirrors the tray menu's "Open Automations".
   const ok = globalShortcut.register("CommandOrControl+Shift+A", () => {
     showMainWindow();
     mainWindow?.webContents.send("window:open-automations");

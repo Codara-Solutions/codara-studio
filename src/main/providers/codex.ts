@@ -6,13 +6,13 @@
 //
 // Notes
 // -----
-// Spark launches Codex with `--yolo` so the agent can run tools without
+// Codara launches Codex with `--yolo` so the agent can run tools without
 // per-tool approval. `-m <model>` picks the model; effort is configured via
 // `-c "model_reasoning_effort=<level>"` rather than a dedicated flag —
 // Codex's `-c` switch sets any config-reference key, so it's the same syntax
 // the user would put in `~/.codex/config.toml`.
 //
-// Directory trust is a separate concern Spark handles outside the provider
+// Directory trust is a separate concern Codara handles outside the provider
 // by writing a `[projects.'<cwd>']` block into `~/.codex/config.toml` before
 // spawning. The provider is the place to centralize that later if we want
 // — but today the trust write lives in run-store next to the launch path
@@ -63,7 +63,7 @@ export const codexProvider: CliProvider = {
   id: "codex",
   displayName: "Codex CLI",
   binaryName: "codex",
-  // `~/.codex/config.toml` is the writable config — Spark's directory-trust
+  // `~/.codex/config.toml` is the writable config — Codara's directory-trust
   // write targets it, and future hook ingestion will read it for hook
   // declarations.
   hookConfigPath: join(homedir(), ".codex", "config.toml"),

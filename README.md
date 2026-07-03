@@ -1,4 +1,4 @@
-# Spark Agent
+# Codara
 
 Desktop control surface (Electron) for supervising AI coding agents — terminals,
 runs, automations, and a built-in browser Preview.
@@ -8,23 +8,23 @@ runs, automations, and a built-in browser Preview.
 
 ## Preview browser-use
 
-Spark ships a zero-install browser-use / computer-use surface: the built-in
+Codara ships a zero-install browser-use / computer-use surface: the built-in
 **Preview** tab is a real Chromium `<webview>`, and any manually-run or
 orchestrated `claude` / `codex` CLI can drive it through the bundled
-`spark-preview` MCP server. No Playwright, no headless Chrome, no extra browser
+`cora-preview` MCP server. No Playwright, no headless Chrome, no extra browser
 window — the agent acts on the exact pixels and DOM the user sees.
 
 The server is auto-installed into `~/.claude.json` and `~/.codex/config.toml`
 (toggle: **Settings → Capabilities**, or `playwrightMcpAutoInstall`). When the
-`claude` / `codex` binary is detectable on disk, Spark creates the config entry
+`claude` / `codex` binary is detectable on disk, Codara creates the config entry
 even if the CLI has never been launched. It proxies each tool call back to the
 running app over a loopback HTTP + bearer-token channel described by
 `<spark-home>/agent-socket.json`.
 
 ### Using it
 
-1. **The Spark app must be running.** The MCP server reads the handshake file on
-   every call; if Spark is closed the tool returns a clean "Spark App appears to
+1. **The Codara app must be running.** The MCP server reads the handshake file on
+   every call; if Codara is closed the tool returns a clean "Codara appears to
    be offline" error instead of hanging.
 2. **First call `spark_preview_navigate({ url })`.** It auto-creates the preview
    tab if none is open — you do not have to ask the user to open one. Subsequent
@@ -53,7 +53,7 @@ the display in one call, not seven).
 
 `bin/cora.cjs` is a zero-dependency terminal remote for the running app — the
 fastest way to poke a new feature without a Playwright harness. It discovers
-the app exactly like the MCP servers do (reads `~/.Cora/agent-socket.json`,
+the app exactly like the MCP servers do (reads `~/.Codara/agent-socket.json`,
 speaks bearer-authed JSON-RPC to the loopback socket).
 
 ```sh
@@ -72,5 +72,5 @@ cora rpc preview.list    # raw JSON-RPC escape hatch (any method)
 `cora help` lists everything. The app-level commands (`shot`, `eval`, `notify`,
 `prefs`, `glass`) ride the dev-gated `app.*` RPC namespace: always available in
 unpackaged builds, and in packaged builds only when the app is launched with
-`CORA_DEV_TOOLS=1` — a shipped app's socket must not let another local process
+`CODARA_DEV_TOOLS=1` — a shipped app's socket must not let another local process
 screenshot the user's terminals. Preview and run commands work everywhere.

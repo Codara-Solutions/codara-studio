@@ -155,7 +155,7 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
   const launch = resolveLaunchTarget(opts.exe, opts.args);
   const shell: ShellInfo = {
     id: `spark-cli-session-${opts.sessionId}`,
-    label: "Spark CLI session",
+    label: "Codara CLI session",
     exe: launch.exe,
     args: launch.args,
     family: "other",
@@ -339,7 +339,7 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
       // short-circuit and return the still-dying PTY with its original
       // (stale) args, silently discarding any new args we just built — which
       // is exactly how mode-flip respawns kept reusing the old talk-mode CC
-      // subprocess despite Spark intending to relaunch in execute mode. The
+      // subprocess despite Codara intending to relaunch in execute mode. The
       // GRACE_MS soft-dispose is for UI panes that re-attach a webContents;
       // headless CLI sessions have no such re-attach path, so kill now.
       pty.killImmediate(opts.sessionId);

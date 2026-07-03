@@ -1,6 +1,6 @@
 // Workspace sanitizer.
 //
-// Spark workers are instructed (via manager-profile.json's worker prompt
+// Cora workers are instructed (via manager-profile.json's worker prompt
 // opening) to keep their final diff focused: no `.tmp-*` scratch dirs, no
 // planning markdowns, no compiler debris. In practice strong workers
 // occasionally bypass that rule — typically by spawning a parallel `tsc`
@@ -11,7 +11,7 @@
 // reaches a terminal status, the run-store calls `sanitizeWorkspace(cwd)`
 // to delete the small set of patterns that are unambiguously scratch.
 // The set is intentionally narrow — only names that have no legitimate
-// purpose for any user (`.tmp-*` dirs, named scratch markdowns Spark or
+// purpose for any user (`.tmp-*` dirs, named scratch markdowns Codara or
 // the eval harness add) — so the cleanup never destroys real work.
 //
 // Production runs and headless eval runs share this code path, so the

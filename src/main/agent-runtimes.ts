@@ -118,7 +118,7 @@ export function applyAgentRuntimeSettings(
   });
 }
 
-// The runtime kinds Spark recognizes today. Derived from the provider
+// The runtime kinds Codara recognizes today. Derived from the provider
 // registry so adding a new provider automatically expands this set.
 const ALL_RUNTIMES: readonly AgentRuntimeKind[] = listProviders().map((p) => p.id);
 
@@ -133,9 +133,9 @@ export function enabledAgentRuntimeKinds(
   // Legacy string tokens kept for backwards-compat reads from older settings.
   if (selection === "claude") return new Set<AgentRuntimeKind>(["claude"]);
   if (selection === "codex") return new Set<AgentRuntimeKind>(["codex"]);
-  // "auto" and "both" both mean "every runtime Spark knows about". The
+  // "auto" and "both" both mean "every runtime Codara knows about". The
   // historical "cursor" token migrates here implicitly (we no longer support
-  // Cursor as a runtime — Spark App only spawns Claude or Codex workers).
+  // Cursor as a runtime — Codara only spawns Claude or Codex workers).
   return new Set<AgentRuntimeKind>(ALL_RUNTIMES);
 }
 

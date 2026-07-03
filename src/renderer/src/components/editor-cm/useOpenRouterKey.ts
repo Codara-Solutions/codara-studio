@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { AppSettings } from "@shared/types";
 
-// Reads Spark Agent's existing OpenRouter API key from AppSettings on mount
+// Reads Codara's existing OpenRouter API key from AppSettings on mount
 // and keeps a ref fresh. This is the same key used by the orchestration
 // manager (src/main/orchestration/openrouter-manager.ts) — DO NOT add a new
 // settings field for it. The key flows: settings.json → loadSettings() →

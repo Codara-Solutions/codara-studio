@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// cora — talk to the running Cora app from a terminal.
+// cora — talk to the running Codara app from a terminal.
 //
 // Discovers the app the same way the MCP servers do: read
-// $CORA_HOME_DIR/agent-socket.json (default ~/.Cora) for the loopback URL +
+// $CODARA_HOME_DIR/agent-socket.json (default ~/.Codara) for the loopback URL +
 // bearer token, then speak JSON-RPC. Zero dependencies; works against
-// `npm run dev`, `npm start`, or a packaged app launched with CORA_DEV_TOOLS=1
+// `npm run dev`, `npm start`, or a packaged app launched with CODARA_DEV_TOOLS=1
 // (the app.* commands are dev-gated in packaged builds; preview.* always work).
 //
 // Install once with `npm link` (gives a global `cora`), or run directly:
@@ -17,13 +17,13 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 
-const HELP = `cora — drive the running Cora app from your terminal
+const HELP = `cora — drive the running Codara app from your terminal
 
 USAGE
   cora <command> [args] [--json]
 
-APP (dev-gated in packaged builds: launch with CORA_DEV_TOOLS=1)
-  status                              is Cora running? version, home dir, windows
+APP (dev-gated in packaged builds: launch with CODARA_DEV_TOOLS=1)
+  status                              is Codara running? version, home dir, windows
   shot [file.png]                     screenshot the app window   (default cora-shot.png)
   eval <js>                           run JS in the app renderer, print the result
   notify [kind] [--title --body --tone --sound --source --run-id]
@@ -62,7 +62,7 @@ ESCAPE HATCH
 
 FLAGS
   --json          print the raw JSON-RPC result
-  --home <dir>    override the Cora home dir (else $CORA_HOME_DIR or ~/.Cora)
+  --home <dir>    override the Codara home dir (else $CODARA_HOME_DIR or ~/.Codara)
 `;
 
 // ── plumbing ────────────────────────────────────────────────────────────────
@@ -70,10 +70,10 @@ FLAGS
 function homeDir(flags) {
   return (
     flags.home ||
-    process.env.CORA_HOME_DIR ||
+    process.env.CODARA_HOME_DIR ||
     process.env.SPARK_HOME_DIR ||
     process.env.SPARK_USER_DATA_DIR ||
-    path.join(os.homedir(), ".Cora")
+    path.join(os.homedir(), ".Codara")
   );
 }
 
@@ -84,8 +84,8 @@ function readHandshake(flags) {
     raw = fs.readFileSync(file, "utf8");
   } catch {
     fail(
-      `Cora isn't running — no handshake at ${file}\n` +
-        `Start it with \`npm run dev\` (or open the app), or point --home / $CORA_HOME_DIR at its home dir.`,
+      `Codara isn't running — no handshake at ${file}\n` +
+        `Start it with \`npm run dev\` (or open the app), or point --home / $CODARA_HOME_DIR at its home dir.`,
     );
   }
   const handshake = JSON.parse(raw);
@@ -126,7 +126,7 @@ function rpc(flags, method, params) {
       if (err.code === "ECONNREFUSED") {
         reject(
           new Error(
-            `Cora's socket at ${handshake.url} is not answering — stale handshake? Restart the app.`,
+            `Codara's socket at ${handshake.url} is not answering — stale handshake? Restart the app.`,
           ),
         );
       } else reject(err);

@@ -301,7 +301,7 @@ function WindowChrome({
             lineHeight: 1,
           }}
         >
-          Cora
+          Codara
         </span>
       </div>
       <div style={{ flex: 1 }} />

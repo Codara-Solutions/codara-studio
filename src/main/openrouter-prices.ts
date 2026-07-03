@@ -1,7 +1,7 @@
 // Hardcoded OpenRouter model price table.
 //
 // USD cost per 1,000,000 tokens for each pricing dimension. Numbers reflect
-// OpenRouter's published listed prices for the manager-model roster Spark
+// OpenRouter's published listed prices for the manager-model roster Codara
 // actually uses today (see `manager-profile.json` + `openrouter-manager.ts`).
 // They drift; treat this table as a starting estimate, not a billing source
 // of truth. To update:
@@ -32,7 +32,7 @@ export interface ModelPrice {
 }
 
 // Source: https://openrouter.ai/models (snapshotted 2026-05). Update when a
-// vendor changes prices or Spark starts using a new model.
+// vendor changes prices or Codara starts using a new model.
 export const MODEL_PRICES: Record<string, ModelPrice> = {
   // Anthropic — Claude 4.x family.
   "anthropic/claude-opus-4-8": { input: 15, output: 75, cacheRead: 1.5 },
@@ -158,7 +158,7 @@ function pickCacheReadTokens(usage: OpenRouterUsage): number | undefined {
 
 // OpenRouter accepts model ids with optional variant suffixes (`:nitro`,
 // `:floor`, `@max`, etc.). The price is keyed off the base slug for most
-// variants — strip `@<effort>` first because that's a Spark-internal marker.
+// variants — strip `@<effort>` first because that's a Codara-internal marker.
 // `:nitro` is route-specific and we *do* want to look it up specifically when
 // listed in the table, so try the exact id first before falling back.
 function normalizeModelKey(model: string): string {
@@ -172,7 +172,7 @@ function normalizeModelKey(model: string): string {
 
 // Map a worker runtime (+ optional model hint) to a MODEL_PRICES key. Workers
 // run inside the Claude Code / Codex CLIs, so we never see a clean OpenRouter
-// slug for them — only a runtime tag and, sometimes, a Spark-internal model
+// slug for them — only a runtime tag and, sometimes, a Codara-internal model
 // hint like `claude-sonnet-4-6@medium`. This bridges that gap by reconstructing
 // the provider-prefixed slug the price table is keyed on.
 //
@@ -202,7 +202,7 @@ export function priceKeyForWorker(
   }
 
   // run-store stores hints like 'claude-sonnet-4-6@medium'; the `@effort`
-  // suffix is a Spark-internal marker, not part of any OpenRouter slug.
+  // suffix is a Codara-internal marker, not part of any OpenRouter slug.
   const base = (modelHint ?? "").trim().replace(/@.+$/, "") || defaultBase;
 
   const key = `${provider}/${base}`;

@@ -5,7 +5,7 @@ import type { GuardPredicate, LoomWorkerConfig } from "@shared/types";
 import type { FlowNodeData } from "./model";
 
 // Custom ReactFlow node + edge renderers for the loom canvas. They paint with
-// Spark's CSS variables (no n8n purple). Each node exposes a '+' affordance on
+// Codara's CSS variables (no n8n purple). Each node exposes a '+' affordance on
 // its source handle(s) via an `onAddFrom` callback threaded through node data.
 
 export interface NodeCallbacks {

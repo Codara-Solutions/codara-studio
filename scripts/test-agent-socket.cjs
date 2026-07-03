@@ -1,7 +1,7 @@
 // Integration test for the agent-socket RPC layer + MCP discovery contract.
 //
 // Unlike the esbuild-stub harnesses, this drives the REAL app: it launches the
-// built Electron main (npm run build first) under a throwaway CORA_HOME_DIR,
+// built Electron main (npm run build first) under a throwaway CODARA_HOME_DIR,
 // waits for the agent-socket handshake file, fabricates run.json files on
 // disk (run-store reads any well-formed run.json on cache miss), and speaks
 // bearer-authed JSON-RPC to the loopback socket — the exact path the
@@ -94,7 +94,7 @@ function fabricateRun(runId, extra) {
 async function main() {
   const electron = path.join(ROOT, "node_modules", ".bin", "electron");
   const app = spawn(electron, [path.join(ROOT, "out", "main", "index.js")], {
-    env: { ...process.env, CORA_HOME_DIR: HOME, SPARK_NO_SHELL_INTEGRATION: "1" },
+    env: { ...process.env, CODARA_HOME_DIR: HOME, SPARK_NO_SHELL_INTEGRATION: "1" },
     stdio: "ignore",
   });
 

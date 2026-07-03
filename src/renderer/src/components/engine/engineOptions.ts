@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { AgentRuntimeDiagnostic, ChatBackendKind } from "@shared/types";
 
 // One pickable engine for the "Run plan" / "Smart Merge" pickers. `backend`
-// is undefined for the default Spark engine (the OpenRouter manager) and the
+// is undefined for the default Codara engine (the OpenRouter manager) and the
 // CLI runtime kind otherwise. A glyph keeps the rows recognizable at a glance,
 // matching the composer's model picker vocabulary.
 export interface EngineOption {
@@ -66,7 +66,7 @@ export function buildEngineOptions(diagnostics: AgentRuntimeDiagnostic[]): Engin
 // no runtimes-changed event to subscribe to, so a single fetch matches the
 // composer's approach; agents.runtimes() is cached in the main process, so the
 // duplicate fetch from FileTree + CommitComposer is cheap. Before the fetch
-// resolves, only Spark shows (callers render their plain action), then the CLI
+// resolves, only Codara shows (callers render their plain action), then the CLI
 // engines fill in — which is fine since menus open well after app start.
 export function useEngineOptions(): EngineOption[] {
   const [diagnostics, setDiagnostics] = useState<AgentRuntimeDiagnostic[]>([]);

@@ -40,27 +40,29 @@ function isEditorThemeId(value: unknown): value is EditorThemeId {
 function normalizeTheme(value: unknown): ThemePref {
   if (typeof value !== "string") return DEFAULT_PREFERENCES.theme;
   if ((APP_THEME_IDS as readonly string[]).includes(value)) return value as ThemePref;
-  // Legacy / removed light themes (incl. the pre-rename spark-daylight id)
-  // collapse to the flagship light palette.
+  // Legacy / removed light themes (incl. the pre-rename spark-daylight and
+  // cora-daylight ids) collapse to the flagship light palette.
   if (
     value === "light" ||
     value === "spark-light" ||
     value === "spark-daylight" ||
+    value === "cora-daylight" ||
     value === "paper-lantern" ||
     value === "frosted-glass" ||
     value === "sage-terminal" ||
     value === "solar-flare"
   ) {
-    return "cora-daylight";
+    return "codara-daylight";
   }
-  // Legacy / removed dark themes (incl. the pre-rename spark-classic id and
-  // retired Gruvbox / Solarized / Rosé Pine / Everforest / Kanagawa) collapse
-  // to Cora Classic.
+  // Legacy / removed dark themes (incl. the pre-rename spark-classic and
+  // cora-classic ids and retired Gruvbox / Solarized / Rosé Pine / Everforest /
+  // Kanagawa) collapse to Codara Classic.
   if (
     value === "dark" ||
     value === "system" ||
     value === "spark-dark" ||
     value === "spark-classic" ||
+    value === "cora-classic" ||
     value === "github-dark" ||
     value === "tokyo-night" ||
     value === "nord" ||
@@ -77,7 +79,7 @@ function normalizeTheme(value: unknown): ThemePref {
     value === "neon-orchard" ||
     value === "velvet-dusk"
   ) {
-    return "cora-classic";
+    return "codara-classic";
   }
   return DEFAULT_PREFERENCES.theme;
 }
@@ -117,7 +119,7 @@ function normalizeInlineDelay(value: unknown): number {
 // `notificationChannels` blob if present, otherwise falls back to the
 // legacy `notifications: { enabled, sounds }` shape from older prefs
 // files. Unknown / missing channels resolve to true (on by default) so
-// users who skip a Spark version that introduces a new channel get the
+// users who skip a Codara version that introduces a new channel get the
 // channel auto-enabled instead of silently disabled.
 function normalizeNotificationChannels(
   value: unknown,

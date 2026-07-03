@@ -1,7 +1,7 @@
 // Headless eval argument parser.
 //
-// Spark normally launches as an Electron desktop app and ignores extra argv
-// entries. The eval harness flips Spark into headless mode by passing
+// Codara normally launches as an Electron desktop app and ignores extra argv
+// entries. The eval harness flips Codara into headless mode by passing
 // `--eval-plan <path>` at startup; if that flag is present the main process
 // branches to the headless runner before any BrowserWindow is created.
 //
@@ -29,7 +29,7 @@ export interface HeadlessArgsResult {
 }
 
 // Inspect process.argv. Returns enabled=false when --eval-plan is absent so
-// interactive Spark behaves identically to today. When the flag is present
+// interactive Codara behaves identically to today. When the flag is present
 // but other args are wrong, returns enabled=true with a populated `error`
 // string the caller logs before exiting 2.
 export function readHeadlessEvalArgs(argv: string[] = process.argv): HeadlessArgsResult {

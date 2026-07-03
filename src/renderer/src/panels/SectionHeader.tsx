@@ -14,7 +14,7 @@ export interface SectionHeaderProps extends SectionHeaderDragProps {
   collapsed: boolean;
   onToggleCollapse: () => void;
   collapsible?: boolean;
-  // Optional leading glyph (e.g. the Spark mark on the chat header).
+  // Optional leading glyph (e.g. the Codara mark on the chat header).
   glyph?: React.ReactNode;
   // Optional zero-padded mono count shown before the action cluster.
   count?: number;

@@ -1,6 +1,6 @@
 import type { Workspace } from "@shared/types";
 
-// Conductor-style provenance banner shown in the Spark chat when a freshly
+// Conductor-style provenance banner shown in the Codara chat when a freshly
 // created copy-branch workspace has no conversation yet. Mirrors Conductor's
 // three lines: "You're in a new copy of <repo> called <city>", "Branched
 // <branch> from <base>", and "Created <city> and copied N files".

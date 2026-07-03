@@ -227,12 +227,12 @@ export default function App() {
   const [showLeft, setShowLeft] = useState(true);
   const [showRight, setShowRight] = useState(true);
   // Runs for the currently active workspace, plus the user's selection. Lifted
-  // here so the workbench RunsView and Spark chat tab both read from the same
+  // here so the workbench RunsView and Codara chat tab both read from the same
   // source of truth: picking a chat updates the graph, deleting a chat removes
   // it everywhere.
   const [runs, setRuns] = useState<RunState[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  // Each workspace has its own Spark chat selection. The visible state stays
+  // Each workspace has its own Codara chat selection. The visible state stays
   // as a single activeRunId, but this map lets workspace switches restore the
   // previous chat instead of inheriting another workspace's draft/new-chat UI.
   const activeIdRef = useRef(activeId);
@@ -644,7 +644,7 @@ export default function App() {
   }, [activeRunId, runs]);
 
   // Mirror the workbench selection back into the active chat: clicking a
-  // chat's node-graph tab makes the Spark chat tab follow along.
+  // chat's node-graph tab makes the Codara chat tab follow along.
   useEffect(() => {
     const tab = tabs.activeTab;
     if (tab && tab.kind === "runs" && tab.runId) {
@@ -662,7 +662,7 @@ export default function App() {
   // closes them or sends their first message (which then rekeys the draft
   // tab id to the new run id via promoteDraftChatTab).
   useEffect(() => {
-    // All chat tabs in the top strip render as "Spark Agent" — see
+    // All chat tabs in the top strip render as "Cora" — see
     // CHAT_TAB_LABEL above. Run.title is preserved on the RunState for the
     // chat panel header and history popover; only the tab label is forced
     // to a stable brand so short prompts don't surface as "He...".
@@ -921,7 +921,7 @@ export default function App() {
         }, 500);
       }
 
-      // A spawn_terminals decision: Spark opened interactive terminals for
+      // A spawn_terminals decision: Codara opened interactive terminals for
       // the user to drive. Each request gets a fresh numbered terminal tab
       // so it doesn't disturb whatever terminal layout the user already has.
       if (event.type === "spark.spawn_terminals") {
@@ -1117,7 +1117,7 @@ export default function App() {
 
   // When the orchestration runner emits `envelope_prepared`, the worker is
   // about to start and is waiting for a renderer-side PTY at sessionId =
-  // attemptId. Spark workers live in one run-scoped terminal tab titled
+  // attemptId. Cora workers live in one run-scoped terminal tab titled
   // "workers" instead of claiming arbitrary user shells. The tab stays mounted
   // across chat switches so PTYs continue running, but the tab strip only
   // reveals it while its run is the active chat.
@@ -1216,7 +1216,7 @@ export default function App() {
   //
   //   1. The pane registry — which pty sessions are user terminal panes, and
   //      which workspace/tab each lives in (for routing the click back).
-  //      Spark-orchestrated worker panes register excluded: run-store events
+  //      Cora-orchestrated worker panes register excluded: run-store events
   //      already alert for those.
   //   2. The active context — which workspace + tab is on screen, so main
   //      can apply the "never ping me about the tab I'm watching" rule.
@@ -1238,7 +1238,7 @@ export default function App() {
           paneId: leaf.paneId,
           tabId: tab.id,
           tabTitle: tab.title,
-          // Spark-orchestrated panes are excluded only while their worker is
+          // Cora-orchestrated panes are excluded only while their worker is
           // RUNNING (run-store events already alert that lifecycle). Once the
           // attempt is done the pane is an ordinary terminal again — a manual
           // `claude` run in it must notify like any other pane.
@@ -1348,7 +1348,7 @@ export default function App() {
       // running:false teardown rather than writing runtimeState:"done" onto a
       // live chip (which `visibleWorkerChip` would keep showing as a stale grey
       // badge while the lifecycle `state` is still "running"). Manual chips have
-      // no lifecycle outside the pane → clear them; Spark chips keep their run
+      // no lifecycle outside the pane → clear them; Codara chips keep their run
       // metadata but drop agentRunning so the run store owns completion.
       if (payload.state === "done") {
         if (existing.source === "spark") {
@@ -1870,7 +1870,7 @@ export default function App() {
           planTitle: entry.name,
           planText: file.content,
           // Engine picked from the explorer's Run plan flyout (undefined = the
-          // default Spark / OpenRouter manager).
+          // default Codara / OpenRouter manager).
           chatBackend: backend,
         });
         handleSelectRun(run.id);
@@ -1930,13 +1930,13 @@ export default function App() {
 
       // Part C — auto-open is opt-in. When the user hasn't enabled it, stop
       // here: the detected-URL chip above already ran (setDetectedUrl +
-      // broadcast), so the user can click to open the preview, but Spark never
+      // broadcast), so the user can click to open the preview, but Codara never
       // yanks a preview tab open on its own.
       if (preferencesRef.current.autoOpenPreview !== true) return;
 
       // Belt-and-suspenders (Part C3): never auto-open from an agent/worker
       // pane, even with the pref on — an agent's own dev server must not spawn a
-      // preview. A pane is "agent-owned" if its tab is a Spark workers-scoped
+      // preview. A pane is "agent-owned" if its tab is a Cora workers-scoped
       // terminal tab OR the source leaf currently hosts a worker chip (manual
       // claude/codex panes are exactly this case). Those still get the click-to-
       // open chip; they just never auto-open.
@@ -2429,7 +2429,7 @@ export default function App() {
       if (!leaf?.worker) return;
       // D5 (error). A non-zero pty exit is a crash, not a clean finish. Keep
       // the chip visible so the user sees "exited(N)" in red rather than the
-      // pane silently dropping its badge. Applies to manual chips (a Spark-owned
+      // pane silently dropping its badge. Applies to manual chips (a Codara-owned
       // attempt that crashed is surfaced through the run-store lifecycle, so we
       // only flip its agentRunning bit below as before). Treat a non-zero code
       // OR a terminating signal as a crash; exit code 0 is a normal teardown.
@@ -2452,7 +2452,7 @@ export default function App() {
         t.setLeafWorker(tabId, paneId, null);
         return;
       }
-      // A PTY exit is not the worker completion signal. Spark-owned panes move
+      // A PTY exit is not the worker completion signal. Codara-owned panes move
       // to "done" only when orchestration emits worker_attempt.finished. A crash
       // still surfaces "error" on the chip so the pane doesn't read as healthy.
       t.setLeafWorker(tabId, paneId, {
@@ -2471,7 +2471,7 @@ export default function App() {
   // moment they Ctrl+C out — the chip means "an agent is live in this
   // pane" and nothing more, so once the agent quits the pane shows no chip
   // at all (rather than a lingering "DONE" badge).
-  // Spark-orchestrated workers (source="spark") keep their completion
+  // Cora-orchestrated workers (source="spark") keep their completion
   // lifecycle in the run store, but the terminal chip still follows the
   // foreground process: when Claude/Codex returns to the shell prompt, the
   // pane stops advertising an active agent.
@@ -2525,7 +2525,7 @@ export default function App() {
       }
       // running=false: the agent's TUI closed — the user Ctrl+C'd out (or
       // the agent exited) and the shell prompt is back. Clear manual chips
-      // outright; for Spark-owned panes, keep the run metadata but mark the
+      // outright; for Codara-owned panes, keep the run metadata but mark the
       // foreground agent inactive so the terminal no longer shows CLAUDE DONE.
       if (!existing) return;
       if (existing.source === "spark") {
@@ -2548,7 +2548,7 @@ export default function App() {
   //
   // "done" is deliberately ignored here: the poller emits it from the same
   // resetAgentPhase that fires onAgentState(running:false) — which removes the
-  // manual chip / clears agentRunning on a Spark chip — and that callback runs
+  // manual chip / clears agentRunning on a Codara chip — and that callback runs
   // FIRST in the same synchronous stack. Writing runtimeState:"done" afterward
   // would resurrect the just-removed manual worker (a stale DONE chip), since
   // both setLeafWorker updaters are queued against the same pre-removal tab
@@ -2586,8 +2586,8 @@ export default function App() {
   // SelectionPayload (text prompt, optionally an annotated PNG path). The
   // SelectionRouteMenu calls route() with one of the destinations below to
   // ship that payload at:
-  //   - a brand-new Spark chat (startAutopilot with the payload pre-filled)
-  //   - the currently-focused Spark chat (addRunMessage)
+  //   - a brand-new Codara chat (startAutopilot with the payload pre-filled)
+  //   - the currently-focused Codara chat (addRunMessage)
   //   - a freshly-spawned Claude Code or Codex worker pane (new pane with
   //     autorun + delayed pty.inject once the agent REPL settles)
   //   - any currently-running CLI worker pane (pty.inject)
@@ -3916,14 +3916,14 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
           gap: 6,
         }}
       >
-        <span>Cora stores its data in</span>
+        <span>Codara stores its data in</span>
         <span
           style={{
             fontFamily: "var(--font-mono)",
             color: "var(--ink-dim)",
           }}
         >
-          ~/.Cora
+          ~/.Codara
         </span>
       </div>
     </div>
@@ -3931,7 +3931,7 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
 });
 
 // Centered empty state for a workspace whose tab strip has been emptied — e.g.
-// the user closed the Spark Agent chat and every terminal. The close STICKS
+// the user closed the Cora chat and every terminal. The close STICKS
 // (no tab is auto-respawned), so this is a legitimate resting state, not an
 // error; it gives the user the two obvious ways back in. The "+" picker in the
 // top strip offers the same actions plus Open file / Preview / Automations.

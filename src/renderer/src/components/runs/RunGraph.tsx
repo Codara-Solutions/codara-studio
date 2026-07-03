@@ -388,7 +388,7 @@ function OutcomeGraph({ run }: { run: RunState }) {
 }
 
 // The single middle node for a stepless finished run — names the concrete
-// outcome so the graph shows what Spark did, not a bare SPARK -> COMPLETE link.
+// outcome so the graph shows what Codara did, not a bare SPARK -> COMPLETE link.
 function OutcomeNode({ run }: { run: RunState }) {
   const count = run.autopilot?.spawnedTerminals ?? 0;
   const spawned = run.autopilot?.lastAction === "spawned_terminals" || count > 0;

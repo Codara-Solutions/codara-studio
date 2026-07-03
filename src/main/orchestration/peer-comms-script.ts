@@ -31,7 +31,7 @@ function parseArgs(tokens) {
 
 function usage() {
   return [
-    "Spark peer comms",
+    "Cora peer comms",
     "",
     "Commands:",
     "  list  --dir <peer-comms-dir>",

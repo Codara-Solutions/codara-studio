@@ -154,7 +154,7 @@ import { getBackend } from "./backend-registry";
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
 const CONTINUE_INPUT = "continue\r";
-const HUMAN_INPUT_PAUSE_REASON = "Spark needs human input before continuing.";
+const HUMAN_INPUT_PAUSE_REASON = "Cora needs human input before continuing.";
 // How many run directories under ~/.SparkAgent/runs/ we keep on disk. Older
 // runs are swept lazily on the first listRuns() call per process. Bumped from
 // "unbounded" because users reported the runs/ tree growing into GB of pty
@@ -641,7 +641,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   // plannedAgents but no materialized worker tasks. Mirror runAutopilotManagerReview's
   // line ~595 fallback: run step_planning to turn plannedAgents into worker tasks
   // before deciding there's nothing to do. Without this, startAutopilot falsely
-  // concludes "no ready task" and asks the user a clarifying question Spark
+  // concludes "no ready task" and asks the user a clarifying question Codara
   // already has the answer to.
   if (tasks.length === 0 && needsStepPlanning(run)) {
     const fastPathPlan = await tryTrivialFastPathStepPlanning(run);
@@ -2338,8 +2338,8 @@ async function runInitialAutopilotPlanning(
     await askHumanQuestion(
       run.id,
       mode === "chat"
-        ? "OpenRouter is not configured, so Spark cannot think through this chat turn yet. Add the API key in Settings, then send the message again."
-        : "OpenRouter is not configured, so Spark cannot plan Claude/Codex/Cursor worker tasks yet. Add the API key in Settings, then run the plan again.",
+        ? "OpenRouter is not configured, so Cora cannot think through this chat turn yet. Add the API key in Settings, then send the message again."
+        : "OpenRouter is not configured, so Cora cannot plan Claude/Codex/Cursor worker tasks yet. Add the API key in Settings, then run the plan again.",
     );
     return;
   }
@@ -2659,7 +2659,7 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
         workspaceId: run.workspaceId,
         runId: run.id,
         type: "autopilot.manager_review_skipped",
-        message: "Spark manager review skipped because OpenRouter is not configured",
+        message: "Cora manager review skipped because OpenRouter is not configured",
         payload: {
           reason: "manual_fallback",
         },
@@ -2668,7 +2668,7 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
     }
     await askHumanQuestion(
       run.id,
-      "Worker results are ready, but OpenRouter is not configured for Spark manager review. Add the API key in Settings, then resume the run.",
+      "Worker results are ready, but OpenRouter is not configured for Cora manager review. Add the API key in Settings, then resume the run.",
     );
     return;
   }
@@ -2682,7 +2682,7 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
   // wrong-but-confident implementations the self-check missed.
 
   // NOTE: a standard-tier "clean-impl fast-path" used to skip the verifier
-  // when Spark could re-run the impl worker's OWN verificationCommands and
+  // when Codara could re-run the impl worker's OWN verificationCommands and
   // they all exited 0. But the worker picks those commands itself — they
   // rarely probe the adversarial edge cases an independent verifier would.
   // Eval runs proved this: a pricing refactor self-verified green, the
@@ -3148,7 +3148,7 @@ async function askOpenRouterManager(
     runId: run.id,
     sparkCallId: callId,
     type: "spark_call.started",
-    message: `Spark manager call started: ${config.model}`,
+    message: `Cora manager call started: ${config.model}`,
     payload: {
       mode,
       model: config.model,
@@ -3210,7 +3210,7 @@ async function askOpenRouterManager(
         runId: latest.id,
         sparkCallId: callId,
         type: "spark_call.model_fallback",
-        message: `Spark manager retried with structured-output fallback model: ${result.model}`,
+        message: `Cora manager retried with structured-output fallback model: ${result.model}`,
         payload: {
           mode,
           requestedModel: result.fallbackFrom,
@@ -3225,7 +3225,7 @@ async function askOpenRouterManager(
       runId: latest.id,
       sparkCallId: callId,
       type: "spark_call.completed",
-      message: `Spark manager call completed: ${result.decision.status}`,
+      message: `Cora manager call completed: ${result.decision.status}`,
       payload: {
         mode,
         model: result.model,
@@ -3273,7 +3273,7 @@ async function askOpenRouterManager(
       runId: latest.id,
       sparkCallId: callId,
       type: "spark_call.failed",
-      message: `Spark manager call failed: ${error}`,
+      message: `Cora manager call failed: ${error}`,
       payload: {
         mode,
         model: config.model,
@@ -3409,7 +3409,7 @@ async function askChatBackendNonOpenRouter(
       runId: latest.id,
       sparkCallId: callId,
       type: "spark_call.failed",
-      message: `Spark manager (${chatConfig.backend}) call failed: ${error}`,
+      message: `Cora manager (${chatConfig.backend}) call failed: ${error}`,
       payload: { mode, model: chatConfig.model, backend: chatConfig.backend, error },
     });
     return null;
@@ -3452,7 +3452,7 @@ function isTopTierModel(hint: string | undefined): boolean {
 
 // Fable 5 (`claude-fable-5`) is Anthropic's top-tier model. It is reserved for
 // the main chat session and for opt-in automation (loom) workers — workers that
-// Spark itself spawns (execute-mode spark_spawn_workers, plan-council workers,
+// Codara itself spawns (execute-mode spark_spawn_workers, plan-council workers,
 // autopilot worker tasks) must NEVER run fable. A manager LLM may nonetheless
 // emit a fable modelHint; this helper downgrades any such hint to Opus 4.8.
 // Case-insensitive substring match on "fable" so suffixed/aliased variants
@@ -3563,7 +3563,7 @@ async function maybeEnforceExplicitParallelStagingPlan(
   return {
     reason:
       usesWorkspaceSparkParts
-        ? "The human does not want a .spark-parts workspace folder; moving staged parallel artifacts into the Spark run artifact directory."
+        ? "The human does not want a .spark-parts workspace folder; moving staged parallel artifacts into the Cora run artifact directory."
         : shouldUseHybridRuntimes
           ? "The explicit parallel UI/logic split should use the available hybrid of installed runtimes instead of one runtime for every worker."
         : hasParallelPartsStep
@@ -3573,7 +3573,7 @@ async function maybeEnforceExplicitParallelStagingPlan(
     decision: {
       ...decision,
       summary: usesWorkspaceSparkParts
-        ? "Explicit multi-agent plan repaired: staging moves to the Spark run artifact directory, followed by a single integration worker."
+        ? "Explicit multi-agent plan repaired: staging moves to the Cora run artifact directory, followed by a single integration worker."
         : shouldUseHybridRuntimes
           ? "Explicit multi-agent plan repaired: parallel UI/logic staging uses the available runtime hybrid, followed by a single integration worker."
         : hasParallelPartsStep
@@ -4001,7 +4001,7 @@ const COUNCIL_TOP_TIER_MODEL: Partial<Record<WorkerRuntime, string>> = {
 };
 
 // Plan-council scratch + output live under .spark/<runId>/ so every run owns a
-// self-contained, clearly Spark-owned folder: candidate drafts under
+// self-contained, clearly Codara-owned folder: candidate drafts under
 // candidates/<i>/ and the synthesized result under spark-plan/. Keeping it inside
 // .spark (and namespaced by run id) means we never clobber a user's own
 // root-level PLAN.md / plan.md, runs never collide, and the result is easy to
@@ -4325,7 +4325,7 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
   // The "main AI" judge runs on the model + effort the user picked in the
   // composer (e.g. Opus 4.8 @ medium) — it's the one that decides what to keep
   // from each candidate. Fall back to a top-tier default only if the run didn't
-  // record a selection. The judge is a Spark-spawned WORKER, so Fable is not
+  // record a selection. The judge is a Cora-spawned WORKER, so Fable is not
   // permitted (reserved for the main chat + automations): sanitize the hint and
   // surface the downgrade so it isn't a silent swap by the launch-command
   // backstop.
@@ -4913,7 +4913,7 @@ function dropVerifierTasksWithExistingPeer(
 // so its task description guesses file paths — verified on bjgp3uso7, where the
 // manager guessed cli.js but the fix landed in parser.js / rules/*. The worker
 // (Codex/Claude) has full filesystem access and writes a more accurate plan
-// internally. Spark's job is to relay intent, not invent files.
+// internally. Codara's job is to relay intent, not invent files.
 //
 // Only fires when:
 //   - run.taskComplexity === 'trivial'
@@ -4953,7 +4953,7 @@ async function tryTrivialFastPathStepPlanning(run: RunState): Promise<RunState |
     ...(acceptanceLines.length > 0 ? acceptanceLines : ["- Worker completes the goal above and reports evidence."]),
     "",
     "WORKING METHOD",
-    "Spark Agent (the orchestrator that dispatched you) has no filesystem access and knows nothing concrete about this codebase. It's just relaying intent. You have full access — explore the repo yourself.",
+    "Cora (the orchestrator that dispatched you) has no filesystem access and knows nothing concrete about this codebase. It's just relaying intent. You have full access — explore the repo yourself.",
     "First inspect the workspace. If files already exist, discover the real files involved with Glob/Grep/Read before editing. If the workspace is blank or only contains the plan, create exactly the artifact(s) required by the goal.",
     "Do not assume file paths beyond names explicitly stated in the goal/acceptance criteria. Keep the change scoped to this task.",
     "",
@@ -4998,7 +4998,7 @@ async function tryTrivialFastPathStepPlanning(run: RunState): Promise<RunState |
   return next;
 }
 
-// Effort levels Spark passes through verbatim when building a Claude
+// Effort levels Codara passes through verbatim when building a Claude
 // standing terminal. "max" is intentionally omitted: the user types these
 // terminals manually and Claude rejects `--effort max` outside of certain
 // model+plan combinations. "minimal" is omitted because the Claude CLI
@@ -5008,7 +5008,7 @@ const STANDING_TERMINAL_CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhig
 
 // Build the launch command for a standing interactive terminal: a plain
 // claude/codex session the user drives. Like buildLaunchCommandLine, but
-// without the worker-task wiring — these are not Spark workers.
+// without the worker-task wiring — these are not Cora workers.
 //
 // The CLI-specific argv is produced by the runtime's `CliProvider`
 // (see src/main/providers/) so adding a new CLI later only requires a new
@@ -5077,13 +5077,13 @@ function spawnedTerminalsTitle(terminals: Array<{ runtime: string }>): string {
   return `${parts.join(" + ")} terminals`;
 }
 
-// Handle a spawn_terminals manager decision: the user asked Spark to open
-// standing interactive terminals they will drive themselves. Spark emits one
+// Handle a spawn_terminals manager decision: the user asked Codara to open
+// standing interactive terminals they will drive themselves. Codara emits one
 // spark.spawn_terminals event carrying ready-to-run terminal specs (the
 // renderer opens a grid tab with a pane per spec) and marks the run
 // complete. A later chat message re-engages the manager via addRunMessage's
 // terminal-run replanning path; the terminals are user-driven and are not
-// tracked as Spark workers.
+// tracked as Cora workers.
 async function applySpawnTerminalsDecision(
   run: RunState,
   decision: SparkManagerDecision,
@@ -5179,7 +5179,7 @@ async function applySparkManagerDecision(
     });
     return run;
   }
-  // Surface the manager's natural-language reply to the user as a Spark chat
+  // Surface the manager's natural-language reply to the user as a Codara chat
   // bubble before applying the structural decision. Avoids dupes by skipping
   // when the latest spark/note already matches verbatim.
   const reply = decision.chatReply?.trim();
@@ -5213,7 +5213,7 @@ async function applySparkManagerDecision(
         runId: run.id,
         stepId: activeStep?.id,
         type: "spark_manager.question_deferred",
-        message: "Spark manager asked for input while planned work remained; continuing the existing plan",
+        message: "Cora asked for input while planned work remained; continuing the existing plan",
         payload: {
           summary: decision.summary,
           question: decision.question,
@@ -5264,7 +5264,7 @@ async function applySparkManagerDecision(
     }
     return askHumanQuestion(
       run.id,
-      decision.question || "Please clarify what Spark should do next.",
+      decision.question || "Please clarify what Cora should do next.",
       decision.questionOptions,
     );
   }
@@ -5273,7 +5273,7 @@ async function applySparkManagerDecision(
     if (mode === "chat") {
       return commitRunChange(run, {
         type: "spark_manager.chat_completed",
-        message: "Spark manager answered the chat turn",
+        message: "Cora answered the chat turn",
         payload: {
           summary: decision.summary,
         },
@@ -5342,7 +5342,7 @@ async function applySparkManagerDecision(
       if (pendingStepsCanComplete) {
         return commitRunChange(run, {
           type: "spark_manager.completed_run",
-          message: "Spark manager marked the run complete after accepting reviewed steps",
+          message: "Cora marked the run complete after accepting reviewed steps",
           payload: {
             summary: decision.summary,
             completedStepIds: pendingSteps.map((step) => step.id),
@@ -5511,7 +5511,7 @@ async function applySparkManagerDecision(
     }
     return commitRunChange(run, {
       type: "spark_manager.completed_run",
-      message: "Spark manager marked the run complete",
+      message: "Cora marked the run complete",
       payload: {
         summary: decision.summary,
       },
@@ -5546,7 +5546,7 @@ async function applySparkManagerDecision(
   // Note: a hardcoded "route any calculator-shaped step to codex" override
   // used to live here. It second-guessed every plan touching the word
   // "calculator" and rewrote claude assignments to codex regardless of what
-  // the manager decided — the dominant cause of "Spark almost only uses
+  // the manager decided — the dominant cause of "Codara almost only uses
   // codex" complaints. Removed so the manager's own routing (and the
   // hybrid-runtime split in shouldEnforceHybridParallelRuntimes) stand.
   // Quality regressions on calculator-shaped tasks should be addressed by
@@ -5622,7 +5622,7 @@ async function applySparkManagerDecision(
         : [
           {
             kind: "worker_batch",
-            title: "Spark planned work",
+            title: "Cora planned work",
             goal: decision.summary,
             plannedAgents: [],
             acceptanceCriteria: ["The selected worker tasks complete and report final evidence."],
@@ -6096,7 +6096,7 @@ async function applySparkManagerDecision(
     workspaceId: latest.workspaceId,
     runId: latest.id,
     type: "spark_manager.decision_applied",
-    message: "Spark manager decision applied",
+    message: "Cora decision applied",
     payload: {
       summary: decision.summary,
       status: decision.status,
@@ -6316,9 +6316,9 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
 
   // Swallow a repeated message: the same author re-sending identical text
   // shortly after their last one is a double-click, an Enter-key repeat, or a
-  // frustrated re-send while waiting — never intent. Look back past any Spark
+  // frustrated re-send while waiting — never intent. Look back past any Codara
   // replies in between, since the immediately-previous message is often
-  // Spark's own confirmation, which would otherwise mask the repeat.
+  // Codara's own confirmation, which would otherwise mask the repeat.
   const priorSameAuthor = [...run.humanMessages]
     .reverse()
     .find((entry) => entry.author === input.author);
@@ -6398,7 +6398,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
   if (!messageRecorded) return updated;
 
   // Re-engage the manager when the user chatted into a terminal run. Terminal
-  // follow-ups begin in chat-decision mode so Spark can either answer directly
+  // follow-ups begin in chat-decision mode so Codara can either answer directly
   // from context or choose worker orchestration when tools are useful.
   // Never for direct (loom) runs — the loop driver decides what runs next.
   if (input.author === "user" && wasTerminal && run.executionMode !== "direct") {
@@ -7482,7 +7482,7 @@ async function rerouteSparkShellTaskToAgent(task: WorkerTask): Promise<RuntimeRe
     modelHint,
     effortHint,
     reason:
-      "Spark-created shell workers are not autonomous yet; route command-heavy work through an installed agent so it can inspect output and write the final report.",
+      "Cora-created shell workers are not autonomous yet; route command-heavy work through an installed agent so it can inspect output and write the final report.",
   };
 }
 
@@ -7534,7 +7534,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     await ensureCodexProjectTrust(attempt.cwd).catch(() => undefined);
   }
   // Automation (loom) workers are allowed fable; the fable backstop in
-  // buildLaunchCommandLine only fires for Spark-spawned workers. A direct run
+  // buildLaunchCommandLine only fires for Cora-spawned workers. A direct run
   // bound to an automationId is the automation worker path.
   const isAutomationLaunch = run.executionMode === "direct" && Boolean(run.automationId);
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd, {
@@ -7910,7 +7910,7 @@ export async function undoToCheckpoint(input: UndoToCheckpointInput): Promise<Un
   // at or after that timestamp is downstream of the message and gets trimmed
   // (steps, worker tasks, attempts, manager calls). Without this the chat
   // timeline keeps rendering all the post-message work (step cards, tool
-  // rows, Spark's prose reply) even though humanMessages is trimmed —
+  // rows, Codara's prose reply) even though humanMessages is trimmed —
   // exactly the "agent's message still there after undo" the user reported.
   const undoneMessage = run.humanMessages[pointer];
   const cutoff = undoneMessage?.createdAt;
@@ -8104,7 +8104,7 @@ export async function forcePauseRun(runId: string): Promise<RunState> {
 // Stop-as-give-back: the Stop button in execute-mode chat. Combines force-pause
 // (ESC the CC/Codex turn + kill workers) with undo-to-checkpoint (trim the
 // pending user message and downstream state). When CC/Codex received the user
-// prompt but Spark was still mid-spawn or mid-turn, ESC alone leaves the
+// prompt but Codara was still mid-spawn or mid-turn, ESC alone leaves the
 // message visible in the timeline as if it had been processed — confusing
 // because the model never finished thinking about it. This wrapper rolls back
 // to the checkpoint BEFORE the latest user message and returns the original
@@ -8114,9 +8114,9 @@ export async function stopAndUndoPending(
 ): Promise<UndoToCheckpointResult> {
   const run = await requireRun(runId);
   // Interrupt the chat backend's live CC/Codex turn FIRST, on every Stop path.
-  // The checkpoint-undo path below rolls back Spark's state and cancels workers
+  // The checkpoint-undo path below rolls back Codara's state and cancels workers
   // but does NOT touch the chat CLI — so without this the claude/codex process
-  // keeps churning its turn in the terminal behind Spark after the user hit
+  // keeps churning its turn in the terminal behind Codara after the user hit
   // Stop. ESC aborts the in-flight turn; the session stays alive so the
   // restored message can be resubmitted. Backends with no live session no-op.
   for (const backendKind of ["claude", "codex"] as const) {
@@ -8241,7 +8241,7 @@ async function reviewWorkerReportArtifact({
   // CLI launch failure auto-fallback: when the runtime binary couldn't even
   // start (codex demanded an interactive update, claude not logged in, model id
   // invalid, etc.) the failure is environmental, not behavioral. Don't waste an
-  // LLM manager round-trip — Spark already knows the answer is "try the same
+  // LLM manager round-trip — Codara already knows the answer is "try the same
   // task with the other runtime." Queue that fallback deterministically here,
   // before the manager review consumes the failed report.
   const launchFallback = await maybeQueueCliLaunchFallback({
@@ -9250,7 +9250,7 @@ function normalizeRun(run: RunState): RunState {
   // Older run.json files (pre-attention-rollup) didn't track `seen`. A
   // freshly-loaded complete run from disk has no signal to claim "I'm
   // unseen", so treat it as already-seen — otherwise every prior run would
-  // turn teal the first time Spark restarts.
+  // turn teal the first time Codara restarts.
   if (run.seen === undefined) {
     run.seen = run.status === "complete" ? true : false;
   }
@@ -9475,14 +9475,14 @@ async function appendCompletionSummaryMessage(runId: string): Promise<RunState> 
   const run = await requireRun(runId);
   if (run.status !== "complete") return run;
   // Chat-only runs (no steps, no worker tasks) already showed their answer in
-  // the chatReply Spark bubble. A separate "Run complete / Spark answered the
+  // the chatReply Codara bubble. A separate "Run complete / Codara answered the
   // chat." turn would just repeat that. The renderer paints a tiny "done"
-  // marker under the last Spark bubble instead.
+  // marker under the last Codara bubble instead.
   if (run.steps.length === 0 && run.workerTasks.length === 0) return run;
   const completedAt = run.completedAt ?? run.updatedAt;
   const completedAtMs = Date.parse(completedAt);
   // If the manager already posted a chatReply note for this completion turn,
-  // suppress the templated summary entirely — one Spark bubble per turn is the
+  // suppress the templated summary entirely — one Codara bubble per turn is the
   // goal. The chatReply is emitted as spark/note by applySparkManagerDecision
   // just before the run flips to complete, so a spark/note whose createdAt is
   // at-or-after completedAt (with a small grace window for clock skew) is the
@@ -10009,7 +10009,7 @@ function activeWorkersForRun(runId: string): ActiveWorkerProcess[] {
 
 // Hook RPC handoff (big-bet "Hook contract for sub-agents to self-report").
 // Called from hook-rpc.ts when a worker POSTs to /state. The paneId is the
-// PTY session id, which Spark uses interchangeably with attemptId for active
+// PTY session id, which Codara uses interchangeably with attemptId for active
 // workers — see ActiveWorkerProcess.attemptId + how pty-manager keys sessions
 // by opts.id. We:
 //   1. find the ActiveWorkerProcess by paneId,
@@ -10018,7 +10018,7 @@ function activeWorkersForRun(runId: string): ActiveWorkerProcess[] {
 //      event so the renderer can react (or a future Session Inspector tab
 //      can replay the timeline).
 //
-// Tolerates an unknown paneId quietly — a worker spawned outside Spark's
+// Tolerates an unknown paneId quietly — a worker spawned outside Codara's
 // orchestration loop (e.g. a user-launched claude pane that picked up the
 // env vars) is allowed to call us, but if we don't have an ActiveWorkerProcess
 // to attach the state to we just drop the report. This matches the doc's
@@ -10355,7 +10355,7 @@ function buildResumePrompt(run: RunState): { kind: "continue" | "prompt"; input:
 const HOOK_TRUST_MS = 5_000;
 
 // Find the WorkerAttempt + its parent RunState anywhere in the in-memory
-// run cache. paneId === attempt.id for Spark workers (pty-manager keys
+// run cache. paneId === attempt.id for Cora workers (pty-manager keys
 // sessions by attemptId). Returns null if no cached run owns that attempt
 // — happens for manual user-spawned terminals and for runs that haven't
 // been loaded from disk yet. Bounded by RUN_RETENTION_KEEP (~50 cached
@@ -10371,7 +10371,7 @@ function findAttemptByPaneId(
 }
 
 // Live agent state report from the renderer-side terminal poller. paneId is
-// the same id the renderer used for pty:spawn — for Spark workers this is
+// the same id the renderer used for pty:spawn — for Cora workers this is
 // the attemptId. We walk the in-memory run cache to find the matching
 // attempt, stamp the new state on it, and broadcast a change event so the
 // chat UI and notification system can react.
@@ -10913,7 +10913,7 @@ function buildLaunchCommandLine(
     if (sandboxDir) args.push("--add-dir", quoteShellArg(sandboxDir));
     // Fable 5 backstop. Automation (loom) workers are ALLOWED fable, so skip
     // the guard for automation-originated launches; for every other claude
-    // worker (the Spark-spawned execute/council/autopilot path) silently
+    // worker (the Cora-spawned execute/council/autopilot path) silently
     // downgrade a fable hint to Opus 4.8. The visible note is emitted earlier
     // at the spawn chokepoint (agent-socket); this is a defence-in-depth catch
     // that should normally never fire.
@@ -10963,7 +10963,7 @@ function buildLaunchCommandLine(
 // the read+check+append window is atomic.
 const codexConfigLocks = new Map<string, Promise<unknown>>();
 // Process-local set of (configPath -> Set<tomlKey>) we've already verified
-// during this Spark session. The first worker spawn in a given cwd does the
+// during this Codara session. The first worker spawn in a given cwd does the
 // read-modify-write under the lock; every subsequent spawn in the same cwd
 // short-circuits without touching the filesystem, eliminating the per-spawn
 // lock wait under high concurrency. Cleared on app restart, so a codex
@@ -11009,12 +11009,12 @@ async function writeCodexProjectTrustEntry(configPath: string, cwd: string): Pro
 // Cursor's interactive TUI rejects --trust (only valid with --print) and so
 // prompts for workspace trust on every fresh cwd. The CLI persists trust as
 // a sentinel file at ~/.cursor/projects/<encoded-cwd>/.workspace-trusted
-// where <encoded-cwd> replaces ':' and '\' and '/' with '-'. Spark writes
+// where <encoded-cwd> replaces ':' and '\' and '/' with '-'. Codara writes
 // this file before spawning the worker so node-pty never sees the prompt.
 // Trust grants are per-cwd, so an eval that materializes 500 fresh repos
 // would otherwise need 500 human clicks; this writes them all in one place.
-// Translate Spark's internal effort scale to the values the claude CLI
-// actually accepts: low, medium, high, xhigh, max. Spark's manager profile
+// Translate Codara's internal effort scale to the values the claude CLI
+// actually accepts: low, medium, high, xhigh, max. Codara's manager profile
 // emits "minimal" for the cheapest/quickest leaf tasks, which the CLI
 // rejects with `error: option '--effort <level>' argument 'minimal' is
 // invalid`. Mapping minimal -> low preserves the manager's intent (lowest

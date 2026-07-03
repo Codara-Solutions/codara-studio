@@ -1,4 +1,4 @@
-/* Spark markdown preview — VS Code-style rendered view for .md files.
+/* Codara markdown preview — VS Code-style rendered view for .md files.
    All colors are token-driven so the preview reads identically against the
    warm-tinted dark theme defined in styles.css (var(--bg)/--panel/--ink etc.).
    Scoped under .spark-markdown so it can never leak into chat prose. */

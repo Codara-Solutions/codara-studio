@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Cora</title>
+    <title>Codara</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       http-equiv="Content-Security-Policy"
@@ -38,8 +38,8 @@
     </style>
   </head>
   <body>
-    <div id="root"><div id="spark-boot">Cora</div></div>
-    <!-- Liquid-glass lens: referenced from CSS as backdrop-filter: url(#cora-glass-lens).
+    <div id="root"><div id="spark-boot">Codara</div></div>
+    <!-- Liquid-glass lens: referenced from CSS as backdrop-filter: url(#codara-glass-lens).
          Ports the liquidglass-oss shader recipe (rounded-rect lens height field) to
          SVG filters: the displacement map is neutral gray across the core (crisp,
          see-through center) and ramps only in the outer rim, so the backdrop bends
@@ -52,7 +52,7 @@
          the ramp from extreme to neutral spans ~9% of the region ≈ a rim of ~12%
          of the element's size. -->
     <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
-      <filter id="cora-glass-lens" x="-15%" y="-15%" width="130%" height="130%" color-interpolation-filters="sRGB">
+      <filter id="codara-glass-lens" x="-15%" y="-15%" width="130%" height="130%" color-interpolation-filters="sRGB">
         <feImage href="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256'%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='0'%3E%3Cstop offset='0.115' stop-color='%23000000'/%3E%3Cstop offset='0.215' stop-color='%23808080'/%3E%3Cstop offset='0.785' stop-color='%23808080'/%3E%3Cstop offset='0.885' stop-color='%23ffffff'/%3E%3C/linearGradient%3E%3Crect width='256' height='256' fill='url(%23g)'/%3E%3C/svg%3E" preserveAspectRatio="none" result="xm0" />
         <feColorMatrix in="xm0" type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0 1" result="xm" />
         <feImage href="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256'%3E%3ClinearGradient id='g' x1='0' y1='0' x2='0' y2='1'%3E%3Cstop offset='0.115' stop-color='%23000000'/%3E%3Cstop offset='0.215' stop-color='%23808080'/%3E%3Cstop offset='0.785' stop-color='%23808080'/%3E%3Cstop offset='0.885' stop-color='%23ffffff'/%3E%3C/linearGradient%3E%3Crect width='256' height='256' fill='url(%23g)'/%3E%3C/svg%3E" preserveAspectRatio="none" result="ym0" />

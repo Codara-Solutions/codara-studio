@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spark Agent hook script for Claude Code.
+"""Codara hook script for Claude Code.
 
 Claude Code invokes this script for each configured hook event (SessionStart,
 PreToolUse, PostToolUse, UserPromptSubmit, Stop, Notification, PreCompact, ...).
@@ -32,12 +32,13 @@ from datetime import datetime, timezone
 
 def _spark_home() -> str:
     """Mirror the resolution logic in src/main/spark-home.ts."""
-    override = os.environ.get("CORA_HOME_DIR") or os.environ.get("SPARK_HOME_DIR") or os.environ.get("SPARK_USER_DATA_DIR")
+    override = os.environ.get("CODARA_HOME_DIR") or os.environ.get("SPARK_HOME_DIR") or os.environ.get("SPARK_USER_DATA_DIR")
     if override and override.strip():
         return override
-    cora = os.path.join(os.path.expanduser("~"), ".Cora")
-    if os.path.isdir(cora):
-        return cora
+    for name in (".Codara", ".Cora"):
+        candidate = os.path.join(os.path.expanduser("~"), name)
+        if os.path.isdir(candidate):
+            return candidate
     return os.path.join(os.path.expanduser("~"), ".SparkAgent")
 
 

@@ -5,7 +5,7 @@
 //
 // Design rules
 // ------------
-// 1. fs.watch (not chokidar) — Spark already uses fs.watch elsewhere
+// 1. fs.watch (not chokidar) — Codara already uses fs.watch elsewhere
 //    (fs-watcher.ts) and the burst rate here is small (a tool-heavy Claude
 //    turn might produce 30-50 files; not 30k). Falling back to a scan on
 //    "rename" events keeps Windows/macOS quirks from dropping events.
@@ -62,7 +62,7 @@ const RESCAN_DEBOUNCE_MS = 50;
 
 // Concurrency cap for handleFile. The "burst rate here is small" assumption
 // above holds for a live session, but the cold-start backlog does not: the
-// hooks dir accumulates while Spark is closed (every Claude CLI session on
+// hooks dir accumulates while Codara is closed (every Claude CLI session on
 // the machine drops files here), and the initial rescan once hit 11k+
 // pending files — firing an unbounded handleFile per entry exhausted the
 // process's file handles (EMFILE) and broke app launch. Slots hand off
@@ -158,7 +158,7 @@ export async function startHookWatcher(): Promise<void> {
   };
   active = state;
 
-  // Pick up any files that were dropped while Spark was shut down. Without
+  // Pick up any files that were dropped while Codara was shut down. Without
   // this, a long-running Claude session that emitted hooks during a crash
   // would have those events lost forever.
   void rescanDirectory(state).catch((err) =>
@@ -400,7 +400,7 @@ async function pruneProcessed(state: WatcherState): Promise<void> {
 async function dispatchEnvelope(state: WatcherState, envelope: HookFileEnvelope): Promise<void> {
   // No paneId means we can't tie the event to a worker (the python script
   // landed without SPARK_PANE_ID in env — happens if the user launched
-  // Claude outside Spark's orchestrator). We still log + drop here; a future
+  // Claude outside Codara's orchestrator). We still log + drop here; a future
   // "ambient hook surface" can pick these up.
   if (!envelope.paneId) {
     return;
@@ -452,7 +452,7 @@ async function dispatchEnvelope(state: WatcherState, envelope: HookFileEnvelope)
       return;
     }
     case "SessionStart": {
-      // SessionStart carries the new session id, which Spark uses for
+      // SessionStart carries the new session id, which Codara uses for
       // `claude -r <uuid>` resume. We append the event with the id surfaced
       // as a top-level field so a future "agent-resume on restore" big-bet
       // can pull it without re-parsing the payload.

@@ -10,7 +10,7 @@ import type { RuntimeState } from "./types";
 // no Electron, no Node imports — so it is safe to import from any process.
 
 // Internal-only union of every agent CLI we can detect from terminal output.
-// Spark's public surface (App.tsx, TerminalStack.tsx, run-store, etc.) still
+// Codara's public surface (App.tsx, TerminalStack.tsx, run-store, etc.) still
 // only models the three first-party runtimes — anything outside that set is
 // coerced to `null` at the onAgentState boundary so the UI accent / tab-type
 // machinery doesn't need to grow new cases for each new banner we recognise.
@@ -195,7 +195,7 @@ export function runtimeFromCommandLine(cmdLine: string): AgentRuntime | null {
 //              with text like "esc to interrupt" or "(thinking)".
 //   `blocked`: the agent is waiting on the user for permission or
 //              confirmation. These prompts are the whole point of the
-//              detection — Spark surfaces them as the "needs you" signal.
+//              detection — Codara surfaces them as the "needs you" signal.
 //   `done`   : the agent has actively printed a completion line (vs simply
 //              going quiet, which is `idle`). Today we mostly fall back to
 //              the OSC 633;A "prompt is back" boundary (handled elsewhere),
@@ -203,7 +203,7 @@ export function runtimeFromCommandLine(cmdLine: string): AgentRuntime | null {
 //              waiting for the debounce window.
 //
 // Patterns were lifted from herdr's hand-tuned table (research/HERDR_LEARNINGS
-// quick-win B), trimmed to the three runtimes Spark spawns today. The patterns
+// quick-win B), trimmed to the three runtimes Codara spawns today. The patterns
 // match against the CSI/OSC-stripped tail string so Ink's per-character cursor
 // moves do not interleave bytes inside the literal we're looking for.
 export interface RuntimePatterns {

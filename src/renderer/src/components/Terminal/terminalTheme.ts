@@ -4,7 +4,7 @@ import { readAppTokens } from "../../lib/theme-tokens";
 // xterm.js's ITheme is 18 colors: bg / fg / cursor / cursorAccent / selection
 // + the 16 ANSI slots. We split the build:
 //
-//   - chrome (background/foreground/cursor/selection) is read from Spark's
+//   - chrome (background/foreground/cursor/selection) is read from Codara's
 //     CSS-variable design tokens via theme-tokens.ts. This guarantees the
 //     terminal visually fuses with the surrounding panel chrome and tracks
 //     named theme changes and accent color changes.

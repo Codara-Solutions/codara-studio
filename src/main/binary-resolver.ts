@@ -1,7 +1,7 @@
 // Binary resolver.
 //
 // When the user picks "Claude Code" (or any other agent CLI) in the runtime
-// picker, Spark needs the absolute path to the binary on this machine.
+// picker, Codara needs the absolute path to the binary on this machine.
 // `which` / `where` is the obvious starting point, but in practice it misses
 // installs that aren't on the inherited PATH — Electron from Finder/Dock
 // inherits a sparse PATH that excludes npm-global, nvm, volta, scoop, etc.

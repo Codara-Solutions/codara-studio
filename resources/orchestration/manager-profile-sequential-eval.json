@@ -1,21 +1,21 @@
 {
   "$comment": [
     "Eval-only manager profile used by evals-v2/configs/spark_sequential.json.",
-    "It keeps Spark's manager and worker prompts comparable to the default profile,",
+    "It keeps Codara's manager and worker prompts comparable to the default profile,",
     "but forces a one-worker-at-a-time plan so the hybrid parallel profile has a real A/B baseline."
   ],
   "version": 1,
   "manager": {
     "systemPromptOverrides": {
       "plan_analysis": [
-        "You are Spark Agent planning a coding task for a SEQUENTIAL eval variant. Output JSON matching the schema, nothing else.",
+        "You are Cora planning a coding task for a SEQUENTIAL eval variant. Output JSON matching the schema, nothing else.",
         "",
         "- Create a durable step-by-step division of the task.",
         "- Every worker_batch step MUST contain exactly one plannedAgent. Never put two plannedAgents in the same step.",
         "- If the work naturally splits into independent pieces, make them consecutive worker_batch steps instead of parallel peers.",
-        "- COVER EVERY ENUMERATED DELIVERABLE: when the task names multiple modules / files / components to build (a dependency graph or a list of files), emit one worker_batch step for EACH deliverable (or each dependency layer) — never stop after the first 'foundation' batch of independent modules. A plan that names 9 modules but only steps through the 5 independent ones leaves 4 required deliverables unbuilt and the run wrongly completes. If you cannot scope the dependent layers yet because they need the earlier files, end your emitted steps with a brake so Spark replans the rest with the foundation as evidence.",
+        "- COVER EVERY ENUMERATED DELIVERABLE: when the task names multiple modules / files / components to build (a dependency graph or a list of files), emit one worker_batch step for EACH deliverable (or each dependency layer) — never stop after the first 'foundation' batch of independent modules. A plan that names 9 modules but only steps through the 5 independent ones leaves 4 required deliverables unbuilt and the run wrongly completes. If you cannot scope the dependent layers yet because they need the earlier files, end your emitted steps with a brake so Codara replans the rest with the foundation as evidence.",
         "- Do not plan peer-worker batches, peer verifiers, mailbox-dependent coordination, or hybrid implementation batches.",
-        "- Keep the same quality bar as the default Spark profile: clear acceptance criteria, concrete boundaries, installed runtime/model/effort hints, and no tactical questions to the human.",
+        "- Keep the same quality bar as the default Codara profile: clear acceptance criteria, concrete boundaries, installed runtime/model/effort hints, and no tactical questions to the human.",
         "- Verification belongs inside the implementation worker's prompt or in a later single verifier follow-up, never as a same-step peer batch.",
         "- Return tasks=[] in this mode. Set question=\"\" unless a hard product/scope/credential/safety decision is missing."
       ],

@@ -16,7 +16,7 @@ import {
 } from "@shared/types";
 import { readAppTokens } from "../lib/theme-tokens";
 
-// Spark uses named workbench themes. The selected theme
+// Codara uses named workbench themes. The selected theme
 // id lives on <html data-theme="..."> so the stylesheet can swap a complete
 // token palette. A separate data-theme-mode/class stays available for the few
 // consumers that only need to know whether the palette is light or dark.
@@ -40,27 +40,29 @@ const FAST_PATH_KEY = "spark-ui-theme-shadow";
 function normalizeTheme(value: unknown): Theme {
   if (typeof value !== "string") return DEFAULT_PREFERENCES.theme;
   if ((APP_THEME_IDS as readonly string[]).includes(value)) return value as Theme;
-  // Legacy / removed light themes (incl. the pre-rename spark-daylight id)
-  // collapse to the flagship light palette.
+  // Legacy / removed light themes (incl. the pre-rename spark-daylight and
+  // cora-daylight ids) collapse to the flagship light palette.
   if (
     value === "light" ||
     value === "spark-light" ||
     value === "spark-daylight" ||
+    value === "cora-daylight" ||
     value === "paper-lantern" ||
     value === "frosted-glass" ||
     value === "sage-terminal" ||
     value === "solar-flare"
   ) {
-    return "cora-daylight";
+    return "codara-daylight";
   }
-  // Legacy / removed dark themes (incl. the pre-rename spark-classic id and
-  // retired Gruvbox / Solarized / Rosé Pine / Everforest / Kanagawa) collapse
-  // to Cora Classic.
+  // Legacy / removed dark themes (incl. the pre-rename spark-classic and
+  // cora-classic ids and retired Gruvbox / Solarized / Rosé Pine / Everforest /
+  // Kanagawa) collapse to Codara Classic.
   if (
     value === "dark" ||
     value === "system" ||
     value === "spark-dark" ||
     value === "spark-classic" ||
+    value === "cora-classic" ||
     value === "github-dark" ||
     value === "tokyo-night" ||
     value === "nord" ||
@@ -77,7 +79,7 @@ function normalizeTheme(value: unknown): Theme {
     value === "neon-orchard" ||
     value === "velvet-dusk"
   ) {
-    return "cora-classic";
+    return "codara-classic";
   }
   return DEFAULT_PREFERENCES.theme;
 }
@@ -111,7 +113,7 @@ function applyGlassAttr(enabled: boolean): void {
 // Liquid-glass tuning (Settings → Appearance), percentages of the design
 // default. Veil/blur ride CSS scale vars consumed by the --glass-* tokens;
 // refraction/chroma become the scale attributes of the three per-channel
-// feDisplacementMap primitives in #cora-glass-lens (index.html): center bend
+// feDisplacementMap primitives in #codara-glass-lens (index.html): center bend
 // 58px at 100%, ±13px channel spread for the chromatic fringe.
 const GLASS_TUNING_KEYS = ["glassVeil", "glassBlur", "glassRefraction", "glassChroma"] as const;
 type GlassTuningKey = (typeof GLASS_TUNING_KEYS)[number];
@@ -136,7 +138,7 @@ function applyGlassTuning(): void {
   const spread = center > 0 ? 13 * asGlassFactor(glassTuning.glassChroma) : 0;
   const scales = [center + spread, center, Math.max(0, center - spread)];
   document
-    .querySelectorAll("#cora-glass-lens feDisplacementMap")
+    .querySelectorAll("#codara-glass-lens feDisplacementMap")
     .forEach((node, i) => node.setAttribute("scale", String(scales[i] ?? center)));
 }
 

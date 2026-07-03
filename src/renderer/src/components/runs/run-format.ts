@@ -282,7 +282,7 @@ export function isCompletedTask(task: WorkerTask): boolean {
   return task.status === "accepted" || task.status === "needs_review";
 }
 
-// The step Spark is currently rendering worker prompts for. The connector
+// The step Codara is currently rendering worker prompts for. The connector
 // glow rides the wire INTO this step — worker execution itself lights the
 // step node, not the wire feeding the next queued step.
 export function promptGenerationTargetStepId(run: RunState): string | undefined {

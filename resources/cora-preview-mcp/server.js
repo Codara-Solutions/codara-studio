@@ -4,17 +4,17 @@
 // This script is spawned by Claude Code / Codex / any MCP-aware
 // runtime as a child process. It speaks MCP's stdio transport
 // (newline-delimited JSON-RPC 2.0) and proxies tool calls to the
-// running Spark App via its agent socket (loopback HTTP + bearer
-// token). Spark's renderer drives an open <preview> tab to make
+// running Codara via its agent socket (loopback HTTP + bearer
+// token). Codara's renderer drives an open <preview> tab to make
 // the tool calls real.
 //
 // Design rules:
-//   - Zero npm deps. Pure Node stdlib. Bundled with Spark App's
+//   - Zero npm deps. Pure Node stdlib. Bundled with Codara's
 //     extraResources. Runs under any modern Node (>= 18).
-//   - Late-binding: Spark may not be running yet when this script
+//   - Late-binding: Codara may not be running yet when this script
 //     is spawned. Read the handshake file on EVERY call and surface
-//     "Spark is not running" cleanly.
-//   - Read the handshake file every call so a Spark restart with a
+//     "Codara is not running" cleanly.
+//   - Read the handshake file every call so a Codara restart with a
 //     new token doesn't permanently break the MCP server child.
 
 "use strict";
@@ -25,19 +25,19 @@ const path = require("node:path");
 const http = require("node:http");
 
 const HANDSHAKE_FILE = "agent-socket.json";
-const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".Cora");
+const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".Codara");
 
 const TOOLS = [
   {
     name: "spark_preview_list",
     description:
-      "List the preview tabs currently open in Spark App. Returns each tab's id, url, and whether it is the active one. Use this first to confirm a preview tab exists.",
+      "List the preview tabs currently open in Codara. Returns each tab's id, url, and whether it is the active one. Use this first to confirm a preview tab exists.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "spark_preview_url",
     description:
-      "Return the current URL and title of a Spark preview tab. Defaults to the active preview tab when tabId is omitted.",
+      "Return the current URL and title of a Codara preview tab. Defaults to the active preview tab when tabId is omitted.",
     inputSchema: {
       type: "object",
       properties: { tabId: { type: "string", description: "Optional tab id from spark_preview_list." } },
@@ -47,7 +47,7 @@ const TOOLS = [
   {
     name: "spark_preview_navigate",
     description:
-      "Navigate the target Spark preview tab to a URL (http://, https://, or file://). Waits briefly for dom-ready before returning.",
+      "Navigate the target Codara preview tab to a URL (http://, https://, or file://). Waits briefly for dom-ready before returning.",
     inputSchema: {
       type: "object",
       required: ["url"],
@@ -151,7 +151,7 @@ const TOOLS = [
   {
     name: "spark_preview_screenshot",
     description:
-      "Capture the current preview tab as a PNG (returned base64-encoded in a data: URL). The pixels are exactly what the user sees in Spark.",
+      "Capture the current preview tab as a PNG (returned base64-encoded in a data: URL). The pixels are exactly what the user sees in Codara.",
     inputSchema: {
       type: "object",
       properties: { tabId: { type: "string" } },
@@ -416,7 +416,7 @@ const STEP_ACTION_TO_RPC = {
 };
 
 function resolveSparkHome() {
-  const override = process.env.CORA_HOME_DIR || process.env.SPARK_HOME_DIR || process.env.SPARK_USER_DATA_DIR;
+  const override = process.env.CODARA_HOME_DIR || process.env.SPARK_HOME_DIR || process.env.SPARK_USER_DATA_DIR;
   if (override && override.trim()) return override;
   return DEFAULT_SPARK_HOME;
 }
@@ -432,7 +432,7 @@ function readHandshake() {
     return { url: parsed.url, token: parsed.token };
   } catch (err) {
     const e = new Error(
-      `Spark App appears to be offline (could not read ${file}). Open Spark App and try again. Cause: ${err.message}`,
+      `Codara appears to be offline (could not read ${file}). Open Codara and try again. Cause: ${err.message}`,
     );
     e.code = "SPARK_OFFLINE";
     throw e;
@@ -474,7 +474,7 @@ function postJsonRpc(method, params) {
         res.on("end", () => {
           const text = Buffer.concat(chunks).toString("utf8");
           if (res.statusCode !== 200) {
-            reject(new Error(`Spark agent socket returned ${res.statusCode}: ${text.slice(0, 200)}`));
+            reject(new Error(`Codara agent socket returned ${res.statusCode}: ${text.slice(0, 200)}`));
             return;
           }
           try {
@@ -486,14 +486,14 @@ function postJsonRpc(method, params) {
             }
             resolve(parsed && Object.prototype.hasOwnProperty.call(parsed, "result") ? parsed.result : null);
           } catch (err) {
-            reject(new Error(`Spark agent socket returned non-JSON: ${err.message}`));
+            reject(new Error(`Codara agent socket returned non-JSON: ${err.message}`));
           }
         });
       },
     );
-    req.on("error", (err) => reject(new Error(`Spark agent socket unreachable: ${err.message}`)));
+    req.on("error", (err) => reject(new Error(`Codara agent socket unreachable: ${err.message}`)));
     req.setTimeout(60_000, () => {
-      req.destroy(new Error("Spark agent socket timeout"));
+      req.destroy(new Error("Codara agent socket timeout"));
     });
     req.write(body);
     req.end();

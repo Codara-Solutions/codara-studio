@@ -43,7 +43,7 @@ A Cora automation (internally a "loom") is a recurring agent job bound to this w
 
 - `spark_list_automations` — list existing looms (id, name, enabled, trigger/loop summary, worker, node/edge counts, status, history tail).
 - `spark_get_automation` — full definition of one loom.
-- `spark_create_automation` — create a new loom in THIS workspace (you never supply paths — Spark binds the workspace from the chat).
+- `spark_create_automation` — create a new loom in THIS workspace (you never supply paths — Codara binds the workspace from the chat).
 - `spark_update_automation` — patch fields of an existing loom.
 - `spark_run_automation` — run a loom now (manual fire); returns a run id.
 - `spark_wait_for_automation` — long-poll until the loom's current run settles; returns final status, stopReason, iteration count, cost, and a last-output snippet.

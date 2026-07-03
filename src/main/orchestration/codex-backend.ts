@@ -90,7 +90,7 @@ interface CodexChatSession {
    *  (e.g. spark_wait_for_workers blocking 10-20 min) don't trip the 90s
    *  wall-clock cap. Mirrors claude-backend's lastJsonlActivityAt. */
   lastJsonlActivityAt: number;
-  /** Spark MCP long-poll tool calls in flight (function_call emitted, no
+  /** Codara MCP long-poll tool calls in flight (function_call emitted, no
    *  matching function_call_output yet). When non-empty waitForTurnEnd
    *  extends its cap to EXTENDED_TURN_TIMEOUT_MS — without this, the rollout
    *  goes silent during spark_wait_for_workers' 10-20 min block and the 90s
@@ -104,7 +104,7 @@ interface CodexChatSession {
 
 const SESSIONS = new Map<string, CodexChatSession>();
 
-// Runs whose Spark plan-context block has already been injected into the chat
+// Runs whose Codara plan-context block has already been injected into the chat
 // CLI. Module-scoped so it survives the session respawn a mode flip triggers
 // (the rollout keeps the block via `-r`), so we inject exactly once: the first
 // turn after the chat leaves Plan mode. Cleared on disposeChat. Mirrors
@@ -112,7 +112,7 @@ const SESSIONS = new Map<string, CodexChatSession>();
 const contextInjectedRuns = new Set<string>();
 
 const TURN_TIMEOUT_MS = 90_000;
-// While a Spark long-poll MCP tool call is in flight (spark_wait_for_workers),
+// While a Codara long-poll MCP tool call is in flight (spark_wait_for_workers),
 // the rollout JSONL emits the initial function_call entry once and is then
 // silent for the 10-20 min that the tool blocks. We extend the cap to 30 min
 // while any tracked entry is outstanding so the function_call_output has time
@@ -137,7 +137,7 @@ const CODEX_REPL_READY_TIMEOUT_MS = 15_000;
 const CODEX_INPUT_SETTLE_MS = 1_200;
 // Between the pasted prompt body and the submitting CR, so Codex processes the
 // text before the Enter (a single merged burst can drop the submit). Scales with
-// paste size: a large bracketed paste (e.g. the injected Spark run-context, a
+// paste size: a large bracketed paste (e.g. the injected Codara run-context, a
 // few KB) takes the TUI longer to ingest, and an Enter sent before the paste
 // commits is dropped — leaving the prompt stuck in the input box, never
 // submitted. Mirrors claude-backend's PASTE_SETTLE_* scaling.
@@ -155,7 +155,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Only Spark MCP long-pollers extend the cap. Codex writes the bare tool name
+// Only Codara MCP long-pollers extend the cap. Codex writes the bare tool name
 // in payload.name (e.g. "spark_wait_for_workers"); the mcp__server__ prefix
 // lives in payload.namespace, so name alone is the gate.
 function isSparkLongPollMcpTool(name: string): boolean {
@@ -192,11 +192,11 @@ function resolveAutomationPromptPath(): string {
     : join(__dirname, "..", "..", "resources", "orchestration", AUTOMATION_PROMPT_RESOURCE_FILENAME);
 }
 
-const DEFAULT_TALK_PROMPT = `You are running inside Spark Agent's Talk mode. The user is chatting with you conversationally; respond as a helpful, terse engineering collaborator.
+const DEFAULT_TALK_PROMPT = `You are running inside Codara's Talk mode. The user is chatting with you conversationally; respond as a helpful, terse engineering collaborator.
 
 Keep answers focused: clarify, ask, and explain. Do not make filesystem changes or run destructive commands unless the user explicitly asks for them. When you do need to run a tool, prefer read-only inspection (ls, rg, cat) over writes.
 
-TODO(execute-mode): When Spark's Talk-mode chat escalates into an Execute run, this prompt is replaced by a stricter operational variant. For now treat every chat message as advisory and avoid side-effects on the workspace.
+TODO(execute-mode): When Codara's Talk-mode chat escalates into an Execute run, this prompt is replaced by a stricter operational variant. For now treat every chat message as advisory and avoid side-effects on the workspace.
 `;
 
 const ROLLOUT_FILENAME_UUID_RE = /rollout-.*-([0-9a-f-]{36})\.jsonl$/i;
@@ -607,7 +607,7 @@ function handleEntry(
       // Track for execute-mode SparkManagerDecision conversion after the
       // turn ends — same pattern as the Claude backend.
       session.turnToolCalls.push({ toolName, toolUseId, input: parsedInput });
-      // Track Spark long-poll MCP calls so waitForTurnEnd extends its cap
+      // Track Codara long-poll MCP calls so waitForTurnEnd extends its cap
       // while Codex is blocked inside the tool. Removed by function_call_output;
       // backstopped by expiresAt sweep in effectiveTurnTimeoutMs.
       if (isSparkLongPollMcpTool(toolName)) {

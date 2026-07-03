@@ -1,5 +1,5 @@
 // Preview-bridge — main-side half of the request/response IPC that lets the
-// agent-socket dispatcher drive any open <preview> tab inside Spark.
+// agent-socket dispatcher drive any open <preview> tab inside Codara.
 //
 // Architecture
 // ------------
@@ -100,7 +100,7 @@ export async function requestPreviewOp<T = unknown>(
   const win = pickTargetWindow();
   if (!win) {
     throw new Error(
-      "No Spark window is open. Open Spark and a preview tab before calling spark-preview tools.",
+      "No Codara window is open. Open Codara and a preview tab before calling spark-preview tools.",
     );
   }
   if (win.webContents.isDestroyed() || win.webContents.isLoading()) {

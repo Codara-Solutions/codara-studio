@@ -31,7 +31,7 @@ export const openRouterBackend: SparkAgentBackend = {
   async requestManagerDecision(input: ManagerRequestInput): Promise<ManagerCallResult> {
     const config = readOpenRouterConfig(input.settings);
     if (!config) {
-      throw new Error("OpenRouter API key is not configured. Set it in Settings > Spark Agent.");
+      throw new Error("OpenRouter API key is not configured. Set it in Settings > OpenRouter.");
     }
     const promptProfile = loadManagerPromptProfile();
     // Per-chat model override beats the global setting. This is what makes the

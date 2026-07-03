@@ -87,7 +87,7 @@ interface PaneWatcher {
   workspaceName: string;
   tabId: string;
   tabTitle: string;
-  // Spark-orchestrated worker panes register excluded — their lifecycle
+  // Cora-orchestrated worker panes register excluded — their lifecycle
   // already alerts through run-store status events, and double-notifying
   // every worker turn would be pure noise.
   excluded: boolean;
@@ -592,7 +592,7 @@ function runtimeLabel(runtime: PublicAgentRuntime | null): string {
 // is looking elsewhere — that hidden case is exactly when the renderer's own
 // visible-buffer poller is frozen and the banner gets stuck on "working". We
 // dedup on lastEmittedState so a repeated state (e.g. "working" re-asserted by
-// every footer repaint) doesn't spam IPC. Excluded panes (Spark workers) carry
+// every footer repaint) doesn't spam IPC. Excluded panes (Cora workers) carry
 // their own run-store-driven chip and are skipped. Note we deliberately do NOT
 // emit for the worker-pane case; manual panes are the audience.
 function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {

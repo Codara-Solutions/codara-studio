@@ -1,5 +1,5 @@
 /**
- * Runtime resolution of Spark's CSS custom properties into concrete rgb strings.
+ * Runtime resolution of Codara's CSS custom properties into concrete rgb strings.
  *
  * styles.css declares tokens in oklch() / color-mix(), which xterm.js (WebGL),
  * Monaco, and CodeMirror's static theme builders can't consume directly. We
@@ -74,7 +74,7 @@ function resolve(el: HTMLDivElement, varName: string): string {
 }
 
 /**
- * Reads every Spark theme token and returns the resolved rgb strings.
+ * Reads every Codara theme token and returns the resolved rgb strings.
  *
  * WHY: xterm WebGL, Monaco, and CodeMirror need rgb() — they can't parse
  * oklch() or color-mix(). This bridges the design tokens to those consumers.

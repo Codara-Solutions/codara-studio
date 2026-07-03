@@ -151,8 +151,8 @@ const api = {
         return {
           startedAt: now,
           completedAt: now,
-          mcp: { toClaude: [], toCodex: [], skipped: [], errors: ["Restart Spark to enable agent sync."] },
-          skills: { toClaude: [], toCodex: [], skipped: [], errors: ["Restart Spark to enable agent sync."] },
+          mcp: { toClaude: [], toCodex: [], skipped: [], errors: ["Restart Codara to enable agent sync."] },
+          skills: { toClaude: [], toCodex: [], skipped: [], errors: ["Restart Codara to enable agent sync."] },
         };
       }),
     assets: (input?: { cwd?: string | null }): Promise<AgentAssetInventory> =>
@@ -163,14 +163,14 @@ const api = {
     deleteAsset: (id: string): Promise<AgentAssetDeleteResult> =>
       ipcRenderer.invoke("agents:deleteAsset", { id }).catch((err: unknown) => {
         if (isMissingIpcHandlerError(err, "agents:deleteAsset")) {
-          return { ok: false, deleted: [], error: "Restart Spark to enable agent asset deletion." };
+          return { ok: false, deleted: [], error: "Restart Codara to enable agent asset deletion." };
         }
         throw err;
       }),
     installAsset: (id: string, target: "claude" | "codex"): Promise<AgentAssetInstallResult> =>
       ipcRenderer.invoke("agents:installAsset", { id, target }).catch((err: unknown) => {
         if (isMissingIpcHandlerError(err, "agents:installAsset")) {
-          return { ok: false, installed: [], error: "Restart Spark to enable installing to another runtime." };
+          return { ok: false, installed: [], error: "Restart Codara to enable installing to another runtime." };
         }
         throw err;
       }),
@@ -185,7 +185,7 @@ const api = {
     ): Promise<SparkBuiltinActionResult> =>
       ipcRenderer.invoke("agents:installBuiltin", { id, runtime }).catch((err: unknown) => {
         if (isMissingIpcHandlerError(err, "agents:installBuiltin")) {
-          return { ok: false, error: "Restart Spark to enable installing built-in MCP servers." };
+          return { ok: false, error: "Restart Codara to enable installing built-in MCP servers." };
         }
         throw err;
       }),
@@ -195,7 +195,7 @@ const api = {
     ): Promise<SparkBuiltinActionResult> =>
       ipcRenderer.invoke("agents:uninstallBuiltin", { id, runtime }).catch((err: unknown) => {
         if (isMissingIpcHandlerError(err, "agents:uninstallBuiltin")) {
-          return { ok: false, error: "Restart Spark to enable removing built-in MCP servers." };
+          return { ok: false, error: "Restart Codara to enable removing built-in MCP servers." };
         }
         throw err;
       }),
@@ -592,7 +592,7 @@ const api = {
      * update into run-store so any worker attempt hosted in that pane carries
      * the freshest "what is the agent doing" state.
      *
-     * `paneId` is the same id used for pty:spawn — for Spark workers this is
+     * `paneId` is the same id used for pty:spawn — for Cora workers this is
      * the attemptId, for manual claude/codex panes it's the leaf id. Main
      * silently drops reports for panes that have no live WorkerAttempt
      * attached (manual user panes), so the IPC is safe to call from every
@@ -692,7 +692,7 @@ const api = {
     readImageAsTempFile: (): Promise<string | null> =>
       ipcRenderer.invoke("clipboard:readImageAsTempFile"),
   },
-  // Spark-preview MCP bridge: main forwards preview-tool requests here, the
+  // cora-preview MCP bridge: main forwards preview-tool requests here, the
   // renderer dispatches against the picked preview tab and sends a response
   // back through ipcRenderer.send. One listener per renderer process.
   previewBridge: {
@@ -785,7 +785,7 @@ const api = {
     cancel: (searchId: string): Promise<void> =>
       ipcRenderer.invoke("search:cancel", searchId),
   },
-  // Browser-ish URLs should stay inside Spark by default. Non-browser
+  // Browser-ish URLs should stay inside Codara by default. Non-browser
   // schemes still route through Electron so mailto: and friends work.
   openExternal: async (url: string): Promise<void> => {
     if (isBrowserUrl(url)) {

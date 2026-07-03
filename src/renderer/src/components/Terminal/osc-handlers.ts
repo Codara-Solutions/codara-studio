@@ -6,7 +6,7 @@ import type { IMarker, Terminal } from "@xterm/xterm";
 // OSC 133;A — prompt start; we drop a non-disposing xterm marker so callers
 //   can later highlight per-prompt blocks inline (the marker survives the
 //   buffer trim threshold xterm enforces by default).
-// OSC 8888;file=<path> — Spark-private "open file in editor" extension. The
+// OSC 8888;file=<path> — Codara-private "open file in editor" extension. The
 //   shell-integration scripts emit it via the `spark_open` / `tp` command;
 //   the renderer dispatches `spark:terax-open` so any registered editor
 //   subscriber can pop the file open.

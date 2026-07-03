@@ -1,6 +1,6 @@
 // CLI provider abstraction.
 //
-// One TypeScript interface per coding CLI that Spark can spawn (Claude Code,
+// One TypeScript interface per coding CLI that Codara can spawn (Claude Code,
 // Codex CLI, Cursor Agent today; Aider, Amp, OpenCode, Grok CLI, Droid,
 // Hermes, Pi, Kimi, Kiro, Antigravity, Cline tomorrow). The contract bundles
 // everything callers need to launch the binary without baking CLI-specific
@@ -112,7 +112,7 @@ export interface CliProvider {
    * Absolute path to the CLI's own settings / hook config file (e.g.
    * `~/.claude/settings.json` for Claude). Used by the future hook
    * ingestion pipeline (research §50). Undefined when the CLI doesn't
-   * expose a writable config file or Spark doesn't need to read one.
+   * expose a writable config file or Codara doesn't need to read one.
    */
   hookConfigPath?: string;
   /** Feature flags surfaced via the renderer's `<Capability />` wrapper. */
@@ -134,7 +134,7 @@ export interface CliProvider {
    * Returns the recommended single-line shell command for a worker pane
    * using the provider's default model + effort. Surfaced in
    * detectAgentRuntimes diagnostics — the user pastes it into a terminal
-   * to TEST the install before relying on Spark to spawn it.
+   * to TEST the install before relying on Codara to spawn it.
    */
   recommendedWorkerCommand(model: AgentRuntimeModel, effort: AgentEffortLevel): string;
 }

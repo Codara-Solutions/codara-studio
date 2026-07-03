@@ -1,4 +1,4 @@
-// Spark Agent backend registry.
+// Cora manager backend registry.
 //
 // Single source of truth for the backends a chat's `chatBackend` field can
 // resolve to. Adding a new backend later is one new file + one entry here.
@@ -22,7 +22,7 @@ const REGISTRY: Record<ChatBackendKind, SparkAgentBackend> = {
 
 export function getBackend(kind: ChatBackendKind): SparkAgentBackend {
   const backend = REGISTRY[kind];
-  if (!backend) throw new Error(`Unknown Spark Agent backend: ${kind}`);
+  if (!backend) throw new Error(`Unknown Cora manager backend: ${kind}`);
   return backend;
 }
 

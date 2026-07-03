@@ -1,6 +1,6 @@
 // Provider registry.
 //
-// Single source of truth for the CLI providers Spark knows about. Adding a
+// Single source of truth for the CLI providers Codara knows about. Adding a
 // new coding CLI is a two-step process:
 //
 //   1. Create `src/main/providers/<id>.ts` that exports a `CliProvider`
@@ -9,7 +9,7 @@
 //      detectAgentRuntimes returns runtimes in, which is also the order
 //      they appear in the Settings > Agents picker.
 //
-// Spark must NOT silently fall back when a caller asks for an unknown
+// Codara must NOT silently fall back when a caller asks for an unknown
 // provider id — the lookup throws so the bug surfaces immediately instead
 // of a worker spawning under the wrong runtime.
 

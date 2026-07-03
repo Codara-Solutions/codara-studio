@@ -323,7 +323,7 @@ export async function mergeBackSandboxWorktree(
 
 // Normalize a path for comparison: forward slashes, no trailing slash, lower
 // case. git emits worktree paths with `/` (and sometimes a different drive-
-// letter case) on Windows, while Spark hands us native `\` paths — so we can't
+// letter case) on Windows, while Codara hands us native `\` paths — so we can't
 // compare them raw.
 function normalizePathForCompare(p: string): string {
   return p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();

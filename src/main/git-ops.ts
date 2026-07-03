@@ -279,7 +279,7 @@ function parseStatus(stdout: string): GitStatus {
 async function computeGitLog(cwd: string): Promise<GitLog> {
   try {
     // --all would walk every ref including refs/spark/runs/* (the hidden
-    // checkpoint refs Spark writes to back chat undo). We deliberately scope
+    // checkpoint refs Codara writes to back chat undo). We deliberately scope
     // to the namespaces users care about so internal plumbing commits never
     // leak into History.
     const { stdout } = await runGit(cwd, [

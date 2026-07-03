@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Spark Agent UserPromptSubmit hook for Claude Code.
+"""Codara UserPromptSubmit hook for Claude Code.
 
 Original purpose was to inject the user's prompt into CC by reading the
 queue file and writing it to stdout (CC appends UserPromptSubmit hook stdout
@@ -17,7 +17,7 @@ append a duplicate of the prompt as an attachment block.
 Design constraints mirror spark-hook.py:
 - Python 3.6+ only, stdlib only.
 - Resolve SPARK_HOME_DIR / SPARK_USER_DATA_DIR exactly like
-  src/main/spark-home.ts; fall back to ~/.Cora (or the legacy ~/.SparkAgent when ~/.Cora does not exist yet).
+  src/main/spark-home.ts; fall back to ~/.Codara, then ~/.Cora, then the legacy ~/.SparkAgent.
 - Always exit 0 — a non-zero exit fails the hook and blocks CC.
 - Read SPARK_RUN_ID from the env (set by claude-backend on spawn).
 """
@@ -29,12 +29,13 @@ import sys
 
 def _spark_home() -> str:
     """Mirror src/main/spark-home.ts resolution order."""
-    override = os.environ.get("CORA_HOME_DIR") or os.environ.get("SPARK_HOME_DIR") or os.environ.get("SPARK_USER_DATA_DIR")
+    override = os.environ.get("CODARA_HOME_DIR") or os.environ.get("SPARK_HOME_DIR") or os.environ.get("SPARK_USER_DATA_DIR")
     if override and override.strip():
         return override
-    cora = os.path.join(os.path.expanduser("~"), ".Cora")
-    if os.path.isdir(cora):
-        return cora
+    for name in (".Codara", ".Cora"):
+        candidate = os.path.join(os.path.expanduser("~"), name)
+        if os.path.isdir(candidate):
+            return candidate
     return os.path.join(os.path.expanduser("~"), ".SparkAgent")
 
 

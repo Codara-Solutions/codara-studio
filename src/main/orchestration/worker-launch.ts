@@ -132,7 +132,7 @@ export async function waitForAgentTui(
 
 export async function waitForCodexInputReady(attemptId: string): Promise<void> {
   // Codex paints its model banner before it finishes MCP-server startup. If
-  // Spark bracket-pastes the worker prompt during that startup window, some
+  // Codara bracket-pastes the worker prompt during that startup window, some
   // Codex TUI builds drop the paste/submit and sit forever at the prompt.
   //
   // The placeholder/suggestion strings rotate and change between Codex
@@ -229,7 +229,7 @@ export async function writeAutoFailureReport(
 ): Promise<void> {
   const report: WorkerReport = {
     status: "failed",
-    summary: `Spark could not complete the ${task.runtimePreference} CLI worker for this task: ${reason}.`,
+    summary: `Codara could not complete the ${task.runtimePreference} CLI worker for this task: ${reason}.`,
     filesChanged: [],
     commandsRun: [],
     tests: [],

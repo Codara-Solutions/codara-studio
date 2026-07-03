@@ -527,7 +527,7 @@ export function registerIpc(): void {
   });
 
   // Import external files/folders dropped onto the Explorer. The DESTINATION
-  // is gated by the read sandbox so a hostile renderer can't make Spark write
+  // is gated by the read sandbox so a hostile renderer can't make Codara write
   // a copy outside the open workspaces; the sources can live anywhere on disk
   // (that's the whole point of importing them in).
   ipcMain.handle(
@@ -1463,7 +1463,7 @@ export function registerIpc(): void {
     // Windows that executes the file with its default handler (e.g. a .bat),
     // so a malicious file:// URL would be remote code execution. Instead
     // reveal the target in the OS file manager (never run it). The preload's
-    // openExternal already routes file:// to Spark's in-app browser, so this
+    // openExternal already routes file:// to Codara's in-app browser, so this
     // branch only fires for callers (openInSystemBrowser) that hit the channel
     // directly.
     if (/^file:/i.test(url)) {

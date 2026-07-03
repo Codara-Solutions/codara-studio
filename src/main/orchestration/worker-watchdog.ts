@@ -15,7 +15,7 @@ const WORKSPACE_SKIP = new Set([
   ".git",
   ".next",
   ".turbo",
-  ".Cora", ".SparkAgent",
+  ".Codara", ".Cora", ".SparkAgent",
   "build",
   "coverage",
   "dist",
