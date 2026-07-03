@@ -3764,7 +3764,12 @@ const Workspace = React.memo(function Workspace({
                 position: "absolute",
                 inset: 0,
                 visibility: isActive ? "visible" : "hidden",
-                pointerEvents: isActive ? "auto" : "none",
+                // Always none — this layer paints above ChatStack, so enabling
+                // pointer events here would let its empty space swallow clicks
+                // aimed at the chat surface below (dead composer buttons).
+                // TerminalStack keeps its own root at pointer-events:none and
+                // each visible terminal-tab wrapper re-enables auto for itself.
+                pointerEvents: "none",
               }}
             >
               <TerminalStack
