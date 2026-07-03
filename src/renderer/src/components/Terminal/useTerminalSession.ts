@@ -38,7 +38,7 @@ export type { SparkOpenInput };
 const FONT_SIZE = 13;
 const FIT_DEBOUNCE_MS = 8;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
-const RESTORE_NOTICE = "[restored from last Codara session]";
+const RESTORE_NOTICE = "[restored from last Codara Studio session]";
 
 // Shell-escape a dropped file path for insertion at the terminal cursor,
 // replicating iTerm2's default drag-and-drop behavior.

@@ -301,7 +301,7 @@ function WindowChrome({
             lineHeight: 1,
           }}
         >
-          Codara
+          Codara Studio
         </span>
       </div>
       <div style={{ flex: 1 }} />

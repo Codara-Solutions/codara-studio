@@ -1,4 +1,4 @@
-# Codara
+# Codara Studio
 
 Desktop control surface (Electron) for supervising AI coding agents — terminals,
 runs, automations, and a built-in browser Preview.

@@ -3916,7 +3916,7 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
           gap: 6,
         }}
       >
-        <span>Codara stores its data in</span>
+        <span>Codara Studio stores its data in</span>
         <span
           style={{
             fontFamily: "var(--font-mono)",

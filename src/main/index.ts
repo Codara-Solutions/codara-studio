@@ -41,7 +41,7 @@ async function getRunStore(): Promise<typeof import("./orchestration/run-store")
   return runStoreMod;
 }
 
-app.setName("Codara");
+app.setName("Codara Studio");
 
 // Chromium feature flags Codara never uses. Disabling them at startup saves
 // ~25-40 MB of idle RAM by preventing background services from spinning up:
@@ -153,9 +153,9 @@ function ensureTray(): void {
       trayImage = trayImage.resize({ width: 18, height: 18 });
     }
     tray = new Tray(trayImage);
-    tray.setToolTip("Codara");
+    tray.setToolTip("Codara Studio");
     const menu = Menu.buildFromTemplate([
-      { label: "Show Codara", click: showMainWindow },
+      { label: "Show Codara Studio", click: showMainWindow },
       {
         label: "Open Automations",
         click: () => {
@@ -165,7 +165,7 @@ function ensureTray(): void {
       },
       { type: "separator" },
       {
-        label: "Quit Codara",
+        label: "Quit Codara Studio",
         click: () => {
           isQuitting = true;
           app.quit();
@@ -188,7 +188,7 @@ function createWindow(): void {
     show: false,
     autoHideMenuBar: true,
     backgroundColor: "#0e0d0b",
-    title: "Codara",
+    title: "Codara Studio",
     icon: windowIcon,
     // `titleBarStyle: "hidden"` removes the OS-painted frame so we can draw
     // our own chrome. We used to pair this with `titleBarOverlay` to paint

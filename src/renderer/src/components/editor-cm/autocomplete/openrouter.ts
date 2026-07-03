@@ -39,7 +39,7 @@ export async function requestOpenRouterCompletion(
   // Throw a recognisable error so the inline-ai status badge surfaces it
   // instead of crashing the renderer.
   if (!window.spark.inlineAi || typeof window.spark.inlineAi.complete !== "function") {
-    throw new Error("Preload not refreshed — restart Codara");
+    throw new Error("Preload not refreshed — restart Codara Studio");
   }
 
   const requestId = generateRequestId();

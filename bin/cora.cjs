@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// cora — talk to the running Codara app from a terminal.
+// cora — talk to the running Codara Studio app from a terminal.
 //
 // Discovers the app the same way the MCP servers do: read
 // $CODARA_HOME_DIR/agent-socket.json (default ~/.Codara) for the loopback URL +
@@ -17,7 +17,7 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 
-const HELP = `cora — drive the running Codara app from your terminal
+const HELP = `cora — drive the running Codara Studio app from your terminal
 
 USAGE
   cora <command> [args] [--json]
