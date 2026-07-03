@@ -61,6 +61,20 @@ interface Props {
   run: RunState | null;
   cwd: string | null;
   disabled?: boolean;
+  // Pin the manager mode: the PlanModeToggle is hidden and every send (draft
+  // and follow-up alike) carries exactly this mode. Used by embedded surfaces
+  // that exist FOR one mode — e.g. the Automations Hub's loom-architect chat,
+  // which is always chatMode "automation". Leaving this unset keeps the normal
+  // user-cycling pill.
+  lockedMode?: ChatMode;
+  // Detach the window-level spark:focus-composer / spark:prefill-composer
+  // listeners while true. The chat tab only ever mounts ONE composer, but an
+  // embedded composer (Automations assist chat) stays mounted-but-hidden when
+  // its tab is in the background — without this guard it would swallow
+  // prefill broadcasts (Stop-restore, browser-inspector "ship to composer")
+  // aimed at the visible chat composer. Run-scoped listeners (chat.usage
+  // token accumulation) intentionally keep running so totals stay accurate.
+  suspendGlobalEvents?: boolean;
   onStartChat: (
     message: string,
     clientMessageId: string,
@@ -107,7 +121,15 @@ interface MentionQuery {
   query: string;
 }
 
-export default function ChatComposer({ run, cwd, disabled, onStartChat, onForcePauseRun }: Props) {
+export default function ChatComposer({
+  run,
+  cwd,
+  disabled,
+  lockedMode,
+  suspendGlobalEvents,
+  onStartChat,
+  onForcePauseRun,
+}: Props) {
   const [draft, setDraft] = useState("");
   const [images, setImages] = useState<AddRunMessageAttachmentInput[]>([]);
   const [fileMentions, setFileMentions] = useState<FileMention[]>([]);
@@ -120,7 +142,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   const [error, setError] = useState<string | null>(null);
   const [draftChatBackend, setDraftChatBackend] = useState<ChatBackendKind>(DEFAULT_CHAT_BACKEND);
   const [draftChatModel, setDraftChatModel] = useState<string>(DEFAULT_CHAT_MODEL);
-  const [draftChatMode, setDraftChatMode] = useState<ChatMode>(DEFAULT_CHAT_MODE);
+  const [draftChatMode, setDraftChatMode] = useState<ChatMode>(lockedMode ?? DEFAULT_CHAT_MODE);
   const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(DEFAULT_CHAT_EFFORT);
   // Tracks whether the draft default has been resolved from settings + runtime
   // diagnostics. The first paint uses the hardcoded fallbacks above; once the
@@ -143,10 +165,11 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
 
   // Focus on the global composer shortcut (App broadcasts spark:focus-composer).
   useEffect(() => {
+    if (suspendGlobalEvents) return;
     const handler = () => textareaRef.current?.focus({ preventScroll: true });
     window.addEventListener("spark:focus-composer", handler);
     return () => window.removeEventListener("spark:focus-composer", handler);
-  }, []);
+  }, [suspendGlobalEvents]);
 
   // Resolve the draft default from settings + runtimes. The hardcoded
   // fallback above (OpenRouter + Gemini Flash) only matters before this
@@ -207,6 +230,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   // mid-thought; pass `replace: true` to overwrite the draft entirely (used
   // by undo so the just-removed message reappears verbatim for editing).
   useEffect(() => {
+    if (suspendGlobalEvents) return;
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<{ text?: unknown; replace?: unknown }>).detail;
       const text = typeof detail?.text === "string" ? detail.text : "";
@@ -227,7 +251,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
     };
     window.addEventListener("spark:prefill-composer", handler);
     return () => window.removeEventListener("spark:prefill-composer", handler);
-  }, []);
+  }, [suspendGlobalEvents]);
 
   // Grow the textarea with its content up to a cap, then scroll internally.
   useEffect(() => {
@@ -418,7 +442,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
         const chatConfig: ChatComposerStartConfig = {
           backend: draftChatBackend,
           model: draftChatModel,
-          mode: draftChatMode,
+          mode: lockedMode ?? draftChatMode,
           effort: draftChatEffort,
           fastMode: draftFastMode,
           oneMillionContext: draftOneMillionContext,
@@ -616,7 +640,13 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
 
   const activeChatBackend: ChatBackendKind = run_?.chatBackend ?? draftChatBackend;
   const activeChatModelId: string = run_?.chatModel ?? draftChatModel;
-  const activeChatMode: ChatMode = run_?.chatMode ?? draftChatMode;
+  // lockedMode wins even over a run's persisted chatMode — the embedding
+  // surface owns the mode outright, so the shell styling and every send stay
+  // pinned to it no matter what the run record says. An EXISTING run with no
+  // stamped chatMode dispatches as execute (resolveChatBackendConfig's
+  // fallback), so display that — not the draft default, which is now "auto".
+  const activeChatMode: ChatMode =
+    lockedMode ?? run_?.chatMode ?? (run_ ? "execute" : draftChatMode);
   const activeChatEffort: AgentEffortLevel = run_?.chatEffort ?? draftChatEffort;
   const rawFastMode: boolean = run_?.chatFastMode ?? draftFastMode;
   const rawOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
@@ -733,7 +763,9 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
   // has no popover, so no global listener is needed here anymore.
 
   const placeholder = !run_
-    ? "Tell Cora what to build, or describe a task."
+    ? lockedMode === "automation"
+      ? "Describe the loom you want — trigger, loop, and worker."
+      : "Tell Cora what to build, or describe a task."
     : openQuestion
       ? "Answer Cora, and it keeps going."
       : isTerminal
@@ -890,7 +922,7 @@ export default function ChatComposer({ run, cwd, disabled, onStartChat, onForceP
               availableEfforts={availableEfforts}
               onCycle={onPickEffort}
             />
-            <PlanModeToggle mode={activeChatMode} onSelect={onSelectMode} />
+            {!lockedMode && <PlanModeToggle mode={activeChatMode} onSelect={onSelectMode} />}
             {fastModeAvailable && (
               <button
                 type="button"

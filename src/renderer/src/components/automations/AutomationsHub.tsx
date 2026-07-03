@@ -25,6 +25,7 @@ import WorkersView from "./WorkersView";
 import RunPeek from "./RunPeek";
 import MiniFlow from "./MiniFlow";
 import NodeFlowEditor from "./flow/NodeFlowEditor";
+import AssistChat from "./AssistChat";
 
 // AutomationsHub — the dedicated home for "Looms": automations that are a
 // TRIGGER (when to start) + a LOOP (how it repeats) + a WORKER (which CLI
@@ -44,7 +45,14 @@ export interface Props {
   terminalScrollbackLineLimit: number;
 }
 
-type Mode = { kind: "view" } | { kind: "create" } | { kind: "edit"; job: ScheduledJob };
+// view — list + detail; create/edit — the manual node-flow editor; assist —
+// the "Create with Cora" split: live loom list on the left, an architect chat
+// (chatMode "automation") on the right.
+type Mode =
+  | { kind: "view" }
+  | { kind: "create" }
+  | { kind: "edit"; job: ScheduledJob }
+  | { kind: "assist" };
 type SubTab = "looms" | "workers";
 
 const SUBTAB_STORAGE_KEY = "spark.automations.subtab";
@@ -221,7 +229,9 @@ export default function AutomationsHub({
       // nothing is being authored. Mirrors the onNewLoom guard — unconditionally
       // setting {kind:"view"} here would clobber an open create/edit draft (this
       // is reachable while editing via a Workers-pane loom button / armed row).
-      setMode((m) => (m.kind === "view" ? { kind: "view" } : m));
+      // The assist chat is NOT a draft (its run persists and resumes), so an
+      // explicit "show me this loom" wins over it and reveals the detail pane.
+      setMode((m) => (m.kind === "create" || m.kind === "edit" ? m : { kind: "view" }));
     },
     [switchSubTab],
   );
@@ -233,7 +243,85 @@ export default function AutomationsHub({
     [act],
   );
 
-  const editing = mode.kind !== "view";
+  // "editing" = the node-flow editor owns the body (create/edit draft).
+  // "assisting" = the Cora architect chat replaces the detail pane.
+  const editing = mode.kind === "create" || mode.kind === "edit";
+  const assisting = mode.kind === "assist";
+
+  // The looms list column, shared by the plain view (list + detail) and the
+  // assist view (list + architect chat). Only one of the two renders at a
+  // time; the list itself is stateless (jobs/selection live on the hub), so
+  // remounting across the branches is harmless.
+  const loomListAside = (
+    <aside
+      style={{
+        flex: "0 0 300px",
+        width: 300,
+        minWidth: 0,
+        display: "flex",
+        flexDirection: "column",
+        background: "var(--panel)",
+        borderRight: "1px solid var(--rule)",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "10px 12px",
+          borderBottom: "1px solid var(--rule)",
+        }}
+      >
+        <span className="spark-eyebrow" style={{ flex: 1 }}>
+          Looms
+        </span>
+        <span className="spark-mono spark-num" style={{ fontSize: 10, color: "var(--muted-2)" }}>
+          {String(jobs.length).padStart(2, "0")}
+        </span>
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "8px 8px 12px" }}>
+        {loading ? (
+          <div style={{ padding: "10px 8px", color: "var(--muted-2)", fontSize: 11 }}>Loading…</div>
+        ) : jobs.length === 0 ? (
+          <div className="spark-empty" style={{ padding: "26px 8px", gap: 8 }}>
+            <div className="spark-eyebrow">No looms yet</div>
+            <div className="spark-empty__body">
+              Author a loop that prompts Claude or Codex on your schedule.
+            </div>
+            {!assisting && (
+              <button
+                type="button"
+                className="spark-btn is-primary"
+                style={{ marginTop: 4 }}
+                onClick={() => setMode({ kind: "create" })}
+              >
+                New loom
+              </button>
+            )}
+          </div>
+        ) : (
+          jobs.map((job) => (
+            <AutomationRow
+              key={job.id}
+              job={job}
+              selected={job.id === selectedId}
+              onSelect={() => {
+                setActionError(null);
+                setSelectedId(job.id);
+                // Picking a loom while the assist chat is up means "show
+                // me this loom" — swap the chat for the detail pane. The
+                // session isn't lost: its run persists and "Create with
+                // Cora" resumes it.
+                setMode((m) => (m.kind === "assist" ? { kind: "view" } : m));
+              }}
+            />
+          ))
+        )}
+      </div>
+    </aside>
+  );
 
   return (
     <div
@@ -300,17 +388,33 @@ export default function AutomationsHub({
         </div>
         <span style={{ flex: 1 }} />
         {subTab === "looms" && !editing && (
-          <button
-            type="button"
-            className="spark-btn is-primary"
-            style={{ height: 26, padding: "0 12px", fontSize: 11.5 }}
-            onClick={() => {
-              setActionError(null);
-              setMode({ kind: "create" });
-            }}
-          >
-            + New loom
-          </button>
+          <>
+            {!assisting && (
+              <button
+                type="button"
+                className="spark-btn"
+                style={{ height: 26, padding: "0 12px", fontSize: 11.5 }}
+                onClick={() => {
+                  setActionError(null);
+                  setMode({ kind: "assist" });
+                }}
+                title="Chat with Cora — she designs, creates, and test-runs the loom for you"
+              >
+                ✦ Create with Cora
+              </button>
+            )}
+            <button
+              type="button"
+              className="spark-btn is-primary"
+              style={{ height: 26, padding: "0 12px", fontSize: 11.5 }}
+              onClick={() => {
+                setActionError(null);
+                setMode({ kind: "create" });
+              }}
+            >
+              + New loom
+            </button>
+          </>
         )}
       </div>
 
@@ -394,77 +498,48 @@ export default function AutomationsHub({
               // Switching back to Looms must reveal whatever editor is already
               // open. Only start a fresh create when nothing is being authored;
               // if an edit draft is open, just unhide it (don't double-mount or
-              // clobber the in-progress edit with a blank create form).
+              // clobber the in-progress edit with a blank create form). An
+              // assist chat is not a draft — an explicit "new loom" opens the
+              // manual editor over it (the session persists and resumes).
               switchSubTab("looms");
-              setMode((m) => (m.kind === "view" ? { kind: "create" } : m));
+              setMode((m) => (m.kind === "create" || m.kind === "edit" ? m : { kind: "create" }));
             }}
           />
         )}
 
-        {!editing && subTab === "looms" && (
-        <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: "flex" }}>
-          {/* LEFT: list */}
-          <aside
+        {/* Assist view: live loom list + the Cora architect chat. Kept MOUNTED
+            behind the Workers sub-tab (same visibility contract as the editor
+            above) so the chat's composer draft, session selection, and live
+            stream buffer survive a Looms ↔ Workers flip. `inherit` (not
+            visible/auto) for the same punch-through reason documented on the
+            editor overlay. */}
+        {assisting && (
+          <div
+            aria-hidden={subTab !== "looms"}
             style={{
-              flex: "0 0 300px",
-              width: 300,
-              minWidth: 0,
+              position: "absolute",
+              inset: 0,
               display: "flex",
-              flexDirection: "column",
-              background: "var(--panel)",
-              borderRight: "1px solid var(--rule)",
+              visibility: subTab === "looms" ? "inherit" : "hidden",
+              pointerEvents: subTab === "looms" ? "inherit" : "none",
             }}
           >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                padding: "10px 12px",
-                borderBottom: "1px solid var(--rule)",
-              }}
-            >
-              <span className="spark-eyebrow" style={{ flex: 1 }}>
-                Looms
-              </span>
-              <span className="spark-mono spark-num" style={{ fontSize: 10, color: "var(--muted-2)" }}>
-                {String(jobs.length).padStart(2, "0")}
-              </span>
-            </div>
+            {loomListAside}
+            <AssistChat
+              workspaceId={workspaceId}
+              workspaceName={workspaceName}
+              cwd={cwd}
+              runtimes={runtimes}
+              active={active && subTab === "looms"}
+              onClose={() => setMode({ kind: "view" })}
+            />
+          </div>
+        )}
 
-            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "8px 8px 12px" }}>
-              {loading ? (
-                <div style={{ padding: "10px 8px", color: "var(--muted-2)", fontSize: 11 }}>Loading…</div>
-              ) : jobs.length === 0 ? (
-                <div className="spark-empty" style={{ padding: "26px 8px", gap: 8 }}>
-                  <div className="spark-eyebrow">No looms yet</div>
-                  <div className="spark-empty__body">
-                    Author a loop that prompts Claude or Codex on your schedule.
-                  </div>
-                  <button
-                    type="button"
-                    className="spark-btn is-primary"
-                    style={{ marginTop: 4 }}
-                    onClick={() => setMode({ kind: "create" })}
-                  >
-                    New loom
-                  </button>
-                </div>
-              ) : (
-                jobs.map((job) => (
-                  <AutomationRow
-                    key={job.id}
-                    job={job}
-                    selected={job.id === selectedId}
-                    onSelect={() => {
-                      setActionError(null);
-                      setSelectedId(job.id);
-                    }}
-                  />
-                ))
-              )}
-            </div>
-          </aside>
+        {!editing && !assisting && subTab === "looms" && (
+        <div style={{ flex: 1, minHeight: 0, minWidth: 0, display: "flex" }}>
+          {/* LEFT: list */}
+          {loomListAside}
 
           {/* RIGHT: detail */}
           <section style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>

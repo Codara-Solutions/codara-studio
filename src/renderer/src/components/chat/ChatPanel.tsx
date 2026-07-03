@@ -390,7 +390,9 @@ function RunIdChip({ runId }: { runId: string }) {
 // which both swaps the active chat AND opens (or focuses) its tab in the
 // top strip. Resume happens implicitly: typing into the composer of the
 // reopened chat invokes resumeRun on the next turn.
-function ChatHistoryButton({
+// Exported for the Automations Hub's loom-assistant chat, which reuses the
+// same button/popover to switch between past architect sessions.
+export function ChatHistoryButton({
   runs,
   activeRunId,
   onSelect,

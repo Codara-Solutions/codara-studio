@@ -666,8 +666,24 @@ export default function App() {
     // CHAT_TAB_LABEL above. Run.title is preserved on the RunState for the
     // chat panel header and history popover; only the tab label is forced
     // to a stable brand so short prompts don't surface as "He...".
+    //
+    // Automation-architect chats (chatMode "automation") live in the
+    // Automations tab's assist view now, so they never auto-materialize a
+    // chat tab here. A run whose chat tab is ALREADY open stays in the sync
+    // list, though — syncChatTabsToRuns drops tabs for unlisted runs, and a
+    // legacy automation chat opened via deep link (toast, run switcher) must
+    // survive the next runs refresh. tabsRef is read fresh on every sync, so
+    // an automation tab opened after this effect ran is protected by the
+    // following one.
+    const openChatTabIds = new Set(
+      tabsRef.current.tabs
+        .filter((tab) => tab.kind === "chat")
+        .map((tab) => tab.id),
+    );
     tabsRef.current.syncChatTabsToRuns(
-      runs.map((run) => ({ id: run.id, title: CHAT_TAB_LABEL })),
+      runs
+        .filter((run) => run.chatMode !== "automation" || openChatTabIds.has(run.id))
+        .map((run) => ({ id: run.id, title: CHAT_TAB_LABEL })),
     );
   }, [runs]);
 
@@ -844,10 +860,16 @@ export default function App() {
         activeRunIdRef.current = current;
         return current;
       }
-      const live = runs.find((run) =>
+      // Automation-architect chats never become the fallback selection — they
+      // live in the Automations tab's assist view, and silently landing one in
+      // the Cora chat panel would surface a conversation the chat tab
+      // deliberately hides. (An EXPLICIT selection of one — the deep-link case
+      // — is the `current` branch above, which doesn't filter.)
+      const selectable = runs.filter((run) => run.chatMode !== "automation");
+      const live = selectable.find((run) =>
         ["planning", "running", "reviewing", "blocked", "paused"].includes(run.status),
       );
-      const fallback = live?.id ?? runs[0]?.id ?? null;
+      const fallback = live?.id ?? selectable[0]?.id ?? null;
       activeRunIdsByWorkspaceRef.current[workspaceId] = fallback;
       activeRunIdRef.current = fallback;
       return fallback;

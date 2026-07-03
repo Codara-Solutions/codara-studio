@@ -54,6 +54,15 @@ export default function OrchestrationSidebar({
   );
   const activeRun = creatingNewRun ? null : selectedRun;
 
+  // Automation-architect chats live in the Automations tab's assist view now,
+  // so they're hidden from the chat tab's history popover. Resolution above
+  // still runs over the FULL list on purpose: a legacy automation run selected
+  // via deep link (toast, run switcher) must still render as the active chat.
+  const chatHistoryRuns = useMemo(
+    () => runs.filter((run) => run.chatMode !== "automation"),
+    [runs],
+  );
+
   // A selection landing from outside the panel (right-click Run plan, the
   // workbench tab sync) clears the local draft so the chosen chat shows.
   useEffect(() => {
@@ -220,7 +229,7 @@ export default function OrchestrationSidebar({
   return (
     <ChatPanel
       workspace={workspace}
-      runs={runs}
+      runs={chatHistoryRuns}
       activeRun={activeRun}
       terminalScrollbackLineLimit={terminalScrollbackLineLimit}
       error={error}
