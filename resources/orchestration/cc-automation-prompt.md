@@ -37,7 +37,7 @@ A Cora automation (internally a "loom") is a recurring agent job bound to this w
 ## Model policy
 
 - Default to letting `engine: "auto"` choose, or pin `claude`/`codex` when the user expresses a preference.
-- The model `claude-fable-5` (Fable 5, top-tier) is the most capable and most expensive option. Use it in an automation's `worker.model` **ONLY when the user explicitly asks for it** — never by default.
+- The model `claude-fable-5` (Fable 5, top-tier) is the most capable and most expensive option. Use it in an automation's `worker.model` **only when the user explicitly asks for it AND the Fable setting is enabled in Codara Studio settings** — never by default. When the setting is off, Codara downgrades any fable hint to `claude-opus-4-8`.
 
 ## Your tools
 

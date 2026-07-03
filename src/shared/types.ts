@@ -264,6 +264,13 @@ export interface AppPreferences {
   // in a terminal in the new worktree after creation. Repos with no entry use
   // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
   copyBranchSetupCommandByRepo: Record<string, string>;
+  // Gate for Fable 5 (`claude-fable-5`), Anthropic's top-tier and most
+  // expensive model. Default OFF: when false Fable is hidden from every model
+  // picker and automations that request it fall back to Opus 4.8. Flip on to
+  // opt into the extra cost. The Cora-spawned-worker downgrade is unconditional
+  // regardless of this flag — Fable is only ever available to the main chat
+  // and (when this is on) opt-in automations.
+  fableEnabled?: boolean;
 }
 
 export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "google/gemini-3.5-flash";
@@ -365,6 +372,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keepRunningInBackground: true,
   autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},
+  fableEnabled: false,
 };
 
 // Coarse needs-you-vs-finished classification, still carried by the

@@ -118,7 +118,7 @@ const WORKER_SCHEMA = {
     model: {
       type: "string",
       description:
-        "Engine-native model id (e.g. claude-opus-4-8, gpt-5.5). Omit for the CLI default. NOTE: 'claude-fable-5' (Fable 5, top-tier) is permitted ONLY when the user explicitly asked for it.",
+        "Engine-native model id (e.g. claude-opus-4-8, gpt-5.5). Omit for the CLI default. NOTE: 'claude-fable-5' (Fable 5, top-tier) is permitted ONLY when the user explicitly asked for it AND the Fable setting is enabled in Codara Studio settings; otherwise it is downgraded to claude-opus-4-8.",
     },
     effort: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh", "max"] },
     timeoutMinutes: { type: "number", description: "Hard per-iteration wall-clock ceiling in minutes." },

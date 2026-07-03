@@ -138,6 +138,7 @@ import {
 import { createSandboxWorktree, mergeBackSandboxWorktree, removeSandboxWorktree } from "../git-worktrees";
 import { readGitText } from "../git-exec";
 import { sparkHome } from "../spark-home";
+import { getPreferenceCached } from "../preferences-store";
 import * as pty from "../pty-manager";
 import {
   formatStuckReason,
@@ -5030,10 +5031,22 @@ function buildStandingTerminalCommand(
     effectiveEffort = effort as SpawnOpts["effort"];
   }
 
+  // Fable 5 gate (default off): a Cora-opened standing terminal must not launch
+  // on claude-fable-5 unless the user opted in via the Fable setting. Downgrade
+  // to Opus 4.8 when the pref is off, matching the worker/main-chat chokepoints.
+  let effectiveModel = model?.trim() || undefined;
+  if (
+    effectiveModel &&
+    /fable/i.test(effectiveModel) &&
+    getPreferenceCached("fableEnabled") !== true
+  ) {
+    effectiveModel = SPARK_WORKER_FABLE_FALLBACK;
+  }
+
   const provider = getProvider(runtime);
   const providerArgs = provider.buildArgs({
     cwd: "",
-    model: model?.trim(),
+    model: effectiveModel,
     effort: effectiveEffort,
   });
 
@@ -7534,10 +7547,16 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   if (task.runtimePreference === "codex") {
     await ensureCodexProjectTrust(attempt.cwd).catch(() => undefined);
   }
-  // Automation (loom) workers are allowed fable; the fable backstop in
+  // Automation (loom) workers are allowed fable ONLY when the user opted in
+  // via the Fable setting (default off); the fable backstop in
   // buildLaunchCommandLine only fires for Cora-spawned workers. A direct run
-  // bound to an automationId is the automation worker path.
-  const isAutomationLaunch = run.executionMode === "direct" && Boolean(run.automationId);
+  // bound to an automationId is the automation worker path. With the pref off
+  // we leave isAutomationLaunch false so the backstop downgrades any fable hint
+  // to Opus 4.8, matching the Cora-spawned-worker chokepoint.
+  const isAutomationLaunch =
+    getPreferenceCached("fableEnabled") === true &&
+    run.executionMode === "direct" &&
+    Boolean(run.automationId);
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd, {
     sandboxDir: attempt.sandboxWorktreePath,
     isAutomation: isAutomationLaunch,

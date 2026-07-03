@@ -230,6 +230,10 @@ function normalize(
     copyBranchSetupCommandByRepo: normalizeCopyBranchSetupCommands(
       src.copyBranchSetupCommandByRepo,
     ),
+    fableEnabled:
+      typeof src.fableEnabled === "boolean"
+        ? src.fableEnabled
+        : DEFAULT_PREFERENCES.fableEnabled,
   };
 }
 

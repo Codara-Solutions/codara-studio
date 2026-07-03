@@ -155,16 +155,24 @@ export function clampEffort(
 export function buildVisibleGroups({
   diagnostics,
   openRouterModel,
+  fableEnabled = false,
 }: {
   diagnostics: AgentRuntimeDiagnostic[];
   openRouterModel: string;
+  // Default OFF: Fable 5 is filtered out of the Claude group unless the user
+  // opted in via Settings. The static CLAUDE_MODELS list is left intact, so
+  // toggling the preference back on re-exposes the row with no reload.
+  fableEnabled?: boolean;
 }): ChatBackendGroup[] {
   const groups: ChatBackendGroup[] = [];
   if (isAvailable(diagnostics, "claude")) {
+    const claudeModels = fableEnabled
+      ? CLAUDE_MODELS
+      : CLAUDE_MODELS.filter((m) => !/fable/i.test(m.id));
     groups.push({
       backend: "claude",
       label: labelFor(diagnostics, "claude", "Claude Code"),
-      models: CLAUDE_MODELS,
+      models: claudeModels,
     });
   }
   if (isAvailable(diagnostics, "codex")) {

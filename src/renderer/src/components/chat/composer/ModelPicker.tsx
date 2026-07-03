@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { AgentRuntimeDiagnostic, ChatBackendKind } from "@shared/types";
+import { usePreferences } from "../../../preferences/usePreferences";
 import {
   buildVisibleGroups,
   composeModelId,
@@ -28,6 +29,7 @@ export default function ModelPicker({
   const [open, setOpen] = useState(false);
   const [diagnostics, setDiagnostics] = useState<AgentRuntimeDiagnostic[]>([]);
   const [openRouterModel, setOpenRouterModel] = useState<string>("");
+  const { preferences } = usePreferences();
   const rootRef = useRef<HTMLDivElement>(null);
 
   // One-shot load of runtimes + the configured OpenRouter model. Settings
@@ -66,7 +68,11 @@ export default function ModelPicker({
     };
   }, [open]);
 
-  const groups: ChatBackendGroup[] = buildVisibleGroups({ diagnostics, openRouterModel });
+  const groups: ChatBackendGroup[] = buildVisibleGroups({
+    diagnostics,
+    openRouterModel,
+    fableEnabled: preferences.fableEnabled === true,
+  });
   const activeCompoundId = composeModelId(activeModelId, activeOneMillion);
   const activeLabel = labelFor(groups, activeBackend, activeCompoundId, activeModelId);
 

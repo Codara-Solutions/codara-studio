@@ -1329,6 +1329,7 @@ function AgentsSettings({
 }) {
   const [diagnostics, setDiagnostics] = useState<AgentRuntimeDiagnostic[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const { preferences, setPreference } = usePreferences();
 
   useEffect(() => {
     let alive = true;
@@ -1438,6 +1439,21 @@ function AgentsSettings({
           onChange={(workerStuckMaxAutoRetries) =>
             onChange({ ...draft, workerStuckMaxAutoRetries })
           }
+        />
+      </div>
+
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+
+      <div style={{ display: "grid", gap: 8 }}>
+        <SectionTitle
+          title="Models"
+          detail="Extra models that are hidden by default because they cost significantly more."
+        />
+        <ToggleRow
+          title="Allow Fable 5"
+          desc="Fable 5 is Anthropic's top-tier model — significantly more expensive than Opus 4.8. Off by default: when off it is hidden from the chat model picker and any automation that requests it falls back to Opus 4.8."
+          checked={preferences.fableEnabled === true}
+          onChange={(v) => void setPreference("fableEnabled", v)}
         />
       </div>
     </div>
