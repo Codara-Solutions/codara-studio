@@ -175,12 +175,16 @@ function candidateRunRoots(explicitRoots) {
   for (const root of explicitRoots) roots.push(root);
 
   if (process.env.SPARK_RUNS_DIR) roots.push(process.env.SPARK_RUNS_DIR);
-  if (process.env.SPARK_USER_DATA_DIR) roots.push(path.join(process.env.SPARK_USER_DATA_DIR, "runs"));
+  for (const home of [process.env.CODARA_HOME_DIR, process.env.SPARK_HOME_DIR, process.env.SPARK_USER_DATA_DIR]) {
+    if (home) roots.push(path.join(home, "runs"));
+  }
 
   const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
   const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
   const names = ["Codara", "Cora", "Spark Agent", "spark-agent", "Electron"];
-  roots.push(path.join(os.homedir(), ".SparkAgent", "runs"));
+  for (const home of [".Codara", ".Cora", ".SparkAgent"]) {
+    roots.push(path.join(os.homedir(), home, "runs"));
+  }
   for (const base of [appData, localAppData]) {
     for (const name of names) roots.push(path.join(base, name, "runs"));
   }

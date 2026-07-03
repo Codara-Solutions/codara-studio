@@ -578,11 +578,11 @@ function renderVerifierWorkerPrompt({
     ),
     "",
     "Confidence ladder (Cora uses this to decide what to do next):",
-    "- PERFECT: every atomic claim verified with strong evidence; no missing oracle. Codara accepts the implementation.",
-    "- VERIFIED: every atomic claim verified; minor gaps not load-bearing. Codara accepts.",
-    "- PARTIAL: some atomic claims verified, some unverifiable, none failed. Codara may accept-with-risk or queue a follow-up.",
-    "- FEEDBACK: at least one atomic claim FAILED with a fixable, specific corrective_prompt. Codara retries the implementation worker with your corrective_prompt.",
-    "- FAILED: implementation is broken in ways no narrow corrective prompt fixes (architectural error, wrong file modified, wrong approach). Codara may escalate to the human.",
+    "- PERFECT: every atomic claim verified with strong evidence; no missing oracle. Cora accepts the implementation.",
+    "- VERIFIED: every atomic claim verified; minor gaps not load-bearing. Cora accepts.",
+    "- PARTIAL: some atomic claims verified, some unverifiable, none failed. Cora may accept-with-risk or queue a follow-up.",
+    "- FEEDBACK: at least one atomic claim FAILED with a fixable, specific corrective_prompt. Cora retries the implementation worker with your corrective_prompt.",
+    "- FAILED: implementation is broken in ways no narrow corrective prompt fixes (architectural error, wrong file modified, wrong approach). Cora may escalate to the human.",
   );
 
   return lines.join("\n");

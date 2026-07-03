@@ -9475,14 +9475,14 @@ async function appendCompletionSummaryMessage(runId: string): Promise<RunState> 
   const run = await requireRun(runId);
   if (run.status !== "complete") return run;
   // Chat-only runs (no steps, no worker tasks) already showed their answer in
-  // the chatReply Codara bubble. A separate "Run complete / Codara answered the
+  // the chatReply Cora bubble. A separate "Run complete / Codara answered the
   // chat." turn would just repeat that. The renderer paints a tiny "done"
-  // marker under the last Codara bubble instead.
+  // marker under the last Cora bubble instead.
   if (run.steps.length === 0 && run.workerTasks.length === 0) return run;
   const completedAt = run.completedAt ?? run.updatedAt;
   const completedAtMs = Date.parse(completedAt);
   // If the manager already posted a chatReply note for this completion turn,
-  // suppress the templated summary entirely — one Codara bubble per turn is the
+  // suppress the templated summary entirely — one Cora bubble per turn is the
   // goal. The chatReply is emitted as spark/note by applySparkManagerDecision
   // just before the run flips to complete, so a spark/note whose createdAt is
   // at-or-after completedAt (with a small grace window for clock skew) is the

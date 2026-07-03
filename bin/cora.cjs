@@ -175,7 +175,7 @@ function parseValue(raw) {
   try {
     return JSON.parse(raw);
   } catch {
-    return raw; // bare strings don't need quoting: cora prefs theme cora-classic
+    return raw; // bare strings don't need quoting: cora prefs theme codara-classic
   }
 }
 

@@ -229,7 +229,7 @@ export async function writeAutoFailureReport(
 ): Promise<void> {
   const report: WorkerReport = {
     status: "failed",
-    summary: `Codara could not complete the ${task.runtimePreference} CLI worker for this task: ${reason}.`,
+    summary: `Cora could not complete the ${task.runtimePreference} CLI worker for this task: ${reason}.`,
     filesChanged: [],
     commandsRun: [],
     tests: [],

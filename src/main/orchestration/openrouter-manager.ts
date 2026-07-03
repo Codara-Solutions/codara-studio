@@ -68,8 +68,8 @@ export interface SparkManagerDecision {
   taskComplexity?: TaskComplexity;
   /**
    * Natural-language reply addressed to the user. Populated only when the most
-   * recent humanMessage is a fresh user note that asked Codara to do something
-   * (or asked a question). Empty string otherwise. Surfaced as a Codara chat
+   * recent humanMessage is a fresh user note that asked Cora to do something
+   * (or asked a question). Empty string otherwise. Surfaced as a Cora chat
    * bubble in the run chat — keep it 1-3 sentences, plain English, no JSON.
    */
   chatReply?: string;
@@ -232,7 +232,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
           },
           answer: {
             type: "string",
-            description: "Full answer text Codara should treat as the user's response if selected.",
+            description: "Full answer text Cora should treat as the user's response if selected.",
           },
           recommended: {
             type: "boolean",
@@ -244,7 +244,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
     chatReply: {
       type: "string",
       description:
-        "Natural-language reply to the user, surfaced in the run chat as a Codara bubble. Populate ONLY when the most recent human message is a fresh user note/answer that asks for action or for a status update. 1-3 plain sentences, no JSON, no markdown headings. Empty string when there is no fresh user message to respond to.",
+        "Natural-language reply to the user, surfaced in the run chat as a Cora bubble. Populate ONLY when the most recent human message is a fresh user note/answer that asks for action or for a status update. 1-3 plain sentences, no JSON, no markdown headings. Empty string when there is no fresh user message to respond to.",
     },
     taskComplexity: {
       type: "string",
@@ -296,13 +296,13 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
             type: "string",
             enum: ["worker_batch", "brake"],
             description:
-              "worker_batch: 1+ parallel workers with non-overlapping write scopes. brake: no workers; plannedAgents=[]; checkpoint where Codara replans downstream steps using prior worker reports. HARD STOP: when you emit a brake, the steps array MUST end at that brake. Do not emit any step after a brake; Codara will re-invoke plan_analysis once the brake resolves and you will plan the next slice then.",
+              "worker_batch: 1+ parallel workers with non-overlapping write scopes. brake: no workers; plannedAgents=[]; checkpoint where Cora replans downstream steps using prior worker reports. HARD STOP: when you emit a brake, the steps array MUST end at that brake. Do not emit any step after a brake; Cora will re-invoke plan_analysis once the brake resolves and you will plan the next slice then.",
           },
           title: { type: "string" },
           goal: { type: "string" },
           plannedAgents: {
             type: "array",
-            description: "Agents Codara plans to run in this step, as a compact durable overview. Empty array for kind=brake.",
+            description: "Agents Cora plans to run in this step, as a compact durable overview. Empty array for kind=brake.",
             items: {
               type: "object",
               additionalProperties: false,
@@ -1105,8 +1105,8 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
   if (status === "ask_user") {
     return {
       status,
-      summary: normalizeText(raw.summary, "Codara needs user input before creating worker tasks."),
-      question: question || "Please clarify the next decision Codara should make.",
+      summary: normalizeText(raw.summary, "Cora needs user input before creating worker tasks."),
+      question: question || "Please clarify the next decision Cora should make.",
       questionOptions,
       chatReply,
       steps: [],
@@ -1123,7 +1123,7 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
     if (terminals.length > 0) {
       return {
         status: "spawn_terminals",
-        summary: normalizeText(raw.summary, "Codara is opening terminals."),
+        summary: normalizeText(raw.summary, "Cora is opening terminals."),
         chatReply,
         terminals,
         steps: [],
@@ -1136,7 +1136,7 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
   if (status === "complete") {
     return {
       status,
-      summary: normalizeText(raw.summary, "Codara thinks the run is complete."),
+      summary: normalizeText(raw.summary, "Cora thinks the run is complete."),
       chatReply,
       steps: [],
       tasks: [],
@@ -1149,7 +1149,7 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
       if (mode === "chat") {
         return {
           status: "complete",
-          summary: normalizeText(raw.summary, "Codara answered the chat turn."),
+          summary: normalizeText(raw.summary, "Cora answered the chat turn."),
           chatReply: chatReply || normalizeText(raw.summary, "Done."),
           steps: [],
           tasks: [],
@@ -1158,7 +1158,7 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
       }
       return {
         status: "ask_user",
-        summary: "Codara could not create a step-by-step division from the plan.",
+        summary: "Cora could not create a step-by-step division from the plan.",
         question: question || "Please clarify the concrete outcome this project plan should produce.",
         questionOptions,
         chatReply,
@@ -1172,7 +1172,7 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
       status: "run_workers",
       summary: normalizeText(
         raw.summary,
-        mode === "chat" ? "Codara decided this chat needs worker help." : "Codara analyzed the plan into concrete steps.",
+        mode === "chat" ? "Cora decided this chat needs worker help." : "Cora analyzed the plan into concrete steps.",
       ),
       chatReply,
       steps,
@@ -1190,7 +1190,7 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
     if (mode === "worker_result_review") {
       return {
         status: "run_workers",
-        summary: normalizeText(raw.summary, "Codara accepted the worker; advancing to the next step."),
+        summary: normalizeText(raw.summary, "Cora accepted the worker; advancing to the next step."),
         chatReply,
         steps,
         tasks: [],
@@ -1199,7 +1199,7 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
     }
     return {
       status: "ask_user",
-      summary: "Codara could not produce a worker task from the plan.",
+      summary: "Cora could not produce a worker task from the plan.",
       question: question || "Please clarify the first concrete task to run.",
       questionOptions,
       chatReply,
@@ -1211,7 +1211,7 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
 
   return {
     status: "run_workers",
-    summary: normalizeText(raw.summary, "Codara planned the next worker task."),
+    summary: normalizeText(raw.summary, "Cora planned the next worker task."),
     chatReply,
     steps,
     tasks,
@@ -1270,7 +1270,7 @@ function normalizeSteps(value: unknown): SparkManagerStepDecision[] {
       const plannedAgents = kind === "brake" ? [] : normalizePlannedAgents(item.plannedAgents);
       return {
         kind,
-        title: stripStepPrefix(normalizeText(item.title, `Codara planned step ${index + 1}`)),
+        title: stripStepPrefix(normalizeText(item.title, `Cora planned step ${index + 1}`)),
         goal: normalizeText(item.goal, "Complete the next concrete part of the selected plan."),
         plannedAgents,
         acceptanceCriteria: normalizeStringList(item.acceptanceCriteria),
@@ -1278,7 +1278,7 @@ function normalizeSteps(value: unknown): SparkManagerStepDecision[] {
       };
     });
   // Skeleton-then-brake enforcement: any worker_batch step containing a
-  // skeleton-class plannedAgent must be followed by a brake so Codara can
+  // skeleton-class plannedAgent must be followed by a brake so Cora can
   // inspect the foundation before committing more workers to it. The system
   // prompt requires this; we inject a synthetic brake when the model forgets.
   const enforced: SparkManagerStepDecision[] = [];
@@ -1307,7 +1307,7 @@ function normalizeSteps(value: unknown): SparkManagerStepDecision[] {
     });
   }
   // Hard-stop at the first brake: anything past a brake is speculation made
-  // before the brake's evidence exists. Codara re-invokes plan_analysis once
+  // before the brake's evidence exists. Cora re-invokes plan_analysis once
   // the brake resolves and the manager emits the next slice with prior worker
   // reports in context. The system prompt forbids speculating past a brake;
   // this is the enforcement layer for models that ignore the rule.
@@ -1355,7 +1355,7 @@ function normalizeTasks(value: unknown): SparkManagerTaskDecision[] {
   return value
     .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
     .map((item, index) => {
-      const title = normalizeText(item.title, `Codara worker task ${index + 1}`);
+      const title = normalizeText(item.title, `Cora worker task ${index + 1}`);
       const description = normalizeText(
         item.description,
         "Work on the next focused implementation task.",
