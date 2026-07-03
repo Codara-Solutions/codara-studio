@@ -37,6 +37,11 @@ export type { SparkOpenInput };
 
 const FONT_SIZE = 13;
 const FIT_DEBOUNCE_MS = 8;
+// Cap on consecutive WebGL addon reloads triggered by a lost GL context when a
+// pane is re-shown. Past this we stop reloading and let xterm ride the DOM
+// renderer, so a machine that can't hold a context (GPU eviction storms, driver
+// flake) doesn't thrash a new addon on every tab switch.
+const WEBGL_MAX_RELOADS = 3;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
 const RESTORE_NOTICE = "[restored from last Codara Studio session]";
 
@@ -280,6 +285,10 @@ export function useTerminalSession({
   // in the same effect — can trigger a re-fit + pty.resize after xterm falls
   // back to the DOM renderer. See the onContextLoss handler for why.
   const refitAfterRendererSwapRef = useRef<(() => void) | null>(null);
+  // Bridge to the effect-local renderer-recovery routine so the visibility
+  // layout effect can force a full repaint — and reload a dead WebGL context —
+  // the moment a hidden pane returns to screen. See recoverRendererOnShow.
+  const recoverRendererRef = useRef<(() => void) | null>(null);
   const normalizedScrollbackLineLimit = normalizeTerminalScrollbackLineLimit(scrollbackLineLimit);
   const scrollbackLineLimitRef = useRef<number>(normalizedScrollbackLineLimit);
   useEffect(() => {
@@ -480,15 +489,17 @@ export function useTerminalSession({
       // (driver crash, lost GPU, tab move between displays) we dispose the
       // addon and xterm transparently falls back to DOM.
       let webgl: WebglAddon | null = null;
-      try {
-        webgl = new WebglAddon();
-        webgl.onContextLoss(() => {
+      // Consecutive reloads triggered by a lost GL context on re-show (see
+      // recoverRendererOnShow). Reset once a live context is observed.
+      let webglReloads = 0;
+      const attachWebglLossHandler = (addon: WebglAddon) => {
+        addon.onContextLoss(() => {
           try {
-            webgl?.dispose();
+            addon.dispose();
           } catch {
             /* ignore */
           }
-          webgl = null;
+          if (webgl === addon) webgl = null;
           // Disposing the WebGL addon makes xterm fall back to the DOM renderer.
           // The DOM renderer derives a WIDER css cell width than WebGL (it does
           // NOT floor device char width the way WebglRenderer does), and the
@@ -502,10 +513,95 @@ export function useTerminalSession({
           // size is pushed to the pty (SIGWINCH → the TUI repaints to fit).
           refitAfterRendererSwapRef.current?.();
         });
-        term.loadAddon(webgl);
-      } catch {
-        webgl = null;
-      }
+      };
+      const loadWebgl = (): boolean => {
+        try {
+          const addon = new WebglAddon();
+          attachWebglLossHandler(addon);
+          term.loadAddon(addon);
+          webgl = addon;
+          return true;
+        } catch {
+          webgl = null;
+          return false;
+        }
+      };
+      loadWebgl();
+
+      // Renderer recovery on pane re-activation. Two failure modes are healed
+      // here, both invisible until the pane is shown again — this is the fix for
+      // a terminal rendering ALL BLACK after chat↔terminal tab switches:
+      //   1. The WebGL addon is created with preserveDrawingBuffer:false, so
+      //      after a visibility:hidden → visible toggle the browser may composite
+      //      the canvas as BLACK until the next draw. xterm only repaints DIRTIED
+      //      rows, so a pane shown with no new output (an idle claude/codex TUI)
+      //      — or one where only a few rows changed — keeps the stale black
+      //      buffer. A full-viewport refresh forces every row to redraw and
+      //      repopulate the drawing buffer.
+      //   2. The GL context itself can be evicted while offscreen (too many live
+      //      contexts, GPU memory pressure) WITHOUT the webglcontextlost event
+      //      firing on the hidden canvas, so the addon never falls back. A
+      //      refresh can't repaint a dead context — detect the loss via
+      //      gl.isContextLost() and reload the addon (re-establishing a live
+      //      context, or dropping to the DOM renderer once the reload budget is
+      //      spent).
+      const recoverRendererOnShow = () => {
+        const t = termRef.current;
+        if (!t) return;
+        if (webgl) {
+          // Find the WebGL renderer's OWN canvas. .xterm-screen also holds the
+          // renderer's link layer — a 2D canvas (class xterm-link-layer) that is
+          // appended BEFORE the WebGL canvas — so a plain ".xterm-screen canvas"
+          // query returns the 2D one, and getContext("webgl2") on a canvas that
+          // already owns a 2D context is null. Probe each canvas and keep the one
+          // that actually yields a webgl2 context (the addon's own); a lost-but-
+          // live context is still returned, so isContextLost() is the real signal.
+          let gl: WebGL2RenderingContext | null = null;
+          const canvases = container.current?.querySelectorAll<HTMLCanvasElement>(
+            ".xterm-screen canvas",
+          );
+          if (canvases) {
+            for (const c of canvases) {
+              const ctx = c.getContext("webgl2");
+              if (ctx) {
+                gl = ctx;
+                break;
+              }
+            }
+          }
+          if (!gl || gl.isContextLost()) {
+            try {
+              webgl.dispose();
+            } catch {
+              /* ignore */
+            }
+            webgl = null;
+            if (webglReloads < WEBGL_MAX_RELOADS && loadWebgl()) {
+              webglReloads += 1;
+              // Fresh addon: re-fit so cols/atlas re-establish for the reloaded
+              // renderer, then the refresh below paints the first frame.
+              refitAfterRendererSwapRef.current?.();
+            }
+            // else: reload budget spent — xterm is on the DOM renderer now, and
+            // the refresh below repaints it.
+          } else {
+            // Live context — clear any prior reload debt so a single future loss
+            // still gets the full reload budget.
+            webglReloads = 0;
+          }
+        }
+        try {
+          t.refresh(0, t.rows - 1);
+        } catch {
+          /* terminal may be mid-dispose during a fast switch */
+        }
+      };
+      recoverRendererRef.current = recoverRendererOnShow;
+      cleanups.push(() => {
+        if (recoverRendererRef.current === recoverRendererOnShow) {
+          recoverRendererRef.current = null;
+        }
+      });
 
       // Terminal copy/paste keybindings.
       //
@@ -2087,6 +2183,12 @@ export function useTerminalSession({
       } catch {
         /* ignore late layout churn */
       }
+      // After the final fit (rows settled), force a full repaint and reload the
+      // WebGL context if it was lost while hidden. Without this the pane can
+      // return from a tab switch rendering all black — the WebGL canvas
+      // (preserveDrawingBuffer:false) composites black until a draw, and xterm
+      // only repaints dirtied rows. Runs once per re-activation, not on typing.
+      recoverRendererRef.current?.();
     });
     termRef.current?.focus();
     return () => window.cancelAnimationFrame(raf);

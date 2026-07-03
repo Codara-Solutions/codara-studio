@@ -108,6 +108,108 @@ test("terminal content stays inside the pane after a WebGL→DOM renderer swap",
   }
 });
 
+// Regression guard for the "terminal pane renders ALL BLACK after repeated
+// chat↔terminal tab switches" bug. Terminal tabs are hidden via
+// visibility:hidden (App.tsx), and the WebGL addon canvas is created with
+// preserveDrawingBuffer:false — so after a hidden→visible toggle the canvas can
+// composite black until the next draw, and xterm only repaints dirtied rows.
+// The fix forces a full-viewport refresh (and reloads a lost GL context) on
+// re-show. This test exercises the switch cycle and asserts the recovery path
+// stays on a LIVE renderer — never falsely tearing WebGL down to DOM on benign
+// switches (which would be a thrash regression), never losing the context.
+async function rendererHealth(page: Page): Promise<{
+  renderer: string;
+  contextLost: boolean;
+  overflow: number;
+} | null> {
+  return page.evaluate(() => {
+    const host = document.querySelector(".xterm-host") as HTMLElement | null;
+    if (!host) return null;
+    const screen =
+      (host.querySelector(".xterm-screen") as HTMLElement | null) ??
+      (host.querySelector(".xterm") as HTMLElement | null);
+    if (!screen) return null;
+    // .xterm-screen holds the WebGL renderer's link layer (a 2D canvas) plus
+    // the WebGL canvas itself; probe each for a real webgl2 context so we read
+    // the renderer's own canvas, not the 2D link layer.
+    const canvases = Array.from(
+      host.querySelectorAll(".xterm-screen canvas"),
+    ) as HTMLCanvasElement[];
+    let gl: WebGL2RenderingContext | null = null;
+    for (const c of canvases) {
+      const ctx = c.getContext("webgl2");
+      if (ctx) {
+        gl = ctx;
+        break;
+      }
+    }
+    const hr = host.getBoundingClientRect();
+    const sr = screen.getBoundingClientRect();
+    const padR = parseFloat(getComputedStyle(host).paddingRight) || 0;
+    return {
+      renderer: gl ? "webgl" : "DOM",
+      contextLost: !!gl && gl.isContextLost(),
+      overflow: +(sr.right - (hr.right - padR)).toFixed(1),
+    };
+  });
+}
+
+test("terminal renderer survives repeated chat↔terminal tab switches", async () => {
+  const { userDataDir } = await prepareWorkspace();
+
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: { ...process.env, SPARK_USER_DATA_DIR: userDataDir },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.getByText("workspace").first()).toBeVisible();
+
+    // The chat tab is foreground on launch — capture it by its stable
+    // data-tab-id (not its label) so we can switch back to it reliably.
+    await expect(page.locator(".spark-tab--active").first()).toBeVisible();
+    const chatTabId = await page
+      .locator(".spark-tab--active")
+      .first()
+      .getAttribute("data-tab-id");
+    expect(chatTabId, "expected an active chat tab on launch").toBeTruthy();
+    const chatTab = page.locator(`.spark-tab[data-tab-id="${chatTabId}"]`).first();
+    const terminalTab = page.locator(".spark-tab", { hasText: "terminals" }).first();
+
+    // Surface the terminal (chat is foreground on launch) and let WebGL settle.
+    await terminalTab.click();
+    await expect(page.locator(".xterm-host").first()).toBeVisible({ timeout: 15_000 });
+    await page.waitForTimeout(1200);
+
+    const before = await rendererHealth(page);
+    expect(before, "expected a measurable terminal pane").not.toBeNull();
+    expect(before!.renderer).toBe("webgl");
+    expect(before!.contextLost).toBe(false);
+
+    // Cycle chat → terminal several times, exactly the reported repro. After
+    // each re-show the pane must stay on the live WebGL renderer (no thrash to
+    // DOM), keep a non-lost context, and still fit the pane.
+    for (let i = 0; i < 4; i++) {
+      await chatTab.click();
+      await expect(chatTab).toHaveClass(/spark-tab--active/);
+      await page.waitForTimeout(300);
+      await terminalTab.click();
+      await expect(terminalTab).toHaveClass(/spark-tab--active/);
+      await page.waitForTimeout(400);
+
+      const at = await rendererHealth(page);
+      expect(at, `cycle ${i}: expected a measurable pane`).not.toBeNull();
+      expect(at!.renderer, `cycle ${i}: renderer fell back to DOM on a benign switch`).toBe("webgl");
+      expect(at!.contextLost, `cycle ${i}: WebGL context reported lost`).toBe(false);
+      expect(at!.overflow, `cycle ${i}: grid overflows pane by ${at!.overflow}px`).toBeLessThanOrEqual(1);
+    }
+  } finally {
+    await app?.close();
+  }
+});
+
 async function prepareWorkspace(): Promise<{ userDataDir: string; workspaceDir: string }> {
   const root = await mkdtemp(join(tmpdir(), "spark-tui-overflow-"));
   const userDataDir = join(root, "user-data");
