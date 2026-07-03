@@ -5,11 +5,15 @@
   "main": "out/main/index.js",
   "author": "Etienne",
   "private": true,
+  "bin": {
+    "cora": "bin/cora.cjs"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "build:safe": "cmd /c start /b /wait /affinity FFFFF0FF cmd /c electron-vite build",
     "start": "electron-vite preview",
+    "cora": "node bin/cora.cjs",
     "inspect-run": "node scripts/inspect-run.cjs",
     "test:worktrees": "node scripts/test-worktrees.cjs",
     "eval:v2:noop": "node evals-v2/run-benchmark.cjs --adapter noop --repetitions 1",

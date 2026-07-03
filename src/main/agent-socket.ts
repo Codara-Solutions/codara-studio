@@ -1,3 +1,4 @@
+import { app, BrowserWindow } from "electron";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { promises as fsp } from "node:fs";
@@ -8,7 +9,14 @@ import { sparkHome } from "./spark-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
 import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
+import { loadPreferences, setPreference } from "./preferences-store";
+import { DEFAULT_PREFERENCES } from "@shared/types";
 import type {
+  AppPreferences,
+  InAppNotificationTone,
+  NotificationSoundKind,
+  NotifyKind,
+  PrefKey,
   AutomationLoop,
   AutomationTrigger,
   CreateScheduledJobInput,
@@ -39,6 +47,10 @@ const ERR_INTERNAL = -32603;
 // distinct from ERR_METHOD_NOT_FOUND so clients can branch on
 // "implementable today" vs "typo in method name".
 const ERR_NOT_IMPLEMENTED = -32004;
+// Custom code for "method exists but is disabled in this build" (the app.*
+// dev-tools gate). Not ERR_INVALID_REQUEST — the envelope is well-formed —
+// so clients can branch without string-matching the message.
+const ERR_FORBIDDEN = -32003;
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const TERMINAL_READ_MAX_BYTES = 32 * 1024;
@@ -310,6 +322,18 @@ async function dispatch(
         return await handleTerminalRead(params, id);
       case "chat.append":
         return await handleChatAppend(params, id);
+      case "app.info":
+        return handleAppInfo(id);
+      case "app.screenshot":
+        return await handleAppScreenshot(params, id);
+      case "app.evaluate":
+        return await handleAppEvaluate(params, id);
+      case "app.notify":
+        return await handleAppNotify(params, id);
+      case "app.prefs.get":
+        return await handleAppPrefsGet(params, id);
+      case "app.prefs.set":
+        return await handleAppPrefsSet(params, id);
       case "preview.list":
       case "preview.navigate":
       case "preview.url":
@@ -493,6 +517,217 @@ async function handleChatAppend(
     }
     return errorResponse(id, ERR_INTERNAL, message);
   }
+}
+
+// ── app.* — dev/test surface for the `cora` CLI (bin/cora.cjs) ──────────────
+//
+// These drive the APP ITSELF (main window pixels, renderer JS, preferences,
+// the notify pipeline) rather than a preview tab, so a feature can be
+// exercised and observed from a terminal without a Playwright harness.
+// Everything except app.info is dev-gated: always available in unpackaged
+// builds (npm run dev / npm start), and in packaged builds only when
+// CORA_DEV_TOOLS=1 — a shipped app's socket must not let another local
+// process screenshot the user's terminals or rewrite their preferences.
+
+function devToolsEnabled(): boolean {
+  return !app.isPackaged || process.env.CORA_DEV_TOOLS === "1";
+}
+
+function requireDevTools(id: JsonRpcId): JsonRpcResponse | null {
+  if (devToolsEnabled()) return null;
+  return errorResponse(
+    id,
+    ERR_FORBIDDEN,
+    "app.* dev tools are disabled in packaged builds (launch with CORA_DEV_TOOLS=1 to enable)",
+  );
+}
+
+function pickAppWindow(): BrowserWindow | null {
+  const focused = BrowserWindow.getFocusedWindow();
+  if (focused && !focused.webContents.isDestroyed()) return focused;
+  return BrowserWindow.getAllWindows().find((w) => !w.webContents.isDestroyed()) ?? null;
+}
+
+function handleAppInfo(id: JsonRpcId): JsonRpcResponse {
+  return successResponse(id, {
+    name: app.getName(),
+    version: app.getVersion(),
+    packaged: app.isPackaged,
+    devTools: devToolsEnabled(),
+    pid: process.pid,
+    platform: process.platform,
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    node: process.versions.node,
+    homeDir: sparkHome(),
+    uptimeSec: Math.round(process.uptime()),
+    windows: BrowserWindow.getAllWindows()
+      .filter((w) => !w.webContents.isDestroyed())
+      .map((w) => ({ id: w.id, title: w.getTitle(), focused: w.isFocused(), bounds: w.getBounds() })),
+  });
+}
+
+async function handleAppScreenshot(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const gated = requireDevTools(id);
+  if (gated) return gated;
+  const win = pickAppWindow();
+  if (!win) return errorResponse(id, ERR_INTERNAL, "no live app window to capture");
+  const image = await win.webContents.capturePage();
+  const { width, height } = image.getSize();
+  // Same result shape as preview.screenshot so clients share one image path.
+  return successResponse(id, {
+    width,
+    height,
+    dataUrl: `data:image/png;base64,${image.toPNG().toString("base64")}`,
+  });
+}
+
+const APP_EVALUATE_DEFAULT_TIMEOUT_MS = 15_000;
+const APP_EVALUATE_MAX_TIMEOUT_MS = 60_000;
+
+async function handleAppEvaluate(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const gated = requireDevTools(id);
+  if (gated) return gated;
+  const code = stringParam(params, "code");
+  if (!code) return errorResponse(id, ERR_INVALID_PARAMS, "code is required");
+  const win = pickAppWindow();
+  if (!win) return errorResponse(id, ERR_INTERNAL, "no live app window");
+  const requested = optionalNumberParam(params, "timeout_ms");
+  const timeoutMs =
+    requested === null
+      ? APP_EVALUATE_DEFAULT_TIMEOUT_MS
+      : Math.max(100, Math.min(requested | 0, APP_EVALUATE_MAX_TIMEOUT_MS));
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    // executeJavaScript resolves with structured-clonable values only; DOM
+    // nodes/functions reject inside Electron before reaching us. The race
+    // guards against user code that never settles (e.g. a pending promise).
+    const value = await Promise.race([
+      win.webContents.executeJavaScript(code, true),
+      new Promise<never>((_, rejectTimeout) => {
+        timer = setTimeout(
+          () => rejectTimeout(new Error(`app.evaluate timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+    return successResponse(id, { value: value === undefined ? null : (value as unknown) });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const NOTIFY_KINDS: ReadonlySet<string> = new Set<NotifyKind>([
+  "run.blocked",
+  "run.complete",
+  "run.failed",
+  "terminal.agent.needs-input",
+  "terminal.agent.done",
+  "automation.finished",
+  "automation.failed",
+  "app.update-ready",
+]);
+const NOTIFY_TONES: ReadonlySet<string> = new Set<InAppNotificationTone>([
+  "success",
+  "warning",
+  "danger",
+]);
+const NOTIFY_SOUNDS: ReadonlySet<string> = new Set<NotificationSoundKind>(["needs-you", "done"]);
+
+async function handleAppNotify(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const gated = requireDevTools(id);
+  if (gated) return gated;
+  const kind = stringParam(params, "kind") ?? "run.complete";
+  if (!NOTIFY_KINDS.has(kind)) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `unknown kind: ${kind} (expected one of ${[...NOTIFY_KINDS].join(", ")})`,
+    );
+  }
+  const defaultTone: InAppNotificationTone = kind.endsWith(".failed")
+    ? "danger"
+    : kind === "run.blocked" || kind === "terminal.agent.needs-input"
+      ? "warning"
+      : "success";
+  const tone = stringParam(params, "tone") ?? defaultTone;
+  if (!NOTIFY_TONES.has(tone)) {
+    return errorResponse(id, ERR_INVALID_PARAMS, `unknown tone: ${tone}`);
+  }
+  const sound = stringParam(params, "sound") ?? (tone === "success" ? "done" : "needs-you");
+  if (!NOTIFY_SOUNDS.has(sound)) {
+    return errorResponse(id, ERR_INVALID_PARAMS, `unknown sound: ${sound}`);
+  }
+  // Unique sourceKey per call unless the caller pins one — the policy dedupes
+  // repeated same-kind alerts per source, which a "fire a test notification"
+  // command must not silently hit. Pass an explicit sourceKey to exercise the
+  // dedup/rearm behavior itself.
+  const sourceKey =
+    stringParam(params, "sourceKey") ??
+    `cli:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const { publish } = await import("./notify");
+  publish({
+    kind: kind as NotifyKind,
+    sourceKey,
+    title: stringParam(params, "title") ?? "Test notification",
+    body: stringParam(params, "body") ?? "Fired via app.notify (cora CLI).",
+    tone: tone as InAppNotificationTone,
+    soundKind: sound as NotificationSoundKind,
+    target: { type: "run", runId: stringParam(params, "runId") ?? "cli-test" },
+  });
+  return successResponse(id, { published: true, kind, sourceKey });
+}
+
+async function handleAppPrefsGet(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const gated = requireDevTools(id);
+  if (gated) return gated;
+  const key = stringParam(params, "key");
+  const prefs = await loadPreferences();
+  if (!key) return successResponse(id, { preferences: prefs });
+  // hasOwn, not `in`: `in` also passes prototype keys ("toString"), whose
+  // "value" would then be a function and blow up response serialization.
+  if (!Object.hasOwn(DEFAULT_PREFERENCES, key)) {
+    return errorResponse(id, ERR_INVALID_PARAMS, `unknown preference: ${key}`);
+  }
+  const prefKey = key as PrefKey;
+  return successResponse(id, { key, value: prefs[prefKey] ?? DEFAULT_PREFERENCES[prefKey] });
+}
+
+async function handleAppPrefsSet(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const gated = requireDevTools(id);
+  if (gated) return gated;
+  const key = stringParam(params, "key");
+  if (!key || !Object.hasOwn(DEFAULT_PREFERENCES, key)) {
+    return errorResponse(id, ERR_INVALID_PARAMS, `unknown preference: ${key ?? "(missing)"}`);
+  }
+  if (!("value" in params)) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "value is required");
+  }
+  const prefKey = key as PrefKey;
+  // setPreference runs the same normalize() the settings UI goes through, so
+  // out-of-range values are clamped, not stored raw. The broadcast makes the
+  // renderer apply it live (glass sliders, theme, notification prefs). The one
+  // side effect not replayed here is ipc.ts's tray ensure/destroy hook for
+  // keepRunningInBackground — a dev-only gap; the tray catches up on restart.
+  const next = await setPreference(prefKey, params.value as AppPreferences[PrefKey]);
+  const { broadcastPreferencesChanged } = await import("./ipc");
+  broadcastPreferencesChanged({ key: prefKey, value: next[prefKey] });
+  return successResponse(id, { key, value: next[prefKey] });
 }
 
 // ── orchestrator.* — Execute-mode tools called by Claude/Codex via the

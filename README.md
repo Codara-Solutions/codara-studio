@@ -48,3 +48,29 @@ Batch:
 `spark_preview_run` executes an ordered batch of steps in a single round-trip —
 strongly preferred for multi-step verification flows (drive `7 / 2 =` and read
 the display in one call, not seven).
+
+## The `cora` CLI
+
+`bin/cora.cjs` is a zero-dependency terminal remote for the running app — the
+fastest way to poke a new feature without a Playwright harness. It discovers
+the app exactly like the MCP servers do (reads `~/.Cora/agent-socket.json`,
+speaks bearer-authed JSON-RPC to the loopback socket).
+
+```sh
+npm link                 # once — gives you a global `cora`
+cora status              # is the app up? version, home dir, windows
+cora shot ui.png         # screenshot the app window itself
+cora eval 'document.title'
+cora notify run.complete --title "Done" --body "It works"
+cora glass refraction 140   # tune liquid glass live; also veil/blur/chroma
+cora open localhost:5173    # drive the built-in Preview…
+cora pshot page.png         # …and look at it
+cora runs                # list runs straight off disk (works app-closed)
+cora rpc preview.list    # raw JSON-RPC escape hatch (any method)
+```
+
+`cora help` lists everything. The app-level commands (`shot`, `eval`, `notify`,
+`prefs`, `glass`) ride the dev-gated `app.*` RPC namespace: always available in
+unpackaged builds, and in packaged builds only when the app is launched with
+`CORA_DEV_TOOLS=1` — a shipped app's socket must not let another local process
+screenshot the user's terminals. Preview and run commands work everywhere.

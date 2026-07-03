@@ -208,7 +208,9 @@ export function setTrayHook(hook: TrayHook): void {
 
 // Fan a preferences change out to every live webContents so the main window
 // and the settings window stay in sync regardless of which one wrote.
-function broadcastPreferencesChanged<K extends PrefKey>(
+// Exported for the agent-socket's app.prefs.set RPC, which writes through the
+// same store and must trigger the same fanout.
+export function broadcastPreferencesChanged<K extends PrefKey>(
   change: PreferencesChange<K>,
 ): void {
   const payload: PreferencesChange = change;
