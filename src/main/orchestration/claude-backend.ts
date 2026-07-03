@@ -146,6 +146,7 @@ You are in **Talk mode**. You can read code, search files, and answer questions 
 Free-form prose replies are the primary output. Use Read, Glob, and Grep for exploration when a question requires it.
 `;
 const EXECUTE_PROMPT_RESOURCE_FILENAME = "cc-execute-prompt.md";
+const AUTO_PROMPT_RESOURCE_FILENAME = "cc-auto-prompt.md";
 const AUTOMATION_PROMPT_RESOURCE_FILENAME = "cc-automation-prompt.md";
 
 // Resolve the Execute-mode orchestrator prompt shipped under
@@ -156,6 +157,14 @@ function resolveExecutePromptPath(): string {
   return app.isPackaged
     ? join(process.resourcesPath, "orchestration", EXECUTE_PROMPT_RESOURCE_FILENAME)
     : join(__dirname, "..", "..", "resources", "orchestration", EXECUTE_PROMPT_RESOURCE_FILENAME);
+}
+
+// Resolve the Auto-mode coordinator prompt (Cora routes each message herself)
+// — same packaged/dev resolution as the Execute prompt above.
+function resolveAutoPromptPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "orchestration", AUTO_PROMPT_RESOURCE_FILENAME)
+    : join(__dirname, "..", "..", "resources", "orchestration", AUTO_PROMPT_RESOURCE_FILENAME);
 }
 
 // Resolve the Automation-mode architect prompt — same packaged/dev resolution
@@ -265,12 +274,15 @@ export const claudeBackend: SparkAgentBackend = {
       // Pick the right system prompt for the active mode. Talk uses the
       // lazy-created lightweight default; Execute uses the shipped
       // orchestrator prompt that teaches the LLM to call spark.* MCP tools;
-      // Automation uses the shipped automation-architect prompt and, like
-      // Execute, needs the spark-orchestrator MCP installed (it proxies the
-      // automation.* RPCs that create/run/test looms).
+      // Auto uses the shipped coordinator prompt (Cora routes each message
+      // herself) and shares Execute's MCP wiring; Automation uses the shipped
+      // automation-architect prompt and, like Execute, needs the
+      // spark-orchestrator MCP installed (it proxies the automation.* RPCs
+      // that create/run/test looms).
       let systemPromptPath: string;
-      if (mode === "execute") {
-        systemPromptPath = resolveExecutePromptPath();
+      if (mode === "execute" || mode === "auto") {
+        systemPromptPath =
+          mode === "auto" ? resolveAutoPromptPath() : resolveExecutePromptPath();
         // Idempotent — installs spark-orchestrator into ~/.claude.json the
         // first time, no-ops thereafter. We skip the work when the entry is
         // already in place to avoid touching the file on every turn.
@@ -510,12 +522,14 @@ export const claudeBackend: SparkAgentBackend = {
       }
 
       const replyText = chat.turnAssistantText.trim();
-      // Execute mode: convert spark_spawn_workers tool calls into the same
-      // SparkManagerDecision shape grok/OpenRouter produces. The run-store
-      // already knows how to apply that decision (spawn workers, ask user,
-      // mark complete). This is what makes CC in execute mode behave like
-      // the existing manager pattern instead of a chat assistant.
-      if (mode === "execute") {
+      // Execute/Auto mode: convert spark_spawn_workers tool calls into the
+      // same SparkManagerDecision shape grok/OpenRouter produces. The
+      // run-store already knows how to apply that decision (spawn workers,
+      // ask user, mark complete). This is what makes CC in execute mode
+      // behave like the existing manager pattern instead of a chat
+      // assistant. Auto rides the same bridge: a turn with no spark_* tool
+      // call falls through to a plain chat reply (the "just answer" route).
+      if (mode === "execute" || mode === "auto") {
         const decision = buildExecuteDecisionFromToolCalls(
           chat.turnToolCalls,
           replyText,
@@ -693,8 +707,10 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   // Execute worker-spawning roster. The globally-installed user-scope entry
   // has no env, so automation-loop workers calling spark_request_next_iteration
   // keep seeing the legacy 6-tool roster.
+  // Auto mode shares Execute's config verbatim (no SPARK_MCP_MODE, so the
+  // server exposes the worker-orchestration roster).
   let mcpConfigFile: string | null = null;
-  if (opts.mode === "execute" || opts.mode === "automation") {
+  if (opts.mode === "execute" || opts.mode === "auto" || opts.mode === "automation") {
     const orchestratorMcpServerPath = app.isPackaged
       ? join(process.resourcesPath, "cora-orchestrator-mcp", "server.js")
       : join(__dirname, "..", "..", "resources", "cora-orchestrator-mcp", "server.js");
@@ -767,6 +783,23 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     // not a tool-list filter — CC still sees everything with that flag,
     // which is why the model kept refusing.
     args.push("--tools", "");
+    if (mcpConfigFile) {
+      args.push("--mcp-config", mcpConfigFile);
+      args.push("--strict-mcp-config");
+    }
+  } else if (opts.mode === "auto") {
+    // Auto: CC is the *coordinator* — it routes each message itself (answer /
+    // spawn workers / plan-then-execute / ask). Like Execute the shipped
+    // prompt is a FULL --system-prompt override (Cora's persona replaces
+    // CC's default coder), with the workspace cwd appended the same way
+    // buildExecuteSystemPrompt bakes it in. Unlike Execute, the prompt
+    // promises Read/Glob/Grep for grounding answers and decompositions, so
+    // `--tools` whitelists exactly those three read-only built-ins instead
+    // of disabling everything — mutating tools stay invisible, delegation
+    // still has no competing Edit/Bash to reach for.
+    const autoPrompt = await fs.readFile(opts.talkPromptPath, "utf8");
+    args.push("--system-prompt", `${autoPrompt}\n\nWorkspace cwd: ${opts.cwd}\n`);
+    args.push("--tools", "Read,Glob,Grep");
     if (mcpConfigFile) {
       args.push("--mcp-config", mcpConfigFile);
       args.push("--strict-mcp-config");

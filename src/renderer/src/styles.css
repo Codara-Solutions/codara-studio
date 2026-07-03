@@ -975,10 +975,11 @@ a { color: inherit; }
 }
 
 /* Manager-mode selector — a SINGLE pill that CYCLES on each press:
-   Talk → Plan → Execute → Talk. The label shows the current mode; the colour
-   and the leading dot shift per mode so the active state reads at a glance
-   (Talk = muted, Plan = info-blue, Execute = accent/armed). Execute also lights
-   the composer shell's dashed "armed" border (.composer-shell.is-execute-mode).
+   Auto → Talk → Plan → Execute → Auto. The label shows the current mode; the
+   colour and the leading dot shift per mode so the active state reads at a
+   glance (Auto = ok-green, Talk = muted, Plan = info-blue, Execute =
+   accent/armed). Execute also lights the composer shell's dashed "armed"
+   border (.composer-shell.is-execute-mode).
    Replaces the old three-segment Execute/Plan/Talk pill. */
 .composer-mode-cycle {
   display: inline-flex;
@@ -1010,6 +1011,16 @@ a { color: inherit; }
   background: currentColor;
   opacity: 0.85;
   flex: 0 0 auto;
+}
+/* Auto — ok-green; Cora routes each message herself. The default mode. */
+.composer-mode-cycle.is-auto {
+  color: var(--ok);
+  border-color: color-mix(in oklch, var(--ok) 45%, var(--rule-soft));
+  background: color-mix(in oklch, var(--ok) 12%, transparent);
+}
+.composer-mode-cycle.is-auto:hover {
+  border-color: color-mix(in oklch, var(--ok) 60%, var(--rule-soft));
+  background: color-mix(in oklch, var(--ok) 22%, transparent);
 }
 /* Talk — quiet/neutral. */
 .composer-mode-cycle.is-talk {

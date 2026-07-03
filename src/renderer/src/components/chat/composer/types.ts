@@ -80,7 +80,7 @@ const CODEX_MODELS: ChatModelOption[] = [
 
 export const DEFAULT_CHAT_BACKEND: ChatBackendKind = "openrouter";
 export const DEFAULT_CHAT_MODEL = "google/gemini-flash-latest";
-export const DEFAULT_CHAT_MODE: ChatMode = "execute";
+export const DEFAULT_CHAT_MODE: ChatMode = "auto";
 export const DEFAULT_CHAT_EFFORT: AgentEffortLevel = "medium";
 
 export const EFFORT_LABELS: Record<AgentEffortLevel, string> = {

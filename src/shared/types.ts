@@ -947,14 +947,21 @@ export type RunStatus =
 export type ChatBackendKind = "openrouter" | "claude" | "codex";
 
 // Manager behaviour mode chosen per chat:
+//   auto    — Cora routes each message herself: answer directly, spawn workers,
+//             plan-then-execute in the same turn, or ask the user. Backend
+//             plumbing is execute-like (same MCP roster, no plan council).
+//             Default for new chats.
 //   execute — Codara spawns workers to do the work (current behaviour).
 //   talk    — no workers, pure conversational chat with the chosen backend.
 //   plan    — Best-of-N council: Codara spawns several top-tier CLI agents (a mix
 //             of Claude Code + Codex) that each independently draft a PLAN + PRD,
 //             then a judge synthesizes the best merged PLAN.md + PRD.md into the
 //             workspace. No implementation code is written.
-// Mode is the "Execute / Plan / Talk" selector on the composer.
-export type ChatMode = "execute" | "talk" | "plan" | "automation";
+//   automation — legacy composer mode; still valid on persisted runs and used
+//             by the automation architect (moving to the Automations tab), but
+//             no longer offered by the composer's mode pill.
+// Mode is the "Auto / Talk / Plan / Execute" selector on the composer.
+export type ChatMode = "auto" | "execute" | "talk" | "plan" | "automation";
 
 export type PlanStatus = "draft" | "imported" | "analyzed" | "active" | "complete" | "archived";
 

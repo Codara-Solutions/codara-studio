@@ -2412,8 +2412,8 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   }
   const hasOtherActiveCycles = hasOtherAutopilotCycles(runId, attemptId);
   const hasOtherActiveWorkers = activeWorkersForRun(runId).some((worker) => worker.attemptId !== attemptId);
-  // For execute-mode CC/Codex chat backends, the CC/Codex manager session is
-  // doing review itself (reading the worker's final_report_path returned by
+  // For execute/auto-mode CC/Codex chat backends, the CC/Codex manager session
+  // is doing review itself (reading the worker's final_report_path returned by
   // spark_wait_for_workers and deciding spark_complete vs spawn correctives).
   // We need the worker_task to reach a TERMINAL status (accepted/failed/
   // cancelled) so spark_wait_for_workers actually unblocks — `needs_review`
@@ -2423,7 +2423,7 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   // success here; the CC manager will inspect the report and judge quality.
   const isExecuteModeCliManager =
     (latest.chatBackend === "claude" || latest.chatBackend === "codex") &&
-    latest.chatMode === "execute";
+    (latest.chatMode === "execute" || latest.chatMode === "auto");
   const finishedAttempt = latest.workerAttempts.find((a) => a.id === attemptId);
   const finishedTaskId = finishedAttempt?.workerTaskId;
   const shouldAutoAccept =
@@ -2641,14 +2641,14 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
   // no active workers). Synthesize the best merged PLAN.md + PRD.md and complete
   // the run — skip the verifier/manager review (planning docs aren't code).
   //
-  // Gate out chatMode === "execute": council tasks keep their councilGroupId
+  // Gate out chatMode "execute"/"auto": council tasks keep their councilGroupId
   // forever, so isCouncilRun(run) stays true even after the plan is finalized.
-  // Once the user flips the SAME chat to Execute ("run the plan"), chatMode is
-  // "execute" and we must NOT re-route into council finalize — otherwise
-  // switching to Execute would re-finalize the old plan instead of spawning
-  // execute workers. Any other mode (plan, or unset for a programmatic council)
-  // still advances/finalizes the council normally.
-  if (isCouncilRun(run) && run.chatMode !== "execute") {
+  // Once the user flips the SAME chat to Execute or Auto ("run the plan"),
+  // we must NOT re-route into council finalize — otherwise the flip would
+  // re-finalize the old plan instead of spawning execute workers. Any other
+  // mode (plan, or unset for a programmatic council) still advances/finalizes
+  // the council normally.
+  if (isCouncilRun(run) && run.chatMode !== "execute" && run.chatMode !== "auto") {
     await advanceCouncil(run, cwd);
     return;
   }
@@ -6251,7 +6251,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   // cycle path). The scheduler itself dedupes, so this can't double-drive.
   const isExecuteModeCliManager =
     (resumed.chatBackend === "claude" || resumed.chatBackend === "codex") &&
-    resumed.chatMode === "execute";
+    (resumed.chatMode === "execute" || resumed.chatMode === "auto");
   const shouldScheduleDriver =
     !isExecuteModeCliManager && activeWorkersForRun(resumed.id).length === 0;
   if (shouldScheduleManagerAfterResume || shouldScheduleDriver) {

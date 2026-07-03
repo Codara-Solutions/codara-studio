@@ -173,6 +173,7 @@ function isSparkLongPollMcpTool(name: string): boolean {
 
 const TALK_PROMPT_FILENAME = "codex-talk.md";
 const EXECUTE_PROMPT_RESOURCE_FILENAME = "codex-execute-prompt.md";
+const AUTO_PROMPT_RESOURCE_FILENAME = "codex-auto-prompt.md";
 // Automation mode reuses the Claude automation architect prompt (engine-neutral
 // guidance about looms + the spark_*_automation tools). Shipped under the same
 // resources/orchestration dir.
@@ -184,6 +185,13 @@ function resolveExecutePromptPath(): string {
   return app.isPackaged
     ? join(process.resourcesPath, "orchestration", EXECUTE_PROMPT_RESOURCE_FILENAME)
     : join(__dirname, "..", "..", "resources", "orchestration", EXECUTE_PROMPT_RESOURCE_FILENAME);
+}
+
+// Resolve the Auto-mode coordinator prompt (Cora routes each message herself).
+function resolveAutoPromptPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "orchestration", AUTO_PROMPT_RESOURCE_FILENAME)
+    : join(__dirname, "..", "..", "resources", "orchestration", AUTO_PROMPT_RESOURCE_FILENAME);
 }
 
 // Resolve the Automation-mode architect prompt (shared with the CC backend).
@@ -378,16 +386,20 @@ async function spawnSession(
     );
   }
   // Choose Talk (lazy-created lightweight default) vs Execute (shipped
-  // orchestrator prompt teaching the LLM to call spark.* MCP tools) vs
-  // Automation (the architect prompt for building looms via spark_*_automation).
+  // orchestrator prompt teaching the LLM to call spark.* MCP tools) vs Auto
+  // (the coordinator prompt — Cora routes each message herself, Execute
+  // wiring otherwise) vs Automation (the architect prompt for building looms
+  // via spark_*_automation).
   const promptPath =
     input.chat.mode === "execute"
       ? resolveExecutePromptPath()
-      : input.chat.mode === "automation"
-        ? resolveAutomationPromptPath()
-        : await ensureTalkPromptFile();
-  // Execute and Automation both proxy through the cora-orchestrator MCP, so
-  // both ensure it is installed (once, globally, in ~/.codex/config.toml).
+      : input.chat.mode === "auto"
+        ? resolveAutoPromptPath()
+        : input.chat.mode === "automation"
+          ? resolveAutomationPromptPath()
+          : await ensureTalkPromptFile();
+  // Execute, Auto, and Automation all proxy through the cora-orchestrator MCP,
+  // so each ensures it is installed (once, globally, in ~/.codex/config.toml).
   // Unlike the Claude backend, Codex has no per-run MCP CONFIG file, but it DOES
   // honor per-invocation `-c mcp_servers."cora-orchestrator".env.*` overrides
   // (added in buildArgs for automation mode), so a Codex automation chat gets
@@ -397,7 +409,9 @@ async function spawnSession(
   // orchestration RPCs reject automation mode) remain the defense-in-depth
   // backstop regardless of which roster the CLI happens to see.
   if (
-    (input.chat.mode === "execute" || input.chat.mode === "automation") &&
+    (input.chat.mode === "execute" ||
+      input.chat.mode === "auto" ||
+      input.chat.mode === "automation") &&
     !(await isSparkOrchestratorMcpInstalled("codex"))
   ) {
     await installOrchestratorMcpForCodex().catch((err) => {
@@ -791,10 +805,11 @@ export const codexBackend: SparkAgentBackend = {
         session.sessionUuid && session.sessionUuid !== input.chat.sessionUuid
           ? session.sessionUuid
           : undefined;
-      // Execute mode: turn spark_spawn_workers tool calls into a
+      // Execute/Auto mode: turn spark_spawn_workers tool calls into a
       // SparkManagerDecision — same shape grok produces, so the run-store
-      // pipeline spawns workers exactly the same way.
-      if (input.chat.mode === "execute") {
+      // pipeline spawns workers exactly the same way. In Auto a turn with no
+      // spark_* tool call falls through to a plain chat reply.
+      if (input.chat.mode === "execute" || input.chat.mode === "auto") {
         return {
           decision: buildExecuteDecisionFromToolCalls(
             session.turnToolCalls,
