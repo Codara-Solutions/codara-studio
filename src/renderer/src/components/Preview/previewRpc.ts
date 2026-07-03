@@ -145,10 +145,32 @@ async function evaluate(params: Record<string, unknown>): Promise<unknown> {
   if (!code) throw new Error("evaluate requires 'code'");
   const awaitPromise = readBool(params, "awaitPromise") ?? false;
   const tab = requireTab(params);
-  const wrapped = awaitPromise
-    ? `Promise.resolve((async () => { ${code} })()).then((__r) => JSON.parse(JSON.stringify(__r ?? null)))`
-    : `(() => { const __r = (function() { ${code} })(); return JSON.parse(JSON.stringify(__r ?? null)); })()`;
-  const result = await tab.handle.executeJavaScript(wrapped);
+  // The documented contract is "last expression's value is returned", so run
+  // the snippet as a single expression when it parses as one — `1+1`,
+  // `document.title` — which covers virtually every real call. (The old
+  // body-only wrap made every expression evaluate to undefined unless the
+  // caller wrote `return`.) Multi-statement snippets get the function-body
+  // wrap, where an explicit `return` still yields the value.
+  //
+  // Expression-ness is decided by a compile-only probe: DEFINING an arrow
+  // whose body is the snippet parses it without executing it, so the choice
+  // never runs the code twice (a naive try-expression-then-fallback would
+  // re-execute side effects when the snippet itself throws a runtime
+  // SyntaxError, e.g. JSON.parse on bad input). Trailing newline guards a
+  // `// comment` on the snippet's last line.
+  const wrap = (inner: string) =>
+    awaitPromise
+      ? `Promise.resolve((async () => ${inner})()).then((__r) => JSON.parse(JSON.stringify(__r ?? null)))`
+      : `(() => { const __r = (() => ${inner})(); return JSON.parse(JSON.stringify(__r ?? null)); })()`;
+  let isExpression = true;
+  try {
+    await tab.handle.executeJavaScript(`void (() => (${code}\n)); "cora-parse-ok"`);
+  } catch {
+    isExpression = false;
+  }
+  const result: unknown = await tab.handle.executeJavaScript(
+    wrap(isExpression ? `(${code}\n)` : `{ ${code} }`),
+  );
   return { value: result };
 }
 
