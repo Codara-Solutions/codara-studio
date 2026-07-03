@@ -22,13 +22,25 @@ test("run graph can be dragged and zoomed from the node surface", async () => {
     await expect(page.getByText("Cora", { exact: true }).first()).toBeVisible({ timeout: 20_000 });
 
     await seedWorkbenchRun(page, workspaceDir);
-    await page.getByRole("button", { name: /New chat|Chat -/ }).click();
-    await page.getByRole("button", { name: "Canvas repro" }).click();
+    // Run-backed chat tabs all render with the fixed CHAT_TAB_LABEL ("Cora").
+    // Selecting the run's chat tab sets it active; because the seeded run has a
+    // step + worker task (runHasWorkbench), App auto-opens its "Runs" node-graph
+    // tab, which we then bring forward.
+    await page.getByRole("tab", { name: "Cora" }).click();
     await page.getByRole("tab", { name: /Runs/ }).click();
-    await expect(page.getByText("Drag node surface")).toBeVisible();
+    // The inspector overlay covers the right half of the canvas and would eat
+    // pointer events aimed at nodes underneath it; fold it away, then fit the
+    // graph so the step node is guaranteed inside the visible viewport.
+    await page.getByRole("button", { name: "Collapse inspector" }).click();
+    await page.getByRole("button", { name: "Fit graph to view" }).click();
+    // Scope to the pan viewport (the only element with the grab cursor) — the
+    // header strip above the canvas also renders the step title text.
+    const canvas = page.locator('div[style*="cursor: grab"]');
+    const nodeCard = canvas.getByText("Drag node surface", { exact: true });
+    await expect(nodeCard).toBeVisible();
 
     const beforeDrag = await graphTransform(page);
-    const stepBox = await page.getByText("Drag node surface").boundingBox();
+    const stepBox = await nodeCard.boundingBox();
     expect(stepBox).toBeTruthy();
     await page.mouse.move(stepBox!.x + stepBox!.width / 2, stepBox!.y + stepBox!.height / 2);
     await page.mouse.down();
@@ -109,8 +121,9 @@ async function seedWorkbenchRun(page: Page, cwd: string): Promise<void> {
       canRunParallel: true,
     });
   }, cwd);
-  await expect(page.getByRole("button", { name: /New chat|Chat -/ })).toBeVisible();
-  await expect(page.getByText("Canvas repro")).toBeVisible({ timeout: 10_000 });
+  // The run store sync adds a top-strip chat tab for the seeded run; wait for it
+  // before interacting so the click in the test body has a target.
+  await expect(page.getByRole("tab", { name: "Cora" })).toBeVisible({ timeout: 10_000 });
 }
 
 async function graphTransform(page: Page): Promise<string> {
