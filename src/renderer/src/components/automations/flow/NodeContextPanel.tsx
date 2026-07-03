@@ -10,6 +10,7 @@ import type {
   ScheduledJob,
 } from "@shared/types";
 import { DEFAULT_ITERATION_TIMEOUT_MINUTES } from "@shared/types";
+import { usePreferences } from "../../../preferences/usePreferences";
 import { Check, Field, Segmented } from "../FormKit";
 import {
   installedEngines,
@@ -367,8 +368,14 @@ function WorkerForm({
       .filter((e) => installed.has(e))
       .map((e) => ({ value: e, label: e === "claude" ? "Claude" : "Codex" })),
   ];
+  const { preferences } = usePreferences();
   const runtime = w.engine !== "auto" ? runtimes.find((r) => r.kind === w.engine) : undefined;
-  const models = runtime?.models ?? [];
+  // Fable 5 gate (default off): hide it from the loom worker model dropdown
+  // unless opted in via Settings, matching the chat composer picker. With the
+  // pref off, launchWorkerAttempt downgrades any lingering fable hint to Opus.
+  const models = (runtime?.models ?? []).filter(
+    (m) => preferences.fableEnabled === true || !/fable/i.test(m.id),
+  );
   const selectedModel = models.find((m) => m.id === w.model);
   const effortLevels: AgentEffortLevel[] = selectedModel?.effortLevels ?? ["low", "medium", "high", "xhigh"];
 
