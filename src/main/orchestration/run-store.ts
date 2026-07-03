@@ -125,6 +125,7 @@ import {
   upstreamOf,
 } from "./loom-graph";
 import { evaluateGuardPredicate } from "./loom-predicates";
+import { ensureCodexProjectTrust } from "./codex-trust";
 import type { LoomGraph, LoomNodeDef } from "@shared/types";
 import { recordRunMemory } from "./run-memory";
 import {
@@ -10946,64 +10947,6 @@ function buildLaunchCommandLine(
     return cdPrefix + args.join(" ");
   }
   return null;
-}
-
-// Codex v0.128 stores trusted-directory entries in ~/.codex/config.toml as
-// `[projects.'<lowercase-backslash-cwd>'] trust_level = "trusted"`. The
-// directory-trust prompt on TUI launch matches the cwd against that exact
-// key only — parent-dir trust does NOT propagate, and the -c CLI override
-// stopped being honored. We append the entry once per cwd before spawning
-// so node-pty workers don't get stuck on the prompt.
-//
-// Concurrency: when two codex workers in the same workspace spawn at the same
-// time (parallel impl+verifier, two peer impls), both calls would otherwise
-// read the file before either writes, both see "no entry", and both append —
-// producing a duplicate `[projects.'X']` key that fails TOML parsing on the
-// next codex launch. We serialize per configPath via a process-local lock so
-// the read+check+append window is atomic.
-const codexConfigLocks = new Map<string, Promise<unknown>>();
-// Process-local set of (configPath -> Set<tomlKey>) we've already verified
-// during this Codara session. The first worker spawn in a given cwd does the
-// read-modify-write under the lock; every subsequent spawn in the same cwd
-// short-circuits without touching the filesystem, eliminating the per-spawn
-// lock wait under high concurrency. Cleared on app restart, so a codex
-// upgrade that invalidates the trust format is picked up next launch.
-const codexTrustedCwds = new Map<string, Set<string>>();
-async function ensureCodexProjectTrust(cwd: string): Promise<void> {
-  if (!cwd) return;
-  const homeDir = process.env.USERPROFILE || process.env.HOME;
-  if (!homeDir) return;
-  const configPath = join(homeDir, ".codex", "config.toml");
-  const tomlKey = cwd.toLowerCase().replace(/\//g, "\\");
-  const cached = codexTrustedCwds.get(configPath);
-  if (cached?.has(tomlKey)) return;
-  const prior = codexConfigLocks.get(configPath) ?? Promise.resolve();
-  const next = prior.then(() => writeCodexProjectTrustEntry(configPath, cwd)).catch(() => undefined);
-  codexConfigLocks.set(configPath, next);
-  await next;
-  if (codexConfigLocks.get(configPath) === next) {
-    codexConfigLocks.delete(configPath);
-  }
-  const set = codexTrustedCwds.get(configPath) ?? new Set<string>();
-  set.add(tomlKey);
-  codexTrustedCwds.set(configPath, set);
-}
-
-async function writeCodexProjectTrustEntry(configPath: string, cwd: string): Promise<void> {
-  const tomlKey = cwd.toLowerCase().replace(/\//g, "\\");
-  const entry = `[projects.'${tomlKey}']\ntrust_level = "trusted"\n`;
-  let existing = "";
-  try {
-    existing = await fs.readFile(configPath, "utf8");
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return;
-    await fs.mkdir(dirname(configPath), { recursive: true }).catch(() => undefined);
-  }
-  if (existing.includes(`[projects.'${tomlKey}']`)) {
-    return;
-  }
-  const sep = existing.length === 0 || existing.endsWith("\n") ? "" : "\n";
-  await fs.appendFile(configPath, `${sep}\n${entry}`, "utf8");
 }
 
 // Cursor's interactive TUI rejects --trust (only valid with --print) and so

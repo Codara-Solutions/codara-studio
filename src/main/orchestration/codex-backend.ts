@@ -8,7 +8,7 @@
 // Per-chat lifecycle:
 //   1. First call for a runId spawns a fresh `codex --yolo …` (or
 //      `codex resume <uuid> --yolo …` when chat.sessionUuid is set), writes a
-//      `[projects.'<cwd>']` trust block to ~/.codex/config.toml so the TUI
+//      `[projects."<cwd>"]` trust block to ~/.codex/config.toml so the TUI
 //      doesn't prompt, and starts tailing the rollout. Subsequent calls reuse
 //      the same CliSession.
 //   2. Each turn writes the user prompt to PTY stdin (Codex submits on \r;
@@ -42,6 +42,7 @@ import {
 } from "./spark-agent-backend";
 import { buildExecuteDecisionFromToolCalls } from "./claude-backend";
 import { startCliSession, type CliSession } from "./cli-session";
+import { ensureCodexProjectTrust } from "./codex-trust";
 import {
   installOrchestratorMcpForCodex,
   isSparkOrchestratorMcpInstalled,
@@ -200,52 +201,6 @@ TODO(execute-mode): When Codara's Talk-mode chat escalates into an Execute run, 
 `;
 
 const ROLLOUT_FILENAME_UUID_RE = /rollout-.*-([0-9a-f-]{36})\.jsonl$/i;
-
-// Process-local serialization for the ~/.codex/config.toml trust write so two
-// concurrent spawns for distinct cwds don't race the read-modify-write window
-// and emit duplicate `[projects.'X']` blocks (which would fail TOML parsing on
-// the next codex launch). Mirrors run-store.ts's ensureCodexProjectTrust — we
-// replicate it here rather than reach into run-store to avoid a circular import
-// (run-store already imports from this module via backend-registry).
-const codexConfigLocks = new Map<string, Promise<unknown>>();
-const codexTrustedCwds = new Map<string, Set<string>>();
-
-async function ensureCodexProjectTrust(cwd: string): Promise<void> {
-  if (!cwd) return;
-  const homeDir = process.env.USERPROFILE || process.env.HOME;
-  if (!homeDir) return;
-  const configPath = join(homeDir, ".codex", "config.toml");
-  const tomlKey = cwd.toLowerCase().replace(/\//g, "\\");
-  const cached = codexTrustedCwds.get(configPath);
-  if (cached?.has(tomlKey)) return;
-  const prior = codexConfigLocks.get(configPath) ?? Promise.resolve();
-  const next = prior
-    .then(() => writeCodexProjectTrustEntry(configPath, cwd))
-    .catch(() => undefined);
-  codexConfigLocks.set(configPath, next);
-  await next;
-  if (codexConfigLocks.get(configPath) === next) {
-    codexConfigLocks.delete(configPath);
-  }
-  const set = codexTrustedCwds.get(configPath) ?? new Set<string>();
-  set.add(tomlKey);
-  codexTrustedCwds.set(configPath, set);
-}
-
-async function writeCodexProjectTrustEntry(configPath: string, cwd: string): Promise<void> {
-  const tomlKey = cwd.toLowerCase().replace(/\//g, "\\");
-  const entry = `[projects.'${tomlKey}']\ntrust_level = "trusted"\n`;
-  let existing = "";
-  try {
-    existing = await fs.readFile(configPath, "utf8");
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return;
-    await fs.mkdir(dirname(configPath), { recursive: true }).catch(() => undefined);
-  }
-  if (existing.includes(`[projects.'${tomlKey}']`)) return;
-  const sep = existing.length === 0 || existing.endsWith("\n") ? "" : "\n";
-  await fs.appendFile(configPath, `${sep}\n${entry}`, "utf8");
-}
 
 async function ensureTalkPromptFile(): Promise<string> {
   const promptsDir = join(sparkHome(), "prompts");
