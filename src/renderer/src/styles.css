@@ -1656,6 +1656,25 @@ a { color: inherit; }
     -webkit-backdrop-filter: blur(3px) saturate(1.1);
     backdrop-filter: blur(3px) saturate(1.1);
   }
+  /* Glass surfaces appear instantly — no entry animation on the lens carrier.
+     The --glass-lens SVG reference filter can't be composited by Chromium while
+     the element carrying it runs a (compositor-driven) opacity/transform entry
+     animation: the surface paints FULLY OPAQUE for the animation's duration and
+     stays opaque until the next repaint of that area — seconds later if nothing
+     invalidates it. So the frost "takes a while" instead of being instant.
+     Killing the animation on the carrier itself fixes it; !important beats the
+     inline `animation:` that dialogs (SettingsDialog etc.) set. This targets
+     only lens-carrying classes — surfaces that animate a non-glass outer
+     wrapper (RunSwitcher/Search dialogs) keep their entry motion, and plain
+     blur() surfaces (--faint, .spark-backdrop-glass, .spark-scrim) composite
+     fine so they're untouched. Opaque mode (data-glass="off" / reduced
+     transparency) is outside this gate and keeps its animations — no lens to
+     break there. */
+  html:not([data-glass="off"]) .spark-glass,
+  html:not([data-glass="off"]) .spark-glass--strong,
+  html:not([data-glass="off"]) .spark-menu {
+    animation: none !important;
+  }
 }
 
 /* ── Divider ─────────────────────────────────────────────────────────────────
