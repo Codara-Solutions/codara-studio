@@ -604,6 +604,10 @@ export interface UseTabsApi {
   // a deleted run can never re-surface them via its inner tab strip, so
   // leaving them would strand invisible, uncloseable browser tabs).
   closePreviewTabsFor: (runId: string) => void;
+  // run.deleted cleanup for background workspaces: purge the dead run's owned
+  // tabs from the frozen live-snapshot map and the inactive-layout mirror so
+  // switching back can't restore a stranded (pill-less) active tab.
+  pruneDeletedRunTabsFromInactiveWorkspaces: (runId: string) => void;
   openEditorTab: (entry: FsEntry, options?: { preview?: boolean }) => TabId;
   pinEditorTab: (id: TabId) => void;
   setEditorEntry: (oldPath: string, entry: FsEntry) => void;
@@ -2036,13 +2040,73 @@ export function useTabs(
           if (!active || !doomedIds.has(active)) return active;
           const fallbackChat = next.find((t) => t.kind === "chat");
           const fallbackFree = next.find((t) => !isRunOwnedTab(t));
-          return fallbackChat?.id ?? fallbackFree?.id ?? next[0]?.id ?? null;
+          // Same rule as closeChatTabForRun: NEVER fall back onto a run-owned
+          // tab (it may itself be pill-less) — empty state beats a stranding.
+          return fallbackChat?.id ?? fallbackFree?.id ?? null;
         });
         return next;
       });
     },
     [fireDispose],
   );
+
+  // run.deleted cleanup for workspaces that are NOT the active one. The
+  // closers above only mutate the active workspace's tab store; a run living
+  // in a background workspace keeps its owned tabs (chat, workers terminal,
+  // Runs canvas, previews) frozen inside the live in-memory snapshot and the
+  // inactive-layout mirror. Switching back restores that snapshot VERBATIM —
+  // the loadPersisted runId-strip only runs on boot / first entry — so a
+  // deleted run's preview could come back as a fullscreen active tab with no
+  // pill anywhere (the stranded-browser bug, via the Settings run manager's
+  // cross-workspace delete). Prune every tab the dead run owned from both
+  // stores, rerouting a stranded frozen activeId the same way the closers do.
+  // The chat tab is pruned too (its run no longer exists; the sync effect
+  // would drop it on switch-in anyway, but without any activeId reroute) —
+  // closedChatRunIds is deliberately NOT touched: that set belongs to
+  // explicit user closes, and a deleted run can never re-sync regardless.
+  const pruneDeletedRunTabsFromInactiveWorkspaces = useCallback((runId: string) => {
+    const ownedByRun = (t: Tab) =>
+      (t.kind === "chat" && t.id === runId) ||
+      (t.kind === "terminal" && t.scope?.kind === "workers" && t.scope.runId === runId) ||
+      (t.kind === "runs" && t.runId === runId) ||
+      (t.kind === "preview" && t.runId === runId);
+    const prune = (
+      layout: { tabs: Tab[]; activeId: TabId | null },
+    ): { tabs: Tab[]; activeId: TabId | null } | null => {
+      const doomed = layout.tabs.filter(ownedByRun);
+      if (doomed.length === 0) return null;
+      const next = layout.tabs.filter((t) => !ownedByRun(t));
+      let nextActive = layout.activeId;
+      if (nextActive && doomed.some((t) => t.id === nextActive)) {
+        const fallbackChat = next.find((t) => t.kind === "chat");
+        const fallbackFree = next.find((t) => !isRunOwnedTab(t));
+        nextActive = fallbackChat?.id ?? fallbackFree?.id ?? null;
+      }
+      return { tabs: next, activeId: nextActive };
+    };
+    // The ref loop also handles pty teardown for pruned worker tabs (dispose
+    // is idempotent / no-op for already-dead sessions). Kept OUT of the state
+    // updater below so the updater stays pure under StrictMode double-invoke.
+    for (const [ws, layout] of liveWorkspaceTabsRef.current) {
+      if (ws === tabsWorkspaceIdRef.current) continue; // active store: closers own it
+      const pruned = prune(layout);
+      if (!pruned) continue;
+      for (const t of layout.tabs) {
+        if (ownedByRun(t)) disposeTerminalTabPanes(t);
+      }
+      liveWorkspaceTabsRef.current.set(ws, pruned);
+    }
+    setInactiveWorkspaceLayouts((prev) => {
+      let changed = false;
+      const next = prev.map((layout) => {
+        const pruned = prune(layout);
+        if (!pruned) return layout;
+        changed = true;
+        return { ...layout, ...pruned };
+      });
+      return changed ? next : prev;
+    });
+  }, []);
 
   const openEditorTab = useCallback((entry: FsEntry, options?: { preview?: boolean }): TabId => {
     // The setter is invoked synchronously by React, so reading `outId`
@@ -2227,6 +2291,7 @@ export function useTabs(
       closeRunsTabFor,
       closeWorkerTerminalTabFor,
       closePreviewTabsFor,
+      pruneDeletedRunTabsFromInactiveWorkspaces,
       openEditorTab,
       pinEditorTab,
       setEditorEntry,

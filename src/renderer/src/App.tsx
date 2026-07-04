@@ -928,6 +928,11 @@ export default function App() {
           // show again — leaving them would strand invisible browser tabs (and
           // if one was active, a fullscreen browser with no way to close it).
           tabsRef.current.closePreviewTabsFor(event.runId);
+          // The three closers above only touch the ACTIVE workspace's store.
+          // The Settings run manager can delete a background workspace's run;
+          // its frozen snapshot would restore the dead run's tabs verbatim on
+          // switch-back (stranded browser again). Prune those stores too.
+          tabsRef.current.pruneDeletedRunTabsFromInactiveWorkspaces(event.runId);
           // Drop the chat tab too, so the active selection can't keep pointing
           // at a deleted run until the debounced refresh catches up. Unlike the
           // two calls above (which only mutate the active workspace's setTabs and
