@@ -983,13 +983,13 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
 
       <SectionTitle
         title="Notifications"
-        detail="Pick which channels fire when a run — or a Claude/Codex CLI you ran in a terminal — is blocked or finishes while you're away. Turn off Native OS notification to stop Windows toasts, or Embedded sound clip to silence the chime. Alerts never fire when you're already watching that chat or terminal tab; the workspace rail still shows a quiet dot until you visit it."
+        detail="Pick which channels fire when a run — or a Claude/Codex CLI you ran in a terminal — is blocked or finishes while you're away. The in-app toast and the native OS notification never fire together: you get the toast while Codara Studio is focused, and the OS notification when it's minimized or in the background — never both at once. Turn off Native OS notification to stop those system alerts, or Embedded sound clip to silence the chime. Alerts never fire when you're already watching that chat or terminal tab; the workspace rail still shows a quiet dot until you visit it."
       />
       {hydrated ? (
         <div style={{ display: "grid", gap: 6 }}>
           <ToggleRow
             title="In-app toast"
-            desc="Stacked top-right card. Click to jump to the chat or terminal that needs you."
+            desc="Stacked top-right card, shown while Codara Studio is focused. Click to jump to the chat or terminal that needs you."
             checked={preferences.notificationChannels.inApp}
             onChange={(v) =>
               void setPreference("notificationChannels", {
@@ -1000,7 +1000,7 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
           />
           <ToggleRow
             title="Native OS notification"
-            desc="System tray / notification center alert via your OS notifications service."
+            desc="System notification-center alert, shown only when Codara Studio is minimized or in the background — so it never doubles up with the in-app toast."
             checked={preferences.notificationChannels.native}
             onChange={(v) =>
               void setPreference("notificationChannels", {

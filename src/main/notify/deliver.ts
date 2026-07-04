@@ -16,6 +16,13 @@ import type {
 //   - sound   → renderer chime via "notification:sound"
 //   - osCues  → Windows taskbar flash (cleared on focus). The macOS dock
 //               badge is owned by center-store (unread count), not here.
+//
+// inApp and native are the same alert shown two ways, so they never fire
+// together — that duplicate (one toast inside the app, one in the OS notif
+// center) is exactly what we avoid. They split on window focus: when Codara
+// Studio is the focused foreground window the user sees the in-app toast, so
+// that's the alert; when it is minimized or in the background the toast would
+// go unseen, so the native OS notification takes over. See isAppFocused().
 
 let getMainWindow: () => BrowserWindow | null = () => null;
 
@@ -39,6 +46,14 @@ export function activeWindow(): BrowserWindow | null {
     if (!candidate.isDestroyed()) return candidate;
   }
   return null;
+}
+
+// True when the given window is the focused foreground window — i.e. the user
+// is actually looking at Codara Studio and would see an in-app toast. A
+// minimized window is never focused, and neither is one sitting behind another
+// app, so this is precisely the "in the app now" vs "away, notify me" split.
+function isAppFocused(win: BrowserWindow | null): boolean {
+  return !!win && !win.isMinimized() && win.isFocused();
 }
 
 export function focusTarget(target: NavigationTarget): void {
@@ -72,7 +87,12 @@ export function deliver(event: NotifyEvent, channels: NotificationChannelsPref):
     }
   }
 
-  if (channels.inApp && win) {
+  const appFocused = isAppFocused(win);
+
+  // In-app toast: only when the window is focused, so it can actually be seen.
+  // When Codara Studio is minimized or backgrounded the toast would just stack
+  // unseen, and the native channel covers that case instead.
+  if (channels.inApp && win && appFocused) {
     try {
       win.webContents.send("notification:in-app", event);
     } catch (err) {
@@ -80,7 +100,11 @@ export function deliver(event: NotifyEvent, channels: NotificationChannelsPref):
     }
   }
 
-  if (channels.native) {
+  // Native OS notification: the away-fallback. Fire it whenever the in-app
+  // toast is NOT the alert — either the window isn't focused (minimized /
+  // backgrounded), or the in-app channel is turned off — so enabling both
+  // channels never produces the double notification.
+  if (channels.native && (!appFocused || !channels.inApp)) {
     try {
       if (Notification.isSupported()) {
         const n = new Notification({ title: event.title, body: event.body });
