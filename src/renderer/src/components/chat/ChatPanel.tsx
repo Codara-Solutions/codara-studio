@@ -245,6 +245,16 @@ export default function ChatPanel({
                       // submit Enter, but pty.resize IS allowed so CC's Ink
                       // REPL paints into the actual visible cols/rows.
                       inputBlocked
+                      // rawTailReattach: this xterm attaches onto a live Ink
+                      // TUI (Claude/Codex). Switching to another tab and back
+                      // unmounts/remounts this pane; without raw-tail mode the
+                      // unmount captures a flattened-text snapshot that, replayed
+                      // under the TUI's cursor-relative repaints, garbles the
+                      // screen (scattered transcript, detached input box). Raw
+                      // mode makes every remount replay main's RAW pty tail —
+                      // exactly like the first attach, which always renders
+                      // cleanly. See useTerminalSession.ts for the invariant.
+                      rawTailReattach
                     />
                   ) : (
                     <BackendTerminalPlaceholder

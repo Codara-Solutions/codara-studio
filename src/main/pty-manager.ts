@@ -280,14 +280,35 @@ export async function spawn(
     // turn instead of a black hole.
     const previouslyDetached = !existing.webContents && Boolean(opts.webContents);
     if (opts.webContents) existing.webContents = opts.webContents;
-    if (previouslyDetached && opts.webContents && existing.tail.length > 0) {
-      const snapshot = existing.tail.length === 1
-        ? existing.tail[0]
-        : Buffer.concat(existing.tail, existing.tailBytes);
-      try {
-        opts.webContents.send(existing.dataChannel, snapshot);
-      } catch {
-        /* webContents may have been destroyed before we got here; OK */
+    if (previouslyDetached && opts.webContents) {
+      // The tail replay below is the AUTHORITATIVE re-attach frame for a session
+      // whose renderer sink was absent (a headless cli-session, or a raw-tail
+      // detach()). Anything still sitting in pendingChunks is a strict SUBSET of
+      // the tail — enqueueData appends every chunk to s.tail unconditionally
+      // (line ~711) BEFORE queueing it for the renderer flush — and while
+      // webContents was null those pending bytes were only ever dropped at flush
+      // (see flushDataNow's no-webContents guard), never delivered. If we left
+      // the pending queue + its 16 ms flushTimer armed, reassigning webContents
+      // just above would let that timer fire right AFTER this tail send and
+      // re-deliver the same trailing bytes a second time. For a live Ink TUI a
+      // duplicated fragment applied on top of the freshly replayed frame desyncs
+      // the cursor — the exact garble raw-tail reattach exists to prevent. Drop
+      // the pending queue + timer here so the tail snapshot is the sole delivery.
+      if (existing.flushTimer) {
+        clearTimeout(existing.flushTimer);
+        existing.flushTimer = null;
+      }
+      existing.pendingChunks = [];
+      existing.pendingBytes = 0;
+      if (existing.tail.length > 0) {
+        const snapshot = existing.tail.length === 1
+          ? existing.tail[0]
+          : Buffer.concat(existing.tail, existing.tailBytes);
+        try {
+          opts.webContents.send(existing.dataChannel, snapshot);
+        } catch {
+          /* webContents may have been destroyed before we got here; OK */
+        }
       }
     }
     try {
@@ -802,6 +823,41 @@ export function resume(id: string): void {
   s.detachedBacklog = [];
   s.detachedBacklogBytes = 0;
   s.attached = true;
+}
+
+// Called by the renderer's raw-tail-reattach panes (the ChatPanel backend
+// terminal) when their TerminalPane unmounts, INSTEAD of pause(). Unlike
+// pause() — which keeps webContents bound and stashes bytes into a replayable
+// backlog — detach makes the session look exactly like a never-yet-attached
+// one: webContents is nulled and ALL pause/backlog + pending state is
+// discarded. The next spawn() at this id then hits the `previouslyDetached`
+// branch and replays the RAW tail bytes into the fresh xterm, reproducing a
+// live Ink TUI's frame exactly like the known-good first attach (a flattened
+// xterm-text snapshot replayed under an incrementally-redrawing TUI garbles it).
+//
+// Why it's safe to throw the backlog away: enqueueData pushes EVERY chunk into
+// s.tail unconditionally (see line ~711, before the attached check), so the
+// tail is a strict superset of anything the backlog held. Clearing the backlog
+// here — and leaving attached=true so bytes that arrive while detached take the
+// normal (webContents===null → dropped at flush) path instead of re-growing a
+// backlog — guarantees a later attach can't double-deliver bytes the raw-tail
+// replay is already going to send. Incoming bytes keep accumulating in the tail
+// while detached, since onData routes through enqueueData regardless of
+// webContents (it tolerated webContents===null before the first attach too).
+// Safe no-op for unknown ids.
+export function detach(id: string): void {
+  const s = sessions.get(id);
+  if (!s) return;
+  s.webContents = null;
+  s.attached = true;
+  s.detachedBacklog = [];
+  s.detachedBacklogBytes = 0;
+  s.pendingChunks = [];
+  s.pendingBytes = 0;
+  if (s.flushTimer) {
+    clearTimeout(s.flushTimer);
+    s.flushTimer = null;
+  }
 }
 
 function flushDataNow(s: Session): void {

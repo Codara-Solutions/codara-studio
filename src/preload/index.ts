@@ -575,6 +575,11 @@ const api = {
     exists: (id: string): Promise<boolean> => ipcRenderer.invoke("pty:exists", { id }),
     pause: (id: string): Promise<void> => ipcRenderer.invoke("pty:pause", { id }),
     resume: (id: string): Promise<void> => ipcRenderer.invoke("pty:resume", { id }),
+    // Raw-tail-reattach variant of pause: drops main's renderer sink and
+    // discards the pause/backlog state so the next spawn() replays the raw pty
+    // tail into a fresh xterm (like a first attach). Used by ChatPanel's
+    // backend terminal so a live Ink TUI reattaches cleanly instead of garbling.
+    detach: (id: string): Promise<void> => ipcRenderer.invoke("pty:detach", { id }),
     onData: (id: string, handler: PtyDataHandler): (() => void) => {
       const channel = `pty:data:${id}`;
       const listener = (_e: Electron.IpcRendererEvent, data: Uint8Array | string) => handler(data);

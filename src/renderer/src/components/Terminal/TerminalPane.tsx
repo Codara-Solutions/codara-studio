@@ -43,6 +43,12 @@ interface Props {
   // chat panel's backend-terminal tab) so the PTY tracks the xterm's actual
   // dimensions instead of staying at a tiny default size.
   inputBlocked?: boolean;
+  // Raw-tail reattach mode. Opt-in, default off — only ChatPanel's backend
+  // terminal sets it. Makes every re-attach behave like the first attach
+  // (unmount → pty.detach, remount → replay main's raw pty tail) so a live Ink
+  // TUI reattaches cleanly instead of garbling under a flattened-text snapshot
+  // replay. See the option's WHY-comment in useTerminalSession.ts.
+  rawTailReattach?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   onCwd?: (cwd: string) => void;
@@ -70,6 +76,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       extraEnv,
       readOnly,
       inputBlocked,
+      rawTailReattach,
       onSearchReady,
       onExit,
       onCwd,
@@ -96,6 +103,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       extraEnv,
       readOnly,
       inputBlocked,
+      rawTailReattach,
       onSearchReady,
       onExit,
       onCwd,

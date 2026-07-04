@@ -1236,6 +1236,13 @@ export function registerIpc(): void {
   ipcMain.handle("pty:resume", async (_e, args: { id: string }) => {
     pty.resume(args.id);
   });
+  // Detach — the raw-tail-reattach variant of pause used by ChatPanel's backend
+  // terminal. Nulls the renderer sink and DISCARDS the pause/backlog state so
+  // the next spawn() replays the raw pty tail into a fresh xterm (like a first
+  // attach) instead of resuming a backlog that would double-deliver tail bytes.
+  ipcMain.handle("pty:detach", async (_e, args: { id: string }) => {
+    pty.detach(args.id);
+  });
 
   // Live runtime-state report from the renderer-side terminal poller. Main
   // forwards the report into run-store (which finds the worker attempt by

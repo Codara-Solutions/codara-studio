@@ -175,6 +175,19 @@ interface Options {
   // its tiny default size while the user's xterm fills the panel, leaving
   // most of the visible area unpainted.
   inputBlocked?: boolean;
+  // Raw-tail reattach mode. Opt-in, default off — used ONLY by ChatPanel's
+  // backend terminal, which attaches a read-only xterm onto a live Ink TUI
+  // (Claude/Codex) that repaints with cursor-relative sequences assuming its
+  // own prior frame is on screen. In this mode every re-attach is made to
+  // behave exactly like the known-good FIRST attach: on unmount we call
+  // pty.detach (not pty.pause) so main keeps only its RAW tail bytes, and on
+  // remount we skip the flattened-text snapshot / scrollback replay entirely
+  // and let main replay that raw tail (spawn()'s `previouslyDetached` branch)
+  // — raw bytes reproduce the TUI frame exactly, whereas a flattened-text
+  // snapshot replayed under an incrementally-redrawing TUI garbles the screen.
+  // Leave OFF for regular panes (TerminalStack, workers): they never unmount
+  // during tab switches, so the snapshot/backlog path is correct for them.
+  rawTailReattach?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   onCwd?: (cwd: string) => void;
@@ -229,6 +242,7 @@ export function useTerminalSession({
   extraEnv,
   readOnly = false,
   inputBlocked = false,
+  rawTailReattach = false,
   onSearchReady,
   onExit,
   onCwd,
@@ -253,6 +267,15 @@ export function useTerminalSession({
   useEffect(() => {
     inputBlockedRef.current = inputBlocked;
   }, [inputBlocked]);
+  // Same latest-value pattern for rawTailReattach. The unmount cleanup and the
+  // mount replay both branch on this; a ref lets the parent flip it without
+  // forcing the once-per-sessionId xterm setup effect to re-run (in practice
+  // ChatPanel sets it statically true, but the ref keeps the two read sites
+  // consistent with the freshest value).
+  const rawTailReattachRef = useRef<boolean>(rawTailReattach);
+  useEffect(() => {
+    rawTailReattachRef.current = rawTailReattach;
+  }, [rawTailReattach]);
 
   const detectedRef = useRef<string | null>(null);
   // Latest-callback refs so the effect can run exactly once per `sessionId`
@@ -1010,13 +1033,30 @@ export function useTerminalSession({
       } catch {
         /* host may be 0×0 on first paint; ResizeObserver will fix it. */
       }
-      // Prefer the in-memory snapshot captured during the previous unmount —
-      // it's the full visible+scrollback buffer (capped by the configured line
-      // limit) and exists only for workspace-switch round-trips. Falls back to the leaf's
-      // localStorage-persisted scrollback (smaller, sampled) for the cold-start
-      // app-restart path; that one still carries the RESTORE_NOTICE so the user
-      // knows the prompt below is fresh.
-      const liveSnapshot = xtermBufferSnapshots.get(sessionId);
+      // Raw-tail reattach mode (chat backend terminal): the reattach is driven
+      // ENTIRELY by main replaying the raw pty tail bytes into this fresh xterm
+      // (spawn()'s existing-session `previouslyDetached` branch, below), exactly
+      // like the known-good first attach. Skip BOTH the flattened-text snapshot
+      // replay and the localStorage scrollback restore — a flattened-text replay
+      // reflows the old frame as plain text, and the live Ink TUI's next
+      // incremental cursor-relative repaint assumes ITS prior frame is on screen;
+      // the two don't compose, which is the reported garble (scattered
+      // transcript, huge gaps, a detached input box near the bottom). Also delete
+      // any stale snapshot for this id so an old flattened frame can never replay
+      // — including on a future non-raw mount of the same session.
+      //
+      // INVARIANT: the data listener (offData) is registered before the spawn()
+      // call further down, so the raw tail main sends during spawn is received by
+      // this xterm. This already holds — first attach works — so raw mode just
+      // relies on the same ordering. No resume() is issued in this mode (see the
+      // guarded resume below): detach() left nothing paused, so the raw tail is
+      // the sole source of replayed bytes and can't be double-delivered.
+      const liveSnapshot = rawTailReattachRef.current
+        ? null
+        : xtermBufferSnapshots.get(sessionId);
+      if (rawTailReattachRef.current) {
+        xtermBufferSnapshots.delete(sessionId);
+      }
       if (liveSnapshot) {
         // Replay the cached buffer, then any bytes that arrived while the pane
         // was hidden during its last life (pendingBytes). Keep the cache entry
@@ -1053,7 +1093,11 @@ export function useTerminalSession({
         } else {
           finishReplay();
         }
-      } else {
+      } else if (!rawTailReattachRef.current) {
+        // Non-raw path only: restore the sampled localStorage scrollback for the
+        // cold app-restart case. Raw mode never restores here — main's raw tail
+        // replay is authoritative and any text restore would sit under the live
+        // TUI's incremental repaint and garble it.
         const restoredScrollback = trimTerminalScrollbackLines(
           initialScrollback?.trimEnd() ?? "",
           scrollbackLineLimitRef.current,
@@ -1878,7 +1922,15 @@ export function useTerminalSession({
       // flushes them back through the same data channel as live output, so
       // the user sees everything the agent printed during the gap. On a
       // fresh session this is a no-op (backlog empty, already attached).
-      void window.spark.pty.resume(sessionId);
+      //
+      // SKIP in raw-tail reattach mode: unmount called pty.detach (not pause),
+      // which cleared the backlog and left the session attached, so nothing was
+      // ever paused. The raw tail replayed by spawn() above is the sole source
+      // of replayed bytes; calling resume would risk re-delivering tail bytes,
+      // so we make the "no double-delivery" invariant explicit by not calling it.
+      if (!rawTailReattachRef.current) {
+        void window.spark.pty.resume(sessionId);
+      }
 
       // Two-stage debounce, ported from the terax design.
       //  - FIT runs on a tight (~one frame) timer so xterm visually keeps up
@@ -2057,7 +2109,18 @@ export function useTerminalSession({
       // as possible — any chunk that slips through during that one-tick
       // gap is also absorbed by pause() itself, which moves the pending
       // flush queue into the backlog.
-      if (!readOnlyRef.current) {
+      if (rawTailReattachRef.current) {
+        // Raw-tail reattach (chat backend terminal): DETACH instead of pause.
+        // detach() nulls main's renderer sink and DISCARDS the pause/backlog
+        // state; bytes keep accumulating in main's raw tail (a superset of what
+        // this pane saw), which the next spawn() replays verbatim into a fresh
+        // xterm — reproducing the live Ink TUI frame exactly like a first
+        // attach. We deliberately do NOT capture a flattened xterm-text snapshot
+        // below in this mode (see the guarded snapshot block): a text snapshot
+        // replayed under an incrementally-redrawing TUI is precisely what garbles
+        // the screen on remount.
+        void window.spark.pty.detach?.(sessionId);
+      } else if (!readOnlyRef.current) {
         void window.spark.pty.pause?.(sessionId);
       }
       for (const fn of cleanups) {
@@ -2086,7 +2149,13 @@ export function useTerminalSession({
       // snapshot and progressively erode scrollback across fast remount
       // cycles. The cache still holds the full original (we delete it only in
       // the replay write callback), so skip re-snapshotting entirely here.
-      if (dyingTerm && !replayPending) {
+      // Raw-tail reattach mode skips the snapshot entirely: main's raw tail is
+      // the sole replay source on remount (a flattened-text snapshot would
+      // garble the live TUI), so capturing one here would be dead weight and,
+      // worse, could replay on a later non-raw mount of the same session. The
+      // hidden-buffer refs are dropped unconditionally below — their bytes are in
+      // main's tail and come back via the raw replay.
+      if (dyingTerm && !replayPending && !rawTailReattachRef.current) {
         try {
           const text = captureXtermBuffer(dyingTerm, scrollbackLineLimitRef.current);
           // Bytes that streamed in while this pane was hidden never reached
