@@ -152,3 +152,16 @@ export interface AutomationsTab extends BaseTab {
 export type Tab = ChatTab | EditorTab | TerminalTab | PreviewTab | RunsTab | AutomationsTab;
 
 export type TabKind = Tab["kind"];
+
+// True when a tab represents content owned by an orchestration run (worker
+// terminal, Runs canvas, orchestration-spawned preview). These render inside
+// the chat panel's inner tab strip instead of the top tab bar — which also
+// means they have NO pill anywhere once their owning chat tab is closed, so
+// tab-close/reroute logic must never leave one of them as the active tab.
+// Shared by App (strip filtering) and useTabs (close-time active rerouting).
+export function isRunOwnedTab(tab: Tab): boolean {
+  if (tab.kind === "terminal" && tab.scope?.kind === "workers") return true;
+  if (tab.kind === "runs") return true;
+  if (tab.kind === "preview" && tab.runId) return true;
+  return false;
+}

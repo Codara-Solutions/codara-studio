@@ -52,6 +52,7 @@ import type {
   TerminalLeaf,
   TerminalTab,
 } from "./tabs/types";
+import { isRunOwnedTab } from "./tabs/types";
 import { basename } from "./path-utils";
 import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
@@ -922,6 +923,11 @@ export default function App() {
         if (event.runId) {
           tabsRef.current.closeRunsTabFor(event.runId);
           tabsRef.current.closeWorkerTerminalTabFor(event.runId);
+          // Previews spawned by the deleted run must close too: they're listed
+          // only in the run's inner tab strip, which a deleted run can never
+          // show again — leaving them would strand invisible browser tabs (and
+          // if one was active, a fullscreen browser with no way to close it).
+          tabsRef.current.closePreviewTabsFor(event.runId);
           // Drop the chat tab too, so the active selection can't keep pointing
           // at a deleted run until the debounced refresh catches up. Unlike the
           // two calls above (which only mutate the active workspace's setTabs and
@@ -3364,16 +3370,6 @@ function isTabVisibleForRun(tab: Tab, activeRunId: string | null): boolean {
     tab.scope?.kind === "workers" &&
     tab.scope.runId !== activeRunId
   );
-}
-
-// True when a tab represents content owned by an orchestration run (worker
-// terminal, Runs canvas, orchestration-spawned preview). These render inside
-// the chat panel's inner tab strip instead of the top tab bar.
-function isRunOwnedTab(tab: Tab): boolean {
-  if (tab.kind === "terminal" && tab.scope?.kind === "workers") return true;
-  if (tab.kind === "runs") return true;
-  if (tab.kind === "preview" && tab.runId) return true;
-  return false;
 }
 
 // Filter for what the top tab strip displays. Top strip = chat + workspace

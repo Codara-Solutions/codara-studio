@@ -34,6 +34,7 @@ import type {
   TerminalSplit,
   TerminalTab,
 } from "./types";
+import { isRunOwnedTab } from "./types";
 
 // useTabs is the in-memory tabs store for the workspace pane. We keep it as
 // a plain React hook (no zustand dependency) since the rest of Codara uses
@@ -599,6 +600,10 @@ export interface UseTabsApi {
   // Close the runs tab bound to a chat (used when the chat is deleted).
   closeRunsTabFor: (runId: string) => void;
   closeWorkerTerminalTabFor: (runId: string) => void;
+  // Close every preview tab spawned by a run (used when the run is deleted —
+  // a deleted run can never re-surface them via its inner tab strip, so
+  // leaving them would strand invisible, uncloseable browser tabs).
+  closePreviewTabsFor: (runId: string) => void;
   openEditorTab: (entry: FsEntry, options?: { preview?: boolean }) => TabId;
   pinEditorTab: (id: TabId) => void;
   setEditorEntry: (oldPath: string, entry: FsEntry) => void;
@@ -1742,12 +1747,30 @@ export function useTabs(
       // popover; the closedChatRunIds marker added above keeps
       // syncChatTabsToRuns from resurrecting the tab on the next runs refresh.
       const next = curr.filter((t) => t.id !== runId);
-      // Reroute active selection if the closed tab was active: prefer another
-      // chat tab, then any remaining tab, else null (→ empty state).
+      // Reroute the active selection away from anything this close just made
+      // unreachable. Run-owned tabs (workers terminal, Runs canvas, run-tagged
+      // previews) are listed ONLY in the chat panel's inner tab strip — the top
+      // strip filters them out — so once the owning chat tab is gone they have
+      // no pill anywhere. If one of them stayed (or became) active, the user
+      // would be stranded on a fullscreen surface with no way to leave or close
+      // it (the reported "browser stays open and there is no way to close it").
+      // They remain in the tab list per the close-only contract — reopening the
+      // run from history surfaces them again — they just can't be the active
+      // tab while orphaned, and can never be the fallback target either.
+      // Scoped to THIS run's tabs: closing an unrelated chat while viewing
+      // another (still-open) run's worker/preview must not yank the view.
+      const ownedByClosedRun = (t: Tab) =>
+        (t.kind === "terminal" && t.scope?.kind === "workers" && t.scope.runId === runId) ||
+        (t.kind === "runs" && t.runId === runId) ||
+        (t.kind === "preview" && t.runId === runId);
       setActiveId((active) => {
-        if (active !== runId) return active;
+        const activeTab = active ? next.find((t) => t.id === active) : undefined;
+        const stranded =
+          active === runId || (activeTab ? ownedByClosedRun(activeTab) : false);
+        if (!stranded) return active;
         const fallbackChat = next.find((t) => t.kind === "chat");
-        return fallbackChat?.id ?? next[0]?.id ?? null;
+        const fallbackFree = next.find((t) => !isRunOwnedTab(t));
+        return fallbackChat?.id ?? fallbackFree?.id ?? null;
       });
       return next;
     });
@@ -1987,6 +2010,40 @@ export function useTabs(
     });
   }, []);
 
+  // Close every preview tab a run spawned (run.deleted cleanup, alongside
+  // closeRunsTabFor/closeWorkerTerminalTabFor). Run-tagged previews are listed
+  // only in the deleted run's inner tab strip, so any left behind would be
+  // invisible and uncloseable forever. A run can own several previews, hence
+  // the filter (unlike the single runs/workers tabs). No PTYs to dispose —
+  // fireDispose covers any registered per-tab teardown. Same reseed contract
+  // as the sibling closers: never reseed a chat tab on an emptied workspace.
+  const closePreviewTabsFor = useCallback(
+    (runId: string) => {
+      setTabs((curr) => {
+        const doomed = curr.filter(
+          (t): t is PreviewTab => t.kind === "preview" && t.runId === runId,
+        );
+        if (doomed.length === 0) return curr;
+        const doomedIds = new Set<TabId>(doomed.map((t) => t.id));
+        const next = curr.filter((t) => !doomedIds.has(t.id));
+        for (const id of doomedIds) fireDispose(id);
+        if (next.length === 0) {
+          const seed = createTerminalTab(defaultCwdRef.current);
+          setActiveId(seed.id);
+          return [seed];
+        }
+        setActiveId((active) => {
+          if (!active || !doomedIds.has(active)) return active;
+          const fallbackChat = next.find((t) => t.kind === "chat");
+          const fallbackFree = next.find((t) => !isRunOwnedTab(t));
+          return fallbackChat?.id ?? fallbackFree?.id ?? next[0]?.id ?? null;
+        });
+        return next;
+      });
+    },
+    [fireDispose],
+  );
+
   const openEditorTab = useCallback((entry: FsEntry, options?: { preview?: boolean }): TabId => {
     // The setter is invoked synchronously by React, so reading `outId`
     // back after `setTabs` returns is safe. TypeScript can't see through
@@ -2169,6 +2226,7 @@ export function useTabs(
       openAutomationsTab,
       closeRunsTabFor,
       closeWorkerTerminalTabFor,
+      closePreviewTabsFor,
       openEditorTab,
       pinEditorTab,
       setEditorEntry,
