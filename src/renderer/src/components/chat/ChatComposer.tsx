@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AddRunMessageAttachmentInput,
   AgentEffortLevel,
@@ -254,12 +254,36 @@ export default function ChatComposer({
   }, [suspendGlobalEvents]);
 
   // Grow the textarea with its content up to a cap, then scroll internally.
-  useEffect(() => {
+  // Measuring is only valid while the composer is actually laid out: ChatPanel
+  // keeps the whole composer mounted but display:none while the Terminal
+  // sub-view is active, and a display:none textarea reports scrollHeight 0 —
+  // writing that as an inline "0px" height left the input invisibly collapsed
+  // after switching back to Chat (nothing re-ran the measure until the next
+  // draft keystroke, which the user can't type into a 0px box). So: skip the
+  // measure while hidden, and re-run it from a ResizeObserver when the
+  // textarea regains real geometry (display:none → visible flips its width).
+  const autosizeTextarea = useCallback(() => {
     const node = textareaRef.current;
     if (!node) return;
+    // offsetParent === null ⇔ a display:none ancestor (the textarea is never
+    // position:fixed). Keep the previous height; the observer below fires the
+    // re-measure once the composer is visible again.
+    if (node.offsetParent === null) return;
     node.style.height = "auto";
     node.style.height = `${Math.min(node.scrollHeight, MAX_TEXTAREA_H)}px`;
-  }, [draft]);
+  }, []);
+  useEffect(() => {
+    autosizeTextarea();
+  }, [draft, autosizeTextarea]);
+  useEffect(() => {
+    const node = textareaRef.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+    // Fires on the hidden→visible transition (width 0 → real) and on panel
+    // resizes. Re-measuring to the same height is a no-op, so no feedback loop.
+    const observer = new ResizeObserver(() => autosizeTextarea());
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [autosizeTextarea]);
 
   // Reset the token accumulator on run change so a freshly-selected chat
   // starts at 0 rather than carrying the previous chat's running total.
