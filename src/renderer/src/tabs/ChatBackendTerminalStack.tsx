@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RunState, RunStatus } from "@shared/types";
 import { backendPtySessionId } from "@shared/backend-pty";
 import { TerminalPane } from "../components/Terminal/TerminalPane";
@@ -44,13 +44,27 @@ import { PANEL_HEADER_H } from "../panels/usePanelLayout";
 // Runs in a terminal status can't still be producing an incrementally-repainting
 // frame, so their last paint sits stable in the raw tail and a fresh attach
 // replays it fine — no need to burn a warm xterm on every historical chat. Only
-// actively-streaming runs (everything else) and the currently-active run get a
-// kept-alive pane.
+// actively-streaming runs (everything else) and the currently-active run become
+// NEW warm panes; but see the sticky-set note below — once warm, a pane's
+// lifetime is tied to its PTY, not to this candidate filter.
 const TERMINAL_RUN_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
   "complete",
   "failed",
   "cancelled",
 ]);
+
+// Upper bound on simultaneously-warm hidden xterms (each one costs continuous
+// parse/paint while its CLI streams). Eviction is oldest-first, skipping the
+// currently-visible pane; live concurrent chat backends are few in practice.
+const WARM_PANE_CAP = 8;
+
+// A dead PTY only evicts its warm pane after this many consecutive missed
+// existence polls AND only if the PTY was seen alive at least once. One missed
+// poll must never dispose the xterm — a transient IPC hiccup would silently
+// convert into transcript loss — and a run whose CLI hasn't spawned yet
+// (created, no first message) must be allowed to sit at exists=false without
+// being evicted before its first spawn.
+const DEAD_POLL_EVICT_THRESHOLD = 5;
 
 interface Props {
   runs: RunState[];
@@ -78,14 +92,10 @@ function ChatBackendTerminalStack({
   terminalScrollbackLineLimit,
   workspaceCwd,
 }: Props) {
-  // Kept-alive set: every run with a backend PTY session that is either actively
-  // streaming (non-terminal status) or the currently-active run. De-duped by
-  // sessionId. A streaming run stays in this set even when its chat tab is
-  // inactive or CLOSED — the run lives in the run store, not the tab set — so
-  // reopening it from history reveals the same warm xterm instead of a fresh
-  // blank one. That is the "close chat, reopen from history, still streaming"
-  // case the raw-tail replay could never satisfy.
-  const sessions = useMemo(() => {
+  // Candidate set THIS RENDER: every run with a backend PTY session that is
+  // either actively streaming (non-terminal status) or the currently-active
+  // run. De-duped by sessionId.
+  const candidates = useMemo(() => {
     const seen = new Set<string>();
     const out: { runId: string; sessionId: string }[] = [];
     for (const run of runs) {
@@ -100,6 +110,23 @@ function ChatBackendTerminalStack({
     return out;
   }, [runs, activeRunId]);
 
+  // STICKY warm set. Candidates only ever ADD panes; nothing is removed when a
+  // session drops out of `candidates`. This is load-bearing two ways:
+  //  - `runs` is scoped to the ACTIVE workspace, so on a workspace switch every
+  //    session of the previous workspace vanishes from `candidates`. Keying the
+  //    render on candidates alone would unmount every warm xterm on a plain
+  //    workspace toggle and resurrect the blank-terminal bug on switch-back —
+  //    the exact hole TerminalStack plugs with per-workspace mounted layers.
+  //  - A run finishing (terminal status) while another chat is active would
+  //    otherwise evict its pane and destroy the accumulated transcript
+  //    scrollback that the bounded raw tail can never rebuild.
+  // A pane leaves the map only when (a) its PTY has been observed alive and
+  // then gone for DEAD_POLL_EVICT_THRESHOLD consecutive polls (the pane
+  // reports via onDead), or (b) the WARM_PANE_CAP eviction below reclaims the
+  // oldest hidden pane. Map iteration order = insertion order = warm age.
+  const [warmSessions, setWarmSessions] = useState<ReadonlyMap<string, string>>(
+    () => new Map<string, string>(),
+  );
   // Show the active run's terminal only when the user is genuinely on its chat
   // tab with the Terminal sub-view active. chatView can read "terminal" while a
   // worker tab is focused (it's remembered per active run); the tab-identity
@@ -108,8 +135,54 @@ function ChatBackendTerminalStack({
     effectiveActiveId != null &&
     effectiveActiveId === activeChatTabId &&
     chatView === "terminal";
+  const visibleSessionId = useMemo(() => {
+    if (!showActive || !activeRunId) return null;
+    for (const [sessionId, runId] of warmSessions) {
+      if (runId === activeRunId) return sessionId;
+    }
+    return null;
+  }, [showActive, activeRunId, warmSessions]);
 
-  if (sessions.length === 0) return null;
+  useEffect(() => {
+    setWarmSessions((prev) => {
+      let next: Map<string, string> | null = null;
+      for (const { runId, sessionId } of candidates) {
+        if (prev.has(sessionId) && prev.get(sessionId) === runId) continue;
+        if (!next) next = new Map(prev);
+        next.set(sessionId, runId);
+      }
+      if (!next) return prev;
+      // Cap: evict oldest first, but never the pane the user is looking at.
+      // (A just-added candidate can't be evicted unless the cap is full of
+      // even-older entries, which is the point.)
+      while (next.size > WARM_PANE_CAP) {
+        let evicted = false;
+        for (const [sessionId] of next) {
+          if (sessionId === visibleSessionId) continue;
+          next.delete(sessionId);
+          evicted = true;
+          break;
+        }
+        if (!evicted) break; // pathological: everything visible-protected
+      }
+      return next;
+    });
+  }, [candidates, visibleSessionId]);
+
+  // Pane self-reports a confirmed-dead PTY (alive once, then gone for the
+  // eviction threshold). Dropping the entry unmounts the pane; if the same
+  // session id later respawns, the exists-poll of a fresh candidate pane picks
+  // it up again with a clean raw-tail attach.
+  const dropSession = useCallback((sessionId: string) => {
+    setWarmSessions((prev) => {
+      if (!prev.has(sessionId)) return prev;
+      const next = new Map(prev);
+      next.delete(sessionId);
+      return next;
+    });
+  }, []);
+
+  if (warmSessions.size === 0) return null;
 
   return (
     <div
@@ -128,13 +201,14 @@ function ChatBackendTerminalStack({
         pointerEvents: "none",
       }}
     >
-      {sessions.map(({ runId, sessionId }) => (
+      {Array.from(warmSessions, ([sessionId, runId]) => (
         <PersistentBackendTerminal
           key={sessionId}
           sessionId={sessionId}
           visible={showActive && runId === activeRunId}
           scrollbackLineLimit={terminalScrollbackLineLimit}
           workspaceCwd={workspaceCwd}
+          onDead={dropSession}
         />
       ))}
     </div>
@@ -146,6 +220,10 @@ interface PaneProps {
   visible: boolean;
   scrollbackLineLimit: number;
   workspaceCwd?: string | null;
+  // Confirmed-dead report: the PTY was observed alive at least once and has
+  // now been gone for DEAD_POLL_EVICT_THRESHOLD consecutive polls. The parent
+  // drops this pane from the warm set in response.
+  onDead: (sessionId: string) => void;
 }
 
 function PersistentBackendTerminal({
@@ -153,23 +231,44 @@ function PersistentBackendTerminal({
   visible,
   scrollbackLineLimit,
   workspaceCwd,
+  onDead,
 }: PaneProps) {
   // Gate the actual xterm mount on the PTY's existence. Mounting TerminalPane
   // before main has spawned the session makes useTerminalSession spawn the
   // placeholder "noop" shell (File not found). Poll (cheap Map.has in main);
   // once the session exists the pane mounts and then stays mounted across
-  // visibility flips — the whole point of this layer. When the session later
-  // disappears (run torn down, app resume before the CLI respawns) the pane
-  // unmounts cleanly; a fresh existence flip remounts it.
+  // visibility flips — the whole point of this layer. A single failed poll
+  // must NOT unmount the xterm (that would trade a transient IPC hiccup for
+  // transcript loss); only a confirmed death — alive once, then gone for
+  // DEAD_POLL_EVICT_THRESHOLD straight polls — flips `exists` off and reports
+  // up so the warm entry is dropped.
   const [exists, setExists] = useState(false);
+  const onDeadRef = useRef(onDead);
+  useEffect(() => {
+    onDeadRef.current = onDead;
+  }, [onDead]);
   useEffect(() => {
     let disposed = false;
+    let everAlive = false;
+    let misses = 0;
     const check = async () => {
+      let alive = false;
       try {
-        const e = await window.spark.pty.exists(sessionId);
-        if (!disposed) setExists(e);
+        alive = await window.spark.pty.exists(sessionId);
       } catch {
-        if (!disposed) setExists(false);
+        alive = false; // treated as a miss, absorbed by the threshold below
+      }
+      if (disposed) return;
+      if (alive) {
+        everAlive = true;
+        misses = 0;
+        setExists(true);
+        return;
+      }
+      misses += 1;
+      if (everAlive && misses >= DEAD_POLL_EVICT_THRESHOLD) {
+        setExists(false);
+        onDeadRef.current(sessionId);
       }
     };
     void check();

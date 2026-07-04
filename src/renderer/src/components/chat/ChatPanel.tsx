@@ -126,7 +126,11 @@ export default function ChatPanel({
   // Once the PTY exists, render TerminalPane; otherwise show a placeholder.
   const [backendPtyExists, setBackendPtyExists] = useState(false);
   useEffect(() => {
-    if (!backendSessionId || chatView !== "terminal") {
+    // In the hoisted path the inline TerminalPane is never mounted (the
+    // App-level ChatBackendTerminalStack owns the pane and runs its own
+    // existence poll), so this poll's result is unreachable — skip it rather
+    // than fire another concurrent pty.exists IPC every second.
+    if (!backendSessionId || chatView !== "terminal" || usingHoistedChatView) {
       setBackendPtyExists(false);
       return;
     }
@@ -147,7 +151,7 @@ export default function ChatPanel({
       disposed = true;
       window.clearInterval(interval);
     };
-  }, [backendSessionId, chatView]);
+  }, [backendSessionId, chatView, usingHoistedChatView]);
 
   return (
     <div
