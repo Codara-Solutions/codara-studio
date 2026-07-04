@@ -33,6 +33,7 @@ import { CopyBranchDeleteDialog, CopyBranchErrorToast } from "./components/CopyB
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar, { type PickerHints } from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
+import ChatBackendTerminalStack from "./tabs/ChatBackendTerminalStack";
 import InnerTabStrip from "./tabs/InnerTabStrip";
 import EditorStack from "./tabs/EditorStack";
 import TerminalStack from "./tabs/TerminalStack";
@@ -3797,6 +3798,24 @@ const Workspace = React.memo(function Workspace({
           onChatViewChange={setChatView}
           onSelectRun={onSelectRun}
           onRunSnapshot={onRunSnapshot}
+        />
+        {/* Persistent host for the chat backend terminals. Rendered here — a
+            sibling of ChatStack that App never unmounts — so a chat's live Ink
+            TUI xterm survives ChatStack tearing down the chat panel on any tab
+            or sub-view switch. This is what stops the backend Terminal view from
+            going blank after a few minutes of streaming; ChatStack/ChatPanel
+            deliberately no longer mount the pane inline (see ChatPanel's
+            usingHoistedChatView gate). Sits just above ChatStack and below the
+            other stacks, and hides itself unless the user is on the owning
+            chat's Terminal sub-view, so it never covers another tab. */}
+        <ChatBackendTerminalStack
+          runs={runs}
+          activeRunId={activeRunId}
+          activeChatTabId={activeChatTabId}
+          effectiveActiveId={effectiveActiveId}
+          chatView={chatView}
+          terminalScrollbackLineLimit={terminalScrollbackLineLimit}
+          workspaceCwd={workspace?.cwd ?? null}
         />
         <EditorStack
           tabs={visibleTabs}

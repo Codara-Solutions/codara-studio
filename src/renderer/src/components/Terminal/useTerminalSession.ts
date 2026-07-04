@@ -188,6 +188,20 @@ interface Options {
   // Leave OFF for regular panes (TerminalStack, workers): they never unmount
   // during tab switches, so the snapshot/backlog path is correct for them.
   rawTailReattach?: boolean;
+  // Write PTY bytes into xterm even while the pane is hidden. Opt-in, default
+  // off — used ONLY by the persistent chat backend terminal
+  // (ChatBackendTerminalStack), which EAGER-ATTACHES the moment the PTY exists,
+  // typically long before the user ever opens the Terminal sub-view. A normal
+  // hidden pane stashes incoming bytes in hiddenBufferRef (256 KB, head-dropped)
+  // and flushes them on the first reveal — but for a live Ink TUI that cap would
+  // discard the boot draw + <Static> transcript + input-box frame of a session
+  // that has been streaming for minutes, so the first reveal would replay only
+  // recent repaint churn and render blank (the very bug the persistent layer
+  // exists to prevent). With this flag the pane keeps xterm's own buffer +
+  // scrollback authoritative from first attach, so any later reveal just shows
+  // the accumulated frame. Costs continuous xterm.write while hidden — acceptable
+  // for the one-or-few live chat backends, NOT for regular panes.
+  writeWhileHidden?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   onCwd?: (cwd: string) => void;
@@ -243,6 +257,7 @@ export function useTerminalSession({
   readOnly = false,
   inputBlocked = false,
   rawTailReattach = false,
+  writeWhileHidden = false,
   onSearchReady,
   onExit,
   onCwd,
@@ -276,6 +291,14 @@ export function useTerminalSession({
   useEffect(() => {
     rawTailReattachRef.current = rawTailReattach;
   }, [rawTailReattach]);
+  // Same latest-value pattern for writeWhileHidden. Read on the pty-onData hot
+  // path (captured once per sessionId), so a ref keeps it fresh without
+  // re-running the setup effect. Set statically true by the persistent chat
+  // backend pane.
+  const writeWhileHiddenRef = useRef<boolean>(writeWhileHidden);
+  useEffect(() => {
+    writeWhileHiddenRef.current = writeWhileHidden;
+  }, [writeWhileHidden]);
 
   const detectedRef = useRef<string | null>(null);
   // Latest-callback refs so the effect can run exactly once per `sessionId`
@@ -1832,6 +1855,28 @@ export function useTerminalSession({
         // next visible-transition. PTY keeps streaming; only the renderer-side
         // rendering cost is deferred.
         if (!visibleRef.current) {
+          // writeWhileHidden (persistent chat backend terminal): DON'T stash —
+          // write straight into xterm even while hidden. This pane eager-attaches
+          // when the PTY appears, usually before the user opens the Terminal
+          // sub-view, so the raw-tail replay at mount and every byte after it
+          // must land in xterm's own buffer to keep its scrollback authoritative.
+          // Stashing instead would funnel them through hiddenBufferRef's 256 KB
+          // head-dropped cap, discarding a long-streaming Ink TUI's boot draw +
+          // <Static> transcript + input-box frame, so the first reveal would
+          // paint only recent repaint churn → blank (the exact bug the persistent
+          // layer prevents). We deliberately do NOT flip visibleRef.current: real
+          // visibility still gates term.focus at spawn and on the visible-flip so
+          // a PTY appearing while the user is typing in the composer can't steal
+          // focus. INVARIANTS in this mode: hiddenBufferRef stays empty, so the
+          // visible-flip flush is a no-op and the unmount snapshot's hidden-byte
+          // merge has nothing to fold (it's also skipped outright, since
+          // writeWhileHidden is only ever set alongside rawTailReattach). URL
+          // sniffing stays visible-only, exactly as in the stash path.
+          if (writeWhileHiddenRef.current) {
+            term.write(bytes);
+            onActivityRef.current?.();
+            return;
+          }
           hiddenBufferRef.current.push(bytes);
           hiddenBytesRef.current += bytes.length;
           hiddenLineBreaksRef.current += countLineFeeds(bytes);

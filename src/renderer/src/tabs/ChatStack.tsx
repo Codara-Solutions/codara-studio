@@ -47,14 +47,15 @@ function ChatStack({
   // multiplied the streaming hot path: each hidden ChatConversation/ChatComposer
   // registered an orchestration.onEvent listener, ran collectWorkspaceFiles on
   // mount, and (in terminal sub-view) started a 1s pty.exists poll — all for
-  // zero visible output. Unmounting the chat tab also unmounts its backend
-  // TerminalPane, but that pane runs in rawTailReattach mode (see ChatPanel):
-  // its unmount detaches (not snapshots) the PTY, so the next mount replays
-  // main's RAW pty tail into a fresh xterm exactly like the first attach —
-  // which is what keeps a live Ink TUI (Claude/Codex) rendering cleanly across
-  // remounts instead of garbling under a flattened-text snapshot replay. The
-  // active tab's wrapper keeps its DOM identity via the tab key so switching
-  // back is a clean remount of just one panel.
+  // zero visible output. The ONE thing that must survive this unmount — the
+  // backend Terminal view's live Ink TUI xterm — is no longer mounted inside
+  // this panel: App hoists it into a persistent ChatBackendTerminalStack layer
+  // that outlives ChatStack tearing this panel down, so the xterm and its full
+  // scrollback stay alive across tab switches (replaying main's bounded raw pty
+  // tail into a fresh xterm only reproduces a live TUI while the whole session
+  // still fits the 64KB tail — after a few minutes it doesn't, and a remount
+  // renders blank). The active tab's wrapper keeps its DOM identity via the tab
+  // key so switching back is a clean remount of just one panel.
   const activeTab = chatTabs.find((tab) => tab.id === activeId);
   if (!activeTab) return null;
   return (

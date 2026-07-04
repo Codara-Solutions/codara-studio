@@ -15,7 +15,7 @@ import { describeRunStatus, statusToneColor } from "./timeline";
 // id is already registered — but the React prop is typed required. Using a
 // no-op exe avoids any chance of an accidental spawn if id-matching ever
 // breaks.
-const BACKEND_TERMINAL_SHELL: ShellInfo = {
+export const BACKEND_TERMINAL_SHELL: ShellInfo = {
   id: "spark-backend-attached",
   label: "Backend PTY",
   exe: "noop",
@@ -229,7 +229,25 @@ export default function ChatPanel({
                     pointerEvents: chatView === "terminal" ? "auto" : "none",
                   }}
                 >
-                  {backendPtyExists ? (
+                  {backendPtyExists && !usingHoistedChatView ? (
+                    // LEGACY (non-hoisted) path only. When the inner tab strip
+                    // is hoisted into App (the real app — chatView flows in as a
+                    // prop, so usingHoistedChatView is true), the backend
+                    // terminal is NOT mounted here. Instead App renders it in a
+                    // persistent App-level layer (ChatBackendTerminalStack) that
+                    // survives ChatStack unmounting this whole panel on a tab
+                    // switch. That is what keeps a live Ink TUI's xterm — and its
+                    // scrollback — ALIVE across tab/sub-view switches: replaying
+                    // main's bounded raw tail into a fresh xterm can only
+                    // reproduce the frame while the whole session still fits the
+                    // 64KB tail; once it has streamed past that (Claude/Codex
+                    // print the transcript once via Ink <Static> and then only
+                    // repaint the small live region), the tail holds nothing but
+                    // incremental repaints and a remount renders blank. Mounting
+                    // here too would double-attach two xterms to one PTY session
+                    // (they fight over main's single webContents sink), so the
+                    // hoisted path defers entirely to the App layer and shows the
+                    // placeholder beneath it.
                     <TerminalPane
                       // Keyed on sessionId so a backend switch (which changes
                       // the id) remounts the pane cleanly against the new
