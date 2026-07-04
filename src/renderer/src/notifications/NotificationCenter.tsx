@@ -241,11 +241,17 @@ export default function NotificationCenter({
                     key={entry.id}
                     entry={entry}
                     onOpen={() => {
-                      center.markRead(entry.id);
-                      navigateTo?.(entry.target);
+                      // Opening an entry is the user ACTING on it: route to the
+                      // target, then drop it from the center so handled items
+                      // don't pile up (replaces the old mark-read-and-keep).
+                      // Guard on navigateTo (as the toast does) so we never
+                      // destroy an entry without actually routing anywhere.
+                      if (!navigateTo) return;
+                      navigateTo(entry.target);
+                      center.remove(entry.id);
                       setOpen(false);
                     }}
-                    markRead={() => center.markRead(entry.id)}
+                    onActed={() => center.remove(entry.id)}
                     resolveQuestion={resolveQuestion}
                     shouldResumeOnAnswer={shouldResumeOnAnswer}
                   />
@@ -354,13 +360,15 @@ function DndSwitch({ on, onToggle }: { on: boolean; onToggle: () => void }) {
 function CenterEntry({
   entry,
   onOpen,
-  markRead,
+  onActed,
   resolveQuestion,
   shouldResumeOnAnswer,
 }: {
   entry: NotificationCenterEntry;
   onOpen: () => void;
-  markRead: () => void;
+  // Fired when the user resolves the entry in place (answers the inline
+  // question) — the entry is removed from the center, not merely marked read.
+  onActed: () => void;
   resolveQuestion?: (runId: string) => RunQuestionOption[];
   shouldResumeOnAnswer?: (runId: string) => boolean;
 }) {
@@ -386,7 +394,7 @@ function CenterEntry({
         option,
         shouldResumeOnAnswer?.(questionRunId) ?? true,
       );
-      markRead();
+      onActed();
     } catch {
       answering.current = false;
     }

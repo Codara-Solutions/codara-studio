@@ -21,6 +21,7 @@ import {
   listCenterEntries,
   markCenterAllRead,
   markCenterRead,
+  removeCenterEntry,
   setAttention,
 } from "./notify";
 import {
@@ -1284,6 +1285,9 @@ export function registerIpc(): void {
   });
   ipcMain.handle("notify:markAllRead", async (): Promise<void> => {
     await markCenterAllRead();
+  });
+  ipcMain.handle("notify:remove", async (_e, id: string): Promise<void> => {
+    if (typeof id === "string") await removeCenterEntry(id);
   });
   ipcMain.handle("notify:clear", async (): Promise<void> => {
     await clearCenter();

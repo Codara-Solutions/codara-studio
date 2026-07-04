@@ -1260,13 +1260,37 @@ export default function App() {
           paneId: leaf.paneId,
           tabId: tab.id,
           tabTitle: tab.title,
-          // Cora-orchestrated panes are excluded only while their worker is
-          // RUNNING (run-store events already alert that lifecycle). Once the
-          // attempt is done the pane is an ordinary terminal again — a manual
-          // `claude` run in it must notify like any other pane.
-          excluded:
-            workersTab ||
-            (leaf.worker?.source === "spark" && leaf.worker.state === "running"),
+          // Cora-spawned worker panes are excluded from terminal-agent alerts
+          // for their WHOLE lifetime, not just while state==="running". The
+          // run-store lifecycle already alerts these workers; the pty tap must
+          // never speak for them. The old state gate leaked at TEARDOWN: state
+          // leaves "running" (worker_attempt.finished flips it to "done") while
+          // the CLI is still painting its exit / a lingering permission prompt,
+          // so the pane became watched and that boot/exit prompt matched the
+          // broad "blocked" patterns → a bogus "needs you" toast for a prompt
+          // nobody had to answer. `leaf.worker.source` is never cleared to null
+          // once set to "spark" (only manual chips clear; spark panes keep their
+          // metadata with agentRunning:false), so this covers the pane until it
+          // is closed.
+          //
+          // Reachability: `source:"spark"` panes are created inside a
+          // workers-scoped tab (ensureWorkerTerminalTab), already covered by the
+          // `workersTab` clause. The spark clause therefore only bites once such
+          // a pane is DETACHED/moved into a plain tab (detachTerminalPaneToNewTab
+          // / moveTerminalPane carry the worker meta across). No chip regression
+          // for the orchestration lifecycle: a running spark pane was ALREADY not
+          // fed by this tap; its chip comes from the run-store worker lifecycle
+          // (worker_attempt.* → setLeafWorker) and the renderer visible-buffer
+          // poller, both independent of `excluded`.
+          //
+          // Known trade-off (accepted): if a user DETACHES a done worker pane and
+          // manually runs `claude`/`codex` in it, that reused session no longer
+          // fires done/blocked toasts and — while the pane is hidden — its chip
+          // runtimeState can go stale (the notifier tap was the only hidden-pane
+          // writer; teardown via alt-screen exit still clears it). This is a rare
+          // path and the bogus-alert fix is worth it; if it ever needs alerts,
+          // clear leaf.worker on detach so the pane reads as a plain terminal.
+          excluded: workersTab || leaf.worker?.source === "spark",
         });
       });
     }

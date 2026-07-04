@@ -247,6 +247,10 @@ const api = {
     list: (): Promise<NotificationCenterEntry[]> => ipcRenderer.invoke("notify:list"),
     markRead: (id: string): Promise<void> => ipcRenderer.invoke("notify:markRead", id),
     markAllRead: (): Promise<void> => ipcRenderer.invoke("notify:markAllRead"),
+    // Remove a single entry — fired when the user acts on a notification
+    // (toast click-through, inline answer, or opening the entry). Handled
+    // items must not linger; the main side no-ops if it's already gone.
+    remove: (id: string): Promise<void> => ipcRenderer.invoke("notify:remove", id),
     clear: (): Promise<void> => ipcRenderer.invoke("notify:clear"),
     onCenterUpdated: (
       handler: (summary: NotificationCenterSummary) => void,

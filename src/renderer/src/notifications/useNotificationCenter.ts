@@ -11,6 +11,7 @@ export interface NotificationCenterApi {
   unread: number;
   markRead: (id: string) => void;
   markAllRead: () => void;
+  remove: (id: string) => void;
   clear: () => void;
 }
 
@@ -19,6 +20,11 @@ export function useNotificationCenter(open: boolean): NotificationCenterApi {
   const [unread, setUnread] = useState(0);
   const openRef = useRef(open);
   openRef.current = open;
+  // Mirror the latest entries so mutation callbacks can read read-status
+  // without closing over stale state — keeps their state updaters PURE
+  // (StrictMode double-invokes updaters, so no setState may live inside one).
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
 
   const refresh = useCallback(async () => {
     try {
@@ -58,11 +64,24 @@ export function useNotificationCenter(open: boolean): NotificationCenterApi {
     void window.spark.notifications.markAllRead().catch(() => undefined);
   }, []);
 
+  // Drop an entry the user acted on. Optimistically splice it out (and shave
+  // the badge if it was still unread) so the list reacts instantly; the main
+  // side reconciles the authoritative unread count through the next push.
+  const remove = useCallback((id: string) => {
+    // Read read-status off the ref (not inside the updater) so both setters
+    // fire exactly once. Shave the badge only if the dropped entry was unread;
+    // the main-side push then reconciles the authoritative count.
+    const target = entriesRef.current.find((e) => e.id === id);
+    if (target && !target.read) setUnread((n) => Math.max(0, n - 1));
+    setEntries((current) => current.filter((e) => e.id !== id));
+    void window.spark.notifications.remove(id).catch(() => undefined);
+  }, []);
+
   const clear = useCallback(() => {
     setEntries([]);
     setUnread(0);
     void window.spark.notifications.clear().catch(() => undefined);
   }, []);
 
-  return { entries, unread, markRead, markAllRead, clear };
+  return { entries, unread, markRead, markAllRead, remove, clear };
 }

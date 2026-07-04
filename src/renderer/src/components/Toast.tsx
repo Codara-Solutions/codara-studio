@@ -9,13 +9,18 @@ import type { NavigateTo } from "../notifications/routing";
 // whenever the notify policy fires) and surfaces them as a stacked
 // top-right column of cards.
 //
-// Each toast auto-dismisses after AUTO_DISMISS_MS, the user can also
-// click the close button to drop it early. Click anywhere else on the
-// card routes the event's NavigationTarget through navigateTo — this lets
-// a "needs you" alert deep-link the user straight to the chat, terminal
-// pane, or loom that needs them.
+// Each toast auto-dismisses after AUTO_DISMISS_MS on a fixed wall-clock
+// window measured from ITS OWN arrival — independent of focus and of when
+// other toasts arrive (a burst never resets the countdown of toasts already
+// on screen). A missed toast (window elapsed, never clicked) is not lost: its
+// center entry stays unread in the bell, so there's no reason to freeze the
+// timer while unfocused. The user can also click the close button to drop one
+// early. Click anywhere else on the card routes the event's NavigationTarget
+// through navigateTo — this lets a "needs you" alert deep-link the user
+// straight to the chat, terminal pane, or loom that needs them — and, because
+// that counts as acting on it, also removes the matching center entry.
 
-const AUTO_DISMISS_MS = 6_000;
+const AUTO_DISMISS_MS = 15_000;
 // Cap simultaneous toasts so a misbehaving run that fires many alerts
 // in a row can't cover the whole screen. The oldest ones drop off the
 // stack while keeping the most recent visible.
@@ -44,23 +49,10 @@ export default function ToastHost({
   shouldResumeOnAnswer,
 }: ToastHostProps) {
   const [toasts, setToasts] = useState<Toast[]>([]);
-  // Auto-dismiss only counts down while the window is focused. The whole
-  // point of several alerts (terminal-agent "finished", run completions) is
-  // to be seen by a user who is in ANOTHER app — burning the 6s window into
-  // an unfocused surface guarantees they return to nothing. Held toasts get
-  // a fresh window when focus comes back.
-  const [focused, setFocused] = useState(() => document.hasFocus());
-
-  useEffect(() => {
-    const onFocus = () => setFocused(true);
-    const onBlur = () => setFocused(false);
-    window.addEventListener("focus", onFocus);
-    window.addEventListener("blur", onBlur);
-    return () => {
-      window.removeEventListener("focus", onFocus);
-      window.removeEventListener("blur", onBlur);
-    };
-  }, []);
+  // One pending dismissal timer per on-screen toast, keyed by id. Held in a
+  // ref (not state) so re-renders and new arrivals never disturb the timers
+  // already ticking.
+  const dismissTimers = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     const off = window.spark.notifications.onInAppNotification((payload) => {
@@ -82,19 +74,40 @@ export default function ToastHost({
   }, []);
 
   useEffect(() => {
-    if (toasts.length === 0 || !focused) return undefined;
-    // One timer per toast so each gets its own AUTO_DISMISS_MS window.
-    // Using setTimeout per toast (instead of a single rolling timer)
-    // keeps the dismissal independent of when other toasts arrive.
-    const timers = toasts.map((toast) =>
-      window.setTimeout(() => {
-        setToasts((current) => current.filter((t) => t.id !== toast.id));
-      }, AUTO_DISMISS_MS),
-    );
+    const timers = dismissTimers.current;
+    const liveIds = new Set(toasts.map((t) => t.id));
+    // Cancel timers for toasts that are gone — closed early, clicked through,
+    // answered, or pushed off the bottom of the MAX_VISIBLE stack.
+    for (const [id, timer] of timers) {
+      if (!liveIds.has(id)) {
+        window.clearTimeout(timer);
+        timers.delete(id);
+      }
+    }
+    // Start a fresh AUTO_DISMISS_MS window for any toast that doesn't already
+    // have one. Existing timers are left untouched, so a stream of arrivals
+    // can't keep older toasts alive forever — each expires on its own clock.
+    for (const toast of toasts) {
+      if (!timers.has(toast.id)) {
+        timers.set(
+          toast.id,
+          window.setTimeout(() => {
+            timers.delete(toast.id);
+            setToasts((current) => current.filter((t) => t.id !== toast.id));
+          }, AUTO_DISMISS_MS),
+        );
+      }
+    }
+  }, [toasts]);
+
+  // Clear every pending timer on unmount so a teardown can't fire setToasts.
+  useEffect(() => {
+    const timers = dismissTimers.current;
     return () => {
-      for (const id of timers) window.clearTimeout(id);
+      for (const timer of timers.values()) window.clearTimeout(timer);
+      timers.clear();
     };
-  }, [toasts, focused]);
+  }, []);
 
   if (toasts.length === 0) return null;
 
@@ -186,6 +199,9 @@ function ToastCard({
         option,
         shouldResumeOnAnswer?.(questionRunId) ?? true,
       );
+      // Answering resolves the question in place — that's acting on it, so
+      // drop the center entry too (same rationale as the card click-through).
+      void window.spark.notifications.remove(toast.id).catch(() => undefined);
       onClose();
     } catch {
       // Answering failed (run gone, IPC error) — release the guard so the
@@ -226,6 +242,11 @@ function ToastCard({
       onClick={() => {
         if (!clickable) return;
         navigateTo?.(toast.target);
+        // Routing to the target is the user ACTING on the notification —
+        // remove its center entry so a handled item doesn't linger as unread
+        // in the bell. (The X button and auto-expiry deliberately do NOT do
+        // this: a merely-hidden toast stays as a "missed" unread entry.)
+        void window.spark.notifications.remove(toast.id).catch(() => undefined);
         onClose();
       }}
       onMouseEnter={() => setHover(true)}

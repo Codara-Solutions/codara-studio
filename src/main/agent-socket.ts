@@ -996,6 +996,39 @@ async function handleOrchestratorAskUser(
   return errorResponse(id, ERR_INTERNAL, "ask_user timed out waiting for human response");
 }
 
+// A worker task is "done" only in these three states. Used by
+// wait_for_workers to report is_terminal.
+const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "cancelled"]);
+
+// Worker task statuses that represent REAL in-flight work — an attempt is
+// scheduled, running, awaiting review, or queued to retry — so completing the
+// run now would strand it (the reproduced bug: a QUEUED corrective worker was
+// cancelled when spark_complete landed early). This is what gates spark_complete.
+//
+// Deliberately a positive "in-flight" allowlist rather than "everything not
+// terminal", so the guard fails OPEN (allows completion) on statuses that are
+// NOT live work and must never deadlock the coordinator:
+//   - `created`: a task only lingers here when prepareWorkerTask never
+//     succeeded (spark_spawn_workers' prepare threw — see ~L859) or a user
+//     hand-added a task via the UI that was never launched. Such a task never
+//     reaches a terminal state on its own, and NO coordinator RPC can launch,
+//     retry, or cancel it — so blocking on it would make the run permanently
+//     uncompletable (spark_wait_for_workers on a `created` task can only time
+//     out). createWorkerTask stamps `created`; prepareWorkerTask advances to
+//     `queued`, so a healthy just-spawned task is already past `created` by the
+//     time the model can call spark_complete.
+//   - `blocked`: only ever set on the loom-pass path (run-store), and
+//     loom/automation runs are rejected by rejectIfAutomationRun before this
+//     guard — so it cannot legitimately reach here.
+//   - any future/unknown status: fail-open beats a mystery deadlock.
+const IN_FLIGHT_WORKER_TASK_STATUSES = new Set<string>([
+  "queued",
+  "claimed",
+  "running",
+  "needs_review",
+  "retry_queued",
+]);
+
 async function handleOrchestratorComplete(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1008,6 +1041,34 @@ async function handleOrchestratorComplete(
   if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   const blocked = rejectIfAutomationRun(run, id, "spark_complete");
   if (blocked) return blocked;
+  // Guard: never complete the run while a worker task the coordinator spawned is
+  // still in-flight. Completing here flips the run to `complete`, which fires the
+  // "done" toast and tears the run down mid-flight — observed live: a corrective
+  // worker was QUEUED after a failed attempt, then spark_complete landed and the
+  // queued worker was left stranded/cancelled. Reject with an instructive,
+  // structured error so the CLI coordinator waits on the stragglers first
+  // (spark_wait_for_workers) and only then completes. The MCP server relays a
+  // JSON-RPC error `message` back to the model as an isError tool result
+  // (server.js callTool), so this reaches the model and course-corrects it. We
+  // deliberately do NOT auto-cancel the stragglers here. Only genuinely in-flight
+  // statuses block (see IN_FLIGHT_WORKER_TASK_STATUSES) — a never-launched
+  // `created` task must not deadlock completion.
+  const pendingTasks = (run.workerTasks ?? []).filter(
+    (wt) => IN_FLIGHT_WORKER_TASK_STATUSES.has(wt.status),
+  );
+  if (pendingTasks.length > 0) {
+    const detail = pendingTasks
+      .map((wt) => `"${wt.title}" (${wt.id}, ${wt.status})`)
+      .join(", ");
+    const ids = pendingTasks.map((wt) => wt.id).join(", ");
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `Cannot complete: ${pendingTasks.length} worker task(s) still pending/running: ${detail}. ` +
+        `Call spark_wait_for_workers with worker_task_ids [${ids}] first, then read each report and call ` +
+        `spark_complete once every worker has reached a terminal state (accepted/failed/cancelled).`,
+    );
+  }
   try {
     if (summary) {
       await runStore.addRunMessage({
@@ -1111,7 +1172,6 @@ async function handleOrchestratorRequestNextIteration(
 const WAIT_FOR_WORKERS_POLL_MS = 500;
 const WAIT_FOR_WORKERS_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 min default
 const WAIT_FOR_WORKERS_MAX_TIMEOUT_MS = 20 * 60 * 1000; // 20 min cap (req.setTimeout in MCP client is also 20 min)
-const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "cancelled"]);
 
 async function handleOrchestratorWaitForWorkers(
   params: Record<string, unknown>,

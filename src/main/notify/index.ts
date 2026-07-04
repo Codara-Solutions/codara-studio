@@ -32,6 +32,7 @@ export {
   listCenterEntries,
   markCenterAllRead,
   markCenterRead,
+  removeCenterEntry,
 } from "./center-store";
 export type { PublishInput } from "./types";
 
