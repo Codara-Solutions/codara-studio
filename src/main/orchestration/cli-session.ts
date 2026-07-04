@@ -17,6 +17,12 @@ import type { ShellInfo } from "@shared/types";
 import * as pty from "../pty-manager";
 import { tailJsonl, type Disposable } from "./jsonl-tail";
 
+// DECSET 2004 — the CLI asking the terminal to enable bracketed-paste mode.
+// Ink (claude) and ratatui (codex) both emit this when their interactive
+// input widget mounts, which is the earliest reliable "the REPL can accept
+// pasted input" signal. See CliSession.waitForInputReady.
+const INPUT_READY_SEQUENCE = "\x1b[?2004h";
+
 // node-pty spawns via CreateProcess on Windows, which can only launch real PE
 // images (`.exe`/`.com`). npm-installed CLIs like `codex` ship as a `.cmd`
 // batch shim (and a bare `sh` shim) with no `.exe`, so handing the resolved
@@ -131,6 +137,16 @@ export interface CliSession {
    * an already-resolved promise if stdout has already arrived.
    */
   waitForFirstStdout(timeoutMs: number): Promise<void>;
+  /**
+   * Resolves once the CLI has enabled bracketed-paste mode (`ESC[?2004h`),
+   * which both the claude and codex TUIs emit when their input box mounts —
+   * a much stronger "safe to paste input" signal than first stdout (CC
+   * 2.1.201 answers terminal probes ~0.4s after spawn but mounts the input
+   * box seconds later; a paste into that gap is silently swallowed). Rejects
+   * after timeoutMs so callers can fall back to best-effort pasting against
+   * a CLI that never emits the sequence. Idempotent once seen.
+   */
+  waitForInputReady(timeoutMs: number): Promise<void>;
   /** Dispose pty + tail. Idempotent. */
   dispose(): Promise<void>;
 }
@@ -176,6 +192,9 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
   let disposed = false;
   let firstStdoutSeen = false;
   const firstStdoutWaiters = new Set<() => void>();
+  let inputReadySeen = false;
+  let inputReadyCarry = "";
+  const inputReadyWaiters = new Set<() => void>();
 
   const entryHandlers = new Set<(entry: unknown) => void | Promise<void>>();
   const stdoutHandlers = new Set<(chunk: Buffer) => void>();
@@ -196,6 +215,31 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
   }
 
   const detachStdout = pty.tap(opts.sessionId, (chunk) => {
+    if (!inputReadySeen) {
+      // Watch the raw output stream for DECSET 2004 (`ESC [ ? 2004 h`) — the
+      // CLI enabling bracketed-paste mode. Both the claude and codex TUIs
+      // emit it when their input box mounts, which makes it the earliest
+      // reliable "safe to paste" signal. First-stdout alone is NOT enough:
+      // CC 2.1.201 answers terminal probes ~0.4s after spawn but mounts the
+      // input box seconds later (what's-new panel, self-update check), and a
+      // paste into that gap is silently swallowed. Carry the tail of the
+      // previous chunk so a sequence split across chunk boundaries still
+      // matches.
+      const text = inputReadyCarry + chunk.toString("utf8");
+      if (text.includes(INPUT_READY_SEQUENCE)) {
+        inputReadySeen = true;
+        for (const resolve of inputReadyWaiters) {
+          try {
+            resolve();
+          } catch {
+            // swallow — never let a waiter's resolve callback break the tap
+          }
+        }
+        inputReadyWaiters.clear();
+      } else {
+        inputReadyCarry = text.slice(-(INPUT_READY_SEQUENCE.length - 1));
+      }
+    }
     if (!firstStdoutSeen) {
       firstStdoutSeen = true;
       for (const resolve of firstStdoutWaiters) {
@@ -313,6 +357,24 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
           resolve();
         };
         firstStdoutWaiters.add(onReady);
+      });
+    },
+    waitForInputReady: (timeoutMs: number) => {
+      if (inputReadySeen) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          inputReadyWaiters.delete(onReady);
+          reject(
+            new Error(
+              `CLI session did not enable bracketed paste within ${timeoutMs}ms`,
+            ),
+          );
+        }, timeoutMs);
+        const onReady = (): void => {
+          clearTimeout(timer);
+          resolve();
+        };
+        inputReadyWaiters.add(onReady);
       });
     },
     dispose: async () => {

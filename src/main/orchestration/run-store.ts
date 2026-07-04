@@ -3354,8 +3354,13 @@ async function askChatBackendNonOpenRouter(
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     const completedAt = new Date().toISOString();
+    const turnAborted = result.turnAborted === true;
+    const turnFailed = !turnAborted && result.turnFailed === true;
     if (targetCall) {
-      targetCall.status = "completed";
+      targetCall.status = turnFailed ? "failed" : "completed";
+      if (turnFailed) {
+        targetCall.error = result.notice ?? "Chat turn failed.";
+      }
       targetCall.model = result.model;
       targetCall.durationMs = result.durationMs;
       if (typeof result.promptTokens === "number") targetCall.promptTokens = result.promptTokens;
@@ -3380,6 +3385,108 @@ async function askChatBackendNonOpenRouter(
     recomputeRunCostRollups(latest);
     latest.updatedAt = completedAt;
     await saveRun(latest);
+
+    // Backend reported the turn was ABORTED by the user (Stop button). Not
+    // a failure and not an answer: the Stop path (forcePauseRun /
+    // stopAndUndoPending) already interrupted the CLI, cancelled workers,
+    // and set the run status. Record a quiet note and return — applying the
+    // placeholder decision would fabricate a "Cora answered the chat turn"
+    // completion, and the turnFailed branch would flag a routine Stop as
+    // run.failed with a danger toast.
+    if (turnAborted) {
+      await appendEvent({
+        timestamp: completedAt,
+        workspaceId: latest.workspaceId,
+        runId: latest.id,
+        sparkCallId: callId,
+        type: "chat.backend_notice",
+        message: result.notice ?? "Chat turn interrupted by user.",
+        payload: { backend: chatConfig.backend, interrupted: true },
+      });
+      return latest;
+    }
+
+    // Backend reported the turn itself FAILED (turn timeout, CLI crash,
+    // backend error). The decision object only carries a best-effort
+    // chatReply — applying it through applySparkManagerDecision would record
+    // "Cora answered the chat turn" and complete the run as if it had been
+    // answered (the CC 2.1.201 false-finish). Instead: surface the reply
+    // (partial assistant text or the error description) as a chat bubble,
+    // record the SparkCall failure, and move the run to "failed" through a
+    // run.status_updated event so the notify pipeline emits a truthful
+    // run.failed. The CLI session stays alive in the backend's session map
+    // and addRunMessage re-engages the manager when the user chats into a
+    // terminal run, so the chat remains fully usable afterwards.
+    if (turnFailed) {
+      const failureMessage = result.notice ?? "Chat turn failed.";
+      await appendEvent({
+        timestamp: completedAt,
+        workspaceId: latest.workspaceId,
+        runId: latest.id,
+        sparkCallId: callId,
+        type: "spark_call.failed",
+        message: `Cora manager (${chatConfig.backend}) turn failed: ${failureMessage}`,
+        payload: { mode, model: result.model, backend: chatConfig.backend, error: failureMessage },
+      });
+      let failedRun = latest;
+      const replyText = result.decision.chatReply?.trim();
+      if (replyText) {
+        failedRun = await addRunMessage({
+          runId: latest.id,
+          author: "spark",
+          kind: "note",
+          message: replyText,
+        });
+      }
+      return commitRunChange(failedRun, {
+        type: "run.status_updated",
+        message: `Cora's ${chatConfig.backend} chat turn failed: ${failureMessage}`,
+        payload: { previousStatus: failedRun.status, status: "failed" },
+        mutate: (draft, timestamp) => {
+          draft.status = "failed";
+          draft.autopilot = {
+            ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+            status: "failed",
+            lastAction: "chat_turn_failed",
+            updatedAt: timestamp,
+          };
+          // The run is failing — terminalize any in-flight worker attempts/
+          // tasks, mirroring markAutopilotCycleFailed (and the status sets in
+          // forcePauseRun/cancelRun). Without this, a worker finishing after
+          // the failure hits handleAutopilotCycleCompletion's terminal-run
+          // early-return and its task is stranded in needs_review forever,
+          // while a revived manager turn's spark_wait_for_workers blocks to
+          // its ceiling waiting on tasks nothing will ever settle.
+          for (const attempt of draft.workerAttempts) {
+            if (
+              attempt.status === "preparing" ||
+              attempt.status === "prompt_ready" ||
+              attempt.status === "launching" ||
+              attempt.status === "running" ||
+              attempt.status === "finishing"
+            ) {
+              attempt.status = "failed";
+              attempt.finishedAt = attempt.finishedAt ?? timestamp;
+            }
+          }
+          for (const task of draft.workerTasks) {
+            if (
+              task.status === "created" ||
+              task.status === "queued" ||
+              task.status === "claimed" ||
+              task.status === "running" ||
+              task.status === "needs_review" ||
+              task.status === "retry_queued"
+            ) {
+              task.status = "failed";
+              task.updatedAt = timestamp;
+            }
+          }
+          draft.updatedAt = timestamp;
+        },
+      });
+    }
+
     if (result.notice) {
       await appendEvent({
         timestamp: completedAt,

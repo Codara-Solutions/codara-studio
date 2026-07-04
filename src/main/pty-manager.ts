@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { WebContents } from "electron";
 import type { ShellInfo } from "@shared/types";
+import { sanitizeNestedAgentEnv } from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
 import { getHookRpcEnvSafe } from "./hook-rpc";
 import { sparkHome } from "./spark-home";
@@ -381,6 +382,14 @@ function doSpawn(
   for (const [k, v] of Object.entries(process.env)) {
     if (typeof v === "string") env[k] = v;
   }
+  // Strip inherited Claude Code nesting markers (CLAUDECODE, CLAUDE_CODE_*…)
+  // BEFORE the per-shell / per-spawn override layers below, so callers that
+  // deliberately set a CLAUDE_CODE_* var still win. When Codara is launched
+  // from inside a CC session (how the dev instance starts), these leak into
+  // every pty and make any spawned `claude` CLI believe it's a nested child —
+  // CC 2.1.201 then writes NO session JSONL, killing the chat backends'
+  // transcript tailing and timing out every turn. See env-sanitize.ts.
+  sanitizeNestedAgentEnv(env);
   // Ink/React-CLI (Claude Code, Codex) inspects these to pick interactive/colour
   // mode. Inheriting CI=true or NO_COLOR from a parent shell silently disables
   // ANSI cursor sequences and produces visually corrupt redraws.

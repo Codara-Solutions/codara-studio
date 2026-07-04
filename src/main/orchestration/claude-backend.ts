@@ -31,6 +31,7 @@ import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { classifyTail } from "@shared/agent-patterns";
 import { backendPtySessionId } from "@shared/backend-pty";
 import type { ChatMode } from "@shared/types";
 
@@ -111,6 +112,25 @@ const POST_STOP_GRACE_POLL_MS = 50;
 // through and try writing anyway; the prompt write is harmless if dropped
 // and the user sees the turn-timeout error rather than a hang.
 const REPL_READY_TIMEOUT_MS = 15_000;
+// After first stdout, how long we additionally wait for the input-ready
+// signal: the REPL enabling bracketed-paste mode (ESC[?2004h — see
+// CliSession.waitForInputReady). First stdout is NOT enough: CC 2.1.201
+// answers terminal control-sequence probes ~0.4s after spawn but attaches
+// its stdin listener later, and a paste into that gap is silently swallowed
+// — the prompt never echoes, the Enters are no-ops, and the turn dies at
+// the 90s cap. Past this timeout we paste best-effort (a CC that never
+// emits the sequence still gets the legacy behavior); the verify-and-
+// repaste loop below is the second line of defense.
+const INPUT_READY_TIMEOUT_MS = 10_000;
+// Empirical (CC 2.1.201, macOS): ESC[?2004h is emitted ~0.3s after spawn —
+// BEFORE the UI paints (~0.8s) and before the stdin listener attaches, which
+// happens silently (zero output) somewhere in the ~0.9-1.3s window. A paste
+// written right after the sequence is still swallowed, so the first turn
+// additionally waits this long after input-ready before pasting. 1.5s puts
+// the first paste at ~1.8s post-spawn, the empirically reliable point; the
+// verify-and-repaste loop mops up slower cold-starts. Later turns skip this
+// settle entirely (the REPL is proven live).
+const INPUT_MOUNT_SETTLE_MS = 1_500;
 // Bracketed-paste control codes Ink REPLs (CC and Codex both) honor. Using
 // these lets us inject a prompt that contains slashes, newlines, escape
 // codes, or any other character without Ink interpreting it as a command.
@@ -135,6 +155,34 @@ const PASTE_SETTLE_CEILING_MS = 5_000;
 // Enters into an empty input box are harmless newlines.
 const SUBMIT_RETRY_COUNT = 3;
 const SUBMIT_RETRY_INTERVAL_MS = 2_200;
+// Verify-and-repaste loop (submitPromptWithVerification). Total paste
+// attempts per turn: the initial paste plus up to two full re-pastes.
+const PASTE_ATTEMPT_LIMIT = 3;
+// How long each attempt waits for evidence that the turn actually started
+// (JSONL activity — CC writes the user entry the moment the prompt submits).
+// Grows by the backoff step per attempt so a slow cold REPL gets more room.
+const SUBMIT_VERIFY_WINDOW_MS = 4_000;
+const SUBMIT_VERIFY_BACKOFF_MS = 2_000;
+const SUBMIT_VERIFY_POLL_MS = 150;
+// First-attempt verify window when the prompt has NO usable echo needle
+// (first line normalizes shorter than ECHO_PREFIX_MIN_CHARS). With echo
+// evidence unavailable, a slow UserPromptSubmit hook / JSONL tail poll must
+// not be mistaken for "paste swallowed" — a wrong re-paste here would inject
+// a duplicate user message into an already-active turn. Wait much longer
+// before concluding the paste failed.
+const SUBMIT_VERIFY_NO_ECHO_WINDOW_MS = 10_000;
+// How much recent pty output classifyTail inspects for the "is a turn
+// actively running?" check that gates every full re-paste.
+const REPASTE_GUARD_TAIL_CHARS = 4_096;
+// Echo probe: how many characters of the prompt's first line we look for in
+// the (ANSI-stripped) pty output to decide "the paste landed in the input
+// box". Multi-line / large pastes render as CC's "[Pasted text #N +M lines]"
+// placeholder instead of the raw text, so that marker counts as echo too.
+const ECHO_PREFIX_MAX_CHARS = 24;
+// Prefixes shorter than this are too likely to collide with UI chrome
+// (spinners, borders) to be trusted as echo evidence.
+const ECHO_PREFIX_MIN_CHARS = 6;
+const PASTED_TEXT_PLACEHOLDER = "[Pasted text";
 const TALK_SYSTEM_PROMPT_FILENAME = "cc-talk.md";
 // Opus 4.8 is the fallback when a chat requests Fable 5 but the Fable setting
 // is off. Matches the Cora-spawned-worker downgrade target (run-store.ts).
@@ -204,6 +252,10 @@ interface ClaudeChatSession {
    *  on the active turn and refuse to start more turns on this session. */
   fatal: boolean;
   fatalMessage: string | null;
+  /** First-turn input gate (wait for bracketed-paste-enable + mount settle)
+   *  already ran for this spawn. Later turns skip it — the REPL proved
+   *  itself live, and waiting again would just add latency per message. */
+  firstTurnGateDone: boolean;
   /** Tool calls observed during the current turn — populated by the JSONL
    *  translator when CC fires `mcp__cora-orchestrator__*` (or any other
    *  tool). In Execute mode the request handler reads this after the turn
@@ -445,14 +497,33 @@ export const claudeBackend: SparkAgentBackend = {
           }`,
         });
       }
+      // First turn only: wait for the input-readiness signal — the REPL
+      // enabling bracketed-paste mode (ESC[?2004h) — plus a short mount
+      // settle. First stdout arrives ~0.4s after spawn (terminal probes)
+      // but CC 2.1.201 attaches its stdin listener with NO output signal
+      // some time after painting the UI; a paste into that gap is silently
+      // swallowed. Timing out here is non-fatal: we paste best-effort and
+      // rely on the verify-and-repaste loop below. Later turns skip the
+      // gate — the REPL already proved itself live by completing a turn.
+      if (!chat.firstTurnGateDone) {
+        chat.firstTurnGateDone = true;
+        try {
+          await chat.session.waitForInputReady(INPUT_READY_TIMEOUT_MS);
+        } catch {
+          emit({
+            kind: "system_note",
+            message: `Claude Code did not signal input readiness (bracketed paste) within ${INPUT_READY_TIMEOUT_MS}ms — pasting best-effort.`,
+          });
+        }
+        await sleep(INPUT_MOUNT_SETTLE_MS);
+      }
 
       // Inject the prompt using the same bracketed-paste-then-Enter pattern
-      // that worker spawns in run-store.ts use successfully. Bracketed paste
-      // guards against Ink interpreting slashes (slash commands), newlines
-      // (multi-submit), or escape codes in the prompt. The settle delay
-      // before Enter is the empirically-tuned window for CC's input box to
-      // commit the paste; pressing Enter mid-commit silently drops the
-      // submit and the chat hangs until the turn timeout.
+      // that worker spawns in run-store.ts use successfully, then VERIFY the
+      // turn actually started (JSONL activity) and re-paste if it didn't —
+      // see submitPromptWithVerification. Bracketed paste guards against Ink
+      // interpreting slashes (slash commands), newlines (multi-submit), or
+      // escape codes in the prompt.
       //
       // The UserPromptSubmit hook (spark-cc-userprompt.py) fires alongside
       // but writes nothing to stdout — its only job is to unlink the queue
@@ -461,21 +532,18 @@ export const claudeBackend: SparkAgentBackend = {
       // copy of the prompt as an attachment block (rendering the user's
       // prompt twice in CC's terminal and doubling the input-token cost).
       const promptForStdin = prompt || ".";
-      chat.session.writeRaw(PASTE_BEGIN);
-      await sleep(PASTE_PIECE_DELAY_MS);
-      chat.session.writeRaw(promptForStdin);
-      await sleep(PASTE_PIECE_DELAY_MS);
-      chat.session.writeRaw(PASTE_END);
-      const settleMs = Math.min(
-        PASTE_SETTLE_CEILING_MS,
-        PASTE_SETTLE_BASE_MS + Math.ceil(promptForStdin.length / 2048) * PASTE_SETTLE_PER_2KB_MS,
-      );
-      await sleep(settleMs);
+      const submitted = await submitPromptWithVerification(chat, promptForStdin, emit);
+      if (!submitted && !chat.fatal) {
+        emit({
+          kind: "system_note",
+          message: `Prompt submission could not be verified after ${PASTE_ATTEMPT_LIMIT} paste attempts — waiting for the turn anyway.`,
+        });
+      }
 
-      // Wait for the Stop hook's done-marker, but retry the submit Enter a
-      // few times in case the first one was dropped. Extra Enters into an
-      // empty input box are harmless newlines. (turnFile was computed and
-      // cleared of any stale marker at the top of this turn.)
+      // Wait for the Stop hook's done-marker, retrying the submit Enter a
+      // few times in case one was dropped. Extra Enters into an empty input
+      // box are harmless newlines. (turnFile was computed and cleared of any
+      // stale marker at the top of this turn.)
       const turnEnded = await waitForTurnFileWithRetries(turnFile, chat, () => {
         chat.session.writeRaw("\r");
       });
@@ -494,6 +562,13 @@ export const claudeBackend: SparkAgentBackend = {
           cacheReadTokens: chat.lastUsage.cacheReadTokens,
           newSessionUuid: chat.sessionUuid ?? undefined,
           notice: turnEnded.message,
+          // A timed-out turn is a FAILED turn. Without this flag the
+          // status:"complete" talk-reply decision above would be applied as
+          // a normal chat completion — recording "Cora answered the chat
+          // turn" and marking the run complete even though nothing was
+          // answered (the proven CC 2.1.201 false-finish). run-store's
+          // dispatcher fails the SparkCall and the run instead.
+          turnFailed: true,
         };
       }
 
@@ -567,6 +642,9 @@ export const claudeBackend: SparkAgentBackend = {
         durationMs: Date.now() - startedAt,
         model: input.chat.model,
         notice: message,
+        // Same truthfulness rule as the turn-timeout branch: an errored
+        // turn must not be recorded as "Cora answered the chat turn".
+        turnFailed: true,
       };
     }
   },
@@ -913,6 +991,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     lastUsage: {},
     fatal: false,
     fatalMessage: null,
+    firstTurnGateDone: false,
     turnToolCalls: [],
     // Seeded to now so the first 90s window still applies if CC fails to
     // emit even an init `mode` event. Refreshed on every JSONL line below.
@@ -1164,6 +1243,141 @@ function effectiveTurnTimeoutMs(chat: ClaudeChatSession): number {
   return chat.pendingMcpToolCalls.size > 0
     ? EXTENDED_TURN_TIMEOUT_MS
     : TURN_TIMEOUT_MS;
+}
+
+// Normalize pty output for the echo probe: strip ANSI escapes (CSI, OSC,
+// bare two-byte ESC codes) AND all whitespace. Whitespace must go because
+// Ink's renderer doesn't emit spaces between words — it repositions the
+// cursor instead (`Reply\x1b[9Gwith\x1b[14Gexactly…`, observed on CC
+// 2.1.201), so a space-containing needle never matches the stripped stream.
+// The needle is normalized the same way before searching.
+function normalizeForEcho(text: string): string {
+  return text
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b[@-Z\\-_]/g, "")
+    .replace(/\s+/g, "");
+}
+
+/**
+ * Bracketed-paste the prompt, press Enter, and VERIFY the turn actually
+ * started — re-pasting when it didn't. Two independent pieces of evidence:
+ *
+ *  - Echo: the prompt's first-line prefix (or CC's "[Pasted text #N …]"
+ *    placeholder, which replaces the raw text for large/multi-line pastes)
+ *    appearing in the ANSI-stripped pty output. Proves the paste LANDED in
+ *    the input box. When the paste landed but the turn didn't start, only
+ *    the Enter was dropped — we press Enter again WITHOUT re-pasting, so
+ *    the prompt is never doubled in the input box.
+ *  - JSONL activity: chat.lastJsonlActivityAt advancing past the baseline
+ *    taken before the first paste. CC writes the user entry to the session
+ *    JSONL the moment a prompt submits, so this proves the turn STARTED —
+ *    the authoritative success signal.
+ *
+ * A paste with no echo was swallowed whole (the proven CC 2.1.201 cold-boot
+ * failure: the input box isn't mounted yet and the paste vanishes without a
+ * trace), so the full prompt is pasted again. Because re-pasting only ever
+ * happens when there is NO evidence of an active turn, this never types into
+ * (or doubles input on) a turn that is actually running.
+ *
+ * Returns true once the turn is verified as started; false when every
+ * attempt was exhausted (caller falls through to the legacy Enter-retry +
+ * 90s turn-timeout path) or the session died.
+ */
+async function submitPromptWithVerification(
+  chat: ClaudeChatSession,
+  promptForStdin: string,
+  emit: ChatStreamHandler,
+): Promise<boolean> {
+  const firstLine = promptForStdin.split(/\r?\n/, 1)[0] ?? "";
+  const echoPrefix = normalizeForEcho(firstLine).slice(0, ECHO_PREFIX_MAX_CHARS);
+  const pastedPlaceholder = normalizeForEcho(PASTED_TEXT_PLACEHOLDER);
+  // Very short prefixes ("hi", the "." empty-prompt stand-in) collide with
+  // UI chrome too easily to be trusted; those prompts rely on the pasted-
+  // text placeholder and the JSONL signal alone.
+  const useEchoPrefix = echoPrefix.length >= ECHO_PREFIX_MIN_CHARS;
+  let outputTail = "";
+  let echoSeen = false;
+  const detachEcho = chat.session.onStdout((chunk) => {
+    if (echoSeen) return;
+    outputTail += chunk.toString("utf8");
+    // Cap the accumulation — the echo shows up within the first repaint
+    // after a successful paste, so an unbounded buffer buys nothing.
+    if (outputTail.length > 64 * 1024) outputTail = outputTail.slice(-32 * 1024);
+    const plain = normalizeForEcho(outputTail);
+    if (
+      plain.includes(pastedPlaceholder) ||
+      (useEchoPrefix && plain.includes(echoPrefix))
+    ) {
+      echoSeen = true;
+    }
+  });
+  // Baseline BEFORE the first paste: any JSONL line after this point means
+  // the CLI started processing the turn.
+  const activityBaseline = chat.lastJsonlActivityAt;
+  // Settle delay between PASTE_END and Enter — the empirically-tuned window
+  // for CC's input box to commit the paste; an Enter mid-commit is dropped.
+  const settleMs = Math.min(
+    PASTE_SETTLE_CEILING_MS,
+    PASTE_SETTLE_BASE_MS + Math.ceil(promptForStdin.length / 2048) * PASTE_SETTLE_PER_2KB_MS,
+  );
+  try {
+    for (let attempt = 0; attempt < PASTE_ATTEMPT_LIMIT; attempt += 1) {
+      if (chat.fatal) return false;
+      let repaste: boolean = attempt === 0 || !echoSeen;
+      if (repaste && attempt > 0) {
+        // Last line of defense before a full re-paste: if the recent pty
+        // output classifies as an actively-working turn, the previous submit
+        // DID land and only our evidence channels are lagging (echo is
+        // unavailable for short prompts; the JSONL tail poll / UserPrompt-
+        // Submit hook can run slow). Re-pasting now would inject a duplicate
+        // user message into the running turn — degrade to Enter-only, which
+        // is a harmless newline.
+        const tailState = classifyTail(
+          "claude",
+          outputTail.slice(-REPASTE_GUARD_TAIL_CHARS),
+        );
+        if (tailState === "working") {
+          repaste = false;
+        }
+      }
+      if (repaste) {
+        chat.session.writeRaw(PASTE_BEGIN);
+        await sleep(PASTE_PIECE_DELAY_MS);
+        chat.session.writeRaw(promptForStdin);
+        await sleep(PASTE_PIECE_DELAY_MS);
+        chat.session.writeRaw(PASTE_END);
+        await sleep(settleMs);
+      }
+      chat.session.writeRaw("\r");
+      // Prompts with no usable echo needle get a much wider first window —
+      // without echo, "no JSONL yet" is the ONLY signal, and it must not be
+      // confused with "paste swallowed" while the hook/tailer is merely slow.
+      const windowMs =
+        attempt === 0 && !useEchoPrefix
+          ? SUBMIT_VERIFY_NO_ECHO_WINDOW_MS
+          : SUBMIT_VERIFY_WINDOW_MS + attempt * SUBMIT_VERIFY_BACKOFF_MS;
+      const deadline = Date.now() + windowMs;
+      while (Date.now() < deadline) {
+        if (chat.fatal) return false;
+        if (chat.lastJsonlActivityAt !== activityBaseline) return true;
+        await sleep(SUBMIT_VERIFY_POLL_MS);
+      }
+      if (attempt < PASTE_ATTEMPT_LIMIT - 1) {
+        emit({
+          kind: "system_note",
+          message: `No evidence the prompt reached Claude Code (attempt ${attempt + 1}/${PASTE_ATTEMPT_LIMIT}) — ${
+            echoSeen
+              ? "the paste echoed but the turn has not started; pressing Enter again."
+              : "no echo observed; retrying (re-paste unless the REPL looks busy)."
+          }`,
+        });
+      }
+    }
+    return false;
+  } finally {
+    detachEcho();
+  }
 }
 
 /**

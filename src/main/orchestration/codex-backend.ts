@@ -101,6 +101,15 @@ interface CodexChatSession {
     string,
     { toolName: string; startedAt: number; expiresAt: number }
   >;
+  /** Wall-clock ms of the most recent user interrupt (Stop button →
+   *  interruptChat), or null. Codex's ESC abort emits no task_complete, so
+   *  without this marker the in-flight waitForTurnEnd would sit out the 90s
+   *  silence window and then reject — and the catch would report the routine
+   *  user Stop as a FAILED turn (run.failed + danger toast). interruptChat
+   *  sets it and fast-fails the waiter; the catch turns an interrupt-flagged
+   *  rejection into a quiet turnAborted result. Cleared at each turn start.
+   *  Claude gets the same semantics for free via its .done marker. */
+  interruptedAt: number | null;
 }
 
 const SESSIONS = new Map<string, CodexChatSession>();
@@ -134,7 +143,15 @@ const MAX_PENDING_MCP_HOLD_MS = 25 * 60_000;
 // latency before the Ink input loop attaches. Mirrors claude-backend's
 // REPL-ready gate (waitForFirstStdout + settle, then a separate submit CR).
 const CODEX_REPL_READY_TIMEOUT_MS = 15_000;
-// After first stdout, give Codex's Ink input box a beat to mount before typing.
+// After first stdout, wait for the bracketed-paste-enable sequence (see
+// CliSession.waitForInputReady) — the "input box mounted" signal — before
+// typing. Kept SHORT and non-fatal: codex 0.142.x demonstrably accepts input
+// ~1.7s after first stdout today, so a codex build that never emits the
+// sequence merely pays this extra wait on the first turn and then proceeds
+// with the proven settle-delay path below.
+const CODEX_INPUT_READY_TIMEOUT_MS = 4_000;
+// After input-ready (or its timeout), give Codex's input box a beat to
+// finish mounting before typing.
 const CODEX_INPUT_SETTLE_MS = 1_200;
 // Between the pasted prompt body and the submitting CR, so Codex processes the
 // text before the Enter (a single merged burst can drop the submit). Scales with
@@ -465,6 +482,7 @@ async function spawnSession(
     turnToolCalls: [],
     lastJsonlActivityAt: Date.now(),
     pendingMcpToolCalls: new Map(),
+    interruptedAt: null,
   };
 
   cli.onJsonlEntry((raw) => {
@@ -758,6 +776,9 @@ export const codexBackend: SparkAgentBackend = {
       // is expected to be empty between turns. Defensive clear in case a
       // previous turn's orphan would extend an unrelated turn.
       session.pendingMcpToolCalls.clear();
+      // A previous turn's user interrupt must not misclassify THIS turn's
+      // outcome as aborted.
+      session.interruptedAt = null;
 
       const userPrompt = latestUserPromptFromRun(input.run);
       if (!userPrompt.trim()) {
@@ -793,7 +814,14 @@ export const codexBackend: SparkAgentBackend = {
       // its Ink input loop attaches a beat after first stdout; typing earlier
       // drops the prompt (no turn -> no rollout -> the JSONL watchdog trips).
       await session.cli.waitForFirstStdout(CODEX_REPL_READY_TIMEOUT_MS).catch(() => {});
-      if (freshSpawn) await sleep(CODEX_INPUT_SETTLE_MS);
+      if (freshSpawn) {
+        // Prefer the real input-ready signal (bracketed-paste enable) over a
+        // blind sleep; fall back to just the settle delay when the TUI never
+        // emits it. Both catches are non-fatal by design — the settle path
+        // below is the behavior proven against codex 0.142.x.
+        await session.cli.waitForInputReady(CODEX_INPUT_READY_TIMEOUT_MS).catch(() => {});
+        await sleep(CODEX_INPUT_SETTLE_MS);
+      }
       const waiter = waitForTurnEnd(session);
       await submitPrompt(session, prompt);
       await waiter;
@@ -828,12 +856,33 @@ export const codexBackend: SparkAgentBackend = {
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      // User interrupt (Stop button) — not a failure. The Stop path
+      // (forcePauseRun / stopAndUndoPending) already interrupted the CLI,
+      // cancelled workers, and put the run where it belongs; the waiter
+      // rejection just unwinds this in-flight call. Surface a quiet note
+      // and hand run-store a turnAborted result so it neither applies a
+      // decision ("Cora answered the chat turn") nor fails the run.
+      if (SESSIONS.get(input.run.id)?.interruptedAt != null) {
+        onStream?.({ kind: "system_note", message: "Codex turn interrupted." });
+        return {
+          decision: buildTalkReplyDecision("Codex turn interrupted."),
+          durationMs: Date.now() - startedAt,
+          model: input.chat.model,
+          notice: "Codex turn interrupted by user.",
+          turnAborted: true,
+        };
+      }
       onStream?.({ kind: "error", message });
       return {
         decision: buildTalkReplyDecision(`Codex backend error: ${message}`),
         durationMs: Date.now() - startedAt,
         model: input.chat.model,
         notice: message,
+        // Turn timeout / CLI exit / spawn failure all land here. None of
+        // them answered the user — without this flag the status:"complete"
+        // talk-reply decision would be recorded as "Cora answered the chat
+        // turn" and the run marked complete. run-store fails the run instead.
+        turnFailed: true,
       };
     }
   },
@@ -853,6 +902,10 @@ export const codexBackend: SparkAgentBackend = {
   interruptChat(runId: string): void {
     const session = SESSIONS.get(runId);
     if (!session) return;
+    // Flag FIRST so the requestManagerDecision catch classifies the waiter
+    // rejection below as a user interrupt (quiet turnAborted), not a failed
+    // turn (run.failed + danger toast for a routine Stop).
+    session.interruptedAt = Date.now();
     // ESC aborts the in-flight Codex turn. Session stays alive so the next
     // user message can continue the conversation.
     try {
@@ -860,5 +913,11 @@ export const codexBackend: SparkAgentBackend = {
     } catch {
       // session may already be disposed; nothing useful to surface
     }
+    // Settle the in-flight turn waiter promptly. Codex's ESC abort emits no
+    // task_complete rollout entry, so without this the waiter would sit out
+    // the full silence window (~90s) before rejecting. Mirrors the claude
+    // backend, whose interruptChat stamps the .done marker for the same
+    // reason. No-op when no turn is in flight.
+    session.pendingReject?.(new Error("Codex turn interrupted by user"));
   },
 };

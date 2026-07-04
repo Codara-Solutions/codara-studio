@@ -6,12 +6,18 @@
 //
 // Design rules
 // ------------
-// 1. Idempotent. We tag every entry we write with `_sparkManaged: true` plus
-//    a `_sparkVersion` token. On a second call we replace just our own
-//    entries (drop everything where `_sparkManaged === true`, re-add the
-//    current set) so the user's hand-rolled hooks stay put. Skip the write
-//    entirely if the file already contains our entries at the current
-//    version.
+// 1. Idempotent. Our entries are identified by their COMMAND STRING (any
+//    command referencing spark-hook.py is ours) — not just by the
+//    `_sparkManaged: true` / `_sparkVersion` tags we also write. Claude Code
+//    rewrites ~/.claude/settings.json itself (e.g. when the user changes a
+//    setting) and STRIPS unknown keys like our tags; a tag-only identity
+//    check then sees "user hooks" it refuses to touch and appends a fresh
+//    tagged set on every boot — which is exactly how settings files ended up
+//    with N identical spark-hook entries per event. On every call we drop
+//    everything that matches by command-or-tag and re-add exactly one entry
+//    per event (collapsing any accumulated duplicates), leaving genuine user
+//    hooks untouched. Skip the write entirely when the file already contains
+//    exactly one current-shape entry per event and nothing else of ours.
 // 2. Non-destructive. Other top-level keys (`env`, `permissions`,
 //    `statusLine`, etc.) are preserved exactly. We only touch the `hooks`
 //    object. Unknown nested keys under hooks[Event] entries we don't own
@@ -173,9 +179,39 @@ async function readExistingSettings(): Promise<{ settings: ClaudeSettings | null
   }
 }
 
-// Strip every entry we previously authored from the hooks map, returning a
-// fresh map that contains only the user's own entries. Mutates a copy of
-// the input map (caller passes us a freshly-cloned object).
+// The basename that identifies our hook command regardless of install
+// location (dev repo, packaged resourcesPath, a moved checkout). Command-
+// string identity survives Claude Code stripping our `_sparkManaged` /
+// `_sparkVersion` tags when IT rewrites the settings file.
+const SPARK_HOOK_SCRIPT_FILENAME = "spark-hook.py";
+
+// A command is ours when it carries our tag OR its command string references
+// spark-hook.py (tag-stripped survivors from a CC rewrite, and entries
+// written by older Codara builds from a different install path).
+function isSparkHookCommand(cmd: unknown): boolean {
+  if (cmd === null || typeof cmd !== "object") return false;
+  const record = cmd as ClaudeHookCommand;
+  if (record._sparkManaged === true) return true;
+  return (
+    typeof record.command === "string" &&
+    record.command.includes(SPARK_HOOK_SCRIPT_FILENAME)
+  );
+}
+
+// An entry is ours when it's tagged or when it carries at least one of our
+// commands. (An entry the user manually merged one of our commands into is
+// handled command-by-command in stripSparkEntries, not dropped wholesale.)
+function entryHasSparkCommand(entry: unknown): boolean {
+  if (entry === null || typeof entry !== "object") return false;
+  const record = entry as ClaudeHookEntry;
+  if (record._sparkManaged === true) return true;
+  return Array.isArray(record.hooks) && record.hooks.some((cmd) => isSparkHookCommand(cmd));
+}
+
+// Strip every entry we previously authored from the hooks map — matched by
+// tag OR by command string, so untagged duplicates left behind by Claude
+// Code's own settings rewrites are collapsed too. Returns a fresh map that
+// contains only the user's own entries.
 function stripSparkEntries(hooks: ClaudeHookMap | undefined): ClaudeHookMap {
   const out: ClaudeHookMap = {};
   if (!hooks || typeof hooks !== "object") return out;
@@ -185,14 +221,12 @@ function stripSparkEntries(hooks: ClaudeHookMap | undefined): ClaudeHookMap {
       .filter((entry): entry is ClaudeHookEntry => entry !== null && typeof entry === "object")
       .filter((entry) => entry._sparkManaged !== true)
       .map((entry) => {
-        // Also strip our hook commands from any user-shared entry (very
-        // unlikely path — user manually merged ours into theirs — but the
-        // schema allows it). We keep the entry if it still has commands.
+        // Strip our hook commands from any user-shared entry. We keep the
+        // entry only if it still has commands of the user's own.
         if (!Array.isArray(entry.hooks)) return entry;
-        const remainingCommands = entry.hooks.filter(
-          (cmd) => cmd !== null && typeof cmd === "object" && cmd._sparkManaged !== true,
-        );
+        const remainingCommands = entry.hooks.filter((cmd) => !isSparkHookCommand(cmd));
         if (remainingCommands.length === 0) return null;
+        if (remainingCommands.length === entry.hooks.length) return entry;
         return { ...entry, hooks: remainingCommands };
       })
       .filter((entry): entry is ClaudeHookEntry => entry !== null);
@@ -203,25 +237,50 @@ function stripSparkEntries(hooks: ClaudeHookMap | undefined): ClaudeHookMap {
   return out;
 }
 
-// Check whether the existing hooks already contain our entries at the
-// current version. Used to skip the rewrite (no atime/mtime churn) when
-// nothing's changed.
-function alreadyInstalled(hooks: ClaudeHookMap | undefined, scriptPath: string): boolean {
+// Check whether the existing hooks already contain EXACTLY our current set:
+// one spark entry per event, each with exactly our current command string,
+// and no stray spark commands anywhere else (duplicates, retired events,
+// stale install paths all fail this and trigger the strip-and-rewrite).
+// Deliberately does NOT require our `_sparkManaged`/`_sparkVersion` tags:
+// Claude Code strips unknown keys when it rewrites the settings file, and
+// re-writing just to restore cosmetic tags would churn the file every boot.
+// When a tag DID survive, a version mismatch still forces a reinstall.
+function alreadyInstalled(
+  hooks: ClaudeHookMap | undefined,
+  scriptPath: string,
+  python: string,
+): boolean {
   if (!hooks) return false;
   for (const event of HOOK_EVENTS) {
     const entries = hooks[event];
     if (!Array.isArray(entries)) return false;
-    const ours = entries.find((entry) => entry?._sparkManaged === true);
-    if (!ours) return false;
-    if (ours._sparkVersion !== SPARK_HOOK_VERSION) return false;
-    if (!Array.isArray(ours.hooks)) return false;
-    const cmd = ours.hooks.find((c) => c?._sparkManaged === true);
-    if (!cmd) return false;
-    // Verify the command still references the current script path so we
-    // re-install if Codara moved (dev → packaged install, etc).
-    if (typeof cmd.command !== "string" || !cmd.command.includes(scriptPath)) {
+    const sparkEntries = entries.filter((entry) => entryHasSparkCommand(entry));
+    // 0 = missing, >1 = duplicates: either way, rewrite.
+    if (sparkEntries.length !== 1) return false;
+    const ours = sparkEntries[0];
+    if (ours._sparkVersion !== undefined && ours._sparkVersion !== SPARK_HOOK_VERSION) {
       return false;
     }
+    // Must be purely ours with a single command — a user-merged entry gets
+    // disentangled by the rewrite (their commands stay, ours re-added
+    // standalone).
+    if (!Array.isArray(ours.hooks) || ours.hooks.length !== 1) return false;
+    const cmd = ours.hooks[0];
+    if (cmd === null || typeof cmd !== "object") return false;
+    if (cmd._sparkVersion !== undefined && cmd._sparkVersion !== SPARK_HOOK_VERSION) {
+      return false;
+    }
+    // Exact command equality — covers script relocation (dev → packaged),
+    // python launcher changes, and any future command-shape change.
+    if (cmd.command !== buildHookCommand(python, scriptPath, event).command) {
+      return false;
+    }
+  }
+  // No spark leftovers under events we no longer manage.
+  for (const [event, entries] of Object.entries(hooks)) {
+    if ((HOOK_EVENTS as readonly string[]).includes(event)) continue;
+    if (!Array.isArray(entries)) continue;
+    if (entries.some((entry) => entryHasSparkCommand(entry))) return false;
   }
   return true;
 }
@@ -255,11 +314,11 @@ export async function installClaudeHooks(): Promise<void> {
     return;
   }
 
-  if (alreadyInstalled(settings.hooks, scriptPath)) {
+  const python = resolvePythonBinary();
+  if (alreadyInstalled(settings.hooks, scriptPath, python)) {
     return;
   }
 
-  const python = resolvePythonBinary();
   const userHooks = stripSparkEntries(settings.hooks);
   const merged: ClaudeHookMap = { ...userHooks };
   for (const event of HOOK_EVENTS) {

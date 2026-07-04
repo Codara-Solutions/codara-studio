@@ -126,6 +126,26 @@ export interface ManagerCallResult {
    *  but doesn't block the decision. Used by the stub backends to tell the
    *  user "claude backend is not yet wired; falling back to OpenRouter". */
   notice?: string;
+  /**
+   * The backend could NOT complete this turn (turn timeout, CLI crash,
+   * backend error). `decision` then only carries a best-effort chatReply
+   * (partial assistant text or the error description) and MUST NOT be
+   * applied as a normal manager decision — a status:"complete" decision
+   * from a dead turn would record "Cora answered the chat turn" and mark
+   * the run complete even though nothing was answered. run-store's
+   * dispatcher surfaces the reply, fails the SparkCall, and moves the run
+   * to status "failed" (which the user can re-prompt out of) instead.
+   */
+  turnFailed?: boolean;
+  /**
+   * The turn ended because the USER interrupted it (Stop button →
+   * interruptChat), not because anything went wrong. run-store treats this
+   * as a quiet no-op: no manager decision applied (no "Cora answered the
+   * chat turn"), no run.failed, run status untouched — the Stop path
+   * (forcePauseRun / stopAndUndoPending) already put the run where it
+   * belongs. Wins over turnFailed when both could apply.
+   */
+  turnAborted?: boolean;
 }
 
 /**
