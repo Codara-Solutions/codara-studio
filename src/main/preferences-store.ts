@@ -200,6 +200,10 @@ function normalize(
       typeof src.disableHardwareAcceleration === "boolean"
         ? src.disableHardwareAcceleration
         : DEFAULT_PREFERENCES.disableHardwareAcceleration,
+    closeTabsOnMiddleClick:
+      typeof src.closeTabsOnMiddleClick === "boolean"
+        ? src.closeTabsOnMiddleClick
+        : DEFAULT_PREFERENCES.closeTabsOnMiddleClick,
     notificationChannels: normalizeNotificationChannels(
       src.notificationChannels,
       (src as Record<string, unknown>).notifications,

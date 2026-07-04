@@ -965,6 +965,23 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
       <hr className="spark-divider" style={{ margin: "2px 0" }} />
 
       <SectionTitle
+        title="Tabs"
+        detail="How the workspace tab strip responds to the mouse."
+      />
+      {hydrated ? (
+        <div style={{ display: "grid", gap: 6 }}>
+          <ToggleRow
+            title="Middle-click to close tabs"
+            desc="Click a tab with the mouse wheel button to close it, just like the × button."
+            checked={preferences.closeTabsOnMiddleClick}
+            onChange={(v) => void setPreference("closeTabsOnMiddleClick", v)}
+          />
+        </div>
+      ) : null}
+
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+
+      <SectionTitle
         title="Notifications"
         detail="Pick which channels fire when a run — or a Claude/Codex CLI you ran in a terminal — is blocked or finishes while you're away. Turn off Native OS notification to stop Windows toasts, or Embedded sound clip to silence the chime. Alerts never fire when you're already watching that chat or terminal tab; the workspace rail still shows a quiet dot until you visit it."
       />
