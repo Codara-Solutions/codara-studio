@@ -157,7 +157,7 @@
     "publish": {
       "provider": "github",
       "owner": "Codara-Solutions",
-      "repo": "spark-agent"
+      "repo": "codara-studio"
     }
   }
 }
