@@ -200,6 +200,7 @@ function renderPeerCommsGuidance(
           "- Message the `manager` (`--to manager`) when you are blocked on a peer or a contract question, or when a significant milestone lands. The manager may also message you mid-flight to steer or answer — you will see it next time you read your inbox.",
         ]
       : []),
+    "- When your inbox holds a peer question you can answer quickly, reply before resuming your own work — a peer stalled on your answer slows the whole fleet more than the minute your reply costs.",
     "- If your task tells you to settle a contract with a peer before building on it, send the contract note first, then use `await` to block briefly for their agreement before you build on it.",
     "- If your slice defines or consumes a shared interface/contract another peer depends on, send one short contract note to that peer (or `all`) before editing and read your inbox once with `--mark-read` before finalizing.",
     "- Shared contracts come from the task spec, not from invention. If your note conflicts with a peer's, reconcile before finalizing or report `partial` with the exact conflict in `risks[]`.",

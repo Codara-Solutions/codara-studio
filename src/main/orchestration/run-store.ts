@@ -3575,11 +3575,31 @@ function isTopTierModel(hint: string | undefined): boolean {
 // itself (`claude-fable-5`) is the canonical string used everywhere else.
 const SPARK_WORKER_FABLE_FALLBACK = "claude-opus-4-8" as const;
 
+// Manager sessions keep the system prompt they were born with for the whole
+// run, so a run started before a model-roster update keeps emitting the old
+// mid-tier id (observed: run-mr7vuzog kept requesting claude-sonnet-4-6 after
+// the prompts moved to claude-sonnet-5). Remap superseded Sonnet ids here at
+// the spawn chokepoint — same capability tier, same price, strictly better
+// model — preserving any "@effort" suffix. Bare aliases are covered too:
+// managers have shipped raw variants like "sonnet-4-6" across runs (see the
+// TOP_TIER_MODEL_BASES comment re: bare "opus"). "-legacy"/other suffixed ids
+// stay untouched (the anchor requires the id to END at the version digits).
+const SUPERSEDED_SONNET_BASE = /^(claude-)?sonnet-4(-\d+)?$/i;
+const SPARK_WORKER_SONNET_CURRENT = "claude-sonnet-5" as const;
+
 export function sanitizeWorkerModelHint(
   hint: string | undefined,
 ): { hint: string | undefined; downgraded: boolean } {
   if (hint && /fable/i.test(hint)) {
     return { hint: SPARK_WORKER_FABLE_FALLBACK, downgraded: true };
+  }
+  if (hint) {
+    const at = hint.indexOf("@");
+    const base = (at >= 0 ? hint.slice(0, at) : hint).trim();
+    if (SUPERSEDED_SONNET_BASE.test(base)) {
+      const suffix = at >= 0 ? hint.slice(at) : "";
+      return { hint: `${SPARK_WORKER_SONNET_CURRENT}${suffix}`, downgraded: false };
+    }
   }
   return { hint, downgraded: false };
 }
@@ -11200,12 +11220,14 @@ function buildLaunchCommandLine(
   if (task.runtimePreference === "claude") {
     const args = ["claude", "--dangerously-skip-permissions"];
     if (sandboxDir) args.push("--add-dir", quoteShellArg(sandboxDir));
-    // Fable 5 backstop. Automation (loom) workers are ALLOWED fable, so skip
-    // the guard for automation-originated launches; for every other claude
-    // worker (the Cora-spawned execute/council/autopilot path) silently
-    // downgrade a fable hint to Opus 4.8. The visible note is emitted earlier
-    // at the spawn chokepoint (agent-socket); this is a defence-in-depth catch
-    // that should normally never fire.
+    // Model-hint backstop: downgrades fable to Opus 4.8 and remaps superseded
+    // Sonnet ids to the current one. Automation (loom) workers are ALLOWED
+    // fable and get their hint verbatim, so skip the sanitize for
+    // automation-originated launches; for every other claude worker (the
+    // Cora-spawned execute/council/autopilot path) this is defence-in-depth —
+    // the visible fable note is emitted earlier at the spawn chokepoint
+    // (agent-socket), and tasks persisted by pre-remap builds still get their
+    // stale sonnet hint fixed here at launch.
     const rawModel = task.modelHint?.trim();
     const launchModel = opts?.isAutomation
       ? rawModel

@@ -817,6 +817,10 @@ async function handleOrchestratorSpawnWorkers(
   const isParallelBatch = workerTitles.length >= 2;
 
   const workerTaskIds: string[] = [];
+  // taskClass of each task actually created, index-aligned with workerTaskIds
+  // (raw entries with empty titles are dropped, so rawWorkers can't be used to
+  // find the surviving worker's class for the solo-spawn advisory below).
+  const createdTaskClasses: (string | undefined)[] = [];
   const attemptIdsToLaunch: string[] = [];
   // Fable 5 is reserved for the main chat and automations — Cora-spawned
   // workers must never run it. Downgrade any fable modelHint the manager emits
@@ -862,6 +866,7 @@ async function handleOrchestratorSpawnWorkers(
     const created = updated.workerTasks.at(-1);
     if (!created) continue;
     workerTaskIds.push(created.id);
+    createdTaskClasses.push(typeof w.taskClass === "string" ? w.taskClass : undefined);
   }
   for (const workerTaskId of workerTaskIds) {
     try {
@@ -906,15 +911,40 @@ async function handleOrchestratorSpawnWorkers(
   if (attemptIdsToLaunch.length > 0) {
     runStore.scheduleAutopilotCycles(runId, attemptIdsToLaunch);
   }
-  // Echo the downgrade back to the manager LLM so it doesn't try to re-pin
-  // fable on the next turn (it never sees the run's system note).
+  // Echo policy back to the manager LLM through the tool result — it never
+  // sees run system notes, and its system prompt is frozen at run start, so
+  // this response is the ONLY channel that reaches managers of long-lived
+  // runs when fleet/model policy evolves underneath them.
+  const notes: string[] = [];
+  if (downgradedFableTitles.length > 0) {
+    notes.push(
+      `Fable 5 is reserved for the main chat and automations; ${downgradedFableTitles.length} worker model hint(s) were downgraded to claude-opus-4-8. Do not request claude-fable-5 for workers.`,
+    );
+  }
+  // Solo-spawn advisory. Legitimate solo spawns exist — a lone verifier or
+  // leaf, a skeleton before a fan-out (the prompts' own endorsed pattern), a
+  // targeted corrective fix after a failed verify — so the note names them as
+  // fine and only nudges the under-decomposed-build case. Derive the class
+  // from the tasks actually CREATED (rawWorkers entries can be silently
+  // dropped above, so rawWorkers[0] may not be the surviving worker).
+  const soloTaskClass = workerTaskIds.length === 1 && createdTaskClasses.length === 1
+    ? createdTaskClasses[0]?.toLowerCase()
+    : undefined;
+  const soloIsExpected =
+    soloTaskClass === "verifier" || soloTaskClass === "leaf" || soloTaskClass === "skeleton";
+  if (workerTaskIds.length === 1 && !soloIsExpected) {
+    notes.push(
+      "Note: this batch spawned a single worker. That is right for a trivial fix (typo, copy tweak, " +
+        "one-line change), a targeted corrective fix after a failed verify, or a deliberate skeleton " +
+        "before a fan-out. If this was a full build/feature ask, decompose into a parallel fleet instead: " +
+        "2-4 workers on DISJOINT allowedPaths plus a verifier, mixing claude and codex runtimes when both " +
+        "CLIs are installed, with mid-tier models (claude-sonnet-5 / gpt-5.5) for standard pieces.",
+    );
+  }
   return successResponse(
     id,
-    downgradedFableTitles.length > 0
-      ? {
-          worker_task_ids: workerTaskIds,
-          note: `Fable 5 is reserved for the main chat and automations; ${downgradedFableTitles.length} worker model hint(s) were downgraded to claude-opus-4-8. Do not request claude-fable-5 for workers.`,
-        }
+    notes.length > 0
+      ? { worker_task_ids: workerTaskIds, note: notes.join("\n") }
       : { worker_task_ids: workerTaskIds },
   );
 }
