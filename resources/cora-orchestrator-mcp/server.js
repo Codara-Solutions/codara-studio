@@ -502,6 +502,27 @@ const EXECUTE_TOOLS = [
     },
   },
   {
+    name: "spark_name_chat",
+    description:
+      "Give THIS chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Fix login redirect bug\" or \"Add CSV export\"). Call this EARLY — once the goal for the session is clear — and again if the topic shifts substantially. The title shows in the chat history so the user can tell their chats apart. Does not spawn workers or change any files.",
+    inputSchema: {
+      type: "object",
+      required: ["title"],
+      properties: {
+        runId: {
+          type: "string",
+          description:
+            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+        },
+        title: {
+          type: "string",
+          description: "Short chat title (3-6 words). Must be non-empty; capped at ~60 characters server-side.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "spark_request_next_iteration",
     description:
       "For Codara AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextEngine/nextModel/nextEffort — honored only when the automation's engine is set to Auto, and only for installed engines (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
@@ -673,6 +694,7 @@ const EXECUTE_TOOL_TO_RPC = {
   spark_spawn_workers: "orchestrator.spawn_workers",
   spark_ask_user: "orchestrator.ask_user",
   spark_complete: "orchestrator.complete",
+  spark_name_chat: "orchestrator.name_chat",
   spark_request_next_iteration: "orchestrator.request_next_iteration",
   spark_get_worker_status: "orchestrator.get_worker_status",
   spark_wait_for_workers: "orchestrator.wait_for_workers",

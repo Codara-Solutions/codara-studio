@@ -4,10 +4,18 @@ import type {
   AgentRuntimeDiagnostic,
   RunState,
 } from "@shared/types";
+import { backendPtySessionId } from "@shared/backend-pty";
 import ChatConversation from "../chat/ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "../chat/ChatComposer";
+import { BACKEND_TERMINAL_SHELL } from "../chat/ChatPanel";
+import { TerminalPane } from "../Terminal/TerminalPane";
 import { describeRunStatus, statusToneColor } from "../chat/timeline";
 import { CloseIcon, HistoryIcon, PlusIcon } from "../icons";
+
+// Chat vs. the raw backend Claude/Codex TUI, toggled in the header. Local to
+// this panel (mirrors ChatPanel's own ChatView) — the assist panel is not a
+// chat tab, so it never joins App's hoisted terminal-view machinery.
+type ChatView = "chat" | "terminal";
 
 // Stable short id for an assist chat: the tail segment of the run id, so
 // "run-mr7vuzog-1l3h2v" reads as "#1l3h2v". Run ids are `run-<time>-<rand>`, and
@@ -50,10 +58,13 @@ function formatRelativeTime(iso: string): string {
 // and this panel owns the run lifecycle instead of App's lifted runs state
 // (architect runs are filtered OUT of the chat tab; their home is here).
 //
-// Session model: one workspace can accumulate several architect chats. On
-// mount we resume the most recent one (a fresh hub visit continues where the
-// user left off); "New session" drops back to the draft composer, and the
-// history button switches between past sessions.
+// Session model: one workspace can accumulate several architect chats. Every
+// entry via "Create with Cora" opens a FRESH draft session — the previous one
+// keeps running in the background and stays reachable from the history popover,
+// so on mount we sit on the draft composer rather than auto-resuming the latest.
+// The one exception is `focusRunId` (the loom detail's "Open chat" back-pointer),
+// which selects the exact authoring run. "New session" (+) drops back to the
+// draft composer, and the history button switches between past sessions.
 
 interface Props {
   workspaceId: string;
@@ -67,11 +78,15 @@ interface Props {
   // window-level listeners so a hidden assist composer never swallows
   // prefill/focus broadcasts aimed at the chat tab's composer.
   active: boolean;
-  // When set (and it changes to a non-null value), select THAT run instead of
-  // the auto-resumed latest — the loom detail's "Open chat" jumps back to the
-  // architect conversation that authored a loom. Overrides the one-shot resume
-  // guard once; the user can still switch sessions afterward.
+  // When set (and it changes to a non-null value), select THAT run — the loom
+  // detail's "Open chat" jumps back to the architect conversation that authored
+  // a loom. This is the ONLY path that auto-selects a run on mount; without it
+  // the panel opens on the draft composer. The user can still switch sessions
+  // afterward.
   focusRunId?: string;
+  // Scrollback cap for the backend-terminal xterm (threaded from settings via
+  // AutomationsHub, same value ChatPanel's terminal uses).
+  terminalScrollbackLineLimit: number;
   onClose: () => void;
 }
 
@@ -94,28 +109,26 @@ export default function AssistChat({
   runtimes,
   active,
   focusRunId,
+  terminalScrollbackLineLimit,
   onClose,
 }: Props): React.ReactElement {
   // null = not loaded yet; afterwards always the latest fetched list, newest
   // first. Kept fresh by the debounced orchestration-event refresh below.
   const [assistRuns, setAssistRuns] = useState<RunState[] | null>(null);
+  // Draft composer by default (null). Nothing auto-resumes a past session — a
+  // fresh "Create with Cora" entry always starts a new draft; only focusRunId
+  // and explicit history/​(+) selections change this.
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // One-shot resume guard: only the FIRST load auto-selects the latest
-  // session. After that the selection is the user's (including an explicit
-  // "New session" null, which a refresh must not override).
-  const autoResumed = useRef(false);
 
   // Parent-driven focus: "Open chat" from a loom's detail sets focusRunId to the
-  // authoring run. Select it and mark the resume guard consumed so a still-in-
-  // flight initial listRuns can't clobber the choice with the latest session.
-  // Guarded on the value so a plain re-render doesn't yank the user off a
-  // session they switched to after the jump.
+  // authoring run — the one path that selects a run on mount (otherwise we open
+  // on the draft composer). Guarded on the value so a plain re-render doesn't
+  // yank the user off a session they switched to after the jump.
   const focusedRunRef = useRef<string | null>(null);
   useEffect(() => {
     if (!focusRunId || focusedRunRef.current === focusRunId) return;
     focusedRunRef.current = focusRunId;
-    autoResumed.current = true;
     setSelectedId(focusRunId);
   }, [focusRunId]);
 
@@ -126,13 +139,10 @@ export default function AssistChat({
         .filter(isAssistRun)
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       setAssistRuns(assist);
-      if (!autoResumed.current) {
-        autoResumed.current = true;
-        // Resume the latest architect session instead of always starting
-        // fresh — runs are never "archived", so most-recent-first is the
-        // whole heuristic. No session yet → stay on the draft composer.
-        if (assist.length > 0) setSelectedId((current) => current ?? assist[0].id);
-      }
+      // Deliberately no auto-resume: entering the hub always lands on the draft
+      // composer (selectedId stays null). Past sessions keep running in the
+      // background and are reachable from the history popover; only focusRunId
+      // (loom "Open chat") selects a run on mount.
     } catch {
       /* best-effort: keep the last good list */
     }
@@ -163,6 +173,80 @@ export default function AssistChat({
     () => assistRuns?.find((run) => run.id === selectedId) ?? null,
     [assistRuns, selectedId],
   );
+
+  // ── Backend terminal view ────────────────────────────────────────────────
+  // Assist runs are ordinary runs with a claude/codex chat backend, so their
+  // CLI TUI lives in a headless PTY at backendPtySessionId(run.id, backend) —
+  // the very same one a normal chat surfaces via its Chat | Terminal toggle. We
+  // host it INLINE here rather than through App's hoisted ChatBackendTerminalStack
+  // because that layer decides WHEN to reveal a backend terminal purely from
+  // chat-tab identity (activeChatTabId / activeRunId), and an assist run has no
+  // chat tab — so the hoisted layer could never actually show it. Crucially, the
+  // hoisted stack would still *attach* a hidden warm xterm to this PTY anyway
+  // (its candidate set is keyed on run status, not chat tabs), and a SECOND
+  // canonical xterm on one session fights over main's single renderer sink and
+  // SIGWINCHes the live Ink TUI. So assist runs (chatMode "automation") are
+  // excluded from the hoisted stack's candidates (see ChatBackendTerminalStack),
+  // leaving THIS inline pane the sole attacher — which is why it mirrors the
+  // hoisted pane's proven props (inputBlocked + writeWhileHidden + rawTailReattach)
+  // rather than ChatPanel's thinner legacy inline set. OpenRouter chats have no
+  // PTY, so backendSessionId is null and the toggle never shows.
+  const backendSessionId = activeRun
+    ? backendPtySessionId(activeRun.id, activeRun.chatBackend)
+    : null;
+  const [chatView, setChatView] = useState<ChatView>("chat");
+  // The session id whose PTY the poll last CONFIRMED alive (null = none). We
+  // store the id rather than a bare boolean and DERIVE existence by matching it
+  // against the CURRENT backendSessionId: switching sessions or backends (a new
+  // id) therefore reads as "not confirmed" on the very first render — never a
+  // stale-true window that could mount the re-keyed pane against a not-yet-
+  // spawned session. Matches the hoisted stack's per-session immunity.
+  const [ptyAliveSessionId, setPtyAliveSessionId] = useState<string | null>(null);
+  const backendPtyExists = backendSessionId !== null && ptyAliveSessionId === backendSessionId;
+
+  // A fresh/switched SESSION starts on the chat view.
+  useEffect(() => {
+    setChatView("chat");
+  }, [activeRun?.id]);
+
+  // Poll whether the backend PTY exists so the header toggle only appears once
+  // the CLI session has actually spawned it — mounting TerminalPane earlier
+  // would try to renderer-spawn the placeholder "noop" shell and fail. Gated on
+  // `active` so a backgrounded Automations tab doesn't run a perpetual 1s
+  // pty.exists probe; while inactive the confirmed id is KEPT (not cleared), so
+  // tabbing away and back never drops a terminal the user was viewing. A THROWN
+  // probe (transient IPC hiccup) is ignored — only a definitive exists=false
+  // (main's Map.has miss) for THIS session clears it, so a blip can't eject the
+  // user from the terminal view.
+  useEffect(() => {
+    if (!backendSessionId || !active) return;
+    let disposed = false;
+    const check = async (): Promise<void> => {
+      try {
+        const exists = await window.spark.pty.exists(backendSessionId);
+        if (disposed) return;
+        setPtyAliveSessionId((prev) =>
+          exists ? backendSessionId : prev === backendSessionId ? null : prev,
+        );
+      } catch {
+        /* transient IPC failure — keep the last confirmed id, don't flip */
+      }
+    };
+    void check();
+    const interval = window.setInterval(check, 1000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [active, backendSessionId]);
+
+  // If the PTY never existed or has died (OpenRouter run, backend switch, or a
+  // Codara restart before the next turn re-spawns it), fall back to the chat
+  // view so the user is never stranded on a terminal pane whose toggle — gated
+  // on backendPtyExists — has just disappeared.
+  useEffect(() => {
+    if (chatView === "terminal" && !backendPtyExists) setChatView("chat");
+  }, [chatView, backendPtyExists]);
 
   // Merge a fresh snapshot into the local list without waiting for the next
   // listRuns round-trip (used right after createRun/startAutopilot so the
@@ -334,6 +418,13 @@ export default function AssistChat({
           <PlusIcon size={13} />
         </button>
         <span style={{ flex: 1 }} />
+        {/* Chat | Terminal — see the raw backend Claude/Codex TUI behind this
+            chat, just like a normal Cora chat. Sits left of the history icon.
+            Only shown once the run's PTY actually exists; falls back to chat
+            when it dies (see the terminal-state effects above). */}
+        {activeRun && backendSessionId && backendPtyExists && (
+          <ChatViewToggle view={chatView} onChange={setChatView} />
+        )}
         <AssistHistoryButton
           runs={assistRuns ?? []}
           activeRunId={activeRun?.id ?? null}
@@ -393,9 +484,78 @@ export default function AssistChat({
       )}
 
       {activeRun ? (
-        // Keyed on the run so switching sessions remounts the stream cleanly
-        // (same contract as ChatPanel's `conversation:${id}` key).
-        <ChatConversation key={`assist-conversation:${activeRun.id}`} run={activeRun} />
+        // Chat and (when the backend has a PTY) Terminal stack absolutely and
+        // switch by VISIBILITY — never by unmount — so ChatConversation keeps
+        // its streaming state and the xterm never remounts on a flip. Same
+        // visibility-stacking + terminal-safety contract ChatPanel uses; the
+        // inline-vs-hoisted rationale lives in the terminal-state block above.
+        <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              flexDirection: "column",
+              visibility: chatView === "chat" ? "visible" : "hidden",
+              pointerEvents: chatView === "chat" ? "auto" : "none",
+            }}
+          >
+            {/* Keyed on the run so switching sessions remounts the stream cleanly
+                (same contract as ChatPanel's `conversation:${id}` key). */}
+            <ChatConversation key={`assist-conversation:${activeRun.id}`} run={activeRun} />
+          </div>
+          {backendSessionId && (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                flexDirection: "column",
+                padding: 4,
+                background: "var(--bg)",
+                visibility: chatView === "terminal" ? "visible" : "hidden",
+                pointerEvents: chatView === "terminal" ? "auto" : "none",
+              }}
+            >
+              {backendPtyExists ? (
+                <TerminalPane
+                  // Keyed on sessionId so a backend switch (which changes the id)
+                  // remounts the pane cleanly against the new PTY.
+                  key={`assist-backend-term:${backendSessionId}`}
+                  sessionId={backendSessionId}
+                  shell={BACKEND_TERMINAL_SHELL}
+                  // Gated on `active` too: while the Automations tab is
+                  // backgrounded the pane isn't truly on screen, so it must not
+                  // count itself visible (which would fire resizes/flushes) — it
+                  // stays warm via writeWhileHidden instead.
+                  visible={active && chatView === "terminal"}
+                  scrollbackLineLimit={terminalScrollbackLineLimit}
+                  initialCwd={cwd}
+                  // inputBlocked (not readOnly): no keystrokes forwarded so the
+                  // user can't collide with the backend's bracketed paste + submit
+                  // Enter, but pty.resize IS allowed so the Ink REPL paints into
+                  // the real visible cols/rows.
+                  inputBlocked
+                  // writeWhileHidden: this pane eager-attaches the moment the PTY
+                  // exists — usually while the user is still on the Chat view — so
+                  // it must paint into xterm even while hidden. Without it, a
+                  // long-running session's first Terminal open would show the same
+                  // blank frame the hoisted stack exists to prevent. Matches the
+                  // hoisted PersistentBackendTerminal, whose role this pane takes
+                  // over for assist runs.
+                  writeWhileHidden
+                  // rawTailReattach: the residual genuine mount/unmount (first
+                  // attach after the PTY appears; teardown on session death)
+                  // replays main's RAW pty tail so attaching onto a live Ink TUI
+                  // renders cleanly (see useTerminalSession.ts).
+                  rawTailReattach
+                />
+              ) : (
+                <BackendTerminalPlaceholder backend={activeRun.chatBackend ?? null} />
+              )}
+            </div>
+          )}
+        </div>
       ) : (
         <AssistWelcome loading={loading} />
       )}
@@ -451,6 +611,63 @@ function AssistWelcome({ loading }: { loading: boolean }): React.ReactElement {
           creates and test-runs the loom for you. It appears in your Looms list as she works.
         </div>
       )}
+    </div>
+  );
+}
+
+// Compact Chat | Terminal segmented toggle for the header — reuses the shared
+// .spark-segmented control so it sits cleanly among the icon buttons.
+function ChatViewToggle({
+  view,
+  onChange,
+}: {
+  view: ChatView;
+  onChange: (view: ChatView) => void;
+}): React.ReactElement {
+  return (
+    <div
+      className="spark-segmented"
+      role="tablist"
+      aria-label="Chat or terminal view"
+      style={{ marginRight: 4 }}
+    >
+      <button
+        type="button"
+        role="tab"
+        aria-selected={view === "chat"}
+        className={`spark-segmented-item${view === "chat" ? " is-selected" : ""}`}
+        onClick={() => onChange("chat")}
+        title="The Cora conversation"
+      >
+        Chat
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={view === "terminal"}
+        className={`spark-segmented-item${view === "terminal" ? " is-selected" : ""}`}
+        onClick={() => onChange("terminal")}
+        title="Live xterm attached to the backend Claude/Codex PTY for this chat — read-only."
+      >
+        Terminal
+      </button>
+    </div>
+  );
+}
+
+// Shown inside the Terminal view before the CLI session has spawned its PTY
+// (fresh chat, or after a Codara restart until the next turn re-spawns it). A
+// local twin of ChatPanel's BackendTerminalPlaceholder so this panel stays
+// self-contained.
+function BackendTerminalPlaceholder({ backend }: { backend: string | null }): React.ReactElement {
+  const label = backend === "codex" ? "Codex" : "Claude Code";
+  return (
+    <div className="spark-empty" style={{ flex: 1, minHeight: 0 }}>
+      <div className="spark-eyebrow">Terminal idle</div>
+      <div className="spark-empty__body">
+        {label} hasn't been spawned for this chat yet. Send a message to start the session — its
+        terminal will appear here.
+      </div>
     </div>
   );
 }

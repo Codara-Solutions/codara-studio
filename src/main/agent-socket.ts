@@ -377,6 +377,8 @@ async function dispatch(
         return await handleOrchestratorMessageWorkers(params, id);
       case "orchestrator.check_messages":
         return await handleOrchestratorCheckMessages(params, id);
+      case "orchestrator.name_chat":
+        return await handleOrchestratorNameChat(params, id);
       case "automation.list":
         return await handleAutomationList(params, id);
       case "automation.get":
@@ -2483,6 +2485,20 @@ async function handleAutomationDelete(
 // this is a hard backstop so a runaway title can't bloat the tab/header label.
 const NAME_CHAT_MAX_CHARS = 60;
 
+// Sanitize a proposed chat title from a *_name_chat tool call: strip newlines /
+// control chars (they would break the single-line header and history rows) and
+// truncate on CODE POINTS — a naive .slice() can bisect a surrogate pair,
+// leaving a lone "�" in the UI. renameRun trims + rejects empty as a backstop.
+// Shared by handleAutomationNameChat and handleOrchestratorNameChat so both
+// name-chat surfaces sanitize identically.
+function sanitizeChatTitle(rawTitle: string): string {
+  const cleaned = rawTitle.replace(/[\r\n\t]+/g, " ").replace(/\p{C}/gu, "").trim();
+  const codePoints = Array.from(cleaned);
+  return codePoints.length > NAME_CHAT_MAX_CHARS
+    ? codePoints.slice(0, NAME_CHAT_MAX_CHARS).join("").trim()
+    : cleaned;
+}
+
 async function handleAutomationNameChat(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -2494,21 +2510,50 @@ async function handleAutomationNameChat(
   if (!rawTitle) {
     return errorResponse(id, ERR_INVALID_PARAMS, "title is required (a short 3-6 word chat name)");
   }
-  // Sanitize: newlines/control chars would break the single-line header and
-  // history rows, and a naive .slice() can bisect a surrogate pair (lone "�"
-  // in the UI) — truncate on code points instead. renameRun trims + rejects
-  // empty as a backstop.
-  const cleaned = rawTitle.replace(/[\r\n\t]+/g, " ").replace(/\p{C}/gu, "").trim();
-  const codePoints = Array.from(cleaned);
-  const title =
-    codePoints.length > NAME_CHAT_MAX_CHARS
-      ? codePoints.slice(0, NAME_CHAT_MAX_CHARS).join("").trim()
-      : cleaned;
+  const title = sanitizeChatTitle(rawTitle);
   try {
     const runStore = await getRunStore();
     // renameRun emits a `run.renamed` event stamped with the run's workspaceId,
     // so AssistChat's workspace-scoped orchestration-event subscription refreshes
     // and the new title/short-id render live.
+    const updated = await runStore.renameRun({ runId: run.id, title });
+    return successResponse(id, { ok: true, run_id: updated.id, title: updated.title });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+// orchestrator.name_chat — the Execute/Auto manager's counterpart to
+// automation.name_chat: give an ordinary chat an AI-authored title. Mirrors how
+// the other orchestrator.* handlers load the run (getRun + not-found guard) and
+// restricts to execute/auto chats: an automation chat must go through
+// automation.name_chat (which enforces its own mode), and talk/plan chats have
+// no orchestrator manager to call this.
+async function handleOrchestratorNameChat(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const rawTitle = stringParam(params, "title");
+  if (!rawTitle) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "title is required (a short 3-6 word chat name)");
+  }
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  if (run.chatMode !== "execute" && run.chatMode !== "auto") {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `orchestrator.name_chat is only available for execute/auto chats (this run's chatMode is "${run.chatMode ?? "unset"}"). Automation chats use automation.name_chat.`,
+    );
+  }
+  const title = sanitizeChatTitle(rawTitle);
+  try {
+    // renameRun emits `run.renamed` stamped with the run's workspaceId, so App's
+    // orchestration-event refresh re-lists runs and the new title renders live in
+    // the chat history popover.
     const updated = await runStore.renameRun({ runId: run.id, title });
     return successResponse(id, { ok: true, run_id: updated.id, title: updated.title });
   } catch (err) {

@@ -64,6 +64,13 @@ One-shot snapshot of a single worker — use sparingly; prefer `spark_wait_for_w
 ### `spark_complete({ summary })`
 Mark the run complete with a 2-3 sentence summary. The user sees this as the final chat message. Only call once the work meets the request.
 
+### `spark_name_chat({ title })`
+Give this chat a short, human-readable title (3-6 words). Purely cosmetic — it does not spawn workers or change any files. See "Name this chat" below.
+
+## Name this chat
+
+Early in the session — once you understand what the user wants — call `spark_name_chat` with a **3-6 word** title describing the goal (e.g. "Fix login redirect bug", "Add CSV export", "Refactor auth module"). Re-name it if the conversation's topic shifts substantially. This is how the user tells their chats apart in the history; it does not spawn workers or change any files.
+
 ## Operating loop
 
 1. **Read the user's request** carefully. Use your built-in shell/file tools for exploration if needed.

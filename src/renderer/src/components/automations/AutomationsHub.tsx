@@ -657,6 +657,7 @@ export default function AutomationsHub({
               runtimes={runtimes}
               active={active && subTab === "looms"}
               focusRunId={focusAssistRunId ?? undefined}
+              terminalScrollbackLineLimit={terminalScrollbackLineLimit}
               onClose={() => setMode({ kind: "view" })}
             />
           </div>

@@ -99,6 +99,17 @@ function ChatBackendTerminalStack({
     const seen = new Set<string>();
     const out: { runId: string; sessionId: string }[] = [];
     for (const run of runs) {
+      // Skip loom-architect ("Create with Cora") chats: chatMode "automation"
+      // runs live in the Automations tab, which hosts their backend terminal
+      // INLINE (AssistChat's own Chat|Terminal toggle). They have no chat tab,
+      // so this layer's visibility gate (activeChatTabId / activeRunId) could
+      // never reveal them anyway — and warming a hidden pane here would attach a
+      // SECOND canonical xterm to a session AssistChat's inline pane already
+      // drives, two xterms fighting over main's single renderer sink + a resize
+      // war on the live Ink TUI. Leaving them out makes the inline pane the sole
+      // attacher. (Loom-OWNED runs never reach here — App filters them by
+      // automationId before this list.)
+      if (run.chatMode === "automation") continue;
       const sessionId = backendPtySessionId(run.id, run.chatBackend);
       if (!sessionId || seen.has(sessionId)) continue;
       const keepWarm =
