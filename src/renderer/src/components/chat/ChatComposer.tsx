@@ -637,6 +637,59 @@ export default function ChatComposer({
     void attachPastedImages(files);
   };
 
+  // Insert dropped file path(s) into the draft at the caret (append when the
+  // textarea has no selection range), space-separated and double-quoted when a
+  // path contains whitespace. Goes through setDraft — the controlled value's
+  // single source of truth — never the DOM value.
+  const insertPathsAtCaret = (paths: string[]) => {
+    const token = paths.map(quotePathForDrop).join(" ");
+    const node = textareaRef.current;
+    const start = node?.selectionStart ?? draft.length;
+    const end = node?.selectionEnd ?? draft.length;
+    const before = draft.slice(0, start);
+    const after = draft.slice(end);
+    // Pad with a single space where the insertion abuts existing non-space text
+    // so the dropped path doesn't fuse onto a neighbouring word.
+    const leftPad = before.length > 0 && !/\s$/.test(before) ? " " : "";
+    const rightPad = after.length > 0 && !/^\s/.test(after) ? " " : "";
+    const insertion = `${leftPad}${token}${rightPad}`;
+    const caret = before.length + leftPad.length + token.length;
+    setDraft(`${before}${insertion}${after}`);
+    window.setTimeout(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus({ preventScroll: true });
+      el.setSelectionRange(caret, caret);
+    }, 0);
+  };
+
+  // Drop file paths onto the textarea. Covers OS/Finder file drops AND in-app
+  // Explorer drags (native OS drags that deliver real File objects) via the same
+  // dataTransfer.files → getPathForFile path the terminal uses. IMAGE files are
+  // left to the shell's image-attach handler (onComposerDrop) so dropping a
+  // screenshot still attaches it; only NON-image files insert their path here.
+  const onTextareaDragOver = (event: React.DragEvent<HTMLTextAreaElement>) => {
+    if (!dragHasNonImageFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+  };
+
+  const onTextareaDrop = (event: React.DragEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length === 0) return;
+    // Defer image drops to the shell's image-attach handler.
+    if (files.some((file) => SUPPORTED_PASTED_IMAGE_TYPES.has(file.type))) return;
+    const paths = files
+      .map((file) => window.spark.fs.getPathForFile(file))
+      .filter((path) => path && path.length > 0);
+    if (paths.length === 0) return;
+    // preventDefault stops Chromium navigating the webContents to the file:// URL.
+    event.preventDefault();
+    event.stopPropagation();
+    insertPathsAtCaret(paths);
+  };
+
   const removeImage = (sourcePath: string) => {
     setImages((current) => current.filter((image) => image.sourcePath !== sourcePath));
   };
@@ -891,6 +944,8 @@ export default function ChatComposer({
             updateMentionFromSelection(next, event.currentTarget.selectionStart);
           }}
           onPaste={onPaste}
+          onDragOver={onTextareaDragOver}
+          onDrop={onTextareaDrop}
           onKeyDown={onKeyDown}
           onKeyUp={(event) => updateMentionFromSelection(draft, event.currentTarget.selectionStart)}
           onClick={(event) => updateMentionFromSelection(draft, event.currentTarget.selectionStart)}
@@ -1127,6 +1182,22 @@ function dragHasImageItems(data: DataTransfer): boolean {
   return Array.from(data.items).some(
     (item) => item.kind === "file" && SUPPORTED_PASTED_IMAGE_TYPES.has(item.type),
   );
+}
+
+// True when a drag carries file items that are NOT images. Read during dragover
+// (File payloads aren't yet available) from the item metadata, so the composer
+// can claim non-image file drags for path insertion while leaving image drags
+// to the image-attach handler.
+function dragHasNonImageFiles(data: DataTransfer): boolean {
+  if (!Array.from(data.types).includes("Files")) return false;
+  return !dragHasImageItems(data);
+}
+
+// Quote a dropped path for insertion into the composer: bare unless it holds
+// whitespace, then wrap it in double quotes (embedded quotes escaped) so the
+// path survives as a single shell token.
+function quotePathForDrop(path: string): string {
+  return /\s/.test(path) ? `"${path.replace(/"/g, '\\"')}"` : path;
 }
 
 function pastedImageName(file: File, index: number): string {

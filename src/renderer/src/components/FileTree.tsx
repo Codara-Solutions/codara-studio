@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { ChatBackendKind, FsEntry } from "@shared/types";
 import { type EngineOption, useEngineOptions } from "./engine/engineOptions";
@@ -1218,6 +1218,18 @@ export default function FileTree({
               : null
           }
           revealLabel={isPreviewFile(contextMenu.entry) ? "Open in Preview" : "Reveal in OS"}
+          onCopyPath={() => {
+            const text = contextMenuEntries.map((entry) => entry.path).join("\n");
+            setContextMenu(null);
+            void navigator.clipboard.writeText(text).catch((err) => setError((err as Error).message));
+          }}
+          onCopyRelativePath={() => {
+            const text = contextMenuEntries
+              .map((entry) => workspaceRelativePath(cwd, entry.path))
+              .join("\n");
+            setContextMenu(null);
+            void navigator.clipboard.writeText(text).catch((err) => setError((err as Error).message));
+          }}
           onDelete={() => void deleteEntries(contextMenuEntries)}
           deleteLabel={
             contextMenuEntries.length > 1
@@ -1638,6 +1650,8 @@ function FileMenu({
   onRename,
   onReveal,
   revealLabel,
+  onCopyPath,
+  onCopyRelativePath,
   onDelete,
   deleteLabel,
 }: {
@@ -1651,12 +1665,24 @@ function FileMenu({
   onRename: (() => void) | null;
   onReveal: (() => void) | null;
   revealLabel: string;
+  onCopyPath: () => void;
+  onCopyRelativePath: () => void;
   onDelete: () => void;
   deleteLabel: string;
 }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Clamp against the menu's REAL rendered height, not a constant — the item
+  // set varies per entry kind and grows over time (a stale constant left the
+  // bottom rows unclickable off-screen). First paint uses the previous/none
+  // measurement; the layout effect corrects before the frame is shown.
+  const menuElRef = useRef<HTMLDivElement | null>(null);
+  const [menuHeight, setMenuHeight] = useState(280);
+  useLayoutEffect(() => {
+    const h = menuElRef.current?.offsetHeight;
+    if (h && h !== menuHeight) setMenuHeight(h);
+  });
   const x = Math.min(menu.x, window.innerWidth - 236);
-  const y = Math.min(menu.y, window.innerHeight - 280);
+  const y = Math.min(menu.y, window.innerHeight - 8 - menuHeight);
   // The Run plan engine flyout opens to the right by default, flipping left
   // when the menu sits too close to the viewport's right edge to fit it.
   const engineFlyoutOpensLeft = Math.max(8, x) + 228 + ENGINE_FLYOUT_WIDTH > window.innerWidth - 8;
@@ -1673,6 +1699,7 @@ function FileMenu({
   // Reset confirm state if user mouse-leaves the menu briefly.
   return (
     <div
+      ref={menuElRef}
       onClick={(e) => e.stopPropagation()}
       onMouseLeave={() => {
         if (confirmDelete) setTimeout(() => setConfirmDelete(false), 1500);
@@ -1744,6 +1771,8 @@ function FileMenu({
       <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
       {onRename && <MenuButton icon="R" onClick={onRename}>Rename</MenuButton>}
       {onReveal && <MenuButton icon="V" onClick={onReveal}>{revealLabel}</MenuButton>}
+      <MenuButton icon="C" onClick={onCopyPath}>Copy Path</MenuButton>
+      <MenuButton icon="P" onClick={onCopyRelativePath}>Copy Relative Path</MenuButton>
       <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
       <MenuButton
         icon="D"
@@ -1944,6 +1973,20 @@ function MenuButton({
 
 function parentPath(path: string): string {
   return dirname(path);
+}
+
+// Path relative to the workspace root for the "Copy Relative Path" action.
+// Prefix-matches case-insensitively (macOS/Windows filesystems) but returns the
+// segment with its original casing. Falls back to the absolute path when the
+// entry somehow sits outside the workspace root.
+function workspaceRelativePath(cwd: string, path: string): string {
+  const normCwd = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  const normPath = path.replace(/\\/g, "/");
+  if (normPath.toLowerCase() === normCwd.toLowerCase()) return ".";
+  if (normPath.toLowerCase().startsWith(`${normCwd.toLowerCase()}/`)) {
+    return normPath.slice(normCwd.length + 1);
+  }
+  return normPath;
 }
 
 function HeaderIconButton({

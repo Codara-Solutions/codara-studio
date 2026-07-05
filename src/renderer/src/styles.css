@@ -615,6 +615,11 @@ a { color: inherit; }
 
 .spark-tab__label--preview {
   font-style: italic;
+  /* body sets `font-synthesis: none`, and Inter ships here without an italic
+     face — without re-allowing style synthesis the italic silently renders
+     as regular and preview (unpinned) tabs are indistinguishable from
+     pinned ones. */
+  font-synthesis: style;
 }
 
 .spark-tab__reorder-edge {
