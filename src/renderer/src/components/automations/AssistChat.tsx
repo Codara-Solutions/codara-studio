@@ -7,6 +7,7 @@ import type {
 import ChatConversation from "../chat/ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "../chat/ChatComposer";
 import { describeRunStatus, statusToneColor } from "../chat/timeline";
+import { CloseIcon, HistoryIcon, PlusIcon } from "../icons";
 
 // Stable short id for an assist chat: the tail segment of the run id, so
 // "run-mr7vuzog-1l3h2v" reads as "#1l3h2v". Run ids are `run-<time>-<rand>`, and
@@ -303,7 +304,7 @@ export default function AssistChat({
           background: "var(--bg)",
         }}
       >
-        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+        <div style={{ flex: "0 1 auto", minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)", whiteSpace: "nowrap" }}>
             Create with Cora
           </span>
@@ -320,6 +321,19 @@ export default function AssistChat({
             {activeRun ? <SessionStatusLine run={activeRun} /> : "New architect session"}
           </span>
         </div>
+        {/* + lives beside the title (it acts on "this session" context); history
+            sits at the right; × is alone in the far corner with a gap — three
+            separate homes on purpose, per user feedback (no button cluster). */}
+        <button
+          type="button"
+          className="spark-icon-btn"
+          aria-label="New session"
+          onClick={newSession}
+          title="Start a fresh architect session (past sessions stay in the history)"
+        >
+          <PlusIcon size={13} />
+        </button>
+        <span style={{ flex: 1 }} />
         <AssistHistoryButton
           runs={assistRuns ?? []}
           activeRunId={activeRun?.id ?? null}
@@ -328,21 +342,13 @@ export default function AssistChat({
         />
         <button
           type="button"
-          className="spark-btn"
-          style={{ height: 24, padding: "0 10px", fontSize: 11 }}
-          onClick={newSession}
-          title="Start a fresh architect session (past sessions stay in the history)"
-        >
-          New session
-        </button>
-        <button
-          type="button"
-          className="spark-btn"
-          style={{ height: 24, padding: "0 10px", fontSize: 11 }}
+          className="spark-icon-btn"
+          aria-label="Done — back to the looms view"
+          style={{ marginLeft: 14 }}
           onClick={onClose}
-          title="Back to the loom detail view — the session keeps running"
+          title="Back to the looms view — the session keeps running"
         >
-          Done
+          <CloseIcon size={13} />
         </button>
       </div>
 
@@ -442,7 +448,7 @@ function AssistWelcome({ loading }: { loading: boolean }): React.ReactElement {
       {!loading && (
         <div className="spark-empty__body" style={{ maxWidth: 300 }}>
           Tell Cora what you want automated — she designs the trigger, loop, and worker, then
-          creates and test-runs the loom for you. It appears in the list on the left as she works.
+          creates and test-runs the loom for you. It appears in your Looms list as she works.
         </div>
       )}
     </div>
@@ -500,13 +506,13 @@ function AssistHistoryButton({
     <div ref={wrapperRef} style={{ position: "relative", display: "inline-flex" }}>
       <button
         type="button"
-        className="spark-btn"
-        style={{ height: 24, padding: "0 10px", fontSize: 11 }}
+        className="spark-icon-btn"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
+        aria-label="Session history"
         title="Past architect sessions in this workspace"
       >
-        History
+        <HistoryIcon size={13} />
       </button>
       {open && (
         <div

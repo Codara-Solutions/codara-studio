@@ -430,11 +430,16 @@ export default function AutomationsHub({
         color: "var(--ink)",
       }}
     >
-      {/* ── Sub-tab strip ─────────────────────────────────────────────────── */}
+      {/* ── Sub-tab strip ─────────────────────────────────────────────────
+          Hidden entirely while the Cora architect chat is open: assist mode
+          takes over the tab (user feedback — no Looms/Workers toggle and no
+          "+ New loom" competing with the chat). display:none, not unmount,
+          so segmented-control state costs nothing to restore; the assist
+          overlay's own × is the way back. */}
       <div
         style={{
           flex: "0 0 40px",
-          display: "flex",
+          display: assisting ? "none" : "flex",
           alignItems: "center",
           gap: 10,
           padding: "0 12px",
@@ -642,7 +647,9 @@ export default function AutomationsHub({
               pointerEvents: subTab === "looms" ? "inherit" : "none",
             }}
           >
-            {loomListAside}
+            {/* No looms aside here — the chat takes the full tab width
+                ("bigger window", per user feedback). Created looms surface in
+                the Looms list the moment the user closes the chat via ×. */}
             <AssistChat
               workspaceId={workspaceId}
               workspaceName={workspaceName}
