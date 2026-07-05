@@ -1083,7 +1083,12 @@ export function useTerminalSession({
       // relies on the same ordering. No resume() is issued in this mode (see the
       // guarded resume below): detach() left nothing paused, so the raw tail is
       // the sole source of replayed bytes and can't be double-delivered.
-      const liveSnapshot = rawTailReattachRef.current
+      // Read-only mirror panes also skip the snapshot replay: any snapshot at
+      // this sessionId belongs to a CANONICAL pane's lifecycle, and replaying a
+      // flattened-text frame under a live TUI's incremental repaints is the
+      // documented garble. Mirrors neither consume nor delete it — the entry is
+      // left for whichever canonical mount owns it.
+      const liveSnapshot = rawTailReattachRef.current || readOnlyRef.current
         ? null
         : xtermBufferSnapshots.get(sessionId);
       if (rawTailReattachRef.current) {
@@ -1125,7 +1130,7 @@ export function useTerminalSession({
         } else {
           finishReplay();
         }
-      } else if (!rawTailReattachRef.current) {
+      } else if (!rawTailReattachRef.current && !readOnlyRef.current) {
         // Non-raw path only: restore the sampled localStorage scrollback for the
         // cold app-restart case. Raw mode never restores here — main's raw tail
         // replay is authoritative and any text restore would sit under the live
@@ -1356,7 +1361,12 @@ export function useTerminalSession({
         }
       };
       const reportRuntimeState = (state: RuntimeState) => {
-        void window.spark.terminalState?.report?.({ paneId: sessionId, state });
+        // Read-only mirrors never report to main: their xterm buffer lacks the
+        // canonical pane's history, so their classification can diverge and
+        // would flap the run-store attempt state the canonical pane reports.
+        if (!readOnlyRef.current) {
+          void window.spark.terminalState?.report?.({ paneId: sessionId, state });
+        }
         // Surface the same debounced state to the renderer so a manual pane's
         // worker chip can render the finer label/tone. Main still gets the
         // report above (used for Cora-owned attempts / notifications); this is
@@ -1958,6 +1968,13 @@ export function useTerminalSession({
           rows,
           env: extraEnv,
           startupCommand: initialCommand?.trim() || undefined,
+          // Read-only mirror panes attach to a session whose canonical xterm
+          // lives elsewhere. The mirror flag makes main's existing-session
+          // branch a pure no-op — critically it skips the pty resize to OUR
+          // cols/rows, which would SIGWINCH the live TUI at the mirror's size
+          // and garble the canonical pane's display. It also refuses to
+          // create a session, so a mirror can never spawn the noop shell.
+          mirror: readOnlyRef.current || undefined,
         });
         if (disposed) {
           return;
@@ -1982,7 +1999,10 @@ export function useTerminalSession({
       // ever paused. The raw tail replayed by spawn() above is the sole source
       // of replayed bytes; calling resume would risk re-delivering tail bytes,
       // so we make the "no double-delivery" invariant explicit by not calling it.
-      if (!rawTailReattachRef.current) {
+      // Read-only mirrors also skip it: they never pause on unmount, and a
+      // resume issued here would drain a backlog the CANONICAL pane paused for,
+      // stealing its bytes onto the shared channel at the wrong moment.
+      if (!rawTailReattachRef.current && !readOnlyRef.current) {
         void window.spark.pty.resume(sessionId);
       }
 
@@ -2161,7 +2181,8 @@ export function useTerminalSession({
         void window.spark.pty.resize(sessionId, term.cols, term.rows);
       }
 
-      if (visible) term.focus();
+      // Same readOnly gate as the reveal effect: mirrors never auto-focus.
+      if (visible && !readOnlyRef.current) term.focus();
 
       // One-shot autorun: type the requested command + CR into the PTY once
       // the shell has had a moment to render its first prompt. The 1500ms
@@ -2252,7 +2273,12 @@ export function useTerminalSession({
       // worse, could replay on a later non-raw mount of the same session. The
       // hidden-buffer refs are dropped unconditionally below — their bytes are in
       // main's tail and come back via the raw replay.
-      if (dyingTerm && !replayPending && !rawTailReattachRef.current) {
+      // Read-only mirrors never capture a snapshot either: the cache is keyed
+      // by sessionId and consumed by the next CANONICAL mount — a mirror's
+      // partial buffer stored there would replay a flattened frame under the
+      // canonical pane's live TUI (or under a later mirror), the exact garble
+      // the raw-tail path exists to prevent.
+      if (dyingTerm && !replayPending && !rawTailReattachRef.current && !readOnlyRef.current) {
         try {
           const text = captureXtermBuffer(dyingTerm, scrollbackLineLimitRef.current);
           // Bytes that streamed in while this pane was hidden never reached
@@ -2366,7 +2392,11 @@ export function useTerminalSession({
       // only repaints dirtied rows. Runs once per re-activation, not on typing.
       recoverRendererRef.current?.();
     });
-    termRef.current?.focus();
+    // Read-only mirrors don't grab keyboard focus on reveal: they drop every
+    // keystroke, so stealing focus from e.g. a blocked-worker answer input
+    // would silently eat the user's typing. Click-to-focus (the explicit
+    // focus() API) still works for copy/scroll.
+    if (!readOnlyRef.current) termRef.current?.focus();
     return () => window.cancelAnimationFrame(raf);
   }, [visible]);
 

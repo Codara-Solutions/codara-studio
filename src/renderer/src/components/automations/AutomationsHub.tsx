@@ -24,6 +24,7 @@ import { useAutomationWorkers } from "./useAutomationWorkers";
 import WorkersView from "./WorkersView";
 import RunPeek from "./RunPeek";
 import MiniFlow from "./MiniFlow";
+import LiveBoard from "./LiveBoard";
 import NodeFlowEditor from "./flow/NodeFlowEditor";
 import AssistChat from "./AssistChat";
 
@@ -84,6 +85,13 @@ export default function AutomationsHub({
   // Inline feedback when an action (Run now / Pause / Save / …) fails — there is
   // no renderer-callable toast API, so we surface errors locally.
   const [actionError, setActionError] = useState<string | null>(null);
+  // Live board — the "whiteboard" view of the selected loom's run (full flow
+  // canvas + in-canvas worker dock). Auto-opens when the selected loom is
+  // running; a manual close is remembered per loom for the DURATION of that
+  // run only (dismissal is dropped when the loom leaves running/blocked), so
+  // iterations never re-open it against the user but the next fresh run does.
+  const [boardOpen, setBoardOpen] = useState(false);
+  const dismissedBoardsRef = useRef<Set<string>>(new Set());
 
   const workers = useAutomationWorkers(active);
   const workspaceWorkers = useMemo(
@@ -180,6 +188,66 @@ export default function AutomationsHub({
 
   const selected = useMemo(() => jobs.find((j) => j.id === selectedId) ?? null, [jobs, selectedId]);
 
+  // ── live board open/close policy ────────────────────────────────────────
+  const selectedLive =
+    selected != null &&
+    (selected.state.status === "running" || selected.state.status === "blocked");
+  const selectedLiveRef = useRef(selectedLive);
+  selectedLiveRef.current = selectedLive;
+
+  // Dismissals expire the moment their loom is no longer mid-run — checked
+  // against EVERY jobs refresh (not just the selected loom), so a run that
+  // ends (and the next one that starts) while ANOTHER loom is selected still
+  // gets its fresh auto-open on reselect.
+  useEffect(() => {
+    const dismissed = dismissedBoardsRef.current;
+    if (dismissed.size === 0) return;
+    for (const id of [...dismissed]) {
+      const job = jobs.find((j) => j.id === id);
+      if (!job || (job.state.status !== "running" && job.state.status !== "blocked")) {
+        dismissed.delete(id);
+      }
+    }
+  }, [jobs]);
+
+  // Selection change always resets the board (a different loom's board is a
+  // different surface); the auto-open effect below re-opens it if the new
+  // selection is mid-run.
+  useEffect(() => {
+    setBoardOpen(false);
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (!selected || !selectedLive) return;
+    // "When it's running I want to see it in the whiteboard": surface the
+    // live board as the primary view of a running loom, unless the user
+    // closed it for this run (dismissals expire with the run — see above).
+    if (!dismissedBoardsRef.current.has(selected.id)) setBoardOpen(true);
+    // selected.id (not the object) so per-iteration job refreshes don't refire.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id, selectedLive]);
+
+  const openLiveBoard = useCallback(() => {
+    const id = selectedIdRef.current;
+    if (id) dismissedBoardsRef.current.delete(id);
+    switchSubTab("looms");
+    setBoardOpen(true);
+  }, [switchSubTab]);
+
+  const closeLiveBoard = useCallback(() => {
+    const id = selectedIdRef.current;
+    // Record the dismissal only while the run is in flight: closing a
+    // FINISHED run's board must not suppress the next run's auto-open (the
+    // expiry effect above may already have run for this loom by then).
+    if (id && selectedLiveRef.current) dismissedBoardsRef.current.add(id);
+    setBoardOpen(false);
+  }, []);
+
+  const boardWorkers = useMemo(
+    () => (selected ? workspaceWorkers.filter((w) => w.automationId === selected.id) : []),
+    [workspaceWorkers, selected],
+  );
+
   const handleCreate = useCallback(
     async (input: CreateScheduledJobInput) => {
       setActionError(null);
@@ -270,6 +338,10 @@ export default function AutomationsHub({
   // "assisting" = the Cora architect chat replaces the detail pane.
   const editing = mode.kind === "create" || mode.kind === "edit";
   const assisting = mode.kind === "assist";
+  // Live board on screen: it owns the Looms body while open, but yields to the
+  // editor/assist overlays and to the Workers sub-tab (kept mounted under the
+  // same visibility contract so the canvas viewport + dock mirrors survive).
+  const boardShowing = boardOpen && selected !== null && subTab === "looms" && !editing && !assisting;
 
   // The looms list column, shared by the plain view (list + detail) and the
   // assist view (list + architect chat). Only one of the two renders at a
@@ -619,7 +691,7 @@ export default function AutomationsHub({
                     setSelectedId(null);
                   })
                 }
-                onViewWorker={() => switchSubTab("workers")}
+                onOpenLiveBoard={openLiveBoard}
                 onAnswer={(runId, answer) =>
                   void act(() =>
                     window.spark.orchestration.addRunMessage({
@@ -634,6 +706,50 @@ export default function AutomationsHub({
             )}
           </section>
         </div>
+        )}
+
+        {/* Live board overlay: the loom run as a full "whiteboard" — the flow
+            canvas with live node state and the worker terminal docked INSIDE
+            the canvas. Kept MOUNTED across Looms ↔ Workers flips and
+            editor/assist excursions (same visibility contract as the other
+            overlays — ReactFlow must never sit under display:none, and the
+            dock's mirror xterms must never remount on a view flip). Rendered
+            LAST so it paints above the in-flow detail while showing. */}
+        {boardOpen && selected && (
+          <div
+            aria-hidden={!boardShowing}
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              // "inherit", not visible/auto — same punch-through reason as the
+              // editor overlay above.
+              visibility: boardShowing ? "inherit" : "hidden",
+              pointerEvents: boardShowing ? "inherit" : "none",
+            }}
+          >
+            <LiveBoard
+              key={selected.id}
+              job={selected}
+              liveRun={liveRun}
+              workers={boardWorkers}
+              shown={active && boardShowing}
+              scrollbackLineLimit={terminalScrollbackLineLimit}
+              onClose={closeLiveBoard}
+              onOpenWorkersGrid={() => switchSubTab("workers")}
+              onStop={() => stopLoom(selected.id)}
+              onAnswer={(runId, answer) =>
+                void act(() =>
+                  window.spark.orchestration.addRunMessage({
+                    runId,
+                    author: "user",
+                    kind: "note",
+                    message: answer,
+                  }),
+                )
+              }
+            />
+          </div>
         )}
       </div>
     </div>
@@ -744,7 +860,7 @@ function AutomationDetail({
   onStop,
   onToggleEnabled,
   onDelete,
-  onViewWorker,
+  onOpenLiveBoard,
   onAnswer,
 }: {
   job: ScheduledJob;
@@ -760,7 +876,8 @@ function AutomationDetail({
   onStop: () => void;
   onToggleEnabled: (enabled: boolean) => void;
   onDelete: () => void;
-  onViewWorker: () => void;
+  // Opens the live board — the flow canvas with the worker terminal docked in.
+  onOpenLiveBoard: () => void;
   onAnswer: (runId: string, answer: string) => void;
 }): React.ReactElement {
   const status = job.state.status;
@@ -870,14 +987,14 @@ function AutomationDetail({
           onEdit={onEdit}
           onOpenCreatorChat={canOpenCreatorChat ? onOpenCreatorChat : undefined}
           onToggleEnabled={onToggleEnabled}
-          onViewWorker={onViewWorker}
+          onOpenLiveBoard={onOpenLiveBoard}
           onAnswer={onAnswer}
         />
       </Section>
 
       {/* History */}
       <Section label="History" count={job.history.length}>
-        <HistoryTimeline history={job.history} liveRunId={job.state.currentRunId} onViewWorker={onViewWorker} />
+        <HistoryTimeline history={job.history} liveRunId={job.state.currentRunId} onOpenLiveBoard={onOpenLiveBoard} />
       </Section>
 
       {/* Loop config */}
@@ -924,7 +1041,7 @@ function LiveWorkerCard({
   onEdit,
   onOpenCreatorChat,
   onToggleEnabled,
-  onViewWorker,
+  onOpenLiveBoard,
   onAnswer,
 }: {
   job: ScheduledJob;
@@ -936,7 +1053,7 @@ function LiveWorkerCard({
   onEdit: () => void;
   onOpenCreatorChat?: () => void;
   onToggleEnabled: (enabled: boolean) => void;
-  onViewWorker: () => void;
+  onOpenLiveBoard: () => void;
   onAnswer: (runId: string, answer: string) => void;
 }): React.ReactElement {
   const [confirmStop, setConfirmStop] = useState(false);
@@ -990,10 +1107,10 @@ function LiveWorkerCard({
               type="button"
               className="spark-btn"
               style={{ height: 24, padding: "0 10px", fontSize: 11 }}
-              onClick={onViewWorker}
-              title="Watch the live worker terminal"
+              onClick={onOpenLiveBoard}
+              title="Watch this run on the whiteboard — live graph + worker terminal"
             >
-              View terminal →
+              Live board →
             </button>
           )}
         </div>
@@ -1130,11 +1247,11 @@ function LiveWorkerCard({
 function HistoryTimeline({
   history,
   liveRunId,
-  onViewWorker,
+  onOpenLiveBoard,
 }: {
   history: AutomationRunRecord[];
   liveRunId?: string;
-  onViewWorker: () => void;
+  onOpenLiveBoard: () => void;
 }): React.ReactElement {
   // Keyed iteration+runId — iteration alone collides across loop cycles
   // ("Run now" resets the counter while history is retained), which would
@@ -1230,8 +1347,8 @@ function HistoryTimeline({
                   </span>
                   <span style={{ flex: 1 }} />
                   {isLive ? (
-                    <button type="button" className="spark-btn" style={{ height: 22, padding: "0 9px", fontSize: 10.5 }} onClick={onViewWorker}>
-                      View terminal →
+                    <button type="button" className="spark-btn" style={{ height: 22, padding: "0 9px", fontSize: 10.5 }} onClick={onOpenLiveBoard}>
+                      Live board →
                     </button>
                   ) : (
                     <button

@@ -1203,6 +1203,7 @@ export function registerIpc(): void {
         rows: number;
         env?: Record<string, string>;
         startupCommand?: string;
+        mirror?: boolean;
       },
     ) => {
       return pty.spawn({
@@ -1213,6 +1214,7 @@ export function registerIpc(): void {
         rows: args.rows,
         env: args.env,
         startupCommand: args.startupCommand,
+        mirror: args.mirror,
         webContents: e.sender,
       });
     },

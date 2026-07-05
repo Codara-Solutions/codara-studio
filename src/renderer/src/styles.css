@@ -1818,10 +1818,11 @@ a { color: inherit; }
    nested in it: handles, the loom-node card, the '+' PlusButtons) re-paints
    over the hidden tab. An author rule marked !important outranks a non-important
    inline style in the cascade, so this force-hides every RF visual sub-element
-   whenever any ancestor is aria-hidden. Scoped under .loom-flow (the only
-   ReactFlow instance in the app) so unrelated UI is untouched. It is INACTIVE in
-   the legitimate visible state (active tab + looms sub-tab), where no ancestor is
-   aria-hidden. */
+   whenever any ancestor is aria-hidden. Scoped under .loom-flow — worn by BOTH
+   ReactFlow instances (the node-flow editor and the read-only LiveBoard canvas,
+   whose overlay wrapper sets aria-hidden in the same lockstep) so unrelated UI
+   is untouched. It is INACTIVE in the legitimate visible state (active tab +
+   looms sub-tab), where no ancestor is aria-hidden. */
 [aria-hidden="true"] .loom-flow .react-flow__node,
 [aria-hidden="true"] .loom-flow .react-flow__handle,
 [aria-hidden="true"] .loom-flow .react-flow__edges,

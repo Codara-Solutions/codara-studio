@@ -7,6 +7,7 @@ import type {
 } from "@shared/types";
 import { TerminalPane } from "../Terminal/TerminalPane";
 import { automationDotColor, fmtClock, fmtElapsed } from "./presentation";
+import { registerCanonicalWorkerPane } from "./worker-pane-registry";
 
 // The Workers sub-tab: every live automation worker as a full terminal pane,
 // attached to the headless pty main spawned for it (sessionId === attemptId).
@@ -457,6 +458,18 @@ function WorkerPane({
     const t = window.setTimeout(() => setConfirmStop(false), 2500);
     return () => window.clearTimeout(t);
   }, [confirmStop]);
+
+  // Publish "this attempt's CANONICAL TerminalPane is mounted" so the live
+  // board's read-only mirror pane (LiveBoard dock) can gate its own attach on
+  // it. Ordering contract: the TerminalPane child below commits in the SAME
+  // render that flips ptyExists, and child effects run before this one — so by
+  // the time a mirror sees the registry flip, the canonical pane's spawn timer
+  // is already armed ahead of the mirror's, and the canonical attach (raw-tail
+  // replay + pty sizing) always wins the race. See worker-pane-registry.ts.
+  useEffect(() => {
+    if (!ptyExists) return;
+    return registerCanonicalWorkerPane(worker.attemptId);
+  }, [ptyExists, worker.attemptId]);
 
   return (
     <div

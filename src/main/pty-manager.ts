@@ -189,6 +189,17 @@ export interface SpawnOptions {
   // Claude/Codex panes so they don't have to wait for the renderer to type a
   // command after the prompt appears.
   startupCommand?: string;
+  // Mirror attach: a SECONDARY renderer xterm observing an EXISTING session
+  // whose canonical pane lives elsewhere (TerminalPane's readOnly mode — the
+  // Automations live-board dock). A mirror attach must be a pure no-op on
+  // session state: no webContents reassignment, no tail replay (the replay is
+  // broadcast on the shared data channel and would double-paint the canonical
+  // xterm), and crucially NO resize — the existing-session branch below
+  // otherwise resizes the pty to the caller's cols/rows, which would SIGWINCH
+  // the live TUI at the mirror's dimensions and garble the canonical pane.
+  // A mirror can never CREATE a session; attaching to a missing id throws so
+  // the mirror pane surfaces the error locally instead of spawning a shell.
+  mirror?: boolean;
 }
 
 // node-pty on POSIX (macOS/Linux) never execs the target program directly.
@@ -264,6 +275,16 @@ export async function spawn(
   opts: SpawnOptions,
 ): Promise<{ id: string; pid: number; startupCommandHandled?: boolean }> {
   ensureSpawnHelperExecutable();
+  // Mirror attach (see SpawnOptions.mirror): observe-only. Checked FIRST so a
+  // mirror can never clear a pending kill, mutate session sinks, resize the
+  // pty, or fall through into a real spawn of the placeholder shell.
+  if (opts.mirror) {
+    const target = sessions.get(opts.id);
+    if (!target) {
+      throw new Error(`mirror attach: no pty session '${opts.id}'`);
+    }
+    return { id: opts.id, pid: target.pty.pid, startupCommandHandled: false };
+  }
   const pending = pendingKills.get(opts.id);
   if (pending) {
     clearTimeout(pending);

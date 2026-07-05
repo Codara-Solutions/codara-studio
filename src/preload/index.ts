@@ -568,6 +568,10 @@ const api = {
       rows: number;
       env?: Record<string, string>;
       startupCommand?: string;
+      // Mirror attach: observe an EXISTING session without touching its
+      // state (no resize / no sink change / no tail replay). Set by readOnly
+      // TerminalPanes; throws if the session does not exist.
+      mirror?: boolean;
     }): Promise<{ id: string; pid: number; startupCommandHandled?: boolean }> =>
       ipcRenderer.invoke("pty:spawn", args),
     write: (id: string, data: string): Promise<void> =>
