@@ -7,3 +7,27 @@ export const CLAUDE_LAUNCH_COMMAND = "claude --dangerously-skip-permissions";
 export const CODEX_LAUNCH_COMMAND = "codex --yolo";
 // Cursor's CLI worker — only the composer-2.5-fast model is supported, no flags.
 export const CURSOR_LAUNCH_COMMAND = "agent";
+
+// Runtimes whose CLI sessions Codara can capture + restore across app restarts.
+export type AgentSessionRuntime = "claude" | "codex";
+
+// Resume-command builders — the autorun typed into a restored pane's fresh
+// shell on reopen. These mirror the (main-side) provider `buildResumeArgs` in
+// src/main/providers/{claude,codex}.ts (`-r <id>` / `resume <id>`), rendered as
+// a single shell string because the terminal pane types one command, not argv.
+export function buildClaudeResumeCommand(sessionId: string): string {
+  return `${CLAUDE_LAUNCH_COMMAND} --resume ${sessionId}`;
+}
+
+export function buildCodexResumeCommand(sessionId: string): string {
+  return `codex resume ${sessionId} --yolo`;
+}
+
+export function buildAgentResumeCommand(session: {
+  runtime: AgentSessionRuntime;
+  sessionId: string;
+}): string {
+  return session.runtime === "claude"
+    ? buildClaudeResumeCommand(session.sessionId)
+    : buildCodexResumeCommand(session.sessionId);
+}

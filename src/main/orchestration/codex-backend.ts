@@ -42,6 +42,7 @@ import {
 } from "./spark-agent-backend";
 import { buildExecuteDecisionFromToolCalls } from "./claude-backend";
 import { startCliSession, type CliSession } from "./cli-session";
+import { discoverRolloutPath, extractSessionUuid } from "./codex-sessions";
 import { ensureCodexProjectTrust } from "./codex-trust";
 import {
   installOrchestratorMcpForCodex,
@@ -208,8 +209,6 @@ Keep answers focused: clarify, ask, and explain. Do not make filesystem changes 
 TODO(execute-mode): When Codara's Talk-mode chat escalates into an Execute run, this prompt is replaced by a stricter operational variant. For now treat every chat message as advisory and avoid side-effects on the workspace.
 `;
 
-const ROLLOUT_FILENAME_UUID_RE = /rollout-.*-([0-9a-f-]{36})\.jsonl$/i;
-
 async function ensureTalkPromptFile(): Promise<string> {
   const promptsDir = join(sparkHome(), "prompts");
   const promptPath = join(promptsDir, TALK_PROMPT_FILENAME);
@@ -227,79 +226,6 @@ async function ensureTalkPromptFile(): Promise<string> {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
   }
   return promptPath;
-}
-
-function pad2(n: number): string {
-  return n < 10 ? `0${n}` : String(n);
-}
-
-function sessionsDirFor(date: Date): string {
-  const homeDir = process.env.USERPROFILE || process.env.HOME || "";
-  return join(
-    homeDir,
-    ".codex",
-    "sessions",
-    String(date.getFullYear()),
-    pad2(date.getMonth() + 1),
-    pad2(date.getDate()),
-  );
-}
-
-/**
- * Find the newest rollout-*.jsonl whose mtime is at or after `since`. Walks
- * the current day's folder; if the current local day differs from the day
- * recorded at spawn time (midnight rollover during the spawn window), also
- * scans the previous day's folder so we don't miss a file Codex started
- * writing seconds before midnight.
- */
-async function discoverRolloutPath(since: number, spawnDate: Date): Promise<string | null> {
-  const candidates: string[] = [];
-  const today = new Date();
-  const dirs = new Set<string>([sessionsDirFor(today), sessionsDirFor(spawnDate)]);
-  // If we crossed a day boundary between spawn and now, also probe the spawn
-  // day's folder explicitly (already in the set if today != spawnDate). And
-  // for safety, the day BEFORE spawn — codex writes the file using the local
-  // time at the start of its run, so if we discover after a slow startup we
-  // could legitimately be one folder back.
-  const previous = new Date(spawnDate.getTime() - 24 * 60 * 60 * 1000);
-  dirs.add(sessionsDirFor(previous));
-
-  for (const dir of dirs) {
-    let entries: string[];
-    try {
-      entries = await fs.readdir(dir);
-    } catch {
-      continue;
-    }
-    for (const name of entries) {
-      if (!name.startsWith("rollout-") || !name.endsWith(".jsonl")) continue;
-      candidates.push(join(dir, name));
-    }
-  }
-  if (candidates.length === 0) return null;
-
-  let bestPath: string | null = null;
-  let bestMtime = -1;
-  for (const path of candidates) {
-    let stat: Awaited<ReturnType<typeof fs.stat>>;
-    try {
-      stat = await fs.stat(path);
-    } catch {
-      continue;
-    }
-    const mtimeMs = stat.mtimeMs;
-    if (mtimeMs + 5 < since) continue; // 5ms slack for clock skew
-    if (mtimeMs > bestMtime) {
-      bestMtime = mtimeMs;
-      bestPath = path;
-    }
-  }
-  return bestPath;
-}
-
-function extractSessionUuid(rolloutPath: string): string | null {
-  const match = rolloutPath.match(ROLLOUT_FILENAME_UUID_RE);
-  return match ? match[1] : null;
 }
 
 function tryParseJson(value: unknown): unknown {

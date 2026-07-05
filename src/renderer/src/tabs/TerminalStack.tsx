@@ -880,6 +880,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               initialCwd={leaf.cwd}
               initialScrollback={leaf.scrollback}
               initialCommand={leaf.autorun}
+              agentSession={leaf.agentSession}
               visible={visible && !placeOffScreen}
               scrollbackLineLimit={scrollbackLineLimit}
               onDetectedLocalUrl={bundle.onDetectedUrl}

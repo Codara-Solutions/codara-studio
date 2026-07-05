@@ -29,6 +29,7 @@ import type {
   RunsTab,
   Tab,
   TabId,
+  TerminalAgentSession,
   TerminalLeaf,
   TerminalLeafWorker,
   TerminalSplit,
@@ -59,7 +60,9 @@ const DRAFT_CHAT_PREFIX = "draft:";
 // by the App sync effect — editor/terminal/preview tabs survive. v4
 // introduced chat-scoped Runs tabs. v3 dropped the removed "project"/CRM
 // tab kind. v2 introduced the recursive PaneNode tree on TerminalTab.
-const TAB_VERSION = 5;
+// v6: terminal leaves may carry a durable `agentSession` pointer (Claude/Codex
+// session id) that survives restart so a reopened pane can `--resume`.
+const TAB_VERSION = 6;
 const MAX_TERMINAL_SCROLLBACK_CHARS = 40_000;
 
 interface PersistedShape {
@@ -537,6 +540,14 @@ export interface UseTabsApi {
   // (beforeunload/pagehide) where deferred updaters never get a render.
   flushScrollbackNow: (entries: Array<{ tabId: TabId; paneId: string; text: string }>) => void;
   setLeafWorker: (tabId: TabId, paneId: string, worker: TerminalLeafWorker | null) => void;
+  // Set (or clear, with null) the durable Claude/Codex session pointer on a
+  // leaf. Written at launch (capture) and cleared when a restore finds the
+  // transcript gone. Unlike setLeafWorker's transient chip, this survives quit.
+  setLeafAgentSession: (
+    tabId: TabId,
+    paneId: string,
+    session: TerminalAgentSession | null,
+  ) => void;
   // Rename a leaf's paneId. The caller must dispose the old PTY when it is
   // intentionally replacing a live shell. The new TerminalPane mounts at the
   // new id and spawns/attaches there. Used by orchestration to take over an
@@ -1465,6 +1476,19 @@ export function useTabs(
     [],
   );
 
+  const setLeafAgentSession = useCallback(
+    (tabId: TabId, paneId: string, session: TerminalAgentSession | null) => {
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          const root = setLeafField(t.root, paneId, "agentSession", session);
+          return root === t.root ? t : { ...t, root };
+        }),
+      );
+    },
+    [],
+  );
+
   // Rename a leaf's paneId. Walks the tree, swaps the id, and bumps the
   // tab's activePaneId to point at the new id if it used to point at the
   // old one. Returns true if the leaf was found, false otherwise.
@@ -2155,6 +2179,7 @@ export function useTabs(
       setLeafScrollback,
       flushScrollbackNow,
       setLeafWorker,
+      setLeafAgentSession,
       renameLeaf,
       addPaneInTab,
       openChatTab,

@@ -34,6 +34,7 @@ import { dirname, join } from "node:path";
 import { backendPtySessionId } from "@shared/backend-pty";
 import type { ChatMode } from "@shared/types";
 
+import { encodeCwdForClaudeProjects } from "./claude-paths";
 import { writeFileAtomic } from "../fs-atomic";
 import { resolvePythonBinary } from "../hook-installer";
 import { installOrchestratorMcpForCC, isSparkOrchestratorMcpInstalled } from "../mcp-installer";
@@ -1220,15 +1221,6 @@ async function waitForTurnFileWithRetries(
     }
     await sleep(TURN_POLL_INTERVAL_MS);
   }
-}
-
-/**
- * Mirror CC's project-dir naming: full absolute path with `:`, `\`, and `/`
- * collapsed to `-`. E.g. `C:\Users\Etienne\Documents\Project\Codara-Agent` →
- * `C--Users-Etienne-Documents-Project-Codara-Agent`.
- */
-function encodeCwdForClaudeProjects(cwd: string): string {
-  return cwd.replace(/[:\\/]/g, "-");
 }
 
 async function ensureTalkPromptFile(path: string): Promise<void> {
