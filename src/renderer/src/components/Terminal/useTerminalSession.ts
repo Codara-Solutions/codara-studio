@@ -331,6 +331,13 @@ export function useTerminalSession({
   // in the same effect — can trigger a re-fit + pty.resize after xterm falls
   // back to the DOM renderer. See the onContextLoss handler for why.
   const refitAfterRendererSwapRef = useRef<(() => void) | null>(null);
+  // Bridge to the effect-local `scheduleFitRetry` so the visibility layout
+  // effect (defined outside the setup closure) can re-fit AND push a trailing-
+  // edge pty.resize the moment a hidden pane returns to screen. A pane resized
+  // while hidden re-fits xterm on reveal, but nothing else re-syncs the pty, so
+  // without this the TUI keeps painting at its pre-hide cols. See the reveal
+  // useLayoutEffect below.
+  const refitAndResizeRef = useRef<(() => void) | null>(null);
   // Bridge to the effect-local renderer-recovery routine so the visibility
   // layout effect can force a full repaint — and reload a dead WebGL context —
   // the moment a hidden pane returns to screen. See recoverRendererOnShow.
@@ -2002,6 +2009,23 @@ export function useTerminalSession({
         const tick = () => {
           rafHandle = null;
           if (disposed || !spawned) return;
+          // Defer (don't drop) while the host is unmeasurable. A pane sitting
+          // under a display:none ancestor — a non-zoomed leaf while a sibling is
+          // zoomed, or a not-yet-laid-out tab — reports clientWidth/Height 0, and
+          // FitAddon would then read the specified "100%"/"auto" as bogus pixels
+          // and shrink the grid to a tiny column count. Skipping leaves term.cols
+          // at its last good value; the reveal path re-runs this once the host is
+          // measurable again.
+          const host = container.current;
+          if (!host || host.clientWidth === 0 || host.clientHeight === 0) {
+            // Unmeasurable this frame — a display:none sibling (zoom), or the host
+            // mid-transition (tab/flex settle). Keep the retry alive for the
+            // remaining frames so a one-frame 0 still lands a fit once layout
+            // settles, instead of stranding the pane until the next resize event.
+            rafFits += 1;
+            if (rafFits < 3) rafHandle = window.requestAnimationFrame(tick);
+            return;
+          }
           try {
             fit.fit();
           } catch {
@@ -2009,10 +2033,18 @@ export function useTerminalSession({
           }
           lastAppliedCols = term.cols;
           lastAppliedRows = term.rows;
+          // Fit is local + cheap and runs every frame so xterm visually tracks a
+          // drag-resize; the pty.resize (SIGWINCH) only fires on the trailing edge
+          // via the shared debounce below. Sending a SIGWINCH per intermediate
+          // column count is what breaks worker CLIs: Claude Code / Codex Ink TUIs
+          // mishandle a burst of expanding SIGWINCHes (anthropics/claude-code#46462
+          // — the old narrower frame isn't cleared, so the input box strands in a
+          // left-hand sub-column, the reported symptom). Coalescing to one resize
+          // at the final size sidesteps that and restores the two-stage-debounce
+          // contract the ResizeObserver path already honors.
           if (!readOnlyRef.current && (term.cols !== lastSentCols || term.rows !== lastSentRows)) {
-            lastSentCols = term.cols;
-            lastSentRows = term.rows;
-            void window.spark.pty.resize(sessionId, term.cols, term.rows);
+            if (ptyTimer !== null) window.clearTimeout(ptyTimer);
+            ptyTimer = window.setTimeout(flushPtyResize, PTY_RESIZE_DEBOUNCE_MS);
           }
           rafFits += 1;
           if (rafFits < 3) {
@@ -2027,6 +2059,16 @@ export function useTerminalSession({
       // unless we re-fit; scheduleFitRetry recomputes cols and pushes the new
       // size to the pty.
       refitAfterRendererSwapRef.current = scheduleFitRetry;
+      // Same bridge for the visibility reveal path (outside this closure), so a
+      // pane resized while hidden re-fits AND re-syncs the pty the instant it
+      // returns to screen. Nulled on cleanup so a stale closure can't run after
+      // unmount (scheduleFitRetry also self-guards on `disposed`).
+      refitAndResizeRef.current = scheduleFitRetry;
+      cleanups.push(() => {
+        if (refitAndResizeRef.current === scheduleFitRetry) {
+          refitAndResizeRef.current = null;
+        }
+      });
 
       const el = container.current;
       const flushPtyResize = () => {
@@ -2052,6 +2094,14 @@ export function useTerminalSession({
             if (disposed) return;
             const w = el.clientWidth;
             const h = el.clientHeight;
+            // Unmeasurable host (display:none ancestor — e.g. a non-zoomed
+            // leaf behind a zoomed sibling): FitAddon would misread the
+            // specified "100%" as 100px and shrink the grid to ~11 cols, then
+            // SIGWINCH the worker TUI at that width (the narrow-left-column
+            // garble). Skip WITHOUT recording lastW/lastH, so the observer
+            // fire on the display:none→block transition still sees a size
+            // change and lands the real fit.
+            if (w === 0 || h === 0) return;
             if (w === lastW && h === lastH) return;
             lastW = w;
             lastH = h;
@@ -2288,6 +2338,16 @@ export function useTerminalSession({
     } catch {
       /* host may be hidden during the transition */
     }
+    // Re-sync the pty to the pane's CURRENT size on every reveal. If the app
+    // window was resized while this pane sat on a hidden tab (or it was just
+    // un-zoomed from behind a display:none sibling), xterm re-fits above, but
+    // nothing pushed the new cols/rows to the pty — so the TUI would keep
+    // painting at the size it had when hidden. scheduleFitRetry re-fits across
+    // the next few frames (late flex/tab layout) and schedules a single
+    // trailing-edge pty.resize only when the size actually changed; it no-ops
+    // while the host is still unmeasurable, so a mid-transition reveal defers
+    // rather than pushing a bogus size.
+    refitAndResizeRef.current?.();
     // The host can finish expanding one paint later when it sits inside a
     // flex/absolute stack or a tab transition. Re-fit on the next frame so
     // xterm doesn't stay pinned to the smaller first-pass row count.
