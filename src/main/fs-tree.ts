@@ -202,6 +202,92 @@ export async function importEntries(destDir: string, sourcePaths: string[]): Pro
   return created;
 }
 
+// Move a set of workspace paths (files or folders) into `destDir`, the way a
+// drag-and-drop "move" works inside a file manager. Each source keeps its own
+// basename. Unlike importEntries — a copy that resolves collisions by appending
+// " (n)" — a move is rename-like: a name collision in the destination is an
+// ERROR (mirroring `renameFile`'s clobber guard), never a silent overwrite or
+// auto-suffix. Drops that wouldn't change anything are skipped silently rather
+// than erroring: a source whose current parent already IS `destDir`, or a
+// folder dropped onto its own row (`src === destDir`). Cross-volume moves fall
+// back to a recursive copy + delete because `fs.rename` rejects with EXDEV
+// across devices. Returns an FsEntry for every entry actually moved so the
+// renderer can refresh both the destination and each source's former parent.
+export async function moveEntries(destDir: string, sourcePaths: string[]): Promise<FsEntry[]> {
+  const destStat = await fs.stat(destDir);
+  if (!destStat.isDirectory()) {
+    throw new Error("Drop target is not a folder.");
+  }
+
+  const moved: FsEntry[] = [];
+  for (const src of sourcePaths) {
+    if (typeof src !== "string" || src.length === 0) continue;
+
+    let srcStat: import("node:fs").Stats;
+    try {
+      srcStat = await fs.stat(src);
+    } catch {
+      // Source vanished between drop and move — skip it rather than abort the
+      // whole batch (matches importEntries).
+      continue;
+    }
+
+    const isDir = srcStat.isDirectory();
+    const name = basename(src);
+    if (!name) continue;
+
+    // No-op drops: onto the folder the source already lives in, or (for a
+    // folder) onto its own row. Neither is an error — silently skip so the
+    // renderer shows no banner. Checked before the descendant guard below so a
+    // folder dropped on itself isn't misreported as "into itself".
+    if (dirname(src) === destDir || src === destDir) continue;
+
+    const target = join(destDir, name);
+
+    // Refuse to move a folder into itself or one of its own descendants — that
+    // would strand the subtree mid-rename.
+    if (isDir) {
+      const rel = relative(src, target);
+      if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) {
+        throw new Error("Cannot move a folder into itself.");
+      }
+    }
+
+    // A move never clobbers or auto-suffixes: refuse when the destination
+    // already holds an entry with this basename (mirrors renameFile). The one
+    // exception is when `target` IS the source itself under a different path
+    // spelling — a case-insensitive filesystem, an NFC/NFD unicode difference,
+    // or a symlinked root can make the raw no-op check above miss an own-parent
+    // drop. Same device + inode ⇒ it's the same file, so treat it as the silent
+    // no-op it is instead of a spurious "already exists" error.
+    if (await pathExists(target)) {
+      let sameFile = false;
+      try {
+        const targetStat = await fs.stat(target);
+        sameFile = targetStat.dev === srcStat.dev && targetStat.ino === srcStat.ino;
+      } catch {
+        // Fall through and report the collision if we can't stat the target.
+      }
+      if (sameFile) continue;
+      throw new Error(`A file named "${name}" already exists in this folder.`);
+    }
+
+    try {
+      await fs.rename(src, target);
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "EXDEV") throw err;
+      // Cross-device move: `fs.rename` can't span volumes, so copy the tree
+      // over then delete the original. The pathExists guard above already
+      // ruled out an existing target, so this can't clobber.
+      await fs.cp(src, target, { recursive: true, errorOnExist: false, force: false });
+      await fs.rm(src, { recursive: true, force: true });
+    }
+    moved.push(await makeEntry(target, isDir));
+  }
+  return moved;
+}
+
 // Pick a non-colliding path inside `destDir` for `name`. Returns `destDir/name`
 // when free, else inserts a " (n)" suffix before the extension.
 async function uniqueDestPath(destDir: string, name: string): Promise<string> {

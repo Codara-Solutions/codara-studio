@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
-import { createFile, createFolder, deleteFile, importEntries, listDir, listFiles, listMarkdownFiles, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
+import { createFile, createFolder, deleteFile, importEntries, listDir, listFiles, listMarkdownFiles, moveEntries, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPath, setAllowedRoots } from "./fs-sandbox";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { sparkHome } from "./spark-home";
@@ -542,6 +542,26 @@ export function registerIpc(): void {
         : [];
       if (sourcePaths.length === 0) return [];
       return importEntries(destDir, sourcePaths);
+    },
+  );
+
+  // Move workspace files/folders into another workspace directory (drag-and-drop
+  // MOVE). Both the destination AND every source are gated by the read sandbox:
+  // unlike importEntries — whose sources may live anywhere on disk because it
+  // only copies — a move DELETES from the source location, so each source must
+  // already sit inside an allowed workspace root.
+  ipcMain.handle(
+    "fs:moveEntries",
+    async (_e, args: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> => {
+      const destDir = typeof args?.destDir === "string" ? args.destDir : "";
+      if (!destDir) throw new Error("Missing move destination.");
+      assertAllowedReadPath(destDir);
+      const sourcePaths = Array.isArray(args?.sourcePaths)
+        ? args.sourcePaths.filter((p): p is string => typeof p === "string" && p.length > 0)
+        : [];
+      if (sourcePaths.length === 0) return [];
+      for (const src of sourcePaths) assertAllowedReadPath(src);
+      return moveEntries(destDir, sourcePaths);
     },
   );
 

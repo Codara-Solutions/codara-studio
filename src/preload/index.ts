@@ -322,6 +322,11 @@ const api = {
     // Copy externally-dropped files/folders into a workspace directory.
     importEntries: (input: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> =>
       ipcRenderer.invoke("fs:importEntries", input),
+    // Move workspace-internal files/folders into another workspace directory
+    // (drag-and-drop MOVE). Each source must already live inside a workspace
+    // root; the main side renames (copy+delete across volumes) rather than copy.
+    moveEntries: (input: { destDir: string; sourcePaths: string[] }): Promise<FsEntry[]> =>
+      ipcRenderer.invoke("fs:moveEntries", input),
     // Begin a native OS drag-out of the given workspace paths so the user can
     // drop them onto the desktop or another app. Fire-and-forget: the main
     // process owns the drag session via webContents.startDrag.

@@ -568,12 +568,19 @@ export default function FileTree({
     [onDeleteFile, refreshDir],
   );
 
-  // External file drag-and-drop ---------------------------------------------
-  // Copy OS files/folders dropped onto the Explorer into `destDir`. Electron 32
-  // removed `File.path`, so each File's real path comes from the preload-exposed
-  // `getPathForFile`. After the copy we reveal the destination (expand it if
-  // it's a subfolder) and refresh so the new entries appear immediately.
-  const importExternalFiles = useCallback(
+  // File drag-and-drop onto the Explorer -----------------------------------
+  // A drop arrives as real OS File objects whether it came from Finder or from
+  // an internal row drag (rows drag natively via webContents.startDrag), so the
+  // two are indistinguishable by type. We decide MOVE vs COPY by provenance:
+  // sources already inside the workspace root are MOVED; sources from outside
+  // are COPIED via the unchanged import path. A single drop can mix both.
+  //
+  // Electron 32 removed `File.path`, so each File's real path comes from the
+  // preload-exposed `getPathForFile`. After the drop we reveal the destination
+  // (expand it if it's a subfolder) and refresh the destination plus every
+  // moved source's old parent, so moved rows both appear at the destination and
+  // vanish from where they came from.
+  const dropEntriesInto = useCallback(
     async (destDir: string, fileList: FileList) => {
       const sourcePaths: string[] = [];
       for (const file of Array.from(fileList)) {
@@ -585,29 +592,92 @@ export default function FileTree({
         }
       }
       if (sourcePaths.length === 0) return;
+
+      const insideSources = sourcePaths.filter((p) => isInsideWorkspace(p, cwd));
+      const outsideSources = sourcePaths.filter((p) => !isInsideWorkspace(p, cwd));
+
+      let movedEntries: FsEntry[] = [];
+      let dropError: string | null = null;
       try {
-        await window.spark.fs.importEntries({ destDir, sourcePaths });
-        if (destDir !== cwd) {
-          const node = findDir(rootRef.current, destDir);
-          if (node) await expandDir(node);
+        if (outsideSources.length > 0) {
+          await window.spark.fs.importEntries({ destDir, sourcePaths: outsideSources });
         }
-        await refreshDir(destDir);
-        setError(null);
+        if (insideSources.length > 0) {
+          movedEntries = await window.spark.fs.moveEntries({ destDir, sourcePaths: insideSources });
+        }
       } catch (err) {
-        setError((err as Error).message);
+        dropError = (err as Error).message;
       }
+
+      // Reveal a subfolder target so the newly-arrived entries are visible.
+      if (destDir !== cwd) {
+        const node = findDir(rootRef.current, destDir);
+        if (node) await expandDir(node);
+      }
+      // Re-list the destination AND every moved source's old parent: a copy
+      // only touches the destination, but a move empties the source dir too.
+      const dirsToRefresh = new Set<string>([destDir]);
+      for (const p of insideSources) dirsToRefresh.add(parentPath(p));
+      await Promise.allSettled(Array.from(dirsToRefresh).map((d) => refreshDir(d)));
+
+      // Reconcile app state for the entries that ACTUALLY moved (a no-op or
+      // failed source is absent from the return). Match each old source path to
+      // its new entry by basename — successfully-moved entries have unique names
+      // within `destDir` (a name collision throws, so never two of the same).
+      if (movedEntries.length > 0) {
+        const movedByName = new Map(movedEntries.map((e) => [e.name, e]));
+        const movedOldPaths: string[] = [];
+        for (const src of insideSources) {
+          const newEntry = movedByName.get(basename(src));
+          if (!newEntry) continue;
+          movedOldPaths.push(src);
+          // A move is a rename in disguise: repoint any open editor tab at the
+          // file's new location so a later save doesn't recreate it at the old
+          // path (mirrors commitRename → onRenameFile; a no-op for unopened
+          // files and directories).
+          onRenameFile?.(src, newEntry);
+        }
+        // Moved paths no longer exist where they were — drop them from the
+        // selection so no stale ghost row stays highlighted.
+        if (movedOldPaths.length > 0) {
+          const movedSet = new Set(movedOldPaths);
+          setSelectedFilePaths((prev) => {
+            let changed = false;
+            const next = new Set(prev);
+            for (const p of movedSet) if (next.delete(p)) changed = true;
+            return changed ? next : prev;
+          });
+          setSelectionAnchorPath((anchor) => (anchor && movedSet.has(anchor) ? null : anchor));
+        }
+      }
+
+      // refreshDir clears the banner on success; re-surface the drop error (if
+      // any) so a failed move/copy still reports its message.
+      if (dropError) setError(dropError);
     },
-    [cwd, expandDir, refreshDir],
+    [cwd, expandDir, refreshDir, onRenameFile],
   );
 
-  // Resolve which directory a pointer position would drop into: the nearest
-  // directory row under the cursor, else the workspace root. Uses the live DOM
-  // (rows carry `data-fs-dir-path`) so it works with the virtualized list.
+  // Resolve which directory a pointer position would drop into. Uses the live
+  // DOM (every row carries `data-fs-path`; directory rows also carry
+  // `data-fs-dir-path`) so it works with the virtualized list:
+  //   * over a directory row → that directory (drop INTO the folder);
+  //   * over a FILE row → the file's parent directory, so dropping onto a file
+  //     targets its containing folder rather than the workspace root — this is
+  //     what makes "drop a file back onto its own row" a no-op for a MOVE
+  //     (dest === the source's current parent) instead of relocating it to root;
+  //   * over empty space → the workspace root.
   const dropDirForPoint = useCallback(
     (clientX: number, clientY: number): string => {
       const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
-      const dirPath = el?.closest<HTMLElement>("[data-fs-dir-path]")?.dataset.fsDirPath;
-      return dirPath && dirPath.length > 0 ? dirPath : cwd;
+      const row = el?.closest<HTMLElement>("[data-fs-row]");
+      if (row) {
+        const dirPath = row.dataset.fsDirPath;
+        if (dirPath && dirPath.length > 0) return dirPath;
+        const filePath = row.dataset.fsPath;
+        if (filePath && filePath.length > 0) return parentPath(filePath);
+      }
+      return cwd;
     },
     [cwd],
   );
@@ -645,9 +715,9 @@ export default function FileTree({
       event.preventDefault();
       const dir = dropDirForPoint(event.clientX, event.clientY);
       setExternalDropDir(null);
-      void importExternalFiles(dir, event.dataTransfer.files);
+      void dropEntriesInto(dir, event.dataTransfer.files);
     },
-    [dropDirForPoint, importExternalFiles],
+    [dropDirForPoint, dropEntriesInto],
   );
 
   // Native OS drag-OUT of a row. If the grabbed row is part of a multi-file
@@ -1582,6 +1652,7 @@ const Row = React.memo(function Row({
     <div
       ref={handleRowRef}
       data-fs-row=""
+      data-fs-path={node.entry.path}
       data-fs-dir-path={isDir ? node.entry.path : undefined}
       draggable={!renaming}
       onDragStart={handleDragStart}
@@ -1973,6 +2044,17 @@ function MenuButton({
 
 function parentPath(path: string): string {
   return dirname(path);
+}
+
+// True when `path` is the workspace root itself or sits somewhere beneath it.
+// Slash- and case-normalized like `workspaceRelativePath` (macOS/Windows
+// filesystems are case-insensitive; watcher/OS paths can carry mixed
+// separators) so a source resolved via `getPathForFile` still matches `cwd`.
+// This is the drop rule's discriminator: inside → move, outside → copy.
+function isInsideWorkspace(path: string, cwd: string): boolean {
+  const normCwd = cwd.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const normPath = path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return normPath === normCwd || normPath.startsWith(`${normCwd}/`);
 }
 
 // Path relative to the workspace root for the "Copy Relative Path" action.
