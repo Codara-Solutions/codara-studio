@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { NotificationCenterEntry, RunQuestionOption } from "@shared/types";
+import type { NotificationCenterEntry, ResolvedRunQuestion, RunQuestionOption } from "@shared/types";
 import { NotifyGlyphSvg } from "../components/Toast";
 import { answerRunQuestion } from "./answers";
 import { accentVar, kindMeta } from "./kinds";
@@ -18,7 +18,7 @@ type AppRegionStyle = React.CSSProperties & {
 
 export interface NotificationCenterProps {
   navigateTo?: NavigateTo;
-  resolveQuestion?: (runId: string) => RunQuestionOption[];
+  resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
   shouldResumeOnAnswer?: (runId: string) => boolean;
 }
 
@@ -372,7 +372,7 @@ function CenterEntry({
   // Fired when the user resolves the entry in place (answers the inline
   // question) — the entry is removed from the center, not merely marked read.
   onActed: () => void;
-  resolveQuestion?: (runId: string) => RunQuestionOption[];
+  resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
   shouldResumeOnAnswer?: (runId: string) => boolean;
 }) {
   const [hover, setHover] = useState(false);
@@ -389,8 +389,11 @@ function CenterEntry({
       : entry.kind === "automation.blocked" && entry.target.type === "automation"
         ? (entry.target.runId ?? null)
         : null;
-  const answerOptions: RunQuestionOption[] =
-    questionRunId && resolveQuestion ? resolveQuestion(questionRunId).slice(0, 3) : [];
+  const resolvedQuestion =
+    questionRunId && resolveQuestion ? resolveQuestion(questionRunId) : null;
+  const answerOptions: RunQuestionOption[] = resolvedQuestion
+    ? resolvedQuestion.options.slice(0, 3)
+    : [];
 
   const answerWith = async (option: RunQuestionOption) => {
     if (!questionRunId || answering.current) return;
@@ -400,6 +403,7 @@ function CenterEntry({
         questionRunId,
         option,
         shouldResumeOnAnswer?.(questionRunId) ?? true,
+        resolvedQuestion?.questionMessageId,
       );
       onActed();
     } catch {

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import type { RunQuestionOption } from "@shared/types";
+import type { ResolvedRunQuestion } from "@shared/types";
 import NotificationCenter from "../notifications/NotificationCenter";
 import type { NavigateTo } from "../notifications/routing";
 
@@ -191,7 +191,7 @@ interface Props {
   onOpenSettings?: () => void;
   // Notification-center wiring (bell + popover in the right-side controls).
   notifyNavigateTo?: NavigateTo;
-  notifyResolveQuestion?: (runId: string) => RunQuestionOption[];
+  notifyResolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
   notifyShouldResumeOnAnswer?: (runId: string) => boolean;
 }
 

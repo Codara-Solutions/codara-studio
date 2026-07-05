@@ -500,6 +500,7 @@ const MessageTurn = React.memo(function MessageTurn({
         {showChoices && (
           <QuestionChoices
             runId={runId}
+            questionMessageId={item.id}
             options={(item.questionOptions ?? []).slice(0, 3)}
           />
         )}
@@ -801,7 +802,15 @@ function fencedMarkdown(content: string, language: string): string {
   return `${fence}${language}\n${content.trim()}\n${fence}`;
 }
 
-function QuestionChoices({ runId, options }: { runId: string; options: RunQuestionOption[] }) {
+function QuestionChoices({
+  runId,
+  questionMessageId,
+  options,
+}: {
+  runId: string;
+  questionMessageId: string;
+  options: RunQuestionOption[];
+}) {
   const [custom, setCustom] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -820,6 +829,9 @@ function QuestionChoices({ runId, options }: { runId: string; options: RunQuesti
         author: "user",
         kind: "answer",
         message,
+        // Link the answer to the question it came from — consent gates
+        // (automation edit/delete approval) only accept linked answers.
+        answersMessageId: questionMessageId,
       });
       await window.spark.orchestration.resumeRun({ runId });
       setCustom("");

@@ -1460,6 +1460,14 @@ export interface RunQuestionOption {
   recommended?: boolean;
 }
 
+/** An open question resolved for an answer surface (toast, notification
+ *  center): the options to render plus the question's message id, which every
+ *  answer must link back to via answersMessageId. */
+export interface ResolvedRunQuestion {
+  questionMessageId: string;
+  options: RunQuestionOption[];
+}
+
 export interface RunMessageAttachment {
   id: string;
   kind: RunMessageAttachmentKind;
@@ -1487,6 +1495,9 @@ export interface HumanRunMessage {
    * output. Undefined on every non-loom message and pre-graph direct runs.
    */
   loomNodeId?: string;
+  /** For kind "answer": the id of the question message this answers (set by
+   *  every question-card/toast answer path). Consent gates match on it. */
+  answersMessageId?: string;
 }
 
 export interface RunArtifactPaths {
@@ -2101,6 +2112,11 @@ export interface AddRunMessageInput {
   message: string;
   questionOptions?: RunQuestionOption[];
   attachments?: AddRunMessageAttachmentInput[];
+  /** For kind "answer": the message id of the question this answers. Consent
+   *  gates (automation edit/delete approval) accept ONLY answers linked to
+   *  their own question — an unlinked affirmative ("yes" to some other
+   *  question, a casual "ok" note) must never approve a pending change. */
+  answersMessageId?: string;
 }
 
 export interface AddRunMessageAttachmentInput {

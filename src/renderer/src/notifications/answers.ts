@@ -10,6 +10,10 @@ export async function answerRunQuestion(
   runId: string,
   option: RunQuestionOption,
   resume: boolean,
+  // The question message this answers. Consent gates (automation edit/delete
+  // approval) only accept answers linked to their own question, so every
+  // surface that knows the question must pass its id.
+  questionMessageId?: string,
 ): Promise<void> {
   await window.spark.orchestration.addRunMessage({
     runId,
@@ -17,6 +21,7 @@ export async function answerRunQuestion(
     author: "user",
     kind: "answer",
     message: option.answer,
+    answersMessageId: questionMessageId,
   });
   if (resume) {
     await window.spark.orchestration.resumeRun({ runId });

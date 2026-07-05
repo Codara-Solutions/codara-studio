@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { NotifyEvent, RunQuestionOption } from "@shared/types";
+import type { NotifyEvent, ResolvedRunQuestion, RunQuestionOption } from "@shared/types";
 import { accentVar, kindMeta, type NotifyGlyph } from "../notifications/kinds";
 import { answerRunQuestion } from "../notifications/answers";
 import type { NavigateTo } from "../notifications/routing";
@@ -35,7 +35,7 @@ export interface ToastHostProps {
   // toast can offer one-click answers. The NotifyEvent from main only
   // carries the runId — the options live in the run state, so the App
   // resolves them in the renderer (global runs feed + findOpenQuestion).
-  resolveQuestion?: (runId: string) => RunQuestionOption[];
+  resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
   // Whether answering should also resumeRun (default true). Loom-owned runs
   // must NOT be resumed from here: resume re-runs the direct-run finalizer
   // against the already-blocked report (re-asking the question), while the
@@ -163,7 +163,7 @@ function ToastCard({
   depth: number;
   onClose: () => void;
   navigateTo?: NavigateTo;
-  resolveQuestion?: (runId: string) => RunQuestionOption[];
+  resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
   shouldResumeOnAnswer?: (runId: string) => boolean;
 }) {
   // In-flight guard so a fast double-click on an answer button (or two
@@ -193,8 +193,11 @@ function ToastCard({
       : toast.kind === "automation.blocked" && toast.target.type === "automation"
         ? (toast.target.runId ?? null)
         : null;
-  const answerOptions: RunQuestionOption[] =
-    questionRunId && resolveQuestion ? resolveQuestion(questionRunId).slice(0, 3) : [];
+  const resolvedQuestion =
+    questionRunId && resolveQuestion ? resolveQuestion(questionRunId) : null;
+  const answerOptions: RunQuestionOption[] = resolvedQuestion
+    ? resolvedQuestion.options.slice(0, 3)
+    : [];
 
   const answerWith = async (option: RunQuestionOption) => {
     if (!questionRunId || answering.current) return;
@@ -204,6 +207,7 @@ function ToastCard({
         questionRunId,
         option,
         shouldResumeOnAnswer?.(questionRunId) ?? true,
+        resolvedQuestion?.questionMessageId,
       );
       // Answering resolves the question in place — that's acting on it, so
       // drop the center entry too (same rationale as the card click-through).

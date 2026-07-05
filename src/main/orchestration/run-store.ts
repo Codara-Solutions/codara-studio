@@ -6472,13 +6472,29 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
   // frustrated re-send while waiting — never intent. Look back past any Codara
   // replies in between, since the immediately-previous message is often
   // Codara's own confirmation, which would otherwise mask the repeat.
+  //
+  // Two identical-text cases ARE intent and must not be swallowed:
+  //   * an answer to a DIFFERENT question ("Allow" for edit #1, then "Allow"
+  //     for edit #2 seconds later) — distinguished by answersMessageId;
+  //   * a question re-posted under a distinct clientMessageId (a consent gate
+  //     re-asking after a denied/timed-out attempt with the same diff text).
+  // Same-question answer repeats (double-click) still dedupe.
   const priorSameAuthor = [...run.humanMessages]
     .reverse()
     .find((entry) => entry.author === input.author);
+  const answersDifferentQuestion =
+    Boolean(input.answersMessageId) &&
+    priorSameAuthor?.answersMessageId !== input.answersMessageId;
+  const distinctQuestionRepost =
+    input.kind === "question" &&
+    Boolean(clientMessageId) &&
+    priorSameAuthor?.clientMessageId !== clientMessageId;
   if (
     attachmentInputs.length === 0 &&
     priorSameAuthor &&
     priorSameAuthor.message === message &&
+    !answersDifferentQuestion &&
+    !distinctQuestionRepost &&
     Date.now() - new Date(priorSameAuthor.createdAt).getTime() < 20000
   ) {
     return run;
@@ -6499,6 +6515,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     message,
     questionOptions,
     attachments,
+    answersMessageId: input.answersMessageId,
     createdAt: new Date().toISOString(),
   };
 

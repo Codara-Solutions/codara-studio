@@ -244,7 +244,9 @@ const AUTOMATION_TOOLS = [
   {
     name: "spark_update_automation",
     description:
-      "Update an existing automation. Only the fields you pass are changed; omit the rest. Same field shapes as spark_create_automation.",
+      "Update an existing automation. Only the fields you pass are changed; omit the rest. Same field shapes as spark_create_automation. " +
+      "The user will be asked to APPROVE the edit in the chat before it is applied (enforced server-side) — so narrate the change you intend to make in prose, then call this tool ONCE; do NOT ask the user to confirm separately in text. " +
+      "The result includes an `approved` flag: when `approved:false` the user declined and the automation was left UNCHANGED — do not retry, ask the user what they'd like instead.",
     inputSchema: {
       type: "object",
       required: ["automation_id"],
@@ -292,7 +294,8 @@ const AUTOMATION_TOOLS = [
   },
   {
     name: "spark_set_automation_enabled",
-    description: "Enable or disable an automation's trigger without deleting it.",
+    description:
+      "Enable or disable an automation's trigger without deleting it. The user is asked to approve the toggle in the chat before it applies (same consent flow as update/delete) — call once and read the `approved` flag in the result.",
     inputSchema: {
       type: "object",
       required: ["automation_id", "enabled"],
@@ -333,11 +336,29 @@ const AUTOMATION_TOOLS = [
   {
     name: "spark_delete_automation",
     description:
-      "Permanently delete an automation. DESTRUCTIVE: you MUST confirm with the user in conversation before calling this — never delete an automation the user did not explicitly ask to remove.",
+      "Permanently delete an automation. DESTRUCTIVE. The user will be asked to APPROVE the deletion in the chat before it happens (enforced server-side) — so narrate which automation you're about to delete in prose, then call this tool ONCE; do NOT ask the user to confirm separately in text. " +
+      "The result includes an `approved` flag: when `approved:false` the user declined and NOTHING was deleted — do not retry.",
     inputSchema: {
       type: "object",
       required: ["automation_id"],
       properties: { ...runIdProp, automation_id: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_name_chat",
+    description:
+      "Give THIS architect chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Nightly test-fix loom\" or \"Docs folder watcher\"). Call this EARLY — right after you understand what the user wants automated — and again if the topic shifts substantially. The title shows in the chat header and the session-history list so the user can tell their architect chats apart. Does not create or change any automation.",
+    inputSchema: {
+      type: "object",
+      required: ["title"],
+      properties: {
+        ...runIdProp,
+        title: {
+          type: "string",
+          description: "Short chat title (3-6 words). Must be non-empty; capped at ~60 characters server-side.",
+        },
+      },
       additionalProperties: false,
     },
   },
@@ -644,6 +665,7 @@ const AUTOMATION_TOOL_TO_RPC = {
   spark_resume_automation: "automation.resume",
   spark_stop_automation: "automation.stop",
   spark_delete_automation: "automation.delete",
+  spark_name_chat: "automation.name_chat",
   spark_ask_user: "orchestrator.ask_user",
 };
 

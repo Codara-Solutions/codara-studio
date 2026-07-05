@@ -384,13 +384,15 @@ async function dispatch(
       case "automation.create":
         return await handleAutomationCreate(params, id);
       case "automation.update":
-        return await handleAutomationUpdate(params, id);
+        // res threads through so the server-side consent gate can long-poll for
+        // the user's Allow/Deny and abort cleanly if the MCP client hangs up.
+        return await handleAutomationUpdate(params, id, res);
       case "automation.run_now":
         return await handleAutomationRunNow(params, id);
       case "automation.wait":
         return await handleAutomationWait(params, id, res);
       case "automation.set_enabled":
-        return await handleAutomationSetEnabled(params, id);
+        return await handleAutomationSetEnabled(params, id, res);
       case "automation.pause":
         return await handleAutomationPause(params, id);
       case "automation.resume":
@@ -398,7 +400,11 @@ async function dispatch(
       case "automation.stop":
         return await handleAutomationStop(params, id);
       case "automation.delete":
-        return await handleAutomationDelete(params, id);
+        // res threads through for the same consent gate as update (deletes are
+        // destructive and require explicit user approval).
+        return await handleAutomationDelete(params, id, res);
+      case "automation.name_chat":
+        return await handleAutomationNameChat(params, id);
       case "tab.create":
       case "pane.split":
         // The renderer owns tab/pane state and reaching it from main requires
@@ -1526,6 +1532,208 @@ async function requireAutomationRun(
   return { run };
 }
 
+/**
+ * Resolve an automation by id AND enforce that it belongs to the calling
+ * chat's workspace. The Automations Hub only ever shows looms whose
+ * `input.workspaceId` matches the active workspace (AutomationsHub filters on
+ * exactly this field), so an architect chat must see and mutate the same set —
+ * otherwise it "sees" (and could edit/delete) looms from other workspaces the
+ * user can't even see in the panel, which produced the phantom-duplicate report.
+ * Returns the loaded job on success, or a ready-to-return error response
+ * (not-found, or a helpful "belongs to a different workspace" message).
+ */
+async function loadJobForRun(
+  automationId: string,
+  run: RunState,
+  id: JsonRpcId,
+): Promise<{ job: ScheduledJob } | { error: JsonRpcResponse }> {
+  const { getJob } = await getScheduler();
+  const job = await getJob(automationId);
+  if (!job) {
+    return { error: errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`) };
+  }
+  if (job.input?.workspaceId !== run.workspaceId) {
+    return {
+      error: errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        `automation "${job.name}" (${automationId}) belongs to a different workspace and can't be accessed or changed from this chat. ` +
+          `Only automations in this chat's workspace are available — call spark_list_automations to see them.`,
+      ),
+    };
+  }
+  return { job };
+}
+
+// ── Consent gate for destructive automation edits ───────────────────────────
+// The architect model may freely CREATE looms, but it must not modify or delete
+// an EXISTING loom without the user's explicit approval — enforced here on the
+// server so the model cannot bypass it via prompt injection. Mechanism mirrors
+// handleOrchestratorAskUser: post a blocking `question` message with quick-pick
+// options, then long-poll the run's humanMessages for the user's answer, giving
+// up if the MCP client disconnects (clientGone) or the deadline passes.
+const CONSENT_POLL_MS = 500;
+const CONSENT_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — matches ask_user's AFK budget
+// Explicit affirmatives only. Anything else (including "Deny", "Not now", a
+// stray chat message, or free-form text) FAILS SAFE to a decline — a consent
+// gate must never treat ambiguity as approval.
+const CONSENT_ALLOW_ANSWERS: ReadonlySet<string> = new Set([
+  "allow",
+  "approve",
+  "approved",
+  "yes",
+  "confirm",
+  "ok",
+]);
+
+/**
+ * Post a consent question and block until the user answers. Returns
+ * `{ approved: true }` only on an explicit affirmative; otherwise returns
+ * `{ approved: false, response }` with a ready-to-return response the caller
+ * hands straight back to the model:
+ *   - decline / timeout → an error-SHAPED SUCCESS `{ approved:false, message }`
+ *     so the model can read it and narrate to the user instead of retrying.
+ *   - client disconnected / run vanished → a JSON-RPC error (the socket is
+ *     usually already dead, so this is a no-op write, same as ask_user).
+ *
+ * NOTE: the run-store's question normalizer discards option sets with fewer than
+ * 3 entries and substitutes generic fallbacks, so we always supply three (one
+ * allow + two decline variants) to guarantee the real Allow/Deny buttons render.
+ */
+// One consent gate per run at a time. Claude/Codex issue parallel tool_use
+// blocks, and the MCP server services each tools/call as an independent HTTP
+// request — without serialization, two gates could poll concurrently and a
+// single Allow click would approve BOTH (the UI only surfaces the latest open
+// question, so the user would never even see the second one).
+const pendingConsentRuns = new Set<string>();
+
+async function requestUserConsent(opts: {
+  runStore: Awaited<ReturnType<typeof getRunStore>>;
+  runId: string;
+  res: ServerResponse;
+  id: JsonRpcId;
+  question: string;
+  denyMessage: string;
+}): Promise<{ approved: true } | { approved: false; response: JsonRpcResponse }> {
+  const { runStore, runId, res, id, question, denyMessage } = opts;
+  if (pendingConsentRuns.has(runId)) {
+    return {
+      approved: false,
+      response: successResponse(id, {
+        approved: false,
+        message:
+          "Another change is already awaiting the user's approval in this chat. " +
+          "Wait for that answer before requesting a new one — do not retry immediately.",
+      }),
+    };
+  }
+  pendingConsentRuns.add(runId);
+  try {
+    // Unique clientMessageId per ask: identifies the question message we just
+    // posted (so answers can be matched to IT), and marks a re-ask with
+    // identical diff text as a distinct question for the dedup swallow.
+    const askClientId = `consent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    let questionMessageId: string | undefined;
+    try {
+      const afterAsk = await runStore.addRunMessage({
+        runId,
+        clientMessageId: askClientId,
+        author: "spark",
+        kind: "question",
+        message: question,
+        questionOptions: [
+          { id: "allow", label: "Allow", description: "Apply this change now", answer: "Allow", recommended: true },
+          { id: "deny", label: "Deny", description: "Do not make this change", answer: "Deny" },
+          { id: "not_now", label: "Not now", description: "Skip this change for now", answer: "Not now" },
+        ],
+      });
+      questionMessageId = afterAsk.humanMessages.find(
+        (m) => m.clientMessageId === askClientId,
+      )?.id;
+    } catch (err) {
+      return { approved: false, response: errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message) };
+    }
+    if (!questionMessageId) {
+      // The ask was swallowed (shouldn't happen with a unique clientMessageId,
+      // but a gate polling for an invisible question would hang 15 minutes).
+      return {
+        approved: false,
+        response: errorResponse(id, ERR_INTERNAL, "consent question could not be posted"),
+      };
+    }
+
+    // Nudge the user even when the Automations panel isn't focused — the gate
+    // otherwise declines silently after the timeout. Best-effort; assist runs
+    // carry no automationId, so the notify pipeline treats this as an ordinary
+    // blocked-run alert (toast + native + center, inline answers included).
+    try {
+      const run = await runStore.getRun(runId);
+      const { publish } = await import("./notify");
+      publish({
+        kind: "run.blocked",
+        sourceKey: `run:${runId}`,
+        tone: "warning",
+        title: "Automation chat — approval needed",
+        body: question.split("\n")[0]?.slice(0, 160) || "Cora is asking to change an automation.",
+        soundKind: "needs-you",
+        target: { type: "run", runId, workspaceId: run?.workspaceId },
+      });
+    } catch {
+      /* the gate works without the notification */
+    }
+
+    const deadline = Date.now() + CONSENT_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, CONSENT_POLL_MS));
+      if (clientGone(res)) {
+        return {
+          approved: false,
+          response: errorResponse(id, ERR_INTERNAL, "consent request aborted: client disconnected"),
+        };
+      }
+      const run = await runStore.getRun(runId);
+      if (!run) {
+        return {
+          approved: false,
+          response: errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-consent: ${runId}`),
+        };
+      }
+      // ONLY answers explicitly linked to THIS question count. An unlinked
+      // affirmative — the user answering some other question the model asked
+      // in the same turn, or typing a casual "ok" into the chat — must never
+      // approve a change. (Without the link, spark_ask_user("…yes/no?") fired
+      // alongside the gated call could harvest the user's "yes" — a live
+      // bypass found in adversarial review.)
+      const answer = [...run.humanMessages]
+        .reverse()
+        .find(
+          (m) =>
+            m.author === "user" &&
+            m.kind === "answer" &&
+            m.answersMessageId === questionMessageId,
+        );
+      if (answer) {
+        const normalized = answer.message.trim().toLowerCase();
+        if (CONSENT_ALLOW_ANSWERS.has(normalized)) return { approved: true };
+        // Linked but not an affirmative: Deny, Not now, or free-form typed
+        // into this question's card — all fail safe to a decline.
+        return { approved: false, response: successResponse(id, { approved: false, message: denyMessage }) };
+      }
+    }
+    return {
+      approved: false,
+      response: successResponse(id, {
+        approved: false,
+        message:
+          "No response from the user before the request timed out, so the change was NOT applied. " +
+          "Ask the user again if they still want it.",
+      }),
+    };
+  } finally {
+    pendingConsentRuns.delete(runId);
+  }
+}
+
 function summarizeTrigger(t: AutomationTrigger): string {
   switch (t.kind) {
     case "cron":
@@ -1818,10 +2026,16 @@ async function handleAutomationList(
 ): Promise<JsonRpcResponse> {
   const guard = await requireAutomationRun(params, id);
   if ("error" in guard) return guard.error;
+  const { run } = guard;
   try {
     const { listJobs } = await getScheduler();
     const jobs = await listJobs();
-    return successResponse(id, { automations: jobs.map(summarizeJob) });
+    // Scope to THIS chat's workspace so the architect sees exactly the looms the
+    // Automations Hub shows (it filters on the same input.workspaceId). Returning
+    // the unfiltered cross-workspace list is what made the architect "see" looms
+    // the user had already deleted/hidden in other workspaces (phantom dupes).
+    const scoped = jobs.filter((job) => job.input?.workspaceId === run.workspaceId);
+    return successResponse(id, { automations: scoped.map(summarizeJob) });
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, (err as Error).message);
   }
@@ -1836,9 +2050,9 @@ async function handleAutomationGet(
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
   try {
-    const { getJob } = await getScheduler();
-    const job = await getJob(automationId);
-    if (!job) return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
+    const jobGuard = await loadJobForRun(automationId, guard.run, id);
+    if ("error" in jobGuard) return jobGuard.error;
+    const { job } = jobGuard;
     // Return the full job (trigger/loop/prompt/worker/graph/state) plus the
     // history tail so the architect can patch precisely.
     return successResponse(id, {
@@ -1934,12 +2148,59 @@ async function handleAutomationCreate(
   }
 }
 
+/**
+ * Human-readable one-liners describing what an update patch changes, relative to
+ * the loom's current state — fed into the consent question so the user knows
+ * exactly what they're approving. Only fields the patch actually carries are
+ * listed; unchanged fields are omitted.
+ */
+function describeUpdate(existing: ScheduledJob, update: UpdateScheduledJobInput): string[] {
+  const lines: string[] = [];
+  if (update.name !== undefined && update.name !== existing.name) {
+    lines.push(`name: "${existing.name}" → "${update.name}"`);
+  }
+  if (update.trigger !== undefined) {
+    lines.push(`trigger: ${summarizeTrigger(existing.trigger)} → ${summarizeTrigger(update.trigger)}`);
+  }
+  if (update.loop !== undefined) {
+    lines.push(`loop: ${summarizeLoop(existing.loop)} → ${summarizeLoop(update.loop)}`);
+  }
+  if (update.prompt !== undefined) {
+    // Show actual content, not just "updated" — the user is approving a
+    // prompt rewrite and must be able to see what it becomes (a blind
+    // "prompt template updated" line makes malicious rewrites invisible).
+    const clip = (s: string | undefined): string => {
+      const one = (s ?? "").replace(/\s+/g, " ").trim();
+      if (!one) return "(empty)";
+      return one.length > 140 ? `${one.slice(0, 137)}...` : one;
+    };
+    const oldTemplate = existing.prompt?.template;
+    const newTemplate = update.prompt?.template;
+    lines.push(`prompt: "${clip(oldTemplate)}" → "${clip(newTemplate)}"`);
+  }
+  if (update.worker !== undefined) {
+    const w = update.worker;
+    const ew = existing.worker;
+    const fmt = (x?: LoomWorkerConfig): string =>
+      x ? [x.engine, x.model, x.effort].filter(Boolean).join("/") : "auto";
+    lines.push(`worker: ${fmt(ew)} → ${fmt(w)}`);
+  }
+  if (update.graph !== undefined) {
+    const n = update.graph.nodes?.length ?? 0;
+    const e = update.graph.edges?.length ?? 0;
+    lines.push(`graph updated (${n} node${n === 1 ? "" : "s"}, ${e} edge${e === 1 ? "" : "s"})`);
+  }
+  return lines;
+}
+
 async function handleAutomationUpdate(
   params: Record<string, unknown>,
   id: JsonRpcId,
+  res: ServerResponse,
 ): Promise<JsonRpcResponse> {
   const guard = await requireAutomationRun(params, id);
   if ("error" in guard) return guard.error;
+  const { run } = guard;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
   const graph = paramGraph(params);
@@ -1967,13 +2228,37 @@ async function handleAutomationUpdate(
     ...(paramWorker(params) ? { worker: paramWorker(params) } : {}),
     ...(graph ? { graph } : {}),
   };
+  // Resolve + workspace-scope the target job. loadJobForRun also gives us the
+  // pre-edit snapshot for the human-readable change summary.
+  const jobGuard = await loadJobForRun(automationId, run, id);
+  if ("error" in jobGuard) return jobGuard.error;
+  const { job: existing } = jobGuard;
+
+  // Consent gate: editing an EXISTING loom requires explicit user approval,
+  // enforced here so the model cannot bypass it.
+  const changeLines = describeUpdate(existing, update);
+  const changeSummary = changeLines.length > 0 ? changeLines.map((l) => `• ${l}`).join("\n") : "(no field changes detected)";
+  const runStore = await getRunStore();
+  const consent = await requestUserConsent({
+    runStore,
+    runId: run.id,
+    res,
+    id,
+    question: `Cora wants to edit automation "${existing.name}". Proposed changes:\n${changeSummary}\n\nAllow this edit?`,
+    denyMessage:
+      `The user declined the edit, so automation "${existing.name}" was left unchanged. ` +
+      "Do not retry the update; ask the user how they'd like to proceed.",
+  });
+  if (!consent.approved) return consent.response;
+
   try {
-    const { getJob, updateJob } = await getScheduler();
-    if (!(await getJob(automationId))) {
-      return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
-    }
+    const { updateJob } = await getScheduler();
     const job = await updateJob(update);
-    return successResponse(id, { updated: summarizeJob(job) });
+    return successResponse(id, {
+      updated: summarizeJob(job),
+      approved: true,
+      message: "The user approved the edit; the changes were applied.",
+    });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }
@@ -1987,11 +2272,10 @@ async function handleAutomationRunNow(
   if ("error" in guard) return guard.error;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  const jobGuard = await loadJobForRun(automationId, guard.run, id);
+  if ("error" in jobGuard) return jobGuard.error;
   try {
-    const { getJob, runJobNow } = await getScheduler();
-    if (!(await getJob(automationId))) {
-      return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
-    }
+    const { runJobNow } = await getScheduler();
     const runState = await runJobNow(automationId);
     return successResponse(id, { run_id: runState.id, status: runState.status });
   } catch (err) {
@@ -2013,10 +2297,9 @@ async function handleAutomationWait(
     requested && requested > 0
       ? Math.min(requested, AUTOMATION_WAIT_MAX_TIMEOUT_MS)
       : AUTOMATION_WAIT_DEFAULT_TIMEOUT_MS;
+  const jobGuard = await loadJobForRun(automationId, guard.run, id);
+  if ("error" in jobGuard) return jobGuard.error;
   const { getJob } = await getScheduler();
-  if (!(await getJob(automationId))) {
-    return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
-  }
   const deadline = Date.now() + timeoutMs;
   const snapshot = (job: ScheduledJob, reason: string): JsonRpcResponse => {
     const history = Array.isArray(job.history) ? job.history : [];
@@ -2056,6 +2339,7 @@ async function handleAutomationWait(
 async function handleAutomationSetEnabled(
   params: Record<string, unknown>,
   id: JsonRpcId,
+  res: ServerResponse,
 ): Promise<JsonRpcResponse> {
   const guard = await requireAutomationRun(params, id);
   if ("error" in guard) return guard.error;
@@ -2064,10 +2348,29 @@ async function handleAutomationSetEnabled(
   if (typeof params.enabled !== "boolean") {
     return errorResponse(id, ERR_INVALID_PARAMS, "enabled (boolean) is required");
   }
+  const jobGuard = await loadJobForRun(automationId, guard.run, id);
+  if ("error" in jobGuard) return jobGuard.error;
+  // Enabling/disabling is a state change the user relies on (silently
+  // disabling a loom they depend on — or re-arming one they deliberately
+  // turned off — is a modification), so it takes the same consent gate as
+  // update/delete. No-op toggles skip the ask.
+  if (jobGuard.job.enabled !== params.enabled) {
+    const runStore = await getRunStore();
+    const verb = params.enabled ? "enable" : "disable";
+    const consent = await requestUserConsent({
+      runStore,
+      runId: guard.run.id,
+      res,
+      id,
+      question: `Cora wants to ${verb} automation "${jobGuard.job.name}". Allow?`,
+      denyMessage: `The user declined to ${verb} "${jobGuard.job.name}". Do not retry; ask the user how they'd like to proceed.`,
+    });
+    if (!consent.approved) return consent.response;
+  }
   try {
     const { setEnabled } = await getScheduler();
     const job = await setEnabled(automationId, params.enabled);
-    return successResponse(id, { updated: summarizeJob(job) });
+    return successResponse(id, { updated: summarizeJob(job), approved: true });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }
@@ -2081,11 +2384,10 @@ async function handleAutomationPause(
   if ("error" in guard) return guard.error;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  const jobGuard = await loadJobForRun(automationId, guard.run, id);
+  if ("error" in jobGuard) return jobGuard.error;
   try {
-    const { getJob, pauseJob } = await getScheduler();
-    if (!(await getJob(automationId))) {
-      return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
-    }
+    const { pauseJob } = await getScheduler();
     const job = await pauseJob(automationId);
     return successResponse(id, { updated: job ? summarizeJob(job) : null });
   } catch (err) {
@@ -2101,11 +2403,10 @@ async function handleAutomationResume(
   if ("error" in guard) return guard.error;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  const jobGuard = await loadJobForRun(automationId, guard.run, id);
+  if ("error" in jobGuard) return jobGuard.error;
   try {
-    const { getJob, resumeJob } = await getScheduler();
-    if (!(await getJob(automationId))) {
-      return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
-    }
+    const { resumeJob } = await getScheduler();
     const job = await resumeJob(automationId);
     return successResponse(id, { updated: job ? summarizeJob(job) : null });
   } catch (err) {
@@ -2121,11 +2422,10 @@ async function handleAutomationStop(
   if ("error" in guard) return guard.error;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  const jobGuard = await loadJobForRun(automationId, guard.run, id);
+  if ("error" in jobGuard) return jobGuard.error;
   try {
-    const { getJob, stopJob } = await getScheduler();
-    if (!(await getJob(automationId))) {
-      return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
-    }
+    const { stopJob } = await getScheduler();
     const job = await stopJob(automationId);
     return successResponse(id, { updated: job ? summarizeJob(job) : null });
   } catch (err) {
@@ -2136,17 +2436,81 @@ async function handleAutomationStop(
 async function handleAutomationDelete(
   params: Record<string, unknown>,
   id: JsonRpcId,
+  res: ServerResponse,
 ): Promise<JsonRpcResponse> {
   const guard = await requireAutomationRun(params, id);
   if ("error" in guard) return guard.error;
+  const { run } = guard;
   const automationId = stringParam(params, "automation_id");
   if (!automationId) return errorResponse(id, ERR_INVALID_PARAMS, "automation_id is required");
+  const jobGuard = await loadJobForRun(automationId, run, id);
+  if ("error" in jobGuard) return jobGuard.error;
+  const { job: existing } = jobGuard;
+
+  // Consent gate: deleting an existing loom is destructive and requires explicit
+  // user approval, enforced server-side so the model cannot bypass it.
+  const runStore = await getRunStore();
+  const consent = await requestUserConsent({
+    runStore,
+    runId: run.id,
+    res,
+    id,
+    question:
+      `Cora wants to permanently delete automation "${existing.name}" (${automationId}). ` +
+      "This cannot be undone. Allow?",
+    denyMessage:
+      `The user declined the deletion, so automation "${existing.name}" was NOT deleted. ` +
+      "Do not retry the delete; ask the user how they'd like to proceed.",
+  });
+  if (!consent.approved) return consent.response;
+
   try {
-    const { getJob, deleteJob } = await getScheduler();
-    const existing = await getJob(automationId);
-    if (!existing) return errorResponse(id, ERR_INVALID_PARAMS, `automation not found: ${automationId}`);
+    const { deleteJob } = await getScheduler();
     await deleteJob(automationId);
-    return successResponse(id, { deleted: true, id: automationId, name: existing.name });
+    return successResponse(id, {
+      deleted: true,
+      id: automationId,
+      name: existing.name,
+      approved: true,
+      message: "The user approved the deletion; the automation was removed.",
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+// Cap on an AI-generated chat title. The architect is asked for a 3-6 word name;
+// this is a hard backstop so a runaway title can't bloat the tab/header label.
+const NAME_CHAT_MAX_CHARS = 60;
+
+async function handleAutomationNameChat(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const guard = await requireAutomationRun(params, id);
+  if ("error" in guard) return guard.error;
+  const { run } = guard;
+  const rawTitle = stringParam(params, "title");
+  if (!rawTitle) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "title is required (a short 3-6 word chat name)");
+  }
+  // Sanitize: newlines/control chars would break the single-line header and
+  // history rows, and a naive .slice() can bisect a surrogate pair (lone "�"
+  // in the UI) — truncate on code points instead. renameRun trims + rejects
+  // empty as a backstop.
+  const cleaned = rawTitle.replace(/[\r\n\t]+/g, " ").replace(/\p{C}/gu, "").trim();
+  const codePoints = Array.from(cleaned);
+  const title =
+    codePoints.length > NAME_CHAT_MAX_CHARS
+      ? codePoints.slice(0, NAME_CHAT_MAX_CHARS).join("").trim()
+      : cleaned;
+  try {
+    const runStore = await getRunStore();
+    // renameRun emits a `run.renamed` event stamped with the run's workspaceId,
+    // so AssistChat's workspace-scoped orchestration-event subscription refreshes
+    // and the new title/short-id render live.
+    const updated = await runStore.renameRun({ runId: run.id, title });
+    return successResponse(id, { ok: true, run_id: updated.id, title: updated.title });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }

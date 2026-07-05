@@ -6,8 +6,40 @@ import type {
 } from "@shared/types";
 import ChatConversation from "../chat/ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "../chat/ChatComposer";
-import { ChatHistoryButton } from "../chat/ChatPanel";
 import { describeRunStatus, statusToneColor } from "../chat/timeline";
+
+// Stable short id for an assist chat: the tail segment of the run id, so
+// "run-mr7vuzog-1l3h2v" reads as "#1l3h2v". Run ids are `run-<time>-<rand>`, and
+// near-simultaneous sessions share the time segment — the tail (random) piece is
+// what actually tells them apart, which is exactly why we surface it rather than
+// the head-truncated full id.
+function shortRunId(runId: string): string {
+  const tail = runId.split("-").pop() || runId;
+  return `#${tail}`;
+}
+
+// Compact "now / 5m / 3h / 2d / 1w" relative time for the session-history rows,
+// mirroring the chat panel's own history formatter (kept local so this panel's
+// UI stays self-contained).
+function formatRelativeTime(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "";
+  const diffMs = Date.now() - t;
+  if (diffMs < 0) return "now";
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 45) return "now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d`;
+  const wk = Math.floor(day / 7);
+  if (wk < 5) return `${wk}w`;
+  const mo = Math.floor(day / 30);
+  if (mo < 12) return `${mo}mo`;
+  return `${Math.floor(day / 365)}y`;
+}
 
 // AssistChat — the Automations Hub's "Create with Cora" surface: a real Cora
 // chat pinned to chatMode "automation" (the loom architect). It reuses the
@@ -288,7 +320,7 @@ export default function AssistChat({
             {activeRun ? <SessionStatusLine run={activeRun} /> : "New architect session"}
           </span>
         </div>
-        <ChatHistoryButton
+        <AssistHistoryButton
           runs={assistRuns ?? []}
           activeRunId={activeRun?.id ?? null}
           onSelect={(runId) => setSelectedId(runId)}
@@ -392,7 +424,11 @@ function SessionStatusLine({ run }: { run: RunState }): React.ReactElement {
         }}
       />
       <span>
-        {run.title || ASSIST_RUN_TITLE} — {status.label}
+        {run.title || ASSIST_RUN_TITLE}{" "}
+        <span style={{ color: "var(--muted)" }} title={run.id}>
+          {shortRunId(run.id)}
+        </span>{" "}
+        — {status.label}
         {status.detail ? ` ${status.detail}` : ""}
       </span>
     </span>
@@ -409,6 +445,267 @@ function AssistWelcome({ loading }: { loading: boolean }): React.ReactElement {
           creates and test-runs the loom for you. It appears in the list on the left as she works.
         </div>
       )}
+    </div>
+  );
+}
+
+// Session-history dropdown for the architect chat. A local, self-contained
+// twin of the chat panel's ChatHistoryButton — the difference is that each row
+// carries the chat's short id (#tail) alongside its AI-generated title + relative
+// time, so a workspace's several architect sessions are tellable apart even when
+// they were created seconds apart (the shared row only shows a head-truncated id
+// that collapses to the same prefix for near-simultaneous chats).
+function AssistHistoryButton({
+  runs,
+  activeRunId,
+  onSelect,
+  onDelete,
+}: {
+  runs: RunState[];
+  activeRunId: string | null;
+  onSelect: (runId: string) => void;
+  onDelete?: (runId: string) => void;
+}): React.ReactElement {
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const node = wrapperRef.current;
+      if (node && e.target instanceof Node && node.contains(e.target)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const sortedRuns = useMemo(() => {
+    const score = (run: RunState): number => {
+      const candidate = run.updatedAt ?? run.completedAt ?? run.createdAt;
+      const t = candidate ? Date.parse(candidate) : NaN;
+      return Number.isFinite(t) ? t : 0;
+    };
+    return [...runs].sort((a, b) => score(b) - score(a));
+  }, [runs]);
+
+  return (
+    <div ref={wrapperRef} style={{ position: "relative", display: "inline-flex" }}>
+      <button
+        type="button"
+        className="spark-btn"
+        style={{ height: 24, padding: "0 10px", fontSize: 11 }}
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        title="Past architect sessions in this workspace"
+      >
+        History
+      </button>
+      {open && (
+        <div
+          role="listbox"
+          aria-label="Past architect sessions"
+          className="spark-menu"
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            right: 0,
+            zIndex: 50,
+            width: 300,
+            maxHeight: "min(50vh, 420px)",
+            overflowY: "auto",
+            padding: 4,
+          }}
+        >
+          <div className="spark-eyebrow" style={{ padding: "6px 8px 5px" }}>
+            Past sessions
+          </div>
+          {sortedRuns.length === 0 ? (
+            <div className="spark-empty" style={{ minHeight: 0, padding: "18px 8px" }}>
+              <div className="spark-eyebrow">No sessions yet</div>
+              <div className="spark-empty__body">Start one below to see it here.</div>
+            </div>
+          ) : (
+            sortedRuns.map((run) => (
+              <AssistHistoryRow
+                key={run.id}
+                run={run}
+                active={run.id === activeRunId}
+                onClick={() => {
+                  setOpen(false);
+                  onSelect(run.id);
+                }}
+                onDelete={onDelete}
+              />
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AssistHistoryRow({
+  run,
+  active,
+  onClick,
+  onDelete,
+}: {
+  run: RunState;
+  active: boolean;
+  onClick: () => void;
+  onDelete?: (runId: string) => void;
+}): React.ReactElement {
+  const [hover, setHover] = useState(false);
+  // Two-click delete: first click arms (button reads "Delete?"), a second within
+  // ~2.6s removes it, and moving away or waiting disarms — so a stray click never
+  // destroys a session.
+  const [armed, setArmed] = useState(false);
+  const disarmTimer = useRef<number | null>(null);
+  useEffect(() => {
+    if (!armed) return;
+    disarmTimer.current = window.setTimeout(() => setArmed(false), 2600);
+    return () => {
+      if (disarmTimer.current !== null) window.clearTimeout(disarmTimer.current);
+    };
+  }, [armed]);
+
+  const status = describeRunStatus(run);
+  const dotColor = statusToneColor(status.tone);
+  const ts = run.updatedAt ?? run.completedAt ?? run.createdAt;
+  const relTime = ts ? formatRelativeTime(ts) : "";
+
+  const handleDelete = (e: React.MouseEvent): void => {
+    e.stopPropagation();
+    if (!armed) {
+      setArmed(true);
+      return;
+    }
+    setArmed(false);
+    onDelete?.(run.id);
+  };
+
+  return (
+    <div
+      role="option"
+      aria-selected={active}
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => {
+        setHover(false);
+        setArmed(false);
+      }}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 3,
+        width: "100%",
+        padding: "7px 8px",
+        background: active ? "var(--accent-soft)" : hover ? "var(--hover)" : "transparent",
+        border: active ? "1px solid var(--accent-edge)" : "1px solid transparent",
+        borderRadius: "var(--radius-control, 7px)",
+        textAlign: "left",
+        cursor: "default",
+        color: "var(--ink)",
+        boxSizing: "border-box",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+        <span
+          aria-hidden
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: 999,
+            background: dotColor,
+            flex: "0 0 6px",
+            animation: status.tone === "live" ? "spark-pulse 1.3s ease-in-out infinite" : undefined,
+          }}
+        />
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            fontSize: 12,
+            color: active ? "var(--accent)" : "var(--ink)",
+          }}
+        >
+          {run.title || ASSIST_RUN_TITLE}
+        </span>
+        {relTime && (
+          <span
+            style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--muted)", flex: "0 0 auto" }}
+          >
+            {relTime}
+          </span>
+        )}
+        {onDelete && (hover || armed) && (
+          <button
+            type="button"
+            onClick={handleDelete}
+            title={armed ? "Click again to delete permanently" : "Delete session"}
+            aria-label={armed ? "Confirm delete session" : "Delete session"}
+            style={{
+              appearance: "none",
+              height: 18,
+              padding: armed ? "0 6px" : 0,
+              width: armed ? "auto" : 18,
+              border: "none",
+              borderRadius: "var(--radius-control, 7px)",
+              background: armed ? "var(--danger)" : "transparent",
+              color: armed ? "var(--accent-ink)" : "var(--muted)",
+              fontSize: 10,
+              fontWeight: 600,
+              whiteSpace: "nowrap",
+              cursor: "default",
+              flex: "0 0 auto",
+            }}
+          >
+            {armed ? "Delete?" : "✕"}
+          </button>
+        )}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, paddingLeft: 12 }}>
+        <span
+          className="spark-mono"
+          style={{ fontSize: 10, color: "var(--muted)", flex: "0 0 auto" }}
+          title={run.id}
+        >
+          {shortRunId(run.id)}
+        </span>
+        <span
+          className="spark-mono"
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontSize: 10,
+            color: "var(--ink-dim)",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {status.label}
+          {status.detail ? ` ${status.detail}` : ""}
+        </span>
+      </div>
     </div>
   );
 }

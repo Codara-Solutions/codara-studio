@@ -1551,7 +1551,10 @@ export default function App() {
     (runId: string) => {
       const run = globalRuns.runsRef.current.find((r) => r.id === runId);
       const question = run ? findOpenQuestion(run) : null;
-      return question?.questionOptions ?? [];
+      if (!question) return null;
+      // The question's message id rides along so answer surfaces can link
+      // their answer to it (consent gates only accept linked answers).
+      return { questionMessageId: question.id, options: question.questionOptions ?? [] };
     },
     [globalRuns.runsRef],
   );
