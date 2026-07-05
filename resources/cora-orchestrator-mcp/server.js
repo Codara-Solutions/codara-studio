@@ -543,9 +543,55 @@ const EXECUTE_TOOLS = [
     },
   },
   {
+    name: "spark_message_workers",
+    description:
+      "Send a message from you (the manager) into the running batch's shared mailbox — the same mailbox the workers use to coordinate with each other. Use it to steer a drifting worker mid-flight (before it finishes wrong), answer a question a worker sent you, or broadcast a contract clarification to the whole batch. Address one worker by its worker_task_id or use \"all\" to reach every worker in the batch. Workers see it the next time they check their inbox. The response carries a warning when the recipient likely will not read it (already terminal, or spawned solo without mailbox briefing) — do not assume such steering landed. This is worker coordination, NOT the human channel — use spark_ask_user to reach the user.",
+    inputSchema: {
+      type: "object",
+      required: ["to", "body"],
+      properties: {
+        runId: {
+          type: "string",
+          description:
+            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+        },
+        to: {
+          type: "string",
+          description:
+            "Recipient: a worker_task_id returned from spark_spawn_workers, or \"all\" to broadcast to every worker in the batch.",
+        },
+        subject: {
+          type: "string",
+          description: "Optional short subject/topic line.",
+        },
+        body: {
+          type: "string",
+          description: "Message body. Keep it tight and actionable — exact files, the correction, or the answer.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_check_messages",
+    description:
+      "Read messages workers have sent you (the manager) that you have not seen yet — questions when they are blocked, and milestone/progress notes — plus any batch-wide `all` broadcasts. Use it to poll for worker questions mid-flight without blocking; spark_wait_for_workers also returns these (as manager_messages) at each return. Returns { messages: [...] } and marks each returned message read so it is not surfaced again — this is the acknowledging read (spark_wait_for_workers only peeks).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runId: {
+          type: "string",
+          description:
+            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "spark_wait_for_workers",
     description:
-      "Block until the listed worker tasks reach a terminal state (accepted / failed / cancelled) or timeout_ms elapses. This is the canonical way to wait on workers — call it once after spark_spawn_workers and react to the results. Returns each worker's final task_status, attempt_status, finished_at, and final_report_path so you can read each report and decide whether to spark_complete (default) or spark_spawn_workers (only for genuine regressions/corrective fixes).",
+      "Block until the listed worker tasks reach a terminal state (accepted / failed / cancelled) or timeout_ms elapses. This is the canonical way to wait on workers — call it once after spark_spawn_workers and react to the results. Returns each worker's final task_status, attempt_status, finished_at, and final_report_path so you can read each report and decide whether to spark_complete (default) or spark_spawn_workers (only for genuine regressions/corrective fixes). Also returns manager_messages: unread questions/progress workers sent you, surfaced NON-destructively (they stay unread and re-appear on later waits until you acknowledge them with spark_check_messages) — answer or steer with spark_message_workers.",
     inputSchema: {
       type: "object",
       required: ["worker_task_ids"],
@@ -608,6 +654,8 @@ const EXECUTE_TOOL_TO_RPC = {
   spark_request_next_iteration: "orchestrator.request_next_iteration",
   spark_get_worker_status: "orchestrator.get_worker_status",
   spark_wait_for_workers: "orchestrator.wait_for_workers",
+  spark_message_workers: "orchestrator.message_workers",
+  spark_check_messages: "orchestrator.check_messages",
 };
 
 const TOOL_TO_RPC = IS_AUTOMATION_MODE ? AUTOMATION_TOOL_TO_RPC : EXECUTE_TOOL_TO_RPC;

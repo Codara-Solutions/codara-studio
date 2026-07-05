@@ -40,6 +40,7 @@ import {
   latestUserPromptFromRun,
   runDidPlanCouncil,
 } from "./spark-agent-backend";
+import { logConfigShieldOnce } from "./agent-config-shield";
 import { buildExecuteDecisionFromToolCalls } from "./claude-backend";
 import { startCliSession, type CliSession } from "./cli-session";
 import { ensureCodexProjectTrust } from "./codex-trust";
@@ -453,6 +454,15 @@ async function spawnSession(
     kind: "system_note",
     message: `Spawning codex (mode=${input.chat.mode}) args: ${args.map((a) => JSON.stringify(a)).join(" ")}`,
   });
+  // NO config shield here, deliberately: this manager runs with `-s read-only`,
+  // which makes codex apply its own macOS Seatbelt profile to every command it
+  // executes — and Seatbelt cannot nest. Wrapping this spawn in sandbox-exec
+  // makes EVERY manager shell command fail with "sandbox_apply: Operation not
+  // permitted" (confirmed live on codex 0.142.5), including reading worker
+  // final_report_path files. We accept the ~/.codex/AGENTS.md leak for the
+  // manager; claude-backend keeps its wrap (the claude manager applies no
+  // Seatbelt of its own). See agent-config-shield.ts.
+  logConfigShieldOnce();
   const cli = await startCliSession({
     sessionId,
     cwd: input.cwd,

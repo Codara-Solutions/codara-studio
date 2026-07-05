@@ -47,6 +47,7 @@ import type {
   SparkManagerQuestionOption,
   SparkManagerTaskDecision,
 } from "./openrouter-manager";
+import { buildClaudeSandboxArgv, logConfigShieldOnce } from "./agent-config-shield";
 import { startCliSession, type CliSession } from "./cli-session";
 import {
   buildSparkRunContextBlock,
@@ -954,11 +955,18 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
       })
       .join(" ")}`,
   });
+  // Config shield: wrap the CLI in sandbox-exec so this Cora-spawned manager
+  // session can't read the user's personal ~/.claude config (CLAUDE.md, custom
+  // agents, hooks). On darwin this rewrites exe -> /usr/bin/sandbox-exec with
+  // the profile + original argv; elsewhere it's a no-op. See
+  // agent-config-shield.ts.
+  logConfigShieldOnce();
+  const shielded = buildClaudeSandboxArgv(exe, args);
   const session = await startCliSession({
     sessionId,
     cwd: opts.cwd,
-    exe,
-    args,
+    exe: shielded.exe,
+    args: shielded.args,
     env: {
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
       CLAUDE_CODE_HIDE_CWD: "1",

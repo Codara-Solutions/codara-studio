@@ -373,6 +373,10 @@ async function dispatch(
         return await handleOrchestratorGetWorkerStatus(params, id);
       case "orchestrator.wait_for_workers":
         return await handleOrchestratorWaitForWorkers(params, id, res);
+      case "orchestrator.message_workers":
+        return await handleOrchestratorMessageWorkers(params, id);
+      case "orchestrator.check_messages":
+        return await handleOrchestratorCheckMessages(params, id);
       case "automation.list":
         return await handleAutomationList(params, id);
       case "automation.get":
@@ -805,6 +809,13 @@ async function handleOrchestratorSpawnWorkers(
   const synthStep = stepRunState.steps.at(-1);
   const synthStepId = synthStep?.id;
 
+  // A batch of ≥2 workers coordinates through the shared peer-comms mailbox and
+  // the manager channel, so mark every task in a multi-worker spawn parallel.
+  // shouldUsePeerComms gates on canRunParallel, so this is what makes the
+  // mailbox + guidance fire for manager-spawned fleets. Single-worker spawns
+  // stay sequential (no peers to coordinate with).
+  const isParallelBatch = workerTitles.length >= 2;
+
   const workerTaskIds: string[] = [];
   const attemptIdsToLaunch: string[] = [];
   // Fable 5 is reserved for the main chat and automations — Cora-spawned
@@ -812,6 +823,12 @@ async function handleOrchestratorSpawnWorkers(
   // to Opus 4.8 here (the spawn chokepoint) and remember the titles so we can
   // surface ONE visible system note after the loop.
   const downgradedFableTitles: string[] = [];
+  // Create every task BEFORE preparing any: prepareWorkerTask renders the
+  // worker prompt and evaluates shouldUsePeerComms against the run snapshot at
+  // that instant. If we interleaved create+prepare, the first worker's prompt
+  // would be rendered before its peers exist on the step, so it would miss the
+  // mailbox + peer-comms guidance (the synthetic step has no plannedAgents to
+  // compensate). Two passes guarantee each worker's prompt sees the full batch.
   for (const raw of rawWorkers) {
     if (!raw || typeof raw !== "object") continue;
     const w = raw as Record<string, unknown> & OrchestratorWorkerInput;
@@ -838,14 +855,17 @@ async function handleOrchestratorSpawnWorkers(
         ? w.verificationCommands.filter((p): p is string => typeof p === "string")
         : [],
       taskClass: w.taskClass,
+      canRunParallel: isParallelBatch,
       createdBy: "spark",
     });
     // The just-created task is the LAST entry on updated.workerTasks.
     const created = updated.workerTasks.at(-1);
     if (!created) continue;
     workerTaskIds.push(created.id);
+  }
+  for (const workerTaskId of workerTaskIds) {
     try {
-      const envelope = await runStore.prepareWorkerTask({ runId, workerTaskId: created.id, cwd });
+      const envelope = await runStore.prepareWorkerTask({ runId, workerTaskId, cwd });
       // The prepared attempt is sitting at prompt_ready; schedule the
       // autopilot cycle that flips it to launching + actually spawns the
       // worker CLI. Before the execute-mode autopilot-review-skip landed
@@ -861,7 +881,7 @@ async function handleOrchestratorSpawnWorkers(
       // worker stays in 'created' state and the autopilot will retry. Not
       // silent though — a stuck-in-created worker is otherwise undiagnosable.
       console.warn(
-        `[agent-socket] prepareWorkerTask failed for ${created.id} (run ${runId}); autopilot will retry:`,
+        `[agent-socket] prepareWorkerTask failed for ${workerTaskId} (run ${runId}); autopilot will retry:`,
         err instanceof Error ? err.message : err,
       );
     }
@@ -1248,12 +1268,14 @@ async function handleOrchestratorWaitForWorkers(
     if (mode === "any" && terminalCount > 0) {
       return successResponse(id, {
         workers: snapshot.map(({ is_terminal: _t, ...rest }) => rest),
+        manager_messages: await peekManagerInbox(runStore, runId),
         reason: "any_terminal",
       });
     }
     if (mode === "all" && terminalCount === snapshot.length) {
       return successResponse(id, {
         workers: snapshot.map(({ is_terminal: _t, ...rest }) => rest),
+        manager_messages: await peekManagerInbox(runStore, runId),
         reason: "all_terminal",
       });
     }
@@ -1263,8 +1285,88 @@ async function handleOrchestratorWaitForWorkers(
   const finalSnapshot = finalRun ? snapshotWorkers(finalRun) : snapshotWorkers(firstRun);
   return successResponse(id, {
     workers: finalSnapshot.map(({ is_terminal: _t, ...rest }) => rest),
+    manager_messages: await peekManagerInbox(runStore, runId),
     reason: "timeout",
   });
+}
+
+// Collect the manager's unread inbox (worker→manager messages and worker `all`
+// broadcasts) at wait return time WITHOUT marking read: the wait response can
+// be lost after this point (client socket drop, manager CLI turn timeout), and
+// a destructive read there would silently swallow a blocked worker's question
+// forever. Messages therefore re-surface on later waits until the manager
+// acknowledges them via spark_check_messages (the only mark-read reader).
+// Failures are swallowed — a mailbox hiccup must never fail the wait.
+async function peekManagerInbox(
+  runStore: Awaited<ReturnType<typeof getRunStore>>,
+  runId: string,
+): Promise<unknown[]> {
+  try {
+    return await runStore.readManagerInbox(runId, { markRead: false });
+  } catch {
+    return [];
+  }
+}
+
+async function handleOrchestratorMessageWorkers(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const to = stringParam(params, "to");
+  if (!to) return errorResponse(id, ERR_INVALID_PARAMS, "to is required (a worker_task_id or \"all\")");
+  const body = stringParam(params, "body");
+  if (!body) return errorResponse(id, ERR_INVALID_PARAMS, "body is required");
+  const subject = stringParam(params, "subject") ?? "";
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  const blocked = rejectIfAutomationRun(run, id, "spark_message_workers");
+  if (blocked) return blocked;
+  // Guard against addressing a worker that isn't in this run; "all" is always
+  // valid (broadcast to the whole batch's mailbox).
+  const recipient = to === "all" ? undefined : run.workerTasks.find((wt) => wt.id === to);
+  if (to !== "all" && !recipient) {
+    return errorResponse(id, ERR_INVALID_PARAMS, `unknown worker_task_id: ${to}`);
+  }
+  // Deliver regardless, but warn when the recipient will likely never read it:
+  // solo-spawned workers were never briefed on the mailbox (no peer-comms
+  // guidance in their prompt), and terminal workers are gone. Without the
+  // warning the ok:true reads as "steering landed" — false confidence.
+  let warning: string | undefined;
+  if (recipient) {
+    if (TERMINAL_WORKER_TASK_STATUSES.has(recipient.status)) {
+      warning = `recipient ${to} is already terminal (${recipient.status}); the message will not be read`;
+    } else if (!recipient.canRunParallel) {
+      warning = `recipient ${to} was spawned solo and is not briefed on the mailbox; it is unlikely to read this — its prompt already contains its full task`;
+    }
+  }
+  try {
+    const { id: messageId } = await runStore.sendManagerMessage(runId, to, subject, body);
+    return successResponse(id, warning ? { ok: true, message_id: messageId, to, warning } : { ok: true, message_id: messageId, to });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, (err as Error).message);
+  }
+}
+
+async function handleOrchestratorCheckMessages(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  const blocked = rejectIfAutomationRun(run, id, "spark_check_messages");
+  if (blocked) return blocked;
+  try {
+    const messages = await runStore.readManagerInbox(runId, { markRead: true });
+    return successResponse(id, { messages });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, (err as Error).message);
+  }
 }
 
 async function handleOrchestratorGetWorkerStatus(

@@ -1,4 +1,5 @@
 import { promises as fs, createWriteStream } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 import type {
   AddDirectIterationInput,
@@ -85,6 +86,11 @@ import {
   renderWorkerPrompt,
   shouldUsePeerComms,
 } from "./worker-prompt";
+import {
+  buildClaudeShieldPrefix,
+  buildCodexShieldPrefix,
+  logConfigShieldOnce,
+} from "./agent-config-shield";
 import {
   detectFatalWorkerRuntimeError,
   pasteAndSubmit,
@@ -10674,9 +10680,165 @@ async function updatePeerCommsRegistry(
     stepId: currentTask.stepId,
     stepTitle: step?.title,
     updatedAt: timestamp,
-    agents: cards,
+    agents: runHasMcpManager(run) ? [managerAgentCard(timestamp), ...cards] : cards,
   };
   await writeFileAtomic(paths.peerCommsAgents, JSON.stringify(registry, null, 2));
+}
+
+// The manager (the orchestrator that spawned this batch) is a first-class
+// mailbox participant under the reserved id "manager". It shows up in `list`
+// so workers know they can address it, and it sends/reads via the main-process
+// helpers below rather than the on-disk CLI.
+const MANAGER_PEER_ID = "manager";
+
+// True only when a live CC/Codex execute- or auto-mode manager drives this run
+// — the ONLY flows where anything ever READS the manager inbox (the
+// orchestrator.message_workers / check_messages RPCs and the wait_for_workers
+// drain). Fan-out, council, loom, and OpenRouter-autopilot parallel batches
+// have no manager session, so advertising a `manager` mailbox participant
+// there would leave workers awaiting replies that can never come. Keep this
+// predicate in sync with isExecuteModeCliManager (worker auto-accept path).
+export function runHasMcpManager(run: RunState): boolean {
+  return (
+    (run.chatBackend === "claude" || run.chatBackend === "codex") &&
+    (run.chatMode === "execute" || run.chatMode === "auto")
+  );
+}
+
+function managerAgentCard(timestamp: string): PeerCommsAgentCard {
+  return {
+    workerTaskId: MANAGER_PEER_ID,
+    title: "Cora manager (orchestrator)",
+    runtime: "claude",
+    status: "running",
+    canRunParallel: true,
+    allowedPaths: [],
+    forbiddenPaths: [],
+    expectedOutputs: [],
+    updatedAt: timestamp,
+  };
+}
+
+interface PeerCommsMessage {
+  id: string;
+  createdAt: string;
+  from: string;
+  to: string | string[];
+  subject: string;
+  body: string;
+  replyTo: string | null;
+  readBy: string[];
+}
+
+function peerCommsRunPaths(runId: string): {
+  dir: string;
+  messagesDir: string;
+  script: string;
+  agents: string;
+} {
+  const dir = join(runDir(runId), "peer-comms");
+  return {
+    dir,
+    messagesDir: join(dir, "messages"),
+    script: join(dir, "spark-peer-comms.cjs"),
+    agents: join(dir, "agents.json"),
+  };
+}
+
+// Mirror the id + shape the on-disk peer-comms CLI produces so the manager's
+// writes are indistinguishable from a worker's and interoperate on the same
+// message files (see peer-comms-script.ts messageId()).
+function peerCommsMessageId(): string {
+  return "msg-" + Date.now().toString(36) + "-" + randomBytes(4).toString("hex");
+}
+
+async function readPeerCommsMessages(messagesDir: string): Promise<PeerCommsMessage[]> {
+  let names: string[];
+  try {
+    names = (await fs.readdir(messagesDir)).filter((name) => name.endsWith(".json"));
+  } catch {
+    return [];
+  }
+  const messages: PeerCommsMessage[] = [];
+  for (const name of names) {
+    try {
+      const raw = await fs.readFile(join(messagesDir, name), "utf8");
+      const parsed = JSON.parse(raw) as PeerCommsMessage;
+      if (parsed && typeof parsed.id === "string") messages.push(parsed);
+    } catch {
+      /* skip malformed / partially-written files */
+    }
+  }
+  return messages.sort((a, b) =>
+    String(a.createdAt || "").localeCompare(String(b.createdAt || "")),
+  );
+}
+
+// Write a message from the reserved "manager" id into the run's peer-comms
+// mailbox. Ensures the peer-comms artifacts exist first (dir + helper script)
+// so a manager can reach workers even before a worker has read its own inbox.
+export async function sendManagerMessage(
+  runId: string,
+  to: string,
+  subject: string,
+  body: string,
+): Promise<{ id: string }> {
+  await requireRun(runId);
+  const trimmedTo = to.trim();
+  if (!trimmedTo) throw new Error("message recipient (to) is required");
+  if (!body.trim()) throw new Error("message body is required");
+  const paths = peerCommsRunPaths(runId);
+  await fs.mkdir(paths.messagesDir, { recursive: true });
+  // Best-effort: keep the on-disk CLI available for workers that want to reply.
+  await writeFileAtomic(paths.script, PEER_COMMS_HELPER_SCRIPT).catch(() => undefined);
+  const message: PeerCommsMessage = {
+    id: peerCommsMessageId(),
+    createdAt: new Date().toISOString(),
+    from: MANAGER_PEER_ID,
+    to: trimmedTo,
+    subject: subject ?? "",
+    body,
+    replyTo: null,
+    readBy: [],
+  };
+  await writeFileAtomic(
+    join(paths.messagesDir, message.id + ".json"),
+    JSON.stringify(message, null, 2),
+  );
+  return { id: message.id };
+}
+
+// Read messages addressed to the manager: anything sent directly `--to manager`
+// plus worker broadcasts to `all` (the manager never reads its own broadcasts).
+// When markRead, appends "manager" to each returned message's readBy so a
+// subsequent check does not re-surface it.
+export async function readManagerInbox(
+  runId: string,
+  opts?: { markRead?: boolean },
+): Promise<PeerCommsMessage[]> {
+  await requireRun(runId);
+  const paths = peerCommsRunPaths(runId);
+  const messages = await readPeerCommsMessages(paths.messagesDir);
+  const inbox = messages.filter((message) => {
+    if (message.from === MANAGER_PEER_ID) return false;
+    const readBy = Array.isArray(message.readBy) ? message.readBy : [];
+    if (readBy.includes(MANAGER_PEER_ID)) return false;
+    const target = message.to;
+    if (target === MANAGER_PEER_ID || target === "all") return true;
+    return Array.isArray(target) && target.includes(MANAGER_PEER_ID);
+  });
+  if (opts?.markRead) {
+    for (const message of inbox) {
+      const readBy = Array.isArray(message.readBy) ? message.readBy : [];
+      if (readBy.includes(MANAGER_PEER_ID)) continue;
+      message.readBy = [...readBy, MANAGER_PEER_ID];
+      await writeFileAtomic(
+        join(paths.messagesDir, message.id + ".json"),
+        JSON.stringify(message, null, 2),
+      ).catch(() => undefined);
+    }
+  }
+  return inbox;
 }
 
 // The orchestration worker now uses the EXACT same pty path as a user-opened
@@ -11051,7 +11213,13 @@ function buildLaunchCommandLine(
     if (launchModel) args.push("--model", quoteShellArg(launchModel));
     const claudeEffort = mapClaudeEffort(task.effortHint);
     if (claudeEffort) args.push("--effort", claudeEffort);
-    return cdPrefix + args.join(" ");
+    // Config shield: run the CLI under sandbox-exec so it can't read the user's
+    // personal ~/.claude config (CLAUDE.md, custom agents, hooks, …). darwin
+    // only; null elsewhere, where worker-prompt.ts adds a prompt-level fallback
+    // note instead. See agent-config-shield.ts.
+    logConfigShieldOnce();
+    const claudeShield = buildClaudeShieldPrefix() ?? "";
+    return cdPrefix + claudeShield + args.join(" ");
   }
   if (task.runtimePreference === "codex") {
     // codex >= v0.128 ignores the older `-c projects."<abs>".trust_level=...`
@@ -11070,7 +11238,15 @@ function buildLaunchCommandLine(
     if (task.modelHint?.trim()) args.push("-m", quoteShellArg(task.modelHint.trim()));
     const codexEffort = mapCodexEffort(task.effortHint);
     if (codexEffort) args.push("-c", quoteShellArg(`model_reasoning_effort=${codexEffort}`));
-    return cdPrefix + args.join(" ");
+    // Config shield: deny reads of ~/.codex/AGENTS.md (personal global codex
+    // instructions). darwin only — and ONLY for --yolo launches: with
+    // `--sandbox workspace-write` codex applies its own macOS Seatbelt profile
+    // per command, and Seatbelt cannot nest, so wrapping that variant in
+    // sandbox-exec makes every worker command fail with "sandbox_apply:
+    // Operation not permitted". See agent-config-shield.ts.
+    logConfigShieldOnce();
+    const codexShield = sandboxDir ? "" : (buildCodexShieldPrefix() ?? "");
+    return cdPrefix + codexShield + args.join(" ");
   }
   return null;
 }

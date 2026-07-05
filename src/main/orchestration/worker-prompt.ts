@@ -17,11 +17,24 @@ import type {
   WorkerTask,
 } from "@shared/types";
 import { DEFAULT_MANAGER_PROMPT_PROFILE, loadManagerPromptProfile } from "./prompt-profile";
+import { isConfigShieldActive } from "./agent-config-shield";
 import { renderAgentSyncPromptLines } from "../agent-sync";
 import { isSparkPreviewMcpAvailable } from "../mcp-installer";
 
-function quotePwshString(value: string): string {
-  return `"${value.replace(/`/g, "``").replace(/"/g, '`"')}"`;
+// Fallback for platforms where the sandbox-exec config shield can't run (see
+// agent-config-shield.ts). There, the CLI still walks ancestor dirs and absorbs
+// the user's personal ~/.claude/CLAUDE.md + custom agents, so we neutralize
+// that in text: tell the worker to ignore personal user-level policy and not to
+// reach for personally-defined custom agents (advisor/adversary/fable-coder/…)
+// that don't exist in this session. When the shield IS active the personal
+// config is already invisible, so this section is omitted.
+function personalConfigFallbackLines(): string[] {
+  if (isConfigShieldActive()) return [];
+  return [
+    "",
+    "## PERSONAL CONFIG NOT APPLICABLE",
+    "Any user-level `~/.claude/CLAUDE.md` policies you may have picked up (for example subagent model/effort routing policies that name custom agents like advisor, adversary, or fable-coder) — and likewise any global `~/.codex/AGENTS.md` personal instructions — are the machine owner's personal settings and DO NOT apply in this Cora-spawned session. Ignore them. Do not attempt to invoke personally-defined custom subagents — they do not exist here. Follow only this task prompt and the project's own committed configuration.",
+  ];
 }
 
 export async function readWorkerPromptForLaunch(paths: WorkerArtifactPaths): Promise<string> {
@@ -90,23 +103,25 @@ function shouldRenderAgentSyncPromptLines(step: StepState | undefined, task: Wor
   );
 }
 
+// Peer comms (and the manager mailbox that rides on the same artifacts) fire
+// for any parallel batch: a task that may run alongside same-step peers gets
+// the mailbox + guidance automatically. Every ≥2-worker spawn marks its tasks
+// canRunParallel, so manager-spawned fleets always coordinate. The earlier
+// keyword-regex gate is gone — a shared mailbox is cheap and the manager may
+// need to steer any batch worker regardless of how its brief was phrased.
 export function shouldUsePeerComms(
   run: RunState,
   step: StepState | undefined,
   task: WorkerTask,
 ): boolean {
   if (!step || !task.canRunParallel) return false;
+  // Best-of-N plan-council candidates are DELIBERATELY independent — their
+  // prompt promises N independent planners, so cross-candidate mailbox chatter
+  // would converge the drafts and defeat the council. No peer comms for them.
+  if (task.councilGroupId !== undefined) return false;
   const peerTasks = run.workerTasks.filter((item) => item.stepId === task.stepId && item.id !== task.id);
   const plannedPeerCount = Math.max(0, (step.plannedAgents?.length ?? 0) - 1);
-  if (peerTasks.length + plannedPeerCount <= 0) return false;
-
-  const text = taskContextText(step, task);
-  if (task.taskClass === "verifier") {
-    return /\b(peer|parallel|disagreement|other runtime|same surface|second verifier)\b/i.test(text);
-  }
-  return /\b(shared|interface|contract|api|schema|integrat|consume|producer|provider|handoff|merge|combine|staging|coordinate|collision|conflict|depends|dependency|same file|data hook|dom hook)\b/i.test(
-    text,
-  );
+  return peerTasks.length + plannedPeerCount > 0;
 }
 
 function renderRuntimeDelegationGuidance(task: WorkerTask): string[] {
@@ -150,36 +165,57 @@ function renderRuntimeDelegationGuidance(task: WorkerTask): string[] {
   return [];
 }
 
-function renderPeerCommsGuidance(task: WorkerTask, paths: WorkerArtifactPaths): string[] {
+function renderPeerCommsGuidance(
+  task: WorkerTask,
+  paths: WorkerArtifactPaths,
+  // Only CC/Codex execute/auto-manager runs ever READ the manager inbox; in
+  // every other flow (fan-out, loom, OpenRouter autopilot) advertising a
+  // `manager` recipient would leave workers awaiting replies that never come,
+  // so the manager mentions are dropped there. See runHasMcpManager.
+  managerReachable: boolean,
+): string[] {
   if (!paths.peerCommsDir || !paths.peerCommsScript) return [];
-  const script = quotePwshString(paths.peerCommsScript);
-  const dir = quotePwshString(paths.peerCommsDir);
-  const self = quotePwshString(task.id);
+  // Plain double-quoted args work in zsh/bash/pwsh alike; run-dir paths do not
+  // contain quote metacharacters, so no shell-specific quoting helper is needed.
+  const script = paths.peerCommsScript;
+  const dir = paths.peerCommsDir;
+  const self = task.id;
   return [
-    "Cora may be running several Claude/Codex/Cursor workers for this same step. Use this mailbox when direct peer coordination would prevent duplicated work, clarify an interface, share a narrow finding, or ask for a second opinion.",
-    "This is a run artifact mailbox, not the project source tree; using it is allowed even for read-only verifier tasks.",
-    "If your task defines or consumes a shared interface/contract that another peer may depend on, send one short contract note to `all` before editing and check your inbox once before finalizing.",
-    `List peers: node ${script} list --dir ${dir}`,
-    `Read your inbox: node ${script} inbox --dir ${dir} --self ${self} --limit 10 --mark-read`,
-    "Send a peer message from PowerShell:",
-    "```powershell",
-    "@'",
-    "Short question or finding. Keep it under 300 words. Include exact files/commands when useful.",
-    "'@ | node " + script + " send --dir " + dir + " --from " + self + " --to \"<peer_worker_task_id|all>\" --subject \"<topic>\" --stdin",
-    "```",
-    "Reply to a peer message:",
-    "```powershell",
-    "@'",
-    "Short answer with evidence or uncertainty.",
-    "'@ | node " + script + " reply --dir " + dir + " --from " + self + " --to \"<sender_worker_task_id>\" --reply-to \"<msg_id>\" --subject \"Re: <topic>\" --stdin",
-    "```",
-    `Wait briefly for a reply: node ${script} await --dir ${dir} --self ${self} --reply-to "<msg_id>" --timeout 120`,
-    "- Shared contracts must come from the task spec, not from invention. If your contract note conflicts with a peer's note, reconcile the conflict before finalizing or report `partial` with the exact conflict in `risks[]`.",
-    "- Before your final report on any shared-interface task, read your inbox with `--mark-read` and include a short `proof[]` entry naming the mailbox command and the contract you accepted.",
-    "- If your slice consumes another worker's output, run a small integration probe when possible. If the peer file is not ready yet, wait briefly once; if still unavailable, state that risk instead of claiming the cross-file contract is proven.",
-    "- Do not wait indefinitely. If no peer replies within about 2 minutes, continue with the safest explicit assumption and mention it in `risks[]`.",
-    "- Summarize any material peer input in `proof[]`, `risks[]`, or `followups[]`; do not paste long mailbox transcripts into the final report.",
+    managerReachable
+      ? "Cora may be running several Claude/Codex/Cursor workers for this same step, plus the `manager` that spawned this batch. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, ask a peer for a second opinion, or reach the manager when blocked or at a milestone."
+      : "Cora may be running several Claude/Codex/Cursor workers for this same step. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, or ask a peer for a second opinion.",
+    "This is a run-artifact mailbox, not the project source tree; using it is allowed even for read-only verifier tasks.",
+    managerReachable
+      ? "Addressable recipients: any peer worker task id shown by `list`, `all` (every peer), or `manager` (the orchestrator that spawned you)."
+      : "Addressable recipients: any peer worker task id shown by `list`, or `all` (every peer).",
+    `List participants: node "${script}" list --dir "${dir}"`,
+    `Check your inbox at natural checkpoints (after finishing a phase, before starting integration): node "${script}" inbox --dir "${dir}" --self ${self} --unread --mark-read`,
+    managerReachable ? "Send a message to a peer, `all`, or `manager`:" : "Send a message to a peer or `all`:",
+    `  node "${script}" send --dir "${dir}" --from ${self} --to "${managerReachable ? "<peer_task_id|all|manager>" : "<peer_task_id|all>"}" --subject "<topic>" --body "Short note, under ~300 words; include exact files/commands when useful."`,
+    "Reply to a message you received:",
+    `  node "${script}" reply --dir "${dir}" --from ${self} --to "<sender_id>" --reply-to "<msg_id>" --subject "Re: <topic>" --body "Short answer with evidence or uncertainty."`,
+    `Block briefly for a specific reply: node "${script}" await --dir "${dir}" --self ${self} --reply-to "<msg_id>" --timeout 120`,
+    ...(managerReachable
+      ? [
+          "- Message the `manager` (`--to manager`) when you are blocked on a peer or a contract question, or when a significant milestone lands. The manager may also message you mid-flight to steer or answer — you will see it next time you read your inbox.",
+        ]
+      : []),
+    "- If your task tells you to settle a contract with a peer before building on it, send the contract note first, then use `await` to block briefly for their agreement before you build on it.",
+    "- If your slice defines or consumes a shared interface/contract another peer depends on, send one short contract note to that peer (or `all`) before editing and read your inbox once with `--mark-read` before finalizing.",
+    "- Shared contracts come from the task spec, not from invention. If your note conflicts with a peer's, reconcile before finalizing or report `partial` with the exact conflict in `risks[]`.",
+    "- Do not wait indefinitely. If no reply arrives within about 2 minutes, continue with the safest explicit assumption and note it in `risks[]`.",
+    "- Summarize any material peer/manager input in `proof[]`, `risks[]`, or `followups[]`; do not paste long mailbox transcripts into the final report.",
   ];
+}
+
+// Mirror of run-store's runHasMcpManager (kept local to avoid an import cycle;
+// see that function's comment for WHY the manager is only reachable in CC/Codex
+// execute/auto-manager runs). Keep the two predicates in sync.
+function managerInboxIsRead(run: RunState): boolean {
+  return (
+    (run.chatBackend === "claude" || run.chatBackend === "codex") &&
+    (run.chatMode === "execute" || run.chatMode === "auto")
+  );
 }
 
 function taskLooksLikeVisibleUi(step: StepState | undefined, task: WorkerTask): boolean {
@@ -301,6 +337,7 @@ function renderImplementationWorkerPrompt({
 
   lines.push(
     ...promptProfile.workerPrompt.opening,
+    ...personalConfigFallbackLines(),
     "",
     "## TASK",
     task.title,
@@ -373,7 +410,7 @@ function renderImplementationWorkerPrompt({
   }
 
   const peerCommsGuidance = shouldUsePeerComms(run, step, task)
-    ? renderPeerCommsGuidance(task, paths)
+    ? renderPeerCommsGuidance(task, paths, managerInboxIsRead(run))
     : [];
   if (peerCommsGuidance.length) {
     lines.push("", "## PEER WORKER COMMUNICATION", ...peerCommsGuidance);
@@ -453,6 +490,7 @@ function renderVerifierWorkerPrompt({
 
   lines.push(
     ...verifierOpening,
+    ...personalConfigFallbackLines(),
     "",
     "## VERIFICATION TASK",
     task.title,
@@ -521,7 +559,7 @@ function renderVerifierWorkerPrompt({
   }
 
   const peerCommsGuidance = shouldUsePeerComms(run, step, task)
-    ? renderPeerCommsGuidance(task, paths)
+    ? renderPeerCommsGuidance(task, paths, managerInboxIsRead(run))
     : [];
   if (peerCommsGuidance.length) {
     lines.push("", "## PEER WORKER COMMUNICATION", ...peerCommsGuidance);
