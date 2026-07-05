@@ -102,8 +102,18 @@ function buildDenyReadProfile(subpaths: string[], literals: string[]): string {
 }
 
 // The personal Claude config surface. Subtrees (agents, hooks, skills, …) are
-// denied wholesale; the top-level dotfiles are denied as literals so the rest
-// of ~/.claude (projects/, transcripts, ~/.claude.json) stays readable.
+// denied wholesale; CLAUDE.md is denied as a literal so the rest of ~/.claude
+// (projects/, transcripts, ~/.claude.json) stays readable.
+//
+// settings.json / settings.local.json are DELIBERATELY readable (verified live
+// on 2026-07-05, claude 2.1.201): an EPERM stat on either makes the
+// interactive TUI re-show the Bypass Permissions consent, and with an explicit
+// --settings flag it escalates to a blocking "Settings file could not be
+// read" dialog — either way a headless pty session hangs and the manager
+// exits code=1. The user's settings.json is also where Cora's OWN
+// spark-hook.py hooks are installed (worker state chips depend on them), so
+// hiding it would break the app's telemetry too. The policy/agents leak the
+// shield exists for lives in CLAUDE.md + agents/, which stay denied.
 function claudeProfile(): string {
   const home = homedir();
   const dot = join(home, ".claude");
@@ -115,11 +125,7 @@ function claudeProfile(): string {
     join(dot, "plugins"),
     join(dot, "rules"),
   ];
-  const literals = [
-    join(dot, "CLAUDE.md"),
-    join(dot, "settings.json"),
-    join(dot, "settings.local.json"),
-  ];
+  const literals = [join(dot, "CLAUDE.md")];
   return buildDenyReadProfile(subpaths, literals);
 }
 
