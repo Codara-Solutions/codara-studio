@@ -49,11 +49,12 @@ interface Props {
   // TUI reattaches cleanly instead of garbling under a flattened-text snapshot
   // replay. See the option's WHY-comment in useTerminalSession.ts.
   rawTailReattach?: boolean;
-  // Write PTY bytes into xterm even while hidden. Opt-in, default off — only the
-  // persistent chat backend terminal sets it, because it eager-attaches before
-  // the user opens the Terminal view and must keep xterm's scrollback complete
-  // rather than funnel a long stream through the capped hidden buffer. See the
-  // option's WHY-comment in useTerminalSession.ts.
+  // Write PTY bytes into xterm even while hidden. Opt-in, default off — set by
+  // the live-TUI hosts that can attach while off screen (the persistent chat
+  // backend terminal and the automation Workers panes). They eager-attach before
+  // the pane is revealed and must keep xterm's scrollback complete rather than
+  // funnel a long stream through the capped hidden buffer. See the option's
+  // WHY-comment in useTerminalSession.ts.
   writeWhileHidden?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;

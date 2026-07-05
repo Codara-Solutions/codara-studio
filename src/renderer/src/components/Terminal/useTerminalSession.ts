@@ -175,32 +175,34 @@ interface Options {
   // its tiny default size while the user's xterm fills the panel, leaving
   // most of the visible area unpainted.
   inputBlocked?: boolean;
-  // Raw-tail reattach mode. Opt-in, default off — used ONLY by ChatPanel's
-  // backend terminal, which attaches a read-only xterm onto a live Ink TUI
-  // (Claude/Codex) that repaints with cursor-relative sequences assuming its
-  // own prior frame is on screen. In this mode every re-attach is made to
-  // behave exactly like the known-good FIRST attach: on unmount we call
-  // pty.detach (not pty.pause) so main keeps only its RAW tail bytes, and on
-  // remount we skip the flattened-text snapshot / scrollback replay entirely
-  // and let main replay that raw tail (spawn()'s `previouslyDetached` branch)
-  // — raw bytes reproduce the TUI frame exactly, whereas a flattened-text
-  // snapshot replayed under an incrementally-redrawing TUI garbles the screen.
-  // Leave OFF for regular panes (TerminalStack, workers): they never unmount
-  // during tab switches, so the snapshot/backlog path is correct for them.
+  // Raw-tail reattach mode. Opt-in, default off — used by the hosts that attach
+  // an xterm onto a live Ink TUI (Claude/Codex): ChatPanel's backend terminal,
+  // ChatBackendTerminalStack, and the automation Workers panes. Such a TUI
+  // repaints with cursor-relative sequences assuming its own prior frame is on
+  // screen. In this mode every re-attach is made to behave exactly like the
+  // known-good FIRST attach: on unmount we call pty.detach (not pty.pause) so
+  // main keeps only its RAW tail bytes, and on remount we skip the flattened-
+  // text snapshot / scrollback replay entirely and let main replay that raw tail
+  // (spawn()'s `previouslyDetached` branch) — raw bytes reproduce the TUI frame
+  // exactly, whereas a flattened-text snapshot replayed under an incrementally-
+  // redrawing TUI garbles the screen.
+  // Leave OFF for ordinary shell panes (TerminalStack): their output is not a
+  // full-screen TUI, so the snapshot/backlog replay path is correct for them.
   rawTailReattach?: boolean;
   // Write PTY bytes into xterm even while the pane is hidden. Opt-in, default
-  // off — used ONLY by the persistent chat backend terminal
-  // (ChatBackendTerminalStack), which EAGER-ATTACHES the moment the PTY exists,
-  // typically long before the user ever opens the Terminal sub-view. A normal
-  // hidden pane stashes incoming bytes in hiddenBufferRef (256 KB, head-dropped)
-  // and flushes them on the first reveal — but for a live Ink TUI that cap would
-  // discard the boot draw + <Static> transcript + input-box frame of a session
-  // that has been streaming for minutes, so the first reveal would replay only
-  // recent repaint churn and render blank (the very bug the persistent layer
+  // off — used by the live-TUI hosts that EAGER-ATTACH the moment the PTY exists,
+  // typically before their pane is ever revealed: the persistent chat backend
+  // terminal (ChatBackendTerminalStack) and the automation Workers panes (which
+  // attach whenever the Automations tab is active, even on the Looms sub-tab). A
+  // normal hidden pane stashes incoming bytes in hiddenBufferRef (256 KB, head-
+  // dropped) and flushes them on the first reveal — but for a live Ink TUI that
+  // cap would discard the boot draw + <Static> transcript + input-box frame of a
+  // session that has been streaming for minutes, so the first reveal would replay
+  // only recent repaint churn and render blank (the very bug the persistent layer
   // exists to prevent). With this flag the pane keeps xterm's own buffer +
   // scrollback authoritative from first attach, so any later reveal just shows
   // the accumulated frame. Costs continuous xterm.write while hidden — acceptable
-  // for the one-or-few live chat backends, NOT for regular panes.
+  // for the handful of concurrent live agent panes, NOT for a wall of shell panes.
   writeWhileHidden?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;

@@ -635,6 +635,7 @@ const NOTIFY_KINDS: ReadonlySet<string> = new Set<NotifyKind>([
   "terminal.agent.done",
   "automation.finished",
   "automation.failed",
+  "automation.blocked",
   "app.update-ready",
 ]);
 const NOTIFY_TONES: ReadonlySet<string> = new Set<InAppNotificationTone>([
@@ -1918,6 +1919,11 @@ async function handleAutomationCreate(
       cwd,
       initialUserNote: promptTemplate,
     },
+    // Record the authoring conversation ONLY for assist runs (an architect chat:
+    // automation mode + not itself owned by a loom). requireAutomationRun already
+    // guarantees chatMode === "automation"; run.automationId being set would mean
+    // a loom-owned iteration run, which we don't back-link.
+    createdByRunId: run.automationId ? undefined : run.id,
   };
   try {
     const { createJob } = await getScheduler();

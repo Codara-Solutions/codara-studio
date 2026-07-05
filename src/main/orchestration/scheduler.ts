@@ -187,6 +187,11 @@ export async function createJob(input: CreateScheduledJobInput): Promise<Schedul
     history: [],
     createdAt: new Date().toISOString(),
     worker: input.worker ?? { engine: "auto" },
+    // Back-pointer to the architect chat that authored this loom (set by the
+    // automation.create RPC for assist runs). Optional — undefined for
+    // manual-editor looms; JSON.stringify drops it so the persisted shape is
+    // unchanged for those.
+    createdByRunId: input.createdByRunId,
   };
   if (!input.worker) job.worker = backfillWorker(job);
   // Re-normalize so a freshly created job lands in the cache with the same

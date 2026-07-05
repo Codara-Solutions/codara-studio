@@ -446,6 +446,7 @@ export type NotifyKind =
   | "terminal.agent.done"
   | "automation.finished"
   | "automation.failed"
+  | "automation.blocked"
   | "app.update-ready";
 
 // Where clicking a notification (toast card, native notification, center
@@ -453,7 +454,7 @@ export type NotifyKind =
 export type NavigationTarget =
   | { type: "run"; runId: string; workspaceId?: string }
   | { type: "terminal"; workspaceId: string; tabId: string; paneId: string }
-  | { type: "automation"; jobId: string; runId?: string };
+  | { type: "automation"; jobId: string; runId?: string; workspaceId?: string };
 
 // The one event shape every producer publishes and every surface consumes:
 // the in-app toast payload ("notification:in-app"), the native-notification
@@ -2643,6 +2644,11 @@ export interface ScheduledJob {
   lastRunId?: string; // runId produced by the most recent firing
   lastFiredPath?: string; // folder triggers: the path whose change last fired it
   createdAt: string; // ISO timestamp
+  /** The assist ("Create with Cora") run that authored this loom, when it was
+   *  created via the architect chat. Lets the Hub's loom detail jump back to
+   *  that conversation. Optional — manual-editor looms and pre-existing
+   *  persisted jobs have none. */
+  createdByRunId?: string;
 }
 
 // Payload the renderer sends to register an automation. `enabled` defaults to
@@ -2656,6 +2662,7 @@ export interface CreateScheduledJobInput {
   worker?: LoomWorkerConfig; // defaulted from input.chatBackend mapping when omitted
   graph?: LoomGraph; // backfilled by normalizeJob when omitted (single w0 node)
   enabled?: boolean;
+  createdByRunId?: string; // the assist run that authored this loom (architect chat only)
 }
 
 // Edit payload (scheduler:update). Partial; id required. enabled/state/history

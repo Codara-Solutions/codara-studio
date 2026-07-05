@@ -68,6 +68,10 @@ export default function AutomationsHub({
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>({ kind: "view" });
+  // The architect run "Open chat" jumps to. Cleared whenever we leave assist
+  // mode (below) so re-opening the SAME creator run re-fires AssistChat's
+  // value-guarded focus effect (null → runId is a change; runId → runId isn't).
+  const [focusAssistRunId, setFocusAssistRunId] = useState<string | null>(null);
   const [liveRun, setLiveRun] = useState<RunState | null>(null);
   const [runtimes, setRuntimes] = useState<AgentRuntimeDiagnostic[]>([]);
   const [subTab, setSubTab] = useState<SubTab>(() => {
@@ -242,6 +246,25 @@ export default function AutomationsHub({
     },
     [act],
   );
+
+  // Jump from a loom's detail back to the architect chat that authored it. The
+  // session isn't a draft (its run persists and resumes), so swapping to the
+  // assist pane is safe; AssistChat picks the run via focusAssistRunId.
+  const openCreatorChat = useCallback(
+    (runId: string) => {
+      setActionError(null);
+      setFocusAssistRunId(runId);
+      switchSubTab("looms");
+      setMode({ kind: "assist" });
+    },
+    [switchSubTab],
+  );
+
+  // Reset the focus target whenever we leave assist mode so a later "Open chat"
+  // for the same run is seen as a fresh change by AssistChat's focus effect.
+  useEffect(() => {
+    if (mode.kind !== "assist") setFocusAssistRunId(null);
+  }, [mode.kind]);
 
   // "editing" = the node-flow editor owns the body (create/edit draft).
   // "assisting" = the Cora architect chat replaces the detail pane.
@@ -486,25 +509,48 @@ export default function AutomationsHub({
           </div>
         )}
 
-        {subTab === "workers" && (
-          <WorkersView
-            workers={workspaceWorkers}
-            jobs={jobs}
-            scrollbackLineLimit={terminalScrollbackLineLimit}
-            visible={active && subTab === "workers"}
-            onStopLoom={stopLoom}
-            onSelectLoom={openLoomDetail}
-            onNewLoom={() => {
-              // Switching back to Looms must reveal whatever editor is already
-              // open. Only start a fresh create when nothing is being authored;
-              // if an edit draft is open, just unhide it (don't double-mount or
-              // clobber the in-progress edit with a blank create form). An
-              // assist chat is not a draft — an explicit "new loom" opens the
-              // manual editor over it (the session persists and resumes).
-              switchSubTab("looms");
-              setMode((m) => (m.kind === "create" || m.kind === "edit" ? m : { kind: "create" }));
+        {/* Workers sub-tab: kept MOUNTED behind the Looms sub-tab (same
+            visibility contract as the editor/assist overlays above) so a
+            Looms ↔ Workers flip no longer unmounts every live worker terminal
+            and forces a garble-prone TUI reattach. Each WorkerPane's `visible`
+            prop stays accurate (below) so useTerminalSession's reveal-refit
+            re-fits + resizes the pty when the panes come back on screen.
+
+            Gated on `active` (NOT kept alive for the whole app): when another
+            top-level tab is showing we DO tear the terminals down — matching
+            the intent that a closed Automations tab shouldn't keep xterms
+            mounted. `inherit` (not visible/auto) for the same punch-through
+            reason documented on the editor overlay. */}
+        {active && (
+          <div
+            aria-hidden={subTab !== "workers"}
+            style={{
+              position: "absolute",
+              inset: 0,
+              display: "flex",
+              visibility: subTab === "workers" ? "inherit" : "hidden",
+              pointerEvents: subTab === "workers" ? "inherit" : "none",
             }}
-          />
+          >
+            <WorkersView
+              workers={workspaceWorkers}
+              jobs={jobs}
+              scrollbackLineLimit={terminalScrollbackLineLimit}
+              visible={active && subTab === "workers"}
+              onStopLoom={stopLoom}
+              onSelectLoom={openLoomDetail}
+              onNewLoom={() => {
+                // Switching back to Looms must reveal whatever editor is already
+                // open. Only start a fresh create when nothing is being authored;
+                // if an edit draft is open, just unhide it (don't double-mount or
+                // clobber the in-progress edit with a blank create form). An
+                // assist chat is not a draft — an explicit "new loom" opens the
+                // manual editor over it (the session persists and resumes).
+                switchSubTab("looms");
+                setMode((m) => (m.kind === "create" || m.kind === "edit" ? m : { kind: "create" }));
+              }}
+            />
+          </div>
         )}
 
         {/* Assist view: live loom list + the Cora architect chat. Kept MOUNTED
@@ -531,6 +577,7 @@ export default function AutomationsHub({
               cwd={cwd}
               runtimes={runtimes}
               active={active && subTab === "looms"}
+              focusRunId={focusAssistRunId ?? undefined}
               onClose={() => setMode({ kind: "view" })}
             />
           </div>
@@ -554,6 +601,11 @@ export default function AutomationsHub({
                 liveRun={liveRun}
                 runtimes={runtimes}
                 onEdit={() => setMode({ kind: "edit", job: selected })}
+                onOpenCreatorChat={
+                  selected.createdByRunId
+                    ? () => openCreatorChat(selected.createdByRunId as string)
+                    : undefined
+                }
                 onRunNow={() => void act(() => window.spark.scheduler.runNow(selected.id))}
                 onPause={() => void act(() => window.spark.scheduler.pause!(selected.id))}
                 onResume={() => void act(() => window.spark.scheduler.resume!(selected.id))}
@@ -685,6 +737,7 @@ function AutomationDetail({
   liveRun,
   runtimes,
   onEdit,
+  onOpenCreatorChat,
   onRunNow,
   onPause,
   onResume,
@@ -698,6 +751,9 @@ function AutomationDetail({
   liveRun: RunState | null;
   runtimes: AgentRuntimeDiagnostic[];
   onEdit: () => void;
+  // Present only when this loom carries a createdByRunId; the button is further
+  // gated below on the run still existing.
+  onOpenCreatorChat?: () => void;
   onRunNow: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -708,6 +764,35 @@ function AutomationDetail({
   onAnswer: (runId: string, answer: string) => void;
 }): React.ReactElement {
   const status = job.state.status;
+  // Resolve whether the authoring architect run still exists so a deleted
+  // session doesn't leave a dead "Open chat" button. One cheap getRun per loom
+  // that has a back-pointer; re-checked when the pointer changes.
+  const creatorRunId = job.createdByRunId;
+  const [creatorRunExists, setCreatorRunExists] = useState(false);
+  // Keyed on the run id ONLY — onOpenCreatorChat is a fresh closure each hub
+  // render (which is frequent while a run streams), so depending on it would
+  // re-fire getRun every render. The button is separately gated on
+  // onOpenCreatorChat below, and the two always move together (both derive from
+  // job.createdByRunId), so the id alone is a faithful trigger.
+  useEffect(() => {
+    if (!creatorRunId) {
+      setCreatorRunExists(false);
+      return;
+    }
+    let disposed = false;
+    void (async () => {
+      try {
+        const run = await window.spark.orchestration.getRun(creatorRunId);
+        if (!disposed) setCreatorRunExists(run !== null);
+      } catch {
+        if (!disposed) setCreatorRunExists(false);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [creatorRunId]);
+  const canOpenCreatorChat = creatorRunExists && !!onOpenCreatorChat;
   // Install hint when the loop stopped because no engine is available.
   const installHint =
     job.state.lastStopReason === "engine-missing"
@@ -783,6 +868,7 @@ function AutomationDetail({
           onResume={onResume}
           onStop={onStop}
           onEdit={onEdit}
+          onOpenCreatorChat={canOpenCreatorChat ? onOpenCreatorChat : undefined}
           onToggleEnabled={onToggleEnabled}
           onViewWorker={onViewWorker}
           onAnswer={onAnswer}
@@ -836,6 +922,7 @@ function LiveWorkerCard({
   onResume,
   onStop,
   onEdit,
+  onOpenCreatorChat,
   onToggleEnabled,
   onViewWorker,
   onAnswer,
@@ -847,6 +934,7 @@ function LiveWorkerCard({
   onResume: () => void;
   onStop: () => void;
   onEdit: () => void;
+  onOpenCreatorChat?: () => void;
   onToggleEnabled: (enabled: boolean) => void;
   onViewWorker: () => void;
   onAnswer: (runId: string, answer: string) => void;
@@ -993,6 +1081,17 @@ function LiveWorkerCard({
         <button type="button" className="spark-btn" style={{ height: 26, fontSize: 11.5 }} onClick={onEdit}>
           Edit
         </button>
+        {onOpenCreatorChat && (
+          <button
+            type="button"
+            className="spark-btn"
+            style={{ height: 26, fontSize: 11.5 }}
+            onClick={onOpenCreatorChat}
+            title="Open the Cora chat that created this loom"
+          >
+            ✦ Open chat
+          </button>
+        )}
         <button
           type="button"
           className="spark-btn"

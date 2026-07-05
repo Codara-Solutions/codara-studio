@@ -34,6 +34,11 @@ interface Props {
   // window-level listeners so a hidden assist composer never swallows
   // prefill/focus broadcasts aimed at the chat tab's composer.
   active: boolean;
+  // When set (and it changes to a non-null value), select THAT run instead of
+  // the auto-resumed latest — the loom detail's "Open chat" jumps back to the
+  // architect conversation that authored a loom. Overrides the one-shot resume
+  // guard once; the user can still switch sessions afterward.
+  focusRunId?: string;
   onClose: () => void;
 }
 
@@ -55,6 +60,7 @@ export default function AssistChat({
   cwd,
   runtimes,
   active,
+  focusRunId,
   onClose,
 }: Props): React.ReactElement {
   // null = not loaded yet; afterwards always the latest fetched list, newest
@@ -66,6 +72,19 @@ export default function AssistChat({
   // session. After that the selection is the user's (including an explicit
   // "New session" null, which a refresh must not override).
   const autoResumed = useRef(false);
+
+  // Parent-driven focus: "Open chat" from a loom's detail sets focusRunId to the
+  // authoring run. Select it and mark the resume guard consumed so a still-in-
+  // flight initial listRuns can't clobber the choice with the latest session.
+  // Guarded on the value so a plain re-render doesn't yank the user off a
+  // session they switched to after the jump.
+  const focusedRunRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!focusRunId || focusedRunRef.current === focusRunId) return;
+    focusedRunRef.current = focusRunId;
+    autoResumed.current = true;
+    setSelectedId(focusRunId);
+  }, [focusRunId]);
 
   const refresh = useCallback(async () => {
     try {
