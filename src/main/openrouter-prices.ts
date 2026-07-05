@@ -39,6 +39,7 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   "anthropic/claude-opus-4-7": { input: 15, output: 75, cacheRead: 1.5 },
   "anthropic/claude-opus-4": { input: 15, output: 75, cacheRead: 1.5 },
   "anthropic/claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3 },
+  "anthropic/claude-sonnet-5": { input: 3, output: 15, cacheRead: 0.3 },
   "anthropic/claude-sonnet-4-5": { input: 3, output: 15, cacheRead: 0.3 },
   "anthropic/claude-sonnet-4": { input: 3, output: 15, cacheRead: 0.3 },
   "anthropic/claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1 },

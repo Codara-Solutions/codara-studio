@@ -30,7 +30,7 @@ Each worker object:
   title: string,                        // 4-10 word title shown in the UI
   description: string,                  // full prompt the worker sees; be specific
   runtimePreference: "claude" | "codex",
-  modelHint?: "claude-opus-4-8" | "claude-sonnet-4-6" | "gpt-5.5",
+  modelHint?: "claude-opus-4-8" | "claude-sonnet-5" | "gpt-5.5",
   effortHint?: "minimal" | "low" | "medium" | "high" | "xhigh",
   allowedPaths?: string[],              // paths this worker may write (cwd-relative)
   forbiddenPaths?: string[],            // paths this worker must not touch

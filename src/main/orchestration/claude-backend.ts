@@ -1681,7 +1681,7 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "    title: string,                       // 4-10 word chip label",
     "    description: string,                 // full prompt the worker sees — be specific",
     "    runtimePreference: 'claude' | 'codex',",
-    "    modelHint?: 'claude-opus-4-8' | 'claude-sonnet-4-6' | 'gpt-5.5',",
+    "    modelHint?: 'claude-opus-4-8' | 'claude-sonnet-5' | 'gpt-5.5',",
     "    effortHint?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh',",
     "    allowedPaths?: string[],             // cwd-relative; parallel workers must NOT overlap",
     "    forbiddenPaths?: string[],",

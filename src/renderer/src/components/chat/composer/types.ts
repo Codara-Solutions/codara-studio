@@ -61,8 +61,8 @@ const CLAUDE_MODELS: ChatModelOption[] = [
     isOneMillion: true,
   },
   {
-    id: "claude-sonnet-4-6:1m",
-    label: "Sonnet 4.6 1M",
+    id: "claude-sonnet-5:1m",
+    label: "Sonnet 5 1M",
     backend: "claude",
     effortLevels: ["low", "medium", "high", "xhigh", "max"],
     isOneMillion: true,

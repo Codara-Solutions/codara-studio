@@ -54,8 +54,8 @@ const CLAUDE_MODELS: AgentRuntimeModel[] = [
     tier: "top",
   },
   {
-    id: "claude-sonnet-4-6",
-    label: "Sonnet 4.6",
+    id: "claude-sonnet-5",
+    label: "Sonnet 5",
     effortLevels: ["low", "medium", "high", "xhigh", "max"],
     tier: "mid",
   },

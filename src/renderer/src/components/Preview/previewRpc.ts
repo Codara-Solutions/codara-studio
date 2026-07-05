@@ -105,6 +105,31 @@ function requireTab(params: { tabId?: string | null }) {
   return tab;
 }
 
+// Electron logs EVERY rejected webview.executeJavaScript to the dev terminal as
+// "Error occurred in handler for 'GUEST_VIEW_MANAGER_CALL': Script failed to
+// execute" — one stack per throw. Agent-driven probes throw routinely (missing
+// selectors, JSON.parse on bad input, evaluate()'s expression-ness parse probe),
+// so raw rejections turn `npm run dev` into an error firehose for what is
+// perfectly normal control flow here. runGuestScript keeps the failure INSIDE
+// the guest page: the injected script never rejects — errors come back as a
+// sentinel object and are rethrown here with the same message the RPC caller
+// would have seen before.
+async function runGuestScript(
+  handle: { executeJavaScript: (code: string) => Promise<unknown> },
+  expr: string,
+): Promise<unknown> {
+  const wrapped = `(async () => { try { return { __coraOk: true, value: await (${expr}\n) }; } catch (err) { return { __coraOk: false, error: String((err && err.message) || err) }; } })()`;
+  const outcome = (await handle.executeJavaScript(wrapped)) as
+    | { __coraOk: true; value: unknown }
+    | { __coraOk: false; error: string }
+    | null;
+  if (outcome && typeof outcome === "object" && "__coraOk" in outcome) {
+    if (outcome.__coraOk) return outcome.value;
+    throw new Error(outcome.error);
+  }
+  return outcome;
+}
+
 async function navigate(params: Record<string, unknown>): Promise<unknown> {
   const url = readString(params, "url");
   if (!url) throw new Error("navigate requires 'url'");
@@ -136,7 +161,7 @@ async function snapshot(params: Record<string, unknown>): Promise<unknown> {
   const maxBytes = readNumber(params, "maxBytes") ?? 12_000;
   const tab = requireTab(params);
   const code = `(${snapshotProbe.toString()})(${JSON.stringify({ mode, maxBytes })})`;
-  const value = await tab.handle.executeJavaScript(code);
+  const value = await runGuestScript(tab.handle, code);
   return value;
 }
 
@@ -164,11 +189,27 @@ async function evaluate(params: Record<string, unknown>): Promise<unknown> {
       : `(() => { const __r = (() => ${inner})(); return JSON.parse(JSON.stringify(__r ?? null)); })()`;
   let isExpression = true;
   try {
-    await tab.handle.executeJavaScript(`void (() => (${code}\n)); "cora-parse-ok"`);
+    // In-page new Function parse: SyntaxError => statement snippet. Runs inside
+    // runGuestScript so a non-expression never rejects the GUEST_VIEW call
+    // (the old `void (() => ...)` probe logged a scary main-terminal error for
+    // every multi-statement evaluate).
+    const parses = await runGuestScript(
+      tab.handle,
+      `(() => { try { new Function(${JSON.stringify(`return (${code}\n)`)}); return true; } catch (e) { if (e instanceof SyntaxError) return false; throw e; } })()`,
+    );
+    isExpression = parses === true;
   } catch {
-    isExpression = false;
+    // new Function unavailable (page CSP blocks eval) — fall back to the old
+    // definition probe. Its rejection logs once, but only on CSP pages.
+    try {
+      await tab.handle.executeJavaScript(`void (() => (${code}\n)); "cora-parse-ok"`);
+      isExpression = true;
+    } catch {
+      isExpression = false;
+    }
   }
-  const result: unknown = await tab.handle.executeJavaScript(
+  const result: unknown = await runGuestScript(
+    tab.handle,
     wrap(isExpression ? `(${code}\n)` : `{ ${code} }`),
   );
   return { value: result };
@@ -179,7 +220,7 @@ async function click(params: Record<string, unknown>): Promise<unknown> {
   if (!selector) throw new Error("click requires 'selector'");
   const tab = requireTab(params);
   const code = `(${clickProbe.toString()})(${JSON.stringify({ selector })})`;
-  return tab.handle.executeJavaScript(code);
+  return runGuestScript(tab.handle, code);
 }
 
 async function typeText(params: Record<string, unknown>): Promise<unknown> {
@@ -190,7 +231,7 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
   const clearFirst = readBool(params, "clearFirst") ?? false;
   const tab = requireTab(params);
   const code = `(${typeProbe.toString()})(${JSON.stringify({ selector, text, clearFirst })})`;
-  return tab.handle.executeJavaScript(code);
+  return runGuestScript(tab.handle, code);
 }
 
 async function pressKey(params: Record<string, unknown>): Promise<unknown> {
@@ -199,7 +240,7 @@ async function pressKey(params: Record<string, unknown>): Promise<unknown> {
   const selector = readString(params, "selector");
   const tab = requireTab(params);
   const code = `(${pressKeyProbe.toString()})(${JSON.stringify({ key, selector })})`;
-  return tab.handle.executeJavaScript(code);
+  return runGuestScript(tab.handle, code);
 }
 
 async function waitFor(params: Record<string, unknown>): Promise<unknown> {
@@ -209,7 +250,7 @@ async function waitFor(params: Record<string, unknown>): Promise<unknown> {
   const timeoutMs = readNumber(params, "timeoutMs") ?? 5_000;
   const tab = requireTab(params);
   const code = `(${waitForProbe.toString()})(${JSON.stringify({ selector, state, timeoutMs })})`;
-  return tab.handle.executeJavaScript(code);
+  return runGuestScript(tab.handle, code);
 }
 
 async function screenshot(params: Record<string, unknown>): Promise<unknown> {
@@ -239,7 +280,8 @@ async function getWebContentsId(params: Record<string, unknown>): Promise<unknow
   let viewport: { width: number; height: number } | null = null;
   let devicePixelRatio = 1;
   try {
-    const metrics = (await tab.handle.executeJavaScript(
+    const metrics = (await runGuestScript(
+      tab.handle,
       "({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio })",
     )) as { width: number; height: number; dpr: number } | null;
     if (metrics) {
