@@ -186,6 +186,26 @@ const CASES = [
     ],
   },
   {
+    // The run adapter (src/main/notify/index.ts) suppresses the per-iteration
+    // run.complete/run.failed ping for loom-owned runs (payload carries
+    // automationId) but still surfaces a blocked iteration as automation.blocked
+    // on the RUN-scoped sourceKey. This exercises that source through the pure
+    // policy: consecutive blocked iterations only re-alert once the run's active
+    // (running/planning/reviewing) transition rearms the source — otherwise the
+    // second block is a same-kind duplicate.
+    name: "automation.blocked re-alerts per iteration only after a rearm",
+    steps: [
+      { kind: "automation.blocked", sourceKey: "run:loom1", expect: { deliver: true } },
+      {
+        kind: "automation.blocked",
+        sourceKey: "run:loom1",
+        expect: { deliver: false, reason: "duplicate" },
+      },
+      { rearm: "run:loom1" },
+      { kind: "automation.blocked", sourceKey: "run:loom1", expect: { deliver: true } },
+    ],
+  },
+  {
     name: "status change (complete → failed) is not a duplicate",
     steps: [
       { kind: "run.complete", expect: { deliver: true } },

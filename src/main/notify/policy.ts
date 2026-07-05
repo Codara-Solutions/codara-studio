@@ -18,6 +18,12 @@ import type { NotifyKind } from "@shared/types";
 // turn's tail and are swallowed until real new work rearms the source.
 
 // Alerts meaning "the agent stopped and waits on the user".
+// automation.blocked is deliberately NOT a member: it must alert on every
+// blocked loom iteration, and membership here would let the completion guard
+// swallow it after any completion on its source. Its source is run-scoped and
+// loom runs never publish run.complete/failed (the run adapter suppresses
+// them), so the guard would otherwise be dormant — keeping it out of this set
+// makes "a blocked iteration always alerts" robust rather than incidental.
 const NEEDS_INPUT_KINDS: ReadonlySet<NotifyKind> = new Set([
   "run.blocked",
   "terminal.agent.needs-input",

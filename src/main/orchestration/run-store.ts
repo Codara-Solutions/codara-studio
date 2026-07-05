@@ -2239,7 +2239,10 @@ async function finalizeDirectRun(runId: string): Promise<void> {
         runId: run.id,
         type: "run.status_updated",
         message: blockedSummary.split(/\r?\n/, 1)[0] ?? "Loom worker is blocked",
-        payload: { previousStatus, status: "blocked" },
+        // automationId lets the notify run-adapter route this to the distinct
+        // "automation.blocked" alert (a blocked iteration still needs the user)
+        // instead of a generic run.blocked.
+        payload: { previousStatus, status: "blocked", automationId: run.automationId },
       }).catch(() => undefined);
     }
   }
@@ -3447,7 +3450,10 @@ async function askChatBackendNonOpenRouter(
       return commitRunChange(failedRun, {
         type: "run.status_updated",
         message: `Cora's ${chatConfig.backend} chat turn failed: ${failureMessage}`,
-        payload: { previousStatus: failedRun.status, status: "failed" },
+        // Carry automationId so the notify run-adapter can suppress the
+        // per-iteration ping for loom-owned runs (the loop-level
+        // automation.failed is the real end signal). Undefined for plain chats.
+        payload: { previousStatus: failedRun.status, status: "failed", automationId: failedRun.automationId },
         mutate: (draft, timestamp) => {
           draft.status = "failed";
           draft.autopilot = {
@@ -7108,6 +7114,10 @@ export async function updateRunStatus(input: UpdateRunStatusInput): Promise<RunS
       previousStatus: run.status,
       status: input.status,
       currentStepId: input.currentStepId ?? run.currentStepId,
+      // Loom-owned runs carry their automationId so the notify run-adapter
+      // suppresses the per-iteration run.complete/run.failed ping (this is the
+      // path automation workers transition through). Undefined for plain runs.
+      automationId: run.automationId,
     },
     mutate: (draft, timestamp) => {
       draft.status = input.status;

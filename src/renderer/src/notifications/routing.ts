@@ -29,8 +29,11 @@ export function createNavigateTo(handlers: NavigationHandlers): NavigateTo {
         break;
       case "automation":
         // A loom's live run is the most useful landing spot; without one,
-        // fall back to the Automations hub.
-        if (target.runId) handlers.selectRun(target.runId);
+        // fall back to the Automations hub. Pass workspaceId so a cross-
+        // workspace click switches projects first (selectRun →
+        // handleSelectRunAnywhere routes loom runs to that workspace's hub);
+        // without it the click dead-ends in the wrong workspace's hub.
+        if (target.runId) handlers.selectRun(target.runId, target.workspaceId);
         else handlers.openAutomations();
         break;
     }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { NotifyEvent, RunQuestionOption } from "@shared/types";
-import { kindMeta, type NotifyGlyph } from "../notifications/kinds";
+import { accentVar, kindMeta, type NotifyGlyph } from "../notifications/kinds";
 import { answerRunQuestion } from "../notifications/answers";
 import type { NavigateTo } from "../notifications/routing";
 
@@ -183,10 +183,16 @@ function ToastCard({
   // Resolve the manager's open-question options for a blocked-run toast.
   // Only "run.blocked" events carry a pending question, and the runId lives
   // on the navigation target; everything else renders no answer buttons.
+  // A blocked run OR a blocked loom iteration both carry an answerable question
+  // on their runId — surface the same one-click answers for each. (Loom runs
+  // route their answer through the loop driver's seam, not resumeRun; the
+  // App-provided shouldResumeOnAnswer handles that distinction.)
   const questionRunId =
     toast.kind === "run.blocked" && toast.target.type === "run"
       ? toast.target.runId
-      : null;
+      : toast.kind === "automation.blocked" && toast.target.type === "automation"
+        ? (toast.target.runId ?? null)
+        : null;
   const answerOptions: RunQuestionOption[] =
     questionRunId && resolveQuestion ? resolveQuestion(questionRunId).slice(0, 3) : [];
 
@@ -219,10 +225,11 @@ function ToastCard({
   // chip. Mirror the herdr "static, never pulse" rule — the surface is solid
   // so urgency reads as gravitas, not a generic spinner.
   const tone = toast.tone ?? meta.tone;
-  // Theme token the tone maps to (all three exist in every theme in
-  // styles.css — we never mint a new one).
-  const toneVar =
-    tone === "danger" ? "var(--danger)" : tone === "warning" ? "var(--warn)" : "var(--ok)";
+  // The accent token driving the stripe + icon chip. Tone → --danger/--warn/
+  // --ok for run/terminal kinds; the automation family overrides to the violet
+  // --automation so it reads as a distinct group (see accentVar). The a11y role
+  // below still keys off the raw tone.
+  const toneVar = accentVar(toast.kind, tone);
   const palette = {
     status: toneVar,
     chipFill: `color-mix(in oklch, ${toneVar} 14%, var(--panel))`,
@@ -493,6 +500,13 @@ export function NotifyGlyphSvg({ glyph, size = 13 }: { glyph: NotifyGlyph; size?
         <>
           <path d="M7 2 a3.4 3.4 0 0 1 3.4 3.4 c0 2.6 1 3.4 1 3.4 H2.6 s1 -0.8 1 -3.4 A3.4 3.4 0 0 1 7 2 Z" />
           <path d="M5.9 11.2 a1.2 1.2 0 0 0 2.2 0" />
+        </>
+      ) : glyph === "loop" ? (
+        <>
+          {/* Circular-arrow "repeats" mark — the automation family glyph, same
+              geometry as the app's reload icon (gap + arrowhead reads clockwise). */}
+          <path d="M11 7 A4 4 0 1 1 9.6 3.9" />
+          <path d="M11.2 1.8 L11.2 4.2 L8.8 4.2" />
         </>
       ) : (
         <path d="M3 7.5 L6 10.5 L11 4" />

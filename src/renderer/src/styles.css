@@ -42,6 +42,11 @@
   --info: oklch(0.78 0.13 235);
   --info-soft: color-mix(in oklch, var(--info) 14%, transparent);
   --warn: oklch(0.80 0.16 80);
+  /* Automation family accent — a violet distinct from every tone AND from the
+     workspace --accent, so automation.* notifications (finished/failed/needs-
+     you) read as their own group. Named dark themes inherit this base value;
+     the light palettes re-tint it darker below (as they do the tone tokens). */
+  --automation: oklch(0.72 0.18 300);
 
   /* Type — humanist sans for chrome, mono for data/code.
      Both use system fallbacks: Inter / Segoe UI Variable / SF Pro on
@@ -402,6 +407,17 @@
   --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 11%, transparent);
   --tab-active-hi: inset 0 1px 0 color-mix(in oklch, var(--ink) 9%, transparent);
   --press: color-mix(in oklch, var(--ink) 10%, transparent);
+}
+
+/* Light palettes need a darker violet for the automation family so the stripe +
+   glyph keep contrast on bright paper (the base 0.72 violet is tuned for dark
+   backgrounds). One rule for all four; :root[data-theme] outranks the base
+   :root by specificity, so source order is irrelevant. */
+:root[data-theme="codara-daylight"],
+:root[data-theme="github-light"],
+:root[data-theme="rose-pine-dawn"],
+:root[data-theme="catppuccin-latte"] {
+  --automation: oklch(0.55 0.20 300);
 }
 
 * { box-sizing: border-box; }

@@ -1354,12 +1354,19 @@ async function finalize(
       kind: failed ? "automation.failed" : "automation.finished",
       sourceKey: automationSourceKey(id),
       tone: failed ? "danger" : "success",
-      title: failed ? "Loom — failed" : "Loom — finished",
+      title: failed ? "Automation — failed" : "Automation — finished",
       body: failed
         ? `“${finalJob.name}” stopped after ${passes} (${reason}).`
         : `“${finalJob.name}” finished after ${passes} (${reason}).`,
       soundKind: failed ? "needs-you" : "done",
-      target: { type: "automation", jobId: id, runId: finalizedRunId },
+      // workspaceId lets a cross-workspace notification click switch projects
+      // before landing on this loom's hub/run (see notifications/routing.ts).
+      target: {
+        type: "automation",
+        jobId: id,
+        runId: finalizedRunId,
+        workspaceId: finalJob.input.workspaceId,
+      },
     });
   }
 

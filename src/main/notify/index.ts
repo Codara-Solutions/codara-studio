@@ -120,12 +120,21 @@ function handleRunEvent(event: SparkEvent): void {
   if (event.type !== "run.status_updated") return;
 
   const payload = event.payload as
-    | { status?: unknown; previousStatus?: unknown }
+    | { status?: unknown; previousStatus?: unknown; automationId?: unknown }
     | undefined;
   const status = typeof payload?.status === "string" ? (payload.status as RunStatus) : undefined;
   const prevStatus =
     typeof payload?.previousStatus === "string"
       ? (payload.previousStatus as RunStatus)
+      : undefined;
+  // Loom-owned runs stamp their automationId onto the status payload (run-store
+  // emit sites). Present ⇒ this transition belongs to one automation iteration,
+  // so terminal (complete/failed) pings are suppressed — the loop-level
+  // automation.finished/failed (once per finalize) is the real end signal —
+  // while a blocked iteration still alerts, as a distinct automation.blocked.
+  const automationId =
+    typeof payload?.automationId === "string" && payload.automationId.length > 0
+      ? payload.automationId
       : undefined;
   const runId = event.runId;
   if (!status || !runId) return;
@@ -157,6 +166,26 @@ function handleRunEvent(event: SparkEvent): void {
   const workspaceId = event.workspaceId;
 
   if (status === "blocked") {
+    if (automationId) {
+      // A blocked loom iteration still needs the user (answer the question or
+      // the loop hangs) — but it reads as its own automation family, and clicks
+      // route via the automation target (jobId + the live run to answer in).
+      // sourceKey stays run-scoped so the run's active transitions (the
+      // running/planning/reviewing branch above rearms the source) let each
+      // fresh blocked iteration alert again instead of being deduped.
+      publish({
+        kind: "automation.blocked",
+        sourceKey,
+        tone: "warning",
+        title: "Automation — needs you",
+        body: event.message?.trim() || "An automation is waiting on your answer.",
+        soundKind: "needs-you",
+        // workspaceId lets a cross-workspace click switch projects before
+        // landing on the loom's hub/run (see routing.ts).
+        target: { type: "automation", jobId: automationId, runId, workspaceId },
+      });
+      return;
+    }
     publish({
       kind: "run.blocked",
       sourceKey,
@@ -171,12 +200,18 @@ function handleRunEvent(event: SparkEvent): void {
   }
 
   if (status === "complete" || status === "failed") {
+    const startedMs = runActiveSince.get(runId);
+    runActiveSince.delete(runId);
+    // Loom-owned runs finalize once per iteration; the per-iteration terminal
+    // ping would spam the user, so suppress it here (the runActiveSince cleanup
+    // above still runs, so no per-run duration state leaks). The loop-level
+    // automation.finished/failed published once per finalize by
+    // automation-loop.ts is the truthful end-of-automation alert.
+    if (automationId) return;
     const ok = status === "complete";
     let body =
       event.message?.trim() ||
       (ok ? "A run just finished while you were away." : "A run failed while you were away.");
-    const startedMs = runActiveSince.get(runId);
-    runActiveSince.delete(runId);
     if (startedMs !== undefined) {
       const elapsed = Date.parse(event.timestamp) - startedMs;
       if (Number.isFinite(elapsed) && elapsed > 5 * 60_000) {

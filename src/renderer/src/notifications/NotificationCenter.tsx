@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import type { NotificationCenterEntry, RunQuestionOption } from "@shared/types";
 import { NotifyGlyphSvg } from "../components/Toast";
 import { answerRunQuestion } from "./answers";
-import { kindMeta } from "./kinds";
+import { accentVar, kindMeta } from "./kinds";
 import type { NavigateTo } from "./routing";
 import { useNotificationCenter } from "./useNotificationCenter";
 
@@ -44,8 +44,11 @@ function timeLabel(iso: string): string {
 }
 
 function toneVarOf(entry: NotificationCenterEntry): string {
+  // Automation.* entries render in the violet family, everything else in its
+  // tone color — shared with the toast card via accentVar so the two surfaces
+  // stay identical.
   const tone = entry.tone ?? kindMeta(entry.kind).tone;
-  return tone === "danger" ? "var(--danger)" : tone === "warning" ? "var(--warn)" : "var(--ok)";
+  return accentVar(entry.kind, tone);
 }
 
 export default function NotificationCenter({
@@ -381,7 +384,11 @@ function CenterEntry({
   // still-open question resolves any options (answered/expired ones return
   // an empty list, so stale entries render no buttons).
   const questionRunId =
-    entry.kind === "run.blocked" && entry.target.type === "run" ? entry.target.runId : null;
+    entry.kind === "run.blocked" && entry.target.type === "run"
+      ? entry.target.runId
+      : entry.kind === "automation.blocked" && entry.target.type === "automation"
+        ? (entry.target.runId ?? null)
+        : null;
   const answerOptions: RunQuestionOption[] =
     questionRunId && resolveQuestion ? resolveQuestion(questionRunId).slice(0, 3) : [];
 
