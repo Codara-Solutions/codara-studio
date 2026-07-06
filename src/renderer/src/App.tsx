@@ -82,6 +82,7 @@ import {
   workerMenuLabel,
 } from "./routing/enumerate-open-workers";
 import { useGlobalRuns } from "./lib/useGlobalRuns";
+import { isRunningStatus } from "./lib/run-status";
 import {
   buildAwayDigest,
   compareRunsByAttention,
@@ -586,6 +587,14 @@ export default function App() {
     Record<string, Record<string, { tabId: string; kind: InAppNotificationKind }>>
   >({});
 
+  // Manual terminal panes whose agent is actively working, keyed
+  // workspaceId → paneId → true, tracked across ALL workspaces (the
+  // main-process notifier keeps watching panes in non-active workspaces).
+  // Feeds the workspace rail's activity spin alongside live/loom runs.
+  const [terminalWorking, setTerminalWorking] = useState<
+    Record<string, Record<string, true>>
+  >({});
+
   // Per-workspace status-tone for the WorkspaceRail dots: the tone of each
   // workspace's highest-attention run (blocked > done-unseen > live > …),
   // sourced from the global feed so the dot reflects every project, not just
@@ -631,6 +640,37 @@ export default function App() {
     }
     return m;
   }, [workspaces, globalRuns.runs, terminalAttention]);
+
+  // Per-workspace "something inside is working" flag for the rail's activity
+  // spin. Unlike toneByWorkspaceId this does NOT filter out automation (loom)
+  // runs — a running loom pass still counts as work in progress.
+  const workingByWorkspaceId = useMemo(() => {
+    const m: Record<string, boolean> = {};
+    for (const w of workspaces) {
+      m[w.id] =
+        globalRuns.runs.some((r) => r.workspaceId === w.id && isRunningStatus(r.status)) ||
+        Object.keys(terminalWorking[w.id] ?? {}).length > 0;
+    }
+    return m;
+  }, [workspaces, globalRuns.runs, terminalWorking]);
+
+  // Reclaim activity-spin records for workspaces that no longer exist: a
+  // workspace deleted while a hidden pane was mid-turn never receives a
+  // clearing state event, so its map entry would otherwise live forever
+  // (invisible — workingByWorkspaceId iterates live workspaces — but leaked).
+  // The empty-list guard skips the pre-boot render where workspaces haven't
+  // loaded yet.
+  useEffect(() => {
+    if (workspaces.length === 0) return;
+    setTerminalWorking((current) => {
+      const live = new Set(workspaces.map((w) => w.id));
+      const stale = Object.keys(current).filter((id) => !live.has(id));
+      if (stale.length === 0) return current;
+      const next = { ...current };
+      for (const id of stale) delete next[id];
+      return next;
+    });
+  }, [workspaces]);
 
   // Keep the active chat's node-graph tab in existence without stealing
   // focus. Chat-only runs (no steps, no worker tasks) intentionally have NO
@@ -1311,6 +1351,27 @@ export default function App() {
         });
       });
     }
+    // Prune activity-spin entries for panes that closed while this workspace
+    // was hidden: a pane removed off-screen never gets a clearing state event,
+    // so drop any tracked paneId no longer in the live pane list. Same
+    // same-object-when-unchanged discipline as the notifier effect.
+    const livePaneIds = new Set(panes.map((p) => p.paneId));
+    setTerminalWorking((current) => {
+      const ws = current[workspaceId];
+      if (!ws) return current;
+      const kept: Record<string, true> = {};
+      let changed = false;
+      for (const paneId of Object.keys(ws)) {
+        if (livePaneIds.has(paneId)) kept[paneId] = true;
+        else changed = true;
+      }
+      if (!changed) return current;
+      if (Object.keys(kept).length === 0) {
+        const { [workspaceId]: _droppedWs, ...restWorkspaces } = current;
+        return restWorkspaces;
+      }
+      return { ...current, [workspaceId]: kept };
+    });
     // Optional chaining: during dev HMR the renderer can be newer than the
     // preload of a long-lived instance; degrade to no-op instead of throwing
     // inside the effect.
@@ -1392,6 +1453,34 @@ export default function App() {
   // resurrects a removed worker, so they coexist without precedence logic.
   useEffect(() => {
     const off = window.spark.terminalNotify?.onState?.((payload) => {
+      // Rail activity spin: track manual panes whose agent is working across
+      // ALL workspaces (this event fires for panes in hidden workspaces too).
+      // "blocked" clears the spin deliberately — a blocked agent is waiting on
+      // the user, not working. "launching" deliberately does NOT spin: a
+      // launched-but-never-prompted agent parks on that state indefinitely
+      // (nothing on the main side ever demotes it while the agent sits idle at
+      // its input box), so counting it would spin the rail forever. Returns
+      // the SAME object when nothing changed so this per-transition effect
+      // never churns renders.
+      if (payload?.workspaceId && payload.paneId && payload.state) {
+        const wsId = payload.workspaceId;
+        const paneId = payload.paneId;
+        const active = payload.state === "working";
+        setTerminalWorking((current) => {
+          const ws = current[wsId];
+          if (active) {
+            if (ws?.[paneId]) return current;
+            return { ...current, [wsId]: { ...(ws ?? {}), [paneId]: true } };
+          }
+          if (!ws?.[paneId]) return current;
+          const { [paneId]: _dropped, ...restPanes } = ws;
+          if (Object.keys(restPanes).length === 0) {
+            const { [wsId]: _droppedWs, ...restWorkspaces } = current;
+            return restWorkspaces;
+          }
+          return { ...current, [wsId]: restPanes };
+        });
+      }
       if (!payload?.tabId || !payload.paneId || !payload.state) return;
       const t = tabsRef.current;
       const tab = t.tabs.find((item) => item.id === payload.tabId);
@@ -3038,6 +3127,7 @@ export default function App() {
           <WorkspaceRail
             side="left"
             toneByWorkspaceId={toneByWorkspaceId}
+            workingByWorkspaceId={workingByWorkspaceId}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
@@ -3145,6 +3235,7 @@ export default function App() {
           <WorkspaceRail
             side="right"
             toneByWorkspaceId={toneByWorkspaceId}
+            workingByWorkspaceId={workingByWorkspaceId}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
