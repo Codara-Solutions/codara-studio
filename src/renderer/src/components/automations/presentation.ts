@@ -177,6 +177,20 @@ export function fmtElapsed(sinceIso: string | undefined, nowMs: number): string 
 }
 
 // The left-list sub-line: the at-a-glance "what is this loom doing".
+// Job-level state — folds the enabled flag into the run status so every
+// surface can say whether a quiet loom is ARMED (trigger live, will fire) or
+// PAUSED (disarmed). Live statuses win over the flag; "stopped" with the
+// trigger still enabled reads as armed again (the next fire starts fresh).
+export type LoomStateKind = "running" | "blocked" | "passPaused" | "armed" | "paused";
+export function loomState(job: ScheduledJob): { kind: LoomStateKind; label: string; color: string } {
+  const s = job.state.status;
+  if (s === "running") return { kind: "running", label: "running", color: "var(--accent)" };
+  if (s === "blocked") return { kind: "blocked", label: "needs you", color: "var(--danger)" };
+  if (s === "paused") return { kind: "passPaused", label: "pass paused", color: "var(--info)" };
+  if (!job.enabled) return { kind: "paused", label: "paused", color: "var(--muted)" };
+  return { kind: "armed", label: "armed", color: "var(--warn)" };
+}
+
 export function liveCue(job: ScheduledJob): string {
   const s = job.state;
   if (s.status === "running") return `iter ${s.iteration}/${capLabel(job)}`;

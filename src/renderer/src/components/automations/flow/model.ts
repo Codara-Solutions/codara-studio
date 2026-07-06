@@ -452,11 +452,15 @@ export function flowFromGraph(
 
   const nodes: FlowNode[] = [];
 
-  // The pinned trigger node — read-only, mirrors job.trigger.
+  // The pinned trigger node — read-only, mirrors job.trigger. Placed one layer
+  // LEFT of the leftmost entry node (not at a fixed origin): persisted ui
+  // positions are honored verbatim below, so a graph whose nodes sit at/near
+  // the canvas origin would otherwise render the trigger overlapping its own
+  // entry node with the wire running backwards.
   nodes.push({
     id: TRIGGER_ID,
     type: "trigger",
-    position: { x: ORIGIN_X, y: ORIGIN_Y + (triggerY(graph, layout) ?? 0) },
+    position: triggerPosition(graph, layout),
     data: { kind: "trigger", label: "Trigger" },
     draggable: true,
     deletable: false,
@@ -578,19 +582,26 @@ function layeredPositions(graph: LoomGraph): Map<string, { x: number; y: number 
   return out;
 }
 
-function triggerY(
+function triggerPosition(
   graph: LoomGraph,
   layout: Map<string, { x: number; y: number }>,
-): number | null {
-  // Center the trigger vertically against its entry nodes.
-  const ys: number[] = [];
+): { x: number; y: number } {
+  // One layer left of the leftmost entry node, vertically centered against
+  // the entry nodes — wherever the user (or an authoring agent) put them.
+  const pts: { x: number; y: number }[] = [];
   for (const entry of graph.entryNodeIds) {
     const def = graph.nodes.find((n) => n.id === entry);
-    const pos = def?.ui ?? layout.get(entry);
-    if (pos) ys.push(pos.y - ORIGIN_Y);
+    const pos =
+      def?.ui && Number.isFinite(def.ui.x) && Number.isFinite(def.ui.y)
+        ? def.ui
+        : layout.get(entry);
+    if (pos) pts.push(pos);
   }
-  if (ys.length === 0) return 0;
-  return ys.reduce((a, b) => a + b, 0) / ys.length;
+  if (pts.length === 0) return { x: ORIGIN_X, y: ORIGIN_Y };
+  return {
+    x: Math.min(...pts.map((p) => p.x)) - LAYER_DX,
+    y: pts.reduce((a, p) => a + p.y, 0) / pts.length,
+  };
 }
 
 // ── flow → graph ─────────────────────────────────────────────────────────────
