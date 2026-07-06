@@ -333,6 +333,12 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         await finalize(id, "engine-missing");
         return;
       }
+      // Per-worker tool access lives on the graph node (not job.worker), so the
+      // single-node path reads it off the entry node and threads it down. collab
+      // is skipped — a lone worker has no peers.
+      const entryNode = graph.nodes.find((n) => n.id === entryNodeId);
+      const access = entryNode?.kind === "worker" ? entryNode.access : undefined;
+      const blockedTools = entryNode?.kind === "worker" ? entryNode.blockedTools : undefined;
       if (sameRun) {
         const { addDirectIteration } = await import("./run-store");
         run = await addDirectIteration({
@@ -343,6 +349,8 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           model: resolved.model,
           effort: resolved.effort,
           loomNodeId: entryNodeId,
+          access,
+          blockedTools,
           vars: passVars,
           freshPass: true, // same-run PASS boundary: rebuild loomPass from scratch
         });
@@ -359,6 +367,8 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           model: resolved.model,
           effort: resolved.effort,
           loomNodeId: entryNodeId,
+          access,
+          blockedTools,
           vars: passVars,
         });
       }
@@ -398,6 +408,10 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           nodeId: node.id,
           template: rendered,
           worker: { engine: resolved.engine, model: resolved.model, effort: resolved.effort },
+          label: node.label,
+          access: node.access,
+          blockedTools: node.blockedTools,
+          collab: node.collab,
         });
       }
 

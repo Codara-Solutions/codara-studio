@@ -323,6 +323,13 @@ function workerLine(w: LoomWorkerConfig): string {
   return parts.join(" · ");
 }
 
+// Subtle access suffix on the worker meta line — only when the node is fenced.
+function accessSuffix(access?: "full" | "edits" | "readonly"): string {
+  if (access === "edits") return " · edits-only";
+  if (access === "readonly") return " · read-only";
+  return "";
+}
+
 export function WorkerNode({ id, data, selected }: NodeProps): React.ReactElement {
   const d = data as NodeData;
   if (d.kind !== "worker") return <div />;
@@ -346,7 +353,7 @@ export function WorkerNode({ id, data, selected }: NodeProps): React.ReactElemen
           )}
         </div>
         <Title text={d.label || "Worker"} />
-        <Meta text={workerLine(d.worker)} />
+        <Meta text={workerLine(d.worker) + accessSuffix(d.access)} />
         <span
           title={d.prompt}
           style={{

@@ -389,6 +389,9 @@ export type FlowNodeData =
       prompt: string;
       isolate?: boolean;
       retry?: { maxAttempts: number; until?: GuardPredicate };
+      access?: "full" | "edits" | "readonly";
+      blockedTools?: string[];
+      collab?: { awareness?: boolean; chat?: boolean };
     }
   | {
       kind: "guard";
@@ -519,6 +522,9 @@ function nodeDataFromDef(
         prompt: n.prompt,
         isolate: n.isolate,
         retry: n.retry,
+        access: n.access,
+        blockedTools: n.blockedTools,
+        collab: n.collab,
       };
     case "guard":
       return { kind: "guard", label: n.label ?? "Guard", predicate: n.predicate };
@@ -626,6 +632,34 @@ export function graphFromFlow(nodes: FlowNode[], edges: FlowEdge[]): LoomGraph {
       if (d.label && d.label !== "Worker") def.label = d.label;
       if (d.isolate) def.isolate = true;
       if (d.retry && d.retry.maxAttempts > 0) def.retry = d.retry;
+      // Keep specs minimal: persist access/blockedTools/collab only when they
+      // differ from the default (full access, no blocks, no collaboration), so an
+      // untouched worker's saved spec is byte-identical to before this feature.
+      // codex has no read-only preset (its read-only sandbox can't write the
+      // worker's final report), so a readonly value on a codex worker is flipped
+      // to edits here — the same engine-flip protection blockedTools gets below,
+      // so a draft that toggled engine after picking Read-only never persists an
+      // unrunnable spec.
+      if (d.access && d.access !== "full") {
+        def.access = d.access === "readonly" && d.worker.engine === "codex" ? "edits" : d.access;
+      }
+      // blockedTools is claude-only (the form hides it for codex, but the draft
+      // keeps typed values across an engine flip — don't persist them onto a
+      // codex node, where the validator would rightly reject them). Only bare
+      // tool names survive: the claude CLI silently ignores parenthesized/scoped
+      // forms like "Bash(rm *)", so a scoped entry is dropped rather than saved
+      // as a deny that never takes hold.
+      const blocked =
+        d.worker.engine === "claude"
+          ? (d.blockedTools ?? []).map((t) => t.trim()).filter((t) => /^[A-Za-z][A-Za-z0-9_]*$/.test(t))
+          : [];
+      if (blocked.length > 0) def.blockedTools = blocked;
+      if (d.collab && (d.collab.awareness || d.collab.chat)) {
+        def.collab = {
+          ...(d.collab.awareness ? { awareness: true } : {}),
+          ...(d.collab.chat ? { chat: true } : {}),
+        };
+      }
       graphNodes.push(def);
     } else if (d.kind === "guard") {
       const def: LoomGuardNode = { id: n.id, kind: "guard", predicate: d.predicate, ui };

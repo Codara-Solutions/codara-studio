@@ -163,6 +163,92 @@ async function main() {
     );
   }
 
+  // ── 3) per-worker access/blockedTools/collab round-trip (minimal persist) ──
+  {
+    const mkWorker = (id, extra) => ({
+      id,
+      type: "worker",
+      position: { x: 100, y: 0 },
+      data: { kind: "worker", label: "Worker", worker: { engine: "claude" }, prompt: "do work", ...extra },
+    });
+
+    // A fully-default worker persists NONE of the new fields (byte-identical to
+    // before the feature).
+    {
+      const g = M.graphFromFlow([triggerNode, mkWorker("w0", {})], [fEdge("e", TRIGGER, "w0")]);
+      const n = g.nodes.find((x) => x.id === "w0");
+      ok("default worker omits access", n.access === undefined);
+      ok("default worker omits blockedTools", n.blockedTools === undefined);
+      ok("default worker omits collab", n.collab === undefined);
+    }
+
+    // access:"full" is treated as the default and dropped; edits/readonly persist.
+    {
+      const g = M.graphFromFlow([triggerNode, mkWorker("w0", { access: "full" })], [fEdge("e", TRIGGER, "w0")]);
+      ok("access 'full' is not persisted (kept minimal)", g.nodes.find((x) => x.id === "w0").access === undefined);
+    }
+    {
+      const g = M.graphFromFlow([triggerNode, mkWorker("w0", { access: "readonly" })], [fEdge("e", TRIGGER, "w0")]);
+      ok("access 'readonly' persists on a claude worker", g.nodes.find((x) => x.id === "w0").access === "readonly");
+    }
+    // codex has no read-only preset — a readonly value on a codex worker (e.g.
+    // after an engine flip) is persisted as edits, never as an unrunnable spec.
+    {
+      const codexRo = {
+        id: "w0",
+        type: "worker",
+        position: { x: 100, y: 0 },
+        data: { kind: "worker", label: "Worker", worker: { engine: "codex" }, prompt: "do work", access: "readonly" },
+      };
+      const g = M.graphFromFlow([triggerNode, codexRo], [fEdge("e", TRIGGER, "w0")]);
+      ok("codex 'readonly' is flipped to 'edits' on persist", g.nodes.find((x) => x.id === "w0").access === "edits");
+    }
+
+    // blockedTools: trimmed + blanks dropped; an all-blank list persists nothing.
+    {
+      const g = M.graphFromFlow(
+        [triggerNode, mkWorker("w0", { blockedTools: [" WebSearch ", "", "Bash"] })],
+        [fEdge("e", TRIGGER, "w0")],
+      );
+      const n = g.nodes.find((x) => x.id === "w0");
+      ok("blockedTools trimmed + blanks dropped", JSON.stringify(n.blockedTools) === JSON.stringify(["WebSearch", "Bash"]));
+    }
+    // Scoped/parenthesized forms are dropped (claude CLI silently ignores them),
+    // so only bare tool names survive the persist.
+    {
+      const g = M.graphFromFlow(
+        [triggerNode, mkWorker("w0", { blockedTools: ["Bash(rm *)", "WebSearch", "Write "] })],
+        [fEdge("e", TRIGGER, "w0")],
+      );
+      const n = g.nodes.find((x) => x.id === "w0");
+      ok("scoped blockedTools dropped, bare names kept", JSON.stringify(n.blockedTools) === JSON.stringify(["WebSearch", "Write"]));
+    }
+    {
+      const g = M.graphFromFlow(
+        [triggerNode, mkWorker("w0", { blockedTools: ["", "   "] })],
+        [fEdge("e", TRIGGER, "w0")],
+      );
+      ok("all-blank blockedTools persists nothing", g.nodes.find((x) => x.id === "w0").blockedTools === undefined);
+    }
+
+    // collab: an all-false object drops; only the true flags persist.
+    {
+      const g = M.graphFromFlow(
+        [triggerNode, mkWorker("w0", { collab: { awareness: false, chat: false } })],
+        [fEdge("e", TRIGGER, "w0")],
+      );
+      ok("all-false collab persists nothing", g.nodes.find((x) => x.id === "w0").collab === undefined);
+    }
+    {
+      const g = M.graphFromFlow(
+        [triggerNode, mkWorker("w0", { collab: { awareness: true, chat: false } })],
+        [fEdge("e", TRIGGER, "w0")],
+      );
+      const n = g.nodes.find((x) => x.id === "w0");
+      ok("collab persists only the true flags", JSON.stringify(n.collab) === JSON.stringify({ awareness: true }));
+    }
+  }
+
   try {
     fs.rmSync(tmp, { recursive: true, force: true });
   } catch {

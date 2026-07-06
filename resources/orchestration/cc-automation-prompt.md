@@ -28,7 +28,7 @@ A Cora automation (internally a "loom") is a recurring agent job bound to this w
 - **prompt_template** — the instruction each iteration runs. Supports template tokens:
   - `{{var}}` — a named variable, `{{node:id}}` — a named node's last output, `{{incoming}}` — merged output of all inbound edges.
 - **graph** (optional) — a node graph for multi-step looms. Omit it for a simple single-worker loom (Cora synthesizes one worker node from `prompt_template` + `worker`). Nodes:
-  - `worker` — runs a CLI agent on its `prompt` (with the same tokens).
+  - `worker` — runs a CLI agent on its `prompt` (with the same tokens). Optional per-worker controls: `access` (`full` default / `edits` = no shell or web / `readonly` = no edits to existing files, no shell/web — Claude only, since codex's read-only sandbox can't write the worker's report; use `edits` for a fenced codex worker); `blockedTools` (Claude-only extra hard-denies, BARE names only like `["WebSearch","Bash"]` — scoped forms like `Bash(rm *)` are rejected; rejected entirely on codex workers); `collab: { awareness, chat }` to let same-wave parallel workers see (`awareness`) or message (`chat`, via a shared board in the run folder) their siblings — only useful when 2+ workers run in one wave.
   - `guard` — evaluates a `predicate` (`phrase` / `tests` / `gitClean` / `command` / `agentSignal` with `want: continue|done`) and routes `pass`/`fail`.
   - `merge` — joins parallel branches (`joinMode: all|any`).
   - **edges** connect nodes; `branch: "pass"|"fail"` selects a guard's outgoing path; `backEdge: true` + `visitCap: N` forms a bounded retry loop. `entryNodeIds` lists the start nodes. All `from`/`to`/`entryNodeIds` must reference existing node ids.

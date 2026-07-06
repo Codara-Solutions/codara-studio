@@ -10,6 +10,7 @@ import { writeFileAtomic } from "./fs-atomic";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
 import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import { loadPreferences, setPreference } from "./preferences-store";
+import { validateWorkerAccessFields } from "./orchestration/worker-access";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import type {
   AppPreferences,
@@ -1820,6 +1821,9 @@ function validateGraph(graph: LoomGraph): string | null {
       predicate?: { type?: unknown; phrase?: unknown; command?: unknown; want?: unknown };
       prompt?: unknown;
       worker?: { engine?: unknown; model?: unknown; effort?: unknown };
+      access?: unknown;
+      blockedTools?: unknown;
+      collab?: unknown;
     };
     if (!node || typeof node.id !== "string" || node.id.trim().length === 0) {
       return "every graph node needs a non-empty string id";
@@ -1863,6 +1867,10 @@ function validateGraph(graph: LoomGraph): string | null {
       // architect must pin all three per worker, "auto"/blank no longer exist.
       const werr = validateConcreteWorker(node.worker, `worker node ${node.id}`);
       if (werr) return werr;
+      // Optional per-worker tool access + collaboration (Looms v2.5). All absent
+      // = full access, no collaboration (the pre-feature default).
+      const aerr = validateWorkerAccessFields(node, node.worker?.engine, `worker node ${node.id}`);
+      if (aerr) return aerr;
     }
   }
   for (const entry of graph.entryNodeIds) {
@@ -1929,6 +1937,7 @@ function validateConcreteWorker(
   }
   return null;
 }
+
 
 // Floor the scheduler enforces on interval/cadence (setInterval is armed with
 // Math.max(1000, ...)). We reject anything below it (or non-finite) up front so

@@ -104,6 +104,28 @@ function normalizeJob(job: ScheduledJob): ScheduledJob {
       },
     };
   }
+  // Looms v2.5: enforce the bare-tool-name charset on worker-node blockedTools
+  // at EVERY persistence path, not just editor saves (graphFromFlow) and the
+  // MCP path (validateWorkerAccessFields). A raw scheduler IPC could otherwise
+  // persist a scoped entry like "Bash(rm *)" that the claude CLI flag silently
+  // ignores — a fence the user believes exists but doesn't. Same regex as
+  // worker-access.ts BARE_TOOL_NAME; invalid entries are dropped, and a list
+  // that empties disappears entirely (matching graphFromFlow's minimal shape).
+  if (next.graph?.nodes.some((n) => n.kind === "worker" && n.blockedTools?.length)) {
+    next = {
+      ...next,
+      graph: {
+        ...next.graph,
+        nodes: next.graph.nodes.map((n) => {
+          if (n.kind !== "worker" || !n.blockedTools?.length) return n;
+          const filtered = n.blockedTools.filter((t) => /^[A-Za-z][A-Za-z0-9_]*$/.test(t));
+          if (filtered.length === n.blockedTools.length) return n;
+          const { blockedTools: _dropped, ...rest } = n;
+          return filtered.length > 0 ? { ...rest, blockedTools: filtered } : rest;
+        }),
+      },
+    };
+  }
   return next;
 }
 

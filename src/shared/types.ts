@@ -1720,6 +1720,23 @@ export interface WorkerTask {
    * sole node id ("w0").
    */
   loomNodeId?: string;
+  /**
+   * Looms v2.5: per-worker tool-access preset (LoomWorkerNode.access), threaded
+   * onto the task so buildLaunchCommandLine maps it to CLI flags. Undefined =
+   * "full" (today's behavior). Persisted; absent on managed/pre-feature tasks.
+   */
+  accessHint?: "full" | "edits" | "readonly";
+  /**
+   * Looms v2.5: claude-only extra hard-denies (LoomWorkerNode.blockedTools),
+   * merged into the launch --disallowedTools list. Ignored for codex tasks.
+   */
+  blockedToolsHint?: string[];
+  /**
+   * Looms v2.5: absolute path of the run's shared chat board dir (<runDir>/mail),
+   * set only when this task's node rendered a chat block. A codex launch --add-dir
+   * this so the sandbox can reach the out-of-workspace board. Absent otherwise.
+   */
+  collabMailDirHint?: string;
 }
 
 export interface WorkerAttempt {
@@ -2005,6 +2022,13 @@ export interface CreateWorkerTaskInput {
   // Looms v2.5: the graph node this task executes within a loom pass; threads
   // onto the created WorkerTask. Undefined for managed/non-loom tasks.
   loomNodeId?: string;
+  // Looms v2.5: per-worker tool-access preset + claude-only extra hard-denies;
+  // thread onto the created WorkerTask. Undefined = full access (today's).
+  accessHint?: WorkerTask["accessHint"];
+  blockedToolsHint?: string[];
+  // Looms v2.5: the shared chat board dir when this task's node is a chat
+  // participant; a codex launch --add-dir's it. Undefined otherwise.
+  collabMailDirHint?: string;
 }
 
 export interface UpdateWorkerTaskInput {
@@ -2402,6 +2426,18 @@ export interface LoomWorkerNode {
   /** Bounded per-node retry: re-attempt up to maxAttempts until the predicate
    *  holds. Reserved for a later slice — defined now, not executed. */
   retry?: { maxAttempts: number; until?: GuardPredicate };
+  /** Tool-access preset. Absent/"full" = today's behavior (no fence): claude
+   *  runs with --dangerously-skip-permissions, codex with --yolo. "edits" keeps
+   *  file edits but removes shell + web; "readonly" leaves only inspection. */
+  access?: "full" | "edits" | "readonly";
+  /** Claude-only extra hard-denies appended (de-duped) to the preset's
+   *  disallowed-tools list — applies to ANY preset incl. "full". Ignored for
+   *  codex (its sandbox is the mechanism; there is no per-tool deny). */
+  blockedTools?: string[];
+  /** Parallel-wave collaboration. awareness lists this node's same-wave peers in
+   *  its prompt; chat gives peers a shared markdown board in the run folder. Both
+   *  only matter when ≥2 workers run in one wave. */
+  collab?: { awareness?: boolean; chat?: boolean };
 }
 
 /** A node that evaluates a predicate and routes flow down its pass/fail edges.
@@ -2527,6 +2563,10 @@ export interface StartDirectWorkerRunInput {
    *  `prompt`/`engine`/`model`/`effort`/`loomNodeId` above launch one node — the
    *  byte-identical legacy single-node path. */
   nodes?: DirectNodeLaunch[];
+  /** Looms v2.5: per-worker tool access for the single-node path (the multi-node
+   *  path carries these on each DirectNodeLaunch instead). Undefined = full. */
+  access?: "full" | "edits" | "readonly";
+  blockedTools?: string[];
   /** Looms v2.5 (pass boundary): TRUE only on a same-run pass-chaining launch
    *  (the loop driver starting a fresh PASS). When true the launcher rebuilds
    *  loomPass FROM SCRATCH (only the launched wave's nodes, activations 1, fresh
@@ -2548,6 +2588,14 @@ export interface DirectNodeLaunch {
   worker: LoomWorkerConfig;
   /** Forward-parent node ids (empty/omitted for entry nodes). */
   incoming?: string[];
+  /** Human label (LoomWorkerNode.label), shown in the awareness peer list. */
+  label?: string;
+  /** Looms v2.5 per-worker tool access — threaded from LoomWorkerNode onto the
+   *  worker task (access/blockedTools) and used for the readonly chat caveat. */
+  access?: "full" | "edits" | "readonly";
+  blockedTools?: string[];
+  /** Parallel-wave collaboration toggles (LoomWorkerNode.collab). */
+  collab?: { awareness?: boolean; chat?: boolean };
 }
 
 /** run-store.addDirectIteration input — same-run chaining (isolate=false). */
@@ -2568,6 +2616,10 @@ export interface AddDirectIterationInput {
   /** Looms v2.5 (multi-node entry seam): the whole layer-0 frontier as ONE wave.
    *  See StartDirectWorkerRunInput.nodes. */
   nodes?: DirectNodeLaunch[];
+  /** Looms v2.5: per-worker tool access for the single-node path. Undefined =
+   *  full. See StartDirectWorkerRunInput.access. */
+  access?: "full" | "edits" | "readonly";
+  blockedTools?: string[];
   /** Looms v2.5 (pass boundary): rebuild loomPass from scratch. See
    *  StartDirectWorkerRunInput.freshPass. */
   freshPass?: boolean;

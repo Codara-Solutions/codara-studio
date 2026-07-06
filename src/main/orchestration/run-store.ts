@@ -98,6 +98,13 @@ import {
   waitForCodexInputReady,
   writeAutoFailureReport,
 } from "./worker-launch";
+import {
+  claudeDisallowedTools,
+  codexAccessFlags,
+  decorateWavePrompt,
+  waveHasChat,
+  type WavePeerInfo,
+} from "./worker-access";
 import { writeFileAtomic } from "../fs-atomic";
 import { loadSettings } from "../storage";
 import { estimateWorkerCostUsd } from "../openrouter-prices";
@@ -806,6 +813,8 @@ export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Pr
     model: input.model,
     effort: input.effort,
     loomNodeId: input.loomNodeId,
+    access: input.access,
+    blockedTools: input.blockedTools,
     vars: input.vars,
     freshPass: input.freshPass,
   });
@@ -901,6 +910,8 @@ export async function addDirectIteration(input: AddDirectIterationInput): Promis
     model: input.model,
     effort: input.effort,
     loomNodeId: input.loomNodeId,
+    access: input.access,
+    blockedTools: input.blockedTools,
     vars: input.vars,
     freshPass: input.freshPass,
   });
@@ -920,6 +931,10 @@ interface DirectNodeLaunch {
   worker: LoomWorkerConfig;
   incoming?: string[]; // forward-parent node ids (empty/omitted for entry nodes)
   isolate?: boolean; // per-node isolation; reserved (run-level isolate stays in the loop)
+  label?: string; // shown in the awareness peer list
+  access?: "full" | "edits" | "readonly"; // per-worker tool-access preset
+  blockedTools?: string[]; // claude-only extra hard-denies
+  collab?: { awareness?: boolean; chat?: boolean }; // parallel-wave collaboration
 }
 
 // Single-node delegate kept under its original name so its sole callers
@@ -937,6 +952,8 @@ async function launchDirectIterationTask(opts: {
   model?: string;
   effort?: AgentEffortLevel;
   loomNodeId?: string;
+  access?: "full" | "edits" | "readonly";
+  blockedTools?: string[];
   vars?: Record<string, string>;
   freshPass?: boolean;
 }): Promise<RunState> {
@@ -949,6 +966,9 @@ async function launchDirectIterationTask(opts: {
         nodeId: opts.loomNodeId ?? "w0",
         template: opts.prompt,
         worker: { engine: opts.engine, model: opts.model, effort: opts.effort },
+        access: opts.access,
+        blockedTools: opts.blockedTools,
+        // collab is intentionally omitted: a single-node launch has no peers.
       },
     ],
     { vars: opts.vars, freshPass: opts.freshPass },
@@ -1040,6 +1060,41 @@ async function launchDirectNodeTasks(
     }),
   );
 
+  // Parallel-wave collaboration: wrap each worker's rendered prompt with the
+  // awareness (peers listed) and/or chat (shared board) blocks its node enabled,
+  // but only when this wave actually has peers. decorateWavePrompt is a no-op for
+  // a lone worker or a node with no collab, so the default wave is byte-identical
+  // to before. The chat board lives at <runDir>/mail — create it once when any
+  // node in this wave will genuinely post to a peer (a board of one has no
+  // readers, so waveHasChat gates the mkdir too).
+  const dir = runDir(runId);
+  const mailDir = join(dir, "mail");
+  const peerInfos: WavePeerInfo[] = nodes.map((node, i) => ({
+    nodeId: node.nodeId,
+    label: node.label,
+    engine: resolveAuto(node.worker.engine),
+    prompt: rendered[i],
+    collab: node.collab,
+    access: node.access,
+    blockedTools: node.blockedTools,
+  }));
+  const othersOf = (i: number): WavePeerInfo[] => peerInfos.filter((_, j) => j !== i);
+  // Per-node: did we render a chat block for it? Drives BOTH the mail-dir mkdir
+  // and (for a codex worker) making <runDir>/mail writable via --add-dir at
+  // launch, so a chat participant can read AND post to the board.
+  const nodeHasChat = nodes.map((node, i) => waveHasChat(node.collab, othersOf(i)));
+  if (nodeHasChat.some(Boolean)) {
+    await fs.mkdir(mailDir, { recursive: true }).catch(() => undefined);
+  }
+  const decorated = nodes.map((node, i) =>
+    decorateWavePrompt(rendered[i], {
+      self: peerInfos[i],
+      peers: othersOf(i),
+      collab: node.collab,
+      runDir: dir,
+    }),
+  );
+
   let run = await requireRun(runId);
   // Later waves get a user note per node so the transcript shows what each
   // downstream worker was asked (the entry points already noted layer 0).
@@ -1050,7 +1105,7 @@ async function launchDirectNodeTasks(
         clientMessageId: `loom-node-${nodes[i].nodeId}-${run.workerAttempts.length}-${i}`,
         author: "user",
         kind: "note",
-        message: rendered[i],
+        message: decorated[i],
       });
     }
   }
@@ -1063,7 +1118,7 @@ async function launchDirectNodeTasks(
     riskLevel: "low",
     plannedAgents: nodes.map((node, i) => ({
       label: `worker ${passNumber}.${i + 1}`,
-      summary: rendered[i].length > 200 ? `${rendered[i].slice(0, 200)}…` : rendered[i],
+      summary: decorated[i].length > 200 ? `${decorated[i].slice(0, 200)}…` : decorated[i],
       runtimePreference: resolveAuto(node.worker.engine),
       taskClass: "feature",
     })),
@@ -1081,7 +1136,7 @@ async function launchDirectNodeTasks(
       runId: run.id,
       stepId,
       title: `Loom pass ${passNumber}`,
-      description: rendered[i],
+      description: decorated[i],
       runtimePreference: resolveAuto(node.worker.engine),
       modelHint: node.worker.model,
       effortHint: loomEffortToWorkerEffort(node.worker.effort),
@@ -1094,6 +1149,14 @@ async function launchDirectNodeTasks(
       taskClass: "feature",
       createdBy: "spark",
       loomNodeId: node.nodeId,
+      // Per-worker tool access — buildLaunchCommandLine maps these to CLI flags.
+      // blockedTools is claude-only; ignored for codex tasks at launch.
+      accessHint: node.access,
+      blockedToolsHint: node.blockedTools,
+      // When this node rendered a chat block, remember the board dir so a codex
+      // launch can --add-dir it (codex's sandbox otherwise can't reach the
+      // out-of-workspace mail dir). Absent when the node isn't a chat participant.
+      collabMailDirHint: nodeHasChat[i] ? mailDir : undefined,
     });
     const taskId = run.workerTasks.at(-1)?.id;
     if (!taskId) throw new Error("Direct worker task creation failed.");
@@ -2179,6 +2242,10 @@ async function finalizeDirectRun(runId: string): Promise<void> {
         template: wn.prompt,
         worker: wn.worker,
         incoming: upstreamOf(graph!, wn.id),
+        label: wn.label,
+        access: wn.access,
+        blockedTools: wn.blockedTools,
+        collab: wn.collab,
       })),
       { layer: retryLayer, vars, nodeOutputs, addPromptNotes: true },
     );
@@ -2216,6 +2283,10 @@ async function finalizeDirectRun(runId: string): Promise<void> {
           template: wn.prompt,
           worker: wn.worker,
           incoming: upstreamOf(graph!, wn.id),
+          label: wn.label,
+          access: wn.access,
+          blockedTools: wn.blockedTools,
+          collab: wn.collab,
         };
       }),
       { layer: nextLayer, vars, nodeOutputs, addPromptNotes: true },
@@ -7403,6 +7474,9 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     councilRole: input.councilRole,
     createdBy: input.createdBy ?? "user",
     loomNodeId: input.loomNodeId,
+    accessHint: input.accessHint,
+    blockedToolsHint: input.blockedToolsHint,
+    collabMailDirHint: input.collabMailDirHint,
     createdAt: now,
     updatedAt: now,
   };
@@ -7721,9 +7795,18 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     getPreferenceCached("fableEnabled") === true &&
     run.executionMode === "direct" &&
     Boolean(run.automationId);
+  // Dirs a sandboxed codex worker must be able to WRITE despite them living
+  // outside the workspace: the attempt dir (holds final-report.json + logs) and,
+  // for a chat participant, the shared board. buildLaunchCommandLine --add-dir's
+  // them only on codex sandbox launches (claude + --yolo already reach them).
+  const extraWritableDirs = [
+    paths.attemptDir,
+    ...(task.collabMailDirHint ? [task.collabMailDirHint] : []),
+  ];
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd, {
     sandboxDir: attempt.sandboxWorktreePath,
     isAutomation: isAutomationLaunch,
+    extraWritableDirs,
   });
   const command = launchCommand
     ? `pwsh -> ${launchCommand}`
@@ -11254,7 +11337,7 @@ async function recordWorkerOutput(
 function buildLaunchCommandLine(
   task: WorkerTask,
   cwd: string,
-  opts?: { sandboxDir?: string; isAutomation?: boolean },
+  opts?: { sandboxDir?: string; isAutomation?: boolean; extraWritableDirs?: string[] },
 ): string | null {
   // Pin the shell to the workspace directory before the agent CLI starts.
   // The pty is spawned with cwd=workspaceCwd, but the user's $PROFILE
@@ -11270,6 +11353,9 @@ function buildLaunchCommandLine(
   if (task.runtimePreference === "claude") {
     const args = ["claude", "--dangerously-skip-permissions"];
     if (sandboxDir) args.push("--add-dir", quoteShellArg(sandboxDir));
+    // Per-worker tool access is appended LAST (below), after model/effort, so the
+    // variadic --disallowedTools <tools...> can't swallow a following flag.
+    const disallowed = claudeDisallowedTools(task.accessHint, task.blockedToolsHint);
     // Model-hint backstop: downgrades fable to Opus 4.8 and remaps superseded
     // Sonnet ids to the current one. Automation (loom) workers are ALLOWED
     // fable and get their hint verbatim, so skip the sanitize for
@@ -11285,6 +11371,19 @@ function buildLaunchCommandLine(
     if (launchModel) args.push("--model", quoteShellArg(launchModel));
     const claudeEffort = mapClaudeEffort(task.effortHint);
     if (claudeEffort) args.push("--effort", claudeEffort);
+    // Tool fence LAST: --dangerously-skip-permissions suppresses the prompts, but
+    // a preset (or the node's extra blockedTools) still hard-denies tools on top.
+    // "edits" removes shell + web, "readonly" removes existing-file edits + shell
+    // + web (Write stays, for the report); blockedTools merge into ANY preset incl.
+    // "full". Empty = the flag is omitted (full access), so a plain worker is
+    // byte-identical to before. Each tool is its own space-separated value of the
+    // variadic flag — `claude --help` documents `--disallowedTools, --disallowed-
+    // tools <tools...>` and accepts a comma OR space separated list; we use the
+    // space-separated form (claude-backend.ts uses the kebab spelling of the same
+    // variadic flag) and place it LAST so it can't swallow a following flag.
+    if (disallowed.length > 0) {
+      args.push("--disallowedTools", ...disallowed.map((tool) => quoteShellArg(tool)));
+    }
     // Config shield: run the CLI under sandbox-exec so it can't read the user's
     // personal ~/.claude config (CLAUDE.md, custom agents, hooks, …). darwin
     // only; null elsewhere, where worker-prompt.ts adds a prompt-level fallback
@@ -11301,23 +11400,46 @@ function buildLaunchCommandLine(
     // spawning, so by the time codex starts, the directory is already
     // trusted and the prompt is skipped silently.
     //
-    // When sandboxed, run under `--sandbox workspace-write` (writes confined
-    // to the worktree cwd) instead of the blanket `--yolo`; otherwise keep
-    // --yolo so unsandboxed autopilot/interactive launches are unchanged.
-    const args = sandboxDir
-      ? ["codex", "--sandbox", "workspace-write"]
+    // When sandboxed, run under `--sandbox <mode>` (writes confined to — or, for
+    // read-only, forbidden outside — the cwd) instead of the blanket `--yolo`.
+    // The mode is chosen by codexAccessFlags: an access preset ("edits" →
+    // workspace-write, "readonly" → read-only) wins over the legacy
+    // isolate-worktree sandboxDir (which alone still maps to workspace-write), so
+    // when both apply the more restrictive sandbox wins. With neither, output is
+    // byte-identical to before (plain --yolo). The new presets also add
+    // `-a never` so a mid-run approval prompt can't hang a watch-only worker
+    // terminal; the legacy sandboxDir path keeps its prior approval behavior.
+    // blockedTools is claude-only (codex has no per-tool deny — the sandbox IS
+    // the fence), so it is ignored here.
+    const codex = codexAccessFlags(task.accessHint, Boolean(sandboxDir));
+    const args = codex.sandboxMode
+      ? ["codex", "--sandbox", codex.sandboxMode]
       : ["codex", "--yolo"];
+    if (codex.approvalsNever) args.push("-a", "never");
+    // A codex --sandbox confines writes to the workspace cwd, but the worker's
+    // final-report.json (and, for chat, the shared board) live OUTSIDE it under
+    // ~/.Codara/runs. Make exactly those dirs writable with --add-dir so a fenced
+    // codex worker can report + post — WITHOUT exposing the rest of the run dir
+    // (run.json/events.jsonl stay out of reach). Only meaningful when sandboxed;
+    // a --yolo launch already has full disk access, so skip it there.
+    if (codex.sandboxMode) {
+      for (const extra of opts?.extraWritableDirs ?? []) {
+        const d = extra.trim();
+        if (d) args.push("--add-dir", quoteShellArg(d));
+      }
+    }
     if (task.modelHint?.trim()) args.push("-m", quoteShellArg(task.modelHint.trim()));
     const codexEffort = mapCodexEffort(task.effortHint);
     if (codexEffort) args.push("-c", quoteShellArg(`model_reasoning_effort=${codexEffort}`));
     // Config shield: deny reads of ~/.codex/AGENTS.md (personal global codex
-    // instructions). darwin only — and ONLY for --yolo launches: with
-    // `--sandbox workspace-write` codex applies its own macOS Seatbelt profile
-    // per command, and Seatbelt cannot nest, so wrapping that variant in
-    // sandbox-exec makes every worker command fail with "sandbox_apply:
-    // Operation not permitted". See agent-config-shield.ts.
+    // instructions). darwin only — and ONLY for --yolo launches: whenever a
+    // `--sandbox` mode is set (for ANY reason — a preset OR the isolate
+    // worktree), codex applies its own macOS Seatbelt profile per command, and
+    // Seatbelt cannot nest, so wrapping that variant in sandbox-exec makes every
+    // worker command fail with "sandbox_apply: Operation not permitted". See
+    // agent-config-shield.ts.
     logConfigShieldOnce();
-    const codexShield = sandboxDir ? "" : (buildCodexShieldPrefix() ?? "");
+    const codexShield = codex.sandboxMode ? "" : (buildCodexShieldPrefix() ?? "");
     return cdPrefix + codexShield + args.join(" ");
   }
   return null;

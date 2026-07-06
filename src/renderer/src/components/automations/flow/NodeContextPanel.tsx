@@ -30,6 +30,22 @@ import {
 // panel owns its header (kind glyph + label + close) and a footer Delete for
 // non-trigger nodes.
 
+const ACCESS_OPTIONS: { value: "full" | "edits" | "readonly"; label: string }[] = [
+  { value: "full", label: "Full" },
+  { value: "edits", label: "Edits" },
+  { value: "readonly", label: "Read-only" },
+];
+
+// One-line, engine-specific description of what the access presets map to, so the
+// picker shows the real fence (claude disallowed-tools vs codex sandbox). Honest
+// about the caveats: claude read-only still allows Write (the worker needs it for
+// its own report), and codex has no read-only preset at all.
+function accessHintFor(engine: LoomEngine): string {
+  return engine === "codex"
+    ? "Full: --yolo. Edits: workspace-write sandbox (adds -a never). Read-only isn't available for Codex — its read-only sandbox can't write the run's report."
+    : "Full: all tools. Edits: no shell or web. Read-only: edit tools, shell, and web denied — but Write stays available (it can create or overwrite files; needed for its final report). A guardrail, not a jail.";
+}
+
 const TRIGGER_KINDS: { value: AutomationTrigger["kind"]; label: string }[] = [
   { value: "manual", label: "Manual" },
   { value: "cron", label: "Cron" },
@@ -530,6 +546,68 @@ function WorkerForm({
           checked={Boolean(d.isolate)}
           onToggle={() => onPatchNodeData(node.id, { isolate: !d.isolate })}
         />
+      </Group>
+
+      <Group label="Access — what this worker may touch" hint={accessHintFor(w.engine as LoomEngine)}>
+        <Segmented
+          // Codex has no read-only preset (its read-only sandbox can't write the
+          // worker's final report), so drop that segment for codex and coerce a
+          // stored/flipped "readonly" to "edits" for display — matching what
+          // graphFromFlow persists.
+          options={w.engine === "codex" ? ACCESS_OPTIONS.filter((o) => o.value !== "readonly") : ACCESS_OPTIONS}
+          value={w.engine === "codex" && (d.access ?? "full") === "readonly" ? "edits" : d.access ?? "full"}
+          onChange={(v) => onPatchNodeData(node.id, { access: v })}
+        />
+        {w.engine === "claude" && (
+          <Field label="Blocked tools (comma-separated)">
+            <input
+              className="spark-input spark-mono"
+              value={(d.blockedTools ?? []).join(", ")}
+              placeholder="e.g. WebSearch, Bash"
+              onChange={(e) => {
+                const list = e.target.value
+                  .split(",")
+                  .map((t) => t.trim())
+                  .filter((t) => t.length > 0);
+                onPatchNodeData(node.id, { blockedTools: list.length > 0 ? list : undefined });
+              }}
+            />
+            <span style={{ fontSize: 10.5, lineHeight: 1.5, color: "var(--muted)", marginTop: -2 }}>
+              Hard-denied on top of the preset (Claude only — Codex has no per-tool deny).
+            </span>
+          </Field>
+        )}
+      </Group>
+
+      <Group
+        label="Collaboration"
+        hint="Only matters when 2+ workers run in the same parallel wave."
+      >
+        <Check
+          label="Knows its siblings — peers listed in the prompt"
+          checked={Boolean(d.collab?.awareness)}
+          onToggle={() =>
+            onPatchNodeData(node.id, {
+              collab: { ...d.collab, awareness: !d.collab?.awareness },
+            })
+          }
+        />
+        <Check
+          label="Can message siblings — shared board in the run folder"
+          checked={Boolean(d.collab?.chat)}
+          onToggle={() =>
+            onPatchNodeData(node.id, {
+              collab: { ...d.collab, chat: !d.collab?.chat },
+            })
+          }
+        />
+        {d.collab?.chat &&
+          w.engine === "claude" &&
+          (d.blockedTools ?? []).some((t) => t.trim() === "Write") && (
+            <span style={{ fontSize: 10.5, lineHeight: 1.5, color: "var(--muted)", marginTop: -2 }}>
+              Write is blocked for this worker: it can read peers' notes but cannot post to the board.
+            </span>
+          )}
       </Group>
 
       {/* Retry */}
