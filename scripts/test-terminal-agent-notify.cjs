@@ -13,8 +13,9 @@
 //
 //   node scripts/test-terminal-agent-notify.cjs
 //
-// Takes ~12s (the done-detection quiet window is 3s of real time, swept at
-// 1s cadence). Exits non-zero on any failed assertion.
+// Takes ~40s (the done-detection quiet window is 3s of real time, swept at
+// 1s cadence, and the stall/rearm regression scenarios each ride out several
+// quiet windows). Exits non-zero on any failed assertion.
 
 const path = require("node:path");
 const os = require("node:os");
@@ -118,7 +119,7 @@ async function main() {
     console.log(`PASS ${name}`);
   };
 
-  // ── Register two user panes + one excluded spark-worker pane ──
+  // ── Register three user panes + one excluded spark-worker pane ──
   mod.syncTerminalNotifyPanes({
     workspaceId: "ws1",
     workspaceName: "Fleet",
@@ -126,10 +127,11 @@ async function main() {
       { paneId: "p1", tabId: "t1", tabTitle: "Terminal 1", excluded: false },
       { paneId: "p2", tabId: "t2", tabTitle: "Terminal 2", excluded: false },
       { paneId: "p3", tabId: "t3", tabTitle: "workers", excluded: true },
+      { paneId: "p4", tabId: "t4", tabTitle: "Terminal 4", excluded: false },
     ],
   });
   await sleep(50);
-  check("taps attached for all registered panes", T.taps.size === 3);
+  check("taps attached for all registered panes", T.taps.size === 4);
 
   // ── Scenario 1: turn finishes while the user is on ANOTHER tab ──
   // User is in the same workspace but looking at a chat tab; window focused.
@@ -162,6 +164,9 @@ async function main() {
 
   // ── Scenario 2: same flow, but the user IS watching that tab → suppressed ──
   T.activeContext = { workspaceId: "ws1", tabId: "t1" };
+  // The user types the next prompt (they're at the pane) — user input is what
+  // re-arms the pane's alert dedup now, NOT the stream re-matching "working".
+  mod.noteTerminalUserInput("p1");
   feed("p1", "\x1b[2K\x1b[G✻ Reticulating… (2s · ↓ 312 tokens)");
   await sleep(1700);
   feed("p1", "\x1b[2K\x1b[G✻ Reticulating… (4s · ↓ 312 tokens)");
@@ -193,6 +198,60 @@ async function main() {
     "OSC 9 alert is kind complete and carries the program's message",
     T.alerts[2].kind === "complete" && /turn completed/.test(T.alerts[2].body),
   );
+
+  // ── Scenario 4b: ConEmu OSC 9 subcommands are not toasts ──
+  // `9;9;<cwd>` (Windows Terminal / oh-my-posh cwd reporting) and `9;4;…`
+  // (progress) share the OSC 9 prefix with iTerm2-style notifications but
+  // must never fire one. Free text that merely STARTS with digits is still
+  // a real notification.
+  const beforeConEmu = alertCount();
+  feed("p1", "\x1b]9;9;C:\\Users\\jorge\x07");
+  feed("p1", "\x1b]9;4;1;50\x07");
+  check("ConEmu OSC 9 subcommands (cwd, progress) produced no toast", alertCount() === beforeConEmu);
+  feed("p1", "\x1b]9;3 tests failed in suite\x07");
+  check(
+    "digit-leading free text still toasts",
+    alertCount() === beforeConEmu + 1 && /3 tests failed/.test(T.alerts[alertCount() - 1].body),
+  );
+
+  // ── Scenario 4c: mid-turn output stall must NOT fire "finished" ──
+  // The 2026-07-06 ghost-notification loop: on ConPTY the byte stream goes
+  // silent for >3s mid-turn (hidden thinking, silent tool runs) with the
+  // working footer as the last thing painted. That silence must ride the
+  // longer stall window instead of alerting at 3s.
+  T.activeContext = { workspaceId: "ws2", tabId: "elsewhere" };
+  feed("p4", "\x1b]633;E;claude\x07");
+  feed("p4", "Claude Code v2.1.170\r\n");
+  feed("p4", "✻ Percolating… (2s · ↓ 10 tokens)");
+  await sleep(1700);
+  feed("p4", "✻ Percolating… (4s · ↓ 80 tokens)"); // footer is the LAST paint before silence
+  const beforeStall = alertCount();
+  await sleep(4600); // > TURN_QUIET_MS + sweep margin — the old code ghosted here
+  check("footer-then-silence (mid-turn stall) did not alert at the 3s window", alertCount() === beforeStall);
+  // The turn resumes, then genuinely finishes with an idle repaint.
+  feed("p4", "✻ Percolating… (9s · ↓ 240 tokens)");
+  feed("p4", "\x1b[2K\x1b[GHere is the summary.\r\n> \r\n? for shortcuts");
+  await sleep(4500);
+  check("real finish after the stall alerted once", alertCount() === beforeStall + 1);
+
+  // ── Scenario 4d: no second "finished" without user input (stall-loop) ──
+  // The stream re-matching "working" is NOT a new turn. After a done alert,
+  // another working→quiet cycle with zero user input must be deduped; a
+  // keystroke into the pane re-arms it.
+  const beforeLoop = alertCount();
+  feed("p4", "✻ Cogitating… (2s · ↓ 12 tokens)");
+  await sleep(1700);
+  feed("p4", "✻ Cogitating… (4s · ↓ 50 tokens)");
+  feed("p4", "\x1b[2K\x1b[GMore of the same turn.\r\n> \r\n? for shortcuts");
+  await sleep(4500);
+  check("no second finished without user input (stall-loop regression)", alertCount() === beforeLoop);
+  mod.noteTerminalUserInput("p4"); // user types the next prompt
+  feed("p4", "✻ Brewing… (2s · ↓ 9 tokens)");
+  await sleep(1700);
+  feed("p4", "✻ Brewing… (4s · ↓ 22 tokens)");
+  feed("p4", "\x1b[2K\x1b[GDone again.\r\n> \r\n? for shortcuts");
+  await sleep(4500);
+  check("user input re-armed the done alert", alertCount() === beforeLoop + 1);
 
   // ── Scenario 5: agent exits mid-work (prompt marker) → immediate done ──
   feed("p2", "\x1b]633;E;claude --continue\x07");

@@ -62,6 +62,18 @@ const CARRY_MAX = 1_024;
 // missed repaints is a confident "stopped", while keeping the notification
 // within a beat of the actual finish.
 const TURN_QUIET_MS = 3_000;
+// Stall-aware quiet window. The 3s window above assumed the footer repaints
+// at least once per second for the WHOLE turn, but on ConPTY the byte stream
+// goes genuinely silent mid-turn whenever nothing visible changes (hidden
+// thinking, a long tool run with no output, API backoff) — and each such
+// stall used to fire a ghost "finished" (live-observed 2026-07-06: 13 ghost
+// dones for one pane in 10 minutes). Discriminator: on a REAL turn end the
+// last chunk before silence is the idle repaint (footer erased, input box
+// painted — no working pattern), while a stall goes silent with the working
+// footer as the last thing painted. Footer-then-silence therefore waits this
+// much longer before calling the turn done; idle-frame-then-silence keeps
+// the fast 3s window.
+const TURN_QUIET_STALL_MS = 15_000;
 const SWEEP_MS = 1_000;
 // Minimum working-phase duration before heuristic alerts fire. Codex paints
 // its full working footer ("(0s • esc to interrupt)") for ~half a second
@@ -106,6 +118,12 @@ interface PaneWatcher {
   workingSince: number;
   lastWorkingAt: number;
   lastOscNotifyAt: number;
+  // Whether the most recent chunk positively asserted "working" (footer
+  // pattern / structured OSC busy signal), as opposed to merely sustaining
+  // the phase with unclassified bytes. Drives the stall-aware quiet window:
+  // silence that began with the working footer still painting reads as a
+  // mid-turn stall, not a finish (see TURN_QUIET_STALL_MS).
+  lastChunkAssertedWorking: boolean;
   // Last RuntimeState pushed to the renderer chip via emitPaneState. Distinct
   // from `state` (the 3-value notifier vocabulary idle/working/blocked) — this
   // is the translated chip RuntimeState and exists purely to dedup the chip
@@ -198,6 +216,7 @@ export function syncTerminalNotifyPanes(input: {
       workingSince: 0,
       lastWorkingAt: 0,
       lastOscNotifyAt: 0,
+      lastChunkAssertedWorking: false,
       lastEmittedState: null,
     };
     watchers.set(entry.paneId, watcher);
@@ -296,9 +315,15 @@ function ensureSweep(): void {
       if (!w.attached && !w.awaitingSpawn) attach(w);
       if (w.excluded || !w.runtime) continue;
       if (w.state !== "working") continue;
-      if (now - w.lastWorkingAt < TURN_QUIET_MS) continue;
+      // Stall-aware window: silence right after a working-footer paint is a
+      // mid-turn stall until proven otherwise; silence after an idle repaint
+      // (no working pattern in the final chunk) is a confident finish.
+      const quietMs = w.lastChunkAssertedWorking ? TURN_QUIET_STALL_MS : TURN_QUIET_MS;
+      if (now - w.lastWorkingAt < quietMs) continue;
       w.state = "idle";
-      tanLog(`pane=${w.paneId} turn finished (quiet window elapsed, worked ${w.lastWorkingAt - w.workingSince}ms)`);
+      tanLog(
+        `pane=${w.paneId} turn finished (quiet ${quietMs}ms elapsed, stall-like=${w.lastChunkAssertedWorking}, worked ${w.lastWorkingAt - w.workingSince}ms)`,
+      );
       // The turn ended (no working repaints for the quiet window) → chip ready.
       // Emit BEFORE the workedLongEnough/OSC-mute toast gates below: those gate
       // the toast (a boot blip shouldn't ping the user), but the chip should
@@ -361,20 +386,37 @@ function newMatches(re: RegExp, text: string, minEnd: number): RegExpExecArray[]
 
 // Enter (or stay in) the working state, stamping the phase start on the
 // idle/blocked → working transition.
+//
+// Deliberately does NOT rearm the notify policy: a stream re-match of the
+// working footer is not proof of a NEW turn — a mid-turn output stall (>
+// quiet window of byte silence, common on ConPTY during hidden thinking or
+// silent tool runs) resumes through here too, and rearming on it let one
+// long turn fire a "finished" ghost per stall (the 2026-07-06 spam loop).
+// A new turn in a manual pane always starts with user input, so the rearm
+// lives in noteTerminalUserInput() instead; the policy's same-kind dedup
+// then caps heuristic dones at one per user interaction.
 function enterWorking(w: PaneWatcher, now: number): void {
   if (w.state !== "working") {
     w.workingSince = now;
     tanLog(`pane=${w.paneId} state -> working (was ${w.state})`);
-    // Real new activity resumed — re-arm the notify policy for this pane so
-    // the next done/blocked alert is a fresh event, not the previous turn's
-    // tail (Bug 1, Path B).
-    rearm(paneSourceKey(w.paneId));
     // Push the working chip state on the transition only (emitPaneState dedups
     // repeats anyway, so the per-chunk lastWorkingAt sustain below is cheap).
     emitPaneState(w, "working");
   }
   w.state = "working";
   w.lastWorkingAt = now;
+}
+
+// User keystrokes / injected input reached this pane's pty. This is the one
+// signal that genuinely means "a fresh turn may start" for a manual terminal
+// pane, so it (not the stream heuristic) clears the notify policy's dedup +
+// completion guard. Excluded (Cora worker) panes are driven programmatically
+// and alert through run-store instead, so they're skipped. Unknown panes
+// (chat backends, orchestration ptys) are a cheap Map-miss no-op.
+export function noteTerminalUserInput(paneId: string): void {
+  const w = watchers.get(paneId);
+  if (!w || w.excluded) return;
+  rearm(paneSourceKey(paneId));
 }
 
 // True when the current/just-ended working phase ran long enough to be a
@@ -394,7 +436,13 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
   // agent or not, mirroring a real terminal emulator.
   for (const m of newMatches(OSC9_G, text, carryLen)) {
     const message = m[1] ?? "";
-    if (message === "4" || message.startsWith("4;")) continue; // ConEmu progress, not a toast
+    // ConEmu overloaded OSC 9 with numeric subcommands (1..12): `9;4` is the
+    // progress protocol, `9;9;<cwd>` is cwd reporting (emitted per prompt by
+    // Windows Terminal shell-integration snippets and oh-my-posh), etc. None
+    // of them are toasts. A real iTerm2/growl notification is free text, so
+    // a bare 1–2 digit first param marks the ConEmu family; a message that
+    // merely STARTS with digits ("3 tests failed") doesn't match.
+    if (/^\d{1,2}(?:;|$)/.test(message)) continue;
     handleExplicitNotify(w, message.trim());
   }
   for (const m of newMatches(OSC777_G, text, carryLen)) {
@@ -422,6 +470,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       w.state = "idle";
       w.workingSince = 0;
       w.lastWorkingAt = 0;
+      w.lastChunkAssertedWorking = false;
       tanLog(`pane=${w.paneId} runtime sniffed: ${sniffed}`);
       // An agent was just detected but no working/idle pattern has classified
       // yet — show the chip as "starting" until the first real signal. The
@@ -432,6 +481,10 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
 
   if (w.runtime) {
     const now = Date.now();
+    // Set true below when THIS chunk positively asserts working (footer
+    // pattern / structured busy signal); the per-chunk value feeds the
+    // stall-aware quiet window in the sweep.
+    let chunkAssertedWorking = false;
 
     // Activity sustain: while a turn is running, ANY pty output counts as
     // "still working". Codex (live-captured v0.138.0) repaints its full
@@ -458,14 +511,20 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
         emitPaneState(w, "idle");
       } else {
         enterWorking(w, now);
+        chunkAssertedWorking = true;
       }
     }
     for (const m of newMatches(OSC21337_G, text, carryLen)) {
       const status = /(?:^|;)status=([^;]*)/.exec(m[1] ?? "")?.[1] ?? "";
       if (/working/i.test(status)) {
         enterWorking(w, now);
+        chunkAssertedWorking = true;
       } else if (/waiting/i.test(status)) {
         if (w.state === "working" && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
+          // A positive "waiting on the user" signal is never the previous
+          // turn's tail — stand the completion guard down (a prior done on
+          // this source would otherwise swallow it) so the alert delivers.
+          rearm(paneSourceKey(w.paneId));
           deliver(w, "blocked", null);
         }
         w.state = "blocked";
@@ -495,12 +554,19 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       // "needs you" is worse than an occasional boot-menu alert (which the
       // suppress-while-watching rule already swallows in the common case).
       if (w.state === "working" && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
+        // Same reasoning as the OSC 21337 waiting path: a blocked prompt in
+        // a live working phase means the agent genuinely stopped for the
+        // user, even if an earlier (possibly stall-ghost) done armed the
+        // completion guard on this source. Missing a real "needs you" is
+        // worse than an occasional duplicate, so rearm before delivering.
+        rearm(paneSourceKey(w.paneId));
         deliver(w, "blocked", null);
       }
       w.state = "blocked";
       emitPaneState(w, "blocked");
     } else if (cls === "working") {
       enterWorking(w, now);
+      chunkAssertedWorking = true;
     } else if (cls === "done") {
       // Positive completion line (e.g. "Session ended.") — alert without
       // waiting out the quiet window.
@@ -516,6 +582,10 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       // still up; the real "done" (TUI gone) is the exited block below.
       emitPaneState(w, "idle");
     }
+
+    // Remember whether this chunk's bytes positively asserted working — the
+    // sweep reads it to pick the normal vs stall quiet window.
+    w.lastChunkAssertedWorking = chunkAssertedWorking;
 
     // Agent exit: the shell prompt is back (spark.ps1's OSC 633/133 markers)
     // or the TUI left the alt screen. A turn that was still mid-work when the
@@ -545,6 +615,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       w.state = "idle";
       w.workingSince = 0;
       w.lastWorkingAt = 0;
+      w.lastChunkAssertedWorking = false;
       w.ring = "";
     }
   }

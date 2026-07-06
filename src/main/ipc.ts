@@ -28,6 +28,7 @@ import {
   setAttention,
 } from "./notify";
 import {
+  noteTerminalUserInput,
   syncTerminalNotifyPanes,
   type TerminalNotifyPaneEntry,
 } from "./terminal-agent-notify";
@@ -1225,12 +1226,18 @@ export function registerIpc(): void {
 
   ipcMain.handle("pty:write", async (_e, args: { id: string; data: string }) => {
     pty.write(args.id, args.data);
+    // User keystrokes are the notifier's "a fresh turn may start" signal —
+    // they re-arm the pane's alert dedup (see noteTerminalUserInput).
+    noteTerminalUserInput(args.id);
   });
 
   ipcMain.handle(
     "pty:inject",
     async (_e, args: { id: string; text: string; submit?: boolean }) => {
       pty.inject(args.id, args.text, { submit: args.submit ?? true });
+      // Injected prompts (slash commands, drag-drop paths) start turns the
+      // same way keystrokes do.
+      noteTerminalUserInput(args.id);
     },
   );
 
