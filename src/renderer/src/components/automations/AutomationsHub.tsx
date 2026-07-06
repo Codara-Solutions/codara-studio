@@ -4,6 +4,9 @@ import type {
   AutomationRunRecord,
   AutomationWorkerInfo,
   CreateScheduledJobInput,
+  GuardPredicate,
+  LoomGraph,
+  LoomNodeDef,
   RunState,
   ScheduledJob,
   UpdateScheduledJobInput,
@@ -22,8 +25,10 @@ import {
   loopSummary,
   triggerSummary,
   jobWorkerSummary,
+  workerSummary,
 } from "./presentation";
 import { ENGINE_TONE, LoomIcon } from "./flow/FlowNodes";
+import { graphForJob } from "./flow/model";
 import { useAutomationWorkers } from "./useAutomationWorkers";
 import WorkersView from "./WorkersView";
 import RunPeek from "./RunPeek";
@@ -1064,7 +1069,9 @@ function AutomationDetail({
         "Install Claude Code or Codex, then run the loom again."
       : null;
   return (
-    <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+    // flex:"1 0 auto" — fill the scroll pane's height so the last section's
+    // background runs to the bottom instead of leaving a dead void.
+    <div style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: "1 0 auto" }}>
       {/* Sticky header */}
       <div
         style={{
@@ -1185,8 +1192,9 @@ function AutomationDetail({
       </Section>
 
       {/* Read-only configuration — the actions for it (Edit / Delete) live in
-          the action bar up top with everything else. */}
-      <Section label="Configuration">
+          the action bar up top with everything else. Grows to absorb the
+          leftover height so the page reads as one composed surface. */}
+      <Section label="Configuration" grow>
         <LoopConfigSummary job={job} />
       </Section>
     </div>
@@ -1345,14 +1353,24 @@ function ActionBar({
 function Section({
   label,
   count,
+  grow,
   children,
 }: {
   label: string;
   count?: number;
+  // Grow to fill the leftover column height (for the LAST section, so the
+  // detail never ends in a dead void).
+  grow?: boolean;
   children: React.ReactNode;
 }): React.ReactElement {
   return (
-    <div style={{ borderBottom: "1px solid var(--rule-soft)" }}>
+    <div
+      style={
+        grow
+          ? { flex: "1 0 auto", display: "flex", flexDirection: "column" }
+          : { borderBottom: "1px solid var(--rule-soft)" }
+      }
+    >
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 16px 4px" }}>
         <span className="spark-eyebrow">{label}</span>
         {typeof count === "number" && (
@@ -1361,7 +1379,7 @@ function Section({
           </span>
         )}
       </div>
-      <div style={{ padding: "4px 16px 14px" }}>{children}</div>
+      <div style={{ padding: "4px 16px 14px", ...(grow ? { flex: 1 } : {}) }}>{children}</div>
     </div>
   );
 }
@@ -1762,6 +1780,116 @@ function HistoryTimeline({
 
 // ── Loop config summary ──────────────────────────────────────────────────────
 
+// Entry-first walk (BFS along forward edges, back-edges skipped, unreachable
+// leftovers appended) so the config cards read in execution order.
+function orderedNodes(graph: LoomGraph): LoomNodeDef[] {
+  const seen = new Set<string>();
+  const out: LoomNodeDef[] = [];
+  const queue = [...graph.entryNodeIds];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const node = graph.nodes.find((n) => n.id === id);
+    if (!node) continue;
+    out.push(node);
+    for (const e of graph.edges) {
+      if (e.from === id && !e.backEdge) queue.push(e.to);
+    }
+  }
+  for (const n of graph.nodes) if (!seen.has(n.id)) out.push(n);
+  return out;
+}
+
+function predicateSummary(p: GuardPredicate): string {
+  switch (p.type) {
+    case "phrase":
+      return `phrase "${p.phrase}"`;
+    case "tests":
+      return p.command ? `tests · ${p.command}` : "tests pass";
+    case "gitClean":
+      return "git clean";
+    case "command":
+      return `command · ${p.command}`;
+    case "agentSignal":
+      return p.want === "done" ? "agent says done" : "agent says continue";
+  }
+}
+
+// One card per graph node — a multi-worker loom has one prompt and one engine
+// PER worker, so a single flat "Prompt" row would lie about what runs.
+function NodeConfigCard({ node }: { node: LoomNodeDef }): React.ReactElement {
+  const tone =
+    node.kind === "worker"
+      ? ENGINE_TONE[node.worker.engine] ?? "var(--rule-strong)"
+      : node.kind === "guard"
+        ? "var(--ok)"
+        : "var(--info)";
+  const title =
+    node.label || (node.kind === "worker" ? "Worker" : node.kind === "guard" ? "Guard" : "Merge");
+  const meta =
+    node.kind === "worker"
+      ? workerSummary(node.worker)
+      : node.kind === "guard"
+        ? predicateSummary(node.predicate)
+        : node.joinMode === "all"
+          ? "waits for all branches"
+          : "first branch wins";
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 10,
+        padding: "9px 12px",
+        borderRadius: "var(--radius-surface)",
+        border: "1px solid var(--rule-soft)",
+        background: "var(--panel)",
+        boxShadow: `inset 3px 0 0 ${tone}`,
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          flex: "0 0 20px",
+          width: 20,
+          height: 20,
+          marginTop: 1,
+          borderRadius: 6,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          border: `1px solid color-mix(in oklch, ${tone} 26%, var(--rule-soft))`,
+          background: `color-mix(in oklch, ${tone} 9%, var(--panel-2))`,
+        }}
+      >
+        <LoomIcon kind={node.kind} tone={tone} size={12} />
+      </span>
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 }}>
+          <span
+            style={{ fontSize: 12, fontWeight: 600, color: "var(--ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+            title={title}
+          >
+            {title}
+          </span>
+          <span className="spark-mono" style={{ flex: "0 0 auto", fontSize: 10, color: "var(--muted)" }}>
+            {meta}
+          </span>
+        </div>
+        {node.kind === "worker" && (
+          <div
+            className="spark-mono"
+            style={{ fontSize: 11, color: "var(--ink-dim)", whiteSpace: "pre-wrap", maxHeight: 132, overflow: "auto" }}
+          >
+            {node.prompt || <span style={{ color: "var(--muted-2)" }}>—</span>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function LoopConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
   // Tolerate malformed persisted jobs (loop without stop) — the scheduler
   // backfills on read, but a bad record must never take down the renderer.
@@ -1773,12 +1901,11 @@ function LoopConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
   if (stop.untilGitClean) chips.push("git clean");
   if (stop.untilPhrase) chips.push(`phrase: ${stop.untilPhrase}`);
   if (stop.untilCommand) chips.push("custom cmd");
-  const template = job.prompt?.template ?? job.input.initialUserNote ?? "";
+  const nodes = orderedNodes(graphForJob(job));
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <KeyVal k="Trigger" v={triggerSummary(job.trigger)} />
       <KeyVal k="Loop" v={loopSummary(job.loop)} />
-      <KeyVal k="Worker" v={jobWorkerSummary(job)} />
       <div style={{ display: "flex", gap: 8 }}>
         <span className="spark-eyebrow" style={{ flex: "0 0 72px", paddingTop: 3 }}>
           Stops
@@ -1795,15 +1922,17 @@ function LoopConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
           )}
         </div>
       </div>
+      {/* The pipeline, node by node in execution order — each worker with ITS
+          engine and ITS prompt (the old flat Worker/Prompt rows collapsed a
+          multi-worker loom into one misleading line). */}
       <div style={{ display: "flex", gap: 8 }}>
         <span className="spark-eyebrow" style={{ flex: "0 0 72px", paddingTop: 3 }}>
-          Prompt
+          Pipeline
         </span>
-        <div
-          className="spark-mono"
-          style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--ink-dim)", whiteSpace: "pre-wrap", maxHeight: 96, overflow: "auto" }}
-        >
-          {template || <span style={{ color: "var(--muted-2)" }}>—</span>}
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+          {nodes.map((n) => (
+            <NodeConfigCard key={n.id} node={n} />
+          ))}
         </div>
       </div>
     </div>
