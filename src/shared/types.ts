@@ -2341,11 +2341,15 @@ export type LoomEngine = "claude" | "codex";
 
 /** Per-loom worker configuration (the Worker node in the flow editor). */
 export interface LoomWorkerConfig {
-  /** "auto" = the agent finishing iteration N picks N+1's engine/model via
-   *  spark_request_next_iteration; validated against installed runtimes.
-   *  Auto's first pass resolves claude-if-installed, else codex. */
+  /** The CLI engine that runs this worker. New looms always pin a concrete
+   *  engine ("claude"|"codex") — the editor and the architect never emit "auto".
+   *  "auto" is retained ONLY for runtime tolerance of looms persisted before that
+   *  change; resolveWorker maps a legacy "auto" to claude-if-installed, else
+   *  codex. Model/effort are likewise concrete on new looms; undefined means a
+   *  legacy blank that resolveWorker treats as the CLI default. */
   engine: LoomEngine | "auto";
-  /** Engine-native model id (AgentRuntimeModel.id). Undefined = CLI default. */
+  /** Engine-native model id (AgentRuntimeModel.id). Undefined = legacy blank
+   *  (CLI default); new looms always set a concrete id. */
   model?: string;
   effort?: AgentEffortLevel;
   /** Hard per-iteration wall-clock ceiling enforced by the loop watchdog,
@@ -2619,10 +2623,10 @@ export interface AutomationState {
   nextFireAt?: string; // cadence/cron: ISO; drives the left-list sub-line
   lastStopReason?: AutomationStopReason;
   pendingNextPrompt?: string; // agent-supplied next instruction (from the tool)
-  /** Validated agent handoff for the next iteration; honored only when
-   *  worker.engine === "auto" (a pinned engine always wins). Consumed once.
-   *  `engine` may be absent for an effort-only handoff — auto resolution still
-   *  picks the engine, the steering only pins effort/model. */
+  /** Validated agent handoff for the next iteration, honored regardless of the
+   *  pinned engine ("auto" no longer exists as a gate). Consumed once. `engine`
+   *  may be absent for an effort-only handoff — the loom's own engine is kept and
+   *  only effort/model are steered. */
   pendingNextWorker?: { engine?: LoomEngine; model?: string; effort?: AgentEffortLevel };
   /** Persisted mirror of the in-memory agent signal — survives a restart
    *  that lands between worker-finish and onTerminal. Read-once. */

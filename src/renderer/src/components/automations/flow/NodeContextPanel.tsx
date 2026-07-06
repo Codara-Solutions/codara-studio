@@ -13,6 +13,8 @@ import { DEFAULT_ITERATION_TIMEOUT_MINUTES } from "@shared/types";
 import { usePreferences } from "../../../preferences/usePreferences";
 import { Check, Field, Segmented } from "../FormKit";
 import {
+  DEFAULT_ENGINE_MODEL,
+  DEFAULT_WORKER_EFFORT,
   installedEngines,
   upstreamNodeIds,
   TRIGGER_ID,
@@ -362,14 +364,13 @@ function WorkerForm({
     onPatchNodeData(node.id, { worker: { ...w, ...patch } });
 
   const installed = installedEngines(runtimes);
-  const engineOptions: { value: LoomEngine | "auto"; label: string }[] = [
-    { value: "auto", label: "Auto" },
-    ...(["claude", "codex"] as LoomEngine[])
-      .filter((e) => installed.has(e))
-      .map((e) => ({ value: e, label: e === "claude" ? "Claude" : "Codex" })),
-  ];
+  // Engine is claude|codex only — "auto" is gone. Always offer both so an
+  // uninstalled engine can still be selected (a badge warns it isn't installed).
+  const engineOptions: { value: LoomEngine; label: string }[] = (["claude", "codex"] as LoomEngine[]).map(
+    (e) => ({ value: e, label: e === "claude" ? "Claude" : "Codex" }),
+  );
   const { preferences } = usePreferences();
-  const runtime = w.engine !== "auto" ? runtimes.find((r) => r.kind === w.engine) : undefined;
+  const runtime = runtimes.find((r) => r.kind === w.engine);
   // Fable 5 gate (default off): hide it from the loom worker model dropdown
   // unless opted in via Settings, matching the chat composer picker. With the
   // pref off, launchWorkerAttempt downgrades any lingering fable hint to Opus.
@@ -415,42 +416,57 @@ function WorkerForm({
       </Field>
 
       <Group label="Engine — who runs this node">
-        <Segmented options={engineOptions} value={w.engine} onChange={(v) => setWorker({ engine: v, model: undefined, effort: undefined })} />
-        {installed.size === 0 && (
+        <Segmented
+          options={engineOptions}
+          // Node data is concretized on load, so engine is always claude|codex
+          // here; the cast just drops the vestigial "auto" from the stored type.
+          value={w.engine as LoomEngine}
+          onChange={(v) =>
+            setWorker({ engine: v, model: DEFAULT_ENGINE_MODEL[v], effort: w.effort ?? DEFAULT_WORKER_EFFORT })
+          }
+        />
+        {installed.size === 0 ? (
           <span className="spark-badge is-danger" style={{ alignSelf: "flex-start" }}>
             Install Claude Code or Codex to run looms
           </span>
-        )}
-        {w.engine === "auto" ? (
-          <Hint>
-            The worker finishing this pass picks the next engine/model via
-            <span className="spark-mono"> spark_request_next_iteration</span>. Only installed engines are
-            honored. First pass uses Claude when installed, otherwise Codex.
-          </Hint>
-        ) : (
-          <div style={{ display: "flex", gap: 10 }}>
-            <Field label="Model" grow>
-              <select className="spark-select" value={w.model ?? ""} onChange={(e) => setWorker({ model: e.target.value || undefined, effort: undefined })}>
-                <option value="">CLI default</option>
-                {models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Effort" grow>
-              <select className="spark-select" value={w.effort ?? ""} onChange={(e) => setWorker({ effort: (e.target.value || undefined) as AgentEffortLevel | undefined })}>
-                <option value="">default</option>
-                {effortLevels.map((lvl) => (
-                  <option key={lvl} value={lvl}>
-                    {lvl}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          </div>
-        )}
+        ) : !installed.has(w.engine as LoomEngine) ? (
+          // The engine picked for THIS node isn't on this machine — the loom
+          // would die with engine-missing at run time. Warn here, at selection.
+          <span className="spark-badge is-danger" style={{ alignSelf: "flex-start" }}>
+            {w.engine === "claude" ? "Claude Code" : "Codex"} isn't installed — this node can't run
+          </span>
+        ) : null}
+        {/* Model + effort are required — every worker carries a concrete value,
+            never blank ("CLI default"/"default" no longer exist). A stored
+            value the current catalog doesn't offer (fable with the pref off,
+            an effort the model lacks) renders as an explicit "(unavailable)"
+            option instead of silently displaying the wrong selection. */}
+        <div style={{ display: "flex", gap: 10 }}>
+          <Field label="Model" grow>
+            <select className="spark-select" value={w.model ?? ""} onChange={(e) => setWorker({ model: e.target.value })}>
+              {w.model && !models.some((m) => m.id === w.model) && (
+                <option value={w.model}>{w.model} (unavailable)</option>
+              )}
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Effort" grow>
+            <select className="spark-select" value={w.effort ?? ""} onChange={(e) => setWorker({ effort: e.target.value as AgentEffortLevel })}>
+              {w.effort && !effortLevels.includes(w.effort) && (
+                <option value={w.effort}>{w.effort} (unavailable)</option>
+              )}
+              {effortLevels.map((lvl) => (
+                <option key={lvl} value={lvl}>
+                  {lvl}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
         <Field label="Per-pass timeout (minutes)">
           <input
             className="spark-input spark-mono"

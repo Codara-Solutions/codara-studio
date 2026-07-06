@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import type { NotificationCenterEntry, ResolvedRunQuestion, RunQuestionOption } from "@shared/types";
 import { NotifyGlyphSvg } from "../components/Toast";
 import { answerRunQuestion } from "./answers";
-import { accentVar, kindMeta } from "./kinds";
+import { accentVar, isCompletionKind, kindMeta } from "./kinds";
 import type { NavigateTo } from "./routing";
 import { useNotificationCenter } from "./useNotificationCenter";
 
@@ -245,13 +245,15 @@ export default function NotificationCenter({
                     entry={entry}
                     onOpen={() => {
                       // Opening an entry is the user ACTING on it: route to the
-                      // target, then drop it from the center so handled items
-                      // don't pile up (replaces the old mark-read-and-keep).
-                      // Guard on navigateTo (as the toast does) so we never
-                      // destroy an entry without actually routing anywhere.
+                      // target, then — for a completion record (automation/run
+                      // finished/failed) — mark it READ so it stays in the center
+                      // as history; for an actionable prompt, drop it so handled
+                      // items don't pile up. Guard on navigateTo (as the toast
+                      // does) so we never touch an entry without routing anywhere.
                       if (!navigateTo) return;
                       navigateTo(entry.target);
-                      center.remove(entry.id);
+                      if (isCompletionKind(entry.kind)) center.markRead(entry.id);
+                      else center.remove(entry.id);
                       setOpen(false);
                     }}
                     onActed={() => center.remove(entry.id)}

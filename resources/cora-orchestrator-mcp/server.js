@@ -111,16 +111,16 @@ const LOOP_SCHEMA = {
 const WORKER_SCHEMA = {
   type: "object",
   description:
-    "Per-iteration worker (CLI agent) config. engine 'auto' lets the finishing agent pick the next engine/model via spark_request_next_iteration; 'claude'/'codex' pin it.",
-  required: ["engine"],
+    "Per-iteration worker (CLI agent) config. You MUST always set engine, model, AND effort explicitly — there is no 'auto' engine and no CLI-default model/effort; a worker missing any of the three is rejected.",
+  required: ["engine", "model", "effort"],
   properties: {
-    engine: { type: "string", enum: ["auto", "claude", "codex"] },
+    engine: { type: "string", enum: ["claude", "codex"], description: "Which CLI runs this worker — pick 'claude' or 'codex'." },
     model: {
       type: "string",
       description:
-        "Engine-native model id (e.g. claude-opus-4-8, gpt-5.5). Omit for the CLI default. NOTE: 'claude-fable-5' (Fable 5, top-tier) is permitted ONLY when the user explicitly asked for it AND the Fable setting is enabled in Codara Studio settings; otherwise it is downgraded to claude-opus-4-8.",
+        "Engine-native model id (REQUIRED): 'claude-opus-4-8' or 'claude-sonnet-5' for claude, 'gpt-5.5' for codex. NOTE: 'claude-fable-5' (Fable 5, top-tier) is permitted ONLY when the user explicitly asked for it AND the Fable setting is enabled in Codara Studio settings; otherwise it is downgraded to claude-opus-4-8.",
     },
-    effort: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh", "max"] },
+    effort: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh", "max"], description: "Reasoning effort (REQUIRED)." },
     timeoutMinutes: { type: "number", description: "Hard per-iteration wall-clock ceiling in minutes." },
   },
   additionalProperties: false,
@@ -525,7 +525,7 @@ const EXECUTE_TOOLS = [
   {
     name: "spark_request_next_iteration",
     description:
-      "For Codara AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextEngine/nextModel/nextEffort — honored only when the automation's engine is set to Auto, and only for installed engines (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
+      "For Codara AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextEngine/nextModel/nextEffort — honored for the next pass regardless of the loom's pinned engine, and only for installed engines (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
     inputSchema: {
       type: "object",
       properties: {
@@ -547,7 +547,7 @@ const EXECUTE_TOOLS = [
           type: "string",
           enum: ["claude", "codex"],
           description:
-            "Optional: which CLI agent runs the NEXT iteration. Honored only for Auto-engine automations; ignored (with a warning) when the engine is pinned or not installed.",
+            "Optional: which CLI agent runs the NEXT iteration. Honored for the next pass regardless of the loom's pinned engine; ignored (with a warning) when the requested engine is not installed.",
         },
         nextModel: {
           type: "string",

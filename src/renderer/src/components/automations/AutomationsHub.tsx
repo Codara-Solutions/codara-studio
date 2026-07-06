@@ -18,7 +18,7 @@ import {
   loopSummary,
   statusWord,
   triggerSummary,
-  workerSummary,
+  jobWorkerSummary,
 } from "./presentation";
 import { useAutomationWorkers } from "./useAutomationWorkers";
 import WorkersView from "./WorkersView";
@@ -86,12 +86,10 @@ export default function AutomationsHub({
   // no renderer-callable toast API, so we surface errors locally.
   const [actionError, setActionError] = useState<string | null>(null);
   // Live board — the "whiteboard" view of the selected loom's run (full flow
-  // canvas + in-canvas worker dock). Auto-opens when the selected loom is
-  // running; a manual close is remembered per loom for the DURATION of that
-  // run only (dismissal is dropped when the loom leaves running/blocked), so
-  // iterations never re-open it against the user but the next fresh run does.
+  // canvas + in-canvas worker terminals). NEVER auto-opens (user feedback:
+  // "I should go to it myself") — only the explicit affordances (the Board /
+  // Live board buttons) open it, and closing it is always manual too.
   const [boardOpen, setBoardOpen] = useState(false);
-  const dismissedBoardsRef = useRef<Set<string>>(new Set());
 
   const workers = useAutomationWorkers(active);
   const workspaceWorkers = useMemo(
@@ -188,58 +186,19 @@ export default function AutomationsHub({
 
   const selected = useMemo(() => jobs.find((j) => j.id === selectedId) ?? null, [jobs, selectedId]);
 
-  // ── live board open/close policy ────────────────────────────────────────
-  const selectedLive =
-    selected != null &&
-    (selected.state.status === "running" || selected.state.status === "blocked");
-  const selectedLiveRef = useRef(selectedLive);
-  selectedLiveRef.current = selectedLive;
-
-  // Dismissals expire the moment their loom is no longer mid-run — checked
-  // against EVERY jobs refresh (not just the selected loom), so a run that
-  // ends (and the next one that starts) while ANOTHER loom is selected still
-  // gets its fresh auto-open on reselect.
-  useEffect(() => {
-    const dismissed = dismissedBoardsRef.current;
-    if (dismissed.size === 0) return;
-    for (const id of [...dismissed]) {
-      const job = jobs.find((j) => j.id === id);
-      if (!job || (job.state.status !== "running" && job.state.status !== "blocked")) {
-        dismissed.delete(id);
-      }
-    }
-  }, [jobs]);
-
-  // Selection change always resets the board (a different loom's board is a
-  // different surface); the auto-open effect below re-opens it if the new
-  // selection is mid-run.
+  // ── live board open/close ───────────────────────────────────────────────
+  // Selection change always closes the board (a different loom's board is a
+  // different surface); the new selection's board waits for an explicit open.
   useEffect(() => {
     setBoardOpen(false);
   }, [selectedId]);
 
-  useEffect(() => {
-    if (!selected || !selectedLive) return;
-    // "When it's running I want to see it in the whiteboard": surface the
-    // live board as the primary view of a running loom, unless the user
-    // closed it for this run (dismissals expire with the run — see above).
-    if (!dismissedBoardsRef.current.has(selected.id)) setBoardOpen(true);
-    // selected.id (not the object) so per-iteration job refreshes don't refire.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected?.id, selectedLive]);
-
   const openLiveBoard = useCallback(() => {
-    const id = selectedIdRef.current;
-    if (id) dismissedBoardsRef.current.delete(id);
     switchSubTab("looms");
     setBoardOpen(true);
   }, [switchSubTab]);
 
   const closeLiveBoard = useCallback(() => {
-    const id = selectedIdRef.current;
-    // Record the dismissal only while the run is in flight: closing a
-    // FINISHED run's board must not suppress the next run's auto-open (the
-    // expiry effect above may already have run for this loom by then).
-    if (id && selectedLiveRef.current) dismissedBoardsRef.current.add(id);
     setBoardOpen(false);
   }, []);
 
@@ -729,6 +688,10 @@ export default function AutomationsHub({
             style={{
               position: "absolute",
               inset: 0,
+              // Above the detail pane's sticky header (zIndex 2) — without
+              // this the detail header paints THROUGH the board's header (the
+              // "two headers fighting" overlap the user reported).
+              zIndex: 5,
               display: "flex",
               // "inherit", not visible/auto — same punch-through reason as the
               // editor overlay above.
@@ -739,6 +702,7 @@ export default function AutomationsHub({
             <LiveBoard
               key={selected.id}
               job={selected}
+              runtimes={runtimes}
               liveRun={liveRun}
               workers={boardWorkers}
               shown={active && boardShowing}
@@ -837,7 +801,7 @@ const AutomationRow = React.memo(function AutomationRow({
         <span
           className="spark-mono"
           style={{ fontSize: 10, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
-          title={`${triggerSummary(job.trigger)} · ${loopSummary(job.loop)} · ${workerSummary(job.worker)}`}
+          title={`${triggerSummary(job.trigger)} · ${loopSummary(job.loop)} · ${jobWorkerSummary(job)}`}
         >
           {triggerSummary(job.trigger)} · {loopSummary(job.loop)}
         </span>
@@ -889,6 +853,7 @@ function AutomationDetail({
   onAnswer: (runId: string, answer: string) => void;
 }): React.ReactElement {
   const status = job.state.status;
+  const running = status === "running" || status === "blocked";
   // Resolve whether the authoring architect run still exists so a deleted
   // session doesn't leave a dead "Open chat" button. One cheap getRun per loom
   // that has a back-pointer; re-checked when the pointer changes.
@@ -957,9 +922,45 @@ function AutomationDetail({
             {job.name}
           </div>
           <div className="spark-mono" style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 2 }}>
-            {triggerSummary(job.trigger)} · {loopSummary(job.loop)} · {workerSummary(job.worker)}
+            {triggerSummary(job.trigger)} · {loopSummary(job.loop)} · {jobWorkerSummary(job)}
           </div>
         </div>
+        {/* The board's ONLY entry points are explicit clicks like this one —
+            it never auto-opens. Glowing while live so a running loom invites
+            you in; plain "Board" otherwise (the board shows the last run). */}
+        <button
+          type="button"
+          className="spark-btn"
+          style={
+            running
+              ? {
+                  height: 26,
+                  padding: "0 12px",
+                  fontSize: 11.5,
+                  borderColor: "var(--accent-edge)",
+                  background: "var(--accent-soft)",
+                  boxShadow: "0 0 14px var(--accent-glow)",
+                }
+              : { height: 26, padding: "0 12px", fontSize: 11.5 }
+          }
+          onClick={onOpenLiveBoard}
+          title={
+            running
+              ? "Watch this run on the whiteboard — live graph + worker terminals"
+              : "Open the whiteboard — the loom graph with its last run's state"
+          }
+        >
+          {running ? (
+            <>
+              <span aria-hidden style={{ color: "var(--accent)", marginRight: 6 }}>
+                ●
+              </span>
+              Live board
+            </>
+          ) : (
+            "Board"
+          )}
+        </button>
         <span
           className="spark-badge"
           style={{
@@ -1396,7 +1397,7 @@ function LoopConfigSummary({ job, onEdit, onDelete }: { job: ScheduledJob; onEdi
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <KeyVal k="Trigger" v={triggerSummary(job.trigger)} />
       <KeyVal k="Loop" v={loopSummary(job.loop)} />
-      <KeyVal k="Worker" v={workerSummary(job.worker)} />
+      <KeyVal k="Worker" v={jobWorkerSummary(job)} />
       <div style={{ display: "flex", gap: 8 }}>
         <span className="spark-eyebrow" style={{ flex: "0 0 72px", paddingTop: 3 }}>
           Stops

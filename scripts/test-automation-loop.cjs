@@ -611,7 +611,9 @@ async function main() {
     L.pending.length = 0;
     await completeRun(rid, { summary: "SPARK_LOOP_DONE" });
 
-    // Pinned loom: same signal, engine must NOT change.
+    // Pinned loom: the handoff is honored even on a pinned engine — "auto" no
+    // longer exists as a gate, so a validated handoff steers the next pass
+    // directly (and no rejection event exists anymore).
     L.launches.length = 0;
     L.pending.length = 0;
     const pinned = await sched.createJob({
@@ -632,10 +634,10 @@ async function main() {
     }));
     await completeRun(rid, { summary: "no sentinel" });
     const launch2 = L.launches[L.launches.length - 1];
-    ok("pinned loom ignores the handoff (engine stays claude)", launch2.engine === "claude");
+    ok("pinned loom honors the handoff (engine becomes codex)", launch2.engine === "codex");
     ok(
-      "rejected handoff emits automation.handoff_rejected",
-      (L.events ?? []).some((e) => e.type === "automation.handoff_rejected"),
+      "no handoff_rejected event is emitted anymore",
+      !(L.events ?? []).some((e) => e.type === "automation.handoff_rejected"),
     );
     rid = nextPending();
     L.pending.length = 0;

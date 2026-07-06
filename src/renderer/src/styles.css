@@ -1835,3 +1835,38 @@ a { color: inherit; }
 [aria-hidden="true"] .loom-flow .loom-node {
   visibility: hidden !important;
 }
+
+/* ── Loom silhouettes ─────────────────────────────────────────────────────
+   Shared shape language for every loom surface (editor canvas, LiveBoard,
+   run graph, mini flow): the SILHOUETTE tells the role.
+     · trigger → a disc (power source: energy enters here)
+     · worker  → a soft card wearing its engine's color
+     · guard   → a rounded diamond (a decision)
+     · merge   → a capsule (branches flow back together)
+   Engine identity: claude wears coral, codex wears cyan — on medallions,
+   worker port rails, and run-graph worker cards. Tokens re-tint for light
+   below, mirroring the --lift-hi convention. */
+:root {
+  --engine-claude: oklch(0.7 0.09 45);
+  --engine-codex: oklch(0.72 0.07 220);
+}
+:root[data-theme-mode="light"] {
+  --engine-claude: oklch(0.55 0.1 45);
+  --engine-codex: oklch(0.48 0.08 225);
+}
+/* Role icon tile. Tone arrives via --md-tone (set inline per role / engine);
+   everything else derives from it so one rule serves all roles. Deliberately
+   flat and quiet — the tile identifies, it does not decorate. */
+.loom-medallion {
+  --md-tone: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  color: var(--md-tone);
+  background: color-mix(in oklch, var(--md-tone) 9%, var(--panel-2));
+  border: 1px solid color-mix(in oklch, var(--md-tone) 22%, var(--rule-soft));
+}

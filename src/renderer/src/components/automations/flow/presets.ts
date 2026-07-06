@@ -2,8 +2,10 @@ import type { AutomationLoop, AutomationTrigger, LoomGraph, LoomWorkerConfig } f
 
 // Preset gallery for the node-flow editor. Each preset stamps the whole draft
 // (trigger + loop + worker + prompt) so a new loom is one click + one prompt
-// tweak away. Workers default to "auto" — the loom runs on whichever CLI agent
-// is installed, and agent-driven loops may hand off between them.
+// tweak away. Workers carry a concrete engine/model/effort default (Claude +
+// claude-sonnet-5 + medium) — "auto"/blank no longer exist. On a Codex-only
+// machine the engine select shows an "not installed" badge and the user
+// switches it to Codex.
 
 export interface LoomPreset {
   id: string;
@@ -18,7 +20,7 @@ export interface LoomPreset {
   graph?: LoomGraph;
 }
 
-const AUTO: LoomWorkerConfig = { engine: "auto" };
+const DEFAULT_WORKER: LoomWorkerConfig = { engine: "claude", model: "claude-sonnet-5", effort: "medium" };
 
 // ── example graphs ───────────────────────────────────────────────────────────
 
@@ -32,7 +34,7 @@ export const GRAPH_FIX_UNTIL_TESTS: LoomGraph = {
       kind: "worker",
       label: "Fix failures",
       ui: { x: 320, y: 60 },
-      worker: AUTO,
+      worker: DEFAULT_WORKER,
       prompt:
         "Run the tests, read the failures, and fix the root cause. Make one focused change, then stop.",
     },
@@ -61,7 +63,7 @@ export const GRAPH_FANOUT_REVIEW: LoomGraph = {
       kind: "worker",
       label: "Reviewer A",
       ui: { x: 320, y: 20 },
-      worker: AUTO,
+      worker: DEFAULT_WORKER,
       prompt: "Review the latest diff for correctness bugs. List concrete findings.",
     },
     {
@@ -69,7 +71,7 @@ export const GRAPH_FANOUT_REVIEW: LoomGraph = {
       kind: "worker",
       label: "Reviewer B",
       ui: { x: 320, y: 200 },
-      worker: AUTO,
+      worker: DEFAULT_WORKER,
       prompt: "Review the latest diff for simplification and reuse opportunities.",
     },
     {
@@ -84,7 +86,7 @@ export const GRAPH_FANOUT_REVIEW: LoomGraph = {
       kind: "worker",
       label: "Apply fixes",
       ui: { x: 880, y: 110 },
-      worker: AUTO,
+      worker: DEFAULT_WORKER,
       prompt:
         "Two reviewers reported on the diff. Combine {{node:a}} and {{node:b}} and apply the high-confidence fixes.",
     },
@@ -104,7 +106,7 @@ export const PRESETS: LoomPreset[] = [
     blurb: "The model keeps looping until it says it's done — bounded by your caps.",
     trigger: { kind: "manual" },
     loop: { kind: "agent", stop: { maxIterations: 20, budgetUsd: 5 } },
-    worker: AUTO,
+    worker: DEFAULT_WORKER,
     promptHint:
       "Improve the codebase one focused change at a time. When you've made a change, end your summary with SPARK_LOOP_CONTINUE to keep going, or SPARK_LOOP_DONE when there's nothing left worth doing.",
   },
@@ -114,7 +116,7 @@ export const PRESETS: LoomPreset[] = [
     blurb: "Worker → tests guard; loops back on failure until green.",
     trigger: { kind: "manual" },
     loop: { kind: "until", stop: { untilTestsPass: true, testCommand: "npm test", maxIterations: 15 } },
-    worker: AUTO,
+    worker: DEFAULT_WORKER,
     promptHint: "Find and fix the failing tests. Run the tests, read the failures, and fix the root cause.",
     graph: GRAPH_FIX_UNTIL_TESTS,
   },
@@ -124,7 +126,7 @@ export const PRESETS: LoomPreset[] = [
     blurb: "Two reviewers in parallel → merge → apply fixes.",
     trigger: { kind: "manual" },
     loop: { kind: "once", stop: {} },
-    worker: AUTO,
+    worker: DEFAULT_WORKER,
     promptHint: "Review the latest diff.",
     graph: GRAPH_FANOUT_REVIEW,
   },
@@ -134,7 +136,7 @@ export const PRESETS: LoomPreset[] = [
     blurb: "Run once every night on a cron schedule.",
     trigger: { kind: "cron", expr: "0 2 * * *" },
     loop: { kind: "once", stop: {} },
-    worker: AUTO,
+    worker: DEFAULT_WORKER,
     promptHint: "Summarize what changed in this repo today and write it to NOTES.md.",
   },
   {
@@ -143,7 +145,7 @@ export const PRESETS: LoomPreset[] = [
     blurb: "Fire when files change in a folder.",
     trigger: { kind: "folder", path: "", events: ["add", "change"] },
     loop: { kind: "once", stop: {} },
-    worker: AUTO,
+    worker: DEFAULT_WORKER,
     promptHint: "A file changed at {{file}}. Review it and take the appropriate action.",
   },
   {
@@ -152,7 +154,7 @@ export const PRESETS: LoomPreset[] = [
     blurb: "Loop back-to-back until the budget runs out.",
     trigger: { kind: "continuous" },
     loop: { kind: "continuous", stop: { budgetUsd: 5, maxIterations: 20 } },
-    worker: AUTO,
+    worker: DEFAULT_WORKER,
     promptHint: "Make one small, safe improvement to the codebase. Iteration {{iteration}}.",
   },
   {
@@ -161,7 +163,7 @@ export const PRESETS: LoomPreset[] = [
     blurb: "A manual one-shot you can shape from scratch.",
     trigger: { kind: "manual" },
     loop: { kind: "once", stop: {} },
-    worker: AUTO,
+    worker: DEFAULT_WORKER,
     promptHint: "",
   },
 ];

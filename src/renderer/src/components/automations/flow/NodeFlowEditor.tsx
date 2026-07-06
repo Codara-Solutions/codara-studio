@@ -30,6 +30,7 @@ import {
   buildLoop,
   buildTrigger,
   buildWorker,
+  concreteWorker,
   defaultNodeData,
   draftFromJob,
   emptyDraft,
@@ -37,6 +38,7 @@ import {
   freshId,
   graphForJob,
   graphFromFlow,
+  installedEngines,
   sinkWorkerNode,
   validateGraph,
   type FlowEdge,
@@ -81,13 +83,20 @@ function Editor({
 }: NodeFlowEditorProps): React.ReactElement {
   const editing = Boolean(initial);
 
+  // Installed engines drive every worker's concrete engine/model/effort defaults
+  // (a fresh node, a legacy "auto"/blank one loaded for editing, or a preset all
+  // resolve against this). "auto" and blank no longer exist as worker choices.
+  const installed = useMemo(() => installedEngines(runtimes), [runtimes]);
+
   // The draft holds name + trigger + loop + (worker defaults). The GRAPH lives
   // in ReactFlow state. Worker node data carries its own LoomWorkerConfig.
-  const [draft, setDraft] = useState<LoomDraft>(() => (initial ? draftFromJob(initial) : emptyDraft()));
+  const [draft, setDraft] = useState<LoomDraft>(() =>
+    initial ? draftFromJob(initial, installed) : emptyDraft(installed),
+  );
 
   const initialFlow = useMemo(() => {
     if (initial) {
-      const flow = flowFromGraph(initial);
+      const flow = flowFromGraph(initial, installed);
       // Open with the trigger selected so its config panel is showing.
       flow.nodes = flow.nodes.map((n) => ({ ...n, selected: n.id === TRIGGER_ID }));
       return flow;
@@ -107,7 +116,7 @@ function Editor({
         id: wid,
         type: "worker",
         position: { x: 340, y: 120 },
-        data: defaultNodeData("worker") as FlowNodeData & Record<string, unknown>,
+        data: defaultNodeData("worker", installed) as FlowNodeData & Record<string, unknown>,
       },
     ];
     const edges: FlowEdge[] = [{ id: `e-trigger-${wid}`, source: TRIGGER_ID, target: wid, type: "loom" }];
@@ -273,7 +282,7 @@ function Editor({
         id: newId,
         type: kind,
         position: pos,
-        data: defaultNodeData(kind) as FlowNodeData & Record<string, unknown>,
+        data: defaultNodeData(kind, installed) as FlowNodeData & Record<string, unknown>,
         selected: true,
       };
       // Append the new node selected; clear selection from everything else so
@@ -299,22 +308,23 @@ function Editor({
       setPalette(null);
       markDirty();
     },
-    [palette, nodes, rf, setNodes, setEdges, markDirty],
+    [palette, nodes, rf, setNodes, setEdges, markDirty, installed],
   );
 
   // ── presets ──────────────────────────────────────────────────────────────────
   const applyPreset = useCallback(
     (preset: LoomPreset) => {
       // Stamp trigger + loop into the draft, and the graph into the canvas.
+      const pw = concreteWorker(preset.worker, installed);
       setDraft((d) => {
         const next: LoomDraft = {
           ...d,
           trigger: { ...d.trigger, kind: preset.trigger.kind },
           loop: { ...d.loop, kind: preset.loop.kind },
           worker: {
-            engine: preset.worker.engine,
-            model: preset.worker.model ?? "",
-            effort: preset.worker.effort ?? "",
+            engine: pw.engine,
+            model: pw.model,
+            effort: pw.effort,
             timeoutMin: preset.worker.timeoutMinutes !== undefined ? String(preset.worker.timeoutMinutes) : "",
           },
         };
@@ -337,7 +347,7 @@ function Editor({
         prompt: { template: preset.promptHint },
         input: { initialUserNote: preset.promptHint },
       } as unknown as ScheduledJob;
-      const flow = flowFromGraph(presetJob);
+      const flow = flowFromGraph(presetJob, installed);
       setNodes(flow.nodes.map((n) => ({ ...n, selected: n.id === TRIGGER_ID })));
       setEdges(flow.edges);
       setPresetsOpen(false);
@@ -346,7 +356,7 @@ function Editor({
       setLoopOpen(false);
       requestAnimationFrame(() => rf.fitView?.({ padding: 0.2, duration: 200 }));
     },
-    [cwd, rf, setNodes, setEdges],
+    [cwd, rf, setNodes, setEdges, installed],
   );
 
   // ── validation ────────────────────────────────────────────────────────────

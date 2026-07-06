@@ -56,10 +56,65 @@ export interface LoopDraft {
 }
 
 export interface WorkerDraft {
-  engine: LoomEngine | "auto";
-  model: string; // "" = CLI default
-  effort: "" | AgentEffortLevel;
+  engine: LoomEngine;
+  model: string; // concrete engine-native model id — never blank
+  effort: AgentEffortLevel; // concrete — never blank
   timeoutMin: string; // "" = engine default (60)
+}
+
+// Every worker must carry a concrete engine, model, and effort — "auto" and
+// blank ("CLI default"/"default") no longer exist as choices. These are the
+// pre-selections a fresh worker (or a legacy "auto"/blank one loaded for
+// editing) resolves to, mirroring automation-loop's runtime resolution so what
+// the editor shows matches what would run.
+export const DEFAULT_ENGINE_MODEL: Record<LoomEngine, string> = {
+  claude: "claude-sonnet-5",
+  codex: "gpt-5.5",
+};
+export const DEFAULT_WORKER_EFFORT: AgentEffortLevel = "medium";
+
+/** A worker config guaranteed concrete: a real engine (never "auto") and a
+ *  non-blank model/effort. */
+export type ConcreteWorkerConfig = LoomWorkerConfig & {
+  engine: LoomEngine;
+  model: string;
+  effort: AgentEffortLevel;
+};
+
+/** Resolve a possibly-legacy worker config (engine "auto", or a blank
+ *  model/effort) to concrete display values. Mirrors automation-loop.resolveWorker:
+ *  "auto" → claude when installed, else codex (else claude as a last resort so
+ *  the select is never blank); a blank model/effort fills the engine's concrete
+ *  default. The returned config never has engine "auto" nor a blank model/effort. */
+export function concreteWorker(
+  worker: LoomWorkerConfig,
+  installed: Set<LoomEngine>,
+): ConcreteWorkerConfig {
+  const engine: LoomEngine =
+    worker.engine === "claude" || worker.engine === "codex"
+      ? worker.engine
+      : installed.has("claude")
+        ? "claude"
+        : installed.has("codex")
+          ? "codex"
+          : "claude";
+  return {
+    ...worker,
+    engine,
+    model: worker.model && worker.model.trim() ? worker.model : DEFAULT_ENGINE_MODEL[engine],
+    effort: worker.effort ?? DEFAULT_WORKER_EFFORT,
+  };
+}
+
+/** The concrete default worker for a fresh node/loom, engine chosen from what's
+ *  installed (claude-if-installed, else codex). */
+export function defaultWorker(installed: Set<LoomEngine>): ConcreteWorkerConfig {
+  return concreteWorker({ engine: "auto" }, installed);
+}
+
+function workerDraftFrom(worker: LoomWorkerConfig, installed: Set<LoomEngine>): Pick<WorkerDraft, "engine" | "model" | "effort"> {
+  const c = concreteWorker(worker, installed);
+  return { engine: c.engine, model: c.model, effort: c.effort };
 }
 
 export interface LoomDraft {
@@ -69,7 +124,8 @@ export interface LoomDraft {
   worker: WorkerDraft;
 }
 
-export function emptyDraft(): LoomDraft {
+export function emptyDraft(installed: Set<LoomEngine> = new Set()): LoomDraft {
+  const w = workerDraftFrom({ engine: "auto" }, installed);
   return {
     name: "",
     trigger: {
@@ -96,12 +152,12 @@ export function emptyDraft(): LoomDraft {
       untilCommand: "",
       template: "",
     },
-    worker: { engine: "auto", model: "", effort: "", timeoutMin: "" },
+    worker: { engine: w.engine, model: w.model, effort: w.effort, timeoutMin: "" },
   };
 }
 
-export function draftFromJob(job: ScheduledJob): LoomDraft {
-  const d = emptyDraft();
+export function draftFromJob(job: ScheduledJob, installed: Set<LoomEngine> = new Set()): LoomDraft {
+  const d = emptyDraft(installed);
   d.name = job.name;
   d.trigger.kind = job.trigger.kind;
   if (job.trigger.kind === "cron") {
@@ -136,23 +192,30 @@ export function draftFromJob(job: ScheduledJob): LoomDraft {
   d.loop.untilCommand = job.loop.stop.untilCommand ?? "";
   d.loop.template = job.prompt?.template ?? job.input.initialUserNote ?? "";
 
-  d.worker.engine = job.worker?.engine ?? "auto";
-  d.worker.model = job.worker?.model ?? "";
-  d.worker.effort = job.worker?.effort ?? "";
+  const jw = workerDraftFrom(job.worker ?? { engine: "auto" }, installed);
+  d.worker.engine = jw.engine;
+  d.worker.model = jw.model;
+  d.worker.effort = jw.effort;
   d.worker.timeoutMin =
     job.worker?.timeoutMinutes !== undefined ? String(job.worker.timeoutMinutes) : "";
   return d;
 }
 
-export function applyPresetToDraft(draft: LoomDraft, preset: LoomPreset, cwd: string): LoomDraft {
+export function applyPresetToDraft(
+  draft: LoomDraft,
+  preset: LoomPreset,
+  cwd: string,
+  installed: Set<LoomEngine> = new Set(),
+): LoomDraft {
+  const pw = workerDraftFrom(preset.worker, installed);
   const next: LoomDraft = {
     ...draft,
     trigger: { ...draft.trigger, kind: preset.trigger.kind },
     loop: { ...draft.loop, kind: preset.loop.kind },
     worker: {
-      engine: preset.worker.engine,
-      model: preset.worker.model ?? "",
-      effort: preset.worker.effort ?? "",
+      engine: pw.engine,
+      model: pw.model,
+      effort: pw.effort,
       timeoutMin: preset.worker.timeoutMinutes !== undefined ? String(preset.worker.timeoutMinutes) : "",
     },
   };
@@ -239,11 +302,8 @@ export function buildLoop(d: LoopDraft): AutomationLoop {
 }
 
 export function buildWorker(d: WorkerDraft): LoomWorkerConfig {
-  const worker: LoomWorkerConfig = { engine: d.engine };
-  if (d.engine !== "auto") {
-    if (d.model.trim()) worker.model = d.model.trim();
-    if (d.effort) worker.effort = d.effort;
-  }
+  // engine/model/effort are always concrete in the draft — persist them all.
+  const worker: LoomWorkerConfig = { engine: d.engine, model: d.model.trim(), effort: d.effort };
   const t = Number(d.timeoutMin);
   if (d.timeoutMin.trim() && Number.isFinite(t) && t > 0) worker.timeoutMinutes = Math.round(t);
   return worker;
@@ -290,7 +350,7 @@ export function validateNode(
   // worker
   const installed = installedEngines(ctx.runtimes);
   if (installed.size === 0) return "Install Claude Code or Codex to run looms.";
-  if (draft.worker.engine !== "auto" && !installed.has(draft.worker.engine)) {
+  if (!installed.has(draft.worker.engine)) {
     return `${draft.worker.engine === "claude" ? "Claude Code" : "Codex"} is not installed/enabled.`;
   }
   return null;
@@ -350,13 +410,13 @@ export function freshId(prefix: string): string {
   return `${prefix}${Date.now().toString(36).slice(-4)}${(idSeq % 1000).toString(36)}`;
 }
 
-export function defaultNodeData(kind: LoomGraphNodeKind): FlowNodeData {
+export function defaultNodeData(kind: LoomGraphNodeKind, installed: Set<LoomEngine> = new Set()): FlowNodeData {
   switch (kind) {
     case "worker":
       return {
         kind: "worker",
         label: "Worker",
-        worker: { engine: "auto" },
+        worker: defaultWorker(installed),
         prompt: "",
       };
     case "guard":
@@ -382,6 +442,7 @@ const ORIGIN_Y = 40;
  *  node.ui when present; missing ones get a simple layered auto-layout. */
 export function flowFromGraph(
   job: ScheduledJob,
+  installed: Set<LoomEngine> = new Set(),
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
   const graph = graphForJob(job);
   const layout = layeredPositions(graph);
@@ -407,7 +468,7 @@ export function flowFromGraph(
       id: n.id,
       type: n.kind,
       position: pos,
-      data: nodeDataFromDef(n),
+      data: nodeDataFromDef(n, installed),
     });
   }
 
@@ -436,13 +497,18 @@ export function flowFromGraph(
   return { nodes, edges };
 }
 
-function nodeDataFromDef(n: LoomNodeDef): FlowNodeData & Record<string, unknown> {
+function nodeDataFromDef(
+  n: LoomNodeDef,
+  installed: Set<LoomEngine> = new Set(),
+): FlowNodeData & Record<string, unknown> {
   switch (n.kind) {
     case "worker":
       return {
         kind: "worker",
         label: n.label ?? "Worker",
-        worker: n.worker,
+        // Concretize legacy "auto"/blank workers for display so what the editor
+        // shows matches what would run. Persisted only when the user next saves.
+        worker: concreteWorker(n.worker, installed),
         prompt: n.prompt,
         isolate: n.isolate,
         retry: n.retry,

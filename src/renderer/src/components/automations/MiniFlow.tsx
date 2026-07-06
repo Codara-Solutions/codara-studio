@@ -2,11 +2,13 @@ import React, { useMemo } from "react";
 import type { LoomNodeDef, ScheduledJob } from "@shared/types";
 import { triggerSummary } from "./presentation";
 import { graphForJob } from "./flow/model";
+import { ENGINE_TONE, LoomIcon } from "./flow/FlowNodes";
 
 // Read-only miniature of the loom's GRAPH for the detail view: the trigger
 // pinned at the left, then the worker/guard/merge nodes laid out left-to-right
-// with their edges. Clicking anywhere opens the editor. The live worker node(s)
-// pulse while a pass is running.
+// with their edges, in the same silhouette language as the editor (role icon +
+// tone; the trigger chip's left edge is rounded). Clicking anywhere opens the
+// editor. Live worker chips hold a steady accent border — never a pulse.
 
 const NODE_W = 116;
 const NODE_H = 38;
@@ -19,7 +21,8 @@ interface Placed {
   id: string;
   col: number;
   row: number;
-  glyph: string;
+  kind: "trigger" | "worker" | "guard" | "merge";
+  tone: string;
   eyebrow: string;
   text: string;
 }
@@ -57,13 +60,21 @@ export default function MiniFlow({
     };
     const rowCounter = new Map<number, number>();
     const placedNodes: Placed[] = [
-      { id: "__trigger__", col: 0, row: 0, glyph: "⚡", eyebrow: "Trigger", text: triggerSummary(job.trigger) },
+      {
+        id: "__trigger__",
+        col: 0,
+        row: 0,
+        kind: "trigger",
+        tone: "var(--warn)",
+        eyebrow: "Trigger",
+        text: triggerSummary(job.trigger),
+      },
     ];
     for (const n of graph.nodes) {
       const col = depth(n.id);
       const row = rowCounter.get(col) ?? 0;
       rowCounter.set(col, row + 1);
-      placedNodes.push({ id: n.id, col, row, glyph: glyphFor(n), eyebrow: eyebrowFor(n), text: textFor(n) });
+      placedNodes.push({ id: n.id, col, row, kind: n.kind, tone: toneFor(n), eyebrow: eyebrowFor(n), text: textFor(n) });
     }
     const maxCol = Math.max(0, ...placedNodes.map((p) => p.col));
     const maxRow = Math.max(0, ...placedNodes.map((p) => p.row));
@@ -110,8 +121,12 @@ export default function MiniFlow({
         })}
       </svg>
       {placed.map((p) => {
+        const liveChip = live && p.id !== "__trigger__" && graph.nodes.find((n) => n.id === p.id)?.kind === "worker";
         const pos = { x: PAD_X + p.col * COL_DX, y: PAD_Y + p.row * ROW_DY };
-        const pulse = live && p.id !== "__trigger__" && graph.nodes.find((n) => n.id === p.id)?.kind === "worker";
+        const radius =
+          p.kind === "trigger"
+            ? "999px var(--radius-control) var(--radius-control) 999px"
+            : "var(--radius-control)";
         return (
           <button
             key={p.id}
@@ -125,28 +140,28 @@ export default function MiniFlow({
               width: NODE_W,
               height: NODE_H,
               display: "flex",
-              flexDirection: "column",
-              alignItems: "flex-start",
-              justifyContent: "center",
-              gap: 1,
-              padding: "0 9px",
+              alignItems: "center",
+              gap: 6,
+              padding: p.kind === "trigger" ? "0 8px 0 10px" : "0 8px",
               textAlign: "left",
               cursor: "default",
-              borderRadius: "var(--radius-control)",
-              border: `1px solid ${pulse ? "var(--accent-edge)" : "var(--rule-soft)"}`,
-              background: pulse ? "color-mix(in oklch, var(--accent) 10%, var(--panel))" : "var(--panel)",
-              animation: pulse ? "spark-pulse 1.4s ease-in-out infinite" : undefined,
+              borderRadius: radius,
+              border: `1px solid ${liveChip ? "var(--accent-edge)" : "var(--rule-soft)"}`,
+              background: liveChip ? "color-mix(in oklch, var(--accent) 10%, var(--panel))" : "var(--panel)",
+              boxShadow: liveChip ? "0 0 10px var(--accent-glow)" : undefined,
               transition: "border-color var(--motion-fast) var(--ease-out)",
             }}
             onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--rule-strong)")}
-            onMouseLeave={(e) => (e.currentTarget.style.borderColor = pulse ? "var(--accent-edge)" : "var(--rule-soft)")}
+            onMouseLeave={(e) => (e.currentTarget.style.borderColor = liveChip ? "var(--accent-edge)" : "var(--rule-soft)")}
           >
-            <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
-              <span aria-hidden style={{ fontSize: 9, color: "var(--accent)" }}>{p.glyph}</span>
-              <span className="spark-eyebrow" style={{ fontSize: 8 }}>{p.eyebrow}</span>
+            <span aria-hidden style={{ display: "inline-flex", flex: "0 0 auto" }}>
+              <LoomIcon kind={p.kind} tone={p.tone} size={12} />
             </span>
-            <span className="spark-mono" style={{ fontSize: 9.5, color: "var(--ink-dim)", maxWidth: "100%", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              {p.text}
+            <span style={{ display: "flex", flexDirection: "column", gap: 0, minWidth: 0 }}>
+              <span className="spark-eyebrow" style={{ fontSize: 7.5 }}>{p.eyebrow}</span>
+              <span className="spark-mono" style={{ fontSize: 9.5, color: "var(--ink-dim)", maxWidth: "100%", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {p.text}
+              </span>
             </span>
           </button>
         );
@@ -155,10 +170,10 @@ export default function MiniFlow({
   );
 }
 
-function glyphFor(n: LoomNodeDef): string {
-  if (n.kind === "worker") return n.worker.engine === "codex" ? "◆" : n.worker.engine === "claude" ? "◇" : "⟲";
-  if (n.kind === "guard") return "◈";
-  return "⊕";
+function toneFor(n: LoomNodeDef): string {
+  if (n.kind === "worker") return ENGINE_TONE[n.worker.engine] ?? "var(--muted)";
+  if (n.kind === "guard") return "var(--ok)";
+  return "var(--info)";
 }
 function eyebrowFor(n: LoomNodeDef): string {
   return n.kind.charAt(0).toUpperCase() + n.kind.slice(1);

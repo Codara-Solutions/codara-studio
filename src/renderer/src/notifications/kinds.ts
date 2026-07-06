@@ -38,6 +38,22 @@ export function kindMeta(kind: NotifyKind): NotifyKindMeta {
   return NOTIFY_KIND_META[kind] ?? FALLBACK_META;
 }
 
+// Completion records — "an automation/run finished (or failed)". Acting on one
+// (clicking its toast/entry through to the target) marks it READ but KEEPS it in
+// the center as history, so a finished automation stays visible after the fact.
+// Actionable kinds (questions/blocked/needs-input) are still REMOVED when acted
+// on, so handled prompts don't pile up.
+const COMPLETION_KINDS: ReadonlySet<NotifyKind> = new Set<NotifyKind>([
+  "automation.finished",
+  "automation.failed",
+  "run.complete",
+  "run.failed",
+]);
+
+export function isCompletionKind(kind: NotifyKind): boolean {
+  return COMPLETION_KINDS.has(kind);
+}
+
 // The accent color a notification renders with — the left status rule, the icon
 // chip tint/border, and the glyph color all derive from it. Automation.* kinds
 // share a dedicated violet family (var(--automation)) so they're instantly

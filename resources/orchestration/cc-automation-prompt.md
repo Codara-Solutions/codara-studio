@@ -19,8 +19,12 @@ A Cora automation (internally a "loom") is a recurring agent job bound to this w
   - kinds: `once`, `count`, `cadence` (gap `everyMs` between iteration starts), `until`, `agent` (the worker decides each pass), `continuous`.
   - `stop` caps (ALWAYS set sensible caps): `maxIterations` (default 20 for agent/continuous), `budgetUsd`, `untilTestsPass` (+ `testCommand`, default `npm test`), `untilGitClean`, `untilPhrase`, `untilCommand`.
   - `isolate`: false (default) = iterations chain in the SAME run carrying context; true = a fresh run per iteration.
-- **worker** — the CLI agent each iteration runs: `engine` (`auto`/`claude`/`codex`), optional `model`, `effort` (`minimal`..`max`), `timeoutMinutes`.
-  - With `engine: "auto"`, the agent finishing iteration N can pick N+1's engine/model/effort via handoff (see below).
+- **worker** — the CLI agent each iteration runs. You MUST always set all three of `engine`, `model`, and `effort` explicitly on every worker — there is no "auto" engine and no default/blank model or effort:
+  - `engine`: `claude` or `codex` (pick one).
+  - `model`: `claude-opus-4-8` or `claude-sonnet-5` for `claude`; `gpt-5.5` for `codex`.
+  - `effort`: one of `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
+  - optional `timeoutMinutes`.
+  - A spec that omits engine/model/effort (or sets `engine: "auto"`) on any worker is rejected — set concrete values.
 - **prompt_template** — the instruction each iteration runs. Supports template tokens:
   - `{{var}}` — a named variable, `{{node:id}}` — a named node's last output, `{{incoming}}` — merged output of all inbound edges.
 - **graph** (optional) — a node graph for multi-step looms. Omit it for a simple single-worker loom (Cora synthesizes one worker node from `prompt_template` + `worker`). Nodes:
@@ -31,12 +35,12 @@ A Cora automation (internally a "loom") is a recurring agent job bound to this w
 
 ## Handoffs and chaining
 
-- A worker can hand off to a **different engine/model/effort for the next iteration** by calling `spark_request_next_iteration` with `nextEngine`/`nextModel`/`nextEffort` — honored only when the worker's `engine` is `"auto"`.
+- A worker can hand off to a **different engine/model/effort for the next iteration** by calling `spark_request_next_iteration` with `nextEngine`/`nextModel`/`nextEffort`. The handoff steers the next pass's worker directly (only installed engines are honored); it applies whatever the loom's pinned engine is.
 - Automations chain to each other via the `onFinishOf` trigger: automation B fires when automation A finishes.
 
 ## Model policy
 
-- Default to letting `engine: "auto"` choose, or pin `claude`/`codex` when the user expresses a preference.
+- Always choose a concrete `engine` (`claude` or `codex`), `model`, and `effort` for every worker — never leave any of them unset. Pick `claude` unless the user prefers `codex` or the task fits Codex better; default `model` to `claude-sonnet-5` (`gpt-5.5` for codex) and `effort` to `medium`, adjusting up for harder tasks.
 - The model `claude-fable-5` (Fable 5, top-tier) is the most capable and most expensive option. Use it in an automation's `worker.model` **only when the user explicitly asks for it AND the Fable setting is enabled in Codara Studio settings** — never by default. When the setting is off, Codara downgrades any fable hint to `claude-opus-4-8`.
 
 ## Your tools

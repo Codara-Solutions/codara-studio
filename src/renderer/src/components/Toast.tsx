@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { NotifyEvent, ResolvedRunQuestion, RunQuestionOption } from "@shared/types";
-import { accentVar, kindMeta, type NotifyGlyph } from "../notifications/kinds";
+import { accentVar, isCompletionKind, kindMeta, type NotifyGlyph } from "../notifications/kinds";
 import { answerRunQuestion } from "../notifications/answers";
 import type { NavigateTo } from "../notifications/routing";
 
@@ -17,8 +17,10 @@ import type { NavigateTo } from "../notifications/routing";
 // timer while unfocused. The user can also click the close button to drop one
 // early. Click anywhere else on the card routes the event's NavigationTarget
 // through navigateTo — this lets a "needs you" alert deep-link the user
-// straight to the chat, terminal pane, or loom that needs them — and, because
-// that counts as acting on it, also removes the matching center entry.
+// straight to the chat, terminal pane, or loom that needs them. Acting on the
+// card then MARKS READ a completion record (automation/run finished/failed) so
+// it stays in the center as history, or REMOVES an actionable prompt
+// (question/blocked/needs-input) so handled items don't pile up.
 
 const AUTO_DISMISS_MS = 15_000;
 // Cap simultaneous toasts so a misbehaving run that fires many alerts
@@ -253,11 +255,17 @@ function ToastCard({
       onClick={() => {
         if (!clickable) return;
         navigateTo?.(toast.target);
-        // Routing to the target is the user ACTING on the notification —
-        // remove its center entry so a handled item doesn't linger as unread
-        // in the bell. (The X button and auto-expiry deliberately do NOT do
-        // this: a merely-hidden toast stays as a "missed" unread entry.)
-        void window.spark.notifications.remove(toast.id).catch(() => undefined);
+        // Routing to the target is the user ACTING on the notification. For a
+        // completion record (automation/run finished/failed) mark it READ so it
+        // remains in the center as history; for an actionable prompt remove it so
+        // a handled item doesn't linger. (The X button and auto-expiry
+        // deliberately do NEITHER: a merely-hidden toast stays as a "missed"
+        // unread entry.)
+        if (isCompletionKind(toast.kind)) {
+          void window.spark.notifications.markRead(toast.id).catch(() => undefined);
+        } else {
+          void window.spark.notifications.remove(toast.id).catch(() => undefined);
+        }
         onClose();
       }}
       onMouseEnter={() => setHover(true)}

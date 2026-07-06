@@ -1,8 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Background, BackgroundVariant, Controls, Handle, Position, ReactFlow } from "@xyflow/react";
-import type { Edge, Node, NodeProps } from "@xyflow/react";
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  Handle,
+  Position,
+  ReactFlow,
+  getBezierPath,
+} from "@xyflow/react";
+import type { Edge, EdgeProps, Node, NodeProps } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import type {
+  AgentRuntimeDiagnostic,
   AutomationWorkerInfo,
   RunState,
   ScheduledJob,
@@ -15,43 +24,49 @@ import {
   fmtClock,
   fmtElapsed,
   fmtUsd,
+  loopSummary,
   statusWord,
   triggerSummary,
+  jobWorkerSummary,
 } from "./presentation";
-import { TRIGGER_ID, flowFromGraph, graphForJob } from "./flow/model";
+import { TRIGGER_ID, flowFromGraph, graphForJob, installedEngines } from "./flow/model";
+import { ENGINE_TONE, LoomIcon, Medallion, TopRule } from "./flow/FlowNodes";
 import {
   hasCanonicalWorkerPane,
   subscribeCanonicalWorkerPanes,
 } from "./worker-pane-registry";
 
 // LiveBoard — the "whiteboard" view of ONE running loom: the loom graph on a
-// full read-only ReactFlow canvas with LIVE execution state (the executing
-// node pulses, settled nodes tint, the active edges animate), plus a worker
-// dock INSIDE the canvas viewport hosting the live worker terminal(s).
+// full read-only ReactFlow canvas with LIVE execution state. Live edges carry
+// the house "electricity" (the run-graph's travelling accent dash — see
+// .spark-wire-flow in styles.css); the executing node holds a steady accent
+// glow. No breathing/scale pulses anywhere on the board. Clicking a worker
+// node opens a floating terminal sheet INSIDE the board that mirrors that
+// worker's pty.
 //
-// Terminal hosting: the dock panes are READ-ONLY MIRRORS of the same pty the
-// Workers grid's canonical WorkerPane is attached to (TerminalPane readOnly +
-// the pty.spawn `mirror` flag). A mirror provably cannot garble the TUI: it
-// forwards no keystrokes, sends no pty.resize (neither renderer-side nor via
-// main's existing-session spawn branch — the mirror flag skips that resize),
-// never pauses/detaches the session on unmount, and never captures/replays a
-// flattened snapshot. The canonical pane's behavior is bit-identical whether
-// or not a mirror exists. Mount is gated on worker-pane-registry so the
-// canonical pane always attaches FIRST (it owns the raw-tail replay and the
-// pty's dimensions). Trade-off accepted: a mirror that attaches mid-session
-// starts from the TUI's next repaint rather than the full frame — the full
-// canonical terminal is one click away ("Workers grid →").
+// Terminal hosting: the sheet's panes are READ-ONLY MIRRORS of the same pty
+// the Workers grid's canonical WorkerPane is attached to (TerminalPane
+// readOnly + the pty.spawn `mirror` flag). A mirror provably cannot garble the
+// TUI: it forwards no keystrokes, sends no pty.resize (neither renderer-side
+// nor via main's existing-session spawn branch — the mirror flag skips that
+// resize), never pauses/detaches the session on unmount, and never captures/
+// replays a flattened snapshot. The canonical pane's behavior is bit-identical
+// whether or not a mirror exists. Mount is gated on worker-pane-registry so
+// the canonical pane always attaches FIRST (it owns the raw-tail replay and
+// the pty's dimensions). Trade-off accepted: a mirror that attaches
+// mid-session starts from the TUI's next repaint rather than the full frame —
+// the full canonical terminal is one click away ("Workers grid →").
 //
-// The dock is an untransformed overlay positioned within the canvas CONTAINER
-// (never inside ReactFlow's zoom/pan transform layer — scaled transforms break
-// xterm rendering and mouse targeting). It is full-bleed horizontally so the
-// mirror xterm is at least as wide as any canonical grid cell / focus pane
-// (same hub rect minus identical 4px body padding), keeping mirror cols >=
-// pty cols in every layout — a narrower mirror would wrap the TUI's full-width
-// frame lines. Collapsing the dock hides it via visibility (geometry kept), so
-// hidden mirrors are never resized; and because mirrors are readOnly, even a
-// dock drag-resize can only ever re-fit the mirrors locally — the pty itself
-// is never SIGWINCH'd from here.
+// The sheet is an untransformed overlay positioned within the canvas
+// CONTAINER (never inside ReactFlow's zoom/pan transform layer — scaled
+// transforms break xterm rendering and mouse targeting). It is full-bleed
+// horizontally so the mirror xterm is at least as wide as any canonical grid
+// cell / focus pane (same hub rect minus identical 4px body padding), keeping
+// mirror cols >= pty cols in every layout — a narrower floating card would
+// wrap the TUI's full-width frame lines. Closing the sheet hides it via
+// visibility (geometry kept), so hidden mirrors are never resized; and
+// because mirrors are readOnly, even a sheet drag-resize can only ever re-fit
+// the mirrors locally — the pty itself is never SIGWINCH'd from here.
 
 // Same attach-only placeholder shell contract as WorkersView / ChatPanel: the
 // pty already exists; with the readOnly mirror flag main refuses to spawn
@@ -68,8 +83,8 @@ const MIRROR_SHELL: ShellInfo = {
 // that mean the worker process is still going.
 const LIVE_ATTEMPT = new Set(["preparing", "prompt_ready", "launching", "running", "finishing"]);
 
-const DOCK_BAR_H = 34;
-const DOCK_MIN_H = 140;
+const SHEET_BAR_H = 34;
+const SHEET_MIN_H = 160;
 
 type LiveNodeStatus =
   | "pending"
@@ -86,14 +101,19 @@ interface LiveNodeDatum extends Record<string, unknown> {
   title: string;
   sub: string;
   status: LiveNodeStatus;
+  // Worker-only: which engine runs it (drives the runtime-colored card edge).
+  engine?: "claude" | "codex" | "auto";
   // Trigger-only: the loom is mid-pass, so the trigger has fired.
   fired?: boolean;
-  // This node's worker is the one focused in the dock.
+  // This node's worker is the one focused in the terminal sheet.
   docked?: boolean;
 }
 
 export interface LiveBoardProps {
   job: ScheduledJob;
+  // Installed CLI runtimes — resolves a legacy "auto"/blank worker to the same
+  // concrete engine/model the run actually uses, so the board never mislabels it.
+  runtimes: AgentRuntimeDiagnostic[];
   // The loom's live run (job.state.currentRunId). Null once the pass settles —
   // the board retains the last-seen run so the final state stays viewable.
   liveRun: RunState | null;
@@ -112,6 +132,7 @@ export interface LiveBoardProps {
 
 export default function LiveBoard({
   job,
+  runtimes,
   liveRun,
   workers,
   shown,
@@ -132,13 +153,14 @@ export default function LiveBoard({
   const status = job.state.status;
   const loomLive = status === "running" || status === "blocked";
 
-  // ── dock state ──────────────────────────────────────────────────────────
+  // ── terminal sheet state ────────────────────────────────────────────────
+  // Closed until the user clicks a worker node — the whiteboard opens clean.
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
-  const [dockH, setDockH] = useState(300);
-  // Track the canvas height so the dock body can be CLAMPED at render time —
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [sheetH, setSheetH] = useState(320);
+  // Track the canvas height so the sheet can be CLAMPED at render time —
   // without this, shrinking the window after a tall drag would leave the
-  // absolutely-positioned body poking above the canvas over the header.
+  // absolutely-positioned sheet covering the whole canvas.
   // (visibility:hidden keeps the canvas measurable, so this works while the
   // board is mounted-but-hidden too.)
   const [canvasH, setCanvasH] = useState(0);
@@ -150,22 +172,22 @@ export default function LiveBoard({
     setCanvasH(el.clientHeight);
     return () => ro.disconnect();
   }, []);
-  const maxDockH = canvasH > 0 ? Math.max(DOCK_MIN_H, canvasH - DOCK_BAR_H - 90) : null;
-  // Effective body height: the user's dragged height, window-shrink-clamped.
+  const maxSheetH = canvasH > 0 ? Math.max(SHEET_MIN_H, canvasH - 88) : null;
+  // Effective sheet height: the user's dragged height, window-shrink-clamped.
   // Clamping resizes the mirrors, but they are readOnly — only a local xterm
   // re-fit, never a SIGWINCH to the worker pty.
-  const dockBodyH = maxDockH === null ? dockH : Math.min(dockH, maxDockH);
-  const dockSizedRef = useRef(false);
-  // Size the dock once from the real canvas height (~42%). Never re-derived on
-  // later resizes — the user's drag height wins from then on.
+  const sheetBodyH = maxSheetH === null ? sheetH : Math.min(sheetH, maxSheetH);
+  const sheetSizedRef = useRef(false);
+  // Size the sheet once from the real canvas height (~46%). Never re-derived
+  // on later resizes — the user's drag height wins from then on.
   useEffect(() => {
-    if (dockSizedRef.current || canvasH <= 0) return;
-    dockSizedRef.current = true;
-    setDockH(Math.max(DOCK_MIN_H, Math.round(canvasH * 0.42)));
+    if (sheetSizedRef.current || canvasH <= 0) return;
+    sheetSizedRef.current = true;
+    setSheetH(Math.max(SHEET_MIN_H, Math.round(canvasH * 0.46)));
   }, [canvasH]);
 
   const [pickedAttemptId, setPickedAttemptId] = useState<string | null>(null);
-  // Focused dock worker: explicit pick while it still exists, else blocked
+  // Focused sheet worker: explicit pick while it still exists, else blocked
   // first (needs the user), else first live, else the newest lingering one.
   const current = useMemo<AutomationWorkerInfo | null>(() => {
     const picked = workers.find((w) => w.attemptId === pickedAttemptId);
@@ -188,28 +210,28 @@ export default function LiveBoard({
     return () => window.clearInterval(t);
   }, [shown, anyLive]);
 
-  // Dock height drag. Applies to the VISIBLE mirror only in effect — hidden
+  // Sheet height drag. Applies to the VISIBLE mirror only in effect — hidden
   // sibling mirrors share the same box and re-fit locally, but being readOnly
   // they can never push a resize to the pty.
   const dragRef = useRef<{ startY: number; startH: number } | null>(null);
   const onDragStart = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      // Drag from the VISUAL height (clamped), so a window-shrunk dock doesn't
-      // jump to its stored pre-shrink height on the first pointer move.
-      dragRef.current = { startY: e.clientY, startH: dockBodyH };
+      // Drag from the VISUAL height (clamped), so a window-shrunk sheet
+      // doesn't jump to its stored pre-shrink height on the first pointer move.
+      dragRef.current = { startY: e.clientY, startH: sheetBodyH };
       e.currentTarget.setPointerCapture(e.pointerId);
     },
-    [dockBodyH],
+    [sheetBodyH],
   );
   const onDragMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       const s = dragRef.current;
       if (!s) return;
-      const maxH = maxDockH ?? Math.max(DOCK_MIN_H, 600 - DOCK_BAR_H - 90);
-      const next = Math.min(maxH, Math.max(DOCK_MIN_H, s.startH + (s.startY - e.clientY)));
-      setDockH(next);
+      const maxH = maxSheetH ?? Math.max(SHEET_MIN_H, 600 - 88);
+      const next = Math.min(maxH, Math.max(SHEET_MIN_H, s.startH + (s.startY - e.clientY)));
+      setSheetH(next);
     },
-    [maxDockH],
+    [maxSheetH],
   );
   const onDragEnd = useCallback(() => {
     dragRef.current = null;
@@ -221,8 +243,9 @@ export default function LiveBoard({
     [job, run, workers],
   );
 
+  const installed = useMemo(() => installedEngines(runtimes), [runtimes]);
   const { nodes, edges } = useMemo(() => {
-    const flow = flowFromGraph(job);
+    const flow = flowFromGraph(job, installed);
     const liveNodes: Node<LiveNodeDatum>[] = flow.nodes.map((n) => {
       const d = n.data;
       let datum: LiveNodeDatum;
@@ -251,6 +274,7 @@ export default function LiveBoard({
           title: d.label || "Worker",
           sub: engineLine,
           status: statuses.get(n.id) ?? "pending",
+          engine: w.engine,
           docked: current?.nodeId === n.id,
         };
       } else if (d.kind === "guard") {
@@ -284,43 +308,40 @@ export default function LiveBoard({
       };
     });
 
+    // The house electricity treatment (not xyflow's stock dashdraw): each
+    // edge is a custom "flow" edge — a static base path plus, while live, the
+    // run-graph's travelling accent dash overlay (.spark-wire-flow).
     const liveEdges: Edge[] = flow.edges.map((e) => {
       const src = statuses.get(e.source);
       const tgt = statuses.get(e.target);
       const active =
         src === "running" || src === "blocked" || tgt === "running" || tgt === "blocked";
       const branch = e.data?.branch;
-      const stroke =
+      // tone: the color the live pulse travels in; rest: the static stroke.
+      const tone =
+        branch === "pass" ? "var(--ok)" : branch === "fail" ? "var(--danger)" : "var(--accent)";
+      const rest =
         branch === "pass"
           ? "var(--ok)"
           : branch === "fail"
             ? "var(--danger)"
-            : active
-              ? "var(--accent)"
-              : "var(--rule-strong)";
+            : "var(--rule-strong)";
       return {
         id: e.id,
         source: e.source,
         target: e.target,
         sourceHandle: e.sourceHandle,
-        // Default bezier edge; `animated` rides xyflow's stock dashdraw CSS,
-        // so live edges must NOT set an inline strokeDasharray (inline wins
-        // over the animation's dasharray). Back-edges keep their static dash.
-        animated: active,
-        style: {
-          stroke,
-          strokeWidth: active ? 2.25 : 1.75,
-          ...(e.data?.backEdge && !active ? { strokeDasharray: "5 4" } : {}),
-        },
+        type: "flow",
+        data: { live: active, backEdge: e.data?.backEdge, tone, rest },
         focusable: false,
         selectable: false,
       };
     });
 
     return { nodes: liveNodes, edges: liveEdges };
-  }, [job, statuses, loomLive, current?.nodeId]);
+  }, [job, statuses, loomLive, current?.nodeId, installed]);
 
-  // Clicking a running node focuses its worker's terminal in the dock.
+  // Clicking a running node opens its worker's mirror terminal in the sheet.
   const workersRef = useRef(workers);
   workersRef.current = workers;
   const onNodeClick = useCallback((_e: React.MouseEvent, node: Node) => {
@@ -332,14 +353,14 @@ export default function LiveBoard({
       (ws.length === 1 ? ws[0] : undefined);
     if (!w) return;
     setPickedAttemptId(w.attemptId);
-    setCollapsed(false);
+    setSheetOpen(true);
   }, []);
 
-  // Esc closes the board. CAPTURE + stopPropagation for the same reason as
-  // WorkersView's focus mode: a focused dock xterm would otherwise swallow
-  // Escape and forward it to the agent as an interrupt (the mirror is
-  // readOnly, so claiming Esc from it costs nothing). Exempt INPUTs and
-  // contenteditables: Esc mid-answer in the blocked strip (or the terminal
+  // Esc closes the sheet first, then the board. CAPTURE + stopPropagation for
+  // the same reason as WorkersView's focus mode: a focused sheet xterm would
+  // otherwise swallow Escape and forward it to the agent as an interrupt (the
+  // mirror is readOnly, so claiming Esc from it costs nothing). Exempt INPUTs
+  // and contenteditables: Esc mid-answer in the blocked strip (or the terminal
   // find overlay) must act on THAT field, not unmount the whole board and
   // discard the draft. xterm's hidden helper is a TEXTAREA, so it stays
   // claimed by this handler.
@@ -351,11 +372,12 @@ export default function LiveBoard({
       if (t instanceof HTMLElement && (t.tagName === "INPUT" || t.isContentEditable)) return;
       e.preventDefault();
       e.stopPropagation();
-      onClose();
+      if (sheetOpen) setSheetOpen(false);
+      else onClose();
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [shown, onClose]);
+  }, [shown, sheetOpen, onClose]);
 
   const [confirmStop, setConfirmStop] = useState(false);
   const dot = automationDotColor(status);
@@ -371,10 +393,10 @@ export default function LiveBoard({
         background: "var(--bg)",
       }}
     >
-      {/* ── header ─────────────────────────────────────────────────────── */}
+      {/* ── header — the ONE header: back, identity, stats, actions ──────── */}
       <div
         style={{
-          flex: "0 0 40px",
+          flex: "0 0 48px",
           display: "flex",
           alignItems: "center",
           gap: 10,
@@ -386,7 +408,7 @@ export default function LiveBoard({
         <button
           type="button"
           className="spark-btn"
-          style={{ height: 26, padding: "0 10px", fontSize: 11.5 }}
+          style={{ height: 26, padding: "0 10px", fontSize: 11.5, flex: "0 0 auto" }}
           onClick={onClose}
           title="Back to the loom detail (Esc)"
         >
@@ -400,32 +422,63 @@ export default function LiveBoard({
             height: 8,
             borderRadius: 999,
             background: dot,
-            boxShadow: `0 0 0 3px color-mix(in oklch, ${dot} 18%, transparent)`,
-            animation: status === "running" ? "spark-pulse 1.4s ease-in-out infinite" : undefined,
+            boxShadow: loomLive
+              ? `0 0 0 3px color-mix(in oklch, ${dot} 18%, transparent), 0 0 10px ${dot}`
+              : `0 0 0 3px color-mix(in oklch, ${dot} 18%, transparent)`,
           }}
         />
+        <div style={{ flex: "1 1 auto", minWidth: 60, display: "flex", flexDirection: "column", gap: 1 }}>
+          <span
+            style={{
+              fontSize: 13,
+              fontWeight: 700,
+              color: "var(--ink)",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+            title={job.name}
+          >
+            {job.name}
+          </span>
+          <span
+            className="spark-mono"
+            style={{
+              fontSize: 10,
+              color: "var(--muted)",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+            title={`${triggerSummary(job.trigger)} · ${loopSummary(job.loop)} · ${jobWorkerSummary(job)}`}
+          >
+            {triggerSummary(job.trigger)} · {loopSummary(job.loop)} · {jobWorkerSummary(job)}
+          </span>
+        </div>
+        {/* compact stats — one quiet mono line; shrinks with ellipsis, so the
+            header can never overlap at narrow widths. */}
         <span
+          className="spark-mono spark-num"
           style={{
-            fontSize: 13,
-            fontWeight: 700,
-            color: "var(--ink)",
-            whiteSpace: "nowrap",
+            flex: "0 1 auto",
+            minWidth: 0,
             overflow: "hidden",
             textOverflow: "ellipsis",
-            minWidth: 0,
+            whiteSpace: "nowrap",
+            fontSize: 10.5,
+            color: "var(--muted)",
           }}
-          title={job.name}
         >
-          {job.name}
+          <span style={{ color: dot }}>{statusWord(status)}</span>
+          {` · pass ${job.state.iteration}/${capLabel(job)} · est. ${fmtUsd(job.state.spentUsd)}`}
+          {workers.length > 0 ? ` · ${workers.length} worker${workers.length === 1 ? "" : "s"}` : ""}
+          {anyLive && current?.startedAt ? ` · ${fmtElapsed(current.startedAt, now)}` : ""}
+          {run && !loomLive ? ` · last run ${run.status}` : ""}
         </span>
-        <span className="spark-eyebrow" style={{ flex: "0 0 auto" }}>
-          Live board
-        </span>
-        <span style={{ flex: 1 }} />
         <button
           type="button"
           className="spark-btn"
-          style={{ height: 26, padding: "0 10px", fontSize: 11.5 }}
+          style={{ height: 26, padding: "0 10px", fontSize: 11.5, flex: "0 0 auto" }}
           onClick={onOpenWorkersGrid}
           title="Open the full multi-automation Workers grid (the canonical, interactive terminals)"
         >
@@ -434,7 +487,7 @@ export default function LiveBoard({
         <button
           type="button"
           className="spark-btn is-danger"
-          style={{ height: 26, padding: "0 10px", fontSize: 11.5 }}
+          style={{ height: 26, padding: "0 10px", fontSize: 11.5, flex: "0 0 auto" }}
           disabled={!loomLive}
           onClick={() => {
             if (confirmStop) {
@@ -451,16 +504,17 @@ export default function LiveBoard({
         </button>
       </div>
 
-      {/* ── canvas + overlays ──────────────────────────────────────────── */}
-      {/* position:relative container: the chip row and the dock are absolute
-          overlays HERE — outside ReactFlow's zoom/pan transform layer — so
-          xterm never renders under a scaled transform. */}
+      {/* ── canvas + terminal sheet ────────────────────────────────────── */}
+      {/* position:relative container: the sheet is an absolute overlay HERE —
+          outside ReactFlow's zoom/pan transform layer — so xterm never renders
+          under a scaled transform. */}
       <div ref={canvasRef} style={{ flex: 1, minHeight: 0, minWidth: 0, position: "relative" }}>
         <div className="loom-flow" style={{ position: "absolute", inset: 0 }}>
           <ReactFlow
             nodes={nodes}
             edges={edges}
             nodeTypes={liveNodeTypes}
+            edgeTypes={liveEdgeTypes}
             onNodeClick={onNodeClick}
             fitView
             fitViewOptions={{ padding: 0.25 }}
@@ -476,173 +530,88 @@ export default function LiveBoard({
             multiSelectionKeyCode={null}
           >
             <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="var(--rule)" />
-            {/* top-right: the default bottom-left slot sits under the dock. */}
+            {/* top-right: the bottom slots sit under the terminal sheet. */}
             <Controls position="top-right" showInteractive={false} />
           </ReactFlow>
         </div>
 
-        {/* status chip row (top-left, above the canvas) */}
-        <div
-          style={{
-            position: "absolute",
-            top: 10,
-            left: 10,
-            zIndex: 6,
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-            flexWrap: "wrap",
-            paddingRight: 56, // keep clear of nothing in particular; breathing room
-          }}
-        >
-          <BoardChip>
-            <span aria-hidden style={{ color: dot }}>●</span> {statusWord(status)}
-          </BoardChip>
-          <BoardChip mono>
-            pass {job.state.iteration}/{capLabel(job)}
-          </BoardChip>
-          <BoardChip mono>est. {fmtUsd(job.state.spentUsd)}</BoardChip>
-          {workers.length > 0 && (
-            <BoardChip mono>
-              {workers.length} worker{workers.length === 1 ? "" : "s"}
-            </BoardChip>
-          )}
-          {anyLive && current?.startedAt && (
-            <BoardChip mono>{fmtElapsed(current.startedAt, now)}</BoardChip>
-          )}
-          {run && !loomLive && (
-            <BoardChip mono>
-              last run · {run.status}
-            </BoardChip>
-          )}
-        </div>
-
-        {/* ── worker dock ────────────────────────────────────────────────── */}
-        {/* Bottom overlay. The chip BAR is always at the bottom edge; the
-            terminal BODY floats above it at a fixed height and hides via
-            visibility when collapsed (geometry preserved → hidden mirrors are
-            never resized; the whiteboard shows through, workers one click
-            away). pointerEvents discipline: nothing here sets an explicit
+        {/* ── floating worker terminal sheet ─────────────────────────────── */}
+        {/* Opened by clicking a worker node; closed via ✕ or Esc. Full-bleed
+            horizontally (width invariant — see module comment) but floating:
+            rounded top corners + shadow over the canvas, no permanent dock.
+            Hidden via visibility with geometry preserved, so hidden mirrors
+            are never resized and reopening shows the accumulated frame.
+            pointerEvents discipline: nothing here sets an explicit
             "auto"/"visible" that could punch through the hidden board overlay
             (values inherit); only the TerminalPane manages its own pair, and
-            its `visible` prop is false whenever the board is off screen. */}
-        <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, zIndex: 7 }}>
-          {/* body */}
+            its `visible` prop is false whenever the sheet is off screen. */}
+        <div
+          aria-hidden={!sheetOpen}
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            bottom: 0,
+            height: sheetBodyH,
+            zIndex: 7,
+            display: "flex",
+            flexDirection: "column",
+            background: "var(--panel)",
+            border: "1px solid var(--rule)",
+            borderBottom: "none",
+            borderRadius: "14px 14px 0 0",
+            boxShadow: "var(--lift-hi), 0 -14px 36px color-mix(in oklch, var(--bg) 60%, transparent)",
+            overflow: "hidden",
+            visibility: sheetOpen ? "inherit" : "hidden",
+            pointerEvents: sheetOpen ? "inherit" : "none",
+          }}
+        >
+          {/* drag handle — inside the sheet so overflow:hidden can't clip it */}
           <div
-            aria-hidden={collapsed}
+            role="separator"
+            aria-orientation="horizontal"
+            title="Drag to resize the terminal sheet"
+            onPointerDown={onDragStart}
+            onPointerMove={onDragMove}
+            onPointerUp={onDragEnd}
+            onPointerCancel={onDragEnd}
             style={{
               position: "absolute",
+              top: 0,
               left: 0,
               right: 0,
-              bottom: DOCK_BAR_H,
-              height: dockBodyH,
+              height: 8,
+              cursor: "ns-resize",
+              zIndex: 2,
               display: "flex",
-              flexDirection: "column",
-              background: "var(--panel)",
-              borderTop: "1px solid var(--rule)",
-              boxShadow: "0 -8px 24px color-mix(in oklch, var(--bg) 55%, transparent)",
-              visibility: collapsed ? "hidden" : "inherit",
-              pointerEvents: collapsed ? "none" : "inherit",
+              alignItems: "center",
+              justifyContent: "center",
             }}
           >
-            {/* drag handle */}
-            <div
-              role="separator"
-              aria-orientation="horizontal"
-              title="Drag to resize the terminal dock"
-              onPointerDown={onDragStart}
-              onPointerMove={onDragMove}
-              onPointerUp={onDragEnd}
-              onPointerCancel={onDragEnd}
+            <span
+              aria-hidden
               style={{
-                position: "absolute",
-                top: -4,
-                left: 0,
-                right: 0,
-                height: 9,
-                cursor: "ns-resize",
-                zIndex: 2,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
+                width: 44,
+                height: 3,
+                borderRadius: 999,
+                background: "var(--rule-strong)",
               }}
-            >
-              <span
-                aria-hidden
-                style={{
-                  width: 44,
-                  height: 3,
-                  borderRadius: 999,
-                  background: "var(--rule-strong)",
-                }}
-              />
-            </div>
-
-            {/* blocked question strip for the focused worker */}
-            {current?.blocked && current.question && (
-              <BlockedAnswerStrip
-                key={current.attemptId}
-                question={current.question}
-                onSend={(text) => onAnswer(current.runId, text)}
-              />
-            )}
-
-            {/* mirror terminals — ALL mounted, visibility-switched, sharing the
-                same box so a chip switch never resizes anything. */}
-            <div style={{ flex: 1, minHeight: 0, position: "relative", background: "var(--bg)" }}>
-              {workers.length === 0 ? (
-                <div
-                  className="spark-mono"
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    fontSize: 11,
-                    color: "var(--muted-2)",
-                  }}
-                >
-                  {loomLive ? "Worker starting…" : "No live worker — run the loom to see it here."}
-                </div>
-              ) : (
-                workers.map((w) => (
-                  <div
-                    key={w.attemptId}
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      padding: 4,
-                      visibility: w.attemptId === current?.attemptId ? "inherit" : "hidden",
-                      pointerEvents: w.attemptId === current?.attemptId ? "inherit" : "none",
-                    }}
-                  >
-                    <MirrorTerminal
-                      worker={w}
-                      visible={shown && !collapsed && w.attemptId === current?.attemptId}
-                      scrollbackLineLimit={scrollbackLineLimit}
-                    />
-                  </div>
-                ))
-              )}
-            </div>
+            />
           </div>
 
-          {/* bar (always visible at the bottom edge) */}
+          {/* sheet bar: worker switcher + close */}
           <div
             style={{
-              position: "relative",
-              height: DOCK_BAR_H,
+              flex: `0 0 ${SHEET_BAR_H}px`,
               display: "flex",
               alignItems: "center",
               gap: 8,
               padding: "0 10px",
-              background: "var(--panel)",
-              borderTop: "1px solid var(--rule)",
+              borderBottom: "1px solid var(--rule)",
             }}
           >
             <span className="spark-eyebrow" style={{ flex: "0 0 auto" }}>
-              Workers
+              Worker
             </span>
             <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 6, overflowX: "auto" }}>
               {workers.map((w) => {
@@ -653,10 +622,7 @@ export default function LiveBoard({
                   <button
                     key={w.attemptId}
                     type="button"
-                    onClick={() => {
-                      setPickedAttemptId(w.attemptId);
-                      setCollapsed(false);
-                    }}
+                    onClick={() => setPickedAttemptId(w.attemptId)}
                     title={`${w.nodeLabel ?? w.automationName} · pass ${w.iteration + 1}${w.blocked ? " · needs you" : ""}`}
                     style={{
                       appearance: "none",
@@ -689,8 +655,8 @@ export default function LiveBoard({
                         height: 7,
                         borderRadius: 999,
                         background: cdot,
-                        animation:
-                          live && !w.blocked ? "spark-pulse 1.4s ease-in-out infinite" : undefined,
+                        // Steady glow while live — no breathing pulse.
+                        boxShadow: live && !w.blocked ? `0 0 6px ${cdot}` : undefined,
                       }}
                     />
                     <span
@@ -731,14 +697,62 @@ export default function LiveBoard({
             <button
               type="button"
               className="spark-icon-btn"
-              aria-label={collapsed ? "Expand worker dock" : "Collapse worker dock"}
-              aria-expanded={!collapsed}
-              title={collapsed ? "Show the worker terminal" : "Collapse — whiteboard unobstructed"}
+              aria-label="Close the worker terminal"
+              title="Close — whiteboard unobstructed (Esc)"
               style={{ ["--spark-icon-btn-size"]: "22px", flex: "0 0 auto" } as React.CSSProperties}
-              onClick={() => setCollapsed((c) => !c)}
+              onClick={() => setSheetOpen(false)}
             >
-              {collapsed ? "▴" : "▾"}
+              ✕
             </button>
+          </div>
+
+          {/* blocked question strip for the focused worker */}
+          {current?.blocked && current.question && (
+            <BlockedAnswerStrip
+              key={current.attemptId}
+              question={current.question}
+              onSend={(text) => onAnswer(current.runId, text)}
+            />
+          )}
+
+          {/* mirror terminals — ALL mounted, visibility-switched, sharing the
+              same box so a chip switch never resizes anything. */}
+          <div style={{ flex: 1, minHeight: 0, position: "relative", background: "var(--bg)" }}>
+            {workers.length === 0 ? (
+              <div
+                className="spark-mono"
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 11,
+                  color: "var(--muted-2)",
+                }}
+              >
+                {loomLive ? "Worker starting…" : "No live worker — run the loom to see it here."}
+              </div>
+            ) : (
+              workers.map((w) => (
+                <div
+                  key={w.attemptId}
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    padding: 4,
+                    visibility: w.attemptId === current?.attemptId ? "inherit" : "hidden",
+                    pointerEvents: w.attemptId === current?.attemptId ? "inherit" : "none",
+                  }}
+                >
+                  <MirrorTerminal
+                    worker={w}
+                    visible={shown && sheetOpen && w.attemptId === current?.attemptId}
+                    scrollbackLineLimit={scrollbackLineLimit}
+                  />
+                </div>
+              ))
+            )}
           </div>
         </div>
       </div>
@@ -746,7 +760,7 @@ export default function LiveBoard({
   );
 }
 
-// ── dock terminal (read-only mirror) ─────────────────────────────────────────
+// ── sheet terminal (read-only mirror) ────────────────────────────────────────
 
 function MirrorTerminal({
   worker,
@@ -802,7 +816,7 @@ function MirrorTerminal({
       // pane and freeze it.
       readOnly
       // Keep the mirror's own buffer complete while the board is hidden or the
-      // dock shows a sibling, so a reveal shows the accumulated frame instead
+      // sheet shows a sibling, so a reveal shows the accumulated frame instead
       // of a capped hidden-buffer remnant. Same contract as the worker panes.
       writeWhileHidden
     />
@@ -874,37 +888,59 @@ function BlockedAnswerStrip({
   );
 }
 
-// ── chip ─────────────────────────────────────────────────────────────────────
+// ── live edge renderer ───────────────────────────────────────────────────────
 
-function BoardChip({
-  mono,
-  children,
-}: {
-  mono?: boolean;
-  children: React.ReactNode;
-}): React.ReactElement {
+// The board's "electricity": a static base path plus, while the edge is live,
+// the run-graph's travelling dash overlay (same .spark-wire-flow keyframes as
+// GraphWires — the house convention for "this wire is carrying work").
+function LiveFlowEdge({
+  sourceX,
+  sourceY,
+  targetX,
+  targetY,
+  sourcePosition,
+  targetPosition,
+  data,
+}: EdgeProps): React.ReactElement {
+  const [path] = getBezierPath({
+    sourceX,
+    sourceY,
+    sourcePosition,
+    targetX,
+    targetY,
+    targetPosition,
+  });
+  const live = data?.live === true;
+  const tone = (data?.tone as string) ?? "var(--accent)";
+  const rest = (data?.rest as string) ?? "var(--rule-strong)";
   return (
-    <span
-      className={mono ? "spark-mono spark-num" : undefined}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        height: 24,
-        padding: "0 10px",
-        borderRadius: 999,
-        border: "1px solid var(--rule)",
-        background: "var(--panel)",
-        boxShadow: "var(--shadow-1)",
-        fontSize: 10.5,
-        color: "var(--ink-dim)",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {children}
-    </span>
+    <g style={{ pointerEvents: "none" }}>
+      <path
+        d={path}
+        fill="none"
+        stroke={live ? `color-mix(in oklch, ${tone} 32%, transparent)` : rest}
+        strokeWidth={live ? 1.8 : 1.6}
+        strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
+        strokeDasharray={data?.backEdge && !live ? "5 4" : undefined}
+      />
+      {live && (
+        <path
+          d={path}
+          className="spark-wire-flow"
+          fill="none"
+          stroke={tone}
+          strokeWidth={2}
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
+          style={{ filter: "drop-shadow(0 0 3px var(--accent-glow))" }}
+        />
+      )}
+    </g>
   );
 }
+
+const liveEdgeTypes = { flow: LiveFlowEdge };
 
 // ── live node renderer ───────────────────────────────────────────────────────
 
@@ -919,7 +955,9 @@ const HANDLE_STYLE: React.CSSProperties = {
 interface StatusLook {
   border: string;
   background: string;
-  pulse: boolean;
+  // Steady glow tone for the actively-working states — never a scale/opacity
+  // pulse (the user rejected "breathing" boxes; electricity + glow instead).
+  glow: "accent" | "danger" | null;
   badge?: { text: string; color: string };
   dashed?: boolean;
   dim?: boolean;
@@ -931,154 +969,315 @@ function lookFor(status: LiveNodeStatus): StatusLook {
       return {
         border: "var(--accent-edge)",
         background: "color-mix(in oklch, var(--accent) 10%, var(--panel))",
-        pulse: true,
+        glow: "accent",
         badge: { text: "running", color: "var(--accent)" },
       };
     case "blocked":
       return {
         border: "color-mix(in oklch, var(--danger) 55%, transparent)",
-        background: "var(--danger-soft)",
-        pulse: true,
+        // Opaque (mixed onto the panel, not transparent) so chamfered shapes
+        // can layer it over their border backing without bleed-through.
+        background: "color-mix(in oklch, var(--danger) 12%, var(--panel))",
+        glow: "danger",
         badge: { text: "needs you", color: "var(--danger)" },
       };
     case "succeeded":
       return {
         border: "color-mix(in oklch, var(--ok) 38%, transparent)",
         background: "color-mix(in oklch, var(--ok) 6%, var(--panel))",
-        pulse: false,
+        glow: null,
         badge: { text: "done", color: "var(--ok)" },
       };
     case "failed":
       return {
         border: "color-mix(in oklch, var(--danger) 45%, transparent)",
         background: "color-mix(in oklch, var(--danger) 7%, var(--panel))",
-        pulse: false,
+        glow: null,
         badge: { text: "failed", color: "var(--danger)" },
       };
     case "skipped":
       return {
         border: "var(--rule-soft)",
         background: "var(--panel)",
-        pulse: false,
+        glow: null,
         badge: { text: "skipped", color: "var(--muted-2)" },
         dashed: true,
         dim: true,
       };
     default:
-      return { border: "var(--rule-soft)", background: "var(--panel)", pulse: false };
+      return { border: "var(--rule-soft)", background: "var(--panel)", glow: null };
   }
+}
+
+// Steady status glow as a box-shadow list (accent = the house --shadow-glow).
+function statusShadow(look: StatusLook, docked?: boolean): string {
+  const parts: string[] = [];
+  if (look.glow === "accent") parts.push("var(--shadow-glow)");
+  else if (look.glow === "danger")
+    parts.push(
+      "0 0 0 1px color-mix(in oklch, var(--danger) 45%, transparent)",
+      "0 0 24px color-mix(in oklch, var(--danger) 26%, transparent)",
+    );
+  else parts.push("var(--shadow-1)");
+  if (docked) parts.push("0 0 0 2px var(--accent-soft)");
+  return parts.join(", ");
+}
+
+// Engine identity tone for worker tiles / top rules (the same coral/cyan the
+// editor's cards wear); a legacy "auto" worker stays neutral.
+function liveEngineTone(engine: LiveNodeDatum["engine"]): string {
+  if (engine === "claude" || engine === "codex") return ENGINE_TONE[engine];
+  return "var(--muted)";
+}
+
+function NodeBadge({ badge }: { badge: { text: string; color: string } }): React.ReactElement {
+  return (
+    <span
+      className="spark-badge"
+      style={{
+        color: badge.color,
+        borderColor: `color-mix(in oklch, ${badge.color} 32%, transparent)`,
+      }}
+    >
+      {badge.text}
+    </span>
+  );
 }
 
 function LiveNode({ data }: NodeProps): React.ReactElement {
   const d = data as LiveNodeDatum;
-  const isTrigger = d.kind === "trigger";
-  const look = isTrigger
-    ? d.fired
-      ? lookFor("running")
-      : lookFor("pending")
-    : lookFor(d.status);
-  const badge = isTrigger ? undefined : look.badge;
+  switch (d.kind) {
+    case "trigger":
+      return <TriggerCard d={d} />;
+    case "guard":
+      return <GuardCard d={d} />;
+    case "merge":
+      return <MergeCard d={d} />;
+    default:
+      return <WorkerCard d={d} />;
+  }
+}
+
+// ── node cards — the editor's silhouette language + live status jewelry ─────
+// Role is told the same way the editor tells it (icon tile, role-toned top
+// rule, trigger's rounded-left edge); STATUS is told by the border color,
+// a steady glow, and a badge — never a pulse.
+
+function cardBase(look: StatusLook, docked?: boolean): React.CSSProperties {
+  return {
+    // No overflow:hidden — the card is the containing block for its xyflow
+    // handles (right/left: -4px), which would be half-clipped otherwise.
+    position: "relative",
+    fontFamily: "var(--font-sans)",
+    cursor: "default",
+    boxSizing: "border-box",
+    borderRadius: "var(--radius-surface)",
+    border: `1px ${look.dashed ? "dashed" : "solid"} ${look.border}`,
+    background: look.background,
+    opacity: look.dim ? 0.6 : undefined,
+    boxShadow: statusShadow(look, docked),
+  };
+}
+
+function CardTitle({ text }: { text: string }): React.ReactElement {
   return (
-    <div
-      className="loom-node"
+    <span
+      title={text}
       style={{
-        width: 210,
-        borderRadius: "var(--radius-surface)",
-        fontFamily: "var(--font-sans)",
+        fontSize: 12,
+        fontWeight: 600,
+        color: "var(--ink)",
+        whiteSpace: "nowrap",
         overflow: "hidden",
-        cursor: "default",
-        border: `1px ${look.dashed ? "dashed" : "solid"} ${look.border}`,
-        background: look.background,
-        opacity: look.dim ? 0.6 : undefined,
-        boxShadow: d.docked
-          ? "var(--lift-hi), 0 0 0 2px var(--accent-soft)"
-          : "var(--shadow-1)",
-        animation: look.pulse ? "spark-pulse 1.4s ease-in-out infinite" : undefined,
+        textOverflow: "ellipsis",
       }}
     >
-      {!isTrigger && <Handle type="target" position={Position.Left} style={HANDLE_STYLE} isConnectable={false} />}
-      <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "7px 9px 5px" }}>
+      {text}
+    </span>
+  );
+}
+
+function CardMeta({ text }: { text: string }): React.ReactElement {
+  return (
+    <span
+      className="spark-mono"
+      title={text}
+      style={{
+        fontSize: 9.5,
+        color: "var(--muted)",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+      }}
+    >
+      {text}
+    </span>
+  );
+}
+
+// Trigger — rounded left edge: the pass flows out of here (same silhouette as
+// the editor's trigger card).
+const LIVE_TRIGGER_RADIUS = "999px var(--radius-surface) var(--radius-surface) 999px";
+
+function TriggerCard({ d }: { d: LiveNodeDatum }): React.ReactElement {
+  const look = d.fired ? lookFor("running") : lookFor("pending");
+  return (
+    <div
+      style={{
+        ...cardBase(look),
+        width: 212,
+        borderRadius: LIVE_TRIGGER_RADIUS,
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "10px 13px 10px 15px",
+      }}
+    >
+      <TopRule tone="var(--warn)" radius={LIVE_TRIGGER_RADIUS} />
+      <Medallion icon={<LoomIcon kind="trigger" tone="var(--warn)" size={16} />} tone="var(--warn)" size={32} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0, flex: 1 }}>
+        <span className="spark-eyebrow" style={{ fontSize: 8.5 }}>
+          {d.eyebrow}
+        </span>
+        <CardTitle text={d.title} />
+        <CardMeta text={d.sub} />
+      </div>
+      <Handle type="source" position={Position.Right} style={HANDLE_STYLE} isConnectable={false} />
+    </div>
+  );
+}
+
+// Worker — the engine's card: icon tile + engine-toned top rule.
+function WorkerCard({ d }: { d: LiveNodeDatum }): React.ReactElement {
+  const look = lookFor(d.status);
+  const tone = liveEngineTone(d.engine);
+  return (
+    <div style={{ ...cardBase(look, d.docked), width: 232 }}>
+      <TopRule tone={tone} radius="var(--radius-surface) var(--radius-surface) 0 0" />
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} isConnectable={false} />
+      <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "10px 12px 8px 13px" }}>
+        <Medallion icon={<LoomIcon kind="worker" tone={tone} size={16} />} tone={tone} size={32} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0, flex: 1 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span className="spark-eyebrow" style={{ fontSize: 8.5 }}>
+              {d.eyebrow}
+            </span>
+            <span style={{ flex: 1 }} />
+            {look.badge && <NodeBadge badge={look.badge} />}
+          </div>
+          <CardTitle text={d.title} />
+          <CardMeta text={d.sub} />
+        </div>
+      </div>
+      <Handle type="source" position={Position.Right} style={HANDLE_STYLE} isConnectable={false} />
+    </div>
+  );
+}
+
+// Guard — a decision: labelled pass port exits high, fail port exits low
+// (the editor's guard anatomy, plus live status).
+function GuardCard({ d }: { d: LiveNodeDatum }): React.ReactElement {
+  const look = lookFor(d.status);
+  return (
+    <div
+      style={{
+        ...cardBase(look),
+        width: 224,
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        padding: "11px 44px 11px 13px",
+      }}
+    >
+      <TopRule tone="var(--ok)" radius="var(--radius-surface) var(--radius-surface) 0 0" />
+      <Medallion icon={<LoomIcon kind="guard" tone="var(--ok)" size={16} />} tone="var(--ok)" size={32} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0, flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span className="spark-eyebrow" style={{ fontSize: 8.5 }}>
+            {d.eyebrow}
+          </span>
+          {look.badge && <NodeBadge badge={look.badge} />}
+        </div>
+        <CardTitle text={d.title} />
+        <CardMeta text={d.sub} />
+      </div>
+      {(["pass", "fail"] as const).map((port) => (
         <span
+          key={port}
+          className="spark-mono"
           aria-hidden
           style={{
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            width: 20,
-            height: 20,
-            borderRadius: 6,
-            fontSize: 11,
-            background: isTrigger
-              ? "color-mix(in oklch, var(--warn) 16%, var(--panel-2))"
-              : "color-mix(in oklch, var(--accent) 14%, var(--panel-2))",
-            color: isTrigger ? "var(--warn)" : "var(--accent)",
-            flex: "0 0 auto",
-          }}
-        >
-          {d.glyph}
-        </span>
-        <span className="spark-eyebrow" style={{ fontSize: 8.5 }}>{d.eyebrow}</span>
-        <span style={{ flex: 1 }} />
-        {badge && (
-          <span
-            className="spark-badge"
-            style={{
-              color: badge.color,
-              borderColor: `color-mix(in oklch, ${badge.color} 32%, transparent)`,
-            }}
-          >
-            {badge.text}
-          </span>
-        )}
-      </div>
-      <div style={{ padding: "0 9px 8px", display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-        <span
-          style={{
-            fontSize: 12,
+            position: "absolute",
+            right: 9,
+            top: port === "pass" ? "32%" : "68%",
+            transform: "translateY(-50%)",
+            fontSize: 8,
             fontWeight: 600,
-            color: "var(--ink)",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
+            letterSpacing: "0.1em",
+            textTransform: "uppercase",
+            color: `color-mix(in oklch, ${port === "pass" ? "var(--ok)" : "var(--danger)"} 75%, var(--muted))`,
           }}
-          title={d.title}
         >
-          {d.title}
+          {port}
         </span>
-        <span
-          className="spark-mono"
-          style={{
-            fontSize: 10,
-            color: "var(--muted)",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-          title={d.sub}
-        >
-          {d.sub}
-        </span>
+      ))}
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} isConnectable={false} />
+      <Handle
+        id="pass"
+        type="source"
+        position={Position.Right}
+        style={{
+          ...HANDLE_STYLE,
+          top: "32%",
+          borderColor: "var(--ok)",
+          background: "color-mix(in oklch, var(--ok) 40%, var(--panel-3))",
+        }}
+        isConnectable={false}
+      />
+      <Handle
+        id="fail"
+        type="source"
+        position={Position.Right}
+        style={{
+          ...HANDLE_STYLE,
+          top: "68%",
+          borderColor: "var(--danger)",
+          background: "color-mix(in oklch, var(--danger) 40%, var(--panel-3))",
+        }}
+        isConnectable={false}
+      />
+    </div>
+  );
+}
+
+// Merge — branches come back together.
+function MergeCard({ d }: { d: LiveNodeDatum }): React.ReactElement {
+  const look = lookFor(d.status);
+  return (
+    <div
+      style={{
+        ...cardBase(look),
+        width: 200,
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        padding: "11px 13px",
+      }}
+    >
+      <TopRule tone="var(--info)" radius="var(--radius-surface) var(--radius-surface) 0 0" />
+      <Medallion icon={<LoomIcon kind="merge" tone="var(--info)" size={16} />} tone="var(--info)" size={32} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0, flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span className="spark-eyebrow" style={{ fontSize: 8.5 }}>
+            {d.eyebrow}
+          </span>
+          {look.badge && <NodeBadge badge={look.badge} />}
+        </div>
+        <CardTitle text={d.title} />
+        <CardMeta text={d.sub} />
       </div>
-      {d.kind === "guard" ? (
-        <>
-          <Handle
-            id="pass"
-            type="source"
-            position={Position.Right}
-            style={{ ...HANDLE_STYLE, top: "34%", borderColor: "var(--ok)" }}
-            isConnectable={false}
-          />
-          <Handle
-            id="fail"
-            type="source"
-            position={Position.Right}
-            style={{ ...HANDLE_STYLE, top: "66%", borderColor: "var(--danger)" }}
-            isConnectable={false}
-          />
-        </>
-      ) : (
-        <Handle type="source" position={Position.Right} style={HANDLE_STYLE} isConnectable={false} />
-      )}
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} isConnectable={false} />
+      <Handle type="source" position={Position.Right} style={HANDLE_STYLE} isConnectable={false} />
     </div>
   );
 }

@@ -4,115 +4,125 @@ import type { EdgeProps, NodeProps } from "@xyflow/react";
 import type { GuardPredicate, LoomWorkerConfig } from "@shared/types";
 import type { FlowNodeData } from "./model";
 
-// Custom ReactFlow node + edge renderers for the loom canvas. They paint with
-// Codara's CSS variables (no n8n purple). Each node exposes a '+' affordance on
-// its source handle(s) via an `onAddFrom` callback threaded through node data.
+// Custom ReactFlow node + edge renderers for the loom canvas, painted with
+// Codara's CSS variables. Design language: precision instrument — every role
+// is a quiet card with a crisp line-icon tile and a restrained role-toned top
+// hairline; the silhouette carries meaning without theatrics (a trigger's
+// left edge is fully rounded — flow starts here; a guard exposes labelled
+// pass/fail ports). Each node exposes a '+' affordance on its source
+// handle(s) via an `onAddFrom` callback threaded through node data.
 
 export interface NodeCallbacks {
   /** Open the add-node palette anchored on a node's source handle. */
   onAddFrom?: (nodeId: string, branch?: "pass" | "fail", anchor?: DOMRect) => void;
 }
 
-// The trigger summary text is injected via data.label2 to avoid importing
+// The trigger summary text is injected via data.summary to avoid importing
 // presentation into every node; the editor stamps it.
 type NodeData = FlowNodeData & { summary?: string; onAddFrom?: NodeCallbacks["onAddFrom"] } & Record<
     string,
     unknown
   >;
 
-const SHELL: React.CSSProperties = {
-  width: 230,
-  borderRadius: "var(--radius-surface)",
-  fontFamily: "var(--font-sans)",
-  overflow: "hidden",
-  cursor: "default",
+// Engine identity — shared with the LiveBoard and run graph so a Claude
+// worker is warm coral and a Codex worker cool cyan on every surface.
+export const ENGINE_TONE: Record<string, string> = {
+  claude: "var(--engine-claude)",
+  codex: "var(--engine-codex)",
 };
 
-// The base (unselected) border/shadow/hover live in CSS (.loom-node) so :hover
-// can lift them — inline styles would win over CSS and freeze hover. Selection
-// styling is applied inline (it must always win, including over :hover).
-function shellStyle(selected: boolean | undefined): React.CSSProperties {
-  if (!selected) return SHELL;
-  return {
-    ...SHELL,
-    border: "1px solid var(--accent-edge)",
-    boxShadow: "var(--lift-hi), 0 0 0 2px var(--accent-soft)",
-    background: "color-mix(in oklch, var(--accent) 9%, var(--panel))",
-  };
+export function engineTone(engine: LoomWorkerConfig["engine"]): string {
+  return ENGINE_TONE[engine] ?? "var(--accent)";
 }
 
-function Header({
-  glyph,
-  eyebrow,
-  glyphColor,
-  glyphTint,
-}: {
-  glyph: string;
-  eyebrow: string;
-  glyphColor?: string;
-  glyphTint?: string;
-}): React.ReactElement {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px 6px" }}>
-      <span
-        aria-hidden
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          width: 22,
-          height: 22,
-          borderRadius: 6,
-          fontSize: 12,
-          background: glyphTint ?? "color-mix(in oklch, var(--accent) 14%, var(--panel-2))",
-          color: glyphColor ?? "var(--accent)",
-          flex: "0 0 auto",
-        }}
-      >
-        {glyph}
-      </span>
-      <span className="spark-eyebrow">{eyebrow}</span>
-    </div>
-  );
-}
+// ── crisp 16px line icons (stroke 1.5, round caps) ──────────────────────────
 
-function Body({ children }: { children: React.ReactNode }): React.ReactElement {
+function Icon({ d, tone, size = 17 }: { d: React.ReactNode; tone: string; size?: number }) {
   return (
-    <div
-      style={{
-        padding: "0 10px 10px",
-        display: "flex",
-        flexDirection: "column",
-        gap: 3,
-        minWidth: 0,
-      }}
+    <svg
+      aria-hidden
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke={tone}
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
     >
-      {children}
-    </div>
+      {d}
+    </svg>
   );
 }
 
-function Line({
-  text,
-  strong,
-  title,
+const BOLT = <path d="M8.7 1.6 4 9h3.4l-.9 5.4L11.9 7H8.4l.3-5.4Z" />;
+const CPU = (
+  <>
+    <rect x="4.2" y="4.2" width="7.6" height="7.6" rx="1.6" />
+    <path d="M6.5 1.2v2.2M9.5 1.2v2.2M6.5 12.6v2.2M9.5 12.6v2.2M1.2 6.5h2.2M1.2 9.5h2.2M12.6 6.5h2.2M12.6 9.5h2.2" />
+  </>
+);
+const SPLIT = (
+  <>
+    <path d="M1.8 8h4.4M6.2 8c2.8 0 2.6-3.8 5.4-3.8M6.2 8c2.8 0 2.6 3.8 5.4 3.8" />
+    <circle cx="13.4" cy="4.2" r="1.1" />
+    <circle cx="13.4" cy="11.8" r="1.1" />
+  </>
+);
+const JOIN = (
+  <>
+    <path d="M14.2 8H9.8M9.8 8C7 8 7.2 4.2 4.4 4.2M9.8 8C7 8 7.2 11.8 4.4 11.8" />
+    <circle cx="2.6" cy="4.2" r="1.1" />
+    <circle cx="2.6" cy="11.8" r="1.1" />
+  </>
+);
+
+/** Role → line icon, for surfaces that dispatch on node kind (LiveBoard). */
+export function LoomIcon({
+  kind,
+  tone,
+  size,
 }: {
-  text: string;
-  strong?: boolean;
-  title?: string;
+  kind: "trigger" | "worker" | "guard" | "merge";
+  tone: string;
+  size?: number;
+}): React.ReactElement {
+  const d = kind === "trigger" ? BOLT : kind === "guard" ? SPLIT : kind === "merge" ? JOIN : CPU;
+  return <Icon d={d} tone={tone} size={size} />;
+}
+
+/** Role icon tile (styles.css .loom-medallion); tone via --md-tone. */
+export function Medallion({
+  icon,
+  tone,
+  size = 34,
+}: {
+  icon: React.ReactNode;
+  tone: string;
+  size?: number;
 }): React.ReactElement {
   return (
     <span
-      className={strong ? undefined : "spark-mono"}
-      title={title ?? text}
+      className="loom-medallion"
+      style={{ "--md-tone": tone, width: size, height: size } as React.CSSProperties}
+    >
+      {icon}
+    </span>
+  );
+}
+
+// ── shared card anatomy ──────────────────────────────────────────────────────
+
+function Eyebrow({ text }: { text: string }): React.ReactElement {
+  return (
+    <span
+      className="spark-mono"
       style={{
-        fontSize: strong ? 12.5 : 10.5,
-        fontWeight: strong ? 600 : undefined,
-        color: strong ? "var(--ink)" : "var(--muted)",
-        whiteSpace: "nowrap",
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        maxWidth: "100%",
+        fontSize: 8.5,
+        fontWeight: 600,
+        letterSpacing: "0.13em",
+        textTransform: "uppercase",
+        color: "var(--muted)",
       }}
     >
       {text}
@@ -120,22 +130,104 @@ function Line({
   );
 }
 
+function Title({ text }: { text: string }): React.ReactElement {
+  return (
+    <span
+      title={text}
+      style={{
+        fontSize: 12.5,
+        fontWeight: 600,
+        color: "var(--ink)",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+      }}
+    >
+      {text}
+    </span>
+  );
+}
+
+function Meta({ text, title }: { text: string; title?: string }): React.ReactElement {
+  return (
+    <span
+      className="spark-mono"
+      title={title ?? text}
+      style={{
+        fontSize: 10,
+        color: "var(--muted)",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+      }}
+    >
+      {text}
+    </span>
+  );
+}
+
+// Role-toned top hairline: its own element (not a border / box-shadow) so the
+// .loom-node CSS hover lift keeps owning the card's real border and shadow.
+// Exported — the LiveBoard's status-bearing cards wear the same rule.
+export function TopRule({ tone, radius }: { tone: string; radius: string }): React.ReactElement {
+  return (
+    <span
+      aria-hidden
+      style={{
+        position: "absolute",
+        top: 0,
+        left: 0,
+        right: 0,
+        height: 2,
+        borderRadius: radius,
+        background: `linear-gradient(90deg, color-mix(in oklch, ${tone} 62%, transparent), color-mix(in oklch, ${tone} 14%, transparent))`,
+      }}
+    />
+  );
+}
+
+// Selection must always win, including over .loom-node:hover — inline only.
+const SELECTED: React.CSSProperties = {
+  border: "1px solid var(--accent-edge)",
+  boxShadow: "var(--lift-hi), 0 0 0 2.5px var(--accent-soft), var(--shadow-2)",
+};
+
+function cardStyle(selected: boolean | undefined, extra?: React.CSSProperties): React.CSSProperties {
+  return {
+    // NO overflow:hidden here: the card is the positioned containing block
+    // for its '+' buttons and handles, which sit OUTSIDE the right edge —
+    // clipping would swallow them. Backgrounds clip to the border-radius on
+    // their own, and TopRule carries its own matching radius.
+    position: "relative",
+    borderRadius: "var(--radius-surface)",
+    fontFamily: "var(--font-sans)",
+    cursor: "default",
+    display: "flex",
+    alignItems: "center",
+    gap: 11,
+    padding: "11px 13px",
+    boxSizing: "border-box",
+    ...extra,
+    ...(selected ? SELECTED : null),
+  };
+}
+
 const HANDLE_STYLE: React.CSSProperties = {
-  width: 11,
-  height: 11,
+  width: 10,
+  height: 10,
   background: "var(--panel-3)",
   border: "1.5px solid var(--rule-strong)",
 };
 
-// The '+' button that rides a source handle. Positioned just outside the node.
+// The '+' button that rides a source handle.
 function PlusButton({
   onClick,
-  top,
   title,
+  style,
 }: {
   onClick: (e: React.MouseEvent) => void;
-  top: string;
   title: string;
+  style: React.CSSProperties;
 }): React.ReactElement {
   return (
     <button
@@ -145,24 +237,23 @@ function PlusButton({
       onClick={onClick}
       style={{
         position: "absolute",
-        right: -34,
-        top,
-        transform: "translateY(-50%)",
-        width: 20,
-        height: 20,
+        width: 21,
+        height: 21,
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
-        borderRadius: 6,
+        borderRadius: 999,
         border: "1px solid var(--rule)",
         background: "var(--panel-2)",
         color: "var(--muted)",
-        fontSize: 14,
+        fontSize: 13,
         lineHeight: 1,
         cursor: "default",
-        boxShadow: "var(--lift-hi)",
+        boxShadow: "var(--lift-hi), var(--shadow-1)",
         zIndex: 5,
-        transition: "color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+        transition:
+          "color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
+        ...style,
       }}
       onMouseEnter={(e) => {
         e.currentTarget.style.color = "var(--accent)";
@@ -178,27 +269,28 @@ function PlusButton({
   );
 }
 
-// ── trigger node (read-only root) ────────────────────────────────────────────
+// ── trigger node — rounded left edge: flow starts here ──────────────────────
+
+const TRIGGER_RADIUS = "999px var(--radius-surface) var(--radius-surface) 999px";
 
 export function TriggerNode({ id, data, selected }: NodeProps): React.ReactElement {
   const d = data as NodeData;
   return (
-    <div className="loom-node" style={shellStyle(selected)}>
-      <Header
-        glyph="⚡"
-        eyebrow="Trigger"
-        glyphColor="var(--warn)"
-        glyphTint="color-mix(in oklch, var(--warn) 16%, var(--panel-2))"
-      />
-      <Body>
-        <Line text={d.summary ?? "manual"} strong />
-        <Line text="when this fires, the loom runs" />
-      </Body>
+    <div
+      className="loom-node"
+      style={cardStyle(selected, { width: 208, borderRadius: TRIGGER_RADIUS, paddingLeft: 15 })}
+    >
+      <TopRule tone="var(--warn)" radius={TRIGGER_RADIUS} />
+      <Medallion icon={<Icon d={BOLT} tone="var(--warn)" />} tone="var(--warn)" />
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+        <Eyebrow text="Trigger" />
+        <Title text={d.summary ?? "manual"} />
+      </div>
       <Handle type="source" position={Position.Right} style={HANDLE_STYLE} />
       {d.onAddFrom && (
         <PlusButton
           title="Add first step"
-          top="50%"
+          style={{ top: "50%", right: -31, transform: "translateY(-50%)" }}
           onClick={(e) => {
             e.stopPropagation();
             d.onAddFrom?.(id, undefined, (e.currentTarget as HTMLElement).getBoundingClientRect());
@@ -209,16 +301,10 @@ export function TriggerNode({ id, data, selected }: NodeProps): React.ReactEleme
   );
 }
 
-// ── worker node ──────────────────────────────────────────────────────────────
-
-function engineGlyph(engine: LoomWorkerConfig["engine"]): string {
-  if (engine === "codex") return "◆";
-  if (engine === "claude") return "◇";
-  return "⟲";
-}
+// ── worker node — the engine's card ──────────────────────────────────────────
 
 function workerLine(w: LoomWorkerConfig): string {
-  if (w.engine === "auto") return "Auto · agent picks";
+  if (w.engine === "auto") return "auto · agent picks";
   const parts = [w.engine === "claude" ? "Claude" : "Codex"];
   if (w.model) parts.push(w.model);
   if (w.effort) parts.push(w.effort);
@@ -228,29 +314,48 @@ function workerLine(w: LoomWorkerConfig): string {
 export function WorkerNode({ id, data, selected }: NodeProps): React.ReactElement {
   const d = data as NodeData;
   if (d.kind !== "worker") return <div />;
+  const tone = engineTone(d.worker.engine);
   const promptPreview = d.prompt.trim() || "no prompt yet";
   return (
-    <div className="loom-node" style={shellStyle(selected)}>
-      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} />
-      <Header glyph={engineGlyph(d.worker.engine)} eyebrow="Worker" />
-      <Body>
-        <Line text={d.label || "Worker"} strong />
-        <Line text={workerLine(d.worker)} />
-        <Line
-          text={promptPreview.length > 38 ? promptPreview.slice(0, 38) + "…" : promptPreview}
+    <div className="loom-node" style={cardStyle(selected, { width: 248, alignItems: "flex-start" })}>
+      <TopRule tone={tone} radius="var(--radius-surface) var(--radius-surface) 0 0" />
+      <Medallion icon={<Icon d={CPU} tone={tone} />} tone={tone} />
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <Eyebrow text="Worker" />
+          {d.retry && d.retry.maxAttempts > 0 && (
+            <span
+              className="spark-mono"
+              title={`retries up to ${d.retry.maxAttempts}×`}
+              style={{ marginLeft: "auto", fontSize: 8.5, color: "var(--muted)" }}
+            >
+              retry ×{d.retry.maxAttempts}
+            </span>
+          )}
+        </div>
+        <Title text={d.label || "Worker"} />
+        <Meta text={workerLine(d.worker)} />
+        <span
           title={d.prompt}
-        />
-        {d.retry && d.retry.maxAttempts > 0 && (
-          <span className="spark-badge is-info" style={{ alignSelf: "flex-start", marginTop: 2 }}>
-            retry ×{d.retry.maxAttempts}
-          </span>
-        )}
-      </Body>
+          style={{
+            fontSize: 10,
+            lineHeight: 1.5,
+            color: "color-mix(in oklch, var(--muted) 78%, transparent)",
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+          }}
+        >
+          {promptPreview}
+        </span>
+      </div>
+      <Handle type="target" position={Position.Left} style={HANDLE_STYLE} />
       <Handle type="source" position={Position.Right} style={HANDLE_STYLE} />
       {d.onAddFrom && (
         <PlusButton
           title="Add next step"
-          top="50%"
+          style={{ top: "50%", right: -31, transform: "translateY(-50%)" }}
           onClick={(e) => {
             e.stopPropagation();
             d.onAddFrom?.(id, undefined, (e.currentTarget as HTMLElement).getBoundingClientRect());
@@ -261,7 +366,10 @@ export function WorkerNode({ id, data, selected }: NodeProps): React.ReactElemen
   );
 }
 
-// ── guard node (two source handles) ──────────────────────────────────────────
+// ── guard node — a decision with labelled pass / fail ports ─────────────────
+
+const GUARD_PASS_TOP = "32%";
+const GUARD_FAIL_TOP = "68%";
 
 function predicateLine(p: GuardPredicate): string {
   switch (p.type) {
@@ -278,49 +386,82 @@ function predicateLine(p: GuardPredicate): string {
   }
 }
 
+function PortLabel({
+  text,
+  tone,
+  top,
+}: {
+  text: string;
+  tone: string;
+  top: string;
+}): React.ReactElement {
+  return (
+    <span
+      className="spark-mono"
+      aria-hidden
+      style={{
+        position: "absolute",
+        right: 9,
+        top,
+        transform: "translateY(-50%)",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        fontSize: 8,
+        fontWeight: 600,
+        letterSpacing: "0.1em",
+        textTransform: "uppercase",
+        color: `color-mix(in oklch, ${tone} 75%, var(--muted))`,
+      }}
+    >
+      {text}
+    </span>
+  );
+}
+
 export function GuardNode({ id, data, selected }: NodeProps): React.ReactElement {
   const d = data as NodeData;
   if (d.kind !== "guard") return <div />;
   return (
-    <div className="loom-node" style={shellStyle(selected)}>
+    <div className="loom-node" style={cardStyle(selected, { width: 232, paddingRight: 44 })}>
+      <TopRule tone="var(--ok)" radius="var(--radius-surface) var(--radius-surface) 0 0" />
+      <Medallion icon={<Icon d={SPLIT} tone="var(--ok)" />} tone="var(--ok)" />
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+        <Eyebrow text="Guard" />
+        <Title text={d.label || "Guard"} />
+        <Meta text={predicateLine(d.predicate)} />
+      </div>
+      <PortLabel text="pass" tone="var(--ok)" top={GUARD_PASS_TOP} />
+      <PortLabel text="fail" tone="var(--danger)" top={GUARD_FAIL_TOP} />
       <Handle type="target" position={Position.Left} style={HANDLE_STYLE} />
-      <Header
-        glyph="◈"
-        eyebrow="Guard"
-        glyphColor="var(--ok)"
-        glyphTint="color-mix(in oklch, var(--ok) 14%, var(--panel-2))"
-      />
-      <Body>
-        <Line text={d.label || "Guard"} strong />
-        <Line text={predicateLine(d.predicate)} />
-        <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
-          <span
-            className="spark-badge"
-            style={{ color: "var(--ok)", borderColor: "color-mix(in oklch, var(--ok) 35%, transparent)" }}
-          >
-            pass
-          </span>
-          <span className="spark-badge is-danger">fail</span>
-        </div>
-      </Body>
-      {/* pass = top-right (green), fail = bottom-right (red) */}
+      {/* pass = upper port (green), fail = lower port (red) */}
       <Handle
         id="pass"
         type="source"
         position={Position.Right}
-        style={{ ...HANDLE_STYLE, top: "34%", borderColor: "var(--ok)", background: "color-mix(in oklch, var(--ok) 40%, var(--panel-3))" }}
+        style={{
+          ...HANDLE_STYLE,
+          top: GUARD_PASS_TOP,
+          borderColor: "var(--ok)",
+          background: "color-mix(in oklch, var(--ok) 40%, var(--panel-3))",
+        }}
       />
       <Handle
         id="fail"
         type="source"
         position={Position.Right}
-        style={{ ...HANDLE_STYLE, top: "66%", borderColor: "var(--danger)", background: "color-mix(in oklch, var(--danger) 40%, var(--panel-3))" }}
+        style={{
+          ...HANDLE_STYLE,
+          top: GUARD_FAIL_TOP,
+          borderColor: "var(--danger)",
+          background: "color-mix(in oklch, var(--danger) 40%, var(--panel-3))",
+        }}
       />
       {d.onAddFrom && (
         <>
           <PlusButton
             title="Add pass branch"
-            top="34%"
+            style={{ top: GUARD_PASS_TOP, right: -31, transform: "translateY(-50%)" }}
             onClick={(e) => {
               e.stopPropagation();
               d.onAddFrom?.(id, "pass", (e.currentTarget as HTMLElement).getBoundingClientRect());
@@ -328,7 +469,7 @@ export function GuardNode({ id, data, selected }: NodeProps): React.ReactElement
           />
           <PlusButton
             title="Add fail branch"
-            top="66%"
+            style={{ top: GUARD_FAIL_TOP, right: -31, transform: "translateY(-50%)" }}
             onClick={(e) => {
               e.stopPropagation();
               d.onAddFrom?.(id, "fail", (e.currentTarget as HTMLElement).getBoundingClientRect());
@@ -340,29 +481,26 @@ export function GuardNode({ id, data, selected }: NodeProps): React.ReactElement
   );
 }
 
-// ── merge node ───────────────────────────────────────────────────────────────
+// ── merge node — branches come back together ────────────────────────────────
 
 export function MergeNode({ id, data, selected }: NodeProps): React.ReactElement {
   const d = data as NodeData;
   if (d.kind !== "merge") return <div />;
   return (
-    <div className="loom-node" style={{ ...shellStyle(selected), width: 190 }}>
+    <div className="loom-node" style={cardStyle(selected, { width: 196 })}>
+      <TopRule tone="var(--info)" radius="var(--radius-surface) var(--radius-surface) 0 0" />
+      <Medallion icon={<Icon d={JOIN} tone="var(--info)" />} tone="var(--info)" />
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+        <Eyebrow text="Merge" />
+        <Title text={d.label || "Merge"} />
+        <Meta text={d.joinMode === "all" ? "waits for all branches" : "first branch wins"} />
+      </div>
       <Handle type="target" position={Position.Left} style={HANDLE_STYLE} />
-      <Header
-        glyph="⊕"
-        eyebrow="Merge"
-        glyphColor="var(--info)"
-        glyphTint="color-mix(in oklch, var(--info) 16%, var(--panel-2))"
-      />
-      <Body>
-        <Line text={d.label || "Merge"} strong />
-        <Line text={d.joinMode === "all" ? "wait for ALL branches" : "first branch wins"} />
-      </Body>
       <Handle type="source" position={Position.Right} style={HANDLE_STYLE} />
       {d.onAddFrom && (
         <PlusButton
           title="Add next step"
-          top="50%"
+          style={{ top: "50%", right: -31, transform: "translateY(-50%)" }}
           onClick={(e) => {
             e.stopPropagation();
             d.onAddFrom?.(id, undefined, (e.currentTarget as HTMLElement).getBoundingClientRect());
@@ -398,8 +536,8 @@ export function LoomEdge({
   const branch = (data as { branch?: "pass" | "fail"; backEdge?: boolean } | undefined)?.branch;
   const backEdge = (data as { backEdge?: boolean } | undefined)?.backEdge;
   let stroke = "var(--rule-strong)";
-  if (branch === "pass") stroke = "var(--ok)";
-  else if (branch === "fail") stroke = "var(--danger)";
+  if (branch === "pass") stroke = "color-mix(in oklch, var(--ok) 60%, var(--rule-strong))";
+  else if (branch === "fail") stroke = "color-mix(in oklch, var(--danger) 60%, var(--rule-strong))";
   if (selected) stroke = "var(--accent)";
   return (
     <BaseEdge
@@ -409,7 +547,8 @@ export function LoomEdge({
       style={{
         stroke,
         strokeWidth: selected ? 2.25 : 1.75,
-        strokeDasharray: backEdge ? "5 4" : undefined,
+        strokeLinecap: "round",
+        strokeDasharray: backEdge ? "6 6" : undefined,
       }}
     />
   );

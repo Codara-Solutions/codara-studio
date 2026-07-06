@@ -15,6 +15,13 @@ import { ElapsedTime } from "./elapsed";
 // worker nodes, and the COMPLETE terminal. Each is sized to fill the absolute
 // wrapper RunGraph positions it in; the wire layer connects them by their
 // laid-out edge ports.
+//
+// Silhouette language (shared with the automations LiveBoard): the SHAPE tells
+// the role. Capsules bookend the pipeline (SPARK origin / COMPLETE terminal),
+// steps are soft generous-radius cards, checkpoints are chamfered gates, and
+// workers are small cards wearing a runtime-colored left edge. Shapes only —
+// the wire/port geometry (box edges) is untouched, so GraphWires still lands
+// exactly on every node.
 
 // ── Icons ────────────────────────────────────────────────────────────────────
 
@@ -333,7 +340,8 @@ export const SparkNode = React.memo(function SparkNode({
         width: "100%",
         height: "100%",
         boxSizing: "border-box",
-        borderRadius: 13,
+        // Capsule — the origin's silhouette; ports still meet the box edges.
+        borderRadius: 999,
         border: `1px solid ${live ? "var(--accent-edge)" : failed ? "var(--danger)" : "var(--rule-strong)"}`,
         background:
           "linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 84%, var(--accent) 8%), color-mix(in oklch, var(--panel) 78%, var(--bg) 22%))",
@@ -495,7 +503,7 @@ function WorkerBatchNode({
         width: "100%",
         height: "100%",
         boxSizing: "border-box",
-        borderRadius: 12,
+        borderRadius: 18,
         border: `1px solid ${border}`,
         background,
         boxShadow: shadow,
@@ -652,10 +660,16 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
       onMouseLeave={() => setHover(false)}
       title={`${step.goal || step.title}\n\nCheckpoint — Cora replans here.`}
       style={{
+        position: "relative",
         width: "100%",
         height: "100%",
         boxSizing: "border-box",
-        borderRadius: 12,
+        cursor: "pointer",
+        fontFamily: "var(--font-sans)",
+        overflow: "hidden",
+        // A gate between worker batches: dashed border + accent top rule —
+        // quieter than a work node, no clip-path theatrics.
+        borderRadius: 14,
         border: `1px dashed ${border}`,
         background:
           "linear-gradient(150deg, color-mix(in oklch, var(--panel) 84%, var(--ink) 1%), color-mix(in oklch, var(--panel) 80%, var(--bg) 18%))",
@@ -664,16 +678,26 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
           : live
             ? "0 0 16px var(--accent-glow), var(--shadow-1)"
             : "var(--shadow-1)",
-        padding: "13px 15px",
+        padding: "13px 16px",
         display: "flex",
         flexDirection: "column",
         gap: 9,
-        cursor: "pointer",
-        fontFamily: "var(--font-sans)",
         transition:
           "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
+      <span
+        aria-hidden
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          height: 2,
+          background:
+            "linear-gradient(90deg, color-mix(in oklch, var(--accent) 55%, transparent), color-mix(in oklch, var(--accent) 10%, transparent))",
+        }}
+      />
       <header style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <span
           style={{
@@ -884,20 +908,24 @@ export const WorkerNode = React.memo(function WorkerNode({
         width: "100%",
         height: "100%",
         boxSizing: "border-box",
-        borderRadius: 9,
+        borderRadius: 12,
         border: `1px solid ${border}`,
         background: blocked
           ? "linear-gradient(150deg, color-mix(in oklch, var(--panel) 88%, var(--danger) 8%), color-mix(in oklch, var(--panel) 82%, var(--bg) 18%))"
           : running
             ? "linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 84%, var(--accent) 7%), color-mix(in oklch, var(--panel) 86%, transparent))"
             : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 90%, var(--ink) 2%), color-mix(in oklch, var(--panel) 82%, var(--bg) 18%))",
-        boxShadow: selected
-          ? "0 0 0 1.5px var(--accent), 0 0 16px var(--accent-glow), var(--shadow-1)"
-          : running
-            ? "var(--lift-hi), 0 0 14px var(--accent-glow), var(--shadow-1)"
-            : "var(--lift-hi), var(--shadow-1)",
+        // The runtime-colored left edge is the worker card's silhouette cue —
+        // same left-rule convention as the LiveBoard worker nodes.
+        boxShadow: `inset 3px 0 0 color-mix(in oklch, ${tone.label} 78%, transparent), ${
+          selected
+            ? "0 0 0 1.5px var(--accent), 0 0 16px var(--accent-glow), var(--shadow-1)"
+            : running
+              ? "var(--lift-hi), 0 0 14px var(--accent-glow), var(--shadow-1)"
+              : "var(--lift-hi), var(--shadow-1)"
+        }`,
         opacity: queued ? 0.62 : 1,
-        padding: "8px 10px",
+        padding: "8px 10px 8px 13px",
         display: "flex",
         flexDirection: "column",
         gap: 4,
@@ -1018,7 +1046,8 @@ export const EndNode = React.memo(function EndNode({
         width: "100%",
         height: "100%",
         boxSizing: "border-box",
-        borderRadius: 14,
+        // Capsule — the terminal's silhouette, matching the SPARK origin.
+        borderRadius: 999,
         border: `1px solid ${complete ? "var(--ok)" : failed ? "var(--danger)" : "var(--rule)"}`,
         background: complete
           ? "linear-gradient(150deg, color-mix(in oklch, var(--ok) 16%, var(--panel)), color-mix(in oklch, var(--panel) 86%, transparent))"

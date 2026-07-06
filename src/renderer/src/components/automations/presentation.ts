@@ -4,6 +4,7 @@ import type {
   AutomationStopReason,
   AutomationTrigger,
   LoomWorkerConfig,
+  LoomWorkerNode,
   ScheduledJob,
 } from "@shared/types";
 import { DEFAULT_AGENT_MAX_ITERATIONS } from "@shared/types";
@@ -124,6 +125,25 @@ export function workerSummary(worker: LoomWorkerConfig | undefined): string {
     parts.push("agent picks");
   }
   return parts.join(" · ");
+}
+
+// The JOB's worker identity for headers/list rows. Graph looms summarize
+// their actual worker nodes — the legacy flat job.worker is meaningless there
+// and reads "Auto · agent picks". Single-worker graphs keep the full
+// engine · model · effort line; wider graphs count per engine.
+export function jobWorkerSummary(job: ScheduledJob): string {
+  const workers = (job.graph?.nodes ?? []).filter((n): n is LoomWorkerNode => n.kind === "worker");
+  if (workers.length === 0) return workerSummary(job.worker);
+  if (workers.length === 1) return workerSummary(workers[0].worker);
+  const counts = new Map<string, number>();
+  for (const w of workers) {
+    const word = ENGINE_WORD[w.worker.engine] ?? w.worker.engine;
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  const engines = [...counts.entries()]
+    .map(([word, n]) => (n > 1 ? `${word} ×${n}` : word))
+    .join(" + ");
+  return `${workers.length} workers · ${engines}`;
 }
 
 export function fmtTime(value: string | undefined): string {

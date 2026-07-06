@@ -119,22 +119,23 @@ export function stepNeedsAttention(status: StepState["status"]): boolean {
   return status === "blocked" || status === "failed" || status === "completed_unverified";
 }
 
-// Per-runtime accent. claude rides the brand accent (it is the flagship
-// runtime); codex is info-blue; cursor is warn-amber; shell is ok-green;
-// manual stays neutral.
+// Per-runtime accent — the app-wide engine identity tokens (claude wears
+// coral, codex cyan; see the "Loom silhouettes" section in styles.css), so a
+// worker's runtime reads the same on the run graph, the loom editor, and the
+// LiveBoard. shell is ok-green; manual stays neutral.
 export function runtimeTone(runtime: WorkerRuntime): RuntimeTone {
   switch (runtime) {
     case "claude":
       return {
-        label: "var(--accent)",
-        border: "var(--accent-edge)",
-        bg: "color-mix(in oklch, var(--accent) 9%, transparent)",
+        label: "var(--engine-claude)",
+        border: "color-mix(in oklch, var(--engine-claude) 52%, transparent)",
+        bg: "color-mix(in oklch, var(--engine-claude) 10%, transparent)",
       };
     case "codex":
       return {
-        label: "var(--info)",
-        border: "color-mix(in oklch, var(--info) 52%, transparent)",
-        bg: "color-mix(in oklch, var(--info) 10%, transparent)",
+        label: "var(--engine-codex)",
+        border: "color-mix(in oklch, var(--engine-codex) 52%, transparent)",
+        bg: "color-mix(in oklch, var(--engine-codex) 10%, transparent)",
       };
     case "shell":
       return {

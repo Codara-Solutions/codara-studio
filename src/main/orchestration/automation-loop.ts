@@ -263,7 +263,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
     // agent-loop footer — the EXACT transforms the legacy single-node prompt got.
     // Used for BOTH the degenerate entry prompt AND each multi-node entry's
     // per-node prompt (FIX 1: the footer/note apply PER entry node).
-    const decoratePrompt = (rendered: string): string => {
+    const decoratePrompt = (rendered: string, steerable = true): string => {
       let p = rendered;
       // A folder trigger's changed path: append it unless the template already
       // wove it in via {{file}}, so the agent always knows what fired.
@@ -273,11 +273,14 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       }
       // Agent-driven loops: tell the model how to keep the loop going even if the
       // template never mentioned the mechanism. (Hard caps stop it regardless.)
+      // steerable=false for multi-node entry prompts: resolveWorker only consumes
+      // a handoff on the job-level worker (degenerate/answer-resume paths), so
+      // graph entries must not be promised engine steering that can't happen.
       if (
         job.loop.kind === "agent" &&
         !/SPARK_LOOP_(CONTINUE|DONE)|spark_request_next_iteration/.test(p)
       ) {
-        p = `${p}${agentLoopFooter(job)}`;
+        p = `${p}${agentLoopFooter(job, steerable)}`;
       }
       return p;
     };
@@ -382,6 +385,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
         }
         const rendered = decoratePrompt(
           renderNodePrompt(node.prompt, { vars: passVars, nodeOutputs: {}, incoming: [] }),
+          false,
         );
         launches.push({
           nodeId: node.id,
@@ -715,9 +719,11 @@ export function recordAgentSignal(runId: string, signal: AgentLoopSignal): void 
 
 // ── Worker resolution (Looms v2) ─────────────────────────────────────────────
 // Which CLI engine/model/effort runs the NEXT pass. Precedence:
-//   1. a pinned engine always wins (handoffs are only honored on "auto" looms);
-//   2. a validated agent handoff (state.pendingNextWorker, consumed once);
-//   3. "auto" resolves claude-when-installed, else codex.
+//   1. a validated agent handoff (state.pendingNextWorker, consumed once) — now
+//      honored even on a pinned engine, since "auto" no longer exists;
+//   2. the loom's own pinned engine/model/effort;
+//   3. a legacy "auto" spec (persisted before the auto→concrete change) still
+//      resolves claude-when-installed, else codex.
 // A model id unknown to the resolved runtime falls back to the CLI default
 // rather than failing the pass.
 async function resolveWorker(
@@ -738,16 +744,12 @@ async function resolveWorker(
   // Resolve against the GIVEN worker config (defaults to job.worker so every
   // existing call is byte-identical). A multi-node entry frontier resolves each
   // entry node's OWN worker via resolveWorker(job, node.worker); the agent
-  // handoff + pin precedence below stay keyed off job.worker (the loom-level
-  // engine policy) — only a job.worker-shaped config carries a pending handoff.
-  const handoff = workerConfig.engine === "auto" ? job.state.pendingNextWorker : undefined;
-  if (job.state.pendingNextWorker && workerConfig.engine !== "auto") {
-    void emitLoopNote("automation.handoff_rejected", {
-      automationId: job.id,
-      requested: job.state.pendingNextWorker,
-      reason: "engine is pinned",
-    });
-  }
+  // handoff stays keyed off job.worker (the loom-level engine policy) — only the
+  // job-level config carries a pending handoff. A handoff steers the NEXT pass's
+  // engine/model/effort even when the engine is pinned: "auto" no longer exists,
+  // so gating on it would silently drop every handoff (the socket already
+  // validated the fields against installed runtimes before recording them).
+  const handoff = workerConfig === job.worker ? job.state.pendingNextWorker : undefined;
 
   const want = handoff?.engine ?? workerConfig.engine;
   const engine: LoomEngine | null =
@@ -947,16 +949,16 @@ const ATTEMPT_TERMINAL = new Set(["succeeded", "failed", "timed_out", "cancelled
 const answerResumes = new Set<string>();
 
 // The agent-loop continuation instructions appended to every agent-driven
-// pass's prompt (and to answer-resume continuations). Auto-engine looms also
-// learn they may steer the next pass's engine/model — pinned looms aren't
-// invited to hand off because the pin always wins (the request would just be
-// rejected).
-function agentLoopFooter(job: ScheduledJob): string {
+// pass's prompt (and to answer-resume continuations). A handoff is honored even
+// on a pinned engine ("auto" no longer exists), but ONLY on the job-level
+// worker (degenerate single-node passes + answer resumes) — resolveWorker never
+// consumes a handoff for a graph entry node's own worker, so steerable=false
+// there keeps the prompt honest.
+function agentLoopFooter(job: ScheduledJob, steerable = true): string {
   if (job.loop.kind !== "agent") return "";
-  const handoffNote =
-    job.worker.engine === "auto"
-      ? ` You may also pass nextEngine ("claude"|"codex"), nextModel, and nextEffort to spark_request_next_iteration to pick the next pass's worker; only installed engines are honored.`
-      : "";
+  const handoffNote = steerable
+    ? ` You may also pass nextEngine ("claude"|"codex"), nextModel, and nextEffort to spark_request_next_iteration to pick the next pass's worker; only installed engines are honored.`
+    : "";
   return `\n\n---\nThis is an automation loop. When you finish this pass, decide whether to continue: call the spark_request_next_iteration tool (done=false to run another iteration, done=true to stop), or end your final summary with ${SPARK_LOOP_CONTINUE} or ${SPARK_LOOP_DONE} on its own last line.${handoffNote} If you give no signal the loop stops. Your safety caps always stop it regardless.`;
 }
 
@@ -1195,22 +1197,15 @@ async function onTerminal(id: string, run: RunState): Promise<void> {
     case "agent": {
       const sig = await readAgentSignal(fresh, run, summary);
       if (sig.continue) {
-        // Honor a worker handoff only on auto-engine looms — a pinned engine
-        // always wins (resolveWorker re-checks and emits the rejection ping).
-        // Effort-only steering (no nextEngine) is a valid handoff too: the
-        // socket acknowledged it, so dropping it here would be a silent lie.
+        // Record a worker handoff for the next pass regardless of the pinned
+        // engine — "auto" no longer exists, so a handoff steers the next pass's
+        // engine/model/effort directly (the socket already validated the fields
+        // against installed runtimes). Effort-only steering (no nextEngine) is a
+        // valid handoff too. resolveWorker consumes it on the job-level worker.
         const wantsHandoff = Boolean(sig.nextEngine || sig.nextModel || sig.nextEffort);
-        const handoff =
-          fresh.worker.engine === "auto" && wantsHandoff
-            ? { engine: sig.nextEngine, model: sig.nextModel, effort: sig.nextEffort }
-            : undefined;
-        if (wantsHandoff && fresh.worker.engine !== "auto") {
-          void emitLoopNote("automation.handoff_rejected", {
-            automationId: id,
-            requested: { engine: sig.nextEngine, model: sig.nextModel, effort: sig.nextEffort },
-            reason: "engine is pinned",
-          });
-        }
+        const handoff = wantsHandoff
+          ? { engine: sig.nextEngine, model: sig.nextModel, effort: sig.nextEffort }
+          : undefined;
         await patchJob(id, (j) => ({
           ...j,
           state: {

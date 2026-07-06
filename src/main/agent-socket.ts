@@ -1160,11 +1160,12 @@ async function handleOrchestratorRequestNextIteration(
   // signal in a multi-node wave; undefined for single-node looms.
   const nodeId = stringParam(params, "nodeId") ?? undefined;
 
-  // Looms v2 auto-handoff: the agent may steer the NEXT pass's worker. Invalid
+  // Looms v2 handoff: the agent may steer the NEXT pass's worker. Invalid
   // fields are dropped (never an error response — the continue/stop signal must
   // always be recorded; killing the loop over a typo'd model id would be worse
-  // than ignoring the steering). Whatever survives validation is honored only
-  // by auto-engine looms; the loop driver re-checks the pin.
+  // than ignoring the steering). Whatever survives validation is honored by the
+  // loop driver for the next pass regardless of the pinned engine ("auto" no
+  // longer exists as a gate).
   const requestedEngine = stringParam(params, "nextEngine") ?? undefined;
   const requestedModel = stringParam(params, "nextModel") ?? undefined;
   const requestedEffort = stringParam(params, "nextEffort") ?? undefined;
@@ -1807,7 +1808,6 @@ function validateGraph(graph: LoomGraph): string | null {
     return "graph.entryNodeIds must be a non-empty array when a graph is provided";
   }
   const GUARD_PREDICATE_TYPES = new Set(["phrase", "tests", "gitClean", "command", "agentSignal"]);
-  const ENGINES = new Set(["auto", "claude", "codex"]);
   const ids = new Set<string>();
   const guardIds = new Set<string>();
   for (const rawNode of graph.nodes) {
@@ -1819,7 +1819,7 @@ function validateGraph(graph: LoomGraph): string | null {
       kind?: unknown;
       predicate?: { type?: unknown; phrase?: unknown; command?: unknown; want?: unknown };
       prompt?: unknown;
-      worker?: { engine?: unknown };
+      worker?: { engine?: unknown; model?: unknown; effort?: unknown };
     };
     if (!node || typeof node.id !== "string" || node.id.trim().length === 0) {
       return "every graph node needs a non-empty string id";
@@ -1858,13 +1858,11 @@ function validateGraph(graph: LoomGraph): string | null {
         return `worker node ${node.id} requires a non-empty prompt`;
       }
       // node.worker is dereferenced (n.worker.engine) by advance/relaunch waves;
-      // a missing/garbage worker crashes the pass mid-flight. Require it.
-      if (!node.worker || typeof node.worker !== "object") {
-        return `worker node ${node.id} requires a worker config (with an 'engine')`;
-      }
-      if (typeof node.worker.engine !== "string" || !ENGINES.has(node.worker.engine)) {
-        return `worker node ${node.id} has invalid worker.engine '${String(node.worker.engine)}' (expected auto|claude|codex)`;
-      }
+      // a missing/garbage worker crashes the pass mid-flight. Require it — and
+      // require it CONCRETE (engine claude|codex + explicit model + effort): the
+      // architect must pin all three per worker, "auto"/blank no longer exist.
+      const werr = validateConcreteWorker(node.worker, `worker node ${node.id}`);
+      if (werr) return werr;
     }
   }
   for (const entry of graph.entryNodeIds) {
@@ -1902,6 +1900,36 @@ function validateGraph(graph: LoomGraph): string | null {
   return null;
 }
 
+// The engines/efforts an architect-supplied worker MUST pin. "auto" and an
+// unset model/effort no longer exist — the architect always chooses a concrete
+// engine, model, and effort per worker. (Runtime resolution still tolerates a
+// legacy "auto"/blank spec loaded from disk; this strictness is only on the
+// create/update path so the architect corrects itself.)
+const CONCRETE_ENGINES = new Set(["claude", "codex"]);
+const WORKER_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
+
+/** Reject any worker that fails to pin a concrete engine ∈ {claude, codex}, a
+ *  non-blank model, and a valid effort. Returns an instructive error naming the
+ *  offending worker (so the architect fixes it), or null when concrete. */
+function validateConcreteWorker(
+  worker: { engine?: unknown; model?: unknown; effort?: unknown } | undefined,
+  label: string,
+): string | null {
+  if (!worker || typeof worker !== "object") {
+    return `${label} requires a worker config with an explicit engine, model, and effort`;
+  }
+  if (typeof worker.engine !== "string" || !CONCRETE_ENGINES.has(worker.engine)) {
+    return `${label} has engine '${String(worker.engine)}' — it must be 'claude' or 'codex' ('auto' and an unset engine are no longer allowed; choose one explicitly)`;
+  }
+  if (typeof worker.model !== "string" || worker.model.trim().length === 0) {
+    return `${label} must set an explicit model (claude: claude-opus-4-8 or claude-sonnet-5; codex: gpt-5.5) — a CLI-default/blank model is no longer allowed`;
+  }
+  if (typeof worker.effort !== "string" || !WORKER_EFFORTS.has(worker.effort)) {
+    return `${label} must set an explicit effort — one of minimal, low, medium, high, xhigh, max (a blank/default effort is no longer allowed)`;
+  }
+  return null;
+}
+
 // Floor the scheduler enforces on interval/cadence (setInterval is armed with
 // Math.max(1000, ...)). We reject anything below it (or non-finite) up front so
 // a NaN everyMs can't become setInterval(fn, NaN) ≈ a 1ms hot loop persisted
@@ -1923,7 +1951,6 @@ async function validateTriggerLoopWorker(opts: {
 }): Promise<string | null> {
   const TRIGGER_KINDS = new Set(["cron", "interval", "folder", "manual", "continuous", "onFinishOf"]);
   const LOOP_KINDS = new Set(["once", "count", "cadence", "until", "continuous", "agent"]);
-  const ENGINES = new Set(["auto", "claude", "codex"]);
   if (opts.trigger !== undefined) {
     const t = opts.trigger as AutomationTrigger & {
       kind?: unknown;
@@ -1997,9 +2024,8 @@ async function validateTriggerLoopWorker(opts: {
     }
   }
   if (opts.worker !== undefined) {
-    if (typeof opts.worker.engine !== "string" || !ENGINES.has(opts.worker.engine)) {
-      return `worker.engine '${String(opts.worker.engine)}' is invalid (expected auto|claude|codex)`;
-    }
+    const err = validateConcreteWorker(opts.worker, "worker");
+    if (err) return err;
   }
   return null;
 }
@@ -2085,7 +2111,13 @@ async function handleAutomationCreate(
     loop.stop = {};
   }
   const worker = paramWorker(params);
-  if (!worker) return errorResponse(id, ERR_INVALID_PARAMS, "worker (with an 'engine') is required");
+  if (!worker) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      "worker is required — set an explicit engine ('claude'|'codex'), model, and effort",
+    );
+  }
   const tlwErr = await validateTriggerLoopWorker({ trigger, loop, worker });
   if (tlwErr) return errorResponse(id, ERR_INVALID_PARAMS, tlwErr);
   const promptTemplate = stringParam(params, "prompt_template");

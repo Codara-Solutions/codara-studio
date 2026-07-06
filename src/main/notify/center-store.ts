@@ -139,10 +139,13 @@ export async function markCenterRead(id: string): Promise<void> {
   pushSummary();
 }
 
-// Remove a single entry outright — used when the user ACTS on a notification
-// (clicks a toast through to its target, answers an inline question, or opens
-// the entry from the center). Handled items must not pile up, so this splices
-// rather than marks read. A no-op when the id is already gone (race-safe:
+// Remove a single entry outright — used when the user ACTS on an ACTIONABLE
+// notification (answers an inline question, or clicks a blocked/needs-input
+// prompt through to its target). Handled prompts must not pile up, so this
+// splices rather than marks read. Completion records (automation/run
+// finished/failed) are the exception: acting on those calls markCenterRead
+// instead, so a finished automation stays in the center as history (see the
+// renderer's isCompletionKind). A no-op when the id is already gone (race-safe:
 // auto-expiry / a prior removal may have dropped it), and it persists +
 // pushes the unread summary through the same debounced writer as the others.
 export async function removeCenterEntry(id: string): Promise<void> {
