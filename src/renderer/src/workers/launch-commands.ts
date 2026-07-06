@@ -25,6 +25,18 @@ export function buildClaudeLaunch(): { command: string; sessionId: string } {
   };
 }
 
+// True when an autorun command launches a restorable agent CLI (claude/codex).
+// Such panes spawn with SPARK_NO_SHELL_INTEGRATION=1 so pwsh can take the
+// command over args (-NoProfile -NoExit -Command …) — see withStartupCommand
+// in src/main/pty-manager.ts — which removes the 1500ms type-after-mount race.
+// Cursor is deliberately excluded: its runtime detection relies on the OSC
+// 633;E command echo that shell integration provides.
+export function isAgentSessionLaunchCommand(command: string | undefined | null): boolean {
+  const cmd = command?.trim();
+  if (!cmd) return false;
+  return cmd.startsWith(CLAUDE_LAUNCH_COMMAND) || cmd.startsWith(CODEX_LAUNCH_COMMAND);
+}
+
 // Resume-command builders — the autorun typed into a restored pane's fresh
 // shell on reopen. These mirror the (main-side) provider `buildResumeArgs` in
 // src/main/providers/{claude,codex}.ts (`-r <id>` / `resume <id>`), rendered as

@@ -3888,6 +3888,16 @@ const Workspace = React.memo(function Workspace({
     },
     [tabs],
   );
+  // A failed Claude restore self-healed: the pane launched a FRESH forced-id
+  // session (buildClaudeLaunch) in the same cwd. Persist the replacement
+  // pointer so the next reopen resumes the new conversation instead of the
+  // dead one.
+  const handleLeafResumeFallback = useCallback(
+    (tabId: string, paneId: string, session: TerminalAgentSession) => {
+      tabs.setLeafAgentSession(tabId, paneId, session);
+    },
+    [tabs],
+  );
 
   return (
     <div
@@ -4017,6 +4027,7 @@ const Workspace = React.memo(function Workspace({
                 onPaneAgentState={isActive ? onTerminalPaneAgentState : noopTerminalCb}
                 onPaneRuntimeState={isActive ? onTerminalPaneRuntimeState : noopTerminalCb}
                 onPaneResumeUnavailable={isActive ? handleLeafResumeUnavailable : noopTerminalCb}
+                onPaneResumeFallback={isActive ? handleLeafResumeFallback : noopTerminalCb}
               />
             </div>
           );

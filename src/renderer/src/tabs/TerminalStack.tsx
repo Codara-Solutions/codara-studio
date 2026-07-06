@@ -13,6 +13,7 @@ import type {
   PaneNode,
   Tab,
   TabId,
+  TerminalAgentSession,
   TerminalLeaf,
   TerminalLeafWorker,
   TerminalSplit,
@@ -111,6 +112,9 @@ interface Props {
   // A restored pane's `--resume` probe found no transcript on disk — clear the
   // stale session pointer so it stops trying to resume and can re-capture.
   onPaneResumeUnavailable: (tabId: TabId, paneId: string) => void;
+  // A failed Claude restore self-healed into a fresh forced-id session —
+  // persist the replacement pointer on the leaf.
+  onPaneResumeFallback: (tabId: TabId, paneId: string, session: TerminalAgentSession) => void;
 }
 
 // Per-pane bundle of stable callbacks. Cached per `tabId:paneId` so a
@@ -133,6 +137,7 @@ type Bundle = {
   onAgentState: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
   onRuntimeState: (state: RuntimeState) => void;
   onResumeUnavailable: () => void;
+  onResumeFallback: (session: TerminalAgentSession) => void;
 };
 
 // React.memo: with the useTabs API object now memoized, TerminalStack's
@@ -162,6 +167,7 @@ function TerminalStack({
   onPaneAgentState,
   onPaneRuntimeState,
   onPaneResumeUnavailable,
+  onPaneResumeFallback,
 }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
   // unrelated tab kind mutates, and so the bundle-GC effect (keyed on
@@ -191,6 +197,7 @@ function TerminalStack({
   const agentStateRef = useRef(onPaneAgentState);
   const runtimeStateRef = useRef(onPaneRuntimeState);
   const resumeUnavailableRef = useRef(onPaneResumeUnavailable);
+  const resumeFallbackRef = useRef(onPaneResumeFallback);
   useEffect(() => {
     detectedRef.current = onDetectedUrl;
     sparkOpenRef.current = onSparkOpen;
@@ -209,7 +216,8 @@ function TerminalStack({
     agentStateRef.current = onPaneAgentState;
     runtimeStateRef.current = onPaneRuntimeState;
     resumeUnavailableRef.current = onPaneResumeUnavailable;
-  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable]);
+    resumeFallbackRef.current = onPaneResumeFallback;
+  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback]);
 
   // Latest tab roots so the + smart-add button can read whichever PaneNode
   // tree is current at click time (a stale capture would split a tree that
@@ -291,6 +299,7 @@ function TerminalStack({
           onAgentState: (state) => agentStateRef.current(tabId, paneId, state),
           onRuntimeState: (state) => runtimeStateRef.current(tabId, paneId, state),
           onResumeUnavailable: () => resumeUnavailableRef.current(tabId, paneId),
+          onResumeFallback: (session) => resumeFallbackRef.current(tabId, paneId, session),
         };
         bundles.current.set(key, b);
       }
@@ -380,6 +389,103 @@ function TerminalStack({
     [],
   );
 
+  // ── Staggered pane warm-up (cold-boot cost control) ─────────────────────
+  // Mounting a <TerminalPane> is expensive: PTY spawn + xterm + a WebGL
+  // context each. At boot, every pane of every persisted tab used to mount
+  // simultaneously — a startup spike plus a burst of simultaneous
+  // `claude --resume` launches. Instead, panes that start out in HIDDEN tabs
+  // are marked dormant (render nothing — their tab is CSS-hidden anyway) and
+  // wake a couple at a time in the background, or instantly when their tab
+  // becomes visible (the mounted pane replays the persisted scrollback, so
+  // the user still sees the previous output immediately).
+  //
+  // Dormancy is decided ONCE, from the layout present at stack mount: any
+  // pane created afterwards (splits, worker launches, drag-routing) mounts
+  // immediately like before. The set only shrinks, so a woken pane can never
+  // go dormant again — the workspace keep-alive contract (panes stay mounted
+  // across tab/workspace switches) is untouched.
+  const [dormantPanes, setDormantPanes] = useState<ReadonlySet<string>>(() => {
+    const dormant = new Set<string>();
+    for (const t of terminals) {
+      if (t.id === activeId) continue;
+      for (const id of collectTerminalPaneIds(t.root)) dormant.add(id);
+    }
+    return dormant;
+  });
+  const dormantPanesRef = useRef(dormantPanes);
+  dormantPanesRef.current = dormantPanes;
+  const warmupTabsRef = useRef(terminals);
+  warmupTabsRef.current = terminals;
+
+  const wakePanes = useCallback((ids: readonly string[]) => {
+    setDormantPanes((prev) => {
+      if (prev.size === 0) return prev;
+      let next: Set<string> | null = null;
+      for (const id of ids) {
+        if (!prev.has(id)) continue;
+        if (!next) next = new Set(prev);
+        next.delete(id);
+      }
+      return next ?? prev;
+    });
+  }, []);
+
+  // Activating a tab wakes all of its panes at once. (The render gate below
+  // already treats visible-tab panes as open, so this just makes the wake
+  // permanent for when the user switches away again mid-warm-up.)
+  useEffect(() => {
+    if (dormantPanes.size === 0 || !activeId) return;
+    const active = terminals.find((t) => t.id === activeId);
+    if (!active) return;
+    const ids = collectTerminalPaneIds(active.root).filter((id) => dormantPanes.has(id));
+    if (ids.length > 0) wakePanes(ids);
+  }, [terminals, activeId, dormantPanes, wakePanes]);
+
+  // Background warm-up: starting shortly after mount, wake 2 dormant panes
+  // per tick (front-to-back tab order) until none remain. Reads live state
+  // through refs so the interval never goes stale; stops itself when the
+  // boot-time dormant set is drained (nothing is ever added back).
+  useEffect(() => {
+    if (dormantPanesRef.current.size === 0) return;
+    let interval: number | null = null;
+    const stop = () => {
+      if (interval !== null) {
+        window.clearInterval(interval);
+        interval = null;
+      }
+    };
+    const tick = () => {
+      const dormant = dormantPanesRef.current;
+      if (dormant.size === 0) {
+        stop();
+        return;
+      }
+      const batch: string[] = [];
+      for (const t of warmupTabsRef.current) {
+        for (const id of collectTerminalPaneIds(t.root)) {
+          if (dormant.has(id) && batch.length < 2) batch.push(id);
+        }
+        if (batch.length >= 2) break;
+      }
+      if (batch.length === 0) {
+        // Every remaining dormant pane's tab was closed while dormant —
+        // clear the set so the interval terminates.
+        setDormantPanes(new Set());
+        stop();
+        return;
+      }
+      wakePanes(batch);
+    };
+    const start = window.setTimeout(() => {
+      tick();
+      interval = window.setInterval(tick, 800);
+    }, 1200);
+    return () => {
+      window.clearTimeout(start);
+      stop();
+    };
+  }, [wakePanes]);
+
   useEffect(() => {
     // Only the visible workspace's stack owns the global drag listeners.
     // Hidden (kept-alive) workspace stacks skip them so a single pane drag
@@ -462,6 +568,7 @@ function TerminalStack({
           key={t.id}
           tab={t}
           visible={t.id === activeId}
+          dormantPanes={dormantPanes}
           shell={shell}
           scrollbackLineLimit={scrollbackLineLimit}
           getBundle={getBundle}
@@ -481,6 +588,10 @@ export default React.memo(TerminalStack);
 interface TerminalTabPaneProps {
   tab: TerminalTab;
   visible: boolean;
+  // Boot-time dormant panes (see the warm-up block in TerminalStack). A leaf
+  // in this set renders no <TerminalPane> until woken; visible tabs are
+  // always fully open regardless.
+  dormantPanes: ReadonlySet<string>;
   shell: ShellInfo;
   scrollbackLineLimit: number;
   getBundle: (tabId: TabId, paneId: string) => Bundle;
@@ -500,6 +611,19 @@ interface TerminalTabPaneProps {
   ) => void;
 }
 
+// Every leaf paneId in a tab's pane tree, in tree order. Used by the
+// staggered warm-up above to enumerate a tab's panes without building the
+// full layout geometry.
+function collectTerminalPaneIds(node: PaneNode, out: string[] = []): string[] {
+  if (node.kind === "leaf") {
+    out.push(node.paneId);
+    return out;
+  }
+  collectTerminalPaneIds(node.a, out);
+  collectTerminalPaneIds(node.b, out);
+  return out;
+}
+
 // One terminal tab's flattened pane area. Extracted from TerminalStack and
 // wrapped in React.memo so a change to tab A's pane tree doesn't re-render
 // tabs B/C/D (and doesn't re-run their layoutPanes walks). Every prop is
@@ -508,6 +632,7 @@ interface TerminalTabPaneProps {
 const TerminalTabPane = React.memo(function TerminalTabPane({
   tab,
   visible,
+  dormantPanes,
   shell,
   scrollbackLineLimit,
   getBundle,
@@ -881,26 +1006,29 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
           >
             {!placeOffScreen && isActive ? <PaneFocusRing /> : null}
             {!placeOffScreen && isZoomed ? <PaneZoomedRing /> : null}
-            <TerminalPane
-              ref={(h) => setHandle(leaf.paneId, h)}
-              sessionId={leaf.paneId}
-              shell={shell}
-              initialCwd={leaf.cwd}
-              initialScrollback={leaf.scrollback}
-              initialCommand={leaf.autorun}
-              agentSession={leaf.agentSession}
-              visible={visible && !placeOffScreen}
-              scrollbackLineLimit={scrollbackLineLimit}
-              onDetectedLocalUrl={bundle.onDetectedUrl}
-              onSparkOpen={bundle.onSparkOpen}
-              onExit={bundle.onExit}
-              onCwd={bundle.onCwd}
-              onActivity={bundle.onActivity}
-              onUserInput={bundle.onUserInput}
-              onAgentState={bundle.onAgentState}
-              onRuntimeState={bundle.onRuntimeState}
-              onResumeUnavailable={bundle.onResumeUnavailable}
-            />
+            {visible || !dormantPanes.has(leaf.paneId) ? (
+              <TerminalPane
+                ref={(h) => setHandle(leaf.paneId, h)}
+                sessionId={leaf.paneId}
+                shell={shell}
+                initialCwd={leaf.cwd}
+                initialScrollback={leaf.scrollback}
+                initialCommand={leaf.autorun}
+                agentSession={leaf.agentSession}
+                visible={visible && !placeOffScreen}
+                scrollbackLineLimit={scrollbackLineLimit}
+                onDetectedLocalUrl={bundle.onDetectedUrl}
+                onSparkOpen={bundle.onSparkOpen}
+                onExit={bundle.onExit}
+                onCwd={bundle.onCwd}
+                onActivity={bundle.onActivity}
+                onUserInput={bundle.onUserInput}
+                onAgentState={bundle.onAgentState}
+                onRuntimeState={bundle.onRuntimeState}
+                onResumeUnavailable={bundle.onResumeUnavailable}
+                onResumeFallback={bundle.onResumeFallback}
+              />
+            ) : null}
             {!placeOffScreen && workerChip ? <WorkerChip worker={workerChip} /> : null}
             {!placeOffScreen ? (
               <PaneToolbar

@@ -616,13 +616,15 @@ const api = {
       sinceMs: number;
     }): Promise<{ sessionId: string; transcriptPath: string } | null> =>
       ipcRenderer.invoke("agentSession:capture", args),
-    // Check a saved session's transcript still exists before resuming it.
+    // Check a saved session's transcript still exists — and is resumable
+    // (has a real user message; stillborn transcripts make `--resume` refuse)
+    // — before resuming it.
     probe: (args: {
       runtime: "claude" | "codex";
       sessionId: string;
       cwd: string;
       transcriptPath?: string;
-    }): Promise<{ exists: boolean; transcriptPath?: string }> =>
+    }): Promise<{ exists: boolean; resumable?: boolean; transcriptPath?: string }> =>
       ipcRenderer.invoke("agentSession:probe", args),
     // Pre-seed Codex directory trust before a `codex --yolo` (re)launch.
     ensureCodexTrust: (cwd: string): Promise<void> =>

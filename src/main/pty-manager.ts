@@ -341,16 +341,21 @@ export async function spawn(
     return { id: opts.id, pid: existing.pty.pid, startupCommandHandled: false };
   }
 
-  const launch = withStartupCommand(opts.shell, opts.startupCommand);
+  const noShellIntegration = opts.env?.SPARK_NO_SHELL_INTEGRATION === "1";
+  const launch = withStartupCommand(opts.shell, opts.startupCommand, noShellIntegration);
   const spawnOpts: SpawnOptions = launch.shell === opts.shell ? opts : { ...opts, shell: launch.shell };
 
   // See FAMILIES_WITH_SHARED_PROFILE_WRITES — wait for the previous spawn of
-  // this family to finish $PROFILE before starting the next one.
+  // this family to finish $PROFILE before starting the next one. Panes that
+  // run -NoProfile (SPARK_NO_SHELL_INTEGRATION=1 worker/agent panes — doSpawn
+  // injects the flag) never touch the shared profile caches, so they neither
+  // need the repair pass nor the serializing lock.
   const family = spawnOpts.shell.family;
-  if (FAMILIES_WITH_SHARED_PROFILE_WRITES.has(family) && !launch.skipsProfile) {
+  const skipsProfile = launch.skipsProfile || noShellIntegration;
+  if (FAMILIES_WITH_SHARED_PROFILE_WRITES.has(family) && !skipsProfile) {
     await repairProfileCachesOnce();
   }
-  const releaseLock = FAMILIES_WITH_SHARED_PROFILE_WRITES.has(family) && !launch.skipsProfile
+  const releaseLock = FAMILIES_WITH_SHARED_PROFILE_WRITES.has(family) && !skipsProfile
     ? await acquireSpawnLock(family)
     : null;
 
@@ -365,17 +370,32 @@ export async function spawn(
 function withStartupCommand(
   shell: ShellInfo,
   command: string | undefined,
+  noShellIntegration = false,
 ): { shell: ShellInfo; handled: boolean; skipsProfile: boolean } {
   const startup = command?.trim();
   if (!startup) return { shell, handled: false, skipsProfile: false };
 
   if (shell.family === "pwsh" || shell.family === "powershell") {
-    // We deliberately do NOT take over the shell args here. The default
-    // pwsh launch loads spark.ps1 (OSC 633 boundary markers), and our
-    // chip-detection signals (OSC 633;E for launch, OSC 633;A for exit)
-    // rely on that. The renderer's useTerminalSession types the startup
-    // command into the live shell after 1500ms instead — see the autorun
-    // block in src/renderer/src/components/Terminal/useTerminalSession.ts.
+    if (noShellIntegration) {
+      // Worker/agent panes (SPARK_NO_SHELL_INTEGRATION=1) never load
+      // spark.ps1 — no OSC 633 markers exist to protect — so pwsh CAN take
+      // the command over args here. This removes the renderer's 1500ms
+      // type-after-mount race entirely: the command is the shell's first
+      // action, delivered by pwsh itself, immune to profile-load timing.
+      // -NoExit keeps a usable prompt after the agent exits (same reasoning
+      // as cmd /K below).
+      return {
+        shell: { ...shell, args: ["-NoLogo", "-NoProfile", "-NoExit", "-Command", startup] },
+        handled: true,
+        skipsProfile: true,
+      };
+    }
+    // Integrated panes: we deliberately do NOT take over the shell args.
+    // The default pwsh launch loads spark.ps1 (OSC 633 boundary markers),
+    // and our chip-detection signals (OSC 633;E for launch, OSC 633;A for
+    // exit) rely on that. The renderer's useTerminalSession types the
+    // startup command into the live shell after 1500ms instead — see the
+    // autorun block in src/renderer/src/components/Terminal/useTerminalSession.ts.
     return { shell, handled: false, skipsProfile: false };
   }
 
@@ -1112,6 +1132,74 @@ export function disposeAll(): void {
   for (const t of pendingKills.values()) clearTimeout(t);
   pendingKills.clear();
   for (const id of [...sessions.keys()]) killNow(id);
+}
+
+// Quit-path variant of disposeAll. killNow() taskkill /T /F's the process
+// tree the instant it runs, which can cut a Claude/Codex CLI mid-write and
+// leave a transcript .jsonl that `claude --resume` refuses on the next
+// launch — the root cause of restored panes erroring into fresh sessions.
+// Here every session first loses its pseudo-console (pty.kill() → Windows
+// delivers CTRL_CLOSE_EVENT to the attached tree, giving the CLIs their
+// normal exit path to flush), and only after a bounded grace do the shells
+// still alive get the taskkill sledgehammer. The grace polls actual pid
+// liveness, so an all-processes-exited quit proceeds in one poll tick; the
+// worst case stays well inside index.ts's 5s before-quit hard-exit budget.
+export async function disposeAllGraceful(maxWaitMs = 1500): Promise<void> {
+  for (const t of pendingKills.values()) clearTimeout(t);
+  pendingKills.clear();
+  const pids: number[] = [];
+  for (const id of [...sessions.keys()]) {
+    const s = sessions.get(id);
+    if (!s) continue;
+    // Same teardown bookkeeping as killNow, minus the immediate taskkill.
+    s.disposed = true;
+    stashWebContents(id, s);
+    const pid = s.pty.pid;
+    if (typeof pid === "number" && pid > 0) pids.push(pid);
+    try {
+      flushDataNow(s);
+      s.pty.kill();
+    } catch {
+      /* ignore */
+    }
+    if (s.flushTimer) clearTimeout(s.flushTimer);
+    s.tail = [];
+    s.tailBytes = 0;
+    s.detachedBacklog = [];
+    s.detachedBacklogBytes = 0;
+    sessions.delete(id);
+  }
+  if (pids.length === 0 || process.platform !== "win32") return;
+
+  const alive = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const deadline = Date.now() + Math.max(0, maxWaitMs);
+  while (Date.now() < deadline && pids.some(alive)) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  // Unconditional reap attempt: for shells that exited cleanly this no-ops
+  // (pid gone), for stragglers it walks and kills the descendant tree —
+  // preserving killNow's "closing a pane kills its dev server" guarantee.
+  for (const pid of pids) {
+    if (!alive(pid)) continue;
+    try {
+      const child = spawnChild("taskkill", ["/T", "/F", "/PID", String(pid)], {
+        windowsHide: true,
+        stdio: "ignore",
+        detached: false,
+      });
+      child.on("error", () => undefined);
+      child.unref();
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 function killNow(id: string): void {

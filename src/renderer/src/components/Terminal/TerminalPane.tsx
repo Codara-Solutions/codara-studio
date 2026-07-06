@@ -74,6 +74,9 @@ interface Props {
   // Codex) and restore (reopened panes). See useTerminalSession.
   agentSession?: TerminalAgentSession | null;
   onResumeUnavailable?: () => void;
+  // Fires when a failed Claude restore self-heals into a fresh forced-id
+  // session so the owner can persist the replacement pointer.
+  onResumeFallback?: (session: TerminalAgentSession) => void;
 }
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
@@ -102,6 +105,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onRuntimeState,
       agentSession,
       onResumeUnavailable,
+      onResumeFallback,
     },
     ref,
   ) {
@@ -132,6 +136,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onRuntimeState,
       agentSession,
       onResumeUnavailable,
+      onResumeFallback,
     });
 
     useImperativeHandle(

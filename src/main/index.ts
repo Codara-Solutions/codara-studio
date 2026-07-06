@@ -577,7 +577,10 @@ app.on("window-all-closed", async () => {
   if (!isQuitting && tray && getPreferenceCached("keepRunningInBackground")) {
     return;
   }
-  pty.disposeAll();
+  // Graceful (bounded) PTY teardown: closing the pseudo-console first lets
+  // Claude/Codex CLIs flush their transcripts, so `--resume` works on the
+  // next launch; stragglers still get taskkill'd. See disposeAllGraceful.
+  await pty.disposeAllGraceful();
   fsWatcher.disposeAll();
   await flushAllStores();
   // Quit on all platforms. The close-to-tray early-return above already
@@ -618,7 +621,10 @@ app.on("before-quit", (event) => {
 
   void (async () => {
     try {
-      pty.disposeAll();
+      // Graceful (bounded ≤1.5s) PTY teardown so agent CLIs can flush their
+      // session transcripts before any force-kill — fits comfortably inside
+      // the 5s hard-exit fallback above. See disposeAllGraceful.
+      await pty.disposeAllGraceful();
       fsWatcher.disposeAll();
       // Close the hook RPC alongside ptys so any in-flight worker post (which
       // can only land on 127.0.0.1) gets a clean close instead of a connection

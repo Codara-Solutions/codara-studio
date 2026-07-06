@@ -1312,26 +1312,47 @@ export function registerIpc(): void {
   );
 
   // Probe: on reopen, before a restored pane fires its `--resume` autorun, check
-  // that the CLI's transcript still exists on disk. Missing → the renderer drops
-  // the resume and comes back as a plain shell instead of erroring on a dead id.
+  // that the CLI's transcript still exists on disk AND is actually resumable.
+  // Existence alone isn't enough: a session that was killed at birth leaves a
+  // ~2KB .jsonl with no user message, and `claude --resume` refuses those with
+  // "No conversation found with session ID" — stranding the pane on an error.
+  // `resumable: false` → the renderer self-heals (fresh forced-id Claude, or a
+  // plain shell for codex) instead of delivering a doomed resume.
   ipcMain.handle(
     "agentSession:probe",
     async (
       _e,
       args: { runtime: "claude" | "codex"; sessionId: string; cwd: string; transcriptPath?: string },
-    ): Promise<{ exists: boolean; transcriptPath?: string }> => {
+    ): Promise<{ exists: boolean; resumable?: boolean; transcriptPath?: string }> => {
       if (!args.sessionId) return { exists: false };
       if (args.runtime === "claude") {
         const path = claudeSessionTranscriptPath(args.cwd, args.sessionId);
         const exists = await fs.access(path).then(() => true, () => false);
-        return { exists, transcriptPath: path };
+        if (!exists) return { exists: false, transcriptPath: path };
+        // Resumability: the transcript must contain at least one real user
+        // message line. Scan only the head — a genuine conversation has its
+        // first user message within the first few KB.
+        const resumable = await fs
+          .open(path, "r")
+          .then(async (handle) => {
+            try {
+              const buf = Buffer.alloc(65_536);
+              const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+              return buf.subarray(0, bytesRead).toString("utf8").includes('"type":"user"');
+            } finally {
+              await handle.close().catch(() => undefined);
+            }
+          })
+          .catch(() => true); // unreadable head → don't block the resume attempt
+        return { exists: true, resumable, transcriptPath: path };
       }
       // Codex: sessions are date-bucketed, not addressable by cwd, so rely on the
-      // transcript path captured at launch.
+      // transcript path captured at launch. Size floor stands in for the message
+      // scan (rollout formats vary): a stillborn rollout is a few hundred bytes.
       const path = args.transcriptPath;
       if (path) {
-        const exists = await fs.access(path).then(() => true, () => false);
-        if (exists) return { exists: true, transcriptPath: path };
+        const stat = await fs.stat(path).catch(() => null);
+        if (stat) return { exists: true, resumable: stat.size >= 1_024, transcriptPath: path };
       }
       return { exists: false };
     },

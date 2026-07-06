@@ -96,6 +96,15 @@ export const RUNTIME_BANNERS: ReadonlyArray<{ runtime: AgentRuntime; pattern: Re
   { runtime: "pi",         pattern: /\bPi\s*v\d/ },
 ];
 
+// Resume-refusal signature. `claude --resume <id>` prints this (then exits to
+// the shell) when the id has no resumable conversation — a transcript that was
+// deleted, moved, or never got a real user message. The restored pane watches
+// its output for this for a short window after delivering the resume command
+// so it can self-heal (clear the stale pointer + launch a fresh session)
+// instead of leaving a dead shell and a confusing error. Match on stripped
+// text (see stripAnsi) — Ink may interleave cursor moves inside the sentence.
+export const CLAUDE_RESUME_FAILED_RE = /No conversation found with session ID/i;
+
 // CSI / OSC stripper. Ink (Claude / Codex / Cursor) often positions individual
 // characters with cursor moves, so a banner like "Claude Code v2.1.139"
 // arrives in the raw byte stream as `C\x1b[H l\x1b[H a…` and a literal
