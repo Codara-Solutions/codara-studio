@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type {
   AgentRuntimeDiagnostic,
   AutomationRunRecord,
+  AutomationWorkerInfo,
   CreateScheduledJobInput,
   RunState,
   ScheduledJob,
@@ -12,6 +13,8 @@ import {
   STOP_REASON_LABEL,
   automationDotColor,
   capLabel,
+  fmtClock,
+  fmtElapsed,
   fmtTime,
   fmtUsd,
   liveCue,
@@ -20,6 +23,7 @@ import {
   triggerSummary,
   jobWorkerSummary,
 } from "./presentation";
+import { ENGINE_TONE } from "./flow/FlowNodes";
 import { useAutomationWorkers } from "./useAutomationWorkers";
 import WorkersView from "./WorkersView";
 import RunPeek from "./RunPeek";
@@ -58,6 +62,10 @@ type SubTab = "looms" | "workers";
 
 const SUBTAB_STORAGE_KEY = "spark.automations.subtab";
 
+// Attempt statuses that mean the worker process is still going. Mirrors the
+// module-private set in WorkersView / LiveBoard — one live-vs-done rule.
+const LIVE_ATTEMPT = new Set(["preparing", "prompt_ready", "launching", "running", "finishing"]);
+
 export default function AutomationsHub({
   workspaceId,
   workspaceName,
@@ -90,6 +98,11 @@ export default function AutomationsHub({
   // "I should go to it myself") — only the explicit affordances (the Board /
   // Live board buttons) open it, and closing it is always manual too.
   const [boardOpen, setBoardOpen] = useState(false);
+  // When the board is opened by clicking a worker row in the loom detail, the
+  // attemptId to focus the board's terminal sheet on. Null for a plain "Board"
+  // open (whiteboard opens clean). Cleared on close / selection change so the
+  // same worker clicked twice re-fires LiveBoard's focus effect.
+  const [boardFocusWorkerId, setBoardFocusWorkerId] = useState<string | null>(null);
 
   const workers = useAutomationWorkers(active);
   const workspaceWorkers = useMemo(
@@ -191,15 +204,29 @@ export default function AutomationsHub({
   // different surface); the new selection's board waits for an explicit open.
   useEffect(() => {
     setBoardOpen(false);
+    setBoardFocusWorkerId(null);
   }, [selectedId]);
 
   const openLiveBoard = useCallback(() => {
     switchSubTab("looms");
+    setBoardFocusWorkerId(null);
     setBoardOpen(true);
   }, [switchSubTab]);
 
+  // Open the board AND focus its terminal sheet on one specific worker — the
+  // affordance the loom detail's Workers rows use.
+  const openBoardFocused = useCallback(
+    (attemptId: string) => {
+      switchSubTab("looms");
+      setBoardFocusWorkerId(attemptId);
+      setBoardOpen(true);
+    },
+    [switchSubTab],
+  );
+
   const closeLiveBoard = useCallback(() => {
     setBoardOpen(false);
+    setBoardFocusWorkerId(null);
   }, []);
 
   const boardWorkers = useMemo(
@@ -639,6 +666,7 @@ export default function AutomationsHub({
                 job={selected}
                 liveRun={liveRun}
                 runtimes={runtimes}
+                workers={boardWorkers}
                 onEdit={() => setMode({ kind: "edit", job: selected })}
                 onOpenCreatorChat={
                   selected.createdByRunId
@@ -659,6 +687,7 @@ export default function AutomationsHub({
                   })
                 }
                 onOpenLiveBoard={openLiveBoard}
+                onOpenBoardFocused={openBoardFocused}
                 onAnswer={(runId, answer) =>
                   void act(() =>
                     window.spark.orchestration.addRunMessage({
@@ -705,6 +734,7 @@ export default function AutomationsHub({
               runtimes={runtimes}
               liveRun={liveRun}
               workers={boardWorkers}
+              initialFocusWorkerId={boardFocusWorkerId}
               shown={active && boardShowing}
               scrollbackLineLimit={terminalScrollbackLineLimit}
               onClose={closeLiveBoard}
@@ -824,6 +854,7 @@ function AutomationDetail({
   job,
   liveRun,
   runtimes,
+  workers,
   onEdit,
   onOpenCreatorChat,
   onRunNow,
@@ -833,11 +864,14 @@ function AutomationDetail({
   onToggleEnabled,
   onDelete,
   onOpenLiveBoard,
+  onOpenBoardFocused,
   onAnswer,
 }: {
   job: ScheduledJob;
   liveRun: RunState | null;
   runtimes: AgentRuntimeDiagnostic[];
+  // This loom's workers only (live + briefly-lingering exited ones).
+  workers: AutomationWorkerInfo[];
   onEdit: () => void;
   // Present only when this loom carries a createdByRunId; the button is further
   // gated below on the run still existing.
@@ -850,6 +884,8 @@ function AutomationDetail({
   onDelete: () => void;
   // Opens the live board — the flow canvas with the worker terminal docked in.
   onOpenLiveBoard: () => void;
+  // Opens the board with its terminal sheet focused on one worker (by attemptId).
+  onOpenBoardFocused: (attemptId: string) => void;
   onAnswer: (runId: string, answer: string) => void;
 }): React.ReactElement {
   const status = job.state.status;
@@ -1001,6 +1037,14 @@ function AutomationDetail({
         />
       </Section>
 
+      {/* Workers — THIS loom's live/lingering workers, surfaced inside the loom
+          (not only on the global Workers grid). Hidden entirely when none. */}
+      {workers.length > 0 && (
+        <Section label="Workers" count={workers.length}>
+          <LoomWorkersList workers={workers} onOpenBoardFocused={onOpenBoardFocused} />
+        </Section>
+      )}
+
       {/* History */}
       <Section label="History" count={job.history.length}>
         <HistoryTimeline history={job.history} liveRunId={job.state.currentRunId} onOpenLiveBoard={onOpenLiveBoard} />
@@ -1035,6 +1079,144 @@ function Section({
       </div>
       <div style={{ padding: "4px 16px 14px" }}>{children}</div>
     </div>
+  );
+}
+
+// ── This loom's workers (inside the detail) ──────────────────────────────────
+
+// The Workers section of a loom's detail: its own live/lingering workers as
+// compact rows. Live rows are clickable — they open this loom's board with the
+// terminal sheet focused on that worker. Reads from the same
+// useAutomationWorkers source as the global Workers grid, filtered to this loom
+// upstream; this is the "inside the loom" surfacing of that same inventory.
+function LoomWorkersList({
+  workers,
+  onOpenBoardFocused,
+}: {
+  workers: AutomationWorkerInfo[];
+  onOpenBoardFocused: (attemptId: string) => void;
+}): React.ReactElement {
+  const anyLive = useMemo(() => workers.some((w) => LIVE_ATTEMPT.has(w.status)), [workers]);
+  // One shared 1s clock for the elapsed readouts, ticking only while a worker
+  // is live (a settled row's "finished" label needs no ticking).
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!anyLive) return;
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [anyLive]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {workers.map((w) => (
+        <LoomWorkerRow key={w.attemptId} worker={w} now={now} onOpenBoardFocused={onOpenBoardFocused} />
+      ))}
+    </div>
+  );
+}
+
+function LoomWorkerRow({
+  worker,
+  now,
+  onOpenBoardFocused,
+}: {
+  worker: AutomationWorkerInfo;
+  now: number;
+  onOpenBoardFocused: (attemptId: string) => void;
+}): React.ReactElement {
+  const live = LIVE_ATTEMPT.has(worker.status);
+  const blocked = worker.blocked;
+  // Steady dot — accent live, danger blocked, muted otherwise. No pulse.
+  const dot = blocked ? "var(--danger)" : live ? "var(--accent)" : "var(--muted)";
+  // Runtime tint edge — the engine's coral/cyan (matches the flow cards); a
+  // legacy "auto" worker stays neutral.
+  const tone = ENGINE_TONE[worker.engine] ?? "var(--rule-strong)";
+  const engineWord =
+    worker.engine === "claude" ? "Claude" : worker.engine === "codex" ? "Codex" : "Auto";
+  const meta = worker.model ? `${engineWord} · ${worker.model}` : engineWord;
+  const title = worker.nodeLabel ?? "Worker";
+
+  const body = (
+    <>
+      <span
+        aria-hidden
+        style={{
+          flex: "0 0 8px",
+          width: 8,
+          height: 8,
+          borderRadius: 999,
+          background: dot,
+          boxShadow: `0 0 0 3px color-mix(in oklch, ${dot} 18%, transparent)`,
+        }}
+      />
+      <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
+        <span
+          style={{
+            fontSize: 12,
+            fontWeight: 600,
+            color: "var(--ink)",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+          title={title}
+        >
+          {title}
+          <span className="spark-mono spark-num" style={{ marginLeft: 8, fontWeight: 400, fontSize: 10, color: "var(--muted)" }}>
+            pass {worker.iteration + 1}
+          </span>
+        </span>
+        <span
+          className="spark-mono"
+          style={{ fontSize: 10, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+          title={worker.model ?? "CLI default model"}
+        >
+          {meta}
+        </span>
+      </span>
+      {blocked && (
+        <span className="spark-badge is-danger" style={{ flex: "0 0 auto" }}>
+          needs you
+        </span>
+      )}
+      <span
+        className="spark-mono spark-num"
+        style={{ flex: "0 0 auto", fontSize: 10, color: "var(--muted-2)" }}
+        title={worker.startedAt ? `started ${fmtClock(worker.startedAt)}` : undefined}
+      >
+        {live ? fmtElapsed(worker.startedAt, now) : "finished"}
+      </span>
+    </>
+  );
+
+  const shared: React.CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 9,
+    padding: "7px 10px",
+    borderRadius: "var(--radius-control)",
+    border: "1px solid var(--rule-soft)",
+    background: "var(--panel)",
+    boxShadow: `inset 3px 0 0 ${tone}`,
+    textAlign: "left",
+  };
+
+  // Live rows open the board focused on this worker; a lingering exited row is
+  // not interactive (its terminal is released — nothing to focus on the board).
+  if (!live) {
+    return <div style={shared}>{body}</div>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => onOpenBoardFocused(worker.attemptId)}
+      title="Open this loom's board on this worker's terminal"
+      style={{ ...shared, appearance: "none", width: "100%", cursor: "default" }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--hover)")}
+      onMouseLeave={(e) => (e.currentTarget.style.background = "var(--panel)")}
+    >
+      {body}
+    </button>
   );
 }
 

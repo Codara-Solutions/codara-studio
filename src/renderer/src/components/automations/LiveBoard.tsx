@@ -119,6 +119,11 @@ export interface LiveBoardProps {
   liveRun: RunState | null;
   // Workers of THIS automation only (live + briefly-lingering exited ones).
   workers: AutomationWorkerInfo[];
+  // Optional: open the terminal sheet focused on this worker (by attemptId) the
+  // moment the board is shown. Set when the board is opened by clicking a worker
+  // row in the loom detail; null/undefined for a plain "Board" open (sheet stays
+  // closed). Non-breaking — the plain-open path passes nothing.
+  initialFocusWorkerId?: string | null;
   // On screen right now (hub tab active + looms sub-tab + view mode). Drives
   // terminal visibility and the ticking clock; the board stays mounted while
   // hidden so the canvas viewport and mirror xterms survive sub-tab flips.
@@ -135,6 +140,7 @@ export default function LiveBoard({
   runtimes,
   liveRun,
   workers,
+  initialFocusWorkerId,
   shown,
   scrollbackLineLimit,
   onClose,
@@ -199,6 +205,16 @@ export default function LiveBoard({
       null
     );
   }, [workers, pickedAttemptId]);
+
+  // Board opened via a loom-detail worker row: focus the sheet on that worker
+  // and reveal it. Fires on each new request (the hub clears the id on close /
+  // selection change, so re-clicking the same worker is a fresh null→id change).
+  // A plain "Board" open passes null and leaves the sheet as-is.
+  useEffect(() => {
+    if (!initialFocusWorkerId) return;
+    setPickedAttemptId(initialFocusWorkerId);
+    setSheetOpen(true);
+  }, [initialFocusWorkerId]);
 
   const anyLive = workers.some((w) => LIVE_ATTEMPT.has(w.status));
 
@@ -1120,7 +1136,16 @@ function CardMeta({ text }: { text: string }): React.ReactElement {
 const LIVE_TRIGGER_RADIUS = "999px var(--radius-surface) var(--radius-surface) 999px";
 
 function TriggerCard({ d }: { d: LiveNodeDatum }): React.ReactElement {
-  const look = d.fired ? lookFor("running") : lookFor("pending");
+  // Fired = a pass is in flight somewhere downstream. The trigger itself is
+  // never "the one running", so it must NOT light up (only the executing
+  // node glows) — a fired trigger gets a modest warm tint, no glow, no badge.
+  const look: StatusLook = d.fired
+    ? {
+        border: "color-mix(in oklch, var(--warn) 38%, var(--rule-soft))",
+        background: "color-mix(in oklch, var(--warn) 6%, var(--panel))",
+        glow: null,
+      }
+    : lookFor("pending");
   return (
     <div
       style={{
@@ -1133,7 +1158,7 @@ function TriggerCard({ d }: { d: LiveNodeDatum }): React.ReactElement {
         padding: "10px 13px 10px 15px",
       }}
     >
-      <TopRule tone="var(--warn)" radius={LIVE_TRIGGER_RADIUS} />
+      <TopRule tone="var(--warn)" left={34} />
       <Medallion icon={<LoomIcon kind="trigger" tone="var(--warn)" size={16} />} tone="var(--warn)" size={32} />
       <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0, flex: 1 }}>
         <span className="spark-eyebrow" style={{ fontSize: 8.5 }}>
@@ -1153,7 +1178,7 @@ function WorkerCard({ d }: { d: LiveNodeDatum }): React.ReactElement {
   const tone = liveEngineTone(d.engine);
   return (
     <div style={{ ...cardBase(look, d.docked), width: 232 }}>
-      <TopRule tone={tone} radius="var(--radius-surface) var(--radius-surface) 0 0" />
+      <TopRule tone={tone} />
       <Handle type="target" position={Position.Left} style={HANDLE_STYLE} isConnectable={false} />
       <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "10px 12px 8px 13px" }}>
         <Medallion icon={<LoomIcon kind="worker" tone={tone} size={16} />} tone={tone} size={32} />
@@ -1189,7 +1214,7 @@ function GuardCard({ d }: { d: LiveNodeDatum }): React.ReactElement {
         padding: "11px 44px 11px 13px",
       }}
     >
-      <TopRule tone="var(--ok)" radius="var(--radius-surface) var(--radius-surface) 0 0" />
+      <TopRule tone="var(--ok)" />
       <Medallion icon={<LoomIcon kind="guard" tone="var(--ok)" size={16} />} tone="var(--ok)" size={32} />
       <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0, flex: 1 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -1264,7 +1289,7 @@ function MergeCard({ d }: { d: LiveNodeDatum }): React.ReactElement {
         padding: "11px 13px",
       }}
     >
-      <TopRule tone="var(--info)" radius="var(--radius-surface) var(--radius-surface) 0 0" />
+      <TopRule tone="var(--info)" />
       <Medallion icon={<LoomIcon kind="merge" tone="var(--info)" size={16} />} tone="var(--info)" size={32} />
       <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0, flex: 1 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
