@@ -477,7 +477,11 @@ export interface UseTabsApi {
   reorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
   setDirty: (id: TabId, dirty: boolean) => void;
   setDetectedUrl: (tabId: TabId, paneId: string, url: string) => void;
-  newTerminalTab: (cwd?: string, autorun?: string, options?: { focus?: boolean }) => TabId;
+  newTerminalTab: (
+    cwd?: string,
+    autorun?: string,
+    options?: { focus?: boolean; agentSession?: TerminalAgentSession | null },
+  ) => TabId;
   // Open ONE terminal tab whose panes are split into a grid — used when Cora
   // spawns a batch of standing agent terminals, so the user sees them all at
   // once. One pane per spec, each autorunning its agent command.
@@ -566,6 +570,7 @@ export interface UseTabsApi {
       cwd?: string;
       autorun?: string;
       worker?: TerminalLeafWorker | null;
+      agentSession?: TerminalAgentSession | null;
     },
   ) => boolean;
   // Focus (or create) the chat tab for a specific run. Pass `null` to focus
@@ -999,10 +1004,17 @@ export function useTabs(
   );
 
   const newTerminalTab = useCallback(
-    (cwd?: string, autorun?: string, options?: { focus?: boolean }): TabId => {
+    (
+      cwd?: string,
+      autorun?: string,
+      options?: { focus?: boolean; agentSession?: TerminalAgentSession | null },
+    ): TabId => {
       const id = makeId("term");
       const paneId = makeId("pane");
       const root = leaf(paneId, cwd, autorun);
+      // Durable resume pointer (Claude launches only) — set at creation so it is
+      // persisted immediately, independent of post-hoc discovery.
+      if (options?.agentSession) root.agentSession = options.agentSession;
       setTabs((curr) => {
         const tab: TerminalTab = {
           id,
@@ -1534,6 +1546,7 @@ export function useTabs(
         cwd?: string;
         autorun?: string;
         worker?: TerminalLeafWorker | null;
+        agentSession?: TerminalAgentSession | null;
       },
     ): boolean => {
       let added = false;
@@ -1553,6 +1566,7 @@ export function useTabs(
           if (!target) return t;
           const newLeaf = leaf(paneId, options?.cwd, options?.autorun);
           if (options?.worker !== undefined) newLeaf.worker = options.worker;
+          if (options?.agentSession) newLeaf.agentSession = options.agentSession;
           const root = splitAtLeaf(t.root, target.paneId, target.direction, newLeaf);
           added = true;
           return { ...t, root, activePaneId: paneId };
