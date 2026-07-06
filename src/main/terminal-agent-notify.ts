@@ -4,6 +4,7 @@ import * as path from "node:path";
 import {
   classifyTail,
   coercePublicRuntime,
+  countTeammateEvents,
   runtimeFromCommandLine,
   sniffRuntime,
   stripAnsi,
@@ -87,6 +88,13 @@ const MIN_WORK_MS = 1_500;
 // completion), mute the stream heuristic for a while so the same turn end
 // can't alert twice.
 const OSC_NOTIFY_MUTE_MS = 10_000;
+// Self-heal window for a desynced teammate counter (a "finished" line that
+// scrolled past unseen, or a full-screen redraw double-counting a stale
+// "1 teammate started" from scrollback). A RUNNING teammate repaints its
+// strip row at least once a second (live v2.1.201 capture); an IDLE-but-alive
+// teammate can go 20s+ between paints — but an idle teammate's turn IS over,
+// so clearing the counter on total byte-silence is correct in both cases.
+const TEAMMATE_SILENCE_MS = 15_000;
 // How long to wait for the renderer-side TerminalPane to actually spawn the
 // pty after the pane registers. Panes spawn on mount, so this is generous.
 const SPAWN_WAIT_MS = 120_000;
@@ -124,6 +132,14 @@ interface PaneWatcher {
   // silence that began with the working footer still painting reads as a
   // mid-turn stall, not a finish (see TURN_QUIET_STALL_MS).
   lastChunkAssertedWorking: boolean;
+  // Net count of live background teammates (Task-tool / background agents),
+  // fed by countTeammateEvents on the transcript stream. While > 0, the main
+  // REPL's turn-stopped signals (progress clear, idle status, quiet window)
+  // are held — the pane is still busy even though the main turn ended.
+  teammatesActive: number;
+  // When the last non-empty decoded chunk arrived, any content. Backs the
+  // teammate counter's silence self-heal in the sweep.
+  lastOutputAt: number;
   // Last RuntimeState pushed to the renderer chip via emitPaneState. Distinct
   // from `state` (the 3-value notifier vocabulary idle/working/blocked) — this
   // is the translated chip RuntimeState and exists purely to dedup the chip
@@ -217,6 +233,8 @@ export function syncTerminalNotifyPanes(input: {
       lastWorkingAt: 0,
       lastOscNotifyAt: 0,
       lastChunkAssertedWorking: false,
+      teammatesActive: 0,
+      lastOutputAt: 0,
       lastEmittedState: null,
     };
     watchers.set(entry.paneId, watcher);
@@ -314,6 +332,17 @@ function ensureSweep(): void {
       // lookup per pane per second.
       if (!w.attached && !w.awaitingSpawn) attach(w);
       if (w.excluded || !w.runtime) continue;
+      if (w.teammatesActive > 0) {
+        if (now - w.lastOutputAt >= TEAMMATE_SILENCE_MS) {
+          // A RUNNING teammate repaints its strip row at least once a second
+          // (live capture); total byte-silence this long means the counter is
+          // stale — clear it and let the normal quiet window resolve the turn.
+          tanLog(`pane=${w.paneId} teammate counter stale (silence) — cleared`);
+          w.teammatesActive = 0;
+        } else {
+          continue;
+        }
+      }
       if (w.state !== "working") continue;
       // Stall-aware window: silence right after a working-footer paint is a
       // mid-turn stall until proven otherwise; silence after an idle repaint
@@ -429,6 +458,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
   if (w.excluded) return;
   const decoded = w.decoder.decode(chunk, { stream: true });
   if (decoded.length === 0) return;
+  w.lastOutputAt = Date.now();
   const carryLen = w.carry.length;
   const text = w.carry + decoded;
 
@@ -485,6 +515,11 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     // pattern / structured busy signal); the per-chunk value feeds the
     // stall-aware quiet window in the sweep.
     let chunkAssertedWorking = false;
+    // Offset into the STRIPPED text where the fresh bytes begin — shared by
+    // classifyTail and countTeammateEvents below so only matches that end in
+    // the newly arrived bytes count (see the classifyTail comment further
+    // down).
+    const fresh = carryLen === 0 ? 0 : stripAnsi(w.carry).length;
 
     // Activity sustain: while a turn is running, ANY pty output counts as
     // "still working". Codex (live-captured v0.138.0) repaints its full
@@ -496,12 +531,60 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     // still requires a real pattern/OSC match.
     if (w.state === "working") w.lastWorkingAt = now;
 
+    // Teammate lifecycle bookkeeping (Claude only). Must run BEFORE the
+    // turn-stopped handlers below: a "1 teammate started" transcript line and
+    // the main turn's progress-clear can land in the same chunk, and the
+    // clear must see the incremented counter to know the pane is still busy.
+    //
+    // Fresh-offset slack: stripAnsi leaves a PARTIAL escape at the carry's end
+    // unstripped, so stripAnsi(carry).length can overshoot the carry content's
+    // true offset within the stripped combined text — and unlike classifyTail's
+    // patterns (repainted every second), a teammate event is ONE-SHOT: a match
+    // rejected as "stale" by the overshoot is lost forever, and a lost
+    // "started" resurrects the false done. The slack biases the error the safe
+    // way — an event near the boundary may be counted twice (a spurious
+    // started only DELAYS the alert and the silence self-heal clears it) but
+    // is never dropped.
+    // KNOWN LIMITATION (accepted): the counter reads a lossy visual stream, so
+    // it can desync — a full-screen redraw (resize, /clear) can re-count a
+    // stale started/finished line still on screen, printing this repo's own
+    // test fixtures in a transcript counts their literal phrases, and the
+    // boundary slack above can double-count. Every desync is bounded:
+    //   counter too HIGH → the done alert is HELD, until the sweep's
+    //     15s-total-silence self-heal or Claude's own OSC 9 "waiting for your
+    //     input" (arrives within ~60s of true idle, live-captured) clears it —
+    //     worst case a delayed notification, never a lost one;
+    //   counter too LOW → the hold releases early and that one turn reverts to
+    //     exactly the pre-fix behavior (a premature "finished"), never worse.
+    if (w.runtime === "claude") {
+      const tm = countTeammateEvents(text, Math.max(0, fresh - 16));
+      if (tm.started || tm.finished) {
+        w.teammatesActive = Math.max(0, w.teammatesActive + tm.started - tm.finished);
+        tanLog(`pane=${w.paneId} teammates ${tm.started}+/${tm.finished}- -> ${w.teammatesActive}`);
+      }
+    }
+
     // Structured busy/idle signals (both opt-in Claude Code settings; both
     // strictly more reliable than the footer heuristic when present).
     for (const m of newMatches(OSC9_PROGRESS_G, text, carryLen)) {
       const state = m[1] ?? "";
       if (state === "" || state === "0") {
-        // Progress cleared — the turn stopped.
+        // Progress cleared — the MAIN turn stopped. A live background
+        // teammate keeps the pane busy, though: hold the alert AND the chip
+        // until the teammate count drains (or the sweep's silence self-heal
+        // clears a stale counter). Keeping w.state on "working" is
+        // load-bearing — the any-output sustain above then rides the teammate
+        // strip's per-second ticks, so the quiet-window sweep stays quiet
+        // while a teammate genuinely runs.
+        if (w.teammatesActive > 0) {
+          tanLog(
+            `pane=${w.paneId} progress-clear held — ${w.teammatesActive} teammate(s) active`,
+          );
+          // A blocked chip stays blocked — a pending permission prompt is the
+          // actionable cue and must not be repainted as mere busyness.
+          if (w.state !== "blocked") emitPaneState(w, "working");
+          continue;
+        }
         if (w.state === "working" && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
           deliver(w, "done", null);
         }
@@ -530,6 +613,16 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
         w.state = "blocked";
         emitPaneState(w, "blocked");
       } else if (/idle/i.test(status)) {
+        // Same teammate hold as the progress-clear path: "Idle" describes the
+        // main REPL, not a background teammate still running.
+        if (w.teammatesActive > 0) {
+          tanLog(
+            `pane=${w.paneId} idle status held — ${w.teammatesActive} teammate(s) active`,
+          );
+          // Same blocked-chip precedence as the progress-clear hold above.
+          if (w.state !== "blocked") emitPaneState(w, "working");
+          continue;
+        }
         if (w.state === "working" && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
           deliver(w, "done", null);
         }
@@ -542,11 +635,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     // the carry exists to bridge phrases split across chunk boundaries, but
     // a footer merely sitting in it (painted seconds ago) must not keep
     // re-asserting "working" off the back of unrelated idle repaints.
-    const cls = classifyTail(
-      w.runtime,
-      text,
-      carryLen === 0 ? 0 : stripAnsi(w.carry).length,
-    );
+    const cls = classifyTail(w.runtime, text, fresh);
     if (cls === "blocked") {
       if (w.state !== "blocked") tanLog(`pane=${w.paneId} state -> blocked (was ${w.state})`);
       // Deliberately NOT gated on workedLongEnough: a permission prompt can
@@ -569,7 +658,10 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       chunkAssertedWorking = true;
     } else if (cls === "done") {
       // Positive completion line (e.g. "Session ended.") — alert without
-      // waiting out the quiet window.
+      // waiting out the quiet window. Unlike the progress-clear / idle-status
+      // holds above, this is a REAL session end: any teammate bookkeeping
+      // dies with the session, so reset it and deliver as usual.
+      w.teammatesActive = 0;
       if (
         w.state === "working" &&
         workedLongEnough(w) &&
@@ -616,6 +708,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       w.workingSince = 0;
       w.lastWorkingAt = 0;
       w.lastChunkAssertedWorking = false;
+      w.teammatesActive = 0;
       w.ring = "";
     }
   }
@@ -625,28 +718,75 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
 
 // An explicit OSC 9/777 from the foreground program. Codex's own copy says
 // what happened ("Codex: turn completed", "approval requested"), so prefer it
-// as the body. Classify needs-you vs done from the message text; default to
-// done since turn-complete is the overwhelmingly common emission.
+// as the body. Classify needs-you vs done from the message text, in order:
+// "Claude is waiting for your input" is Claude Code's TURN-COMPLETE
+// notification (live-captured v2.1.201), NOT a permission prompt — real
+// permission prompts read "Claude needs your permission to use X" — so the
+// waiting-for-your-input shape must be recognised as "done" BEFORE the
+// blocked-keyword scan (whose "waiting"/"input" terms would otherwise
+// misread it). Default to done since turn-complete is the overwhelmingly
+// common emission.
 function handleExplicitNotify(w: PaneWatcher, message: string): void {
   const now = Date.now();
+  const kind = /waiting\s*for\s*your\s*input/i.test(message)
+    ? ("done" as const)
+    : /approv|permission|review|needs|attention|confirm|waiting|input/i.test(message)
+      ? ("blocked" as const)
+      : ("done" as const);
+  // A DONE announcement while background teammates run is held like the
+  // progress-clear: Claude Code fires "waiting for your input" off the MAIN
+  // REPL's idleness ~60s after the turn ends and IGNORES running teammates
+  // (live-captured 2026-07-06: emitted at T+60 while a teammate's sleep-100
+  // turn was mid-flight) — honoring it would just move the false "finished"
+  // from turn-end to turn-end+60s. No state change, no lastOscNotifyAt stamp
+  // (nothing was delivered, so there is nothing to mute), chip stays on
+  // working unless a permission prompt owns it. The real done arrives when
+  // the teammate count drains (progress-clear / quiet window), and a STALE
+  // counter still resolves through the sweep's 15s-silence self-heal — a user
+  // actively typing in the pane defers that heal, but someone typing there is
+  // watching it, which is exactly the case the suppress-while-watching policy
+  // mutes anyway.
+  if (kind === "done" && w.teammatesActive > 0) {
+    tanLog(
+      `pane=${w.paneId} explicit done held — ${w.teammatesActive} teammate(s) active`,
+    );
+    if (w.state !== "blocked") emitPaneState(w, "working");
+    return;
+  }
   w.lastOscNotifyAt = now;
   // The program announced the stop itself; stand the heuristic down so the
   // quiet-window sweep doesn't re-alert the same turn end.
-  if (w.state === "working") w.state = "idle";
-  const kind = /approv|permission|review|waiting|needs|input|attention|confirm/i.test(message)
-    ? ("blocked" as const)
-    : ("done" as const);
+  if (kind === "blocked") {
+    // A permission/approval announcement says NOTHING about background
+    // teammates — leaving the counter alone is load-bearing: wiping it here
+    // let the post-approval turn's progress-clear fire the false "done" the
+    // teammate hold exists to prevent (approve → resume → turn end → alert
+    // while the teammate still runs).
+    w.state = "blocked";
+  } else {
+    // A DONE announcement with no live teammates is the program declaring the
+    // whole pane idle — any residual teammate bookkeeping is stale beside it.
+    w.state = "idle";
+    w.teammatesActive = 0;
+  }
   // Chip state mirrors the announced state, focus-independent: an explicit
   // "done" notification means the turn finished and the agent is ready for
   // input → "idle"; an "approval/permission" announcement → "blocked". The TUI
   // is still up (this is not a process exit), so we never emit "done" here.
   emitPaneState(w, kind === "blocked" ? "blocked" : "idle");
   // An explicit OSC notification is the program authoritatively announcing its
-  // current state — it is never the previous turn's heuristic footer tail. So
-  // stand the policy's completion guard down here; otherwise a real "approval
-  // requested" emitted right after a turn-complete (no intervening detected
-  // working phase) would be wrongly swallowed by the dedup.
-  rearm(paneSourceKey(w.paneId));
+  // current state — it is never the previous turn's heuristic footer tail — so
+  // it stands the policy's completion guard down and always toasts, exactly
+  // like a real terminal renders every OSC 9. The ONE exception: an agent's
+  // "waiting for your input" is Claude Code's idle ECHO — it re-announces the
+  // same turn end long after the progress-clear already alerted (60s later in
+  // the live v2.1.201 capture) — so it keeps the guard armed and lets the
+  // policy's same-kind dedup fold the repeat. A genuinely new turn's echo
+  // still passes because the user input that started the turn rearmed via
+  // noteTerminalUserInput.
+  const isAgentIdleEcho =
+    kind === "done" && w.runtime !== null && /waiting\s*for\s*your\s*input/i.test(message);
+  if (!isAgentIdleEcho) rearm(paneSourceKey(w.paneId));
   deliver(w, kind, message.length > 0 ? message : null);
 }
 

@@ -285,5 +285,72 @@ check(
   "working",
 );
 
+// ── countTeammateEvents: background-teammate lifecycle (v2.1.201 capture) ──
+function checkTm(name, actual, started, finished) {
+  const ok = actual && actual.started === started && actual.finished === finished;
+  if (!ok) failures += 1;
+  console.log(
+    `${ok ? "PASS" : "FAIL"} ${name} → ${JSON.stringify(actual)} (want {"started":${started},"finished":${finished}})`,
+  );
+}
+
+// REAL captured Task tool result line announcing a background teammate.
+checkTm(
+  "teammate started (real Task result line)",
+  ap.countTeammateEvents(
+    "⎿  Initializing… ·  Pondering… (9s · ↓ 250 tokens · thought for 7s)  1 teammate started",
+  ),
+  1,
+  0,
+);
+// REAL captured finish line — Ink's cursor-move word gaps stripped away ALL
+// the spaces ("⏺ Teammate@napper finished" arrives as this).
+checkTm(
+  "teammate finished (space-stripped Ink form)",
+  ap.countTeammateEvents("⏺Teammate@napperfinished"),
+  0,
+  1,
+);
+checkTm(
+  "teammate finished (hyphenated name, spaces intact)",
+  ap.countTeammateEvents("⏺ Teammate@models-page finished"),
+  0,
+  1,
+);
+checkTm("plural teammates started", ap.countTeammateEvents("2 teammates started"), 2, 0);
+// Raw Ink form: inter-word gaps are cursor-forward moves, not spaces.
+checkTm(
+  "started with cursor-move word gaps (raw Ink)",
+  ap.countTeammateEvents("1\x1b[1Cteammate\x1b[1Cstarted"),
+  1,
+  0,
+);
+// freshFrom guard: an event sitting entirely in the carry (before freshFrom)
+// was already counted on a previous chunk and must not count again…
+const TM_STALE = "⎿ 1 teammate started";
+checkTm(
+  "event entirely before freshFrom is not counted",
+  ap.countTeammateEvents(TM_STALE, ap.stripAnsi(TM_STALE).length),
+  0,
+  0,
+);
+// …but an event STRADDLING the boundary (match ends past freshFrom) counts.
+const TM_HEAD = "⏺ Teammate@napper fin";
+checkTm(
+  "event straddling freshFrom is counted",
+  ap.countTeammateEvents(TM_HEAD + "ished", ap.stripAnsi(TM_HEAD).length),
+  0,
+  1,
+);
+checkTm(
+  "plain prose has no teammate events",
+  ap.countTeammateEvents("The team started reviewing the finished patch."),
+  0,
+  0,
+);
+// "restarted" must not read as "started": `teammates?\s*started` allows only
+// whitespace between the words, so the "re" breaks the match.
+checkTm("'restarted' does not count", ap.countTeammateEvents("5 teammates restarted"), 0, 0);
+
 process.exitCode = failures === 0 ? 0 : 1;
 console.log(failures === 0 ? "\nAll agent-pattern checks passed." : `\n${failures} check(s) FAILED.`);
