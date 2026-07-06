@@ -77,7 +77,7 @@ export function loopSummary(loop: AutomationLoop): string {
     case "once":
       return "once";
     case "count":
-      return `${loop.stop.maxIterations ?? 1}×`;
+      return `${loop.stop?.maxIterations ?? 1}×`;
     case "cadence": {
       const minutes = (loop.everyMs ?? 60_000) / 60_000;
       return Number.isInteger(minutes)
@@ -96,7 +96,7 @@ export function loopSummary(loop: AutomationLoop): string {
 }
 
 export function capLabelForLoop(loop: AutomationLoop): string {
-  const m = loop.stop.maxIterations;
+  const m = loop.stop?.maxIterations;
   if (typeof m === "number" && m > 0) return String(m);
   if (loop.kind === "count") return String(m ?? 1);
   if (loop.kind === "once") return "1";

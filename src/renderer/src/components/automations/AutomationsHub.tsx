@@ -1252,7 +1252,7 @@ function LiveWorkerCard({
   const status = job.state.status;
   const running = status === "running" || status === "blocked";
   const edge = liveRun ? runStatusColor(liveRun.status) : automationDotColor(status);
-  const budget = job.loop.stop.budgetUsd;
+  const budget = job.loop?.stop?.budgetUsd;
 
   // The blocked iteration's pending question (last spark question), if any.
   const pendingQuestion =
@@ -1566,7 +1566,9 @@ function HistoryTimeline({
 
 function LoopConfigSummary({ job, onEdit, onDelete }: { job: ScheduledJob; onEdit: () => void; onDelete: () => void }): React.ReactElement {
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const stop = job.loop.stop;
+  // Tolerate malformed persisted jobs (loop without stop) — the scheduler
+  // backfills on read, but a bad record must never take down the renderer.
+  const stop = job.loop?.stop ?? {};
   const chips: string[] = [];
   if (typeof stop.maxIterations === "number") chips.push(`max ${stop.maxIterations}`);
   if (typeof stop.budgetUsd === "number") chips.push(`est. ${fmtUsd(stop.budgetUsd)}`);

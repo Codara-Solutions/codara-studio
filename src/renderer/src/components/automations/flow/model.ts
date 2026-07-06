@@ -177,19 +177,22 @@ export function draftFromJob(job: ScheduledJob, installed: Set<LoomEngine> = new
     d.trigger.chainSourceId = job.trigger.automationId;
   }
 
+  // `stop` is contractually backfilled by the scheduler, but a malformed
+  // persisted job must degrade to defaults here, not crash the editor.
+  const stop = job.loop.stop ?? {};
   d.loop.kind = job.loop.kind;
-  if (job.loop.kind === "count") d.loop.countN = String(job.loop.stop.maxIterations ?? 5);
+  if (job.loop.kind === "count") d.loop.countN = String(stop.maxIterations ?? 5);
   if (job.loop.everyMs) d.loop.cadenceMin = String(job.loop.everyMs / 60_000);
   d.loop.isolate = Boolean(job.loop.isolate);
-  if (job.loop.stop.maxIterations !== undefined && job.loop.kind !== "count") {
-    d.loop.maxIters = String(job.loop.stop.maxIterations);
+  if (stop.maxIterations !== undefined && job.loop.kind !== "count") {
+    d.loop.maxIters = String(stop.maxIterations);
   }
-  if (job.loop.stop.budgetUsd !== undefined) d.loop.budget = String(job.loop.stop.budgetUsd);
-  d.loop.untilTests = Boolean(job.loop.stop.untilTestsPass);
-  d.loop.testCommand = job.loop.stop.testCommand ?? "npm test";
-  d.loop.untilGit = Boolean(job.loop.stop.untilGitClean);
-  d.loop.untilPhrase = job.loop.stop.untilPhrase ?? "";
-  d.loop.untilCommand = job.loop.stop.untilCommand ?? "";
+  if (stop.budgetUsd !== undefined) d.loop.budget = String(stop.budgetUsd);
+  d.loop.untilTests = Boolean(stop.untilTestsPass);
+  d.loop.testCommand = stop.testCommand ?? "npm test";
+  d.loop.untilGit = Boolean(stop.untilGitClean);
+  d.loop.untilPhrase = stop.untilPhrase ?? "";
+  d.loop.untilCommand = stop.untilCommand ?? "";
   d.loop.template = job.prompt?.template ?? job.input.initialUserNote ?? "";
 
   const jw = workerDraftFrom(job.worker ?? { engine: "auto" }, installed);

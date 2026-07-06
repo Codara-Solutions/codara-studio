@@ -64,6 +64,11 @@ function normalizeJob(job: ScheduledJob): ScheduledJob {
   }
   if (!next.loop) {
     next = { ...next, loop: { kind: "once", stop: {} } };
+  } else if (!next.loop.stop) {
+    // A loop object persisted without its stop config (hand-authored or via a
+    // caller that skipped it) must still satisfy the "stop always exists"
+    // contract every consumer relies on.
+    next = { ...next, loop: { ...next.loop, stop: {} } };
   }
   if (!next.state) {
     next = { ...next, state: { status: "idle", iteration: 0 } };
@@ -211,7 +216,9 @@ export async function updateJob(input: UpdateScheduledJobInput): Promise<Schedul
   const jobs = await loadJobs();
   const target = jobs.find((job) => job.id === input.id);
   if (!target) throw new Error(`Scheduled job not found: ${input.id}`);
-  const updated: ScheduledJob = {
+  // normalizeJob re-runs on the merged result so a caller-supplied partial
+  // shape (e.g. a loop without stop) can't re-introduce a malformed record.
+  const updated: ScheduledJob = normalizeJob({
     ...target,
     ...(input.name !== undefined ? { name: input.name } : {}),
     ...(input.trigger !== undefined ? { trigger: input.trigger } : {}),
@@ -220,7 +227,7 @@ export async function updateJob(input: UpdateScheduledJobInput): Promise<Schedul
     ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
     ...(input.worker !== undefined ? { worker: input.worker } : {}),
     ...(input.graph !== undefined ? { graph: input.graph } : {}),
-  };
+  });
   await persist(jobs.map((job) => (job.id === input.id ? updated : job)));
   // Re-arm so a changed trigger schedule takes effect now.
   if (updated.enabled) armJob(updated);
