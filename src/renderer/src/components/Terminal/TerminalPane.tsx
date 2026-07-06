@@ -73,10 +73,17 @@ interface Props {
   // Durable Claude/Codex session pointer for this pane; drives capture (fresh
   // Codex) and restore (reopened panes). See useTerminalSession.
   agentSession?: TerminalAgentSession | null;
+  // One-shot hydration marker: true only on the pane's first mount after app
+  // boot when its agent was running at quit. Gates the restore in
+  // useTerminalSession; consumed via onBootResumeConsumed.
+  bootResume?: boolean;
   onResumeUnavailable?: () => void;
   // Fires when a failed Claude restore self-heals into a fresh forced-id
   // session so the owner can persist the replacement pointer.
   onResumeFallback?: (session: TerminalAgentSession) => void;
+  // Fires once the boot restore was attempted (any outcome) so the owner can
+  // clear the leaf's `bootResume` marker.
+  onBootResumeConsumed?: () => void;
 }
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
@@ -104,8 +111,10 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onAgentState,
       onRuntimeState,
       agentSession,
+      bootResume,
       onResumeUnavailable,
       onResumeFallback,
+      onBootResumeConsumed,
     },
     ref,
   ) {
@@ -135,8 +144,10 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onAgentState,
       onRuntimeState,
       agentSession,
+      bootResume,
       onResumeUnavailable,
       onResumeFallback,
+      onBootResumeConsumed,
     });
 
     useImperativeHandle(

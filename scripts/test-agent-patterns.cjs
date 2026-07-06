@@ -352,5 +352,45 @@ checkTm(
 // whitespace between the words, so the "re" breaks the match.
 checkTm("'restarted' does not count", ap.countTeammateEvents("5 teammates restarted"), 0, 0);
 
+// ── resume-refusal watch: refusal signature vs TUI-launch disarm ──
+// The restored-pane watch (useTerminalSession) matches CLAUDE_RESUME_FAILED_RE
+// on stripped text but disarms permanently when the RAW stream shows
+// TUI_ALT_SCREEN_ENTER — a resumed TUI can repaint the refusal sentence as
+// transcript content, and only the disarm keeps that from triggering a bogus
+// self-heal typed into the live session.
+const refusalPrint = "\x1b[2mNo conversation \x1b[1mfound\x1b[0m with session ID abc";
+check(
+  "refusal print matches on stripped text",
+  ap.CLAUDE_RESUME_FAILED_RE.test(ap.stripAnsi(refusalPrint)),
+  true,
+);
+check(
+  "refusal print never contains the disarm marker",
+  refusalPrint.includes(ap.TUI_ALT_SCREEN_ENTER),
+  false,
+);
+const resumedTui = "\x1b[?1049h\x1b[2J…transcript: 'No conversation found with session ID'…";
+check(
+  "resumed TUI raw stream carries the disarm marker",
+  resumedTui.includes(ap.TUI_ALT_SCREEN_ENTER),
+  true,
+);
+check(
+  "disarm marker is gone after stripAnsi (watch must scan raw)",
+  ap.stripAnsi(resumedTui).includes(ap.TUI_ALT_SCREEN_ENTER),
+  false,
+);
+// Straddle: the watch keeps marker-length−1 raw chars between chunks, so a
+// marker split across two pty chunks still completes.
+const markerMid = Math.floor(ap.TUI_ALT_SCREEN_ENTER.length / 2);
+const chunk1 = "resuming…" + ap.TUI_ALT_SCREEN_ENTER.slice(0, markerMid);
+const chunk2 = ap.TUI_ALT_SCREEN_ENTER.slice(markerMid) + "\x1b[2J";
+const carried = chunk1.slice(1 - ap.TUI_ALT_SCREEN_ENTER.length);
+check(
+  "straddled disarm marker completes across chunks",
+  (carried + chunk2).includes(ap.TUI_ALT_SCREEN_ENTER),
+  true,
+);
+
 process.exitCode = failures === 0 ? 0 : 1;
 console.log(failures === 0 ? "\nAll agent-pattern checks passed." : `\n${failures} check(s) FAILED.`);

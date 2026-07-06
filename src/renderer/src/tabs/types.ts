@@ -55,6 +55,11 @@ export interface TerminalAgentSession {
   transcriptPath?: string;
   // ISO timestamp of capture; debugging / staleness only.
   capturedAt: string;
+  // True while the pane's runtime poller currently detects this agent running;
+  // undefined/false = not running. Restore eligibility requires active===true
+  // in the persisted blob — old blobs without the field are deliberately not
+  // restore-eligible (only sessions RUNNING at quit come back on reopen).
+  active?: boolean;
 }
 
 // Each terminal tab owns a recursive tree of panes. A leaf is one PTY-backed
@@ -88,6 +93,11 @@ export interface TerminalLeaf {
   // launched as a "Worker — Claude/Codex" agent; survives a full app quit (it is
   // NOT stripped like `worker`/`autorun`) so reopen can relaunch via --resume.
   agentSession?: TerminalAgentSession | null;
+  // Transient one-shot restore marker set ONLY at hydration (loadPersisted),
+  // iff the persisted agentSession was active (agent running at quit). The
+  // pane's first mount after boot consumes it; it is never persisted, so
+  // nothing else in the app's lifetime can re-fire an auto-resume.
+  bootResume?: boolean;
 }
 
 export interface TerminalLeafWorker {

@@ -115,6 +115,9 @@ interface Props {
   // A failed Claude restore self-healed into a fresh forced-id session —
   // persist the replacement pointer on the leaf.
   onPaneResumeFallback: (tabId: TabId, paneId: string, session: TerminalAgentSession) => void;
+  // A restored pane's first mount made its boot-restore attempt — clear the
+  // leaf's one-shot `bootResume` hydration marker.
+  onPaneBootResumeConsumed: (tabId: TabId, paneId: string) => void;
 }
 
 // Per-pane bundle of stable callbacks. Cached per `tabId:paneId` so a
@@ -138,6 +141,7 @@ type Bundle = {
   onRuntimeState: (state: RuntimeState) => void;
   onResumeUnavailable: () => void;
   onResumeFallback: (session: TerminalAgentSession) => void;
+  onBootResumeConsumed: () => void;
 };
 
 // React.memo: with the useTabs API object now memoized, TerminalStack's
@@ -168,6 +172,7 @@ function TerminalStack({
   onPaneRuntimeState,
   onPaneResumeUnavailable,
   onPaneResumeFallback,
+  onPaneBootResumeConsumed,
 }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
   // unrelated tab kind mutates, and so the bundle-GC effect (keyed on
@@ -198,6 +203,7 @@ function TerminalStack({
   const runtimeStateRef = useRef(onPaneRuntimeState);
   const resumeUnavailableRef = useRef(onPaneResumeUnavailable);
   const resumeFallbackRef = useRef(onPaneResumeFallback);
+  const bootResumeConsumedRef = useRef(onPaneBootResumeConsumed);
   useEffect(() => {
     detectedRef.current = onDetectedUrl;
     sparkOpenRef.current = onSparkOpen;
@@ -217,7 +223,8 @@ function TerminalStack({
     runtimeStateRef.current = onPaneRuntimeState;
     resumeUnavailableRef.current = onPaneResumeUnavailable;
     resumeFallbackRef.current = onPaneResumeFallback;
-  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback]);
+    bootResumeConsumedRef.current = onPaneBootResumeConsumed;
+  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
 
   // Latest tab roots so the + smart-add button can read whichever PaneNode
   // tree is current at click time (a stale capture would split a tree that
@@ -300,6 +307,7 @@ function TerminalStack({
           onRuntimeState: (state) => runtimeStateRef.current(tabId, paneId, state),
           onResumeUnavailable: () => resumeUnavailableRef.current(tabId, paneId),
           onResumeFallback: (session) => resumeFallbackRef.current(tabId, paneId, session),
+          onBootResumeConsumed: () => bootResumeConsumedRef.current(tabId, paneId),
         };
         bundles.current.set(key, b);
       }
@@ -1015,6 +1023,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 initialScrollback={leaf.scrollback}
                 initialCommand={leaf.autorun}
                 agentSession={leaf.agentSession}
+                bootResume={leaf.bootResume === true}
                 visible={visible && !placeOffScreen}
                 scrollbackLineLimit={scrollbackLineLimit}
                 onDetectedLocalUrl={bundle.onDetectedUrl}
@@ -1027,6 +1036,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 onRuntimeState={bundle.onRuntimeState}
                 onResumeUnavailable={bundle.onResumeUnavailable}
                 onResumeFallback={bundle.onResumeFallback}
+                onBootResumeConsumed={bundle.onBootResumeConsumed}
               />
             ) : null}
             {!placeOffScreen && workerChip ? <WorkerChip worker={workerChip} /> : null}

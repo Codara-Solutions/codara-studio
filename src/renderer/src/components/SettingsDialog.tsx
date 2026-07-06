@@ -928,7 +928,7 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
           />
           <ToggleRow
             title="Resume Claude/Codex terminal sessions on reopen"
-            desc="Terminal panes that were running a Claude or Codex worker relaunch their conversation (claude --resume / codex resume) when Codara Studio reopens. When off, panes come back as plain shells."
+            desc="Terminal panes with a Claude or Codex session still running when you quit relaunch that conversation (claude --resume / codex resume) when Codara Studio reopens. When off, panes come back as plain shells."
             checked={preferences.restoreAgentSessions !== false}
             onChange={(v) => void setPreference("restoreAgentSessions", v)}
           />

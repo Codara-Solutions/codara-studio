@@ -2200,6 +2200,9 @@ export default function App() {
               sessionId: claudeLaunch.sessionId,
               cwd,
               capturedAt: new Date().toISOString(),
+              // The launch command is about to run; mark the pointer live so a
+              // quit before the poller's first report still restores it.
+              active: true,
             }
           : null,
     };
@@ -2620,7 +2623,15 @@ export default function App() {
       const tab = t.tabs.find((item) => item.id === tabId);
       if (!tab || tab.kind !== "terminal") return;
       const leaf = findLeafByPaneId(tab.root, paneId);
-      if (!leaf?.worker) return;
+      if (!leaf) return;
+      // The shell died, taking any foreground agent with it — a pointer left
+      // `active` here would wrongly restore on the next boot. The poller's
+      // running:false usually lands first; this covers a pty that dies without
+      // the TUI ever leaving alt-screen (kill, crash, window-manager teardown).
+      if (leaf.agentSession?.active) {
+        t.setLeafAgentSession(tabId, paneId, { ...leaf.agentSession, active: false });
+      }
+      if (!leaf.worker) return;
       // D5 (error). A non-zero pty exit is a crash, not a clean finish. Keep
       // the chip visible so the user sees "exited(N)" in red rather than the
       // pane silently dropping its badge. Applies to manual chips (a Codara-owned
@@ -2739,12 +2750,47 @@ export default function App() {
                   cwd: capCwd,
                   transcriptPath: res.transcriptPath,
                   capturedAt: new Date().toISOString(),
+                  // Capture polls up to 15s; the agent may have exited in the
+                  // meantime (its running:false already deactivated the OLD
+                  // pointer). Read the live alt-screen state instead of
+                  // assuming true so this late write can't resurrect `active`
+                  // on a dead pane.
+                  active:
+                    paneRuntimeRef.current.get(paneId)?.altScreenActive === true,
                 });
               }
             })
             .catch(() => undefined)
             .finally(() => capturingPanesRef.current.delete(paneId));
         }
+      }
+      // Restore eligibility (`active`) tracks "is this pointer's agent running
+      // RIGHT NOW", independent of capture: a `--resume`d session appends to
+      // its existing transcript, so discovery finds no new file and the
+      // capture arm above never rewrites the pointer — the flag must still
+      // flip here. Only written on a real change to avoid render churn.
+      //
+      // Two ACCEPTED limitations:
+      // - An agent that exits while its workspace layer is HIDDEN is not
+      //   recorded (hidden layers get noop write-backs), so the persisted blob
+      //   keeps active:true and the next boot resumes a session that died
+      //   while hidden. This only occurs on crash/kill — a clean exit is
+      //   reported once the layer is active again — and resuming a crashed
+      //   session reads as recovery, not annoyance.
+      // - The 90s re-capture age guard above means a DIFFERENT claude started
+      //   in the same pane within 90s of the previous pointer's capture can
+      //   leave the old sessionId blessed as active. Narrow window; the mild
+      //   failure is that restore opens that pane's previous conversation.
+      if (
+        state.running &&
+        (state.runtime === "claude" || state.runtime === "codex") &&
+        leaf.agentSession?.sessionId &&
+        leaf.agentSession.runtime === state.runtime &&
+        leaf.agentSession.active !== true
+      ) {
+        t.setLeafAgentSession(tabId, paneId, { ...leaf.agentSession, active: true });
+      } else if (!state.running && leaf.agentSession?.active) {
+        t.setLeafAgentSession(tabId, paneId, { ...leaf.agentSession, active: false });
       }
       const existing = leaf.worker;
       if (state.running) {
@@ -3946,6 +3992,9 @@ const Workspace = React.memo(function Workspace({
           sessionId: launch.sessionId,
           cwd,
           capturedAt: new Date().toISOString(),
+          // Same as prepareWorkerLaunch's makeSession: the autorun is about to
+          // run, so the pointer starts live.
+          active: true,
         });
       }
       return newPaneId;
@@ -3986,6 +4035,15 @@ const Workspace = React.memo(function Workspace({
   const handleLeafResumeFallback = useCallback(
     (tabId: string, paneId: string, session: TerminalAgentSession) => {
       tabs.setLeafAgentSession(tabId, paneId, session);
+    },
+    [tabs],
+  );
+  // A restored pane's first mount made its boot-restore attempt (whatever the
+  // outcome) — clear the one-shot hydration marker so no later remount of the
+  // pane auto-resumes again.
+  const handleLeafBootResumeConsumed = useCallback(
+    (tabId: string, paneId: string) => {
+      tabs.setLeafBootResumeConsumed(tabId, paneId);
     },
     [tabs],
   );
@@ -4119,6 +4177,7 @@ const Workspace = React.memo(function Workspace({
                 onPaneRuntimeState={isActive ? onTerminalPaneRuntimeState : noopTerminalCb}
                 onPaneResumeUnavailable={isActive ? handleLeafResumeUnavailable : noopTerminalCb}
                 onPaneResumeFallback={isActive ? handleLeafResumeFallback : noopTerminalCb}
+                onPaneBootResumeConsumed={isActive ? handleLeafBootResumeConsumed : noopTerminalCb}
               />
             </div>
           );

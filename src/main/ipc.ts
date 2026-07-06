@@ -1298,7 +1298,12 @@ export function registerIpc(): void {
         if (args.runtime === "claude") {
           found = await discoverClaudeSessionForCwd(args.cwd, since).catch(() => null);
         } else {
-          const path = await discoverRolloutForCwd(since, spawnDate, args.cwd).catch(() => null);
+          // strict: an unmatched-cwd fallback here would bind the pane to some
+          // OTHER session's rollout. This poll loop retries for 15s, so a
+          // not-yet-flushed session_meta line just means "try again next tick".
+          const path = await discoverRolloutForCwd(since, spawnDate, args.cwd, {
+            strict: true,
+          }).catch(() => null);
           if (path) {
             const sessionId = extractSessionUuid(path);
             if (sessionId) found = { sessionId, transcriptPath: path };

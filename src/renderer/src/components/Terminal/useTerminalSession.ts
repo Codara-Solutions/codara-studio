@@ -21,6 +21,7 @@ import {
   stripAnsi,
   unescapeOsc633,
   CLAUDE_RESUME_FAILED_RE,
+  TUI_ALT_SCREEN_ENTER,
   type AgentRuntime,
   type PublicAgentRuntime,
 } from "@shared/agent-patterns";
@@ -255,6 +256,12 @@ interface Options {
   // exists and, if so, types the `--resume` command to relaunch the session.
   // Fresh launches are captured elsewhere (the App-level agent-detection hook).
   agentSession?: TerminalAgentSession | null;
+  // One-shot boot-restore marker, minted on the leaf ONLY at hydration
+  // (useTabs.loadPersisted) when the persisted pointer was `active` (agent
+  // running at quit). The restore precompute below requires it, so a restore
+  // can only fire on the pane's first mount after app boot — later remounts
+  // (workspace switches, pty death) see the consumed flag and stay quiet.
+  bootResume?: boolean;
   // Fires when a restore's saved transcript is gone (pruned / cwd moved) so the
   // owner can clear the stale pointer; the pane stays a plain shell.
   onResumeUnavailable?: () => void;
@@ -263,6 +270,10 @@ interface Options {
   // agentSession at the replacement. Codex can't force ids, so its failed
   // restores go through onResumeUnavailable instead.
   onResumeFallback?: (session: TerminalAgentSession) => void;
+  // Fires exactly once when the boot restore was attempted — for EVERY outcome
+  // (resume typed, fresh fallback, pointer cleared, prefs-disabled, probe
+  // failure) — so the owner clears the leaf's one-shot `bootResume` marker.
+  onBootResumeConsumed?: () => void;
 }
 
 export interface TerminalSessionApi {
@@ -296,8 +307,10 @@ export function useTerminalSession({
   onAgentState,
   onRuntimeState,
   agentSession,
+  bootResume,
   onResumeUnavailable,
   onResumeFallback,
+  onBootResumeConsumed,
 }: Options): TerminalSessionApi {
   // Latest-value ref so the input/resize closures (captured once per
   // sessionId) see the freshest readOnly flag without re-running the
@@ -345,6 +358,7 @@ export function useTerminalSession({
   const onRuntimeStateRef = useRef(onRuntimeState);
   const onResumeUnavailableRef = useRef(onResumeUnavailable);
   const onResumeFallbackRef = useRef(onResumeFallback);
+  const onBootResumeConsumedRef = useRef(onBootResumeConsumed);
   useEffect(() => {
     onDetectedRef.current = onDetectedLocalUrl;
     onCwdRef.current = onCwd;
@@ -357,7 +371,8 @@ export function useTerminalSession({
     onRuntimeStateRef.current = onRuntimeState;
     onResumeUnavailableRef.current = onResumeUnavailable;
     onResumeFallbackRef.current = onResumeFallback;
-  }, [onDetectedLocalUrl, onCwd, onExit, onSearchReady, onSparkOpen, onActivity, onUserInput, onAgentState, onRuntimeState, onResumeUnavailable, onResumeFallback]);
+    onBootResumeConsumedRef.current = onBootResumeConsumed;
+  }, [onDetectedLocalUrl, onCwd, onExit, onSearchReady, onSparkOpen, onActivity, onUserInput, onAgentState, onRuntimeState, onResumeUnavailable, onResumeFallback, onBootResumeConsumed]);
 
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -488,6 +503,10 @@ export function useTerminalSession({
     const cleanups: Array<() => void> = [];
     let spawned = false;
     let startupCommandHandled = false;
+    // True when pty.spawn bound to an EXISTING session (pane remount) instead
+    // of creating a fresh pty — a live shell/TUI owns it, so an undelivered
+    // resume must stay silent rather than print a manual-run notice.
+    let attachedExistingSession = false;
     // True between issuing the snapshot replay term.write(...) and its write
     // callback completing. While set, the unmount cleanup skips re-snapshotting
     // so a mid-parse remount can't overwrite the cached full buffer with a
@@ -1987,24 +2006,46 @@ export function useTerminalSession({
 
       // ── Claude/Codex restore precompute (probe BEFORE spawn) ────────────
       // A restored pane has no autorun (stripped on save) but carries a saved
-      // agentSession pointer. Deciding the outcome BEFORE the PTY exists lets
-      // the resume command ride pty.spawn's startupCommand — delivered by the
-      // shell itself as its first action (see withStartupCommand in
-      // src/main/pty-manager.ts) — instead of a post-mount timer racing the
-      // first prompt. The probe is one fs.access-grade IPC, so this delays
-      // spawn by milliseconds, and only for panes that actually restore.
+      // agentSession pointer. Restore is boot-once and active-at-close only:
+      // it additionally requires the leaf's `bootResume` marker, which useTabs
+      // mints at hydration — once per workspace per app run — and only for
+      // pointers whose agent was RUNNING when the app quit (active===true).
+      // The owner clears the marker after this attempt (any outcome), so
+      // remounts within the app's lifetime (workspace switches, pty death) can
+      // never auto-type a resume again. Deciding the outcome BEFORE the PTY
+      // exists lets the resume command ride pty.spawn's startupCommand —
+      // delivered by the shell itself as its first action (see
+      // withStartupCommand in src/main/pty-manager.ts). That is the ONLY
+      // delivery path for a resume: if spawn reports it unhandled (attached
+      // to an EXISTING session, or a shell family without startup-command
+      // support), the resume is dropped rather than typed by the 1500ms
+      // autorun fallback — so it is structurally impossible to type a resume
+      // into a live TUI. (Boot hydration means no pty can pre-exist anyway —
+      // main just started — but the delivery gate doesn't rely on that.)
+      // The probe is one fs.access-grade IPC, so this delays spawn by
+      // milliseconds, and only for panes that actually restore.
       const cmd = initialCommand?.trim();
       let resumeCommand: string | null = null;
       let resumeIsFreshFallback = false;
       let fallbackNotice: string | null = null;
       let fallbackSession: TerminalAgentSession | null = null;
+      // Set when the restore gate below was entered; consumeBootResume fires
+      // the owner callback at most once no matter which exit path runs.
+      let bootResumeEntered = false;
+      const consumeBootResume = () => {
+        if (!bootResumeEntered) return;
+        bootResumeEntered = false;
+        onBootResumeConsumedRef.current?.();
+      };
       if (
+        bootResume === true &&
         agentSession?.sessionId &&
         !cmd &&
         !readOnlyRef.current &&
         !inputBlockedRef.current &&
         !autorunFiredSessions.has(sessionId)
       ) {
+        bootResumeEntered = true;
         const restore = agentSession;
         const prefs = await window.spark.preferences.load().catch(() => null);
         if (!(prefs && prefs.restoreAgentSessions === false)) {
@@ -2041,12 +2082,27 @@ export function useTerminalSession({
               sessionId: fresh.sessionId,
               cwd: restore.cwd,
               capturedAt: new Date().toISOString(),
+              // The fresh launch is about to run — same rationale as the
+              // App-level mints: quitting before the poller's first report
+              // must still restore the replacement.
+              active: true,
             };
           } else {
             // Codex can't force session ids, so there's nothing to relaunch
             // deterministically — surface the notice, clear the pointer, and
             // leave a plain shell.
             fallbackNotice = "previous Codex session couldn't be resumed";
+          }
+        } else {
+          // Pref off: the pane stays a plain shell, but the hydrated pointer
+          // must not stay frozen at active:true — an idle shell emits no agent
+          // events to flip it back, so it would re-persist as "running" on
+          // every quit, and re-enabling the pref weeks later would resume this
+          // ancient session. Deactivate it now (same persist chain as the
+          // fallback pointer); it re-earns `active` the next time its agent is
+          // actually seen running.
+          if (restore.active) {
+            onResumeFallbackRef.current?.({ ...restore, active: false });
           }
         }
       }
@@ -2087,27 +2143,64 @@ export function useTerminalSession({
           mirror: readOnlyRef.current || undefined,
         });
         if (disposed) {
+          // The spawn attempt happened — consume the one-shot marker even
+          // though this mount is already dead, so the next mount can't
+          // re-deliver the resume on top of the PTY this spawn created.
+          consumeBootResume();
           return;
         }
         spawned = true;
         startupCommandHandled = Boolean(spawnResult.startupCommandHandled);
+        attachedExistingSession = Boolean(spawnResult.attached);
         if (startupCommandHandled) autorunFiredSessions.add(sessionId);
       } catch (err) {
         term.write(`\r\n\x1b[31mfailed to spawn: ${(err as Error).message}\x1b[0m\r\n`);
+        consumeBootResume();
         return;
       }
+
+      // A computed resume/fresh command that spawn did NOT deliver
+      // (startupCommandHandled=false). Nothing ran, so nothing may self-heal
+      // or mutate the pointer — no replacement, no refusal watch. Two shapes:
+      //   - attached: spawn bound to an EXISTING session (pane remount while
+      //     a live shell/TUI owns the pty) — stay completely silent.
+      //   - fresh spawn on a shell family withStartupCommand can't drive
+      //     (fish etc.) — this recurs every boot, so tell the user how to
+      //     resume by hand; the pointer stays intact.
+      // The codex clear-pointer case (resumeCommand null, notice only) is
+      // unaffected: it never had anything to deliver.
+      const resumeUndelivered = resumeCommand !== null && !startupCommandHandled;
 
       // Restore self-heal bookkeeping (decided in the precompute above):
       // surface the one-line notice and hand the owner the replacement
       // pointer (fresh Claude) or the clear signal (codex, transcript gone).
-      if (fallbackNotice) {
-        term.write(`\x1b[2m[${fallbackNotice}]\x1b[0m\r\n`);
+      if (!resumeUndelivered) {
+        if (fallbackNotice) {
+          term.write(`\x1b[2m[${fallbackNotice}]\x1b[0m\r\n`);
+        }
+        if (fallbackSession) {
+          onResumeFallbackRef.current?.(fallbackSession);
+        } else if (fallbackNotice) {
+          onResumeUnavailableRef.current?.();
+        }
+      } else if (!attachedExistingSession) {
+        term.write(
+          `\x1b[2m[couldn't auto-resume the previous ${agentSession?.runtime ?? "agent"} session in this shell — run: ${resumeCommand}]\x1b[0m\r\n`,
+        );
       }
-      if (fallbackSession) {
-        onResumeFallbackRef.current?.(fallbackSession);
-      } else if (fallbackNotice) {
-        onResumeUnavailableRef.current?.();
-      }
+      // Boot restore attempted — every outcome lands here (resume riding the
+      // spawn, undelivered resume, fresh fallback, codex clear-pointer,
+      // prefs-disabled, probe failure), so the marker is consumed exactly
+      // once per boot.
+      //
+      // "Exactly once" has a caveat: a pane mounted in a HIDDEN workspace
+      // layer gets a noop'd consumption callback (App's isActive gate), so the
+      // leaf's marker survives that mount. Safety then rests on two other
+      // guards — autorunFiredSessions (a delivered resume marks the id, so a
+      // re-entered gate can't type again) and the attach gate above (the pty
+      // now exists, so a later mount's spawn attaches and delivers nothing).
+      // Do not weaken either without revisiting this.
+      consumeBootResume();
 
       // Drain any bytes the pty emitted while the previous TerminalPane was
       // unmounted (workspace switched away). Main holds those bytes in a
@@ -2322,7 +2415,12 @@ export function useTerminalSession({
       // arming would type the command a second time after the first has
       // already launched the TUI. Once we commit to writing, we mark the id
       // permanently so no later remount can resurrect the timer.
-      const typedCommand = cmd || resumeCommand;
+      //
+      // Deliberately cmd ONLY — never resumeCommand. A resume is delivered
+      // exclusively by a fresh spawn's startupCommand; if spawn instead
+      // attached to an EXISTING session (startupCommandHandled=false), typing
+      // the resume here would land it inside the live TUI's input box.
+      const typedCommand = cmd;
       if (
         typedCommand &&
         typedCommand.length > 0 &&
@@ -2347,19 +2445,43 @@ export function useTerminalSession({
       // output for the signature and self-heal exactly like a failed probe:
       // notice + fresh forced-id launch typed into the now-idle shell +
       // replacement pointer. One attempt — the fresh launch can't loop back
-      // here because the watch only arms for genuine resumes.
-      if (resumeCommand && !resumeIsFreshFallback && agentSession?.runtime === "claude") {
+      // here because the watch only arms for genuine resumes. Arms ONLY when
+      // the resume was actually delivered (startupCommandHandled): watching an
+      // existing session's output would "self-heal" a live conversation that
+      // was never asked to resume.
+      if (
+        resumeCommand &&
+        !resumeIsFreshFallback &&
+        startupCommandHandled &&
+        agentSession?.runtime === "claude"
+      ) {
         const restoreCwd = agentSession.cwd;
         let watchTail = "";
+        // Raw (unstripped) tail kept only long enough to catch an alt-screen
+        // marker straddling a chunk boundary.
+        let rawWatchTail = "";
         let watchDone = false;
         const watchDecoder = new TextDecoder();
         const stopWatch = window.spark.pty.onData(sessionId, (data) => {
           if (watchDone || disposed) return;
           const bytes =
             data instanceof Uint8Array ? data : new TextEncoder().encode(String(data));
-          watchTail = (
-            watchTail + stripAnsi(watchDecoder.decode(bytes, { stream: true }))
-          ).slice(-512);
+          const text = watchDecoder.decode(bytes, { stream: true });
+          // Disarm permanently the moment the TUI actually launches: once the
+          // resumed conversation is repainting inside the alt screen, the
+          // refusal sentence can appear as transcript CONTENT, and matching it
+          // would type a fresh claude command INTO the live TUI. A real
+          // refusal prints before any alt-screen enter, so it still matches
+          // below. Checked on raw text — stripAnsi removes the sequence.
+          const rawScan = rawWatchTail + text;
+          // Keep marker-length−1 chars: enough to complete a straddled marker
+          // with the next chunk, nothing more.
+          rawWatchTail = rawScan.slice(1 - TUI_ALT_SCREEN_ENTER.length);
+          if (rawScan.includes(TUI_ALT_SCREEN_ENTER)) {
+            watchDone = true;
+            return;
+          }
+          watchTail = (watchTail + stripAnsi(text)).slice(-512);
           if (!CLAUDE_RESUME_FAILED_RE.test(watchTail)) return;
           watchDone = true;
           const fresh = buildClaudeLaunch();
@@ -2371,6 +2493,10 @@ export function useTerminalSession({
             sessionId: fresh.sessionId,
             cwd: restoreCwd,
             capturedAt: new Date().toISOString(),
+            // The fresh launch is typed just below — same rationale as the
+            // other mints: a quit before the poller's first report must
+            // still restore the replacement.
+            active: true,
           });
           // Small delay so the shell is back at its prompt after Claude's
           // refusal-exit before the fresh launch is typed.

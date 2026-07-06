@@ -148,14 +148,18 @@ function normalizePath(p: string): string {
  * Like discoverRolloutPath, but prefers a rollout whose recorded cwd matches
  * `cwd`. Used by the manual-terminal capture path, where several Codex windows
  * could be writing rollouts concurrently and the newest-by-mtime file might
- * belong to a different pane. Falls back to the newest candidate when no file's
- * cwd can be matched (unknown/older schema), so it never does worse than the
- * mtime heuristic.
+ * belong to a different pane. By default falls back to the newest candidate
+ * when no file's cwd can be matched (unknown/older schema), so it never does
+ * worse than the mtime heuristic. `strict: true` returns null instead — for
+ * callers that retry (the agentSession:capture poll loop), where "no cwd match
+ * yet" usually means the session_meta line hasn't flushed and binding the
+ * newest unmatched file would capture some OTHER pane's conversation.
  */
 export async function discoverRolloutForCwd(
   since: number,
   spawnDate: Date,
   cwd: string,
+  opts?: { strict?: boolean },
 ): Promise<string | null> {
   const candidates = await listCandidates(since, spawnDate, new Date());
   if (candidates.length === 0) return null;
@@ -164,5 +168,5 @@ export async function discoverRolloutForCwd(
     const recorded = await readRolloutCwd(candidate.path);
     if (recorded && normalizePath(recorded) === target) return candidate.path;
   }
-  return candidates[0].path;
+  return opts?.strict ? null : candidates[0].path;
 }

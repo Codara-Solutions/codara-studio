@@ -287,10 +287,22 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
   }
 }
 
-function cleanupTransientTerminalState(node: PaneNode): void {
+// Exported for tests (scripts/test-session-restore.cjs); only loadPersisted
+// calls it in production.
+export function cleanupTransientTerminalState(node: PaneNode): void {
   if (node.kind === "leaf") {
     delete node.worker;
     delete node.autorun;
+    // Boot-once restore marker: minted here — at hydration, once per workspace
+    // per app run — and nowhere else. Only a pointer whose agent was RUNNING at
+    // quit (active===true, real sessionId) earns it; anything else (old blobs
+    // without `active`, idle panes, pending Codex captures with sessionId "")
+    // hydrates without one and never auto-resumes.
+    if (node.agentSession?.active === true && node.agentSession.sessionId) {
+      node.bootResume = true;
+    } else {
+      delete node.bootResume;
+    }
     return;
   }
   cleanupTransientTerminalState(node.a);
@@ -340,10 +352,12 @@ function stripTransientTerminalState(tabs: Tab[]): Tab[] {
   return changed ? next : tabs;
 }
 
-function stripTransientPaneState(node: PaneNode): PaneNode {
+// Exported for tests (scripts/test-session-restore.cjs); only persist calls it
+// in production.
+export function stripTransientPaneState(node: PaneNode): PaneNode {
   if (node.kind === "leaf") {
-    if (!("worker" in node) && !("autorun" in node)) return node;
-    const { worker: _worker, autorun: _autorun, ...rest } = node;
+    if (!("worker" in node) && !("autorun" in node) && !("bootResume" in node)) return node;
+    const { worker: _worker, autorun: _autorun, bootResume: _bootResume, ...rest } = node;
     return rest;
   }
   const a = stripTransientPaneState(node.a);
@@ -553,6 +567,10 @@ export interface UseTabsApi {
     paneId: string,
     session: TerminalAgentSession | null,
   ) => void;
+  // One-shot boot-restore marker consumed: clear the leaf's hydration-minted
+  // `bootResume` flag once the pane's first mount has made its restore attempt
+  // (whatever the outcome), so no later remount can auto-resume again.
+  setLeafBootResumeConsumed: (tabId: TabId, paneId: string) => void;
   // Rename a leaf's paneId. The caller must dispose the old PTY when it is
   // intentionally replacing a live shell. The new TerminalPane mounts at the
   // new id and spawns/attaches there. Used by orchestration to take over an
@@ -1510,6 +1528,21 @@ export function useTabs(
     [],
   );
 
+  const setLeafBootResumeConsumed = useCallback(
+    (tabId: TabId, paneId: string) => {
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          const existing = findLeaf(t.root, paneId);
+          if (!existing || existing.bootResume !== true) return t;
+          const root = setLeafField(t.root, paneId, "bootResume", false);
+          return root === t.root ? t : { ...t, root };
+        }),
+      );
+    },
+    [],
+  );
+
   // Rename a leaf's paneId. Walks the tree, swaps the id, and bumps the
   // tab's activePaneId to point at the new id if it used to point at the
   // old one. Returns true if the leaf was found, false otherwise.
@@ -2315,6 +2348,7 @@ export function useTabs(
       flushScrollbackNow,
       setLeafWorker,
       setLeafAgentSession,
+      setLeafBootResumeConsumed,
       renameLeaf,
       addPaneInTab,
       openChatTab,

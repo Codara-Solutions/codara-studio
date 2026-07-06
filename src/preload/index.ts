@@ -572,7 +572,10 @@ const api = {
       // state (no resize / no sink change / no tail replay). Set by readOnly
       // TerminalPanes; throws if the session does not exist.
       mirror?: boolean;
-    }): Promise<{ id: string; pid: number; startupCommandHandled?: boolean }> =>
+      // Result `attached` is true when spawn bound to an EXISTING session
+      // (remount / mirror) instead of creating a fresh pty — startupCommand
+      // is never delivered in that case.
+    }): Promise<{ id: string; pid: number; startupCommandHandled?: boolean; attached?: boolean }> =>
       ipcRenderer.invoke("pty:spawn", args),
     write: (id: string, data: string): Promise<void> =>
       ipcRenderer.invoke("pty:write", { id, data }),
