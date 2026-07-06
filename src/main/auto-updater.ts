@@ -30,6 +30,18 @@ const INITIAL_CHECK_DELAY_MS = 4000;
 
 let registered = false;
 
+// True once a check has actually FOUND an update (update-available fired).
+// Errors before that point are check-phase failures — the update feed being
+// unreachable. For this app that is the steady state, not an incident: the
+// publish repo (Codara-Solutions/codara-studio) is private with no releases,
+// so GitHub answers every feed request with 404 ("Please double check that
+// your authentication token is correct…"), and offline machines fail with
+// DNS/timeout errors. Surfacing those as a red banner on every launch trains
+// the user to ignore the banner. Check-phase errors are logged to the console
+// only; once an update HAS been found, download/install failures are real
+// problems the user can act on, so those still get the banner.
+let updateFound = false;
+
 function send(window: BrowserWindow, event: UpdaterEvent): void {
   if (window.isDestroyed()) return;
   if (window.webContents.isDestroyed()) return;
@@ -60,6 +72,7 @@ export function registerAutoUpdater(mainWindow: BrowserWindow): void {
   });
 
   autoUpdater.on("update-available", (info: UpdateInfo) => {
+    updateFound = true;
     send(mainWindow, {
       kind: "update-available",
       payload: { version: info.version, releaseDate: info.releaseDate },
@@ -67,6 +80,7 @@ export function registerAutoUpdater(mainWindow: BrowserWindow): void {
   });
 
   autoUpdater.on("update-not-available", (info: UpdateInfo) => {
+    updateFound = false;
     send(mainWindow, {
       kind: "update-not-available",
       payload: { version: info.version },
@@ -93,20 +107,23 @@ export function registerAutoUpdater(mainWindow: BrowserWindow): void {
   });
 
   autoUpdater.on("error", (err: Error) => {
-    send(mainWindow, {
-      kind: "error",
-      payload: { message: err?.message ?? String(err) },
-    });
+    const message = err?.message ?? String(err);
+    // Check-phase failure (feed unreachable — see `updateFound` note above):
+    // console only, never a banner.
+    if (!updateFound) {
+      console.warn("[auto-updater] update check failed (ignored):", message);
+      return;
+    }
+    send(mainWindow, { kind: "error", payload: { message } });
   });
 
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch((err: unknown) => {
-      // checkForUpdates rejects when no publish target is configured. Don't
-      // crash main — surface the error to the renderer where the banner can
-      // dismiss it.
+      // checkForUpdates rejects when no publish target is configured or the
+      // feed is unreachable — a check-phase failure by definition. Log and
+      // move on; don't crash main and don't alarm the user.
       const message = err instanceof Error ? err.message : String(err);
-      console.error("[auto-updater] checkForUpdates failed:", message);
-      send(mainWindow, { kind: "error", payload: { message } });
+      console.warn("[auto-updater] checkForUpdates failed (ignored):", message);
     });
   }, INITIAL_CHECK_DELAY_MS);
 }
