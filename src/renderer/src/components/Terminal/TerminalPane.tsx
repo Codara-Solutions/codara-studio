@@ -5,6 +5,7 @@ import {
   useTerminalSession,
   type SparkOpenInput,
 } from "./useTerminalSession";
+import type { TerminalAgentSession } from "../../tabs/types";
 
 // TerminalPane wraps a single xterm pane in a forwardRef component so the
 // parent strip can imperatively `write`, `focus`, copy the visible buffer,
@@ -68,6 +69,10 @@ interface Props {
   // confirms a new RuntimeState (working / blocked / idle / done) for the
   // foreground agent. Lets the owning stack surface the finer state on a chip.
   onRuntimeState?: (state: RuntimeState) => void;
+  // Durable Claude/Codex session pointer for this pane; drives capture (fresh
+  // Codex) and restore (reopened panes). See useTerminalSession.
+  agentSession?: TerminalAgentSession | null;
+  onResumeUnavailable?: () => void;
 }
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
@@ -94,6 +99,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onUserInput,
       onAgentState,
       onRuntimeState,
+      agentSession,
+      onResumeUnavailable,
     },
     ref,
   ) {
@@ -122,6 +129,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onUserInput,
       onAgentState,
       onRuntimeState,
+      agentSession,
+      onResumeUnavailable,
     });
 
     useImperativeHandle(

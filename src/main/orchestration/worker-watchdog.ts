@@ -3,6 +3,8 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import type { WorkerTask } from "@shared/types";
 
+import { claudeProjectsDirForCwd } from "./claude-paths";
+
 // Three-channel stuck detector. A worker is declared stuck only when ALL of:
 //  - pty byte stream (TUI spinner repaints)
 //  - CLI session jsonl file (Codex / Claude record per-turn events here)
@@ -119,15 +121,9 @@ async function listSessionLogCandidates(
     return findRecentJsonlsUnder(path.join(homedir(), ".codex", "sessions"), 4);
   }
   if (runtime === "claude") {
-    return findRecentJsonlsUnder(path.join(homedir(), ".claude", "projects", encodeClaudeCwd(cwd)), 2);
+    return findRecentJsonlsUnder(claudeProjectsDirForCwd(cwd), 2);
   }
   return [];
-}
-
-// Claude Code maps a project cwd onto its log folder by replacing /, \, and :
-// with `-`. Mirror that so we land in the right directory on Windows + POSIX.
-function encodeClaudeCwd(cwd: string): string {
-  return cwd.replace(/[\\/:]/g, "-");
 }
 
 async function findRecentJsonlsUnder(

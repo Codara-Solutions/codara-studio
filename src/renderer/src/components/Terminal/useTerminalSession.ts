@@ -32,6 +32,8 @@ import {
   type SparkOpenInput,
 } from "./osc-handlers";
 import { buildTerminalTheme } from "./terminalTheme";
+import { buildAgentResumeCommand } from "../../workers/launch-commands";
+import type { TerminalAgentSession } from "../../tabs/types";
 
 export type { SparkOpenInput };
 
@@ -237,6 +239,15 @@ interface Options {
   // instead of a binary running/done. `blocked` means the agent is waiting on
   // the user. Reuses the poller's debounced output — no second detector.
   onRuntimeState?: (state: RuntimeState) => void;
+  // Durable Claude/Codex session pointer for this pane (TerminalLeaf.agentSession),
+  // used for RESTORE: on a reopened pane that has NO initialCommand (its launch
+  // autorun was stripped on save), the hook probes that the transcript still
+  // exists and, if so, types the `--resume` command to relaunch the session.
+  // Fresh launches are captured elsewhere (the App-level agent-detection hook).
+  agentSession?: TerminalAgentSession | null;
+  // Fires when a restore's saved transcript is gone (pruned / cwd moved) so the
+  // owner can clear the stale pointer; the pane stays a plain shell.
+  onResumeUnavailable?: () => void;
 }
 
 export interface TerminalSessionApi {
@@ -269,6 +280,8 @@ export function useTerminalSession({
   onUserInput,
   onAgentState,
   onRuntimeState,
+  agentSession,
+  onResumeUnavailable,
 }: Options): TerminalSessionApi {
   // Latest-value ref so the input/resize closures (captured once per
   // sessionId) see the freshest readOnly flag without re-running the
@@ -314,6 +327,7 @@ export function useTerminalSession({
   const onUserInputRef = useRef(onUserInput);
   const onAgentStateRef = useRef(onAgentState);
   const onRuntimeStateRef = useRef(onRuntimeState);
+  const onResumeUnavailableRef = useRef(onResumeUnavailable);
   useEffect(() => {
     onDetectedRef.current = onDetectedLocalUrl;
     onCwdRef.current = onCwd;
@@ -324,7 +338,8 @@ export function useTerminalSession({
     onUserInputRef.current = onUserInput;
     onAgentStateRef.current = onAgentState;
     onRuntimeStateRef.current = onRuntimeState;
-  }, [onDetectedLocalUrl, onCwd, onExit, onSearchReady, onSparkOpen, onActivity, onUserInput, onAgentState, onRuntimeState]);
+    onResumeUnavailableRef.current = onResumeUnavailable;
+  }, [onDetectedLocalUrl, onCwd, onExit, onSearchReady, onSparkOpen, onActivity, onUserInput, onAgentState, onRuntimeState, onResumeUnavailable]);
 
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -2213,6 +2228,52 @@ export function useTerminalSession({
           void window.spark.pty.write(sessionId, `${cmd}\r`);
         }, 1500);
         cleanups.push(() => window.clearTimeout(autorunTimer));
+      }
+
+      // ── Claude/Codex session restore ────────────────────────────────────
+      // A RESTORED pane has no `cmd` (its launch autorun was stripped on save)
+      // but carries a saved `agentSession` loaded from the persisted layout.
+      // Relaunch the prior conversation via `--resume` once we confirm the
+      // transcript still exists and the user hasn't disabled restore. Fresh
+      // launches set `cmd` and are captured elsewhere (the App-level
+      // agent-detection hook), so they skip this branch.
+      if (
+        agentSession &&
+        !readOnlyRef.current &&
+        !cmd &&
+        agentSession.sessionId &&
+        !autorunFiredSessions.has(sessionId)
+      ) {
+        const restore = agentSession;
+        const resumeTimer = window.setTimeout(() => {
+          if (disposed || readOnlyRef.current) return;
+          void (async () => {
+            const prefs = await window.spark.preferences.load().catch(() => null);
+            if (prefs && prefs.restoreAgentSessions === false) return;
+            const probe = await window.spark.agentSession
+              .probe({
+                runtime: restore.runtime,
+                sessionId: restore.sessionId,
+                cwd: restore.cwd,
+                transcriptPath: restore.transcriptPath ?? undefined,
+              })
+              .catch(() => ({ exists: false as const }));
+            if (disposed || readOnlyRef.current) return;
+            if (!probe.exists) {
+              onResumeUnavailableRef.current?.();
+              return;
+            }
+            if (restore.runtime === "codex") {
+              await window.spark.agentSession
+                .ensureCodexTrust(restore.cwd)
+                .catch(() => undefined);
+              if (disposed || readOnlyRef.current) return;
+            }
+            autorunFiredSessions.add(sessionId);
+            void window.spark.pty.write(sessionId, `${buildAgentResumeCommand(restore)}\r`);
+          })();
+        }, 1500);
+        cleanups.push(() => window.clearTimeout(resumeTimer));
       }
     };
 

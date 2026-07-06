@@ -323,6 +323,9 @@ export default function App() {
       }
     >
   >(new Map());
+  // Panes with an in-flight session-id capture (post agent-detection), so
+  // repeated "agent running" events don't kick off duplicate discovery calls.
+  const capturingPanesRef = useRef<Set<string>>(new Set());
   const handlePaneCwd = useCallback(
     (tabId: string, paneId: string, cwd: string) => {
       const entry = paneRuntimeRef.current.get(paneId) ?? { lastActivityAt: 0 };
@@ -2557,6 +2560,37 @@ export default function App() {
       if (!tab || tab.kind !== "terminal") return;
       const leaf = findLeafByPaneId(tab.root, paneId);
       if (!leaf) return;
+      // Capture this pane's CLI session id the first time a claude/codex agent
+      // is detected running, so a future reopen can `--resume` it. Discovery is
+      // by newest transcript for this cwd, so it works for every launch path
+      // (keybind, picker, drag, inject, or a plain `claude` the user typed).
+      if (
+        state.running &&
+        (state.runtime === "claude" || state.runtime === "codex") &&
+        !leaf.agentSession?.sessionId &&
+        !capturingPanesRef.current.has(paneId)
+      ) {
+        const capRuntime = state.runtime;
+        const capCwd = leaf.cwd ?? paneRuntimeRef.current.get(paneId)?.cwd;
+        if (capCwd) {
+          capturingPanesRef.current.add(paneId);
+          void window.spark.agentSession
+            .capture({ runtime: capRuntime, cwd: capCwd, sinceMs: Date.now() - 60_000 })
+            .then((res) => {
+              if (res) {
+                tabsRef.current.setLeafAgentSession(tabId, paneId, {
+                  runtime: capRuntime,
+                  sessionId: res.sessionId,
+                  cwd: capCwd,
+                  transcriptPath: res.transcriptPath,
+                  capturedAt: new Date().toISOString(),
+                });
+              }
+            })
+            .catch(() => undefined)
+            .finally(() => capturingPanesRef.current.delete(paneId));
+        }
+      }
       const existing = leaf.worker;
       if (state.running) {
         if (existing && existing.source === "spark") {

@@ -16,6 +16,9 @@ import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import { listEvents } from "./orchestration/event-log";
+import { claudeSessionTranscriptPath, discoverClaudeSessionForCwd } from "./orchestration/claude-paths";
+import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex-sessions";
+import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import {
   clearCenter,
   listCenterEntries,
@@ -1264,6 +1267,73 @@ export function registerIpc(): void {
   // attach) instead of resuming a backlog that would double-deliver tail bytes.
   ipcMain.handle("pty:detach", async (_e, args: { id: string }) => {
     pty.detach(args.id);
+  });
+
+  // ── Agent session restore (manual Claude/Codex terminal panes) ──────────
+  // Capture: when the renderer detects a `claude`/`codex` agent running in a
+  // pane, find the transcript it just started writing and return its session id
+  // so a future reopen can `--resume` it. Neither CLI reports its id back over
+  // the PTY, so it is discovered from disk: Claude buckets transcripts per-cwd
+  // (newest .jsonl in ~/.claude/projects/<enc-cwd>/); Codex date-buckets rollout
+  // files (newest matching this cwd). Polls up to 15s since the file may appear
+  // a beat after the TUI does.
+  ipcMain.handle(
+    "agentSession:capture",
+    async (
+      _e,
+      args: { runtime: "claude" | "codex"; cwd: string; sinceMs: number },
+    ): Promise<{ sessionId: string; transcriptPath: string } | null> => {
+      const since = args.sinceMs;
+      const spawnDate = new Date(since);
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        let found: { sessionId: string; transcriptPath: string } | null = null;
+        if (args.runtime === "claude") {
+          found = await discoverClaudeSessionForCwd(args.cwd, since).catch(() => null);
+        } else {
+          const path = await discoverRolloutForCwd(since, spawnDate, args.cwd).catch(() => null);
+          if (path) {
+            const sessionId = extractSessionUuid(path);
+            if (sessionId) found = { sessionId, transcriptPath: path };
+          }
+        }
+        if (found) return found;
+        if (Date.now() >= deadline) return null;
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      }
+    },
+  );
+
+  // Probe: on reopen, before a restored pane fires its `--resume` autorun, check
+  // that the CLI's transcript still exists on disk. Missing → the renderer drops
+  // the resume and comes back as a plain shell instead of erroring on a dead id.
+  ipcMain.handle(
+    "agentSession:probe",
+    async (
+      _e,
+      args: { runtime: "claude" | "codex"; sessionId: string; cwd: string; transcriptPath?: string },
+    ): Promise<{ exists: boolean; transcriptPath?: string }> => {
+      if (!args.sessionId) return { exists: false };
+      if (args.runtime === "claude") {
+        const path = claudeSessionTranscriptPath(args.cwd, args.sessionId);
+        const exists = await fs.access(path).then(() => true, () => false);
+        return { exists, transcriptPath: path };
+      }
+      // Codex: sessions are date-bucketed, not addressable by cwd, so rely on the
+      // transcript path captured at launch.
+      const path = args.transcriptPath;
+      if (path) {
+        const exists = await fs.access(path).then(() => true, () => false);
+        if (exists) return { exists: true, transcriptPath: path };
+      }
+      return { exists: false };
+    },
+  );
+
+  // Pre-seed Codex directory trust before a resumed (or fresh) `codex --yolo`
+  // pane so its TUI never stalls on the "trust this directory?" prompt.
+  ipcMain.handle("agentSession:ensureCodexTrust", async (_e, args: { cwd: string }): Promise<void> => {
+    await ensureCodexProjectTrust(args.cwd).catch(() => undefined);
   });
 
   // Live runtime-state report from the renderer-side terminal poller. Main
