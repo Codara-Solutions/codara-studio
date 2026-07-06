@@ -11038,10 +11038,29 @@ async function runWorkerSession({
       resolve(value);
     };
     const offExit = pty.onExit(attemptId, (info) => {
-      finish({
-        exitCode: info.exitCode ?? 1,
-        error: info.signal ? `Worker pane closed (signal ${info.signal})` : "Worker pane closed before final report",
-      });
+      // A CLI that exits the instant it writes final-report.json must not be
+      // failed just because the exit event beat the 750ms report poll. Give
+      // the report one last chance to parse (short grace covers a mid-write
+      // file) before declaring the pane closed. finish() is idempotent, so a
+      // poll tick landing during the grace resolves first and this no-ops.
+      void (async () => {
+        for (let i = 0; i < 4 && !settled; i++) {
+          try {
+            const report = await readWorkerReport(paths.finalReportJson);
+            if (report) {
+              finish({ exitCode: 0 });
+              return;
+            }
+          } catch {
+            /* absent or mid-write; retry below */
+          }
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        finish({
+          exitCode: info.exitCode ?? 1,
+          error: info.signal ? `Worker pane closed (signal ${info.signal})` : "Worker pane closed before final report",
+        });
+      })();
     });
     const reportPoll = setInterval(() => {
       // Finish only once the report PARSES, not merely exists. The agent CLI

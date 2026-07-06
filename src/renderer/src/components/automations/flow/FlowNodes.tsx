@@ -168,18 +168,30 @@ function Meta({ text, title }: { text: string; title?: string }): React.ReactEle
 
 // Role-toned top hairline: its own element (not a border / box-shadow) so the
 // .loom-node CSS hover lift keeps owning the card's real border and shadow.
-// Exported — the LiveBoard's status-bearing cards wear the same rule.
-export function TopRule({ tone, radius }: { tone: string; radius: string }): React.ReactElement {
+// Inset from both corners (the cards deliberately do NOT clip overflow — the
+// '+' buttons and handles live outside the right edge — so a full-width bar
+// would overhang the corner curves; on the trigger's pill-rounded left edge
+// the caller passes a wider inset to clear the semicircle). Exported — the
+// LiveBoard's status-bearing cards wear the same rule.
+export function TopRule({
+  tone,
+  left = 10,
+  right = 10,
+}: {
+  tone: string;
+  left?: number;
+  right?: number;
+}): React.ReactElement {
   return (
     <span
       aria-hidden
       style={{
         position: "absolute",
         top: 0,
-        left: 0,
-        right: 0,
+        left,
+        right,
         height: 2,
-        borderRadius: radius,
+        borderRadius: 999,
         background: `linear-gradient(90deg, color-mix(in oklch, ${tone} 62%, transparent), color-mix(in oklch, ${tone} 14%, transparent))`,
       }}
     />
@@ -280,7 +292,7 @@ export function TriggerNode({ id, data, selected }: NodeProps): React.ReactEleme
       className="loom-node"
       style={cardStyle(selected, { width: 208, borderRadius: TRIGGER_RADIUS, paddingLeft: 15 })}
     >
-      <TopRule tone="var(--warn)" radius={TRIGGER_RADIUS} />
+      <TopRule tone="var(--warn)" left={32} />
       <Medallion icon={<Icon d={BOLT} tone="var(--warn)" />} tone="var(--warn)" />
       <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
         <Eyebrow text="Trigger" />
@@ -318,7 +330,7 @@ export function WorkerNode({ id, data, selected }: NodeProps): React.ReactElemen
   const promptPreview = d.prompt.trim() || "no prompt yet";
   return (
     <div className="loom-node" style={cardStyle(selected, { width: 248, alignItems: "flex-start" })}>
-      <TopRule tone={tone} radius="var(--radius-surface) var(--radius-surface) 0 0" />
+      <TopRule tone={tone} />
       <Medallion icon={<Icon d={CPU} tone={tone} />} tone={tone} />
       <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: 1 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -424,7 +436,7 @@ export function GuardNode({ id, data, selected }: NodeProps): React.ReactElement
   if (d.kind !== "guard") return <div />;
   return (
     <div className="loom-node" style={cardStyle(selected, { width: 232, paddingRight: 44 })}>
-      <TopRule tone="var(--ok)" radius="var(--radius-surface) var(--radius-surface) 0 0" />
+      <TopRule tone="var(--ok)" />
       <Medallion icon={<Icon d={SPLIT} tone="var(--ok)" />} tone="var(--ok)" />
       <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
         <Eyebrow text="Guard" />
@@ -488,7 +500,7 @@ export function MergeNode({ id, data, selected }: NodeProps): React.ReactElement
   if (d.kind !== "merge") return <div />;
   return (
     <div className="loom-node" style={cardStyle(selected, { width: 196 })}>
-      <TopRule tone="var(--info)" radius="var(--radius-surface) var(--radius-surface) 0 0" />
+      <TopRule tone="var(--info)" />
       <Medallion icon={<Icon d={JOIN} tone="var(--info)" />} tone="var(--info)" />
       <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
         <Eyebrow text="Merge" />

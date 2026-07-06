@@ -78,6 +78,13 @@ const loops = new Map<string, LoopRunner>();
 const onFinishWatchers = new Map<string, Set<string>>();
 // runIds with a live completion watcher (avoid double-subscribing).
 const watchedRuns = new Set<string>();
+// Jobs whose "paused" state was MIRRORED from their run being paused (chat
+// Pause / force-pause on the pass), as opposed to the user pausing the loom
+// itself. Only mirrored pauses may be auto-cleared when the run moves again —
+// a user's loom-level pause must never be laundered back to running. In-memory
+// on purpose: after a restart the conservative outcome (loom stays paused
+// until the user acts) is the safe one.
+const runPausedMirror = new Set<string>();
 // Structured agent continuation intents, keyed by runId then by NODE id (the
 // inner key is "" for an unstamped/legacy signal — SPARK_NODE_ID absent, i.e. a
 // pre-graph single-node loom). Written by the MCP handler via recordAgentSignal;
@@ -903,7 +910,39 @@ function watchTerminal(id: string, runId: string): void {
           await maybeResumeAnsweredPass(id, run);
           return; // HOLD — keep the subscription; resume when it leaves blocked
         }
+        if (run.status === "paused") {
+          // A paused RUN must pull its loom out of "Running" — otherwise the
+          // Hub shows a live loom forever while nothing is in flight (a
+          // force-paused pass stranded exactly that way). Mirror one-way and
+          // remember it, so only a mirrored pause is ever auto-cleared below.
+          const current = await getJob(id);
+          if (
+            current &&
+            (current.state.status === "running" || current.state.status === "blocked")
+          ) {
+            runPausedMirror.add(id);
+            await patchJob(id, (j) =>
+              j.state.status === "running" || j.state.status === "blocked"
+                ? { ...j, state: { ...j.state, status: "paused" } }
+                : j,
+            );
+          }
+          return; // HOLD — resumeRun / terminal re-drives this watcher
+        }
         if (!TERMINAL.has(run.status)) {
+          // The run left a mirrored pause (user resumed the pass) — give the
+          // loom its Running cue back. Loom-level pauses (not in the mirror
+          // set) are untouched.
+          if (runPausedMirror.has(id)) {
+            runPausedMirror.delete(id);
+            const mirrored = await getJob(id);
+            if (mirrored?.state.status === "paused") {
+              await patchJob(id, (j) =>
+                j.state.status === "paused" ? { ...j, state: { ...j.state, status: "running" } } : j,
+              );
+              void emitIteration(id, mirrored.state.iteration, runId, "running");
+            }
+          }
           // The run LEFT "blocked" (user answered / resumeRun) but is still
           // non-terminal — clear the stale blocked cue so the Hub stops showing
           // the danger dot / "needs you" / red badge while the loom progresses.
