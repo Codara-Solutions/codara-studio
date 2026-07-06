@@ -1028,6 +1028,10 @@ async function launchDirectNodeTasks(
   // {{incoming}} (its forward parents' outputs). For the entry wave the template
   // is already fully assembled and carries no tokens, so this is a no-op and the
   // launched string is byte-identical to the pre-graph single-node launch.
+  // Downstream (advance/relaunch) waves pass `incoming`, so renderNodePrompt's
+  // auto-incoming rule applies: a template that references neither {{incoming}}
+  // nor {{node:*}} gets its upstream output appended — a downstream worker must
+  // never run blind on "this"/"it" prompts written without explicit tokens.
   const rendered = nodes.map((node) =>
     renderNodePrompt(node.template, {
       vars,

@@ -641,12 +641,23 @@ export function truncateOutput(s: string, limit = 8192): string {
  *  For a layer-0 node nodeOutputs/incoming are empty, so only the pass vars
  *  apply and the result equals renderPrompt(template) — the single-node parity
  *  invariant. Substitution uses replaceAll (no regex), so template text never
- *  triggers special-char surprises. */
+ *  triggers special-char surprises.
+ *
+ *  AUTO-INCOMING: a downstream worker must never run blind. When the authored
+ *  template places NEITHER {{incoming}} NOR any {{node:...}} token but the
+ *  node HAS upstream output (ctx.incoming carries real content), the exact
+ *  block {{incoming}} would have produced is auto-appended under its labeled
+ *  separator — via the same substitution path, by rendering
+ *  `template + "\n\n{{incoming}}"`. Explicit {{incoming}}/{{node:*}} placement
+ *  always wins (an authored token disables the append). Entry nodes and
+ *  single-node looms pass incoming: [] and are untouched, preserving parity. */
 export function renderNodePrompt(
   template: string,
   ctx: { vars: Record<string, string>; nodeOutputs: Record<string, string>; incoming: string[] },
 ): string {
-  let result = template;
+  const referencesUpstream = template.includes("{{incoming}}") || template.includes("{{node:");
+  const hasIncoming = ctx.incoming.some((out) => out.trim().length > 0);
+  let result = !referencesUpstream && hasIncoming ? `${template}\n\n{{incoming}}` : template;
   for (const [key, value] of Object.entries(ctx.vars)) {
     result = result.replaceAll(`{{${key}}}`, value);
   }
@@ -657,7 +668,7 @@ export function renderNodePrompt(
     const joined =
       ctx.incoming.length > 0
         ? ctx.incoming
-            .map((out, i) => `--- Output from upstream worker ${i + 1} ---\n${truncateOutput(out)}`)
+            .map((out, i) => `--- Output from upstream node ${i + 1} ---\n${truncateOutput(out)}`)
             .join("\n\n")
         : "";
     result = result.replaceAll("{{incoming}}", joined);

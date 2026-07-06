@@ -40,13 +40,16 @@ const TRIGGER_KINDS: { value: AutomationTrigger["kind"]; label: string }[] = [
 ];
 
 const FOLDER_EVENTS: FolderTriggerEvent[] = ["add", "change", "unlink"];
-const BASE_VARIABLES = [
-  "{{iteration}}",
-  "{{lastOutput}}",
-  "{{file}}",
-  "{{date}}",
-  "{{name}}",
-  "{{incoming}}",
+// Chip token + tooltip. The chip DISPLAYS uppercase (spark-badge's
+// text-transform) but inserts the literal lowercase token — the executor's
+// substitution is case-sensitive.
+const BASE_VARIABLES: { token: string; tip: string }[] = [
+  { token: "{{iteration}}", tip: "This pass's loop counter (starts at 0)" },
+  { token: "{{lastOutput}}", tip: "The last PASS's final summary — empty on pass 1. For the previous node's output in THIS pass, use {{incoming}}." },
+  { token: "{{file}}", tip: "The file path that fired a folder trigger — empty for other triggers" },
+  { token: "{{date}}", tip: "Today's date (YYYY-MM-DD)" },
+  { token: "{{name}}", tip: "This automation's name" },
+  { token: "{{incoming}}", tip: "Output of the upstream worker(s) in this pass, labeled per branch" },
 ];
 
 export interface NodeContextPanelProps {
@@ -486,8 +489,8 @@ function WorkerForm({
       <Group label="Prompt">
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {BASE_VARIABLES.map((v) => (
-            <button key={v} type="button" className="spark-badge is-accent" style={{ cursor: "default" }} onClick={() => insertVariable(v)}>
-              {v}
+            <button key={v.token} type="button" className="spark-badge is-accent" style={{ cursor: "default" }} title={v.tip} onClick={() => insertVariable(v.token)}>
+              {v.token}
             </button>
           ))}
           {upstream.map((nid) => (
@@ -496,13 +499,20 @@ function WorkerForm({
               type="button"
               className="spark-badge"
               style={{ cursor: "default" }}
-              title={`Reference output of upstream node ${nid}`}
+              title={`Output of the specific upstream node ${nid} in this pass`}
               onClick={() => insertVariable(`{{node:${nid}}}`)}
             >
               {`{{node:${nid}}}`}
             </button>
           ))}
         </div>
+        {upstream.length > 0 && (
+          <span style={{ fontSize: 10.5, lineHeight: 1.5, color: "var(--muted)", marginTop: -2 }}>
+            This node automatically receives its upstream output — place {"{{incoming}}"} in the
+            prompt to control where it appears, or {"{{node:…}}"} to pull ONE specific parent
+            (other parents are then omitted).
+          </span>
+        )}
         <textarea
           ref={promptRef}
           className="spark-input"

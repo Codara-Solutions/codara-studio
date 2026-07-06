@@ -492,9 +492,9 @@ async function main() {
     });
     ok(
       "renderNodePrompt: {{incoming}} joins parents with a labeled separator",
-      r3.includes("--- Output from upstream worker 1 ---") &&
+      r3.includes("--- Output from upstream node 1 ---") &&
         r3.includes("out-A") &&
-        r3.includes("--- Output from upstream worker 2 ---") &&
+        r3.includes("--- Output from upstream node 2 ---") &&
         r3.includes("out-B"),
     );
     ok("renderNodePrompt: {{incoming}} with no parents → empty", G.renderNodePrompt("[{{incoming}}]", { vars, nodeOutputs: {}, incoming: [] }) === "[]");
@@ -512,7 +512,58 @@ async function main() {
     });
     ok(
       "renderNodePrompt: vars + {{node}} + {{incoming}} all substitute together",
-      r5.startsWith("#3 AA | ") && r5.includes("--- Output from upstream worker 1 ---") && r5.includes("AA"),
+      r5.startsWith("#3 AA | ") && r5.includes("--- Output from upstream node 1 ---") && r5.includes("AA"),
+    );
+
+    // AUTO-INCOMING: a downstream node whose template references neither
+    // {{incoming}} nor {{node:*}} gets the upstream block appended — the
+    // "write this in a new file" footgun (worker ran blind, blocked asking).
+    const auto = G.renderNodePrompt("Write this in a new file.\n{{lastOutput}}", {
+      vars,
+      nodeOutputs: { A: "TRANSLATED-TEXT" },
+      incoming: ["TRANSLATED-TEXT"],
+    });
+    ok(
+      "renderNodePrompt: tokenless downstream template auto-appends {{incoming}} block",
+      auto === "Write this in a new file.\nprev\n\n--- Output from upstream node 1 ---\nTRANSLATED-TEXT",
+    );
+
+    // Explicit {{incoming}} wins: substituted in place, never ALSO appended.
+    const explicit = G.renderNodePrompt("Head\n{{incoming}}\nTail", {
+      vars,
+      nodeOutputs: { A: "UP-A" },
+      incoming: ["UP-A"],
+    });
+    ok(
+      "renderNodePrompt: explicit {{incoming}} substitutes in place, no double append",
+      explicit === "Head\n--- Output from upstream node 1 ---\nUP-A\nTail" &&
+        explicit.split("--- Output from upstream node 1 ---").length === 2,
+    );
+
+    // Explicit {{node:<id>}} also disables the append — placement wins.
+    const viaNode = G.renderNodePrompt("Use {{node:A}} only", {
+      vars,
+      nodeOutputs: { A: "UP-A" },
+      incoming: ["UP-A"],
+    });
+    ok(
+      "renderNodePrompt: explicit {{node:A}} disables the auto-append",
+      viaNode === "Use UP-A only" && !viaNode.includes("--- Output from upstream node"),
+    );
+
+    // Entry nodes (incoming: []) never get an appended block — parity holds.
+    const entry = G.renderNodePrompt("Do the thing for {{name}}", { vars, nodeOutputs: {}, incoming: [] });
+    ok("renderNodePrompt: entry node (no incoming) never auto-appends", entry === "Do the thing for MyLoom");
+
+    // All-empty upstream output (parent succeeded silently) → nothing to append.
+    const silent = G.renderNodePrompt("Do the thing", { vars, nodeOutputs: { A: "" }, incoming: ["", "  "] });
+    ok("renderNodePrompt: empty upstream outputs → no auto-append", silent === "Do the thing");
+
+    // The appended block truncates a runaway upstream output like {{incoming}} does.
+    const autoBig = G.renderNodePrompt("Summarize.", { vars, nodeOutputs: {}, incoming: ["z".repeat(20000)] });
+    ok(
+      "renderNodePrompt: auto-appended upstream output is truncated to budget",
+      autoBig.length < 20000 && autoBig.includes("truncated") && autoBig.startsWith("Summarize.\n\n--- Output from upstream node 1 ---"),
     );
   }
 

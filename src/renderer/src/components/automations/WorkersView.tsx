@@ -608,7 +608,7 @@ function WorkerPane({
             borderBottom: "1px solid color-mix(in oklch, var(--danger) 30%, transparent)",
           }}
         >
-          Waiting for you — answer in the terminal below, or use the question card in the loom's detail.
+          Waiting for you — answer via the question card in the loom's detail (this terminal is watch-only).
         </div>
       )}
 
@@ -633,6 +633,16 @@ function WorkerPane({
             // Looms sub-tab is up), so the first reveal shows the full live frame
             // rather than a capped-buffer remnant. Same contract as
             // ChatBackendTerminalStack.
+            //
+            // inputBlocked (NOT readOnly): these panes are watch surfaces — a
+            // blocked worker is answered via the loom detail's question card or
+            // the board's answer strip (orchestration.addRunMessage), never by
+            // typing at the CLI, so keystrokes/paste/drops are dropped. readOnly
+            // would be wrong here: it is full mirror mode and would also strip
+            // the CANONICAL duties this pane owns — pty resize (fit → SIGWINCH),
+            // the raw-tail replay on attach, and the runtime-state reports main
+            // persists onto the attempt.
+            inputBlocked
             rawTailReattach
             writeWhileHidden
           />

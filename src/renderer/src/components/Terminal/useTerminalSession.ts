@@ -172,10 +172,14 @@ interface Options {
   readOnly?: boolean;
   // Input-only mirror: forward NO keystrokes (like readOnly) but DO send
   // pty.resize so the underlying PTY tracks this xterm's cols/rows. Used
-  // when this pane is the SOLE view of the PTY (no canonical sibling pane
-  // exists), so resizing is safe — the alternative is the PTY staying at
-  // its tiny default size while the user's xterm fills the panel, leaving
-  // most of the visible area unpainted.
+  // when this pane OWNS the PTY's dimensions — either the sole view (no
+  // canonical sibling pane exists) or the CANONICAL pane of a watch-only
+  // surface (the automation Workers grid; its LiveBoard mirrors are readOnly
+  // and never resize) — so resizing is safe. The alternative is the PTY
+  // staying at its tiny default size while the user's xterm fills the panel,
+  // leaving most of the visible area unpainted. Everything else stays
+  // canonical: raw-tail replay, snapshot capture, and runtime-state reports
+  // are unaffected by this flag.
   inputBlocked?: boolean;
   // Raw-tail reattach mode. Opt-in, default off — used by the hosts that attach
   // an xterm onto a live Ink TUI (Claude/Codex): ChatPanel's backend terminal,
@@ -2196,8 +2200,10 @@ export function useTerminalSession({
         void window.spark.pty.resize(sessionId, term.cols, term.rows);
       }
 
-      // Same readOnly gate as the reveal effect: mirrors never auto-focus.
-      if (visible && !readOnlyRef.current) term.focus();
+      // Same gate as the reveal effect: mirrors AND input-blocked watch panes
+      // never auto-focus — both drop every keystroke, so stealing focus would
+      // silently eat the user's typing.
+      if (visible && !readOnlyRef.current && !inputBlockedRef.current) term.focus();
 
       // One-shot autorun: type the requested command + CR into the PTY once
       // the shell has had a moment to render its first prompt. The 1500ms
@@ -2219,11 +2225,12 @@ export function useTerminalSession({
         cmd.length > 0 &&
         !startupCommandHandled &&
         !autorunFiredSessions.has(sessionId) &&
-        !readOnlyRef.current
+        !readOnlyRef.current &&
+        !inputBlockedRef.current
       ) {
         const autorunTimer = window.setTimeout(() => {
           if (disposed) return;
-          if (readOnlyRef.current) return;
+          if (readOnlyRef.current || inputBlockedRef.current) return;
           autorunFiredSessions.add(sessionId);
           void window.spark.pty.write(sessionId, `${cmd}\r`);
         }, 1500);
@@ -2246,7 +2253,7 @@ export function useTerminalSession({
       ) {
         const restore = agentSession;
         const resumeTimer = window.setTimeout(() => {
-          if (disposed || readOnlyRef.current) return;
+          if (disposed || readOnlyRef.current || inputBlockedRef.current) return;
           void (async () => {
             const prefs = await window.spark.preferences.load().catch(() => null);
             if (prefs && prefs.restoreAgentSessions === false) return;
@@ -2258,7 +2265,7 @@ export function useTerminalSession({
                 transcriptPath: restore.transcriptPath ?? undefined,
               })
               .catch(() => ({ exists: false as const }));
-            if (disposed || readOnlyRef.current) return;
+            if (disposed || readOnlyRef.current || inputBlockedRef.current) return;
             if (!probe.exists) {
               onResumeUnavailableRef.current?.();
               return;
@@ -2267,7 +2274,7 @@ export function useTerminalSession({
               await window.spark.agentSession
                 .ensureCodexTrust(restore.cwd)
                 .catch(() => undefined);
-              if (disposed || readOnlyRef.current) return;
+              if (disposed || readOnlyRef.current || inputBlockedRef.current) return;
             }
             autorunFiredSessions.add(sessionId);
             void window.spark.pty.write(sessionId, `${buildAgentResumeCommand(restore)}\r`);
@@ -2453,11 +2460,11 @@ export function useTerminalSession({
       // only repaints dirtied rows. Runs once per re-activation, not on typing.
       recoverRendererRef.current?.();
     });
-    // Read-only mirrors don't grab keyboard focus on reveal: they drop every
-    // keystroke, so stealing focus from e.g. a blocked-worker answer input
-    // would silently eat the user's typing. Click-to-focus (the explicit
-    // focus() API) still works for copy/scroll.
-    if (!readOnlyRef.current) termRef.current?.focus();
+    // Read-only mirrors and input-blocked watch panes don't grab keyboard
+    // focus on reveal: they drop every keystroke, so stealing focus from e.g.
+    // a blocked-worker answer input would silently eat the user's typing.
+    // Click-to-focus (the explicit focus() API) still works for copy/scroll.
+    if (!readOnlyRef.current && !inputBlockedRef.current) termRef.current?.focus();
     return () => window.cancelAnimationFrame(raf);
   }, [visible]);
 

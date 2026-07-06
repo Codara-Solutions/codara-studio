@@ -40,9 +40,10 @@ interface Props {
   // canonical pane's display.
   readOnly?: boolean;
   // Input-only mirror. Forwards no keystrokes (like readOnly) but DOES send
-  // pty.resize calls. Use when this is the only view of the PTY (e.g. the
-  // chat panel's backend-terminal tab) so the PTY tracks the xterm's actual
-  // dimensions instead of staying at a tiny default size.
+  // pty.resize calls. Use when this pane owns the PTY's dimensions: the only
+  // view of the PTY (e.g. the chat panel's backend-terminal tab) or the
+  // canonical pane of a watch-only surface (the automation Workers grid). All
+  // other canonical duties (raw-tail replay, runtime-state reports) are kept.
   inputBlocked?: boolean;
   // Raw-tail reattach mode. Opt-in, default off — only ChatPanel's backend
   // terminal sets it. Makes every re-attach behave like the first attach

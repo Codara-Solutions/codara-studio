@@ -116,6 +116,9 @@ export default function AutomationsHub({
     [workers, jobs],
   );
   const anyBlocked = workspaceWorkers.some((w) => w.blocked);
+  // Holds the Workers overlay mounted across top-level tab switches while any
+  // of this workspace's workers is still running — see the gate below.
+  const anyLiveWorkspaceWorker = workspaceWorkers.some((w) => LIVE_ATTEMPT.has(w.status));
 
   const selectedIdRef = useRef<string | null>(null);
   selectedIdRef.current = selectedId;
@@ -587,12 +590,28 @@ export default function AutomationsHub({
             prop stays accurate (below) so useTerminalSession's reveal-refit
             re-fits + resizes the pty when the panes come back on screen.
 
-            Gated on `active` (NOT kept alive for the whole app): when another
-            top-level tab is showing we DO tear the terminals down — matching
-            the intent that a closed Automations tab shouldn't keep xterms
-            mounted. `inherit` (not visible/auto) for the same punch-through
-            reason documented on the editor overlay. */}
-        {active && (
+            Gated on `active` OR a live workspace worker: gating on `active`
+            alone unmounted every canonical WorkerPane on a top-level tab
+            switch — and, because LiveBoard's mirrors mount only while a
+            canonical pane is registered (worker-pane-registry), the board's
+            mirror xterms too — so returning to a RUNNING worker forced a
+            garble-prone raw-tail replay / mid-frame mirror attach (the "leave
+            and come back breaks the terminal" bug). Keeping the overlay
+            mounted while any workspace worker is live preserves the xterm
+            buffers across the round-trip; each WorkerPane's `visible` prop
+            (below) stays false meanwhile, so hidden panes never take focus
+            or reveal-refit (a window resize can still re-fit them at their
+            real kept-layout dimensions — same regime as the hidden sub-tab
+            case), and writeWhileHidden keeps their buffers complete. While the tab
+            is INACTIVE the workers poll pauses and this gate rides the last
+            snapshot (a worker that exits while we're away holds it up until
+            return, when the poll reconciles). Once nothing is live — the
+            60s-lingering exited workers don't count — an inactive tab still
+            tears the terminals down, matching the original intent that a
+            closed Automations tab shouldn't keep xterms mounted forever.
+            `inherit` (not visible/auto) for the same punch-through reason
+            documented on the editor overlay. */}
+        {(active || anyLiveWorkspaceWorker) && (
           <div
             aria-hidden={subTab !== "workers"}
             style={{
