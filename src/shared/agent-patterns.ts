@@ -96,25 +96,6 @@ export const RUNTIME_BANNERS: ReadonlyArray<{ runtime: AgentRuntime; pattern: Re
   { runtime: "pi",         pattern: /\bPi\s*v\d/ },
 ];
 
-// Resume-refusal signature. `claude --resume <id>` prints this (then exits to
-// the shell) when the id has no resumable conversation — a transcript that was
-// deleted, moved, or never got a real user message. The restored pane watches
-// its output for this for a short window after delivering the resume command
-// so it can self-heal (clear the stale pointer + launch a fresh session)
-// instead of leaving a dead shell and a confusing error. Match on stripped
-// text (see stripAnsi) — Ink may interleave cursor moves inside the sentence.
-export const CLAUDE_RESUME_FAILED_RE = /No conversation found with session ID/i;
-
-// Alt-screen enter — the sequence every Ink TUI (claude / codex, also vim /
-// less) emits the moment it actually takes over the terminal. The refusal
-// watch above disarms permanently on this marker: a SUCCESSFULLY resumed
-// conversation repaints its transcript inside the TUI, and that transcript can
-// itself contain the refusal sentence (e.g. the user pasted it) — matching it
-// there would "self-heal" a live session. A real refusal prints at the shell
-// prompt and exits without ever entering the alt screen. Test on RAW text
-// (stripAnsi would remove the sequence).
-export const TUI_ALT_SCREEN_ENTER = "\x1b[?1049h";
-
 // CSI / OSC stripper. Ink (Claude / Codex / Cursor) often positions individual
 // characters with cursor moves, so a banner like "Claude Code v2.1.139"
 // arrives in the raw byte stream as `C\x1b[H l\x1b[H a…` and a literal

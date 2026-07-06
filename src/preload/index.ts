@@ -572,10 +572,7 @@ const api = {
       // state (no resize / no sink change / no tail replay). Set by readOnly
       // TerminalPanes; throws if the session does not exist.
       mirror?: boolean;
-      // Result `attached` is true when spawn bound to an EXISTING session
-      // (remount / mirror) instead of creating a fresh pty — startupCommand
-      // is never delivered in that case.
-    }): Promise<{ id: string; pid: number; startupCommandHandled?: boolean; attached?: boolean }> =>
+    }): Promise<{ id: string; pid: number; startupCommandHandled?: boolean }> =>
       ipcRenderer.invoke("pty:spawn", args),
     write: (id: string, data: string): Promise<void> =>
       ipcRenderer.invoke("pty:write", { id, data }),
@@ -605,33 +602,6 @@ const api = {
       ipcRenderer.on(channel, listener);
       return () => ipcRenderer.off(channel, listener);
     },
-  },
-  // Manual Claude/Codex terminal-pane session restore. Capture a launched
-  // session's id, probe whether it still exists before resuming, and pre-seed
-  // Codex directory trust. See src/main/ipc.ts "agentSession:*" handlers.
-  agentSession: {
-    // Discover the session id of a Claude/Codex agent just detected running in a
-    // pane, by finding the transcript it started writing for this cwd. Resolves
-    // null on timeout.
-    capture: (args: {
-      runtime: "claude" | "codex";
-      cwd: string;
-      sinceMs: number;
-    }): Promise<{ sessionId: string; transcriptPath: string } | null> =>
-      ipcRenderer.invoke("agentSession:capture", args),
-    // Check a saved session's transcript still exists — and is resumable
-    // (has a real user message; stillborn transcripts make `--resume` refuse)
-    // — before resuming it.
-    probe: (args: {
-      runtime: "claude" | "codex";
-      sessionId: string;
-      cwd: string;
-      transcriptPath?: string;
-    }): Promise<{ exists: boolean; resumable?: boolean; transcriptPath?: string }> =>
-      ipcRenderer.invoke("agentSession:probe", args),
-    // Pre-seed Codex directory trust before a `codex --yolo` (re)launch.
-    ensureCodexTrust: (cwd: string): Promise<void> =>
-      ipcRenderer.invoke("agentSession:ensureCodexTrust", { cwd }),
   },
   terminalState: {
     /**
