@@ -54,15 +54,23 @@ export async function discoverClaudeSessionForCwd(
     return null;
   }
   let bestPath: string | null = null;
-  let bestMtime = -1;
+  let bestCreated = -1;
   for (const name of entries) {
     if (!name.endsWith(".jsonl")) continue;
     const path = join(dir, name);
     try {
       const stat = await fs.stat(path);
-      if (stat.mtimeMs + 5 < since) continue; // 5ms slack for clock skew
-      if (stat.mtimeMs > bestMtime) {
-        bestMtime = stat.mtimeMs;
+      // Prefer CREATION time over modification time: a just-launched session's
+      // file is born ~now, whereas a long-running Claude in another pane keeps
+      // bumping its mtime. Picking newest-by-mtime therefore mis-binds a fresh
+      // pane to a concurrent session; newest-by-birthtime picks the one that
+      // actually just started. Fall back to mtime when the platform reports no
+      // usable birthtime.
+      const created =
+        stat.birthtimeMs && stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.mtimeMs;
+      if (created + 5 < since) continue; // 5ms slack for clock skew
+      if (created > bestCreated) {
+        bestCreated = created;
         bestPath = path;
       }
     } catch {

@@ -108,6 +108,9 @@ interface Props {
   // per-pane runtime poller, used to colour + label the worker chip. Distinct
   // from onPaneAgentState, which carries the binary running/runtime lifecycle.
   onPaneRuntimeState: (tabId: TabId, paneId: string, state: RuntimeState) => void;
+  // A restored pane's `--resume` probe found no transcript on disk — clear the
+  // stale session pointer so it stops trying to resume and can re-capture.
+  onPaneResumeUnavailable: (tabId: TabId, paneId: string) => void;
 }
 
 // Per-pane bundle of stable callbacks. Cached per `tabId:paneId` so a
@@ -129,6 +132,7 @@ type Bundle = {
   onUserInput: () => void;
   onAgentState: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
   onRuntimeState: (state: RuntimeState) => void;
+  onResumeUnavailable: () => void;
 };
 
 // React.memo: with the useTabs API object now memoized, TerminalStack's
@@ -157,6 +161,7 @@ function TerminalStack({
   onFlushScrollback,
   onPaneAgentState,
   onPaneRuntimeState,
+  onPaneResumeUnavailable,
 }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
   // unrelated tab kind mutates, and so the bundle-GC effect (keyed on
@@ -185,6 +190,7 @@ function TerminalStack({
   const flushScrollbackRef = useRef(onFlushScrollback);
   const agentStateRef = useRef(onPaneAgentState);
   const runtimeStateRef = useRef(onPaneRuntimeState);
+  const resumeUnavailableRef = useRef(onPaneResumeUnavailable);
   useEffect(() => {
     detectedRef.current = onDetectedUrl;
     sparkOpenRef.current = onSparkOpen;
@@ -202,7 +208,8 @@ function TerminalStack({
     flushScrollbackRef.current = onFlushScrollback;
     agentStateRef.current = onPaneAgentState;
     runtimeStateRef.current = onPaneRuntimeState;
-  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState]);
+    resumeUnavailableRef.current = onPaneResumeUnavailable;
+  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable]);
 
   // Latest tab roots so the + smart-add button can read whichever PaneNode
   // tree is current at click time (a stale capture would split a tree that
@@ -283,6 +290,7 @@ function TerminalStack({
           onUserInput: () => userInputRef.current(tabId, paneId),
           onAgentState: (state) => agentStateRef.current(tabId, paneId, state),
           onRuntimeState: (state) => runtimeStateRef.current(tabId, paneId, state),
+          onResumeUnavailable: () => resumeUnavailableRef.current(tabId, paneId),
         };
         bundles.current.set(key, b);
       }
@@ -891,6 +899,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               onUserInput={bundle.onUserInput}
               onAgentState={bundle.onAgentState}
               onRuntimeState={bundle.onRuntimeState}
+              onResumeUnavailable={bundle.onResumeUnavailable}
             />
             {!placeOffScreen && workerChip ? <WorkerChip worker={workerChip} /> : null}
             {!placeOffScreen ? (

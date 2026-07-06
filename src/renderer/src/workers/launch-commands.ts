@@ -11,6 +11,20 @@ export const CURSOR_LAUNCH_COMMAND = "agent";
 // Runtimes whose CLI sessions Codara can capture + restore across app restarts.
 export type AgentSessionRuntime = "claude" | "codex";
 
+// Fresh Claude launch with a Codara-minted session id. Forcing `--session-id`
+// makes the transcript path deterministic (~/.claude/projects/<enc-cwd>/<id>.jsonl)
+// and lets a pane record its resume pointer synchronously at launch — no fragile
+// post-hoc "newest .jsonl by mtime" discovery, which mis-binds when several Claude
+// sessions share one cwd. Mirrors the chat backend (claude-backend.ts:828-833).
+// Codex has no `--session-id`, so it keeps the bare command + disk discovery.
+export function buildClaudeLaunch(): { command: string; sessionId: string } {
+  const sessionId = crypto.randomUUID();
+  return {
+    command: `${CLAUDE_LAUNCH_COMMAND} --session-id ${sessionId}`,
+    sessionId,
+  };
+}
+
 // Resume-command builders — the autorun typed into a restored pane's fresh
 // shell on reopen. These mirror the (main-side) provider `buildResumeArgs` in
 // src/main/providers/{claude,codex}.ts (`-r <id>` / `resume <id>`), rendered as
