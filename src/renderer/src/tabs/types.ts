@@ -34,6 +34,34 @@ export interface EditorTab extends BaseTab {
   preview?: boolean;
 }
 
+// Durable pointer to a Claude/Codex CLI session that was launched in a terminal
+// leaf via the "Worker — Claude/Codex" entries. Persisted with the tab layout so
+// a reopen can relaunch the same conversation with `claude -r <id>` /
+// `codex resume <id>`. Only the session id (+ its cwd) is stored — the transcript
+// itself lives in the CLI's own on-disk history and is rehydrated by --resume.
+// Unlike `worker`/`autorun` (transient, stripped on save), this survives restart.
+export interface TerminalAgentSession {
+  runtime: "claude" | "codex";
+  // Claude: UUID we forced with `--session-id`. Codex: UUID discovered from the
+  // rollout filename after launch. Empty string means "capture still pending"
+  // (Codex, before discovery resolves).
+  sessionId: string;
+  // The exact cwd the session was launched from. Claude resume is scoped to this
+  // directory's project bucket, so restore must relaunch from the same cwd.
+  cwd: string;
+  // Full path to the CLI's jsonl transcript, when known — lets restore probe
+  // existence with a single stat (mainly for Codex, whose sessions are not
+  // path-addressable by cwd).
+  transcriptPath?: string;
+  // ISO timestamp of capture; debugging / staleness only.
+  capturedAt: string;
+  // True while the pane's runtime poller currently detects this agent running;
+  // undefined/false = not running. Restore eligibility requires active===true
+  // in the persisted blob — old blobs without the field are deliberately not
+  // restore-eligible (only sessions RUNNING at quit come back on reopen).
+  active?: boolean;
+}
+
 // Each terminal tab owns a recursive tree of panes. A leaf is one PTY-backed
 // pane; a split renders two children separated by a draggable handle. The tab
 // remembers which leaf is "active" so split / close shortcuts know what to
@@ -61,6 +89,15 @@ export interface TerminalLeaf {
   // any later re-mount (the PTY persists across remounts, so the command
   // should only fire once per session).
   autorun?: string;
+  // Durable Claude/Codex session pointer for this pane. Set when the pane is
+  // launched as a "Worker — Claude/Codex" agent; survives a full app quit (it is
+  // NOT stripped like `worker`/`autorun`) so reopen can relaunch via --resume.
+  agentSession?: TerminalAgentSession | null;
+  // Transient one-shot restore marker set ONLY at hydration (loadPersisted),
+  // iff the persisted agentSession was active (agent running at quit). The
+  // pane's first mount after boot consumes it; it is never persisted, so
+  // nothing else in the app's lifetime can re-fire an auto-resume.
+  bootResume?: boolean;
 }
 
 export interface TerminalLeafWorker {

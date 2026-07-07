@@ -928,6 +928,12 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
             onChange={(v) => void setPreference("keepRunningInBackground", v)}
           />
           <ToggleRow
+            title="Resume Claude/Codex terminal sessions on reopen"
+            desc="Terminal panes with a Claude or Codex session still running when you quit relaunch that conversation (claude --resume / codex resume) when Codara Studio reopens. When off, panes come back as plain shells."
+            checked={preferences.restoreAgentSessions !== false}
+            onChange={(v) => void setPreference("restoreAgentSessions", v)}
+          />
+          <ToggleRow
             title="Auto-open preview for local dev servers"
             desc="When an agent or terminal prints a localhost URL (e.g. a Vite/Next dev server), automatically open it in a preview tab. When off, a clickable chip appears instead."
             checked={Boolean(preferences.autoOpenPreview)}

@@ -283,7 +283,7 @@ function ensureSpawnHelperExecutable(): void {
 
 export async function spawn(
   opts: SpawnOptions,
-): Promise<{ id: string; pid: number; startupCommandHandled?: boolean }> {
+): Promise<{ id: string; pid: number; startupCommandHandled?: boolean; attached?: boolean }> {
   ensureSpawnHelperExecutable();
   // Mirror attach (see SpawnOptions.mirror): observe-only. Checked FIRST so a
   // mirror can never clear a pending kill, mutate session sinks, resize the
@@ -293,7 +293,11 @@ export async function spawn(
     if (!target) {
       throw new Error(`mirror attach: no pty session '${opts.id}'`);
     }
-    return { id: opts.id, pid: target.pty.pid, startupCommandHandled: false };
+    // attached: the session pre-existed, so an unhandled startupCommand here
+    // means "a live shell/TUI already owns this pty", not "shell can't take
+    // startup commands" — callers use the distinction to decide whether a
+    // dropped resume deserves a manual-run notice.
+    return { id: opts.id, pid: target.pty.pid, startupCommandHandled: false, attached: true };
   }
   const pending = pendingKills.get(opts.id);
   if (pending) {
@@ -348,7 +352,7 @@ export async function spawn(
     } catch {
       /* may have exited */
     }
-    return { id: opts.id, pid: existing.pty.pid, startupCommandHandled: false };
+    return { id: opts.id, pid: existing.pty.pid, startupCommandHandled: false, attached: true };
   }
 
   // Remote workspace pane: the cwd is a ssh://<hostId>/<path> virtual path.

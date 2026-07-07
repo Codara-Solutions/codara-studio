@@ -13,6 +13,7 @@ import type {
   PaneNode,
   Tab,
   TabId,
+  TerminalAgentSession,
   TerminalLeaf,
   TerminalLeafWorker,
   TerminalSplit,
@@ -108,6 +109,15 @@ interface Props {
   // per-pane runtime poller, used to colour + label the worker chip. Distinct
   // from onPaneAgentState, which carries the binary running/runtime lifecycle.
   onPaneRuntimeState: (tabId: TabId, paneId: string, state: RuntimeState) => void;
+  // A restored pane's `--resume` probe found no transcript on disk — clear the
+  // stale session pointer so it stops trying to resume and can re-capture.
+  onPaneResumeUnavailable: (tabId: TabId, paneId: string) => void;
+  // A failed Claude restore self-healed into a fresh forced-id session —
+  // persist the replacement pointer on the leaf.
+  onPaneResumeFallback: (tabId: TabId, paneId: string, session: TerminalAgentSession) => void;
+  // A restored pane's first mount made its boot-restore attempt — clear the
+  // leaf's one-shot `bootResume` hydration marker.
+  onPaneBootResumeConsumed: (tabId: TabId, paneId: string) => void;
 }
 
 // Per-pane bundle of stable callbacks. Cached per `tabId:paneId` so a
@@ -129,6 +139,9 @@ type Bundle = {
   onUserInput: () => void;
   onAgentState: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
   onRuntimeState: (state: RuntimeState) => void;
+  onResumeUnavailable: () => void;
+  onResumeFallback: (session: TerminalAgentSession) => void;
+  onBootResumeConsumed: () => void;
 };
 
 // React.memo: with the useTabs API object now memoized, TerminalStack's
@@ -157,6 +170,9 @@ function TerminalStack({
   onFlushScrollback,
   onPaneAgentState,
   onPaneRuntimeState,
+  onPaneResumeUnavailable,
+  onPaneResumeFallback,
+  onPaneBootResumeConsumed,
 }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
   // unrelated tab kind mutates, and so the bundle-GC effect (keyed on
@@ -185,6 +201,9 @@ function TerminalStack({
   const flushScrollbackRef = useRef(onFlushScrollback);
   const agentStateRef = useRef(onPaneAgentState);
   const runtimeStateRef = useRef(onPaneRuntimeState);
+  const resumeUnavailableRef = useRef(onPaneResumeUnavailable);
+  const resumeFallbackRef = useRef(onPaneResumeFallback);
+  const bootResumeConsumedRef = useRef(onPaneBootResumeConsumed);
   useEffect(() => {
     detectedRef.current = onDetectedUrl;
     sparkOpenRef.current = onSparkOpen;
@@ -202,7 +221,10 @@ function TerminalStack({
     flushScrollbackRef.current = onFlushScrollback;
     agentStateRef.current = onPaneAgentState;
     runtimeStateRef.current = onPaneRuntimeState;
-  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState]);
+    resumeUnavailableRef.current = onPaneResumeUnavailable;
+    resumeFallbackRef.current = onPaneResumeFallback;
+    bootResumeConsumedRef.current = onPaneBootResumeConsumed;
+  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
 
   // Latest tab roots so the + smart-add button can read whichever PaneNode
   // tree is current at click time (a stale capture would split a tree that
@@ -283,6 +305,9 @@ function TerminalStack({
           onUserInput: () => userInputRef.current(tabId, paneId),
           onAgentState: (state) => agentStateRef.current(tabId, paneId, state),
           onRuntimeState: (state) => runtimeStateRef.current(tabId, paneId, state),
+          onResumeUnavailable: () => resumeUnavailableRef.current(tabId, paneId),
+          onResumeFallback: (session) => resumeFallbackRef.current(tabId, paneId, session),
+          onBootResumeConsumed: () => bootResumeConsumedRef.current(tabId, paneId),
         };
         bundles.current.set(key, b);
       }
@@ -375,7 +400,8 @@ function TerminalStack({
   // ── Staggered pane warm-up (cold-boot cost control) ─────────────────────
   // Mounting a <TerminalPane> is expensive: PTY spawn + xterm + a WebGL
   // context each. At boot, every pane of every persisted tab used to mount
-  // simultaneously — a startup spike. Instead, panes that start out in HIDDEN tabs
+  // simultaneously — a startup spike plus a burst of simultaneous
+  // `claude --resume` launches. Instead, panes that start out in HIDDEN tabs
   // are marked dormant (render nothing — their tab is CSS-hidden anyway) and
   // wake a couple at a time in the background, or instantly when their tab
   // becomes visible (the mounted pane replays the persisted scrollback, so
@@ -996,6 +1022,8 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 initialCwd={leaf.cwd}
                 initialScrollback={leaf.scrollback}
                 initialCommand={leaf.autorun}
+                agentSession={leaf.agentSession}
+                bootResume={leaf.bootResume === true}
                 visible={visible && !placeOffScreen}
                 scrollbackLineLimit={scrollbackLineLimit}
                 onDetectedLocalUrl={bundle.onDetectedUrl}
@@ -1006,6 +1034,9 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 onUserInput={bundle.onUserInput}
                 onAgentState={bundle.onAgentState}
                 onRuntimeState={bundle.onRuntimeState}
+                onResumeUnavailable={bundle.onResumeUnavailable}
+                onResumeFallback={bundle.onResumeFallback}
+                onBootResumeConsumed={bundle.onBootResumeConsumed}
               />
             ) : null}
             {!placeOffScreen && workerChip ? <WorkerChip worker={workerChip} /> : null}

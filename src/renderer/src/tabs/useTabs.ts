@@ -30,6 +30,7 @@ import type {
   RunsTab,
   Tab,
   TabId,
+  TerminalAgentSession,
   TerminalLeaf,
   TerminalLeafWorker,
   TerminalSplit,
@@ -61,8 +62,8 @@ const DRAFT_CHAT_PREFIX = "draft:";
 // by the App sync effect — editor/terminal/preview tabs survive. v4
 // introduced chat-scoped Runs tabs. v3 dropped the removed "project"/CRM
 // tab kind. v2 introduced the recursive PaneNode tree on TerminalTab.
-// v6: terminal leaves briefly carried a durable `agentSession` pointer for the
-// removed session-restore feature; loading now deletes any leftover pointer.
+// v6: terminal leaves may carry a durable `agentSession` pointer (Claude/Codex
+// session id) that survives restart so a reopened pane can `--resume`.
 const TAB_VERSION = 6;
 const MAX_TERMINAL_SCROLLBACK_CHARS = 40_000;
 
@@ -287,15 +288,22 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
   }
 }
 
-function cleanupTransientTerminalState(node: PaneNode): void {
+// Exported for tests (scripts/test-session-restore.cjs); only loadPersisted
+// calls it in production.
+export function cleanupTransientTerminalState(node: PaneNode): void {
   if (node.kind === "leaf") {
     delete node.worker;
     delete node.autorun;
-    // Blobs persisted before the session-restore feature was removed carry
-    // leftover `agentSession` pointers (and possibly a stray `bootResume`
-    // marker) — drop them at hydration so they don't ride the layout forever.
-    delete (node as { agentSession?: unknown }).agentSession;
-    delete (node as { bootResume?: unknown }).bootResume;
+    // Boot-once restore marker: minted here — at hydration, once per workspace
+    // per app run — and nowhere else. Only a pointer whose agent was RUNNING at
+    // quit (active===true, real sessionId) earns it; anything else (old blobs
+    // without `active`, idle panes, pending Codex captures with sessionId "")
+    // hydrates without one and never auto-resumes.
+    if (node.agentSession?.active === true && node.agentSession.sessionId) {
+      node.bootResume = true;
+    } else {
+      delete node.bootResume;
+    }
     return;
   }
   cleanupTransientTerminalState(node.a);
@@ -345,10 +353,12 @@ function stripTransientTerminalState(tabs: Tab[]): Tab[] {
   return changed ? next : tabs;
 }
 
-function stripTransientPaneState(node: PaneNode): PaneNode {
+// Exported for tests (scripts/test-session-restore.cjs); only persist calls it
+// in production.
+export function stripTransientPaneState(node: PaneNode): PaneNode {
   if (node.kind === "leaf") {
-    if (!("worker" in node) && !("autorun" in node)) return node;
-    const { worker: _worker, autorun: _autorun, ...rest } = node;
+    if (!("worker" in node) && !("autorun" in node) && !("bootResume" in node)) return node;
+    const { worker: _worker, autorun: _autorun, bootResume: _bootResume, ...rest } = node;
     return rest;
   }
   const a = stripTransientPaneState(node.a);
@@ -482,7 +492,11 @@ export interface UseTabsApi {
   reorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
   setDirty: (id: TabId, dirty: boolean) => void;
   setDetectedUrl: (tabId: TabId, paneId: string, url: string) => void;
-  newTerminalTab: (cwd?: string, autorun?: string, options?: { focus?: boolean }) => TabId;
+  newTerminalTab: (
+    cwd?: string,
+    autorun?: string,
+    options?: { focus?: boolean; agentSession?: TerminalAgentSession | null },
+  ) => TabId;
   // Open ONE terminal tab whose panes are split into a grid — used when Cora
   // spawns a batch of standing agent terminals, so the user sees them all at
   // once. One pane per spec, each autorunning its agent command.
@@ -546,6 +560,18 @@ export interface UseTabsApi {
   // (beforeunload/pagehide) where deferred updaters never get a render.
   flushScrollbackNow: (entries: Array<{ tabId: TabId; paneId: string; text: string }>) => void;
   setLeafWorker: (tabId: TabId, paneId: string, worker: TerminalLeafWorker | null) => void;
+  // Set (or clear, with null) the durable Claude/Codex session pointer on a
+  // leaf. Written at launch (capture) and cleared when a restore finds the
+  // transcript gone. Unlike setLeafWorker's transient chip, this survives quit.
+  setLeafAgentSession: (
+    tabId: TabId,
+    paneId: string,
+    session: TerminalAgentSession | null,
+  ) => void;
+  // One-shot boot-restore marker consumed: clear the leaf's hydration-minted
+  // `bootResume` flag once the pane's first mount has made its restore attempt
+  // (whatever the outcome), so no later remount can auto-resume again.
+  setLeafBootResumeConsumed: (tabId: TabId, paneId: string) => void;
   // Rename a leaf's paneId. The caller must dispose the old PTY when it is
   // intentionally replacing a live shell. The new TerminalPane mounts at the
   // new id and spawns/attaches there. Used by orchestration to take over an
@@ -563,6 +589,7 @@ export interface UseTabsApi {
       cwd?: string;
       autorun?: string;
       worker?: TerminalLeafWorker | null;
+      agentSession?: TerminalAgentSession | null;
     },
   ) => boolean;
   // Focus (or create) the chat tab for a specific run. Pass `null` to focus
@@ -1000,10 +1027,17 @@ export function useTabs(
   );
 
   const newTerminalTab = useCallback(
-    (cwd?: string, autorun?: string, options?: { focus?: boolean }): TabId => {
+    (
+      cwd?: string,
+      autorun?: string,
+      options?: { focus?: boolean; agentSession?: TerminalAgentSession | null },
+    ): TabId => {
       const id = makeId("term");
       const paneId = makeId("pane");
       const root = leaf(paneId, cwd, autorun);
+      // Durable resume pointer (Claude launches only) — set at creation so it is
+      // persisted immediately, independent of post-hoc discovery.
+      if (options?.agentSession) root.agentSession = options.agentSession;
       setTabs((curr) => {
         const tab: TerminalTab = {
           id,
@@ -1486,6 +1520,34 @@ export function useTabs(
     [],
   );
 
+  const setLeafAgentSession = useCallback(
+    (tabId: TabId, paneId: string, session: TerminalAgentSession | null) => {
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          const root = setLeafField(t.root, paneId, "agentSession", session);
+          return root === t.root ? t : { ...t, root };
+        }),
+      );
+    },
+    [],
+  );
+
+  const setLeafBootResumeConsumed = useCallback(
+    (tabId: TabId, paneId: string) => {
+      setTabs((curr) =>
+        curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          const existing = findLeaf(t.root, paneId);
+          if (!existing || existing.bootResume !== true) return t;
+          const root = setLeafField(t.root, paneId, "bootResume", false);
+          return root === t.root ? t : { ...t, root };
+        }),
+      );
+    },
+    [],
+  );
+
   // Rename a leaf's paneId. Walks the tree, swaps the id, and bumps the
   // tab's activePaneId to point at the new id if it used to point at the
   // old one. Returns true if the leaf was found, false otherwise.
@@ -1522,6 +1584,7 @@ export function useTabs(
         cwd?: string;
         autorun?: string;
         worker?: TerminalLeafWorker | null;
+        agentSession?: TerminalAgentSession | null;
       },
     ): boolean => {
       let added = false;
@@ -1541,6 +1604,7 @@ export function useTabs(
           if (!target) return t;
           const newLeaf = leaf(paneId, options?.cwd, options?.autorun);
           if (options?.worker !== undefined) newLeaf.worker = options.worker;
+          if (options?.agentSession) newLeaf.agentSession = options.agentSession;
           const root = splitAtLeaf(t.root, target.paneId, target.direction, newLeaf);
           added = true;
           return { ...t, root, activePaneId: paneId };
@@ -2320,6 +2384,8 @@ export function useTabs(
       setLeafScrollback,
       flushScrollbackNow,
       setLeafWorker,
+      setLeafAgentSession,
+      setLeafBootResumeConsumed,
       renameLeaf,
       addPaneInTab,
       openChatTab,

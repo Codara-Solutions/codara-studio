@@ -292,6 +292,12 @@ export interface AppPreferences {
   // regardless of this flag — Fable is only ever available to the main chat
   // and (when this is on) opt-in automations.
   fableEnabled?: boolean;
+  // When true (default), a manual "Worker — Claude/Codex" terminal pane that was
+  // running an agent when the app closed relaunches its prior conversation on the
+  // next open via `claude -r <id>` / `codex resume <id>`. The pane's CLI session
+  // id is captured at launch and persisted with the tab layout; no process is kept
+  // alive. Off: restored agent panes come back as plain shells.
+  restoreAgentSessions?: boolean;
 }
 
 export const DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID = "google/gemini-3.5-flash";
@@ -426,6 +432,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},
   fableEnabled: false,
+  restoreAgentSessions: true,
 };
 
 // Coarse needs-you-vs-finished classification, still carried by the
