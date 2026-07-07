@@ -955,6 +955,7 @@ function KindIcon({ tab }: { tab: Tab }) {
   if (tab.kind === "terminal") return <GlyphIcon glyph="❯" color="var(--accent)" />;
   if (tab.kind === "preview") return <GlyphIcon glyph="◉" color="var(--accent)" />;
   if (tab.kind === "automations") return <GlyphIcon glyph="◷" color="var(--accent)" />;
+  if (tab.kind === "diff") return <GlyphIcon glyph="±" color="var(--accent)" />;
   return <GlyphIcon glyph="◆" color="var(--accent)" />;
 }
 
@@ -981,6 +982,7 @@ function GlyphIcon({ glyph, color }: { glyph: string; color: string }) {
 function labelFor(t: Tab): string {
   if (t.kind === "terminal") return t.title || "terminals";
   if (t.kind === "automations") return t.title || "Automations";
+  if (t.kind === "diff") return `${t.title} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
   return t.title;
 }
 
@@ -990,6 +992,7 @@ function titleFor(t: Tab): string {
   if (t.kind === "preview") return t.url;
   if (t.kind === "terminal") return t.title;
   if (t.kind === "automations") return t.title;
+  if (t.kind === "diff") return `${t.path} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
   return t.title;
 }
 

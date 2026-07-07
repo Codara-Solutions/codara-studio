@@ -4,6 +4,8 @@ import type {
   AppState,
   ChatBackendKind,
   FsEntry,
+  GitFileChange,
+  GitStatus,
   InAppNotificationKind,
   RunState,
   RuntimeState,
@@ -41,6 +43,8 @@ import PreviewStack from "./tabs/PreviewStack";
 import { setOpenPreviewTabFn } from "./components/Preview/registry";
 import RunsStack from "./tabs/RunsStack";
 import AutomationsStack from "./tabs/AutomationsStack";
+import DiffStack from "./tabs/DiffStack";
+import { useSharedGitStatus } from "./git/useSharedGitStatus";
 import { useTabs, isDraftChatTabId } from "./tabs/useTabs";
 import { createNavigateTo, useNotifyFocusRouting } from "./notifications/routing";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
@@ -425,6 +429,11 @@ export default function App() {
   // Tabs are scoped per-workspace so each workspace remembers its own layout.
   // useTabs internally swaps tab lists when the workspaceId argument changes.
   const tabs = useTabs(activeId, activeWorkspace?.cwd, settings.terminalScrollbackLineLimit);
+
+  // One shared git status/log poll per active workspace — feeds the Source
+  // Control panel, the explorer's changed-file decorations, and the diff
+  // tabs from a single source of truth (was GitPanel's private poll).
+  const sharedGit = useSharedGitStatus(activeWorkspace?.cwd ?? null);
 
   // Evict frozen terminal layouts for deleted workspaces so they don't linger
   // in state. Render already prunes them (the validWorkspaceIds gate in
@@ -1960,6 +1969,35 @@ export default function App() {
     tabsRef.current.openEditorTab(entryFromPath(path));
   }, []);
 
+  // Open a changed file's diff as a workbench tab (Source Control row click).
+  const handleOpenDiffTab = useCallback((file: GitFileChange) => {
+    tabsRef.current.openDiffTab(file.path, file.staged);
+  }, []);
+
+  // Explorer "Open Changes": absolute path → repo-relative (forward slashes),
+  // always the working-tree (unstaged) diff — matching VS Code's entry point.
+  const activeCwdRef = useRef<string | null>(activeWorkspace?.cwd ?? null);
+  activeCwdRef.current = activeWorkspace?.cwd ?? null;
+  const handleOpenDiffForPath = useCallback((absolutePath: string) => {
+    const cwd = activeCwdRef.current;
+    if (!cwd || !absolutePath) return;
+    const base = cwd.replace(/[\\/]+$/, "");
+    let rel = absolutePath;
+    if (absolutePath.toLowerCase().startsWith(base.toLowerCase())) {
+      rel = absolutePath.slice(base.length).replace(/^[\\/]+/, "");
+    }
+    tabsRef.current.openDiffTab(rel.replace(/\\/g, "/"), false);
+  }, []);
+
+  // Which diff tab is focused — highlights its ChangeRow in the git panel.
+  const activeDiffTarget = useMemo(
+    () =>
+      tabs.activeTab?.kind === "diff"
+        ? { path: tabs.activeTab.path, staged: tabs.activeTab.staged }
+        : null,
+    [tabs.activeTab],
+  );
+
   // ── Detected URL → preview tab ─────────────────────────────────────────────
 
   // Ports we auto-spawn a preview tab for when a terminal sniffs the URL on
@@ -3072,6 +3110,10 @@ export default function App() {
             onDeleteFile={handleDeleteFile}
             onRenameFile={handleRenameFile}
             onRunPlan={handleRunPlan}
+            git={sharedGit}
+            onOpenDiffTab={handleOpenDiffTab}
+            activeDiffTarget={activeDiffTarget}
+            onOpenDiffForPath={handleOpenDiffForPath}
           />
         )}
         {showLeft && (
@@ -3108,6 +3150,10 @@ export default function App() {
               onRunSnapshot={handleRunSnapshot}
               onDetectedUrl={handleDetectedUrl}
               onSparkOpenFile={openFileByPath}
+              gitStatus={sharedGit.status}
+              gitVersion={sharedGit.gitVersion}
+              onGitChanged={sharedGit.notifyChanged}
+              onFileSaved={sharedGit.notifyChanged}
               onTerminalPaneExit={onTerminalPaneExit}
               onPreviewUrlChange={handlePreviewUrlChange}
               onPaneCwd={handlePaneCwd}
@@ -3179,6 +3225,10 @@ export default function App() {
             onDeleteFile={handleDeleteFile}
             onRenameFile={handleRenameFile}
             onRunPlan={handleRunPlan}
+            git={sharedGit}
+            onOpenDiffTab={handleOpenDiffTab}
+            activeDiffTarget={activeDiffTarget}
+            onOpenDiffForPath={handleOpenDiffForPath}
           />
         )}
 
@@ -3511,6 +3561,14 @@ interface WorkspaceProps {
   ) => void;
   onDetectedUrl: (tabId: string, paneId: string, url: string) => void;
   onSparkOpenFile: (path: string) => void;
+  // Shared git state for the diff tabs (see useSharedGitStatus in App).
+  gitStatus: GitStatus | null;
+  gitVersion: number;
+  onGitChanged: () => void;
+  // Editor save (manual or autosave) → immediate git refresh; content-only
+  // writes never fire the fs watcher, so without this the diff tabs and
+  // explorer decorations lag behind saves by up to the 10s poll.
+  onFileSaved: (path: string) => void;
   onTerminalPaneExit: (
     tabId: string,
     paneId: string,
@@ -3563,6 +3621,10 @@ const Workspace = React.memo(function Workspace({
   onRunSnapshot,
   onDetectedUrl,
   onSparkOpenFile,
+  gitStatus,
+  gitVersion,
+  onGitChanged,
+  onFileSaved,
   onTerminalPaneExit,
   onPreviewUrlChange,
   onPaneCwd,
@@ -3980,6 +4042,17 @@ const Workspace = React.memo(function Workspace({
           activeId={effectiveActiveId}
           onDirtyChange={handleEditorDirty}
           onClose={handleTabClose}
+          onSaved={onFileSaved}
+        />
+        <DiffStack
+          tabs={visibleTabs}
+          activeId={effectiveActiveId}
+          cwd={workspace?.cwd ?? null}
+          status={gitStatus}
+          gitVersion={gitVersion}
+          onOpenFile={onSparkOpenFile}
+          onChanged={onGitChanged}
+          onCloseTab={handleTabClose}
         />
         {/* One mounted TerminalStack per kept-alive workspace. Only the active
             one is visible/interactive; the rest stay mounted-but-hidden so

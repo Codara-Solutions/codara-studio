@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
-import type { ChatBackendKind, FsEntry } from "@shared/types";
+import type { ChatBackendKind, FsEntry, GitFileStatus, GitStatus } from "@shared/types";
+import { statusColor, statusGlyph } from "./git/git-ui";
 import { type EngineOption, useEngineOptions } from "./engine/engineOptions";
 import { ChevronIcon } from "./icons";
 import { FileNodeIcon } from "./file-icons/FileNodeIcon";
@@ -145,6 +146,11 @@ interface Props {
   // `backend` is the engine chosen from the Run plan flyout (undefined = the
   // default Codara / OpenRouter manager; "claude" / "codex" route to that CLI).
   onRunPlan?: (entry: FsEntry, backend?: ChatBackendKind) => void;
+  // Shared git status (App-owned poll) — drives VS Code-style changed-file
+  // decorations: colored filename + trailing status glyph on leaf rows.
+  gitStatus?: GitStatus | null;
+  // "Open Changes" context-menu action for a git-changed file.
+  onOpenChanges?: (absolutePath: string) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
   headerDrag?: SectionHeaderDragProps;
@@ -185,6 +191,8 @@ export default function FileTree({
   onDeleteFile,
   onRenameFile,
   onRunPlan,
+  gitStatus,
+  onOpenChanges,
   collapsed,
   onToggleCollapse,
   headerDrag,
@@ -757,6 +765,20 @@ export default function FileTree({
     [explorerClipboard],
   );
 
+  // Git decorations: absolute path → status for every changed file, derived
+  // from the shared status. Unstaged wins when a file appears in both lists
+  // (matches VS Code's single-decoration-per-file behavior).
+  const statusByPath = React.useMemo(() => {
+    if (!gitStatus?.isRepo) return null;
+    const sep = cwd.includes("\\") ? "\\" : "/";
+    const base = cwd.replace(/[\\/]+$/, "");
+    const toAbs = (rel: string) => base + sep + rel.replace(/\//g, sep);
+    const m = new Map<string, GitFileStatus>();
+    for (const f of gitStatus.staged) m.set(toAbs(f.path), f.status);
+    for (const f of gitStatus.unstaged) m.set(toAbs(f.path), f.status);
+    return m.size > 0 ? m : null;
+  }, [gitStatus, cwd]);
+
   const copyToClipboard = useCallback((paths: string[], mode: "copy" | "cut") => {
     if (paths.length === 0) return;
     setExplorerClipboard({ mode, paths });
@@ -1231,6 +1253,9 @@ export default function FileTree({
                 renaming={renamingPath === row.node.entry.path}
                 isDropTarget={dirNode != null && externalDropDir === row.node.entry.path}
                 cut={cutSet?.has(row.node.entry.path) ?? false}
+                gitFileStatus={
+                  row.node.entry.isDir ? undefined : statusByPath?.get(row.node.entry.path)
+                }
                 onRowClick={handleRowClick}
                 onRowElement={updateRowElement}
                 onContextMenu={handleContextMenu}
@@ -1398,6 +1423,18 @@ export default function FileTree({
               : null
           }
           revealLabel={isPreviewFile(contextMenu.entry) ? "Open in Preview" : "Reveal in OS"}
+          onOpenChanges={
+            onOpenChanges &&
+            contextMenuEntries.length === 1 &&
+            !contextMenu.entry.isDir &&
+            statusByPath?.has(contextMenu.entry.path)
+              ? () => {
+                  const path = contextMenu.entry.path;
+                  setContextMenu(null);
+                  onOpenChanges(path);
+                }
+              : null
+          }
           onCopy={() => {
             const paths = contextMenuEntries.map((entry) => entry.path);
             setContextMenu(null);
@@ -1673,6 +1710,9 @@ interface RowProps {
   // True while this entry sits on the file clipboard in "cut" mode — the row
   // dims (Explorer/VS Code convention) until the cut is pasted or replaced.
   cut: boolean;
+  // Git status for changed leaf files (undefined = unchanged/untracked-clean):
+  // colors the filename + renders a trailing status glyph, VS Code-style.
+  gitFileStatus?: GitFileStatus;
   onRowClick: (node: Node, event: React.MouseEvent) => void;
   onRowElement: (path: string, element: HTMLDivElement | null) => void;
   onContextMenu: (entry: FsEntry, x: number, y: number) => void;
@@ -1701,6 +1741,7 @@ function rowPropsEqual(prev: RowProps, next: RowProps): boolean {
     prev.renaming !== next.renaming ||
     prev.isDropTarget !== next.isDropTarget ||
     prev.cut !== next.cut ||
+    prev.gitFileStatus !== next.gitFileStatus ||
     prev.onRowClick !== next.onRowClick ||
     prev.onRowElement !== next.onRowElement ||
     prev.onContextMenu !== next.onContextMenu ||
@@ -1726,6 +1767,7 @@ const Row = React.memo(function Row({
   renaming,
   isDropTarget,
   cut,
+  gitFileStatus,
   onRowClick,
   onRowElement,
   onContextMenu,
@@ -1829,11 +1871,32 @@ const Row = React.memo(function Row({
         <span
           style={{
             ...ROW_LABEL_STYLE,
-            color: selected || active ? "var(--ink)" : "var(--ink-dim)",
+            color:
+              selected || active
+                ? "var(--ink)"
+                : gitFileStatus
+                  ? statusColor(gitFileStatus)
+                  : "var(--ink-dim)",
           }}
           title={node.entry.path}
         >
           {node.entry.name}
+        </span>
+      )}
+      {!renaming && gitFileStatus && (
+        <span
+          aria-hidden
+          title={gitFileStatus}
+          style={{
+            flex: "0 0 auto",
+            marginLeft: 6,
+            fontFamily: "var(--font-mono)",
+            fontSize: 9.5,
+            fontWeight: 800,
+            color: statusColor(gitFileStatus),
+          }}
+        >
+          {statusGlyph(gitFileStatus)}
         </span>
       )}
       {isDir && dirLoading && <span style={ROW_LOADING_STYLE}>…</span>}
@@ -1852,6 +1915,7 @@ function FileMenu({
   onRename,
   onReveal,
   revealLabel,
+  onOpenChanges,
   onCopy,
   onCut,
   onPaste,
@@ -1870,6 +1934,7 @@ function FileMenu({
   onRename: (() => void) | null;
   onReveal: (() => void) | null;
   revealLabel: string;
+  onOpenChanges: (() => void) | null;
   onCopy: () => void;
   onCut: () => void;
   onPaste: () => void;
@@ -1972,6 +2037,11 @@ function FileMenu({
       {onOpen && (
         <MenuButton icon="O" onClick={onOpen} hint={multiple ? undefined : "Enter"}>
           {openLabel}
+        </MenuButton>
+      )}
+      {onOpenChanges && (
+        <MenuButton icon="±" onClick={onOpenChanges}>
+          Open Changes
         </MenuButton>
       )}
       <MenuButton icon="N" onClick={onNewFile}>New File</MenuButton>

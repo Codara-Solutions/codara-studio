@@ -1,9 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type {
   ChatBackendKind,
-  GitDiff,
   GitFileChange,
-  GitLog,
   GitOpResult,
   GitStatus,
   RunState,
@@ -16,8 +14,8 @@ import BranchMenu from "./BranchMenu";
 import CommitComposer from "./CommitComposer";
 import CommitDetail from "./CommitDetail";
 import CommitHistory from "./CommitHistory";
-import DiffView from "./DiffView";
 import StashSection from "./StashSection";
+import type { SharedGitStatus } from "../../git/useSharedGitStatus";
 import { buildSmartMergePlan, requestPrepareSmartMerge, smartMergePlanTitle } from "./smart-merge";
 import {
   CommitIcon,
@@ -40,98 +38,12 @@ interface Props {
     run: RunState,
     options?: { select?: boolean; focusRuns?: boolean },
   ) => void;
-  /** Opens an absolute path as an editor tab (threaded from App). */
-  onOpenFile: (absolutePath: string) => void;
-}
-
-interface DiffTarget {
-  path: string;
-  staged: boolean;
-  untracked: boolean;
-}
-
-// How often the panel re-reads git state while it is on screen. The fs watcher
-// drives most updates already — this poll is a safety net for changes the
-// watcher misses (e.g. ref / index writes that bypass the worktree).
-const POLL_MS = 10000;
-
-// Cheap shallow equality on git status. Used to skip no-op setState calls so
-// the change-row React.memo gates actually hold, instead of being defeated by
-// fresh array identities arriving every poll.
-function sameStatus(a: GitStatus | null, b: GitStatus | null): boolean {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  if (
-    a.isRepo !== b.isRepo ||
-    a.branch !== b.branch ||
-    a.detached !== b.detached ||
-    a.upstream !== b.upstream ||
-    a.ahead !== b.ahead ||
-    a.behind !== b.behind ||
-    a.hasConflicts !== b.hasConflicts ||
-    a.error !== b.error ||
-    a.staged.length !== b.staged.length ||
-    a.unstaged.length !== b.unstaged.length
-  ) {
-    return false;
-  }
-  for (let i = 0; i < a.staged.length; i++) {
-    const x = a.staged[i];
-    const y = b.staged[i];
-    if (
-      x.path !== y.path ||
-      x.status !== y.status ||
-      x.staged !== y.staged ||
-      x.untracked !== y.untracked ||
-      x.oldPath !== y.oldPath
-    ) {
-      return false;
-    }
-  }
-  for (let i = 0; i < a.unstaged.length; i++) {
-    const x = a.unstaged[i];
-    const y = b.unstaged[i];
-    if (
-      x.path !== y.path ||
-      x.status !== y.status ||
-      x.staged !== y.staged ||
-      x.untracked !== y.untracked ||
-      x.oldPath !== y.oldPath
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
-// Cheap shallow equality on git log. Commit shas are the identity here — if
-// every row hash + ref decoration is unchanged, the graph view models can be
-// reused and the memoized commit rows skip re-rendering.
-function sameLog(a: GitLog | null, b: GitLog | null): boolean {
-  if (a === b) return true;
-  if (!a || !b) return false;
-  if (a.isRepo !== b.isRepo || a.error !== b.error || a.rows.length !== b.rows.length) {
-    return false;
-  }
-  for (let i = 0; i < a.rows.length; i++) {
-    const x = a.rows[i];
-    const y = b.rows[i];
-    if (
-      x.hash !== y.hash ||
-      x.subject !== y.subject ||
-      x.isHead !== y.isHead ||
-      x.graph !== y.graph
-    ) {
-      return false;
-    }
-    const xRefs = x.refs ?? [];
-    const yRefs = y.refs ?? [];
-    if (xRefs.length !== yRefs.length) return false;
-    for (let j = 0; j < xRefs.length; j++) {
-      if (xRefs[j] !== yRefs[j]) return false;
-    }
-  }
-  return true;
+  /** Shared status/log poll owned by App (one per active workspace). */
+  git: SharedGitStatus;
+  /** Opens a changed file's diff as a workbench tab (VS Code-style). */
+  onOpenDiffTab: (file: GitFileChange) => void;
+  /** The diff tab currently focused, if any — highlights its ChangeRow. */
+  activeDiffTarget: { path: string; staged: boolean } | null;
 }
 
 // The left-rail Source Control panel — branch + commit composer, staged /
@@ -144,130 +56,35 @@ export default function GitPanel({
   onToggleCollapse,
   headerDrag,
   onRunSnapshot,
-  onOpenFile,
+  git,
+  onOpenDiffTab,
+  activeDiffTarget,
 }: Props): React.ReactElement {
-  const [status, setStatus] = useState<GitStatus | null>(null);
-  const [log, setLog] = useState<GitLog | null>(null);
-  const [loading, setLoading] = useState(false);
+  // Status/log/loading/gitVersion live in the App-owned shared hook
+  // (useSharedGitStatus) so the explorer decorations and diff tabs read the
+  // same snapshot this panel does. Everything below is panel-local UI state.
+  const { status, log, loading, gitVersion, refresh, notifyChanged, readError } = git;
   const [opError, setOpError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [sections, setSections] = useState({ staged: false, changes: false, history: false });
-  const [diffTarget, setDiffTarget] = useState<DiffTarget | null>(null);
-  const [diff, setDiff] = useState<GitDiff | null>(null);
-  const [diffLoading, setDiffLoading] = useState(false);
-  // Bumped after any git mutation so the self-contained branch / stash sections
-  // re-read their own state (they don't share GitPanel's status/log).
-  const [gitVersion, setGitVersion] = useState(0);
   // A commit selected for inspection — when set, the body shows CommitDetail
   // (the history/inspection agent builds that view).
   const [detailHash, setDetailHash] = useState<string | null>(null);
 
-  // Refs let the timer / event callbacks and action guards read live values
-  // without re-subscribing or going stale.
-  const cwdRef = useRef(cwd);
-  cwdRef.current = cwd;
+  // Refs let action guards read live values without going stale.
   const busyRef = useRef<string | null>(busy);
   busyRef.current = busy;
   const statusRef = useRef<GitStatus | null>(status);
   statusRef.current = status;
 
-  const logRef = useRef<GitLog | null>(log);
-  logRef.current = log;
-
-  const refresh = useCallback(async (silent = false): Promise<void> => {
-    const target = cwdRef.current;
-    if (!target) {
-      setStatus(null);
-      setLog(null);
-      return;
-    }
-    if (!silent) setLoading(true);
-    try {
-      const [nextStatus, nextLog] = await Promise.all([
-        window.spark.git.status(target),
-        window.spark.git.log(target),
-      ]);
-      if (cwdRef.current !== target) return;
-      // Skip the setState when nothing changed — keeps row identities stable
-      // so memoized children don't re-render on every poll tick.
-      if (!sameStatus(statusRef.current, nextStatus)) setStatus(nextStatus);
-      if (!sameLog(logRef.current, nextLog)) setLog(nextLog);
-    } catch (err) {
-      if (cwdRef.current === target) setOpError((err as Error).message);
-    } finally {
-      if (cwdRef.current === target) setLoading(false);
-    }
-  }, []);
-
-  // Initial load + full reset whenever the workspace changes.
+  // Reset panel-local state whenever the workspace changes.
   useEffect(() => {
-    setStatus(null);
-    setLog(null);
     setOpError(null);
-    setDiffTarget(null);
     setDetailHash(null);
     setMessage("");
     setSections({ staged: false, changes: false, history: false });
-    if (cwd) void refresh(false);
-  }, [cwd, refresh]);
-
-  // Lightweight poll so the panel tracks changes made from the terminal or
-  // another tool. Skipped while the window is hidden or an op is running.
-  useEffect(() => {
-    if (!cwd) return undefined;
-    const id = window.setInterval(() => {
-      if (document.visibilityState === "visible" && !busyRef.current) {
-        void refresh(true);
-      }
-    }, POLL_MS);
-    return () => window.clearInterval(id);
-  }, [cwd, refresh]);
-
-  // Snappier than the poll when the file watcher (driven by the file tree) is
-  // live — a debounced refresh on any change under the workspace root.
-  useEffect(() => {
-    if (!cwd) return undefined;
-    let timer: number | null = null;
-    const unsub = window.spark.fs.onChanged((event) => {
-      if (event.root !== cwd) return;
-      if (timer !== null) window.clearTimeout(timer);
-      timer = window.setTimeout(() => void refresh(true), 300);
-    });
-    return () => {
-      if (timer !== null) window.clearTimeout(timer);
-      unsub();
-    };
-  }, [cwd, refresh]);
-
-  // Load the diff whenever a file is opened in the diff view.
-  useEffect(() => {
-    if (!diffTarget || !cwd) {
-      setDiff(null);
-      return undefined;
-    }
-    let cancelled = false;
-    setDiffLoading(true);
-    setDiff(null);
-    window.spark.git
-      .diff(cwd, diffTarget.path, diffTarget.staged, diffTarget.untracked)
-      .then((result) => {
-        if (!cancelled) setDiff(result);
-      })
-      .catch((err: Error) => {
-        if (!cancelled) {
-          setDiff({ path: diffTarget.path, binary: false, lines: [], error: err.message });
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setDiffLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // gitVersion in deps so an open diff reloads after a partial stage / unstage
-    // / discard (the working or staged side changed underneath it).
-  }, [diffTarget, cwd, gitVersion]);
+  }, [cwd]);
 
   // Run one git mutation: block re-entrancy, surface failures, refresh after.
   const runAction = useCallback(
@@ -282,19 +99,15 @@ export default function GitPanel({
         setOpError((err as Error).message);
       } finally {
         setBusy(null);
-        void refresh(true);
-        setGitVersion((v) => v + 1);
+        notifyChanged();
       }
     },
-    [refresh],
+    [notifyChanged],
   );
 
   // Passed to the branch / stash sections so a mutation they perform refreshes
   // the whole panel (and bumps the version the other sections re-read on).
-  const handleGitChanged = useCallback(() => {
-    void refresh(true);
-    setGitVersion((v) => v + 1);
-  }, [refresh]);
+  const handleGitChanged = notifyChanged;
 
   const stageOne = useCallback(
     (file: GitFileChange) => {
@@ -367,12 +180,12 @@ export default function GitPanel({
     [workspace, onRunSnapshot, refresh],
   );
 
-  // History actions can move HEAD or the working tree — drop any open diff so
-  // the panel does not keep showing a now-stale one.
+  // History actions can move HEAD or the working tree. Open diff tabs derive
+  // their state from the shared status, so they refresh (or show "no
+  // changes") on the version bump — no explicit teardown needed here.
   const handleCheckout = useCallback(
     (ref: string) => {
       if (!cwd) return;
-      setDiffTarget(null);
       void runAction("checkout", () => window.spark.git.checkout(cwd, ref));
     },
     [cwd, runAction],
@@ -380,14 +193,12 @@ export default function GitPanel({
   const handleRevert = useCallback(
     (hash: string) => {
       if (!cwd) return;
-      setDiffTarget(null);
       void runAction("revert", () => window.spark.git.revert(cwd, hash));
     },
     [cwd, runAction],
   );
   const handleUndoLastCommit = useCallback(() => {
     if (!cwd) return;
-    setDiffTarget(null);
     void runAction("undo", () => window.spark.git.undoLastCommit(cwd));
   }, [cwd, runAction]);
 
@@ -434,33 +245,28 @@ export default function GitPanel({
         setOpError((err as Error).message);
       } finally {
         setBusy(null);
-        void refresh(true);
-        setGitVersion((v) => v + 1);
+        notifyChanged();
       }
     },
-    [cwd, message, refresh],
+    [cwd, message, notifyChanged],
   );
 
-  const openDiff = useCallback((file: GitFileChange) => {
-    setDetailHash(null);
-    setDiffTarget({ path: file.path, staged: file.staged, untracked: file.untracked });
-  }, []);
+  // Clicking a changed row opens (or focuses) its diff as a workbench tab.
+  const openDiff = useCallback(
+    (file: GitFileChange) => {
+      setDetailHash(null);
+      onOpenDiffTab(file);
+    },
+    [onOpenDiffTab],
+  );
 
   // Open a commit in the inspection view (built by the history/inspection agent).
   const openCommitDetail = useCallback((hash: string) => {
-    setDiffTarget(null);
     setDetailHash(hash);
   }, []);
 
-  const openDiffFileInEditor = useCallback(() => {
-    if (!cwd || !diffTarget) return;
-    const sep = cwd.includes("\\") ? "\\" : "/";
-    const base = cwd.replace(/[\\/]+$/, "");
-    onOpenFile(base + sep + diffTarget.path.replace(/\//g, sep));
-  }, [cwd, diffTarget, onOpenFile]);
-
   const disabled = busy !== null;
-  const displayError = opError ?? status?.error ?? log?.error ?? null;
+  const displayError = opError ?? status?.error ?? log?.error ?? readError ?? null;
   const staged = status?.staged ?? [];
   const unstaged = status?.unstaged ?? [];
   const stagedCount = staged.length;
@@ -510,24 +316,12 @@ export default function GitPanel({
           style={{
             flex: 1,
             minHeight: 0,
-            overflowY: diffTarget || detailHash ? "hidden" : "auto",
+            overflowY: detailHash ? "hidden" : "auto",
             overflowX: "hidden",
           }}
         >
           {!cwd ? (
             <PanelMessage text="No active workspace." />
-          ) : diffTarget ? (
-            <DiffView
-              path={diffTarget.path}
-              staged={diffTarget.staged}
-              untracked={diffTarget.untracked}
-              cwd={cwd}
-              diff={diff}
-              loading={diffLoading}
-              onBack={() => setDiffTarget(null)}
-              onOpenFile={openDiffFileInEditor}
-              onChanged={handleGitChanged}
-            />
           ) : detailHash ? (
             <CommitDetail cwd={cwd} hash={detailHash} onClose={() => setDetailHash(null)} />
           ) : status === null ? (
@@ -587,7 +381,7 @@ export default function GitPanel({
                       key={`s:${file.path}`}
                       file={file}
                       staged
-                      selected={false}
+                      selected={activeDiffTarget?.staged === true && activeDiffTarget.path === file.path}
                       disabled={disabled}
                       onOpenDiff={openDiff}
                       onStage={stageOne}
@@ -616,7 +410,7 @@ export default function GitPanel({
                       key={`u:${file.path}`}
                       file={file}
                       staged={false}
-                      selected={false}
+                      selected={activeDiffTarget?.staged === false && activeDiffTarget.path === file.path}
                       disabled={disabled}
                       onOpenDiff={openDiff}
                       onStage={stageOne}

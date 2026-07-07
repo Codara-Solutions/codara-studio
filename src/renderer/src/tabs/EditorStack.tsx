@@ -16,12 +16,16 @@ interface Props {
   activeId: TabId | null;
   onDirtyChange: (id: TabId, dirty: boolean) => void;
   onClose: (id: TabId) => void;
+  // Fired after every successful save (manual or autosave). App uses it to
+  // refresh the shared git status immediately instead of waiting for the
+  // 10s poll — content-only writes never fire the fs watcher.
+  onSaved?: (path: string) => void;
 }
 
 // React.memo: with the useTabs API object now memoized, EditorStack's props
 // only change when the tab list / active id / callbacks genuinely change,
 // so an unrelated App re-render no longer walks this whole stack.
-function EditorStack({ tabs, activeId, onDirtyChange, onClose }: Props) {
+function EditorStack({ tabs, activeId, onDirtyChange, onClose, onSaved }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
   // unrelated tab kind mutates — and so the GC effect below (keyed on
   // `editors`) only fires when the editor set actually changes.
@@ -32,16 +36,21 @@ function EditorStack({ tabs, activeId, onDirtyChange, onClose }: Props) {
 
   const dirtyRef = useRef(onDirtyChange);
   const closeRef = useRef(onClose);
+  const savedRef = useRef(onSaved);
   useEffect(() => {
     dirtyRef.current = onDirtyChange;
   }, [onDirtyChange]);
   useEffect(() => {
     closeRef.current = onClose;
   }, [onClose]);
+  useEffect(() => {
+    savedRef.current = onSaved;
+  }, [onSaved]);
 
   type Bundle = {
     onDirty: (path: string, dirty: boolean) => void;
     onClose: (path: string) => void;
+    onSaved: (path: string) => void;
   };
   const bundles = useRef(new Map<TabId, Bundle>());
   const getBundle = (id: TabId): Bundle => {
@@ -50,6 +59,7 @@ function EditorStack({ tabs, activeId, onDirtyChange, onClose }: Props) {
       b = {
         onDirty: (_path: string, dirty: boolean) => dirtyRef.current(id, dirty),
         onClose: () => closeRef.current(id),
+        onSaved: (path: string) => savedRef.current?.(path),
       };
       bundles.current.set(id, b);
     }
@@ -89,6 +99,7 @@ function EditorStack({ tabs, activeId, onDirtyChange, onClose }: Props) {
             <EditorPane
               file={t.entry}
               onDirtyChange={bundle.onDirty}
+              onSaved={bundle.onSaved}
               onClose={bundle.onClose}
               active={visible}
             />

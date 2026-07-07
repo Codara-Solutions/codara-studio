@@ -118,6 +118,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       enabled: prefsRef.current.autosaveEnabled,
       delayMs: prefsRef.current.autosaveDelayMs,
     }),
+    onAutosaved: (savedPath) => onSavedRef.current?.(savedPath),
     skip: previewOnly,
   });
   const reloadRef = useRef(reload);

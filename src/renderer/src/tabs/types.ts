@@ -168,6 +168,20 @@ export interface RunsTab extends BaseTab {
   runId: string | null;
 }
 
+// A working-tree / index diff opened as its own workbench tab (VS Code's
+// "file.ts (Working Tree)"). Identity is (path, staged) — everything else
+// (untracked, renamed, still-changed-at-all) is derived live from the shared
+// GitStatus at render time, so rename/commit/discard while the tab is open
+// degrade gracefully instead of needing invalidation plumbing. The payload is
+// intentionally this small so persistence needs no special casing.
+export interface DiffTab extends BaseTab {
+  kind: "diff";
+  // Repo-relative path, forward-slash separated — matches GitFileChange.path.
+  path: string;
+  // true = diff of the index vs HEAD (staged); false = working tree vs index.
+  staged: boolean;
+}
+
 // Automations tabs host the workspace's scheduler + overnight-queue panel.
 // Modeled on RunsTab: a single workspace-scoped surface mounted absolutely by
 // AutomationsStack, with no per-tab payload beyond the base id/title (the panel
@@ -176,7 +190,7 @@ export interface AutomationsTab extends BaseTab {
   kind: "automations";
 }
 
-export type Tab = ChatTab | EditorTab | TerminalTab | PreviewTab | RunsTab | AutomationsTab;
+export type Tab = ChatTab | EditorTab | TerminalTab | PreviewTab | RunsTab | AutomationsTab | DiffTab;
 
 export type TabKind = Tab["kind"];
 

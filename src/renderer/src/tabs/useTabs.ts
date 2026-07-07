@@ -23,6 +23,7 @@ import {
 import type {
   AutomationsTab,
   ChatTab,
+  DiffTab,
   EditorTab,
   PaneNode,
   PreviewTab,
@@ -613,6 +614,10 @@ export interface UseTabsApi {
   // append a fresh one and focus it. Singleton-ish like the Runs tab — there
   // is only ever one Automations surface per workspace.
   openAutomationsTab: () => TabId;
+  // Open (or focus) the diff tab for a changed file. Identity is
+  // (path, staged) — the same file can have a Working Tree tab and a Staged
+  // tab open side by side, exactly like VS Code's separate diff editors.
+  openDiffTab: (path: string, staged: boolean, options?: { focus?: boolean }) => TabId;
   // Close the runs tab bound to a chat (used when the chat is deleted).
   closeRunsTabFor: (runId: string) => void;
   closeWorkerTerminalTabFor: (runId: string) => void;
@@ -1907,6 +1912,38 @@ export function useTabs(
     return resultId;
   }, []);
 
+  // Open (or focus) a changed file's diff tab. Existence check + setActiveId
+  // both run INSIDE the updater (same double-click race note as
+  // openAutomationsTab above).
+  const openDiffTab = useCallback(
+    (path: string, staged: boolean, options?: { focus?: boolean }): TabId => {
+      const existingId = tabsRef.current.find(
+        (t): t is DiffTab => t.kind === "diff" && t.path === path && t.staged === staged,
+      )?.id;
+      const resultId = existingId ?? makeId("diff");
+      setTabs((curr) => {
+        const existing = curr.find(
+          (t): t is DiffTab => t.kind === "diff" && t.path === path && t.staged === staged,
+        );
+        if (existing) {
+          if (options?.focus !== false) setActiveId(existing.id);
+          return curr;
+        }
+        const tab: DiffTab = {
+          id: resultId,
+          kind: "diff",
+          title: basename(path),
+          path,
+          staged,
+        };
+        if (options?.focus !== false) setActiveId(resultId);
+        return [...curr, tab];
+      });
+      return resultId;
+    },
+    [],
+  );
+
   const setLeafScrollback = useCallback(
     (tabId: TabId, paneId: string, scrollback: string) => {
       const trimmed = trimPersistedTerminalScrollback(
@@ -2327,6 +2364,7 @@ export function useTabs(
       openRunsTab,
       hideRunsTabs,
       openAutomationsTab,
+      openDiffTab,
       closeRunsTabFor,
       closeWorkerTerminalTabFor,
       closePreviewTabsFor,

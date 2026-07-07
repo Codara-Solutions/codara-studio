@@ -17,6 +17,9 @@ interface Options {
   // Live autosave preferences, read at schedule time (not captured) so a
   // Settings toggle applies to already-open tabs without remounting them.
   getAutosavePrefs?: () => { enabled: boolean; delayMs: number };
+  // Fired after a successful AUTOSAVE write (manual saves notify at the
+  // keymap call sites). Lets the workbench refresh git state promptly.
+  onAutosaved?: (path: string) => void;
   // True for files rendered by a visual previewer (image/pdf/media): the
   // text-read IPC round-trip is skipped entirely and `doc` stays "loading",
   // which no preview-only render branch ever consults.
@@ -48,7 +51,13 @@ export interface UseDocumentResult {
 // the write if the disk copy changed underneath us (agent edit, git op,
 // checkpoint restore) — that flips `conflict` on and autosave stays paused
 // for this document until reload(force) or a manual save() resolves it.
-export function useDocument({ path, onDirtyChange, getAutosavePrefs, skip = false }: Options): UseDocumentResult {
+export function useDocument({
+  path,
+  onDirtyChange,
+  getAutosavePrefs,
+  onAutosaved,
+  skip = false,
+}: Options): UseDocumentResult {
   const [doc, setDoc] = useState<DocumentState>({ status: "loading" });
   const [dirty, setDirty] = useState(false);
   const [conflict, setConflict] = useState(false);
@@ -78,6 +87,10 @@ export function useDocument({ path, onDirtyChange, getAutosavePrefs, skip = fals
   useEffect(() => {
     getAutosavePrefsRef.current = getAutosavePrefs;
   }, [getAutosavePrefs]);
+  const onAutosavedRef = useRef(onAutosaved);
+  useEffect(() => {
+    onAutosavedRef.current = onAutosaved;
+  }, [onAutosaved]);
   // Bubble dirty transitions to the parent. Use both `dirty` and `path` so
   // the parent always knows which file the flip applies to.
   useEffect(() => {
@@ -167,6 +180,7 @@ export function useDocument({ path, onDirtyChange, getAutosavePrefs, skip = fals
       savedRef.current = content;
       mtimeRef.current = result.mtimeMs;
       setDirty(bufferRef.current !== content);
+      onAutosavedRef.current?.(path);
     } catch {
       // Transient IO/IPC failure — stay dirty; the next keystroke reschedules
       // and a manual save can always force the issue.

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { ChatBackendKind, FsEntry, RunState, Workspace } from "@shared/types";
+import type { ChatBackendKind, FsEntry, GitFileChange, RunState, Workspace } from "@shared/types";
+import type { SharedGitStatus } from "../git/useSharedGitStatus";
 import type { ChatStatusTone } from "./chat/timeline";
 import { statusToneColor } from "./chat/timeline";
 import { MinusIcon, PlusIcon } from "./icons";
@@ -77,6 +78,13 @@ interface RailProps {
   onDeleteFile: (path: string) => void;
   onRenameFile: (oldPath: string, entry: FsEntry) => void;
   onRunPlan: (entry: FsEntry, backend?: ChatBackendKind) => void;
+  // Shared git status (owned by App) — feeds the Source Control panel and
+  // the explorer's changed-file decorations from one poll.
+  git: SharedGitStatus;
+  onOpenDiffTab: (file: GitFileChange) => void;
+  activeDiffTarget: { path: string; staged: boolean } | null;
+  // Explorer context-menu "Open Changes" for a changed file (absolute path).
+  onOpenDiffForPath: (absolutePath: string) => void;
 }
 
 // Memoized: App hoists every prop to a stable reference (the `workspaces`
@@ -295,7 +303,9 @@ function WorkspaceRail(props: RailProps) {
             onToggleCollapse={() => onToggleSection("graph")}
             headerDrag={headerDrag("graph")}
             onRunSnapshot={props.onRunSnapshot}
-            onOpenFile={props.onOpenFile}
+            git={props.git}
+            onOpenDiffTab={props.onOpenDiffTab}
+            activeDiffTarget={props.activeDiffTarget}
           />
         );
       case "explorer": {
@@ -330,6 +340,8 @@ function WorkspaceRail(props: RailProps) {
             onDeleteFile={props.onDeleteFile}
             onRenameFile={props.onRenameFile}
             onRunPlan={props.onRunPlan}
+            gitStatus={props.git.status}
+            onOpenChanges={props.onOpenDiffForPath}
             collapsed={collapsed.explorer}
             onToggleCollapse={() => onToggleSection("explorer")}
             headerDrag={headerDrag("explorer")}
