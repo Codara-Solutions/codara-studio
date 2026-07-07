@@ -112,6 +112,12 @@ function normalize(w: Workspace): Workspace {
       ...(typeof cb.fileCount === "number" ? { fileCount: cb.fileCount } : {}),
     };
   }
+  // SSH remote workspaces: carry the host pointer through, and never let the
+  // cwd fallback above replace a ssh:// cwd with the local home directory.
+  const remote = w.remote;
+  if (remote && typeof remote === "object" && typeof remote.hostId === "string" && remote.hostId) {
+    normalized.remote = { hostId: remote.hostId };
+  }
   return normalized;
 }
 

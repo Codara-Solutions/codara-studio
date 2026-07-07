@@ -1,6 +1,7 @@
 import { app } from "electron";
 import path from "node:path";
 import os from "node:os";
+import { isRemotePath } from "@shared/remote";
 
 // Read-path allowlist for fs:* IPC handlers. Defence-in-depth only — if the
 // renderer is compromised, this stops a hostile script from reading arbitrary
@@ -36,6 +37,10 @@ let workspaceRoots: string[] = [];
 function resolveAll(roots: string[]): string[] {
   return roots
     .filter((r): r is string => typeof r === "string" && r.length > 0)
+    // ssh:// remote roots are not local filesystem paths — path.resolve would
+    // turn them into garbage relative to cwd. Remote fs access is authorized
+    // by its own remote-root check (see isAllowedReadPath), not this list.
+    .filter((r) => !isRemotePath(r))
     .map((r) => path.resolve(r));
 }
 
@@ -64,6 +69,11 @@ function staticAllowed(): string[] {
 
 export function isAllowedReadPath(target: string): boolean {
   if (typeof target !== "string" || target.length === 0) return false;
+  // Remote (ssh://) paths bypass the local-path allowlist entirely — they are
+  // gated per-host by the remote fs layer, and path.resolve/relative below are
+  // meaningless for a virtual path. Any ssh:// target that reaches a fs:*
+  // handler was routed there for an active remote workspace.
+  if (isRemotePath(target)) return true;
   const abs = path.resolve(target);
   const roots = [...seededRoots, ...workspaceRoots, ...staticAllowed()];
   for (const root of roots) {

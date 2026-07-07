@@ -45,6 +45,9 @@ import RunsStack from "./tabs/RunsStack";
 import AutomationsStack from "./tabs/AutomationsStack";
 import DiffStack from "./tabs/DiffStack";
 import { useSharedGitStatus } from "./git/useSharedGitStatus";
+import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
+import RemoteConnectDialog from "./components/remote/RemoteConnectDialog";
+import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
 import { useTabs, isDraftChatTabId } from "./tabs/useTabs";
 import { createNavigateTo, useNotifyFocusRouting } from "./notifications/routing";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
@@ -257,6 +260,7 @@ export default function App() {
   const [integratedShell, setIntegratedShell] = useState<ShellInfo | null>(null);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -1805,6 +1809,35 @@ export default function App() {
     setEditingId(ws.id);
   }, [workspaces, activeWorkspace, home]);
 
+  // SSH remote workspace: the connect dialog resolves a host + POSIX folder,
+  // and we mint a workspace whose cwd is the ssh:// virtual path. The main
+  // process routes every fs/git/pty/search call on that prefix.
+  const createRemoteWs = useCallback(
+    async (host: RemoteHostConfig, remotePath: string) => {
+      const cwd = makeRemotePath(host.id, remotePath);
+      const usedColors = new Set(workspaces.map((w) => w.color.toLowerCase()));
+      const color =
+        WORKSPACE_COLORS.find((c) => !usedColors.has(c.toLowerCase())) ?? WORKSPACE_COLORS[0];
+      const ws: Workspace = {
+        id: makeId("ws"),
+        name: basename(remotePath) || host.id,
+        cwd,
+        color,
+        workers: [],
+        remote: { hostId: host.id },
+      };
+      const existingCwds = workspaces
+        .map((w) => w.cwd)
+        .filter((c): c is string => typeof c === "string" && c.length > 0);
+      await window.spark.ui?.setAllowedRoots([...existingCwds, ws.cwd]).catch(() => undefined);
+      setWorkspaces((list) => [...list, ws]);
+      activeRunIdsByWorkspaceRef.current[ws.id] = null;
+      setActiveId(ws.id);
+      setRemoteConnectOpen(false);
+    },
+    [workspaces],
+  );
+
   const createCopyBranchWs = useCallback(
     async (sourceWs: Workspace) => {
       const res = await window.spark.git.createCopyWorktree(sourceWs.cwd);
@@ -3098,6 +3131,7 @@ export default function App() {
             onReorder={reorderWs}
             onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
+            onCreateRemote={() => setRemoteConnectOpen(true)}
             onCreateCopyBranch={handleCreateCopyBranch}
             onSplitChange={panels.setLeftSplit}
             onToggleSection={togglePanelSection}
@@ -3213,6 +3247,7 @@ export default function App() {
             onReorder={reorderWs}
             onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
+            onCreateRemote={() => setRemoteConnectOpen(true)}
             onCreateCopyBranch={handleCreateCopyBranch}
             onSplitChange={panels.setRightSplit}
             onToggleSection={togglePanelSection}
@@ -3231,6 +3266,14 @@ export default function App() {
             onOpenDiffForPath={handleOpenDiffForPath}
           />
         )}
+
+        {remoteConnectOpen && (
+          <RemoteConnectDialog
+            onClose={() => setRemoteConnectOpen(false)}
+            onPick={(host, remotePath) => void createRemoteWs(host, remotePath)}
+          />
+        )}
+        <RemoteAuthPrompt />
 
         {settingsOpen && (
           <SettingsDialog

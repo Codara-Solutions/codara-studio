@@ -56,6 +56,9 @@ export interface Worker {
 export interface Workspace {
   id: string;
   name: string;
+  // Local absolute path, or — for SSH remote workspaces — a virtual path of
+  // the form `ssh://<hostId>/<posix path>` (see src/shared/remote.ts). The
+  // main process routes fs/git/pty/search on this prefix.
   cwd: string;
   color: string;
   workers: Worker[];
@@ -69,6 +72,12 @@ export interface Workspace {
     city: string; // generated slug (directory + branch name)
     createdAt: string; // ISO timestamp
     fileCount?: number; // tracked files copied into the worktree (chat banner)
+  };
+  // Present only on SSH remote workspaces (cwd is then ssh://<hostId>/...).
+  // Host connection details live in the remote-hosts registry, keyed by id,
+  // so credential/host edits apply to every workspace on that host.
+  remote?: {
+    hostId: string;
   };
 }
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitLog, GitStatus } from "@shared/types";
+import { isRemotePath } from "@shared/remote";
 
 // Single shared git status/log poll per active workspace, extracted verbatim
 // from GitPanel so the Source Control panel, the explorer's git decorations,
@@ -124,6 +125,14 @@ export function useSharedGitStatus(cwd: string | null): SharedGitStatus {
   const refresh = useCallback(async (silent = false): Promise<void> => {
     const target = cwdRef.current;
     if (!target) {
+      setStatus(null);
+      setLog(null);
+      return;
+    }
+    // Remote workspaces: local git can't operate on a ssh:// cwd. Remote git
+    // support lands in Phase 3; until then the Source Control panel shows a
+    // placeholder and this hook stays idle for remote roots.
+    if (isRemotePath(target)) {
       setStatus(null);
       setLog(null);
       return;

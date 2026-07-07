@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 import type {
+  RemoteAuthPromptAnswer,
+  RemoteAuthPromptRequest,
+  RemoteBrowseResult,
+  RemoteConnectionStatus,
+  RemoteHostConfig,
+} from "@shared/remote";
+import type {
   AddRunMessageInput,
   AgentAssetDeleteResult,
   AgentAssetInstallResult,
@@ -759,6 +766,37 @@ const api = {
       ipcRenderer.invoke("clipboard:readFilePaths"),
     writeFilePaths: (paths: string[]): Promise<boolean> =>
       ipcRenderer.invoke("clipboard:writeFilePaths", { paths }),
+  },
+  // SSH remote workspaces: host registry, connection lifecycle, the
+  // pre-workspace folder browser, and the auth-prompt bridge.
+  remote: {
+    listHosts: (): Promise<RemoteHostConfig[]> => ipcRenderer.invoke("remote:listHosts"),
+    saveHost: (host: RemoteHostConfig): Promise<RemoteHostConfig[]> =>
+      ipcRenderer.invoke("remote:saveHost", host),
+    deleteHost: (hostId: string): Promise<RemoteHostConfig[]> =>
+      ipcRenderer.invoke("remote:deleteHost", hostId),
+    connect: (hostId: string): Promise<RemoteConnectionStatus> =>
+      ipcRenderer.invoke("remote:connect", hostId),
+    disconnect: (hostId: string): Promise<void> => ipcRenderer.invoke("remote:disconnect", hostId),
+    status: (hostId: string): Promise<RemoteConnectionStatus> =>
+      ipcRenderer.invoke("remote:status", hostId),
+    browse: (hostId: string, path: string | null): Promise<RemoteBrowseResult> =>
+      ipcRenderer.invoke("remote:browse", { hostId, path }),
+    answerAuthPrompt: (answer: RemoteAuthPromptAnswer): void => {
+      ipcRenderer.send("remote:authPromptAnswer", answer);
+    },
+    onAuthPrompt: (handler: (request: RemoteAuthPromptRequest) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, request: RemoteAuthPromptRequest) =>
+        handler(request);
+      ipcRenderer.on("remote:authPrompt", listener);
+      return () => ipcRenderer.off("remote:authPrompt", listener);
+    },
+    onStatus: (handler: (status: RemoteConnectionStatus) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, status: RemoteConnectionStatus) =>
+        handler(status);
+      ipcRenderer.on("remote:status", listener);
+      return () => ipcRenderer.off("remote:status", listener);
+    },
   },
   // cora-preview MCP bridge: main forwards preview-tool requests here, the
   // renderer dispatches against the picked preview tab and sends a response

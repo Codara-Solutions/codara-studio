@@ -5,17 +5,27 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { WebContents } from "electron";
 import type { ShellInfo } from "@shared/types";
+import { isRemotePath, parseRemotePath } from "@shared/remote";
 import { sanitizeNestedAgentEnv } from "./env-sanitize";
 import { injectEnrichedPath } from "./path-reconstruction";
 import { getHookRpcEnvSafe } from "./hook-rpc";
 import { sparkHome } from "./spark-home";
+import { getConnection, shQuote } from "./remote/connections";
+
+// The subset of node-pty's IPty that pty-manager actually drives. Local
+// sessions hand in the real IPty; REMOTE sessions (ssh:// cwd) hand in an
+// adapter over an ssh2 shell channel with the same shape — everything
+// downstream (tail buffers, pause/resume, taps, kill bookkeeping) is
+// transport-agnostic. Remote handles report pid 0, which the Windows
+// taskkill reaping paths already skip via their `pid > 0` guards.
+type PtyHandle = Pick<nodePty.IPty, "pid" | "write" | "resize" | "kill" | "onData" | "onExit">;
 
 interface Session {
   id: string;
   // Working directory the pty was spawned in. Lets disposeUnderCwd find and
   // kill the shells / agent panes holding a worktree open when it's deleted.
   cwd: string;
-  pty: nodePty.IPty;
+  pty: PtyHandle;
   // Renderer sink for live output. Null in headless eval mode — orchestration
   // drives workers without a BrowserWindow, so pty bytes go only to main-process
   // taps (the agent-TUI sniffer) and the writer writes/exit waiters.
@@ -341,6 +351,13 @@ export async function spawn(
     return { id: opts.id, pid: existing.pty.pid, startupCommandHandled: false };
   }
 
+  // Remote workspace pane: the cwd is a ssh://<hostId>/<path> virtual path.
+  // Everything local below (shell detection, $PROFILE locks, node-pty) is
+  // irrelevant — the host's own login shell runs on an ssh2 PTY channel.
+  if (isRemotePath(opts.cwd)) {
+    return doSpawnRemote(opts);
+  }
+
   const noShellIntegration = opts.env?.SPARK_NO_SHELL_INTEGRATION === "1";
   const launch = withStartupCommand(opts.shell, opts.startupCommand, noShellIntegration);
   const spawnOpts: SpawnOptions = launch.shell === opts.shell ? opts : { ...opts, shell: launch.shell };
@@ -365,6 +382,147 @@ export async function spawn(
     releaseLock?.();
     throw err;
   }
+}
+
+// Spawn a REMOTE pty: an ssh2 shell channel on the workspace's host, wrapped
+// in a PtyHandle so every downstream path (enqueueData, tail buffers,
+// pause/resume/detach, taps, exit waiters) is shared with local sessions.
+// The remote host runs the user's own login shell; we cd into the workspace
+// path and optionally fire the startup command as the shell's first input,
+// so callers get `startupCommandHandled: true` (no renderer type-after-mount
+// race, same as the pwsh args-takeover path locally).
+async function doSpawnRemote(
+  opts: SpawnOptions,
+): Promise<{ id: string; pid: number; startupCommandHandled?: boolean }> {
+  const parts = parseRemotePath(opts.cwd);
+  if (!parts) throw new Error(`Malformed remote path: ${opts.cwd}`);
+  const cols = Math.max(1, opts.cols | 0);
+  const rows = Math.max(1, opts.rows | 0);
+  const conn = await getConnection(parts.hostId);
+  const channel = await conn.shell({ cols, rows });
+
+  const handle: PtyHandle = {
+    pid: 0,
+    write: (data: string) => {
+      try {
+        channel.write(data);
+      } catch {
+        /* channel already closed */
+      }
+    },
+    resize: (c: number, r: number) => {
+      try {
+        // ssh2 order is (rows, cols, heightPx, widthPx).
+        channel.setWindow(r, c, 0, 0);
+      } catch {
+        /* ignore */
+      }
+    },
+    kill: () => {
+      try {
+        channel.close();
+      } catch {
+        /* ignore */
+      }
+    },
+    onData: (cb: (data: string) => void) => {
+      const listener = (d: Buffer) => cb(d as unknown as string);
+      channel.on("data", listener);
+      channel.stderr.on("data", listener);
+      return {
+        dispose: () => {
+          channel.off("data", listener);
+          channel.stderr.off("data", listener);
+        },
+      };
+    },
+    onExit: (cb: (e: { exitCode: number; signal?: number }) => void) => {
+      const listener = () => cb({ exitCode: 0 });
+      channel.on("close", listener);
+      return { dispose: () => channel.off("close", listener) };
+    },
+  };
+
+  const stranded = opts.webContents ? null : consumeStrandedBinding(opts.id);
+  const session: Session = {
+    id: opts.id,
+    cwd: opts.cwd,
+    pty: handle,
+    webContents: opts.webContents ?? stranded?.webContents ?? null,
+    dataChannel: `pty:data:${opts.id}`,
+    exitChannel: `pty:exit:${opts.id}`,
+    pendingChunks: [],
+    pendingBytes: 0,
+    flushTimer: null,
+    resizedAt: 0,
+    exited: false,
+    tail: [],
+    tailBytes: 0,
+    attached: true,
+    detachedBacklog: [],
+    detachedBacklogBytes: 0,
+    disposed: false,
+  };
+
+  handle.onData((data: string | Buffer) => {
+    if (session.disposed) return;
+    enqueueData(opts.id, data);
+  });
+
+  handle.onExit(({ exitCode, signal }) => {
+    const current = sessions.get(opts.id);
+    if (current && current !== session) return;
+    const s = current ?? session;
+    if (s) {
+      s.exited = true;
+      flushDataNow(s);
+      if (s.webContents && !s.webContents.isDestroyed()) {
+        s.webContents.send(s.exitChannel, { exitCode, signal });
+      }
+      if (!strandedBindings.has(opts.id)) {
+        stashWebContents(opts.id, s);
+      }
+      if (s.flushTimer) clearTimeout(s.flushTimer);
+    }
+    if (current === session) sessions.delete(opts.id);
+    const t = pendingKills.get(opts.id);
+    if (t) {
+      clearTimeout(t);
+      pendingKills.delete(opts.id);
+    }
+    const waiters = exitWaiters.get(opts.id) ?? [];
+    exitWaiters.delete(opts.id);
+    for (const w of waiters) {
+      try {
+        w({ exitCode, signal });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
+  sessions.set(opts.id, session);
+  const waiters = spawnWaiters.get(opts.id) ?? [];
+  spawnWaiters.delete(opts.id);
+  for (const w of waiters) {
+    try {
+      w();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  // First input: land in the workspace directory, mark the pane, wipe the
+  // banner + echoed setup line, then run the caller's startup command (if
+  // any) as the shell's first real action.
+  const startup = opts.startupCommand?.trim();
+  const setup =
+    `cd ${shQuote(parts.path)} && export SPARK_TERMINAL=1 SPARK_REMOTE=1 && clear` +
+    (startup ? ` && ${startup}` : "") +
+    "\n";
+  channel.write(setup);
+
+  return { id: opts.id, pid: 0, startupCommandHandled: Boolean(startup) };
 }
 
 function withStartupCommand(

@@ -9,6 +9,22 @@ import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, importEntries, listDir, listFiles, listMarkdownFiles, moveEntries, readFileBytes, readFileEx, readTextFile, renameFile, statFile, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPath, setAllowedRoots } from "./fs-sandbox";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
+import { deleteManualHost, listHosts, saveManualHost } from "./remote/ssh-hosts";
+import { browseRemoteDir } from "./remote/browse";
+import {
+  answerAuthPrompt,
+  disconnectHost,
+  getConnection,
+  getConnectionStatus,
+  setAuthPromptSender,
+  setStatusSender,
+} from "./remote/connections";
+import type {
+  RemoteAuthPromptAnswer,
+  RemoteBrowseResult,
+  RemoteConnectionStatus,
+  RemoteHostConfig,
+} from "@shared/remote";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { sparkHome } from "./spark-home";
 import { detectAgentRuntimes } from "./agent-runtimes";
@@ -1588,6 +1604,60 @@ export function registerIpc(): void {
       /* best-effort */
     }
   });
+  // ── SSH remote workspaces ──────────────────────────────────────────────
+  // Host registry, pre-workspace folder browsing, connection lifecycle, and
+  // the auth-prompt bridge (main asks → renderer modal answers).
+  const broadcast = (channel: string, payload: unknown) => {
+    for (const wc of webContents.getAllWebContents()) {
+      if (!wc.isDestroyed()) {
+        try {
+          wc.send(channel, payload);
+        } catch {
+          /* window mid-teardown */
+        }
+      }
+    }
+  };
+  setAuthPromptSender((request) => broadcast("remote:authPrompt", request));
+  setStatusSender((status) => broadcast("remote:status", status));
+
+  ipcMain.handle("remote:listHosts", async (): Promise<RemoteHostConfig[]> => listHosts());
+  ipcMain.handle(
+    "remote:saveHost",
+    async (_e, host: RemoteHostConfig): Promise<RemoteHostConfig[]> => saveManualHost(host),
+  );
+  ipcMain.handle(
+    "remote:deleteHost",
+    async (_e, hostId: string): Promise<RemoteHostConfig[]> => deleteManualHost(hostId),
+  );
+  ipcMain.handle(
+    "remote:connect",
+    async (_e, hostId: string): Promise<RemoteConnectionStatus> => {
+      try {
+        const conn = await getConnection(hostId);
+        await conn.ensure();
+      } catch {
+        // getConnectionStatus below carries the error detail.
+      }
+      return getConnectionStatus(hostId);
+    },
+  );
+  ipcMain.handle("remote:disconnect", async (_e, hostId: string): Promise<void> => {
+    disconnectHost(hostId);
+  });
+  ipcMain.handle(
+    "remote:status",
+    async (_e, hostId: string): Promise<RemoteConnectionStatus> => getConnectionStatus(hostId),
+  );
+  ipcMain.handle(
+    "remote:browse",
+    async (_e, args: { hostId: string; path: string | null }): Promise<RemoteBrowseResult> =>
+      browseRemoteDir(args.hostId, args.path),
+  );
+  ipcMain.on("remote:authPromptAnswer", (_e, answer: RemoteAuthPromptAnswer) => {
+    answerAuthPrompt(answer);
+  });
+
   // File clipboard bridge for the explorer's copy/cut/paste. Real CF_HDROP
   // interop with Windows Explorer via clipboard-files.ts; both directions
   // fail soft so the renderer's in-app clipboard keeps working regardless.

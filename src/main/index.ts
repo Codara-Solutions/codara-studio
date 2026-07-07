@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { registerIpc, setTrayHook } from "./ipc";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
+import { disposeAllConnections } from "./remote/connections";
 import { startAgentSocket, stopAgentSocket } from "./agent-socket";
 import { registerDaemonHostScaffold } from "./orchestration/daemon";
 import { ensureSparkHomeSync } from "./spark-home";
@@ -582,6 +583,7 @@ app.on("window-all-closed", async () => {
   // next launch; stragglers still get taskkill'd. See disposeAllGraceful.
   await pty.disposeAllGraceful();
   fsWatcher.disposeAll();
+  disposeAllConnections();
   await flushAllStores();
   // Quit on all platforms. The close-to-tray early-return above already
   // protects the background-running case; if we reach this line the user closed
@@ -626,6 +628,7 @@ app.on("before-quit", (event) => {
       // the 5s hard-exit fallback above. See disposeAllGraceful.
       await pty.disposeAllGraceful();
       fsWatcher.disposeAll();
+      disposeAllConnections();
       // Close the hook RPC alongside ptys so any in-flight worker post (which
       // can only land on 127.0.0.1) gets a clean close instead of a connection
       // reset during shutdown.

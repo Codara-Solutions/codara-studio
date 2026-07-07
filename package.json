@@ -73,13 +73,16 @@
     "rehype-highlight": "^7.0.2",
     "rehype-raw": "^7.0.0",
     "rehype-sanitize": "^6.0.0",
-    "remark-gfm": "^4.0.0"
+    "remark-gfm": "^4.0.0",
+    "ssh-config": "^5.2.0",
+    "ssh2": "^1.17.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "@types/node": "^20.14.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
+    "@types/ssh2": "^1.15.5",
     "@vitejs/plugin-react": "^4.3.1",
     "electron": "^32.0.0",
     "electron-builder": "^26.15.3",

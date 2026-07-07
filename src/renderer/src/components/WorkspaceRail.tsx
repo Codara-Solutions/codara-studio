@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { ChatBackendKind, FsEntry, GitFileChange, RunState, Workspace } from "@shared/types";
 import type { SharedGitStatus } from "../git/useSharedGitStatus";
+import { isRemotePath } from "@shared/remote";
 import type { ChatStatusTone } from "./chat/timeline";
 import { statusToneColor } from "./chat/timeline";
 import { MinusIcon, PlusIcon } from "./icons";
@@ -15,7 +16,7 @@ import {
   type PanelSide,
 } from "../panels/usePanelLayout";
 import ResizeHandle from "../panels/ResizeHandle";
-import SectionHeader from "../panels/SectionHeader";
+import SectionHeader, { type SectionHeaderDragProps } from "../panels/SectionHeader";
 
 const WORKSPACE_COLORS = [
   "#2AA298",
@@ -64,6 +65,8 @@ interface RailProps {
   onReorder: (fromIndex: number, toIndex: number) => void;
   onCloseEditor: () => void;
   onCreate: () => void;
+  // Opens the SSH connect dialog to add a remote (VPS) workspace.
+  onCreateRemote: () => void;
   onSplitChange: (ratio: number) => void;
   onToggleSection: (section: PanelSectionKey) => void;
   onMoveSection: (section: PanelSectionKey, side: PanelSide, index: number) => void;
@@ -192,6 +195,9 @@ function WorkspaceRail(props: RailProps) {
                   <RailIconButton title="New workspace" onClick={onCreate}>
                     <PlusIcon size={11} />
                   </RailIconButton>
+                  <RailIconButton title="New remote workspace (SSH)" onClick={props.onCreateRemote}>
+                    <RemoteGlyph />
+                  </RailIconButton>
                   <RailIconButton
                     title={
                       props.activeId
@@ -295,6 +301,20 @@ function WorkspaceRail(props: RailProps) {
           </>
         );
       case "graph":
+        // Phase 3 brings remote git; until then Source Control is a calm
+        // placeholder for remote workspaces (running local git against a
+        // ssh:// cwd would just error).
+        if (isRemotePath(props.activeWorkspace?.cwd)) {
+          return (
+            <RemoteSectionPlaceholder
+              label="Source Control"
+              collapsed={collapsed.graph}
+              onToggle={() => onToggleSection("graph")}
+              headerDrag={headerDrag("graph")}
+              text="Source control for remote workspaces is coming soon. Use a terminal on the host for git in the meantime."
+            />
+          );
+        }
         return (
           <GitPanel
             cwd={props.activeWorkspace?.cwd ?? null}
@@ -310,6 +330,18 @@ function WorkspaceRail(props: RailProps) {
         );
       case "explorer": {
         const cwd = props.activeWorkspace?.cwd ?? null;
+        // Phase 2 brings the remote file tree; until then show a placeholder.
+        if (isRemotePath(cwd)) {
+          return (
+            <RemoteSectionPlaceholder
+              label="Explorer"
+              collapsed={collapsed.explorer}
+              onToggle={() => onToggleSection("explorer")}
+              headerDrag={headerDrag("explorer")}
+              text="Remote file browsing is coming soon. Open a terminal to work on the host now."
+            />
+          );
+        }
         if (!cwd) {
           return (
             <>
@@ -1211,6 +1243,45 @@ function BranchGlyph({ color, active }: { color: string; active: boolean }) {
         <path d="M18 9a9 9 0 0 1-9 9" />
       </svg>
     </span>
+  );
+}
+
+// Collapsible section placeholder shown for remote-workspace sections whose
+// remote backend lands in a later phase (Source Control, Explorer).
+function RemoteSectionPlaceholder({
+  label,
+  collapsed,
+  onToggle,
+  headerDrag,
+  text,
+}: {
+  label: string;
+  collapsed: boolean;
+  onToggle: () => void;
+  headerDrag: SectionHeaderDragProps;
+  text: string;
+}) {
+  return (
+    <>
+      <SectionHeader label={label} collapsed={collapsed} onToggleCollapse={onToggle} {...headerDrag} />
+      {!collapsed && (
+        <div style={{ padding: "12px 14px", color: "var(--muted)", fontSize: 11, lineHeight: 1.5 }}>
+          {text}
+        </div>
+      )}
+    </>
+  );
+}
+
+// Small server/remote glyph for the "new remote workspace" rail action.
+function RemoteGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="7" rx="1.5" />
+      <rect x="3" y="14" width="18" height="6" rx="1.5" />
+      <line x1="7" y1="7.5" x2="7" y2="7.5" />
+      <line x1="7" y1="17" x2="7" y2="17" />
+    </svg>
   );
 }
 
