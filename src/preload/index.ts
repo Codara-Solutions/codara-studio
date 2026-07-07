@@ -797,6 +797,10 @@ const api = {
       ipcRenderer.on("remote:status", listener);
       return () => ipcRenderer.off("remote:status", listener);
     },
+    // Which agent CLIs (claude/codex) are installed on the host — used to
+    // hint before launching a remote agent terminal.
+    detectAgents: (hostIdOrPath: string): Promise<{ hostId: string; claude: boolean; codex: boolean }> =>
+      ipcRenderer.invoke("remote:detectAgents", hostIdOrPath),
   },
   // cora-preview MCP bridge: main forwards preview-tool requests here, the
   // renderer dispatches against the picked preview tab and sends a response

@@ -20,12 +20,28 @@ import {
   setStatusSender,
 } from "./remote/connections";
 import { isRemotePath } from "@shared/remote";
+import { detectRemoteAgents, type RemoteAgentAvailability } from "./remote/remote-agents";
 import type {
   RemoteAuthPromptAnswer,
   RemoteBrowseResult,
   RemoteConnectionStatus,
   RemoteHostConfig,
 } from "@shared/remote";
+
+// Managed orchestration (Cora chat backend, automations, autopilot,
+// checkpoints) is wired to local file side-channels — the CLI's on-disk
+// transcript, the hook queue/turn files, the checkpoint temp index — all of
+// which assume the agent runs on the same machine as the app. Those don't hold
+// for a remote host yet, so we refuse cleanly instead of hanging. Running the
+// agent CLI directly on the VPS works today via a "Worker — Claude/Codex"
+// terminal on the remote workspace.
+function assertLocalWorkspace(cwd: string, feature: string): void {
+  if (isRemotePath(cwd)) {
+    throw new Error(
+      `${feature} isn't available for remote (SSH) workspaces yet. Open a terminal on the host and run the agent there instead.`,
+    );
+  }
+}
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { sparkHome } from "./spark-home";
 import { detectAgentRuntimes } from "./agent-runtimes";
@@ -993,6 +1009,7 @@ export function registerIpc(): void {
   );
 
   ipcMain.handle("orchestration:createRun", async (_e, input: CreateRunInput): Promise<RunState> => {
+    assertLocalWorkspace(input.cwd, "Managed chat");
     const { createRun } = await getRunStore();
     return createRun(input);
   });
@@ -1022,6 +1039,7 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("orchestration:startAutopilot", async (_e, input: StartAutopilotInput): Promise<RunState> => {
+    assertLocalWorkspace(input.cwd, "Automations and autopilot");
     const { startAutopilot } = await getRunStore();
     return startAutopilot(input);
   });
@@ -1674,6 +1692,11 @@ export function registerIpc(): void {
   ipcMain.on("remote:authPromptAnswer", (_e, answer: RemoteAuthPromptAnswer) => {
     answerAuthPrompt(answer);
   });
+  ipcMain.handle(
+    "remote:detectAgents",
+    async (_e, hostIdOrPath: string): Promise<RemoteAgentAvailability> =>
+      detectRemoteAgents(hostIdOrPath),
+  );
 
   // File clipboard bridge for the explorer's copy/cut/paste. Real CF_HDROP
   // interop with Windows Explorer via clipboard-files.ts; both directions
