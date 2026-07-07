@@ -1367,6 +1367,19 @@ export function useTerminalSession({
       // A byte-identical tail is coerced to null so the existing idle debounce
       // arms promptly. Reset across agent enter/exit so a new turn starts clean.
       let lastWorkingTail: string | null = null;
+      // Flicker fix (idle→working re-promotion off the SAME frozen footer). D4
+      // above resolves a confirmed-working chip to "idle" once its footer freezes,
+      // but the frozen frame keeps classifying as "working" — so two ticks later
+      // the pending-confirm path drags the chip BACK to "working", D4 debounces it
+      // to "idle" again ~1.2s on, and the chip oscillates working↔ready forever.
+      // We snapshot the exact tail at the moment we settle on "idle" and refuse to
+      // re-promote to "working" while the tail is byte-identical to it: a genuine
+      // new turn repaints the footer (fresh spinner / "(0s ·" / the echoed prompt)
+      // so the tail differs and promotion proceeds normally. Cleared when we leave
+      // idle and reset across agent enter/exit. Claude-only, mirroring D4: Codex/
+      // Cursor turn-completion is driven by the focus-independent notifier, and
+      // their idle composer doesn't classify as "working" anyway.
+      let idleFrozenTail: string | null = null;
       // Bug B (baseline idle): a launched-but-never-worked agent (the user
       // typed `claude`, the idle box is up, nothing run yet) classifies as
       // null forever, so confirmedState stays null and the chip would fall
@@ -1417,6 +1430,7 @@ export function useTerminalSession({
         baselineIdleSinceMs = null;
         uiGoneTicks = 0;
         lastWorkingTail = null;
+        idleFrozenTail = null;
         clearCtrlCExitTimer();
       };
       const tickStatePoller = () => {
@@ -1460,6 +1474,24 @@ export function useTerminalSession({
           lastWorkingTail = tail;
         } else {
           lastWorkingTail = null;
+        }
+
+        // Flicker fix — do NOT re-promote an already-idle chip to "working" off
+        // the exact frozen footer we already resolved to idle. classifyTail keeps
+        // matching the frozen "(12s · … tokens)" summary as "working" forever
+        // (freshFrom=0 snapshot), so without this the pending-confirm path would
+        // drag the chip back to "working" ~600ms after every idle, and D4 would
+        // debounce it back to "idle" ~1.2s later — the reported working↔ready
+        // oscillation. A genuine new turn repaints the footer, so tail differs
+        // from idleFrozenTail and promotion proceeds. Claude-only, mirroring D4.
+        if (
+          activeRuntime === "claude" &&
+          confirmedState === "idle" &&
+          raw === "working" &&
+          idleFrozenTail !== null &&
+          tail === idleFrozenTail
+        ) {
+          effectiveRaw = null;
         }
 
         // Bug A — poller-driven exit detection. The agent's persistent UI
@@ -1535,6 +1567,8 @@ export function useTerminalSession({
             pendingState = null;
             idleSinceMs = null;
             lastWorkingTail = null;
+            // Snapshot the frozen footer so it can't re-promote us to "working".
+            idleFrozenTail = tail;
             reportRuntimeState("idle");
           }
           return;
@@ -1557,6 +1591,7 @@ export function useTerminalSession({
             if (now - baselineIdleSinceMs >= IDLE_DEBOUNCE_MS) {
               confirmedState = "idle";
               baselineIdleSinceMs = null;
+              idleFrozenTail = tail;
               reportRuntimeState("idle");
             }
           }
@@ -1569,6 +1604,9 @@ export function useTerminalSession({
         }
         if (confirmedState !== effectiveRaw) {
           confirmedState = effectiveRaw;
+          // Left idle for a real, fresh signal — drop the frozen-footer snapshot
+          // so a later idle re-captures the current frame.
+          idleFrozenTail = null;
           // A confirmed working/blocked signal means the agent is alive and
           // active — stand down the Ctrl+C exit one-shot so it can't fire after
           // a new turn started post-interrupt.
@@ -1584,6 +1622,7 @@ export function useTerminalSession({
         baselineIdleSinceMs = null;
         uiGoneTicks = 0;
         lastWorkingTail = null;
+        idleFrozenTail = null;
         clearCtrlCExitTimer();
         if (stateTimer !== null) window.clearInterval(stateTimer);
         stateTimer = window.setInterval(tickStatePoller, STATE_POLL_MS);
