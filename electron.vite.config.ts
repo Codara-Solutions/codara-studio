@@ -104,6 +104,10 @@ export default defineConfig({
               return "flow-vendor";
             if (id.includes("react-virtuoso")) return "virtuoso-vendor";
             if (id.includes("@iconify")) return "icons-vendor";
+            // pdf.js is only imported by the lazily-loaded PdfPreview chunk;
+            // keeping it out of the eager "vendor" chunk means the ~1MB
+            // library loads only when a PDF is first previewed.
+            if (id.includes("pdfjs-dist")) return "pdfjs-vendor";
             return "vendor";
           },
         },

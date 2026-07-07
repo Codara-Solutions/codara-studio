@@ -93,6 +93,34 @@ export async function readTextFile(path: string): Promise<FsFileContent> {
   };
 }
 
+// Lightweight metadata probe for the file previewers (image/pdf/media):
+// they load content via file:// URLs, so all they need from IPC is size +
+// mtime for captions and cache-busting — never the buffer itself.
+export async function statFile(path: string): Promise<{ size: number; mtimeMs: number }> {
+  const st = await fs.stat(path);
+  if (!st.isFile()) {
+    throw new Error("Path is not a file.");
+  }
+  return { size: st.size, mtimeMs: st.mtimeMs };
+}
+
+// Raw bytes for renderer-side binary consumers (pdf.js document loading and
+// the blob-URL fallback the previewers use in dev, where an http-served
+// renderer cannot load file:// subresources). Hard cap keeps a mis-click on
+// a giant artifact from ballooning main-process memory.
+const MAX_BINARY_READ_BYTES = 300 * 1024 * 1024;
+
+export async function readFileBytes(path: string): Promise<Uint8Array> {
+  const st = await fs.stat(path);
+  if (!st.isFile()) {
+    throw new Error("Path is not a file.");
+  }
+  if (st.size > MAX_BINARY_READ_BYTES) {
+    throw new Error("File is too large to preview.");
+  }
+  return fs.readFile(path);
+}
+
 // Discriminated-union read used by the CodeMirror editor so it can render a
 // dedicated banner for binary/oversize files instead of throwing. Mirrors
 // the terax-scout pattern (kind: text | binary | toolarge).

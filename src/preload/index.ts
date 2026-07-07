@@ -311,6 +311,14 @@ const api = {
     }> => ipcRenderer.invoke("fs:pathExists", input),
     listMarkdownFiles: (root: string): Promise<PlanFile[]> =>
       ipcRenderer.invoke("fs:listMarkdownFiles", root),
+    // Size + mtime only — used by the file previewers, which load content
+    // via file:// URLs and never round-trip bytes through IPC.
+    statFile: (path: string): Promise<{ size: number; mtimeMs: number }> =>
+      ipcRenderer.invoke("fs:statFile", path),
+    // Raw bytes (capped main-side) — pdf.js document data and the blob-URL
+    // fallback path for previews when file:// subresources are unavailable.
+    readFileBytes: (path: string): Promise<Uint8Array> =>
+      ipcRenderer.invoke("fs:readFileBytes", path),
     // Editor save. `expectedMtimeMs` (autosave) makes the write conditional:
     // the main process refuses with kind:"conflict" if the file on disk
     // changed since the buffer loaded. Omitted (manual save) = always write.

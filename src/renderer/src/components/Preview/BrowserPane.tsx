@@ -11,6 +11,7 @@ import InspectorOverlay, { type InspectorPick } from "./InspectorOverlay";
 import DrawOverlay from "./DrawOverlay";
 import { GlobeIcon } from "../icons";
 import type { SelectionPayload } from "../../routing/SelectionRoutingContext";
+import { pathToFileUrl } from "../../lib/pathToFileUrl";
 
 // BrowserPane wraps Electron's <webview> tag for preview tabs. We use
 // <webview> over <iframe> because it sidesteps X-Frame-Options/CSP and
@@ -850,23 +851,6 @@ function EmptyState({ onFocusAddress }: { onFocusAddress: () => void }) {
       </button>
     </div>
   );
-}
-
-// Convert an OS path into a `file://` URL the chat can render as a link and
-// downstream tools (e.g. Claude Code's image-read tool) can open. Handles
-// Windows backslashes + drive letters; falls back to a best-effort prefix on
-// other shapes so the prompt is still useful.
-function pathToFileUrl(osPath: string): string {
-  if (!osPath) return osPath;
-  if (/^file:\/\//i.test(osPath)) return osPath;
-  const normalized = osPath.replace(/\\/g, "/");
-  if (/^[A-Za-z]:\//.test(normalized)) {
-    return `file:///${encodeURI(normalized).replace(/#/g, "%23")}`;
-  }
-  if (normalized.startsWith("/")) {
-    return `file://${encodeURI(normalized).replace(/#/g, "%23")}`;
-  }
-  return `file:///${encodeURI(normalized).replace(/#/g, "%23")}`;
 }
 
 // Composite the freehand drawing canvas onto a copy of the page screenshot.

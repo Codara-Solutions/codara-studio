@@ -17,6 +17,10 @@ interface Options {
   // Live autosave preferences, read at schedule time (not captured) so a
   // Settings toggle applies to already-open tabs without remounting them.
   getAutosavePrefs?: () => { enabled: boolean; delayMs: number };
+  // True for files rendered by a visual previewer (image/pdf/media): the
+  // text-read IPC round-trip is skipped entirely and `doc` stays "loading",
+  // which no preview-only render branch ever consults.
+  skip?: boolean;
 }
 
 export interface UseDocumentResult {
@@ -44,7 +48,7 @@ export interface UseDocumentResult {
 // the write if the disk copy changed underneath us (agent edit, git op,
 // checkpoint restore) — that flips `conflict` on and autosave stays paused
 // for this document until reload(force) or a manual save() resolves it.
-export function useDocument({ path, onDirtyChange, getAutosavePrefs }: Options): UseDocumentResult {
+export function useDocument({ path, onDirtyChange, getAutosavePrefs, skip = false }: Options): UseDocumentResult {
   const [doc, setDoc] = useState<DocumentState>({ status: "loading" });
   const [dirty, setDirty] = useState(false);
   const [conflict, setConflict] = useState(false);
@@ -101,6 +105,7 @@ export function useDocument({ path, onDirtyChange, getAutosavePrefs }: Options):
     savedRef.current = "";
     bufferRef.current = "";
     mtimeRef.current = null;
+    if (skip) return;
 
     void window.spark.fs
       .readEx(path)
@@ -128,7 +133,7 @@ export function useDocument({ path, onDirtyChange, getAutosavePrefs }: Options):
       // must never fire against the new one.
       clearAutosaveTimer();
     };
-  }, [path, reloadCounter, clearAutosaveTimer, setConflictState]);
+  }, [path, reloadCounter, skip, clearAutosaveTimer, setConflictState]);
 
   // Re-read the file from disk. No-op (silent) if the buffer is dirty —
   // callers shouldn't clobber unsaved user edits — unless `force` is set

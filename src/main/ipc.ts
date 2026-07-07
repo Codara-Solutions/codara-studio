@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
-import { createFile, createFolder, deleteFile, importEntries, listDir, listFiles, listMarkdownFiles, moveEntries, readFileEx, readTextFile, renameFile, writeTextFile } from "./fs-tree";
+import { createFile, createFolder, deleteFile, importEntries, listDir, listFiles, listMarkdownFiles, moveEntries, readFileBytes, readFileEx, readTextFile, renameFile, statFile, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPath, setAllowedRoots } from "./fs-sandbox";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { sparkHome } from "./spark-home";
@@ -510,6 +510,19 @@ export function registerIpc(): void {
   ipcMain.handle("fs:listMarkdownFiles", async (_e, root: string): Promise<PlanFile[]> => {
     assertAllowedReadPath(root);
     return listMarkdownFiles(root);
+  });
+
+  ipcMain.handle(
+    "fs:statFile",
+    async (_e, path: string): Promise<{ size: number; mtimeMs: number }> => {
+      assertAllowedReadPath(path);
+      return statFile(path);
+    },
+  );
+
+  ipcMain.handle("fs:readFileBytes", async (_e, path: string): Promise<Uint8Array> => {
+    assertAllowedReadPath(path);
+    return readFileBytes(path);
   });
 
   ipcMain.handle(

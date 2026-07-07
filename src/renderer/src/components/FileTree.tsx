@@ -6,6 +6,7 @@ import { ChevronIcon } from "./icons";
 import { FileNodeIcon } from "./file-icons/FileNodeIcon";
 import { InlineInput } from "./file-icons/InlineInput";
 import { basename, dirname } from "../path-utils";
+import { pathToFileUrl } from "../lib/pathToFileUrl";
 import SectionHeader, { type SectionHeaderDragProps } from "../panels/SectionHeader";
 
 // Tree row geometry. Hoisted to module scope so the values are shared by
@@ -110,18 +111,9 @@ function isPreviewFile(entry: FsEntry): boolean {
   return !entry.isDir && PREVIEW_FILE_EXTS.has((entry.ext ?? "").toLowerCase());
 }
 
-function filePathToBrowserUrl(path: string): string {
-  const normalized = path.replace(/\\/g, "/");
-  const absolute = normalized.startsWith("/") ? normalized : `/${normalized}`;
-  const encoded = absolute
-    .split("/")
-    .map((segment, index) => {
-      if (index === 1 && /^[A-Za-z]:$/.test(segment)) return segment;
-      return encodeURIComponent(segment);
-    })
-    .join("/");
-  return `file://${encoded}`;
-}
+// file:// URL building lives in lib/pathToFileUrl.ts — one shared
+// implementation for the browser preview, the previewers, and this menu.
+const filePathToBrowserUrl = pathToFileUrl;
 
 interface DirNode {
   entry: FsEntry;

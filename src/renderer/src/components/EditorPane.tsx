@@ -36,6 +36,8 @@ import {
 } from "./editor-cm/autocomplete/inlineExtension";
 import { usePreferences } from "../preferences/usePreferences";
 import MarkdownPreview from "./markdown-preview/MarkdownPreview";
+import FilePreview from "./file-preview/FilePreview";
+import { previewKindForPath } from "./file-preview/previewKind";
 
 // Path-based detection used to decide whether to expose the "Preview" toggle
 // and listen for the markdown.togglePreview shortcut. Keeping this co-located
@@ -89,12 +91,18 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
 ) {
   const path = file.path;
   const isMarkdown = useMemo(() => isMarkdownPath(path), [path]);
+  const previewKind = useMemo(() => previewKindForPath(path), [path]);
+  // Image/pdf/media panes never mount CodeMirror or read text over IPC —
+  // FilePreview loads them via file:// URLs. SVG is real markup, so it keeps
+  // the document flow and gets the same Preview/Edit toggle as markdown.
+  const previewOnly = previewKind !== null && previewKind !== "svg";
+  const hasViewToggle = isMarkdown || previewKind === "svg";
 
-  // View mode applies only to markdown panes. Default to "edit" to match
-  // VS Code — preview is opt-in via the toolbar button or Mod+Shift+V. Mode
-  // is intentionally NOT persisted; reopening a tab returns the user to the
-  // edit view they expect.
-  const [viewMode, setViewMode] = useState<ViewMode>("edit");
+  // View mode applies to markdown + SVG panes. Markdown defaults to "edit"
+  // to match VS Code; SVG defaults to "preview" (you open an SVG to look at
+  // it). Mode is intentionally NOT persisted; reopening a tab returns the
+  // user to the view they expect.
+  const [viewMode, setViewMode] = useState<ViewMode>(previewKind === "svg" ? "preview" : "edit");
   const [copiedAt, setCopiedAt] = useState<number | null>(null);
 
   const cmRef = useRef<ReactCodeMirrorRef>(null);
@@ -110,6 +118,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       enabled: prefsRef.current.autosaveEnabled,
       delayMs: prefsRef.current.autosaveDelayMs,
     }),
+    skip: previewOnly,
   });
   const reloadRef = useRef(reload);
   reloadRef.current = reload;
@@ -364,13 +373,17 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           background: "var(--bg)",
         }}
       >
-        {isMarkdown && doc.status === "ready" && (
+        {hasViewToggle && doc.status === "ready" && (
           <MarkdownToolbar
             mode={viewMode}
             copied={copiedAt !== null}
             onCopy={handleCopy}
             onSetMode={setViewMode}
           />
+        )}
+        {previewOnly && <FilePreview path={path} kind={previewKind!} />}
+        {previewKind === "svg" && viewMode === "preview" && (
+          <FilePreview path={path} kind="svg" />
         )}
         {doc.status === "ready" && conflict && (
           <div
@@ -411,15 +424,15 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             </button>
           </div>
         )}
-        {doc.status === "loading" && <EditorMessage text="Loading file..." />}
-        {doc.status === "error" && <EditorMessage text={doc.message} danger />}
-        {doc.status === "binary" && (
+        {previewKind === null && doc.status === "loading" && <EditorMessage text="Loading file..." />}
+        {!previewOnly && doc.status === "error" && <EditorMessage text={doc.message} danger />}
+        {previewKind === null && doc.status === "binary" && (
           <EditorBanner
             title="Binary file"
             detail={`${formatBytes(doc.size)} - preview not supported.`}
           />
         )}
-        {doc.status === "toolarge" && (
+        {previewKind === null && doc.status === "toolarge" && (
           <EditorBanner
             title="File too large"
             detail={`${formatBytes(doc.size)} exceeds the ${formatBytes(doc.limit)} editor limit.`}
@@ -428,7 +441,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         {doc.status === "ready" && isMarkdown && viewMode === "preview" && (
           <MarkdownPreview text={doc.content} basePath={path} />
         )}
-        {doc.status === "ready" && (!isMarkdown || viewMode === "edit") && (
+        {doc.status === "ready" && (!hasViewToggle || viewMode === "edit") && (
           <CodeMirror
             ref={cmRef}
             value={doc.content}
