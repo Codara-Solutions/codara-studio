@@ -201,6 +201,10 @@ export default function FileTree({
 }: Props) {
   const [root, setRoot] = useState<DirNode & { kind: "dir" }>(() => makeDir({ name: basename(cwd), path: cwd, isDir: true }, true));
   const [contextMenu, setContextMenu] = useState<FileContextMenu | null>(null);
+  // Minimal right-click menu for blank Explorer space (no row under the
+  // pointer): a single Paste action. Row right-clicks use `contextMenu`
+  // (FileMenu) instead — the two are mutually exclusive.
+  const [blankMenu, setBlankMenu] = useState<{ x: number; y: number } | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const [pendingCreate, setPendingCreate] = useState<PendingCreate | null>(null);
   const [selectedFilePaths, setSelectedFilePaths] = useState<Set<string>>(() => new Set());
@@ -226,6 +230,13 @@ export default function FileTree({
   selectionAnchorPathRef.current = selectionAnchorPath;
   const marqueeSelectionRef = useRef<MarqueeSelection | null>(null);
   const suppressNextClickRef = useRef(false);
+  // Paste destination anchor: the last row the user clicked or right-clicked.
+  // Clicking a folder clears the file selection (so the selection can't carry
+  // the destination), and a Finder→tree paste has no selection at all — this
+  // ref preserves "paste into the folder I just clicked". A directory anchor
+  // pastes INTO itself; a file anchor pastes into its parent. Nulled when the
+  // press lands on blank space or the anchored row is moved/deleted.
+  const pasteAnchorRef = useRef<{ path: string; isDir: boolean } | null>(null);
   // Imperative handle on the virtualized list. Used to scroll the active node
   // back into view when `activePath` changes from outside the visible window
   // (e.g. opening a file via search, or F2 rename on an off-screen node).
@@ -445,6 +456,22 @@ export default function FileTree({
     };
   }, [contextMenu]);
 
+  useEffect(() => {
+    if (!blankMenu) return;
+    const close = () => setBlankMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [blankMenu]);
+
   // Rename ----------------------------------------------------------------
   const beginRename = useCallback((entry: FsEntry) => {
     setContextMenu(null);
@@ -484,6 +511,11 @@ export default function FileTree({
           return next;
         });
         setSelectionAnchorPath((anchor) => (anchor === path ? renamed.path : anchor));
+        // Repoint the paste anchor if it pointed at the renamed entry — a
+        // renamed directory would otherwise resolve to a path that's gone.
+        if (pasteAnchorRef.current?.path === path) {
+          pasteAnchorRef.current = { path: renamed.path, isDir: renamed.isDir };
+        }
         setError(null);
       } catch (err) {
         setError((err as Error).message);
@@ -569,6 +601,10 @@ export default function FileTree({
           setSelectionAnchorPath((anchor) =>
             anchor && deletedPaths.includes(anchor) ? null : anchor,
           );
+          // Drop the paste anchor if the row it pointed at was deleted.
+          if (pasteAnchorRef.current && deletedPaths.includes(pasteAnchorRef.current.path)) {
+            pasteAnchorRef.current = null;
+          }
         }
       }
     },
@@ -648,6 +684,11 @@ export default function FileTree({
             return changed ? next : prev;
           });
           setSelectionAnchorPath((anchor) => (anchor && movedSet.has(anchor) ? null : anchor));
+          // A moved source no longer exists at its old path — drop it as the
+          // paste anchor so a later Cmd+V doesn't target a vanished row.
+          if (pasteAnchorRef.current && movedSet.has(pasteAnchorRef.current.path)) {
+            pasteAnchorRef.current = null;
+          }
         }
       }
 
@@ -805,15 +846,22 @@ export default function FileTree({
 
   const pasteFromClipboard = useCallback(
     async (destOverride?: string) => {
-      // Destination: explicit (context menu on a row) → that folder; else the
-      // selection anchor's parent; else the workspace root — matching VS Code.
+      // Destination priority: explicit override (context-menu Paste on a row or
+      // blank space) → the last-clicked paste anchor (folder → into it, file →
+      // into its parent) → the selection anchor's parent → the workspace root.
+      // The paste anchor is what makes "click a destination folder, then Cmd+V"
+      // work even though clicking a folder clears the file selection.
       let destDir = destOverride ?? null;
       if (!destDir) {
+        const anchor = pasteAnchorRef.current;
+        if (anchor) destDir = anchor.isDir ? anchor.path : parentPath(anchor.path);
+      }
+      if (!destDir) {
         const selected = selectedFilePathsRef.current;
-        const anchor =
+        const selAnchor =
           selectionAnchorPathRef.current ??
           (selected.size > 0 ? Array.from(selected)[0] : null);
-        destDir = anchor ? parentPath(anchor) : cwd;
+        destDir = selAnchor ? parentPath(selAnchor) : cwd;
       }
       const local = getExplorerClipboard();
       let sources: string[] | null = null;
@@ -860,19 +908,44 @@ export default function FileTree({
       const key = e.key.toLowerCase();
       if (key !== "c" && key !== "x" && key !== "v") return;
       const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
-      ) {
-        return;
+      // Focus inside the tree means the user engaged the Explorer (a tree
+      // mousedown focuses the list container), so these keys act on the tree
+      // rather than on whatever editor/terminal previously held focus. When
+      // focus is NOT in the tree the editable-target guard stays verbatim:
+      // Cmd+C/X/V typed into an editor or terminal keep their native behavior.
+      // The one in-tree exception is the inline rename INPUT, which must keep
+      // native text editing.
+      const inTree = listViewportRef.current?.contains(document.activeElement) ?? false;
+      const targetIsTreeInput =
+        !!target &&
+        target.tagName === "INPUT" &&
+        (listViewportRef.current?.contains(target) ?? false);
+      if (!inTree || targetIsTreeInput) {
+        if (
+          target &&
+          (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+        ) {
+          return;
+        }
       }
       if ((key === "c" || key === "x") && (window.getSelection()?.toString() ?? "") !== "") return;
       const selected = selectedFilePathsRef.current;
-      if (selected.size === 0) return;
+      if (key === "c" || key === "x") {
+        // Copy/cut act on the current selection — nothing selected, nothing to do.
+        if (selected.size === 0) return;
+        e.preventDefault();
+        copyToClipboard(Array.from(selected), key === "c" ? "copy" : "cut");
+        return;
+      }
+      // Paste ("v") deliberately does NOT require a selection: clicking a
+      // destination folder clears the file selection, and a Finder→tree paste
+      // has no in-app selection — the destination comes from the paste anchor /
+      // cwd fallback instead. Gate it so Cmd+V is only claimed by the Explorer
+      // once the user has actually engaged the tree (focus-within), armed a
+      // paste anchor, or has a selection — never when the tree was never touched.
+      if (!inTree && pasteAnchorRef.current === null && selected.size === 0) return;
       e.preventDefault();
-      if (key === "c") copyToClipboard(Array.from(selected), "copy");
-      else if (key === "x") copyToClipboard(Array.from(selected), "cut");
-      else void pasteFromClipboard();
+      void pasteFromClipboard();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -886,6 +959,9 @@ export default function FileTree({
   // tree. These `useCallback`s take the node / path as an argument instead, so
   // the function identities stay stable and `Row` invokes them with its node.
   const handleContextMenu = useCallback((entry: FsEntry, x: number, y: number) => {
+    // Right-clicking a row anchors paste at it (folder → into it; file → into
+    // its parent), matching the FileMenu Paste destination below.
+    pasteAnchorRef.current = { path: entry.path, isDir: entry.isDir };
     if (entry.isDir) {
       setSelectedFilePaths(new Set());
       setSelectionAnchorPath(null);
@@ -893,6 +969,7 @@ export default function FileTree({
       setSelectedFilePaths(new Set([entry.path]));
       setSelectionAnchorPath(entry.path);
     }
+    setBlankMenu(null);
     setContextMenu({ entry, x, y });
   }, []);
 
@@ -912,6 +989,9 @@ export default function FileTree({
       }
 
       if (node.kind === "dir") {
+        // A folder is a valid paste destination even though it clears the
+        // file selection below.
+        pasteAnchorRef.current = { path: node.entry.path, isDir: true };
         void toggleDir(node);
         if (!event.ctrlKey && !event.metaKey && !event.shiftKey) {
           setSelectedFilePaths(new Set());
@@ -921,6 +1001,8 @@ export default function FileTree({
       }
 
       const path = node.entry.path;
+      // A file anchors paste at its parent directory (all click variants below).
+      pasteAnchorRef.current = { path, isDir: false };
       const toggleSelection = event.ctrlKey || event.metaKey;
       if (event.shiftKey) {
         const anchorPath = selectionAnchorPathRef.current ?? path;
@@ -954,8 +1036,21 @@ export default function FileTree({
 
   const handleListMouseDown = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      if (event.button !== 0 || renamingPath) return;
       const target = event.target as HTMLElement | null;
+      // Focus the list container on any tree press (a row or blank space) so
+      // keyboard clipboard shortcuts target the Explorer instead of whatever
+      // editor/terminal previously held focus — the keydown handler's `inTree`
+      // check reads document.activeElement. mousedown (not click) so it lands
+      // before native drag-out and any editor-open focus side effects. The
+      // inline rename/create input keeps its own focus (it also stops mousedown
+      // propagation, so this never sees it — belt-and-suspenders).
+      const targetEditable =
+        !!target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+      if (!targetEditable) listViewportRef.current?.focus({ preventScroll: true });
+      if (event.button !== 0 || renamingPath) return;
       if (
         target?.closest("button, input, textarea, [contenteditable='true']")
       ) {
@@ -967,6 +1062,9 @@ export default function FileTree({
       // `mouseup` the marquee waits for). Rubber-band selection starts from
       // empty space only — clicks on rows still select via the row's onClick.
       if (target?.closest("[data-fs-row]")) return;
+      // Blank-space press: no destination row under the pointer, so clear the
+      // paste anchor (a later Cmd+V then falls back to selection anchor / cwd).
+      pasteAnchorRef.current = null;
       setContextMenu(null);
       marqueeSelectionRef.current = {
         startX: event.clientX,
@@ -983,6 +1081,22 @@ export default function FileTree({
       window.addEventListener("mouseup", finishMarqueeSelection, { once: true });
     },
     [finishMarqueeSelection, renamingPath, updateMarqueeSelection],
+  );
+
+  const handleListContextMenu = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      // Row right-clicks call stopPropagation before reaching here (see Row's
+      // onContextMenu), so this only fires on blank Explorer space. Blank space
+      // targets the workspace root: clear the row paste anchor and offer a
+      // minimal Paste menu pointed at cwd.
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-fs-row]")) return;
+      event.preventDefault();
+      pasteAnchorRef.current = null;
+      setContextMenu(null);
+      setBlankMenu({ x: event.clientX, y: event.clientY });
+    },
+    [],
   );
 
   // Re-flatten on every render. We mutate root.children in place and bump
@@ -1207,7 +1321,13 @@ export default function FileTree({
       */}
       <div
         ref={listViewportRef}
+        // Programmatically focusable (not tab-reachable) so a tree press can
+        // move keyboard focus here — that's what lets Cmd+C/X/V act on the
+        // Explorer even when an editor/terminal had focus. `outline: none`
+        // hides the resulting focus ring on the scroll container.
+        tabIndex={-1}
         onMouseDown={handleListMouseDown}
+        onContextMenu={handleListContextMenu}
         onDragOver={handleExternalDragOver}
         onDragLeave={handleExternalDragLeave}
         onDrop={handleExternalDrop}
@@ -1216,6 +1336,7 @@ export default function FileTree({
           minHeight: 0,
           position: "relative",
           overflow: "hidden",
+          outline: "none",
           userSelect: selectionRect ? "none" : undefined,
           // Whole-list ring when an external drag targets the workspace root
           // (a subfolder target highlights its own row instead).
@@ -1481,6 +1602,32 @@ export default function FileTree({
               : "Delete"
           }
         />
+      )}
+      {blankMenu && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="spark-glass"
+          style={{
+            position: "fixed",
+            zIndex: 100,
+            left: Math.max(8, Math.min(blankMenu.x, window.innerWidth - 180)),
+            top: Math.max(8, Math.min(blankMenu.y, window.innerHeight - 60)),
+            width: 172,
+            borderRadius: 8,
+            padding: 6,
+          }}
+        >
+          <MenuButton
+            icon="V"
+            hint="Ctrl+V"
+            onClick={() => {
+              setBlankMenu(null);
+              void pasteFromClipboard(cwd);
+            }}
+          >
+            Paste
+          </MenuButton>
+        </div>
       )}
     </div>
   );
