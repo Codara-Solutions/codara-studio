@@ -33,6 +33,7 @@ import { loadPreferences, setPreference } from "./preferences-store";
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
+import { remoteStreamGrep } from "./remote/remote-search";
 import { listEvents } from "./orchestration/event-log";
 import { claudeSessionTranscriptPath, discoverClaudeSessionForCwd } from "./orchestration/claude-paths";
 import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex-sessions";
@@ -1561,11 +1562,12 @@ export function registerIpc(): void {
     "search:start",
     async (e, opts: SearchOptions): Promise<StartSearchResponse> => {
       const sender = e.sender;
-      assertAllowedReadPath(opts.root);
+      const remote = isRemotePath(opts.root);
+      if (!remote) assertAllowedReadPath(opts.root);
       const searchId = `search-${Date.now().toString(36)}-${(searchCounter++).toString(36)}`;
       const hitChannel = `search:hit:${searchId}`;
       const doneChannel = `search:done:${searchId}`;
-      const handle = streamGrep(
+      const handle = (remote ? remoteStreamGrep : streamGrep)(
         opts,
         // streamGrep batches hits, so each message carries an array — keeps
         // a 2000-hit search to a handful of IPC sends.

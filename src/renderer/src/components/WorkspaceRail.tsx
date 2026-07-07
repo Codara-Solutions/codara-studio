@@ -2,7 +2,6 @@ import React, { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { ChatBackendKind, FsEntry, GitFileChange, RunState, Workspace } from "@shared/types";
 import type { SharedGitStatus } from "../git/useSharedGitStatus";
-import { isRemotePath } from "@shared/remote";
 import type { ChatStatusTone } from "./chat/timeline";
 import { statusToneColor } from "./chat/timeline";
 import { MinusIcon, PlusIcon } from "./icons";
@@ -301,20 +300,6 @@ function WorkspaceRail(props: RailProps) {
           </>
         );
       case "graph":
-        // Phase 3 brings remote git; until then Source Control is a calm
-        // placeholder for remote workspaces (running local git against a
-        // ssh:// cwd would just error).
-        if (isRemotePath(props.activeWorkspace?.cwd)) {
-          return (
-            <RemoteSectionPlaceholder
-              label="Source Control"
-              collapsed={collapsed.graph}
-              onToggle={() => onToggleSection("graph")}
-              headerDrag={headerDrag("graph")}
-              text="Source control for remote workspaces is coming soon. Use a terminal on the host for git in the meantime."
-            />
-          );
-        }
         return (
           <GitPanel
             cwd={props.activeWorkspace?.cwd ?? null}
@@ -1088,13 +1073,15 @@ function WorkspaceRow({
                   onEdit();
                 }}
               />
-              <RowMenuItem
-                label="Create copy"
-                onClick={() => {
-                  setMenuOpen(false);
-                  onCreateCopyBranch();
-                }}
-              />
+              {!ws.remote && (
+                <RowMenuItem
+                  label="Create copy"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onCreateCopyBranch();
+                  }}
+                />
+              )}
               <RowMenuItem
                 label="Delete"
                 danger
@@ -1231,33 +1218,6 @@ function BranchGlyph({ color, active }: { color: string; active: boolean }) {
         <path d="M18 9a9 9 0 0 1-9 9" />
       </svg>
     </span>
-  );
-}
-
-// Collapsible section placeholder shown for remote-workspace sections whose
-// remote backend lands in a later phase (Source Control, Explorer).
-function RemoteSectionPlaceholder({
-  label,
-  collapsed,
-  onToggle,
-  headerDrag,
-  text,
-}: {
-  label: string;
-  collapsed: boolean;
-  onToggle: () => void;
-  headerDrag: SectionHeaderDragProps;
-  text: string;
-}) {
-  return (
-    <>
-      <SectionHeader label={label} collapsed={collapsed} onToggleCollapse={onToggle} {...headerDrag} />
-      {!collapsed && (
-        <div style={{ padding: "12px 14px", color: "var(--muted)", fontSize: 11, lineHeight: 1.5 }}>
-          {text}
-        </div>
-      )}
-    </>
   );
 }
 

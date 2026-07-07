@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { isRemotePath } from "@shared/remote";
+import { runRemoteGit } from "./remote/remote-git";
 
 // Shared low-level git plumbing for every Source Control backend module
 // (git-ops, git-commit-message, git-branches, git-stash, git-inspect,
@@ -30,6 +32,12 @@ export async function runGit(
   args: string[],
   opts: { timeout?: number } = {},
 ): Promise<RunResult> {
+  // Remote workspace: run git on the host over the SSH exec channel. Same
+  // flags + non-interactive credential env; parsers are unchanged since git's
+  // stdout format doesn't depend on where it ran.
+  if (isRemotePath(cwd)) {
+    return runRemoteGit(cwd, args, { timeout: opts.timeout });
+  }
   const { stdout, stderr } = await execFileAsync(
     "git",
     ["-C", cwd, "-c", "credential.interactive=false", ...args],

@@ -449,6 +449,32 @@ class RemoteConnection {
     });
   }
 
+  // Streaming exec for long/incremental output (project-wide search). The
+  // caller gets stdout line-by-line-ish (raw chunks) and an exit callback; the
+  // returned cancel() closes the channel. Unlike exec(), nothing is buffered.
+  async execStream(
+    command: string,
+    handlers: { onStdout: (chunk: string) => void; onExit: (code: number | null) => void },
+  ): Promise<{ cancel: () => void }> {
+    const client = await this.ensure();
+    return new Promise((resolve, reject) => {
+      client.exec(command, (err, stream) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        let code: number | null = null;
+        stream.on("data", (chunk: Buffer) => handlers.onStdout(chunk.toString("utf8")));
+        stream.on("exit", (c: number | null) => {
+          code = c;
+        });
+        stream.on("close", () => handlers.onExit(code));
+        stream.stderr.resume(); // drain stderr so the channel can close
+        resolve({ cancel: () => stream.close() });
+      });
+    });
+  }
+
   /** Interactive PTY shell channel (remote terminals). */
   async shell(opts: { cols: number; rows: number; term?: string }): Promise<ClientChannel> {
     const client = await this.ensure();

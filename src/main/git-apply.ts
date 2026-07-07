@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
 import type { GitConflictSide, GitOpResult } from "@shared/types";
+import { isRemotePath } from "@shared/remote";
 import { errorText, runGit } from "./git-exec";
 import { invalidateGitCache } from "./git-ops";
+import { runRemoteGit } from "./remote/remote-git";
 
 // Partial (hunk / line) staging and merge-conflict resolution. Hunk staging
 // works by feeding a reconstructed unified-diff patch to `git apply` over
@@ -12,6 +14,20 @@ import { invalidateGitCache } from "./git-ops";
 // `git apply` reads the patch from stdin; execFile can't pipe input, so spawn
 // directly here (same hardening flags as git-exec.runGit).
 function runGitWithInput(cwd: string, args: string[], input: string): Promise<GitOpResult> {
+  // Remote workspace: pipe the patch over the SSH exec channel's stdin (the
+  // ssh2 exec stream is a real pipe, unlike execFile). Same args + non-
+  // interactive env, applied by git on the host.
+  if (isRemotePath(cwd)) {
+    return runRemoteGit(cwd, args, { stdin: input })
+      .then(() => {
+        invalidateGitCache(cwd);
+        return { ok: true } as GitOpResult;
+      })
+      .catch((err) => {
+        invalidateGitCache(cwd);
+        return { ok: false, error: errorText(err) } as GitOpResult;
+      });
+  }
   return new Promise((resolve) => {
     const child = spawn(
       "git",
