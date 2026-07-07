@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import type { ChatBackendKind, FsEntry } from "@shared/types";
 import { type EngineOption, useEngineOptions } from "./engine/engineOptions";
@@ -7,6 +7,11 @@ import { FileNodeIcon } from "./file-icons/FileNodeIcon";
 import { InlineInput } from "./file-icons/InlineInput";
 import { basename, dirname } from "../path-utils";
 import { pathToFileUrl } from "../lib/pathToFileUrl";
+import {
+  getExplorerClipboard,
+  setExplorerClipboard,
+  subscribeExplorerClipboard,
+} from "../lib/explorerClipboard";
 import SectionHeader, { type SectionHeaderDragProps } from "../panels/SectionHeader";
 
 // Tree row geometry. Hoisted to module scope so the values are shared by
@@ -572,27 +577,20 @@ export default function FileTree({
   // (expand it if it's a subfolder) and refresh the destination plus every
   // moved source's old parent, so moved rows both appear at the destination and
   // vanish from where they came from.
-  const dropEntriesInto = useCallback(
-    async (destDir: string, fileList: FileList) => {
-      const sourcePaths: string[] = [];
-      for (const file of Array.from(fileList)) {
-        try {
-          const resolved = window.spark.fs.getPathForFile(file);
-          if (resolved) sourcePaths.push(resolved);
-        } catch {
-          // Non-file drag payloads (text, internal MIME) have no path — skip.
-        }
-      }
-      if (sourcePaths.length === 0) return;
-
-      const insideSources = sourcePaths.filter((p) => isInsideWorkspace(p, cwd));
-      const outsideSources = sourcePaths.filter((p) => !isInsideWorkspace(p, cwd));
-
+  // Shared transfer core for drag-drop AND clipboard paste: copy `copySources`
+  // into destDir (recursive, auto-suffixing collisions), move `moveSources`
+  // there (throws on collision — surfaced via the error banner, nothing is
+  // silently overwritten), then do the post-op bookkeeping: reveal the
+  // destination, refresh affected dirs, repoint open editor tabs for moves,
+  // and drop moved paths from the selection.
+  const transferEntriesInto = useCallback(
+    async (destDir: string, copySources: string[], moveSources: string[]) => {
       let movedEntries: FsEntry[] = [];
       let dropError: string | null = null;
+      const insideSources = moveSources;
       try {
-        if (outsideSources.length > 0) {
-          await window.spark.fs.importEntries({ destDir, sourcePaths: outsideSources });
+        if (copySources.length > 0) {
+          await window.spark.fs.importEntries({ destDir, sourcePaths: copySources });
         }
         if (insideSources.length > 0) {
           movedEntries = await window.spark.fs.moveEntries({ destDir, sourcePaths: insideSources });
@@ -646,8 +644,30 @@ export default function FileTree({
       // refreshDir clears the banner on success; re-surface the drop error (if
       // any) so a failed move/copy still reports its message.
       if (dropError) setError(dropError);
+      return dropError === null;
     },
     [cwd, expandDir, refreshDir, onRenameFile],
+  );
+
+  const dropEntriesInto = useCallback(
+    async (destDir: string, fileList: FileList) => {
+      const sourcePaths: string[] = [];
+      for (const file of Array.from(fileList)) {
+        try {
+          const resolved = window.spark.fs.getPathForFile(file);
+          if (resolved) sourcePaths.push(resolved);
+        } catch {
+          // Non-file drag payloads (text, internal MIME) have no path — skip.
+        }
+      }
+      if (sourcePaths.length === 0) return;
+      // Drag provenance decides MOVE vs COPY: sources already inside the
+      // workspace root are moved; outside sources are copied.
+      const insideSources = sourcePaths.filter((p) => isInsideWorkspace(p, cwd));
+      const outsideSources = sourcePaths.filter((p) => !isInsideWorkspace(p, cwd));
+      await transferEntriesInto(destDir, outsideSources, insideSources);
+    },
+    [cwd, transferEntriesInto],
   );
 
   // Resolve which directory a pointer position would drop into. Uses the live
@@ -726,6 +746,103 @@ export default function FileTree({
     event.preventDefault();
     window.spark.fs.startDrag(paths);
   }, []);
+
+  // Explorer file clipboard ---------------------------------------------------
+  // Module-singleton state (survives the key={cwd} remount on workspace
+  // switch); OS interop is best-effort CF_HDROP via main. See explorerClipboard.ts.
+  const explorerClipboard = useSyncExternalStore(subscribeExplorerClipboard, getExplorerClipboard);
+  const cutSet = React.useMemo(
+    () =>
+      explorerClipboard?.mode === "cut" ? new Set(explorerClipboard.paths) : null,
+    [explorerClipboard],
+  );
+
+  const copyToClipboard = useCallback((paths: string[], mode: "copy" | "cut") => {
+    if (paths.length === 0) return;
+    setExplorerClipboard({ mode, paths });
+    // Real CF_HDROP so Windows Explorer can paste these files. The text
+    // fallback only runs when file interop is unavailable — writing text
+    // AFTER a successful file write would clear the CF_HDROP formats again
+    // (Windows clipboard formats only coexist when set in one operation).
+    void window.spark.clipboard
+      .writeFilePaths(paths)
+      .then((ok) => {
+        if (!ok) return navigator.clipboard.writeText(paths.join("\n"));
+        return undefined;
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const pasteFromClipboard = useCallback(
+    async (destOverride?: string) => {
+      // Destination: explicit (context menu on a row) → that folder; else the
+      // selection anchor's parent; else the workspace root — matching VS Code.
+      let destDir = destOverride ?? null;
+      if (!destDir) {
+        const selected = selectedFilePathsRef.current;
+        const anchor =
+          selectionAnchorPathRef.current ??
+          (selected.size > 0 ? Array.from(selected)[0] : null);
+        destDir = anchor ? parentPath(anchor) : cwd;
+      }
+      const local = getExplorerClipboard();
+      let sources: string[] | null = null;
+      try {
+        sources = await window.spark.clipboard.readFilePaths();
+      } catch {
+        sources = null;
+      }
+      if (!sources || sources.length === 0) sources = local?.paths ?? [];
+      if (sources.length === 0) return; // nothing to paste — quiet no-op
+      // Cut (move) semantics apply only when the OS clipboard still holds our
+      // own cut set (or interop is unavailable and we fell back to it). If the
+      // user copied something else in Explorer since, it's a plain copy.
+      const sameAsLocal =
+        local !== null &&
+        sources.length === local.paths.length &&
+        sources.every((p, i) => p === local.paths[i]);
+      const isCut = local?.mode === "cut" && sameAsLocal;
+      const ok = await transferEntriesInto(
+        destDir,
+        isCut ? [] : sources,
+        isCut ? sources : [],
+      );
+      // A paste consumes a cut (Explorer/VS Code behavior); a copy persists
+      // for repeated pastes.
+      if (isCut && ok) setExplorerClipboard(null);
+    },
+    [cwd, transferEntriesInto],
+  );
+
+  // Ctrl/Cmd+C / X / V, scoped to the explorer WITHOUT the global shortcut
+  // registry (its capture-phase dispatcher would steal copy from CodeMirror
+  // and the terminals). Same bubble-phase pattern as the F2 rename handler:
+  // never fires from editable targets, never fires while text is selected
+  // (that's a text copy), and requires an explorer selection as the signal
+  // that the user is acting on the tree.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+      const key = e.key.toLowerCase();
+      if (key !== "c" && key !== "x" && key !== "v") return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      ) {
+        return;
+      }
+      if ((key === "c" || key === "x") && (window.getSelection()?.toString() ?? "") !== "") return;
+      const selected = selectedFilePathsRef.current;
+      if (selected.size === 0) return;
+      e.preventDefault();
+      if (key === "c") copyToClipboard(Array.from(selected), "copy");
+      else if (key === "x") copyToClipboard(Array.from(selected), "cut");
+      else void pasteFromClipboard();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [copyToClipboard, pasteFromClipboard]);
 
   // Stable per-row handlers --------------------------------------------------
   // Every visible node renders one `<Row>`. `Row` is wrapped in `React.memo`,
@@ -1113,6 +1230,7 @@ export default function FileTree({
                 dirError={dirNode?.error}
                 renaming={renamingPath === row.node.entry.path}
                 isDropTarget={dirNode != null && externalDropDir === row.node.entry.path}
+                cut={cutSet?.has(row.node.entry.path) ?? false}
                 onRowClick={handleRowClick}
                 onRowElement={updateRowElement}
                 onContextMenu={handleContextMenu}
@@ -1280,6 +1398,21 @@ export default function FileTree({
               : null
           }
           revealLabel={isPreviewFile(contextMenu.entry) ? "Open in Preview" : "Reveal in OS"}
+          onCopy={() => {
+            const paths = contextMenuEntries.map((entry) => entry.path);
+            setContextMenu(null);
+            copyToClipboard(paths, "copy");
+          }}
+          onCut={() => {
+            const paths = contextMenuEntries.map((entry) => entry.path);
+            setContextMenu(null);
+            copyToClipboard(paths, "cut");
+          }}
+          onPaste={() => {
+            const entry = contextMenu.entry;
+            setContextMenu(null);
+            void pasteFromClipboard(entry.isDir ? entry.path : parentPath(entry.path));
+          }}
           onCopyPath={() => {
             const text = contextMenuEntries.map((entry) => entry.path).join("\n");
             setContextMenu(null);
@@ -1537,6 +1670,9 @@ interface RowProps {
   // True when an in-flight external file drag is hovering this (directory) row,
   // so it should paint the drop-target ring.
   isDropTarget: boolean;
+  // True while this entry sits on the file clipboard in "cut" mode — the row
+  // dims (Explorer/VS Code convention) until the cut is pasted or replaced.
+  cut: boolean;
   onRowClick: (node: Node, event: React.MouseEvent) => void;
   onRowElement: (path: string, element: HTMLDivElement | null) => void;
   onContextMenu: (entry: FsEntry, x: number, y: number) => void;
@@ -1564,6 +1700,7 @@ function rowPropsEqual(prev: RowProps, next: RowProps): boolean {
     prev.dirError !== next.dirError ||
     prev.renaming !== next.renaming ||
     prev.isDropTarget !== next.isDropTarget ||
+    prev.cut !== next.cut ||
     prev.onRowClick !== next.onRowClick ||
     prev.onRowElement !== next.onRowElement ||
     prev.onContextMenu !== next.onContextMenu ||
@@ -1588,6 +1725,7 @@ const Row = React.memo(function Row({
   dirLoading,
   renaming,
   isDropTarget,
+  cut,
   onRowClick,
   onRowElement,
   onContextMenu,
@@ -1658,6 +1796,7 @@ const Row = React.memo(function Row({
         padding: `0 8px 0 ${rowPaddingLeft}px`,
         background,
         color: selected || active ? "var(--ink)" : "var(--ink-dim)",
+        opacity: cut ? 0.55 : undefined,
         boxShadow: rowShadow,
         transition:
           "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
@@ -1713,6 +1852,9 @@ function FileMenu({
   onRename,
   onReveal,
   revealLabel,
+  onCopy,
+  onCut,
+  onPaste,
   onCopyPath,
   onCopyRelativePath,
   onDelete,
@@ -1728,6 +1870,9 @@ function FileMenu({
   onRename: (() => void) | null;
   onReveal: (() => void) | null;
   revealLabel: string;
+  onCopy: () => void;
+  onCut: () => void;
+  onPaste: () => void;
   onCopyPath: () => void;
   onCopyRelativePath: () => void;
   onDelete: () => void;
@@ -1831,6 +1976,10 @@ function FileMenu({
       )}
       <MenuButton icon="N" onClick={onNewFile}>New File</MenuButton>
       <MenuButton icon="F" onClick={onNewFolder}>New Folder</MenuButton>
+      <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
+      <MenuButton icon="C" onClick={onCopy} hint="Ctrl+C">Copy</MenuButton>
+      <MenuButton icon="X" onClick={onCut} hint="Ctrl+X">Cut</MenuButton>
+      <MenuButton icon="V" onClick={onPaste} hint="Ctrl+V">Paste</MenuButton>
       <div style={{ height: 1, background: "var(--rule)", margin: "4px 0" }} />
       {onRename && <MenuButton icon="R" onClick={onRename}>Rename</MenuButton>}
       {onReveal && <MenuButton icon="V" onClick={onReveal}>{revealLabel}</MenuButton>}

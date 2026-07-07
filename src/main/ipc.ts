@@ -8,6 +8,7 @@ import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, importEntries, listDir, listFiles, listMarkdownFiles, moveEntries, readFileBytes, readFileEx, readTextFile, renameFile, statFile, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPath, setAllowedRoots } from "./fs-sandbox";
+import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { sparkHome } from "./spark-home";
 import { detectAgentRuntimes } from "./agent-runtimes";
@@ -1587,6 +1588,21 @@ export function registerIpc(): void {
       /* best-effort */
     }
   });
+  // File clipboard bridge for the explorer's copy/cut/paste. Real CF_HDROP
+  // interop with Windows Explorer via clipboard-files.ts; both directions
+  // fail soft so the renderer's in-app clipboard keeps working regardless.
+  ipcMain.handle("clipboard:readFilePaths", async (): Promise<string[] | null> => {
+    return readClipboardFilePaths();
+  });
+  ipcMain.handle(
+    "clipboard:writeFilePaths",
+    async (_e, args: { paths: string[] }): Promise<boolean> => {
+      const paths = Array.isArray(args?.paths)
+        ? args.paths.filter((p): p is string => typeof p === "string" && p.length > 0)
+        : [];
+      return writeClipboardFilePaths(paths);
+    },
+  );
   // Image paste bridge for terminal panes. Agent CLIs (Claude Code) accept an
   // image by its file path — dragging or pasting an image into their TUI turns
   // into an `[Image #N]` chip when they see a bracketed-paste of a path ending

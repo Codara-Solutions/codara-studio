@@ -752,6 +752,13 @@ const api = {
     // file path they can turn into an `[Image #N]` chip.
     readImageAsTempFile: (): Promise<string | null> =>
       ipcRenderer.invoke("clipboard:readImageAsTempFile"),
+    // Explorer file clipboard (Windows CF_HDROP interop). Null / false when
+    // the OS clipboard holds no files or interop is unavailable — callers
+    // fall back to the in-app clipboard state.
+    readFilePaths: (): Promise<string[] | null> =>
+      ipcRenderer.invoke("clipboard:readFilePaths"),
+    writeFilePaths: (paths: string[]): Promise<boolean> =>
+      ipcRenderer.invoke("clipboard:writeFilePaths", { paths }),
   },
   // cora-preview MCP bridge: main forwards preview-tool requests here, the
   // renderer dispatches against the picked preview tab and sends a response
