@@ -20,7 +20,6 @@ import {
   sniffRuntime,
   stripAnsi,
   unescapeOsc633,
-  CLAUDE_RESUME_FAILED_RE,
   type AgentRuntime,
   type PublicAgentRuntime,
 } from "@shared/agent-patterns";
@@ -34,12 +33,7 @@ import {
   type SparkOpenInput,
 } from "./osc-handlers";
 import { buildTerminalTheme } from "./terminalTheme";
-import {
-  buildAgentResumeCommand,
-  buildClaudeLaunch,
-  isAgentSessionLaunchCommand,
-} from "../../workers/launch-commands";
-import type { TerminalAgentSession } from "../../tabs/types";
+import { isAgentSessionLaunchCommand } from "../../workers/launch-commands";
 
 export type { SparkOpenInput };
 
@@ -249,20 +243,6 @@ interface Options {
   // instead of a binary running/done. `blocked` means the agent is waiting on
   // the user. Reuses the poller's debounced output — no second detector.
   onRuntimeState?: (state: RuntimeState) => void;
-  // Durable Claude/Codex session pointer for this pane (TerminalLeaf.agentSession),
-  // used for RESTORE: on a reopened pane that has NO initialCommand (its launch
-  // autorun was stripped on save), the hook probes that the transcript still
-  // exists and, if so, types the `--resume` command to relaunch the session.
-  // Fresh launches are captured elsewhere (the App-level agent-detection hook).
-  agentSession?: TerminalAgentSession | null;
-  // Fires when a restore's saved transcript is gone (pruned / cwd moved) so the
-  // owner can clear the stale pointer; the pane stays a plain shell.
-  onResumeUnavailable?: () => void;
-  // Fires when a failed Claude restore self-heals by launching a FRESH session
-  // (new --session-id uuid) in the same cwd, so the owner can point the leaf's
-  // agentSession at the replacement. Codex can't force ids, so its failed
-  // restores go through onResumeUnavailable instead.
-  onResumeFallback?: (session: TerminalAgentSession) => void;
 }
 
 export interface TerminalSessionApi {
@@ -295,9 +275,6 @@ export function useTerminalSession({
   onUserInput,
   onAgentState,
   onRuntimeState,
-  agentSession,
-  onResumeUnavailable,
-  onResumeFallback,
 }: Options): TerminalSessionApi {
   // Latest-value ref so the input/resize closures (captured once per
   // sessionId) see the freshest readOnly flag without re-running the
@@ -343,8 +320,6 @@ export function useTerminalSession({
   const onUserInputRef = useRef(onUserInput);
   const onAgentStateRef = useRef(onAgentState);
   const onRuntimeStateRef = useRef(onRuntimeState);
-  const onResumeUnavailableRef = useRef(onResumeUnavailable);
-  const onResumeFallbackRef = useRef(onResumeFallback);
   useEffect(() => {
     onDetectedRef.current = onDetectedLocalUrl;
     onCwdRef.current = onCwd;
@@ -355,9 +330,7 @@ export function useTerminalSession({
     onUserInputRef.current = onUserInput;
     onAgentStateRef.current = onAgentState;
     onRuntimeStateRef.current = onRuntimeState;
-    onResumeUnavailableRef.current = onResumeUnavailable;
-    onResumeFallbackRef.current = onResumeFallback;
-  }, [onDetectedLocalUrl, onCwd, onExit, onSearchReady, onSparkOpen, onActivity, onUserInput, onAgentState, onRuntimeState, onResumeUnavailable, onResumeFallback]);
+  }, [onDetectedLocalUrl, onCwd, onExit, onSearchReady, onSparkOpen, onActivity, onUserInput, onAgentState, onRuntimeState]);
 
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -2024,71 +1997,7 @@ export function useTerminalSession({
       });
       cleanups.push(() => inputDisposable.dispose());
 
-      // ── Claude/Codex restore precompute (probe BEFORE spawn) ────────────
-      // A restored pane has no autorun (stripped on save) but carries a saved
-      // agentSession pointer. Deciding the outcome BEFORE the PTY exists lets
-      // the resume command ride pty.spawn's startupCommand — delivered by the
-      // shell itself as its first action (see withStartupCommand in
-      // src/main/pty-manager.ts) — instead of a post-mount timer racing the
-      // first prompt. The probe is one fs.access-grade IPC, so this delays
-      // spawn by milliseconds, and only for panes that actually restore.
       const cmd = initialCommand?.trim();
-      let resumeCommand: string | null = null;
-      let resumeIsFreshFallback = false;
-      let fallbackNotice: string | null = null;
-      let fallbackSession: TerminalAgentSession | null = null;
-      if (
-        agentSession?.sessionId &&
-        !cmd &&
-        !readOnlyRef.current &&
-        !inputBlockedRef.current &&
-        !autorunFiredSessions.has(sessionId)
-      ) {
-        const restore = agentSession;
-        const prefs = await window.spark.preferences.load().catch(() => null);
-        if (!(prefs && prefs.restoreAgentSessions === false)) {
-          const probe = await window.spark.agentSession
-            .probe({
-              runtime: restore.runtime,
-              sessionId: restore.sessionId,
-              cwd: restore.cwd,
-              transcriptPath: restore.transcriptPath ?? undefined,
-            })
-            .catch(() => ({ exists: false as const }));
-          const resumable =
-            probe.exists && (probe as { resumable?: boolean }).resumable !== false;
-          if (resumable) {
-            if (restore.runtime === "codex") {
-              await window.spark.agentSession
-                .ensureCodexTrust(restore.cwd)
-                .catch(() => undefined);
-            }
-            resumeCommand = buildAgentResumeCommand(restore);
-          } else if (restore.runtime === "claude") {
-            // Self-heal: the transcript is gone or never got a real message
-            // (stillborn session — `claude --resume` would print "No
-            // conversation found" and strand the pane). Launch a FRESH
-            // forced-id Claude in the same cwd so the pane is immediately
-            // useful, and hand the owner the replacement pointer to persist.
-            const fresh = buildClaudeLaunch();
-            resumeCommand = fresh.command;
-            resumeIsFreshFallback = true;
-            fallbackNotice =
-              "previous Claude session couldn't be resumed — starting a fresh one";
-            fallbackSession = {
-              runtime: "claude",
-              sessionId: fresh.sessionId,
-              cwd: restore.cwd,
-              capturedAt: new Date().toISOString(),
-            };
-          } else {
-            // Codex can't force session ids, so there's nothing to relaunch
-            // deterministically — surface the notice, clear the pointer, and
-            // leave a plain shell.
-            fallbackNotice = "previous Codex session couldn't be resumed";
-          }
-        }
-      }
       if (disposed) return;
 
       // Spawn the PTY. We pass the pre-fit cols/rows so the shell starts at
@@ -2098,13 +2007,13 @@ export function useTerminalSession({
       const cols = Math.max(1, term.cols);
       const rows = Math.max(1, term.rows);
       const cwd = initialCwd && initialCwd.trim().length > 0 ? initialCwd : "";
-      // Agent panes — a claude/codex autorun or any restore/resume — flip
+      // Agent panes — a claude/codex autorun — flip
       // SPARK_NO_SHELL_INTEGRATION=1: spark.ps1's OSC 633;E echo would feed
       // the TUI stray input, the user $PROFILE only adds latency and error
       // spam before the banner, and (critically) it lets pwsh take the
       // startup command over args in main — race-free delivery, no pwsh
       // spawn-lock queueing.
-      const agentPane = resumeCommand !== null || isAgentSessionLaunchCommand(cmd);
+      const agentPane = isAgentSessionLaunchCommand(cmd);
       const spawnEnv = agentPane
         ? { ...(extraEnv ?? {}), SPARK_NO_SHELL_INTEGRATION: "1" }
         : extraEnv;
@@ -2116,7 +2025,7 @@ export function useTerminalSession({
           cols,
           rows,
           env: spawnEnv,
-          startupCommand: cmd || resumeCommand || undefined,
+          startupCommand: cmd || undefined,
           // Read-only mirror panes attach to a session whose canonical xterm
           // lives elsewhere. The mirror flag makes main's existing-session
           // branch a pure no-op — critically it skips the pty resize to OUR
@@ -2134,18 +2043,6 @@ export function useTerminalSession({
       } catch (err) {
         term.write(`\r\n\x1b[31mfailed to spawn: ${(err as Error).message}\x1b[0m\r\n`);
         return;
-      }
-
-      // Restore self-heal bookkeeping (decided in the precompute above):
-      // surface the one-line notice and hand the owner the replacement
-      // pointer (fresh Claude) or the clear signal (codex, transcript gone).
-      if (fallbackNotice) {
-        term.write(`\x1b[2m[${fallbackNotice}]\x1b[0m\r\n`);
-      }
-      if (fallbackSession) {
-        onResumeFallbackRef.current?.(fallbackSession);
-      } else if (fallbackNotice) {
-        onResumeUnavailableRef.current?.();
       }
 
       // Drain any bytes the pty emitted while the previous TerminalPane was
@@ -2361,10 +2258,9 @@ export function useTerminalSession({
       // arming would type the command a second time after the first has
       // already launched the TUI. Once we commit to writing, we mark the id
       // permanently so no later remount can resurrect the timer.
-      const typedCommand = cmd || resumeCommand;
       if (
-        typedCommand &&
-        typedCommand.length > 0 &&
+        cmd &&
+        cmd.length > 0 &&
         !startupCommandHandled &&
         !autorunFiredSessions.has(sessionId) &&
         !readOnlyRef.current &&
@@ -2374,59 +2270,9 @@ export function useTerminalSession({
           if (disposed) return;
           if (readOnlyRef.current || inputBlockedRef.current) return;
           autorunFiredSessions.add(sessionId);
-          void window.spark.pty.write(sessionId, `${typedCommand}\r`);
+          void window.spark.pty.write(sessionId, `${cmd}\r`);
         }, 1500);
         cleanups.push(() => window.clearTimeout(autorunTimer));
-      }
-
-      // ── Resume-refusal watch ────────────────────────────────────────────
-      // The pre-spawn probe can pass and `claude --resume <id>` still refuse
-      // (transcript truncated past repair, CLI version quirks). Claude then
-      // prints its refusal and exits to the prompt. Watch the first ~20s of
-      // output for the signature and self-heal exactly like a failed probe:
-      // notice + fresh forced-id launch typed into the now-idle shell +
-      // replacement pointer. One attempt — the fresh launch can't loop back
-      // here because the watch only arms for genuine resumes.
-      if (resumeCommand && !resumeIsFreshFallback && agentSession?.runtime === "claude") {
-        const restoreCwd = agentSession.cwd;
-        let watchTail = "";
-        let watchDone = false;
-        const watchDecoder = new TextDecoder();
-        const stopWatch = window.spark.pty.onData(sessionId, (data) => {
-          if (watchDone || disposed) return;
-          const bytes =
-            data instanceof Uint8Array ? data : new TextEncoder().encode(String(data));
-          watchTail = (
-            watchTail + stripAnsi(watchDecoder.decode(bytes, { stream: true }))
-          ).slice(-512);
-          if (!CLAUDE_RESUME_FAILED_RE.test(watchTail)) return;
-          watchDone = true;
-          const fresh = buildClaudeLaunch();
-          term.write(
-            `\r\n\x1b[2m[couldn't resume the previous Claude session — starting a fresh one]\x1b[0m\r\n`,
-          );
-          onResumeFallbackRef.current?.({
-            runtime: "claude",
-            sessionId: fresh.sessionId,
-            cwd: restoreCwd,
-            capturedAt: new Date().toISOString(),
-          });
-          // Small delay so the shell is back at its prompt after Claude's
-          // refusal-exit before the fresh launch is typed.
-          window.setTimeout(() => {
-            if (disposed) return;
-            void window.spark.pty.write(sessionId, `${fresh.command}\r`);
-          }, 400);
-        });
-        const watchTimer = window.setTimeout(() => {
-          watchDone = true;
-          stopWatch();
-        }, 20_000);
-        cleanups.push(() => {
-          watchDone = true;
-          stopWatch();
-          window.clearTimeout(watchTimer);
-        });
       }
     };
 

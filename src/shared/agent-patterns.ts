@@ -96,15 +96,6 @@ export const RUNTIME_BANNERS: ReadonlyArray<{ runtime: AgentRuntime; pattern: Re
   { runtime: "pi",         pattern: /\bPi\s*v\d/ },
 ];
 
-// Resume-refusal signature. `claude --resume <id>` prints this (then exits to
-// the shell) when the id has no resumable conversation — a transcript that was
-// deleted, moved, or never got a real user message. The restored pane watches
-// its output for this for a short window after delivering the resume command
-// so it can self-heal (clear the stale pointer + launch a fresh session)
-// instead of leaving a dead shell and a confusing error. Match on stripped
-// text (see stripAnsi) — Ink may interleave cursor moves inside the sentence.
-export const CLAUDE_RESUME_FAILED_RE = /No conversation found with session ID/i;
-
 // CSI / OSC stripper. Ink (Claude / Codex / Cursor) often positions individual
 // characters with cursor moves, so a banner like "Claude Code v2.1.139"
 // arrives in the raw byte stream as `C\x1b[H l\x1b[H a…` and a literal
@@ -370,6 +361,58 @@ export function classifyTail(
     if (matchEndsPast(re, stripped, freshFrom)) return "done";
   }
   return null;
+}
+
+// ── Teammate lifecycle events ─────────────────────────────────────────────
+// Claude Code ≥2.1.2x background agents / Task-tool teammates print parseable
+// transcript lines when they start and finish. Counted from the stream so the
+// notifier can hold its "done" alert while a background teammate is still
+// running — the teammate strip's per-second ticks are digit-only partial
+// repaints that match no `working` pattern, so repaint recency alone cannot
+// see a live teammate (verified against a live v2.1.201 capture, 2026-07-06).
+// Inter-word gaps are `\s*` because Ink encodes them as cursor moves; the
+// stripped stream can drop ALL spaces ("⏺Teammate@napperfinished").
+//
+//   started:  `1 teammate started` / `2 teammates started` — appears in the
+//             Task tool result line; the leading count is summed.
+//   finished: `⏺ Teammate@napper finished` — "stopped|exited|failed" are
+//             defensive alternates; only "finished" was captured live.
+//
+// Module-level globals with lastIndex reset on entry (mirrors matchEndsPast's
+// zero-length-match loop guard) so no state leaks between calls.
+const TEAMMATE_STARTED_RE = /(\d+)\s*teammates?\s*started/gi;
+const TEAMMATE_FINISHED_RE = /Teammate\s*@\s*[\w-]+\s*(?:finished|stopped|exited|failed)/gi;
+// Cap each started-count capture to bound the damage from a garbled digit run
+// (a corrupted repaint reading "999999 teammates started" must not wedge the
+// notifier's counter until the silence self-heal).
+const TEAMMATE_STARTED_CAP = 32;
+
+// Count teammate start/finish events in `text`. Semantics mirror
+// classifyTail's: the text is stripAnsi-stripped first, and only matches that
+// END strictly past `freshFrom` (an offset into the STRIPPED text) count —
+// stream callers pass stripAnsi(carry).length so an event merely sitting in
+// the carry can't be double-counted; freshFrom = 0 counts everything.
+export function countTeammateEvents(
+  text: string,
+  freshFrom = 0,
+): { started: number; finished: number } {
+  const stripped = stripAnsi(text);
+  let started = 0;
+  let finished = 0;
+  let m: RegExpExecArray | null;
+  TEAMMATE_STARTED_RE.lastIndex = 0;
+  while ((m = TEAMMATE_STARTED_RE.exec(stripped))) {
+    if (m.index + m[0].length > freshFrom) {
+      started += Math.min(TEAMMATE_STARTED_CAP, parseInt(m[1], 10) || 0);
+    }
+    if (m[0].length === 0) TEAMMATE_STARTED_RE.lastIndex += 1;
+  }
+  TEAMMATE_FINISHED_RE.lastIndex = 0;
+  while ((m = TEAMMATE_FINISHED_RE.exec(stripped))) {
+    if (m.index + m[0].length > freshFrom) finished += 1;
+    if (m[0].length === 0) TEAMMATE_FINISHED_RE.lastIndex += 1;
+  }
+  return { started, finished };
 }
 
 // Reverse spark.ps1's __Spark-Esc encoding (control chars, ';' and '\'

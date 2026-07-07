@@ -57,7 +57,6 @@ import type {
   RunsTab,
   Tab,
   TabId,
-  TerminalAgentSession,
   TerminalLeaf,
   TerminalTab,
 } from "./tabs/types";
@@ -71,7 +70,6 @@ import type { CommandId } from "./shortcuts/commands";
 import { isRecording } from "./shortcuts/recording";
 import { usePreferences } from "./preferences/usePreferences";
 import {
-  buildClaudeLaunch,
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
   CURSOR_LAUNCH_COMMAND,
@@ -89,6 +87,7 @@ import {
   workerMenuLabel,
 } from "./routing/enumerate-open-workers";
 import { useGlobalRuns } from "./lib/useGlobalRuns";
+import { isRunningStatus } from "./lib/run-status";
 import {
   buildAwayDigest,
   compareRunsByAttention,
@@ -333,9 +332,6 @@ export default function App() {
       }
     >
   >(new Map());
-  // Panes with an in-flight session-id capture (post agent-detection), so
-  // repeated "agent running" events don't kick off duplicate discovery calls.
-  const capturingPanesRef = useRef<Set<string>>(new Set());
   const handlePaneCwd = useCallback(
     (tabId: string, paneId: string, cwd: string) => {
       const entry = paneRuntimeRef.current.get(paneId) ?? { lastActivityAt: 0 };
@@ -599,6 +595,14 @@ export default function App() {
     Record<string, Record<string, { tabId: string; kind: InAppNotificationKind }>>
   >({});
 
+  // Manual terminal panes whose agent is actively working, keyed
+  // workspaceId → paneId → true, tracked across ALL workspaces (the
+  // main-process notifier keeps watching panes in non-active workspaces).
+  // Feeds the workspace rail's activity spin alongside live/loom runs.
+  const [terminalWorking, setTerminalWorking] = useState<
+    Record<string, Record<string, true>>
+  >({});
+
   // Per-workspace status-tone for the WorkspaceRail dots: the tone of each
   // workspace's highest-attention run (blocked > done-unseen > live > …),
   // sourced from the global feed so the dot reflects every project, not just
@@ -644,6 +648,37 @@ export default function App() {
     }
     return m;
   }, [workspaces, globalRuns.runs, terminalAttention]);
+
+  // Per-workspace "something inside is working" flag for the rail's activity
+  // spin. Unlike toneByWorkspaceId this does NOT filter out automation (loom)
+  // runs — a running loom pass still counts as work in progress.
+  const workingByWorkspaceId = useMemo(() => {
+    const m: Record<string, boolean> = {};
+    for (const w of workspaces) {
+      m[w.id] =
+        globalRuns.runs.some((r) => r.workspaceId === w.id && isRunningStatus(r.status)) ||
+        Object.keys(terminalWorking[w.id] ?? {}).length > 0;
+    }
+    return m;
+  }, [workspaces, globalRuns.runs, terminalWorking]);
+
+  // Reclaim activity-spin records for workspaces that no longer exist: a
+  // workspace deleted while a hidden pane was mid-turn never receives a
+  // clearing state event, so its map entry would otherwise live forever
+  // (invisible — workingByWorkspaceId iterates live workspaces — but leaked).
+  // The empty-list guard skips the pre-boot render where workspaces haven't
+  // loaded yet.
+  useEffect(() => {
+    if (workspaces.length === 0) return;
+    setTerminalWorking((current) => {
+      const live = new Set(workspaces.map((w) => w.id));
+      const stale = Object.keys(current).filter((id) => !live.has(id));
+      if (stale.length === 0) return current;
+      const next = { ...current };
+      for (const id of stale) delete next[id];
+      return next;
+    });
+  }, [workspaces]);
 
   // Keep the active chat's node-graph tab in existence without stealing
   // focus. Chat-only runs (no steps, no worker tasks) intentionally have NO
@@ -1324,6 +1359,27 @@ export default function App() {
         });
       });
     }
+    // Prune activity-spin entries for panes that closed while this workspace
+    // was hidden: a pane removed off-screen never gets a clearing state event,
+    // so drop any tracked paneId no longer in the live pane list. Same
+    // same-object-when-unchanged discipline as the notifier effect.
+    const livePaneIds = new Set(panes.map((p) => p.paneId));
+    setTerminalWorking((current) => {
+      const ws = current[workspaceId];
+      if (!ws) return current;
+      const kept: Record<string, true> = {};
+      let changed = false;
+      for (const paneId of Object.keys(ws)) {
+        if (livePaneIds.has(paneId)) kept[paneId] = true;
+        else changed = true;
+      }
+      if (!changed) return current;
+      if (Object.keys(kept).length === 0) {
+        const { [workspaceId]: _droppedWs, ...restWorkspaces } = current;
+        return restWorkspaces;
+      }
+      return { ...current, [workspaceId]: kept };
+    });
     // Optional chaining: during dev HMR the renderer can be newer than the
     // preload of a long-lived instance; degrade to no-op instead of throwing
     // inside the effect.
@@ -1405,6 +1461,34 @@ export default function App() {
   // resurrects a removed worker, so they coexist without precedence logic.
   useEffect(() => {
     const off = window.spark.terminalNotify?.onState?.((payload) => {
+      // Rail activity spin: track manual panes whose agent is working across
+      // ALL workspaces (this event fires for panes in hidden workspaces too).
+      // "blocked" clears the spin deliberately — a blocked agent is waiting on
+      // the user, not working. "launching" deliberately does NOT spin: a
+      // launched-but-never-prompted agent parks on that state indefinitely
+      // (nothing on the main side ever demotes it while the agent sits idle at
+      // its input box), so counting it would spin the rail forever. Returns
+      // the SAME object when nothing changed so this per-transition effect
+      // never churns renders.
+      if (payload?.workspaceId && payload.paneId && payload.state) {
+        const wsId = payload.workspaceId;
+        const paneId = payload.paneId;
+        const active = payload.state === "working";
+        setTerminalWorking((current) => {
+          const ws = current[wsId];
+          if (active) {
+            if (ws?.[paneId]) return current;
+            return { ...current, [wsId]: { ...(ws ?? {}), [paneId]: true } };
+          }
+          if (!ws?.[paneId]) return current;
+          const { [paneId]: _dropped, ...restPanes } = ws;
+          if (Object.keys(restPanes).length === 0) {
+            const { [wsId]: _droppedWs, ...restWorkspaces } = current;
+            return restWorkspaces;
+          }
+          return { ...current, [wsId]: restPanes };
+        });
+      }
       if (!payload?.tabId || !payload.paneId || !payload.state) return;
       const t = tabsRef.current;
       const tab = t.tabs.find((item) => item.id === payload.tabId);
@@ -2165,31 +2249,8 @@ export default function App() {
   // shell prompt is a place to run things, so the keybind runs the worker
   // there. Touched panes (active build output, half-typed command) still
   // get a fresh sibling pane so the user's work isn't disturbed.
-  // Prepare a worker launch command + a durable resume-pointer factory. For a
-  // Claude launch we mint a session id and force `--session-id`, so the pane can
-  // record its resume pointer synchronously at creation (deterministic transcript
-  // path) instead of relying on fragile post-hoc "newest .jsonl by mtime"
-  // discovery. Codex (no `--session-id`) and Cursor pass through with a null
-  // session; Codex is still captured later by the agent-state hook's discovery.
-  const prepareWorkerLaunch = useCallback((autorun: string) => {
-    const claudeLaunch = autorun === CLAUDE_LAUNCH_COMMAND ? buildClaudeLaunch() : null;
-    return {
-      command: claudeLaunch?.command ?? autorun,
-      makeSession: (cwd: string | undefined): TerminalAgentSession | null =>
-        claudeLaunch && cwd
-          ? {
-              runtime: "claude" as const,
-              sessionId: claudeLaunch.sessionId,
-              cwd,
-              capturedAt: new Date().toISOString(),
-            }
-          : null,
-    };
-  }, []);
-
   const handleNewWorkerTab = useCallback(
     (autorun: string) => {
-      const { command: launchCommand, makeSession } = prepareWorkerLaunch(autorun);
       const active = tabs.tabs.find((t) => t.id === tabs.activeId);
       const target =
         active?.kind === "terminal"
@@ -2198,10 +2259,7 @@ export default function App() {
             // so the worker pane lands in a visible top-strip terminal.
             tabs.tabs.find((t) => t.kind === "terminal" && t.scope?.kind !== "workers");
       if (!target || target.kind !== "terminal") {
-        const seedCwd = activeWorkspace?.cwd ?? undefined;
-        tabs.newTerminalTab(seedCwd, launchCommand, {
-          agentSession: makeSession(seedCwd),
-        });
+        tabs.newTerminalTab(activeWorkspace?.cwd ?? undefined, autorun);
         return;
       }
 
@@ -2226,21 +2284,12 @@ export default function App() {
       if (isUnusedPane) {
         tabs.setActiveTab(target.id);
         tabs.setActiveTerminalPane(target.id, target.activePaneId);
-        // Record the resume pointer on the reused pane before launching, so a
-        // reopen can `--resume` this exact session (Claude only; Codex/Cursor
-        // get a null session and are handled by discovery / not at all).
-        const injectCwd =
-          runtime?.cwd ?? activeLeaf?.cwd ?? activeWorkspace?.cwd ?? undefined;
-        const injectSession = makeSession(injectCwd);
-        if (injectSession) {
-          tabs.setLeafAgentSession(target.id, target.activePaneId, injectSession);
-        }
         // Inject as a bracketed paste + submit so the existing pwsh/bash/zsh
         // prompt receives the autorun as if the user had typed it. pty.inject
         // is async but fire-and-forget is fine — failures (pane disposed,
         // PTY exited) just mean nothing runs, which is recoverable by
         // pressing the keybind again.
-        void window.spark.pty.inject(target.activePaneId, launchCommand, { submit: true });
+        void window.spark.pty.inject(target.activePaneId, autorun, { submit: true });
         return;
       }
 
@@ -2252,8 +2301,7 @@ export default function App() {
         undefined;
       const added = tabs.addPaneInTab(target.id, paneId, {
         cwd,
-        autorun: launchCommand,
-        agentSession: makeSession(cwd),
+        autorun,
       });
       if (added) {
         tabs.setActiveTab(target.id);
@@ -2261,9 +2309,9 @@ export default function App() {
         return;
       }
 
-      tabs.newTerminalTab(cwd, launchCommand, { agentSession: makeSession(cwd) });
+      tabs.newTerminalTab(cwd, autorun);
     },
-    [tabs, activeWorkspace?.cwd, prepareWorkerLaunch],
+    [tabs, activeWorkspace?.cwd],
   );
 
   const handleNewEditorTab = useCallback(() => {
@@ -2665,10 +2713,6 @@ export default function App() {
       // safe to inject the launch command.
       const runtimeEntry =
         paneRuntimeRef.current.get(paneId) ?? { lastActivityAt: 0 };
-      // Previous TUI state, read BEFORE the overwrite below: capture re-arms
-      // only on a genuine not-running → running transition, not on the
-      // poller's repeated running:true emissions for one live TUI.
-      const wasRunning = runtimeEntry.altScreenActive === true;
       runtimeEntry.altScreenActive = state.running;
       paneRuntimeRef.current.set(paneId, runtimeEntry);
       const t = tabsRef.current;
@@ -2676,58 +2720,6 @@ export default function App() {
       if (!tab || tab.kind !== "terminal") return;
       const leaf = findLeafByPaneId(tab.root, paneId);
       if (!leaf) return;
-      // Capture this pane's CLI session id when a claude/codex agent is
-      // detected running, so a future reopen can `--resume` it. Discovery is
-      // by newest transcript CREATED in the last minute for this cwd, so it
-      // works for every launch path (keybind, picker, drag, inject, or a plain
-      // `claude` the user typed).
-      //
-      // Two arms:
-      // - Initial capture: the pane has no pointer yet.
-      // - Re-capture: a NEW agent run just started (wasRunning=false) in a pane
-      //   whose pointer is old. Without this the pointer is write-once — start
-      //   a fresh conversation in the same pane and reopen would resume the
-      //   previous one. The age guard keeps a just-minted `--session-id`
-      //   pointer (keybind launch, seconds old when the TUI is first detected)
-      //   from being clobbered by a discovery race. Discovery only matches
-      //   transcripts CREATED within the last minute, so a `--resume` of an
-      //   existing session (old file, appended in place) finds nothing and the
-      //   pointer correctly stays put — while a genuinely new session (new
-      //   file) takes over the pointer. For Codex this also keeps the chain
-      //   alive if `codex resume` writes a fresh rollout file per run.
-      const pointerAgeMs = leaf.agentSession?.capturedAt
-        ? Date.now() - Date.parse(leaf.agentSession.capturedAt)
-        : Number.POSITIVE_INFINITY;
-      const shouldCapture =
-        !leaf.agentSession?.sessionId ||
-        (!wasRunning && !(pointerAgeMs < 90_000));
-      if (
-        state.running &&
-        (state.runtime === "claude" || state.runtime === "codex") &&
-        shouldCapture &&
-        !capturingPanesRef.current.has(paneId)
-      ) {
-        const capRuntime = state.runtime;
-        const capCwd = leaf.cwd ?? paneRuntimeRef.current.get(paneId)?.cwd;
-        if (capCwd) {
-          capturingPanesRef.current.add(paneId);
-          void window.spark.agentSession
-            .capture({ runtime: capRuntime, cwd: capCwd, sinceMs: Date.now() - 60_000 })
-            .then((res) => {
-              if (res) {
-                tabsRef.current.setLeafAgentSession(tabId, paneId, {
-                  runtime: capRuntime,
-                  sessionId: res.sessionId,
-                  cwd: capCwd,
-                  transcriptPath: res.transcriptPath,
-                  capturedAt: new Date().toISOString(),
-                });
-              }
-            })
-            .catch(() => undefined)
-            .finally(() => capturingPanesRef.current.delete(paneId));
-        }
-      }
       const existing = leaf.worker;
       if (state.running) {
         if (existing && existing.source === "spark") {
@@ -2834,7 +2826,6 @@ export default function App() {
   // and we had to fall back to creating a whole new tab (no stable id).
   const spawnRoutedWorkerPane = useCallback(
     (autorun: string): string | null => {
-      const { command: launchCommand, makeSession } = prepareWorkerLaunch(autorun);
       const t = tabsRef.current;
       const active = t.tabs.find((tab) => tab.id === t.activeId);
       const target =
@@ -2843,8 +2834,7 @@ export default function App() {
           : // Skip run-scoped worker tabs (hidden unless their run is active).
             t.tabs.find((tab) => tab.kind === "terminal" && tab.scope?.kind !== "workers");
       if (!target || target.kind !== "terminal") {
-        const seedCwd = activeWorkspace?.cwd ?? undefined;
-        t.newTerminalTab(seedCwd, launchCommand, { agentSession: makeSession(seedCwd) });
+        t.newTerminalTab(activeWorkspace?.cwd ?? undefined, autorun);
         return null;
       }
       const paneId = makeId("pane");
@@ -2856,18 +2846,17 @@ export default function App() {
         undefined;
       const added = t.addPaneInTab(target.id, paneId, {
         cwd,
-        autorun: launchCommand,
-        agentSession: makeSession(cwd),
+        autorun,
       });
       if (!added) {
-        t.newTerminalTab(cwd, launchCommand, { agentSession: makeSession(cwd) });
+        t.newTerminalTab(cwd, autorun);
         return null;
       }
       t.setActiveTab(target.id);
       t.setActiveTerminalPane(target.id, paneId);
       return paneId;
     },
-    [activeWorkspace?.cwd, prepareWorkerLaunch],
+    [activeWorkspace?.cwd],
   );
 
   // Wait for a freshly-spawned worker pane's CLI agent to enter its REPL
@@ -3109,6 +3098,7 @@ export default function App() {
           <WorkspaceRail
             side="left"
             toneByWorkspaceId={toneByWorkspaceId}
+            workingByWorkspaceId={workingByWorkspaceId}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
@@ -3225,6 +3215,7 @@ export default function App() {
           <WorkspaceRail
             side="right"
             toneByWorkspaceId={toneByWorkspaceId}
+            workingByWorkspaceId={workingByWorkspaceId}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
@@ -3935,36 +3926,8 @@ const Workspace = React.memo(function Workspace({
       paneId: string,
       direction: Parameters<typeof splitTerminalPane>[2],
       autorun?: string,
-    ) => {
-      // Non-Claude split (plain shell / codex / cursor) — unchanged. Codex is
-      // captured post-hoc by the agent-state hook; only Claude gets a forced id.
-      if (autorun !== CLAUDE_LAUNCH_COMMAND) {
-        return splitTerminalPane(tabId, paneId, direction, autorun);
-      }
-      // Claude worker split (pane "+" → Claude picker). Force `--session-id` and
-      // record the resume pointer on the new pane, which inherits the SOURCE
-      // pane's cwd (splitTerminalPane) — so the pointer must use that same cwd to
-      // resolve the transcript bucket on reopen.
-      const launch = buildClaudeLaunch();
-      const sourceTab = tabs.tabs.find((t) => t.id === tabId);
-      const cwd =
-        (sourceTab && sourceTab.kind === "terminal"
-          ? findLeafByPaneId(sourceTab.root, paneId)?.cwd
-          : undefined) ??
-        workspace?.cwd ??
-        undefined;
-      const newPaneId = splitTerminalPane(tabId, paneId, direction, launch.command);
-      if (newPaneId && cwd) {
-        tabs.setLeafAgentSession(tabId, newPaneId, {
-          runtime: "claude",
-          sessionId: launch.sessionId,
-          cwd,
-          capturedAt: new Date().toISOString(),
-        });
-      }
-      return newPaneId;
-    },
-    [splitTerminalPane, tabs, workspace?.cwd],
+    ) => splitTerminalPane(tabId, paneId, direction, autorun),
+    [splitTerminalPane],
   );
   const handleMovePane = useCallback(
     (
@@ -3981,27 +3944,6 @@ const Workspace = React.memo(function Workspace({
   const handlePaneZoomToggle = useCallback(
     (tabId: string, paneId: string) => toggleTerminalPaneZoom(tabId, paneId),
     [toggleTerminalPaneZoom],
-  );
-  // A restored pane's `--resume` probe found no transcript on disk (pruned, or
-  // the session id went stale). Clear the dead pointer so the pane stops trying
-  // to resume it AND so a future launch in this pane can capture a fresh session
-  // — without this, a single failed restore stranded the pointer permanently and
-  // the pane could never self-heal.
-  const handleLeafResumeUnavailable = useCallback(
-    (tabId: string, paneId: string) => {
-      tabs.setLeafAgentSession(tabId, paneId, null);
-    },
-    [tabs],
-  );
-  // A failed Claude restore self-healed: the pane launched a FRESH forced-id
-  // session (buildClaudeLaunch) in the same cwd. Persist the replacement
-  // pointer so the next reopen resumes the new conversation instead of the
-  // dead one.
-  const handleLeafResumeFallback = useCallback(
-    (tabId: string, paneId: string, session: TerminalAgentSession) => {
-      tabs.setLeafAgentSession(tabId, paneId, session);
-    },
-    [tabs],
   );
 
   return (
@@ -4142,8 +4084,6 @@ const Workspace = React.memo(function Workspace({
                 onFlushScrollback={isActive ? tabs.flushScrollbackNow : noopTerminalCb}
                 onPaneAgentState={isActive ? onTerminalPaneAgentState : noopTerminalCb}
                 onPaneRuntimeState={isActive ? onTerminalPaneRuntimeState : noopTerminalCb}
-                onPaneResumeUnavailable={isActive ? handleLeafResumeUnavailable : noopTerminalCb}
-                onPaneResumeFallback={isActive ? handleLeafResumeFallback : noopTerminalCb}
               />
             </div>
           );

@@ -251,10 +251,6 @@ function normalize(
       typeof src.fableEnabled === "boolean"
         ? src.fableEnabled
         : DEFAULT_PREFERENCES.fableEnabled,
-    restoreAgentSessions:
-      typeof src.restoreAgentSessions === "boolean"
-        ? src.restoreAgentSessions
-        : DEFAULT_PREFERENCES.restoreAgentSessions,
   };
 }
 

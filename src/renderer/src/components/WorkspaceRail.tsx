@@ -51,6 +51,11 @@ interface RailProps {
   // passes a memoized object so this prop stays referentially stable and the
   // rail's React.memo keeps holding off unrelated re-renders.
   toneByWorkspaceId?: Record<string, ChatStatusTone | null>;
+  // Per-workspace "something inside is working" flag (a live run, a loom pass,
+  // or a manual terminal agent mid-turn). Spins the workspace color dot. App
+  // passes a memoized object so this prop stays referentially stable like
+  // toneByWorkspaceId.
+  workingByWorkspaceId?: Record<string, boolean>;
   // The first section's share when exactly two sections are stacked here.
   split: number;
   collapsed: Record<PanelSectionKey, boolean>;
@@ -249,6 +254,7 @@ function WorkspaceRail(props: RailProps) {
                       editing={w.id === props.editingId}
                       dragging={wsDragIndex === index}
                       tone={props.toneByWorkspaceId?.[w.id] ?? null}
+                      working={props.workingByWorkspaceId?.[w.id] ?? false}
                       onActivate={() => props.onActivate(w.id)}
                       onEdit={() => props.onEdit(w.id)}
                       onChange={(patch) => props.onChange(w.id, patch)}
@@ -626,6 +632,7 @@ interface RowProps {
   editing: boolean;
   dragging: boolean;
   tone?: ChatStatusTone | null;
+  working?: boolean;
   onActivate: () => void;
   onEdit: () => void;
   onChange: (patch: Partial<Workspace>) => void;
@@ -645,6 +652,7 @@ function WorkspaceRow({
   editing,
   dragging,
   tone,
+  working = false,
   onActivate,
   onEdit,
   onChange,
@@ -848,7 +856,7 @@ function WorkspaceRow({
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minWidth: 0 }}>
         {ws.copyBranch && !editing ? (
-          <BranchGlyph color={accent} active={active} />
+          <BranchGlyph color={accent} active={active} working={working} />
         ) : (
           <button
             type="button"
@@ -866,12 +874,19 @@ function WorkspaceRow({
               // editing never nudges the label. Active reads purely through
               // the glow (box-shadow), never a size bump. BranchGlyph shares
               // this exact 8px advance so the copy-branch swap never reflows.
+              // While `working`, the dot keeps its 8px slot but hollows to a
+              // faint core and grows the spinning comet ring below — the ring's
+              // asymmetric arc, not the recoloured core, is what reads as motion.
               width: 8,
               height: 8,
               borderRadius: 999,
-              background: accent,
+              background: working
+                ? `color-mix(in oklch, ${accent} 30%, transparent)`
+                : accent,
               flex: "0 0 8px",
               cursor: "default",
+              position: "relative",
+              overflow: "visible",
               // No resting ink ring — the idle list settles flat. The active /
               // editing dot earns a SOFT COLORED GLOW RING in its own color so
               // the eye lands on it; the 8px advance never changes (glow only).
@@ -881,7 +896,23 @@ function WorkspaceRow({
                   ? `0 0 0 3px color-mix(in oklch, ${accent} 22%, transparent), 0 0 10px color-mix(in oklch, ${accent} 50%, transparent)`
                   : "none",
             }}
-          />
+          >
+            {working && (
+              <span
+                aria-hidden
+                className="spark-activity-spin"
+                style={{
+                  position: "absolute",
+                  inset: -2, // 12px visual ring over the 8px slot
+                  borderRadius: 999,
+                  background: `conic-gradient(from 0deg, transparent 0deg 70deg, color-mix(in oklch, ${accent} 35%, transparent) 120deg, ${accent} 330deg, transparent 330deg 360deg)`,
+                  WebkitMask:
+                    "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
+                  mask: "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
+                }}
+              />
+            )}
+          </button>
         )}
         <StatusDot tone={tone} />
         {editing && (
@@ -1178,7 +1209,15 @@ function StatusDot({ tone }: { tone?: ChatStatusTone | null }) {
 
 // Branch glyph shown in place of the color dot on copy-branch workspace rows,
 // tinted with the inherited (parent) color so the row reads as a branch of it.
-function BranchGlyph({ color, active }: { color: string; active: boolean }) {
+function BranchGlyph({
+  color,
+  active,
+  working = false,
+}: {
+  color: string;
+  active: boolean;
+  working?: boolean;
+}) {
   return (
     <span
       aria-hidden
@@ -1194,6 +1233,7 @@ function BranchGlyph({ color, active }: { color: string; active: boolean }) {
         width: 8,
         height: 13,
         overflow: "visible",
+        position: "relative",
         // Mirrors the color dot's active treatment: a soft glow in the row's
         // own color so the branch glyph reads as the selected mark, no halo.
         filter: active
@@ -1201,6 +1241,30 @@ function BranchGlyph({ color, active }: { color: string; active: boolean }) {
           : "none",
       }}
     >
+      {working && (
+        <span
+          aria-hidden
+          className="spark-activity-spin"
+          style={{
+            // A ring must be SQUARE to rotate cleanly — inset on this 8×13
+            // slot would spin a wobbling ellipse. Centered via margins, not
+            // transform: spark-spin animates `transform`, so a translate here
+            // would be overwritten on the animation's first frame.
+            position: "absolute",
+            left: "50%",
+            top: "50%",
+            width: 18,
+            height: 18,
+            marginLeft: -9,
+            marginTop: -9,
+            borderRadius: 999,
+            background: `conic-gradient(from 0deg, transparent 0deg 70deg, color-mix(in oklch, ${color} 35%, transparent) 120deg, ${color} 330deg, transparent 330deg 360deg)`,
+            WebkitMask:
+              "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
+            mask: "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
+          }}
+        />
+      )}
       <svg
         width="13"
         height="13"

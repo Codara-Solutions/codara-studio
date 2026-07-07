@@ -794,6 +794,17 @@ a { color: inherit; }
   animation: spark-wire-flow 1.5s linear infinite;
 }
 
+/* Workspace-rail activity ring: a comet arc that orbits the workspace color
+   dot while something inside (agent turn, live run, loom pass) is working.
+   The asymmetric arc — not the recolored dot — is what makes rotation
+   legible at 12px. Collapses to a static 3/4 ring under reduced motion. */
+.spark-activity-spin {
+  animation: spark-spin 0.9s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .spark-activity-spin { animation: none; }
+}
+
 /* ── Reduced motion ─────────────────────────────────────────────────────────
    Honor the OS "reduce motion" setting: keyframe animations (pulsing status
    dots, the connector spark, shimmer, spinners) collapse to their final
