@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import type { PreviewKind } from "./previewKind";
 import { pathToFileUrl } from "../../lib/pathToFileUrl";
+import { isRemotePath } from "@shared/remote";
 
 // Heavy pdf.js chunk stays out of the eager bundle — same pattern as the
 // lazy mermaid renderer in markdown-preview/MermaidBlock.tsx.
@@ -39,6 +40,22 @@ export default function FilePreview({ path, kind }: Props) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
 
+  // Blob fallback: pull bytes over IPC and objectURL them when the direct
+  // file:// load errors out (and eagerly for remote files, which have no
+  // file:// form). Also cleans up the object URL on path change.
+  const activateBlobFallback = useCallback(() => {
+    void window.spark.fs
+      .readFileBytes(path)
+      .then((bytes) => {
+        const url = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer]));
+        setBlobUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return url;
+        });
+      })
+      .catch(() => setLoadFailed(true));
+  }, [path]);
+
   useEffect(() => {
     let cancelled = false;
     setStat(null);
@@ -61,6 +78,9 @@ export default function FilePreview({ path, kind }: Props) {
         });
     };
     refreshStat();
+    // Remote files have no file:// form — load their bytes over IPC into a
+    // blob URL straight away instead of waiting for the <img> to error.
+    if (isRemotePath(path)) activateBlobFallback();
     // fs:changed only fires for create/delete/rename (content writes are
     // filtered main-side), so this catches deletion/replacement of the
     // previewed file; the mtime doubles as the <img> cache-buster.
@@ -69,22 +89,8 @@ export default function FilePreview({ path, kind }: Props) {
       cancelled = true;
       off();
     };
-  }, [path]);
+  }, [path, activateBlobFallback]);
 
-  // Blob fallback: pull bytes over IPC and objectURL them when the direct
-  // file:// load errors out. Also cleans up the object URL on path change.
-  const activateBlobFallback = useCallback(() => {
-    void window.spark.fs
-      .readFileBytes(path)
-      .then((bytes) => {
-        const url = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer]));
-        setBlobUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev);
-          return url;
-        });
-      })
-      .catch(() => setLoadFailed(true));
-  }, [path]);
   useEffect(() => {
     return () => {
       setBlobUrl((prev) => {

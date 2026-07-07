@@ -330,18 +330,6 @@ function WorkspaceRail(props: RailProps) {
         );
       case "explorer": {
         const cwd = props.activeWorkspace?.cwd ?? null;
-        // Phase 2 brings the remote file tree; until then show a placeholder.
-        if (isRemotePath(cwd)) {
-          return (
-            <RemoteSectionPlaceholder
-              label="Explorer"
-              collapsed={collapsed.explorer}
-              onToggle={() => onToggleSection("explorer")}
-              headerDrag={headerDrag("explorer")}
-              text="Remote file browsing is coming soon. Open a terminal to work on the host now."
-            />
-          );
-        }
         if (!cwd) {
           return (
             <>

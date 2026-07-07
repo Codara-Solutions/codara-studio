@@ -8,6 +8,7 @@ import { FileNodeIcon } from "./file-icons/FileNodeIcon";
 import { InlineInput } from "./file-icons/InlineInput";
 import { basename, dirname } from "../path-utils";
 import { pathToFileUrl } from "../lib/pathToFileUrl";
+import { isRemotePath } from "@shared/remote";
 import {
   getExplorerClipboard,
   setExplorerClipboard,
@@ -745,6 +746,12 @@ export default function FileTree({
   // preventDefault to suppress the default HTML5 drag and let the main process
   // own the drag via webContents.startDrag.
   const handleRowDragStart = useCallback((node: Node, event: React.DragEvent) => {
+    // OS drag-out is a local-filesystem gesture (webContents.startDrag needs
+    // real local paths). Remote entries live on the VPS — suppress it.
+    if (isRemotePath(node.entry.path)) {
+      event.preventDefault();
+      return;
+    }
     const path = node.entry.path;
     const selected = selectedFilePathsRef.current;
     const paths =

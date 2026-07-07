@@ -5,6 +5,8 @@ import type { FileListResult, FsEntry, FsFileContent, FsReadResult, FsWriteResul
 import { FS_READ_TEXT_LIMIT_BYTES } from "@shared/types";
 import { writeFileAtomic } from "./fs-atomic";
 import { recordEditorWrite } from "./editor-write-tracker";
+import { isRemotePath } from "@shared/remote";
+import * as remoteFs from "./remote/remote-fs";
 
 const MAX_TEXT_FILE_BYTES = FS_READ_TEXT_LIMIT_BYTES;
 const MAX_FILE_LIST_FILES = 10000;
@@ -23,6 +25,7 @@ const SKIPPED_FILE_LIST_DIRS = new Set([
 ]);
 
 export async function listDir(dir: string): Promise<FsEntry[]> {
+  if (isRemotePath(dir)) return remoteFs.remoteListDir(dir);
   let entries: import("node:fs").Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
@@ -51,6 +54,7 @@ export async function listDir(dir: string): Promise<FsEntry[]> {
 }
 
 export async function listFiles(root: string): Promise<FileListResult> {
+  if (isRemotePath(root)) return remoteFs.remoteListFiles(root);
   const files: FsEntry[] = [];
   await collectFiles(root, files, root);
   files.sort((a, b) =>
@@ -72,6 +76,7 @@ async function isDirSafe(p: string): Promise<boolean> {
 }
 
 export async function readTextFile(path: string): Promise<FsFileContent> {
+  if (isRemotePath(path)) return remoteFs.remoteReadText(path);
   const st = await fs.stat(path);
   if (!st.isFile()) {
     throw new Error("Path is not a file.");
@@ -97,6 +102,7 @@ export async function readTextFile(path: string): Promise<FsFileContent> {
 // they load content via file:// URLs, so all they need from IPC is size +
 // mtime for captions and cache-busting — never the buffer itself.
 export async function statFile(path: string): Promise<{ size: number; mtimeMs: number }> {
+  if (isRemotePath(path)) return remoteFs.remoteStatFile(path);
   const st = await fs.stat(path);
   if (!st.isFile()) {
     throw new Error("Path is not a file.");
@@ -111,6 +117,7 @@ export async function statFile(path: string): Promise<{ size: number; mtimeMs: n
 const MAX_BINARY_READ_BYTES = 300 * 1024 * 1024;
 
 export async function readFileBytes(path: string): Promise<Uint8Array> {
+  if (isRemotePath(path)) return remoteFs.remoteReadFileBytes(path);
   const st = await fs.stat(path);
   if (!st.isFile()) {
     throw new Error("Path is not a file.");
@@ -125,6 +132,7 @@ export async function readFileBytes(path: string): Promise<Uint8Array> {
 // dedicated banner for binary/oversize files instead of throwing. Mirrors
 // the terax-scout pattern (kind: text | binary | toolarge).
 export async function readFileEx(path: string): Promise<FsReadResult> {
+  if (isRemotePath(path)) return remoteFs.remoteReadFileEx(path);
   const st = await fs.stat(path);
   if (!st.isFile()) {
     throw new Error("Path is not a file.");
@@ -146,6 +154,7 @@ export async function readFileEx(path: string): Promise<FsReadResult> {
 }
 
 export async function listMarkdownFiles(root: string): Promise<PlanFile[]> {
+  if (isRemotePath(root)) return remoteFs.remoteListMarkdownFiles(root);
   const files: PlanFile[] = [];
   await collectMarkdownFiles(root, root, 0, files);
   return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath, undefined, { sensitivity: "base" }));
@@ -161,6 +170,7 @@ export async function writeTextFile(
   content: string,
   opts?: { expectedMtimeMs?: number },
 ): Promise<FsWriteResult> {
+  if (isRemotePath(path)) return remoteFs.remoteWriteText(path, content, opts);
   if (opts?.expectedMtimeMs != null) {
     let before;
     try {
@@ -182,6 +192,7 @@ export async function writeTextFile(
 }
 
 export async function renameFile(path: string, newName: string): Promise<FsEntry> {
+  if (isRemotePath(path)) return remoteFs.remoteRename(path, newName);
   const cleanName = sanitizeName(newName);
 
   const st = await fs.stat(path);
@@ -205,6 +216,9 @@ export async function renameFile(path: string, newName: string): Promise<FsEntry
 }
 
 export async function deleteFile(path: string): Promise<void> {
+  // Remote delete is permanent rm -rf (no OS trash on the host); the file
+  // tree adds a confirm step for remote entries.
+  if (isRemotePath(path)) return remoteFs.remoteDelete(path);
   // Allow trashing both files and directories.
   await shell.trashItem(path);
 }
@@ -216,6 +230,7 @@ export async function deleteFile(path: string): Promise<void> {
 // recursively. Returns an FsEntry for every entry actually created so the
 // renderer can refresh / reveal them.
 export async function importEntries(destDir: string, sourcePaths: string[]): Promise<FsEntry[]> {
+  if (isRemotePath(destDir)) return remoteFs.remoteImportEntries(destDir, sourcePaths);
   const destStat = await fs.stat(destDir);
   if (!destStat.isDirectory()) {
     throw new Error("Drop target is not a folder.");
@@ -268,6 +283,7 @@ export async function importEntries(destDir: string, sourcePaths: string[]): Pro
 // across devices. Returns an FsEntry for every entry actually moved so the
 // renderer can refresh both the destination and each source's former parent.
 export async function moveEntries(destDir: string, sourcePaths: string[]): Promise<FsEntry[]> {
+  if (isRemotePath(destDir)) return remoteFs.remoteMoveEntries(destDir, sourcePaths);
   const destStat = await fs.stat(destDir);
   if (!destStat.isDirectory()) {
     throw new Error("Drop target is not a folder.");
@@ -367,6 +383,7 @@ async function pathExists(p: string): Promise<boolean> {
 }
 
 export async function createFile(parentPath: string, name: string): Promise<FsEntry> {
+  if (isRemotePath(parentPath)) return remoteFs.remoteCreateFile(parentPath, name);
   const cleanName = sanitizeName(name);
   const target = join(parentPath, cleanName);
   // wx mode = exclusive create; fail if exists.
@@ -376,6 +393,7 @@ export async function createFile(parentPath: string, name: string): Promise<FsEn
 }
 
 export async function createFolder(parentPath: string, name: string): Promise<FsEntry> {
+  if (isRemotePath(parentPath)) return remoteFs.remoteCreateFolder(parentPath, name);
   const cleanName = sanitizeName(name);
   const target = join(parentPath, cleanName);
   await fs.mkdir(target, { recursive: false });

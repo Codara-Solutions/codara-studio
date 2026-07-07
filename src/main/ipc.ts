@@ -19,6 +19,7 @@ import {
   setAuthPromptSender,
   setStatusSender,
 } from "./remote/connections";
+import { isRemotePath } from "@shared/remote";
 import type {
   RemoteAuthPromptAnswer,
   RemoteBrowseResult,
@@ -509,6 +510,11 @@ export function registerIpc(): void {
         typeof args?.baseDir === "string" && args.baseDir.length > 0
           ? args.baseDir
           : undefined;
+      // Terminal ctrl-click link probing is a local-fs feature; for a remote
+      // pane the base cwd is a ssh:// path and there's nothing local to stat.
+      if (isRemotePath(target) || (base && isRemotePath(base))) {
+        return { exists: false, isFile: false, resolved: target };
+      }
       const resolved = base ? join(base, target) : target;
       try {
         assertAllowedReadPath(resolved);
@@ -636,6 +642,13 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("fs:setWatchRoot", async (e, root: string | null): Promise<void> => {
+    // Remote (ssh://) roots have no local fs.watch — the git panel's 10s poll
+    // + manual refresh cover change detection, exactly as on Linux where
+    // recursive fs.watch is unavailable. No-op here so nothing throws.
+    if (root !== null && isRemotePath(root)) {
+      await fsWatcher.setWatchRoot(e.sender, null);
+      return;
+    }
     // Gate only the root path here; downstream watcher events do not need a
     // per-event check (they all fire inside the gated root).
     if (root !== null) assertAllowedReadPath(root);
@@ -652,6 +665,8 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("fs:revealInOS", async (_e, path: string): Promise<void> => {
+    // No OS file manager for a path on a remote host — silently ignore.
+    if (isRemotePath(path)) return;
     try {
       const stat = await fs.stat(path);
       if (stat.isDirectory()) {
