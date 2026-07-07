@@ -16,6 +16,7 @@ import {
   EDITOR_THEME_IDS,
   TERMINAL_SCROLLBACK_LINE_LIMIT_MAX,
   TERMINAL_SCROLLBACK_LINE_LIMIT_MIN,
+  AUTOSAVE_DELAY_PRESETS,
   INLINE_AI_DELAY_PRESETS,
   INLINE_AI_MODEL_PRESETS,
 } from "@shared/types";
@@ -1175,6 +1176,10 @@ function EditorSettings() {
     0,
     Math.min(2_000, Math.round(preferences.inlineAutocompleteDelayMs)),
   );
+  const currentAutosaveDelayMs = Math.max(
+    250,
+    Math.min(10_000, Math.round(preferences.autosaveDelayMs)),
+  );
   return (
     <div style={{ display: "grid", gap: 18 }}>
       <SectionTitle title="Code editor" detail="Editing behaviour for the file editor pane." />
@@ -1196,6 +1201,77 @@ function EditorSettings() {
           }
         />
       </Label>
+
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+
+      <SectionTitle
+        title="Autosave"
+        detail="Save the active file automatically after you stop typing."
+      />
+      <ToggleRow
+        title="Autosave"
+        desc="Debounced save after the last keystroke. If the file changed on disk (e.g. an agent edited it), autosave pauses and asks instead of overwriting. Ctrl/Cmd+S always saves."
+        checked={preferences.autosaveEnabled}
+        onChange={(v) => void setPreference("autosaveEnabled", v)}
+      />
+      {preferences.autosaveEnabled && (
+        <div style={{ display: "grid", gap: 7 }}>
+          <span className="spark-eyebrow" style={{ fontSize: 11 }}>
+            Autosave delay
+          </span>
+          <div
+            role="group"
+            aria-label="Autosave delay"
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+              gap: 6,
+            }}
+          >
+            {AUTOSAVE_DELAY_PRESETS.map((preset) => (
+              <TimingPresetButton
+                key={preset.value}
+                label={preset.label}
+                hint={preset.hint}
+                active={currentAutosaveDelayMs === preset.value}
+                onClick={() => void setPreference("autosaveDelayMs", preset.value)}
+              />
+            ))}
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(0, 1fr) auto",
+              gap: 10,
+              alignItems: "center",
+            }}
+          >
+            <input
+              aria-label="Autosave wait time"
+              type="range"
+              min={250}
+              max={10000}
+              step={250}
+              value={currentAutosaveDelayMs}
+              onChange={(event) =>
+                void setPreference("autosaveDelayMs", Number(event.currentTarget.value))
+              }
+              style={{ width: "100%", accentColor: "var(--accent)" }}
+            />
+            <span
+              style={{
+                color: "var(--muted)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                minWidth: 44,
+                textAlign: "right",
+              }}
+            >
+              {(currentAutosaveDelayMs / 1000).toFixed(currentAutosaveDelayMs % 1000 === 0 ? 0 : 2)}s
+            </span>
+          </div>
+        </div>
+      )}
 
       <hr className="spark-divider" style={{ margin: "2px 0" }} />
 

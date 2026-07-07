@@ -132,6 +132,7 @@ import type {
   FsEntry,
   FsFileContent,
   FsReadResult,
+  FsWriteResult,
   GitBranchList,
   GitCommitDetailResult,
   GitCommitMessageResult,
@@ -511,9 +512,19 @@ export function registerIpc(): void {
     return listMarkdownFiles(root);
   });
 
-  ipcMain.handle("fs:writeText", async (_e, args: { path: string; content: string }): Promise<FsFileContent> => {
-    return writeTextFile(args.path, args.content);
-  });
+  ipcMain.handle(
+    "fs:writeText",
+    async (
+      _e,
+      args: { path: string; content: string; expectedMtimeMs?: number },
+    ): Promise<FsWriteResult> => {
+      return writeTextFile(
+        args.path,
+        args.content,
+        typeof args.expectedMtimeMs === "number" ? { expectedMtimeMs: args.expectedMtimeMs } : undefined,
+      );
+    },
+  );
 
   ipcMain.handle("fs:renameFile", async (_e, args: RenameFileInput): Promise<FsEntry> => {
     return renameFile(args.path, args.newName);

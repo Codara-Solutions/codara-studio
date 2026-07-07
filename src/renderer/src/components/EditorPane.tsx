@@ -97,12 +97,24 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const [viewMode, setViewMode] = useState<ViewMode>("edit");
   const [copiedAt, setCopiedAt] = useState<number | null>(null);
 
-  const { doc, dirty, onChange, save, reload } = useDocument({ path, onDirtyChange });
-  const reloadRef = useRef(reload);
-  reloadRef.current = reload;
-
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const { preferences } = usePreferences();
+
+  const { doc, dirty, conflict, onChange, save, reload, flush } = useDocument({
+    path,
+    onDirtyChange,
+    // Read live prefs at debounce-schedule time so toggling autosave in
+    // Settings applies to already-open tabs. prefsRef is assigned below,
+    // before any editing can schedule an autosave.
+    getAutosavePrefs: () => ({
+      enabled: prefsRef.current.autosaveEnabled,
+      delayMs: prefsRef.current.autosaveDelayMs,
+    }),
+  });
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+  const flushRef = useRef(flush);
+  flushRef.current = flush;
   // The inline-AI plugin fires `onStatus` on every transition (~every 350ms
   // while typing). We forward each status into <AIStatusFooter>, which owns
   // the `aiStatus` useState itself, so an AI tick re-renders only the footer
@@ -243,6 +255,18 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     };
   }, [path, doc.status]);
 
+  // Autosave flush points: a pending debounce fires immediately when the
+  // window loses focus or this pane goes inactive (tab switch), so edits
+  // aren't left unsaved while the user is looking elsewhere.
+  useEffect(() => {
+    const onBlur = () => flushRef.current();
+    window.addEventListener("blur", onBlur);
+    return () => window.removeEventListener("blur", onBlur);
+  }, []);
+  useEffect(() => {
+    if (!active) flushRef.current();
+  }, [active]);
+
   // Markdown preview toggle — dispatched globally by the keyboard handler
   // in App.tsx. Every mounted MD pane listens, but only the active tab acts;
   // non-MD panes ignore it entirely.
@@ -347,6 +371,45 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             onCopy={handleCopy}
             onSetMode={setViewMode}
           />
+        )}
+        {doc.status === "ready" && conflict && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "6px 12px",
+              flex: "0 0 auto",
+              background: "color-mix(in oklch, var(--warn) 12%, var(--panel))",
+              borderBottom: "1px solid var(--rule-soft)",
+              fontSize: 12,
+            }}
+          >
+            <span style={{ color: "var(--warn)", fontWeight: 600 }}>File changed on disk</span>
+            <span style={{ color: "var(--muted)" }}>
+              Autosave paused so your edits aren&apos;t lost.
+            </span>
+            <span style={{ flex: 1 }} />
+            <button
+              className="spark-btn"
+              style={{ fontSize: 11, padding: "2px 10px" }}
+              onClick={() => reloadRef.current(true)}
+            >
+              Reload from disk
+            </button>
+            <button
+              className="spark-btn"
+              style={{ fontSize: 11, padding: "2px 10px" }}
+              onClick={() => {
+                void (async () => {
+                  await saveRef.current();
+                  onSavedRef.current?.(pathRef.current);
+                })();
+              }}
+            >
+              Keep my edits
+            </button>
+          </div>
         )}
         {doc.status === "loading" && <EditorMessage text="Loading file..." />}
         {doc.status === "error" && <EditorMessage text={doc.message} danger />}

@@ -26,6 +26,7 @@ import type {
   FsEntry,
   FsFileContent,
   FsReadResult,
+  FsWriteResult,
   GitBranchList,
   GitCommitDetailResult,
   GitCommitMessageResult,
@@ -310,8 +311,15 @@ const api = {
     }> => ipcRenderer.invoke("fs:pathExists", input),
     listMarkdownFiles: (root: string): Promise<PlanFile[]> =>
       ipcRenderer.invoke("fs:listMarkdownFiles", root),
-    writeText: (path: string, content: string): Promise<FsFileContent> =>
-      ipcRenderer.invoke("fs:writeText", { path, content }),
+    // Editor save. `expectedMtimeMs` (autosave) makes the write conditional:
+    // the main process refuses with kind:"conflict" if the file on disk
+    // changed since the buffer loaded. Omitted (manual save) = always write.
+    writeText: (
+      path: string,
+      content: string,
+      opts?: { expectedMtimeMs?: number },
+    ): Promise<FsWriteResult> =>
+      ipcRenderer.invoke("fs:writeText", { path, content, expectedMtimeMs: opts?.expectedMtimeMs }),
     renameFile: (input: RenameFileInput): Promise<FsEntry> =>
       ipcRenderer.invoke("fs:renameFile", input),
     deleteFile: (path: string): Promise<void> => ipcRenderer.invoke("fs:deleteFile", path),

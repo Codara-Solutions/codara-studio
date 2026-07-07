@@ -220,6 +220,14 @@ export interface AppPreferences {
   theme: ThemePref;
   vimMode: boolean;
   editorTheme: EditorThemeId;
+  // When true, the editor saves a dirty buffer automatically after typing
+  // pauses (debounced by autosaveDelayMs). Off by default: autosave writes
+  // are guarded by an mtime staleness check (see FsWriteConflict) so a stale
+  // buffer never silently clobbers a file an agent rewrote on disk — but the
+  // interaction is still opt-in.
+  autosaveEnabled: boolean;
+  // Autosave debounce in ms, clamped 250–10000.
+  autosaveDelayMs: number;
   inlineAutocompleteEnabled: boolean;
   inlineAutocompleteDelayMs: number;
   // OpenRouter model id used for inline ghost-text autocomplete. Free-text
@@ -351,6 +359,35 @@ export const INLINE_AI_DELAY_PRESETS: ReadonlyArray<{
   },
 ];
 
+export const DEFAULT_AUTOSAVE_DELAY_MS = 1000;
+
+export const AUTOSAVE_DELAY_PRESETS: ReadonlyArray<{
+  value: number;
+  label: string;
+  hint: string;
+}> = [
+  {
+    value: 500,
+    label: "Quick",
+    hint: "Save half a second after you stop typing.",
+  },
+  {
+    value: 1000,
+    label: "Steady",
+    hint: "Save one second after you stop typing.",
+  },
+  {
+    value: 2500,
+    label: "Relaxed",
+    hint: "Wait a couple of seconds before saving.",
+  },
+  {
+    value: 5000,
+    label: "Slow",
+    hint: "Wait five seconds before saving.",
+  },
+];
+
 export const DEFAULT_NOTIFICATION_CHANNELS: NotificationChannelsPref = {
   inApp: true,
   native: true,
@@ -367,6 +404,8 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   theme: "codara-classic",
   vimMode: false,
   editorTheme: "github-dark",
+  autosaveEnabled: false,
+  autosaveDelayMs: DEFAULT_AUTOSAVE_DELAY_MS,
   inlineAutocompleteEnabled: true,
   inlineAutocompleteDelayMs: DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS,
   inlineAutocompleteModelId: DEFAULT_INLINE_AUTOCOMPLETE_MODEL_ID,
@@ -716,6 +755,27 @@ export type FsReadResult =
   | { kind: "text"; path: string; content: string; size: number; mtimeMs: number }
   | { kind: "binary"; path: string; size: number }
   | { kind: "toolarge"; path: string; size: number; limit: number };
+
+// Discriminated result for `fs:writeText`. When the caller passes
+// `expectedMtimeMs` (autosave does; manual Ctrl+S does not), the main process
+// stats the file first and refuses to write over content that changed on disk
+// since the buffer was loaded — surfacing a conflict instead of clobbering
+// e.g. an agent's edit or a checkpoint restore.
+export interface FsWriteOk {
+  kind: "ok";
+  path: string;
+  size: number;
+  mtimeMs: number;
+}
+
+export interface FsWriteConflict {
+  kind: "conflict";
+  path: string;
+  reason: "modified" | "deleted";
+  diskMtimeMs: number | null;
+}
+
+export type FsWriteResult = FsWriteOk | FsWriteConflict;
 
 export interface PlanFile {
   name: string;

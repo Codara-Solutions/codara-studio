@@ -1,9 +1,10 @@
 import { shell } from "electron";
 import { promises as fs } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative } from "node:path";
-import type { FileListResult, FsEntry, FsFileContent, FsReadResult, PlanFile } from "@shared/types";
+import type { FileListResult, FsEntry, FsFileContent, FsReadResult, FsWriteResult, PlanFile } from "@shared/types";
 import { FS_READ_TEXT_LIMIT_BYTES } from "@shared/types";
 import { writeFileAtomic } from "./fs-atomic";
+import { recordEditorWrite } from "./editor-write-tracker";
 
 const MAX_TEXT_FILE_BYTES = FS_READ_TEXT_LIMIT_BYTES;
 const MAX_FILE_LIST_FILES = 10000;
@@ -122,9 +123,34 @@ export async function listMarkdownFiles(root: string): Promise<PlanFile[]> {
   return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath, undefined, { sensitivity: "base" }));
 }
 
-export async function writeTextFile(path: string, content: string): Promise<FsFileContent> {
+// Conflict-aware editor save. When `expectedMtimeMs` is provided (autosave),
+// the write is refused if the file on disk changed since the buffer was
+// loaded — an agent in a terminal, a git operation, or a checkpoint restore
+// may have rewritten it, and a stale buffer must not silently win. Manual
+// Ctrl+S omits the option and always writes (explicit user intent).
+export async function writeTextFile(
+  path: string,
+  content: string,
+  opts?: { expectedMtimeMs?: number },
+): Promise<FsWriteResult> {
+  if (opts?.expectedMtimeMs != null) {
+    let before;
+    try {
+      before = await fs.stat(path);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return { kind: "conflict", path, reason: "deleted", diskMtimeMs: null };
+      }
+      throw err;
+    }
+    if (before.mtimeMs !== opts.expectedMtimeMs) {
+      return { kind: "conflict", path, reason: "modified", diskMtimeMs: before.mtimeMs };
+    }
+  }
   await writeFileAtomic(path, content);
-  return readTextFile(path);
+  const st = await fs.stat(path);
+  recordEditorWrite(path, st.mtimeMs);
+  return { kind: "ok", path, size: st.size, mtimeMs: st.mtimeMs };
 }
 
 export async function renameFile(path: string, newName: string): Promise<FsEntry> {

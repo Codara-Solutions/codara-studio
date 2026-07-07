@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { WorkerTask } from "@shared/types";
 
 import { claudeProjectsDirForCwd } from "./claude-paths";
+import { isEditorWrittenMtime } from "../editor-write-tracker";
 
 // Three-channel stuck detector. A worker is declared stuck only when ALL of:
 //  - pty byte stream (TUI spinner repaints)
@@ -172,7 +173,11 @@ async function newestWorkspaceMtime(root: string, maxDepth: number): Promise<num
       const full = path.join(d, e.name);
       const st = await fs.stat(full).catch(() => null);
       if (!st) continue;
-      if (st.mtimeMs > newest) newest = st.mtimeMs;
+      // Skip mtimes attributable to the built-in editor (manual save or
+      // autosave) — editor activity is not agent activity, and counting it
+      // here would let periodic autosave writes keep a genuinely stuck
+      // worker looking alive forever.
+      if (!isEditorWrittenMtime(full, st.mtimeMs) && st.mtimeMs > newest) newest = st.mtimeMs;
       if (e.isDirectory()) await walk(full, depth - 1);
     }
   }

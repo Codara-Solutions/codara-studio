@@ -2,6 +2,7 @@ import { readFileSync, promises as fs } from "node:fs";
 import { join } from "node:path";
 import {
   APP_THEME_IDS,
+  DEFAULT_AUTOSAVE_DELAY_MS,
   DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS,
   DEFAULT_NOTIFICATION_CHANNELS,
   DEFAULT_PREFERENCES,
@@ -108,6 +109,13 @@ function normalizeGlassPct(value: unknown, fallback: number | undefined): number
   return Math.max(0, Math.min(200, Math.round(value)));
 }
 
+function normalizeAutosaveDelay(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return DEFAULT_AUTOSAVE_DELAY_MS;
+  }
+  return Math.max(250, Math.min(10_000, Math.round(value)));
+}
+
 function normalizeInlineDelay(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return DEFAULT_INLINE_AUTOCOMPLETE_DELAY_MS;
@@ -189,6 +197,11 @@ function normalize(
     editorTheme: isEditorThemeId(src.editorTheme)
       ? src.editorTheme
       : DEFAULT_PREFERENCES.editorTheme,
+    autosaveEnabled:
+      typeof src.autosaveEnabled === "boolean"
+        ? src.autosaveEnabled
+        : DEFAULT_PREFERENCES.autosaveEnabled,
+    autosaveDelayMs: normalizeAutosaveDelay(src.autosaveDelayMs),
     inlineAutocompleteEnabled:
       typeof src.inlineAutocompleteEnabled === "boolean"
         ? src.inlineAutocompleteEnabled
