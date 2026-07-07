@@ -11,6 +11,7 @@ import { pathToFileUrl } from "../lib/pathToFileUrl";
 import { isRemotePath } from "@shared/remote";
 import {
   getExplorerClipboard,
+  isSameFileSet,
   setExplorerClipboard,
   subscribeExplorerClipboard,
 } from "../lib/explorerClipboard";
@@ -825,11 +826,15 @@ export default function FileTree({
       if (sources.length === 0) return; // nothing to paste — quiet no-op
       // Cut (move) semantics apply only when the OS clipboard still holds our
       // own cut set (or interop is unavailable and we fell back to it). If the
-      // user copied something else in Explorer since, it's a plain copy.
-      const sameAsLocal =
-        local !== null &&
-        sources.length === local.paths.length &&
-        sources.every((p, i) => p === local.paths[i]);
+      // user copied something else in the file manager since, it's a plain copy.
+      const sameAsLocal = local !== null && isSameFileSet(sources, local.paths);
+      // On a same-set match, run the transfer against the in-app paths, not the
+      // clipboard readback: the OS round-trip can change unicode normalization
+      // form (macOS returns file URLs as NFD), and the in-app paths are what the
+      // tree, open editor tabs, and selection are keyed by — so the move's
+      // editor-tab repoint and selection cleanup line up. Cross-app pastes
+      // (Finder → tree) keep the readback paths and stay a copy.
+      if (sameAsLocal && local) sources = local.paths;
       const isCut = local?.mode === "cut" && sameAsLocal;
       const ok = await transferEntriesInto(
         destDir,

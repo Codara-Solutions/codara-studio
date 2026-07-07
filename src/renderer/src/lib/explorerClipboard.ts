@@ -28,3 +28,13 @@ export function subscribeExplorerClipboard(listener: () => void): () => void {
     listeners.delete(listener);
   };
 }
+
+// Cut-vs-copy detection: is the OS clipboard's path list (in order) the same set
+// of files we last put there? Compared NFC-normalized because a macOS pasteboard
+// round-trip can hand a filename back in a different unicode normalization form
+// (NFC→NFD) — raw === would then read our own cut as a foreign clipboard and
+// silently downgrade the move to a copy.
+export function isSameFileSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((p, i) => p.normalize("NFC") === b[i].normalize("NFC"));
+}

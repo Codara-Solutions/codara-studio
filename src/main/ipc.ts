@@ -1703,9 +1703,10 @@ export function registerIpc(): void {
       detectRemoteAgents(hostIdOrPath),
   );
 
-  // File clipboard bridge for the explorer's copy/cut/paste. Real CF_HDROP
-  // interop with Windows Explorer via clipboard-files.ts; both directions
-  // fail soft so the renderer's in-app clipboard keeps working regardless.
+  // File clipboard bridge for the explorer's copy/cut/paste. Real OS-clipboard
+  // interop with the native file manager via clipboard-files.ts (Windows
+  // CF_HDROP, macOS NSPasteboard file URLs); both directions fail soft so the
+  // renderer's in-app clipboard keeps working regardless.
   ipcMain.handle("clipboard:readFilePaths", async (): Promise<string[] | null> => {
     return readClipboardFilePaths();
   });
