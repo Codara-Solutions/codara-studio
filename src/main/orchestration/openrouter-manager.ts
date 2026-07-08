@@ -1493,7 +1493,7 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
   lines.push("- manual: always available (human executes; only when automation is unsafe).");
   lines.push(
     "Tier semantics:",
-    "- claude-fable-5 (Fable 5) is RESERVED for the main chat and automations — never assign it to a worker. Codara downgrades any fable worker hint to claude-opus-4-8. Use claude-opus-4-8 as the tier=top worker model.",
+    "- claude-fable-5 (Fable 5) is Anthropic's premium, most expensive tier. Assign it to a worker ONLY when the user's OWN message explicitly asks for Fable 5 for the work; otherwise NEVER — use claude-opus-4-8 as the tier=top worker model. Codara enforces this: it downgrades any fable worker hint to claude-opus-4-8 unless the user opted in (Settings → Agents) AND explicitly requested Fable in their message, so do not assign fable on your own judgment.",
     "- Multi-model runtime (Claude): skeleton → claude-opus-4-8 (tier=top) + highest available effort; feature → tier=mid model + medium effort; leaf → tier=mid (sonnet) at low/minimal effort. Never assign claude-opus-4-8 to a leaf task.",
     "- Single-model runtime (Codex, Cursor): the model never changes — vary EFFORT to express tier. Codex (gpt-5.5): skeleton → high/xhigh, feature → medium, leaf → minimal. Cursor (composer-2.5-fast): one effort level, treat as the cheap leaf pick.",
     "- Never pick a top tier or high/xhigh/max effort for a mechanical leaf (e.g. running a single shell command and reporting its output) — that wastes context and money for no gain.",

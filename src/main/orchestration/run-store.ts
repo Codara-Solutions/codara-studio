@@ -152,6 +152,11 @@ import { createSandboxWorktree, mergeBackSandboxWorktree, removeSandboxWorktree 
 import { readGitText } from "../git-exec";
 import { sparkHome } from "../spark-home";
 import { getPreferenceCached } from "../preferences-store";
+import {
+  sanitizeWorkerModelHint,
+  runUserRequestedFable,
+  SPARK_WORKER_FABLE_FALLBACK,
+} from "./worker-model-hint";
 import * as pty from "../pty-manager";
 import {
   formatStuckReason,
@@ -3646,43 +3651,21 @@ function isTopTierModel(hint: string | undefined): boolean {
   return TOP_TIER_MODEL_BASES.has(normalizeModelHint(hint));
 }
 
-// Fable 5 (`claude-fable-5`) is Anthropic's top-tier model. It is reserved for
-// the main chat session and for opt-in automation (loom) workers — workers that
-// Codara itself spawns (execute-mode spark_spawn_workers, plan-council workers,
-// autopilot worker tasks) must NEVER run fable. A manager LLM may nonetheless
-// emit a fable modelHint; this helper downgrades any such hint to Opus 4.8.
-// Case-insensitive substring match on "fable" so suffixed/aliased variants
-// (e.g. "claude-fable-5@high", "Claude-Fable-5") are caught too. The model id
-// itself (`claude-fable-5`) is the canonical string used everywhere else.
-const SPARK_WORKER_FABLE_FALLBACK = "claude-opus-4-8" as const;
+// sanitizeWorkerModelHint (the fable downgrade + superseded-Sonnet remap) lives
+// in worker-model-hint.ts so it can be unit-tested without run-store's deps.
+// Re-exported here because callers (e.g. agent-socket) reach it through the
+// run-store namespace.
+export { sanitizeWorkerModelHint } from "./worker-model-hint";
 
-// Manager sessions keep the system prompt they were born with for the whole
-// run, so a run started before a model-roster update keeps emitting the old
-// mid-tier id (observed: run-mr7vuzog kept requesting claude-sonnet-4-6 after
-// the prompts moved to claude-sonnet-5). Remap superseded Sonnet ids here at
-// the spawn chokepoint — same capability tier, same price, strictly better
-// model — preserving any "@effort" suffix. Bare aliases are covered too:
-// managers have shipped raw variants like "sonnet-4-6" across runs (see the
-// TOP_TIER_MODEL_BASES comment re: bare "opus"). "-legacy"/other suffixed ids
-// stay untouched (the anchor requires the id to END at the version digits).
-const SUPERSEDED_SONNET_BASE = /^(claude-)?sonnet-4(-\d+)?$/i;
-const SPARK_WORKER_SONNET_CURRENT = "claude-sonnet-5" as const;
-
-export function sanitizeWorkerModelHint(
-  hint: string | undefined,
-): { hint: string | undefined; downgraded: boolean } {
-  if (hint && /fable/i.test(hint)) {
-    return { hint: SPARK_WORKER_FABLE_FALLBACK, downgraded: true };
-  }
-  if (hint) {
-    const at = hint.indexOf("@");
-    const base = (at >= 0 ? hint.slice(0, at) : hint).trim();
-    if (SUPERSEDED_SONNET_BASE.test(base)) {
-      const suffix = at >= 0 ? hint.slice(at) : "";
-      return { hint: `${SPARK_WORKER_SONNET_CURRENT}${suffix}`, downgraded: false };
-    }
-  }
-  return { hint, downgraded: false };
+// A Cora-spawned worker may run Fable 5 ONLY when BOTH hold: the user opted in
+// (Settings → Agents "Allow Fable 5", the "fableEnabled" preference) AND the
+// user explicitly named Fable in their own message this run. The manager LLM
+// cannot self-authorize the most expensive tier — runUserRequestedFable scans
+// user-authored chat only, never manager/worker output. Callers pass the result
+// as `sanitizeWorkerModelHint(hint, { allowFable })` so a fable hint passes
+// through unchanged; otherwise it is downgraded to Opus 4.8 with a visible note.
+export function workerFableAllowed(run: RunState): boolean {
+  return getPreferenceCached("fableEnabled") === true && runUserRequestedFable(run);
 }
 
 function promoteForTrivial(agent: PlannedStepAgent): PlannedStepAgent {
@@ -4541,18 +4524,20 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
   // The "main AI" judge runs on the model + effort the user picked in the
   // composer (e.g. Opus 4.8 @ medium) — it's the one that decides what to keep
   // from each candidate. Fall back to a top-tier default only if the run didn't
-  // record a selection. The judge is a Cora-spawned WORKER, so Fable is not
-  // permitted (reserved for the main chat + automations): sanitize the hint and
-  // surface the downgrade so it isn't a silent swap by the launch-command
-  // backstop.
-  const judgeModel = sanitizeWorkerModelHint(run.chatModel ?? COUNCIL_TOP_TIER_MODEL[runtime]);
+  // record a selection. The judge is a Cora-spawned WORKER, so a fable pick is
+  // downgraded to Opus 4.8 UNLESS the user opted in and explicitly asked for
+  // Fable this run (workerFableAllowed). Sanitize the hint and surface any
+  // downgrade so it isn't a silent swap by the launch-command backstop.
+  const judgeModel = sanitizeWorkerModelHint(run.chatModel ?? COUNCIL_TOP_TIER_MODEL[runtime], {
+    allowFable: workerFableAllowed(run),
+  });
   if (judgeModel.downgraded) {
     updated = await addRunMessage({
       runId: updated.id,
       author: "spark",
       kind: "note",
       message:
-        "Fable is reserved for the main chat and automations; the plan-council synthesis judge runs on Opus 4.8 instead.",
+        "Fable is the premium tier and you didn't ask for it here, so the plan-council synthesis judge runs on Opus 4.8 instead.",
     });
   }
 
@@ -7806,6 +7791,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd, {
     sandboxDir: attempt.sandboxWorktreePath,
     isAutomation: isAutomationLaunch,
+    // Cora-spawned worker: honor a fable hint only if the user opted in AND
+    // asked for Fable this run; otherwise the backstop downgrades it.
+    allowFable: workerFableAllowed(run),
     extraWritableDirs,
   });
   const command = launchCommand
@@ -11337,7 +11325,7 @@ async function recordWorkerOutput(
 function buildLaunchCommandLine(
   task: WorkerTask,
   cwd: string,
-  opts?: { sandboxDir?: string; isAutomation?: boolean; extraWritableDirs?: string[] },
+  opts?: { sandboxDir?: string; isAutomation?: boolean; allowFable?: boolean; extraWritableDirs?: string[] },
 ): string | null {
   // Pin the shell to the workspace directory before the agent CLI starts.
   // The pty is spawned with cwd=workspaceCwd, but the user's $PROFILE
@@ -11363,11 +11351,13 @@ function buildLaunchCommandLine(
     // Cora-spawned execute/council/autopilot path) this is defence-in-depth —
     // the visible fable note is emitted earlier at the spawn chokepoint
     // (agent-socket), and tasks persisted by pre-remap builds still get their
-    // stale sonnet hint fixed here at launch.
+    // stale sonnet hint fixed here at launch. `allowFable` (the caller's
+    // opted-in + explicitly-requested gate) lets a fable hint pass the backstop
+    // unchanged, matching the decision made at the spawn chokepoint.
     const rawModel = task.modelHint?.trim();
     const launchModel = opts?.isAutomation
       ? rawModel
-      : sanitizeWorkerModelHint(rawModel).hint;
+      : sanitizeWorkerModelHint(rawModel, { allowFable: opts?.allowFable }).hint;
     if (launchModel) args.push("--model", quoteShellArg(launchModel));
     const claudeEffort = mapClaudeEffort(task.effortHint);
     if (claudeEffort) args.push("--effort", claudeEffort);

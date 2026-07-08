@@ -36,9 +36,11 @@ import type { CliProvider, ResumeOpts, SpawnOpts } from "./types";
 // presence here is what unblocks `worker.model = "claude-fable-5"`. Opus 4.8
 // stays the default (isDefault) so nothing silently upgrades to fable. Workers
 // that Codara itself spawns (execute-mode spark_spawn_workers, plan-council,
-// autopilot) must NEVER run fable — that block lives at the spawn chokepoints
-// (agent-socket handleOrchestratorSpawnWorkers) plus a buildLaunchCommandLine
-// backstop, not here; see sanitizeWorkerModelHint in run-store.ts.
+// autopilot) run fable ONLY when the user opted in AND explicitly asked for it
+// this run; otherwise their fable hint is downgraded to Opus 4.8. That gate
+// lives at the spawn chokepoints (agent-socket handleOrchestratorSpawnWorkers)
+// plus a buildLaunchCommandLine backstop, not here; see sanitizeWorkerModelHint
+// + workerFableAllowed in run-store.ts (and worker-model-hint.ts).
 const CLAUDE_MODELS: AgentRuntimeModel[] = [
   {
     id: "claude-fable-5",

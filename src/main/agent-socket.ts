@@ -832,10 +832,13 @@ async function handleOrchestratorSpawnWorkers(
   // find the surviving worker's class for the solo-spawn advisory below).
   const createdTaskClasses: (string | undefined)[] = [];
   const attemptIdsToLaunch: string[] = [];
-  // Fable 5 is reserved for the main chat and automations — Cora-spawned
-  // workers must never run it. Downgrade any fable modelHint the manager emits
-  // to Opus 4.8 here (the spawn chokepoint) and remember the titles so we can
-  // surface ONE visible system note after the loop.
+  // Fable 5 is the premium tier — a Cora-spawned worker may run it ONLY when the
+  // user opted in AND explicitly asked for Fable this run (workerFableAllowed).
+  // Otherwise downgrade any fable modelHint the manager emits to Opus 4.8 here
+  // (the spawn chokepoint) and remember the titles so we can surface ONE visible
+  // system note after the loop. Computed once per spawn RPC — the run's
+  // user-authored messages don't change mid-call.
+  const allowFable = runStore.workerFableAllowed(run);
   const downgradedFableTitles: string[] = [];
   // Create every task BEFORE preparing any: prepareWorkerTask renders the
   // worker prompt and evaluates shouldUsePeerComms against the run snapshot at
@@ -851,6 +854,7 @@ async function handleOrchestratorSpawnWorkers(
     const description = typeof w.description === "string" ? w.description : "";
     const sanitizedModel = runStore.sanitizeWorkerModelHint(
       typeof w.modelHint === "string" ? w.modelHint : undefined,
+      { allowFable },
     );
     if (sanitizedModel.downgraded) downgradedFableTitles.push(title);
     const updated = await runStore.createWorkerTask({
@@ -904,8 +908,8 @@ async function handleOrchestratorSpawnWorkers(
   if (downgradedFableTitles.length > 0) {
     const list = downgradedFableTitles.map((t) => `"${t}"`).join(", ");
     const note =
-      `Fable 5 (claude-fable-5) is reserved for the main chat session and automations — ` +
-      `it is not available to Cora-spawned workers. ` +
+      `Fable 5 (claude-fable-5) is the premium tier — a worker runs it only when you've ` +
+      `enabled Fable (Settings → Agents) AND explicitly asked for it in your message. ` +
       `Downgraded ${downgradedFableTitles.length === 1 ? "worker" : "workers"} ${list} to Opus 4.8 (claude-opus-4-8).`;
     try {
       await runStore.addRunMessage({
@@ -928,7 +932,7 @@ async function handleOrchestratorSpawnWorkers(
   const notes: string[] = [];
   if (downgradedFableTitles.length > 0) {
     notes.push(
-      `Fable 5 is reserved for the main chat and automations; ${downgradedFableTitles.length} worker model hint(s) were downgraded to claude-opus-4-8. Do not request claude-fable-5 for workers.`,
+      `Fable 5 (claude-fable-5) is the premium tier; ${downgradedFableTitles.length} worker model hint(s) were downgraded to claude-opus-4-8 because the user did not explicitly request Fable this run (or Fable is off in Settings). Only assign claude-fable-5 to a worker when the user's own message explicitly asks for Fable 5.`,
     );
   }
   // Solo-spawn advisory. Legitimate solo spawns exist — a lone verifier or
