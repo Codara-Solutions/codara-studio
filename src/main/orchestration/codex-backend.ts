@@ -14,8 +14,10 @@
 //   2. Each turn writes the user prompt to PTY stdin (Codex submits on \r;
 //      no Ink bug). Multi-line prompts use bracketed paste so newlines don't
 //      submit early.
-//   3. We resolve when the rollout emits a task_complete event_msg, with a 90s
-//      safety timeout.
+//   3. We resolve when the rollout emits a task_complete event_msg. The waiter
+//      never times out on inactivity — a busy Codex can go silent for minutes;
+//      it only emits a throttled "still waiting" note and unblocks on
+//      task_complete, CLI exit, or a user interrupt.
 //
 // The map of runId -> CodexChatSession keeps the CLI process alive across
 // chat turns so users get true conversational continuity (the rollout is the
@@ -88,30 +90,30 @@ interface CodexChatSession {
    *  SparkManagerDecision the run-store can act on — mirrors the claude
    *  backend's turnToolCalls field. */
   turnToolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }>;
-  /** Wall-clock ms of the most recent JSONL line observed from Codex. Used
-   *  by waitForTurnEnd as a sliding deadline so long-poll MCP tool calls
-   *  (e.g. spark_wait_for_workers blocking 10-20 min) don't trip the 90s
-   *  wall-clock cap. Mirrors claude-backend's lastJsonlActivityAt. */
+  /** Wall-clock ms of the most recent JSONL line observed from Codex. Used by
+   *  waitForTurnEnd only to detect silence (no rollout activity) and emit a
+   *  throttled "still waiting" note — never to fail the turn. Mirrors
+   *  claude-backend's lastJsonlActivityAt. */
   lastJsonlActivityAt: number;
-  /** Codara MCP long-poll tool calls in flight (function_call emitted, no
-   *  matching function_call_output yet). When non-empty waitForTurnEnd
-   *  extends its cap to EXTENDED_TURN_TIMEOUT_MS — without this, the rollout
-   *  goes silent during spark_wait_for_workers' 10-20 min block and the 90s
-   *  wall-clock trips before workers can report back. Keyed by call_id.
-   *  Mirrors claude-backend's pendingMcpToolCalls. */
-  pendingMcpToolCalls: Map<
-    string,
-    { toolName: string; startedAt: number; expiresAt: number }
-  >;
   /** Wall-clock ms of the most recent user interrupt (Stop button →
    *  interruptChat), or null. Codex's ESC abort emits no task_complete, so
-   *  without this marker the in-flight waitForTurnEnd would sit out the 90s
-   *  silence window and then reject — and the catch would report the routine
-   *  user Stop as a FAILED turn (run.failed + danger toast). interruptChat
-   *  sets it and fast-fails the waiter; the catch turns an interrupt-flagged
-   *  rejection into a quiet turnAborted result. Cleared at each turn start.
-   *  Claude gets the same semantics for free via its .done marker. */
+   *  interruptChat fast-fails the in-flight waitForTurnEnd via pendingReject;
+   *  this marker lets the catch turn that interrupt-flagged rejection into a
+   *  quiet turnAborted result instead of a FAILED turn (run.failed + danger
+   *  toast). Cleared at each turn start. Claude gets the same semantics for
+   *  free via its .done marker. */
   interruptedAt: number | null;
+  /** Set true once the Codex CLI process exits (or a session-level error
+   *  lands), unconditionally — even between turns when no waiter is in flight.
+   *  Mirrors claude-backend's chat.fatal. Two consumers: (a) waitForTurnEnd
+   *  rejects immediately instead of polling a dead pty forever (the waiter no
+   *  longer self-times-out), and (b) turn start disposes + respawns rather
+   *  than reusing the dead session (submitPrompt would otherwise write to a
+   *  torn-down pty silently and hang the turn). */
+  exited: boolean;
+  /** Human-readable reason captured alongside `exited`, surfaced by the
+   *  waiter's rejection. Null until the process exits. */
+  exitMessage: string | null;
 }
 
 const SESSIONS = new Map<string, CodexChatSession>();
@@ -123,17 +125,14 @@ const SESSIONS = new Map<string, CodexChatSession>();
 // claude-backend's contextInjectedRuns.
 const contextInjectedRuns = new Set<string>();
 
-const TURN_TIMEOUT_MS = 90_000;
-// While a Codara long-poll MCP tool call is in flight (spark_wait_for_workers),
-// the rollout JSONL emits the initial function_call entry once and is then
-// silent for the 10-20 min that the tool blocks. We extend the cap to 30 min
-// while any tracked entry is outstanding so the function_call_output has time
-// to arrive. See claude-backend.ts for the matching CC-side reasoning.
-const EXTENDED_TURN_TIMEOUT_MS = 30 * 60_000;
-// Per-entry expiry on pendingMcpToolCalls: if Codex emits function_call then
-// dies before function_call_output, the entry would otherwise hold the cap
-// indefinitely. 25 min covers the in-server soft ceiling plus slop.
-const MAX_PENDING_MCP_HOLD_MS = 25 * 60_000;
+// waitForTurnEnd never fails a turn on inactivity — a busy Codex legitimately
+// goes silent for minutes (a long tool execution, or a blocking long-poll MCP
+// call like spark_wait_for_workers that runs 10-20 min). A stopwatch would
+// fail a healthy turn mid-flight. Instead the waiter runs until task_complete
+// (or CLI exit / user interrupt) and, purely for visibility, emits a "still
+// waiting" system note after every TURN_SILENCE_NOTE_INTERVAL_MS of silence.
+// See claude-backend.ts for the matching CC-side reasoning.
+const TURN_SILENCE_NOTE_INTERVAL_MS = 5 * 60_000;
 
 // --- First-turn input readiness (Windows especially) -----------------------
 // startCliSession resolves as soon as the PTY spawns — NOT when Codex's TUI is
@@ -173,21 +172,6 @@ const CODEX_SUBMIT_RETRY_INTERVAL_MS = 600;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// Only Codara MCP long-pollers extend the cap. Codex writes the bare tool name
-// in payload.name (e.g. "spark_wait_for_workers"); the mcp__server__ prefix
-// lives in payload.namespace, so name alone is the gate.
-function isSparkLongPollMcpTool(name: string): boolean {
-  // spark_ask_user also blocks the manager turn (up to 15 min) waiting on the
-  // human; without it the cap stays at 90s and the turn times out, force-
-  // completing the run and cancelling active workers. spark_wait_for_automation
-  // (Automation mode) long-polls the scheduler up to 19 min; same hazard.
-  return (
-    name === "spark_wait_for_workers" ||
-    name === "spark_ask_user" ||
-    name === "spark_wait_for_automation"
-  );
 }
 
 const TALK_PROMPT_FILENAME = "codex-talk.md";
@@ -417,17 +401,24 @@ async function spawnSession(
     turnStartUsage: null,
     turnToolCalls: [],
     lastJsonlActivityAt: Date.now(),
-    pendingMcpToolCalls: new Map(),
     interruptedAt: null,
+    exited: false,
+    exitMessage: null,
   };
 
   cli.onJsonlEntry((raw) => {
-    // Every JSONL line is liveness: refresh the sliding deadline so
-    // waitForTurnEnd doesn't trip during a long-poll MCP call.
+    // Every JSONL line is liveness: refresh the silence anchor so
+    // waitForTurnEnd's "still waiting" note only fires during real silence.
     session.lastJsonlActivityAt = Date.now();
     const entry = raw as JsonlEntry;
     if (entry?.__spark_cli_session_error) {
       const msg = entry.message ?? "Codex CLI session error";
+      // Persistent flag so a dead session is never reused on the next turn,
+      // even if no waiter is in flight right now. Mirrors chat.fatal.
+      if (!session.exited) {
+        session.exited = true;
+        session.exitMessage = msg;
+      }
       onStream?.({ kind: "error", message: msg });
       session.pendingReject?.(new Error(msg));
       return;
@@ -436,13 +427,18 @@ async function spawnSession(
   });
 
   cli.onExit((info) => {
-    // If the process dies mid-turn, fail the waiter so the manager call
-    // returns instead of hanging until the 90s timeout.
-    // Also clear any orphan MCP entries — defensive only since pendingReject
-    // settles the waiter immediately, but keeps the map clean across spawns.
-    session.pendingMcpToolCalls.clear();
+    const msg = `codex exited (code=${info.exitCode}${info.signal ? `, signal=${info.signal}` : ""})`;
+    // Mark the session dead UNCONDITIONALLY — even between turns with no waiter
+    // in flight. Turn start checks this to dispose + respawn instead of reusing
+    // a dead pty (submitPrompt would write to it silently and the waiter, which
+    // no longer self-times-out, would poll forever). Mirrors chat.fatal.
+    if (!session.exited) {
+      session.exited = true;
+      session.exitMessage = msg;
+    }
+    // If a turn is in flight, fail its waiter now so the manager call returns
+    // instead of waiting for the next tick to notice `exited`.
     if (session.pendingReject) {
-      const msg = `codex exited (code=${info.exitCode}${info.signal ? `, signal=${info.signal}` : ""})`;
       onStream?.({ kind: "error", message: msg });
       session.pendingReject(new Error(msg));
     }
@@ -530,17 +526,6 @@ function handleEntry(
       // Track for execute-mode SparkManagerDecision conversion after the
       // turn ends — same pattern as the Claude backend.
       session.turnToolCalls.push({ toolName, toolUseId, input: parsedInput });
-      // Track Codara long-poll MCP calls so waitForTurnEnd extends its cap
-      // while Codex is blocked inside the tool. Removed by function_call_output;
-      // backstopped by expiresAt sweep in effectiveTurnTimeoutMs.
-      if (isSparkLongPollMcpTool(toolName)) {
-        const startedAt = Date.now();
-        session.pendingMcpToolCalls.set(toolUseId, {
-          toolName,
-          startedAt,
-          expiresAt: startedAt + MAX_PENDING_MCP_HOLD_MS,
-        });
-      }
       onStream?.({
         kind: "tool_use",
         toolName,
@@ -552,8 +537,6 @@ function handleEntry(
     if (payloadType === "function_call_output") {
       const p = payload as { call_id?: unknown; output?: unknown };
       const toolUseId = typeof p.call_id === "string" ? p.call_id : "";
-      // Clear the pending-MCP entry (no-op if not tracked).
-      if (toolUseId) session.pendingMcpToolCalls.delete(toolUseId);
       onStream?.({
         kind: "tool_result",
         toolUseId,
@@ -596,41 +579,51 @@ async function submitPrompt(session: CodexChatSession, prompt: string): Promise<
 }
 
 
-// Sweep expired pending-MCP entries and return the cap that applies now.
-// While a tracked long-poll MCP call is in flight, the cap is
-// EXTENDED_TURN_TIMEOUT_MS; otherwise normal TURN_TIMEOUT_MS.
-function effectiveTurnTimeoutMs(session: CodexChatSession): number {
-  const now = Date.now();
-  for (const [id, entry] of session.pendingMcpToolCalls) {
-    if (now > entry.expiresAt) session.pendingMcpToolCalls.delete(id);
-  }
-  return session.pendingMcpToolCalls.size > 0
-    ? EXTENDED_TURN_TIMEOUT_MS
-    : TURN_TIMEOUT_MS;
-}
-
-async function waitForTurnEnd(session: CodexChatSession): Promise<void> {
-  // Seed the activity stamp at submit time so a Codex that fails to print
-  // anything within TURN_TIMEOUT_MS still trips. Subsequent JSONL lines
-  // refresh it (see CodexChatSession.lastJsonlActivityAt).
+async function waitForTurnEnd(
+  session: CodexChatSession,
+  onStream: ChatStreamHandler | undefined,
+): Promise<void> {
+  // Seed the silence anchor at submit time so the "still waiting" window is
+  // measured from submit even before Codex prints anything. Subsequent JSONL
+  // lines refresh it (see CodexChatSession.lastJsonlActivityAt).
   session.lastJsonlActivityAt = Date.now();
   return new Promise<void>((resolve, reject) => {
     let settled = false;
-    // Sliding deadline: poll every 500ms and trip only when there's been
-    // (effective cap) of JSONL silence. Long-poll MCP tool calls (e.g.
-    // spark_wait_for_workers, 10-20 min) emit a function_call ONCE and then
-    // the rollout is silent until function_call_output lands. The cap
-    // extends to EXTENDED_TURN_TIMEOUT_MS while pendingMcpToolCalls is
-    // non-empty so the output has time to arrive.
+    // The waiter NEVER fails on inactivity. task_complete (pendingResolve),
+    // CLI exit / session death (pendingReject or the `exited` check below) and
+    // user interrupt (pendingReject) are the only ways it settles. The tick
+    // otherwise exists purely to surface a genuinely silent-but-alive session:
+    // after every TURN_SILENCE_NOTE_INTERVAL_MS of no rollout activity it
+    // emits a throttled "still waiting" note, reset on any JSONL line. A busy
+    // Codex (long tool execution, or a blocking long-poll MCP call like
+    // spark_wait_for_workers for 10-20 min) is silent yet perfectly healthy,
+    // so declaring a timeout would fail a live turn mid-flight.
+    let silenceAnchor = session.lastJsonlActivityAt;
+    let nextSilenceNoteAt = Date.now() + TURN_SILENCE_NOTE_INTERVAL_MS;
     const tick = setInterval(() => {
       if (settled) return;
-      const cap = effectiveTurnTimeoutMs(session);
-      if (Date.now() - session.lastJsonlActivityAt >= cap) {
-        settled = true;
-        clearInterval(tick);
-        session.pendingResolve = null;
-        session.pendingReject = null;
-        reject(new Error(`Codex turn timed out after ${cap}ms`));
+      // Defensive backstop: if the session is flagged dead but this waiter's
+      // pendingReject somehow wasn't fired by onExit, reject it here rather
+      // than poll a dead pty forever.
+      if (session.exited) {
+        session.pendingReject?.(
+          new Error(session.exitMessage ?? "Codex session terminated before turn end."),
+        );
+        return;
+      }
+      if (session.lastJsonlActivityAt !== silenceAnchor) {
+        silenceAnchor = session.lastJsonlActivityAt;
+        nextSilenceNoteAt = Date.now() + TURN_SILENCE_NOTE_INTERVAL_MS;
+      } else if (Date.now() >= nextSilenceNoteAt) {
+        const minutes = Math.max(
+          1,
+          Math.round((Date.now() - session.lastJsonlActivityAt) / 60_000),
+        );
+        onStream?.({
+          kind: "system_note",
+          message: `Still waiting on Codex (no rollout activity for ${minutes}m)…`,
+        });
+        nextSilenceNoteAt = Date.now() + TURN_SILENCE_NOTE_INTERVAL_MS;
       }
     }, 500);
     session.pendingResolve = () => {
@@ -663,6 +656,23 @@ export const codexBackend: SparkAgentBackend = {
     const startedAt = Date.now();
     try {
       let session = SESSIONS.get(input.run.id);
+      if (session && session.exited) {
+        // Previous spawn already died (CLI exit / session error, possibly
+        // between turns). Reusing it would write the prompt into a torn-down
+        // pty and hang the turn. Dispose and respawn from scratch, resuming the
+        // rollout via `codex resume <uuid>` so the conversation continues.
+        const resumeUuid = session.sessionUuid;
+        try {
+          await session.cli.dispose();
+        } catch {
+          // best-effort — the pty is already gone
+        }
+        SESSIONS.delete(input.run.id);
+        session = undefined;
+        if (resumeUuid && !input.chat.sessionUuid) {
+          input.chat.sessionUuid = resumeUuid;
+        }
+      }
       const fastModeChanged = session && session.spawnFastMode !== input.chat.fastMode;
       const effortChanged = session && session.spawnEffort !== input.chat.effort;
       if (
@@ -708,10 +718,6 @@ export const codexBackend: SparkAgentBackend = {
       session.lastMessageId = null;
       session.turnStartUsage = { input: 0, output: 0, cached: 0 };
       session.turnToolCalls = [];
-      // The model can only have one outstanding tool call at a time, so this
-      // is expected to be empty between turns. Defensive clear in case a
-      // previous turn's orphan would extend an unrelated turn.
-      session.pendingMcpToolCalls.clear();
       // A previous turn's user interrupt must not misclassify THIS turn's
       // outcome as aborted.
       session.interruptedAt = null;
@@ -758,7 +764,15 @@ export const codexBackend: SparkAgentBackend = {
         await session.cli.waitForInputReady(CODEX_INPUT_READY_TIMEOUT_MS).catch(() => {});
         await sleep(CODEX_INPUT_SETTLE_MS);
       }
-      const waiter = waitForTurnEnd(session);
+      // The session can die during the pre-submit REPL settle above (onExit
+      // sets `exited`). Fail fast rather than write the prompt into a dead pty
+      // and install a waiter that would only reject on the next tick.
+      if (session.exited) {
+        throw new Error(
+          session.exitMessage ?? "Codex session terminated before turn end.",
+        );
+      }
+      const waiter = waitForTurnEnd(session, onStream);
       await submitPrompt(session, prompt);
       await waiter;
 
@@ -828,6 +842,10 @@ export const codexBackend: SparkAgentBackend = {
     const session = SESSIONS.get(runId);
     if (!session) return;
     SESSIONS.delete(runId);
+    // Unblock any in-flight turn waiter deterministically. Disposing the CLI
+    // normally fires onExit which rejects the waiter, but a pty that is already
+    // gone emits no exit event, so settle it here too before we tear down.
+    session.pendingReject?.(new Error("Codex session disposed."));
     try {
       await session.cli.dispose();
     } catch {
@@ -850,10 +868,12 @@ export const codexBackend: SparkAgentBackend = {
       // session may already be disposed; nothing useful to surface
     }
     // Settle the in-flight turn waiter promptly. Codex's ESC abort emits no
-    // task_complete rollout entry, so without this the waiter would sit out
-    // the full silence window (~90s) before rejecting. Mirrors the claude
-    // backend, whose interruptChat stamps the .done marker for the same
-    // reason. No-op when no turn is in flight.
+    // task_complete rollout entry, and the waiter no longer self-times-out, so
+    // pendingReject is the load-bearing mechanism that unblocks the turn on a
+    // user Stop — without this the waiter would poll indefinitely (emitting
+    // only "still waiting" notes). Mirrors the claude backend, whose
+    // interruptChat stamps the .done marker for the same reason. No-op when no
+    // turn is in flight.
     session.pendingReject?.(new Error("Codex turn interrupted by user"));
   },
 };

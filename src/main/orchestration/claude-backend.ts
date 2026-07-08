@@ -62,44 +62,17 @@ import {
 } from "./spark-agent-backend";
 
 const TURN_POLL_INTERVAL_MS = 200;
-const TURN_TIMEOUT_MS = 90_000;
-// When a Codara long-poll MCP tool call is in flight (currently only
-// spark_wait_for_workers — see isSparkLongPollMcpTool below), the turn-end
-// waiter extends its cap to this value. spark_wait_for_workers can block for
-// 10-20 minutes while workers run, and the CC JSONL is silent during the wait
-// (only the initial `tool_use` line is emitted). Without this extension the
-// wall-clock 90s cap trips roughly when the tool_result is about to land, and
-// the resulting turn-timeout fast-path cancels every queued worker via
-// applySparkManagerDecision (run-store.ts:2841).
-const EXTENDED_TURN_TIMEOUT_MS = 30 * 60_000;
-// Per-entry expiry on pendingMcpToolCalls. If a CLI emits a `tool_use` and
-// then dies before emitting the matching `tool_result`, the entry would
-// otherwise hold the cap indefinitely. 25 min covers the in-MCP-server soft
-// ceiling (20 min for spark_wait_for_workers) plus slop, after which the
-// entry is swept and the regular TURN_TIMEOUT_MS reasserts.
-const MAX_PENDING_MCP_HOLD_MS = 25 * 60_000;
-
-// Only Codara MCP long-pollers extend the cap — every other MCP tool returns
-// quickly and tracking them would broaden the "ignore 90s" surface unnecessarily.
-function isSparkLongPollMcpTool(name: string): boolean {
-  return (
-    name === "spark_wait_for_workers" ||
-    name === "mcp__cora-orchestrator__spark_wait_for_workers" ||
-    // spark_ask_user blocks the manager turn while it waits (up to 15 min) for
-    // the human to answer. Without this it isn't tracked in pendingMcpToolCalls,
-    // the cap stays at 90s, the turn times out, and the run is force-completed —
-    // cancelling any active workers. Treat it as a long-poll so the cap rises.
-    name === "spark_ask_user" ||
-    name === "mcp__cora-orchestrator__spark_ask_user" ||
-    // spark_wait_for_automation (Automation mode) long-polls the scheduler for
-    // an automation run to settle — default 10 min, cap 19 min. Same hazard as
-    // spark_wait_for_workers: untracked, the 90s turn cap fires mid-wait.
-    // (spark_run_automation is NOT here: it returns as soon as the iteration
-    // STARTS, not when it finishes, so it never blocks long.)
-    name === "spark_wait_for_automation" ||
-    name === "mcp__cora-orchestrator__spark_wait_for_automation"
-  );
-}
+// The turn-end waiter NEVER fails a turn on inactivity — a busy CC can write
+// nothing to its JSONL for minutes (a single long tool execution, a long
+// thinking block, or a blocking long-poll MCP call like spark_wait_for_workers
+// that can run 10-20 min) while remaining perfectly healthy. A stopwatch that
+// declares that a timeout would fail a live turn mid-flight (the observed bug:
+// tool calls kept streaming in after a false FAILED marker). Instead the
+// waiter polls indefinitely and, purely for visibility, emits a "still
+// waiting" system note after every TURN_SILENCE_NOTE_INTERVAL_MS of silence
+// (reset on any JSONL activity). It still exits at once on session death
+// (chat.fatal) or the Stop hook's done-marker.
+const TURN_SILENCE_NOTE_INTERVAL_MS = 5 * 60_000;
 // CC's Stop hook fires when the assistant finishes its turn, but the JSONL
 // tailer is on a 150ms poll AND CC sometimes flushes the assistant message
 // to disk slightly AFTER firing the hook. Without this grace window we
@@ -264,25 +237,13 @@ interface ClaudeChatSession {
    *  ends to convert spark_spawn_workers calls into a SparkManagerDecision
    *  that the run-store can act on, exactly like grok/OpenRouter does. */
   turnToolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }>;
-  /** Wall-clock ms of the most recent JSONL line observed from CC. Used by
-   *  the turn-end waiters as a sliding deadline: as long as CC is emitting
-   *  *something* (tool_use, assistant block, mode events) at least every
-   *  TURN_TIMEOUT_MS, the turn isn't considered hung. Without this, CC
-   *  blocking on a long-poll MCP call like spark_wait_for_workers (10-20
-   *  min cap) would trip the 90s wall-clock timeout even though it's
-   *  perfectly healthy — and the resulting "turn timeout → status:complete"
-   *  fast-path cancels every queued worker task (run-store.ts:2841). */
+  /** Wall-clock ms of the most recent JSONL line observed from CC. The
+   *  turn-end waiter uses it only to detect *silence* (no transcript
+   *  activity): after TURN_SILENCE_NOTE_INTERVAL_MS with no new line it emits
+   *  a throttled "still waiting" system note — it never fails the turn on
+   *  inactivity. submitPromptWithVerification also reads it as the baseline
+   *  that proves a freshly-pasted prompt actually started a turn. */
   lastJsonlActivityAt: number;
-  /** Codara MCP long-poll tool calls (currently only spark_wait_for_workers)
-   *  that are in flight: tool_use emitted, no matching tool_result yet. When
-   *  non-empty the turn-end waiter swaps its cap to EXTENDED_TURN_TIMEOUT_MS
-   *  so the inner blocking wait (10-20 min) doesn't trip the wall-clock 90s.
-   *  Keyed by tool_use_id. Each entry has its own expiresAt so a CLI that
-   *  emits tool_use then dies can't extend the cap forever. */
-  pendingMcpToolCalls: Map<
-    string,
-    { toolName: string; startedAt: number; expiresAt: number }
-  >;
   /** Unsubscribe from the JSONL listener; called once on dispose. */
   detachEntries: () => void;
 }
@@ -444,10 +405,6 @@ export const claudeBackend: SparkAgentBackend = {
         chat.turnAssistantText = "";
         chat.lastUsage = {};
         chat.turnToolCalls = [];
-        // The model can only have one outstanding tool call at a time, so the
-        // map is expected to be empty between turns. Clearing defensively
-        // prevents a previous turn's orphan from extending an unrelated turn.
-        chat.pendingMcpToolCalls.clear();
       }
 
       // Resolve the prompt for this turn. Empty prompts still go through:
@@ -546,9 +503,14 @@ export const claudeBackend: SparkAgentBackend = {
       // few times in case one was dropped. Extra Enters into an empty input
       // box are harmless newlines. (turnFile was computed and cleared of any
       // stale marker at the top of this turn.)
-      const turnEnded = await waitForTurnFileWithRetries(turnFile, chat, () => {
-        chat.session.writeRaw("\r");
-      });
+      const turnEnded = await waitForTurnFileWithRetries(
+        turnFile,
+        chat,
+        () => {
+          chat.session.writeRaw("\r");
+        },
+        emit,
+      );
       if (!turnEnded.ok) {
         emit({ kind: "error", message: turnEnded.message });
         return {
@@ -1002,19 +964,17 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     fatalMessage: null,
     firstTurnGateDone: false,
     turnToolCalls: [],
-    // Seeded to now so the first 90s window still applies if CC fails to
-    // emit even an init `mode` event. Refreshed on every JSONL line below.
+    // Seeded to now so silence tracking has a baseline even before CC emits
+    // its first JSONL line. Refreshed on every JSONL line below.
     lastJsonlActivityAt: Date.now(),
-    pendingMcpToolCalls: new Map(),
     detachEntries: () => undefined,
   };
 
   chat.detachEntries = session.onJsonlEntry((entry) => {
     // Every JSONL line is a liveness signal — even mode/permission-mode
     // events at session start, even tool_use blocks while CC is mid-MCP-call.
-    // waitForTurnFile uses this to slide its deadline forward instead of
-    // tripping the wall-clock cap during long-poll tool calls like
-    // spark_wait_for_workers (which can block 10-20 min).
+    // The turn-end waiter reads this to detect silence (and emit a throttled
+    // "still waiting" note); any line here resets that silence window.
     chat.lastJsonlActivityAt = Date.now();
     translateAndEmit(chat, entry, opts.onStream);
   });
@@ -1035,9 +995,9 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     }
   });
 
-  // Flip fatal if the CC process exits unexpectedly so an in-flight
-  // waitForTurnFile bails immediately instead of timing out at 90s.
-  // Without this, a CC crash mid-turn hangs the chat for the full ceiling.
+  // Flip fatal if the CC process exits unexpectedly so an in-flight turn-end
+  // waiter unblocks at once. The waiter polls indefinitely otherwise, so this
+  // (and the Stop hook's done-marker) is how a crashed turn stops waiting.
   session.onExit(({ exitCode, signal }) => {
     if (chat.fatal) return;
     chat.fatal = true;
@@ -1050,9 +1010,6 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     chat.fatalMessage = `Claude Code exited unexpectedly (code=${exitCode}${
       signal !== undefined ? `, signal=${signal}` : ""
     })${tail ? `. Last output: ${tail.slice(-1500)}` : "."}`;
-    // Drop any orphan MCP entries — the waiter checks `fatal` first so this
-    // is defensive only, but keeping the map clean across spawns is cheap.
-    chat.pendingMcpToolCalls.clear();
     opts.onStream({ kind: "error", message: chat.fatalMessage });
   });
 
@@ -1107,17 +1064,6 @@ function translateAndEmit(
         // post-process them into a SparkManagerDecision (execute mode) or
         // just surface them for the UI (talk mode).
         chat.turnToolCalls.push({ toolName, toolUseId, input: block.input });
-        // Track Codara long-poll MCP calls so the turn-end waiter extends its
-        // cap while CC is blocked inside the tool. Removed by the matching
-        // tool_result branch below; backstopped by expiresAt sweep.
-        if (toolUseId && isSparkLongPollMcpTool(toolName)) {
-          const startedAt = Date.now();
-          chat.pendingMcpToolCalls.set(toolUseId, {
-            toolName,
-            startedAt,
-            expiresAt: startedAt + MAX_PENDING_MCP_HOLD_MS,
-          });
-        }
         emit({
           kind: "tool_use",
           toolName,
@@ -1136,10 +1082,6 @@ function translateAndEmit(
       if (block.type !== "tool_result") continue;
       const toolUseId =
         typeof block.tool_use_id === "string" ? block.tool_use_id : "";
-      // Clear the pending-MCP entry if this is the result for a tracked
-      // long-poll call. Map.delete on an unknown key is a no-op, so this is
-      // safe to call for every tool_result (built-ins, third-party MCPs, etc).
-      if (toolUseId) chat.pendingMcpToolCalls.delete(toolUseId);
       const output = stringifyToolResult(block.content);
       const isError = block.is_error === true ? true : undefined;
       emit({ kind: "tool_result", toolUseId, output, isError });
@@ -1237,21 +1179,6 @@ function stringifyToolResult(content: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-// Sweep expired pending-MCP entries and return the cap that should apply
-// right now. While a tracked long-poll MCP call is in flight, the cap is
-// EXTENDED_TURN_TIMEOUT_MS; otherwise normal TURN_TIMEOUT_MS. Sweep first so a
-// long-dead tool_use (CLI died after emit, never sent tool_result) can't hold
-// the extended cap indefinitely.
-function effectiveTurnTimeoutMs(chat: ClaudeChatSession): number {
-  const now = Date.now();
-  for (const [id, entry] of chat.pendingMcpToolCalls) {
-    if (now > entry.expiresAt) chat.pendingMcpToolCalls.delete(id);
-  }
-  return chat.pendingMcpToolCalls.size > 0
-    ? EXTENDED_TURN_TIMEOUT_MS
-    : TURN_TIMEOUT_MS;
 }
 
 // Normalize pty output for the echo probe: strip ANSI escapes (CSI, OSC,
@@ -1390,31 +1317,44 @@ async function submitPromptWithVerification(
 }
 
 /**
- * Like waitForTurnFile, but re-fires the Enter keystroke a handful of times
- * while polling. Some Ink REPL frames silently drop the first Enter when
- * the input box is still committing a bracketed paste; pressing again later
- * recovers. The first press happens immediately, then SUBMIT_RETRY_COUNT
- * more presses on SUBMIT_RETRY_INTERVAL_MS intervals; after that we keep
- * polling on TURN_POLL_INTERVAL_MS up to TURN_TIMEOUT_MS without further
- * Enters (any additional press into an active turn could be misread by the
- * REPL as a new prompt).
+ * Wait for CC's Stop hook to write the turn-done marker, re-firing the Enter
+ * keystroke a handful of times while polling. Some Ink REPL frames silently
+ * drop the first Enter when the input box is still committing a bracketed
+ * paste; pressing again later recovers. The first press happens immediately,
+ * then SUBMIT_RETRY_COUNT more presses on SUBMIT_RETRY_INTERVAL_MS intervals;
+ * after that we keep polling on TURN_POLL_INTERVAL_MS without further Enters
+ * (any additional press into an active turn could be misread by the REPL as a
+ * new prompt).
+ *
+ * This NEVER fails the turn on inactivity. A busy CC legitimately writes
+ * nothing to its JSONL for minutes (one long tool execution, a long thinking
+ * block, or a blocking long-poll MCP call like spark_wait_for_workers), so a
+ * stopwatch would fail a healthy turn mid-flight. It polls indefinitely and
+ * exits only on (a) the done-marker, (b) chat.fatal (session death / pty exit
+ * / dispose — see the onExit handler and disposeChatSessionInternal), or
+ * (c) interruptChat, which stamps the same done-marker to unblock a stop.
+ * For visibility into a genuinely hung session it emits a throttled
+ * `system_note` after every TURN_SILENCE_NOTE_INTERVAL_MS of silence, reset
+ * on any JSONL activity.
  */
 async function waitForTurnFileWithRetries(
   turnFile: string,
   chat: ClaudeChatSession,
   pressEnter: () => void,
+  emit: ChatStreamHandler,
 ): Promise<{ ok: true } | { ok: false; message: string }> {
   pressEnter();
-  // Seed the activity stamp at submit time so a CC that fails to print
-  // ANYTHING within 90s still trips the timeout. Subsequent JSONL lines
-  // refresh it (see ClaudeChatSession.lastJsonlActivityAt).
+  // Seed the activity stamp at submit time so the silence window is measured
+  // from submit even before CC prints anything. Subsequent JSONL lines refresh
+  // it (see ClaudeChatSession.lastJsonlActivityAt).
   chat.lastJsonlActivityAt = Date.now();
   const startedAt = Date.now();
   let nextRetryAt = startedAt + SUBMIT_RETRY_INTERVAL_MS;
   let retriesRemaining = SUBMIT_RETRY_COUNT;
-  // Sliding deadline anchored on most-recent JSONL activity, extended to
-  // EXTENDED_TURN_TIMEOUT_MS while a long-poll MCP call is tracked. See
-  // waitForTurnFile / effectiveTurnTimeoutMs for the rationale.
+  // Silence tracking: anchor on the most-recent JSONL activity and warn once
+  // per TURN_SILENCE_NOTE_INTERVAL_MS of no new lines. Never fails the turn.
+  let silenceAnchor = chat.lastJsonlActivityAt;
+  let nextSilenceNoteAt = Date.now() + TURN_SILENCE_NOTE_INTERVAL_MS;
   while (true) {
     if (chat.fatal) {
       return {
@@ -1423,12 +1363,21 @@ async function waitForTurnFileWithRetries(
           chat.fatalMessage ?? "Claude Code session terminated before turn end.",
       };
     }
-    const cap = effectiveTurnTimeoutMs(chat);
-    if (Date.now() - chat.lastJsonlActivityAt >= cap) {
-      return {
-        ok: false,
-        message: `Claude Code did not signal turn end within ${cap}ms.`,
-      };
+    // Any new JSONL line resets the silence window; a quiet stretch past the
+    // interval emits a single "still waiting" note (throttled, no failure).
+    if (chat.lastJsonlActivityAt !== silenceAnchor) {
+      silenceAnchor = chat.lastJsonlActivityAt;
+      nextSilenceNoteAt = Date.now() + TURN_SILENCE_NOTE_INTERVAL_MS;
+    } else if (Date.now() >= nextSilenceNoteAt) {
+      const minutes = Math.max(
+        1,
+        Math.round((Date.now() - chat.lastJsonlActivityAt) / 60_000),
+      );
+      emit({
+        kind: "system_note",
+        message: `Still waiting on Claude Code (no transcript activity for ${minutes}m)…`,
+      });
+      nextSilenceNoteAt = Date.now() + TURN_SILENCE_NOTE_INTERVAL_MS;
     }
     try {
       await fs.access(turnFile);
@@ -1457,6 +1406,14 @@ async function ensureTalkPromptFile(path: string): Promise<void> {
 }
 
 async function disposeChatSessionInternal(chat: ClaudeChatSession): Promise<void> {
+  // Unblock any in-flight turn-end waiter deterministically. The waiter polls
+  // indefinitely and exits on chat.fatal (or the done-marker); disposing the
+  // pty normally fires onExit which sets fatal, but a pty that is already gone
+  // emits no exit event, so set it here too before we tear anything down.
+  if (!chat.fatal) {
+    chat.fatal = true;
+    chat.fatalMessage = "Claude Code session disposed.";
+  }
   try {
     chat.detachEntries();
   } catch {
@@ -1673,7 +1630,7 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "    title: string,                       // 4-10 word chip label",
     "    description: string,                 // full prompt the worker sees — be specific",
     "    runtimePreference: 'claude' | 'codex',",
-    "    modelHint?: 'claude-opus-4-8' | 'claude-sonnet-5' | 'gpt-5.5',",
+    "    modelHint?: 'claude-opus-4-8' | 'claude-sonnet-5' | 'gpt-5.5' | 'claude-fable-5',",
     "    effortHint?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh',",
     "    allowedPaths?: string[],             // cwd-relative; parallel workers must NOT overlap",
     "    forbiddenPaths?: string[],",
@@ -1690,6 +1647,7 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "- `feature` tasks (standard implementation against an established skeleton) → mid model + medium effort.",
     "- `leaf` tasks (mechanical, well-defined work) → cheapest model + low effort.",
     "- `verifier` tasks (read-only follow-up that re-derives ground truth) → peer model + high effort, `allowedPaths: []`.",
+    "- `claude-fable-5` is Anthropic's premium, most expensive tier. Set it as a worker's modelHint ONLY when the user's own message explicitly asked for Fable 5 for this work; otherwise never — Codara downgrades an unrequested fable hint to claude-opus-4-8.",
     "",
     "The user's chat conversation may include prior turns where you replied conversationally — those were under a different mode and DO NOT bind your behavior now. This system prompt is your sole authority for this turn.",
   ].join("\n");
