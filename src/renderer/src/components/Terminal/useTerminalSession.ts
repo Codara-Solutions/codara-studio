@@ -524,6 +524,15 @@ export function useTerminalSession({
     const start = async () => {
       if (disposed || !container.current) return;
 
+      // Route every terminal link activation through the preload's
+      // openExternal — Electron's shell.open is the only hop that survives
+      // Chrome's external navigation block, and it keeps browser URLs inside
+      // Codara's preview tab. Shared by the WebLinksAddon (plain-text URLs)
+      // and the linkHandler below (OSC 8 hyperlinks).
+      const openTerminalUri = (uri: string) => {
+        void window.spark.openExternal?.(uri);
+      };
+
       const term = new Terminal({
         fontFamily: detectMonoFontFamily(),
         fontSize: FONT_SIZE,
@@ -538,6 +547,15 @@ export function useTerminalSession({
         allowProposedApi: true,
         allowTransparency: true,
         convertEol: false,
+        // OSC 8 hyperlinks (CLIs like Claude Code emit their localhost URLs
+        // this way) are activated by xterm's core, not WebLinksAddon. With no
+        // linkHandler, xterm falls back to a window.confirm("navigate to …?")
+        // whose OK branch calls window.open() with no URL — so the click just
+        // shows a scary dialog and opens nothing. Handle it ourselves so these
+        // links open the in-app preview like plain-text URLs do.
+        linkHandler: {
+          activate: (_event, uri) => openTerminalUri(uri),
+        },
       });
       termRef.current = term;
 
@@ -548,13 +566,7 @@ export function useTerminalSession({
       const search = new SearchAddon();
       term.loadAddon(search);
 
-      term.loadAddon(
-        new WebLinksAddon((_e, uri) => {
-          // Routed through the preload's openExternal — Electron's shell.open
-          // is the only hop that survives Chrome's external navigation block.
-          void window.spark.openExternal?.(uri);
-        }),
-      );
+      term.loadAddon(new WebLinksAddon((_e, uri) => openTerminalUri(uri)));
 
       // ── Ctrl/Cmd+click on file paths → open in editor ─────────────────────
       // Sister to the WebLinksAddon above. Detects path-shaped tokens in
