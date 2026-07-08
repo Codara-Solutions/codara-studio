@@ -129,6 +129,38 @@ check(
   ap.agentUiPresent("claude", "› \n? for shortcuts"),
   true,
 );
+// CC 2.1.204 default "manual" permission mode: the idle footer is just
+// "⏸ manual mode on" — no "(shift+tab to cycle)", no "? for shortcuts" (live
+// pty capture, 2026-07-08). This is the regression fixture: before the mode-
+// text anchors were added, an idle pane in the default mode read as UI-ABSENT
+// and the poller's absence-reset killed its chip a few seconds after boot.
+check(
+  "claude 2.1.204 idle box (manual mode, ⏸ glyph, no shift+tab) is UI-present",
+  ap.agentUiPresent(
+    "claude",
+    "❯ Try \"refactor <filepath>\"\n⏸ manual mode on\n\n󱙺 Fable 5 ╱  spark-agent ╱ no ctx",
+  ),
+  true,
+);
+// Same, with Ink's inter-word gaps collapsed away (no spaces between words).
+check(
+  "claude 2.1.204 manual-mode footer with spaces stripped is UI-present",
+  ap.agentUiPresent("claude", "⏸manualmodeon\n󱙺 Fable 5 ╱  spark-agent ╱ no ctx"),
+  true,
+);
+// Other CC 2.1.204 modes cycled via shift+tab (live capture): plan mode also
+// leads with the single ⏸ glyph; accept-edits uses "accept edits on" (no
+// "mode"); auto/bypass keep the double glyph. All must read UI-present.
+check(
+  "claude 2.1.204 plan mode (⏸ glyph) is UI-present",
+  ap.agentUiPresent("claude", "❯ \n⏸ plan mode on (shift+tab to cycle)\n        0 tokens"),
+  true,
+);
+check(
+  "claude 2.1.204 accept-edits mode is UI-present",
+  ap.agentUiPresent("claude", "❯ \n⏵⏵ accept edits on (shift+tab to cycle)\n ╱ 5h 0% · 7d 4%"),
+  true,
+);
 // Live banner still on screen early in the session → UI-present.
 check(
   "claude banner on screen is UI-present",
@@ -223,6 +255,43 @@ check(
   ap.classifyTail("claude", "I suggest Refactoring… the parser, then testing."),
   null,
 );
+
+// ── REAL Claude Code v2.1.204 frames (live pty capture, 2026-07-08) ──
+// The boxed launch banner still carries "Claude Code v<n>" (Ink glues the
+// words: "Claude Codev2.1.204"), so banner detection / arming is unchanged.
+check(
+  "v2.1.204 boxed banner (Ink-glued words)",
+  ap.sniffRuntime("╭───Claude Codev2.1.204─────────────────────────────╮"),
+  "claude",
+);
+// Working footer: the whimsical spinner verb ("✻Incubating…", glyph glued to
+// the gerund) and the "↓ N tokens" stats group still classify as working. The
+// elapsed group changed shape though — it now paints "(0s)" / "(4s)" and
+// "6s ·" rather than the old "(3s ·", so the "(<n>s ·" pattern alone no longer
+// fires; the gerund + tokens patterns carry it.
+check(
+  "v2.1.204 verb-only spinner frame (glyph glued to gerund)",
+  ap.classifyTail("claude", "\x1b[38;2;215;119;87m✻Incubating… (0s)\x1b[m"),
+  "working",
+);
+check(
+  "v2.1.204 token stats footer",
+  ap.classifyTail("claude", "Photosynthesizing…\x1b[38;2;153;153;153m 34s · ↓25 tokens)"),
+  "working",
+);
+check(
+  "v2.1.204 hook-runner footer (running stop hooks)",
+  ap.classifyTail("claude", "\x1b[13;3Hrunning s\x1b[2Cp hooks… 0/2 · 6s · ↓74 tokens)"),
+  "working",
+);
+// Idle footer in the DEFAULT manual mode must be unclassified (not working /
+// blocked) AND UI-present — the two invariants the chip's absence-reset relies
+// on together. classifyTail=null lets the baseline-idle path settle to "ready";
+// agentUiPresent=true keeps the absence-reset from tearing the chip down.
+const V204_MANUAL_IDLE =
+  "● high · /effort\n❯ Try \"refactor <filepath>\"\n⏸ manual mode on\n\n󱙺 Fable 5 ╱  spark-agent ╱ no ctx";
+check("v2.1.204 manual-mode idle footer is unclassified", ap.classifyTail("claude", V204_MANUAL_IDLE), null);
+check("v2.1.204 manual-mode idle footer is UI-present", ap.agentUiPresent("claude", V204_MANUAL_IDLE), true);
 
 // ── REAL Codex v0.138.0 frames (live pty capture, 2026-06-10) ──
 check(

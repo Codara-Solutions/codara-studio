@@ -508,7 +508,24 @@ const AGENT_UI_ANCHORS: Record<"claude" | "codex" | "cursor", RegExp[]> = {
     /shift\s*\+?\s*tab\s*to\s*cycle/i,
     /←\s*for\s*agents|\bfor\s*agents\b/i,
     /[⏵▶]\s*[⏵▶]\s*(?:auto|bypass|accept|plan)/i,
-    // Universal shortcut hint shown under the idle input box.
+    // CC 2.1.204+ permission-mode badge (VERIFIED against a live v2.1.204 pty
+    // capture, 2026-07-08). This version added a "manual" permission mode that
+    // is the NEW DEFAULT, and its idle footer is just "⏸ manual mode on" — a
+    // SINGLE pause glyph (⏸ U+23F8), the mode word "manual", and NO
+    // "(shift+tab to cycle)" suffix and NO "? for shortcuts" hint. So on a
+    // fresh idle pane in the default mode NONE of the glyph / shift+tab /
+    // shortcuts anchors above match, agentUiPresent goes false the moment the
+    // launch banner scrolls out of the tail, and the poller's absence-reset
+    // tears the chip down (with Fix-1 re-detection, itself anchor-based, unable
+    // to recover it) — the reported "CLAUDE chip never appears" regression.
+    // Match the mode badge's TEXT directly, glyph-independent, across every
+    // mode: "⏸ manual mode on", "⏸ plan mode on", "⏵⏵ auto mode on",
+    // "⏵⏵ accept edits on (shift+tab to cycle)", "▶▶ bypass permissions on".
+    // Inter-word gaps are \s* because Ink encodes them as cursor moves.
+    /\b(?:manual|auto|plan)\s*mode\s*on\b/i,
+    /\baccept\s*edits\s*on\b/i,
+    /\bbypass\s*permissions\s*on\b/i,
+    // Universal shortcut hint shown under the idle input box (pre-2.1.204).
     /\?\s*for\s*shortcuts/i,
     // Live launch banner still on screen (early session, before the user has
     // scrolled it away).
@@ -548,11 +565,17 @@ export function agentUiPresent(
 // wrongly kill its chip.
 //
 //   claude: VERIFIED. The idle footer ("⏵⏵/▶▶ <mode> on (shift+tab to cycle) ·
-//           ← for agents", "? for shortcuts") and statusline are captured in the
-//           harness (scripts/test-agent-patterns.cjs) from real v2.1.17x/v2.1.181
+//           ← for agents", "? for shortcuts", and the CC 2.1.204 "⏸ manual mode
+//           on" default) and statusline are captured in the harness
+//           (scripts/test-agent-patterns.cjs) from real v2.1.17x/v2.1.181/v2.1.204
 //           frames and are reliably last-painted. Claude v2 also renders inline
 //           with no alt-screen-leave on Ctrl+C exit, so absence-based detection
-//           is the ONLY general backstop — keep it aggressive here.
+//           is the ONLY general backstop — keep it aggressive here. Because this
+//           reset is so aggressive, the AGENT_UI_ANCHORS.claude table MUST track
+//           every footer shape a new CC version ships: a mode line the anchors
+//           miss (as happened when 2.1.204 introduced "manual" mode) makes an
+//           idle pane read as "UI gone" and kills its chip a few seconds after
+//           boot.
 //   codex / cursor: NOT VERIFIED. A 2026-06-18 live capture of Codex CLI
 //           (v0.125.0 → v0.141.0) confirmed Codex now renders INLINE too (no
 //           ESC[?1049h alt-screen enter/leave), but a clean idle-composer frame
