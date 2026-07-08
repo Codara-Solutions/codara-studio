@@ -623,6 +623,20 @@ a { color: inherit; }
 }
 
 .spark-tab__label {
+  /* Size the box to the title's OWN intrinsic width (width: max-content,
+     flex-shrink: 0). Letting the label be a flex-shrinkable auto-width item
+     floored its content box a sub-pixel below the glyphs' real advance (e.g.
+     "New chat" paints at 54.1px but the box resolved to 54px); text-overflow:
+     ellipsis then fired on that fractional overflow and dropped a whole
+     trailing word, collapsing short titles to "C…" / "New c…" even with the
+     strip half empty. max-content pins the box to the unfloored glyph width so
+     short titles always paint in full, while max-width caps a long run title at
+     a readable ~15ch and ellipsizes past it — kept under .spark-tab's 200px
+     ceiling (widest = chat, ~90px of icon/rename/close chrome + 104px label)
+     so the trailing controls never get shoved out of the tab. */
+  flex: 0 0 auto;
+  width: max-content;
+  max-width: 104px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
