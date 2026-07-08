@@ -9,10 +9,10 @@ import type {
   SparkBuiltinRuntime,
 } from "@shared/types";
 
-// cora-preview + cora-orchestrator ship inside Codara itself. We surface them
-// in their own branded section and hide them from the generic inventory below
-// so they read as first-class built-ins, not third-party connectors.
-const SPARK_BUILTIN_NAMES = new Set(["spark-preview", "spark-orchestrator"]);
+// codara-studio ships inside Codara itself. We surface it in its own branded
+// section and hide it from the generic inventory below so it reads as a
+// first-class built-in, not a third-party connector.
+const SPARK_BUILTIN_NAMES = new Set(["codara-studio"]);
 
 interface Props {
   settings: AppSettings;
@@ -331,8 +331,8 @@ export default function AgentCapabilitiesDialog({
                   onChange={(agentSkillSyncEnabled) => setDraft((d) => ({ ...d, agentSkillSyncEnabled }))}
                 />
                 <PolicyToggle
-                  title="Auto-install Cora Preview MCP"
-                  detail="Register the cora-preview MCP so verifiers can drive the live <preview> tab inside Codara — same DOM the user sees, no extra browser window."
+                  title="Auto-install Codara Studio MCP"
+                  detail="Register the codara-studio MCP so agents can drive the live <preview> tab and open agent-owned terminal tabs inside Codara — same DOM the user sees, no extra browser window."
                   checked={draft.playwrightMcpAutoInstall}
                   onChange={(playwrightMcpAutoInstall) => setDraft((d) => ({ ...d, playwrightMcpAutoInstall }))}
                 />
@@ -522,7 +522,7 @@ function BuiltinCard({
   onUninstall: (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => void;
 }) {
   const runtimes: SparkBuiltinRuntime[] = ["claude", "codex"];
-  const showAutoHint = builtin.id === "spark-preview" && autoInstallEnabled;
+  const showAutoHint = builtin.id === "codara-studio" && autoInstallEnabled;
   return (
     <div style={builtinCardStyle}>
       <div style={{ minWidth: 0 }}>
@@ -555,7 +555,7 @@ function BuiltinCard({
       </div>
       {showAutoHint ? (
         <div style={builtinFootnoteStyle}>
-          Auto-install keeps cora-preview present on launch. Turn off “Auto-install Cora Preview MCP” below to
+          Auto-install keeps codara-studio present on launch. Turn off “Auto-install Codara Studio MCP” below to
           make a manual uninstall stick.
         </div>
       ) : null}

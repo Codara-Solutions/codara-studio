@@ -41,6 +41,7 @@ import EditorStack from "./tabs/EditorStack";
 import TerminalStack from "./tabs/TerminalStack";
 import PreviewStack from "./tabs/PreviewStack";
 import { setOpenPreviewTabFn } from "./components/Preview/registry";
+import { setCloseAgentTerminalFn, setCreateAgentTerminalFn } from "./components/Terminal/terminalRegistry";
 import RunsStack from "./tabs/RunsStack";
 import AutomationsStack from "./tabs/AutomationsStack";
 import DiffStack from "./tabs/DiffStack";
@@ -2473,6 +2474,29 @@ export default function App() {
     );
     return () => setOpenPreviewTabFn(null);
   }, [tabs]);
+
+  // codara-studio MCP terminal.create bridge: an agent asks for a new terminal
+  // tab; we mint an agent-tinted, UNFOCUSED tab (newAgentTerminalTab never steals
+  // focus) and hand the paneId back so the agent can write/read the PTY. cwd
+  // defaults to the active workspace's cwd when the agent doesn't pass one.
+  useEffect(() => {
+    setCreateAgentTerminalFn((input) => {
+      const cwd = input.cwd || activeWorkspace?.cwd || home;
+      const { tabId, paneId } = tabs.newAgentTerminalTab({
+        cwd,
+        autorun: input.command,
+        title: input.title,
+      });
+      return { tabId, paneId, cwd };
+    });
+    // Cleanup path for terminal.create: if the PTY never spawns (bad cwd), main
+    // asks us to close the orphan tab so a failed create leaves nothing behind.
+    setCloseAgentTerminalFn((tabId) => tabs.closeTab(tabId));
+    return () => {
+      setCreateAgentTerminalFn(null);
+      setCloseAgentTerminalFn(null);
+    };
+  }, [tabs, activeWorkspace?.cwd, home]);
 
   const handleTerminalPaneDropToTab = useCallback(
     (payload: TerminalPaneDragPayload, targetTabId?: string) => {

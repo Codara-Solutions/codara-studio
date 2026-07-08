@@ -8,6 +8,7 @@ import * as pty from "./pty-manager";
 import { sparkHome } from "./spark-home";
 import { writeFileAtomic } from "./fs-atomic";
 import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
+import { requestTerminalOp } from "./terminal-bridge";
 import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { validateWorkerAccessFields } from "./orchestration/worker-access";
@@ -52,11 +53,28 @@ const ERR_NOT_IMPLEMENTED = -32004;
 // dev-tools gate). Not ERR_INVALID_REQUEST — the envelope is well-formed —
 // so clients can branch without string-matching the message.
 const ERR_FORBIDDEN = -32003;
+// Custom code for "terminal.create's PTY failed to come online" (usually a bad
+// cwd). Server-defined (-32000 range) so a client can branch on "the shell
+// didn't start" distinctly from a malformed request.
+const ERR_TERMINAL_SPAWN = -32000;
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const TERMINAL_READ_MAX_BYTES = 32 * 1024;
 const TERMINAL_READ_DEFAULT_LINES = 200;
 const TERMINAL_READ_MAX_LINES = 2000;
+// How long terminal.create waits for the renderer-spawned PTY to come online
+// before returning, so the paneId it hands back is immediately writable.
+const TERMINAL_SPAWN_WAIT_MS = 10_000;
+// Grace after the PTY comes online before terminal.create trusts it — long
+// enough for a bad-cwd shell to have exited (chdir failure is near-instant),
+// short enough not to add noticeable latency to a healthy create.
+const TERMINAL_SPAWN_SETTLE_MS = 750;
+// Pane ids minted by terminal.create in this process. terminal.write is
+// restricted to this set so an agent can't inject keystrokes into a sibling
+// worker's or the user's own terminal (whose paneIds are discoverable via the
+// intentionally-broad terminal.read). Process-session scoped — see
+// handleTerminalWrite for why per-run scoping isn't available here.
+const agentCreatedPaneIds = new Set<string>();
 // Cap on chat.append message length. Big enough for a verifier verdict
 // summary or a multi-paragraph status update, small enough that a buggy
 // sub-agent can't DoS the run-store by sending a megabyte at a time.
@@ -167,7 +185,7 @@ export async function startAgentSocket(): Promise<ServerHandle> {
   // Persist a handshake file so MCP servers spawned by external runtimes
   // (Claude Code, Codex) — which do not inherit Codara's pty env — can pick
   // up the current URL + token. Best-effort: a failed write only means the
-  // spark-preview MCP server has to back off and retry.
+  // codara-studio MCP server has to back off and retry.
   void writeHandshakeFile({ url, token }).catch((err) =>
     console.warn("[agent-socket] failed to write handshake file:", err),
   );
@@ -321,6 +339,10 @@ async function dispatch(
     switch (method) {
       case "terminal.read":
         return await handleTerminalRead(params, id);
+      case "terminal.create":
+        return await handleTerminalCreate(params, id);
+      case "terminal.write":
+        return await handleTerminalWrite(params, id);
       case "chat.append":
         return await handleChatAppend(params, id);
       case "app.info":
@@ -408,13 +430,12 @@ async function dispatch(
         return await handleAutomationDelete(params, id, res);
       case "automation.name_chat":
         return await handleAutomationNameChat(params, id);
-      case "tab.create":
       case "pane.split":
-        // The renderer owns tab/pane state and reaching it from main requires
-        // a request/response IPC roundtrip plus active-workspace selection
-        // semantics we haven't designed yet. Returning a structured error so
-        // a sub-agent's harness can branch cleanly on "verb spec'd but not
-        // yet implemented" without crashing.
+        // Splitting a pane in an EXISTING tab still needs active-tab/active-pane
+        // selection semantics we haven't designed yet. terminal.create (above)
+        // now covers the "give the agent its own terminal" case via the
+        // terminal-bridge roundtrip; pane.split stays a structured stub so a
+        // sub-agent can branch cleanly on "verb spec'd but not yet implemented".
         return errorResponse(id, ERR_NOT_IMPLEMENTED, `${method} is not implemented yet`);
       default:
         return errorResponse(id, ERR_METHOD_NOT_FOUND, `unknown method: ${method}`);
@@ -460,6 +481,109 @@ async function handleTerminalRead(
     truncatedBytes: tail.length >= TERMINAL_READ_MAX_BYTES,
     text: output,
   });
+}
+
+// Create a new terminal tab on the user's behalf. Tab/pane state is owned by
+// the renderer, so we round-trip through the terminal-bridge; the renderer
+// mints an agent-tinted, UNFOCUSED tab and returns the tabId + paneId (the PTY
+// session id the agent then drives via terminal.write / terminal.read).
+async function handleTerminalCreate(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const cwd = stringParam(params, "cwd");
+  const command = stringParam(params, "command");
+  const title = stringParam(params, "title");
+  try {
+    const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string }>(
+      "create",
+      {
+        ...(cwd ? { cwd } : {}),
+        ...(command ? { command } : {}),
+        ...(title ? { title } : {}),
+      },
+    );
+    // The renderer resolves as soon as the tab is added to state, but the PTY
+    // spawns a beat later when TerminalPane mounts and calls pty:spawn. Wait for
+    // the session to come online so the returned paneId is immediately usable by
+    // terminal.write / terminal.read (otherwise a create→write burst races the
+    // spawn and fails with "unknown pane").
+    let alive = result?.paneId
+      ? await pty.waitForSpawn(result.paneId, TERMINAL_SPAWN_WAIT_MS)
+      : false;
+    // A bad cwd (or unusable shell) doesn't always fail the spawn outright: the
+    // session can register and then the shell exits within a few ms when it
+    // can't chdir, so waitForSpawn returns true for a pane that's already dead.
+    // Re-check after a short settle so "started then immediately died" is caught
+    // too. A healthy shell stays alive well past this window even when a startup
+    // `command` runs (the command executes IN the shell; the shell persists).
+    if (alive && result?.paneId) {
+      await new Promise((resolve) => setTimeout(resolve, TERMINAL_SPAWN_SETTLE_MS));
+      alive = pty.exists(result.paneId);
+    }
+    if (!alive) {
+      // The PTY never came online, or came online and immediately exited —
+      // almost always a nonexistent/permission-denied cwd. Don't report success
+      // with a dead paneId, and don't leave the orphan amber tab behind: ask the
+      // renderer to close the tab we just created, then surface a clear error.
+      if (result?.tabId) {
+        try {
+          await requestTerminalOp("destroy", { tabId: result.tabId });
+        } catch {
+          /* best-effort cleanup; still return the error below */
+        }
+      }
+      return errorResponse(
+        id,
+        ERR_TERMINAL_SPAWN,
+        "terminal failed to start (check that cwd exists and is accessible)",
+      );
+    }
+    // Record the pane as agent-created so terminal.write can be restricted to it
+    // (see handleTerminalWrite). Ids are unique per process, so leaving a stale
+    // id after the pane exits is harmless (the exists() check below still gates
+    // dead panes).
+    agentCreatedPaneIds.add(result.paneId);
+    return successResponse(id, result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return errorResponse(id, ERR_INTERNAL, message);
+  }
+}
+
+// Deliver text to a terminal pane's PTY. paneId is the pty session id, so this
+// writes straight to node-pty in main (no renderer round-trip) via the same
+// bracketed-paste inject path user input, drag-drop, and slash commands use.
+async function handleTerminalWrite(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const paneId = stringParam(params, "paneId");
+  if (!paneId) return errorResponse(id, ERR_INVALID_PARAMS, "paneId is required");
+  // text may legitimately be "" (submit a bare newline), so accept any string
+  // rather than going through stringParam (which rejects empty).
+  const text = params.text;
+  if (typeof text !== "string") return errorResponse(id, ERR_INVALID_PARAMS, "text is required");
+  // Ownership gate: writing INJECTS keystrokes (and, by default, Enter) into a
+  // live PTY. terminal.read intentionally lets an agent sample sibling worker
+  // panes, so their paneIds are discoverable — without this check an agent could
+  // type into another worker's Claude/Codex TUI (a confused-deputy). Restrict
+  // writes to panes THIS process created via terminal.create. Scope is the
+  // process session (the socket carries no per-run identity — orchestrator RPCs
+  // pass runId explicitly in params, and these terminal panes are not run-
+  // scoped), so an agent can only reach terminals it (or a co-resident agent)
+  // spawned as agent-owned, never a worker's or the user's own terminal.
+  if (!agentCreatedPaneIds.has(paneId)) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      "terminal.write is only permitted on panes this agent created via terminal.create",
+    );
+  }
+  if (!pty.exists(paneId)) return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
+  const submit = typeof params.submit === "boolean" ? params.submit : true;
+  pty.inject(paneId, text, { submit });
+  return successResponse(id, { ok: true });
 }
 
 async function handlePreviewOp(
@@ -745,7 +869,7 @@ async function handleAppPrefsSet(
 }
 
 // ── orchestrator.* — Execute-mode tools called by Claude/Codex via the
-// spark-orchestrator MCP server. The CLI is acting as Codara's manager; these
+// codara-studio MCP server (orchestration roster). The CLI is acting as Codara's manager; these
 // tools let it spawn Cora workers, ask the user a clarifying question, and
 // mark the run complete. Each call carries `runId` (the MCP server forwards
 // `process.env.SPARK_RUN_ID` that pty-manager injected at spawn time).

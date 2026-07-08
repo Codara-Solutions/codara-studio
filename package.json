@@ -125,12 +125,8 @@
         "to": "claude-hooks"
       },
       {
-        "from": "resources/cora-preview-mcp",
-        "to": "cora-preview-mcp"
-      },
-      {
-        "from": "resources/cora-orchestrator-mcp",
-        "to": "cora-orchestrator-mcp"
+        "from": "resources/codara-studio-mcp",
+        "to": "codara-studio-mcp"
       },
       {
         "from": "resources/sounds",

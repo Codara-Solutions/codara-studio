@@ -497,6 +497,17 @@ export interface UseTabsApi {
     autorun?: string,
     options?: { focus?: boolean; agentSession?: TerminalAgentSession | null },
   ) => TabId;
+  // Create a terminal tab owned by a background agent (agent-socket
+  // terminal.create). It is tinted (color token stored on the tab) and NEVER
+  // focused — an agent must not yank the user off their current surface.
+  // Returns BOTH ids: the paneId is the PTY session id the agent then drives
+  // via terminal.write / terminal.read.
+  newAgentTerminalTab: (options?: {
+    cwd?: string;
+    autorun?: string;
+    title?: string;
+    color?: string;
+  }) => { tabId: TabId; paneId: string };
   // Open ONE terminal tab whose panes are split into a grid — used when Cora
   // spawns a batch of standing agent terminals, so the user sees them all at
   // once. One pane per spec, each autorunning its agent command.
@@ -1050,6 +1061,36 @@ export function useTabs(
       });
       if (options?.focus !== false) setActiveId(id);
       return id;
+    },
+    [],
+  );
+
+  const newAgentTerminalTab = useCallback(
+    (options?: {
+      cwd?: string;
+      autorun?: string;
+      title?: string;
+      color?: string;
+    }): { tabId: TabId; paneId: string } => {
+      const id = makeId("term");
+      const paneId = makeId("pane");
+      const root = leaf(paneId, options?.cwd, options?.autorun);
+      const title = options?.title?.trim() || "terminals";
+      const color = options?.color ?? "var(--agent-tab-accent)";
+      setTabs((curr) => {
+        const tab: TerminalTab = {
+          id,
+          kind: "terminal",
+          title,
+          root,
+          activePaneId: paneId,
+          color,
+        };
+        return normalizeTerminalTitles([...curr, tab]);
+      });
+      // Deliberately NOT setActiveId: an agent-spawned terminal appears in the
+      // strip tinted but does not steal focus from the user's current tab.
+      return { tabId: id, paneId };
     },
     [],
   );
@@ -2369,6 +2410,7 @@ export function useTabs(
       setDirty,
       setDetectedUrl,
       newTerminalTab,
+      newAgentTerminalTab,
       newTerminalGrid,
       addAgentGridToTab,
       addBalancedPaneToTab,

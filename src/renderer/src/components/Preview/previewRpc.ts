@@ -99,7 +99,7 @@ function requireTab(params: { tabId?: string | null }) {
   const tab = pickPreviewTab(params.tabId ?? null);
   if (!tab) {
     throw new Error(
-      "No preview tab is open. Open a preview tab in Codara (right-click → Preview, or open a localhost URL) before calling spark-preview tools.",
+      "No preview tab is open. Open a preview tab in Codara (right-click → Preview, or open a localhost URL) before calling preview tools.",
     );
   }
   return tab;

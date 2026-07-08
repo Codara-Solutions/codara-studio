@@ -1,58 +1,46 @@
-// Preview-bridge — main-side half of the request/response IPC that lets the
-// agent-socket dispatcher drive any open <preview> tab inside Codara.
+// Terminal-bridge — main-side half of the request/response IPC that lets the
+// agent-socket dispatcher create terminal tabs inside Codara. Tab/pane state is
+// owned by the renderer (useTabs), so main can't mint a tab directly; it sends
+// a request to the renderer and awaits the matching response carrying the new
+// tabId + paneId.
 //
-// Architecture
-// ------------
+// Architecture (mirrors preview-bridge.ts)
+// ----------------------------------------
 //   sub-agent stdio MCP server
 //        │  JSON-RPC over HTTP
 //        ▼
-//   agent-socket.ts (preview.* dispatch)
-//        │  requestPreviewOp(op, params)
+//   agent-socket.ts (terminal.create dispatch)
+//        │  requestTerminalOp("create", params)
 //        ▼
-//   THIS MODULE — sends "preview-bridge:request" to renderer, awaits matching
-//                 "preview-bridge:response" with the same reqId
+//   THIS MODULE — sends "terminal-bridge:request" to renderer, awaits matching
+//                 "terminal-bridge:response" with the same reqId
 //        │  ipcRenderer
 //        ▼
-//   renderer/components/Preview/previewRpc.ts
-//        │  picks target preview tab, runs executeJavaScript / capturePage
-//        ▼
-//   <webview> Chromium guest
+//   renderer/components/Terminal/terminalRpc.ts → terminalRegistry → useTabs
+//
+// terminal.write does NOT go through here: paneId is a PTY session id, so the
+// agent-socket handler writes to it directly via pty.inject with no renderer
+// round-trip. The bridge is only needed for tab creation (renderer-owned state).
 //
 // The bridge is intentionally tiny: it does NOT know what each op means, it
 // only correlates request and response by reqId, enforces a timeout, and
-// surfaces a clean error if no main window / no renderer is available. All
-// op semantics live in the renderer module.
+// surfaces a clean error if no main window / no renderer is available.
 
 import { BrowserWindow, ipcMain } from "electron";
 import { randomBytes } from "node:crypto";
 
-export type PreviewOpName =
-  | "list"
-  | "navigate"
-  | "snapshot"
-  | "evaluate"
-  | "click"
-  | "type"
-  | "press_key"
-  | "wait_for"
-  | "screenshot"
-  | "url"
-  // Renderer-side webview-element resize (changes the guest viewport).
-  | "resize"
-  // Internal: resolve the picked tab's guest webContents id (+ viewport/dpr)
-  // so the main-side computer-use executor can drive it directly. Not an MCP
-  // tool — only preview-input.ts calls it.
-  | "get_web_contents_id";
+// "create" mints a new agent-tinted tab; "destroy" closes a tab by id (used to
+// clean up the orphan tab when terminal.create's PTY fails to spawn).
+export type TerminalOpName = "create" | "destroy";
 
-export interface PreviewOpParams {
-  tabId?: string | null;
+export interface TerminalOpParams {
   [key: string]: unknown;
 }
 
 interface BridgeRequest {
   reqId: string;
-  op: PreviewOpName;
-  params: PreviewOpParams;
+  op: TerminalOpName;
+  params: TerminalOpParams;
 }
 
 interface BridgeResponse {
@@ -62,8 +50,8 @@ interface BridgeResponse {
   error?: string;
 }
 
-const REQUEST_CHANNEL = "preview-bridge:request";
-const RESPONSE_CHANNEL = "preview-bridge:response";
+const REQUEST_CHANNEL = "terminal-bridge:request";
+const RESPONSE_CHANNEL = "terminal-bridge:response";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 interface PendingEntry {
@@ -75,7 +63,7 @@ interface PendingEntry {
 const pending = new Map<string, PendingEntry>();
 let listenerRegistered = false;
 
-export function registerPreviewBridge(): void {
+export function registerTerminalBridge(): void {
   if (listenerRegistered) return;
   listenerRegistered = true;
   ipcMain.on(RESPONSE_CHANNEL, (_event, payload: BridgeResponse) => {
@@ -87,20 +75,20 @@ export function registerPreviewBridge(): void {
     if (payload.ok) {
       entry.resolve(payload.result);
     } else {
-      entry.reject(new Error(payload.error || "preview op failed"));
+      entry.reject(new Error(payload.error || "terminal op failed"));
     }
   });
 }
 
-export async function requestPreviewOp<T = unknown>(
-  op: PreviewOpName,
-  params: PreviewOpParams = {},
+export async function requestTerminalOp<T = unknown>(
+  op: TerminalOpName,
+  params: TerminalOpParams = {},
   opts?: { timeoutMs?: number },
 ): Promise<T> {
   const win = pickTargetWindow();
   if (!win) {
     throw new Error(
-      "No Codara window is open. Open Codara and a preview tab before calling preview tools.",
+      "No Codara window is open. Open Codara before calling terminal.create.",
     );
   }
   if (win.webContents.isDestroyed() || win.webContents.isLoading()) {
@@ -115,7 +103,7 @@ export async function requestPreviewOp<T = unknown>(
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(reqId);
-      reject(new Error(`preview op '${op}' timed out after ${timeoutMs}ms`));
+      reject(new Error(`terminal op '${op}' timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     pending.set(reqId, {
       resolve: (value) => resolve(value as T),

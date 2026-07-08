@@ -530,14 +530,22 @@ const TabItem = React.memo(function TabItem({
     return event.clientX < rect.left + rect.width / 2 ? "before" : "after";
   };
 
+  // Terminals a background agent spawned carry an opaque color token; tint the
+  // pill edge + wash so the user can tell an agent owns the tab. The token is
+  // fed to the CSS as a local custom property the .spark-tab--agent rules read.
+  const agentColor = tab.kind === "terminal" ? tab.color : undefined;
   const tabClass = [
     "spark-tab",
     active && "spark-tab--active",
     dragging && "spark-tab--dragging",
     (dropActive || paneDragHover) && "spark-tab--drop-target",
+    agentColor && "spark-tab--agent",
   ]
     .filter(Boolean)
     .join(" ");
+  const tabStyle = agentColor
+    ? ({ "--agent-accent": agentColor } as React.CSSProperties)
+    : undefined;
 
   return (
     <div
@@ -546,6 +554,7 @@ const TabItem = React.memo(function TabItem({
       data-tab-id={tab.id}
       data-preview-editor={isPreviewEditor ? "true" : undefined}
       className={tabClass}
+      style={tabStyle}
       draggable
       onDragStart={(event) => {
         // Use a tab-specific MIME so the strip's terminal-pane drop handler
@@ -952,7 +961,8 @@ function KindIcon({ tab }: { tab: Tab }) {
       </span>
     );
   }
-  if (tab.kind === "terminal") return <GlyphIcon glyph="❯" color="var(--accent)" />;
+  if (tab.kind === "terminal")
+    return <GlyphIcon glyph="❯" color={tab.color ?? "var(--accent)"} />;
   if (tab.kind === "preview") return <GlyphIcon glyph="◉" color="var(--accent)" />;
   if (tab.kind === "automations") return <GlyphIcon glyph="◷" color="var(--accent)" />;
   if (tab.kind === "diff") return <GlyphIcon glyph="±" color="var(--accent)" />;

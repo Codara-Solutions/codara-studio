@@ -232,7 +232,7 @@ interface ClaudeChatSession {
    *  itself live, and waiting again would just add latency per message. */
   firstTurnGateDone: boolean;
   /** Tool calls observed during the current turn — populated by the JSONL
-   *  translator when CC fires `mcp__cora-orchestrator__*` (or any other
+   *  translator when CC fires `mcp__codara-studio__*` (or any other
    *  tool). In Execute mode the request handler reads this after the turn
    *  ends to convert spark_spawn_workers calls into a SparkManagerDecision
    *  that the run-store can act on, exactly like grok/OpenRouter does. */
@@ -292,20 +292,20 @@ export const claudeBackend: SparkAgentBackend = {
       // Auto uses the shipped coordinator prompt (Cora routes each message
       // herself) and shares Execute's MCP wiring; Automation uses the shipped
       // automation-architect prompt and, like Execute, needs the
-      // spark-orchestrator MCP installed (it proxies the automation.* RPCs
+      // codara-studio MCP installed (it proxies the automation.* RPCs
       // that create/run/test looms).
       let systemPromptPath: string;
       if (mode === "execute" || mode === "auto") {
         systemPromptPath =
           mode === "auto" ? resolveAutoPromptPath() : resolveExecutePromptPath();
-        // Idempotent — installs spark-orchestrator into ~/.claude.json the
+        // Idempotent — installs the codara-studio entry into ~/.claude.json the
         // first time, no-ops thereafter. We skip the work when the entry is
         // already in place to avoid touching the file on every turn.
         if (!(await isSparkOrchestratorMcpInstalled("claude"))) {
           await installOrchestratorMcpForCC().catch((err) => {
             emit({
               kind: "system_note",
-              message: `Could not install spark-orchestrator MCP for Claude: ${
+              message: `Could not install codara-studio MCP for Claude: ${
                 err instanceof Error ? err.message : String(err)
               }`,
             });
@@ -320,7 +320,7 @@ export const claudeBackend: SparkAgentBackend = {
           await installOrchestratorMcpForCC().catch((err) => {
             emit({
               kind: "system_note",
-              message: `Could not install spark-orchestrator MCP for Claude: ${
+              message: `Could not install codara-studio MCP for Claude: ${
                 err instanceof Error ? err.message : String(err)
               }`,
             });
@@ -733,11 +733,11 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   await writeFileAtomic(settingsFile, JSON.stringify(settingsPayload, null, 2));
 
   // Execute-mode-only: write a per-chat MCP config that exposes ONLY the
-  // spark-orchestrator server. CC's global ~/.claude.json typically has many
+  // codara-studio server. CC's global ~/.claude.json typically has many
   // unrelated MCPs registered (DigitalOcean, Hetzner, RunPod, etc.) — the
   // resulting tool list is hundreds of items long, and the orchestrator
   // tools are buried inside it. With `--strict-mcp-config --mcp-config <this>`,
-  // CC sees only `mcp__cora-orchestrator__*` and the prompt's "MUST call
+  // CC sees only `mcp__codara-studio__*` and the prompt's "MUST call
   // spark_spawn_workers" rule has a clear, uncontested target.
   //
   // Talk mode skips this entirely because Talk has no MCP delegation —
@@ -753,20 +753,27 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   // server exposes the worker-orchestration roster).
   let mcpConfigFile: string | null = null;
   if (opts.mode === "execute" || opts.mode === "auto" || opts.mode === "automation") {
-    const orchestratorMcpServerPath = app.isPackaged
-      ? join(process.resourcesPath, "cora-orchestrator-mcp", "server.js")
-      : join(__dirname, "..", "..", "resources", "cora-orchestrator-mcp", "server.js");
+    const studioMcpServerPath = app.isPackaged
+      ? join(process.resourcesPath, "codara-studio-mcp", "server.js")
+      : join(__dirname, "..", "..", "resources", "codara-studio-mcp", "server.js");
     const electronExe = app.isPackaged ? process.execPath : process.execPath;
-    const serverEnv: Record<string, string> =
-      opts.mode === "automation"
-        ? { ELECTRON_RUN_AS_NODE: "1", SPARK_MCP_MODE: "automation" }
-        : { ELECTRON_RUN_AS_NODE: "1" };
+    // SPARK_MCP_MODE selects the codara-studio roster: automation → the
+    // architect tools; execute/auto → the worker-orchestration tools. Either
+    // way the studio (preview + terminal) tools ride along, so the manager can
+    // also drive the preview tab / terminals through this same scoped config.
+    // SPARK_HOME_DIR points the MCP child at the handshake file even when the
+    // user runs Codara under a custom home (the child doesn't inherit our env).
+    const serverEnv: Record<string, string> = {
+      ELECTRON_RUN_AS_NODE: "1",
+      SPARK_HOME_DIR: sparkHome(),
+      SPARK_MCP_MODE: opts.mode === "automation" ? "automation" : "execute",
+    };
     const mcpConfig = {
       mcpServers: {
-        "cora-orchestrator": {
+        "codara-studio": {
           type: "stdio" as const,
           command: electronExe,
-          args: [orchestratorMcpServerPath],
+          args: [studioMcpServerPath],
           env: serverEnv,
         },
       },
@@ -808,12 +815,17 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   //   user message goes in, a worker-spawn spec comes out. We use
   //   `--system-prompt` (FULL OVERRIDE, not append) so CC's default
   //   "be a helpful coder" personality is gone and our orchestrator prompt
-  //   is the only instruction CC sees. `--allowed-tools` whitelists ONLY
-  //   the four spark-orchestrator MCP calls — no Read, no Edit, no Bash,
-  //   nothing built-in. The model literally has no other tool to reach for
-  //   than `spark_spawn_workers`, which is exactly what we want. The
-  //   --mcp-config + --strict-mcp-config pair filters the global MCP set
-  //   so the four spark_* tools aren't lost in 400+ unrelated names.
+  //   is the only instruction CC sees. `--tools ""` (below) disables every
+  //   built-in tool (no Read/Edit/Bash), and the --mcp-config +
+  //   --strict-mcp-config pair scopes the visible MCP set to the single
+  //   per-run codara-studio server so its tools aren't lost in 400+ unrelated
+  //   names. Post-merge that server exposes the full studio roster (preview +
+  //   terminal) ALONGSIDE the Execute orchestration tools, so the manager CAN
+  //   reach spark_preview_* / spark_terminal_* for a quick UI check or a
+  //   visible command — that is intended. Containment is downstream, not by
+  //   tool availability: buildExecuteDecisionFromToolCalls treats ONLY
+  //   spark_spawn_workers and spark_complete as manager decisions, so the extra
+  //   studio tools can't derail the delegate-or-complete turn contract.
   if (opts.mode === "execute") {
     args.push("--system-prompt", buildExecuteSystemPrompt(opts.cwd));
     // `--tools ""` disables ALL built-in tools (Read, Edit, Bash, Glob,
@@ -854,7 +866,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     // built-ins (Read/Glob/Grep) available so it can inspect the workspace
     // while designing automations. We block the mutating built-ins —
     // automations are the only thing this mode should change, and those
-    // changes flow exclusively through the scoped spark-orchestrator MCP.
+    // changes flow exclusively through the scoped codara-studio MCP.
     args.push("--append-system-prompt-file", opts.talkPromptPath);
     args.push(
       "--disallowed-tools",
@@ -1447,12 +1459,12 @@ export function buildExecuteDecisionFromToolCalls(
   chatReply: string,
 ): SparkManagerDecision {
   // Tool name matching tolerates BOTH the CC-style prefix
-  // (`mcp__cora-orchestrator__spark_spawn_workers`) and Codex's bare name
+  // (`mcp__codara-studio__spark_spawn_workers`) and Codex's bare name
   // (`spark_spawn_workers`) — Codex's MCP integration drops the prefix when
   // surfacing the tool to the model.
   const matches = (call: { toolName: string }, sparkName: string): boolean =>
     call.toolName === sparkName ||
-    call.toolName === `mcp__cora-orchestrator__${sparkName}`;
+    call.toolName === `mcp__codara-studio__${sparkName}`;
 
   // spark_complete wins when present, even alongside spark_spawn_workers.
   // The CC manager's MCP tool calls executed IN ORDER as the turn ran:

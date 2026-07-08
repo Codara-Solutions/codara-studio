@@ -282,15 +282,19 @@ function buildArgs(input: ManagerRequestInput, promptPath: string): string[] {
   // caller picks the right `promptPath` based on `chat.mode`.
   args.push("-c", `model_instructions_file="${promptPath}"`);
   args.push("-c", "project_doc_max_bytes=0");
-  // Automation mode: Codex has no per-run MCP CONFIG file like Claude, but it
-  // DOES accept dotted `-c` overrides of the global config, including the
-  // managed cora-orchestrator server's env. Override SPARK_MCP_MODE for this
-  // invocation so the orchestrator server exposes the AUTOMATION tool roster
-  // (spark_*_automation) instead of the Execute worker-spawning roster. Verified
-  // codex v0.125 accepts `-c mcp_servers."cora-orchestrator".env.KEY="val"`.
-  // The server name must be TOML-quoted because it contains a hyphen.
-  if (chat.mode === "automation") {
-    args.push("-c", `mcp_servers."cora-orchestrator".env.SPARK_MCP_MODE="automation"`);
+  // Orchestration roster selection. Codex has no per-run MCP CONFIG file like
+  // Claude, but it DOES accept dotted `-c` overrides of the global config,
+  // including the managed codara-studio server's env. The GLOBAL entry has no
+  // SPARK_MCP_MODE, so it exposes only the studio (preview + terminal) roster;
+  // override SPARK_MCP_MODE for this invocation so the server ALSO exposes the
+  // orchestration tools — the Execute worker-spawning roster for execute/auto,
+  // the automation architect roster for automation. Verified codex v0.125
+  // accepts `-c mcp_servers."codara-studio".env.KEY="val"`; the server name
+  // must be TOML-quoted because it contains a hyphen.
+  if (chat.mode === "execute" || chat.mode === "auto") {
+    args.push("-c", `mcp_servers."codara-studio".env.SPARK_MCP_MODE="execute"`);
+  } else if (chat.mode === "automation") {
+    args.push("-c", `mcp_servers."codara-studio".env.SPARK_MCP_MODE="automation"`);
   }
   // Sandbox enforcement. Both modes use read-only:
   // - Talk: user is asking questions, no writes expected.
@@ -326,13 +330,14 @@ async function spawnSession(
         : input.chat.mode === "automation"
           ? resolveAutomationPromptPath()
           : await ensureTalkPromptFile();
-  // Execute, Auto, and Automation all proxy through the cora-orchestrator MCP,
+  // Execute, Auto, and Automation all proxy through the codara-studio MCP,
   // so each ensures it is installed (once, globally, in ~/.codex/config.toml).
   // Unlike the Claude backend, Codex has no per-run MCP CONFIG file, but it DOES
-  // honor per-invocation `-c mcp_servers."cora-orchestrator".env.*` overrides
-  // (added in buildArgs for automation mode), so a Codex automation chat gets
-  // the SPARK_MCP_MODE=automation env and therefore the real spark_*_automation
-  // roster — Codex automation mode is fully functional. The socket-side
+  // honor per-invocation `-c mcp_servers."codara-studio".env.*` overrides
+  // (added in buildArgs to select the execute/automation roster), so a Codex
+  // execute/auto/automation chat gets the right SPARK_MCP_MODE env and therefore
+  // the real orchestration roster — Codex orchestration is fully functional. The
+  // socket-side
   // run.chatMode guards (automation.* require automation mode; the worker-
   // orchestration RPCs reject automation mode) remain the defense-in-depth
   // backstop regardless of which roster the CLI happens to see.
@@ -345,7 +350,7 @@ async function spawnSession(
     await installOrchestratorMcpForCodex().catch((err) => {
       onStream?.({
         kind: "system_note",
-        message: `Could not install cora-orchestrator MCP for Codex: ${
+        message: `Could not install codara-studio MCP for Codex: ${
           err instanceof Error ? err.message : String(err)
         }`,
       });

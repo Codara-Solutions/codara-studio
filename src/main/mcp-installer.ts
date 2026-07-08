@@ -1,22 +1,31 @@
-// spark-preview MCP auto-installer — registers a tiny stdio MCP server in
-// the user-scope Claude and Codex configs so every sub-agent Codara spawns
-// (including verifier passes) can drive the actual <preview> tab inside
-// Codara. The server lives at resources/cora-preview-mcp/server.js
-// and proxies JSON-RPC calls back to Codara's agent-socket loopback HTTP
-// channel. See preview-bridge.ts + previewRpc.ts for the round-trip.
+// codara-studio MCP auto-installer — registers Codara's single built-in stdio
+// MCP server in the user-scope Claude and Codex configs so every sub-agent
+// Codara spawns (including verifier passes) can drive the actual <preview> tab
+// and open/steer agent-owned terminal tabs inside Codara. The server lives at
+// resources/codara-studio-mcp/server.js and proxies JSON-RPC calls back to
+// Codara's agent-socket loopback HTTP channel. See preview-bridge.ts +
+// previewRpc.ts (preview) and agent-socket.ts (terminal) for the round-trip.
+//
+// The globally-installed entry exposes the "studio" roster (preview + terminal
+// tools). The orchestration tool sets (Execute worker-spawning / Automation
+// architect) are layered on TOP of that roster only when a backend spawns the
+// server with SPARK_MCP_MODE=execute|automation — Claude via a per-run
+// --mcp-config, Codex via a `-c mcp_servers."codara-studio".env.SPARK_MCP_MODE`
+// override. The single server, three rosters, live in the server.js itself.
 //
 // Design mirrors hook-installer.ts:
 // 1. Idempotent. JSON entries are tagged `_sparkManaged: true` + version;
 //    Codex TOML insertion lives in a dedicated managed block (`SPARK_AGENT_
 //    BUILTIN_MCP`) so it never fights the agent-sync managed block.
-// 2. Non-destructive. If the user already has a non-Codara `cora-preview`
+// 2. Non-destructive. If the user already has a non-Codara `codara-studio`
 //    entry, we leave it alone. We never touch user-owned `playwright`
 //    entries (the user may have installed Playwright MCP separately).
 // 3. Conservative. We only touch a config file if it (or its parent dir)
 //    already exists — no foreign config gets created in clean homedirs.
 // 4. Fire-and-forget. Errors are logged; they never block startup.
-// 5. Cleanup. Any old Codara-managed `playwright` entries from earlier
-//    Codara versions are removed on every launch.
+// 5. Cleanup. Any old Codara-managed entries from earlier Codara versions
+//    (the Playwright experiment, the pre-merge cora-preview / cora-orchestrator
+//    servers, the pre-Cora spark-* names) are removed on every launch.
 
 import { app } from "electron";
 import { promises as fs } from "node:fs";
@@ -36,28 +45,25 @@ import { resolveBinary } from "./binary-resolver";
 import { writeFileAtomic } from "./fs-atomic";
 import { sparkHome } from "./spark-home";
 
-const SERVER_NAME = "cora-preview";
-// Pre-rename managed entries cleaned up on every launch (never user-owned
-// ones): the original Playwright experiment and the pre-Cora spark-* name.
-const LEGACY_SERVER_NAMES = ["playwright", "spark-preview"] as const;
-// v2: the managed entry now injects SPARK_HOME_DIR into the server's env so an
-// externally-spawned MCP child (Claude Code / Codex, which do NOT inherit
-// Codara's pty env) can find the agent-socket handshake even when the user runs
-// Codara under a custom SPARK_HOME_DIR. Bump forces matchesCurrent to rewrite
-// the older env-less entry.
-// v3: server renamed spark-preview → cora-preview (Cora rebrand) + the trusted
-// computer-use tool roster.
-const SPARK_VERSION = "3";
-
-export const SPARK_ORCHESTRATOR_SERVER_NAME = "cora-orchestrator";
-const LEGACY_ORCHESTRATOR_SERVER_NAMES = ["spark-orchestrator"] as const;
-// v2: spark_request_next_iteration gained nextEngine/nextModel/nextEffort
-// (Looms v2 auto-handoff) — bump forces a re-install of the managed entry.
-// v3: Automation-mode architect tool set (spark_*_automation) added behind the
-// per-run SPARK_MCP_MODE=automation gate — bump reinstalls managed config
-// entries so the Capability Center roster count picks up the new tools.
-// v4: server renamed spark-orchestrator → cora-orchestrator (Cora rebrand).
-const ORCHESTRATOR_SPARK_VERSION = "4";
+// The merged built-in server. Was two servers (cora-preview + cora-orchestrator)
+// before v5 — both are cleaned up as legacy on launch.
+const SERVER_NAME = "codara-studio";
+// Pre-merge managed entries cleaned up on every launch (never user-owned ones):
+// the original Playwright experiment, the pre-Cora spark-* names, and the two
+// separate Cora servers that codara-studio replaced.
+const LEGACY_SERVER_NAMES = [
+  "playwright",
+  "spark-preview",
+  "cora-preview",
+  "spark-orchestrator",
+  "cora-orchestrator",
+] as const;
+// v5: cora-preview + cora-orchestrator merged into a single codara-studio
+// server (preview + terminal studio roster, plus the Execute/Automation
+// orchestration rosters behind SPARK_MCP_MODE). The name change alone forces a
+// fresh managed entry; the version bump forces matchesCurrent to rewrite any
+// pre-merge entry that somehow shares the new name.
+const SPARK_VERSION = "5";
 
 // Instances running under an explicit home override (tests, dev harnesses,
 // side-by-side profiles) must never manage the user's global agent configs —
@@ -74,9 +80,13 @@ function isSandboxedHome(): boolean {
   return override.startsWith(tmp) || override.startsWith("/tmp/") || override.startsWith("/private/tmp/");
 }
 
-// Tool rosters kept in sync with resources/spark-*-mcp/server.js so the
-// Capability Center can show "N tools" without spawning the servers.
-const SPARK_PREVIEW_TOOLS = [
+// Tool rosters kept in sync with resources/codara-studio-mcp/server.js so the
+// Capability Center can show "N tools" without spawning the server. The global
+// entry exposes the STUDIO roster; the orchestration tools are added only in
+// per-run execute/automation spawns, but are listed here so the built-in card
+// reflects everything the server can do.
+const SPARK_STUDIO_TOOLS = [
+  // Preview (drive the live <preview> tab).
   "spark_preview_list",
   "spark_preview_url",
   "spark_preview_navigate",
@@ -87,19 +97,34 @@ const SPARK_PREVIEW_TOOLS = [
   "spark_preview_evaluate",
   "spark_preview_wait_for",
   "spark_preview_screenshot",
+  "spark_preview_mouse",
+  "spark_preview_scroll",
+  "spark_preview_hover",
+  "spark_preview_drag",
+  "spark_preview_key",
+  "spark_preview_upload",
+  "spark_preview_console",
+  "spark_preview_network",
+  "spark_preview_resize",
   "spark_preview_run",
+  // Terminal (open + drive agent-owned terminal tabs).
+  "spark_terminal_create",
+  "spark_terminal_write",
+  "spark_terminal_read",
 ];
 
-const SPARK_ORCHESTRATOR_TOOLS = [
-  // Execute-mode roster (the globally-installed entry exposes exactly these).
+const SPARK_ORCHESTRATION_TOOLS = [
+  // Execute-mode worker orchestration (per-run SPARK_MCP_MODE=execute).
   "spark_spawn_workers",
   "spark_ask_user",
   "spark_complete",
+  "spark_name_chat",
   "spark_request_next_iteration",
   "spark_get_worker_status",
   "spark_wait_for_workers",
-  // Automation-mode architect roster (exposed only behind the per-run
-  // SPARK_MCP_MODE=automation gate; listed here for the Capability Center count).
+  "spark_message_workers",
+  "spark_check_messages",
+  // Automation-mode architect roster (per-run SPARK_MCP_MODE=automation).
   "spark_list_automations",
   "spark_get_automation",
   "spark_create_automation",
@@ -113,6 +138,10 @@ const SPARK_ORCHESTRATOR_TOOLS = [
   "spark_delete_automation",
 ];
 
+// The full tool surface for the Capability Center's built-in card (dedup keeps
+// spark_ask_user / spark_name_chat from double-counting).
+const SPARK_BUILTIN_TOOLS = [...new Set([...SPARK_STUDIO_TOOLS, ...SPARK_ORCHESTRATION_TOOLS])];
+
 const CLAUDE_USER_CONFIG = join(homedir(), ".claude.json");
 const CODEX_USER_CONFIG = join(homedir(), ".codex", "config.toml");
 const CODEX_DIR = join(homedir(), ".codex");
@@ -120,8 +149,20 @@ const CODEX_DIR = join(homedir(), ".codex");
 const CODEX_BLOCK_START = "# >>> SPARK_AGENT_BUILTIN_MCP";
 const CODEX_BLOCK_END = "# <<< SPARK_AGENT_BUILTIN_MCP";
 
+// Retired marker region from the pre-merge orchestrator installer — stripped on
+// every launch so a stale block pointing at the deleted resource dir can't
+// linger.
 const CODEX_ORCHESTRATOR_BLOCK_START = "# >>> SPARK_AGENT_ORCHESTRATOR_MCP";
 const CODEX_ORCHESTRATOR_BLOCK_END = "# <<< SPARK_AGENT_ORCHESTRATOR_MCP";
+
+// TOML tables named after retired servers (post-merge these can only be our own
+// broken leftovers) that the strip logic drops whether or not markers survive.
+const LEGACY_CODEX_TABLE_NAMES = [
+  "spark-preview",
+  "cora-preview",
+  "spark-orchestrator",
+  "cora-orchestrator",
+] as const;
 
 interface ManagedClaudeMcpServer {
   type: "stdio";
@@ -134,16 +175,9 @@ interface ManagedClaudeMcpServer {
 
 function resolveServerScript(): string {
   if (app.isPackaged) {
-    return join(process.resourcesPath, "cora-preview-mcp", "server.js");
+    return join(process.resourcesPath, "codara-studio-mcp", "server.js");
   }
-  return join(__dirname, "..", "..", "resources", "cora-preview-mcp", "server.js");
-}
-
-function resolveOrchestratorServerScript(): string {
-  if (app.isPackaged) {
-    return join(process.resourcesPath, "cora-orchestrator-mcp", "server.js");
-  }
-  return join(__dirname, "..", "..", "resources", "cora-orchestrator-mcp", "server.js");
+  return join(__dirname, "..", "..", "resources", "codara-studio-mcp", "server.js");
 }
 
 function resolveNodeCommand(): string {
@@ -162,20 +196,14 @@ function buildServerEnv(): Record<string, string> {
   // SPARK_HOME_DIR points the MCP server at the handshake file
   // (<spark-home>/agent-socket.json). The server defaults to ~/.Codara
   // when it's unset, so injecting it only matters for custom homes — but we
-  // always write it so the entry is explicit and self-describing.
+  // always write it so the entry is explicit and self-describing. No
+  // SPARK_MCP_MODE here: the global entry exposes the studio (preview +
+  // terminal) roster; execute/automation rosters are opted in per-run.
   return { ELECTRON_RUN_AS_NODE: "1", SPARK_HOME_DIR: sparkHome() };
 }
 
-function buildOrchestratorServerArgs(): string[] {
-  return [resolveOrchestratorServerScript()];
-}
-
-function buildOrchestratorServerEnv(): Record<string, string> {
-  return { ELECTRON_RUN_AS_NODE: "1" };
-}
-
-// Install (or refresh) the spark-preview entry and remove any old Codara-
-// managed Playwright entries from previous versions.
+// Install (or refresh) the codara-studio entry and remove any old Codara-
+// managed entries from previous versions.
 export async function installPlaywrightMcp(): Promise<void> {
   // Keep the old function name so existing callers stay compatible — the
   // wrapper just delegates. New code should call installSparkPreviewMcp.
@@ -189,8 +217,8 @@ export async function installSparkPreviewMcp(): Promise<void> {
 // Boot-time installer. Design rule #3 (stay conservative) says the auto-
 // installer never CREATES a foreign config in a clean homedir — but that also
 // meant a user who has `claude`/`codex` on PATH yet has never launched it (so
-// ~/.claude.json / ~/.codex don't exist yet) silently got no spark-preview
-// entry, and the browser-use surface just didn't work for them. Split the
+// ~/.claude.json / ~/.codex don't exist yet) silently got no codara-studio
+// entry, and the browser/terminal surface just didn't work for them. Split the
 // difference: probe for the actual CLI binary and, only when it resolves, allow
 // createIfMissing so the entry lands the first time. The never-overwrite-a-
 // user-entry guards inside installForClaude/installForCodex still hold.
@@ -214,6 +242,19 @@ export async function installSparkPreviewMcpForClaude(createIfMissing = false): 
 }
 
 export async function installSparkPreviewMcpForCodex(createIfMissing = false): Promise<void> {
+  await installForCodex(createIfMissing);
+}
+
+// Back-compat aliases: the Execute/Automation backends call these lazily before
+// spawning a manager CLI to make sure the (now unified) codara-studio entry
+// exists. Execute/Automation rosters are opted in per-run — Claude via its
+// per-run --mcp-config, Codex via a `-c` env override — but the global entry
+// still has to exist so the CLI can spawn the server at all.
+export async function installOrchestratorMcpForCC(createIfMissing = false): Promise<void> {
+  await installForClaude(createIfMissing);
+}
+
+export async function installOrchestratorMcpForCodex(createIfMissing = false): Promise<void> {
   await installForCodex(createIfMissing);
 }
 
@@ -261,11 +302,9 @@ async function installForClaude(createIfMissing = false): Promise<void> {
   let changed = false;
 
   // Cleanup: remove managed entries under retired names (the Playwright
-  // experiment, the pre-Cora spark-*). The orchestrator's legacy name is
-  // included because its own installer only runs at Execute-mode spawn —
-  // without this a stale spark-orchestrator entry would linger until the
-  // next orchestration. Never touch user-owned entries.
-  for (const legacy of [...LEGACY_SERVER_NAMES, ...LEGACY_ORCHESTRATOR_SERVER_NAMES]) {
+  // experiment, the pre-Cora spark-*, the pre-merge cora-preview /
+  // cora-orchestrator). Never touch user-owned entries.
+  for (const legacy of LEGACY_SERVER_NAMES) {
     if (servers[legacy] && isSparkManaged(servers[legacy])) {
       delete servers[legacy];
       changed = true;
@@ -357,27 +396,16 @@ async function installForCodex(createIfMissing = false): Promise<void> {
     }
   }
 
-  // If the user has a non-Codara `cora-preview` server defined outside our
+  // If the user has a non-Codara `codara-studio` server defined outside our
   // managed block, leave the file alone.
-  if (hasUserSparkPreviewSection(existing)) return;
+  if (hasUserCodaraStudioSection(existing)) return;
 
-  const stripped = stripBuiltinBlock(existing);
+  // Strip our managed block, the retired orchestrator block, and any broken
+  // legacy-named tables, then append one fresh block.
+  const stripped = stripAllManagedBlocks(existing);
   const block = renderCodexBlock();
   const base = stripped.trimEnd();
-  let next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
-
-  // Boot-time cleanup of a LEGACY orchestrator block too — its own installer
-  // only runs at Execute-mode spawn, which would leave a stale
-  // spark-orchestrator block (pointing at a deleted resource dir) lingering
-  // until the next orchestration. A current cora-orchestrator block is
-  // re-rendered in place rather than dropped.
-  const withoutOrchestrator = stripOrchestratorBlock(next);
-  if (withoutOrchestrator !== next) {
-    const hadCurrent = next.includes(`[mcp_servers."${SPARK_ORCHESTRATOR_SERVER_NAME}"]`);
-    next = withoutOrchestrator.trimEnd();
-    if (hadCurrent) next = `${next}\n\n${renderOrchestratorCodexBlock()}`;
-    next += "\n";
-  }
+  const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
   if (next === existing) return;
 
   try {
@@ -395,30 +423,43 @@ function directoryExists(path: string): boolean {
   }
 }
 
-function hasUserSparkPreviewSection(text: string): boolean {
-  const withoutBuiltin = stripBuiltinBlock(text);
-  const pattern = /^\s*\[mcp_servers\.(?:"cora-preview"|'cora-preview'|cora-preview)\]\s*$/m;
-  return pattern.test(withoutBuiltin);
+function hasUserCodaraStudioSection(text: string): boolean {
+  const withoutManaged = stripAllManagedBlocks(text);
+  const pattern = /^\s*\[mcp_servers\.(?:"codara-studio"|'codara-studio'|codara-studio)\]\s*$/m;
+  return pattern.test(withoutManaged);
 }
 
-function stripBuiltinBlock(text: string): string {
-  return stripManagedCodexRegions(text, CODEX_BLOCK_START, CODEX_BLOCK_END, "spark-preview");
+// Strip the codara-studio managed block, the retired orchestrator block, and
+// every stray legacy-named table. Ordering matters: remove BOTH marker regions
+// wholesale FIRST (with no legacy names, so the marker logic drops each block —
+// and any legacy tables inside it — atomically), THEN sweep orphan legacy-named
+// tables that survived outside any marker. Doing the legacy sweep in the same
+// pass as the first marker region let that pass's legacy-section consumption run
+// past the SECOND block's END marker (an END marker is a comment, not a `[`
+// line), orphaning the second block's comment lines forever.
+function stripAllManagedBlocks(text: string): string {
+  let out = stripManagedCodexRegions(text, CODEX_BLOCK_START, CODEX_BLOCK_END, []);
+  out = stripManagedCodexRegions(out, CODEX_ORCHESTRATOR_BLOCK_START, CODEX_ORCHESTRATOR_BLOCK_END, []);
+  // Markers are gone now; reuse the builtin-marker strings as harmless no-ops so
+  // only the legacy-table sweep runs on this final pass.
+  out = stripManagedCodexRegions(out, CODEX_BLOCK_START, CODEX_BLOCK_END, LEGACY_CODEX_TABLE_NAMES);
+  return out;
 }
 
 // Remove every managed marker region plus any stray legacy-named tables.
 // Line-based on purpose: real user configs have been seen with a lost START
-// marker (an orphaned block tail with only the END line), which the previous
-// index-of implementation refused to touch — the stale block then survived
-// forever and the freshly appended one made the user-ownership check trip.
-// Orphan marker lines are consumed; sections named after the RETIRED server
-// (which post-rename can only be our broken leftovers) are dropped whether or
-// not markers survive around them. Current-name sections outside markers are
-// left alone — those are genuinely user-owned.
+// marker (an orphaned block tail with only the END line), which an index-of
+// implementation refused to touch — the stale block then survived forever and
+// the freshly appended one made the user-ownership check trip. Orphan marker
+// lines are consumed; sections named after a RETIRED server (which post-rename
+// can only be our broken leftovers) are dropped whether or not markers survive
+// around them. Current-name (codara-studio) sections outside markers are left
+// alone — those are genuinely user-owned.
 function stripManagedCodexRegions(
   text: string,
   startMarker: string,
   endMarker: string,
-  legacyName: string,
+  legacyNames: readonly string[],
 ): string {
   const lines = text.split("\n");
   const kept: string[] = [];
@@ -429,8 +470,9 @@ function stripManagedCodexRegions(
     lines.some((l, i) => i > idx && l.trim() === endMarker);
   let inBlock = false;
   let inLegacySection = false;
-  const legacyHeader = new RegExp(
-    `^\\s*\\[mcp_servers\\.(?:"${legacyName}"|'${legacyName}'|${legacyName})(?:\\.env)?\\]\\s*$`,
+  const legacyHeaders = legacyNames.map(
+    (name) =>
+      new RegExp(`^\\s*\\[mcp_servers\\.(?:"${name}"|'${name}'|${name})(?:\\.env)?\\]\\s*$`),
   );
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -446,7 +488,7 @@ function stripManagedCodexRegions(
       continue;
     }
     if (inBlock) continue;
-    if (legacyHeader.test(line)) {
+    if (legacyHeaders.some((re) => re.test(line))) {
       inLegacySection = true;
       continue;
     }
@@ -465,10 +507,11 @@ function renderCodexBlock(): string {
   const args = buildServerArgs();
   return [
     CODEX_BLOCK_START,
-    `# Managed by Codara. Auto-installs the cora-preview MCP so verifier`,
-    `# passes can drive the live <preview> tab inside Codara. Disable via`,
-    `# Settings > Capabilities or delete this block (Codara will re-add it on`,
-    `# next launch unless the auto-install toggle is off).`,
+    `# Managed by Codara. Auto-installs the codara-studio MCP so agents can`,
+    `# drive the live <preview> tab and open/steer agent-owned terminal tabs`,
+    `# inside Codara. Disable via Settings > Capabilities or delete this block`,
+    `# (Codara will re-add it on next launch unless the auto-install toggle is`,
+    `# off).`,
     `# Version: ${SPARK_VERSION}`,
     "",
     `[mcp_servers."${SERVER_NAME}"]`,
@@ -491,9 +534,9 @@ function tomlString(value: string): string {
 // Availability detection
 // ---------------------------------------------------------------------------
 
-// True when sub-agent prompts should be told to USE the spark-preview MCP.
+// True when sub-agent prompts should be told to USE the codara-studio MCP.
 // True if either (a) auto-install is on AND a Claude/Codex runtime is on
-// disk (so we know we wrote an entry), or (b) the user has a spark-preview
+// disk (so we know we wrote an entry), or (b) the user has a codara-studio
 // entry of their own in any user/workspace config.
 export function isSparkPreviewMcpAvailable(input: {
   cwd: string | null;
@@ -503,7 +546,7 @@ export function isSparkPreviewMcpAvailable(input: {
     if (existsSync(CLAUDE_USER_CONFIG)) return true;
     if (existsSync(CODEX_DIR)) return true;
   }
-  return detectUserSparkPreviewEntry(input.cwd);
+  return detectUserSparkEntry(input.cwd);
 }
 
 // Back-compat shim — orchestration code still imports this name. Will be
@@ -515,7 +558,7 @@ export function isPlaywrightMcpAvailable(input: {
   return isSparkPreviewMcpAvailable(input);
 }
 
-function detectUserSparkPreviewEntry(cwd: string | null): boolean {
+function detectUserSparkEntry(cwd: string | null): boolean {
   const jsonCandidates = [
     CLAUDE_USER_CONFIG,
     join(homedir(), ".mcp.json"),
@@ -532,7 +575,7 @@ function detectUserSparkPreviewEntry(cwd: string | null): boolean {
   const tomlCandidates = [CODEX_USER_CONFIG];
   if (cwd) tomlCandidates.push(join(cwd, ".codex", "config.toml"));
   for (const path of tomlCandidates) {
-    if (tomlHasUserSparkPreviewSectionAt(path)) return true;
+    if (tomlHasUserCodaraStudioSectionAt(path)) return true;
   }
   return false;
 }
@@ -571,7 +614,7 @@ function jsonContainsServerName(value: unknown, name: string, depth: number): bo
   return false;
 }
 
-function tomlHasUserSparkPreviewSectionAt(path: string): boolean {
+function tomlHasUserCodaraStudioSectionAt(path: string): boolean {
   if (!existsSync(path)) return false;
   let raw: string;
   try {
@@ -579,192 +622,17 @@ function tomlHasUserSparkPreviewSectionAt(path: string): boolean {
   } catch {
     return false;
   }
-  return hasUserSparkPreviewSection(raw);
+  return hasUserCodaraStudioSection(raw);
 }
 
 // ---------------------------------------------------------------------------
-// spark-orchestrator MCP — installed on demand, NOT on app boot
+// Execute/Automation lazy-install gate
 // ---------------------------------------------------------------------------
 //
-// The orchestrator MCP server gives the CLI (claude / codex) running in
-// Execute mode access to spark_spawn_workers / spark_ask_user /
-// spark_complete / spark_get_worker_status. It is wired into the SAME user
-// configs as spark-preview (~/.claude.json + ~/.codex/config.toml), but the
-// backends call installOrchestratorMcpFor*() lazily before spawning so
-// passive users who never run Execute mode don't get the entry written.
-
-function renderOrchestratorClaudeEntry(): ManagedClaudeMcpServer {
-  return {
-    type: "stdio",
-    command: resolveNodeCommand(),
-    args: buildOrchestratorServerArgs(),
-    env: buildOrchestratorServerEnv(),
-    _sparkManaged: true,
-    _sparkVersion: ORCHESTRATOR_SPARK_VERSION,
-  };
-}
-
-function orchestratorMatchesCurrent(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  const entry = value as Record<string, unknown>;
-  if (entry._sparkVersion !== ORCHESTRATOR_SPARK_VERSION) return false;
-  if (entry.command !== resolveNodeCommand()) return false;
-  const expectedArgs = buildOrchestratorServerArgs();
-  if (!Array.isArray(entry.args)) return false;
-  const args = entry.args as unknown[];
-  if (args.length !== expectedArgs.length) return false;
-  if (!args.every((arg, i) => arg === expectedArgs[i])) return false;
-  const env = entry.env as Record<string, unknown> | undefined;
-  if (!env || env.ELECTRON_RUN_AS_NODE !== "1") return false;
-  return true;
-}
-
-export async function installOrchestratorMcpForCC(createIfMissing = false): Promise<void> {
-  if (isSandboxedHome()) return;
-  const fileExists = existsSync(CLAUDE_USER_CONFIG);
-  if (!fileExists && !createIfMissing) return;
-
-  let raw = "";
-  if (fileExists) {
-    try {
-      raw = await fs.readFile(CLAUDE_USER_CONFIG, "utf8");
-    } catch (err) {
-      console.warn("[mcp-installer] could not read ~/.claude.json:", err);
-      return;
-    }
-  }
-
-  let parsed: Record<string, unknown>;
-  if (raw.trim()) {
-    try {
-      const value = JSON.parse(raw) as unknown;
-      if (value === null || typeof value !== "object" || Array.isArray(value)) {
-        console.warn("[mcp-installer] ~/.claude.json is not a JSON object; skipping orchestrator install");
-        return;
-      }
-      parsed = value as Record<string, unknown>;
-    } catch (err) {
-      console.warn(
-        "[mcp-installer] ~/.claude.json parse failed; skipping orchestrator install:",
-        (err as Error).message,
-      );
-      return;
-    }
-  } else {
-    parsed = {};
-  }
-
-  const servers =
-    parsed.mcpServers && typeof parsed.mcpServers === "object" && !Array.isArray(parsed.mcpServers)
-      ? (parsed.mcpServers as Record<string, unknown>)
-      : {};
-
-  // Cleanup: drop managed entries under the retired spark-orchestrator name.
-  let cleaned = false;
-  for (const legacy of LEGACY_ORCHESTRATOR_SERVER_NAMES) {
-    if (servers[legacy] && isSparkManaged(servers[legacy])) {
-      delete servers[legacy];
-      cleaned = true;
-    }
-  }
-
-  const existing = servers[SPARK_ORCHESTRATOR_SERVER_NAME];
-  if (existing && !isSparkManaged(existing)) {
-    // User owns this entry — never overwrite (but persist any cleanup).
-    if (!cleaned) return;
-  } else if (!existing || !orchestratorMatchesCurrent(existing)) {
-    servers[SPARK_ORCHESTRATOR_SERVER_NAME] = renderOrchestratorClaudeEntry();
-  } else if (!cleaned) {
-    return;
-  }
-  parsed.mcpServers = servers;
-  try {
-    const payload = JSON.stringify(parsed, null, 2) + "\n";
-    if (raw === payload) return;
-    await writeFileAtomic(CLAUDE_USER_CONFIG, payload);
-  } catch (err) {
-    console.warn("[mcp-installer] failed to write ~/.claude.json (orchestrator):", err);
-  }
-}
-
-function hasUserOrchestratorSection(text: string): boolean {
-  const withoutManaged = stripOrchestratorBlock(text);
-  const pattern =
-    /^\s*\[mcp_servers\.(?:"cora-orchestrator"|'cora-orchestrator'|cora-orchestrator)\]\s*$/m;
-  return pattern.test(withoutManaged);
-}
-
-function stripOrchestratorBlock(text: string): string {
-  return stripManagedCodexRegions(
-    text,
-    CODEX_ORCHESTRATOR_BLOCK_START,
-    CODEX_ORCHESTRATOR_BLOCK_END,
-    "spark-orchestrator",
-  );
-}
-
-function renderOrchestratorCodexBlock(): string {
-  const args = buildOrchestratorServerArgs();
-  return [
-    CODEX_ORCHESTRATOR_BLOCK_START,
-    `# Managed by Codara. Auto-installs the cora-orchestrator MCP so the`,
-    `# Codex CLI running in Execute mode can spawn Cora workers, ask the user`,
-    `# clarifying questions, and mark the run complete. Disable via Settings >`,
-    `# Capabilities or delete this block (Codara will re-add it on the next`,
-    `# Execute-mode spawn unless the auto-install toggle is off).`,
-    `# Version: ${ORCHESTRATOR_SPARK_VERSION}`,
-    "",
-    `[mcp_servers."${SPARK_ORCHESTRATOR_SERVER_NAME}"]`,
-    `command = ${tomlString(resolveNodeCommand())}`,
-    `args = [${args.map(tomlString).join(", ")}]`,
-    `enabled = true`,
-    "",
-    `[mcp_servers."${SPARK_ORCHESTRATOR_SERVER_NAME}".env]`,
-    `ELECTRON_RUN_AS_NODE = "1"`,
-    CODEX_ORCHESTRATOR_BLOCK_END,
-  ].join("\n");
-}
-
-export async function installOrchestratorMcpForCodex(createIfMissing = false): Promise<void> {
-  if (isSandboxedHome()) return;
-  const dirExists = directoryExists(CODEX_DIR);
-  if (!dirExists && !createIfMissing) return;
-  if (!dirExists) {
-    try {
-      await fs.mkdir(CODEX_DIR, { recursive: true });
-    } catch (err) {
-      console.warn("[mcp-installer] could not create ~/.codex (orchestrator):", err);
-      return;
-    }
-  }
-
-  let existing = "";
-  try {
-    existing = await fs.readFile(CODEX_USER_CONFIG, "utf8");
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-      console.warn("[mcp-installer] could not read ~/.codex/config.toml (orchestrator):", err);
-      return;
-    }
-  }
-
-  // If the user has a non-Codara `cora-orchestrator` server defined outside
-  // our managed block, leave the file alone.
-  if (hasUserOrchestratorSection(existing)) return;
-
-  const stripped = stripOrchestratorBlock(existing);
-  const block = renderOrchestratorCodexBlock();
-  const base = stripped.trimEnd();
-  const next = base.length > 0 ? `${base}\n\n${block}\n` : `${block}\n`;
-  if (next === existing) return;
-
-  try {
-    await fs.writeFile(CODEX_USER_CONFIG, next, "utf8");
-  } catch (err) {
-    console.warn("[mcp-installer] failed to write ~/.codex/config.toml (orchestrator):", err);
-  }
-}
-
+// The Execute/Automation backends call installOrchestratorMcpFor*() before
+// spawning a manager CLI. This predicate tells them whether the (now unified)
+// codara-studio entry is already present + current so they can skip a redundant
+// write. Retained under the old name because the backends import it.
 export async function isSparkOrchestratorMcpInstalled(
   target: "claude" | "codex",
 ): Promise<boolean> {
@@ -785,13 +653,13 @@ export async function isSparkOrchestratorMcpInstalled(
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
     const servers = (parsed as Record<string, unknown>).mcpServers;
     if (!servers || typeof servers !== "object" || Array.isArray(servers)) return false;
-    const entry = (servers as Record<string, unknown>)[SPARK_ORCHESTRATOR_SERVER_NAME];
+    const entry = (servers as Record<string, unknown>)[SERVER_NAME];
     if (!entry) return false;
-    // If a user-owned entry exists we consider it installed (don't reinstall
-    // over it). If a Codara-managed entry exists, only treat it as installed
-    // when it matches the current version + script path.
+    // A user-owned entry counts as installed (don't reinstall over it). A
+    // Codara-managed entry only counts when it matches the current version +
+    // script path.
     if (!isSparkManaged(entry)) return true;
-    return orchestratorMatchesCurrent(entry);
+    return matchesCurrent(entry);
   }
 
   // target === "codex"
@@ -803,28 +671,26 @@ export async function isSparkOrchestratorMcpInstalled(
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     return false;
   }
-  if (hasUserOrchestratorSection(existing)) return true;
+  if (hasUserCodaraStudioSection(existing)) return true;
   // Managed block present AND at the current version? The block embeds a
   // `# Version: <n>` line; if it's missing or stale, report "not installed" so
   // the caller reinstalls the block (picking up roster/env changes from the
-  // version bump). Without the version gate the v2→v3 bump would never refresh
-  // the codex block. We scope the version match to WITHIN the orchestrator
-  // block so it can't false-positive on the preview block's own `# Version:`.
-  const blockStart = existing.indexOf(CODEX_ORCHESTRATOR_BLOCK_START);
-  const blockEnd = existing.indexOf(CODEX_ORCHESTRATOR_BLOCK_END);
+  // version bump). We scope the version match to WITHIN the managed block.
+  const blockStart = existing.indexOf(CODEX_BLOCK_START);
+  const blockEnd = existing.indexOf(CODEX_BLOCK_END);
   if (blockStart < 0 || blockEnd < 0 || blockEnd < blockStart) return false;
-  const block = existing.slice(blockStart, blockEnd + CODEX_ORCHESTRATOR_BLOCK_END.length);
-  return block.includes(`# Version: ${ORCHESTRATOR_SPARK_VERSION}`);
+  const block = existing.slice(blockStart, blockEnd + CODEX_BLOCK_END.length);
+  return block.includes(`# Version: ${SPARK_VERSION}`);
 }
 
 // ---------------------------------------------------------------------------
 // Codara built-in status + per-runtime install/uninstall (Capability Center)
 // ---------------------------------------------------------------------------
 //
-// The Capability Center renders spark-preview and spark-orchestrator in their
-// own branded section with per-runtime install controls. These functions are
-// the backend for that surface: they report where each built-in is installed
-// and let the user add/remove it from a single runtime at a time.
+// The Capability Center renders codara-studio in its own branded section with
+// per-runtime install controls. These functions are the backend for that
+// surface: they report where the built-in is installed and let the user
+// add/remove it from a single runtime at a time.
 
 interface SparkBuiltinMeta {
   id: SparkBuiltinMcpId;
@@ -838,22 +704,13 @@ interface SparkBuiltinMeta {
 function builtinMeta(autoInstallEnabled: boolean): SparkBuiltinMeta[] {
   return [
     {
-      id: "spark-preview",
+      id: "codara-studio",
       serverName: SERVER_NAME,
-      summary: "Drive the live preview tab",
+      summary: "Drive the preview tab, open agent terminals, and orchestrate workers",
       detail:
-        "Lets verifier and worker agents click, type, snapshot, screenshot, and run JS against the exact <preview> DOM the user sees inside Codara — no extra browser window.",
-      tools: SPARK_PREVIEW_TOOLS,
+        "Codara's built-in MCP server. Its always-on studio tools let verifier and worker agents click, type, snapshot, screenshot, and run JS against the exact <preview> DOM the user sees, and open/drive agent-owned terminal tabs — no extra browser window. In Execute and Automation runs the same server also exposes the orchestration tools that spawn and steer Cora workers, ask you clarifying questions, mark runs complete, and build/run automations (looms).",
+      tools: SPARK_BUILTIN_TOOLS,
       autoManaged: autoInstallEnabled,
-    },
-    {
-      id: "spark-orchestrator",
-      serverName: SPARK_ORCHESTRATOR_SERVER_NAME,
-      summary: "Spawn & steer workers in Execute mode; build looms in Automation mode",
-      detail:
-        "Gives the Claude/Codex CLI running in Execute mode the tools to spawn Cora workers, ask you clarifying questions, poll worker status, and mark the run complete. In Automation mode it instead exposes the automation architect tools to list, create, update, run, test, and manage Codara automations (looms). Installed automatically the first time you start an Execute- or Automation-mode run.",
-      tools: SPARK_ORCHESTRATOR_TOOLS,
-      autoManaged: false,
     },
   ];
 }
@@ -866,10 +723,9 @@ export async function getSparkBuiltinStatus(input: {
   const metas = builtinMeta(input.autoInstallEnabled);
   return Promise.all(
     metas.map(async (meta) => {
-      const codexKind = meta.id === "spark-preview" ? "preview" : "orchestrator";
       const [claude, codex] = await Promise.all([
         detectClaudeBuiltinState(meta.serverName, input.claudeRuntimeAvailable),
-        detectCodexBuiltinState(codexKind, input.codexRuntimeAvailable),
+        detectCodexBuiltinState(input.codexRuntimeAvailable),
       ]);
       return {
         id: meta.id,
@@ -886,18 +742,12 @@ export async function getSparkBuiltinStatus(input: {
 }
 
 export async function installSparkBuiltin(
-  id: SparkBuiltinMcpId,
+  _id: SparkBuiltinMcpId,
   runtime: SparkBuiltinRuntime,
 ): Promise<SparkBuiltinActionResult> {
   try {
-    if (id === "spark-preview") {
-      if (runtime === "claude") await installSparkPreviewMcpForClaude(true);
-      else await installSparkPreviewMcpForCodex(true);
-    } else if (runtime === "claude") {
-      await installOrchestratorMcpForCC(true);
-    } else {
-      await installOrchestratorMcpForCodex(true);
-    }
+    if (runtime === "claude") await installForClaude(true);
+    else await installForCodex(true);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -905,13 +755,12 @@ export async function installSparkBuiltin(
 }
 
 export async function uninstallSparkBuiltin(
-  id: SparkBuiltinMcpId,
+  _id: SparkBuiltinMcpId,
   runtime: SparkBuiltinRuntime,
 ): Promise<SparkBuiltinActionResult> {
   try {
-    const serverName = id === "spark-preview" ? SERVER_NAME : SPARK_ORCHESTRATOR_SERVER_NAME;
-    if (runtime === "claude") return await uninstallManagedClaudeServer(serverName);
-    return await uninstallCodexBuiltinBlock(id === "spark-preview" ? "preview" : "orchestrator");
+    if (runtime === "claude") return await uninstallManagedClaudeServer(SERVER_NAME);
+    return await uninstallCodexBuiltinBlock();
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -932,7 +781,6 @@ async function detectClaudeBuiltinState(
 }
 
 async function detectCodexBuiltinState(
-  kind: "preview" | "orchestrator",
   runtimeAvailable: boolean,
 ): Promise<SparkBuiltinRuntimeStatus> {
   let existing = "";
@@ -943,14 +791,8 @@ async function detectCodexBuiltinState(
       existing = "";
     }
   }
-  const hasUserSection =
-    kind === "preview" ? hasUserSparkPreviewSection(existing) : hasUserOrchestratorSection(existing);
-  if (hasUserSection) return { state: "user-managed", configPath: CODEX_USER_CONFIG };
-  const managed =
-    kind === "preview"
-      ? existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END)
-      : existing.includes(CODEX_ORCHESTRATOR_BLOCK_START) &&
-        existing.includes(CODEX_ORCHESTRATOR_BLOCK_END);
+  if (hasUserCodaraStudioSection(existing)) return { state: "user-managed", configPath: CODEX_USER_CONFIG };
+  const managed = existing.includes(CODEX_BLOCK_START) && existing.includes(CODEX_BLOCK_END);
   if (managed) return { state: "installed", configPath: CODEX_USER_CONFIG };
   return { state: runtimeAvailable ? "available" : "unavailable", configPath: CODEX_USER_CONFIG };
 }
@@ -1015,10 +857,8 @@ async function uninstallManagedClaudeServer(serverName: string): Promise<SparkBu
 }
 
 // Strip the Codara-managed Codex block. Refuses when the user keeps their own
-// section outside the managed markers.
-async function uninstallCodexBuiltinBlock(
-  kind: "preview" | "orchestrator",
-): Promise<SparkBuiltinActionResult> {
+// codara-studio section outside the managed markers.
+async function uninstallCodexBuiltinBlock(): Promise<SparkBuiltinActionResult> {
   if (!existsSync(CODEX_USER_CONFIG)) return { ok: true };
   let existing: string;
   try {
@@ -1026,16 +866,13 @@ async function uninstallCodexBuiltinBlock(
   } catch (err) {
     return { ok: false, error: `Could not read ~/.codex/config.toml: ${(err as Error).message}` };
   }
-  const serverName = kind === "preview" ? SERVER_NAME : SPARK_ORCHESTRATOR_SERVER_NAME;
-  const hasUserSection =
-    kind === "preview" ? hasUserSparkPreviewSection(existing) : hasUserOrchestratorSection(existing);
-  if (hasUserSection) {
+  if (hasUserCodaraStudioSection(existing)) {
     return {
       ok: false,
-      error: `A user-defined ${serverName} section exists in config.toml; Codara won't remove it.`,
+      error: `A user-defined ${SERVER_NAME} section exists in config.toml; Codara won't remove it.`,
     };
   }
-  const next = kind === "preview" ? stripBuiltinBlock(existing) : stripOrchestratorBlock(existing);
+  const next = stripAllManagedBlocks(existing);
   if (next === existing) return { ok: true };
   try {
     await fs.writeFile(CODEX_USER_CONFIG, next, "utf8");
@@ -1054,22 +891,14 @@ export const __test = {
   CODEX_USER_CONFIG,
   CODEX_BLOCK_START,
   CODEX_BLOCK_END,
+  CODEX_ORCHESTRATOR_BLOCK_START,
+  CODEX_ORCHESTRATOR_BLOCK_END,
+  LEGACY_CODEX_TABLE_NAMES,
   renderClaudeEntry,
   renderCodexBlock,
-  hasUserSparkPreviewSection,
-  stripBuiltinBlock,
+  hasUserCodaraStudioSection,
+  stripAllManagedBlocks,
   matchesCurrent,
   resolveServerScript,
   resolveNodeCommand,
-  // Orchestrator-specific
-  SPARK_ORCHESTRATOR_SERVER_NAME,
-  ORCHESTRATOR_SPARK_VERSION,
-  CODEX_ORCHESTRATOR_BLOCK_START,
-  CODEX_ORCHESTRATOR_BLOCK_END,
-  resolveOrchestratorServerScript,
-  renderOrchestratorClaudeEntry,
-  renderOrchestratorCodexBlock,
-  hasUserOrchestratorSection,
-  stripOrchestratorBlock,
-  orchestratorMatchesCurrent,
 };

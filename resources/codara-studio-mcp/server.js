@@ -1,24 +1,34 @@
 #!/usr/bin/env node
-// spark-orchestrator MCP server (stdio, zero deps)
+// codara-studio MCP server (stdio, zero deps)
 // ---------------------------------------------------------------
-// This script is spawned by Claude Code / Codex CLIs running in
-// Codara's Execute mode as a child MCP process. It speaks MCP's
-// stdio transport (newline-delimited JSON-RPC 2.0) and proxies
-// orchestrator tool calls to the running Codara via its agent
-// socket (loopback HTTP + bearer token). The CLI plays the role
-// of Codara's manager; these tools let it spawn Cora workers,
-// ask the user clarifying questions, and mark the run complete.
+// The single built-in MCP server Codara Studio ships. It is spawned by
+// Claude Code / Codex / any MCP-aware runtime as a child process, speaks
+// MCP's stdio transport (newline-delimited JSON-RPC 2.0), and proxies tool
+// calls to the running Codara app via its agent socket (loopback HTTP +
+// bearer token). Codara's renderer/main make the calls real.
 //
-// Design rules (mirrored from cora-preview-mcp/server.js):
-//   - Zero npm deps. Pure Node stdlib. Bundled with Codara's
-//     extraResources. Runs under any modern Node (>= 18).
-//   - Late-binding: Codara may not be running yet when this script
-//     is spawned. Read the handshake file on EVERY call and surface
-//     "Codara is not running" cleanly.
-//   - Read the handshake file every call so a Codara restart with a
-//     new token doesn't permanently break the MCP server child.
-//   - Auto-inject runId from process.env.SPARK_RUN_ID so the
-//     orchestrator prompt doesn't have to know its own run id.
+// One server, three rosters, selected ONCE at startup by SPARK_MCP_MODE:
+//   - unset / "studio" (the GLOBAL user-scope entry): the preview tool set
+//     (drive the live <preview> tab) + the terminal tool set (open and drive
+//     agent-owned terminal tabs). This is what any claude/codex sub-agent,
+//     worker, or verifier sees.
+//   - "execute": the studio roster + the Execute worker-orchestration tools
+//     (spawn/steer Cora workers, ask the user, complete the run). Written by
+//     the Claude/Codex backends into a per-run config for the manager CLI.
+//   - "automation": the studio roster + the automation-architect tools
+//     (list/create/run/test looms) + spark_ask_user.
+//
+// Design rules:
+//   - Zero npm deps. Pure Node stdlib. Bundled with Codara's extraResources.
+//     Runs under any modern Node (>= 18).
+//   - Late-binding: Codara may not be running yet when this script is spawned.
+//     Read the handshake file on EVERY call and surface "Codara is not
+//     running" cleanly.
+//   - Read the handshake file every call so a Codara restart with a new token
+//     doesn't permanently break the MCP server child.
+//   - Auto-inject runId from process.env.SPARK_RUN_ID (and nodeId from
+//     SPARK_NODE_ID) for orchestration tools so the manager prompt doesn't
+//     have to know its own run id.
 
 "use strict";
 
@@ -30,21 +40,472 @@ const http = require("node:http");
 const HANDSHAKE_FILE = "agent-socket.json";
 const DEFAULT_SPARK_HOME = path.join(os.homedir(), ".Codara");
 
-// Mode gating. When SPARK_MCP_MODE === "automation" (set by the per-run
-// MCP config the Claude backend writes for Automation-mode chats) the server
-// exposes ONLY the automation architect tool set + spark_ask_user. Anything
-// else (unset / "execute" / the globally-installed user-scope entry that has
-// no env at all) keeps the original 6-tool Execute roster, byte-for-byte
-// backwards-compatible so automation-loop workers calling
-// spark_request_next_iteration are unaffected.
+// Roster gating. Chosen once, at startup. Anything other than "execute" /
+// "automation" (unset, "studio", empty) means the global studio roster —
+// preview + terminal only.
 const SPARK_MCP_MODE = (process.env.SPARK_MCP_MODE || "").trim().toLowerCase();
+const IS_EXECUTE_MODE = SPARK_MCP_MODE === "execute";
 const IS_AUTOMATION_MODE = SPARK_MCP_MODE === "automation";
 
-// ---------------------------------------------------------------------------
-// Shared JSON-schema fragments for the automation tool set. Kept verbose and
-// LLM-friendly: every enum + token is spelled out so the architect model can
+// Orchestration RPCs can block up to ~15 min (spark_ask_user waits on a human;
+// spark_wait_for_workers / spark_wait_for_automation long-poll), so they get a
+// 20-minute HTTP timeout. Preview + terminal ops are quick and get 60s.
+const PREVIEW_TERMINAL_TIMEOUT_MS = 60_000;
+const ORCHESTRATION_TIMEOUT_MS = 20 * 60_000;
+
+// ===========================================================================
+// Preview tool set (drive the live <preview> tab). Byte-for-byte the roster
+// the old cora-preview server exposed.
+// ===========================================================================
+const PREVIEW_TOOLS = [
+  {
+    name: "spark_preview_list",
+    description:
+      "List the preview tabs currently open in Codara. Returns each tab's id, url, and whether it is the active one. Use this first to confirm a preview tab exists.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "spark_preview_url",
+    description:
+      "Return the current URL and title of a Codara preview tab. Defaults to the active preview tab when tabId is omitted.",
+    inputSchema: {
+      type: "object",
+      properties: { tabId: { type: "string", description: "Optional tab id from spark_preview_list." } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_navigate",
+    description:
+      "Navigate the target Codara preview tab to a URL (http://, https://, or file://). Waits briefly for dom-ready before returning.",
+    inputSchema: {
+      type: "object",
+      required: ["url"],
+      properties: {
+        tabId: { type: "string" },
+        url: { type: "string", description: "Absolute URL to load." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_snapshot",
+    description:
+      "Return a compact outline of the current preview DOM (tag, id, class, role, accessible name). Use to find selectors and inspect structure without burning the full HTML into your context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string" },
+        mode: { type: "string", enum: ["outline"], description: "Reserved; currently only 'outline' is supported." },
+        maxBytes: { type: "number", description: "Maximum bytes to return (default 12000)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_click",
+    description:
+      "Click an element by CSS selector inside the target preview tab. Fires pointer/mouse events plus element.click() so React/Vue handlers fire.",
+    inputSchema: {
+      type: "object",
+      required: ["selector"],
+      properties: {
+        tabId: { type: "string" },
+        selector: { type: "string", description: "CSS selector. The first match is used." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_type",
+    description:
+      "Type text into an input/textarea/contentEditable inside the target preview tab. Optionally clears the existing value first.",
+    inputSchema: {
+      type: "object",
+      required: ["selector", "text"],
+      properties: {
+        tabId: { type: "string" },
+        selector: { type: "string" },
+        text: { type: "string" },
+        clearFirst: { type: "boolean", description: "Clear current value before typing (default false)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_press_key",
+    description:
+      "Dispatch a keyboard event on the focused element (or a selector if provided). Use named keys like Enter, Escape, Tab, ArrowUp, Backspace, or a single character like 'a'.",
+    inputSchema: {
+      type: "object",
+      required: ["key"],
+      properties: {
+        tabId: { type: "string" },
+        key: { type: "string" },
+        selector: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_evaluate",
+    description:
+      "Run a JavaScript snippet inside the preview tab. Last expression's value is returned (JSON-serialized). Set awaitPromise=true to await an async expression.",
+    inputSchema: {
+      type: "object",
+      required: ["code"],
+      properties: {
+        tabId: { type: "string" },
+        code: { type: "string" },
+        awaitPromise: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_wait_for",
+    description:
+      "Wait for a CSS selector to be attached / visible / hidden, up to timeoutMs. Returns when the condition is met or times out.",
+    inputSchema: {
+      type: "object",
+      required: ["selector"],
+      properties: {
+        tabId: { type: "string" },
+        selector: { type: "string" },
+        state: { type: "string", enum: ["attached", "visible", "hidden"], description: "Default 'visible'." },
+        timeoutMs: { type: "number", description: "Default 5000." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_screenshot",
+    description:
+      "Capture the current preview tab as a PNG (returned base64-encoded in a data: URL). The pixels are exactly what the user sees in Codara.",
+    inputSchema: {
+      type: "object",
+      properties: { tabId: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_mouse",
+    description:
+      "Trusted mouse input at a CSS selector's center or explicit coordinates — indistinguishable from a real user's click (event.isTrusted=true), unlike spark_preview_click's synthetic DOM events. Actions: click, dblclick, rightclick, down, up. Coordinates are CSS pixels relative to the page viewport (top-left origin); if you measured a point on a spark_preview_screenshot, divide by the screenshot's scale (screenshot width ÷ viewport width) first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string" },
+        action: { type: "string", enum: ["click", "dblclick", "rightclick", "down", "up"], description: "Default 'click'." },
+        selector: { type: "string", description: "Click the element's center (scrolled into view first)." },
+        x: { type: "number", description: "CSS-pixel viewport X (alternative to selector)." },
+        y: { type: "number", description: "CSS-pixel viewport Y (alternative to selector)." },
+        modifiers: { type: "array", items: { type: "string" }, description: "e.g. ['shift','meta','control','alt']" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_scroll",
+    description:
+      "Scroll the page with a trusted mouse-wheel event at a selector's center or explicit CSS-pixel coordinates. Positive deltaY scrolls down, negative up.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string" },
+        selector: { type: "string" },
+        x: { type: "number" },
+        y: { type: "number" },
+        deltaX: { type: "number" },
+        deltaY: { type: "number" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_hover",
+    description:
+      "Move the mouse over a selector's center or explicit CSS-pixel coordinates with a trusted mouseMove — triggers real :hover styles, tooltips, and mouseenter handlers.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string" },
+        selector: { type: "string" },
+        x: { type: "number" },
+        y: { type: "number" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_drag",
+    description:
+      "Trusted drag: mouseDown at 'from', interpolated mouseMove steps, mouseUp at 'to'. Each endpoint is { selector } or { x, y } in CSS pixels.",
+    inputSchema: {
+      type: "object",
+      required: ["from", "to"],
+      properties: {
+        tabId: { type: "string" },
+        from: {
+          type: "object",
+          properties: { selector: { type: "string" }, x: { type: "number" }, y: { type: "number" } },
+          additionalProperties: false,
+        },
+        to: {
+          type: "object",
+          properties: { selector: { type: "string" }, x: { type: "number" }, y: { type: "number" } },
+          additionalProperties: false,
+        },
+        steps: { type: "number", description: "Interpolated move events between endpoints (default 12, max 100)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_key",
+    description:
+      "Trusted keyboard input to the focused element: named keys (Enter, Escape, Tab, Backspace, ArrowDown, …) or a single character, with optional modifiers. For typing whole strings into a field prefer spark_preview_type.",
+    inputSchema: {
+      type: "object",
+      required: ["key"],
+      properties: {
+        tabId: { type: "string" },
+        key: { type: "string" },
+        text: { type: "string", description: "Printable text for the char event when it differs from 'key'." },
+        modifiers: { type: "array", items: { type: "string" } },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_upload",
+    description:
+      "Set the files of an <input type=file> via the DevTools protocol (the only reliable way to script a file upload). 'paths' are absolute paths on this machine.",
+    inputSchema: {
+      type: "object",
+      required: ["selector", "paths"],
+      properties: {
+        tabId: { type: "string" },
+        selector: { type: "string" },
+        paths: { type: "array", minItems: 1, items: { type: "string" } },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_console",
+    description:
+      "Read the preview tab's captured console messages (ring buffer, newest last, cap 500). Filter with level=debug|info|warning|error, trim with limit, or clear=true to reset. Capture starts when the tab loads, so messages from before this build opened the tab may be missing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string" },
+        limit: { type: "number", description: "Default 100, max 500." },
+        level: { type: "string", enum: ["debug", "info", "warning", "error"] },
+        clear: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_network",
+    description:
+      "Read the preview tab's captured network requests (url, method, status, mimeType, failures; ring buffer cap 500). Capture attaches on first call — issue one spark_preview_network before the interaction you want to observe, then again after. filter substring-matches the URL; clear=true resets.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tabId: { type: "string" },
+        limit: { type: "number", description: "Default 100, max 500." },
+        filter: { type: "string" },
+        clear: { type: "boolean" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_resize",
+    description:
+      "Resize the preview viewport to explicit CSS-pixel dimensions (e.g. 375×667 to test a mobile layout). Returns the applied size.",
+    inputSchema: {
+      type: "object",
+      required: ["width", "height"],
+      properties: {
+        tabId: { type: "string" },
+        width: { type: "number" },
+        height: { type: "number" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_preview_run",
+    description:
+      "Run an ordered BATCH of preview steps in ONE call (one MCP round-trip) instead of dozens of single click/press_key calls. Each step dispatches the exact same real input event as its individual tool, so fidelity is identical — you just stop paying a separate round-trip (and a separate agent turn) per keystroke. STRONGLY PREFER this for any multi-step verification flow: e.g. drive `7 / 2 =` and read the display as a single spark_preview_run, not seven calls. Stops at the first failing step unless continueOnError=true. Returns a per-step result array; any screenshot steps are also surfaced as image blocks.",
+    inputSchema: {
+      type: "object",
+      required: ["steps"],
+      properties: {
+        tabId: { type: "string", description: "Default tab for steps that omit their own tabId." },
+        continueOnError: {
+          type: "boolean",
+          description: "Keep running after a failing step (default false).",
+        },
+        steps: {
+          type: "array",
+          minItems: 1,
+          description:
+            "Ordered steps. Each is { action, ...args } where action is one of navigate|click|type|press_key|evaluate|wait_for|snapshot|screenshot and the remaining fields mirror the matching spark_preview_* tool — e.g. {action:'press_key', key:'7'}, {action:'click', selector:'#equals'}, {action:'evaluate', code:\"document.querySelector('#lcd').textContent\"}.",
+          items: {
+            type: "object",
+            required: ["action"],
+            properties: {
+              action: {
+                type: "string",
+                enum: [
+                  "navigate",
+                  "click",
+                  "type",
+                  "press_key",
+                  "evaluate",
+                  "wait_for",
+                  "snapshot",
+                  "screenshot",
+                  "scroll",
+                  "hover",
+                  "key",
+                  "resize",
+                ],
+              },
+              label: { type: "string", description: "Optional note echoed back in the step result." },
+              tabId: { type: "string" },
+              url: { type: "string" },
+              selector: { type: "string" },
+              text: { type: "string" },
+              clearFirst: { type: "boolean" },
+              key: { type: "string" },
+              code: { type: "string" },
+              awaitPromise: { type: "boolean" },
+              state: { type: "string" },
+              timeoutMs: { type: "number" },
+              x: { type: "number" },
+              y: { type: "number" },
+              deltaX: { type: "number" },
+              deltaY: { type: "number" },
+              width: { type: "number" },
+              height: { type: "number" },
+              modifiers: { type: "array", items: { type: "string" } },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+];
+
+const PREVIEW_TOOL_TO_RPC = {
+  spark_preview_list: "preview.list",
+  spark_preview_url: "preview.url",
+  spark_preview_navigate: "preview.navigate",
+  spark_preview_snapshot: "preview.snapshot",
+  spark_preview_click: "preview.click",
+  spark_preview_type: "preview.type",
+  spark_preview_press_key: "preview.press_key",
+  spark_preview_evaluate: "preview.evaluate",
+  spark_preview_wait_for: "preview.wait_for",
+  spark_preview_screenshot: "preview.screenshot",
+  spark_preview_mouse: "preview.mouse",
+  spark_preview_scroll: "preview.scroll",
+  spark_preview_hover: "preview.hover",
+  spark_preview_drag: "preview.drag",
+  spark_preview_key: "preview.key",
+  spark_preview_upload: "preview.upload",
+  spark_preview_console: "preview.console",
+  spark_preview_network: "preview.network",
+  spark_preview_resize: "preview.resize",
+};
+
+// Step action -> RPC for the batched spark_preview_run tool. Mirrors the
+// single-shot tools so a batched step fires the identical real event.
+const STEP_ACTION_TO_RPC = {
+  navigate: "preview.navigate",
+  click: "preview.click",
+  type: "preview.type",
+  press_key: "preview.press_key",
+  evaluate: "preview.evaluate",
+  wait_for: "preview.wait_for",
+  snapshot: "preview.snapshot",
+  screenshot: "preview.screenshot",
+  // Trusted-input steps (drag/upload/console/network stay single-shot tools:
+  // drag's nested from/to and the read-tools' outputs don't batch cleanly).
+  scroll: "preview.scroll",
+  hover: "preview.hover",
+  key: "preview.key",
+  resize: "preview.resize",
+};
+
+// ===========================================================================
+// Terminal tool set (open and drive agent-owned terminal tabs). New with the
+// codara-studio merge; the socket RPCs live in agent-socket.ts.
+// ===========================================================================
+const TERMINAL_TOOLS = [
+  {
+    name: "spark_terminal_create",
+    description:
+      "Open a NEW agent-owned terminal tab in Codara Studio. The tab is visually tinted so the user can see an agent is driving it. Optionally pass a shell `command` to run immediately on open and a `title` for the tab. PASS AN EXPLICIT, VALID `cwd` whenever you have one: when omitted it defaults to the active workspace root, and if that path does not exist the terminal fails to spawn and later spark_terminal_write/read calls report an unknown pane. Returns { tabId, paneId, cwd } — the returned `cwd` is the directory actually used; keep the paneId to drive the terminal with spark_terminal_write and read its output with spark_terminal_read.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        cwd: { type: "string", description: "Working directory for the new terminal. Pass an absolute path that exists. Defaults to the active workspace root when omitted." },
+        command: { type: "string", description: "Optional shell command to run immediately after the terminal opens." },
+        title: { type: "string", description: "Optional tab title." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_terminal_write",
+    description:
+      "Write text to an agent-owned terminal pane (identified by the paneId returned from spark_terminal_create). By default the text is submitted as if the user pressed Enter; set submit=false to type without submitting (e.g. to build up a line or send a raw control sequence). Read the resulting output with spark_terminal_read. Ownership is enforced: you can only write to a paneId your OWN spark_terminal_create returned in this session — a paneId you discovered another way (e.g. a sibling worker's pane sampled via spark_terminal_read) is rejected, so call spark_terminal_create to get a pane you own rather than writing to someone else's.",
+    inputSchema: {
+      type: "object",
+      required: ["paneId", "text"],
+      properties: {
+        paneId: { type: "string", description: "Pane id returned from spark_terminal_create." },
+        text: { type: "string", description: "Text to write into the terminal." },
+        submit: { type: "boolean", description: "Press Enter after writing (default true)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "spark_terminal_read",
+    description:
+      "Read the recent visible output of a terminal pane (identified by paneId). Returns the tail of the pane's buffer with ANSI/VT control sequences stripped, so you can inspect command output. Use after spark_terminal_write to see what a command produced.",
+    inputSchema: {
+      type: "object",
+      required: ["paneId"],
+      properties: {
+        paneId: { type: "string", description: "Pane id returned from spark_terminal_create." },
+        lines: { type: "number", description: "How many trailing lines to return (default 100)." },
+      },
+      additionalProperties: false,
+    },
+  },
+];
+
+const TERMINAL_TOOL_TO_RPC = {
+  spark_terminal_create: "terminal.create",
+  spark_terminal_write: "terminal.write",
+  spark_terminal_read: "terminal.read",
+};
+
+// ===========================================================================
+// Automation-architect tool set (SPARK_MCP_MODE=automation only). Shared
+// JSON-schema fragments kept verbose + LLM-friendly so the architect model can
 // author triggers / loops / workers / graphs without guessing the shape.
-// ---------------------------------------------------------------------------
+// ===========================================================================
 const TRIGGER_SCHEMA = {
   type: "object",
   description:
@@ -203,7 +664,6 @@ const runIdProp = {
   },
 };
 
-// Automation architect tool roster (Automation chat mode only).
 const AUTOMATION_TOOLS = [
   {
     name: "spark_list_automations",
@@ -367,9 +827,10 @@ const AUTOMATION_TOOLS = [
   },
 ];
 
-// spark_ask_user is shared between rosters (its definition lives in
-// EXECUTE_TOOLS below); the automation roster appends it after that array is
-// defined. See `const TOOLS = ...` near the dispatch table.
+// ===========================================================================
+// Execute worker-orchestration tool set (SPARK_MCP_MODE=execute). spark_ask_user
+// lives here and is shared with the automation roster.
+// ===========================================================================
 const EXECUTE_TOOLS = [
   {
     name: "spark_spawn_workers",
@@ -668,14 +1129,22 @@ const EXECUTE_TOOLS = [
   },
 ];
 
-// spark_ask_user is shared by both rosters. Pull its canonical definition out
-// of EXECUTE_TOOLS so the automation roster can reuse the exact same schema.
+// spark_ask_user is shared by the Execute and Automation rosters. Pull its
+// canonical definition out of EXECUTE_TOOLS so the automation roster can reuse
+// the exact same schema.
 const ASK_USER_TOOL = EXECUTE_TOOLS.find((t) => t.name === "spark_ask_user");
 
-// The live roster + RPC map are selected once, at startup, by SPARK_MCP_MODE.
-const TOOLS = IS_AUTOMATION_MODE
-  ? [...AUTOMATION_TOOLS, ...(ASK_USER_TOOL ? [ASK_USER_TOOL] : [])]
-  : EXECUTE_TOOLS;
+const EXECUTE_TOOL_TO_RPC = {
+  spark_spawn_workers: "orchestrator.spawn_workers",
+  spark_ask_user: "orchestrator.ask_user",
+  spark_complete: "orchestrator.complete",
+  spark_name_chat: "orchestrator.name_chat",
+  spark_request_next_iteration: "orchestrator.request_next_iteration",
+  spark_get_worker_status: "orchestrator.get_worker_status",
+  spark_wait_for_workers: "orchestrator.wait_for_workers",
+  spark_message_workers: "orchestrator.message_workers",
+  spark_check_messages: "orchestrator.check_messages",
+};
 
 const AUTOMATION_TOOL_TO_RPC = {
   spark_list_automations: "automation.list",
@@ -693,19 +1162,34 @@ const AUTOMATION_TOOL_TO_RPC = {
   spark_ask_user: "orchestrator.ask_user",
 };
 
-const EXECUTE_TOOL_TO_RPC = {
-  spark_spawn_workers: "orchestrator.spawn_workers",
-  spark_ask_user: "orchestrator.ask_user",
-  spark_complete: "orchestrator.complete",
-  spark_name_chat: "orchestrator.name_chat",
-  spark_request_next_iteration: "orchestrator.request_next_iteration",
-  spark_get_worker_status: "orchestrator.get_worker_status",
-  spark_wait_for_workers: "orchestrator.wait_for_workers",
-  spark_message_workers: "orchestrator.message_workers",
-  spark_check_messages: "orchestrator.check_messages",
-};
+// ===========================================================================
+// Roster + RPC-map selection. Done ONCE at startup by SPARK_MCP_MODE. The
+// studio (preview + terminal) tools are always present; the mode only adds the
+// orchestration layer on top.
+// ===========================================================================
+const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS];
+const STUDIO_TOOL_TO_RPC = { ...PREVIEW_TOOL_TO_RPC, ...TERMINAL_TOOL_TO_RPC };
 
-const TOOL_TO_RPC = IS_AUTOMATION_MODE ? AUTOMATION_TOOL_TO_RPC : EXECUTE_TOOL_TO_RPC;
+let TOOLS;
+let TOOL_TO_RPC;
+if (IS_AUTOMATION_MODE) {
+  TOOLS = [...STUDIO_TOOLS, ...AUTOMATION_TOOLS, ...(ASK_USER_TOOL ? [ASK_USER_TOOL] : [])];
+  TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, ...AUTOMATION_TOOL_TO_RPC };
+} else if (IS_EXECUTE_MODE) {
+  // EXECUTE_TOOLS already contains spark_ask_user.
+  TOOLS = [...STUDIO_TOOLS, ...EXECUTE_TOOLS];
+  TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, ...EXECUTE_TOOL_TO_RPC };
+} else {
+  TOOLS = STUDIO_TOOLS;
+  TOOL_TO_RPC = STUDIO_TOOL_TO_RPC;
+}
+
+// Orchestration RPCs (orchestrator.* / automation.*) get the long HTTP timeout
+// and runId auto-injection; preview + terminal RPCs get the short timeout and
+// no injection.
+function isOrchestrationRpc(rpc) {
+  return typeof rpc === "string" && (rpc.startsWith("orchestrator.") || rpc.startsWith("automation."));
+}
 
 function resolveSparkHome() {
   const override = process.env.CODARA_HOME_DIR || process.env.SPARK_HOME_DIR || process.env.SPARK_USER_DATA_DIR;
@@ -731,7 +1215,7 @@ function readHandshake() {
   }
 }
 
-function postJsonRpc(method, params) {
+function postJsonRpc(method, params, timeoutMs) {
   return new Promise((resolve, reject) => {
     let handshake;
     try {
@@ -772,7 +1256,7 @@ function postJsonRpc(method, params) {
           try {
             const parsed = JSON.parse(text);
             if (parsed && parsed.error) {
-              const errMsg = parsed.error.message || "orchestrator op failed";
+              const errMsg = parsed.error.message || "agent socket op failed";
               reject(new Error(errMsg));
               return;
             }
@@ -784,8 +1268,7 @@ function postJsonRpc(method, params) {
       },
     );
     req.on("error", (err) => reject(new Error(`Codara agent socket unreachable: ${err.message}`)));
-    // ask_user can block up to 15 min waiting on a human, so allow plenty of headroom.
-    req.setTimeout(20 * 60_000, () => {
+    req.setTimeout(timeoutMs || PREVIEW_TERMINAL_TIMEOUT_MS, () => {
       req.destroy(new Error("Codara agent socket timeout"));
     });
     req.write(body);
@@ -854,7 +1337,7 @@ async function dispatch(method, params) {
       return {
         protocolVersion: "2024-11-05",
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "cora-orchestrator", version: "0.1.0" },
+        serverInfo: { name: "codara-studio", version: "0.1.0" },
       };
     case "notifications/initialized":
     case "initialized":
@@ -872,34 +1355,45 @@ async function dispatch(method, params) {
 
 async function callTool(params) {
   const name = params && typeof params.name === "string" ? params.name : null;
-  if (!name || !TOOL_TO_RPC[name]) throw mkErr(-32602, `unknown tool: ${name}`);
-  const args = params.arguments && typeof params.arguments === "object" ? { ...params.arguments } : {};
-  // Auto-inject runId from the env var injected by pty-manager when the CLI
-  // was spawned for this run, so the orchestrator prompt doesn't have to know
-  // its own run id. Caller-supplied runId always wins.
-  if (typeof args.runId !== "string" || args.runId.trim().length === 0) {
-    const envRunId = process.env.SPARK_RUN_ID;
-    if (envRunId && envRunId.trim().length > 0) {
-      args.runId = envRunId.trim();
+  // The batched preview runner is handled locally (it fans out to many RPCs).
+  if (name === "spark_preview_run") {
+    const args = params && params.arguments && typeof params.arguments === "object" ? params.arguments : {};
+    return await callRunBatch(args);
+  }
+  const rpc = name ? TOOL_TO_RPC[name] : null;
+  if (!rpc) throw mkErr(-32602, `unknown tool: ${name}`);
+  const args = params && params.arguments && typeof params.arguments === "object" ? { ...params.arguments } : {};
+
+  if (isOrchestrationRpc(rpc)) {
+    // Auto-inject runId from the env var pty-manager injected when the CLI was
+    // spawned for this run, so the orchestrator prompt doesn't have to know its
+    // own run id. Caller-supplied runId always wins.
+    if (typeof args.runId !== "string" || args.runId.trim().length === 0) {
+      const envRunId = process.env.SPARK_RUN_ID;
+      if (envRunId && envRunId.trim().length > 0) {
+        args.runId = envRunId.trim();
+      }
+    }
+    // Stamp the calling worker's loom node id (SPARK_NODE_ID, exported by
+    // direct-worker's headless spawn) onto the continuation signal so the
+    // pass-level "agent" loop can read ONLY the SINK node's decision in a
+    // multi-node wave. Auto-injected for request_next_iteration only; harmless
+    // (ignored) for single-node looms where the env var is absent. Caller-
+    // supplied nodeId always wins.
+    if (
+      name === "spark_request_next_iteration" &&
+      (typeof args.nodeId !== "string" || args.nodeId.trim().length === 0)
+    ) {
+      const envNodeId = process.env.SPARK_NODE_ID;
+      if (envNodeId && envNodeId.trim().length > 0) {
+        args.nodeId = envNodeId.trim();
+      }
     }
   }
-  // Slice 7: stamp the calling worker's loom node id (SPARK_NODE_ID, exported
-  // by direct-worker's headless spawn) onto the continuation signal so the
-  // pass-level "agent" loop can read ONLY the SINK node's decision in a
-  // multi-node wave. Auto-injected for request_next_iteration only; harmless
-  // (ignored) for single-node looms where the env var is absent. Caller-
-  // supplied nodeId always wins.
-  if (
-    name === "spark_request_next_iteration" &&
-    (typeof args.nodeId !== "string" || args.nodeId.trim().length === 0)
-  ) {
-    const envNodeId = process.env.SPARK_NODE_ID;
-    if (envNodeId && envNodeId.trim().length > 0) {
-      args.nodeId = envNodeId.trim();
-    }
-  }
+
+  const timeoutMs = isOrchestrationRpc(rpc) ? ORCHESTRATION_TIMEOUT_MS : PREVIEW_TERMINAL_TIMEOUT_MS;
   try {
-    const result = await postJsonRpc(TOOL_TO_RPC[name], args);
+    const result = await postJsonRpc(rpc, args, timeoutMs);
     return toToolResult(result);
   } catch (err) {
     return {
@@ -909,8 +1403,76 @@ async function callTool(params) {
   }
 }
 
+// Execute an ordered batch of preview steps in a single MCP round-trip. Each
+// step is the same RPC the single-shot tool would issue, run sequentially so
+// later steps observe the DOM the earlier ones produced. Screenshot steps are
+// surfaced as image content blocks (and their base64 stripped from the JSON
+// echo so the per-step array stays readable).
+async function callRunBatch(args) {
+  const steps = args && Array.isArray(args.steps) ? args.steps : null;
+  if (!steps || steps.length === 0) {
+    return { isError: true, content: [{ type: "text", text: "spark_preview_run requires a non-empty 'steps' array." }] };
+  }
+  const continueOnError = args.continueOnError === true;
+  const defaultTabId = typeof args.tabId === "string" ? args.tabId : undefined;
+  const results = [];
+  const images = [];
+  let sawError = false;
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i] && typeof steps[i] === "object" ? steps[i] : {};
+    const action = step.action;
+    const rpc = STEP_ACTION_TO_RPC[action];
+    if (!rpc) {
+      results.push({ index: i, action: action ?? null, ok: false, error: `unknown action '${action}'` });
+      sawError = true;
+      if (!continueOnError) break;
+      continue;
+    }
+    const { action: _omitAction, label, ...rest } = step;
+    const rpcArgs = { ...rest };
+    if (defaultTabId && rpcArgs.tabId === undefined) rpcArgs.tabId = defaultTabId;
+    const entry = { index: i, action };
+    if (label) entry.label = label;
+    try {
+      const result = await postJsonRpc(rpc, rpcArgs, PREVIEW_TERMINAL_TIMEOUT_MS);
+      entry.ok = true;
+      if (action === "screenshot" && result && typeof result.dataUrl === "string") {
+        const m = /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(result.dataUrl);
+        if (m) images.push({ type: "image", mimeType: m[1], data: m[2] });
+        entry.result = { url: result.url ?? null, captured: Boolean(m) };
+      } else {
+        entry.result = result;
+      }
+      results.push(entry);
+    } catch (err) {
+      entry.ok = false;
+      entry.error = err.message;
+      results.push(entry);
+      sawError = true;
+      if (!continueOnError) break;
+    }
+  }
+  const payload = { ok: !sawError, ran: results.length, total: steps.length, steps: results };
+  return {
+    isError: sawError,
+    content: [...images, { type: "text", text: JSON.stringify(payload, null, 2) }],
+  };
+}
+
 function toToolResult(value) {
   // MCP tool result format: { content: [{type:'text', text}] } + optional isError.
+  // A screenshot result includes a data URL we surface as an image content block.
+  if (value && typeof value === "object" && typeof value.dataUrl === "string" && value.dataUrl.startsWith("data:image/")) {
+    const m = /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(value.dataUrl);
+    if (m) {
+      return {
+        content: [
+          { type: "image", mimeType: m[1], data: m[2] },
+          { type: "text", text: JSON.stringify({ url: value.url ?? null }) },
+        ],
+      };
+    }
+  }
   return {
     content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
   };

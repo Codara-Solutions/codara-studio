@@ -29,6 +29,7 @@ import { startHookRpc, stopHookRpc } from "./hook-rpc";
 import { installClaudeHooks } from "./hook-installer";
 import { installSparkPreviewMcpAtBoot } from "./mcp-installer";
 import { registerPreviewBridge } from "./preview-bridge";
+import { registerTerminalBridge } from "./terminal-bridge";
 import { registerPreviewInput } from "./preview-input";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 
@@ -303,7 +304,7 @@ app.whenReady().then(async () => {
     console.warn("[main] hook installer failed:", err),
   );
 
-  // Auto-install the spark-preview MCP server in the user's Claude / Codex
+  // Auto-install the codara-studio MCP server in the user's Claude / Codex
   // configs so manually-run and orchestrated agents can drive the live
   // <preview> tab (browser-use / computer-use). Guarded by a setting
   // (default on). Unlike the older behavior, this createIfMissing's the config
@@ -315,7 +316,7 @@ app.whenReady().then(async () => {
       if (settings.playwrightMcpAutoInstall === false) return;
       await installSparkPreviewMcpAtBoot();
     } catch (err) {
-      console.warn("[main] spark-preview mcp installer failed:", err);
+      console.warn("[main] codara-studio mcp installer failed:", err);
     }
   })();
 
@@ -412,6 +413,7 @@ app.whenReady().then(async () => {
   // would cycle).
   setTrayHook({ ensure: ensureTray, destroy: destroyTray });
   registerPreviewBridge();
+  registerTerminalBridge();
   // Main-side computer-use executor for the preview tab: listens for tab
   // announcements so console capture starts at dom-ready.
   registerPreviewInput();

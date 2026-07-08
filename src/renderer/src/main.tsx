@@ -4,10 +4,12 @@ import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./theme/ThemeProvider";
 import { registerPreviewRpcHandler } from "./components/Preview/previewRpc";
+import { registerTerminalRpcHandler } from "./components/Terminal/terminalRpc";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 
 registerPreviewRpcHandler();
+registerTerminalRpcHandler();
 
 // Safety net for external file drag-and-drop. Chromium's default action for an
 // unhandled file drop is to navigate the window to that file (file://…), which

@@ -34,6 +34,17 @@
   --accent-edge: color-mix(in oklch, var(--accent) 40%, transparent);
   --accent-glow: color-mix(in oklch, var(--accent) 28%, transparent);
 
+  /* Agent-owned surfaces — tabs a background agent created on the user's
+     behalf. A warm amber, deliberately distinct from the workspace --accent
+     (teal by default) so an agent-spawned terminal reads as "not something I
+     opened" at a glance. Named dark themes inherit this base; the light
+     palettes re-tint it darker below (as they do --automation). The edge/soft
+     derivatives track the base via color-mix, so a theme only overrides the
+     one hue. */
+  --agent-tab-accent: oklch(0.78 0.15 65);
+  --agent-tab-edge: color-mix(in oklch, var(--agent-tab-accent) 55%, transparent);
+  --agent-tab-soft: color-mix(in oklch, var(--agent-tab-accent) 12%, transparent);
+
   /* Status */
   --danger: oklch(0.70 0.20 25);
   --danger-soft: color-mix(in oklch, var(--danger) 16%, transparent);
@@ -418,6 +429,9 @@
 :root[data-theme="rose-pine-dawn"],
 :root[data-theme="catppuccin-latte"] {
   --automation: oklch(0.55 0.20 300);
+  /* Bright paper needs a darker amber so the agent-tab edge + glyph keep
+     contrast (the base 0.78 amber is tuned for dark backgrounds). */
+  --agent-tab-accent: oklch(0.62 0.16 60);
 }
 
 * { box-sizing: border-box; }
@@ -620,6 +634,24 @@ a { color: inherit; }
 .spark-tab--drop-target {
   outline: 1px solid var(--accent-edge);
   outline-offset: 1px;
+}
+
+/* Agent-owned tab: a background agent created this terminal. An amber edge +
+   faint amber wash mark it as not-user-opened in BOTH the inactive and active
+   states, without disturbing the seam where the active tab joins the content
+   area (border-bottom stays none from .spark-tab). The pill reads its accent
+   from --agent-accent, set inline from the tab's stored color token, so the
+   tab model owns the color and the stylesheet only consumes it. */
+.spark-tab--agent {
+  border-color: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 55%, transparent);
+  background: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 8%, var(--panel));
+}
+.spark-tab--agent:hover:not(.spark-tab--active) {
+  background: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 14%, var(--panel));
+}
+.spark-tab--agent.spark-tab--active {
+  border-color: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 65%, transparent);
+  background: color-mix(in oklch, var(--agent-accent, var(--agent-tab-accent)) 12%, var(--bg));
 }
 
 .spark-tab__label {

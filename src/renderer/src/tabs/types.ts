@@ -143,6 +143,14 @@ export interface TerminalTab extends BaseTab {
   kind: "terminal";
   root: PaneNode;
   activePaneId: string;
+  // Opaque CSS color token (e.g. "var(--agent-tab-accent)") marking the tab as
+  // owned by a background agent that created it on the user's behalf. Drives the
+  // tinted glyph + pill edge in TabBar so the user can tell an agent opened it.
+  // Undefined for ordinary user-opened terminals. Stored as a token reference
+  // rather than a literal so palette changes need no tab-model migration.
+  // Persisted with the tab (it is not a leaf field, so the transient-state
+  // strippers leave it intact).
+  color?: string;
   // Run-scoped worker tabs are mounted like normal terminals so their PTYs
   // keep running, but the tab strip only shows them while their run is the
   // active chat.

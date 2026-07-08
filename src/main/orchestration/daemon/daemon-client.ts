@@ -26,8 +26,8 @@ import type { StartAutopilotInput } from "@shared/types";
 // are the contract types from ./daemon-ipc, StartAutopilotInput from
 // @shared/types, and sparkHome() to locate the handshake file.
 //
-// This mirrors how out-of-process MCP children (spark-orchestrator,
-// spark-preview) reach the main process today: they read agent-socket.json out
+// This mirrors how out-of-process MCP children (the codara-studio
+// server) reach the main process today: they read agent-socket.json out
 // of sparkHome() and POST to `${url}/rpc` with `Authorization: Bearer <token>`.
 // DaemonClient does the same against the daemon's handshake file
 // (DAEMON_HANDSHAKE_FILE) instead.
@@ -215,7 +215,7 @@ function unwrap<M extends DaemonMethod>(response: DaemonResponseFor<M>): DaemonR
 
 // ── minimal node:http POST helper ───────────────────────────────────────────
 // A dependency-free request against the loopback host. Mirrors the
-// spark-orchestrator MCP child's postJsonRpc: build the URL, send the JSON body
+// codara-studio MCP child's postJsonRpc: build the URL, send the JSON body
 // with Bearer auth + Content-Length, collect the response, and JSON-parse it.
 
 const REQUEST_TIMEOUT_MS = 20 * 60_000; // matches the host's long-blocking verbs (e.g. ask_user)

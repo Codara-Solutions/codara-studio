@@ -692,13 +692,14 @@ export interface AgentAssetInstallResult {
 }
 
 // ---------------------------------------------------------------------------
-// Codara built-in MCP servers (spark-preview, spark-orchestrator)
+// Codara built-in MCP server (codara-studio)
 // ---------------------------------------------------------------------------
-// These two servers ship inside Codara itself. The Capability Center shows
-// them in a dedicated, branded section — distinct from third-party MCPs the
-// user wires up — with per-runtime install controls.
+// Codara ships one built-in MCP server (preview + terminal studio tools, plus
+// the Execute/Automation orchestration rosters behind SPARK_MCP_MODE). The
+// Capability Center shows it in a dedicated, branded section — distinct from
+// third-party MCPs the user wires up — with per-runtime install controls.
 
-export type SparkBuiltinMcpId = "spark-preview" | "spark-orchestrator";
+export type SparkBuiltinMcpId = "codara-studio";
 export type SparkBuiltinRuntime = "claude" | "codex";
 
 // Per-runtime install state for a built-in:

@@ -20,7 +20,7 @@
 //   * `--bare` removes the config but breaks Keychain auth ("Not logged in").
 //   * `--safe-mode` keeps auth and drops personal config, but ALSO disables
 //     every MCP server — even with an explicit `--mcp-config
-//     --strict-mcp-config`. Workers need the cora-preview MCP, so this is
+//     --strict-mcp-config`. Workers need the codara-studio MCP, so this is
 //     unacceptable.
 //   * VALIDATED recipe: run the CLI under `sandbox-exec` with a surgical
 //     read-denial over just the personal-config paths. Personal CLAUDE.md +

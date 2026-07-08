@@ -829,6 +829,26 @@ const api = {
       ipcRenderer.send("preview-bridge:announce", payload);
     },
   },
+  // codara-studio MCP terminal bridge: main forwards terminal.create requests
+  // here, the renderer mints an agent-tinted terminal tab via useTabs and sends
+  // back the new tabId + paneId. One listener per renderer process. (Mirrors
+  // previewBridge; terminal.write/read talk to the PTY directly in main and do
+  // not use this channel.)
+  terminalBridge: {
+    onRequest: (
+      handler: (req: { reqId: string; op: string; params: Record<string, unknown> }) => void,
+    ): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        req: { reqId: string; op: string; params: Record<string, unknown> },
+      ) => handler(req);
+      ipcRenderer.on("terminal-bridge:request", listener);
+      return () => ipcRenderer.off("terminal-bridge:request", listener);
+    },
+    sendResponse: (response: { reqId: string; ok: boolean; result?: unknown; error?: string }): void => {
+      ipcRenderer.send("terminal-bridge:response", response);
+    },
+  },
   updater: {
     // Subscribe to electron-updater lifecycle events. The returned function
     // unsubscribes the listener; callers should invoke it in a useEffect

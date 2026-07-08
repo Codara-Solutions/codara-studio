@@ -5,7 +5,7 @@
 // waits for the agent-socket handshake file, fabricates run.json files on
 // disk (run-store reads any well-formed run.json on cache miss), and speaks
 // bearer-authed JSON-RPC to the loopback socket — the exact path the
-// cora-preview / cora-orchestrator MCP servers use.
+// the codara-studio MCP server uses.
 //
 //   npm run build && node scripts/test-agent-socket.cjs
 //
