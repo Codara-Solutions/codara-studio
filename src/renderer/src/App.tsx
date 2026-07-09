@@ -3748,6 +3748,19 @@ function isTopStripTab(tab: Tab): boolean {
   return !isRunOwnedTab(tab);
 }
 
+// The run a run-owned tab belongs to, or null for non-run-owned tabs. Unlike
+// isRunOwnedTab (which is run-agnostic), this lets callers reject a run-owned
+// tab that belongs to a DIFFERENT run than the one on screen — the run-scoped
+// runs canvas and previews are not filtered out of visibleTabs, so keyboard
+// tab-cycling can land on another run's preview/Runs tab, and only the owning
+// run's inner strip should follow.
+function runOwnedTabRunId(tab: Tab): string | null {
+  if (tab.kind === "terminal" && tab.scope?.kind === "workers") return tab.scope.runId;
+  if (tab.kind === "runs") return tab.runId;
+  if (tab.kind === "preview" && tab.runId) return tab.runId;
+  return null;
+}
+
 interface WorkspaceProps {
   tabs: ReturnType<typeof useTabs>;
   workspace: Workspace | null;
@@ -3968,6 +3981,18 @@ const Workspace = React.memo(function Workspace({
   // active run has spawned that artifact. When none of these is true the
   // inner strip stays hidden.
   //
+  // But artifacts existing is not enough: the strip is the chat tab's own
+  // sub-navigation, so it must only render while the active view actually
+  // belongs to the run. activeRunId stays pinned to a background run when the
+  // user switches to a plain terminal/editor/preview tab (selecting those tabs
+  // doesn't clear it), so gating on activeRunId alone leaked the strip under
+  // every unrelated tab. Require the active tab to be the run's own chat tab
+  // (its id equals the run id) or one of its run-owned children (worker
+  // terminal / Runs canvas / run preview) that belongs to THIS run — a
+  // run-owned tab owned by a different run (reachable by keyboard tab-cycling,
+  // since previews/Runs tabs aren't run-filtered out of visibleTabs) must not
+  // show the active run's strip over another run's surface.
+  //
   // activeChatTabId is the chat tab whose run owns the current view —
   // either the chat tab whose id matches activeRunId, or (if no run is
   // selected and the user is on a draft) the active draft chat tab. The
@@ -4029,8 +4054,18 @@ const Workspace = React.memo(function Workspace({
       setChatView("chat");
     }
   }, [chatView, backendSessionId, backendPtyExists]);
-  const innerStripVisible =
+  const activeTabForStrip = useMemo(
+    () => visibleTabs.find((tab) => tab.id === effectiveActiveId) ?? null,
+    [visibleTabs, effectiveActiveId],
+  );
+  const activeViewBelongsToRun =
     Boolean(activeRunId) &&
+    activeTabForStrip != null &&
+    (runOwnedTabRunId(activeTabForStrip) === activeRunId ||
+      (activeTabForStrip.kind === "chat" &&
+        activeTabForStrip.id === activeRunId));
+  const innerStripVisible =
+    activeViewBelongsToRun &&
     (backendPtyExists ||
       runOwnedTabs.workers.length > 0 ||
       runOwnedTabs.runs !== null ||
