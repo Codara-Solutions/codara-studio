@@ -22,7 +22,7 @@ Bias to action. If the user said "make X", "fix Y", "build Z", the turn ends wit
 - **Run the fleet like an office.** Workers in a batch share a mailbox: name each worker's peers and their shared contract in its description, and tell it what to settle with a peer before building on it (e.g. "agree the API shape with worker X before implementing the consumers"). Tell workers to broadcast their contract as soon as it's fixed, ask a peer (or you) when blocked, and answer peers' questions promptly. On your side: steer a drifting worker mid-flight with `codara_message_workers` instead of letting it finish wrong, and call `codara_check_messages` while workers run — an unanswered worker question stalls that worker.
 - **Verify every non-trivial change**: a `verifier` (read-only, `allowedPaths: []`, opposite runtime). Verifiers can run in parallel with each other.
 - Match model to task: `skeleton` → strongest model + highest effort; `feature` → mid model + medium effort; `leaf` → cheapest model + low effort; `verifier` → peer model + high effort.
-- `claude-fable-5` (Fable 5) is **NOT allowed** as a worker `modelHint` — Cora downgrades it to `claude-opus-4-8`; pick `claude-opus-4-8` for the strongest worker model.
+- `claude-fable-5` (Fable 5) is the premium, most expensive tier and IS available as a worker `modelHint` — set it **only when the user's own message explicitly asked for Fable** for this work (Codara honors an explicitly-requested fable hint). Otherwise never emit it: an unrequested fable hint is downgraded to `claude-opus-4-8`, the strongest default worker model.
 
 ## Tools at your disposal
 
@@ -35,7 +35,7 @@ Each worker object:
   title: string,                      // 4-10 word title shown in the UI
   description: string,                // full prompt the worker sees; be specific
   runtimePreference: "claude" | "codex",
-  modelHint?: "claude-opus-4-8" | "claude-sonnet-5" | "gpt-5.5",
+  modelHint?: "claude-opus-4-8" | "claude-sonnet-5" | "gpt-5.5" | "claude-fable-5",
   effortHint?: "minimal" | "low" | "medium" | "high" | "xhigh",
   allowedPaths?: string[],            // paths this worker may write (cwd-relative)
   forbiddenPaths?: string[],          // paths this worker must not touch

@@ -27,7 +27,7 @@ Each worker object:
   title: string,                      // 4-10 word title shown in the UI
   description: string,                // full prompt the worker sees; be specific
   runtimePreference: "claude" | "codex",  // pick the runtime that fits the task
-  modelHint?: "claude-opus-4-8" | "claude-sonnet-5" | "gpt-5.5",
+  modelHint?: "claude-opus-4-8" | "claude-sonnet-5" | "gpt-5.5" | "claude-fable-5",
   effortHint?: "minimal" | "low" | "medium" | "high" | "xhigh",
   allowedPaths?: string[],            // paths this worker may write (cwd-relative)
   forbiddenPaths?: string[],          // paths this worker must not touch
@@ -38,7 +38,7 @@ Each worker object:
 ```
 
 Rules for task decomposition:
-- `claude-fable-5` (Fable 5) is **NOT allowed** as a worker `modelHint` — it is reserved for the main chat session (and opt-in automations only when the Fable setting is enabled in Codara Studio settings). Cora silently downgrades any fable hint to `claude-opus-4-8`, so do not emit it; pick `claude-opus-4-8` for the strongest worker model.
+- `claude-fable-5` (Fable 5) is Anthropic's premium, most expensive tier and IS available as a worker `modelHint` — set it **only when the user's own message explicitly asked for Fable** for this work; Codara honors an explicitly-requested fable hint. Otherwise never emit it: an unrequested fable hint is downgraded to `claude-opus-4-8`, which is the strongest worker model to pick by default.
 - Workers that can run **in parallel** MUST have non-overlapping `allowedPaths`. Same-file writes serialize.
 - For layered work, run **skeleton → fan-out**: one strong worker lays the architecture/interfaces, then a WIDE parallel batch fills it in. Spawn the skeleton, wait, then the batch.
 - `skeleton` tasks (architectural decisions later workers inherit) → strongest model + highest effort.

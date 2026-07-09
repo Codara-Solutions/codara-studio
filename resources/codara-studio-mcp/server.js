@@ -579,7 +579,7 @@ const WORKER_SCHEMA = {
     model: {
       type: "string",
       description:
-        "Engine-native model id (REQUIRED): 'claude-opus-4-8' or 'claude-sonnet-5' for claude, 'gpt-5.5' for codex. NOTE: 'claude-fable-5' (Fable 5, top-tier) is permitted ONLY when the user explicitly asked for it AND the Fable setting is enabled in Codara Studio settings; otherwise it is downgraded to claude-opus-4-8.",
+        "Engine-native model id (REQUIRED): 'claude-opus-4-8' or 'claude-sonnet-5' for claude, 'gpt-5.5' for codex. NOTE: 'claude-fable-5' (Fable 5, premium top-tier) IS permitted as a worker model ONLY when the user's own message explicitly asked for Fable for this work; Codara honors an explicitly-requested fable hint. Otherwise it is downgraded to claude-opus-4-8.",
     },
     effort: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh", "max"], description: "Reasoning effort (REQUIRED)." },
     timeoutMinutes: { type: "number", description: "Hard per-iteration wall-clock ceiling in minutes." },

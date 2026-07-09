@@ -3657,15 +3657,17 @@ function isTopTierModel(hint: string | undefined): boolean {
 // run-store namespace.
 export { sanitizeWorkerModelHint } from "./worker-model-hint";
 
-// A Cora-spawned worker may run Fable 5 ONLY when BOTH hold: the user opted in
-// (Settings → Agents "Allow Fable 5", the "fableEnabled" preference) AND the
-// user explicitly named Fable in their own message this run. The manager LLM
-// cannot self-authorize the most expensive tier — runUserRequestedFable scans
-// user-authored chat only, never manager/worker output. Callers pass the result
-// as `sanitizeWorkerModelHint(hint, { allowFable })` so a fable hint passes
-// through unchanged; otherwise it is downgraded to Opus 4.8 with a visible note.
+// A Cora-spawned worker may run Fable 5 whenever the user explicitly named Fable
+// in their OWN message this run. The "Allow Fable 5" setting does NOT gate this
+// worker path — an explicit user request is sufficient (the setting still governs
+// the main-chat model, standing terminals, and automation launches, which have
+// their own checks). The manager LLM cannot self-authorize the most expensive
+// tier — runUserRequestedFable scans user-authored chat only, never
+// manager/worker output. Callers pass the result as
+// `sanitizeWorkerModelHint(hint, { allowFable })` so a fable hint passes through
+// unchanged; otherwise it is downgraded to Opus 4.8 with a visible note.
 export function workerFableAllowed(run: RunState): boolean {
-  return getPreferenceCached("fableEnabled") === true && runUserRequestedFable(run);
+  return runUserRequestedFable(run);
 }
 
 function promoteForTrivial(agent: PlannedStepAgent): PlannedStepAgent {
@@ -4525,8 +4527,8 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
   // composer (e.g. Opus 4.8 @ medium) — it's the one that decides what to keep
   // from each candidate. Fall back to a top-tier default only if the run didn't
   // record a selection. The judge is a Cora-spawned WORKER, so a fable pick is
-  // downgraded to Opus 4.8 UNLESS the user opted in and explicitly asked for
-  // Fable this run (workerFableAllowed). Sanitize the hint and surface any
+  // downgraded to Opus 4.8 UNLESS the user explicitly asked for Fable this run
+  // (workerFableAllowed; the setting doesn't gate this worker path). Sanitize the hint and surface any
   // downgrade so it isn't a silent swap by the launch-command backstop.
   const judgeModel = sanitizeWorkerModelHint(run.chatModel ?? COUNCIL_TOP_TIER_MODEL[runtime], {
     allowFable: workerFableAllowed(run),
@@ -7776,10 +7778,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // bound to an automationId is the automation worker path. With the pref off
   // we leave isAutomationLaunch false so the backstop downgrades any fable hint
   // to Opus 4.8, matching the Cora-spawned-worker chokepoint.
+  const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
   const isAutomationLaunch =
-    getPreferenceCached("fableEnabled") === true &&
-    run.executionMode === "direct" &&
-    Boolean(run.automationId);
+    getPreferenceCached("fableEnabled") === true && isAutomationRun;
   // Dirs a sandboxed codex worker must be able to WRITE despite them living
   // outside the workspace: the attempt dir (holds final-report.json + logs) and,
   // for a chat participant, the shared board. buildLaunchCommandLine --add-dir's
@@ -7791,9 +7792,12 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd, {
     sandboxDir: attempt.sandboxWorktreePath,
     isAutomation: isAutomationLaunch,
-    // Cora-spawned worker: honor a fable hint only if the user opted in AND
-    // asked for Fable this run; otherwise the backstop downgrades it.
-    allowFable: workerFableAllowed(run),
+    // Cora-spawned worker: honor a fable hint whenever the user explicitly asked
+    // for Fable this run (workerFableAllowed). Automation runs stay setting-gated
+    // via isAutomationLaunch — they must NOT inherit the request-only worker gate,
+    // so for an automation run allowFable follows the setting (isAutomationLaunch)
+    // rather than the user-request gate.
+    allowFable: isAutomationRun ? isAutomationLaunch : workerFableAllowed(run),
     extraWritableDirs,
   });
   const command = launchCommand
