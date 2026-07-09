@@ -85,7 +85,7 @@ Every result is `schemaVersion: 2` and includes:
 parsed from `events.jsonl` (`hook.PreToolUse`), with a raw-log fallback. This
 is the signal that exposes the verification bottleneck: a worker can write a
 deliverable in a handful of edits, then spend most of its wall-clock driving
-the live preview one keystroke at a time — each `spark_preview_*` call is a
+the live preview one keystroke at a time — each `codara_preview_*` call is a
 full MCP round-trip. `verificationRoundTrips` counts the preview calls that
 actually drive/inspect the page (click/type/press_key/snapshot/screenshot/
 evaluate/wait_for), excluding cheap navigate/list/url. A serial calculator

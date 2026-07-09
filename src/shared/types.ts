@@ -2851,6 +2851,6 @@ export const SHELL_CHECK_TIMEOUT_MS = 120_000;
 export const DEFAULT_ITERATION_TIMEOUT_MINUTES = 60;
 // Sentinel tokens for the zero-instrumentation agent-driven fallback: the
 // model writes one of these as the LAST line of its final summary to drive the
-// loop even before the spark_request_next_iteration tool is available.
+// loop even before the codara_request_next_iteration tool is available.
 export const SPARK_LOOP_CONTINUE = "SPARK_LOOP_CONTINUE";
 export const SPARK_LOOP_DONE = "SPARK_LOOP_DONE";

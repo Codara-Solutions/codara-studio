@@ -16,7 +16,7 @@
 //     (spawn/steer Cora workers, ask the user, complete the run). Written by
 //     the Claude/Codex backends into a per-run config for the manager CLI.
 //   - "automation": the studio roster + the automation-architect tools
-//     (list/create/run/test looms) + spark_ask_user.
+//     (list/create/run/test looms) + codara_ask_user.
 //
 // Design rules:
 //   - Zero npm deps. Pure Node stdlib. Bundled with Codara's extraResources.
@@ -47,8 +47,8 @@ const SPARK_MCP_MODE = (process.env.SPARK_MCP_MODE || "").trim().toLowerCase();
 const IS_EXECUTE_MODE = SPARK_MCP_MODE === "execute";
 const IS_AUTOMATION_MODE = SPARK_MCP_MODE === "automation";
 
-// Orchestration RPCs can block up to ~15 min (spark_ask_user waits on a human;
-// spark_wait_for_workers / spark_wait_for_automation long-poll), so they get a
+// Orchestration RPCs can block up to ~15 min (codara_ask_user waits on a human;
+// codara_wait_for_workers / codara_wait_for_automation long-poll), so they get a
 // 20-minute HTTP timeout. Preview + terminal ops are quick and get 60s.
 const PREVIEW_TERMINAL_TIMEOUT_MS = 60_000;
 const ORCHESTRATION_TIMEOUT_MS = 20 * 60_000;
@@ -59,23 +59,23 @@ const ORCHESTRATION_TIMEOUT_MS = 20 * 60_000;
 // ===========================================================================
 const PREVIEW_TOOLS = [
   {
-    name: "spark_preview_list",
+    name: "codara_preview_list",
     description:
       "List the preview tabs currently open in Codara. Returns each tab's id, url, and whether it is the active one. Use this first to confirm a preview tab exists.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
-    name: "spark_preview_url",
+    name: "codara_preview_url",
     description:
       "Return the current URL and title of a Codara preview tab. Defaults to the active preview tab when tabId is omitted.",
     inputSchema: {
       type: "object",
-      properties: { tabId: { type: "string", description: "Optional tab id from spark_preview_list." } },
+      properties: { tabId: { type: "string", description: "Optional tab id from codara_preview_list." } },
       additionalProperties: false,
     },
   },
   {
-    name: "spark_preview_navigate",
+    name: "codara_preview_navigate",
     description:
       "Navigate the target Codara preview tab to a URL (http://, https://, or file://). Waits briefly for dom-ready before returning.",
     inputSchema: {
@@ -89,7 +89,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_snapshot",
+    name: "codara_preview_snapshot",
     description:
       "Return a compact outline of the current preview DOM (tag, id, class, role, accessible name). Use to find selectors and inspect structure without burning the full HTML into your context.",
     inputSchema: {
@@ -103,7 +103,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_click",
+    name: "codara_preview_click",
     description:
       "Click an element by CSS selector inside the target preview tab. Fires pointer/mouse events plus element.click() so React/Vue handlers fire.",
     inputSchema: {
@@ -117,7 +117,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_type",
+    name: "codara_preview_type",
     description:
       "Type text into an input/textarea/contentEditable inside the target preview tab. Optionally clears the existing value first.",
     inputSchema: {
@@ -133,7 +133,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_press_key",
+    name: "codara_preview_press_key",
     description:
       "Dispatch a keyboard event on the focused element (or a selector if provided). Use named keys like Enter, Escape, Tab, ArrowUp, Backspace, or a single character like 'a'.",
     inputSchema: {
@@ -148,7 +148,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_evaluate",
+    name: "codara_preview_evaluate",
     description:
       "Run a JavaScript snippet inside the preview tab. Last expression's value is returned (JSON-serialized). Set awaitPromise=true to await an async expression.",
     inputSchema: {
@@ -163,7 +163,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_wait_for",
+    name: "codara_preview_wait_for",
     description:
       "Wait for a CSS selector to be attached / visible / hidden, up to timeoutMs. Returns when the condition is met or times out.",
     inputSchema: {
@@ -179,7 +179,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_screenshot",
+    name: "codara_preview_screenshot",
     description:
       "Capture the current preview tab as a PNG (returned base64-encoded in a data: URL). The pixels are exactly what the user sees in Codara.",
     inputSchema: {
@@ -189,9 +189,9 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_mouse",
+    name: "codara_preview_mouse",
     description:
-      "Trusted mouse input at a CSS selector's center or explicit coordinates — indistinguishable from a real user's click (event.isTrusted=true), unlike spark_preview_click's synthetic DOM events. Actions: click, dblclick, rightclick, down, up. Coordinates are CSS pixels relative to the page viewport (top-left origin); if you measured a point on a spark_preview_screenshot, divide by the screenshot's scale (screenshot width ÷ viewport width) first.",
+      "Trusted mouse input at a CSS selector's center or explicit coordinates — indistinguishable from a real user's click (event.isTrusted=true), unlike codara_preview_click's synthetic DOM events. Actions: click, dblclick, rightclick, down, up. Coordinates are CSS pixels relative to the page viewport (top-left origin); if you measured a point on a codara_preview_screenshot, divide by the screenshot's scale (screenshot width ÷ viewport width) first.",
     inputSchema: {
       type: "object",
       properties: {
@@ -206,7 +206,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_scroll",
+    name: "codara_preview_scroll",
     description:
       "Scroll the page with a trusted mouse-wheel event at a selector's center or explicit CSS-pixel coordinates. Positive deltaY scrolls down, negative up.",
     inputSchema: {
@@ -223,7 +223,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_hover",
+    name: "codara_preview_hover",
     description:
       "Move the mouse over a selector's center or explicit CSS-pixel coordinates with a trusted mouseMove — triggers real :hover styles, tooltips, and mouseenter handlers.",
     inputSchema: {
@@ -238,7 +238,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_drag",
+    name: "codara_preview_drag",
     description:
       "Trusted drag: mouseDown at 'from', interpolated mouseMove steps, mouseUp at 'to'. Each endpoint is { selector } or { x, y } in CSS pixels.",
     inputSchema: {
@@ -262,9 +262,9 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_key",
+    name: "codara_preview_key",
     description:
-      "Trusted keyboard input to the focused element: named keys (Enter, Escape, Tab, Backspace, ArrowDown, …) or a single character, with optional modifiers. For typing whole strings into a field prefer spark_preview_type.",
+      "Trusted keyboard input to the focused element: named keys (Enter, Escape, Tab, Backspace, ArrowDown, …) or a single character, with optional modifiers. For typing whole strings into a field prefer codara_preview_type.",
     inputSchema: {
       type: "object",
       required: ["key"],
@@ -278,7 +278,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_upload",
+    name: "codara_preview_upload",
     description:
       "Set the files of an <input type=file> via the DevTools protocol (the only reliable way to script a file upload). 'paths' are absolute paths on this machine.",
     inputSchema: {
@@ -293,7 +293,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_console",
+    name: "codara_preview_console",
     description:
       "Read the preview tab's captured console messages (ring buffer, newest last, cap 500). Filter with level=debug|info|warning|error, trim with limit, or clear=true to reset. Capture starts when the tab loads, so messages from before this build opened the tab may be missing.",
     inputSchema: {
@@ -308,9 +308,9 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_network",
+    name: "codara_preview_network",
     description:
-      "Read the preview tab's captured network requests (url, method, status, mimeType, failures; ring buffer cap 500). Capture attaches on first call — issue one spark_preview_network before the interaction you want to observe, then again after. filter substring-matches the URL; clear=true resets.",
+      "Read the preview tab's captured network requests (url, method, status, mimeType, failures; ring buffer cap 500). Capture attaches on first call — issue one codara_preview_network before the interaction you want to observe, then again after. filter substring-matches the URL; clear=true resets.",
     inputSchema: {
       type: "object",
       properties: {
@@ -323,7 +323,7 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_resize",
+    name: "codara_preview_resize",
     description:
       "Resize the preview viewport to explicit CSS-pixel dimensions (e.g. 375×667 to test a mobile layout). Returns the applied size.",
     inputSchema: {
@@ -338,9 +338,9 @@ const PREVIEW_TOOLS = [
     },
   },
   {
-    name: "spark_preview_run",
+    name: "codara_preview_run",
     description:
-      "Run an ordered BATCH of preview steps in ONE call (one MCP round-trip) instead of dozens of single click/press_key calls. Each step dispatches the exact same real input event as its individual tool, so fidelity is identical — you just stop paying a separate round-trip (and a separate agent turn) per keystroke. STRONGLY PREFER this for any multi-step verification flow: e.g. drive `7 / 2 =` and read the display as a single spark_preview_run, not seven calls. Stops at the first failing step unless continueOnError=true. Returns a per-step result array; any screenshot steps are also surfaced as image blocks.",
+      "Run an ordered BATCH of preview steps in ONE call (one MCP round-trip) instead of dozens of single click/press_key calls. Each step dispatches the exact same real input event as its individual tool, so fidelity is identical — you just stop paying a separate round-trip (and a separate agent turn) per keystroke. STRONGLY PREFER this for any multi-step verification flow: e.g. drive `7 / 2 =` and read the display as a single codara_preview_run, not seven calls. Stops at the first failing step unless continueOnError=true. Returns a per-step result array; any screenshot steps are also surfaced as image blocks.",
     inputSchema: {
       type: "object",
       required: ["steps"],
@@ -354,7 +354,7 @@ const PREVIEW_TOOLS = [
           type: "array",
           minItems: 1,
           description:
-            "Ordered steps. Each is { action, ...args } where action is one of navigate|click|type|press_key|evaluate|wait_for|snapshot|screenshot and the remaining fields mirror the matching spark_preview_* tool — e.g. {action:'press_key', key:'7'}, {action:'click', selector:'#equals'}, {action:'evaluate', code:\"document.querySelector('#lcd').textContent\"}.",
+            "Ordered steps. Each is { action, ...args } where action is one of navigate|click|type|press_key|evaluate|wait_for|snapshot|screenshot and the remaining fields mirror the matching codara_preview_* tool — e.g. {action:'press_key', key:'7'}, {action:'click', selector:'#equals'}, {action:'evaluate', code:\"document.querySelector('#lcd').textContent\"}.",
           items: {
             type: "object",
             required: ["action"],
@@ -405,28 +405,28 @@ const PREVIEW_TOOLS = [
 ];
 
 const PREVIEW_TOOL_TO_RPC = {
-  spark_preview_list: "preview.list",
-  spark_preview_url: "preview.url",
-  spark_preview_navigate: "preview.navigate",
-  spark_preview_snapshot: "preview.snapshot",
-  spark_preview_click: "preview.click",
-  spark_preview_type: "preview.type",
-  spark_preview_press_key: "preview.press_key",
-  spark_preview_evaluate: "preview.evaluate",
-  spark_preview_wait_for: "preview.wait_for",
-  spark_preview_screenshot: "preview.screenshot",
-  spark_preview_mouse: "preview.mouse",
-  spark_preview_scroll: "preview.scroll",
-  spark_preview_hover: "preview.hover",
-  spark_preview_drag: "preview.drag",
-  spark_preview_key: "preview.key",
-  spark_preview_upload: "preview.upload",
-  spark_preview_console: "preview.console",
-  spark_preview_network: "preview.network",
-  spark_preview_resize: "preview.resize",
+  codara_preview_list: "preview.list",
+  codara_preview_url: "preview.url",
+  codara_preview_navigate: "preview.navigate",
+  codara_preview_snapshot: "preview.snapshot",
+  codara_preview_click: "preview.click",
+  codara_preview_type: "preview.type",
+  codara_preview_press_key: "preview.press_key",
+  codara_preview_evaluate: "preview.evaluate",
+  codara_preview_wait_for: "preview.wait_for",
+  codara_preview_screenshot: "preview.screenshot",
+  codara_preview_mouse: "preview.mouse",
+  codara_preview_scroll: "preview.scroll",
+  codara_preview_hover: "preview.hover",
+  codara_preview_drag: "preview.drag",
+  codara_preview_key: "preview.key",
+  codara_preview_upload: "preview.upload",
+  codara_preview_console: "preview.console",
+  codara_preview_network: "preview.network",
+  codara_preview_resize: "preview.resize",
 };
 
-// Step action -> RPC for the batched spark_preview_run tool. Mirrors the
+// Step action -> RPC for the batched codara_preview_run tool. Mirrors the
 // single-shot tools so a batched step fires the identical real event.
 const STEP_ACTION_TO_RPC = {
   navigate: "preview.navigate",
@@ -451,9 +451,9 @@ const STEP_ACTION_TO_RPC = {
 // ===========================================================================
 const TERMINAL_TOOLS = [
   {
-    name: "spark_terminal_create",
+    name: "codara_terminal_create",
     description:
-      "Open a NEW agent-owned terminal tab in Codara Studio. The tab is visually tinted so the user can see an agent is driving it. Optionally pass a shell `command` to run immediately on open and a `title` for the tab. PASS AN EXPLICIT, VALID `cwd` whenever you have one: when omitted it defaults to the active workspace root, and if that path does not exist the terminal fails to spawn and later spark_terminal_write/read calls report an unknown pane. Returns { tabId, paneId, cwd } — the returned `cwd` is the directory actually used; keep the paneId to drive the terminal with spark_terminal_write and read its output with spark_terminal_read.",
+      "Open a NEW agent-owned terminal tab in Codara Studio. The tab is visually tinted so the user can see an agent is driving it. Optionally pass a shell `command` to run immediately on open and a `title` for the tab. PASS AN EXPLICIT, VALID `cwd` whenever you have one: when omitted it defaults to the active workspace root, and if that path does not exist the terminal fails to spawn and later codara_terminal_write/read calls report an unknown pane. Returns { tabId, paneId, cwd } — the returned `cwd` is the directory actually used; keep the paneId to drive the terminal with codara_terminal_write and read its output with codara_terminal_read.",
     inputSchema: {
       type: "object",
       properties: {
@@ -465,14 +465,14 @@ const TERMINAL_TOOLS = [
     },
   },
   {
-    name: "spark_terminal_write",
+    name: "codara_terminal_write",
     description:
-      "Write text to an agent-owned terminal pane (identified by the paneId returned from spark_terminal_create). By default the text is submitted as if the user pressed Enter; set submit=false to type without submitting (e.g. to build up a line or send a raw control sequence). Read the resulting output with spark_terminal_read. Ownership is enforced: you can only write to a paneId your OWN spark_terminal_create returned in this session — a paneId you discovered another way (e.g. a sibling worker's pane sampled via spark_terminal_read) is rejected, so call spark_terminal_create to get a pane you own rather than writing to someone else's.",
+      "Write text to an agent-owned terminal pane (identified by the paneId returned from codara_terminal_create). By default the text is submitted as if the user pressed Enter; set submit=false to type without submitting (e.g. to build up a line or send a raw control sequence). Read the resulting output with codara_terminal_read. Ownership is enforced: you can only write to a paneId your OWN codara_terminal_create returned in this session — a paneId you discovered another way (e.g. a sibling worker's pane sampled via codara_terminal_read) is rejected, so call codara_terminal_create to get a pane you own rather than writing to someone else's.",
     inputSchema: {
       type: "object",
       required: ["paneId", "text"],
       properties: {
-        paneId: { type: "string", description: "Pane id returned from spark_terminal_create." },
+        paneId: { type: "string", description: "Pane id returned from codara_terminal_create." },
         text: { type: "string", description: "Text to write into the terminal." },
         submit: { type: "boolean", description: "Press Enter after writing (default true)." },
       },
@@ -480,14 +480,14 @@ const TERMINAL_TOOLS = [
     },
   },
   {
-    name: "spark_terminal_read",
+    name: "codara_terminal_read",
     description:
-      "Read the recent visible output of a terminal pane (identified by paneId). Returns the tail of the pane's buffer with ANSI/VT control sequences stripped, so you can inspect command output. Use after spark_terminal_write to see what a command produced.",
+      "Read the recent visible output of a terminal pane (identified by paneId). Returns the tail of the pane's buffer with ANSI/VT control sequences stripped, so you can inspect command output. Use after codara_terminal_write to see what a command produced.",
     inputSchema: {
       type: "object",
       required: ["paneId"],
       properties: {
-        paneId: { type: "string", description: "Pane id returned from spark_terminal_create." },
+        paneId: { type: "string", description: "Pane id returned from codara_terminal_create." },
         lines: { type: "number", description: "How many trailing lines to return (default 100)." },
       },
       additionalProperties: false,
@@ -496,9 +496,9 @@ const TERMINAL_TOOLS = [
 ];
 
 const TERMINAL_TOOL_TO_RPC = {
-  spark_terminal_create: "terminal.create",
-  spark_terminal_write: "terminal.write",
-  spark_terminal_read: "terminal.read",
+  codara_terminal_create: "terminal.create",
+  codara_terminal_write: "terminal.write",
+  codara_terminal_read: "terminal.read",
 };
 
 // ===========================================================================
@@ -513,8 +513,8 @@ const TRIGGER_SCHEMA = {
     "cron REQUIRES a valid `expr` (validated server-side). " +
     "interval REQUIRES a finite numeric `everyMs` >= 1000. " +
     "folder REQUIRES a `path` to watch. " +
-    "onFinishOf REQUIRES an `automationId` that references an EXISTING automation (call spark_list_automations first). " +
-    "manual only fires via spark_run_automation or the Hub. " +
+    "onFinishOf REQUIRES an `automationId` that references an EXISTING automation (call codara_list_automations first). " +
+    "manual only fires via codara_run_automation or the Hub. " +
     "continuous re-fires immediately after each run finishes.",
   required: ["kind"],
   properties: {
@@ -541,7 +541,7 @@ const TRIGGER_SCHEMA = {
 const LOOP_SCHEMA = {
   type: "object",
   description:
-    "How many times / how long the automation iterates per fire. once: a single pass. count: a fixed number (use stop.maxIterations). cadence: re-run every everyMs until a stop condition. until: loop until a stop condition holds. agent: the worker itself decides each pass via spark_request_next_iteration. continuous: loop with no natural end (rely on stop caps).",
+    "How many times / how long the automation iterates per fire. once: a single pass. count: a fixed number (use stop.maxIterations). cadence: re-run every everyMs until a stop condition. until: loop until a stop condition holds. agent: the worker itself decides each pass via codara_request_next_iteration. continuous: loop with no natural end (rely on stop caps).",
   required: ["kind", "stop"],
   properties: {
     kind: { type: "string", enum: ["once", "count", "cadence", "until", "continuous", "agent"] },
@@ -590,7 +590,7 @@ const WORKER_SCHEMA = {
 const GUARD_PREDICATE_SCHEMA = {
   type: "object",
   description:
-    "A guard's pass/fail test. phrase: substring in the upstream worker's output (optional source). tests: testCommand exits 0. gitClean: working tree clean. command: arbitrary shell exits 0. agentSignal: the upstream worker's spark_request_next_iteration signal matched `want`.",
+    "A guard's pass/fail test. phrase: substring in the upstream worker's output (optional source). tests: testCommand exits 0. gitClean: working tree clean. command: arbitrary shell exits 0. agentSignal: the upstream worker's codara_request_next_iteration signal matched `want`.",
   required: ["type"],
   properties: {
     type: { type: "string", enum: ["phrase", "tests", "gitClean", "command", "agentSignal"] },
@@ -666,24 +666,24 @@ const runIdProp = {
 
 const AUTOMATION_TOOLS = [
   {
-    name: "spark_list_automations",
+    name: "codara_list_automations",
     description:
       "List all Cora automations (\"looms\"): id, name, enabled, a trigger/loop summary, worker config, node/edge counts, current state.status, lastRunAt, and the last 3 history records (status/stopReason/costUsd). Call this FIRST when the user asks about automations so you can reference what already exists.",
     inputSchema: { type: "object", properties: { ...runIdProp }, additionalProperties: false },
   },
   {
-    name: "spark_get_automation",
+    name: "codara_get_automation",
     description:
       "Fetch one automation's full definition (trigger, loop, prompt, worker, graph, state, recent history) by id. Use before updating so you can patch only what changes.",
     inputSchema: {
       type: "object",
       required: ["automation_id"],
-      properties: { ...runIdProp, automation_id: { type: "string", description: "The automation id from spark_list_automations." } },
+      properties: { ...runIdProp, automation_id: { type: "string", description: "The automation id from codara_list_automations." } },
       additionalProperties: false,
     },
   },
   {
-    name: "spark_create_automation",
+    name: "codara_create_automation",
     description:
       "Create a new automation bound to THIS chat's workspace (Codara resolves the workspace/cwd from the run — never supply paths). Provide name, trigger, loop, prompt_template, worker, and optionally a node graph. Returns the created automation id + summary. Recommended workflow: list existing automations, summarize your plan to the user in prose, THEN create.",
     inputSchema: {
@@ -705,9 +705,9 @@ const AUTOMATION_TOOLS = [
     },
   },
   {
-    name: "spark_update_automation",
+    name: "codara_update_automation",
     description:
-      "Update an existing automation. Only the fields you pass are changed; omit the rest. Same field shapes as spark_create_automation. " +
+      "Update an existing automation. Only the fields you pass are changed; omit the rest. Same field shapes as codara_create_automation. " +
       "The user will be asked to APPROVE the edit in the chat before it is applied (enforced server-side) — so narrate the change you intend to make in prose, then call this tool ONCE; do NOT ask the user to confirm separately in text. " +
       "The result includes an `approved` flag: when `approved:false` the user declined and the automation was left UNCHANGED — do not retry, ask the user what they'd like instead.",
     inputSchema: {
@@ -727,9 +727,9 @@ const AUTOMATION_TOOLS = [
     },
   },
   {
-    name: "spark_run_automation",
+    name: "codara_run_automation",
     description:
-      "Run an automation immediately (a manual fire), independent of its trigger. Returns the created run id. Pair with spark_wait_for_automation to observe the result.",
+      "Run an automation immediately (a manual fire), independent of its trigger. Returns the created run id. Pair with codara_wait_for_automation to observe the result.",
     inputSchema: {
       type: "object",
       required: ["automation_id"],
@@ -738,9 +738,9 @@ const AUTOMATION_TOOLS = [
     },
   },
   {
-    name: "spark_wait_for_automation",
+    name: "codara_wait_for_automation",
     description:
-      "Long-poll until an automation's current run/iteration reaches a terminal state (idle/stopped/blocked) or timeout_ms elapses. Returns final status, stopReason, iteration count, costUsd, and a snippet of the last iteration's summary. Use after spark_run_automation to report results to the user.",
+      "Long-poll until an automation's current run/iteration reaches a terminal state (idle/stopped/blocked) or timeout_ms elapses. Returns final status, stopReason, iteration count, costUsd, and a snippet of the last iteration's summary. Use after codara_run_automation to report results to the user.",
     inputSchema: {
       type: "object",
       required: ["automation_id"],
@@ -756,7 +756,7 @@ const AUTOMATION_TOOLS = [
     },
   },
   {
-    name: "spark_set_automation_enabled",
+    name: "codara_set_automation_enabled",
     description:
       "Enable or disable an automation's trigger without deleting it. The user is asked to approve the toggle in the chat before it applies (same consent flow as update/delete) — call once and read the `approved` flag in the result.",
     inputSchema: {
@@ -767,7 +767,7 @@ const AUTOMATION_TOOLS = [
     },
   },
   {
-    name: "spark_pause_automation",
+    name: "codara_pause_automation",
     description: "Pause a running automation loop (it can be resumed later). The trigger may still be armed.",
     inputSchema: {
       type: "object",
@@ -777,7 +777,7 @@ const AUTOMATION_TOOLS = [
     },
   },
   {
-    name: "spark_resume_automation",
+    name: "codara_resume_automation",
     description: "Resume a paused automation loop.",
     inputSchema: {
       type: "object",
@@ -787,7 +787,7 @@ const AUTOMATION_TOOLS = [
     },
   },
   {
-    name: "spark_stop_automation",
+    name: "codara_stop_automation",
     description: "Stop an automation's current loop now (finalizes the live iteration). The automation remains and can be run again.",
     inputSchema: {
       type: "object",
@@ -797,7 +797,7 @@ const AUTOMATION_TOOLS = [
     },
   },
   {
-    name: "spark_delete_automation",
+    name: "codara_delete_automation",
     description:
       "Permanently delete an automation. DESTRUCTIVE. The user will be asked to APPROVE the deletion in the chat before it happens (enforced server-side) — so narrate which automation you're about to delete in prose, then call this tool ONCE; do NOT ask the user to confirm separately in text. " +
       "The result includes an `approved` flag: when `approved:false` the user declined and NOTHING was deleted — do not retry.",
@@ -809,7 +809,7 @@ const AUTOMATION_TOOLS = [
     },
   },
   {
-    name: "spark_name_chat",
+    name: "codara_name_chat",
     description:
       "Give THIS architect chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Nightly test-fix loom\" or \"Docs folder watcher\"). Call this EARLY — right after you understand what the user wants automated — and again if the topic shifts substantially. The title shows in the chat header and the session-history list so the user can tell their architect chats apart. Does not create or change any automation.",
     inputSchema: {
@@ -828,14 +828,14 @@ const AUTOMATION_TOOLS = [
 ];
 
 // ===========================================================================
-// Execute worker-orchestration tool set (SPARK_MCP_MODE=execute). spark_ask_user
+// Execute worker-orchestration tool set (SPARK_MCP_MODE=execute). codara_ask_user
 // lives here and is shared with the automation roster.
 // ===========================================================================
 const EXECUTE_TOOLS = [
   {
-    name: "spark_spawn_workers",
+    name: "codara_spawn_workers",
     description:
-      "Delegate one or more focused tasks to Cora workers (claude/codex subagents). Each worker entry needs a title and description; runtime/model/effort hints and path scoping are optional. Returns worker_task_ids that can be queried via spark_get_worker_status. Call this whenever you want to fan work out instead of doing it yourself in the orchestrator turn.",
+      "Delegate one or more focused tasks to Cora workers (claude/codex subagents). Each worker entry needs a title and description; runtime/model/effort hints and path scoping are optional. Returns worker_task_ids that can be queried via codara_get_worker_status. Call this whenever you want to fan work out instead of doing it yourself in the orchestrator turn.",
     inputSchema: {
       type: "object",
       required: ["workers"],
@@ -903,7 +903,7 @@ const EXECUTE_TOOLS = [
     },
   },
   {
-    name: "spark_ask_user",
+    name: "codara_ask_user",
     description:
       "Ask the human user a clarifying question and block until they answer (up to 15 minutes). Use sparingly — only when you genuinely cannot proceed without a decision. Provide up to 4 option objects with stable ids so the user can tap one rather than typing a free-form reply.",
     inputSchema: {
@@ -946,7 +946,7 @@ const EXECUTE_TOOLS = [
     },
   },
   {
-    name: "spark_complete",
+    name: "codara_complete",
     description:
       "Mark the Codara run as complete. Optionally include a short summary of what was accomplished — it is posted as a system note in the chat. Call this exactly once at the very end of the orchestrator turn after all work has settled.",
     inputSchema: {
@@ -966,7 +966,7 @@ const EXECUTE_TOOLS = [
     },
   },
   {
-    name: "spark_name_chat",
+    name: "codara_name_chat",
     description:
       "Give THIS chat a short, human-readable title describing what it is about (3-6 words, e.g. \"Fix login redirect bug\" or \"Add CSV export\"). Call this EARLY — once the goal for the session is clear — and again if the topic shifts substantially. The title shows in the chat history so the user can tell their chats apart. Does not spawn workers or change any files.",
     inputSchema: {
@@ -987,7 +987,7 @@ const EXECUTE_TOOLS = [
     },
   },
   {
-    name: "spark_request_next_iteration",
+    name: "codara_request_next_iteration",
     description:
       "For Codara AUTOMATION LOOPS only: decide whether this loop should run another iteration after the current one finishes. Call this exactly once near the end of an automation turn. Set done=true to STOP the loop, or done=false (with an optional `prompt` for the next pass) to CONTINUE. You may optionally steer the NEXT pass's worker via nextEngine/nextModel/nextEffort — honored for the next pass regardless of the loom's pinned engine, and only for installed engines (invalid values are dropped with a warning, never an error). The user-defined safety caps (max iterations, budget) always still apply. If you never call this, the loop stops by default. (No effect on a normal, non-automation run.)",
     inputSchema: {
@@ -1028,9 +1028,9 @@ const EXECUTE_TOOLS = [
     },
   },
   {
-    name: "spark_get_worker_status",
+    name: "codara_get_worker_status",
     description:
-      "One-shot snapshot of a worker task's current status — use sparingly for ad-hoc spot checks. For waiting on completion, prefer spark_wait_for_workers, which long-polls and returns when workers reach a terminal state. Returns worker_task_id, task_status, the latest attempt's status / runtime / timestamps, and the final_report_path if the worker has finished.",
+      "One-shot snapshot of a worker task's current status — use sparingly for ad-hoc spot checks. For waiting on completion, prefer codara_wait_for_workers, which long-polls and returns when workers reach a terminal state. Returns worker_task_id, task_status, the latest attempt's status / runtime / timestamps, and the final_report_path if the worker has finished.",
     inputSchema: {
       type: "object",
       required: ["worker_task_id"],
@@ -1042,16 +1042,16 @@ const EXECUTE_TOOLS = [
         },
         worker_task_id: {
           type: "string",
-          description: "Worker task id returned from spark_spawn_workers.",
+          description: "Worker task id returned from codara_spawn_workers.",
         },
       },
       additionalProperties: false,
     },
   },
   {
-    name: "spark_message_workers",
+    name: "codara_message_workers",
     description:
-      "Send a message from you (the manager) into the running batch's shared mailbox — the same mailbox the workers use to coordinate with each other. Use it to steer a drifting worker mid-flight (before it finishes wrong), answer a question a worker sent you, or broadcast a contract clarification to the whole batch. Address one worker by its worker_task_id or use \"all\" to reach every worker in the batch. Workers see it the next time they check their inbox. The response carries a warning when the recipient likely will not read it (already terminal, or spawned solo without mailbox briefing) — do not assume such steering landed. This is worker coordination, NOT the human channel — use spark_ask_user to reach the user.",
+      "Send a message from you (the manager) into the running batch's shared mailbox — the same mailbox the workers use to coordinate with each other. Use it to steer a drifting worker mid-flight (before it finishes wrong), answer a question a worker sent you, or broadcast a contract clarification to the whole batch. Address one worker by its worker_task_id or use \"all\" to reach every worker in the batch. Workers see it the next time they check their inbox. The response carries a warning when the recipient likely will not read it (already terminal, or spawned solo without mailbox briefing) — do not assume such steering landed. This is worker coordination, NOT the human channel — use codara_ask_user to reach the user.",
     inputSchema: {
       type: "object",
       required: ["to", "body"],
@@ -1064,7 +1064,7 @@ const EXECUTE_TOOLS = [
         to: {
           type: "string",
           description:
-            "Recipient: a worker_task_id returned from spark_spawn_workers, or \"all\" to broadcast to every worker in the batch.",
+            "Recipient: a worker_task_id returned from codara_spawn_workers, or \"all\" to broadcast to every worker in the batch.",
         },
         subject: {
           type: "string",
@@ -1079,9 +1079,9 @@ const EXECUTE_TOOLS = [
     },
   },
   {
-    name: "spark_check_messages",
+    name: "codara_check_messages",
     description:
-      "Read messages workers have sent you (the manager) that you have not seen yet — questions when they are blocked, and milestone/progress notes — plus any batch-wide `all` broadcasts. Use it to poll for worker questions mid-flight without blocking; spark_wait_for_workers also returns these (as manager_messages) at each return. Returns { messages: [...] } and marks each returned message read so it is not surfaced again — this is the acknowledging read (spark_wait_for_workers only peeks).",
+      "Read messages workers have sent you (the manager) that you have not seen yet — questions when they are blocked, and milestone/progress notes — plus any batch-wide `all` broadcasts. Use it to poll for worker questions mid-flight without blocking; codara_wait_for_workers also returns these (as manager_messages) at each return. Returns { messages: [...] } and marks each returned message read so it is not surfaced again — this is the acknowledging read (codara_wait_for_workers only peeks).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1095,9 +1095,9 @@ const EXECUTE_TOOLS = [
     },
   },
   {
-    name: "spark_wait_for_workers",
+    name: "codara_wait_for_workers",
     description:
-      "Block until the listed worker tasks reach a terminal state (accepted / failed / cancelled) or timeout_ms elapses. This is the canonical way to wait on workers — call it once after spark_spawn_workers and react to the results. Returns each worker's final task_status, attempt_status, finished_at, and final_report_path so you can read each report and decide whether to spark_complete (default) or spark_spawn_workers (only for genuine regressions/corrective fixes). Also returns manager_messages: unread questions/progress workers sent you, surfaced NON-destructively (they stay unread and re-appear on later waits until you acknowledge them with spark_check_messages) — answer or steer with spark_message_workers.",
+      "Block until the listed worker tasks reach a terminal state (accepted / failed / cancelled) or timeout_ms elapses. This is the canonical way to wait on workers — call it once after codara_spawn_workers and react to the results. Returns each worker's final task_status, attempt_status, finished_at, and final_report_path so you can read each report and decide whether to codara_complete (default) or codara_spawn_workers (only for genuine regressions/corrective fixes). Also returns manager_messages: unread questions/progress workers sent you, surfaced NON-destructively (they stay unread and re-appear on later waits until you acknowledge them with codara_check_messages) — answer or steer with codara_message_workers.",
     inputSchema: {
       type: "object",
       required: ["worker_task_ids"],
@@ -1111,7 +1111,7 @@ const EXECUTE_TOOLS = [
           type: "array",
           minItems: 1,
           items: { type: "string" },
-          description: "Worker task ids returned from spark_spawn_workers.",
+          description: "Worker task ids returned from codara_spawn_workers.",
         },
         mode: {
           type: "string",
@@ -1129,37 +1129,37 @@ const EXECUTE_TOOLS = [
   },
 ];
 
-// spark_ask_user is shared by the Execute and Automation rosters. Pull its
+// codara_ask_user is shared by the Execute and Automation rosters. Pull its
 // canonical definition out of EXECUTE_TOOLS so the automation roster can reuse
 // the exact same schema.
-const ASK_USER_TOOL = EXECUTE_TOOLS.find((t) => t.name === "spark_ask_user");
+const ASK_USER_TOOL = EXECUTE_TOOLS.find((t) => t.name === "codara_ask_user");
 
 const EXECUTE_TOOL_TO_RPC = {
-  spark_spawn_workers: "orchestrator.spawn_workers",
-  spark_ask_user: "orchestrator.ask_user",
-  spark_complete: "orchestrator.complete",
-  spark_name_chat: "orchestrator.name_chat",
-  spark_request_next_iteration: "orchestrator.request_next_iteration",
-  spark_get_worker_status: "orchestrator.get_worker_status",
-  spark_wait_for_workers: "orchestrator.wait_for_workers",
-  spark_message_workers: "orchestrator.message_workers",
-  spark_check_messages: "orchestrator.check_messages",
+  codara_spawn_workers: "orchestrator.spawn_workers",
+  codara_ask_user: "orchestrator.ask_user",
+  codara_complete: "orchestrator.complete",
+  codara_name_chat: "orchestrator.name_chat",
+  codara_request_next_iteration: "orchestrator.request_next_iteration",
+  codara_get_worker_status: "orchestrator.get_worker_status",
+  codara_wait_for_workers: "orchestrator.wait_for_workers",
+  codara_message_workers: "orchestrator.message_workers",
+  codara_check_messages: "orchestrator.check_messages",
 };
 
 const AUTOMATION_TOOL_TO_RPC = {
-  spark_list_automations: "automation.list",
-  spark_get_automation: "automation.get",
-  spark_create_automation: "automation.create",
-  spark_update_automation: "automation.update",
-  spark_run_automation: "automation.run_now",
-  spark_wait_for_automation: "automation.wait",
-  spark_set_automation_enabled: "automation.set_enabled",
-  spark_pause_automation: "automation.pause",
-  spark_resume_automation: "automation.resume",
-  spark_stop_automation: "automation.stop",
-  spark_delete_automation: "automation.delete",
-  spark_name_chat: "automation.name_chat",
-  spark_ask_user: "orchestrator.ask_user",
+  codara_list_automations: "automation.list",
+  codara_get_automation: "automation.get",
+  codara_create_automation: "automation.create",
+  codara_update_automation: "automation.update",
+  codara_run_automation: "automation.run_now",
+  codara_wait_for_automation: "automation.wait",
+  codara_set_automation_enabled: "automation.set_enabled",
+  codara_pause_automation: "automation.pause",
+  codara_resume_automation: "automation.resume",
+  codara_stop_automation: "automation.stop",
+  codara_delete_automation: "automation.delete",
+  codara_name_chat: "automation.name_chat",
+  codara_ask_user: "orchestrator.ask_user",
 };
 
 // ===========================================================================
@@ -1176,7 +1176,7 @@ if (IS_AUTOMATION_MODE) {
   TOOLS = [...STUDIO_TOOLS, ...AUTOMATION_TOOLS, ...(ASK_USER_TOOL ? [ASK_USER_TOOL] : [])];
   TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, ...AUTOMATION_TOOL_TO_RPC };
 } else if (IS_EXECUTE_MODE) {
-  // EXECUTE_TOOLS already contains spark_ask_user.
+  // EXECUTE_TOOLS already contains codara_ask_user.
   TOOLS = [...STUDIO_TOOLS, ...EXECUTE_TOOLS];
   TOOL_TO_RPC = { ...STUDIO_TOOL_TO_RPC, ...EXECUTE_TOOL_TO_RPC };
 } else {
@@ -1356,7 +1356,7 @@ async function dispatch(method, params) {
 async function callTool(params) {
   const name = params && typeof params.name === "string" ? params.name : null;
   // The batched preview runner is handled locally (it fans out to many RPCs).
-  if (name === "spark_preview_run") {
+  if (name === "codara_preview_run") {
     const args = params && params.arguments && typeof params.arguments === "object" ? params.arguments : {};
     return await callRunBatch(args);
   }
@@ -1381,7 +1381,7 @@ async function callTool(params) {
     // (ignored) for single-node looms where the env var is absent. Caller-
     // supplied nodeId always wins.
     if (
-      name === "spark_request_next_iteration" &&
+      name === "codara_request_next_iteration" &&
       (typeof args.nodeId !== "string" || args.nodeId.trim().length === 0)
     ) {
       const envNodeId = process.env.SPARK_NODE_ID;
@@ -1411,7 +1411,7 @@ async function callTool(params) {
 async function callRunBatch(args) {
   const steps = args && Array.isArray(args.steps) ? args.steps : null;
   if (!steps || steps.length === 0) {
-    return { isError: true, content: [{ type: "text", text: "spark_preview_run requires a non-empty 'steps' array." }] };
+    return { isError: true, content: [{ type: "text", text: "codara_preview_run requires a non-empty 'steps' array." }] };
   }
   const continueOnError = args.continueOnError === true;
   const defaultTabId = typeof args.tabId === "string" ? args.tabId : undefined;

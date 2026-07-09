@@ -86,7 +86,7 @@ interface CodexChatSession {
    *  chip reflects per-turn spend like every other backend. */
   turnStartUsage: { input: number; output: number; cached: number } | null;
   /** Tool calls observed during the current turn. In Execute mode we read
-   *  this after the turn ends to convert spark_spawn_workers calls into a
+   *  this after the turn ends to convert codara_spawn_workers calls into a
    *  SparkManagerDecision the run-store can act on — mirrors the claude
    *  backend's turnToolCalls field. */
   turnToolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }>;
@@ -127,7 +127,7 @@ const contextInjectedRuns = new Set<string>();
 
 // waitForTurnEnd never fails a turn on inactivity — a busy Codex legitimately
 // goes silent for minutes (a long tool execution, or a blocking long-poll MCP
-// call like spark_wait_for_workers that runs 10-20 min). A stopwatch would
+// call like codara_wait_for_workers that runs 10-20 min). A stopwatch would
 // fail a healthy turn mid-flight. Instead the waiter runs until task_complete
 // (or CLI exit / user interrupt) and, purely for visibility, emits a "still
 // waiting" system note after every TURN_SILENCE_NOTE_INTERVAL_MS of silence.
@@ -601,7 +601,7 @@ async function waitForTurnEnd(
     // after every TURN_SILENCE_NOTE_INTERVAL_MS of no rollout activity it
     // emits a throttled "still waiting" note, reset on any JSONL line. A busy
     // Codex (long tool execution, or a blocking long-poll MCP call like
-    // spark_wait_for_workers for 10-20 min) is silent yet perfectly healthy,
+    // codara_wait_for_workers for 10-20 min) is silent yet perfectly healthy,
     // so declaring a timeout would fail a live turn mid-flight.
     let silenceAnchor = session.lastJsonlActivityAt;
     let nextSilenceNoteAt = Date.now() + TURN_SILENCE_NOTE_INTERVAL_MS;
@@ -687,7 +687,7 @@ export const codexBackend: SparkAgentBackend = {
         // Mode or fast_mode flip → respawn with the new spawn args. Resume
         // via `codex resume <uuid>` brings the rollout transcript along.
         // Execute mode's `model_instructions_file` points at the manager
-        // prompt that strongly redirects Codex to call spark_spawn_workers,
+        // prompt that strongly redirects Codex to call codara_spawn_workers,
         // which dominates over any prior chat-mode turns in the rollout.
         const reason =
           session.spawnMode !== input.chat.mode
@@ -788,7 +788,7 @@ export const codexBackend: SparkAgentBackend = {
         session.sessionUuid && session.sessionUuid !== input.chat.sessionUuid
           ? session.sessionUuid
           : undefined;
-      // Execute/Auto mode: turn spark_spawn_workers tool calls into a
+      // Execute/Auto mode: turn codara_spawn_workers tool calls into a
       // SparkManagerDecision — same shape grok produces, so the run-store
       // pipeline spawns workers exactly the same way. In Auto a turn with no
       // spark_* tool call falls through to a plain chat reply.

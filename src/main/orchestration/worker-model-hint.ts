@@ -8,7 +8,7 @@
 import type { RunState } from "@shared/types";
 
 // Fable 5 (`claude-fable-5`) is Anthropic's top, most expensive tier. Cora-
-// spawned workers (execute-mode spark_spawn_workers, plan-council judges,
+// spawned workers (execute-mode codara_spawn_workers, plan-council judges,
 // autopilot worker tasks) default to Opus 4.8 for a fable hint; they may only
 // run fable when the user explicitly opted in AND asked for it (see
 // runUserRequestedFable / workerFableAllowed in run-store.ts, and the

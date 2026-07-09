@@ -604,7 +604,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         // (and context window) re-shooting a tab that cannot paint.
         throw new Error(
           result.zeroSize
-            ? "preview screenshot unavailable: this preview tab is not visible, so the browser produced no painted frame to capture (capturePage returned a 0-size image). Bring the preview tab to the foreground, or verify with spark_preview_snapshot / spark_preview_evaluate (DOM) instead of retrying the screenshot."
+            ? "preview screenshot unavailable: this preview tab is not visible, so the browser produced no painted frame to capture (capturePage returned a 0-size image). Bring the preview tab to the foreground, or verify with codara_preview_snapshot / codara_preview_evaluate (DOM) instead of retrying the screenshot."
             : `preview screenshot failed: ${result.reason}`,
         );
       },

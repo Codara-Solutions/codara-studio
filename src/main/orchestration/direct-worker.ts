@@ -106,7 +106,7 @@ export function installAutomationWorkerSpawnHandler(): () => void {
         const attempt = run.workerAttempts.find((item) => item.id === attemptId);
         if (!attempt) return;
         // Slice 7: stamp the attempt's graph node id into the worker env so the
-        // orchestrator tools (spark_request_next_iteration) can attribute the
+        // orchestrator tools (codara_request_next_iteration) can attribute the
         // calling worker to ONE loom node — letting the pass-level "agent" loop
         // read only the SINK node's signal in a multi-node wave. Looked up from
         // the attempt's task loomNodeId; undefined for a pre-graph single-node
@@ -122,7 +122,7 @@ export function installAutomationWorkerSpawnHandler(): () => void {
           rows: HEADLESS_PTY_ROWS,
           webContents: null,
           env: {
-            // Makes spark_ask_user / spark_request_next_iteration auto-fill
+            // Makes codara_ask_user / codara_request_next_iteration auto-fill
             // their runId from the worker's own environment.
             SPARK_RUN_ID: runId,
             SPARK_AUTOMATION_ID: automationId,

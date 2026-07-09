@@ -802,7 +802,7 @@ export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Pr
     });
   }
   // The prompt lands as a user note so history detail, {{lastOutput}}
-  // provenance, and the spark_ask_user long-poll all see a normal transcript.
+  // provenance, and the codara_ask_user long-poll all see a normal transcript.
   run = await addRunMessage({
     runId: run.id,
     author: "user",
@@ -2503,9 +2503,9 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   const hasOtherActiveWorkers = activeWorkersForRun(runId).some((worker) => worker.attemptId !== attemptId);
   // For execute/auto-mode CC/Codex chat backends, the CC/Codex manager session
   // is doing review itself (reading the worker's final_report_path returned by
-  // spark_wait_for_workers and deciding spark_complete vs spawn correctives).
+  // codara_wait_for_workers and deciding codara_complete vs spawn correctives).
   // We need the worker_task to reach a TERMINAL status (accepted/failed/
-  // cancelled) so spark_wait_for_workers actually unblocks — `needs_review`
+  // cancelled) so codara_wait_for_workers actually unblocks — `needs_review`
   // is non-terminal in the WorkerTaskStatus enum, and the OpenRouter-driven
   // review path that normally transitions needs_review → accepted via
   // decideWorkerReport is explicitly skipped below. So auto-accept on
@@ -2564,10 +2564,10 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   if (!hasOtherActiveCycles && !hasOtherActiveWorkers) {
     // Skip the autopilot's worker_result_review re-prompt when the chat
     // backend is a long-lived CC/Codex execute session. In that flow the
-    // manager is ALREADY waiting on spark_wait_for_workers in its current
+    // manager is ALREADY waiting on codara_wait_for_workers in its current
     // turn; when those workers terminate, the wait_for_workers RPC unblocks
     // and the same CC/Codex session decides what to do next (read final
-    // reports, then spark_complete or spawn correctives) — all inside its
+    // reports, then codara_complete or spawn correctives) — all inside its
     // active turn. Re-prompting it with latestUserPromptFromRun would be
     // the SAME prompt as turn 1 (because askChatBackendNonOpenRouter has no
     // mode-specific message builder), which is precisely how one user
@@ -2947,7 +2947,7 @@ async function markAutopilotCycleFailed(runId: string, attemptId: string, err: u
         updatedAt: timestamp,
       };
       // The run is failing — terminalize any in-flight worker attempts/tasks so
-      // a CC/Codex manager blocked in spark_wait_for_workers observes a terminal
+      // a CC/Codex manager blocked in codara_wait_for_workers observes a terminal
       // status promptly instead of waiting out the ~20-min MCP hold ceiling.
       // Mirrors the status sets in forcePauseRun/cancelRun.
       for (const attempt of draft.workerAttempts) {
@@ -3547,7 +3547,7 @@ async function askChatBackendNonOpenRouter(
           // forcePauseRun/cancelRun). Without this, a worker finishing after
           // the failure hits handleAutopilotCycleCompletion's terminal-run
           // early-return and its task is stranded in needs_review forever,
-          // while a revived manager turn's spark_wait_for_workers blocks to
+          // while a revived manager turn's codara_wait_for_workers blocks to
           // its ceiling waiting on tasks nothing will ever settle.
           for (const attempt of draft.workerAttempts) {
             if (
@@ -5365,7 +5365,7 @@ async function applySparkManagerDecision(
   cwd: string,
 ): Promise<RunState> {
   // Defensive: if the run already reached a terminal state, drop the decision.
-  // This guards against a race where an MCP tool call (e.g. spark_complete
+  // This guards against a race where an MCP tool call (e.g. codara_complete
   // via handleOrchestratorComplete) flipped run.status BEFORE the same
   // turn's tool calls were synthesized into a SparkManagerDecision and
   // applied here. Without this guard, a stale {status:"run_workers"} decision

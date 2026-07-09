@@ -333,7 +333,7 @@ function peerCommsTelemetry(runDir) {
 // Per-worker tool-call telemetry. This is the signal that exposes the
 // verification bottleneck: a worker can write a deliverable in a handful of
 // edits, then spend most of its wall-clock driving the live preview one
-// keystroke at a time (each spark_preview_* call is a full MCP round-trip).
+// keystroke at a time (each codara_preview_* call is a full MCP round-trip).
 // Counting those round-trips makes "fast vs slow verification" measurable.
 //
 // Primary source: hook.PreToolUse events in events.jsonl (Claude Code workers

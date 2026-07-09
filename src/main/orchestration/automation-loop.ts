@@ -37,7 +37,7 @@ import { gitClean, runShellCheck } from "./loom-predicates";
 // cold start; run-store / event-log are themselves lazy-imported per call.
 //
 // Agent-driven loops: the model decides whether to keep going either via the
-// `spark_request_next_iteration` MCP tool (recorded through recordAgentSignal)
+// `codara_request_next_iteration` MCP tool (recorded through recordAgentSignal)
 // or, with zero instrumentation, by writing SPARK_LOOP_CONTINUE /
 // SPARK_LOOP_DONE as the LAST line of its final summary. Either way the engine
 // caps still apply.
@@ -285,7 +285,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       // graph entries must not be promised engine steering that can't happen.
       if (
         job.loop.kind === "agent" &&
-        !/SPARK_LOOP_(CONTINUE|DONE)|spark_request_next_iteration/.test(p)
+        !/SPARK_LOOP_(CONTINUE|DONE)|codara_request_next_iteration/.test(p)
       ) {
         p = `${p}${agentLoopFooter(job, steerable)}`;
       }
@@ -698,7 +698,7 @@ export function unregisterOnFinishOf(sourceId: string, dependentId: string): voi
   onFinishWatchers.get(sourceId)?.delete(dependentId);
 }
 
-// Record a structured agent continuation intent (the spark_request_next_iteration
+// Record a structured agent continuation intent (the codara_request_next_iteration
 // MCP tool calls this; handoff fields arrive pre-validated by agent-socket).
 // Read once by onTerminal. The signal carries the calling worker's loom node id
 // (slice 7) so a multi-node wave's signals are stored per node; the pass-level
@@ -833,7 +833,7 @@ function armWatchdog(id: string, runId: string, timeoutMinutes: number | undefin
       const run = await safeGetRun(runId);
       if (!run) return;
       // Blocked is not a hang (waiting on the user); the live-ask attempt then
-      // owns its own deadline via spark_ask_user. Don't arm against a blocked
+      // owns its own deadline via codara_ask_user. Don't arm against a blocked
       // run — watchTerminal re-arms when it leaves blocked.
       if (run.status === "blocked") return;
       const liveAttempts = run.workerAttempts.filter((a) => !ATTEMPT_TERMINAL.has(a.status));
@@ -1010,9 +1010,9 @@ const answerResumes = new Set<string>();
 function agentLoopFooter(job: ScheduledJob, steerable = true): string {
   if (job.loop.kind !== "agent") return "";
   const handoffNote = steerable
-    ? ` You may also pass nextEngine ("claude"|"codex"), nextModel, and nextEffort to spark_request_next_iteration to pick the next pass's worker; only installed engines are honored.`
+    ? ` You may also pass nextEngine ("claude"|"codex"), nextModel, and nextEffort to codara_request_next_iteration to pick the next pass's worker; only installed engines are honored.`
     : "";
-  return `\n\n---\nThis is an automation loop. When you finish this pass, decide whether to continue: call the spark_request_next_iteration tool (done=false to run another iteration, done=true to stop), or end your final summary with ${SPARK_LOOP_CONTINUE} or ${SPARK_LOOP_DONE} on its own last line.${handoffNote} If you give no signal the loop stops. Your safety caps always stop it regardless.`;
+  return `\n\n---\nThis is an automation loop. When you finish this pass, decide whether to continue: call the codara_request_next_iteration tool (done=false to run another iteration, done=true to stop), or end your final summary with ${SPARK_LOOP_CONTINUE} or ${SPARK_LOOP_DONE} on its own last line.${handoffNote} If you give no signal the loop stops. Your safety caps always stop it regardless.`;
 }
 
 // The newest spark "question" message a given blocked NODE left, plus the
@@ -1076,7 +1076,7 @@ async function blockedNodesOf(run: RunState): Promise<Array<string | undefined>>
 
 // Resume a report-blocked pass once the user answers. A worker that EXITED
 // declaring itself blocked (final-report status "blocked") left its question as
-// a spark message with no live spark_ask_user poll to consume the reply —
+// a spark message with no live codara_ask_user poll to consume the reply —
 // answering through the Hub only records a user note. When that note postdates
 // the blocking question, chain a continuation attempt into the SAME run (this is
 // a resumption of the pass, not a new iteration: the job's iteration count and
@@ -1291,7 +1291,7 @@ async function readAgentSignal(
   run: RunState,
   summary: string | undefined,
 ): Promise<AgentLoopSignal & { reason: AutomationStopReason }> {
-  // 1) Structured intent from the spark_request_next_iteration MCP tool —
+  // 1) Structured intent from the codara_request_next_iteration MCP tool —
   //    in-memory first, then the persisted mirror (survives a restart that
   //    landed between worker-finish and this decision). Consumed once.
   //    Slice 7: in a multi-node wave several workers may have signalled; the

@@ -876,7 +876,7 @@ async function handleAppPrefsSet(
 //
 // Workers are queued via createWorkerTask + prepareWorkerTask and launched
 // end-to-end from this call site through scheduleAutopilotCycles; the manager
-// can `await` completion via spark_wait_for_workers.
+// can `await` completion via codara_wait_for_workers.
 
 const ASK_USER_POLL_MS = 500;
 const ASK_USER_TIMEOUT_MS = 15 * 60 * 1000; // 15 min — covers the user being AFK
@@ -910,7 +910,7 @@ async function handleOrchestratorSpawnWorkers(
   if (!run) {
     return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   }
-  const blocked = rejectIfAutomationRun(run, id, "spark_spawn_workers");
+  const blocked = rejectIfAutomationRun(run, id, "codara_spawn_workers");
   if (blocked) return blocked;
   const cwd = typeof run.settingsSnapshot?.workspaceCwd === "string"
     ? run.settingsSnapshot.workspaceCwd
@@ -1016,7 +1016,7 @@ async function handleOrchestratorSpawnWorkers(
       // worker_result_review pickup. Now nobody calls launchWorkerAttempt
       // unless we do it here — without this, CC's manager turn spawns
       // workers that sit forever in prompt_ready, blocks on
-      // spark_wait_for_workers until the 90s turn timeout fires, and
+      // codara_wait_for_workers until the 90s turn timeout fires, and
       // reports back "Worker was cancelled before execution."
       attemptIdsToLaunch.push(envelope.attemptId);
     } catch (err) {
@@ -1191,20 +1191,20 @@ const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "ca
 // Worker task statuses that represent REAL in-flight work — an attempt is
 // scheduled, running, awaiting review, or queued to retry — so completing the
 // run now would strand it (the reproduced bug: a QUEUED corrective worker was
-// cancelled when spark_complete landed early). This is what gates spark_complete.
+// cancelled when codara_complete landed early). This is what gates codara_complete.
 //
 // Deliberately a positive "in-flight" allowlist rather than "everything not
 // terminal", so the guard fails OPEN (allows completion) on statuses that are
 // NOT live work and must never deadlock the coordinator:
 //   - `created`: a task only lingers here when prepareWorkerTask never
-//     succeeded (spark_spawn_workers' prepare threw — see ~L859) or a user
+//     succeeded (codara_spawn_workers' prepare threw — see ~L859) or a user
 //     hand-added a task via the UI that was never launched. Such a task never
 //     reaches a terminal state on its own, and NO coordinator RPC can launch,
 //     retry, or cancel it — so blocking on it would make the run permanently
-//     uncompletable (spark_wait_for_workers on a `created` task can only time
+//     uncompletable (codara_wait_for_workers on a `created` task can only time
 //     out). createWorkerTask stamps `created`; prepareWorkerTask advances to
 //     `queued`, so a healthy just-spawned task is already past `created` by the
-//     time the model can call spark_complete.
+//     time the model can call codara_complete.
 //   - `blocked`: only ever set on the loom-pass path (run-store), and
 //     loom/automation runs are rejected by rejectIfAutomationRun before this
 //     guard — so it cannot legitimately reach here.
@@ -1227,15 +1227,15 @@ async function handleOrchestratorComplete(
   const runStore = await getRunStore();
   const run = await runStore.getRun(runId);
   if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
-  const blocked = rejectIfAutomationRun(run, id, "spark_complete");
+  const blocked = rejectIfAutomationRun(run, id, "codara_complete");
   if (blocked) return blocked;
   // Guard: never complete the run while a worker task the coordinator spawned is
   // still in-flight. Completing here flips the run to `complete`, which fires the
   // "done" toast and tears the run down mid-flight — observed live: a corrective
-  // worker was QUEUED after a failed attempt, then spark_complete landed and the
+  // worker was QUEUED after a failed attempt, then codara_complete landed and the
   // queued worker was left stranded/cancelled. Reject with an instructive,
   // structured error so the CLI coordinator waits on the stragglers first
-  // (spark_wait_for_workers) and only then completes. The MCP server relays a
+  // (codara_wait_for_workers) and only then completes. The MCP server relays a
   // JSON-RPC error `message` back to the model as an isError tool result
   // (server.js callTool), so this reaches the model and course-corrects it. We
   // deliberately do NOT auto-cancel the stragglers here. Only genuinely in-flight
@@ -1253,8 +1253,8 @@ async function handleOrchestratorComplete(
       id,
       ERR_INVALID_PARAMS,
       `Cannot complete: ${pendingTasks.length} worker task(s) still pending/running: ${detail}. ` +
-        `Call spark_wait_for_workers with worker_task_ids [${ids}] first, then read each report and call ` +
-        `spark_complete once every worker has reached a terminal state (accepted/failed/cancelled).`,
+        `Call codara_wait_for_workers with worker_task_ids [${ids}] first, then read each report and call ` +
+        `codara_complete once every worker has reached a terminal state (accepted/failed/cancelled).`,
     );
   }
   try {
@@ -1413,7 +1413,7 @@ async function handleOrchestratorWaitForWorkers(
     });
   const firstRun = await runStore.getRun(runId);
   if (!firstRun) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
-  const blocked = rejectIfAutomationRun(firstRun, id, "spark_wait_for_workers");
+  const blocked = rejectIfAutomationRun(firstRun, id, "codara_wait_for_workers");
   if (blocked) return blocked;
   const unknownIds = workerTaskIds.filter(
     (wtid) => !firstRun.workerTasks.some((wt) => wt.id === wtid),
@@ -1464,7 +1464,7 @@ async function handleOrchestratorWaitForWorkers(
 // be lost after this point (client socket drop, manager CLI turn timeout), and
 // a destructive read there would silently swallow a blocked worker's question
 // forever. Messages therefore re-surface on later waits until the manager
-// acknowledges them via spark_check_messages (the only mark-read reader).
+// acknowledges them via codara_check_messages (the only mark-read reader).
 // Failures are swallowed — a mailbox hiccup must never fail the wait.
 async function peekManagerInbox(
   runStore: Awaited<ReturnType<typeof getRunStore>>,
@@ -1491,7 +1491,7 @@ async function handleOrchestratorMessageWorkers(
   const runStore = await getRunStore();
   const run = await runStore.getRun(runId);
   if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
-  const blocked = rejectIfAutomationRun(run, id, "spark_message_workers");
+  const blocked = rejectIfAutomationRun(run, id, "codara_message_workers");
   if (blocked) return blocked;
   // Guard against addressing a worker that isn't in this run; "all" is always
   // valid (broadcast to the whole batch's mailbox).
@@ -1528,7 +1528,7 @@ async function handleOrchestratorCheckMessages(
   const runStore = await getRunStore();
   const run = await runStore.getRun(runId);
   if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
-  const blocked = rejectIfAutomationRun(run, id, "spark_check_messages");
+  const blocked = rejectIfAutomationRun(run, id, "codara_check_messages");
   if (blocked) return blocked;
   try {
     const messages = await runStore.readManagerInbox(runId, { markRead: true });
@@ -1551,7 +1551,7 @@ async function handleOrchestratorGetWorkerStatus(
   if (!run) {
     return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   }
-  const blocked = rejectIfAutomationRun(run, id, "spark_get_worker_status");
+  const blocked = rejectIfAutomationRun(run, id, "codara_get_worker_status");
   if (blocked) return blocked;
   try {
     const task = run.workerTasks.find((wt) => wt.id === workerTaskId);
@@ -1690,7 +1690,7 @@ async function loadJobForRun(
         id,
         ERR_INVALID_PARAMS,
         `automation "${job.name}" (${automationId}) belongs to a different workspace and can't be accessed or changed from this chat. ` +
-          `Only automations in this chat's workspace are available — call spark_list_automations to see them.`,
+          `Only automations in this chat's workspace are available — call codara_list_automations to see them.`,
       ),
     };
   }
@@ -1833,7 +1833,7 @@ async function requestUserConsent(opts: {
       // ONLY answers explicitly linked to THIS question count. An unlinked
       // affirmative — the user answering some other question the model asked
       // in the same turn, or typing a casual "ok" into the chat — must never
-      // approve a change. (Without the link, spark_ask_user("…yes/no?") fired
+      // approve a change. (Without the link, codara_ask_user("…yes/no?") fired
       // alongside the gated call could harvest the user's "yes" — a live
       // bypass found in adversarial review.)
       const answer = [...run.humanMessages]
@@ -2131,7 +2131,7 @@ async function validateTriggerLoopWorker(opts: {
       const { listJobs } = await getScheduler();
       const jobs = await listJobs();
       if (!jobs.some((j) => j.id === t.automationId)) {
-        return `trigger.automationId '${t.automationId}' does not match any existing automation (call spark_list_automations to find a valid id)`;
+        return `trigger.automationId '${t.automationId}' does not match any existing automation (call codara_list_automations to find a valid id)`;
       }
     }
   }

@@ -64,7 +64,7 @@ import {
 const TURN_POLL_INTERVAL_MS = 200;
 // The turn-end waiter NEVER fails a turn on inactivity — a busy CC can write
 // nothing to its JSONL for minutes (a single long tool execution, a long
-// thinking block, or a blocking long-poll MCP call like spark_wait_for_workers
+// thinking block, or a blocking long-poll MCP call like codara_wait_for_workers
 // that can run 10-20 min) while remaining perfectly healthy. A stopwatch that
 // declares that a timeout would fail a live turn mid-flight (the observed bug:
 // tool calls kept streaming in after a false FAILED marker). Instead the
@@ -234,7 +234,7 @@ interface ClaudeChatSession {
   /** Tool calls observed during the current turn — populated by the JSONL
    *  translator when CC fires `mcp__codara-studio__*` (or any other
    *  tool). In Execute mode the request handler reads this after the turn
-   *  ends to convert spark_spawn_workers calls into a SparkManagerDecision
+   *  ends to convert codara_spawn_workers calls into a SparkManagerDecision
    *  that the run-store can act on, exactly like grok/OpenRouter does. */
   turnToolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }>;
   /** Wall-clock ms of the most recent JSONL line observed from CC. The
@@ -561,7 +561,7 @@ export const claudeBackend: SparkAgentBackend = {
       }
 
       const replyText = chat.turnAssistantText.trim();
-      // Execute/Auto mode: convert spark_spawn_workers tool calls into the
+      // Execute/Auto mode: convert codara_spawn_workers tool calls into the
       // same SparkManagerDecision shape grok/OpenRouter produces. The
       // run-store already knows how to apply that decision (spawn workers,
       // ask user, mark complete). This is what makes CC in execute mode
@@ -738,7 +738,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   // resulting tool list is hundreds of items long, and the orchestrator
   // tools are buried inside it. With `--strict-mcp-config --mcp-config <this>`,
   // CC sees only `mcp__codara-studio__*` and the prompt's "MUST call
-  // spark_spawn_workers" rule has a clear, uncontested target.
+  // codara_spawn_workers" rule has a clear, uncontested target.
   //
   // Talk mode skips this entirely because Talk has no MCP delegation —
   // disallowed-tools is the only fence it needs.
@@ -747,7 +747,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   // SPARK_MCP_MODE=automation into the server's env so the server exposes the
   // automation architect tool set (list/create/run/test looms) instead of the
   // Execute worker-spawning roster. The globally-installed user-scope entry
-  // has no env, so automation-loop workers calling spark_request_next_iteration
+  // has no env, so automation-loop workers calling codara_request_next_iteration
   // keep seeing the legacy 6-tool roster.
   // Auto mode shares Execute's config verbatim (no SPARK_MCP_MODE, so the
   // server exposes the worker-orchestration roster).
@@ -821,17 +821,17 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   //   per-run codara-studio server so its tools aren't lost in 400+ unrelated
   //   names. Post-merge that server exposes the full studio roster (preview +
   //   terminal) ALONGSIDE the Execute orchestration tools, so the manager CAN
-  //   reach spark_preview_* / spark_terminal_* for a quick UI check or a
+  //   reach codara_preview_* / codara_terminal_* for a quick UI check or a
   //   visible command — that is intended. Containment is downstream, not by
   //   tool availability: buildExecuteDecisionFromToolCalls treats ONLY
-  //   spark_spawn_workers and spark_complete as manager decisions, so the extra
+  //   codara_spawn_workers and codara_complete as manager decisions, so the extra
   //   studio tools can't derail the delegate-or-complete turn contract.
   if (opts.mode === "execute") {
     args.push("--system-prompt", buildExecuteSystemPrompt(opts.cwd));
     // `--tools ""` disables ALL built-in tools (Read, Edit, Bash, Glob,
     // Grep, NotebookEdit, etc.) — without this, CC sees the built-ins in
     // its tool list and falls back to "I'd Read the file" / "I can't Edit
-    // in this mode" prose instead of just calling spark_spawn_workers.
+    // in this mode" prose instead of just calling codara_spawn_workers.
     // Empirically (verified outside Codara) this is the flag that gets CC
     // to actually delegate. `--allowed-tools` is a USE-permission filter,
     // not a tool-list filter — CC still sees everything with that flag,
@@ -1340,7 +1340,7 @@ async function submitPromptWithVerification(
  *
  * This NEVER fails the turn on inactivity. A busy CC legitimately writes
  * nothing to its JSONL for minutes (one long tool execution, a long thinking
- * block, or a blocking long-poll MCP call like spark_wait_for_workers), so a
+ * block, or a blocking long-poll MCP call like codara_wait_for_workers), so a
  * stopwatch would fail a healthy turn mid-flight. It polls indefinitely and
  * exits only on (a) the done-marker, (b) chat.fatal (session death / pty exit
  * / dispose — see the onExit handler and disposeChatSessionInternal), or
@@ -1459,24 +1459,24 @@ export function buildExecuteDecisionFromToolCalls(
   chatReply: string,
 ): SparkManagerDecision {
   // Tool name matching tolerates BOTH the CC-style prefix
-  // (`mcp__codara-studio__spark_spawn_workers`) and Codex's bare name
-  // (`spark_spawn_workers`) — Codex's MCP integration drops the prefix when
+  // (`mcp__codara-studio__codara_spawn_workers`) and Codex's bare name
+  // (`codara_spawn_workers`) — Codex's MCP integration drops the prefix when
   // surfacing the tool to the model.
   const matches = (call: { toolName: string }, sparkName: string): boolean =>
     call.toolName === sparkName ||
     call.toolName === `mcp__codara-studio__${sparkName}`;
 
-  // spark_complete wins when present, even alongside spark_spawn_workers.
+  // codara_complete wins when present, even alongside codara_spawn_workers.
   // The CC manager's MCP tool calls executed IN ORDER as the turn ran:
   // spawn_workers fired early (and was already handled by handleOrchestratorSpawnWorkers
   // when it arrived — workers are already created, launched, and possibly
-  // accepted), and spark_complete fired at the end as the manager's final
+  // accepted), and codara_complete fired at the end as the manager's final
   // intent. If we returned `run_workers` here, applySparkManagerDecision
   // would re-create the same workers as phantom tasks on top of an already-
   // completed run (status="created", never launched), producing the "0/1
   // worker, marked DONE" UI bug. Checking complete first respects the
   // manager's actual closing decision; spawn was already dispatched live.
-  const completeCall = toolCalls.find((c) => matches(c, "spark_complete"));
+  const completeCall = toolCalls.find((c) => matches(c, "codara_complete"));
   if (completeCall) {
     const input = isRecord(completeCall.input) ? completeCall.input : {};
     const summary =
@@ -1492,7 +1492,7 @@ export function buildExecuteDecisionFromToolCalls(
     };
   }
 
-  const spawnCall = toolCalls.find((c) => matches(c, "spark_spawn_workers"));
+  const spawnCall = toolCalls.find((c) => matches(c, "codara_spawn_workers"));
   if (spawnCall) {
     const input = isRecord(spawnCall.input) ? spawnCall.input : {};
     const workers = Array.isArray(input.workers) ? input.workers : [];
@@ -1510,7 +1510,7 @@ export function buildExecuteDecisionFromToolCalls(
     };
   }
 
-  const askCall = toolCalls.find((c) => matches(c, "spark_ask_user"));
+  const askCall = toolCalls.find((c) => matches(c, "codara_ask_user"));
   if (askCall) {
     const input = isRecord(askCall.input) ? askCall.input : {};
     const question = typeof input.question === "string" ? input.question : "";
@@ -1614,7 +1614,7 @@ function coerceQuestionOption(
  * override of CC's default. This is the only instruction CC sees in
  * execute mode; the chat conversation history is treated as context, not
  * as authority. Mirrors the role grok/OpenRouter plays: turn each user
- * message into a `spark_spawn_workers` call.
+ * message into a `codara_spawn_workers` call.
  *
  * We deliberately don't reference Talk mode, don't apologize for the
  * limitation, and don't leave room for "I can't do this" branches —
@@ -1622,19 +1622,19 @@ function coerceQuestionOption(
  */
 function buildExecuteSystemPrompt(cwd: string): string {
   return [
-    "You are Cora's worker manager. Your entire job is to convert each user message into one or more parallel/sequential worker specs, then delegate via `spark_spawn_workers`. You do not write code, do not read files, do not run commands. Workers do all of that.",
+    "You are Cora's worker manager. Your entire job is to convert each user message into one or more parallel/sequential worker specs, then delegate via `codara_spawn_workers`. You do not write code, do not read files, do not run commands. Workers do all of that.",
     "",
     `Workspace cwd: ${cwd}`,
     "",
     "## Required behavior",
     "",
-    "For every user turn that asks for changes (edits, refactors, new features, fixes, redesigns, file moves, anything that touches the workspace), your FIRST action is a call to `spark_spawn_workers`. The worker spec is the entire output of your turn — no prose alternatives, no clarifying refusals, no \"here's what I'd do\" lists. Just spawn. A single-sentence orchestration comment alongside the call is fine (\"Spawning a Claude worker to redesign the calculator UI.\") but optional.",
+    "For every user turn that asks for changes (edits, refactors, new features, fixes, redesigns, file moves, anything that touches the workspace), your FIRST action is a call to `codara_spawn_workers`. The worker spec is the entire output of your turn — no prose alternatives, no clarifying refusals, no \"here's what I'd do\" lists. Just spawn. A single-sentence orchestration comment alongside the call is fine (\"Spawning a Claude worker to redesign the calculator UI.\") but optional.",
     "",
-    "For genuinely ambiguous turns (the user wrote one vague word, or asked you to make a value judgment with no decision-relevant context), call `spark_ask_user` with 2-4 concrete options. Don't ask in prose.",
+    "For genuinely ambiguous turns (the user wrote one vague word, or asked you to make a value judgment with no decision-relevant context), call `codara_ask_user` with 2-4 concrete options. Don't ask in prose.",
     "",
     "For pure read-only questions where the user wants information without changes, you may answer in prose. But assume the default is delegation — if the user said \"make X\", \"fix Y\", \"change Z\", that's a spawn, not a chat.",
     "",
-    "## spark_spawn_workers payload",
+    "## codara_spawn_workers payload",
     "",
     "```",
     "workers: [",

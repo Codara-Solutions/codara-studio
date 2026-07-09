@@ -63,7 +63,10 @@ const LEGACY_SERVER_NAMES = [
 // orchestration rosters behind SPARK_MCP_MODE). The name change alone forces a
 // fresh managed entry; the version bump forces matchesCurrent to rewrite any
 // pre-merge entry that somehow shares the new name.
-const SPARK_VERSION = "5";
+// v6: MCP tool names renamed from the spark_ prefix to codara_ (preview +
+// terminal + execute + automation rosters). Bumped so matchesCurrent re-renders
+// existing entries and the Capability Center card refreshes its tool-name text.
+const SPARK_VERSION = "6";
 
 // Instances running under an explicit home override (tests, dev harnesses,
 // side-by-side profiles) must never manage the user's global agent configs —
@@ -87,59 +90,59 @@ function isSandboxedHome(): boolean {
 // reflects everything the server can do.
 const SPARK_STUDIO_TOOLS = [
   // Preview (drive the live <preview> tab).
-  "spark_preview_list",
-  "spark_preview_url",
-  "spark_preview_navigate",
-  "spark_preview_snapshot",
-  "spark_preview_click",
-  "spark_preview_type",
-  "spark_preview_press_key",
-  "spark_preview_evaluate",
-  "spark_preview_wait_for",
-  "spark_preview_screenshot",
-  "spark_preview_mouse",
-  "spark_preview_scroll",
-  "spark_preview_hover",
-  "spark_preview_drag",
-  "spark_preview_key",
-  "spark_preview_upload",
-  "spark_preview_console",
-  "spark_preview_network",
-  "spark_preview_resize",
-  "spark_preview_run",
+  "codara_preview_list",
+  "codara_preview_url",
+  "codara_preview_navigate",
+  "codara_preview_snapshot",
+  "codara_preview_click",
+  "codara_preview_type",
+  "codara_preview_press_key",
+  "codara_preview_evaluate",
+  "codara_preview_wait_for",
+  "codara_preview_screenshot",
+  "codara_preview_mouse",
+  "codara_preview_scroll",
+  "codara_preview_hover",
+  "codara_preview_drag",
+  "codara_preview_key",
+  "codara_preview_upload",
+  "codara_preview_console",
+  "codara_preview_network",
+  "codara_preview_resize",
+  "codara_preview_run",
   // Terminal (open + drive agent-owned terminal tabs).
-  "spark_terminal_create",
-  "spark_terminal_write",
-  "spark_terminal_read",
+  "codara_terminal_create",
+  "codara_terminal_write",
+  "codara_terminal_read",
 ];
 
 const SPARK_ORCHESTRATION_TOOLS = [
   // Execute-mode worker orchestration (per-run SPARK_MCP_MODE=execute).
-  "spark_spawn_workers",
-  "spark_ask_user",
-  "spark_complete",
-  "spark_name_chat",
-  "spark_request_next_iteration",
-  "spark_get_worker_status",
-  "spark_wait_for_workers",
-  "spark_message_workers",
-  "spark_check_messages",
+  "codara_spawn_workers",
+  "codara_ask_user",
+  "codara_complete",
+  "codara_name_chat",
+  "codara_request_next_iteration",
+  "codara_get_worker_status",
+  "codara_wait_for_workers",
+  "codara_message_workers",
+  "codara_check_messages",
   // Automation-mode architect roster (per-run SPARK_MCP_MODE=automation).
-  "spark_list_automations",
-  "spark_get_automation",
-  "spark_create_automation",
-  "spark_update_automation",
-  "spark_run_automation",
-  "spark_wait_for_automation",
-  "spark_set_automation_enabled",
-  "spark_pause_automation",
-  "spark_resume_automation",
-  "spark_stop_automation",
-  "spark_delete_automation",
+  "codara_list_automations",
+  "codara_get_automation",
+  "codara_create_automation",
+  "codara_update_automation",
+  "codara_run_automation",
+  "codara_wait_for_automation",
+  "codara_set_automation_enabled",
+  "codara_pause_automation",
+  "codara_resume_automation",
+  "codara_stop_automation",
+  "codara_delete_automation",
 ];
 
 // The full tool surface for the Capability Center's built-in card (dedup keeps
-// spark_ask_user / spark_name_chat from double-counting).
+// codara_ask_user / codara_name_chat from double-counting).
 const SPARK_BUILTIN_TOOLS = [...new Set([...SPARK_STUDIO_TOOLS, ...SPARK_ORCHESTRATION_TOOLS])];
 
 const CLAUDE_USER_CONFIG = join(homedir(), ".claude.json");

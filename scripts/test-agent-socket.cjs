@@ -161,11 +161,11 @@ async function main() {
     );
     check("automation.list returns a jobs payload", Array.isArray(list.result?.automations ?? list.result?.jobs ?? (Array.isArray(list.result) ? list.result : null)), JSON.stringify(list.result ?? list.error).slice(0, 140));
 
-    // spark_complete guard: a coordinator must not complete a run while a
+    // codara_complete guard: a coordinator must not complete a run while a
     // worker task it spawned is still pending/running (Bug 1 — a queued
-    // corrective worker was stranded when spark_complete landed early). The
+    // corrective worker was stranded when codara_complete landed early). The
     // guard rejects with an instructive error that names the pending tasks and
-    // tells the model to spark_wait_for_workers first. The MCP server relays a
+    // tells the model to codara_wait_for_workers first. The MCP server relays a
     // JSON-RPC error message to the model as an isError tool result, so the
     // rejection has to arrive as a JSON-RPC `error`, not a dropped exception.
     fabricateRun("run-pending-worker", {
@@ -180,7 +180,7 @@ async function main() {
       summary: "all done",
     });
     check(
-      "spark_complete rejected while a worker task is non-terminal",
+      "codara_complete rejected while a worker task is non-terminal",
       Boolean(completeBlocked.error) && /still pending\/running/i.test(completeBlocked.error?.message ?? ""),
       JSON.stringify(completeBlocked).slice(0, 200),
     );
@@ -188,12 +188,12 @@ async function main() {
       "rejection names the pending task + steers to wait_for_workers",
       /corrective fix/.test(completeBlocked.error?.message ?? "") &&
         /wt-queued/.test(completeBlocked.error?.message ?? "") &&
-        /spark_wait_for_workers/i.test(completeBlocked.error?.message ?? ""),
+        /codara_wait_for_workers/i.test(completeBlocked.error?.message ?? ""),
       JSON.stringify(completeBlocked.error?.message ?? "").slice(0, 240),
     );
 
     // Same run, but now every worker task is terminal (accepted/cancelled):
-    // spark_complete must go through and flip the run to complete.
+    // codara_complete must go through and flip the run to complete.
     fabricateRun("run-all-terminal", {
       status: "running",
       workerTasks: [
@@ -206,7 +206,7 @@ async function main() {
       summary: "all workers terminal",
     });
     check(
-      "spark_complete accepted once all worker tasks are terminal",
+      "codara_complete accepted once all worker tasks are terminal",
       Boolean(completeOk.result?.ok) && !completeOk.error,
       JSON.stringify(completeOk).slice(0, 200),
     );
@@ -215,7 +215,7 @@ async function main() {
     // succeeded, or a user hand-added task that was never launched) must NOT
     // block completion — it can never reach a terminal state and no coordinator
     // RPC can launch/cancel it, so blocking would make the run permanently
-    // uncompletable. Only genuinely in-flight statuses gate spark_complete.
+    // uncompletable. Only genuinely in-flight statuses gate codara_complete.
     fabricateRun("run-stuck-created", {
       status: "running",
       workerTasks: [
@@ -228,7 +228,7 @@ async function main() {
       summary: "created task is not in-flight",
     });
     check(
-      "spark_complete not deadlocked by a never-launched 'created' task",
+      "codara_complete not deadlocked by a never-launched 'created' task",
       Boolean(completeStuck.result?.ok) && !completeStuck.error,
       JSON.stringify(completeStuck).slice(0, 200),
     );
