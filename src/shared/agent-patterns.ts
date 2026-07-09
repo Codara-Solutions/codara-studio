@@ -205,6 +205,60 @@ export function runtimeFromCommandLine(cmdLine: string): AgentRuntime | null {
   return null;
 }
 
+// ── Generic-arm runtime promotion (renderer arming-race recovery) ──────────
+// The renderer's terminal poller can "arm" a pane as running BEFORE it knows
+// which agent CLI it is: Claude enters the alt screen (`ESC[?1049h`) a beat
+// before it paints its banner, so on a heavy boot (banner and alt-enter split
+// across the main process's 16 ms PTY-flush window) the generic alt-screen
+// fallback tags the pane with NO runtime; and a recognised-but-non-first-party
+// CLI (aider/opencode/droid/…) coerces to a null public runtime. Either way the
+// pane is live but has no first-party working/ready chip and no state poller.
+// The poller then keeps sniffing to PROMOTE the pane to a first-party runtime
+// the moment that runtime's banner (or an OSC 633;E command line) appears. The
+// two pure helpers below own the fiddly bookkeeping that keeps promotion safe —
+// extracted here so they can be unit-tested directly (the renderer closure that
+// hosts the live state cannot be).
+//
+// `promoteGenericArm` — the promotion DECISION. Sniffs ONLY the post-arm slice
+// of the rolling ring (`ring.slice(ringFrom)`) so pre-arm output — a cat'd
+// changelog naming "Claude Code v2.x", or the third-party CLI's own banner still
+// sitting in the ring at arm time — cannot promote the pane to the wrong
+// runtime. Returns null once the give-up budget is spent: banners appear at
+// boot, so there is no reason to keep sniffing a long-lived vim/aider session.
+export function promoteGenericArm(
+  ring: string,
+  ringFrom: number,
+  budget: number,
+): PublicAgentRuntime | null {
+  if (budget <= 0) return null;
+  const fresh = ring.slice(Math.max(0, ringFrom));
+  const sniffed = sniffOsc633CommandRuntime(fresh) ?? sniffRuntime(fresh);
+  return sniffed ? coercePublicRuntime(sniffed) : null;
+}
+
+// `advanceGenericArm` — per-chunk bookkeeping. The renderer's ring is a rolling
+// buffer capped at a fixed char length; when it sheds chars off the front to
+// stay under the cap, the post-arm slice boundary (`ringFrom`) must walk back by
+// the same amount so it keeps pointing at the arm boundary. The give-up budget
+// burns down by the appended chunk size. `ringLenBefore`/`ringLenAfter` are the
+// ring's char length immediately before and after this chunk was folded in.
+// Returns the updated `{ ringFrom, budget }`; `budget <= 0` means "stop
+// attempting promotion". A no-op once the budget is already spent.
+export function advanceGenericArm(
+  ringFrom: number,
+  budget: number,
+  ringLenBefore: number,
+  ringLenAfter: number,
+  chunkLen: number,
+): { ringFrom: number; budget: number } {
+  if (budget <= 0) return { ringFrom, budget: 0 };
+  const dropped = Math.max(0, ringLenBefore + chunkLen - ringLenAfter);
+  return {
+    ringFrom: Math.max(0, ringFrom - dropped),
+    budget: Math.max(0, budget - chunkLen),
+  };
+}
+
 // Per-runtime "what is the agent doing right now" pattern tables. Each entry
 // owns three sets of regexes that run against the same plain-text tail of the
 // xterm buffer (renderer) or the stripped recent byte stream (main).

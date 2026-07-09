@@ -12,10 +12,12 @@ import {
 } from "@shared/types";
 import {
   absenceResetSafe,
+  advanceGenericArm,
   agentUiPresent,
   classifyTail,
   coercePublicRuntime,
   hasPromptMarker,
+  promoteGenericArm,
   sniffOsc633CommandRuntime,
   sniffRuntime,
   stripAnsi,
@@ -1285,6 +1287,21 @@ export function useTerminalSession({
       // alt-screen-leave sequence. Mirrors the main-process notifier's carry.
       let agentMarkerCarry = "";
       const MARKER_CARRY_MAX = 64;
+      // Runtime-promotion bookkeeping, set on ANY arm that leaves the pane
+      // without a first-party runtime — the generic ESC[?1049h alt-screen
+      // fallback (setAgentRunning(null)) AND a recognised-but-non-public CLI
+      // (aider/opencode/… → coercePublicRuntime===null). `genericArmRingFrom` is
+      // the ring offset at that arm: the promotion sniff only considers bytes
+      // appended AFTER it, so pre-arm output already in the ring (a cat'd
+      // changelog naming "Claude Code v2.x", the third-party CLI's own banner)
+      // can't false-promote the pane. `genericArmBudget` (>0 = promotion still
+      // eligible) burns down by each chunk's size so an unrecognised long-lived
+      // TUI isn't sniffed forever. Both are advanced/floored by advanceGenericArm
+      // as the ring slides under its cap, and reset to 0 on a first-party arm or
+      // a successful promotion. See agent-patterns.ts advanceGenericArm/
+      // promoteGenericArm for the pure bookkeeping (unit-tested there).
+      let genericArmRingFrom = 0;
+      let genericArmBudget = 0;
       let agentPhase: "idle" | "agent" = "idle";
       // Tracks the first-party runtime ("claude"|"codex"|"cursor") if the
       // detected runtime maps to one — drives the state poller below, which
@@ -1683,6 +1700,24 @@ export function useTerminalSession({
         // means "something is interactive but we don't know what" — used by
         // the alt-screen fallback below for unrecognised TUIs.
         const publicRuntime = runtime ? coercePublicRuntime(runtime) : null;
+        // Arm the runtime-promotion bookkeeping whenever this arm leaves the pane
+        // WITHOUT a first-party runtime — the generic alt-screen fallback
+        // (runtime===null) OR a recognised non-public CLI (aider/opencode/… that
+        // coerces to null). In both cases activeRuntime stays null and the
+        // promotion sniff below stays live, so it must anchor to post-arm bytes
+        // (genericArmRingFrom) and run under a byte budget (genericArmBudget).
+        // Without this, a non-public arm left the offset/budget unset and the
+        // promotion sniffed the WHOLE ring forever — a pre-arm "Claude Code v2.x"
+        // in the ring would false-promote a third-party pane. A first-party arm
+        // starts its own poller (activeRuntime set), so promotion never runs —
+        // clear the bookkeeping.
+        if (publicRuntime) {
+          genericArmRingFrom = 0;
+          genericArmBudget = 0;
+        } else {
+          genericArmRingFrom = agentTextRing.length;
+          genericArmBudget = POST_ARM_PROMOTE_BUDGET_BYTES;
+        }
         markRecentAgentInput(publicRuntime);
         onAgentStateRef.current?.({ runtime: publicRuntime, running: true });
         // Only the three first-party runtimes have regex tables in
@@ -1733,6 +1768,8 @@ export function useTerminalSession({
         agentPhase = "idle";
         agentTextRing = "";
         agentMarkerCarry = "";
+        genericArmRingFrom = 0;
+        genericArmBudget = 0;
       };
       const handleAgentInterruptKey = () => {
         if (readOnlyRef.current || inputBlockedRef.current) return;
@@ -1844,7 +1881,20 @@ export function useTerminalSession({
       const processAgentChunkText = (chunkText: string) => {
         if (!onAgentStateRef.current) return;
         if (chunkText.length > 0) {
+          const ringLenBefore = agentTextRing.length;
           agentTextRing = (agentTextRing + chunkText).slice(-8192);
+          if (genericArmBudget > 0) {
+            // Walk the post-arm slice boundary back by whatever the capped ring
+            // shed off its front, and burn the chunk off the promotion budget.
+            ({ ringFrom: genericArmRingFrom, budget: genericArmBudget } =
+              advanceGenericArm(
+                genericArmRingFrom,
+                genericArmBudget,
+                ringLenBefore,
+                agentTextRing.length,
+                chunkText.length,
+              ));
+          }
         }
         // Carry-aware marker scan: prepend the previous chunk's tail so a
         // prompt marker / alt-screen-leave split across the PTY chunk boundary
@@ -1879,7 +1929,8 @@ export function useTerminalSession({
             // happily inject the launch command into the running TUI's
             // input box. The exit path (\x1b[?1049l in the else branch
             // below) already restores idle phase, so this fallback rides
-            // the same lifecycle as banner-based detection.
+            // the same lifecycle as banner-based detection. setAgentRunning
+            // arms the runtime-promotion bookkeeping for this null arm.
             setAgentRunning(null);
           } else if (
             !sawAltScreenLeave &&
@@ -1937,6 +1988,85 @@ export function useTerminalSession({
             }
           }
           return;
+        }
+
+        // Runtime PROMOTION (generic/non-public arm → first-party runtime).
+        // A pane in agent phase with activeRuntime===null and NO state poller
+        // (running=true fires but no chip) reached that state one of two ways:
+        // the generic ESC[?1049h fallback above (`setAgentRunning(null)`), or a
+        // recognised non-first-party CLI (aider/opencode/… → coercePublicRuntime
+        // ===null). Either way the working/ready chip never appears (App.tsx
+        // suppresses the chip for runtime===null TUIs, treating them like
+        // vim/less), and the idle-branch sniff above (gated on
+        // agentPhase==="idle") never runs again, so a banner arriving later can't
+        // fix it. Result (for the alt-screen case): a fresh Claude pane shows
+        // no chip at all.
+        //
+        // How the fallback wins the race: Claude enters the alt screen at boot
+        // (`ESC[?1049h`) a beat BEFORE it paints its "Claude Code v…" banner box,
+        // whereas Codex renders inline (no `ESC[?1049h`) and so never trips this
+        // fallback — which is exactly why Codex chips survive and Claude's vanish.
+        // The alt-screen boot is not new: live pty captures (2026-07-09) confirm
+        // it in every locally-available build, 2.1.202 / 2.1.203 / 2.1.204 /
+        // 2.1.205 (each emits `ESC[?1049h` at boot and stays in the alt screen
+        // until exit); older Claude v2 (≤ ~2.1.18x) rendered inline per the
+        // earlier captures documented in agent-patterns.ts. So this race has been
+        // latent for a while — it only STARTS biting once two things line up:
+        //   1. The main process coalesces PTY reads over a 16 ms flush window
+        //      (pty-manager flushDataNow → one Uint8Array per batch). A fast boot
+        //      (empty cwd) has only a ~3 ms alt-enter→banner gap, so both land in
+        //      the same batch and sniffRuntime arms "claude" from the banner —
+        //      no fallback. A heavy boot (real workspace: repo CLAUDE.md + MCP
+        //      servers + hooks) pushes that gap PAST 16 ms (measured ~36 ms), so
+        //      the alt-enter flushes in a batch by itself, trips the fallback,
+        //      and the banner arrives in a LATER batch — never re-sniffed.
+        //   2. The pane has NO shell integration (SPARK_NO_SHELL_INTEGRATION=1
+        //      worker/agent panes — no OSC 633;E command line to arm from).
+        //      Integrated panes arm via 633;E before the alt-screen enter and are
+        //      immune. (This is why it reads as "the 2.1.205 update broke it":
+        //      nothing in the terminal output changed — 2.1.204 and 2.1.205 are
+        //      byte-identical — the boot timing merely drifted across the 16 ms
+        //      threshold on the real workspace.)
+        //
+        // Fix: keep sniffing while armed-but-generic and upgrade to the real
+        // runtime the moment its banner (or an OSC 633;E command line) lands
+        // (promoteGenericArm). Only ever promotes null→known — a genuine
+        // vim/less/fzf/aider session (no first-party banner) stays as it armed,
+        // so no first-party chip sprouts on it. Skipped on a chunk carrying an
+        // exit signal so the reset below wins cleanly. Two guards keep it safe
+        // and cheap: the sniff runs over ONLY the post-arm ring slice
+        // (genericArmRingFrom) so pre-arm output — a cat'd changelog naming a
+        // Claude version, a third-party CLI's own banner — can't promote; and it
+        // stops after genericArmBudget post-arm bytes (POST_ARM_PROMOTE_BUDGET_
+        // BYTES) so a long-lived unrecognised TUI isn't sniffed every chunk.
+        if (
+          agentPhase === "agent" &&
+          activeRuntime === null &&
+          genericArmBudget > 0 &&
+          !sawAltScreenLeave &&
+          !sawPromptMarker
+        ) {
+          const promoted = promoteGenericArm(
+            agentTextRing,
+            genericArmRingFrom,
+            genericArmBudget,
+          );
+          if (promoted) {
+            // startStatePoller sets activeRuntime, so this promotion fires at
+            // most once per generic arm. Mirrors setAgentRunning's known-runtime
+            // tail: re-emit onAgentState with the now-known runtime (App.tsx
+            // sprouts the CLAUDE/CODEX/CURSOR chip in place of the suppressed
+            // null one), refresh the recent-input grace so Shift+Enter keeps
+            // sending the TUI newline, start the state poller, and report
+            // "launching" so the chip reads "starting" until the first real
+            // working/idle classification lands.
+            markRecentAgentInput(promoted);
+            onAgentStateRef.current?.({ runtime: promoted, running: true });
+            startStatePoller(promoted);
+            reportRuntimeState("launching");
+            genericArmRingFrom = 0;
+            genericArmBudget = 0;
+          }
         }
 
         // In agent phase. Watch for any of these and reset:
@@ -2914,6 +3044,13 @@ function readTerminalTail(term: Terminal, maxRows: number): string {
 // operation per row; reading 40 rows per tick across a dozen panes is well
 // under 1 ms of renderer work per second.
 const STATE_POLL_MS = 300;
+// How many post-arm bytes the runtime-promotion sniff will scan before giving
+// up on a generic/non-public arm. A first-party launch banner appears within
+// the first few KB of boot output, so 64 KB is far past any real banner while
+// still cheap — after this the promotion sniff is disabled for that arm so a
+// long-lived vim / less / third-party-agent pane isn't sniffed on every chunk
+// for its whole lifetime. Reset on the next arm.
+const POST_ARM_PROMOTE_BUDGET_BYTES = 64 * 1024;
 // Number of rows of the visible buffer we feed into the regex match.
 const STATE_TAIL_ROWS = 40;
 // Working → Idle transition requires this many ms of consecutive empty ticks

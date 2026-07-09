@@ -293,6 +293,108 @@ const V204_MANUAL_IDLE =
 check("v2.1.204 manual-mode idle footer is unclassified", ap.classifyTail("claude", V204_MANUAL_IDLE), null);
 check("v2.1.204 manual-mode idle footer is UI-present", ap.agentUiPresent("claude", V204_MANUAL_IDLE), true);
 
+// ── REAL Claude Code v2.1.205 frames (live pty capture, 2026-07-09) ──
+// Regression check for the reported "CLAUDE chip gone on 2.1.205" break. A
+// throwaway-dir pty capture of the real 2.1.205 binary is byte-for-byte
+// identical to 2.1.204 in every detection-relevant frame — same boxed banner,
+// same "⏸ manual mode on" idle footer, same working footer — so the update did
+// NOT change the terminal output the patterns key off. These fixtures pin that
+// invariant so a future CC release that DOES change the banner/footer trips
+// here loudly instead of silently killing the chip. (The actual 2.1.205 chip
+// break was an arming race in useTerminalSession.ts — the pane armed generically
+// off ESC[?1049h before the banner arrived — not a pattern miss; see that file's
+// runtime-PROMOTION block.)
+check(
+  "v2.1.205 boxed banner arms claude",
+  ap.sniffRuntime("╭───Claude Codev2.1.205─────────────────────────────╮"),
+  "claude",
+);
+// Working footer now appends the effort indicator ("· thinking with high
+// effort") to the stats group: "✢ Cogitating… (4s · ↓ 25 tokens · thinking with
+// high effort)". The gerund and "↓ N tokens" patterns carry the classification.
+check(
+  "v2.1.205 working footer (gerund + effort suffix)",
+  ap.classifyTail("claude", "\x1b[38;2;215;119;87m✢ Cogitating… (4s · ↓ 25 tokens · thinking with high effort)\x1b[m"),
+  "working",
+);
+check(
+  "v2.1.205 hook-runner footer",
+  ap.classifyTail("claude", "running stop hooks… 0/2 · 4s · ↓ 69 tokens · thinking with high effort)"),
+  "working",
+);
+// Idle footer — same DEFAULT manual mode as 2.1.204: unclassified AND UI-present
+// (the two invariants the absence-reset relies on). Statusline glyph is 󱙺.
+const V205_MANUAL_IDLE =
+  "● high · /effort\n❯ Try \"write a test for <filepath>\"\n⏸ manual mode on\n󱙺 Fable 5 ╱  cc-capture ╱ no ctx";
+check("v2.1.205 manual-mode idle footer is unclassified", ap.classifyTail("claude", V205_MANUAL_IDLE), null);
+check("v2.1.205 manual-mode idle footer is UI-present", ap.agentUiPresent("claude", V205_MANUAL_IDLE), true);
+
+// ── Generic-arm runtime promotion (promoteGenericArm / advanceGenericArm) ──
+// The renderer arms a pane running BEFORE it knows the runtime (generic
+// ESC[?1049h alt-screen fallback, or a non-first-party CLI that coerces to
+// null) and then promotes it to a first-party runtime when the banner appears.
+// These pure helpers own the ring-slice + budget bookkeeping that keeps the
+// promotion from mis-firing; unit-tested here because the renderer closure that
+// drives them can't be.
+const PRE = "shell: see Claude Code v2.1.9 in the changelog "; // pre-arm banner
+const POST_BANNER = "welcome ╭───Claude Codev2.1.205───╮"; // a real post-arm banner
+// A real banner appended AFTER the arm promotes (ringFrom points past pre-arm).
+check(
+  "promote: post-arm banner → claude",
+  ap.promoteGenericArm(PRE + POST_BANNER, PRE.length, 64 * 1024),
+  "claude",
+);
+// 3A regression: a THIRD-PARTY / generic arm whose ring already holds a Claude
+// version string (echoed by the CLI, or pre-arm shell output) must NOT promote
+// — the sniff runs only over the post-arm slice. With ringFrom=0 (the bug: the
+// non-public arm left the offset unset) the whole ring sniffs and false-promotes.
+check(
+  "promote: pre-arm Claude version is guarded by ringFrom",
+  ap.promoteGenericArm(PRE + "aider working, no banner here", PRE.length, 64 * 1024),
+  null,
+);
+check(
+  "promote: ringFrom=0 would have false-promoted (documents the 3A hole)",
+  ap.promoteGenericArm(PRE + "aider working, no banner here", 0, 64 * 1024),
+  "claude",
+);
+// Cross-boundary: pre-arm ends "Claude Code v" (no digit → no match at arm), a
+// post-arm "2.1.5" would complete a spurious banner across the boundary. The
+// post-arm slice sees only "2.1.5 …" → no promotion.
+check(
+  "promote: cross-boundary spurious banner is guarded",
+  ap.promoteGenericArm("editing Claude Code v" + "2.1.5 release notes", "editing Claude Code v".length, 64 * 1024),
+  null,
+);
+// A post-arm OSC 633;E command line promotes too.
+check(
+  "promote: post-arm 633;E command line → claude",
+  ap.promoteGenericArm(PRE + "\x1b]633;E;claude\x07", PRE.length, 64 * 1024),
+  "claude",
+);
+// Budget exhausted: never promote, even on a real post-arm banner.
+check(
+  "promote: spent budget disables promotion",
+  ap.promoteGenericArm(PRE + POST_BANNER, PRE.length, 0),
+  null,
+);
+// advanceGenericArm bookkeeping. Object results compared via JSON.
+function checkAdv(name, actual, ringFrom, budget) {
+  const ok = actual.ringFrom === ringFrom && actual.budget === budget;
+  if (!ok) failures += 1;
+  console.log(`${ok ? "PASS" : "FAIL"} ${name} → ${JSON.stringify(actual)} (want {ringFrom:${ringFrom},budget:${budget}})`);
+}
+// Ring still under cap → nothing dropped: offset unchanged, budget burns by chunk.
+checkAdv("advance: no slide (ring under cap)", ap.advanceGenericArm(20, 1000, 100, 150, 50), 20, 950);
+// Ring pinned at the cap → dropped == chunkLen: offset walks fully back, floors at 0.
+checkAdv("advance: full slide at cap floors ringFrom", ap.advanceGenericArm(20, 1000, 8192, 8192, 100), 0, 900);
+// Partial slide as the ring crosses the cap: dropped = before+chunk-after.
+checkAdv("advance: partial slide across cap", ap.advanceGenericArm(200, 1000, 8000, 8192, 300), 92, 700);
+// Budget already spent → no-op (promotion is already disabled for this arm).
+checkAdv("advance: spent budget is a no-op", ap.advanceGenericArm(50, 0, 100, 150, 50), 50, 0);
+// Budget floors at 0 on the chunk that overshoots it.
+checkAdv("advance: budget floors at 0", ap.advanceGenericArm(50, 30, 8192, 8192, 100), 0, 0);
+
 // ── REAL Codex v0.138.0 frames (live pty capture, 2026-06-10) ──
 check(
   "codex v0.138 working footer",
