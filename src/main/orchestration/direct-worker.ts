@@ -25,13 +25,12 @@ import type {
 import * as pty from "../pty-manager";
 import { defaultShell } from "../shells";
 import { appendEvent, subscribeToEvents } from "./event-log";
-import {
-  failWorkerAttempt,
-  getRun,
-  listRuns,
-  relaunchDirectAttempt,
-  settleRecoveredDirectAttempt,
-} from "./run-store";
+
+let runStoreMod: typeof import("./run-store") | undefined;
+async function getRunStore(): Promise<typeof import("./run-store")> {
+  runStoreMod ??= await import("./run-store");
+  return runStoreMod;
+}
 
 const HEADLESS_PTY_COLS = 120;
 const HEADLESS_PTY_ROWS = 32;
@@ -100,7 +99,8 @@ export function installAutomationWorkerSpawnHandler(): () => void {
     void (async () => {
       let automationId = typeof payload?.automationId === "string" ? payload.automationId : "";
       try {
-        const run = await getRun(runId);
+        const runStore = await getRunStore();
+        const run = await runStore.getRun(runId);
         if (!run || run.executionMode !== "direct" || !run.automationId) return;
         automationId = run.automationId;
         const attempt = run.workerAttempts.find((item) => item.id === attemptId);
@@ -153,7 +153,7 @@ export function installAutomationWorkerSpawnHandler(): () => void {
         // Fail fast instead of letting runWorkerSession eat the full 30s
         // waitForSpawn timeout — the loop driver sees a terminal run promptly.
         const message = err instanceof Error ? err.message : String(err);
-        await failWorkerAttempt(runId, attemptId, `pty-spawn-failed: ${message}`).catch(
+        await (await getRunStore()).failWorkerAttempt(runId, attemptId, `pty-spawn-failed: ${message}`).catch(
           () => undefined,
         );
       }
@@ -178,8 +178,10 @@ export function installAutomationWorkerSpawnHandler(): () => void {
  */
 export async function recoverDirectRuns(): Promise<void> {
   let runs;
+  let runStore: typeof import("./run-store");
   try {
-    runs = await listRuns();
+    runStore = await getRunStore();
+    runs = await runStore.listRuns();
   } catch {
     return;
   }
@@ -223,7 +225,7 @@ export async function recoverDirectRuns(): Promise<void> {
     if (nonTerminal.length === 0) {
       // No active attempt, but the run never finalized (quit landed between the
       // wave's session ends and review). Funnel the run through finalize once.
-      await settleRecoveredDirectAttempt(run.id, run.workerAttempts.at(-1)!.id).catch(
+      await runStore.settleRecoveredDirectAttempt(run.id, run.workerAttempts.at(-1)!.id).catch(
         () => undefined,
       );
       continue;
@@ -239,7 +241,7 @@ export async function recoverDirectRuns(): Promise<void> {
         : false;
       if (reportExists) {
         // Report on disk → settle this attempt (never re-run finished work).
-        await settleRecoveredDirectAttempt(run.id, attempt.id).catch(() => undefined);
+        await runStore.settleRecoveredDirectAttempt(run.id, attempt.id).catch(() => undefined);
         continue;
       }
       if (attempt.attemptNumber <= 1) {
@@ -250,9 +252,9 @@ export async function recoverDirectRuns(): Promise<void> {
         // same way. Settle paths above stay ungated — they spawn no worker, only
         // record already-finished work.
         if (await loomClaimsRun(run.automationId, run.id)) {
-          await relaunchDirectAttempt(run.id, attempt.id).catch(() => undefined);
+          await runStore.relaunchDirectAttempt(run.id, attempt.id).catch(() => undefined);
         } else {
-          await failWorkerAttempt(
+          await runStore.failWorkerAttempt(
             run.id,
             attempt.id,
             "owning loom deleted or no longer claims this run",
@@ -260,7 +262,7 @@ export async function recoverDirectRuns(): Promise<void> {
         }
         continue;
       }
-      await failWorkerAttempt(
+      await runStore.failWorkerAttempt(
         run.id,
         attempt.id,
         "app restarted mid-iteration (relaunch already used)",
@@ -282,7 +284,7 @@ async function loomClaimsRun(automationId: string | undefined, runId: string): P
 
 async function unblockRun(runId: string): Promise<void> {
   try {
-    const { updateRunStatus } = await import("./run-store");
+    const { updateRunStatus } = await getRunStore();
     await updateRunStatus({ runId, status: "running" });
   } catch {
     /* best-effort; the table below still records what it can */
@@ -300,8 +302,9 @@ async function unblockRun(runId: string): Promise<void> {
  * entry is joined with its task config + the owning loom's name + graph.
  */
 export async function listActiveAutomationWorkers(): Promise<AutomationWorkerInfo[]> {
+  const runStore = await getRunStore();
   const [runs, jobs] = await Promise.all([
-    listRuns(),
+    runStore.listRuns(),
     (async () => {
       try {
         const { listJobs } = await import("./scheduler");
@@ -351,7 +354,7 @@ async function describeWorker(
   attemptId?: string,
   ownerJob?: ScheduledJob,
 ): Promise<AutomationWorkerInfo | null> {
-  const run = await getRun(runId);
+  const run = await (await getRunStore()).getRun(runId);
   if (!run || run.executionMode !== "direct" || !run.automationId) return null;
   const attempt = attemptId
     ? run.workerAttempts.find((a) => a.id === attemptId)
@@ -409,7 +412,7 @@ async function describeWorker(
 
 async function failNoAttemptRun(runId: string): Promise<void> {
   try {
-    const { updateRunStatus } = await import("./run-store");
+    const { updateRunStatus } = await getRunStore();
     await updateRunStatus({ runId, status: "failed" });
   } catch {
     /* recovery is best-effort; resumeLoops re-decides from run status */

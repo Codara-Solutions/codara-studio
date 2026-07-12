@@ -42,7 +42,7 @@ export interface SpawnOpts {
   /**
    * Reasoning-effort level. Translated per-provider: Claude takes
    * `--effort <low|medium|high|xhigh|max>`, Codex takes
-   * `-c "model_reasoning_effort=<minimal|low|medium|high|xhigh>"`,
+   * `-c "model_reasoning_effort=<low|medium|high|xhigh|max>"`,
    * Cursor ignores it (no effort flag).
    */
   effort?: AgentEffortLevel;

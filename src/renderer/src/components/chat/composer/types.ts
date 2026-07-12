@@ -4,9 +4,10 @@ import type {
   ChatBackendKind,
   ChatMode,
 } from "@shared/types";
+import { CODEX_MODEL_CATALOG } from "@shared/model-catalog";
 
 // Per-model option used in the model picker. Each row is either a "real" id
-// the backend understands directly (e.g. "claude-opus-4-8", "gpt-5.5") or a
+// the backend understands directly (e.g. "claude-opus-4-8", "gpt-5.6-sol") or a
 // virtual id with the `:1m` suffix that the composer decomposes into the
 // base model id plus chat1mContext=true on pick. The backend never sees a
 // `:1m` id.
@@ -16,6 +17,8 @@ export interface ChatModelOption {
   backend: ChatBackendKind;
   effortLevels?: AgentEffortLevel[];
   isOneMillion?: boolean;
+  description?: string;
+  badge?: string;
 }
 
 export interface ChatBackendGroup {
@@ -43,22 +46,13 @@ export const ALL_EFFORTS: AgentEffortLevel[] = [
 // so selecting Opus/Sonnet always sets chat1mContext=true.
 const CLAUDE_MODELS: ChatModelOption[] = [
   {
-    // Fable 5 (Anthropic's top-tier model) is offered as a plain row — no `:1m`
-    // virtual suffix, since we don't yet know fable supports the 1M-context
-    // beta. findOptionInCatalog / decomposeModelId already handle non-1m rows
-    // (gpt-5.5 is one), so the picker resolves this row by its bare id and the
-    // composer never sets chat1mContext for it.
-    id: "claude-fable-5",
-    label: "Fable 5",
-    backend: "claude",
-    effortLevels: ["low", "medium", "high", "xhigh", "max"],
-  },
-  {
     id: "claude-opus-4-8:1m",
     label: "Opus 4.8 1M",
     backend: "claude",
     effortLevels: ["low", "medium", "high", "xhigh", "max"],
     isOneMillion: true,
+    description: "Highest-quality Claude model for complex project work.",
+    badge: "Flagship",
   },
   {
     id: "claude-sonnet-5:1m",
@@ -66,17 +60,35 @@ const CLAUDE_MODELS: ChatModelOption[] = [
     backend: "claude",
     effortLevels: ["low", "medium", "high", "xhigh", "max"],
     isOneMillion: true,
+    description: "Fast, capable everyday model with a one-million-token context.",
+    badge: "Balanced",
+  },
+  {
+    // Fable stays available when the preference is enabled, but it comes last:
+    // merely opting into a premium model must never make every fresh chat use
+    // it by accident.
+    id: "claude-fable-5",
+    label: "Fable 5",
+    backend: "claude",
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+    description: "Premium Claude tier; use intentionally for the hardest work.",
+    badge: "Premium",
   },
 ];
 
-const CODEX_MODELS: ChatModelOption[] = [
-  {
-    id: "gpt-5.5",
-    label: "GPT-5.5",
-    backend: "codex",
-    effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
-  },
-];
+const CODEX_MODELS: ChatModelOption[] = CODEX_MODEL_CATALOG.map((model) => ({
+  id: model.id,
+  label: model.label,
+  backend: "codex",
+  effortLevels: [...model.effortLevels],
+  description: model.description,
+  badge:
+    model.tier === "top"
+      ? "Flagship"
+      : model.tier === "mid"
+        ? "Balanced"
+        : "Fast",
+}));
 
 export const DEFAULT_CHAT_BACKEND: ChatBackendKind = "openrouter";
 export const DEFAULT_CHAT_MODEL = "google/gemini-flash-latest";

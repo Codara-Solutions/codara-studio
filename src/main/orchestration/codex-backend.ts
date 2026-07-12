@@ -6,7 +6,7 @@
 // and translates the JSONL event vocabulary into ChatStreamEvents.
 //
 // Per-chat lifecycle:
-//   1. First call for a runId spawns a fresh `codex --yolo …` (or
+//   1. First call for a runId spawns a fresh `codex --yolo …` session (or
 //      `codex resume <uuid> --yolo …` when chat.sessionUuid is set), writes a
 //      `[projects."<cwd>"]` trust block to ~/.codex/config.toml so the TUI
 //      doesn't prompt, and starts tailing the rollout. Subsequent calls reuse
@@ -23,7 +23,6 @@
 // chat turns so users get true conversational continuity (the rollout is the
 // model's memory). disposeChat() tears it down.
 
-import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -45,8 +44,14 @@ import {
 import { logConfigShieldOnce } from "./agent-config-shield";
 import { buildExecuteDecisionFromToolCalls } from "./claude-backend";
 import { startCliSession, type CliSession } from "./cli-session";
-import { discoverRolloutPath, extractSessionUuid } from "./codex-sessions";
+import { buildCodexManagerArgs } from "./codex-manager-launch";
+import {
+  discoverRolloutForCwd,
+  extractSessionUuid,
+  snapshotRolloutPaths,
+} from "./codex-sessions";
 import { ensureCodexProjectTrust } from "./codex-trust";
+import { resolveBundledResourcePath } from "../bundled-resources";
 import {
   installOrchestratorMcpForCodex,
   isSparkOrchestratorMcpInstalled,
@@ -77,16 +82,23 @@ interface CodexChatSession {
   /** Last seen agent_message id; we collapse repeats into one assistant block
    *  on the renderer side via the messageId. */
   lastMessageId: string | null;
+  /** Monotonic fallback id for Codex agent_message events that omit a
+   * message_id (current Codex CLI releases do). Giving each complete block a
+   * distinct id preserves paragraph boundaries in the live renderer. */
+  messageSequence: number;
   /** Resolver for the in-flight turn's task_complete waiter, or null if no
    *  turn is in flight. */
   pendingResolve: (() => void) | null;
   pendingReject: ((err: Error) => void) | null;
-  /** Token-count snapshot at the start of the current turn — we report the
-   *  delta as the turn's usage rather than the cumulative total so the cost
-   *  chip reflects per-turn spend like every other backend. */
-  turnStartUsage: { input: number; output: number; cached: number } | null;
+  /** Most recent cumulative counter from Codex's rollout. token_count events
+   * repeat the lifetime total, so emitting that value on every update makes
+   * the composer add the same tokens hundreds of times. */
+  cumulativeUsage: { input: number; output: number; cached: number };
+  usageInitialized: boolean;
+  /** True incremental usage accumulated during only the current manager turn. */
+  turnUsage: { input: number; output: number; cached: number };
   /** Tool calls observed during the current turn. In Execute mode we read
-   *  this after the turn ends to convert codara_spawn_workers calls into a
+   *  this after the turn ends to convert codara_spawn_terminals / codara_spawn_workers calls into a
    *  SparkManagerDecision the run-store can act on — mirrors the claude
    *  backend's turnToolCalls field. */
   turnToolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }>;
@@ -182,26 +194,10 @@ const AUTO_PROMPT_RESOURCE_FILENAME = "codex-auto-prompt.md";
 // resources/orchestration dir.
 const AUTOMATION_PROMPT_RESOURCE_FILENAME = "cc-automation-prompt.md";
 
-// Resolve the Execute-mode orchestrator prompt shipped under
-// `resources/orchestration/`. Mirrors the CC backend's resolveExecutePromptPath.
-function resolveExecutePromptPath(): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, "orchestration", EXECUTE_PROMPT_RESOURCE_FILENAME)
-    : join(__dirname, "..", "..", "resources", "orchestration", EXECUTE_PROMPT_RESOURCE_FILENAME);
-}
-
-// Resolve the Auto-mode coordinator prompt (Cora routes each message herself).
-function resolveAutoPromptPath(): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, "orchestration", AUTO_PROMPT_RESOURCE_FILENAME)
-    : join(__dirname, "..", "..", "resources", "orchestration", AUTO_PROMPT_RESOURCE_FILENAME);
-}
-
-// Resolve the Automation-mode architect prompt (shared with the CC backend).
-function resolveAutomationPromptPath(): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, "orchestration", AUTOMATION_PROMPT_RESOURCE_FILENAME)
-    : join(__dirname, "..", "..", "resources", "orchestration", AUTOMATION_PROMPT_RESOURCE_FILENAME);
+// Resolve prompts from the application resource root. This remains stable when
+// electron-vite moves the backend between out/main and out/main/chunks.
+function resolveOrchestrationPromptPath(filename: string): string {
+  return resolveBundledResourcePath("orchestration", filename);
 }
 
 const DEFAULT_TALK_PROMPT = `You are running inside Codara's Talk mode. The user is chatting with you conversationally; respond as a helpful, terse engineering collaborator.
@@ -249,6 +245,16 @@ function asString(value: unknown): string {
   }
 }
 
+function mcpToolCallSucceeded(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const result = value as Record<string, unknown>;
+  if (!("Ok" in result)) return false;
+  const ok = result.Ok;
+  if (!ok || typeof ok !== "object" || Array.isArray(ok)) return true;
+  const payload = ok as Record<string, unknown>;
+  return payload.isError !== true && payload.is_error !== true;
+}
+
 interface JsonlEntry {
   type?: string;
   payload?: {
@@ -257,53 +263,6 @@ interface JsonlEntry {
   };
   __spark_cli_session_error?: boolean;
   message?: string;
-}
-
-function buildArgs(input: ManagerRequestInput, promptPath: string): string[] {
-  const { chat } = input;
-  const args: string[] = [];
-  if (chat.sessionUuid) {
-    args.push("resume", chat.sessionUuid);
-  }
-  args.push("--yolo");
-  if (chat.model) {
-    args.push("-m", chat.model);
-  }
-  if (chat.effort) {
-    args.push("-c", `model_reasoning_effort=${chat.effort}`);
-  }
-  // Codex's fast_mode is a feature flag (`codex features list` shows it as
-  // stable=true by default). Always pass an explicit --enable/--disable so
-  // the chip's choice is authoritative regardless of the user's saved
-  // config.toml. Codex has no 1M-context offering today; chat.oneMillionContext
-  // is ignored here (Claude-only feature).
-  args.push(chat.fastMode ? "--enable" : "--disable", "fast_mode");
-  // `model_instructions_file` works for both Talk and Execute prompts — the
-  // caller picks the right `promptPath` based on `chat.mode`.
-  args.push("-c", `model_instructions_file="${promptPath}"`);
-  args.push("-c", "project_doc_max_bytes=0");
-  // Orchestration roster selection. Codex has no per-run MCP CONFIG file like
-  // Claude, but it DOES accept dotted `-c` overrides of the global config,
-  // including the managed codara-studio server's env. The GLOBAL entry has no
-  // SPARK_MCP_MODE, so it exposes only the studio (preview + terminal) roster;
-  // override SPARK_MCP_MODE for this invocation so the server ALSO exposes the
-  // orchestration tools — the Execute worker-spawning roster for execute/auto,
-  // the automation architect roster for automation. Verified codex v0.125
-  // accepts `-c mcp_servers."codara-studio".env.KEY="val"`; the server name
-  // must be TOML-quoted because it contains a hyphen.
-  if (chat.mode === "execute" || chat.mode === "auto") {
-    args.push("-c", `mcp_servers."codara-studio".env.SPARK_MCP_MODE="execute"`);
-  } else if (chat.mode === "automation") {
-    args.push("-c", `mcp_servers."codara-studio".env.SPARK_MCP_MODE="automation"`);
-  }
-  // Sandbox enforcement. Both modes use read-only:
-  // - Talk: user is asking questions, no writes expected.
-  // - Execute: Codex is a *manager* — it delegates ALL file changes to
-  //   workers (which run in their own sandboxes with their own write
-  //   permissions). The orchestrator itself doesn't need to write.
-  //   Read-only enforces this even if the prompt drifts.
-  args.push("-s", "read-only");
-  return args;
 }
 
 async function spawnSession(
@@ -324,16 +283,16 @@ async function spawnSession(
   // via spark_*_automation).
   const promptPath =
     input.chat.mode === "execute"
-      ? resolveExecutePromptPath()
+      ? resolveOrchestrationPromptPath(EXECUTE_PROMPT_RESOURCE_FILENAME)
       : input.chat.mode === "auto"
-        ? resolveAutoPromptPath()
+        ? resolveOrchestrationPromptPath(AUTO_PROMPT_RESOURCE_FILENAME)
         : input.chat.mode === "automation"
-          ? resolveAutomationPromptPath()
+          ? resolveOrchestrationPromptPath(AUTOMATION_PROMPT_RESOURCE_FILENAME)
           : await ensureTalkPromptFile();
   // Execute, Auto, and Automation all proxy through the codara-studio MCP,
   // so each ensures it is installed (once, globally, in ~/.codex/config.toml).
   // Unlike the Claude backend, Codex has no per-run MCP CONFIG file, but it DOES
-  // honor per-invocation `-c mcp_servers."codara-studio".env.*` overrides
+  // honor per-invocation `-c mcp_servers.codara-studio.env.*` overrides
   // (added in buildArgs to select the execute/automation roster), so a Codex
   // execute/auto/automation chat gets the right SPARK_MCP_MODE env and therefore
   // the real orchestration roster — Codex orchestration is fully functional. The
@@ -356,8 +315,15 @@ async function spawnSession(
       });
     });
   }
-  const args = buildArgs(input, promptPath);
+  const args = buildCodexManagerArgs(input.chat, promptPath, sparkHome());
   const spawnDate = new Date();
+  // Fresh-session ownership starts with a filesystem snapshot. A personal
+  // Codex window can update an old rollout after this manager starts; without
+  // this exclusion it can win the old newest-mtime heuristic and have its
+  // private transcript replayed into Cora. Resume flows bind by exact UUID.
+  const preexistingRollouts = input.chat.sessionUuid
+    ? undefined
+    : await snapshotRolloutPaths(spawnDate);
   const spawnedAt = Date.now();
   // Deterministic sessionId so the renderer's backend-terminal tab can
   // attach to the same PTY without a state-sync round-trip via the helper.
@@ -369,14 +335,10 @@ async function spawnSession(
     kind: "system_note",
     message: `Spawning codex (mode=${input.chat.mode}) args: ${args.map((a) => JSON.stringify(a)).join(" ")}`,
   });
-  // NO config shield here, deliberately: this manager runs with `-s read-only`,
-  // which makes codex apply its own macOS Seatbelt profile to every command it
-  // executes — and Seatbelt cannot nest. Wrapping this spawn in sandbox-exec
-  // makes EVERY manager shell command fail with "sandbox_apply: Operation not
-  // permitted" (confirmed live on codex 0.142.5), including reading worker
-  // final_report_path files. We accept the ~/.codex/AGENTS.md leak for the
-  // manager; claude-backend keeps its wrap (the claude manager applies no
-  // Seatbelt of its own). See agent-config-shield.ts.
+  // NO config shield here, deliberately: the manager's explicit `--yolo`
+  // contract lets it call the trusted Codara MCP roster without a terminal
+  // approval prompt. The manager prompt remains responsible for delegation
+  // discipline; worker access is constrained separately at worker launch.
   logConfigShieldOnce();
   const cli = await startCliSession({
     sessionId,
@@ -385,7 +347,13 @@ async function spawnSession(
     args,
     env: { SPARK_RUN_ID: input.run.id },
     jsonlReadyTimeoutMs: 30_000,
-    discoverJsonlPath: () => discoverRolloutPath(spawnedAt, spawnDate),
+    discoverJsonlPath: () =>
+      discoverRolloutForCwd(spawnedAt, spawnDate, input.cwd, {
+        strict: true,
+        excludePaths: preexistingRollouts,
+        createdAfter: input.chat.sessionUuid ? undefined : spawnedAt,
+        sessionUuid: input.chat.sessionUuid,
+      }),
     // Resume case: the rollout JSONL already contains prior turns. Skip the
     // existing content so the tailer only delivers fresh appended lines —
     // otherwise replayed assistant blocks pile into the current turn's
@@ -401,9 +369,12 @@ async function spawnSession(
     spawnEffort: input.chat.effort,
     accumulatedText: "",
     lastMessageId: null,
+    messageSequence: 0,
     pendingResolve: null,
     pendingReject: null,
-    turnStartUsage: null,
+    cumulativeUsage: { input: 0, output: 0, cached: 0 },
+    usageInitialized: false,
+    turnUsage: { input: 0, output: 0, cached: 0 },
     turnToolCalls: [],
     lastJsonlActivityAt: Date.now(),
     interruptedAt: null,
@@ -428,6 +399,10 @@ async function spawnSession(
       session.pendingReject?.(new Error(msg));
       return;
     }
+    // An exited manager owns no future stream. This is a second boundary after
+    // cli-session's exit-aware discovery loop: even an already-attached tail
+    // cannot append prose or usage after its SparkCall has failed.
+    if (session.exited) return;
     handleEntry(session, entry, onStream);
   });
 
@@ -482,14 +457,23 @@ function handleEntry(
       const p = payload as { message_id?: unknown; text?: unknown; message?: unknown };
       const text = typeof p.text === "string" ? p.text : typeof p.message === "string" ? p.message : "";
       if (!text) return;
-      const messageId = typeof p.message_id === "string" && p.message_id ? p.message_id : "msg";
+      const messageId =
+        typeof p.message_id === "string" && p.message_id
+          ? p.message_id
+          : `codex-block-${++session.messageSequence}`;
       session.lastMessageId = messageId;
-      session.accumulatedText += (session.accumulatedText ? "\n" : "") + text;
+      session.accumulatedText += (session.accumulatedText ? "\n\n" : "") + text;
       onStream?.({ kind: "assistant_block", messageId, text });
       return;
     }
     if (payloadType === "token_count") {
-      const info = (payload as { info?: { total_token_usage?: unknown; model_context_window?: unknown } }).info;
+      const info = (payload as {
+        info?: {
+          total_token_usage?: unknown;
+          last_token_usage?: unknown;
+          model_context_window?: unknown;
+        };
+      }).info;
       const total = (info?.total_token_usage as
         | { input_tokens?: number; output_tokens?: number; cached_input_tokens?: number }
         | undefined) ?? undefined;
@@ -497,13 +481,31 @@ function handleEntry(
       const cumulativeIn = total.input_tokens ?? 0;
       const cumulativeOut = total.output_tokens ?? 0;
       const cumulativeCached = total.cached_input_tokens ?? 0;
-      const start = session.turnStartUsage;
-      // For a freshly spawned session the very first token_count IS the turn
-      // delta; for an in-progress chat we subtract the snapshot we took on
-      // turn start. Either way, never go negative.
-      const deltaIn = start ? Math.max(0, cumulativeIn - start.input) : cumulativeIn;
-      const deltaOut = start ? Math.max(0, cumulativeOut - start.output) : cumulativeOut;
-      const deltaCached = start ? Math.max(0, cumulativeCached - start.cached) : cumulativeCached;
+      const last = (info?.last_token_usage as
+        | { input_tokens?: number; output_tokens?: number; cached_input_tokens?: number }
+        | undefined) ?? undefined;
+      // token_count repeats a lifetime cumulative total after every model/tool
+      // exchange. Emit only the increment since the prior event. On the first
+      // event of a fresh/resumed tail, last_token_usage is the exact increment
+      // that produced that cumulative snapshot and avoids charging old turns.
+      const deltaIn = session.usageInitialized
+        ? Math.max(0, cumulativeIn - session.cumulativeUsage.input)
+        : Math.max(0, last?.input_tokens ?? cumulativeIn);
+      const deltaOut = session.usageInitialized
+        ? Math.max(0, cumulativeOut - session.cumulativeUsage.output)
+        : Math.max(0, last?.output_tokens ?? cumulativeOut);
+      const deltaCached = session.usageInitialized
+        ? Math.max(0, cumulativeCached - session.cumulativeUsage.cached)
+        : Math.max(0, last?.cached_input_tokens ?? cumulativeCached);
+      session.cumulativeUsage = {
+        input: cumulativeIn,
+        output: cumulativeOut,
+        cached: cumulativeCached,
+      };
+      session.usageInitialized = true;
+      session.turnUsage.input += deltaIn;
+      session.turnUsage.output += deltaOut;
+      session.turnUsage.cached += deltaCached;
       const ctxRaw = info?.model_context_window;
       const ctx = typeof ctxRaw === "number" ? ctxRaw : undefined;
       onStream?.({
@@ -511,7 +513,39 @@ function handleEntry(
         inputTokens: deltaIn,
         outputTokens: deltaOut,
         cacheReadTokens: deltaCached,
+        contextTokens:
+          typeof last?.input_tokens === "number" ? last.input_tokens : undefined,
         contextWindowTokens: ctx,
+      });
+      return;
+    }
+    if (payloadType === "mcp_tool_call_end") {
+      const p = payload as {
+        call_id?: unknown;
+        invocation?: {
+          server?: unknown;
+          tool?: unknown;
+          arguments?: unknown;
+        };
+        result?: unknown;
+      };
+      const toolName =
+        typeof p.invocation?.tool === "string" ? p.invocation.tool : "mcp_tool";
+      const toolUseId =
+        typeof p.call_id === "string" ? p.call_id : `mcp_${Date.now()}`;
+      const input = tryParseJson(p.invocation?.arguments);
+      // Codex 0.144 wraps MCP calls inside its generic `exec` custom tool. The
+      // actionable name/input therefore live on mcp_tool_call_end rather than
+      // a response_item function_call. Record only successful calls: a failed
+      // MCP invocation must not become a terminal/worker decision.
+      if (mcpToolCallSucceeded(p.result)) {
+        session.turnToolCalls.push({ toolName, toolUseId, input });
+      }
+      onStream?.({ kind: "tool_use", toolName, input, toolUseId });
+      onStream?.({
+        kind: "tool_result",
+        toolUseId,
+        output: asString(p.result),
       });
       return;
     }
@@ -717,11 +751,10 @@ export const codexBackend: SparkAgentBackend = {
         SESSIONS.set(input.run.id, session);
         freshSpawn = true;
       }
-      // Snapshot cumulative usage so this turn's token-count deltas don't
-      // accidentally include earlier turns' totals.
       session.accumulatedText = "";
       session.lastMessageId = null;
-      session.turnStartUsage = { input: 0, output: 0, cached: 0 };
+      session.messageSequence = 0;
+      session.turnUsage = { input: 0, output: 0, cached: 0 };
       session.turnToolCalls = [];
       // A previous turn's user interrupt must not misclassify THIS turn's
       // outcome as aborted.
@@ -761,12 +794,18 @@ export const codexBackend: SparkAgentBackend = {
       // its Ink input loop attaches a beat after first stdout; typing earlier
       // drops the prompt (no turn -> no rollout -> the JSONL watchdog trips).
       await session.cli.waitForFirstStdout(CODEX_REPL_READY_TIMEOUT_MS).catch(() => {});
+      if (session.exited) {
+        throw new Error(session.exitMessage ?? "Codex session terminated during startup.");
+      }
       if (freshSpawn) {
         // Prefer the real input-ready signal (bracketed-paste enable) over a
         // blind sleep; fall back to just the settle delay when the TUI never
         // emits it. Both catches are non-fatal by design — the settle path
         // below is the behavior proven against codex 0.142.x.
         await session.cli.waitForInputReady(CODEX_INPUT_READY_TIMEOUT_MS).catch(() => {});
+        if (session.exited) {
+          throw new Error(session.exitMessage ?? "Codex session terminated during startup.");
+        }
         await sleep(CODEX_INPUT_SETTLE_MS);
       }
       // The session can die during the pre-submit REPL settle above (onExit
@@ -801,6 +840,9 @@ export const codexBackend: SparkAgentBackend = {
           durationMs: Date.now() - startedAt,
           model: input.chat.model,
           newSessionUuid,
+          inputTokens: session.turnUsage.input,
+          outputTokens: session.turnUsage.output,
+          cacheReadTokens: session.turnUsage.cached,
         };
       }
       return {
@@ -808,6 +850,9 @@ export const codexBackend: SparkAgentBackend = {
         durationMs: Date.now() - startedAt,
         model: input.chat.model,
         newSessionUuid,
+        inputTokens: session.turnUsage.input,
+        outputTokens: session.turnUsage.output,
+        cacheReadTokens: session.turnUsage.cached,
       };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -826,6 +871,14 @@ export const codexBackend: SparkAgentBackend = {
           notice: "Codex turn interrupted by user.",
           turnAborted: true,
         };
+      }
+      const failedSession = SESSIONS.get(input.run.id);
+      if (failedSession?.exited) {
+        // A crashed/config-rejected manager has no conversational continuity
+        // to preserve. Remove it now so its tail/discovery cannot outlive this
+        // failed SparkCall, and so retry starts from a clean process.
+        SESSIONS.delete(input.run.id);
+        await failedSession.cli.dispose().catch(() => undefined);
       }
       onStream?.({ kind: "error", message });
       return {

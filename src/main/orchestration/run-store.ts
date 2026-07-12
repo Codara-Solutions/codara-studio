@@ -62,6 +62,7 @@ import {
   estimateTokensFromText,
 } from "@shared/context-window";
 import { normalizeChatFeatureFlags } from "@shared/chat-policy";
+import { CODEX_MODEL_BY_TIER, normalizeCodexModelId } from "@shared/model-catalog";
 import {
   appendEvent,
   appendFanOutDirectiveForcedEvent,
@@ -175,11 +176,16 @@ const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
 const CONTINUE_INPUT = "continue\r";
 const HUMAN_INPUT_PAUSE_REASON = "Cora needs human input before continuing.";
-// How many run directories under ~/.SparkAgent/runs/ we keep on disk. Older
-// runs are swept lazily on the first listRuns() call per process. Bumped from
-// "unbounded" because users reported the runs/ tree growing into GB of pty
-// raw.log + worker artifacts after a few weeks of heavy use.
+// How many run directories under ~/.SparkAgent/runs/ count toward retained
+// history. Live/nonterminal runs never consume deletion eligibility: retain all
+// of them even when they exceed this budget, then fill the remaining slots with
+// the newest known-terminal runs.
 const RUN_RETENTION_KEEP = 50;
+const RETENTION_TERMINAL_STATUSES = new Set<RunStatus>([
+  "complete",
+  "failed",
+  "cancelled",
+]);
 
 // SLICE 6 (bounded loop-back cycles) — the SECOND, independent termination bound.
 // Beyond each back-edge's per-edge visitCap (loom-graph.effectiveVisitCap), this
@@ -360,10 +366,10 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
 
 export async function getRun(runId: string): Promise<RunState | null> {
   // Cache HIT: the in-memory copy is authoritative (this module is the sole
-  // writer of run.json), so skip the disk read + JSON.parse entirely. The
-  // cached object is already normalized and stays normalized across saveRun.
+  // writer of run.json) and canonical. It was normalized before entering the
+  // cache and stays normalized across saveRun, so return it without rebuilding.
   const cached = runCache.get(runId);
-  if (cached) return normalizeRun(cached);
+  if (cached) return cached;
 
   // Cache MISS: read + parse + normalize from disk, then populate the cache.
   try {
@@ -381,12 +387,41 @@ export async function getRun(runId: string): Promise<RunState | null> {
   }
 }
 
-// Recursively delete any runs beyond RUN_RETENTION_KEEP, oldest-first. Reads
-// each run.json for its createdAt; falls back to the directory mtime if the
-// JSON is unreadable so a corrupt run still has a stable position in the
-// ordering. Reuses deleteRun() so the in-memory runCache is evicted in lockstep
-// with the on-disk removal. Best-effort: every failure is swallowed so a
-// permission / EBUSY hiccup never bubbles up into the IPC reply for listRuns.
+async function purgeTerminalRunForRetention(runId: string): Promise<void> {
+  // Serialize the final status check with normal run commits. A run can be
+  // resumed while the sweep is scanning; checking only the earlier disk
+  // snapshot would let retention delete it after it became live again.
+  const previous = runMutationQueues.get(runId) ?? Promise.resolve();
+  const next = previous
+    .catch(() => {
+      /* an earlier failed commit must not wedge retention */
+    })
+    .then(async () => {
+      const latest = await getRun(runId);
+      if (!latest || !RETENTION_TERMINAL_STATUSES.has(latest.status)) return;
+      if (
+        activeWorkersForRun(runId).length > 0 ||
+        [...activeAutopilotCycles.keys()].some((key) => key.startsWith(`${runId}:`)) ||
+        activeAutopilotPlans.has(runId) ||
+        activeAutopilotReviews.has(runId)
+      ) {
+        return;
+      }
+      await deleteRun(runId);
+    });
+  runMutationQueues.set(runId, next);
+  try {
+    await next;
+  } finally {
+    if (runMutationQueues.get(runId) === next) runMutationQueues.delete(runId);
+  }
+}
+
+// Recursively delete only known-terminal runs outside the retention budget.
+// Nonterminal, missing, malformed, and unknown statuses are conservative keeps:
+// retention must never destroy work merely because its metadata cannot prove it
+// finished. The remaining budget after those protected entries is filled by the
+// newest terminal runs. Best-effort: failures never bubble into listRuns().
 async function runRetentionSweep(): Promise<void> {
   try {
     const root = runsRoot();
@@ -401,37 +436,46 @@ async function runRetentionSweep(): Promise<void> {
 
     const entries = await Promise.all(
       names.map(async (name) => {
-        let createdAt: string | null = null;
+        let status: unknown;
+        let createdMs = Number.NEGATIVE_INFINITY;
+        let readable = false;
         try {
           const raw = await fs.readFile(runPath(name), "utf8");
-          const parsed = JSON.parse(raw) as { createdAt?: unknown };
-          if (typeof parsed.createdAt === "string") createdAt = parsed.createdAt;
+          const parsed = JSON.parse(raw) as { createdAt?: unknown; status?: unknown };
+          readable = true;
+          status = parsed.status;
+          if (typeof parsed.createdAt === "string") {
+            const parsedMs = Date.parse(parsed.createdAt);
+            if (Number.isFinite(parsedMs)) createdMs = parsedMs;
+          }
         } catch {
-          /* fall through to mtime */
+          // unreadable/corrupt means protected below
         }
-        if (!createdAt) {
+        if (!Number.isFinite(createdMs)) {
           try {
-            const stat = await fs.stat(join(root, name));
-            createdAt = new Date(stat.mtimeMs).toISOString();
+            createdMs = (await fs.stat(join(root, name))).mtimeMs;
           } catch {
-            createdAt = "1970-01-01T00:00:00.000Z";
+            createdMs = Number.NEGATIVE_INFINITY;
           }
         }
-        return { name, createdAt };
+        const terminal =
+          readable &&
+          typeof status === "string" &&
+          RETENTION_TERMINAL_STATUSES.has(status as RunStatus);
+        return { name, createdMs, terminal };
       }),
     );
 
-    // Newest first, then drop the head we want to keep.
-    entries.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    const toPurge = entries.slice(RUN_RETENTION_KEEP);
+    const terminal = entries
+      .filter((entry) => entry.terminal)
+      .sort((a, b) => b.createdMs - a.createdMs || b.name.localeCompare(a.name));
+    const toPurge = terminal.slice(RUN_RETENTION_KEEP);
     for (const entry of toPurge) {
       try {
-        await deleteRun(entry.name);
+        await purgeTerminalRunForRetention(entry.name);
       } catch {
-        // deleteRun requires an in-memory run; for purely on-disk leftovers
-        // that aren't cached, fall back to rmRunDirHard + cache eviction.
-        try { await rmRunDirHard(join(root, entry.name)); } catch { /* best-effort */ }
-        runCache.delete(entry.name);
+        // A failed final re-read/check is conservative: keep the run. The next
+        // process gets another sweep rather than deleting uncertain state.
       }
     }
   } catch (err) {
@@ -516,11 +560,6 @@ function chatTitleFromInput(input: StartAutopilotInput): string {
   return `Autopilot - ${input.workspaceName}`;
 }
 
-// Daemon-split (Phase 0): headless entry the detached daemon-host reuses
-// verbatim — do not fork. The same StartAutopilotInput -> RunState contract
-// drives runHeadlessEval today; the daemon host (src/main/orchestration/daemon/)
-// dispatches its `start` request straight to this function behind a lazy import,
-// so any change here is a change to the daemon's startup path too.
 export async function startAutopilot(input: StartAutopilotInput): Promise<RunState> {
   let run = input.runId ? await requireRun(input.runId) : null;
   if (!run) {
@@ -747,13 +786,13 @@ const DIRECT_ATTEMPT_TERMINAL = new Set<WorkerAttemptStatus>([
   "cancelled",
 ]);
 
-// LoomWorkerConfig.effort is the full AgentEffortLevel ("max" included);
-// WorkerTask.effortHint tops out at "xhigh" — clamp rather than drop.
+// LoomWorkerConfig and WorkerTask now share the full effort vocabulary,
+// including GPT-5.6's max setting, so automation workers preserve the user's
+// exact choice instead of silently clamping it to xhigh.
 function loomEffortToWorkerEffort(
   effort: AgentEffortLevel | undefined,
 ): WorkerTask["effortHint"] {
-  if (!effort) return undefined;
-  return effort === "max" ? "xhigh" : effort;
+  return effort;
 }
 
 export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Promise<RunState> {
@@ -2407,6 +2446,7 @@ async function runInitialAutopilotPlanning(
     managerPlannedRun &&
     managerPlannedRun.status !== "paused" &&
     managerPlannedRun.status !== "cancelled" &&
+    managerPlannedRun.status !== "failed" &&
     managerPlannedRun.steps.length > 0
   ) {
     // If plan_analysis lands on a brake as the first step, resolve it and
@@ -2417,6 +2457,7 @@ async function runInitialAutopilotPlanning(
     managerPlannedRun &&
     managerPlannedRun.status !== "paused" &&
     managerPlannedRun.status !== "cancelled" &&
+    managerPlannedRun.status !== "failed" &&
     managerPlannedRun.steps.length > 0 &&
     managerPlannedRun.workerTasks.length === 0
   ) {
@@ -2442,7 +2483,8 @@ async function runInitialAutopilotPlanning(
   if (
     run.status === "paused" ||
     run.status === "cancelled" ||
-    run.status === "complete"
+    run.status === "complete" ||
+    run.status === "failed"
   ) {
     return;
   }
@@ -3401,11 +3443,17 @@ async function askChatBackendNonOpenRouter(
   const backend = getBackend(chatConfig.backend);
   const callId = makeId("spark");
   const startedAt = new Date().toISOString();
+  // Once requestManagerDecision settles, that SparkCall owns no more stream
+  // events. This closes a lifecycle hole where a failed CLI's background
+  // transcript-discovery task could append assistant text or errors tens of
+  // seconds after the call had already been recorded as failed.
+  let acceptingStreamEvents = true;
 
   // Stream events from the backend get appended to the run's event log so the
   // renderer (which already subscribes to orchestration:event) can render
   // partial assistant text, tool calls, and tool results as they arrive.
   const onStream = (event: ChatStreamEvent): void => {
+    if (!acceptingStreamEvents) return;
     void appendEvent({
       timestamp: new Date().toISOString(),
       workspaceId: run.workspaceId,
@@ -3440,6 +3488,7 @@ async function askChatBackendNonOpenRouter(
       { run, cwd, mode: normalizeOpenRouterManagerMode(mode), settings, chat: chatConfig },
       onStream,
     );
+    acceptingStreamEvents = false;
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     const completedAt = new Date().toISOString();
@@ -3592,6 +3641,7 @@ async function askChatBackendNonOpenRouter(
     }
     return applySparkManagerDecision(latest, result.decision, mode, cwd);
   } catch (err) {
+    acceptingStreamEvents = false;
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
     const completedAt = new Date().toISOString();
@@ -3623,7 +3673,7 @@ async function askChatBackendNonOpenRouter(
 // have the stronger 'taste' that catches all distinct issues in one pass.
 const TRIVIAL_TOP_TIER_BY_RUNTIME: Record<string, { modelHint: string; effortHint: WorkerTask["effortHint"] }> = {
   claude: { modelHint: "claude-opus-4-8", effortHint: "high" },
-  codex: { modelHint: "gpt-5.5", effortHint: "high" },
+  codex: { modelHint: CODEX_MODEL_BY_TIER.top, effortHint: "high" },
 };
 
 // Top-tier model identifiers (post-normalization). Anything else for a
@@ -3638,6 +3688,9 @@ const TRIVIAL_TOP_TIER_BY_RUNTIME: Record<string, { modelHint: string; effortHin
 const TOP_TIER_MODEL_BASES = new Set([
   "claude-opus-4-8",
   "opus",
+  CODEX_MODEL_BY_TIER.top,
+  // Legacy persisted assignments remain top-tier semantically; the launch
+  // sanitizer migrates this id to GPT-5.6 Sol before spawning.
   "gpt-5.5",
 ]);
 
@@ -3694,7 +3747,7 @@ function promoteTaskForTrivial(task: SparkManagerTaskDecision): SparkManagerTask
   const floor = TRIVIAL_TOP_TIER_BY_RUNTIME[task.runtimePreference];
   if (!floor) return task;
   const needsModelBump = !isTopTierModel(task.modelHint);
-  const needsEffortBump = task.effortHint !== "high" && task.effortHint !== "xhigh";
+  const needsEffortBump = task.effortHint !== "high" && task.effortHint !== "xhigh" && task.effortHint !== "max";
   if (!needsModelBump && !needsEffortBump) return task;
   return {
     ...task,
@@ -4198,7 +4251,7 @@ async function forceFanOutBatch(
 
 const COUNCIL_TOP_TIER_MODEL: Partial<Record<WorkerRuntime, string>> = {
   claude: "claude-opus-4-8",
-  codex: "gpt-5.5",
+  codex: CODEX_MODEL_BY_TIER.top,
 };
 
 // Plan-council scratch + output live under .spark/<runId>/ so every run owns a
@@ -4812,7 +4865,7 @@ async function enforceUserRuntimeMandate(
   }
   const modelDefaults: Record<string, { modelHint?: string; effortHint?: WorkerTask["effortHint"] }> = {
     claude: { modelHint: "claude-opus-4-8", effortHint: "high" },
-    codex: { modelHint: "gpt-5.5", effortHint: "high" },
+    codex: { modelHint: CODEX_MODEL_BY_TIER.top, effortHint: "high" },
   };
   const defaults = modelDefaults[mandate] ?? { modelHint: undefined, effortHint: undefined };
   const overrides: RuntimeReroute[] = [];
@@ -5201,13 +5254,10 @@ async function tryTrivialFastPathStepPlanning(run: RunState): Promise<RunState |
   return next;
 }
 
-// Effort levels Codara passes through verbatim when building a Claude
-// standing terminal. "max" is intentionally omitted: the user types these
-// terminals manually and Claude rejects `--effort max` outside of certain
-// model+plan combinations. "minimal" is omitted because the Claude CLI
-// rejects it outright (Codex's lowest tier). Anything else from this set
-// gets forwarded to the provider's buildArgs unchanged.
-const STANDING_TERMINAL_CLAUDE_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
+// Effort levels accepted by the current Claude and Codex CLIs for standing
+// interactive terminals. GPT-5.6 adds Max as a first-class quality setting;
+// both providers receive the explicit choice instead of silently ignoring it.
+const STANDING_TERMINAL_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 // Build the launch command for a standing interactive terminal: a plain
 // claude/codex session the user drives. Like buildLaunchCommandLine, but
@@ -5221,14 +5271,8 @@ function buildStandingTerminalCommand(
   model?: string,
   effort?: string,
 ): string {
-  // Behaviour preservation: the previous inline builder only forwarded
-  // `effort` for Claude (and only the four gated values below). Codex
-  // standing terminals deliberately ignored effort, even when the caller
-  // passed it. We replicate that gate here so the provider doesn't start
-  // emitting `-c "model_reasoning_effort=..."` for codex terminals it never
-  // did before.
   let effectiveEffort: SpawnOpts["effort"];
-  if (runtime === "claude" && effort && STANDING_TERMINAL_CLAUDE_EFFORTS.has(effort)) {
+  if (effort && STANDING_TERMINAL_EFFORTS.has(effort)) {
     effectiveEffort = effort as SpawnOpts["effort"];
   }
 
@@ -5236,6 +5280,9 @@ function buildStandingTerminalCommand(
   // on claude-fable-5 unless the user opted in via the Fable setting. Downgrade
   // to Opus 4.8 when the pref is off, matching the worker/main-chat chokepoints.
   let effectiveModel = model?.trim() || undefined;
+  if (runtime === "codex" && effectiveModel) {
+    effectiveModel = normalizeCodexModelId(effectiveModel);
+  }
   if (
     effectiveModel &&
     /fable/i.test(effectiveModel) &&
@@ -5904,8 +5951,9 @@ async function applySparkManagerDecision(
   // worker landed only 2/3 hidden gates. Code-level enforcement: walk every
   // plannedAgent on every step and every incoming task, and promote any
   // non-top-tier feature assignment to top-tier (opus@high for claude,
-  // gpt-5.5@high for codex). Codex now ships only gpt-5.5 so the model
-  // bump is effectively an effort bump there; sonnet→opus still applies.
+  // GPT-5.6 Sol@high for codex). Codex now has a real model ladder, so this
+  // promotes Terra/Luna to Sol as well as bumping effort; sonnet→opus still
+  // applies on Claude.
   // Leaf and verifier are exempt from this floor (see promoteForTrivial).
   if (latest.taskComplexity === "trivial") {
     const stepBumps: Array<{ stepId: string; bumped: number }> = [];
@@ -7737,7 +7785,7 @@ function normalizeWorkerEffortForModel(
 }
 
 function isWorkerEffort(value: string): value is NonNullable<WorkerTask["effortHint"]> {
-  return value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh";
+  return value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max";
 }
 
 export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Promise<RunState> {
@@ -9325,7 +9373,7 @@ function estimateTextSections(
 
 function fallbackModelHintForRuntime(runtime: WorkerRuntime): string | undefined {
   if (runtime === "claude") return "claude-opus-4-8";
-  if (runtime === "codex") return "gpt-5.5";
+  if (runtime === "codex") return CODEX_MODEL_BY_TIER.top;
   return undefined;
 }
 
@@ -9334,7 +9382,13 @@ function fallbackEffortHintForRuntime(
   prior: WorkerTask["effortHint"],
 ): WorkerTask["effortHint"] {
   if (runtime === "codex") {
-    if (prior === "low" || prior === "medium" || prior === "high") return prior;
+    if (
+      prior === "low" ||
+      prior === "medium" ||
+      prior === "high" ||
+      prior === "xhigh" ||
+      prior === "max"
+    ) return prior;
     return "xhigh";
   }
   if (runtime === "claude") {
@@ -11466,8 +11520,8 @@ function mapClaudeEffort(effort: WorkerTask["effortHint"] | undefined): string |
 
 function mapCodexEffort(effort: WorkerTask["effortHint"] | undefined): string | null {
   if (!effort) return null;
-  if (effort === "minimal" || effort === "max") return effort === "minimal" ? "low" : "xhigh";
-  if (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh") return effort;
+  if (effort === "minimal") return "low";
+  if (effort === "low" || effort === "medium" || effort === "high" || effort === "xhigh" || effort === "max") return effort;
   return "medium";
 }
 

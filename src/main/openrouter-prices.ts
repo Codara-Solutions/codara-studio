@@ -31,7 +31,7 @@ export interface ModelPrice {
   cacheRead?: number;
 }
 
-// Source: https://openrouter.ai/models (snapshotted 2026-05). Update when a
+// Source: https://openrouter.ai/models (snapshotted 2026-07). Update when a
 // vendor changes prices or Codara starts using a new model.
 export const MODEL_PRICES: Record<string, ModelPrice> = {
   // Anthropic — Claude 4.x family.
@@ -44,7 +44,11 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   "anthropic/claude-sonnet-4": { input: 3, output: 15, cacheRead: 0.3 },
   "anthropic/claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1 },
 
-  // OpenAI — GPT-5 / GPT-4o roster.
+  // OpenAI — GPT-5.6 / legacy GPT-5 / GPT-4o roster. GPT-5.6 cached input is
+  // billed at 10% of the uncached input price.
+  "openai/gpt-5.6-sol": { input: 5, output: 30, cacheRead: 0.5 },
+  "openai/gpt-5.6-terra": { input: 2.5, output: 15, cacheRead: 0.25 },
+  "openai/gpt-5.6-luna": { input: 1, output: 6, cacheRead: 0.1 },
   "openai/gpt-5.5": { input: 1.25, output: 10 },
   "openai/gpt-5.4": { input: 1.25, output: 10 },
   "openai/gpt-5.4-mini": { input: 0.25, output: 2 },
@@ -178,7 +182,7 @@ function normalizeModelKey(model: string): string {
 // the provider-prefixed slug the price table is keyed on.
 //
 //   claude -> `anthropic/<base>` (base defaults to 'claude-opus-4-8')
-//   codex  -> `openai/<base>`    (base defaults to 'gpt-5.5')
+//   codex  -> `openai/<base>`    (base defaults to 'gpt-5.6-sol')
 //
 // Any `@<effort>` suffix on the hint is stripped first. We return the fully
 // reconstructed key only when it exists in MODEL_PRICES; failing that we retry
@@ -196,7 +200,7 @@ export function priceKeyForWorker(
     defaultBase = "claude-opus-4-8";
   } else if (runtime === "codex") {
     provider = "openai";
-    defaultBase = "gpt-5.5";
+    defaultBase = "gpt-5.6-sol";
   } else {
     // 'shell' / 'manual' workers don't bill against a model — nothing to price.
     return undefined;

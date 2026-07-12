@@ -273,11 +273,11 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
           model: {
             type: "string",
             description:
-              "Model id the user named (e.g. 'opus', 'sonnet', 'gpt-5.5'); empty string when unspecified.",
+              "Model id the user named (e.g. 'opus', 'sonnet', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'); empty string when unspecified.",
           },
           effort: {
             type: "string",
-            enum: ["low", "medium", "high", "xhigh", ""],
+            enum: ["low", "medium", "high", "xhigh", "max", ""],
             description:
               "Thinking/effort level the user named; empty string when unspecified. Applied to claude terminals only.",
           },
@@ -312,7 +312,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
                 summary: { type: "string" },
                 runtimePreference: { type: "string", enum: ["claude", "codex", "manual", "shell"] },
                 modelHint: { type: "string" },
-                effortHint: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh"] },
+                effortHint: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh", "max"] },
                 taskClass: {
                   type: "string",
                   enum: ["skeleton", "feature", "leaf", "verifier"],
@@ -354,7 +354,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
           description: { type: "string" },
           runtimePreference: { type: "string", enum: ["claude", "codex", "manual", "shell"] },
           modelHint: { type: "string" },
-          effortHint: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh"] },
+          effortHint: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh", "max"] },
           allowedPaths: {
             type: "array",
             items: { type: "string" },
@@ -1434,7 +1434,8 @@ function normalizeEffort(value: unknown): WorkerTask["effortHint"] {
     value === "low" ||
     value === "medium" ||
     value === "high" ||
-    value === "xhigh"
+    value === "xhigh" ||
+    value === "max"
   )
     return value;
   return undefined;
@@ -1495,7 +1496,7 @@ function formatAvailableRuntimes(runtimes: AgentRuntimeDiagnostic[] | undefined)
     "Tier semantics:",
     "- claude-fable-5 (Fable 5) is Anthropic's premium, most expensive tier — but it IS available as a worker model. A worker MAY run claude-fable-5 when the user's OWN message this run explicitly asks for Fable for the work; in that case set the worker's modelHint to \"claude-fable-5\" and Codara will honor it. Otherwise NEVER choose it — use claude-opus-4-8 as the tier=top worker model. Codara enforces this: a fable hint without an explicit user request is downgraded to claude-opus-4-8, so do not assign fable on your own judgment. Do NOT tell the user Fable is unavailable for workers — when they asked for it, assign it.",
     "- Multi-model runtime (Claude): skeleton → claude-opus-4-8 (tier=top) + highest available effort; feature → tier=mid model + medium effort; leaf → tier=mid (sonnet) at low/minimal effort. Never assign claude-opus-4-8 to a leaf task.",
-    "- Single-model runtime (Codex, Cursor): the model never changes — vary EFFORT to express tier. Codex (gpt-5.5): skeleton → high/xhigh, feature → medium, leaf → minimal. Cursor (composer-2.5-fast): one effort level, treat as the cheap leaf pick.",
+    "- Codex has a real GPT-5.6 ladder: skeleton/verifier → gpt-5.6-sol at high/max, feature → gpt-5.6-terra at medium, leaf → gpt-5.6-luna at low. Cursor (composer-2.5-fast) has one effort level and is a fast leaf pick.",
     "- Never pick a top tier or high/xhigh/max effort for a mechanical leaf (e.g. running a single shell command and reporting its output) — that wastes context and money for no gain.",
   );
   return lines.join("\n");
@@ -1506,18 +1507,18 @@ function formatTaskComplexity(complexity: TaskComplexity): string {
     case "trivial":
       return [
         "trivial — single-module fix, ≤3 atomic acceptance criteria, no public API touch.",
-        "Verifier policy: ONE verifier follow-up after the implementation worker on a behavioral step. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-4-8 OR gpt-5.5; effortHint = high; allowedPaths = []; taskClass = verifier. A confident self-report is not proof — the verifier re-derives correct behavior and runs adversarial input/output probes.",
+        "Verifier policy: ONE verifier follow-up after the implementation worker on a behavioral step. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-4-8 OR gpt-5.6-sol; effortHint = high; allowedPaths = []; taskClass = verifier. A confident self-report is not proof — the verifier re-derives correct behavior and runs adversarial input/output probes.",
         "Trivial keeps a tight step cap (max 2 worker_batch steps, no recon, no skeleton); it differs from standard only in scope, not in whether work gets verified.",
       ].join("\n");
     case "standard":
       return [
         "standard — multi-file change OR public API touch, with clear scope.",
-        "Verifier policy: ONE verifier follow-up after each implementation worker. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-4-8 OR gpt-5.5; effortHint = high; allowedPaths = []; taskClass = verifier.",
+        "Verifier policy: ONE verifier follow-up after each implementation worker. runtimePreference = OPPOSITE of the implementation worker (Claude impl → Codex verifier; Codex impl → Claude verifier). modelHint = claude-opus-4-8 OR gpt-5.6-sol; effortHint = high; allowedPaths = []; taskClass = verifier.",
       ].join("\n");
     case "complex":
       return [
         "complex — subtle/byte-level work where atomic claims compound, OR cross-module refactor with ≥3 files changing semantics.",
-        "Verifier policy: TWO peer verifiers IN PARALLEL after each implementation worker — one Claude (claude-opus-4-8@high) and one Codex (gpt-5.5@high). Both with taskClass=verifier, allowedPaths=[], canRunParallel=true. Two model families = two blind spots; peer disagreement IS the signal.",
+        "Verifier policy: TWO peer verifiers IN PARALLEL after each implementation worker — one Claude (claude-opus-4-8@high) and one Codex (gpt-5.6-sol@high). Both with taskClass=verifier, allowedPaths=[], canRunParallel=true. Two model families = two blind spots; peer disagreement IS the signal.",
       ].join("\n");
   }
 }
@@ -1624,4 +1625,3 @@ function formatPlannedAgents(agents: PlannedStepAgent[] | undefined): string {
     })
     .join("; ");
 }
-

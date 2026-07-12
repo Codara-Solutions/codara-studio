@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import type { ChatMode } from "@shared/types";
 
 interface Props {
@@ -5,10 +6,9 @@ interface Props {
   onSelect: (mode: ChatMode) => void;
 }
 
-// Manager-mode selector — a SINGLE pill that CYCLES on each press:
-//   Auto → Talk → Plan → Execute → Auto → …
-// The label shows the CURRENT mode; clicking advances to the next one. Colour
-// and the leading dot shift per mode (see .composer-mode-cycle in styles.css):
+// Manager-mode selector. The pill opens an explicit menu instead of cycling
+// through hidden choices, so a user can understand the consequence before
+// changing modes:
 //   Auto       — Cora decides per message: answer, plan, or build with
 //                parallel workers. Default for new chats.
 //   Talk       — pure conversation, no workers.
@@ -40,24 +40,75 @@ const META: Record<ChatMode, { label: string; blurb: string }> = {
 };
 
 export default function PlanModeToggle({ mode, onSelect }: Props) {
-  // Off-cycle-but-known modes (legacy "automation" runs) render their own
-  // label; unknown persisted junk falls back to Auto. Either way the next
-  // click lands on CYCLE[0]: indexOf(current) is -1 for "automation", and
-  // -1 + 1 === 0.
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
   const current: ChatMode = META[mode] ? mode : CYCLE[0];
-  const next = CYCLE[(CYCLE.indexOf(current) + 1) % CYCLE.length];
   const meta = META[current];
-  const nextMeta = META[next];
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
+  const visibleModes: ReadonlyArray<ChatMode> =
+    current === "automation" ? ["automation", ...CYCLE] : CYCLE;
 
   return (
-    <button
-      type="button"
-      className={`composer-mode-cycle is-${current}`}
-      title={`${meta.label} — ${meta.blurb}.\nClick to switch to ${nextMeta.label}.`}
-      aria-label={`Manager mode: ${meta.label}. Click to switch to ${nextMeta.label}.`}
-      onClick={() => onSelect(next)}
-    >
-      {meta.label}
-    </button>
+    <div className="composer-mode" ref={rootRef}>
+      <button
+        type="button"
+        className={`composer-mode-cycle is-${current}${open ? " is-open" : ""}`}
+        title={`${meta.label} — ${meta.blurb}`}
+        aria-label={`Manager mode: ${meta.label}`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span>{meta.label}</span>
+        <span aria-hidden className="composer-chevron">⌄</span>
+      </button>
+      {open && (
+        <div className="composer-mode-menu spark-menu" role="listbox" aria-label="Cora mode">
+          <div className="composer-menu-heading">How Cora should handle this chat</div>
+          {visibleModes.map((option) => {
+            const optionMeta = META[option];
+            const active = option === current;
+            return (
+              <button
+                key={option}
+                type="button"
+                role="option"
+                aria-selected={active}
+                className={`composer-mode-option is-${option}${active ? " is-active" : ""}`}
+                onClick={() => {
+                  onSelect(option);
+                  setOpen(false);
+                }}
+              >
+                <span className="composer-mode-option-dot" aria-hidden />
+                <span className="composer-mode-option-copy">
+                  <span className="composer-mode-option-label">{optionMeta.label}</span>
+                  <span className="composer-mode-option-description">{optionMeta.blurb}</span>
+                </span>
+                {active && <span className="composer-menu-check" aria-hidden>✓</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }

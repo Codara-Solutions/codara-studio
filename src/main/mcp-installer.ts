@@ -27,7 +27,6 @@
 //    (the Playwright experiment, the pre-merge cora-preview / cora-orchestrator
 //    servers, the pre-Cora spark-* names) are removed on every launch.
 
-import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -42,6 +41,7 @@ import type {
 } from "@shared/types";
 
 import { resolveBinary } from "./binary-resolver";
+import { resolveBundledResourcePath } from "./bundled-resources";
 import { writeFileAtomic } from "./fs-atomic";
 import { sparkHome } from "./spark-home";
 
@@ -118,6 +118,7 @@ const SPARK_STUDIO_TOOLS = [
 
 const SPARK_ORCHESTRATION_TOOLS = [
   // Execute-mode worker orchestration (per-run SPARK_MCP_MODE=execute).
+  "codara_spawn_terminals",
   "codara_spawn_workers",
   "codara_ask_user",
   "codara_complete",
@@ -177,10 +178,7 @@ interface ManagedClaudeMcpServer {
 }
 
 function resolveServerScript(): string {
-  if (app.isPackaged) {
-    return join(process.resourcesPath, "codara-studio-mcp", "server.js");
-  }
-  return join(__dirname, "..", "..", "resources", "codara-studio-mcp", "server.js");
+  return resolveBundledResourcePath("codara-studio-mcp", "server.js");
 }
 
 function resolveNodeCommand(): string {

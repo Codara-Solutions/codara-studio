@@ -17,6 +17,10 @@ import type {
   ScheduledJob,
   StopConditions,
 } from "@shared/types";
+import {
+  DEFAULT_CODEX_WORKER_MODEL,
+  normalizeCodexModelId,
+} from "@shared/model-catalog";
 import type { Edge, Node } from "@xyflow/react";
 import type { LoomPreset } from "./presets";
 
@@ -69,7 +73,7 @@ export interface WorkerDraft {
 // the editor shows matches what would run.
 export const DEFAULT_ENGINE_MODEL: Record<LoomEngine, string> = {
   claude: "claude-sonnet-5",
-  codex: "gpt-5.5",
+  codex: DEFAULT_CODEX_WORKER_MODEL,
 };
 export const DEFAULT_WORKER_EFFORT: AgentEffortLevel = "medium";
 
@@ -101,7 +105,12 @@ export function concreteWorker(
   return {
     ...worker,
     engine,
-    model: worker.model && worker.model.trim() ? worker.model : DEFAULT_ENGINE_MODEL[engine],
+    model:
+      worker.model && worker.model.trim()
+        ? engine === "codex"
+          ? normalizeCodexModelId(worker.model)
+          : worker.model
+        : DEFAULT_ENGINE_MODEL[engine],
     effort: worker.effort ?? DEFAULT_WORKER_EFFORT,
   };
 }

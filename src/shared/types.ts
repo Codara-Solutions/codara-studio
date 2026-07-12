@@ -1229,7 +1229,8 @@ export interface RunState {
   /**
    * Model id passed to the chosen backend. For OpenRouter this is a free-form
    * provider/model slug (e.g. "google/gemini-flash-latest"); for Claude one of
-   * "claude-opus-4-8" / "claude-sonnet-5"; for Codex always "gpt-5.5". When
+   * "claude-opus-4-8" / "claude-sonnet-5"; for Codex one of the GPT-5.6
+   * Sol/Terra/Luna model ids. When
    * undefined the backend picks its registered default.
    */
   chatModel?: string;

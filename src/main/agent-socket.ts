@@ -13,6 +13,11 @@ import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { validateWorkerAccessFields } from "./orchestration/worker-access";
 import { DEFAULT_PREFERENCES } from "@shared/types";
+import {
+  CODEX_MODEL_CATALOG,
+  CODEX_MODEL_BY_TIER,
+  normalizeCodexModelId,
+} from "@shared/model-catalog";
 import type {
   AppPreferences,
   InAppNotificationTone,
@@ -386,6 +391,8 @@ async function dispatch(
         return await handlePreviewInputRpc(method, params, id);
       case "orchestrator.spawn_workers":
         return await handleOrchestratorSpawnWorkers(params, id);
+      case "orchestrator.spawn_terminals":
+        return handleOrchestratorSpawnTerminals(params, id);
       case "orchestrator.ask_user":
         return await handleOrchestratorAskUser(params, id, res);
       case "orchestrator.complete":
@@ -895,6 +902,53 @@ interface OrchestratorWorkerInput {
   taskClass?: "skeleton" | "feature" | "leaf" | "verifier";
 }
 
+// Declarative counterpart to orchestrator.spawn_workers. This RPC validates
+// and acknowledges the requested standing-terminal groups, but deliberately
+// does not mutate the run here. The active Claude/Codex backend records the
+// tool call and converts it to a SparkManagerDecision after the turn ends;
+// run-store then emits spark.spawn_terminals, and the renderer opens one real
+// split-grid terminal tab. Keeping application at the decision boundary avoids
+// a tool-side tab plus a second decision-side tab.
+function handleOrchestratorSpawnTerminals(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): JsonRpcResponse {
+  const rawTerminals = params.terminals;
+  if (!Array.isArray(rawTerminals) || rawTerminals.length === 0) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "terminals array is required and non-empty");
+  }
+
+  let terminalCount = 0;
+  for (const raw of rawTerminals) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "each terminal entry must be an object");
+    }
+    const terminal = raw as Record<string, unknown>;
+    if (terminal.runtime !== "claude" && terminal.runtime !== "codex") {
+      return errorResponse(id, ERR_INVALID_PARAMS, "terminal runtime must be claude or codex");
+    }
+    if (
+      typeof terminal.count !== "number" ||
+      !Number.isInteger(terminal.count) ||
+      terminal.count < 1 ||
+      terminal.count > 8
+    ) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "terminal count must be an integer from 1 to 8");
+    }
+    terminalCount += terminal.count;
+    if (terminalCount > 8) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "at most 8 terminal panes may be opened at once");
+    }
+  }
+
+  return successResponse(id, {
+    ok: true,
+    terminal_count: terminalCount,
+    message:
+      "Standing terminal request accepted. End this turn now; Codara will open the persistent terminal grid.",
+  });
+}
+
 async function handleOrchestratorSpawnWorkers(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1072,11 +1126,11 @@ async function handleOrchestratorSpawnWorkers(
     soloTaskClass === "verifier" || soloTaskClass === "leaf" || soloTaskClass === "skeleton";
   if (workerTaskIds.length === 1 && !soloIsExpected) {
     notes.push(
-      "Note: this batch spawned a single worker. That is right for a trivial fix (typo, copy tweak, " +
-        "one-line change), a targeted corrective fix after a failed verify, or a deliberate skeleton " +
-        "before a fan-out. If this was a full build/feature ask, decompose into a parallel fleet instead: " +
-        "2-4 workers on DISJOINT allowedPaths plus a verifier, mixing claude and codex runtimes when both " +
-        "CLIs are installed, with mid-tier models (claude-sonnet-5 / gpt-5.5) for standard pieces.",
+      "Note: this batch spawned a single worker. That is right for a cohesive same-file or sequential " +
+        "change, a targeted corrective fix, or a deliberate skeleton before a fan-out. For a feature with " +
+        "genuinely independent slices, prefer 2-4 workers on DISJOINT allowedPaths plus a verifier, mixing " +
+        "Claude and Codex when both CLIs are installed. Do not split a cohesive change or invent files just " +
+        `to manufacture parallelism; use a strong worker plus an independent verifier instead. Standard independent pieces can use claude-sonnet-5 / ${CODEX_MODEL_BY_TIER.mid}.`,
     );
   }
   return successResponse(
@@ -2043,6 +2097,7 @@ function validateGraph(graph: LoomGraph): string | null {
 // create/update path so the architect corrects itself.)
 const CONCRETE_ENGINES = new Set(["claude", "codex"]);
 const WORKER_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
+const CODEX_AUTOMATION_MODELS = new Set(CODEX_MODEL_CATALOG.map((model) => model.id));
 
 /** Reject any worker that fails to pin a concrete engine ∈ {claude, codex}, a
  *  non-blank model, and a valid effort. Returns an instructive error naming the
@@ -2058,7 +2113,16 @@ function validateConcreteWorker(
     return `${label} has engine '${String(worker.engine)}' — it must be 'claude' or 'codex' ('auto' and an unset engine are no longer allowed; choose one explicitly)`;
   }
   if (typeof worker.model !== "string" || worker.model.trim().length === 0) {
-    return `${label} must set an explicit model (claude: claude-opus-4-8 or claude-sonnet-5; codex: gpt-5.5) — a CLI-default/blank model is no longer allowed`;
+    return `${label} must set an explicit model (claude: claude-opus-4-8 or claude-sonnet-5; codex: gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna) — a CLI-default/blank model is no longer allowed`;
+  }
+  if (worker.engine === "codex") {
+    const normalized = normalizeCodexModelId(worker.model.trim());
+    if (!CODEX_AUTOMATION_MODELS.has(normalized as (typeof CODEX_MODEL_CATALOG)[number]["id"])) {
+      return `${label} has unknown Codex model '${worker.model}' — choose gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna`;
+    }
+    // Migrate legacy model ids from a long-lived architect session before the
+    // automation is persisted, so the saved loom opens on a real picker row.
+    worker.model = normalized;
   }
   if (typeof worker.effort !== "string" || !WORKER_EFFORTS.has(worker.effort)) {
     return `${label} must set an explicit effort — one of minimal, low, medium, high, xhigh, max (a blank/default effort is no longer allowed)`;

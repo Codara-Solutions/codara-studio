@@ -3,13 +3,11 @@ import { join, basename } from "node:path";
 import { platform } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { app } from "electron";
 import type { ShellInfo } from "@shared/types";
+import { resolveBundledResourcePath } from "./bundled-resources";
 
 function shellIntegrationPath(name: string): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, "shell-integration", name)
-    : join(__dirname, "..", "..", "resources", "shell-integration", name);
+  return resolveBundledResourcePath("shell-integration", name);
 }
 
 // PowerShell single-quoted strings escape ' as ''. Anything else is literal,

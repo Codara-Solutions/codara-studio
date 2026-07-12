@@ -241,6 +241,7 @@ export default function ChatConversation({ run }: { run: RunState }) {
                 ? event.message
                 : "";
           if (!message) return prev;
+          if (next.notes.some((note) => note.message === message)) return prev;
           next.notes = [
             ...next.notes,
             {
@@ -259,6 +260,7 @@ export default function ChatConversation({ run }: { run: RunState }) {
               : typeof event.message === "string"
                 ? event.message
                 : "Streaming error.";
+          if (next.errors.some((error) => error.message === message)) return prev;
           next.errors = [...next.errors, { id: event.id, message }];
           return next;
         }
@@ -364,7 +366,7 @@ export default function ChatConversation({ run }: { run: RunState }) {
 
   return (
     <div ref={scrollRef} style={SCROLL_STYLE}>
-      <div>
+      <div style={CONVERSATION_COLUMN_STYLE} data-testid="cora-conversation">
         {items.length === 0 && !showLive ? (
           <ConversationEmpty />
         ) : (
@@ -468,7 +470,11 @@ const MessageTurn = React.memo(function MessageTurn({
   if (item.author === "user") {
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
-        <div style={USER_BUBBLE_STYLE}>
+        <div
+          className="cora-message cora-message--user"
+          data-message-author="user"
+          style={USER_BUBBLE_STYLE}
+        >
           <div>{item.text}</div>
           <AttachmentStrip attachments={item.attachments} align="end" />
         </div>
@@ -485,6 +491,7 @@ const MessageTurn = React.memo(function MessageTurn({
   const isCompletion = item.messageKind === "decision";
   const showChoices = isQuestion && item.id === openQuestionId && (item.questionOptions ?? []).length > 0;
   const displayText = cleanLegacySparkOutput(item.text);
+  const backendFailure = backendFailureDetails(displayText);
   if (isCompletion) {
     return (
       <SparkTurn repeatCount={item.repeatCount}>
@@ -492,9 +499,20 @@ const MessageTurn = React.memo(function MessageTurn({
       </SparkTurn>
     );
   }
+  if (backendFailure) {
+    return (
+      <SparkTurn tag={<IssueChip />}>
+        <BackendFailureMessage detail={backendFailure} />
+      </SparkTurn>
+    );
+  }
   return (
     <SparkTurn repeatCount={item.repeatCount} tag={isQuestion ? <NeedsYouChip /> : null}>
-      <div style={SPARK_BUBBLE_STYLE}>
+      <div
+        className="cora-message cora-message--assistant"
+        data-message-author="cora"
+        style={SPARK_BUBBLE_STYLE}
+      >
         <Markdown text={displayText} />
         <AttachmentStrip attachments={item.attachments} align="start" />
         {showChoices && (
@@ -525,11 +543,18 @@ const MessageTurn = React.memo(function MessageTurn({
 // danger-tone bubbles.
 function LiveAssistantTurn({ live }: { live: LiveStreamState }) {
   const liveText = liveTextFromState(live);
+  const hasErrors = live.errors.length > 0;
+  const onlyFailure = hasErrors && liveText.length === 0 && live.toolCalls.length === 0;
 
   return (
-    <SparkTurn tag={<LiveTypingPip />}>
-      <div style={LIVE_BUBBLE_STYLE}>
-        {liveText.length > 0 ? <Markdown text={liveText} /> : <LiveEllipsis />}
+    <SparkTurn tag={hasErrors ? <IssueChip /> : <LiveTypingPip />}>
+      <div
+        className={`cora-message cora-message--live${onlyFailure ? " cora-message--error" : ""}`}
+        role={onlyFailure ? "alert" : undefined}
+        style={onlyFailure ? LIVE_FAILURE_STYLE : LIVE_BUBBLE_STYLE}
+      >
+        {onlyFailure && <div style={BACKEND_FAILURE_TITLE_STYLE}>Cora couldn’t start this turn</div>}
+        {liveText.length > 0 ? <Markdown text={liveText} /> : !hasErrors ? <LiveEllipsis /> : null}
         {live.toolCalls.length > 0 && (
           <div style={LIVE_TOOL_LIST_STYLE}>
             {live.toolCalls.map((call) => (
@@ -538,30 +563,15 @@ function LiveAssistantTurn({ live }: { live: LiveStreamState }) {
           </div>
         )}
         {live.notes.length > 0 && (
-          <div style={LIVE_NOTE_LIST_STYLE}>
-            {live.notes.map((note) => (
-              <div
-                key={note.id}
-                style={{
-                  ...LIVE_NOTE_STYLE,
-                  borderColor:
-                    note.tone === "backend"
-                      ? "color-mix(in oklch, var(--accent) 28%, var(--rule-soft))"
-                      : "var(--rule-soft)",
-                }}
-              >
-                <span style={LIVE_NOTE_LABEL_STYLE}>
-                  {note.tone === "backend" ? "backend" : "system"}
-                </span>
-                <span>{note.message}</span>
-              </div>
-            ))}
-          </div>
+          <LiveSessionDetails notes={live.notes} />
         )}
         {live.errors.length > 0 && (
           <div style={LIVE_ERROR_LIST_STYLE}>
             {live.errors.map((err) => (
-              <div key={err.id} style={LIVE_ERROR_STYLE}>
+              <div
+                key={err.id}
+                style={onlyFailure ? BACKEND_FAILURE_DETAIL_STYLE : LIVE_ERROR_STYLE}
+              >
                 {err.message}
               </div>
             ))}
@@ -572,11 +582,60 @@ function LiveAssistantTurn({ live }: { live: LiveStreamState }) {
   );
 }
 
+function backendFailureDetails(text: string): string | null {
+  const match = /^(?:Codex|Claude Code) backend error:\s*(.+)$/is.exec(text.trim());
+  return match?.[1]?.trim() || null;
+}
+
+function BackendFailureMessage({ detail }: { detail: string }) {
+  return (
+    <div
+      className="cora-message cora-message--error"
+      data-message-author="cora"
+      role="alert"
+      style={BACKEND_FAILURE_STYLE}
+    >
+      <div style={BACKEND_FAILURE_TITLE_STYLE}>Cora couldn’t start this turn</div>
+      <div style={BACKEND_FAILURE_DETAIL_STYLE}>{detail}</div>
+      <div style={BACKEND_FAILURE_HINT_STYLE}>Retry the message after the Codex session is available.</div>
+    </div>
+  );
+}
+
+function LiveSessionDetails({ notes }: { notes: LiveStreamState["notes"] }) {
+  return (
+    <details style={LIVE_DETAILS_STYLE}>
+      <summary style={LIVE_DETAILS_SUMMARY_STYLE}>
+        Session details <span style={LIVE_DETAILS_COUNT_STYLE}>{notes.length}</span>
+      </summary>
+      <div style={LIVE_NOTE_LIST_STYLE}>
+        {notes.map((note) => (
+          <div key={note.id} style={LIVE_NOTE_STYLE}>
+            <span style={LIVE_NOTE_LABEL_STYLE}>
+              {note.tone === "backend" ? "backend" : "system"}
+            </span>
+            <span>{note.message}</span>
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function LiveTypingPip() {
   return (
     <span style={LIVE_PIP_STYLE} title="Streaming...">
       <span style={LIVE_PIP_DOT_STYLE} />
       <span>typing</span>
+    </span>
+  );
+}
+
+function IssueChip() {
+  return (
+    <span style={ISSUE_PIP_STYLE}>
+      <span aria-hidden style={ISSUE_PIP_DOT_STYLE} />
+      couldn’t start
     </span>
   );
 }
@@ -1179,7 +1238,11 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
   embedded?: boolean;
 }) {
   const live = item.tone === "live";
-  const [open, setOpen] = useState(live || item.status === "failed");
+  // Failures stay compact by default: the headline already carries the exact
+  // error and status, while the verbose manager metadata remains one click
+  // away. Auto-expanding every failure produced the oversized red slabs seen
+  // in Cora's error state.
+  const [open, setOpen] = useState(live);
   const color = toolToneColor(item);
   const statusLabel = toolStatusLabel(item.status);
   const stats = compactToolStats(item);
@@ -1191,6 +1254,7 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
       style={{
         ...TOOL_ROW_STYLE,
         ...(embedded ? TOOL_ROW_EMBEDDED_STYLE : {}),
+        ...(!embedded ? TOOL_ROW_STANDALONE_STYLE : {}),
         borderColor: item.status === "failed"
           ? "color-mix(in oklch, var(--danger) 38%, transparent)"
           : live
@@ -1844,7 +1908,7 @@ function SparkTurn({
   repeatCount?: number;
 }) {
   return (
-    <div style={SPARK_TURN_STYLE}>
+    <div className="cora-turn" style={SPARK_TURN_STYLE}>
       <SparkAvatar />
       <div style={SPARK_MAIN_STYLE}>
         <div style={SPARK_HEADER_STYLE}>
@@ -1887,11 +1951,21 @@ const SCROLL_STYLE: React.CSSProperties = {
   overflowY: "auto",
   display: "block",
   background: "var(--panel)",
-  padding: "18px 16px 22px",
+  padding: "24px clamp(18px, 3vw, 42px) 32px",
+};
+
+// A readable conversation measure inside wide desktop windows. The workbench
+// can span 2K+ pixels, but prose should not: keeping one centered column makes
+// user turns, Cora responses, and activity rows feel like one conversation
+// instead of unrelated panels pinned to opposite edges.
+const CONVERSATION_COLUMN_STYLE: React.CSSProperties = {
+  width: "100%",
+  maxWidth: 980,
+  margin: "0 auto",
 };
 
 const CHAT_ITEM_STYLE: React.CSSProperties = {
-  marginBottom: 14,
+  marginBottom: 18,
 };
 
 // The user bubble is a calm neutral panel-2 surface with a single hairline —
@@ -1899,8 +1973,8 @@ const CHAT_ITEM_STYLE: React.CSSProperties = {
 // every message the user has ever sent. A subtle --lift-hi top highlight gives
 // it tint-first depth instead of a hard drop shadow.
 const USER_BUBBLE_STYLE: React.CSSProperties = {
-  maxWidth: "82%",
-  background: "var(--panel-2)",
+  maxWidth: "min(72%, 720px)",
+  background: "color-mix(in oklch, var(--ink) 4%, var(--panel-2))",
   // One soft hairline; the recede stays on --rule-soft so the bubble reads as a
   // calm premium surface rather than a hard-outlined box.
   border: "1px solid var(--rule-soft)",
@@ -1910,10 +1984,10 @@ const USER_BUBBLE_STYLE: React.CSSProperties = {
   // (7px) so the corner stays concentric with the bubble's softer body.
   borderRadius: 16,
   borderBottomRightRadius: "var(--radius-control, 7px)",
-  padding: "9px 13px",
+  padding: "10px 14px",
   color: "var(--ink)",
-  fontSize: 13,
-  lineHeight: 1.5,
+  fontSize: 13.5,
+  lineHeight: 1.55,
   whiteSpace: "pre-wrap",
   wordBreak: "break-word",
   boxShadow: "var(--lift-hi)",
@@ -1921,15 +1995,15 @@ const USER_BUBBLE_STYLE: React.CSSProperties = {
 
 const SPARK_TURN_STYLE: React.CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "26px minmax(0, 1fr)",
-  columnGap: 11,
+  gridTemplateColumns: "30px minmax(0, 1fr)",
+  columnGap: 12,
   alignItems: "start",
 };
 
 const SPARK_AVATAR_STYLE: React.CSSProperties = {
   flex: "0 0 auto",
-  width: 26,
-  height: 26,
+  width: 30,
+  height: 30,
   // Squircle-ish brand tile on the surface rung (10px) — softer than a control
   // chip, calmer than a hard bordered square. The fill is the only cue: a
   // gentle accent wash with a faint same-hue hairline (not the full
@@ -1945,6 +2019,7 @@ const SPARK_AVATAR_STYLE: React.CSSProperties = {
 
 const SPARK_MAIN_STYLE: React.CSSProperties = {
   minWidth: 0,
+  maxWidth: 840,
   display: "flex",
   flexDirection: "column",
   gap: 7,
@@ -1959,15 +2034,53 @@ const SPARK_HEADER_STYLE: React.CSSProperties = {
 };
 
 const SPARK_BUBBLE_STYLE: React.CSSProperties = {
-  width: "100%",
-  maxWidth: "100%",
+  width: "fit-content",
+  maxWidth: "min(100%, 78ch)",
   boxSizing: "border-box",
   color: "var(--ink)",
-  background: "transparent",
-  border: "none",
-  borderRadius: 0,
-  padding: 0,
+  background: "color-mix(in oklch, var(--accent) 2.5%, var(--panel-2))",
+  border: "1px solid color-mix(in oklch, var(--rule-soft) 78%, transparent)",
+  borderRadius: 14,
+  borderTopLeftRadius: "var(--radius-control, 7px)",
+  padding: "11px 14px 12px",
+  boxShadow: "var(--lift-hi)",
   overflowWrap: "anywhere",
+};
+
+const BACKEND_FAILURE_STYLE: React.CSSProperties = {
+  width: "fit-content",
+  maxWidth: "min(100%, 68ch)",
+  boxSizing: "border-box",
+  display: "flex",
+  flexDirection: "column",
+  gap: 5,
+  padding: "10px 12px 11px",
+  borderRadius: 12,
+  borderTopLeftRadius: "var(--radius-control, 7px)",
+  border: "1px solid color-mix(in oklch, var(--danger) 28%, var(--rule-soft))",
+  background: "color-mix(in oklch, var(--danger) 7%, var(--panel-2))",
+  boxShadow: "var(--lift-hi)",
+};
+
+const BACKEND_FAILURE_TITLE_STYLE: React.CSSProperties = {
+  color: "var(--ink)",
+  fontSize: 12.5,
+  fontWeight: 700,
+  lineHeight: 1.35,
+};
+
+const BACKEND_FAILURE_DETAIL_STYLE: React.CSSProperties = {
+  color: "var(--danger)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 10.5,
+  lineHeight: 1.45,
+  overflowWrap: "anywhere",
+};
+
+const BACKEND_FAILURE_HINT_STYLE: React.CSSProperties = {
+  color: "var(--muted)",
+  fontSize: 11,
+  lineHeight: 1.4,
 };
 
 const DONE_MARKER_STYLE: React.CSSProperties = {
@@ -2421,6 +2534,12 @@ const TOOL_ROW_EMBEDDED_STYLE: React.CSSProperties = {
   borderRadius: "var(--radius-control, 7px)",
 };
 
+const TOOL_ROW_STANDALONE_STYLE: React.CSSProperties = {
+  width: "calc(100% - 42px)",
+  maxWidth: 840,
+  marginLeft: 42,
+};
+
 const TOOL_ROW_BUTTON_STYLE: React.CSSProperties = {
   appearance: "none",
   width: "100%",
@@ -2586,14 +2705,14 @@ const TOOL_META_VALUE_STYLE: React.CSSProperties = {
 // in-flight state read at a glance.
 const LIVE_BUBBLE_STYLE: React.CSSProperties = {
   width: "fit-content",
-  maxWidth: "94%",
+  maxWidth: "min(100%, 78ch)",
   boxSizing: "border-box",
   color: "var(--ink)",
   background: "color-mix(in oklch, var(--accent) 5%, var(--panel-2))",
   border: "1px solid var(--accent-edge)",
-  borderRadius: "var(--radius-surface, 10px)",
+  borderRadius: 14,
   borderTopLeftRadius: "var(--radius-control, 7px)",
-  padding: "8px 10px",
+  padding: "10px 13px 11px",
   display: "flex",
   flexDirection: "column",
   gap: 6,
@@ -2608,6 +2727,10 @@ const LIVE_BUBBLE_STYLE: React.CSSProperties = {
     "var(--status-edge, inset 3px 0 0 var(--accent)), 0 0 12px var(--accent-glow)",
   transition:
     "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+};
+
+const LIVE_FAILURE_STYLE: React.CSSProperties = {
+  ...BACKEND_FAILURE_STYLE,
 };
 
 const LIVE_PIP_STYLE: React.CSSProperties = {
@@ -2632,6 +2755,30 @@ const LIVE_PIP_DOT_STYLE: React.CSSProperties = {
   background: "var(--accent)",
   display: "inline-block",
   animation: "spark-pulse 1.3s ease-in-out infinite",
+};
+
+const ISSUE_PIP_STYLE: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 4,
+  fontFamily: "var(--font-mono)",
+  fontSize: 8.5,
+  fontWeight: 700,
+  letterSpacing: "0.07em",
+  textTransform: "uppercase",
+  color: "var(--danger)",
+  border: "1px solid color-mix(in oklch, var(--danger) 34%, transparent)",
+  background: "color-mix(in oklch, var(--danger) 7%, transparent)",
+  borderRadius: 999,
+  padding: "1px 6px",
+};
+
+const ISSUE_PIP_DOT_STYLE: React.CSSProperties = {
+  width: 5,
+  height: 5,
+  borderRadius: 999,
+  background: "var(--danger)",
+  display: "inline-block",
 };
 
 const LIVE_ELLIPSIS_STYLE: React.CSSProperties = {
@@ -2699,13 +2846,36 @@ const LIVE_NOTE_LIST_STYLE: React.CSSProperties = {
   marginTop: 2,
 };
 
+const LIVE_DETAILS_STYLE: React.CSSProperties = {
+  marginTop: 2,
+  borderTop: "1px solid color-mix(in oklch, var(--rule-soft) 72%, transparent)",
+  paddingTop: 6,
+};
+
+const LIVE_DETAILS_SUMMARY_STYLE: React.CSSProperties = {
+  width: "fit-content",
+  color: "var(--muted)",
+  fontSize: 10.5,
+  lineHeight: 1.4,
+  cursor: "default",
+  userSelect: "none",
+};
+
+const LIVE_DETAILS_COUNT_STYLE: React.CSSProperties = {
+  marginLeft: 4,
+  color: "var(--muted-2)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 9,
+};
+
 const LIVE_NOTE_STYLE: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
+  display: "grid",
+  gridTemplateColumns: "auto minmax(0, 1fr)",
+  alignItems: "start",
   gap: 6,
   border: "1px solid var(--rule-soft)",
   borderRadius: "var(--radius-control, 7px)",
-  background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
   color: "var(--muted)",
   fontSize: 11,
   lineHeight: 1.4,

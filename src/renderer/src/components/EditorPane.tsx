@@ -1,5 +1,7 @@
 import {
+  Suspense,
   forwardRef,
+  lazy,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -35,7 +37,7 @@ import {
   type InlineAutocompleteStatus,
 } from "./editor-cm/autocomplete/inlineExtension";
 import { usePreferences } from "../preferences/usePreferences";
-import MarkdownPreview from "./markdown-preview/MarkdownPreview";
+const MarkdownPreview = lazy(() => import("./markdown-preview/MarkdownPreview"));
 import FilePreview from "./file-preview/FilePreview";
 import { previewKindForPath } from "./file-preview/previewKind";
 
@@ -440,7 +442,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           />
         )}
         {doc.status === "ready" && isMarkdown && viewMode === "preview" && (
-          <MarkdownPreview text={doc.content} basePath={path} />
+          <Suspense fallback={null}>
+            <MarkdownPreview text={doc.content} basePath={path} />
+          </Suspense>
         )}
         {doc.status === "ready" && (!hasViewToggle || viewMode === "edit") && (
           <CodeMirror

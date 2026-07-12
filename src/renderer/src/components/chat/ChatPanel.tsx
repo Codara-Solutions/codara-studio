@@ -289,7 +289,7 @@ export default function ChatPanel({
           ) : workspace?.copyBranch ? (
             <CopyBranchWelcome copyBranch={workspace.copyBranch} />
           ) : (
-            <WelcomeState />
+            <WelcomeState workspace={workspace} />
           )}
           {/* Keep the composer MOUNTED and hide it with display:none when the
               Terminal sub-view is active, instead of render-conditionally
@@ -932,22 +932,45 @@ function formatCostUsd(value: number, opts: { stripDollar?: boolean } = {}): str
 
 
 
-function WelcomeState() {
+const PROJECT_STARTERS = [
+  {
+    label: "Understand",
+    title: "Map this project",
+    body: "Architecture, entry points, workflows, and the best place to start.",
+    prompt:
+      "Map this project for me. Explain its architecture, main entry points, important workflows, and the highest-leverage place to start working.",
+  },
+  {
+    label: "Build",
+    title: "Create a feature",
+    body: "Turn an idea into a scoped plan and verified implementation.",
+    prompt: "Help me design and build this feature in the current project: ",
+  },
+  {
+    label: "Fix",
+    title: "Investigate a bug",
+    body: "Reproduce it, find the cause, fix it, and protect it with tests.",
+    prompt: "Investigate and fix this bug in the current project: ",
+  },
+  {
+    label: "Improve",
+    title: "Audit project health",
+    body: "Find the most important reliability, UX, and testing gaps.",
+    prompt:
+      "Audit this project for the highest-impact reliability bugs, UX problems, and missing tests. Prioritize the findings, then fix the most important verified issues.",
+  },
+] as const;
+
+function WelcomeState({ workspace }: { workspace: Workspace | null }) {
+  const prefill = (text: string) => {
+    window.dispatchEvent(
+      new CustomEvent("spark:prefill-composer", {
+        detail: { text, replace: true },
+      }),
+    );
+  };
   return (
-    <div
-      style={{
-        flex: 1,
-        minHeight: 0,
-        overflowY: "auto",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 14,
-        padding: "28px 24px",
-        textAlign: "center",
-      }}
-    >
+    <div className="cora-welcome">
       {/* Hero accent icon tile — accent-soft fill + accent-edge hairline +
           the --lift-hi top highlight for tint-first depth. The other chat
           empty states (ConversationEmpty, history "No chats yet") echo this
@@ -967,23 +990,39 @@ function WelcomeState() {
       >
         <SparkMark size={20} />
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <div className="cora-welcome__copy">
         <div className="spark-eyebrow">New chat</div>
-        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--ink)" }}>
-          Start a chat with Cora
+        <div className="cora-welcome__title">Work with Cora on this project</div>
+        <div className="cora-welcome__body">
+          Ask a question or describe an outcome. Cora can inspect the project,
+          plan the work, coordinate Claude and Codex, and verify the result.
         </div>
-        <div
-          style={{
-            fontSize: 12,
-            lineHeight: 1.55,
-            color: "var(--muted)",
-            maxWidth: 268,
-          }}
-        >
-          Describe a task. Cora plans it, spawns Claude, Codex, and Cursor
-          workers, and reports back. Or right-click a plan file in the explorer
-          to run it.
+      </div>
+      {workspace && (
+        <div className="cora-welcome__project" title={workspace.cwd}>
+          <span
+            aria-hidden
+            className="cora-welcome__project-dot"
+            style={{ background: workspace.color || "var(--accent)" }}
+          />
+          <span className="cora-welcome__project-name">{workspace.name}</span>
+          <span className="cora-welcome__project-path">{workspace.cwd}</span>
         </div>
+      )}
+      <div className="cora-welcome__starters" aria-label="Suggested ways to start">
+        {PROJECT_STARTERS.map((starter) => (
+          <button
+            key={starter.title}
+            type="button"
+            className="cora-starter"
+            onClick={() => prefill(starter.prompt)}
+          >
+            <span className="cora-starter__label">{starter.label}</span>
+            <span className="cora-starter__title">{starter.title}</span>
+            <span className="cora-starter__body">{starter.body}</span>
+            <span className="cora-starter__arrow" aria-hidden>↗</span>
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -1111,4 +1150,3 @@ function SparkMark({ size = 13 }: { size?: number }) {
     </span>
   );
 }
-

@@ -152,10 +152,12 @@ export default function ChatComposer({
   const draftDefaultsResolved = useRef(false);
   const [draftFastMode, setDraftFastMode] = useState<boolean>(false);
   const [draftOneMillionContext, setDraftOneMillionContext] = useState<boolean>(false);
-  // Running per-chat token total, summed from chat.usage SparkEvents. Reset
-  // whenever the active run changes so a fresh chat starts at 0; for the
-  // draft (no run yet) we also stay at 0 because no events have fired.
+  // Latest model-context occupancy from chat.usage SparkEvents. This is a
+  // gauge, not a billing counter: each update replaces the prior value so a
+  // CLI that reports cumulative usage repeatedly cannot inflate the pill into
+  // millions/billions of tokens.
   const [tokensUsed, setTokensUsed] = useState(0);
+  const [reportedContextBudget, setReportedContextBudget] = useState<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Synchronous in-flight latch — blocks a second send before React has
   // re-rendered the busy state, which a fast double-click or Enter-key
@@ -289,13 +291,14 @@ export default function ChatComposer({
   // starts at 0 rather than carrying the previous chat's running total.
   useEffect(() => {
     setTokensUsed(0);
+    setReportedContextBudget(null);
   }, [run?.id]);
 
-  // Accumulate live chat.usage SparkEvents into a running per-chat total.
-  // The manager fires one chat.usage event per backend call carrying that
-  // call's inputTokens; summing them gives the user a feel for how much
-  // context this chat has consumed across its lifetime. Filtered by runId
-  // so cross-chat events don't bleed in.
+  // Track the latest live context gauge. Modern backends provide
+  // contextTokens explicitly; older ones expose only inputTokens, which is
+  // still a better estimate when treated as the latest snapshot rather than
+  // summed across every tool-loop update. Filtered by runId so cross-chat
+  // events don't bleed in.
   useEffect(() => {
     const runId = run?.id;
     if (!runId) return;
@@ -303,10 +306,16 @@ export default function ChatComposer({
       if (event.runId !== runId) return;
       if (event.type !== "chat.usage") return;
       const payload = (event.payload ?? {}) as Record<string, unknown>;
-      const raw = payload.inputTokens;
+      const raw =
+        typeof payload.contextTokens === "number"
+          ? payload.contextTokens
+          : payload.inputTokens;
       const value = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
-      if (value <= 0) return;
-      setTokensUsed((prev) => prev + value);
+      if (value >= 0) setTokensUsed(value);
+      const rawBudget = payload.contextWindowTokens;
+      if (typeof rawBudget === "number" && Number.isFinite(rawBudget) && rawBudget > 0) {
+        setReportedContextBudget(rawBudget);
+      }
     });
     return off;
   }, [run?.id]);
@@ -1062,9 +1071,9 @@ export default function ChatComposer({
             <ContextPill
               used={tokensUsed}
               budget={
-                activeOneMillionContext && activeChatBackend === "claude"
+                reportedContextBudget ?? (activeOneMillionContext && activeChatBackend === "claude"
                   ? 1_000_000
-                  : contextWindowForModel(activeChatModelId).tokens
+                  : contextWindowForModel(activeChatModelId).tokens)
               }
             />
             <IconButton
@@ -1885,4 +1894,3 @@ function LightningIcon() {
     </svg>
   );
 }
-

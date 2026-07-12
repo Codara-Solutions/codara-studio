@@ -1,7 +1,7 @@
 import { promises as fsp, constants as fsc } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir, platform } from "node:os";
-import { app } from "electron";
+import { resolveBundledResourcePath } from "./bundled-resources";
 
 // Materializes Codara's shell-integration scripts into a stable on-disk
 // location (`~/.cache/spark/shell-integration/`) and returns the path so a
@@ -14,9 +14,7 @@ import { app } from "electron";
 // already loads spark.ps1 on Windows.
 
 function bundledScriptDir(): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, "shell-integration")
-    : join(app.getAppPath(), "resources", "shell-integration");
+  return resolveBundledResourcePath("shell-integration");
 }
 
 function cacheRoot(): string {

@@ -38,6 +38,7 @@ import type {
   HumanRunMessage,
   RunState,
 } from "@shared/types";
+import { DEFAULT_CODEX_CHAT_MODEL } from "@shared/model-catalog";
 import type {
   OpenRouterManagerMode,
   SparkManagerDecision,
@@ -188,6 +189,10 @@ export type ChatStreamEvent =
       inputTokens?: number;
       outputTokens?: number;
       cacheReadTokens?: number;
+      /** Tokens occupying the model's latest request context. Unlike
+       * inputTokens (an incremental billing/audit counter), this is a gauge:
+       * renderers replace the previous value instead of summing it. */
+      contextTokens?: number;
       /** Model's full context window in tokens, when the backend exposes it.
        *  Defaults handled renderer-side via contextWindowForModel(). */
       contextWindowTokens?: number;
@@ -245,7 +250,7 @@ export interface SparkAgentBackend {
  * Defaults:
  *   - backend: openrouter (preserves pre-feature behaviour)
  *   - model:   backend-specific default (OpenRouter from settings,
- *              Claude=opus-4-8, Codex=gpt-5.5)
+ *              Claude=opus-4-8, Codex=GPT-5.6 Sol)
  *   - mode:    execute (the original behaviour)
  *   - effort:  medium
  */
@@ -263,7 +268,7 @@ export function resolveChatBackendConfig(
     } else if (backend === "claude") {
       model = "claude-opus-4-8";
     } else {
-      model = "gpt-5.5";
+      model = DEFAULT_CODEX_CHAT_MODEL;
     }
   }
   return {

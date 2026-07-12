@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { resolveBundledResourcePath } from "../bundled-resources";
 import type { OpenRouterManagerMode } from "./openrouter-manager";
 
 export interface ManagerPromptProfile {
@@ -80,8 +80,8 @@ export const DEFAULT_MANAGER_PROMPT_PROFILE: ManagerPromptProfile = {
       "- Assumption discipline: if the user request has multiple plausible product/security/data interpretations, ask before spawning workers. If ambiguity is local/technical, give the worker observable success criteria and tell it to discover implementation details itself.",
       "- Skeleton must be followed by a brake. A worker_batch step containing a skeleton plannedAgent MUST be the last step you emit (the next step is a brake or the response ends). Cora inspects the foundation before committing further workers and re-invokes plan_analysis with the foundation as evidence. If you forget, Cora injects a synthetic brake.",
       "- UI polish: when a worker task touches visible UI (HTML, CSS, components, layouts, views, theming), step_planning must append the UI polish checklist verbatim to that worker's description (see step_planning rules).",
-      "- Use CLI-ready modelHint values from AVAILABLE RUNTIMES. Claude: claude-opus-4-8 (top tier) or claude-sonnet-5 (mid); claude-fable-5 is the premium tier and IS available as a worker model — set a worker's modelHint to claude-fable-5 when the user explicitly asked for Fable in their own message this run (Codara honors it), otherwise never (an unrequested fable hint is downgraded to claude-opus-4-8). Codex: gpt-5.5 (sole model — vary effortHint). Cursor: composer-2.5-fast.",
-      "- Use effortHint as the worker thinking level: low, medium, high, or xhigh — only values listed for that model in AVAILABLE RUNTIMES.",
+      "- Use CLI-ready modelHint values from AVAILABLE RUNTIMES. Claude: claude-opus-4-8 (top tier) or claude-sonnet-5 (mid); claude-fable-5 is the premium tier and IS available as a worker model — set a worker's modelHint to claude-fable-5 when the user explicitly asked for Fable in their own message this run (Codara honors it), otherwise never (an unrequested fable hint is downgraded to claude-opus-4-8). Codex: gpt-5.6-sol (top), gpt-5.6-terra (mid), or gpt-5.6-luna (cheap). Cursor: composer-2.5-fast.",
+      "- Use effortHint as the worker thinking level: low, medium, high, xhigh, or max — only values listed for that model in AVAILABLE RUNTIMES.",
       "- Do not write terminal launch commands in your decision. The app opens terminals and builds Claude/Codex/Cursor commands from runtimePreference, modelHint, and effortHint.",
       "- Runtime-native delegation policy: Cora is the top-level orchestrator. Worker templates append compact Claude/Codex native-delegation guardrails only when the task asks for or clearly benefits from delegation. Do not paste docs or URLs into task.description. Native subagents/Task/agent teams/worktrees are for bounded read-heavy exploration, tests/log triage, independent verifier probes, summarization, or explicitly isolated/disjoint worktree experiments. Do not tell ordinary implementation workers to create nested implementation teams; use Cora plannedAgents for top-level parallelism.",
       "- MCP/skill sync policy: when enabled in Settings > Agents, Cora worker templates append only compact MCP server names and skill names discovered from Claude/Codex config. Do not paste MCP config contents, skill docs, or long tool manifests into task.description; workers inspect them on demand and summarize findings.",
@@ -100,7 +100,7 @@ export const DEFAULT_MANAGER_PROMPT_PROFILE: ManagerPromptProfile = {
         "- If the user asks a question you can answer from the provided context, return status=complete, put the answer in chatReply, and leave steps=[] and tasks=[].",
         "- If answering well requires filesystem inspection, command output, code changes, tests, browser checks, or longer tool use, return status=run_workers with a concise step division. Cora will create worker prompts and run the workers.",
         "- SYSTEM-OBSERVATION GUARD: if the user asks for live system state you cannot observe from the conversation/context (current wall-clock time or date, current working directory contents, output of a shell command, what processes are running, network/host status, free disk space, env-var values, git status of an external repo, anything that requires reading the local clock or filesystem RIGHT NOW), you MUST return status=run_workers with a single leaf worker_batch step that runs the appropriate shell-style command via codex/claude/cursor (whichever is installed) — DO NOT refuse with \"I don't have access\" and DO NOT guess. Example: \"what time is it?\" → one leaf worker that runs `Get-Date` (Windows) or `date` (Unix) and reports the value in chatReply via its final report.",
-        "- TIER DISCIPLINE FOR LEAF WORK: when the system-observation guard fires (or any other one-shot mechanical query), the plannedAgent MUST be taskClass=leaf with the cheapest acceptable combination per AVAILABLE RUNTIMES — for Claude pick claude-sonnet-5 at low effort, for Codex pick gpt-5.5 at minimal effort, for Cursor pick composer-2.5-fast. Do NOT assign claude-opus-4-8 or any high/xhigh/max effort to read-the-clock or run-one-command tasks. Top-tier reasoning catches subtle implementation bugs; it adds nothing to `Get-Date`.",
+        "- TIER DISCIPLINE FOR LEAF WORK: when the system-observation guard fires (or any other one-shot mechanical query), the plannedAgent MUST be taskClass=leaf with the cheapest acceptable combination per AVAILABLE RUNTIMES — for Claude pick claude-sonnet-5 at low effort, for Codex pick gpt-5.6-luna at low effort, for Cursor pick composer-2.5-fast. Do NOT assign claude-opus-4-8, gpt-5.6-sol, or any high/xhigh/max effort to read-the-clock or run-one-command tasks. Top-tier reasoning catches subtle implementation bugs; it adds nothing to `Get-Date`.",
         "- If the user explicitly asks to open standing terminals they will drive, return status=spawn_terminals with terminals filled.",
         "- Ask the user only when a real product/scope/credential/destructive-action decision is missing and no sensible default is safe.",
         "- Do not pretend you saw files beyond the attached previews and run context. If a preview is truncated or missing and that matters, either explain the limitation in chatReply or spawn workers to inspect it.",
@@ -413,11 +413,9 @@ function loadProfileFromDisk(): { profile: ManagerPromptProfile; key: string } |
 }
 
 function profilePathCandidates(): string[] {
-  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
   return [
     process.env.SPARK_MANAGER_PROFILE_PATH,
-    join(process.cwd(), "resources", "orchestration", "manager-profile.json"),
-    resourcesPath ? join(resourcesPath, "orchestration", "manager-profile.json") : undefined,
+    resolveBundledResourcePath("orchestration", "manager-profile.json"),
   ].filter((path): path is string => Boolean(path));
 }
 

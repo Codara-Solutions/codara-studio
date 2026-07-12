@@ -35,11 +35,11 @@
 // users without Claude installed (or who have hooks disabled) just lose
 // the free observability — every other part of Codara keeps working.
 
-import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { resolveBundledResourcePath } from "./bundled-resources";
 import { writeFileAtomic } from "./fs-atomic";
 
 const CLAUDE_SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
@@ -91,15 +91,10 @@ interface ClaudeSettings {
   [key: string]: unknown;
 }
 
-// Resolve the absolute path to spark-hook.py in both dev and packaged builds.
-//   dev:      __dirname is out/main/, script lives in repo at resources/claude-hooks
-//   packaged: extraResources are copied to process.resourcesPath/claude-hooks
+// Resolve the absolute path to spark-hook.py in both development and packaged
+// builds through the stable application resource root.
 function resolveHookScriptPath(): string {
-  if (app.isPackaged) {
-    return join(process.resourcesPath, "claude-hooks", "spark-hook.py");
-  }
-  // Out path in dev is out/main/, source at resources/claude-hooks at repo root.
-  return join(__dirname, "..", "..", "resources", "claude-hooks", "spark-hook.py");
+  return resolveBundledResourcePath("claude-hooks", "spark-hook.py");
 }
 
 // Resolve the python executable. Prefer `python3` (most POSIX systems have

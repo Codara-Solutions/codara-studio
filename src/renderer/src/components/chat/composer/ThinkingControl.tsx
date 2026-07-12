@@ -1,9 +1,9 @@
+import { useEffect, useRef, useState } from "react";
 import type { AgentEffortLevel } from "@shared/types";
 import {
   EFFORT_LABELS,
   THINKING_BAR_COUNT,
   barsForEffort,
-  nextEffort,
 } from "./types";
 
 interface Props {
@@ -12,23 +12,89 @@ interface Props {
   onCycle: (next: AgentEffortLevel) => void;
 }
 
-// Click-to-cycle thinking-level pill. Tap advances through the allowed
-// list and wraps. The bars icon shows how "deep" the level is at a glance.
+const EFFORT_DESCRIPTIONS: Record<AgentEffortLevel, string> = {
+  minimal: "Lowest latency for tiny, mechanical work.",
+  low: "Fast reasoning for clear, well-scoped tasks.",
+  medium: "Balanced depth and speed for everyday work.",
+  high: "More planning and checking for difficult tasks.",
+  xhigh: "Deep analysis for complex, high-value work.",
+  max: "Maximum depth when quality matters more than latency.",
+};
+
+// Explicit effort picker. A cycle-only control hid available levels (especially
+// the new GPT-5.6 Max setting) and made changing from Low to Max require several
+// blind clicks. The bars still provide the glanceable depth cue.
 export default function ThinkingControl({ effort, availableEfforts, onCycle }: Props) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
   if (availableEfforts.length === 0) return null;
   const label = EFFORT_LABELS[effort] ?? effort;
   const litBars = barsForEffort(effort);
 
   return (
-    <button
-      type="button"
-      className="composer-thinking"
-      title="Click to change thinking level"
-      onClick={() => onCycle(nextEffort(effort, availableEfforts))}
-    >
-      <ThinkingBars lit={litBars} />
-      <span className="composer-thinking-label">{label}</span>
-    </button>
+    <div className="composer-thinking-wrap" ref={rootRef}>
+      <button
+        type="button"
+        className={`composer-thinking${open ? " is-active" : ""}`}
+        title={`${label} reasoning — ${EFFORT_DESCRIPTIONS[effort]}`}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <ThinkingBars lit={litBars} />
+        <span className="composer-thinking-label">{label}</span>
+        <span aria-hidden className="composer-chevron">⌄</span>
+      </button>
+      {open && (
+        <div className="composer-thinking-menu spark-menu" role="listbox" aria-label="Reasoning effort">
+          <div className="composer-menu-heading">Reasoning effort</div>
+          {availableEfforts.map((option) => {
+            const active = option === effort;
+            return (
+              <button
+                key={option}
+                type="button"
+                role="option"
+                aria-selected={active}
+                className={`composer-effort-option${active ? " is-active" : ""}`}
+                onClick={() => {
+                  onCycle(option);
+                  setOpen(false);
+                }}
+              >
+                <ThinkingBars lit={barsForEffort(option)} />
+                <span className="composer-mode-option-copy">
+                  <span className="composer-mode-option-label">{EFFORT_LABELS[option]}</span>
+                  <span className="composer-mode-option-description">
+                    {EFFORT_DESCRIPTIONS[option]}
+                  </span>
+                </span>
+                {active && <span className="composer-menu-check" aria-hidden>✓</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 

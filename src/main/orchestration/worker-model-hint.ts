@@ -6,6 +6,7 @@
 // esbuild erases every import and the bundle is dependency-free.
 
 import type { RunState } from "@shared/types";
+import { normalizeCodexModelId } from "@shared/model-catalog";
 
 // Fable 5 (`claude-fable-5`) is Anthropic's top, most expensive tier. Cora-
 // spawned workers (execute-mode codara_spawn_workers, plan-council judges,
@@ -52,6 +53,10 @@ export function sanitizeWorkerModelHint(
     if (SUPERSEDED_SONNET_BASE.test(base)) {
       const suffix = at >= 0 ? hint.slice(at) : "";
       return { hint: `${SPARK_WORKER_SONNET_CURRENT}${suffix}`, downgraded: false };
+    }
+    const normalizedCodex = normalizeCodexModelId(hint);
+    if (normalizedCodex !== hint) {
+      return { hint: normalizedCodex, downgraded: false };
     }
   }
   return { hint, downgraded: false };

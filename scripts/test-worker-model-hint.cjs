@@ -110,11 +110,15 @@ async function main() {
     check(`"${hint}" passes through unchanged when allowFable=true`, allowed.downgraded === false && allowed.hint === hint);
   }
 
-  // ── non-fable hints unaffected by allowFable ──
+  // ── non-fable hints + Codex catalog migration ──
   const opus = sanitizeWorkerModelHint("claude-opus-4-8", { allowFable: true });
   check("opus untouched", opus.downgraded === false && opus.hint === "claude-opus-4-8");
   const gpt = sanitizeWorkerModelHint("gpt-5.5", { allowFable: false });
-  check("gpt-5.5 untouched", gpt.downgraded === false && gpt.hint === "gpt-5.5");
+  check("legacy gpt-5.5 migrates to GPT-5.6 Sol", gpt.downgraded === false && gpt.hint === "gpt-5.6-sol");
+  const terra = sanitizeWorkerModelHint("gpt-5.6-terra", { allowFable: false });
+  check("GPT-5.6 Terra stays concrete", terra.downgraded === false && terra.hint === "gpt-5.6-terra");
+  const lunaEffort = sanitizeWorkerModelHint("gpt-5.6-luna@low", { allowFable: false });
+  check("GPT-5.6 Luna keeps @effort", lunaEffort.downgraded === false && lunaEffort.hint === "gpt-5.6-luna@low");
   const undef = sanitizeWorkerModelHint(undefined, { allowFable: false });
   check("undefined hint stays undefined", undef.downgraded === false && undef.hint === undefined);
 

@@ -25,7 +25,6 @@
 // __spark_cli_session_error sentinel from cli-session becomes a kind=error
 // stream event.
 
-import { app } from "electron";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
@@ -36,6 +35,7 @@ import { backendPtySessionId } from "@shared/backend-pty";
 import type { ChatMode } from "@shared/types";
 
 import { encodeCwdForClaudeProjects } from "./claude-paths";
+import { resolveBundledResourcePath } from "../bundled-resources";
 import { writeFileAtomic } from "../fs-atomic";
 import { resolvePythonBinary } from "../hook-installer";
 import { installOrchestratorMcpForCC, isSparkOrchestratorMcpInstalled } from "../mcp-installer";
@@ -50,6 +50,7 @@ import type {
 } from "./openrouter-manager";
 import { buildClaudeSandboxArgv, logConfigShieldOnce } from "./agent-config-shield";
 import { startCliSession, type CliSession } from "./cli-session";
+import { buildSpawnTerminalsDecisionFromToolCalls } from "./cli-terminal-decision";
 import {
   buildSparkRunContextBlock,
   buildTalkReplyDecision,
@@ -172,30 +173,11 @@ const EXECUTE_PROMPT_RESOURCE_FILENAME = "cc-execute-prompt.md";
 const AUTO_PROMPT_RESOURCE_FILENAME = "cc-auto-prompt.md";
 const AUTOMATION_PROMPT_RESOURCE_FILENAME = "cc-automation-prompt.md";
 
-// Resolve the Execute-mode orchestrator prompt shipped under
-// `resources/orchestration/`. Packaged build: read straight from
-// `process.resourcesPath`; dev: walk up to the repo and reach into the source
-// tree. Mirrors the existing hookScript resolver used for the CC Python hooks.
-function resolveExecutePromptPath(): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, "orchestration", EXECUTE_PROMPT_RESOURCE_FILENAME)
-    : join(__dirname, "..", "..", "resources", "orchestration", EXECUTE_PROMPT_RESOURCE_FILENAME);
-}
-
-// Resolve the Auto-mode coordinator prompt (Cora routes each message herself)
-// — same packaged/dev resolution as the Execute prompt above.
-function resolveAutoPromptPath(): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, "orchestration", AUTO_PROMPT_RESOURCE_FILENAME)
-    : join(__dirname, "..", "..", "resources", "orchestration", AUTO_PROMPT_RESOURCE_FILENAME);
-}
-
-// Resolve the Automation-mode architect prompt — same packaged/dev resolution
-// as the Execute prompt above.
-function resolveAutomationPromptPath(): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, "orchestration", AUTOMATION_PROMPT_RESOURCE_FILENAME)
-    : join(__dirname, "..", "..", "resources", "orchestration", AUTOMATION_PROMPT_RESOURCE_FILENAME);
+// Resolve prompts from the application resource root. Do not derive this from
+// __dirname: electron-vite may emit this backend in out/main/chunks, where the
+// relative depth differs from an unsplit out/main module.
+function resolveOrchestrationPromptPath(filename: string): string {
+  return resolveBundledResourcePath("orchestration", filename);
 }
 
 interface ClaudeChatSession {
@@ -234,7 +216,7 @@ interface ClaudeChatSession {
   /** Tool calls observed during the current turn — populated by the JSONL
    *  translator when CC fires `mcp__codara-studio__*` (or any other
    *  tool). In Execute mode the request handler reads this after the turn
-   *  ends to convert codara_spawn_workers calls into a SparkManagerDecision
+   *  ends to convert codara_spawn_terminals / codara_spawn_workers calls into a SparkManagerDecision
    *  that the run-store can act on, exactly like grok/OpenRouter does. */
   turnToolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }>;
   /** Wall-clock ms of the most recent JSONL line observed from CC. The
@@ -297,7 +279,9 @@ export const claudeBackend: SparkAgentBackend = {
       let systemPromptPath: string;
       if (mode === "execute" || mode === "auto") {
         systemPromptPath =
-          mode === "auto" ? resolveAutoPromptPath() : resolveExecutePromptPath();
+          mode === "auto"
+            ? resolveOrchestrationPromptPath(AUTO_PROMPT_RESOURCE_FILENAME)
+            : resolveOrchestrationPromptPath(EXECUTE_PROMPT_RESOURCE_FILENAME);
         // Idempotent — installs the codara-studio entry into ~/.claude.json the
         // first time, no-ops thereafter. We skip the work when the entry is
         // already in place to avoid touching the file on every turn.
@@ -312,7 +296,9 @@ export const claudeBackend: SparkAgentBackend = {
           });
         }
       } else if (mode === "automation") {
-        systemPromptPath = resolveAutomationPromptPath();
+        systemPromptPath = resolveOrchestrationPromptPath(
+          AUTOMATION_PROMPT_RESOURCE_FILENAME,
+        );
         // Same idempotent global install as Execute — the per-run MCP config
         // written in spawnChatSession scopes the visible tools, but the global
         // entry still needs to exist for CC to spawn the server.
@@ -696,9 +682,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   // disables hook loading — then the Stop done-marker never appears and
   // every chat turn times out at 90s. File path is unambiguous.
   const hookScript = (name: string): string =>
-    app.isPackaged
-      ? join(process.resourcesPath, "claude-hooks", name)
-      : join(__dirname, "..", "..", "resources", "claude-hooks", name);
+    resolveBundledResourcePath("claude-hooks", name);
   const userPromptScript = hookScript("spark-cc-userprompt.py");
   const stopScript = hookScript("spark-cc-stop.py");
   // Resolve the python launcher per-platform (python3 on POSIX, python on
@@ -753,10 +737,11 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   // server exposes the worker-orchestration roster).
   let mcpConfigFile: string | null = null;
   if (opts.mode === "execute" || opts.mode === "auto" || opts.mode === "automation") {
-    const studioMcpServerPath = app.isPackaged
-      ? join(process.resourcesPath, "codara-studio-mcp", "server.js")
-      : join(__dirname, "..", "..", "resources", "codara-studio-mcp", "server.js");
-    const electronExe = app.isPackaged ? process.execPath : process.execPath;
+    const studioMcpServerPath = resolveBundledResourcePath(
+      "codara-studio-mcp",
+      "server.js",
+    );
+    const electronExe = process.execPath;
     // SPARK_MCP_MODE selects the codara-studio roster: automation → the
     // architect tools; execute/auto → the worker-orchestration tools. Either
     // way the studio (preview + terminal) tools ride along, so the manager can
@@ -823,9 +808,9 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
   //   terminal) ALONGSIDE the Execute orchestration tools, so the manager CAN
   //   reach codara_preview_* / codara_terminal_* for a quick UI check or a
   //   visible command — that is intended. Containment is downstream, not by
-  //   tool availability: buildExecuteDecisionFromToolCalls treats ONLY
-  //   codara_spawn_workers and codara_complete as manager decisions, so the extra
-  //   studio tools can't derail the delegate-or-complete turn contract.
+  //   tool availability: buildExecuteDecisionFromToolCalls treats only the
+  //   high-level terminal/worker/completion calls as manager decisions, so the
+  //   lower-level studio tools can't derail the route-or-complete contract.
   if (opts.mode === "execute") {
     args.push("--system-prompt", buildExecuteSystemPrompt(opts.cwd));
     // `--tools ""` disables ALL built-in tools (Read, Edit, Bash, Glob,
@@ -1445,11 +1430,11 @@ function sleep(ms: number): Promise<void> {
 /**
  * Convert the spark_* tool calls CC made this turn into a SparkManagerDecision
  * — the shape the rest of the run-store pipeline already knows how to apply
- * (spawn workers, ask user, mark complete). This is the bridge that makes
+ * (open standing terminals, spawn workers, ask user, mark complete). This is the bridge that makes
  * CC-in-execute-mode behave identically to grok/OpenRouter from the
  * run-store's perspective.
  *
- * Lookup order: spawn_workers > ask_user > complete. Everything else is
+ * Lookup order: spawn_terminals > complete > spawn_workers > ask_user. Everything else is
  * treated as conversational and produces a chatReply (which usually means
  * CC did something unexpected — the prompt + tool whitelist make this
  * branch unlikely in practice).
@@ -1465,6 +1450,16 @@ export function buildExecuteDecisionFromToolCalls(
   const matches = (call: { toolName: string }, sparkName: string): boolean =>
     call.toolName === sparkName ||
     call.toolName === `mcp__codara-studio__${sparkName}`;
+
+  // Standing terminal requests are decisions, not workers. The MCP handler
+  // validates and acknowledges the request; applying this decision is what
+  // emits spark.spawn_terminals and opens one persistent split-grid tab. It
+  // wins even if a model redundantly calls codara_complete afterwards.
+  const terminalDecision = buildSpawnTerminalsDecisionFromToolCalls(
+    toolCalls,
+    chatReply,
+  );
+  if (terminalDecision) return terminalDecision;
 
   // codara_complete wins when present, even alongside codara_spawn_workers.
   // The CC manager's MCP tool calls executed IN ORDER as the turn ran:
@@ -1555,7 +1550,7 @@ function coerceWorkerSpec(raw: unknown): SparkManagerTaskDecision | null {
       : undefined;
   const effortHint =
     typeof raw.effortHint === "string" &&
-    ["minimal", "low", "medium", "high", "xhigh"].includes(raw.effortHint)
+    ["minimal", "low", "medium", "high", "xhigh", "max"].includes(raw.effortHint)
       ? (raw.effortHint as SparkManagerTaskDecision["effortHint"])
       : undefined;
   const allowedPaths = Array.isArray(raw.allowedPaths)
@@ -1622,17 +1617,26 @@ function coerceQuestionOption(
  */
 function buildExecuteSystemPrompt(cwd: string): string {
   return [
-    "You are Cora's worker manager. Your entire job is to convert each user message into one or more parallel/sequential worker specs, then delegate via `codara_spawn_workers`. You do not write code, do not read files, do not run commands. Workers do all of that.",
+    "You are Cora's manager. Route explicit requests for user-driven Claude/Codex terminals through `codara_spawn_terminals`; route implementation work through `codara_spawn_workers`. You do not write code, do not read files, do not run commands. Workers do all building.",
     "",
     `Workspace cwd: ${cwd}`,
     "",
     "## Required behavior",
     "",
+    "When the user explicitly asks to open terminals, sessions, or Claude/Codex agents that THEY will prompt and drive, call `codara_spawn_terminals` once. It opens one persistent terminal tab with the requested split panes. Do not spawn workers, wait, or call codara_complete for that route.",
+    "",
     "For every user turn that asks for changes (edits, refactors, new features, fixes, redesigns, file moves, anything that touches the workspace), your FIRST action is a call to `codara_spawn_workers`. The worker spec is the entire output of your turn — no prose alternatives, no clarifying refusals, no \"here's what I'd do\" lists. Just spawn. A single-sentence orchestration comment alongside the call is fine (\"Spawning a Claude worker to redesign the calculator UI.\") but optional.",
+    "The manager has no filesystem tools, so every implementation worker must begin by reading the nearest project guidance and relevant entry points, preserving existing user changes, and discovering the project's real files/scripts/patterns before editing. Never invent paths merely to make a plan look parallel.",
+    "Use the smallest effective team: one strong implementation worker plus an independent verifier for a cohesive same-file or sequential change; 2-4 implementation workers only when the work has genuinely independent, non-overlapping surfaces and explicit interface contracts.",
     "",
     "For genuinely ambiguous turns (the user wrote one vague word, or asked you to make a value judgment with no decision-relevant context), call `codara_ask_user` with 2-4 concrete options. Don't ask in prose.",
     "",
     "For pure read-only questions where the user wants information without changes, you may answer in prose. But assume the default is delegation — if the user said \"make X\", \"fix Y\", \"change Z\", that's a spawn, not a chat.",
+    "",
+    "## codara_spawn_terminals payload",
+    "",
+    "`terminals: [{ runtime: 'claude' | 'codex', count: number, model?: string, effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' }]`",
+    "Two Claude panes means `{ terminals: [{ runtime: 'claude', count: 2 }] }`. Claude launches with --dangerously-skip-permissions; Codex launches with --yolo.",
     "",
     "## codara_spawn_workers payload",
     "",
@@ -1642,8 +1646,8 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "    title: string,                       // 4-10 word chip label",
     "    description: string,                 // full prompt the worker sees — be specific",
     "    runtimePreference: 'claude' | 'codex',",
-    "    modelHint?: 'claude-opus-4-8' | 'claude-sonnet-5' | 'gpt-5.5' | 'claude-fable-5',",
-    "    effortHint?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh',",
+    "    modelHint?: 'claude-opus-4-8' | 'claude-sonnet-5' | 'gpt-5.6-sol' | 'gpt-5.6-terra' | 'gpt-5.6-luna' | 'claude-fable-5',",
+    "    effortHint?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max',",
     "    allowedPaths?: string[],             // cwd-relative; parallel workers must NOT overlap",
     "    forbiddenPaths?: string[],",
     "    expectedOutputs?: string[],          // files/artifacts the worker should produce",

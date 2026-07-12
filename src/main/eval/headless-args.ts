@@ -38,6 +38,9 @@ export function readHeadlessEvalArgs(argv: string[] = process.argv): HeadlessArg
   // just hand it everything past argv[0] and rely on `strict: false` to ignore
   // anything Electron itself uses.
   const trimmed = argv.slice(1);
+  const evalPlanPresent = trimmed.some(
+    (arg) => arg === "--eval-plan" || arg.startsWith("--eval-plan="),
+  );
   let parsed: ReturnType<typeof parseArgs>;
   try {
     parsed = parseArgs({
@@ -55,13 +58,17 @@ export function readHeadlessEvalArgs(argv: string[] = process.argv): HeadlessArg
       allowPositionals: true,
     });
   } catch (err) {
-    return { enabled: false, error: (err as Error).message };
+    return evalPlanPresent
+      ? { enabled: true, error: (err as Error).message }
+      : { enabled: false, error: (err as Error).message };
   }
 
   const values = parsed.values as Record<string, unknown>;
   const planRaw = values["eval-plan"];
   if (typeof planRaw !== "string" || !planRaw.trim()) {
-    return { enabled: false };
+    return evalPlanPresent
+      ? { enabled: true, error: "--eval-plan requires a non-empty path." }
+      : { enabled: false };
   }
 
   const configRaw = values["eval-config"];

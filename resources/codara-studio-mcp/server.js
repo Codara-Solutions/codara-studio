@@ -579,7 +579,7 @@ const WORKER_SCHEMA = {
     model: {
       type: "string",
       description:
-        "Engine-native model id (REQUIRED): 'claude-opus-4-8' or 'claude-sonnet-5' for claude, 'gpt-5.5' for codex. NOTE: 'claude-fable-5' (Fable 5, premium top-tier) IS permitted as a worker model ONLY when the user's own message explicitly asked for Fable for this work; Codara honors an explicitly-requested fable hint. Otherwise it is downgraded to claude-opus-4-8.",
+        "Engine-native model id (REQUIRED): 'claude-opus-4-8' or 'claude-sonnet-5' for claude; 'gpt-5.6-sol', 'gpt-5.6-terra', or 'gpt-5.6-luna' for codex. Use Sol for flagship/complex work, Terra for balanced everyday work, and Luna for fast repeatable work. NOTE: 'claude-fable-5' (Fable 5, premium top-tier) IS permitted as a worker model ONLY when the user's own message explicitly asked for Fable for this work; Codara honors an explicitly-requested fable hint. Otherwise it is downgraded to claude-opus-4-8.",
     },
     effort: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh", "max"], description: "Reasoning effort (REQUIRED)." },
     timeoutMinutes: { type: "number", description: "Hard per-iteration wall-clock ceiling in minutes." },
@@ -833,6 +833,57 @@ const AUTOMATION_TOOLS = [
 // ===========================================================================
 const EXECUTE_TOOLS = [
   {
+    name: "codara_spawn_terminals",
+    description:
+      "Open ONE persistent terminal tab for the user, split into one interactive pane per requested Claude Code or Codex session. Use this when the user explicitly asks to open/spawn terminals, sessions, or agents that THEY will drive. This is NOT worker orchestration: do not call codara_spawn_workers, codara_wait_for_workers, or codara_complete for the same request. Codara launches Claude with --dangerously-skip-permissions and Codex with --yolo. After this tool succeeds, end the turn; Codara applies the terminal decision and posts the confirmation.",
+    inputSchema: {
+      type: "object",
+      required: ["terminals"],
+      properties: {
+        runId: {
+          type: "string",
+          description:
+            "Codara run id. Defaults to process.env.SPARK_RUN_ID (the run this orchestrator was spawned for) when omitted.",
+        },
+        terminals: {
+          type: "array",
+          minItems: 1,
+          maxItems: 8,
+          description:
+            "Terminal groups. Example: [{runtime:'claude',count:2}] opens one tab with two Claude panes; [{runtime:'claude',count:1},{runtime:'codex',count:1}] opens one tab with one of each.",
+          items: {
+            type: "object",
+            required: ["runtime", "count"],
+            properties: {
+              runtime: {
+                type: "string",
+                enum: ["claude", "codex"],
+                description: "Agent CLI to launch in each pane.",
+              },
+              count: {
+                type: "integer",
+                minimum: 1,
+                maximum: 8,
+                description: "Number of panes with this exact configuration.",
+              },
+              model: {
+                type: "string",
+                description: "Optional engine-native model id. Omit to use the CLI default.",
+              },
+              effort: {
+                type: "string",
+                enum: ["low", "medium", "high", "xhigh", "max"],
+                description: "Optional reasoning effort. Omit to use the CLI default.",
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
     name: "codara_spawn_workers",
     description:
       "Delegate one or more focused tasks to Cora workers (claude/codex subagents). Each worker entry needs a title and description; runtime/model/effort hints and path scoping are optional. Returns worker_task_ids that can be queried via codara_get_worker_status. Call this whenever you want to fan work out instead of doing it yourself in the orchestrator turn.",
@@ -1016,7 +1067,7 @@ const EXECUTE_TOOLS = [
         nextModel: {
           type: "string",
           description:
-            "Optional engine-native model id for the NEXT iteration (e.g. claude-opus-4-8, gpt-5.5). Requires nextEngine; unknown ids fall back to the CLI default.",
+            "Optional engine-native model id for the NEXT iteration (e.g. claude-opus-4-8, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna). Requires nextEngine; unknown ids fall back to the CLI default.",
         },
         nextEffort: {
           type: "string",
@@ -1135,6 +1186,7 @@ const EXECUTE_TOOLS = [
 const ASK_USER_TOOL = EXECUTE_TOOLS.find((t) => t.name === "codara_ask_user");
 
 const EXECUTE_TOOL_TO_RPC = {
+  codara_spawn_terminals: "orchestrator.spawn_terminals",
   codara_spawn_workers: "orchestrator.spawn_workers",
   codara_ask_user: "orchestrator.ask_user",
   codara_complete: "orchestrator.complete",

@@ -682,35 +682,16 @@ export default function AutomationsHub({
             {!selected ? (
               <div className="spark-empty" style={{ flex: 1, gap: 8 }}>
                 {loading ? null : jobs.length === 0 ? (
-                  <>
-                    <div className="spark-eyebrow">No looms yet</div>
-                    <div className="spark-empty__body">
-                      A loom is a trigger, a loop, and CLI workers. Build one by hand or let Cora
-                      design it with you.
-                    </div>
-                    <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-                      <button
-                        type="button"
-                        className="spark-btn"
-                        onClick={() => {
-                          setActionError(null);
-                          setMode({ kind: "assist" });
-                        }}
-                      >
-                        ✦ Create with Cora
-                      </button>
-                      <button
-                        type="button"
-                        className="spark-btn is-primary"
-                        onClick={() => {
-                          setActionError(null);
-                          setMode({ kind: "create" });
-                        }}
-                      >
-                        + New loom
-                      </button>
-                    </div>
-                  </>
+                  <AutomationEmptyState
+                    onAssist={() => {
+                      setActionError(null);
+                      setMode({ kind: "assist" });
+                    }}
+                    onManual={() => {
+                      setActionError(null);
+                      setMode({ kind: "create" });
+                    }}
+                  />
                 ) : (
                   <>
                     <div className="spark-eyebrow">Select a loom</div>
@@ -810,6 +791,57 @@ export default function AutomationsHub({
           </div>
         )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function AutomationEmptyState({
+  onAssist,
+  onManual,
+}: {
+  onAssist: () => void;
+  onManual: () => void;
+}): React.ReactElement {
+  return (
+    <div className="automation-launchpad">
+      <div className="automation-launchpad__eyebrow">Automation studio</div>
+      <div className="automation-launchpad__title">Make this project keep working for you</div>
+      <div className="automation-launchpad__body">
+        Looms combine a trigger, bounded repetition, and real Claude or Codex
+        workers. Start from the outcome with Cora, or wire the flow yourself.
+      </div>
+      <div className="automation-launchpad__actions">
+        <button type="button" className="automation-launch-card is-cora" onClick={onAssist}>
+          <span className="automation-launch-card__icon" aria-hidden>✦</span>
+          <span className="automation-launch-card__copy">
+            <span className="automation-launch-card__label">Recommended</span>
+            <span className="automation-launch-card__title">Design with Cora</span>
+            <span className="automation-launch-card__body">
+              Describe the result. Cora designs the schedule, safety limits,
+              models, and worker graph, then test-runs it with you.
+            </span>
+          </span>
+          <span className="automation-launch-card__arrow" aria-hidden>→</span>
+        </button>
+        <button type="button" className="automation-launch-card" onClick={onManual}>
+          <span className="automation-launch-card__icon" aria-hidden>⌘</span>
+          <span className="automation-launch-card__copy">
+            <span className="automation-launch-card__label">Visual builder</span>
+            <span className="automation-launch-card__title">Build a flow</span>
+            <span className="automation-launch-card__body">
+              Start from a proven template, then tune triggers, loops, guards,
+              parallel workers, access, and model effort directly.
+            </span>
+          </span>
+          <span className="automation-launch-card__arrow" aria-hidden>→</span>
+        </button>
+      </div>
+      <div className="automation-launchpad__capabilities" aria-label="Automation capabilities">
+        <span>Schedules & folders</span>
+        <span>Bounded agent loops</span>
+        <span>Parallel workers</span>
+        <span>Guards & retries</span>
       </div>
     </div>
   );

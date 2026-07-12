@@ -807,6 +807,7 @@ function WorkspaceRow({
   return (
     <div
       ref={rowRef}
+      data-workspace-id={ws.id}
       draggable={!editing}
       onDragStart={onRowDragStart}
       onDragOver={onRowDragOver}
@@ -822,6 +823,8 @@ function WorkspaceRow({
         if (!editing) setRowPressed(true);
       }}
       onMouseUp={() => setRowPressed(false)}
+      aria-busy={working}
+      data-agent-working={working ? "true" : undefined}
       style={{
         display: "flex",
         alignItems: "center",
@@ -865,7 +868,13 @@ function WorkspaceRow({
               if (editing) colorRef.current?.click();
             }}
             tabIndex={editing ? 0 : -1}
-            title={editing ? "Change color" : undefined}
+            title={
+              editing
+                ? "Change color"
+                : working
+                  ? `${ws.name} — agent working`
+                  : undefined
+            }
             style={{
               appearance: "none",
               border: "none",

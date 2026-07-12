@@ -10,6 +10,7 @@ import type {
   RunStatus,
   ScheduledJob,
 } from "@shared/types";
+import { normalizeCodexModelId } from "@shared/model-catalog";
 import {
   AUTOMATION_HISTORY_CAP,
   DEFAULT_AGENT_MAX_ITERATIONS,
@@ -786,6 +787,7 @@ async function resolveWorker(
   if (!engine) return { ok: false };
 
   let model = handoff?.model ?? (engine === workerConfig.engine ? workerConfig.model : undefined);
+  if (model && engine === "codex") model = normalizeCodexModelId(model);
   const known = runtimes.find((r) => r.kind === engine)?.models.map((m) => m.id) ?? [];
   if (model && known.length > 0 && !known.includes(model)) {
     void emitLoopNote("automation.model_fallback", {

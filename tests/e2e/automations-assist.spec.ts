@@ -4,10 +4,10 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Smoke for the Automations Hub's "Create with Cora" assist view: the button
-// exists next to "+ New loom", clicking it mounts the architect chat (locked
-// composer — no mode-cycle pill), and "Done" returns to the list view. No
-// message is ever sent, so no backend/CLI is required.
+// Smoke for the Automations Hub's guided empty state: both creation paths are
+// visible, "Design with Cora" mounts the architect chat (locked composer — no
+// mode-cycle pill), and "Done" returns to the launchpad. No message is ever
+// sent, so no backend/CLI is required.
 
 test("automations hub mounts the Create-with-Cora assist chat", async () => {
   test.setTimeout(90_000);
@@ -31,10 +31,10 @@ test("automations hub mounts the Create-with-Cora assist chat", async () => {
     await page.getByRole("button", { name: "New tab", exact: true }).click();
     await page.getByText("New automations", { exact: true }).click();
 
-    // Looms view header: both create affordances present.
-    const assistButton = page.getByRole("button", { name: "✦ Create with Cora", exact: true });
+    // Empty-state launchpad: both creation paths are explicit.
+    const assistButton = page.getByRole("button", { name: /Design with Cora/ });
     await expect(assistButton).toBeVisible();
-    await expect(page.getByRole("button", { name: "+ New loom", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Build a flow/ })).toBeVisible();
 
     // Enter the assist view: architect chat panel + session controls mount,
     // the composer is pinned to automation mode (placeholder proves the
@@ -46,12 +46,22 @@ test("automations hub mounts the Create-with-Cora assist chat", async () => {
       page.getByPlaceholder("Describe the loom you want — trigger, loop, and worker."),
     ).toBeVisible();
     await expect(page.locator(".composer-mode-cycle")).toHaveCount(0);
-
-    // "Done" returns to the plain list view (assist button reappears).
-    await page.getByRole("button", { name: "Done", exact: true }).click();
+    await expect(page.getByText("Describe the outcome, not the plumbing", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: /Keep tests green/ }).click();
     await expect(
-      page.getByRole("button", { name: "✦ Create with Cora", exact: true }),
-    ).toBeVisible();
+      page.getByPlaceholder("Describe the loom you want — trigger, loop, and worker."),
+    ).toHaveValue(/runs the project's tests/);
+
+    // "Done" returns to the launchpad (assist button reappears).
+    await page.getByRole("button", { name: /^Done — back to the looms view$/ }).click();
+    await expect(page.getByRole("button", { name: /Design with Cora/ })).toBeVisible();
+
+    // The manual path opens a real, descriptive template gallery instead of
+    // dropping the user into an unexplained blank graph.
+    await page.getByRole("button", { name: /Build a flow/ }).click();
+    await expect(page.getByRole("button", { name: /Fix until tests pass/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Fan-out review/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Start blank/ })).toBeVisible();
   } finally {
     await app?.close();
   }

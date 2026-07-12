@@ -31,7 +31,7 @@ const harnessPlugin = {
     );
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
       const init =
-        "globalThis.__DW ??= { runs: new Map(), subs: new Set(), spawned: [], failed: [], relaunched: [], settled: [], statusUpdates: [], ptys: new Set(), events: [], spawnThrows: false };\n";
+        "globalThis.__DW ??= { runs: new Map(), subs: new Set(), spawned: [], failed: [], relaunched: [], settled: [], statusUpdates: [], ptys: new Set(), events: [], spawnThrows: false, runStoreLoads: 0 };\n";
       if (args.path === "pty-manager") {
         return {
           contents:
@@ -64,6 +64,7 @@ const harnessPlugin = {
         return {
           contents:
             init +
+            "globalThis.__DW.runStoreLoads += 1;\n" +
             "export async function getRun(id){ return globalThis.__DW.runs.get(id) ?? null; }\n" +
             "export async function listRuns(){ return [...globalThis.__DW.runs.values()]; }\n" +
             "export async function failWorkerAttempt(runId, attemptId, error){ globalThis.__DW.failed.push({ runId, attemptId, error }); const run = globalThis.__DW.runs.get(runId); if (run) run.status = 'failed'; return run; }\n" +
@@ -109,6 +110,7 @@ async function main() {
     ptys: new Set(),
     events: [],
     spawnThrows: false,
+    runStoreLoads: 0,
   };
   const D = globalThis.__DW;
   const dw = require(outfile);
@@ -119,6 +121,7 @@ async function main() {
     passed += 1;
     console.log(`  PASS ${name}`);
   };
+  ok("importing direct-worker does not load run-store", D.runStoreLoads === 0);
 
   const mkRun = (id, over = {}) => {
     const run = {

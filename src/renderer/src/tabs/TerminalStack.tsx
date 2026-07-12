@@ -198,6 +198,7 @@ function TerminalStack({
   const activityRef = useRef(onPaneActivity);
   const userInputRef = useRef(onPaneUserInput);
   const scrollbackRef = useRef(onPaneScrollback);
+  const workspaceVisibleRef = useRef(workspaceVisible);
   const flushScrollbackRef = useRef(onFlushScrollback);
   const agentStateRef = useRef(onPaneAgentState);
   const runtimeStateRef = useRef(onPaneRuntimeState);
@@ -218,13 +219,14 @@ function TerminalStack({
     activityRef.current = onPaneActivity;
     userInputRef.current = onPaneUserInput;
     scrollbackRef.current = onPaneScrollback;
+    workspaceVisibleRef.current = workspaceVisible;
     flushScrollbackRef.current = onFlushScrollback;
     agentStateRef.current = onPaneAgentState;
     runtimeStateRef.current = onPaneRuntimeState;
     resumeUnavailableRef.current = onPaneResumeUnavailable;
     resumeFallbackRef.current = onPaneResumeFallback;
     bootResumeConsumedRef.current = onPaneBootResumeConsumed;
-  }, [onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
+  }, [workspaceVisible, onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
 
   // Latest tab roots so the + smart-add button can read whichever PaneNode
   // tree is current at click time (a stale capture would split a tree that
@@ -297,7 +299,7 @@ function TerminalStack({
             activityRef.current(tabId, paneId);
             const now = Date.now();
             const last = lastScrollbackSnapshotRef.current.get(paneId) ?? 0;
-            if (now - last >= 2_000) {
+            if (workspaceVisibleRef.current && now - last >= 2_000) {
               lastScrollbackSnapshotRef.current.set(paneId, now);
               snapshotScrollback(tabId, paneId);
             }
@@ -2584,6 +2586,10 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
   return (
     <div
       className="spark-fade-in"
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      aria-label={`${label} ${tone.status}`}
       style={{
         position: "absolute",
         top: 6,

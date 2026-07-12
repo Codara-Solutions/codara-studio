@@ -18,13 +18,6 @@ import { flushNotificationCenter, registerMainWindow, startNotifications } from 
 import { setSeededRoots } from "./fs-sandbox";
 import { getEnrichedPath } from "./path-reconstruction";
 import { readHeadlessEvalArgs } from "./eval/headless-args";
-import {
-  emitFinalSummary,
-  exitCodeFor,
-  fail as failHeadless,
-  runHeadlessEval,
-} from "./eval/headless-runner";
-import { registerAutoUpdater } from "./auto-updater";
 import { startHookRpc, stopHookRpc } from "./hook-rpc";
 import { installClaudeHooks } from "./hook-installer";
 import { installSparkPreviewMcpAtBoot } from "./mcp-installer";
@@ -95,7 +88,10 @@ if (process.platform === "win32") {
 // Codara boots normally. We read this BEFORE app.whenReady() so the headless
 // branch can skip BrowserWindow + IPC setup entirely.
 const headlessArgs = readHeadlessEvalArgs(process.argv);
-const isHeadlessEval = headlessArgs.enabled && Boolean(headlessArgs.args);
+// `enabled` means the user selected eval mode even when argument validation
+// failed. Keep that invocation on the headless branch so it reports the parse
+// error and exits instead of accidentally opening the desktop UI.
+const isHeadlessEval = headlessArgs.enabled;
 
 const isDev = !app.isPackaged;
 // On win32 use the .ico; on macOS/Linux use .png — icon.ico fails to load on
@@ -126,6 +122,7 @@ function showMainWindow(): void {
     createWindow();
     return;
   }
+  if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   if (process.platform === "win32") mainWindow.setSkipTaskbar(false);
   mainWindow.focus();
@@ -181,6 +178,13 @@ function ensureTray(): void {
   }
 }
 
+function registerUpdaterAfterFirstPaint(windowForEvents: BrowserWindow): void {
+  if (!app.isPackaged) return;
+  void import("./auto-updater")
+    .then(({ registerAutoUpdater }) => registerAutoUpdater(windowForEvents))
+    .catch((err) => console.warn("[main] auto-updater failed to load:", err));
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -225,7 +229,10 @@ function createWindow(): void {
   // synchronously at notify time.
   registerMainWindow(windowForEvents);
 
-  mainWindow.on("ready-to-show", () => mainWindow?.show());
+  windowForEvents.once("ready-to-show", () => {
+    windowForEvents.show();
+    registerUpdaterAfterFirstPaint(windowForEvents);
+  });
 
   // Close-to-tray: only hide when the tray actually exists AND the user has
   // opted into background running. The live-tray precondition is a deliberate
@@ -353,9 +360,16 @@ app.whenReady().then(async () => {
     // IPC. The headless runner drives the autopilot directly and prints a
     // single JSON summary on stdout when done.
     if (headlessArgs.error) {
-      failHeadless(2, headlessArgs.error);
+      const { fail } = await import("./eval/headless-runner");
+      fail(2, headlessArgs.error);
       return;
     }
+    const {
+      emitFinalSummary,
+      exitCodeFor,
+      fail: failHeadless,
+      runHeadlessEval,
+    } = await import("./eval/headless-runner");
     try {
       const outcome = await runHeadlessEval(headlessArgs.args!);
       emitFinalSummary(outcome);
@@ -461,7 +475,6 @@ app.whenReady().then(async () => {
   await loadPreferences().catch(() => undefined);
 
   createWindow();
-  if (mainWindow) registerAutoUpdater(mainWindow);
 
   // System tray so the app stays reachable while running in the background
   // (close-to-tray). Only created when the user has opted into background
@@ -511,9 +524,10 @@ app.whenReady().then(async () => {
   startNotifications();
 
   // Arm automations (cron / interval / folder-watch triggers) and resume any
-  // queue items left mid-flight by a previous session. Deferred + fire-and-
-  // forget so the window paints first, and dynamically imported so run-store is
-  // only pulled in once an automation actually needs it (not at cold start).
+  // queue items left mid-flight by a previous session. This stays fire-and-
+  // forget after window creation: delaying scheduler registration until paint
+  // could miss startup-time cron/folder events. Dynamic imports still keep the
+  // heavy orchestration graph out of the eager main bundle.
   // NOTE: these fire only while the app is open — surviving app-close is the
   // daemon split's job (docs/daemon-split-PLAN.md).
   void (async () => {

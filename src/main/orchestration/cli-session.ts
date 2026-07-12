@@ -190,11 +190,20 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
   let jsonlPath: string | null = null;
   let tail: Disposable | null = null;
   let disposed = false;
+  // Distinct from `disposed`: an exited process may still have a tail attached
+  // long enough to flush its final JSONL lines, but a process that exited
+  // before discovery found any file must never keep polling and attach to an
+  // unrelated CLI session later.
+  let processExited = false;
   let firstStdoutSeen = false;
-  const firstStdoutWaiters = new Set<() => void>();
+  interface ReadinessWaiter {
+    ready: () => void;
+    exited: () => void;
+  }
+  const firstStdoutWaiters = new Set<ReadinessWaiter>();
   let inputReadySeen = false;
   let inputReadyCarry = "";
-  const inputReadyWaiters = new Set<() => void>();
+  const inputReadyWaiters = new Set<ReadinessWaiter>();
 
   const entryHandlers = new Set<(entry: unknown) => void | Promise<void>>();
   const stdoutHandlers = new Set<(chunk: Buffer) => void>();
@@ -228,9 +237,9 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
       const text = inputReadyCarry + chunk.toString("utf8");
       if (text.includes(INPUT_READY_SEQUENCE)) {
         inputReadySeen = true;
-        for (const resolve of inputReadyWaiters) {
+        for (const waiter of inputReadyWaiters) {
           try {
-            resolve();
+            waiter.ready();
           } catch {
             // swallow — never let a waiter's resolve callback break the tap
           }
@@ -242,9 +251,9 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
     }
     if (!firstStdoutSeen) {
       firstStdoutSeen = true;
-      for (const resolve of firstStdoutWaiters) {
+      for (const waiter of firstStdoutWaiters) {
         try {
-          resolve();
+          waiter.ready();
         } catch {
           // swallow — never let a waiter's resolve callback break the tap
         }
@@ -260,6 +269,11 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
     }
   });
   const detachExit = pty.onExit(opts.sessionId, (info) => {
+    processExited = true;
+    for (const waiter of firstStdoutWaiters) waiter.exited();
+    firstStdoutWaiters.clear();
+    for (const waiter of inputReadyWaiters) waiter.exited();
+    inputReadyWaiters.clear();
     for (const h of exitHandlers) {
       try {
         h(info);
@@ -291,7 +305,7 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
     const discover = opts.discoverJsonlPath;
     void (async () => {
       const startedAt = Date.now();
-      while (!disposed) {
+      while (!disposed && !processExited) {
         let found: string | null = null;
         try {
           found = await discover();
@@ -299,7 +313,7 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
           found = null;
         }
         if (found) {
-          if (disposed) return;
+          if (disposed || processExited) return;
           jsonlPath = found;
           tail = tailJsonl(
             found,
@@ -347,34 +361,56 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
     },
     waitForFirstStdout: (timeoutMs: number) => {
       if (firstStdoutSeen) return Promise.resolve();
+      if (processExited) return Promise.reject(new Error("CLI session exited before first stdout"));
       return new Promise<void>((resolve, reject) => {
+        let waiter: ReadinessWaiter;
         const timer = setTimeout(() => {
-          firstStdoutWaiters.delete(onReady);
+          firstStdoutWaiters.delete(waiter);
           reject(new Error(`CLI session did not emit any stdout within ${timeoutMs}ms`));
         }, timeoutMs);
-        const onReady = (): void => {
-          clearTimeout(timer);
-          resolve();
+        waiter = {
+          ready: () => {
+            clearTimeout(timer);
+            firstStdoutWaiters.delete(waiter);
+            resolve();
+          },
+          exited: () => {
+            clearTimeout(timer);
+            firstStdoutWaiters.delete(waiter);
+            reject(new Error("CLI session exited before first stdout"));
+          },
         };
-        firstStdoutWaiters.add(onReady);
+        firstStdoutWaiters.add(waiter);
       });
     },
     waitForInputReady: (timeoutMs: number) => {
       if (inputReadySeen) return Promise.resolve();
+      if (processExited) {
+        return Promise.reject(new Error("CLI session exited before input became ready"));
+      }
       return new Promise<void>((resolve, reject) => {
+        let waiter: ReadinessWaiter;
         const timer = setTimeout(() => {
-          inputReadyWaiters.delete(onReady);
+          inputReadyWaiters.delete(waiter);
           reject(
             new Error(
               `CLI session did not enable bracketed paste within ${timeoutMs}ms`,
             ),
           );
         }, timeoutMs);
-        const onReady = (): void => {
-          clearTimeout(timer);
-          resolve();
+        waiter = {
+          ready: () => {
+            clearTimeout(timer);
+            inputReadyWaiters.delete(waiter);
+            resolve();
+          },
+          exited: () => {
+            clearTimeout(timer);
+            inputReadyWaiters.delete(waiter);
+            reject(new Error("CLI session exited before input became ready"));
+          },
         };
-        inputReadyWaiters.add(onReady);
+        inputReadyWaiters.add(waiter);
       });
     },
     dispose: async () => {

@@ -128,13 +128,25 @@ export default function ModelPicker({
                     className={`composer-model-row${active ? " is-active" : ""}`}
                     onClick={() => select(model)}
                   >
-                    <span className="composer-model-row-label">{model.label}</span>
-                    {model.isOneMillion && (
-                      <span className="composer-badge is-onem">1M</span>
-                    )}
-                    {group.backend === "openrouter" && (
-                      <span className="composer-badge">API</span>
-                    )}
+                    <span className="composer-model-row-copy">
+                      <span className="composer-model-row-label">{model.label}</span>
+                      {model.description && (
+                        <span className="composer-model-row-description">
+                          {model.description}
+                        </span>
+                      )}
+                    </span>
+                    <span className="composer-model-row-badges">
+                      {model.badge && (
+                        <span className="composer-badge is-family">{model.badge}</span>
+                      )}
+                      {model.isOneMillion && (
+                        <span className="composer-badge is-onem">1M</span>
+                      )}
+                      {group.backend === "openrouter" && (
+                        <span className="composer-badge">API</span>
+                      )}
+                    </span>
                   </button>
                 );
               })}

@@ -602,14 +602,53 @@ function SessionStatusLine({ run }: { run: RunState }): React.ReactElement {
 }
 
 function AssistWelcome({ loading }: { loading: boolean }): React.ReactElement {
+  const suggestions = [
+    {
+      title: "Keep tests green",
+      prompt:
+        "Design an automation that runs the project's tests, diagnoses failures, fixes the root cause, and stops safely once the suite is green.",
+    },
+    {
+      title: "Review every change",
+      prompt:
+        "Design an automation that reviews new code changes for correctness and regressions, then reports or applies only high-confidence fixes.",
+    },
+    {
+      title: "Watch a folder",
+      prompt:
+        "Design a folder-watcher automation for this project. Help me choose the folder, events, debounce, worker, and safe action.",
+    },
+  ] as const;
+  const prefill = (text: string) => {
+    window.dispatchEvent(
+      new CustomEvent("spark:prefill-composer", { detail: { text, replace: true } }),
+    );
+  };
   return (
-    <div className="spark-empty" style={{ flex: 1, minHeight: 0, gap: 8 }}>
+    <div className="automation-assist-welcome">
+      <div className="automation-assist-welcome__mark" aria-hidden>✦</div>
       <div className="spark-eyebrow">{loading ? "Loading…" : "Loom architect"}</div>
       {!loading && (
-        <div className="spark-empty__body" style={{ maxWidth: 300 }}>
-          Tell Cora what you want automated — she designs the trigger, loop, and worker, then
-          creates and test-runs the loom for you. It appears in your Looms list as she works.
-        </div>
+        <>
+          <div className="automation-assist-welcome__title">Describe the outcome, not the plumbing</div>
+          <div className="automation-assist-welcome__body">
+            Cora inspects this project, proposes the trigger, safety caps, model,
+            and worker flow, then creates and test-runs the loom with you.
+          </div>
+          <div className="automation-assist-welcome__suggestions">
+            {suggestions.map((suggestion) => (
+              <button
+                key={suggestion.title}
+                type="button"
+                className="automation-assist-suggestion"
+                onClick={() => prefill(suggestion.prompt)}
+              >
+                <span>{suggestion.title}</span>
+                <span aria-hidden>↗</span>
+              </button>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

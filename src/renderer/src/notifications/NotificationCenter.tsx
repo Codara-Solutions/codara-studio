@@ -152,22 +152,22 @@ export default function NotificationCenter({
             aria-hidden
             style={{
               position: "absolute",
-              top: 5,
-              right: 5,
+              top: 4,
+              right: 3,
               minWidth: 12,
               height: 12,
               padding: "0 2px",
               borderRadius: 6,
               background: "var(--accent)",
               color: "color-mix(in oklch, var(--bg) 92%, var(--accent))",
-              fontSize: 8,
+              fontSize: center.unread > 99 ? 7 : 8,
               fontWeight: 700,
               lineHeight: "12px",
               textAlign: "center",
               fontFamily: "var(--font-sans)",
             }}
           >
-            {center.unread > 9 ? "9+" : center.unread}
+            {center.unread > 99 ? "99+" : center.unread}
           </span>
         )}
       </button>
@@ -197,8 +197,17 @@ export default function NotificationCenter({
               borderBottom: "1px solid var(--rule-soft)",
             }}
           >
-            <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink)", flex: 1 }}>
-              Notifications
+            <span style={{ display: "flex", alignItems: "baseline", gap: 6, flex: 1 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink)" }}>
+                Notifications
+              </span>
+              <span style={{ fontSize: 10, color: "var(--muted)" }}>
+                {center.unread > 0
+                  ? `${center.unread} unread`
+                  : center.entries.length > 0
+                    ? `${center.entries.length} saved`
+                    : "All caught up"}
+              </span>
             </span>
             <HeaderAction
               label="Mark all read"

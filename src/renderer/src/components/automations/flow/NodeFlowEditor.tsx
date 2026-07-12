@@ -577,27 +577,35 @@ function Editor({
 
       {/* Presets band (create flow; collapsible) */}
       {!editing && (
-        <div style={{ flex: "0 0 auto", borderBottom: "1px solid var(--rule-soft)", background: "var(--panel)" }}>
+        <div className="loom-template-band">
           <button
             type="button"
+            className="loom-template-band__toggle"
             onClick={() => setPresetsOpen((v) => !v)}
-            style={{ appearance: "none", background: "transparent", border: "none", cursor: "default", color: "var(--muted)", fontSize: 11, padding: "6px 16px 2px" }}
+            aria-expanded={presetsOpen}
           >
-            {presetsOpen ? "▾" : "▸"} Start from a template
+            <span aria-hidden>{presetsOpen ? "▾" : "▸"}</span>
+            <span>Start from a proven workflow</span>
+            <span className="loom-template-band__hint">Pick one, then change only what matters</span>
           </button>
           {presetsOpen && (
-            <div style={{ display: "flex", gap: 8, padding: "6px 16px 10px", overflowX: "auto", scrollbarWidth: "thin" }}>
+            <div className="loom-template-list">
               {PRESETS.map((p) => (
                 <button
                   key={p.id}
                   type="button"
-                  className="spark-card"
-                  style={{ flex: "0 0 152px", textAlign: "left", cursor: "default", display: "flex", flexDirection: "column", gap: 3, padding: "9px 11px", borderRadius: "var(--radius-surface)" }}
+                  className="loom-template-card"
                   onClick={() => applyPreset(p)}
                   title={p.blurb}
                 >
-                  <span style={{ fontSize: 11.5, fontWeight: 700, color: "var(--ink)" }}>{p.title}</span>
-                  <span className="spark-mono" style={{ fontSize: 9, color: "var(--muted-2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <span className="loom-template-card__topline">
+                    <span className="loom-template-card__icon" aria-hidden>
+                      {presetIcon(p.id)}
+                    </span>
+                    <span className="loom-template-card__title">{p.title}</span>
+                  </span>
+                  <span className="loom-template-card__blurb">{p.blurb}</span>
+                  <span className="loom-template-card__meta spark-mono">
                     {triggerSummary(p.trigger)} · {loopSummary(p.loop)}
                   </span>
                 </button>
@@ -824,3 +832,13 @@ function Editor({
 
 // graphForJob is re-exported for callers that want the resolved graph shape.
 export { graphForJob };
+
+function presetIcon(id: string): string {
+  if (id === "until-tests") return "✓";
+  if (id === "fanout-review") return "⑂";
+  if (id === "nightly") return "◷";
+  if (id === "watch") return "◉";
+  if (id === "continuous") return "∞";
+  if (id === "agent") return "✦";
+  return "+";
+}

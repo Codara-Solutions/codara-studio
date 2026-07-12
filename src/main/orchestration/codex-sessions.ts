@@ -50,6 +50,12 @@ interface RolloutCandidate {
   mtimeMs: number;
 }
 
+export interface RolloutMetadata {
+  cwd: string | null;
+  /** Session creation time recorded by Codex's leading session_meta event. */
+  startedAtMs: number | null;
+}
+
 // All rollout files across the candidate day-folders whose mtime is at or after
 // `since`, sorted newest first.
 async function listCandidates(
@@ -94,6 +100,30 @@ export async function discoverRolloutPath(since: number, spawnDate: Date): Promi
   return candidates.length > 0 ? candidates[0].path : null;
 }
 
+/**
+ * Snapshot the rollout files that already exist immediately before Codara
+ * spawns a fresh Codex manager. A currently-open personal Codex session keeps
+ * changing its mtime, so mtime alone can never prove that a file belongs to
+ * the process we just launched. Excluding this snapshot gives fresh sessions
+ * an important ownership boundary: only a newly-created rollout may attach.
+ */
+export async function snapshotRolloutPaths(spawnDate: Date): Promise<Set<string>> {
+  const paths = new Set<string>();
+  for (const dir of candidateDirs(spawnDate, new Date())) {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(dir);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      if (!name.startsWith("rollout-") || !name.endsWith(".jsonl")) continue;
+      paths.add(join(dir, name));
+    }
+  }
+  return paths;
+}
+
 function extractCwd(entry: unknown): string | null {
   if (!entry || typeof entry !== "object") return null;
   const rec = entry as Record<string, unknown>;
@@ -106,18 +136,41 @@ function extractCwd(entry: unknown): string | null {
   return null;
 }
 
+function extractStartedAtMs(entry: unknown): number | null {
+  if (!entry || typeof entry !== "object") return null;
+  const rec = entry as Record<string, unknown>;
+  const payload =
+    rec.payload && typeof rec.payload === "object"
+      ? (rec.payload as Record<string, unknown>)
+      : null;
+  // Modern Codex records the true thread creation time on payload.timestamp.
+  // The outer event timestamp can be later (for example after startup work),
+  // so use it only as a compatibility fallback for older rollout schemas.
+  const raw =
+    typeof payload?.timestamp === "string"
+      ? payload.timestamp
+      : typeof rec.timestamp === "string"
+        ? rec.timestamp
+        : null;
+  if (!raw) return null;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 // Read the cwd Codex recorded in a rollout's leading `session_meta` entry.
 // Best-effort: the exact JSONL shape is version-dependent, so we scan the first
 // chunk for a `cwd` string at any of the shapes Codex has used. Reads only the
 // head of the file (session_meta is the first line) to stay cheap on long
 // transcripts. Returns null when no cwd can be found.
-export async function readRolloutCwd(path: string): Promise<string | null> {
+export async function readRolloutMetadata(path: string): Promise<RolloutMetadata> {
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
     handle = await fs.open(path, "r");
     const buf = Buffer.alloc(16384);
     const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
     const text = buf.subarray(0, bytesRead).toString("utf8");
+    let cwd: string | null = null;
+    let startedAtMs: number | null = null;
     for (const line of text.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (!trimmed) continue;
@@ -127,15 +180,22 @@ export async function readRolloutCwd(path: string): Promise<string | null> {
       } catch {
         continue; // truncated tail line in the fixed-size read — skip
       }
-      const cwd = extractCwd(entry);
-      if (cwd) return cwd;
+      cwd ??= extractCwd(entry);
+      startedAtMs ??= extractStartedAtMs(entry);
+      if (cwd && startedAtMs != null) break;
     }
-    return null;
+    return { cwd, startedAtMs };
   } catch {
-    return null;
+    return { cwd: null, startedAtMs: null };
   } finally {
     if (handle) await handle.close().catch(() => undefined);
   }
+}
+
+// Read only the cwd for existing callers (manual-terminal capture). Keeping
+// this wrapper avoids making those call sites care about rollout timestamps.
+export async function readRolloutCwd(path: string): Promise<string | null> {
+  return (await readRolloutMetadata(path)).cwd;
 }
 
 // Compare paths case-insensitively with separators unified so a Windows
@@ -159,14 +219,38 @@ export async function discoverRolloutForCwd(
   since: number,
   spawnDate: Date,
   cwd: string,
-  opts?: { strict?: boolean },
+  opts?: {
+    strict?: boolean;
+    /** Files present before a fresh spawn can never belong to that spawn. */
+    excludePaths?: ReadonlySet<string>;
+    /** Require Codex's recorded session creation time to be this recent. */
+    createdAfter?: number;
+    /** Resume flows can bind safely by the exact persisted session UUID. */
+    sessionUuid?: string;
+  },
 ): Promise<string | null> {
   const candidates = await listCandidates(since, spawnDate, new Date());
   if (candidates.length === 0) return null;
   const target = normalizePath(cwd);
+  let fallback: string | null = null;
   for (const candidate of candidates) {
-    const recorded = await readRolloutCwd(candidate.path);
-    if (recorded && normalizePath(recorded) === target) return candidate.path;
+    if (opts?.excludePaths?.has(candidate.path)) continue;
+    if (
+      opts?.sessionUuid &&
+      extractSessionUuid(candidate.path)?.toLowerCase() !== opts.sessionUuid.toLowerCase()
+    ) {
+      continue;
+    }
+    const metadata = await readRolloutMetadata(candidate.path);
+    if (opts?.createdAfter != null) {
+      // Small slack covers timestamp serialization and filesystem clock
+      // granularity without admitting a pre-existing interactive session.
+      if (metadata.startedAtMs == null || metadata.startedAtMs + 2_000 < opts.createdAfter) {
+        continue;
+      }
+    }
+    fallback ??= candidate.path;
+    if (metadata.cwd && normalizePath(metadata.cwd) === target) return candidate.path;
   }
-  return opts?.strict ? null : candidates[0].path;
+  return opts?.strict ? null : fallback;
 }

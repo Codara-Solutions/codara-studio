@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AppSettings,
   AppState,
@@ -23,9 +23,6 @@ import { backendPtySessionId } from "@shared/backend-pty";
 import WindowChrome from "./components/WindowChrome";
 import WorkspaceRail, { WORKSPACE_COLORS } from "./components/WorkspaceRail";
 import StatusBar from "./components/StatusBar";
-import SettingsDialog from "./components/SettingsDialog";
-import SessionInspector from "./components/SessionInspector";
-import AgentCapabilitiesDialog from "./components/AgentCapabilitiesDialog";
 import UpdateBanner from "./components/UpdateBanner";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
@@ -37,13 +34,10 @@ import TabBar, { type PickerHints } from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
 import ChatBackendTerminalStack from "./tabs/ChatBackendTerminalStack";
 import InnerTabStrip from "./tabs/InnerTabStrip";
-import EditorStack from "./tabs/EditorStack";
 import TerminalStack from "./tabs/TerminalStack";
 import PreviewStack from "./tabs/PreviewStack";
 import { setOpenPreviewTabFn } from "./components/Preview/registry";
 import { setCloseAgentTerminalFn, setCreateAgentTerminalFn } from "./components/Terminal/terminalRegistry";
-import RunsStack from "./tabs/RunsStack";
-import AutomationsStack from "./tabs/AutomationsStack";
 import DiffStack from "./tabs/DiffStack";
 import { useSharedGitStatus } from "./git/useSharedGitStatus";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
@@ -100,6 +94,13 @@ import {
   type AwayDigest,
   type ChatStatusTone,
 } from "./components/chat/timeline";
+
+const SettingsDialog = lazy(() => import("./components/SettingsDialog"));
+const SessionInspector = lazy(() => import("./components/SessionInspector"));
+const AgentCapabilitiesDialog = lazy(() => import("./components/AgentCapabilitiesDialog"));
+const EditorStack = lazy(() => import("./tabs/EditorStack"));
+const RunsStack = lazy(() => import("./tabs/RunsStack"));
+const AutomationsStack = lazy(() => import("./tabs/AutomationsStack"));
 
 // Stable brand label for every chat tab in the top strip. The first-message-
 // derived run.title is kept on the RunState for the chat panel header and the
@@ -1497,42 +1498,41 @@ export default function App() {
       }
       if (!payload?.tabId || !payload.paneId || !payload.state) return;
       const t = tabsRef.current;
-      const tab = t.tabs.find((item) => item.id === payload.tabId);
-      if (!tab || tab.kind !== "terminal") return;
-      const leaf = findLeafByPaneId(tab.root, payload.paneId);
-      const existing = leaf?.worker;
-      // Never mint a worker — a late event after the chip was removed no-ops.
-      if (!existing) return;
-      // A pane already flipped to "error" is showing a crash (non-zero pty
-      // exit, set by onTerminalPaneExit, which owns the pty-death case because
-      // it has the exit code). That red "exited" chip must persist until the
-      // user closes the pane, so ignore ANY later notifier state event for it —
-      // a notifier "exited"-block "done" arriving on the same teardown must not
-      // race in and tear the error chip back down.
-      if (existing.runtimeState === "error") return;
-      // "done" = the foreground TUI exited. Mirror onTerminalPaneAgentState's
-      // running:false teardown rather than writing runtimeState:"done" onto a
-      // live chip (which `visibleWorkerChip` would keep showing as a stale grey
-      // badge while the lifecycle `state` is still "running"). Manual chips have
-      // no lifecycle outside the pane → clear them; Codara chips keep their run
-      // metadata but drop agentRunning so the run store owns completion.
-      if (payload.state === "done") {
-        if (existing.source === "spark") {
-          if (existing.agentRunning === false) return;
-          t.setLeafWorker(payload.tabId, payload.paneId, {
-            ...existing,
-            agentRunning: false,
-          });
-        } else {
-          t.setLeafWorker(payload.tabId, payload.paneId, null);
-        }
-        return;
-      }
-      if (existing.runtimeState === payload.state) return;
-      t.setLeafWorker(payload.tabId, payload.paneId, {
-        ...existing,
-        runtimeState: payload.state,
-      });
+      const targetWorkspaceId = payload.workspaceId ?? t.tabsWorkspaceId;
+      if (!targetWorkspaceId) return;
+      t.updateLeafWorkerInWorkspace(
+        targetWorkspaceId,
+        payload.tabId,
+        payload.paneId,
+        (existing) => {
+          // Never mint a worker — a late event after the chip was removed no-ops.
+          if (!existing) return existing;
+          // A pane already flipped to "error" is showing a crash (non-zero pty
+          // exit, set by onTerminalPaneExit, which owns the pty-death case because
+          // it has the exit code). That red "exited" chip must persist until the
+          // user closes the pane, so ignore ANY later notifier state event for it —
+          // a notifier "exited"-block "done" arriving on the same teardown must not
+          // race in and tear the error chip back down.
+          if (existing.runtimeState === "error") return existing;
+          // "done" = the foreground TUI exited. Mirror onTerminalPaneAgentState's
+          // running:false teardown rather than writing runtimeState:"done" onto a
+          // live chip (which `visibleWorkerChip` would keep showing as a stale grey
+          // badge while the lifecycle `state` is still "running"). Manual chips have
+          // no lifecycle outside the pane → clear them; Codara chips keep their run
+          // metadata but drop agentRunning so the run store owns completion.
+          if (payload.state === "done") {
+            if (existing.source === "spark") {
+              return existing.agentRunning === false
+                ? existing
+                : { ...existing, agentRunning: false };
+            }
+            return null;
+          }
+          return existing.runtimeState === payload.state
+            ? existing
+            : { ...existing, runtimeState: payload.state };
+        },
+      );
     });
     return () => off?.();
   }, []);
@@ -3437,31 +3437,37 @@ export default function App() {
         <RemoteAuthPrompt />
 
         {settingsOpen && (
-          <SettingsDialog
-            settings={settings}
-            shells={shells}
-            defaultShell={defaultShell}
-            workspaceCwd={activeWorkspace?.copyBranch?.repoCwd ?? activeWorkspace?.cwd ?? null}
-            onClose={closeSettings}
-            onSave={handleSaveSettings}
-            onOpenRun={handleSettingsOpenRun}
-          />
+          <Suspense fallback={null}>
+            <SettingsDialog
+              settings={settings}
+              shells={shells}
+              defaultShell={defaultShell}
+              workspaceCwd={activeWorkspace?.copyBranch?.repoCwd ?? activeWorkspace?.cwd ?? null}
+              onClose={closeSettings}
+              onSave={handleSaveSettings}
+              onOpenRun={handleSettingsOpenRun}
+            />
+          </Suspense>
         )}
 
         {inspectorOpen && (
-          <SessionInspector
-            run={runs.find((r) => r.id === activeRunId) ?? null}
-            onClose={closeInspector}
-          />
+          <Suspense fallback={null}>
+            <SessionInspector
+              run={runs.find((r) => r.id === activeRunId) ?? null}
+              onClose={closeInspector}
+            />
+          </Suspense>
         )}
 
         {capabilitiesOpen && (
-          <AgentCapabilitiesDialog
-            settings={settings}
-            workspaceCwd={activeWorkspace?.cwd ?? null}
-            onClose={closeCapabilities}
-            onSave={handleSaveSettings}
-          />
+          <Suspense fallback={null}>
+            <AgentCapabilitiesDialog
+              settings={settings}
+              workspaceCwd={activeWorkspace?.cwd ?? null}
+              onClose={closeCapabilities}
+              onSave={handleSaveSettings}
+            />
+          </Suspense>
         )}
 
         <ShortcutsDialog
@@ -4288,13 +4294,17 @@ const Workspace = React.memo(function Workspace({
           terminalScrollbackLineLimit={terminalScrollbackLineLimit}
           workspaceCwd={workspace?.cwd ?? null}
         />
-        <EditorStack
-          tabs={visibleTabs}
-          activeId={effectiveActiveId}
-          onDirtyChange={handleEditorDirty}
-          onClose={handleTabClose}
-          onSaved={onFileSaved}
-        />
+        {visibleTabs.some((tab) => tab.kind === "editor") && (
+          <Suspense fallback={null}>
+            <EditorStack
+              tabs={visibleTabs}
+              activeId={effectiveActiveId}
+              onDirtyChange={handleEditorDirty}
+              onClose={handleTabClose}
+              onSaved={onFileSaved}
+            />
+          </Suspense>
+        )}
         <DiffStack
           tabs={visibleTabs}
           activeId={effectiveActiveId}
@@ -4347,7 +4357,11 @@ const Workspace = React.memo(function Workspace({
                 onPaneActivity={isActive ? onPaneActivity : noopTerminalCb}
                 onPaneUserInput={isActive ? onPaneUserInput : noopTerminalCb}
                 onPaneScrollback={isActive ? onPaneScrollback : noopTerminalCb}
-                onFlushScrollback={isActive ? tabs.flushScrollbackNow : noopTerminalCb}
+                onFlushScrollback={
+                  isActive
+                    ? tabs.flushScrollbackNow
+                    : (entries) => tabs.flushWorkspaceScrollbackNow(layer.workspaceId, entries)
+                }
                 onPaneAgentState={isActive ? onTerminalPaneAgentState : noopTerminalCb}
                 onPaneRuntimeState={isActive ? onTerminalPaneRuntimeState : noopTerminalCb}
                 onPaneResumeUnavailable={isActive ? handleLeafResumeUnavailable : noopTerminalCb}
@@ -4362,20 +4376,28 @@ const Workspace = React.memo(function Workspace({
           activeId={effectiveActiveId}
           onUrlChange={onPreviewUrlChange}
         />
-        <RunsStack
-          tabs={visibleTabs}
-          activeId={effectiveActiveId}
-          workspace={workspace}
-          runs={runs}
-          activeRunId={activeRunId}
-          onSelectRun={onSelectRun}
-        />
-        <AutomationsStack
-          tabs={visibleTabs}
-          activeId={effectiveActiveId}
-          workspace={workspace}
-          terminalScrollbackLineLimit={terminalScrollbackLineLimit}
-        />
+        {visibleTabs.some((tab) => tab.kind === "runs") && (
+          <Suspense fallback={null}>
+            <RunsStack
+              tabs={visibleTabs}
+              activeId={effectiveActiveId}
+              workspace={workspace}
+              runs={runs}
+              activeRunId={activeRunId}
+              onSelectRun={onSelectRun}
+            />
+          </Suspense>
+        )}
+        {visibleTabs.some((tab) => tab.kind === "automations") && (
+          <Suspense fallback={null}>
+            <AutomationsStack
+              tabs={visibleTabs}
+              activeId={effectiveActiveId}
+              workspace={workspace}
+              terminalScrollbackLineLimit={terminalScrollbackLineLimit}
+            />
+          </Suspense>
+        )}
         {/* The legacy hidden orchestration TerminalGrid was removed: worker
             PTYs now spawn inside the user-visible TerminalStack via the
             envelope_prepared claim flow in App.tsx. This means worker

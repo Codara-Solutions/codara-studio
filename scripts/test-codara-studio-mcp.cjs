@@ -48,6 +48,7 @@ const PREVIEW_TOOLS = [
 const TERMINAL_TOOLS = ["codara_terminal_create", "codara_terminal_write", "codara_terminal_read"];
 const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS];
 const EXECUTE_TOOLS = [
+  "codara_spawn_terminals",
   "codara_spawn_workers",
   "codara_ask_user",
   "codara_complete",

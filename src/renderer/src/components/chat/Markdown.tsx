@@ -215,8 +215,8 @@ const CODE_BLOCK_STYLE: React.CSSProperties = {
 
 const PARA_STYLE: React.CSSProperties = {
   margin: 0,
-  fontSize: 13,
-  lineHeight: 1.55,
+  fontSize: 13.5,
+  lineHeight: 1.62,
 };
 
 const LIST_STYLE: React.CSSProperties = {

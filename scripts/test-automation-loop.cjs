@@ -74,7 +74,7 @@ const harnessPlugin = {
         return {
           contents:
             init +
-            "export async function detectAgentRuntimes(){ const L = globalThis.__LOOP; return L.runtimes ?? [ { kind: 'claude', installed: true, disabledBySettings: false, models: [{ id: 'claude-opus-4-8' }, { id: 'claude-sonnet-4-6' }] }, { kind: 'codex', installed: true, disabledBySettings: false, models: [{ id: 'gpt-5.5' }] } ]; }\n",
+            "export async function detectAgentRuntimes(){ const L = globalThis.__LOOP; return L.runtimes ?? [ { kind: 'claude', installed: true, disabledBySettings: false, models: [{ id: 'claude-opus-4-8' }, { id: 'claude-sonnet-4-6' }] }, { kind: 'codex', installed: true, disabledBySettings: false, models: [{ id: 'gpt-5.6-sol' }, { id: 'gpt-5.6-terra' }, { id: 'gpt-5.6-luna' }] } ]; }\n",
           loader: "js",
         };
       }
@@ -533,7 +533,7 @@ async function main() {
     });
     await sched.runJobNow(job.id);
     const launch = L.launches[L.launches.length - 1];
-    ok("pinned engine+model+effort reach the launch", launch.engine === "codex" && launch.model === "gpt-5.5" && launch.effort === "high");
+    ok("legacy pinned Codex model migrates to GPT-5.6 Sol", launch.engine === "codex" && launch.model === "gpt-5.6-sol" && launch.effort === "high");
     let rid = nextPending();
     L.pending.length = 0;
     await completeRun(rid, { summary: "ok" });
@@ -599,14 +599,14 @@ async function main() {
     let rid = nextPending();
     L.pending.length = 0;
     // The MCP tool's signal (persisted mirror — survives restarts) steers the
-    // NEXT pass to codex/gpt-5.5.
+    // NEXT pass to Codex; a legacy GPT-5.5 handoff migrates to GPT-5.6 Sol.
     await sched.patchJob(auto.id, (j) => ({
       ...j,
       state: { ...j.state, pendingAgentSignal: { continue: true, nextEngine: "codex", nextModel: "gpt-5.5" } },
     }));
     await completeRun(rid, { summary: "no sentinel here" });
     const launch = L.launches[L.launches.length - 1];
-    ok("auto loom honors the agent's engine handoff", launch.engine === "codex" && launch.model === "gpt-5.5");
+    ok("auto loom honors and migrates the agent's engine handoff", launch.engine === "codex" && launch.model === "gpt-5.6-sol");
     rid = nextPending();
     L.pending.length = 0;
     await completeRun(rid, { summary: "SPARK_LOOP_DONE" });

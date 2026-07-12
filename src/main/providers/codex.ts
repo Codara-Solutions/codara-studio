@@ -22,28 +22,23 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 import type { AgentEffortLevel, AgentRuntimeCapabilities, AgentRuntimeModel } from "@shared/types";
+import { CODEX_MODEL_CATALOG } from "@shared/model-catalog";
 
 import { resolveBinary } from "../binary-resolver";
 
 import type { CliProvider, ResumeOpts, SpawnOpts } from "./types";
 
-// Codex is locked to gpt-5.5. Older revisions (gpt-5.4, gpt-5.4-mini,
-// gpt-5.3-codex variants) were dropped after observed hangs where the CLI
-// stalled on "model: loading" and never accepted the prompt. With a single
-// model the differentiator becomes the reasoning-effort knob: leaf work
-// uses minimal, feature uses medium, skeleton uses high/xhigh.
-// Codex model_reasoning_effort accepts minimal/low/medium/high/xhigh —
-// NOT max. Verified against `codex doctor -c model_reasoning_effort=...`:
-// `max` fails with "config could not be loaded"; the other five pass.
-const CODEX_MODELS: AgentRuntimeModel[] = [
-  {
-    id: "gpt-5.5",
-    label: "GPT-5.5",
-    effortLevels: ["minimal", "low", "medium", "high", "xhigh"],
-    isDefault: true,
-    tier: "top",
-  },
-];
+// GPT-5.6 offers three concrete Codex variants. The shared catalog is also
+// consumed by the chat composer and automation editor so every Cora surface
+// exposes the same model/effort choices. `codex doctor` on CLI 0.144.1 accepts
+// the full low → max effort range used by these models.
+const CODEX_MODELS: AgentRuntimeModel[] = CODEX_MODEL_CATALOG.map((model) => ({
+  id: model.id,
+  label: model.label,
+  effortLevels: [...model.effortLevels],
+  isDefault: model.isDefault,
+  tier: model.tier,
+}));
 
 const CODEX_CAPABILITIES: AgentRuntimeCapabilities = {
   sessionResume: true,

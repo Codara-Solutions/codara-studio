@@ -570,7 +570,21 @@ export interface UseTabsApi {
   // localStorage in one write, bypassing the debounce. For the quit path
   // (beforeunload/pagehide) where deferred updaters never get a render.
   flushScrollbackNow: (entries: Array<{ tabId: TabId; paneId: string; text: string }>) => void;
+  flushWorkspaceScrollbackNow: (
+    workspaceId: string,
+    entries: Array<{ tabId: TabId; paneId: string; text: string }>,
+  ) => void;
   setLeafWorker: (tabId: TabId, paneId: string, worker: TerminalLeafWorker | null) => void;
+  // Update a worker chip in either the active workspace or one of the mounted
+  // hidden workspace layouts. Main-process terminal notifications keep flowing
+  // while a project is hidden, so routing through this workspace-aware helper
+  // prevents a chip from freezing on its pre-switch state.
+  updateLeafWorkerInWorkspace: (
+    workspaceId: string,
+    tabId: TabId,
+    paneId: string,
+    updater: (worker: TerminalLeafWorker | null) => TerminalLeafWorker | null,
+  ) => void;
   // Set (or clear, with null) the durable Claude/Codex session pointer on a
   // leaf. Written at launch (capture) and cleared when a restore finds the
   // transcript gone. Unlike setLeafWorker's transient chip, this survives quit.
@@ -710,6 +724,12 @@ export function useTabs(
   // this when the workspace set changes. No-ops when nothing is stale so it
   // can't drive a render loop.
   const pruneWorkspaceLayouts = useCallback((validWorkspaceIds: ReadonlySet<string>) => {
+    for (const workspaceId of liveWorkspaceTabsRef.current.keys()) {
+      if (!validWorkspaceIds.has(workspaceId)) {
+        liveWorkspaceTabsRef.current.delete(workspaceId);
+        closedChatRunIdsByWorkspaceRef.current.delete(workspaceId);
+      }
+    }
     setInactiveWorkspaceLayouts((prev) => {
       const next = prev.filter((layout) => validWorkspaceIds.has(layout.workspaceId));
       return next.length === prev.length ? prev : next;
@@ -1561,6 +1581,60 @@ export function useTabs(
     [],
   );
 
+  const updateLeafWorkerInWorkspace = useCallback(
+    (
+      targetWorkspaceId: string,
+      tabId: TabId,
+      paneId: string,
+      updater: (worker: TerminalLeafWorker | null) => TerminalLeafWorker | null,
+    ) => {
+      const updateTabs = (currentTabs: Tab[]): Tab[] => {
+        let changed = false;
+        const nextTabs = currentTabs.map((tab) => {
+          if (tab.id !== tabId || tab.kind !== "terminal") return tab;
+          const leaf = findLeaf(tab.root, paneId);
+          if (!leaf) return tab;
+          const currentWorker = leaf.worker ?? null;
+          const nextWorker = updater(currentWorker);
+          if (nextWorker === currentWorker) return tab;
+          const root = setLeafField(tab.root, paneId, "worker", nextWorker);
+          if (root === tab.root) return tab;
+          changed = true;
+          return { ...tab, root };
+        });
+        return changed ? nextTabs : currentTabs;
+      };
+
+      if (tabsWorkspaceIdRef.current === targetWorkspaceId) {
+        setTabs(updateTabs);
+        return;
+      }
+
+      const live = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+      if (!live) return;
+      const nextTabs = updateTabs(live.tabs);
+      if (nextTabs === live.tabs) return;
+
+      // Update the ref immediately so back-to-back notifier events compose on
+      // the latest hidden state even before React flushes this render.
+      liveWorkspaceTabsRef.current.set(targetWorkspaceId, { ...live, tabs: nextTabs });
+      setInactiveWorkspaceLayouts((current) => {
+        const latest = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+        if (!latest) return current;
+        let changed = false;
+        const next = current.map((layout) => {
+          if (layout.workspaceId !== targetWorkspaceId || layout.tabs === latest.tabs) {
+            return layout;
+          }
+          changed = true;
+          return { ...layout, tabs: latest.tabs };
+        });
+        return changed ? next : current;
+      });
+    },
+    [],
+  );
+
   const setLeafAgentSession = useCallback(
     (tabId: TabId, paneId: string, session: TerminalAgentSession | null) => {
       setTabs((curr) =>
@@ -2082,6 +2156,55 @@ export function useTabs(
     [],
   );
 
+  // Hidden workspace stacks own live xterms too. Persist their final buffers
+  // directly into that workspace's frozen layout instead of routing through the
+  // active tab store (which would corrupt the wrong workspace). This path is
+  // used only for explicit final/unload flushing; periodic snapshots remain
+  // visibility-gated so hidden workspaces stay cheap while their PTYs run.
+  const flushWorkspaceScrollbackNow = useCallback(
+    (
+      targetWorkspaceId: string,
+      entries: Array<{ tabId: TabId; paneId: string; text: string }>,
+    ) => {
+      if (entries.length === 0) return;
+      if (tabsWorkspaceIdRef.current === targetWorkspaceId) {
+        flushScrollbackNow(entries);
+        return;
+      }
+      const live = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+      if (!live) return;
+      const limit = terminalScrollbackLineLimitRef.current;
+      let changed = false;
+      const nextTabs = live.tabs.map((tab) => {
+        if (tab.kind !== "terminal") return tab;
+        let root = tab.root;
+        for (const entry of entries) {
+          if (entry.tabId !== tab.id) continue;
+          const trimmed = trimPersistedTerminalScrollback(entry.text, limit);
+          const leaf = findLeaf(root, entry.paneId);
+          if (!leaf || leaf.scrollback === trimmed) continue;
+          const nextRoot = setLeafField(root, entry.paneId, "scrollback", trimmed);
+          if (nextRoot !== root) root = nextRoot;
+        }
+        if (root === tab.root) return tab;
+        changed = true;
+        return { ...tab, root };
+      });
+      if (!changed) return;
+
+      const next = { ...live, tabs: nextTabs };
+      liveWorkspaceTabsRef.current.set(targetWorkspaceId, next);
+      const closed = closedChatRunIdsByWorkspaceRef.current.get(targetWorkspaceId);
+      persist(targetWorkspaceId, nextTabs, next.activeId, limit, closed ? Array.from(closed) : undefined);
+      setInactiveWorkspaceLayouts((current) =>
+        current.map((layout) =>
+          layout.workspaceId === targetWorkspaceId ? { ...layout, tabs: nextTabs } : layout,
+        ),
+      );
+    },
+    [flushScrollbackNow],
+  );
+
   const hideRunsTabs = useCallback(() => {
     setTabs((curr) => {
       const next = curr.filter((t) => t.kind !== "runs");
@@ -2425,7 +2548,9 @@ export function useTabs(
       setLeafCwd,
       setLeafScrollback,
       flushScrollbackNow,
+      flushWorkspaceScrollbackNow,
       setLeafWorker,
+      updateLeafWorkerInWorkspace,
       setLeafAgentSession,
       setLeafBootResumeConsumed,
       renameLeaf,
