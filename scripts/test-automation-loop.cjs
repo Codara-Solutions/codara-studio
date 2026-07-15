@@ -197,6 +197,20 @@ async function main() {
   const nextPending = () => L.pending[L.pending.length - 1];
   const getState = async (id) => (await sched.getJob(id))?.state;
 
+  // ── 0) folder automations create their watch directory before arming ──
+  {
+    const watchPath = path.join(tmpHome, "new-input-folder");
+    ok("folder trigger starts absent", !fs.existsSync(watchPath));
+    await sched.createJob({
+      name: "folder setup",
+      trigger: { kind: "folder", path: watchPath, events: ["add", "change"] },
+      loop: { kind: "once", stop: {} },
+      input: baseInput,
+      prompt: { template: "process {{firedPath}}" },
+    });
+    ok("folder trigger creates its watch directory", fs.statSync(watchPath).isDirectory());
+  }
+
   // ── 1) count loop runs EXACTLY n iterations, then stops (max-iterations) ──
   {
     L.launches.length = 0;

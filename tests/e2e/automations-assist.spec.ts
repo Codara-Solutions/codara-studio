@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Smoke for the Automations Hub's guided empty state: both creation paths are
-// visible, "Design with Cora" mounts the architect chat (locked composer — no
+// visible, "Design with Cora" mounts the automation architect (locked composer — no
 // mode-cycle pill), and "Done" returns to the launchpad. No message is ever
 // sent, so no backend/CLI is required.
 
@@ -40,7 +40,7 @@ test("automations hub mounts the Create-with-Cora assist chat", async () => {
     // the composer is pinned to automation mode (placeholder proves the
     // lockedMode draft path; the mode-cycle pill must be absent).
     await assistButton.click();
-    await expect(page.getByText("Create with Cora", { exact: true })).toBeVisible();
+    await expect(page.getByText("Cora · Automation architect", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
     await expect(
       page.getByPlaceholder("Describe the loom you want — trigger, loop, and worker."),

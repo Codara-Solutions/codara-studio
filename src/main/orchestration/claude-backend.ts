@@ -60,6 +60,7 @@ import type {
   SparkManagerTaskDecision,
 } from "./openrouter-manager";
 import { buildClaudeSandboxArgv, logConfigShieldOnce } from "./agent-config-shield";
+import { buildClaudeMcpToolAliases } from "./claude-mcp-tool-aliases";
 import { resolveLaunchTarget, startCliSession, type CliSession } from "./cli-session";
 import { buildSpawnTerminalsDecisionFromToolCalls } from "./cli-terminal-decision";
 import {
@@ -1064,6 +1065,7 @@ async function buildClaudeAgentSdkOptions(input: {
     allowDangerouslySkipPermissions: true,
     systemPrompt,
     tools,
+    toolAliases: buildClaudeMcpToolAliases(input.mode),
     disallowedTools,
     mcpServers,
     model: input.model.trim() || undefined,
