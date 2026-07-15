@@ -12,7 +12,7 @@ type WireState = "pending" | "done" | "active" | "blocked";
 
 const WIRE_COLOR: Record<WireState, string> = {
   pending: "var(--rule)",
-  done: "var(--rule-strong)",
+  done: "color-mix(in oklch, var(--ok) 58%, var(--rule-strong))",
   active: "var(--accent)",
   blocked: "var(--danger)",
 };
@@ -94,9 +94,16 @@ function Wire({ d, state }: { d: string; state: WireState }) {
       d={d}
       fill="none"
       stroke={WIRE_COLOR[state]}
-      strokeWidth={1.5}
+      strokeWidth={state === "done" ? 1.7 : 1.5}
       strokeLinecap="round"
       vectorEffect="non-scaling-stroke"
+      style={
+        state === "blocked"
+          ? { filter: "drop-shadow(0 0 2px color-mix(in oklch, var(--danger) 38%, transparent))" }
+          : state === "done"
+            ? { opacity: 0.82 }
+            : undefined
+      }
     />
   );
 }
@@ -109,8 +116,8 @@ function Port({ x, y, state }: { x: number; y: number; state: WireState }) {
     <circle
       cx={x}
       cy={y}
-      r={3.1}
-      fill="var(--bg)"
+      r={state === "active" ? 3.5 : 3.1}
+      fill={state === "active" ? "color-mix(in oklch, var(--accent) 34%, var(--bg))" : "var(--bg)"}
       stroke={color}
       strokeWidth={1.4}
       vectorEffect="non-scaling-stroke"

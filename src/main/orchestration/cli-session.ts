@@ -33,7 +33,7 @@ const INPUT_READY_SEQUENCE = "\x1b[?2004h";
 // interactive shell would — and the same way the worker launch path already
 // gets for free by running the CLI inside pwsh. A real `.exe` is returned
 // unchanged, so this is a no-op for the Claude path. POSIX is untouched.
-function resolveLaunchTarget(exe: string, args: string[]): { exe: string; args: string[] } {
+export function resolveLaunchTarget(exe: string, args: string[]): { exe: string; args: string[] } {
   if (process.platform !== "win32") return { exe, args };
   const ext = extname(exe).toLowerCase();
   if (ext === ".cmd" || ext === ".bat") {
@@ -126,6 +126,8 @@ export interface CliSession {
    * order across async work.
    */
   onJsonlEntry(handler: (entry: unknown) => void | Promise<void>): () => void;
+  /** Immediately consume transcript entries already written to disk. */
+  flushJsonl(): Promise<void>;
   /** Subscribe to PTY raw stdout (for diagnostics; mostly unused). */
   onStdout(handler: (chunk: Buffer) => void): () => void;
   /** Subscribe to process exit. */
@@ -350,6 +352,9 @@ export async function startCliSession(opts: CliSessionOptions): Promise<CliSessi
     onJsonlEntry: (handler) => {
       entryHandlers.add(handler);
       return () => entryHandlers.delete(handler);
+    },
+    flushJsonl: async () => {
+      await tail?.flush();
     },
     onStdout: (handler) => {
       stdoutHandlers.add(handler);

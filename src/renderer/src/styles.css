@@ -523,6 +523,11 @@ a { color: inherit; }
   to { stroke-dashoffset: 0; }
 }
 
+@keyframes runs-node-scan {
+  from { transform: translateX(-120%); }
+  to { transform: translateX(365%); }
+}
+
 /* ── Tab strip (macOS-style) ─────────────────────────────────────────────── */
 .spark-tabbar {
   flex: 0 0 var(--tabbar-h);
@@ -821,6 +826,44 @@ a { color: inherit; }
 }
 .xterm .xterm-screen { background: transparent; }
 
+.codara-terminal-session {
+  container-type: inline-size;
+}
+
+.codara-terminal-intro {
+  position: absolute;
+  z-index: 4;
+  top: 50%;
+  left: 50%;
+  max-width: calc(100% - 40px);
+  margin: 0;
+  transform: translate(-50%, -50%);
+  overflow: hidden;
+  color: color-mix(in oklch, var(--accent) 82%, var(--ink));
+  font-family: var(--font-mono);
+  font-size: clamp(6px, 1.9cqw, 14px);
+  font-weight: 600;
+  line-height: 1.18;
+  letter-spacing: -0.04em;
+  white-space: pre;
+  text-shadow: 0 0 18px var(--accent-glow);
+  opacity: 0.88;
+  pointer-events: none;
+  user-select: none;
+  transition: opacity 400ms var(--ease-out), transform 400ms var(--ease-out);
+}
+
+.codara-terminal-intro.is-fading {
+  opacity: 0;
+  transform: translate(-50%, calc(-50% - 4px));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .codara-terminal-intro {
+    transition: none;
+  }
+}
+
 /* ── Utility classes (opt-in; existing inline styles still work) ────────── */
 .spark-mono { font-family: var(--font-mono); }
 .spark-num  { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
@@ -838,6 +881,24 @@ a { color: inherit; }
   stroke-dasharray: 18 220;
   stroke-dashoffset: 238;
   animation: spark-wire-flow 1.5s linear infinite;
+}
+
+/* Active run cards carry one restrained telemetry sweep. It is deliberately
+   subtle: state and numbers do the communicating; motion only locates the
+   live node in a wide graph. */
+.runs-node-scan {
+  animation: runs-node-scan 3.8s linear infinite;
+}
+
+@media (max-width: 940px) {
+  .runs-mission-header {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 12px !important;
+  }
+
+  .runs-telemetry-grid {
+    grid-template-columns: repeat(5, minmax(70px, 1fr)) !important;
+  }
 }
 
 /* Workspace-rail activity ring: a comet arc that orbits the workspace color

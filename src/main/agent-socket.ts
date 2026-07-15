@@ -29,6 +29,7 @@ import type {
   CreateScheduledJobInput,
   LoomGraph,
   LoomWorkerConfig,
+  RunQuestionCategory,
   RunState,
   ScheduledJob,
   UpdateScheduledJobInput,
@@ -773,6 +774,7 @@ const NOTIFY_KINDS: ReadonlySet<string> = new Set<NotifyKind>([
   "run.failed",
   "terminal.agent.needs-input",
   "terminal.agent.done",
+  "terminal.agent.failed",
   "automation.finished",
   "automation.failed",
   "automation.blocked",
@@ -819,6 +821,16 @@ async function handleAppNotify(
   const sourceKey =
     stringParam(params, "sourceKey") ??
     `cli:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const workspaceId = stringParam(params, "workspaceId");
+  const tabId = stringParam(params, "tabId");
+  const paneId = stringParam(params, "paneId");
+  const jobId = stringParam(params, "jobId");
+  const target =
+    workspaceId && tabId && paneId
+      ? ({ type: "terminal", workspaceId, tabId, paneId } as const)
+      : jobId
+        ? ({ type: "automation", jobId, workspaceId: workspaceId ?? undefined } as const)
+        : ({ type: "run", runId: stringParam(params, "runId") ?? "cli-test" } as const);
   const { publish } = await import("./notify");
   publish({
     kind: kind as NotifyKind,
@@ -827,7 +839,7 @@ async function handleAppNotify(
     body: stringParam(params, "body") ?? "Fired via app.notify (cora CLI).",
     tone: tone as InAppNotificationTone,
     soundKind: sound as NotificationSoundKind,
-    target: { type: "run", runId: stringParam(params, "runId") ?? "cli-test" },
+    target,
   });
   return successResponse(id, { published: true, kind, sourceKey });
 }
@@ -1148,6 +1160,10 @@ function clientGone(res: ServerResponse): boolean {
   return res.writableEnded || res.socket === null || res.socket.destroyed;
 }
 
+function runQuestionWasAbandoned(status: RunState["status"]): boolean {
+  return status === "paused" || status === "cancelled" || status === "complete" || status === "failed";
+}
+
 async function handleOrchestratorAskUser(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1170,71 +1186,98 @@ async function handleOrchestratorAskUser(
     }));
 
   const runStore = await getRunStore();
+  const beforeAsk = await runStore.getRun(runId);
+  if (!beforeAsk) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  const requestedCategory = stringParam(params, "category");
+  const validCategories: ReadonlySet<RunQuestionCategory> = new Set([
+    "credentials_access",
+    "destructive_irreversible",
+    "safety_policy",
+    "irreducible_product_scope",
+  ]);
+  const category =
+    requestedCategory && validCategories.has(requestedCategory as RunQuestionCategory)
+      ? (requestedCategory as RunQuestionCategory)
+      : undefined;
+  if (requestedCategory && !category) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `Unsupported human-blocker category: ${requestedCategory}`,
+    );
+  }
+  const source = beforeAsk.executionMode === "direct" ? "direct_worker" : "live_manager_rpc";
+  const managerMode = [...beforeAsk.sparkCalls]
+    .reverse()
+    .find((call) => call.status === "started" && !call.completedAt)?.mode;
+  let questionMessageId: string;
   try {
-    await runStore.addRunMessage({
+    const resolved = await runStore.resolveManagerQuestion({
       runId,
-      author: "spark",
-      kind: "question",
       message: question,
       questionOptions: options,
+      category,
+      reason: stringParam(params, "reason") ?? undefined,
+      recommendedOptionId: stringParam(params, "recommendedOptionId") ?? undefined,
+      source,
+      resumeStrategy: "active_rpc",
+      managerMode,
+      conversationEpoch: beforeAsk.conversationEpoch ?? 0,
     });
+    if (resolved.action === "assumed") {
+      return successResponse(id, {
+        answer: resolved.assumption.selectedAnswer,
+        kind: "assumption",
+        assumptionId: resolved.assumption.id,
+      });
+    }
+    questionMessageId = resolved.questionMessageId;
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }
 
-  // Looms v2: a direct worker asking mid-session surfaces as a BLOCKED run.
-  // That one status flip drives everything downstream — the Hub's question
-  // card + "needs you" badge, the loop driver's blocked HOLD, and the desktop
-  // notification (run.status_updated is the notifier's canonical signal).
-  // Managed runs are untouched: their manager pipeline owns blocked status.
-  let flippedBlocked = false;
-  try {
-    const run = await runStore.getRun(runId);
-    if (run?.executionMode === "direct" && run.status === "running") {
-      await runStore.updateRunStatus({ runId, status: "blocked" });
-      flippedBlocked = true;
-    }
-  } catch {
-    /* the ask still works without the status cue */
-  }
-  const restoreRunning = async (): Promise<void> => {
-    if (!flippedBlocked) return;
+  const releaseQuestion = async (): Promise<void> => {
     try {
-      const run = await runStore.getRun(runId);
-      if (run?.status === "blocked") {
-        await runStore.updateRunStatus({ runId, status: "running" });
-      }
+      await runStore.releaseRunQuestion(runId, questionMessageId);
     } catch {
-      /* watchTerminal's non-terminal reset clears any stale blocked cue */
+      /* a concurrent answer may already have cleared this blocker */
     }
   };
 
-  const askedAt = Date.now();
-  const deadline = askedAt + ASK_USER_TIMEOUT_MS;
+  const deadline = Date.now() + ASK_USER_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, ASK_USER_POLL_MS));
     // Client hung up — stop polling; writeJsonRpc on a dead socket is a no-op.
     if (clientGone(res)) {
-      await restoreRunning();
+      await releaseQuestion();
       return errorResponse(id, ERR_INTERNAL, "ask_user aborted: client disconnected");
     }
     const run = await runStore.getRun(runId);
     if (!run) {
       return errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-ask: ${runId}`);
     }
+    if (runQuestionWasAbandoned(run.status)) {
+      return errorResponse(id, ERR_INTERNAL, "ask_user ended because the run was paused or terminated");
+    }
     const answer = [...run.humanMessages]
       .reverse()
-      .find((m) =>
-        m.author === "user" &&
-        (m.kind === "answer" || m.kind === "note") &&
-        Date.parse(m.createdAt) > askedAt,
+      .find(
+        (m) =>
+          m.author === "user" &&
+          m.kind === "answer" &&
+          m.answersMessageId === questionMessageId,
       );
     if (answer) {
-      await restoreRunning();
       return successResponse(id, { answer: answer.message, kind: answer.kind });
     }
+    if (
+      run.status !== "blocked" ||
+      run.blockedOn?.questionMessageId !== questionMessageId
+    ) {
+      return errorResponse(id, ERR_INTERNAL, "ask_user ended because question ownership was released");
+    }
   }
-  await restoreRunning();
+  await releaseQuestion();
   return errorResponse(id, ERR_INTERNAL, "ask_user timed out waiting for human response");
 }
 
@@ -1821,21 +1864,22 @@ async function requestUserConsent(opts: {
     const askClientId = `consent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     let questionMessageId: string | undefined;
     try {
-      const afterAsk = await runStore.addRunMessage({
+      const posted = await runStore.postRunQuestion({
         runId,
         clientMessageId: askClientId,
-        author: "spark",
-        kind: "question",
         message: question,
         questionOptions: [
           { id: "allow", label: "Allow", description: "Apply this change now", answer: "Allow", recommended: true },
           { id: "deny", label: "Deny", description: "Do not make this change", answer: "Deny" },
           { id: "not_now", label: "Not now", description: "Skip this change for now", answer: "Not now" },
         ],
+        category: "destructive_irreversible",
+        reason: "Changing an automation requires explicit user approval.",
+        recommendedOptionId: "allow",
+        source: "consent_gate",
+        resumeStrategy: "active_rpc",
       });
-      questionMessageId = afterAsk.humanMessages.find(
-        (m) => m.clientMessageId === askClientId,
-      )?.id;
+      questionMessageId = posted.questionMessageId;
     } catch (err) {
       return { approved: false, response: errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message) };
     }
@@ -1848,30 +1892,11 @@ async function requestUserConsent(opts: {
       };
     }
 
-    // Nudge the user even when the Automations panel isn't focused — the gate
-    // otherwise declines silently after the timeout. Best-effort; assist runs
-    // carry no automationId, so the notify pipeline treats this as an ordinary
-    // blocked-run alert (toast + native + center, inline answers included).
-    try {
-      const run = await runStore.getRun(runId);
-      const { publish } = await import("./notify");
-      publish({
-        kind: "run.blocked",
-        sourceKey: `run:${runId}`,
-        tone: "warning",
-        title: "Automation chat — approval needed",
-        body: question.split("\n")[0]?.slice(0, 160) || "Cora is asking to change an automation.",
-        soundKind: "needs-you",
-        target: { type: "run", runId, workspaceId: run?.workspaceId },
-      });
-    } catch {
-      /* the gate works without the notification */
-    }
-
     const deadline = Date.now() + CONSENT_TIMEOUT_MS;
     while (Date.now() < deadline) {
       await new Promise<void>((resolve) => setTimeout(resolve, CONSENT_POLL_MS));
       if (clientGone(res)) {
+        await runStore.releaseRunQuestion(runId, questionMessageId).catch(() => undefined);
         return {
           approved: false,
           response: errorResponse(id, ERR_INTERNAL, "consent request aborted: client disconnected"),
@@ -1882,6 +1907,18 @@ async function requestUserConsent(opts: {
         return {
           approved: false,
           response: errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-consent: ${runId}`),
+        };
+      }
+      // Cancellation or an explicit pause always wins over a linked Allow that
+      // may have landed just before this poll tick. Never mutate automations from
+      // a consent request whose run is no longer active.
+      if (runQuestionWasAbandoned(run.status)) {
+        return {
+          approved: false,
+          response: successResponse(id, {
+            approved: false,
+            message: "The run was paused or cancelled, so this change was NOT applied.",
+          }),
         };
       }
       // ONLY answers explicitly linked to THIS question count. An unlinked
@@ -1905,7 +1942,20 @@ async function requestUserConsent(opts: {
         // into this question's card — all fail safe to a decline.
         return { approved: false, response: successResponse(id, { approved: false, message: denyMessage }) };
       }
+      if (
+        run.status !== "blocked" ||
+        run.blockedOn?.questionMessageId !== questionMessageId
+      ) {
+        return {
+          approved: false,
+          response: successResponse(id, {
+            approved: false,
+            message: "Question ownership ended before approval, so this change was NOT applied.",
+          }),
+        };
+      }
     }
+    await runStore.releaseRunQuestion(runId, questionMessageId).catch(() => undefined);
     return {
       approved: false,
       response: successResponse(id, {

@@ -20,6 +20,13 @@ import { promises as fs } from "node:fs";
 
 export interface Disposable {
   dispose(): void;
+  /**
+   * Read and dispatch everything currently present in the file before
+   * resolving. Callers use this at provider turn boundaries so a normal
+   * polling interval cannot strand the final transcript entry behind a
+   * completed turn.
+   */
+  flush(): Promise<void>;
 }
 
 export interface TailJsonlOptions {
@@ -177,6 +184,20 @@ export function tailJsonl(
   tick();
 
   return {
+    async flush() {
+      if (stopped) return;
+      // Join an interval-driven read first, then claim the same serialized
+      // slot for one immediate read. There is no await between observing the
+      // empty slot and assigning `polling`, so `tick()` cannot race us here.
+      while (polling) await polling;
+      const immediate = pollOnce()
+        .catch((err) => onError?.(err as Error))
+        .finally(() => {
+          if (polling === immediate) polling = null;
+        });
+      polling = immediate;
+      await immediate;
+    },
     dispose() {
       if (stopped) return;
       stopped = true;

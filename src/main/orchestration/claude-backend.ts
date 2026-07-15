@@ -1,10 +1,16 @@
-// Claude Code backend — real implementation.
+// Claude backend.
 //
-// Spawns the `claude` CLI under a headless PTY (via cli-session), tails the
-// per-session JSONL transcript at ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl
-// for assistant output, and injects user prompts via a UserPromptSubmit hook
-// side-channel (because the Ink REPL ignores programmatic Enter from PTY
-// stdin — claude-code issue #15553).
+// Cora's production transport is Anthropic's Claude Agent SDK. It supplies
+// partial assistant events, ordered tool calls/results, explicit completion,
+// cancellation, and persisted/resumable session IDs without exposing or
+// driving Claude Code's interactive terminal UI. The SDK uses the user's local
+// Claude Code authentication (including subscription OAuth) and Cora scopes
+// settings/MCP servers per query.
+//
+// The print-mode and PTY implementations below remain as diagnostic/legacy
+// fallbacks while old session fixtures and migrations still depend on them.
+// The PTY fallback tails the provider JSONL transcript and uses Codara hooks to
+// bridge prompts and turn completion.
 //
 // Lifecycle per chat (keyed by run.id):
 //   1. First turn: spawn `claude --dangerously-skip-permissions
@@ -26,13 +32,16 @@
 // stream event.
 
 import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { app } from "electron";
 
 import { classifyTail } from "@shared/agent-patterns";
 import { backendPtySessionId } from "@shared/backend-pty";
 import type { ChatMode } from "@shared/types";
+import type { Options as ClaudeAgentSdkOptions } from "@anthropic-ai/claude-agent-sdk";
 
 import { encodeCwdForClaudeProjects } from "./claude-paths";
 import { resolveBundledResourcePath } from "../bundled-resources";
@@ -42,6 +51,8 @@ import { installOrchestratorMcpForCC, isSparkOrchestratorMcpInstalled } from "..
 import { claudeProvider } from "../providers/claude";
 import { getPreferenceCached } from "../preferences-store";
 import { sparkHome } from "../spark-home";
+import { getEnrichedEnv } from "../path-reconstruction";
+import { sanitizeNestedAgentEnv } from "../env-sanitize";
 
 import type {
   SparkManagerDecision,
@@ -49,12 +60,11 @@ import type {
   SparkManagerTaskDecision,
 } from "./openrouter-manager";
 import { buildClaudeSandboxArgv, logConfigShieldOnce } from "./agent-config-shield";
-import { startCliSession, type CliSession } from "./cli-session";
+import { resolveLaunchTarget, startCliSession, type CliSession } from "./cli-session";
 import { buildSpawnTerminalsDecisionFromToolCalls } from "./cli-terminal-decision";
 import {
   buildSparkRunContextBlock,
   buildTalkReplyDecision,
-  latestUserPromptFromRun,
   runDidPlanCouncil,
   type ChatStreamHandler,
   type ManagerCallResult,
@@ -63,6 +73,10 @@ import {
 } from "./spark-agent-backend";
 
 const TURN_POLL_INTERVAL_MS = 200;
+// codara_wait_for_workers legitimately blocks for up to twenty minutes. Claude's
+// stdio MCP transport otherwise applies its five-minute default and paints a
+// healthy, still-running worker wait as a failed tool call in Cora.
+const ORCHESTRATOR_MCP_TOOL_TIMEOUT_MS = 20 * 60_000;
 // The turn-end waiter NEVER fails a turn on inactivity — a busy CC can write
 // nothing to its JSONL for minutes (a single long tool execution, a long
 // thinking block, or a blocking long-poll MCP call like codara_wait_for_workers
@@ -74,13 +88,13 @@ const TURN_POLL_INTERVAL_MS = 200;
 // (reset on any JSONL activity). It still exits at once on session death
 // (chat.fatal) or the Stop hook's done-marker.
 const TURN_SILENCE_NOTE_INTERVAL_MS = 5 * 60_000;
-// CC's Stop hook fires when the assistant finishes its turn, but the JSONL
-// tailer is on a 150ms poll AND CC sometimes flushes the assistant message
-// to disk slightly AFTER firing the hook. Without this grace window we
-// occasionally return the "no output" fallback when the assistant block is
-// 50-300ms behind. 1.5s covers the observed worst case and the user only
-// pays it on the rare "Stop fired with no text yet" path.
+// Stop and transcript persistence are separate provider operations. Always
+// flush after Stop and wait for a short quiet period: a turn may already have
+// emitted tool-preface text while its actual final answer is still waiting in
+// the tailer's 150ms polling window. Gating this on "no text yet" caused Cora
+// to persist those prefaces and miss the real answer.
 const POST_STOP_ASSISTANT_GRACE_MS = 1_500;
+const POST_STOP_TRANSCRIPT_QUIET_MS = 250;
 const POST_STOP_GRACE_POLL_MS = 50;
 // CC's Ink REPL renders its banner within a few hundred ms in the typical
 // case, but cold-start (first launch of the day, package self-updater, etc.)
@@ -199,6 +213,10 @@ interface ClaudeChatSession {
   /** Accumulator for assistant text blocks emitted during the current turn.
    *  Reset on each new requestManagerDecision call. */
   turnAssistantText: string;
+  /** Assistant text retained by provider message id, in arrival order. The
+   *  final non-empty message is the answer; earlier messages are tool-use
+   *  narration and remain available to the live execution stream. */
+  turnAssistantMessages: Map<string, string>;
   /** Latest usage snapshot seen this turn — flushed into ManagerCallResult. */
   lastUsage: {
     inputTokens?: number;
@@ -209,6 +227,8 @@ interface ClaudeChatSession {
    *  on the active turn and refuse to start more turns on this session. */
   fatal: boolean;
   fatalMessage: string | null;
+  /** User interruption marker for truthful turnAborted accounting. */
+  interruptedAt: number | null;
   /** First-turn input gate (wait for bracketed-paste-enable + mount settle)
    *  already ran for this spawn. Later turns skip it — the REPL proved
    *  itself live, and waiting again would just add latency per message. */
@@ -238,6 +258,9 @@ interface ClaudeChatSession {
 const contextInjectedRuns = new Set<string>();
 
 const sessions = new Map<string, ClaudeChatSession>();
+const sessionGenerations = new Map<string, number>();
+const headlessTurns = new Map<string, { child: ChildProcessWithoutNullStreams; interrupted: boolean }>();
+const sdkTurns = new Map<string, { abortController: AbortController; interrupted: boolean }>();
 
 export const claudeBackend: SparkAgentBackend = {
   kind: "claude",
@@ -249,6 +272,14 @@ export const claudeBackend: SparkAgentBackend = {
   ): Promise<ManagerCallResult> {
     const startedAt = Date.now();
     const runId = input.run.id;
+    const requestGeneration = sessionGenerations.get(runId) ?? 0;
+    const abortedResult = (): ManagerCallResult => ({
+      decision: buildTalkReplyDecision("Claude Code turn interrupted."),
+      durationMs: Date.now() - startedAt,
+      model: input.chat.model,
+      notice: "Claude Code turn interrupted by conversation rewind.",
+      turnAborted: true,
+    });
     const emit: ChatStreamHandler = (event) => {
       try {
         onStream?.(event);
@@ -266,6 +297,9 @@ export const claudeBackend: SparkAgentBackend = {
       await fs.mkdir(queueDir, { recursive: true });
       await fs.mkdir(turnDir, { recursive: true });
       await fs.mkdir(promptDir, { recursive: true });
+      if ((sessionGenerations.get(runId) ?? 0) !== requestGeneration) {
+        return abortedResult();
+      }
 
       const mode: ChatMode = input.chat.mode;
       // Pick the right system prompt for the active mode. Talk uses the
@@ -285,7 +319,10 @@ export const claudeBackend: SparkAgentBackend = {
         // Idempotent — installs the codara-studio entry into ~/.claude.json the
         // first time, no-ops thereafter. We skip the work when the entry is
         // already in place to avoid touching the file on every turn.
-        if (!(await isSparkOrchestratorMcpInstalled("claude"))) {
+        if (
+          !useClaudeAgentSdkTransport() &&
+          !(await isSparkOrchestratorMcpInstalled("claude"))
+        ) {
           await installOrchestratorMcpForCC().catch((err) => {
             emit({
               kind: "system_note",
@@ -302,7 +339,10 @@ export const claudeBackend: SparkAgentBackend = {
         // Same idempotent global install as Execute — the per-run MCP config
         // written in spawnChatSession scopes the visible tools, but the global
         // entry still needs to exist for CC to spawn the server.
-        if (!(await isSparkOrchestratorMcpInstalled("claude"))) {
+        if (
+          !useClaudeAgentSdkTransport() &&
+          !(await isSparkOrchestratorMcpInstalled("claude"))
+        ) {
           await installOrchestratorMcpForCC().catch((err) => {
             emit({
               kind: "system_note",
@@ -315,6 +355,44 @@ export const claudeBackend: SparkAgentBackend = {
       } else {
         systemPromptPath = join(promptDir, TALK_SYSTEM_PROMPT_FILENAME);
         await ensureTalkPromptFile(systemPromptPath);
+      }
+
+      // Cora is a structured client, so use Anthropic's Agent SDK rather than
+      // driving Claude Code's interactive Ink UI through a hidden PTY. The SDK
+      // gives us token deltas, ordered tool blocks, an explicit terminal
+      // result, interruption, and resumable provider sessions. The old print
+      // transport remains available only as a test/diagnostic escape hatch.
+      if (
+        /fable/i.test(input.chat.model.trim()) &&
+        getPreferenceCached("fableEnabled") !== true
+      ) {
+        input.chat.model = FABLE_DISABLED_FALLBACK_MODEL;
+        emit({
+          kind: "system_note",
+          message:
+            "Fable 5 is off in Codara Studio settings (it is Anthropic's top-tier, most expensive model). " +
+            "Using Opus 4.8 (claude-opus-4-8) for this chat instead. Enable “Allow Fable 5” in Settings → Agents to use it.",
+        });
+      }
+      if (useClaudeAgentSdkTransport()) {
+        return await runClaudeAgentSdkTurn({
+          input,
+          mode,
+          systemPromptPath,
+          requestGeneration,
+          startedAt,
+          emit,
+        });
+      }
+      if (useClaudePrintTransport()) {
+        return await runClaudePrintTurn({
+          input,
+          mode,
+          systemPromptPath,
+          requestGeneration,
+          startedAt,
+          emit,
+        });
       }
 
       // Spin up (or reuse) the per-chat CLI session.
@@ -385,18 +463,23 @@ export const claudeBackend: SparkAgentBackend = {
           talkPromptPath: systemPromptPath,
           onStream: emit,
         });
+        if ((sessionGenerations.get(runId) ?? 0) !== requestGeneration) {
+          await disposeChatSessionInternal(chat);
+          return abortedResult();
+        }
         sessions.set(runId, chat);
       } else {
         // Reset per-turn accumulators on the existing session.
         chat.turnAssistantText = "";
+        chat.turnAssistantMessages.clear();
         chat.lastUsage = {};
         chat.turnToolCalls = [];
       }
+      chat.interruptedAt = null;
 
-      // Resolve the prompt for this turn. Empty prompts still go through:
-      // the hook will hand CC an empty string which CC tolerates, but the
-      // hook needs SOMETHING on disk to fire the side-channel.
-      const userPrompt = latestUserPromptFromRun(input.run);
+      // run-store froze and durably attached this exact ordered bundle before
+      // any provider startup. Never reread mutable run.humanMessages here.
+      const userPrompt = input.prompt;
       // ONCE per run, when the chat leaves Plan mode, prepend a compact snapshot
       // of what the Plan council produced (completed steps, the worker DONE card,
       // and the plan/PRD as @-mentions). The council ran in its own worker
@@ -405,6 +488,7 @@ export const claudeBackend: SparkAgentBackend = {
       // already "remembers" via its own transcript, so we DON'T re-inject: the
       // block stays in history across the -r respawn a mode flip triggers.
       let prompt = userPrompt;
+      let injectedPlanContext = false;
       if (
         mode !== "plan" &&
         !contextInjectedRuns.has(runId) &&
@@ -413,8 +497,11 @@ export const claudeBackend: SparkAgentBackend = {
         const contextBlock = buildSparkRunContextBlock(input.run, input.cwd);
         if (contextBlock) {
           prompt = userPrompt ? `${contextBlock}\n\n${userPrompt}` : contextBlock;
-          contextInjectedRuns.add(runId);
+          injectedPlanContext = true;
         }
+      }
+      if ((sessionGenerations.get(runId) ?? 0) !== requestGeneration) {
+        return abortedResult();
       }
       const queueFile = join(queueDir, `${runId}.queue`);
       await writeFileAtomic(queueFile, prompt);
@@ -478,6 +565,16 @@ export const claudeBackend: SparkAgentBackend = {
       // prompt twice in CC's terminal and doubling the input-token cost).
       const promptForStdin = prompt || ".";
       const submitted = await submitPromptWithVerification(chat, promptForStdin, emit);
+      if (
+        chat.interruptedAt != null ||
+        (sessionGenerations.get(runId) ?? 0) !== requestGeneration
+      ) {
+        return abortedResult();
+      }
+      if (submitted) {
+        if (injectedPlanContext) contextInjectedRuns.add(runId);
+        await input.onPromptAccepted?.();
+      }
       if (!submitted && !chat.fatal) {
         emit({
           kind: "system_note",
@@ -497,6 +594,20 @@ export const claudeBackend: SparkAgentBackend = {
         },
         emit,
       );
+      if ((sessionGenerations.get(runId) ?? 0) !== requestGeneration) {
+        await fs.unlink(turnFile).catch(() => undefined);
+        return abortedResult();
+      }
+      if (chat.interruptedAt != null) {
+        await fs.unlink(turnFile).catch(() => undefined);
+        return {
+          decision: buildTalkReplyDecision("Claude Code turn interrupted."),
+          durationMs: Date.now() - startedAt,
+          model: input.chat.model,
+          notice: "Claude Code turn interrupted by user.",
+          turnAborted: true,
+        };
+      }
       if (!turnEnded.ok) {
         emit({ kind: "error", message: turnEnded.message });
         return {
@@ -521,6 +632,13 @@ export const claudeBackend: SparkAgentBackend = {
           turnFailed: true,
         };
       }
+      if (!submitted) {
+        // A completed turn is stronger acceptance evidence than the startup
+        // probe. Preserve exactly-once input ownership and consume one-shot
+        // plan context only after that evidence exists.
+        if (injectedPlanContext) contextInjectedRuns.add(runId);
+        await input.onPromptAccepted?.();
+      }
 
       // Clean up the done-marker so the next turn starts from a known state.
       try {
@@ -529,24 +647,13 @@ export const claudeBackend: SparkAgentBackend = {
         // best-effort cleanup — a missing file just means nothing to do.
       }
 
-      // Grace window: if the Stop hook fired before the JSONL tailer
-      // observed the assistant_block (race; CC sometimes flushes the
-      // message to disk a beat after firing the hook), wait briefly for
-      // any final text to arrive. Without this we'd return "no output"
-      // and then the real reply ("2") shows up ~200ms later as orphan
-      // events that get persisted as a separate ghost spark message.
-      if (!chat.turnAssistantText.trim()) {
-        const graceStart = Date.now();
-        while (
-          !chat.turnAssistantText.trim() &&
-          Date.now() - graceStart < POST_STOP_ASSISTANT_GRACE_MS &&
-          !chat.fatal
-        ) {
-          await sleep(POST_STOP_GRACE_POLL_MS);
-        }
-      }
+      // Stop can beat the 150ms JSONL poll even when earlier tool-preface
+      // messages made turnAssistantText non-empty. Flush unconditionally and
+      // wait until transcript activity is briefly quiet before selecting the
+      // final provider message.
+      await settleTranscriptAfterStop(chat);
 
-      const replyText = chat.turnAssistantText.trim();
+      const replyText = finalAssistantMessageText(chat);
       // Execute/Auto mode: convert codara_spawn_workers tool calls into the
       // same SparkManagerDecision shape grok/OpenRouter produces. The
       // run-store already knows how to apply that decision (spawn workers,
@@ -561,6 +668,9 @@ export const claudeBackend: SparkAgentBackend = {
         );
         return {
           decision,
+          decisionAlreadyApplied: executeDecisionWasAppliedDuringTurn(
+            chat.turnToolCalls,
+          ),
           durationMs: Date.now() - startedAt,
           model: input.chat.model,
           inputTokens: chat.lastUsage.inputTokens,
@@ -582,6 +692,19 @@ export const claudeBackend: SparkAgentBackend = {
         newSessionUuid: chat.sessionUuid ?? undefined,
       };
     } catch (err) {
+      if ((sessionGenerations.get(runId) ?? 0) !== requestGeneration) {
+        return abortedResult();
+      }
+      const interrupted = sessions.get(runId)?.interruptedAt != null;
+      if (interrupted) {
+        return {
+          decision: buildTalkReplyDecision("Claude Code turn interrupted."),
+          durationMs: Date.now() - startedAt,
+          model: input.chat.model,
+          notice: "Claude Code turn interrupted by user.",
+          turnAborted: true,
+        };
+      }
       const message = err instanceof Error ? err.message : String(err);
       emit({ kind: "error", message: `Claude Code backend error: ${message}` });
       return {
@@ -600,6 +723,19 @@ export const claudeBackend: SparkAgentBackend = {
   },
 
   async disposeChat(runId: string): Promise<void> {
+    sessionGenerations.set(runId, (sessionGenerations.get(runId) ?? 0) + 1);
+    const sdkTurn = sdkTurns.get(runId);
+    if (sdkTurn) {
+      sdkTurn.interrupted = true;
+      sdkTurn.abortController.abort();
+      sdkTurns.delete(runId);
+    }
+    const headless = headlessTurns.get(runId);
+    if (headless) {
+      headless.interrupted = true;
+      headless.child.kill("SIGTERM");
+      headlessTurns.delete(runId);
+    }
     const chat = sessions.get(runId);
     sessions.delete(runId);
     contextInjectedRuns.delete(runId);
@@ -621,8 +757,23 @@ export const claudeBackend: SparkAgentBackend = {
   },
 
   interruptChat(runId: string): void {
+    const sdkTurn = sdkTurns.get(runId);
+    if (sdkTurn) {
+      sdkTurn.interrupted = true;
+      sdkTurn.abortController.abort();
+      return;
+    }
+    const headless = headlessTurns.get(runId);
+    if (headless) {
+      headless.interrupted = true;
+      headless.child.kill("SIGINT");
+      return;
+    }
     const chat = sessions.get(runId);
     if (!chat) return;
+    // Flag first so the in-flight request resolves as a quiet user abort rather
+    // than fabricating a successful or failed Cora reply from the done marker.
+    chat.interruptedAt = Date.now();
     // ESC tells CC's Ink REPL to abort the in-flight turn. Same key the user
     // would press in the standalone CLI. Mid-tool the model sees an
     // interruption and stops calling more tools — leaves the session alive
@@ -652,6 +803,690 @@ export const claudeBackend: SparkAgentBackend = {
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
+
+interface ClaudePrintTurnOptions {
+  input: ManagerRequestInput;
+  mode: ChatMode;
+  systemPromptPath: string;
+  requestGeneration: number;
+  startedAt: number;
+  emit: ChatStreamHandler;
+}
+
+function useClaudeAgentSdkTransport(): boolean {
+  return process.env.SPARK_CLAUDE_TRANSPORT !== "print";
+}
+
+function useClaudePrintTransport(): boolean {
+  return process.env.SPARK_CLAUDE_TRANSPORT === "print";
+}
+
+interface ClaudePrintBlock {
+  type: "text" | "tool_use";
+  messageId: string;
+  text: string;
+  toolUseId: string;
+  toolName: string;
+  inputJson: string;
+  input: unknown;
+}
+
+async function runClaudeAgentSdkTurn(opts: ClaudePrintTurnOptions): Promise<ManagerCallResult> {
+  const { input, mode, emit, startedAt } = opts;
+  const runId = input.run.id;
+  const modeChanged = Boolean(
+    input.chat.sessionUuid &&
+    input.chat.sessionMode &&
+    input.chat.sessionMode !== mode,
+  );
+  if (modeChanged) {
+    emit({
+      kind: "system_note",
+      message: `Started a fresh Claude session for the switch from ${input.chat.sessionMode} to ${mode} mode.`,
+    });
+  }
+  const resumeSessionUuid = modeChanged ? undefined : input.chat.sessionUuid;
+  const sessionUuid = resumeSessionUuid ?? randomUUID();
+  const abortController = new AbortController();
+  const active = { abortController, interrupted: false };
+  sdkTurns.set(runId, active);
+
+  let prompt = input.prompt;
+  let injectedPlanContext = false;
+  if (mode !== "plan" && !contextInjectedRuns.has(runId) && runDidPlanCouncil(input.run)) {
+    const contextBlock = buildSparkRunContextBlock(input.run, input.cwd);
+    if (contextBlock) {
+      prompt = prompt ? `${contextBlock}\n\n${prompt}` : contextBlock;
+      injectedPlanContext = true;
+    }
+  }
+
+  emit({
+    kind: "system_note",
+    message: `Starting Claude stream (mode=${mode}, session=${sessionUuid}, transport=agent-sdk).`,
+  });
+
+  const parser = createClaudePrintParser(emit);
+  let acceptedPromise: Promise<void> | null = null;
+  let stderrTail = "";
+  const markAccepted = () => {
+    if (acceptedPromise) return;
+    if (injectedPlanContext) contextInjectedRuns.add(runId);
+    acceptedPromise = Promise.resolve(input.onPromptAccepted?.()).then(() => undefined);
+  };
+
+  try {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    const options = await buildClaudeAgentSdkOptions({
+      runId,
+      cwd: input.cwd,
+      mode,
+      model: input.chat.model,
+      effort: input.chat.effort,
+      sessionUuid,
+      resume: Boolean(resumeSessionUuid),
+      systemPromptPath: opts.systemPromptPath,
+      abortController,
+      onStderr(data) {
+        stderrTail = `${stderrTail}${data}`.slice(-8_000);
+      },
+    });
+    const stream = query({ prompt: prompt || ".", options });
+    for await (const message of stream) {
+      if (claudeSdkMessageAcceptedPrompt(message)) markAccepted();
+      parser.accept(message);
+    }
+    parser.finish();
+    await acceptedPromise;
+
+    const stale = (sessionGenerations.get(runId) ?? 0) !== opts.requestGeneration;
+    if (active.interrupted || stale) {
+      return {
+        decision: buildTalkReplyDecision("Claude Code turn interrupted."),
+        durationMs: Date.now() - startedAt,
+        model: input.chat.model,
+        newSessionUuid: parser.sessionUuid ?? sessionUuid,
+        notice: stale
+          ? "Claude Code turn interrupted by conversation rewind."
+          : "Claude Code turn interrupted by user.",
+        turnAborted: true,
+      };
+    }
+    if (parser.error) {
+      const message = parser.error || stderrTail.trim() || "Claude Agent SDK returned an error result.";
+      emit({ kind: "error", message: `Claude Code backend error: ${message}` });
+      return {
+        decision: buildTalkReplyDecision(
+          `Claude Code backend failed to handle this turn: ${message}`,
+          "Claude Code backend error",
+        ),
+        durationMs: Date.now() - startedAt,
+        model: input.chat.model,
+        newSessionUuid: parser.sessionUuid ?? sessionUuid,
+        notice: message,
+        turnFailed: true,
+      };
+    }
+
+    return buildClaudeStreamResult({
+      input,
+      mode,
+      startedAt,
+      sessionUuid,
+      parser,
+    });
+  } catch (error) {
+    parser.finish();
+    await acceptedPromise;
+    const stale = (sessionGenerations.get(runId) ?? 0) !== opts.requestGeneration;
+    if (active.interrupted || stale || abortController.signal.aborted) {
+      return {
+        decision: buildTalkReplyDecision("Claude Code turn interrupted."),
+        durationMs: Date.now() - startedAt,
+        model: input.chat.model,
+        newSessionUuid: parser.sessionUuid ?? sessionUuid,
+        notice: stale
+          ? "Claude Code turn interrupted by conversation rewind."
+          : "Claude Code turn interrupted by user.",
+        turnAborted: true,
+      };
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const detail = stderrTail.trim();
+    const combined = detail && !message.includes(detail) ? `${message}\n${detail}` : message;
+    emit({ kind: "error", message: `Claude Code backend error: ${combined}` });
+    return {
+      decision: buildTalkReplyDecision(
+        `Claude Code backend failed to handle this turn: ${combined}`,
+        "Claude Code backend error",
+      ),
+      durationMs: Date.now() - startedAt,
+      model: input.chat.model,
+      newSessionUuid: parser.sessionUuid ?? sessionUuid,
+      notice: combined,
+      turnFailed: true,
+    };
+  } finally {
+    if (sdkTurns.get(runId) === active) sdkTurns.delete(runId);
+  }
+}
+
+function claudeSdkMessageAcceptedPrompt(message: unknown): boolean {
+  if (!isRecord(message)) return false;
+  // `system:init`, authentication status, MCP startup, and hook status can all
+  // arrive before Claude accepts the user turn. They are useful stream events
+  // but must not consume durable input ownership. Assistant/API deltas, tool
+  // results, and the terminal result are provider-turn evidence.
+  return (
+    message.type === "stream_event" ||
+    message.type === "assistant" ||
+    message.type === "user" ||
+    message.type === "result"
+  );
+}
+
+async function buildClaudeAgentSdkOptions(input: {
+  runId: string;
+  cwd: string;
+  mode: ChatMode;
+  model: string;
+  effort: string;
+  sessionUuid: string;
+  resume: boolean;
+  systemPromptPath: string;
+  abortController: AbortController;
+  onStderr: (data: string) => void;
+}): Promise<ClaudeAgentSdkOptions> {
+  const inherited = await getEnrichedEnv();
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(inherited)) {
+    if (typeof value === "string") env[key] = value;
+  }
+  sanitizeNestedAgentEnv(env);
+  Object.assign(env, {
+    CLAUDE_AGENT_SDK_CLIENT_APP: "codara-studio/0.1.0",
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CLAUDE_CODE_HIDE_CWD: "1",
+    CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: "1",
+    MCP_TOOL_TIMEOUT: String(ORCHESTRATOR_MCP_TOOL_TIMEOUT_MS),
+    SPARK_RUN_ID: input.runId,
+    SPARK_HOME_DIR: sparkHome(),
+  });
+
+  let systemPrompt: ClaudeAgentSdkOptions["systemPrompt"];
+  let tools: ClaudeAgentSdkOptions["tools"];
+  const disallowedTools: string[] = [];
+  if (input.mode === "execute") {
+    systemPrompt = buildExecuteSystemPrompt(input.cwd);
+    tools = [];
+  } else if (input.mode === "auto") {
+    const autoPrompt = await fs.readFile(input.systemPromptPath, "utf8");
+    systemPrompt = `${autoPrompt}\n\nWorkspace cwd: ${input.cwd}\n`;
+    tools = ["Read", "Glob", "Grep"];
+  } else {
+    const appendedPrompt = await fs.readFile(input.systemPromptPath, "utf8");
+    systemPrompt = { type: "preset", preset: "claude_code", append: appendedPrompt };
+    tools = { type: "preset", preset: "claude_code" };
+    disallowedTools.push("Edit", "Write", "Bash", "NotebookEdit", "MultiEdit");
+  }
+
+  const mcpServers: NonNullable<ClaudeAgentSdkOptions["mcpServers"]> = {};
+  if (input.mode === "execute" || input.mode === "auto" || input.mode === "automation") {
+    mcpServers["codara-studio"] = {
+      type: "stdio",
+      command: process.execPath,
+      args: [resolveBundledResourcePath("codara-studio-mcp", "server.js")],
+      env: {
+        ELECTRON_RUN_AS_NODE: "1",
+        SPARK_HOME_DIR: sparkHome(),
+        SPARK_RUN_ID: input.runId,
+        SPARK_MCP_MODE: input.mode === "automation" ? "automation" : "execute",
+      },
+      timeout: ORCHESTRATOR_MCP_TOOL_TIMEOUT_MS,
+      alwaysLoad: true,
+    };
+  }
+
+  const effort = input.effort === "minimal" ? "low" : input.effort;
+  const supportedEffort = ["low", "medium", "high", "xhigh", "max"].includes(effort)
+    ? effort as NonNullable<ClaudeAgentSdkOptions["effort"]>
+    : undefined;
+  const packagedExecutable = packagedClaudeAgentSdkExecutable();
+  return {
+    abortController: input.abortController,
+    cwd: input.cwd,
+    env,
+    includePartialMessages: true,
+    persistSession: true,
+    settingSources: [],
+    strictMcpConfig: true,
+    permissionMode: "bypassPermissions",
+    allowDangerouslySkipPermissions: true,
+    systemPrompt,
+    tools,
+    disallowedTools,
+    mcpServers,
+    model: input.model.trim() || undefined,
+    effort: supportedEffort,
+    pathToClaudeCodeExecutable: packagedExecutable,
+    ...(input.resume ? { resume: input.sessionUuid } : { sessionId: input.sessionUuid }),
+    stderr: input.onStderr,
+  };
+}
+
+function packagedClaudeAgentSdkExecutable(): string | undefined {
+  if (!app.isPackaged) return undefined;
+  const executable = process.platform === "win32" ? "claude.exe" : "claude";
+  return join(
+    process.resourcesPath,
+    "app.asar.unpacked",
+    "node_modules",
+    "@anthropic-ai",
+    `claude-agent-sdk-${process.platform}-${process.arch}`,
+    executable,
+  );
+}
+
+function buildClaudeStreamResult(input: {
+  input: ManagerRequestInput;
+  mode: ChatMode;
+  startedAt: number;
+  sessionUuid: string;
+  parser: ReturnType<typeof createClaudePrintParser>;
+}): ManagerCallResult {
+  const replyText = input.parser.resultText || input.parser.finalAssistantText;
+  const base = {
+    durationMs: Date.now() - input.startedAt,
+    model: input.input.chat.model,
+    inputTokens: input.parser.usage.inputTokens,
+    outputTokens: input.parser.usage.outputTokens,
+    cacheReadTokens: input.parser.usage.cacheReadTokens,
+    newSessionUuid: input.parser.sessionUuid ?? input.sessionUuid,
+  };
+  if (input.mode === "execute" || input.mode === "auto") {
+    return {
+      ...base,
+      decision: buildExecuteDecisionFromToolCalls(input.parser.toolCalls, replyText),
+      decisionAlreadyApplied: executeDecisionWasAppliedDuringTurn(input.parser.toolCalls),
+    };
+  }
+  return {
+    ...base,
+    decision: buildTalkReplyDecision(
+      replyText || "Claude Code finished the turn without producing any text output.",
+    ),
+  };
+}
+
+async function runClaudePrintTurn(opts: ClaudePrintTurnOptions): Promise<ManagerCallResult> {
+  const { input, mode, emit, startedAt } = opts;
+  const runId = input.run.id;
+  const exe = await claudeProvider.resolveBinary();
+  if (!exe) {
+    throw new Error("Claude Code CLI not found on PATH. Install with: npm i -g @anthropic-ai/claude-code");
+  }
+
+  const sessionUuid = input.chat.sessionUuid ?? randomUUID();
+  const args = await buildClaudePrintArgs({
+    runId,
+    cwd: input.cwd,
+    mode,
+    model: input.chat.model,
+    effort: input.chat.effort,
+    sessionUuid,
+    resume: Boolean(input.chat.sessionUuid),
+    systemPromptPath: opts.systemPromptPath,
+  });
+
+  let prompt = input.prompt;
+  let injectedPlanContext = false;
+  if (mode !== "plan" && !contextInjectedRuns.has(runId) && runDidPlanCouncil(input.run)) {
+    const contextBlock = buildSparkRunContextBlock(input.run, input.cwd);
+    if (contextBlock) {
+      prompt = prompt ? `${contextBlock}\n\n${prompt}` : contextBlock;
+      injectedPlanContext = true;
+    }
+  }
+  args.push(prompt || ".");
+
+  emit({
+    kind: "system_note",
+    message: `Starting Claude stream (mode=${mode}, session=${sessionUuid}, transport=stream-json).`,
+  });
+  logConfigShieldOnce();
+  const shielded = buildClaudeSandboxArgv(exe, args);
+  const launch = resolveLaunchTarget(shielded.exe, shielded.args);
+  const inherited = await getEnrichedEnv();
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(inherited)) {
+    if (typeof value === "string") env[key] = value;
+  }
+  sanitizeNestedAgentEnv(env);
+  Object.assign(env, {
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    CLAUDE_CODE_HIDE_CWD: "1",
+    CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: "1",
+    MCP_TOOL_TIMEOUT: String(ORCHESTRATOR_MCP_TOOL_TIMEOUT_MS),
+    SPARK_RUN_ID: runId,
+    SPARK_HOME_DIR: sparkHome(),
+  });
+
+  const child = spawn(launch.exe, launch.args, {
+    cwd: input.cwd,
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  child.stdin.end();
+  const active = { child, interrupted: false };
+  headlessTurns.set(runId, active);
+
+  const parser = createClaudePrintParser(emit);
+  let stdoutBuffer = "";
+  let stderrTail = "";
+  let acceptedPromise: Promise<void> | null = null;
+  const markAccepted = () => {
+    if (acceptedPromise) return;
+    if (injectedPlanContext) contextInjectedRuns.add(runId);
+    acceptedPromise = Promise.resolve(input.onPromptAccepted?.()).then(() => undefined);
+  };
+
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk: string) => {
+    stdoutBuffer += chunk;
+    while (true) {
+      const newline = stdoutBuffer.indexOf("\n");
+      if (newline < 0) break;
+      const line = stdoutBuffer.slice(0, newline).trim();
+      stdoutBuffer = stdoutBuffer.slice(newline + 1);
+      if (!line) continue;
+      try {
+        const message = JSON.parse(line) as unknown;
+        markAccepted();
+        parser.accept(message);
+      } catch {
+        stderrTail = `${stderrTail}\n${line}`.slice(-8_000);
+      }
+    }
+  });
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderrTail = `${stderrTail}${chunk}`.slice(-8_000);
+  });
+
+  const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+  if (stdoutBuffer.trim()) {
+    try {
+      parser.accept(JSON.parse(stdoutBuffer.trim()) as unknown);
+      markAccepted();
+    } catch {
+      stderrTail = `${stderrTail}\n${stdoutBuffer}`.slice(-8_000);
+    }
+  }
+  parser.finish();
+  if (headlessTurns.get(runId) === active) headlessTurns.delete(runId);
+  await acceptedPromise;
+
+  const stale = (sessionGenerations.get(runId) ?? 0) !== opts.requestGeneration;
+  if (active.interrupted || stale) {
+    return {
+      decision: buildTalkReplyDecision("Claude Code turn interrupted."),
+      durationMs: Date.now() - startedAt,
+      model: input.chat.model,
+      newSessionUuid: parser.sessionUuid ?? sessionUuid,
+      notice: stale ? "Claude Code turn interrupted by conversation rewind." : "Claude Code turn interrupted by user.",
+      turnAborted: true,
+    };
+  }
+  if (exit.code !== 0 || parser.error) {
+    const message = parser.error || stderrTail.trim() || `Claude Code exited with code ${exit.code}${exit.signal ? ` (${exit.signal})` : ""}.`;
+    emit({ kind: "error", message: `Claude Code backend error: ${message}` });
+    return {
+      decision: buildTalkReplyDecision(`Claude Code backend failed to handle this turn: ${message}`, "Claude Code backend error"),
+      durationMs: Date.now() - startedAt,
+      model: input.chat.model,
+      newSessionUuid: parser.sessionUuid ?? sessionUuid,
+      notice: message,
+      turnFailed: true,
+    };
+  }
+
+  const replyText = parser.resultText || parser.finalAssistantText;
+  const base = {
+    durationMs: Date.now() - startedAt,
+    model: input.chat.model,
+    inputTokens: parser.usage.inputTokens,
+    outputTokens: parser.usage.outputTokens,
+    cacheReadTokens: parser.usage.cacheReadTokens,
+    newSessionUuid: parser.sessionUuid ?? sessionUuid,
+  };
+  if (mode === "execute" || mode === "auto") {
+    return {
+      ...base,
+      decision: buildExecuteDecisionFromToolCalls(parser.toolCalls, replyText),
+      decisionAlreadyApplied: executeDecisionWasAppliedDuringTurn(parser.toolCalls),
+    };
+  }
+  return {
+    ...base,
+    decision: buildTalkReplyDecision(replyText || "Claude Code finished the turn without producing any text output."),
+  };
+}
+
+async function buildClaudePrintArgs(input: {
+  runId: string;
+  cwd: string;
+  mode: ChatMode;
+  model: string;
+  effort: string;
+  sessionUuid: string;
+  resume: boolean;
+  systemPromptPath: string;
+}): Promise<string[]> {
+  const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"];
+  if (input.resume) args.push("--resume", input.sessionUuid);
+  else args.push("--session-id", input.sessionUuid);
+  args.push("--dangerously-skip-permissions");
+
+  let mcpConfigFile: string | null = null;
+  if (input.mode === "execute" || input.mode === "auto" || input.mode === "automation") {
+    const studioMcpServerPath = resolveBundledResourcePath("codara-studio-mcp", "server.js");
+    const mcpDir = join(sparkHome(), "cc-mcp");
+    await fs.mkdir(mcpDir, { recursive: true });
+    mcpConfigFile = join(mcpDir, `${input.runId}.json`);
+    await writeFileAtomic(mcpConfigFile, JSON.stringify({
+      mcpServers: {
+        "codara-studio": {
+          type: "stdio",
+          command: process.execPath,
+          args: [studioMcpServerPath],
+          env: {
+            ELECTRON_RUN_AS_NODE: "1",
+            SPARK_HOME_DIR: sparkHome(),
+            SPARK_RUN_ID: input.runId,
+            SPARK_MCP_MODE: input.mode === "automation" ? "automation" : "execute",
+          },
+          timeout: ORCHESTRATOR_MCP_TOOL_TIMEOUT_MS,
+        },
+      },
+    }, null, 2));
+  }
+
+  if (input.mode === "execute") {
+    args.push("--system-prompt", buildExecuteSystemPrompt(input.cwd), "--tools", "");
+  } else if (input.mode === "auto") {
+    const autoPrompt = await fs.readFile(input.systemPromptPath, "utf8");
+    args.push("--system-prompt", `${autoPrompt}\n\nWorkspace cwd: ${input.cwd}\n`, "--tools", "Read,Glob,Grep");
+  } else if (input.mode === "automation") {
+    args.push(
+      "--append-system-prompt-file", input.systemPromptPath,
+      "--disallowed-tools", "Edit", "Write", "Bash", "NotebookEdit", "MultiEdit",
+    );
+  } else {
+    args.push(
+      "--append-system-prompt-file", input.systemPromptPath,
+      "--disallowed-tools", "Edit", "Write", "Bash", "NotebookEdit", "MultiEdit",
+    );
+  }
+  if (mcpConfigFile) args.push("--mcp-config", mcpConfigFile, "--strict-mcp-config");
+  if (input.model.trim()) args.push("--model", input.model.trim());
+  if (input.effort) args.push("--effort", input.effort === "minimal" ? "low" : input.effort);
+  return args;
+}
+
+function createClaudePrintParser(emit: ChatStreamHandler) {
+  const blocks = new Map<number, ClaudePrintBlock>();
+  const assistantMessages = new Map<string, string>();
+  const partialTextMessages = new Set<string>();
+  const emittedTools = new Set<string>();
+  const emittedResults = new Set<string>();
+  let currentMessageId = "claude-stream";
+  let pendingText = "";
+  let pendingMessageId = currentMessageId;
+  let flushTimer: NodeJS.Timeout | null = null;
+  const state = {
+    sessionUuid: null as string | null,
+    resultText: "",
+    error: null as string | null,
+    usage: {} as { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number },
+    toolCalls: [] as Array<{ toolName: string; toolUseId: string; input: unknown }>,
+    get finalAssistantText(): string {
+      const values = [...assistantMessages.values()];
+      for (let index = values.length - 1; index >= 0; index -= 1) {
+        if (values[index].trim()) return values[index].trim();
+      }
+      return "";
+    },
+    accept(message: unknown) {
+      if (!isRecord(message)) return;
+      if (typeof message.session_id === "string") state.sessionUuid = message.session_id;
+      if (message.type === "stream_event" && isRecord(message.event)) {
+        acceptStreamEvent(message.event);
+        return;
+      }
+      flushText();
+      if (message.type === "assistant" && isRecord(message.message)) {
+        acceptCompleteAssistant(message.message);
+      } else if (message.type === "user" && isRecord(message.message)) {
+        acceptCompleteUser(message.message);
+      } else if (message.type === "result") {
+        if (typeof message.result === "string") state.resultText = message.result.trim();
+        if (message.is_error === true || message.subtype === "error") {
+          state.error = typeof message.result === "string" ? message.result : "Claude Code returned an error result.";
+        }
+        const usage = isRecord(message.usage) ? extractUsage(message.usage) : null;
+        if (usage) state.usage = usage;
+      } else if (message.type === "system" && message.subtype === "api_retry") {
+        emit({ kind: "system_note", message: `Claude is retrying the request (attempt ${String(message.attempt ?? "?")}).` });
+      }
+    },
+    finish() {
+      flushText();
+      if (flushTimer) clearTimeout(flushTimer);
+    },
+  };
+
+  function queueText(messageId: string, text: string) {
+    if (!text) return;
+    if (pendingText && pendingMessageId !== messageId) flushText();
+    pendingMessageId = messageId;
+    pendingText += text;
+    partialTextMessages.add(messageId);
+    assistantMessages.set(messageId, `${assistantMessages.get(messageId) ?? ""}${text}`);
+    if (pendingText.length >= 96) flushText();
+    else if (!flushTimer) flushTimer = setTimeout(flushText, 32);
+  }
+  function flushText() {
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = null;
+    if (!pendingText) return;
+    emit({ kind: "assistant_block", messageId: pendingMessageId, text: pendingText });
+    pendingText = "";
+  }
+  function acceptStreamEvent(event: Record<string, unknown>) {
+    if (event.type === "message_start" && isRecord(event.message) && typeof event.message.id === "string") {
+      flushText();
+      currentMessageId = event.message.id;
+      return;
+    }
+    const index = typeof event.index === "number" ? event.index : -1;
+    if (event.type === "content_block_start" && isRecord(event.content_block)) {
+      flushText();
+      const content = event.content_block;
+      if (content.type === "text") {
+        blocks.set(index, { type: "text", messageId: currentMessageId, text: "", toolUseId: "", toolName: "", inputJson: "", input: undefined });
+      } else if (content.type === "tool_use") {
+        blocks.set(index, {
+          type: "tool_use", messageId: currentMessageId, text: "",
+          toolUseId: typeof content.id === "string" ? content.id : `tool-${currentMessageId}-${index}`,
+          toolName: typeof content.name === "string" ? content.name : "tool",
+          inputJson: "", input: content.input,
+        });
+      }
+      return;
+    }
+    if (event.type === "content_block_delta" && isRecord(event.delta)) {
+      const block = blocks.get(index);
+      if (!block) return;
+      if (event.delta.type === "text_delta" && typeof event.delta.text === "string") {
+        block.text += event.delta.text;
+        queueText(block.messageId, event.delta.text);
+      } else if (event.delta.type === "input_json_delta" && typeof event.delta.partial_json === "string") {
+        block.inputJson += event.delta.partial_json;
+      }
+      return;
+    }
+    if (event.type === "content_block_stop") {
+      flushText();
+      const block = blocks.get(index);
+      if (!block || block.type !== "tool_use" || emittedTools.has(block.toolUseId)) return;
+      let input = block.input;
+      if (block.inputJson) {
+        try { input = JSON.parse(block.inputJson) as unknown; } catch { input = block.inputJson; }
+      }
+      emittedTools.add(block.toolUseId);
+      state.toolCalls.push({ toolName: block.toolName, toolUseId: block.toolUseId, input });
+      emit({ kind: "tool_use", toolName: block.toolName, toolUseId: block.toolUseId, input });
+    }
+  }
+  function acceptCompleteAssistant(message: Record<string, unknown>) {
+    const messageId = typeof message.id === "string" ? message.id : currentMessageId;
+    const content = Array.isArray(message.content) ? message.content : [];
+    for (const raw of content) {
+      if (!isRecord(raw)) continue;
+      if (raw.type === "text" && typeof raw.text === "string" && !partialTextMessages.has(messageId)) {
+        assistantMessages.set(messageId, raw.text);
+        emit({ kind: "assistant_block", messageId, text: raw.text });
+      } else if (raw.type === "tool_use") {
+        const toolUseId = typeof raw.id === "string" ? raw.id : `tool-${messageId}`;
+        if (emittedTools.has(toolUseId)) continue;
+        const toolName = typeof raw.name === "string" ? raw.name : "tool";
+        emittedTools.add(toolUseId);
+        state.toolCalls.push({ toolName, toolUseId, input: raw.input });
+        emit({ kind: "tool_use", toolName, toolUseId, input: raw.input });
+      }
+    }
+    const usage = isRecord(message.usage) ? extractUsage(message.usage) : null;
+    if (usage) {
+      state.usage = usage;
+      emit({ kind: "usage", ...usage });
+    }
+  }
+  function acceptCompleteUser(message: Record<string, unknown>) {
+    const content = Array.isArray(message.content) ? message.content : [];
+    for (const raw of content) {
+      if (!isRecord(raw) || raw.type !== "tool_result") continue;
+      const toolUseId = typeof raw.tool_use_id === "string" ? raw.tool_use_id : "";
+      if (emittedResults.has(toolUseId)) continue;
+      emittedResults.add(toolUseId);
+      emit({ kind: "tool_result", toolUseId, output: stringifyToolResult(raw.content), isError: raw.is_error === true || undefined });
+    }
+  }
+  return state;
+}
 
 interface SpawnChatSessionOpts {
   runId: string;
@@ -751,6 +1586,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     const serverEnv: Record<string, string> = {
       ELECTRON_RUN_AS_NODE: "1",
       SPARK_HOME_DIR: sparkHome(),
+      SPARK_RUN_ID: opts.runId,
       SPARK_MCP_MODE: opts.mode === "automation" ? "automation" : "execute",
     };
     const mcpConfig = {
@@ -760,6 +1596,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
           command: electronExe,
           args: [studioMcpServerPath],
           env: serverEnv,
+          timeout: ORCHESTRATOR_MCP_TOOL_TIMEOUT_MS,
         },
       },
     };
@@ -931,6 +1768,7 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
       CLAUDE_CODE_HIDE_CWD: "1",
       CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY: "1",
+      MCP_TOOL_TIMEOUT: String(ORCHESTRATOR_MCP_TOOL_TIMEOUT_MS),
       SPARK_RUN_ID: opts.runId,
       // The shipped hooks resolve the app home from this (falling back to
       // ~/.Codara); inject it so hook-written turn markers always land where
@@ -956,9 +1794,11 @@ async function spawnChatSession(opts: SpawnChatSessionOpts): Promise<ClaudeChatS
     // so the next turn (after a Codara restart) can spawn with `-r <uuid>`.
     sessionUuid,
     turnAssistantText: "",
+    turnAssistantMessages: new Map(),
     lastUsage: {},
     fatal: false,
     fatalMessage: null,
+    interruptedAt: null,
     firstTurnGateDone: false,
     turnToolCalls: [],
     // Seeded to now so silence tracking has a baseline even before CC emits
@@ -1052,7 +1892,9 @@ function translateAndEmit(
       if (!isRecord(block)) continue;
       if (block.type === "text" && typeof block.text === "string") {
         if (block.text.length === 0) continue;
-        chat.turnAssistantText += block.text;
+        const previous = chat.turnAssistantMessages.get(messageId) ?? "";
+        chat.turnAssistantMessages.set(messageId, `${previous}${block.text}`);
+        chat.turnAssistantText = appendAssistantText(chat.turnAssistantText, block.text);
         emit({ kind: "assistant_block", messageId, text: block.text });
       } else if (block.type === "tool_use") {
         const toolName = typeof block.name === "string" ? block.name : "unknown";
@@ -1113,6 +1955,32 @@ function translateAndEmit(
     if (!text.trim()) return;
     emit({ kind: "system_note", message: text });
   }
+}
+
+async function settleTranscriptAfterStop(chat: ClaudeChatSession): Promise<void> {
+  const startedAt = Date.now();
+  while (!chat.fatal) {
+    await chat.session.flushJsonl();
+    const now = Date.now();
+    if (now - chat.lastJsonlActivityAt >= POST_STOP_TRANSCRIPT_QUIET_MS) return;
+    if (now - startedAt >= POST_STOP_ASSISTANT_GRACE_MS) return;
+    await sleep(POST_STOP_GRACE_POLL_MS);
+  }
+}
+
+function finalAssistantMessageText(chat: ClaudeChatSession): string {
+  const messages = Array.from(chat.turnAssistantMessages.values());
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const text = messages[index].trim();
+    if (text) return text;
+  }
+  return chat.turnAssistantText.trim();
+}
+
+function appendAssistantText(current: string, next: string): string {
+  if (!current) return next;
+  if (!next) return current;
+  return `${current}\n\n${next}`;
 }
 
 const CC_SYSTEM_NOISE_SUBTYPES = new Set<string>([
@@ -1513,11 +2381,14 @@ export function buildExecuteDecisionFromToolCalls(
     const questionOptions: SparkManagerQuestionOption[] = rawOptions
       .map((opt, idx) => coerceQuestionOption(opt, idx))
       .filter((o): o is SparkManagerQuestionOption => o !== null);
+    // The MCP call already ran through the main-process question policy and, for
+    // a real blocker, waited for the linked answer before this provider turn
+    // resumed. Re-emitting ask_user here would post the same question a second
+    // time after the user had answered it. Treat the settled tool call as the
+    // turn's conversational outcome unless a later spawn/complete call won above.
     return {
-      status: "ask_user",
-      summary: chatReply || question || "Cora asked a question.",
-      question,
-      questionOptions,
+      status: "complete",
+      summary: chatReply || question || "Cora resolved a manager question.",
       steps: [],
       tasks: [],
       chatReply: chatReply || undefined,
@@ -1531,6 +2402,24 @@ export function buildExecuteDecisionFromToolCalls(
   // reply and can retry or rephrase.
   return buildTalkReplyDecision(
     chatReply || "Claude Code finished the turn without spawning workers.",
+  );
+}
+
+/** Whether the winning execute-mode tool was fully handled by its live MCP
+ * RPC. spawn_terminals is the exception: its RPC validates the request and the
+ * synthesized decision performs the UI mutation. */
+export function executeDecisionWasAppliedDuringTurn(
+  toolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }>,
+): boolean {
+  const matches = (name: string, expected: string): boolean =>
+    name === expected || name === `mcp__codara-studio__${expected}`;
+  if (toolCalls.some((call) => matches(call.toolName, "codara_spawn_terminals"))) {
+    return false;
+  }
+  return toolCalls.some((call) =>
+    matches(call.toolName, "codara_complete") ||
+    matches(call.toolName, "codara_spawn_workers") ||
+    matches(call.toolName, "codara_ask_user"),
   );
 }
 

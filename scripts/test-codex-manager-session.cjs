@@ -83,6 +83,10 @@ async function main() {
     "terminal-decision",
     path.join(ROOT, "src", "main", "orchestration", "cli-terminal-decision.ts"),
   );
+  const backendContract = await bundle(
+    "backend-contract",
+    path.join(ROOT, "src", "main", "orchestration", "spark-agent-backend.ts"),
+  );
 
   const promptPath = path.join(ROOT, "resources", "orchestration", "codex-auto-prompt.md");
   const args = launch.buildCodexManagerArgs(
@@ -94,6 +98,7 @@ async function main() {
     },
     promptPath,
     path.join(TMP, "managed-home"),
+    "run-managed-test",
   );
   check("manager launches with explicit --yolo", args.includes("--yolo"));
   check(
@@ -111,6 +116,10 @@ async function main() {
       `mcp_servers.codara-studio.env.SPARK_HOME_DIR="${path.join(TMP, "managed-home")}"`,
     ),
   );
+  check(
+    "manager pins orchestration tools to the owning run",
+    args.includes('mcp_servers.codara-studio.env.SPARK_RUN_ID="run-managed-test"'),
+  );
   const resumeArgs = launch.buildCodexManagerArgs(
     {
       sessionUuid: uuid(9),
@@ -125,6 +134,84 @@ async function main() {
   check(
     "automation selects its own MCP roster",
     resumeArgs.includes('mcp_servers.codara-studio.env.SPARK_MCP_MODE="automation"'),
+  );
+  check(
+    "fresh post-rewind launch cannot resume an old Codex UUID",
+    args[0] !== "resume" && !args.includes(uuid(9)),
+  );
+
+  const replayRun = {
+    id: "run-replay",
+    workspaceId: "ws",
+    title: "Replay",
+    status: "planning",
+    artifactDir: TMP,
+    createdAt: "2026-07-13T00:00:00.000Z",
+    updatedAt: "2026-07-13T00:00:04.000Z",
+    conversationEpoch: 1,
+    plans: [],
+    steps: [],
+    workerTasks: [],
+    workerAttempts: [],
+    sparkCalls: [],
+    humanMessages: [
+      { id: "u-old", runId: "run-replay", author: "user", kind: "note", intent: "turn", deliveryState: "acknowledged", conversationEpoch: 0, message: "Retained user context", createdAt: "2026-07-13T00:00:01.000Z" },
+      { id: "s-old", runId: "run-replay", author: "spark", kind: "note", intent: "answer", deliveryState: "acknowledged", conversationEpoch: 0, message: "Retained Cora answer", createdAt: "2026-07-13T00:00:02.000Z" },
+      { id: "sys", runId: "run-replay", author: "system", kind: "note", intent: "answer", deliveryState: "acknowledged", conversationEpoch: 0, message: "RAW_TOOL_NOISE", createdAt: "2026-07-13T00:00:03.000Z" },
+      { id: "u-new-1", runId: "run-replay", author: "user", kind: "note", intent: "turn", deliveryState: "queued", conversationEpoch: 1, message: "First new instruction", createdAt: "2026-07-13T00:00:04.000Z" },
+      { id: "u-new-2", runId: "run-replay", author: "user", kind: "note", intent: "steer", deliveryState: "queued", conversationEpoch: 1, message: "Then preserve this detail", createdAt: "2026-07-13T00:00:05.000Z" },
+    ],
+  };
+  const selectedReplayInput = replayRun.humanMessages.slice(-2);
+  const replayPrompt = backendContract.buildManagerTurnPrompt(
+    replayRun,
+    selectedReplayInput,
+    { includeCanonicalReplay: true },
+  );
+  check(
+    "post-rewind prompt replays retained canonical dialogue only",
+    replayPrompt.includes("You: Retained user context") &&
+      replayPrompt.includes("Cora: Retained Cora answer") &&
+      !replayPrompt.includes("RAW_TOOL_NOISE"),
+  );
+  check(
+    "immutable manager bundle preserves ordered exactly-once steering",
+    replayPrompt.indexOf("First new instruction") < replayPrompt.indexOf("Then preserve this detail") &&
+      replayPrompt.match(/First new instruction/g)?.length === 1 &&
+      replayPrompt.match(/Then preserve this detail/g)?.length === 1,
+  );
+  const currentTurnRun = {
+    ...replayRun,
+    sparkCalls: [{ id: "spark-new", runId: replayRun.id, mode: "chat", model: "gpt-5.6-sol", status: "started", conversationEpoch: 1, createdAt: "2026-07-13T00:00:06.000Z" }],
+  };
+  const preSubmissionRetryRun = {
+    ...currentTurnRun,
+    sparkCalls: [{ ...currentTurnRun.sparkCalls[0], status: "failed", inputMessageIds: ["u-new-1"] }],
+  };
+  const acceptedTurnRun = {
+    ...currentTurnRun,
+    humanMessages: currentTurnRun.humanMessages.map((message) =>
+      message.id === "u-new-1"
+        ? { ...message, deliveryState: "acknowledged", backendTurnId: "spark-new" }
+        : message,
+    ),
+  };
+  check(
+    "pre-submission retry retains canonical replay ownership",
+    backendContract.shouldIncludeCanonicalReplay(preSubmissionRetryRun, "codex", 1) &&
+      !backendContract.shouldIncludeCanonicalReplay(preSubmissionRetryRun, "openrouter", 1) &&
+      !backendContract.shouldIncludeCanonicalReplay(acceptedTurnRun, "codex", 1),
+  );
+  check(
+    "old-epoch manager completion is rejected",
+    backendContract.isManagerTurnCurrent(currentTurnRun, "spark-new", 1) &&
+      !backendContract.isManagerTurnCurrent(currentTurnRun, "spark-new", 0),
+  );
+  check(
+    "late checkpoint jobs are rejected after epoch change or message removal",
+    !backendContract.isCheckpointJobCurrent(currentTurnRun, 0, "u-new-1") &&
+      !backendContract.isCheckpointJobCurrent(currentTurnRun, 1, "removed-message") &&
+      backendContract.isCheckpointJobCurrent(currentTurnRun, 1, "u-new-1"),
   );
 
   const twoClaude = terminalDecision.buildSpawnTerminalsDecisionFromToolCalls(

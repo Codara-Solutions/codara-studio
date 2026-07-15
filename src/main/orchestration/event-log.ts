@@ -8,8 +8,11 @@ import { sparkHome } from "../spark-home";
 
 const RUNS_DIR = "runs";
 const EVENTS_FILE = "events.jsonl";
+const EVENT_VERSION = 1;
 
 export interface AppendEventInput {
+  /** Reserved for atomic multi-event commits that need to link event ids. */
+  id?: string;
   timestamp?: string;
   workspaceId: string;
   runId?: string;
@@ -34,20 +37,119 @@ export function eventsPath(runId: string): string {
   return join(runDir(runId), EVENTS_FILE);
 }
 
-export async function appendEvent(input: AppendEventInput): Promise<SparkEvent> {
-  const { timestamp, ...eventInput } = input;
-  const event: SparkEvent = {
-    id: makeId("evt"),
+interface RunJournalState {
+  highWater: number;
+  needsLeadingNewline: boolean;
+}
+
+// A run's append, fsync-visible journal order, and live broadcast order are one
+// serialized stream. Keeping the queue here (rather than only in run-store)
+// covers direct appendEvent callers and commit-generated event batches alike.
+const runAppendQueues = new Map<string, Promise<void>>();
+const runJournalStates = new Map<string, RunJournalState>();
+
+function validSequence(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0;
+}
+
+async function readJournalState(runId: string): Promise<RunJournalState> {
+  try {
+    const raw = await fs.readFile(eventsPath(runId), "utf8");
+    let journalPosition = 0;
+    let highWater = 0;
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      journalPosition += 1;
+      highWater = Math.max(highWater, journalPosition);
+      try {
+        const parsed = JSON.parse(line) as { sequence?: unknown };
+        if (validSequence(parsed.sequence)) highWater = Math.max(highWater, parsed.sequence);
+      } catch {
+        // A malformed historical line still occupies a journal position. It is
+        // skipped by listEvents, but new events must advance past it.
+      }
+    }
+    return {
+      highWater,
+      needsLeadingNewline: raw.length > 0 && !/[\r\n]$/.test(raw),
+    };
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { highWater: 0, needsLeadingNewline: false };
+    }
+    throw err;
+  }
+}
+
+function createEvent(input: AppendEventInput, sequence?: number): SparkEvent {
+  const { id, timestamp, ...eventInput } = input;
+  return {
+    id: id ?? makeId("evt"),
     timestamp: timestamp ?? new Date().toISOString(),
+    eventVersion: EVENT_VERSION,
+    sequence,
     ...eventInput,
   };
+}
 
-  if (event.runId) {
-    await fs.mkdir(runDir(event.runId), { recursive: true });
-    await fs.appendFile(eventsPath(event.runId), `${JSON.stringify(event)}\n`, "utf8");
+/**
+ * Append one same-run event batch atomically with respect to all other appends.
+ * The batch form lets run-store persist a domain event and its canonical
+ * lifecycle event without a concurrent direct append slipping between them.
+ */
+export async function appendEvents(inputs: AppendEventInput[]): Promise<SparkEvent[]> {
+  if (inputs.length === 0) return [];
+  const runId = inputs[0].runId;
+  if (inputs.some((input) => input.runId !== runId)) {
+    throw new Error("appendEvents requires every event in a batch to share one runId");
   }
 
-  broadcast(event);
+  // Events without a runId have no journal and therefore no per-run sequence;
+  // they remain live broadcast-only, in caller order.
+  if (!runId) {
+    const events = inputs.map((input) => createEvent(input));
+    for (const event of events) broadcast(event);
+    return events;
+  }
+
+  let appended: SparkEvent[] = [];
+  const previous = runAppendQueues.get(runId) ?? Promise.resolve();
+  const next = previous
+    .catch(() => {
+      /* an earlier failed append must not wedge this run's journal */
+    })
+    .then(async () => {
+      const state = runJournalStates.get(runId) ?? (await readJournalState(runId));
+      const events = inputs.map((input, index) =>
+        createEvent(input, state.highWater + index + 1),
+      );
+      const prefix = state.needsLeadingNewline ? "\n" : "";
+      const journalText = `${prefix}${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+
+      await fs.mkdir(runDir(runId), { recursive: true });
+      await fs.appendFile(eventsPath(runId), journalText, "utf8");
+
+      // Advance the sequence cache only after persistence succeeds. Broadcast is
+      // deliberately after the write and remains inside the same queue slot, so
+      // subscribers observe the exact durable journal order.
+      state.highWater += events.length;
+      state.needsLeadingNewline = false;
+      runJournalStates.set(runId, state);
+      appended = events;
+      for (const event of events) broadcast(event);
+    });
+
+  runAppendQueues.set(runId, next);
+  try {
+    await next;
+  } finally {
+    if (runAppendQueues.get(runId) === next) runAppendQueues.delete(runId);
+  }
+  return appended;
+}
+
+export async function appendEvent(input: AppendEventInput): Promise<SparkEvent> {
+  const [event] = await appendEvents([input]);
   return event;
 }
 
@@ -164,9 +266,17 @@ export async function listEvents(runId: string): Promise<SparkEvent[]> {
   try {
     const raw = await fs.readFile(eventsPath(runId), "utf8");
     const events: SparkEvent[] = [];
-    for (const line of raw.split(/\r?\n/).filter(Boolean)) {
+    let journalPosition = 0;
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      journalPosition += 1;
       try {
-        events.push(JSON.parse(line) as SparkEvent);
+        const event = JSON.parse(line) as SparkEvent;
+        // Legacy lines are normalized only in memory. Their deterministic
+        // synthetic sequence is their non-empty JSONL position; the file is
+        // never rewritten and no historical transition is rebroadcast.
+        if (!validSequence(event.sequence)) event.sequence = journalPosition;
+        events.push(event);
       } catch (parseErr) {
         console.warn(`[spark] skipping unparsable event line for run ${runId}:`, parseErr);
       }

@@ -192,7 +192,6 @@ interface Props {
   // Notification-center wiring (bell + popover in the right-side controls).
   notifyNavigateTo?: NavigateTo;
   notifyResolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
-  notifyShouldResumeOnAnswer?: (runId: string) => boolean;
 }
 
 // Memoized: App passes the `platform` state value, the two visibility
@@ -207,7 +206,6 @@ function WindowChrome({
   onOpenSettings,
   notifyNavigateTo,
   notifyResolveQuestion,
-  notifyShouldResumeOnAnswer,
 }: Props) {
   const isWin = platform === "win32";
   const [maximized, setMaximized] = useState(false);
@@ -319,7 +317,6 @@ function WindowChrome({
         <NotificationCenter
           navigateTo={notifyNavigateTo}
           resolveQuestion={notifyResolveQuestion}
-          shouldResumeOnAnswer={notifyShouldResumeOnAnswer}
         />
         <ChromeButton title="Settings" onClick={() => onOpenSettings?.()} borderLeft>
           <GearIcon size={12} />

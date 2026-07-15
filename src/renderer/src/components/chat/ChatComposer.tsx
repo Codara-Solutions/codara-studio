@@ -481,18 +481,23 @@ export default function ChatComposer({
           oneMillionContext: draftOneMillionContext,
         };
         await onStartChat(message, clientMessageId, attachments, chatConfig);
+      } else if (openQuestion) {
+        await window.spark.orchestration.answerRunQuestion({
+          runId: run_.id,
+          questionMessageId: openQuestion.id,
+          clientMessageId,
+          message,
+          attachments,
+        });
       } else {
         await window.spark.orchestration.addRunMessage({
           runId: run_.id,
           clientMessageId,
           author: "user",
-          kind: openQuestion ? "answer" : "note",
+          kind: "note",
           message,
           attachments,
         });
-        if (openQuestion) {
-          await window.spark.orchestration.resumeRun({ runId: run_.id });
-        }
       }
       setDraft("");
       setImages([]);
@@ -858,8 +863,8 @@ export default function ChatComposer({
         ? "Send a follow-up. Cora picks the work back up."
         : isPaused
           ? "Add a note, then resume."
-          : hasActiveWorker
-            ? "Type — your message queues for after the worker finishes."
+          : isActive
+            ? "Queue steering for Cora's next manager turn."
             : "Reply, steer, or add context.";
 
   return (
@@ -1052,7 +1057,7 @@ export default function ChatComposer({
                 : pastingImages
                   ? "Adding pasted image..."
                 : isActive
-                  ? "Queued for next manager decision"
+                  ? "Enter to queue steering · Stop remains separate"
                   : "Enter to send, Shift+Enter for a new line"}
             </span>
           )}
@@ -1088,11 +1093,12 @@ export default function ChatComposer({
                 Resume
               </TextButton>
             )}
-            {isActive ? (
-              <StopButton onClick={onForcePauseRun} />
-            ) : (
-              <SendButton onClick={send} disabled={!canSend} />
-            )}
+            <SendButton
+              onClick={send}
+              disabled={!canSend}
+              label={isActive ? "Queue steering" : "Send"}
+            />
+            {isActive && <StopButton onClick={onForcePauseRun} />}
           </div>
         </div>
       </div>
@@ -1166,7 +1172,7 @@ function WorkerActivityStatus({
           · {title}
         </span>
       )}
-      <span style={{ flex: "0 0 auto" }}>· replies queue</span>
+      <span style={{ flex: "0 0 auto" }}>· steering queues</span>
     </span>
   );
 }
@@ -1753,7 +1759,15 @@ function StopButton({ onClick }: { onClick: () => void }) {
   );
 }
 
-function SendButton({ onClick, disabled }: { onClick: () => void; disabled: boolean }) {
+function SendButton({
+  onClick,
+  disabled,
+  label = "Send",
+}: {
+  onClick: () => void;
+  disabled: boolean;
+  label?: string;
+}) {
   const [hover, setHover] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [focusRing, setFocusRing] = useState(false);
@@ -1763,8 +1777,8 @@ function SendButton({ onClick, disabled }: { onClick: () => void; disabled: bool
       type="button"
       onClick={onClick}
       disabled={disabled}
-      title="Send"
-      aria-label="Send"
+      title={label}
+      aria-label={label}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {
         setHover(false);

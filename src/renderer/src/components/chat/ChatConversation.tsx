@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import type { Checkpoint, RunMessageAttachment, RunQuestionOption, RunState, SparkEvent } from "@shared/types";
+import type { Checkpoint, RunMessageAttachment, RunQuestionOption, RunState } from "@shared/types";
 import { makeId } from "@shared/ids";
 import {
   buildChatTimeline,
@@ -13,6 +13,13 @@ import {
 import { buildRunMaps, useRunReports } from "../runs/run-format";
 import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
 import Markdown from "./Markdown";
+import {
+  useRunExecutionRecord,
+  type ExecutionBlock,
+  type ExecutionToolCall,
+  type ExecutionTurn,
+} from "../../lib/useRunExecutionRecord";
+import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 
 // The conversation stream for one chat. Renders human messages, Cora's own
 // model/context activity, and worker steps as one ordered chat timeline.
@@ -32,14 +39,7 @@ type ConversationItem = ChatTimelineItem | ActivityGroupItem;
 // `chat.*` orchestration events. Lives only in renderer state; once the
 // turn finishes the run-store rewrites it as a persisted spark "note"
 // message and we drop this buffer.
-interface LiveToolCall {
-  toolUseId: string;
-  toolName: string;
-  input: unknown;
-  output?: string;
-  isError?: boolean;
-  at: string;
-}
+type LiveToolCall = ExecutionToolCall;
 
 interface LiveStreamState {
   // Most recent messageId seen on a `chat.assistant_block`. Successive
@@ -52,26 +52,6 @@ interface LiveStreamState {
   // Latest event timestamp — used to detect when a persisted spark
   // message has surpassed the live buffer and we can clear it.
   lastEventAt: string;
-}
-
-const EMPTY_LIVE_STATE: LiveStreamState = {
-  segments: [],
-  toolCalls: [],
-  notes: [],
-  errors: [],
-  lastEventAt: "",
-};
-
-function isChatStreamEventType(type: string): boolean {
-  return (
-    type === "chat.assistant_block" ||
-    type === "chat.tool_use" ||
-    type === "chat.tool_result" ||
-    type === "chat.system_note" ||
-    type === "chat.usage" ||
-    type === "chat.error" ||
-    type === "chat.backend_notice"
-  );
 }
 
 function hasLiveContent(state: LiveStreamState): boolean {
@@ -143,266 +123,153 @@ export default function ChatConversation({ run }: { run: RunState }) {
       ) ?? null
     );
   }, [run.checkpoints, run.humanMessages]);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const [readerAtBottom, setReaderAtBottom] = useState(true);
 
-  // Live-streaming buffer for in-flight Claude/Codex Talk-mode turns. Fed by
-  // `chat.*` orchestration events; cleared when the run-store finalises the
-  // turn as a persisted spark `note` message or the user switches chats.
-  const [live, setLive] = useState<LiveStreamState>(EMPTY_LIVE_STATE);
-
-  // Reset the live buffer whenever we switch chats. Without this a stale
-  // partial bubble from a previous Talk turn would briefly leak into the
-  // newly-selected chat before its own events start arriving.
-  useEffect(() => {
-    setLive(EMPTY_LIVE_STATE);
-  }, [run.id]);
-
-  // Subscribe to the orchestration event bus and accumulate the chat.* stream
-  // into renderer state. Filtered by runId so cross-chat events don't bleed
-  // into the active conversation.
-  useEffect(() => {
-    const off = window.spark.orchestration.onEvent((event: SparkEvent) => {
-      if (event.runId !== run.id) return;
-      if (!isChatStreamEventType(event.type)) return;
-      const payload = (event.payload ?? {}) as Record<string, unknown>;
-      const at = event.timestamp;
-
-      setLive((prev) => {
-        const next: LiveStreamState = {
-          segments: prev.segments,
-          toolCalls: prev.toolCalls,
-          notes: prev.notes,
-          errors: prev.errors,
-          lastEventAt: at > prev.lastEventAt ? at : prev.lastEventAt,
-        };
-
-        if (event.type === "chat.assistant_block") {
-          const messageId = typeof payload.messageId === "string" ? payload.messageId : "";
-          const text = typeof payload.text === "string" ? payload.text : "";
-          if (!messageId && !text) return prev;
-          const lastSegment = next.segments[next.segments.length - 1];
-          if (lastSegment && lastSegment.messageId === messageId) {
-            next.segments = [
-              ...next.segments.slice(0, -1),
-              { messageId, text: lastSegment.text + text },
-            ];
-          } else {
-            next.segments = [...next.segments, { messageId, text }];
-          }
-          return next;
-        }
-
-        if (event.type === "chat.tool_use") {
-          const toolUseId = typeof payload.toolUseId === "string" ? payload.toolUseId : event.id;
-          const toolName = typeof payload.toolName === "string" ? payload.toolName : "tool";
-          next.toolCalls = [
-            ...next.toolCalls,
-            { toolUseId, toolName, input: payload.input, at },
-          ];
-          return next;
-        }
-
-        if (event.type === "chat.tool_result") {
-          const toolUseId = typeof payload.toolUseId === "string" ? payload.toolUseId : "";
-          const output = typeof payload.output === "string" ? payload.output : "";
-          const isError = payload.isError === true;
-          let matched = false;
-          next.toolCalls = next.toolCalls.map((call) => {
-            if (!matched && call.toolUseId === toolUseId) {
-              matched = true;
-              return { ...call, output, isError };
-            }
-            return call;
-          });
-          if (!matched) {
-            // Orphan result (rare — backend emitted result without a matching
-            // tool_use, or events arrived out of order). Surface it anyway so
-            // the user can see what happened.
-            next.toolCalls = [
-              ...next.toolCalls,
-              {
-                toolUseId: toolUseId || event.id,
-                toolName: "(unknown tool)",
-                input: undefined,
-                output,
-                isError,
-                at,
-              },
-            ];
-          }
-          return next;
-        }
-
-        if (event.type === "chat.system_note" || event.type === "chat.backend_notice") {
-          const message =
-            typeof payload.message === "string"
-              ? payload.message
-              : typeof event.message === "string"
-                ? event.message
-                : "";
-          if (!message) return prev;
-          if (next.notes.some((note) => note.message === message)) return prev;
-          next.notes = [
-            ...next.notes,
-            {
-              id: event.id,
-              message,
-              tone: event.type === "chat.backend_notice" ? "backend" : "system",
-            },
-          ];
-          return next;
-        }
-
-        if (event.type === "chat.error") {
-          const message =
-            typeof payload.message === "string"
-              ? payload.message
-              : typeof event.message === "string"
-                ? event.message
-                : "Streaming error.";
-          if (next.errors.some((error) => error.message === message)) return prev;
-          next.errors = [...next.errors, { id: event.id, message }];
-          return next;
-        }
-
-        // chat.usage is metadata only — accumulating per-chat token totals
-        // belongs to the composer chip (Subagent E), not the conversation
-        // bubble. Drop the event here to avoid churning state pointlessly.
-        return prev;
-      });
-    });
-    return off;
-  }, [run.id]);
-
-  // When the run-store persists the streamed turn as a real spark `note`
-  // message, the conversation timeline already shows the finished version
-  // and the live buffer would just duplicate it. Clear it as soon as a
-  // spark note arrives that's newer than our last event.
-  useEffect(() => {
-    if (!hasLiveContent(live)) return;
-    const liveText = liveTextFromState(live);
-    const liveTextNorm = liveText.replace(/\s+/g, " ").trim();
-    for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
-      const message = run.humanMessages[i];
-      if (message.author !== "spark") continue;
-      if (message.kind !== "note" && message.kind !== "decision") continue;
-      const persistedAt = message.createdAt;
-      const persistedNorm = (message.message ?? "").replace(/\s+/g, " ").trim();
-      const sameText =
-        liveTextNorm.length > 0 &&
-        (persistedNorm === liveTextNorm || persistedNorm.startsWith(liveTextNorm));
-      const isLater = live.lastEventAt && persistedAt >= live.lastEventAt;
-      if (sameText || isLater) {
-        setLive(EMPTY_LIVE_STATE);
-        return;
+  // One durable projection owns history hydration and live frames. It
+  // subscribes before loading events, buffers during hydration, merges by id,
+  // and rejects stale run-switch loads. Chat, Session Inspector, and other run
+  // surfaces now read the same ordered record.
+  const execution = useRunExecutionRecord(run);
+  const executionByCallId = useMemo(
+    () => new Map(execution.turns.map((turn) => [turn.sparkCallId, turn])),
+    [execution.turns],
+  );
+  const finalAnswerByCallId = useMemo(() => {
+    const answers = new Map<string, string>();
+    for (const message of run.humanMessages) {
+      if (message.author === "spark" && message.backendTurnId && message.intent === "answer") {
+        answers.set(message.backendTurnId, message.message);
       }
-      // Only inspect the most recent spark note; older ones can't match a
-      // turn we just started streaming.
-      break;
     }
-  }, [run.humanMessages, live]);
-
-  // Idle-clear: if no chat.* events have arrived for a few seconds AND the
-  // run isn't actively running, the turn ended and the live buffer should
-  // disappear. Covers the race where the backend returned the "no output"
-  // fallback and the actual assistant text arrived as orphan events — the
-  // persist-vs-live text mismatch leaves the TYPING badge stuck on screen
-  // forever otherwise.
-  useEffect(() => {
-    if (!hasLiveContent(live)) return;
-    if (!live.lastEventAt) return;
-    const runIsBusy =
-      run.status === "planning" ||
-      run.status === "running" ||
-      run.status === "reviewing";
-    if (runIsBusy) return;
-    const lastEventMs = Date.parse(live.lastEventAt);
-    if (!Number.isFinite(lastEventMs)) return;
-    const idleMs = 3_000;
-    const elapsed = Date.now() - lastEventMs;
-    if (elapsed >= idleMs) {
-      setLive(EMPTY_LIVE_STATE);
-      return;
-    }
-    const timer = setTimeout(() => setLive(EMPTY_LIVE_STATE), idleMs - elapsed);
-    return () => clearTimeout(timer);
-  }, [live, run.status, run.updatedAt]);
-
-  // Pin to the bottom as the conversation grows. Keyed on the item count and
-  // run state so a new turn or a status change scrolls into view. run.updatedAt
-  // ticks on every stream update so we keep following the tail during streams.
-  // For live streaming we keep the "stay pinned if already pinned" rule — if
-  // the user has scrolled up to re-read a worker report we don't yank them
-  // back to the tail every time a token arrives.
-  const wasAtBottomRef = useRef(true);
-  useEffect(() => {
-    const node = scrollRef.current;
-    if (!node) return;
-    const onScroll = () => {
-      const slack = 24;
-      wasAtBottomRef.current =
-        node.scrollHeight - node.scrollTop - node.clientHeight <= slack;
-    };
-    node.addEventListener("scroll", onScroll, { passive: true });
-    return () => node.removeEventListener("scroll", onScroll);
-  }, []);
-  useEffect(() => {
-    const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-    wasAtBottomRef.current = true;
-  }, [run.id]);
-  useEffect(() => {
-    const node = scrollRef.current;
-    if (!node) return;
-    if (wasAtBottomRef.current) node.scrollTop = node.scrollHeight;
-  }, [items.length, run.status, run.updatedAt]);
-  useEffect(() => {
-    const node = scrollRef.current;
-    if (!node) return;
-    if (wasAtBottomRef.current) node.scrollTop = node.scrollHeight;
-  }, [live]);
-
-  const showLive = hasLiveContent(live);
+    return answers;
+  }, [run.humanMessages]);
+  const manifest = execution.result;
+  // A completed chat gets a manifest for durable inspection even when it only
+  // answered a question. Do not turn an observed dirty working tree into a
+  // giant "Evidence-backed result" card with 0/0 checks. The conversation
+  // surface shows this card only when the collector has substantive result
+  // claims; raw workspace deltas remain available in the Runs/Session
+  // inspectors.
+  const showResult =
+    run.status === "complete" &&
+    Boolean(
+      manifest &&
+        (manifest.outcomes.length > 0 ||
+          manifest.checks.length > 0 ||
+          manifest.evidence.length > 0 ||
+          manifest.risks.length > 0 ||
+          manifest.followups.length > 0),
+    );
+  const resultIndex = items.length;
+  const rowCount = items.length + (showResult ? 1 : 0);
 
   return (
-    <div ref={scrollRef} style={SCROLL_STYLE}>
-      <div style={CONVERSATION_COLUMN_STYLE} data-testid="cora-conversation">
-        {items.length === 0 && !showLive ? (
-          <ConversationEmpty />
-        ) : (
-          items.map((item) => (
-            <div key={timelineItemKey(item)} style={CHAT_ITEM_STYLE}>
-              {item.kind === "message" ? (
-                <MessageTurn
-                  item={item}
-                  runId={run.id}
-                  openQuestionId={openQuestion?.id ?? null}
-                  checkpoint={
-                    latestUndoableCheckpoint?.messageId === item.id
-                      ? latestUndoableCheckpoint
-                      : null
-                  }
-                  showDoneMarker={doneMarkerSparkMessageId === item.id}
-                  completionVerdict={completionVerdict}
-                />
-              ) : item.kind === "tool" ? (
-                <ToolActivityRow item={item} />
-              ) : item.kind === "activity-group" ? (
-                <ActivityGroup item={item} />
-              ) : (
-                <StepCard item={item} />
-              )}
-            </div>
-          ))
-        )}
-        {showLive && (
-          <div style={CHAT_ITEM_STYLE}>
-            <LiveAssistantTurn live={live} />
-          </div>
-        )}
-      </div>
+    <div style={SCROLL_STYLE} data-testid="cora-conversation">
+      {rowCount === 0 ? (
+        <div style={{ ...CONVERSATION_COLUMN_STYLE, padding: "24px 18px" }}><ConversationEmpty /></div>
+      ) : (
+        <Virtuoso
+          key={run.id}
+          ref={virtuosoRef}
+          style={{ height: "100%", width: "100%" }}
+          totalCount={rowCount}
+          initialTopMostItemIndex={Math.max(0, rowCount - 1)}
+          followOutput={readerAtBottom ? "smooth" : false}
+          atBottomStateChange={setReaderAtBottom}
+          increaseViewportBy={{ top: 600, bottom: 400 }}
+          computeItemKey={(index) =>
+            index < items.length ? timelineItemKey(items[index]) : index === resultIndex && showResult ? "result-manifest" : "live"
+          }
+          itemContent={(index) => {
+            const item = items[index];
+            return (
+              <div style={{ ...CONVERSATION_COLUMN_STYLE, padding: index === 0 ? "24px clamp(18px, 3vw, 42px) 0" : "0 clamp(18px, 3vw, 42px)" }}>
+                <div style={CHAT_ITEM_STYLE}>
+                  {index === resultIndex && showResult && manifest ? (
+                    <ResultManifestCard manifest={manifest} />
+                  ) : item?.kind === "message" ? (
+                    <MessageTurn
+                      item={item}
+                      runId={run.id}
+                      openQuestionId={openQuestion?.id ?? null}
+                      checkpoint={latestUndoableCheckpoint?.messageId === item.id ? latestUndoableCheckpoint : null}
+                      showDoneMarker={doneMarkerSparkMessageId === item.id}
+                      completionVerdict={completionVerdict}
+                    />
+                  ) : item?.kind === "tool" ? (
+                    <ToolActivityRow
+                      item={item}
+                      executionTurn={item.activity === "manager" ? executionByCallId.get(item.id.slice("spark-call:".length)) : undefined}
+                      finalAnswer={item.activity === "manager" ? finalAnswerByCallId.get(item.id.slice("spark-call:".length)) : undefined}
+                    />
+                  ) : item?.kind === "activity-group" ? (
+                    <ActivityGroup item={item} />
+                  ) : (
+                    item ? <StepCard item={item} /> : null
+                  )}
+                </div>
+              </div>
+            );
+          }}
+          components={{ Footer: () => <div style={{ height: 24 }} /> }}
+        />
+      )}
+      {!readerAtBottom && rowCount > 0 && (
+        <button
+          type="button"
+          onClick={() => virtuosoRef.current?.scrollToIndex({ index: rowCount - 1, align: "end", behavior: "smooth" })}
+          style={NEW_ACTIVITY_BUTTON_STYLE}
+        >
+          New activity ↓
+        </button>
+      )}
     </div>
   );
+}
+
+function ResultManifestCard({ manifest }: { manifest: NonNullable<RunState["resultManifest"]> }) {
+  const cwd = manifest.workspace.cwd?.replace(/[\\/]+$/, "");
+  const absolute = (path: string) =>
+    !cwd || /^(?:[A-Za-z]:[\\/]|\/)/.test(path) ? path : `${cwd}/${path}`;
+  const passed = manifest.checks.filter((check) => check.result === "passed").length;
+  return (
+    <section style={RESULT_CARD_STYLE} aria-label="Run result">
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ color: "var(--ok)", fontWeight: 800 }}>✓</span>
+        <strong style={{ color: "var(--ink)", fontSize: 13 }}>Evidence-backed result</strong>
+        <span style={{ marginLeft: "auto", color: "var(--muted)", fontSize: 10 }}>
+          {passed}/{manifest.checks.length} checks passed
+        </span>
+      </div>
+      <div style={{ color: "var(--ink-dim)", fontSize: 12.5, lineHeight: 1.5 }}>{manifest.summary}</div>
+      {manifest.workspaceDelta.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          {manifest.workspaceDelta.slice(0, 8).map((file) => {
+            const path = absolute(file.path);
+            return (
+              <div key={file.path} style={RESULT_FILE_ROW_STYLE}>
+                <span style={{ flex: "1 1 180px", minWidth: 0, color: "var(--ink-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{file.path}</span>
+                <span style={{ color: file.provenance === "verified" ? "var(--ok)" : "var(--muted)", fontSize: 9, textTransform: "uppercase" }}>{file.provenance}</span>
+                <ResultAction label="Open" onClick={() => window.dispatchEvent(new CustomEvent("spark:open-file", { detail: { path } }))} />
+                {manifest.workspace.mode === "git" && <ResultAction label="Diff" onClick={() => window.dispatchEvent(new CustomEvent("spark:open-diff", { detail: { path } }))} />}
+                <ResultAction label="Reveal" onClick={() => void window.spark.fs.revealInOS(path)} />
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {(manifest.risks.length > 0 || manifest.followups.length > 0) && (
+        <div style={{ color: "var(--warn)", fontSize: 11.5 }}>
+          {[...manifest.risks, ...manifest.followups].slice(0, 3).join(" · ")}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ResultAction({ label, onClick }: { label: string; onClick: () => void }) {
+  return <button type="button" onClick={onClick} style={RESULT_ACTION_STYLE}>{label}</button>;
 }
 
 function timelineItemKey(item: ConversationItem): string {
@@ -430,7 +297,7 @@ function groupCompletedActivity(items: ChatTimelineItem[]): ConversationItem[] {
   };
 
   for (const item of items) {
-    if (item.kind === "tool" && item.status === "completed" && item.tone === "done") {
+    if (item.kind === "tool" && item.activity !== "manager" && item.status === "completed" && item.tone === "done") {
       buffer.push(item);
       continue;
     }
@@ -468,12 +335,36 @@ const MessageTurn = React.memo(function MessageTurn({
   }
 
   if (item.author === "user") {
+    const steering = item.intent === "steer";
     return (
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+      <div
+        className={`cora-user-turn${steering ? " cora-user-turn--steering" : ""}`}
+        data-message-intent={item.intent ?? "turn"}
+        data-delivery-state={item.deliveryState ?? "acknowledged"}
+        style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}
+      >
+        <div style={USER_HEADER_STYLE}>
+          <span style={USER_SPEAKER_STYLE}>You</span>
+          {steering && (
+            <span style={STEERING_CHIP_STYLE}>
+              {item.deliveryState === "queued"
+                ? "Queued steering"
+                : item.deliveryState === "submitted"
+                  ? "Submitted steering"
+                  : "Steering"}
+            </span>
+          )}
+          {item.deliveryState && item.deliveryState !== "acknowledged" && (
+            <span style={DELIVERY_CHIP_STYLE}>{deliveryStateLabel(item.deliveryState)}</span>
+          )}
+        </div>
         <div
-          className="cora-message cora-message--user"
+          className={`cora-message cora-message--user${steering ? " cora-message--steering" : ""}`}
           data-message-author="user"
-          style={USER_BUBBLE_STYLE}
+          style={{
+            ...USER_BUBBLE_STYLE,
+            ...(steering ? USER_STEERING_BUBBLE_STYLE : null),
+          }}
         >
           <div>{item.text}</div>
           <AttachmentStrip attachments={item.attachments} align="end" />
@@ -507,7 +398,10 @@ const MessageTurn = React.memo(function MessageTurn({
     );
   }
   return (
-    <SparkTurn repeatCount={item.repeatCount} tag={isQuestion ? <NeedsYouChip /> : null}>
+    <SparkTurn
+      repeatCount={item.repeatCount}
+      tag={isQuestion && item.id === openQuestionId ? <NeedsYouChip /> : null}
+    >
       <div
         className="cora-message cora-message--assistant"
         data-message-author="cora"
@@ -519,7 +413,7 @@ const MessageTurn = React.memo(function MessageTurn({
           <QuestionChoices
             runId={runId}
             questionMessageId={item.id}
-            options={(item.questionOptions ?? []).slice(0, 3)}
+            options={(item.questionOptions ?? []).slice(0, 4)}
           />
         )}
       </div>
@@ -653,9 +547,15 @@ function LiveEllipsis() {
 function LiveToolRow({ call }: { call: LiveToolCall }) {
   const finished = call.output !== undefined;
   const failed = finished && call.isError === true;
-  const [open, setOpen] = useState(failed);
-  const inputPreview = compactPreview(formatToolPayload(call.input));
-  const outputPreview = finished ? compactPreview(call.output ?? "") : "running...";
+  // Tool payloads are evidence, not the conversation's visual hierarchy.
+  // Keep even failures collapsed initially; the clean headline carries the
+  // useful cause and raw JSON remains available on demand.
+  const [open, setOpen] = useState(false);
+  const displayName = toolDisplayName(call.toolName);
+  const inputPreview = toolInputSummary(call.toolName, call.input);
+  const readableOutput = finished ? readableToolOutput(call.output ?? "") : "";
+  const outputPreview = finished ? compactPreview(readableOutput) : "In progress";
+  const inlineDetail = failed ? outputPreview : inputPreview || outputPreview;
   const color = failed ? "var(--danger)" : finished ? "var(--muted-2)" : "var(--accent)";
 
   return (
@@ -663,14 +563,14 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
       style={{
         ...LIVE_TOOL_ROW_STYLE,
         borderColor: failed
-          ? "color-mix(in oklch, var(--danger) 38%, transparent)"
+          ? "color-mix(in oklch, var(--danger) 24%, transparent)"
           : finished
             ? open
               ? "var(--rule-soft)"
               : "transparent"
             : "color-mix(in oklch, var(--accent) 34%, transparent)",
         background: failed
-          ? "color-mix(in oklch, var(--danger) 9%, transparent)"
+          ? "color-mix(in oklch, var(--danger) 5%, transparent)"
           : finished
             ? open
               ? "color-mix(in oklch, var(--ink) 3%, transparent)"
@@ -681,17 +581,29 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
       <DisclosureButton
         onClick={() => setOpen((value) => !value)}
         baseStyle={TOOL_ROW_BUTTON_STYLE}
-        title={call.toolName}
+        title={`${displayName} · ${call.toolName}`}
       >
         <StatusDot color={color} pulse={!finished} size={5} />
         <span style={TOOL_KIND_STYLE}>TOOL</span>
-        <span style={TOOL_TITLE_STYLE}>{call.toolName}</span>
-        <span style={TOOL_INLINE_DETAIL_STYLE}>{inputPreview || outputPreview}</span>
+        <span style={TOOL_TITLE_STYLE}>{displayName}</span>
+        <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: failed ? "var(--danger)" : undefined }}>
+          {inlineDetail}
+        </span>
+        <span
+          style={{
+            ...TOOL_STATUS_STYLE,
+            color,
+            borderColor: `color-mix(in oklch, ${color} 30%, transparent)`,
+            background: `color-mix(in oklch, ${color} 7%, transparent)`,
+          }}
+        >
+          {!finished ? "running" : failed ? "failed" : "done"}
+        </span>
         <Caret open={open} />
       </DisclosureButton>
       {open && (
         <div style={TOOL_DETAILS_STYLE}>
-          {inputPreview.length > 0 && (
+          {formatToolPayload(call.input).length > 0 && (
             <div>
               <div style={LIVE_TOOL_LABEL_STYLE}>input</div>
               <pre style={LIVE_TOOL_PRE_STYLE}>{formatToolPayload(call.input)}</pre>
@@ -702,13 +614,101 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
               <div style={{ ...LIVE_TOOL_LABEL_STYLE, color: failed ? "var(--danger)" : "var(--muted)" }}>
                 {failed ? "error" : "result"}
               </div>
-              <pre style={LIVE_TOOL_PRE_STYLE}>{call.output ?? ""}</pre>
+              <pre
+                style={{
+                  ...LIVE_TOOL_PRE_STYLE,
+                  color: failed ? "color-mix(in oklch, var(--danger) 80%, var(--ink))" : "var(--ink-dim)",
+                }}
+              >
+                {readableOutput}
+              </pre>
             </div>
           )}
         </div>
       )}
     </div>
   );
+}
+
+function toolDisplayName(toolName: string): string {
+  const normalized = toolName.replace(/^mcp__codara-studio__/, "");
+  const known: Record<string, string> = {
+    Shell: "Inspect workspace",
+    Bash: "Run command",
+    codara_name_chat: "Name this chat",
+    codara_spawn_workers: "Delegate workers",
+    codara_spawn_terminals: "Open terminals",
+    codara_wait_for_workers: "Wait for workers",
+    codara_get_worker_status: "Check worker status",
+    codara_message_workers: "Message workers",
+    codara_check_messages: "Check worker messages",
+    codara_complete: "Complete run",
+    codara_ask_user: "Ask for a decision",
+  };
+  const knownName = known[normalized];
+  if (knownName) return knownName;
+  return normalized
+    .replace(/^codara_/, "")
+    .split("_")
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`)
+    .join(" ") || toolName;
+}
+
+function toolInputSummary(toolName: string, input: unknown): string {
+  const value = input && typeof input === "object" && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : null;
+  if (!value) return compactPreview(formatToolPayload(input));
+  const normalized = toolName.replace(/^mcp__codara-studio__/, "");
+  if (normalized === "codara_name_chat" && typeof value.title === "string") {
+    return `“${value.title}”`;
+  }
+  if (normalized === "codara_spawn_workers" && Array.isArray(value.workers)) {
+    const titles = value.workers
+      .map((worker) => worker && typeof worker === "object" && typeof (worker as Record<string, unknown>).title === "string"
+        ? String((worker as Record<string, unknown>).title)
+        : "")
+      .filter(Boolean);
+    return `${value.workers.length} ${value.workers.length === 1 ? "worker" : "workers"}${titles.length ? ` · ${titles.join(", ")}` : ""}`;
+  }
+  if (normalized === "codara_wait_for_workers" && Array.isArray(value.worker_task_ids)) {
+    return `${value.worker_task_ids.length} ${value.worker_task_ids.length === 1 ? "worker" : "workers"} · ${value.mode === "any" ? "first result" : "all results"}`;
+  }
+  if (normalized === "codara_get_worker_status") return "Refresh execution state";
+  if ((normalized === "Shell" || normalized === "Bash") && typeof value.command === "string") {
+    const command = value.command;
+    if (/\b(find|rg|grep|ls)\b/.test(command)) return "Read project structure";
+    if (/\b(pwd)\b/.test(command)) return "Confirm workspace context";
+    return `$ ${compactPreview(command)}`;
+  }
+  return compactPreview(formatToolPayload(input));
+}
+
+function readableToolOutput(output: string): string {
+  const trimmed = output.trim();
+  if (!trimmed) return "No output";
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      if (typeof record.message === "string" && record.message.trim()) return record.message.trim();
+      if (Array.isArray(record.content)) {
+        const text = record.content
+          .map((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).text === "string"
+            ? String((item as Record<string, unknown>).text)
+            : "")
+          .filter(Boolean)
+          .join("\n")
+          .trim();
+        if (text) return text;
+      }
+      return JSON.stringify(parsed, null, 2);
+    }
+  } catch {
+    // Plain CLI output is already the most readable representation.
+  }
+  return trimmed;
 }
 
 function compactPreview(text: string): string {
@@ -882,17 +882,12 @@ function QuestionChoices({
     setBusy(true);
     setError(null);
     try {
-      await window.spark.orchestration.addRunMessage({
+      await window.spark.orchestration.answerRunQuestion({
         runId,
+        questionMessageId,
         clientMessageId: makeId("client-msg"),
-        author: "user",
-        kind: "answer",
         message,
-        // Link the answer to the question it came from — consent gates
-        // (automation edit/delete approval) only accept linked answers.
-        answersMessageId: questionMessageId,
       });
-      await window.spark.orchestration.resumeRun({ runId });
       setCustom("");
     } catch (err) {
       setError((err as Error).message);
@@ -1158,7 +1153,7 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
     item.status === "planning" ||
     item.status === "reviewing" ||
     item.status === "blocked";
-  const [open, setOpen] = useState(live);
+  const [open, setOpen] = useState(false);
   const color = stepStatusColor(item.status);
   const doneWorkers = item.workers.filter(
     (worker) => worker.status === "accepted",
@@ -1233,9 +1228,13 @@ const ActivityGroup = React.memo(function ActivityGroup({ item }: { item: Activi
 const ToolActivityRow = React.memo(function ToolActivityRow({
   item,
   embedded = false,
+  executionTurn,
+  finalAnswer,
 }: {
   item: ToolItem;
   embedded?: boolean;
+  executionTurn?: ExecutionTurn;
+  finalAnswer?: string;
 }) {
   const live = item.tone === "live";
   // Failures stay compact by default: the headline already carries the exact
@@ -1246,8 +1245,23 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
   const color = toolToneColor(item);
   const statusLabel = toolStatusLabel(item.status);
   const stats = compactToolStats(item);
-  const hasDetails = item.detail.length > 0 || item.files.length > 0 || item.meta.length > 0;
+  const hasDetails = item.detail.length > 0 || item.files.length > 0 || item.meta.length > 0 || Boolean(executionTurn?.blocks.length);
   const loud = live || item.status === "failed";
+
+  if (item.activity === "manager" && !embedded) {
+    return (
+      <ManagerActivityDisclosure
+        item={item}
+        open={open}
+        setOpen={setOpen}
+        hasDetails={hasDetails}
+        color={color}
+        live={live}
+        executionTurn={executionTurn}
+        finalAnswer={finalAnswer}
+      />
+    );
+  }
 
   return (
     <div
@@ -1302,9 +1316,132 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
   );
 });
 
-function ToolDetails({ item }: { item: ToolItem }) {
+function ManagerActivityDisclosure({
+  item,
+  open,
+  setOpen,
+  hasDetails,
+  color,
+  live,
+  executionTurn,
+  finalAnswer,
+}: {
+  item: ToolItem;
+  open: boolean;
+  setOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  hasDetails: boolean;
+  color: string;
+  live: boolean;
+  executionTurn?: ExecutionTurn;
+  finalAnswer?: string;
+}) {
+  const sparkCallId = item.id.startsWith("spark-call:")
+    ? item.id.slice("spark-call:".length)
+    : item.id;
   return (
-    <div style={TOOL_DETAILS_STYLE}>
+    <div
+      data-manager-call-id={sparkCallId}
+      data-has-execution={executionTurn?.blocks.length ? "true" : "false"}
+      data-open={open ? "true" : "false"}
+      style={{
+        ...MANAGER_DISCLOSURE_STYLE,
+        width: open ? "100%" : "fit-content",
+        borderColor: item.status === "failed"
+          ? "color-mix(in oklch, var(--danger) 30%, transparent)"
+          : open
+            ? "var(--rule-soft)"
+            : "transparent",
+        background: item.status === "failed"
+          ? "color-mix(in oklch, var(--danger) 7%, transparent)"
+          : open
+            ? "color-mix(in oklch, var(--ink) 2.5%, transparent)"
+            : "transparent",
+      }}
+    >
+      <DisclosureButton
+        onClick={() => {
+          if (hasDetails) setOpen((value) => !value);
+        }}
+        baseStyle={MANAGER_DISCLOSURE_BUTTON_STYLE}
+        title={item.detail || item.title}
+      >
+        {live && <StatusDot color={color} pulse size={5} />}
+        <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
+        {item.status === "failed" && (
+          <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: "var(--danger)" }}>{item.detail}</span>
+        )}
+        {hasDetails && <Caret open={open} />}
+      </DisclosureButton>
+      {open && hasDetails && (
+        <div style={MANAGER_DISCLOSURE_BODY_STYLE}>
+          {executionTurn && executionTurn.blocks.length > 0 && (
+            <ExecutionTrace turn={executionTurn} finalAnswer={finalAnswer} />
+          )}
+          <ToolDetails item={item} compact={Boolean(executionTurn?.blocks.length)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExecutionTrace({ turn, finalAnswer }: { turn: ExecutionTurn; finalAnswer?: string }) {
+  const visibleBlocks = omitDuplicatedFinalAnswer(turn.blocks, finalAnswer);
+  const notes = visibleBlocks.filter(
+    (block): block is Extract<ExecutionBlock, { kind: "note" }> => block.kind === "note",
+  );
+  const primary = visibleBlocks.filter((block) => block.kind !== "note");
+  return (
+    <div style={EXECUTION_TRACE_STYLE} data-testid={`execution-trace-${turn.sparkCallId}`}>
+      {primary.map((block) => {
+        if (block.kind === "text") {
+          return (
+            <div key={block.id} style={EXECUTION_TEXT_STYLE} data-execution-kind="text">
+              <Markdown text={block.text} />
+            </div>
+          );
+        }
+        if (block.kind === "tool") {
+          return (
+            <div key={block.id} data-execution-kind="tool">
+              <LiveToolRow call={block} />
+            </div>
+          );
+        }
+        return (
+          <div key={block.id} role="alert" style={LIVE_ERROR_STYLE} data-execution-kind="error">
+            {block.message}
+          </div>
+        );
+      })}
+      {primary.length === 0 && notes.length === 0 && <LiveEllipsis />}
+      {notes.length > 0 && <LiveSessionDetails notes={notes} />}
+    </div>
+  );
+}
+
+function omitDuplicatedFinalAnswer(blocks: ExecutionBlock[], finalAnswer?: string): ExecutionBlock[] {
+  if (!finalAnswer?.trim()) return blocks;
+  const normalizedFinal = normalizeComparableText(finalAnswer);
+  let lastTextIndex = -1;
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    if (blocks[index].kind === "text") {
+      lastTextIndex = index;
+      break;
+    }
+  }
+  if (lastTextIndex < 0) return blocks;
+  const last = blocks[lastTextIndex];
+  if (last.kind !== "text" || normalizeComparableText(last.text) !== normalizedFinal) return blocks;
+  return blocks.filter((_, index) => index !== lastTextIndex);
+}
+
+function normalizeComparableText(text: string): string {
+  return text.replace(/\r\n/g, "\n").trim();
+}
+
+function ToolDetails({ item, compact = false }: { item: ToolItem; compact?: boolean }) {
+  return (
+    <div style={{ ...TOOL_DETAILS_STYLE, ...(compact ? TOOL_DETAILS_COMPACT_STYLE : {}) }}>
       {item.detail && <div style={TOOL_DETAIL_STYLE}>{item.detail}</div>}
       {item.files.length > 0 && (
         <div style={TOOL_FILE_LIST_STYLE}>
@@ -1482,6 +1619,15 @@ function runtimeStateColor(state: ChatWorker["runtimeState"]): string | null {
     default:
       return null;
   }
+}
+
+function deliveryStateLabel(
+  state: NonNullable<MessageItem["deliveryState"]>,
+): string {
+  if (state === "queued") return "Queued";
+  if (state === "submitted") return "Submitted";
+  if (state === "cancelled") return "Cancelled";
+  return "Acknowledged";
 }
 
 // A count badge for a message that was sent (or asked) more than once in a
@@ -1876,28 +2022,9 @@ function SparkMark() {
   );
 }
 
-// The accent avatar that anchors every Cora turn's gutter — the brand mark
-// (the shared SparkIcon star) sitting in a soft, generously-rounded
-// accent-tinted squircle. No hard accent-edge outline: a brand mark should
-// read as identity, not as a tappable "+/add" chip. Depth is the soft tinted
-// fill alone, so it stays calm against the prose beside it.
-function SparkAvatar() {
-  return (
-    <span aria-hidden style={SPARK_AVATAR_STYLE}>
-      <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
-        <path
-          d="M8 1.25L9.35 6.05L14.15 7.4L9.35 8.75L8 13.55L6.65 8.75L1.85 7.4L6.65 6.05L8 1.25Z"
-          fill="currentColor"
-        />
-      </svg>
-    </span>
-  );
-}
-
-// One Cora turn: the avatar in a fixed gutter, then a column with the speaker
-// line (name + optional status tag) above the turn body. Prose, questions,
-// completions, and live streams all render through here so the conversation
-// keeps a single consistent rhythm.
+// One Cora turn. Assistant prose sits directly on the conversation canvas;
+// only user turns use message bubbles. Status tags remain available for live,
+// blocked, and repeated turns without adding a permanent speaker chrome row.
 function SparkTurn({
   children,
   tag,
@@ -1909,13 +2036,13 @@ function SparkTurn({
 }) {
   return (
     <div className="cora-turn" style={SPARK_TURN_STYLE}>
-      <SparkAvatar />
       <div style={SPARK_MAIN_STYLE}>
-        <div style={SPARK_HEADER_STYLE}>
-          <span style={SPEAKER_LABEL_STYLE}>Cora</span>
-          {tag}
-          {repeatCount && repeatCount > 1 ? <RepeatChip count={repeatCount} /> : null}
-        </div>
+        {(tag || (repeatCount && repeatCount > 1)) && (
+          <div style={SPARK_HEADER_STYLE}>
+            {tag}
+            {repeatCount && repeatCount > 1 ? <RepeatChip count={repeatCount} /> : null}
+          </div>
+        )}
         {children}
       </div>
     </div>
@@ -1948,10 +2075,9 @@ function ChevronRight() {
 const SCROLL_STYLE: React.CSSProperties = {
   flex: 1,
   minHeight: 0,
-  overflowY: "auto",
-  display: "block",
+  position: "relative",
+  overflow: "hidden",
   background: "var(--panel)",
-  padding: "24px clamp(18px, 3vw, 42px) 32px",
 };
 
 // A readable conversation measure inside wide desktop windows. The workbench
@@ -1968,10 +2094,104 @@ const CHAT_ITEM_STYLE: React.CSSProperties = {
   marginBottom: 18,
 };
 
+const NEW_ACTIVITY_BUTTON_STYLE: React.CSSProperties = {
+  position: "absolute",
+  right: 22,
+  bottom: 18,
+  zIndex: 4,
+  border: "1px solid var(--accent-edge)",
+  borderRadius: 999,
+  background: "var(--panel-2)",
+  color: "var(--accent)",
+  boxShadow: "var(--shadow-float)",
+  padding: "7px 12px",
+  fontFamily: "var(--font-sans)",
+  fontSize: 11,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
+const RESULT_CARD_STYLE: React.CSSProperties = {
+  border: "1px solid color-mix(in oklch, var(--ok) 34%, var(--rule))",
+  borderRadius: 10,
+  background: "color-mix(in oklch, var(--ok) 5%, var(--panel-2))",
+  boxShadow: "var(--lift-hi)",
+  padding: 14,
+  display: "flex",
+  flexDirection: "column",
+  gap: 10,
+};
+
+const RESULT_FILE_ROW_STYLE: React.CSSProperties = {
+  minWidth: 0,
+  display: "flex",
+  flexWrap: "wrap",
+  gap: 6,
+  alignItems: "center",
+  padding: "5px 7px",
+  borderRadius: 6,
+  background: "color-mix(in oklch, var(--bg) 54%, transparent)",
+};
+
+const RESULT_ACTION_STYLE: React.CSSProperties = {
+  border: "none",
+  background: "transparent",
+  color: "var(--accent)",
+  padding: "2px 3px",
+  fontSize: 10,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
 // The user bubble is a calm neutral panel-2 surface with a single hairline —
 // the accent is reserved for live / needs-you / recommended moments, not for
 // every message the user has ever sent. A subtle --lift-hi top highlight gives
 // it tint-first depth instead of a hard drop shadow.
+const USER_HEADER_STYLE: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "flex-end",
+  gap: 6,
+  minHeight: 18,
+};
+
+const USER_SPEAKER_STYLE: React.CSSProperties = {
+  color: "var(--ink)",
+  fontSize: 11.5,
+  fontWeight: 700,
+};
+
+const STEERING_CHIP_STYLE: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  height: 18,
+  padding: "0 7px",
+  borderRadius: 999,
+  border: "1px solid color-mix(in oklch, var(--warn) 38%, transparent)",
+  background: "color-mix(in oklch, var(--warn) 10%, transparent)",
+  color: "var(--warn)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 8.5,
+  fontWeight: 700,
+  letterSpacing: "0.05em",
+  textTransform: "uppercase",
+};
+
+const DELIVERY_CHIP_STYLE: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  height: 18,
+  padding: "0 7px",
+  borderRadius: 999,
+  border: "1px solid var(--rule-soft)",
+  color: "var(--muted)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 8.5,
+  fontWeight: 700,
+  letterSpacing: "0.04em",
+  textTransform: "uppercase",
+};
+
 const USER_BUBBLE_STYLE: React.CSSProperties = {
   maxWidth: "min(72%, 720px)",
   background: "color-mix(in oklch, var(--ink) 4%, var(--panel-2))",
@@ -1993,28 +2213,14 @@ const USER_BUBBLE_STYLE: React.CSSProperties = {
   boxShadow: "var(--lift-hi)",
 };
 
-const SPARK_TURN_STYLE: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "30px minmax(0, 1fr)",
-  columnGap: 12,
-  alignItems: "start",
+const USER_STEERING_BUBBLE_STYLE: React.CSSProperties = {
+  background: "color-mix(in oklch, var(--warn) 5%, var(--panel-2))",
+  borderColor: "color-mix(in oklch, var(--warn) 28%, var(--rule-soft))",
+  boxShadow: "inset -3px 0 0 color-mix(in oklch, var(--warn) 62%, transparent), var(--lift-hi)",
 };
 
-const SPARK_AVATAR_STYLE: React.CSSProperties = {
-  flex: "0 0 auto",
-  width: 30,
-  height: 30,
-  // Squircle-ish brand tile on the surface rung (10px) — softer than a control
-  // chip, calmer than a hard bordered square. The fill is the only cue: a
-  // gentle accent wash with a faint same-hue hairline (not the full
-  // accent-edge), so the star reads as Cora's mark, not an "add" button.
-  borderRadius: "var(--radius-surface, 10px)",
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-  background: "color-mix(in oklch, var(--accent) 14%, var(--panel-2))",
-  border: "1px solid color-mix(in oklch, var(--accent) 22%, transparent)",
-  color: "var(--accent)",
+const SPARK_TURN_STYLE: React.CSSProperties = {
+  display: "block",
 };
 
 const SPARK_MAIN_STYLE: React.CSSProperties = {
@@ -2034,16 +2240,15 @@ const SPARK_HEADER_STYLE: React.CSSProperties = {
 };
 
 const SPARK_BUBBLE_STYLE: React.CSSProperties = {
-  width: "fit-content",
-  maxWidth: "min(100%, 78ch)",
+  width: "100%",
+  maxWidth: "78ch",
   boxSizing: "border-box",
   color: "var(--ink)",
-  background: "color-mix(in oklch, var(--accent) 2.5%, var(--panel-2))",
-  border: "1px solid color-mix(in oklch, var(--rule-soft) 78%, transparent)",
-  borderRadius: 14,
-  borderTopLeftRadius: "var(--radius-control, 7px)",
-  padding: "11px 14px 12px",
-  boxShadow: "var(--lift-hi)",
+  background: "transparent",
+  border: "none",
+  borderRadius: 0,
+  padding: 0,
+  boxShadow: "none",
   overflowWrap: "anywhere",
 };
 
@@ -2150,13 +2355,6 @@ const SYSTEM_PILL_STYLE: React.CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
-};
-
-const SPEAKER_LABEL_STYLE: React.CSSProperties = {
-  fontSize: 12,
-  fontWeight: 600,
-  letterSpacing: "0.01em",
-  color: "var(--ink)",
 };
 
 const NEEDS_YOU_CHIP_STYLE: React.CSSProperties = {
@@ -2535,9 +2733,57 @@ const TOOL_ROW_EMBEDDED_STYLE: React.CSSProperties = {
 };
 
 const TOOL_ROW_STANDALONE_STYLE: React.CSSProperties = {
-  width: "calc(100% - 42px)",
+  width: "100%",
   maxWidth: 840,
-  marginLeft: 42,
+  marginLeft: 0,
+};
+
+const MANAGER_DISCLOSURE_STYLE: React.CSSProperties = {
+  width: "fit-content",
+  maxWidth: 840,
+  border: "1px solid transparent",
+  borderRadius: "var(--radius-control, 7px)",
+  overflow: "hidden",
+  boxSizing: "border-box",
+};
+
+const MANAGER_DISCLOSURE_BUTTON_STYLE: React.CSSProperties = {
+  appearance: "none",
+  minHeight: 28,
+  border: "none",
+  background: "transparent",
+  color: "inherit",
+  display: "flex",
+  alignItems: "center",
+  gap: 7,
+  padding: "3px 6px 3px 0",
+  cursor: "default",
+  textAlign: "left",
+};
+
+const MANAGER_DISCLOSURE_TITLE_STYLE: React.CSSProperties = {
+  color: "var(--muted)",
+  fontSize: 12,
+  fontWeight: 500,
+  whiteSpace: "nowrap",
+};
+
+const MANAGER_DISCLOSURE_BODY_STYLE: React.CSSProperties = {
+  borderTop: "1px solid color-mix(in oklch, var(--rule-soft) 62%, transparent)",
+  padding: "10px 12px 11px",
+};
+
+const EXECUTION_TRACE_STYLE: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
+  gap: 9,
+  minWidth: 0,
+};
+
+const EXECUTION_TEXT_STYLE: React.CSSProperties = {
+  color: "var(--ink-dim)",
+  fontSize: 12.5,
+  lineHeight: 1.55,
 };
 
 const TOOL_ROW_BUTTON_STYLE: React.CSSProperties = {
@@ -2615,6 +2861,12 @@ const TOOL_DETAILS_STYLE: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
   gap: 7,
+};
+
+const TOOL_DETAILS_COMPACT_STYLE: React.CSSProperties = {
+  marginTop: 9,
+  borderTop: "1px solid color-mix(in oklch, var(--rule-soft) 48%, transparent)",
+  padding: "8px 0 0",
 };
 
 const TOOL_DETAIL_STYLE: React.CSSProperties = {
@@ -2704,15 +2956,14 @@ const TOOL_META_VALUE_STYLE: React.CSSProperties = {
 // added "typing" pip in the header and the border treatment here make the
 // in-flight state read at a glance.
 const LIVE_BUBBLE_STYLE: React.CSSProperties = {
-  width: "fit-content",
-  maxWidth: "min(100%, 78ch)",
+  width: "100%",
+  maxWidth: "78ch",
   boxSizing: "border-box",
   color: "var(--ink)",
-  background: "color-mix(in oklch, var(--accent) 5%, var(--panel-2))",
-  border: "1px solid var(--accent-edge)",
-  borderRadius: 14,
-  borderTopLeftRadius: "var(--radius-control, 7px)",
-  padding: "10px 13px 11px",
+  background: "transparent",
+  border: "none",
+  borderRadius: 0,
+  padding: 0,
   display: "flex",
   flexDirection: "column",
   gap: 6,
@@ -2723,8 +2974,7 @@ const LIVE_BUBBLE_STYLE: React.CSSProperties = {
   // an inset shadow, not a 2px border), so nothing reflows. No keyframe here,
   // so it's reduced-motion-safe by construction (the moving cue is the
   // pulsing typing pip in the header).
-  boxShadow:
-    "var(--status-edge, inset 3px 0 0 var(--accent)), 0 0 12px var(--accent-glow)",
+  boxShadow: "none",
   transition:
     "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
 };
@@ -2800,8 +3050,11 @@ const LIVE_ELLIPSIS_DOT_STYLE: React.CSSProperties = {
 const LIVE_TOOL_LIST_STYLE: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 2,
-  marginTop: 2,
+  gap: 4,
+  marginTop: 4,
+  marginLeft: 3,
+  paddingLeft: 11,
+  borderLeft: "1px solid color-mix(in oklch, var(--accent) 24%, var(--rule-soft))",
 };
 
 const LIVE_TOOL_ROW_STYLE: React.CSSProperties = {

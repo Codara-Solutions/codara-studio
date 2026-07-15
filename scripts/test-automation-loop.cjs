@@ -809,6 +809,7 @@ async function main() {
     run.workerAttempts = [{ id: "att-q", status: "succeeded" }];
     run.humanMessages = [
       {
+        id: "q-config",
         author: "spark",
         kind: "question",
         message: "Which config file should I edit?",
@@ -821,11 +822,13 @@ async function main() {
     ok("report-blocked pass parks the loom blocked", st.status === "blocked");
     ok("no continuation launches before the answer", !L.launches.some((l) => l.kind === "chain"));
 
-    // The Hub answer lands as a plain user note on the run.
+    // The Hub answer resolves the exact open question by message id.
     run.humanMessages.push({
+      id: "a-config",
       author: "user",
-      kind: "note",
+      kind: "answer",
       message: "Use config.staging.ts",
+      answersMessageId: "q-config",
       createdAt: new Date().toISOString(),
     });
     for (const h of [...L.subs]) h({ runId: rid });
@@ -1046,8 +1049,8 @@ async function main() {
     };
     const t0 = Date.now();
     run.humanMessages = [
-      { author: "spark", kind: "question", message: "Node A: which file?", loomNodeId: "A", createdAt: new Date(t0 - 2000).toISOString() },
-      { author: "spark", kind: "question", message: "Node B: which port?", loomNodeId: "B", createdAt: new Date(t0 - 1000).toISOString() },
+      { id: "q-A", author: "spark", kind: "question", message: "Which target?", loomNodeId: "A", createdAt: new Date(t0 - 2000).toISOString() },
+      { id: "q-B", author: "spark", kind: "question", message: "Which target?", loomNodeId: "B", createdAt: new Date(t0 - 1000).toISOString() },
     ];
     for (const h of [...L.subs]) h({ runId: rid });
     await sleep(60);
@@ -1055,13 +1058,15 @@ async function main() {
     ok("multi-node report-blocked pass parks the loom blocked", st.status === "blocked");
     ok("no continuation launches before any answer lands", !L.launches.some((l) => l.kind === "chain"));
 
-    // ONLY node A is answered (a user note postdating A's question, but BEFORE
-    // B's question — so it pairs with A, not B).
-    run.humanMessages.splice(1, 0, {
+    // ONLY node A is answered. Both nodes asked IDENTICAL text, so the exact
+    // answersMessageId — not content or chronology — must select A.
+    run.humanMessages.push({
+      id: "a-A",
       author: "user",
-      kind: "note",
+      kind: "answer",
       message: "Answer for A: use config.ts",
-      createdAt: new Date(t0 - 1500).toISOString(),
+      answersMessageId: "q-A",
+      createdAt: new Date(t0 + 100).toISOString(),
     });
     for (const h of [...L.subs]) h({ runId: rid });
     await sleep(80);
@@ -1070,7 +1075,7 @@ async function main() {
       "answering node A resumes ONLY node A (stamped + carries question/answer)",
       chainsAfterA.length === 1 &&
         chainsAfterA[0].loomNodeId === "A" &&
-        chainsAfterA[0].note.includes("Node A: which file?") &&
+        chainsAfterA[0].note.includes("Which target?") &&
         chainsAfterA[0].note.includes("Answer for A: use config.ts"),
     );
     st = await getState(job.id);
@@ -1084,9 +1089,11 @@ async function main() {
     run.workerAttempts.at(-1).status = "succeeded";
     run.status = "blocked";
     run.humanMessages.push({
+      id: "a-B",
       author: "user",
-      kind: "note",
+      kind: "answer",
       message: "Answer for B: port 8080",
+      answersMessageId: "q-B",
       createdAt: new Date(t0 + 1000).toISOString(),
     });
     for (const h of [...L.subs]) h({ runId: rid });
@@ -1095,7 +1102,7 @@ async function main() {
     ok(
       "the second blocked node resumes on the next finalize re-entry",
       chainsAfterB.length === 1 &&
-        chainsAfterB[0].note.includes("Node B: which port?") &&
+        chainsAfterB[0].note.includes("Which target?") &&
         chainsAfterB[0].note.includes("Answer for B: port 8080"),
     );
     await sched.stopJob(job.id);
@@ -1200,11 +1207,11 @@ async function main() {
     run.status = "blocked";
     run.workerAttempts = [{ id: "att-q", status: "succeeded" }];
     run.humanMessages = [
-      { author: "spark", kind: "question", message: "Which path?", createdAt: new Date(Date.now() - 1000).toISOString() },
+      { id: "q-path", author: "spark", kind: "question", message: "Which path?", createdAt: new Date(Date.now() - 1000).toISOString() },
     ];
     for (const h of [...L.subs]) h({ runId: rid });
     await sleep(60);
-    run.humanMessages.push({ author: "user", kind: "note", message: "Use /tmp", createdAt: new Date().toISOString() });
+    run.humanMessages.push({ id: "a-path", author: "user", kind: "answer", message: "Use /tmp", answersMessageId: "q-path", createdAt: new Date().toISOString() });
     for (const h of [...L.subs]) h({ runId: rid });
     await sleep(80);
     const resume = L.launches[L.launches.length - 1];

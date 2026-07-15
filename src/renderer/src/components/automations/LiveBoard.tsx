@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -15,9 +15,7 @@ import type {
   AutomationWorkerInfo,
   RunState,
   ScheduledJob,
-  ShellInfo,
 } from "@shared/types";
-import { TerminalPane } from "../Terminal/TerminalPane";
 import {
   automationDotColor,
   capLabel,
@@ -31,31 +29,13 @@ import {
 } from "./presentation";
 import { TRIGGER_ID, flowFromGraph, graphForJob, installedEngines } from "./flow/model";
 import { ENGINE_TONE, LoomIcon, Medallion, TopRule } from "./flow/FlowNodes";
-import {
-  hasCanonicalWorkerPane,
-  subscribeCanonicalWorkerPanes,
-} from "./worker-pane-registry";
 
 // LiveBoard — the "whiteboard" view of ONE running loom: the loom graph on a
 // full read-only ReactFlow canvas with LIVE execution state. Live edges carry
 // the house "electricity" (the run-graph's travelling accent dash — see
 // .spark-wire-flow in styles.css); the executing node holds a steady accent
 // glow. No breathing/scale pulses anywhere on the board. Clicking a worker
-// node opens a floating terminal sheet INSIDE the board that mirrors that
-// worker's pty.
-//
-// Terminal hosting: the sheet's panes are READ-ONLY MIRRORS of the same pty
-// the Workers grid's canonical WorkerPane is attached to (TerminalPane
-// readOnly + the pty.spawn `mirror` flag). A mirror provably cannot garble the
-// TUI: it forwards no keystrokes, sends no pty.resize (neither renderer-side
-// nor via main's existing-session spawn branch — the mirror flag skips that
-// resize), never pauses/detaches the session on unmount, and never captures/
-// replays a flattened snapshot. The canonical pane's behavior is bit-identical
-// whether or not a mirror exists. Mount is gated on worker-pane-registry so
-// the canonical pane always attaches FIRST (it owns the raw-tail replay and
-// the pty's dimensions). Trade-off accepted: a mirror that attaches
-// mid-session starts from the TUI's next repaint rather than the full frame —
-// the full canonical terminal is one click away ("Workers grid →").
+// node opens its ordered structured activity stream inside the board.
 //
 // The sheet is an untransformed overlay positioned within the canvas
 // CONTAINER (never inside ReactFlow's zoom/pan transform layer — scaled
@@ -67,17 +47,6 @@ import {
 // visibility (geometry kept), so hidden mirrors are never resized; and
 // because mirrors are readOnly, even a sheet drag-resize can only ever re-fit
 // the mirrors locally — the pty itself is never SIGWINCH'd from here.
-
-// Same attach-only placeholder shell contract as WorkersView / ChatPanel: the
-// pty already exists; with the readOnly mirror flag main refuses to spawn
-// anything for this shell, so a stale id can never launch a real process.
-const MIRROR_SHELL: ShellInfo = {
-  id: "spark-loom-worker-mirror",
-  label: "Loom worker mirror",
-  exe: "noop",
-  args: [],
-  family: "other",
-};
 
 // Mirrors WorkersView's LIVE_ATTEMPT (module-private there): attempt statuses
 // that mean the worker process is still going.
@@ -132,7 +101,7 @@ export interface LiveBoardProps {
   onClose: () => void;
   onOpenWorkersGrid: () => void;
   onStop: () => void;
-  onAnswer: (runId: string, answer: string) => void;
+  onAnswer: (runId: string, questionMessageId: string, answer: string) => void;
 }
 
 export default function LiveBoard({
@@ -496,7 +465,7 @@ export default function LiveBoard({
           className="spark-btn"
           style={{ height: 26, padding: "0 10px", fontSize: 11.5, flex: "0 0 auto" }}
           onClick={onOpenWorkersGrid}
-          title="Open the full multi-automation Workers grid (the canonical, interactive terminals)"
+          title="Open the full multi-automation worker activity grid"
         >
           Workers grid →
         </button>
@@ -520,7 +489,7 @@ export default function LiveBoard({
         </button>
       </div>
 
-      {/* ── canvas + terminal sheet ────────────────────────────────────── */}
+      {/* ── canvas + worker activity sheet ────────────────────────────── */}
       {/* position:relative container: the sheet is an absolute overlay HERE —
           outside ReactFlow's zoom/pan transform layer — so xterm never renders
           under a scaled transform. */}
@@ -723,16 +692,18 @@ export default function LiveBoard({
           </div>
 
           {/* blocked question strip for the focused worker */}
-          {current?.blocked && current.question && (
+          {current?.blocked && current.question && current.questionMessageId && (
             <BlockedAnswerStrip
-              key={current.attemptId}
+              key={`${current.attemptId}:${current.questionMessageId}`}
               question={current.question}
-              onSend={(text) => onAnswer(current.runId, text)}
+              onSend={(text) =>
+                onAnswer(current.runId, current.questionMessageId as string, text)
+              }
             />
           )}
 
-          {/* mirror terminals — ALL mounted, visibility-switched, sharing the
-              same box so a chip switch never resizes anything. */}
+          {/* Structured activity views stay mounted and visibility-switched so
+              changing workers preserves scroll and streaming state. */}
           <div style={{ flex: 1, minHeight: 0, position: "relative", background: "var(--bg)" }}>
             {workers.length === 0 ? (
               <div
@@ -761,10 +732,9 @@ export default function LiveBoard({
                     pointerEvents: w.attemptId === current?.attemptId ? "inherit" : "none",
                   }}
                 >
-                  <MirrorTerminal
+                  <WorkerActivityLog
                     worker={w}
                     visible={shown && sheetOpen && w.attemptId === current?.attemptId}
-                    scrollbackLineLimit={scrollbackLineLimit}
                   />
                 </div>
               ))
@@ -776,28 +746,38 @@ export default function LiveBoard({
   );
 }
 
-// ── sheet terminal (read-only mirror) ────────────────────────────────────────
+// ── sheet structured worker activity ────────────────────────────────────────
 
-function MirrorTerminal({
+function WorkerActivityLog({
   worker,
   visible,
-  scrollbackLineLimit,
 }: {
   worker: AutomationWorkerInfo;
   visible: boolean;
-  scrollbackLineLimit: number;
 }): React.ReactElement {
-  // Gate on the CANONICAL pane being mounted (WorkersView's WorkerPane, which
-  // is kept alive whenever the Automations tab is active). This both prevents
-  // the mirror from ever being the first attacher (the canonical pane must win
-  // the raw-tail replay + own the pty size) and guarantees the pty exists, so
-  // the mirror spawn's session-must-exist check can't trip in practice.
-  const canonicalMounted = useSyncExternalStore(
-    subscribeCanonicalWorkerPanes,
-    () => hasCanonicalWorkerPane(worker.attemptId),
-  );
   const live = LIVE_ATTEMPT.has(worker.status);
-  if (!canonicalMounted) {
+  const [content, setContent] = useState("");
+  useEffect(() => {
+    if (!worker.stdoutLogPath) return;
+    let disposed = false;
+    const refresh = async () => {
+      try {
+        const file = await window.spark.fs.readText(worker.stdoutLogPath!);
+        if (!disposed) setContent(file.content.slice(-80_000));
+      } catch {
+        /* Launch can precede log creation by one render. */
+      }
+    };
+    void refresh();
+    if (!visible || !live) return () => { disposed = true; };
+    const timer = window.setInterval(() => void refresh(), 500);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [live, visible, worker.stdoutLogPath]);
+
+  if (!content.trim()) {
     return (
       <div
         className="spark-mono"
@@ -811,31 +791,28 @@ function MirrorTerminal({
           color: "var(--muted-2)",
         }}
       >
-        {live ? "Connecting to worker terminal…" : "Worker exited — terminal released."}
+        {live ? `Starting ${worker.transport === "agent-sdk" ? "Claude Agent SDK" : "Codex App Server"}…` : "No activity was recorded."}
       </div>
     );
   }
   return (
-    <TerminalPane
-      key={`loom-mirror:${worker.attemptId}`}
-      sessionId={worker.attemptId}
-      shell={MIRROR_SHELL}
-      visible={visible}
-      scrollbackLineLimit={scrollbackLineLimit}
-      initialCwd={worker.cwd}
-      // readOnly = mirror mode: no keystrokes, no pty.resize (renderer-side
-      // AND main's spawn-branch resize via the mirror flag), no pause/detach
-      // on unmount, no snapshot capture/replay, no runtime-state reports. The
-      // canonical WorkerPane's pty stream is bit-identical with or without
-      // this pane. NOT rawTailReattach — that unmount path calls pty.detach,
-      // which would null main's renderer sink out from under the canonical
-      // pane and freeze it.
-      readOnly
-      // Keep the mirror's own buffer complete while the board is hidden or the
-      // sheet shows a sibling, so a reveal shows the accumulated frame instead
-      // of a capped hidden-buffer remnant. Same contract as the worker panes.
-      writeWhileHidden
-    />
+    <pre
+      className="spark-mono"
+      style={{
+        position: "absolute",
+        inset: 0,
+        margin: 0,
+        padding: "14px 16px",
+        overflow: "auto",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        color: "var(--ink-dim)",
+        fontSize: 11.5,
+        lineHeight: 1.58,
+      }}
+    >
+      {content}
+    </pre>
   );
 }
 

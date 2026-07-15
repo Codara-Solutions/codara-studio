@@ -152,6 +152,43 @@ async function main() {
   const unreadAfter = (await store.listCenterEntries()).filter((e) => !e.read).length;
   check("removing an unread entry lowers the unread count", unreadBefore === 2 && unreadAfter === 1);
 
+  // 4. Manual terminal states coalesce per pane so one busy agent cannot fill
+  //    the center, and a newer state replaces stale actionable copy.
+  const terminalBase = {
+    sourceKey: "pane:p1",
+    title: "Claude Code",
+    body: "body",
+    soundKind: "done",
+    target: { type: "terminal", workspaceId: "w1", tabId: "t1", paneId: "p1" },
+  };
+  await store.recordToCenter(
+    {
+      ...terminalBase,
+      id: "terminal-done",
+      kind: "terminal.agent.done",
+      tone: "success",
+      createdAt: "2026-07-04T00:01:00.000Z",
+    },
+    { read: false },
+  );
+  await store.recordToCenter(
+    {
+      ...terminalBase,
+      id: "terminal-blocked",
+      kind: "terminal.agent.needs-input",
+      tone: "warning",
+      soundKind: "needs-you",
+      createdAt: "2026-07-04T00:02:00.000Z",
+    },
+    { read: false },
+  );
+  live = await store.listCenterEntries();
+  check(
+    "terminal history keeps only the newest state per pane",
+    live.filter((e) => e.sourceKey === "pane:p1").map((e) => e.id).join(",") ===
+      "terminal-blocked",
+  );
+
   fs.rmSync(TMP_HOME, { recursive: true, force: true });
 
   if (failures > 0) {

@@ -245,6 +245,35 @@ function taskLooksLikeCalculator(step: StepState | undefined, task: WorkerTask):
   return /\b(calculator|calculate|arithmetic|keypad|numeric input)\b/i.test(text);
 }
 
+function renderCodexImageGenerationGuidance(
+  step: StepState | undefined,
+  task: WorkerTask,
+): string[] {
+  if (task.runtimePreference !== "codex" || task.taskClass === "verifier") return [];
+  const text = [
+    task.title,
+    task.description,
+    step?.title ?? "",
+    step?.goal ?? "",
+    ...(step?.acceptanceCriteria ?? []),
+    ...(task.expectedOutputs ?? []),
+  ].join(" ");
+  const wouldBenefit = /\b(image|imagery|illustration|hero|banner|background|texture|sprite|game art|custom asset|visual theme|poster|cover|mascot|character art|product art|photo|photograph)\b/i.test(
+    text,
+  );
+  const forbidsAssets = /\b(no images?|without images?|no (?:external )?assets?|pure css|css-only|single self-contained file|single-file only|one file only)\b/i.test(
+    text,
+  );
+  if (!wouldBenefit || forbidsAssets) return [];
+
+  return [
+    "- Codex can generate and edit original raster assets with the built-in `$imagegen` skill. Use it when bespoke imagery would materially improve this deliverable instead of settling for emoji, generic gradients, or unrelated placeholders.",
+    "- Generate only assets the brief actually benefits from. Prefer existing project assets and code-native CSS/SVG when those better match the established product language.",
+    "- Keep every generated file inside this worker's allowed paths. Inspect its dimensions, crop, transparency, and appearance in the real UI before accepting it; reference it with a project-safe relative path.",
+    "- List every generated asset in `files_changed[]` and include visual/runtime evidence in `proof[]`. Never generate an asset when the task requires no images, no extra files, or a single self-contained deliverable.",
+  ];
+}
+
 function renderUiQualityGuidance(
   step: StepState | undefined,
   task: WorkerTask,
@@ -376,6 +405,11 @@ function renderImplementationWorkerPrompt({
   const uiQualityGuidance = renderUiQualityGuidance(step, task, { sparkPreviewMcpAvailable });
   if (uiQualityGuidance.length) {
     lines.push("", "## UI QUALITY BAR", ...uiQualityGuidance);
+  }
+
+  const imageGenerationGuidance = renderCodexImageGenerationGuidance(step, task);
+  if (imageGenerationGuidance.length) {
+    lines.push("", "## ORIGINAL IMAGE ASSETS", ...imageGenerationGuidance);
   }
 
   if (task.allowedPaths.length || task.forbiddenPaths.length || task.conflictsWith.length || task.canRunParallel) {

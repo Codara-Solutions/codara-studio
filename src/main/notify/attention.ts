@@ -43,9 +43,15 @@ export function isWatchingRun(runId: string): boolean {
   return windowFocused() && current.runId === runId;
 }
 
-// The user is looking at the tab hosting this pane: window focused AND the
-// pane's workspace + tab are the active ones. Tab-scoped (not pane-scoped)
-// on purpose — every pane of a split in the active tab is on screen.
-export function isWatchingPane(workspaceId: string, tabId: string): boolean {
-  return windowFocused() && current.workspaceId === workspaceId && current.tabId === tabId;
+// The user is actively operating this exact terminal pane: window focused,
+// workspace + tab selected, and the split's active pane matches. A sibling
+// split may be visible, but it cannot receive input; permission prompts there
+// should still surface instead of being silently treated as "watched".
+export function isWatchingPane(workspaceId: string, tabId: string, paneId: string): boolean {
+  return (
+    windowFocused() &&
+    current.workspaceId === workspaceId &&
+    current.tabId === tabId &&
+    current.paneId === paneId
+  );
 }

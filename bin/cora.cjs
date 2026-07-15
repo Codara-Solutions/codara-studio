@@ -27,10 +27,12 @@ APP (dev-gated in packaged builds: launch with CODARA_DEV_TOOLS=1)
   shot [file.png]                     screenshot the app window   (default cora-shot.png)
   eval <js>                           run JS in the app renderer, print the result
   notify [kind] [--title --body --tone --sound --source --run-id]
+                [--workspace-id --tab-id --pane-id | --job-id]
                                       fire a notification through the real pipeline
                                       kinds: run.blocked run.complete run.failed
                                              terminal.agent.needs-input terminal.agent.done
-                                             automation.finished automation.failed
+                                             terminal.agent.failed automation.finished
+                                             automation.failed automation.blocked
   prefs                               print all preferences
   prefs <key>                         print one preference
   prefs <key> <value>                 set one (value parsed as JSON, else string)
@@ -252,6 +254,10 @@ async function main() {
       if (flags.sound) params.sound = flags.sound;
       if (flags.source) params.sourceKey = flags.source;
       if (flags.runId) params.runId = flags.runId;
+      if (flags.workspaceId) params.workspaceId = flags.workspaceId;
+      if (flags.tabId) params.tabId = flags.tabId;
+      if (flags.paneId) params.paneId = flags.paneId;
+      if (flags.jobId) params.jobId = flags.jobId;
       const result = await call(flags, "app.notify", params);
       output(flags, result, (r) => console.log(`published ${r.kind}  (source ${r.sourceKey})`));
       return;

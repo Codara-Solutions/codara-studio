@@ -69,23 +69,28 @@ export function focusTarget(target: NavigationTarget): void {
   }
 }
 
+// Persistent terminal attention is separate from intrusive delivery. The
+// notify policy calls this even for DND-muted unread events, so muting sound /
+// toasts never makes a background permission prompt impossible to find.
+export function signalTerminalAttention(event: NotifyEvent): void {
+  if (event.target.type !== "terminal") return;
+  try {
+    const payload: TerminalAgentAttentionPayload = {
+      target: event.target,
+      kind:
+        event.kind === "terminal.agent.needs-input" ||
+        event.kind === "terminal.agent.failed"
+          ? "blocked"
+          : "complete",
+    };
+    activeWindow()?.webContents.send("terminal-agent:attention", payload);
+  } catch {
+    /* best-effort */
+  }
+}
+
 export function deliver(event: NotifyEvent, channels: NotificationChannelsPref): void {
   const win = activeWindow();
-
-  // Persistent attention marker for the workspace rail — sent before the
-  // channel gates on purpose: even with every channel muted, the rail dot
-  // should record that a terminal wants the user.
-  if (event.target.type === "terminal") {
-    try {
-      const payload: TerminalAgentAttentionPayload = {
-        target: event.target,
-        kind: event.kind === "terminal.agent.needs-input" ? "blocked" : "complete",
-      };
-      win?.webContents.send("terminal-agent:attention", payload);
-    } catch {
-      /* best-effort */
-    }
-  }
 
   const appFocused = isAppFocused(win);
 

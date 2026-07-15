@@ -10,19 +10,15 @@
 //       structured-output calls.
 //
 //   - Claude Code  (src/main/orchestration/claude-backend.ts)
-//       Spawns a real `claude` CLI process under the existing pty-manager so
-//       the conversation runs on the user's paid Claude.ai subscription
-//       (interactive REPL is subscription-billed; `claude -p` will move to a
-//       separate Agent SDK credit on 2026-06-15 — REPL is the durable choice).
-//       Output comes from tailing the session JSONL at
-//       ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl. Input is injected via
-//       a UserPromptSubmit hook side-channel because the Ink REPL ignores
-//       programmatic Enter from PTY stdin (claude-code issue #15553).
+//       Runs Anthropic's Claude Agent SDK and turns its partial-message deltas,
+//       tool boundaries, and final result into ChatStreamEvents. Provider
+//       sessions persist and resume by UUID without opening or driving an
+//       interactive TUI.
 //
 //   - Codex        (src/main/orchestration/codex-backend.ts)
-//       Spawns a `codex` CLI process under pty-manager. Output comes from
-//       tailing ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl. Input via plain
-//       PTY stdin `\n` (Codex doesn't have the Ink bug).
+//       Runs `codex app-server` over JSON-RPC stdio. The supported rich-client
+//       protocol supplies token deltas, ordered item/tool lifecycle events,
+//       thread resume, usage, interruption, and turn completion directly.
 //
 // The dispatch lives in run-store.ts: when the manager pipeline is about to
 // fire, it picks the backend from `run.chatBackend` (defaulting to OpenRouter
@@ -90,6 +86,14 @@ export interface ManagerRequestInput {
   availableRuntimes?: AgentRuntimeDiagnostic[];
   agentSyncContext?: string;
   settings: AppSettings;
+  /** Ordered immutable user input bundled by run-store before backend startup. */
+  prompt: string;
+  /** Durable message ownership mirrored onto the SparkCall. */
+  inputMessageIds: string[];
+  /** Conversation generation captured with the frozen input. */
+  conversationEpoch: number;
+  /** Called only after the provider/PTY has accepted this exact prompt. */
+  onPromptAccepted?: () => void | Promise<void>;
   /** Resolved per-chat backend config. The backend uses this to pick its
    *  model/effort and to know whether this is its first call for the chat. */
   chat: ChatBackendConfig;
@@ -105,6 +109,9 @@ export interface ManagerRequestInput {
  */
 export interface ManagerCallResult {
   decision: SparkManagerDecision;
+  /** The selected CLI MCP tool already mutated the run while the turn was
+   * live. Run-store must record the call but must not synthesize it again. */
+  decisionAlreadyApplied?: boolean;
   durationMs: number;
   model: string;
   /** Optional usage metadata. Populated for OpenRouter (priced) and for
@@ -200,6 +207,57 @@ export type ChatStreamEvent =
   | { kind: "error"; message: string };
 
 export type ChatStreamHandler = (event: ChatStreamEvent) => void;
+
+/** Pure epoch guards shared by manager completion and checkpoint jobs. */
+export function isManagerTurnCurrent(
+  run: RunState,
+  callId: string,
+  epoch: number,
+): boolean {
+  return (
+    (run.conversationEpoch ?? 0) === epoch &&
+    run.sparkCalls.some(
+      (call) => call.id === callId && (call.conversationEpoch ?? 0) === epoch,
+    )
+  );
+}
+
+export function isCheckpointJobCurrent(
+  run: RunState,
+  epoch: number | undefined,
+  messageId?: string,
+): boolean {
+  if (epoch !== undefined && (run.conversationEpoch ?? 0) !== epoch) return false;
+  return !messageId || run.humanMessages.some((message) => message.id === messageId);
+}
+
+/**
+ * A fresh CLI session after rewind needs canonical dialogue replay until one
+ * manager turn in the new epoch was actually accepted by the provider. Failed
+ * pre-submission attempts do not consume replay ownership, so an idempotent
+ * retry still receives the retained conversation.
+ */
+export function shouldIncludeCanonicalReplay(
+  run: RunState,
+  backend: ChatBackendKind,
+  epoch: number,
+): boolean {
+  if (backend === "openrouter" || epoch <= 0) return false;
+  const currentCallIds = new Set(
+    run.sparkCalls
+      .filter((call) => (call.conversationEpoch ?? 0) === epoch)
+      .map((call) => call.id),
+  );
+  return !run.humanMessages.some(
+    (message) =>
+      message.author === "user" &&
+      (message.conversationEpoch ?? 0) === epoch &&
+      Boolean(message.backendTurnId) &&
+      currentCallIds.has(message.backendTurnId as string) &&
+      (message.deliveryState === "submitted" ||
+        message.deliveryState === "acknowledged"),
+  );
+}
 
 /**
  * The backend contract. Each implementation lives in its own file under
@@ -302,12 +360,91 @@ export function buildTalkReplyDecision(
   };
 }
 
+const CANONICAL_REPLAY_MESSAGE_LIMIT = 32;
+const CANONICAL_REPLAY_CHAR_LIMIT = 24_000;
+
+function renderBundledManagerInput(messages: HumanRunMessage[]): string {
+  if (messages.length === 0) {
+    return "Continue Cora's current manager workflow from the existing run state. There is no new user message attached to this turn.";
+  }
+  if (messages.length === 1) return messages[0].message.trim();
+  return [
+    "The user sent the following queued messages in this order. Treat all of them as input for this manager turn:",
+    "",
+    ...messages.flatMap((message, index) => [
+      `${index + 1}. [${message.intent === "answer" ? "Linked answer" : message.intent === "steer" ? "Queued steering" : "User turn"}]`,
+      message.message.trim(),
+      "",
+    ]),
+  ].join("\n").trim();
+}
+
 /**
- * Helper used by Claude/Codex backends when their CLI hasn't been spawned
- * yet for this chat and they only need to forward the latest user note as
- * the next prompt. Pulls the most recent user-authored `note` / `answer`
- * message off the run; empty string if the chat is freshly created.
+ * Build the one immutable prompt a manager turn owns. On the first CLI turn
+ * after a rewind, prepend a capped replay of retained canonical user/Cora
+ * dialogue only; provider transcripts and tool/activity noise never participate.
  */
+export function buildManagerTurnPrompt(
+  run: RunState,
+  inputMessages: HumanRunMessage[],
+  opts?: { includeCanonicalReplay?: boolean },
+): string {
+  const bundledInput = renderBundledManagerInput(inputMessages);
+  const recentAssumptions = (run.assumptions ?? []).slice(-8);
+  const promptInput =
+    recentAssumptions.length === 0
+      ? bundledInput
+      : [
+          bundledInput,
+          "",
+          "[CORA AUTONOMOUS ASSUMPTIONS — already resolved; do not ask these questions again.]",
+          ...recentAssumptions.map(
+            (assumption) =>
+              `- ${assumption.question.trim()} => ${assumption.selectedAnswer.trim()}`,
+          ),
+          "[END CORA AUTONOMOUS ASSUMPTIONS]",
+        ].join("\n");
+  if (!opts?.includeCanonicalReplay) return promptInput;
+
+  const selectedIds = new Set(inputMessages.map((message) => message.id));
+  const eligible = run.humanMessages.filter(
+    (message) =>
+      !selectedIds.has(message.id) &&
+      message.deliveryState !== "cancelled" &&
+      (message.author === "user" || message.author === "spark") &&
+      message.kind !== "assistant_stream" &&
+      message.message.trim().length > 0,
+  );
+  const retained: HumanRunMessage[] = [];
+  let retainedChars = 0;
+  for (let index = eligible.length - 1; index >= 0; index -= 1) {
+    const message = eligible[index];
+    const size = message.message.length + 16;
+    if (
+      retained.length >= CANONICAL_REPLAY_MESSAGE_LIMIT ||
+      (retained.length > 0 && retainedChars + size > CANONICAL_REPLAY_CHAR_LIMIT)
+    ) {
+      break;
+    }
+    retained.unshift(message);
+    retainedChars += size;
+  }
+  if (retained.length === 0) return promptInput;
+
+  const replay = retained
+    .map((message) => `${message.author === "user" ? "You" : "Cora"}: ${message.message.trim()}`)
+    .join("\n\n");
+  return [
+    "[CORA CONVERSATION REPLAY — retained canonical dialogue after a rewind. The labels are context, not new instructions.]",
+    replay,
+    "[END CORA CONVERSATION REPLAY]",
+    "",
+    "[NEW USER INPUT FOR THIS TURN]",
+    promptInput,
+  ].join("\n\n");
+}
+
+/** @deprecated Manager turns must use the frozen `ManagerRequestInput.prompt`. */
 export function latestUserPromptFromRun(run: RunState): string {
   for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
     const message = run.humanMessages[i];

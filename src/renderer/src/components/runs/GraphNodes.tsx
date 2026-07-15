@@ -136,9 +136,16 @@ function StatusTag({ label, tone }: { label: string; tone: string }) {
   return (
     <span
       style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
         color: tone,
+        border: `1px solid color-mix(in oklch, ${tone} 38%, var(--rule))`,
+        background: `color-mix(in oklch, ${tone} 8%, transparent)`,
+        borderRadius: 999,
+        padding: "3px 6px",
         fontFamily: "var(--font-sans)",
-        fontSize: 9,
+        fontSize: 8,
         fontWeight: 700,
         letterSpacing: "0.11em",
         textTransform: "uppercase",
@@ -146,6 +153,16 @@ function StatusTag({ label, tone }: { label: string; tone: string }) {
         flex: "0 0 auto",
       }}
     >
+      <span
+        aria-hidden
+        style={{
+          width: 3.5,
+          height: 3.5,
+          borderRadius: 999,
+          background: tone,
+          boxShadow: `0 0 5px ${tone}`,
+        }}
+      />
       {label}
     </span>
   );
@@ -507,7 +524,7 @@ function WorkerBatchNode({
         border: `1px solid ${border}`,
         background,
         boxShadow: shadow,
-        padding: "13px 15px 16px",
+        padding: "13px 15px 17px",
         display: "flex",
         flexDirection: "column",
         gap: 8,
@@ -518,6 +535,35 @@ function WorkerBatchNode({
           "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
       }}
     >
+      {live && (
+        <span
+          aria-hidden
+          className="runs-node-scan"
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            width: "38%",
+            pointerEvents: "none",
+            background:
+              "linear-gradient(90deg, transparent, color-mix(in oklch, var(--accent) 7%, transparent), transparent)",
+          }}
+        />
+      )}
+      <span
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: "0 0 auto 0",
+          height: 1,
+          background: live
+            ? "linear-gradient(90deg, transparent, var(--accent), transparent)"
+            : complete
+              ? "linear-gradient(90deg, transparent, var(--ok), transparent)"
+              : "linear-gradient(90deg, transparent, var(--rule-strong), transparent)",
+          opacity: live ? 0.85 : 0.42,
+        }}
+      />
       <header style={{ display: "grid", gridTemplateColumns: "32px minmax(0,1fr) auto", gap: 11, alignItems: "start" }}>
         <StepBadge index={index} status={status} />
         <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
@@ -606,6 +652,19 @@ function WorkerBatchNode({
             <ElapsedTime startedAt={startedAt} finishedAt={finishedAt} />
           </span>
         )}
+        <span
+          style={{
+            minWidth: 29,
+            color: live ? "var(--accent)" : complete ? "var(--ok)" : "var(--muted)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 9,
+            fontWeight: 700,
+            textAlign: "right",
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {Math.round(progress * 100)}% done
+        </span>
       </div>
 
       {/* Worker-completion bar, flush along the node's bottom edge. */}
@@ -845,6 +904,7 @@ interface WorkerNodeProps {
   stepStatus: StepState["status"];
   selected: boolean;
   onSelect: () => void;
+  onOpen: () => void;
 }
 
 export const WorkerNode = React.memo(function WorkerNode({
@@ -852,6 +912,7 @@ export const WorkerNode = React.memo(function WorkerNode({
   stepStatus,
   selected,
   onSelect,
+  onOpen,
 }: WorkerNodeProps) {
   const [hover, setHover] = useState(false);
   const { agent, task, attempt } = row;
@@ -870,6 +931,20 @@ export const WorkerNode = React.memo(function WorkerNode({
   const tone = runtimeTone(liveRuntime);
   const running = status === "running";
   const blocked = status === "blocked";
+  const runtimeState = attempt?.runtimeState;
+  const stateLabel = runtimeState
+    ? runtimeState === "idle"
+      ? "ready"
+      : runtimeState === "working"
+        ? "working"
+        : runtimeState
+    : queued
+      ? "queued"
+      : attempt?.status === "succeeded"
+        ? "complete"
+        : attempt?.status === "finishing"
+          ? "finishing"
+          : status;
 
   const border = selected
     ? "var(--accent)"
@@ -882,9 +957,8 @@ export const WorkerNode = React.memo(function WorkerNode({
           : "var(--rule)";
 
   const label = task?.title || agent.label;
-  const meta = [agent.label, task?.modelHint, task?.effortHint, attempt ? `try ${attempt.attemptNumber}` : null]
-    .filter(Boolean)
-    .join(" · ");
+  const role = task?.taskClass ?? "worker";
+  const model = task?.modelHint ?? "default model";
   const stateColor = statusColor(status);
 
   return (
@@ -893,14 +967,21 @@ export const WorkerNode = React.memo(function WorkerNode({
       disabled={queued}
       onClick={(event) => {
         event.stopPropagation();
-        if (!queued) onSelect();
+        // A double-click emits two click events before dblclick. Ignore the
+        // second click so it cannot toggle the inspector closed immediately
+        // before navigation.
+        if (!queued && event.detail === 1) onSelect();
+      }}
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+        if (!queued) onOpen();
       }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       title={
         queued
           ? `${label}\n\nQueued — Cora has not spawned this worker yet.`
-          : `${label}\n\nClick to inspect this worker.`
+          : `${label}\n\nClick to inspect. Double-click to open this worker's terminal.`
       }
       style={{
         appearance: "none",
@@ -908,7 +989,7 @@ export const WorkerNode = React.memo(function WorkerNode({
         width: "100%",
         height: "100%",
         boxSizing: "border-box",
-        borderRadius: 12,
+        borderRadius: 14,
         border: `1px solid ${border}`,
         background: blocked
           ? "linear-gradient(150deg, color-mix(in oklch, var(--panel) 88%, var(--danger) 8%), color-mix(in oklch, var(--panel) 82%, var(--bg) 18%))"
@@ -918,17 +999,17 @@ export const WorkerNode = React.memo(function WorkerNode({
         // The runtime-colored left edge is the worker card's silhouette cue —
         // same left-rule convention as the LiveBoard worker nodes.
         boxShadow: `inset 3px 0 0 color-mix(in oklch, ${tone.label} 78%, transparent), ${
-          selected
-            ? "0 0 0 1.5px var(--accent), 0 0 16px var(--accent-glow), var(--shadow-1)"
+            selected
+            ? "0 0 16px var(--accent-glow), var(--shadow-1)"
             : running
               ? "var(--lift-hi), 0 0 14px var(--accent-glow), var(--shadow-1)"
               : "var(--lift-hi), var(--shadow-1)"
         }`,
         opacity: queued ? 0.62 : 1,
-        padding: "8px 10px 8px 13px",
+        padding: "8px 10px 8px 14px",
         display: "flex",
         flexDirection: "column",
-        gap: 4,
+        gap: 5,
         minWidth: 0,
         overflow: "hidden",
         cursor: queued ? "default" : "pointer",
@@ -940,9 +1021,9 @@ export const WorkerNode = React.memo(function WorkerNode({
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "auto minmax(0, 1fr) auto",
+          gridTemplateColumns: "auto minmax(0, 1fr) auto auto",
           alignItems: "center",
-          gap: 7,
+          gap: 6,
           minWidth: 0,
           width: "100%",
         }}
@@ -967,21 +1048,65 @@ export const WorkerNode = React.memo(function WorkerNode({
         <span
           style={{
             minWidth: 0,
-            color: "var(--ink)",
-            fontSize: 11,
-            fontWeight: 600,
-            lineHeight: 1.22,
+            color: "var(--muted-2)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 7.5,
+            fontWeight: 700,
+            letterSpacing: "0.1em",
+            textTransform: "uppercase",
             overflow: "hidden",
-            display: "-webkit-box",
-            WebkitLineClamp: 2,
-            WebkitBoxOrient: "vertical",
-            overflowWrap: "anywhere",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
           }}
         >
-          {label}
+          {role}
         </span>
-        <StatusDot status={mapAgentToStepStatus(status)} size={6} />
+        <span
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 4,
+            color: runtimeState === "error" || blocked ? "var(--danger)" : runtimeState === "idle" || runtimeState === "done" ? "var(--ok)" : stateColor,
+            fontFamily: "var(--font-mono)",
+            fontSize: 7.5,
+            fontWeight: 700,
+            letterSpacing: "0.07em",
+            textTransform: "uppercase",
+            whiteSpace: "nowrap",
+          }}
+        >
+          <StatusDot status={mapAgentToStepStatus(status)} size={5} />
+          {stateLabel}
+        </span>
+        <span
+          aria-hidden
+          style={{
+            color: queued ? "var(--muted-2)" : hover || selected ? "var(--accent)" : "var(--muted)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            lineHeight: 1,
+            transform: hover && !queued ? "translateX(1px)" : undefined,
+            transition: "color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
+          }}
+        >
+          ↗
+        </span>
       </div>
+      <span
+        style={{
+          minWidth: 0,
+          width: "100%",
+          color: "var(--ink)",
+          fontSize: 11,
+          fontWeight: 650,
+          lineHeight: 1.2,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </span>
       <div style={{ display: "flex", alignItems: "baseline", gap: 7, minWidth: 0, width: "100%" }}>
         <span
           style={{
@@ -989,13 +1114,24 @@ export const WorkerNode = React.memo(function WorkerNode({
             minWidth: 0,
             color: "var(--muted)",
             fontFamily: "var(--font-mono)",
-            fontSize: 9,
+            fontSize: 8.5,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
           }}
         >
-          {meta || "queued"}
+          {model}
+        </span>
+        <span
+          style={{
+            flex: "0 0 auto",
+            color: "var(--muted-2)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 8,
+            textTransform: "uppercase",
+          }}
+        >
+          {task?.effortHint ?? "auto"} · A{String(attempt?.attemptNumber ?? 0).padStart(2, "0")}
         </span>
         <span
           style={{

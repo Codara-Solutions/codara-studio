@@ -1030,7 +1030,7 @@ function answerForBlockedNode(
 ): { question: string; answer: string } | undefined {
   const matchesNode = (msgNode: string | undefined): boolean =>
     nodeId === undefined ? true : msgNode === nodeId;
-  let question: { message: string; createdAt: string } | undefined;
+  let question: { id: string; message: string; createdAt: string } | undefined;
   for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
     const m = run.humanMessages[i];
     if (m.author === "spark" && m.kind === "question" && matchesNode(m.loomNodeId)) {
@@ -1039,15 +1039,19 @@ function answerForBlockedNode(
     }
   }
   if (!question) return undefined;
-  // The answer is a user note/answer that postdates the question. Answers are
-  // not node-stamped (the Hub records a plain user note), so we match the
-  // newest user message after THIS node's question. With serial per-node
-  // resumption the next finalize re-enters for the next blocked node, whose
-  // (older) question then pairs with its own later answer.
+  // Only the exact linked answer can resume this node. A later note (or an
+  // answer to a sibling's question) must never close it. Legacy unlinked answer
+  // messages are safely inferred during run normalization only when one prior
+  // question was unresolved at that point in history.
   let answer: string | undefined;
   for (let i = run.humanMessages.length - 1; i >= 0; i -= 1) {
     const m = run.humanMessages[i];
-    if (m.author === "user" && m.createdAt > question.createdAt && m.message.trim()) {
+    if (
+      m.author === "user" &&
+      m.kind === "answer" &&
+      m.answersMessageId === question.id &&
+      m.message.trim()
+    ) {
       answer = m.message;
       break;
     }
@@ -1079,8 +1083,8 @@ async function blockedNodesOf(run: RunState): Promise<Array<string | undefined>>
 // Resume a report-blocked pass once the user answers. A worker that EXITED
 // declaring itself blocked (final-report status "blocked") left its question as
 // a spark message with no live codara_ask_user poll to consume the reply —
-// answering through the Hub only records a user note. When that note postdates
-// the blocking question, chain a continuation attempt into the SAME run (this is
+// the Hub records an exact linked answer. When that answer targets the blocking
+// question, chain a continuation attempt into the SAME run (this is
 // a resumption of the pass, not a new iteration: the job's iteration count and
 // history record carry across; onTerminal settles them when the resumed attempt
 // finishes). The live-ask flavor (an attempt still active) is deliberately

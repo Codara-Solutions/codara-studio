@@ -12,6 +12,21 @@ const POLL_MS = 5_000;
 
 const TERMINAL_ATTEMPT = new Set(["succeeded", "failed", "timed_out", "cancelled"]);
 
+/** A worker that disappeared from the authoritative inventory may linger only as
+ * terminal history. Any blocked question it used to own is resolved/released now;
+ * retaining that payload would keep LiveBoard's answer strip actionable for 60s. */
+export function toLingeringAutomationWorker(
+  worker: AutomationWorkerInfo,
+): AutomationWorkerInfo {
+  return {
+    ...worker,
+    status: TERMINAL_ATTEMPT.has(worker.status) ? worker.status : "succeeded",
+    blocked: false,
+    question: undefined,
+    questionMessageId: undefined,
+  };
+}
+
 interface Lingering {
   worker: AutomationWorkerInfo;
   exitedAt: number;
@@ -42,7 +57,7 @@ export function useAutomationWorkers(active: boolean): AutomationWorkerInfo[] {
         for (const w of workersRef.current) {
           if (!liveIds.has(w.attemptId) && !linger.has(w.attemptId)) {
             linger.set(w.attemptId, {
-              worker: { ...w, status: TERMINAL_ATTEMPT.has(w.status) ? w.status : "succeeded" },
+              worker: toLingeringAutomationWorker(w),
               exitedAt: now,
             });
           }

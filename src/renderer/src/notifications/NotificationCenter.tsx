@@ -19,7 +19,6 @@ type AppRegionStyle = React.CSSProperties & {
 export interface NotificationCenterProps {
   navigateTo?: NavigateTo;
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
-  shouldResumeOnAnswer?: (runId: string) => boolean;
 }
 
 function dayLabel(iso: string): string {
@@ -54,7 +53,6 @@ function toneVarOf(entry: NotificationCenterEntry): string {
 export default function NotificationCenter({
   navigateTo,
   resolveQuestion,
-  shouldResumeOnAnswer,
 }: NotificationCenterProps) {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState(false);
@@ -267,7 +265,6 @@ export default function NotificationCenter({
                     }}
                     onActed={() => center.remove(entry.id)}
                     resolveQuestion={resolveQuestion}
-                    shouldResumeOnAnswer={shouldResumeOnAnswer}
                   />
                 ))}
               </div>
@@ -376,7 +373,6 @@ function CenterEntry({
   onOpen,
   onActed,
   resolveQuestion,
-  shouldResumeOnAnswer,
 }: {
   entry: NotificationCenterEntry;
   onOpen: () => void;
@@ -384,7 +380,6 @@ function CenterEntry({
   // question) — the entry is removed from the center, not merely marked read.
   onActed: () => void;
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
-  shouldResumeOnAnswer?: (runId: string) => boolean;
 }) {
   const [hover, setHover] = useState(false);
   const answering = useRef(false);
@@ -410,11 +405,11 @@ function CenterEntry({
     if (!questionRunId || answering.current) return;
     answering.current = true;
     try {
+      if (!resolvedQuestion) throw new Error("This question is no longer open.");
       await answerRunQuestion(
         questionRunId,
         option,
-        shouldResumeOnAnswer?.(questionRunId) ?? true,
-        resolvedQuestion?.questionMessageId,
+        resolvedQuestion.questionMessageId,
       );
       onActed();
     } catch {

@@ -956,10 +956,10 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_ask_user",
     description:
-      "Ask the human user a clarifying question and block until they answer (up to 15 minutes). Use sparingly — only when you genuinely cannot proceed without a decision. Provide up to 4 option objects with stable ids so the user can tap one rather than typing a free-form reply.",
+      "Ask the human user only for credentials/access, destructive or irreversible work, safety/policy, or irreducible product scope with no safe default. Reversible engineering choices must be decided autonomously. Include a concrete category and reason; provide up to 4 option objects with stable ids and one recommendation when choices are bounded.",
     inputSchema: {
       type: "object",
-      required: ["question"],
+      required: ["question", "category", "reason"],
       properties: {
         runId: {
           type: "string",
@@ -969,6 +969,27 @@ const EXECUTE_TOOLS = [
         question: {
           type: "string",
           description: "The question to surface in the Codara chat panel.",
+        },
+        category: {
+          type: "string",
+          enum: [
+            "credentials_access",
+            "destructive_irreversible",
+            "safety_policy",
+            "irreducible_product_scope",
+          ],
+          description:
+            "Why this truly requires human judgment. Reversible engineering choices must not call this tool.",
+        },
+        reason: {
+          type: "string",
+          description:
+            "Concrete rationale explaining why repository conventions and a reversible default are insufficient.",
+        },
+        recommendedOptionId: {
+          type: "string",
+          description:
+            "Stable id of the safest recommended option when options are provided.",
         },
         options: {
           type: "array",

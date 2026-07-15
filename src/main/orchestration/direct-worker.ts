@@ -1,13 +1,9 @@
-// Looms v2 — headless pty plumbing for direct-worker (automation) runs.
+// Looms v2 — structured direct-worker (automation) inventory and recovery.
 //
-// Managed runs rely on the renderer to spawn each worker attempt's pty (the
-// workers terminal tab reacts to `worker_task.envelope_prepared`). Automation
-// runs must work with NO tab anywhere, so this module substitutes the renderer
-// exactly the way eval/headless-runner.ts does: spawn the pty in the main
-// process (webContents: null) the moment an envelope for a direct run is
-// prepared. The Automations Hub's Workers sub-tab can attach a TerminalPane to
-// the same pty later (pty.spawn replays the tail buffer on late attach) — the
-// worker keeps running headless regardless.
+// Automation workers run through Claude Agent SDK or Codex App Server in
+// run-store. Ordinary Cora implementation workers retain their visible CLI
+// panes; looms are unattended jobs and expose their ordered activity logs in
+// the Automations Hub instead of fabricating a terminal UI.
 //
 // Also owns: boot recovery for direct runs (the report-first decision table)
 // and the live-worker inventory behind `automations:listActiveWorkers`.
@@ -16,14 +12,15 @@ import type {
   AutomationWorkerInfo,
   LoomEngine,
   LoomGraph,
+  RunState,
   ScheduledJob,
-  ShellInfo,
   SparkEvent,
+  WorkerAttempt,
   WorkerAttemptStatus,
 } from "@shared/types";
+import { resolveOpenRunQuestionForLoomNode } from "@shared/run-questions";
 
 import * as pty from "../pty-manager";
-import { defaultShell } from "../shells";
 import { appendEvent, subscribeToEvents } from "./event-log";
 
 let runStoreMod: typeof import("./run-store") | undefined;
@@ -31,9 +28,6 @@ async function getRunStore(): Promise<typeof import("./run-store")> {
   runStoreMod ??= await import("./run-store");
   return runStoreMod;
 }
-
-const HEADLESS_PTY_COLS = 120;
-const HEADLESS_PTY_ROWS = 32;
 
 const ACTIVE_ATTEMPT_STATUSES = new Set<WorkerAttemptStatus>([
   "preparing",
@@ -45,20 +39,8 @@ const ACTIVE_ATTEMPT_STATUSES = new Set<WorkerAttemptStatus>([
 
 const TERMINAL_RUN_STATUSES = new Set(["complete", "failed", "cancelled"]);
 
-// runIds whose pty this module spawned — lets the exit watcher emit
-// automation.worker "exited" pings without re-reading every event.
+// Attempts announced to the Hub; the finished lifecycle event removes them.
 const trackedAttempts = new Map<string, { runId: string; automationId: string }>();
-
-let cachedShell: ShellInfo | null = null;
-async function ensureShell(): Promise<ShellInfo> {
-  if (cachedShell) return cachedShell;
-  const detected = await defaultShell();
-  if (!detected) {
-    throw new Error("No default shell detected — cannot launch automation workers.");
-  }
-  cachedShell = detected;
-  return detected;
-}
 
 // Broadcast-only live ping for the Hub's Workers sub-tab (same pattern as
 // automation.iteration: empty workspaceId, payload-only consumers).
@@ -81,14 +63,24 @@ async function emitWorkerPhase(
 }
 
 /**
- * Subscribe to envelope_prepared events and claim direct-run attempts with a
- * main-owned headless pty so runWorkerSession's waitForSpawn resolves without
- * any renderer. Returns an unsubscribe for shutdown symmetry.
+ * Subscribe to direct-run lifecycle events and broadcast live inventory pings
+ * for the Automations Hub. Execution itself is owned by run-store's structured
+ * worker transport.
  */
 export function installAutomationWorkerSpawnHandler(): () => void {
   const unsubscribe = subscribeToEvents((event: SparkEvent) => {
-    if (event.type !== "worker_task.envelope_prepared") return;
     if (!event.attemptId || !event.runId) return;
+    if (event.type === "worker_attempt.finished") {
+      const tracked = trackedAttempts.get(event.attemptId);
+      if (!tracked) return;
+      trackedAttempts.delete(event.attemptId);
+      void (async () => {
+        const worker = await describeWorker(tracked.runId, event.attemptId);
+        if (worker) await emitWorkerPhase("exited", worker);
+      })();
+      return;
+    }
+    if (event.type !== "worker_task.envelope_prepared") return;
     const payload = event.payload as Record<string, unknown> | undefined;
     // The payload stamp is authoritative and synchronous; fall back to getRun
     // for events emitted before the stamp existed (same-session upgrades).
@@ -105,57 +97,11 @@ export function installAutomationWorkerSpawnHandler(): () => void {
         automationId = run.automationId;
         const attempt = run.workerAttempts.find((item) => item.id === attemptId);
         if (!attempt) return;
-        // Slice 7: stamp the attempt's graph node id into the worker env so the
-        // orchestrator tools (codara_request_next_iteration) can attribute the
-        // calling worker to ONE loom node — letting the pass-level "agent" loop
-        // read only the SINK node's signal in a multi-node wave. Looked up from
-        // the attempt's task loomNodeId; undefined for a pre-graph single-node
-        // loom (the env var is then simply omitted, behaviour unchanged).
-        const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
-        const nodeId = task?.loomNodeId;
-        const shell = await ensureShell();
-        await pty.spawn({
-          id: attemptId,
-          shell,
-          cwd: attempt.cwd,
-          cols: HEADLESS_PTY_COLS,
-          rows: HEADLESS_PTY_ROWS,
-          webContents: null,
-          env: {
-            // Makes codara_ask_user / codara_request_next_iteration auto-fill
-            // their runId from the worker's own environment.
-            SPARK_RUN_ID: runId,
-            SPARK_AUTOMATION_ID: automationId,
-            // Slice 7: which graph node this worker executes (omitted when the
-            // task carries no loomNodeId — pre-graph single-node loom).
-            ...(nodeId ? { SPARK_NODE_ID: nodeId } : {}),
-            // Same flag renderer worker panes set: the shell-integration
-            // script must not echo the autorun command into the TUI.
-            SPARK_NO_SHELL_INTEGRATION: "1",
-          },
-        });
-        // Mirror the renderer TerminalView's first paint so waitForResize
-        // resolves and run-store types into a shell with a real width.
-        pty.resize(attemptId, HEADLESS_PTY_COLS, HEADLESS_PTY_ROWS);
         trackedAttempts.set(attemptId, { runId, automationId });
-        pty.onExit(attemptId, () => {
-          const tracked = trackedAttempts.get(attemptId);
-          trackedAttempts.delete(attemptId);
-          if (!tracked) return;
-          void (async () => {
-            const worker = await describeWorker(tracked.runId, attemptId);
-            if (worker) await emitWorkerPhase("exited", worker);
-          })();
-        });
         const worker = await describeWorker(runId, attemptId);
         if (worker) await emitWorkerPhase("spawned", worker);
       } catch (err) {
-        // Fail fast instead of letting runWorkerSession eat the full 30s
-        // waitForSpawn timeout — the loop driver sees a terminal run promptly.
-        const message = err instanceof Error ? err.message : String(err);
-        await (await getRunStore()).failWorkerAttempt(runId, attemptId, `pty-spawn-failed: ${message}`).catch(
-          () => undefined,
-        );
+        console.warn("[automation-worker] failed to announce structured worker:", err);
       }
     })();
   });
@@ -197,19 +143,22 @@ export async function recoverDirectRuns(): Promise<void> {
       continue;
     }
 
-    // ── Blocked-recovery split (unchanged): a blocked run is owned by ONE
-    // ask_user worker. The split keys off the NEWEST attempt exactly as before:
-    // a report-blocked worker (newest attempt terminal) is answerable — leave it
-    // for the loop driver's answer seam; a worker that died MID-ask (newest
-    // attempt still active, pty gone) left an unconsumable question — unblock and
-    // fall through to the per-attempt table below.
+    // ── Blocked-recovery split. A multi-node wave can append a terminal sibling
+    // AFTER the worker whose ask_user long-poll is still active, so newest-only
+    // inspection can mistake a dead live ask for a report-blocked run. Inspect the
+    // whole active frontier instead: no active attempts means every blocked node
+    // exited with a report and remains answerable; any surviving pty means a live
+    // process still owns the ask (dev hot-reload re-entry); otherwise every active
+    // attempt belongs to the dead prior process and must pass through recovery.
     if (run.status === "blocked") {
-      const newest = run.workerAttempts.at(-1)!;
-      if (!ACTIVE_ATTEMPT_STATUSES.has(newest.status)) continue; // report-blocked: answerable
-      if (pty.exists(newest.id)) continue; // live ask (dev hot-reload re-entry)
-      // Dead mid-ask worker: the table below funnels through finalizeDirectRun,
-      // which refuses blocked runs — unblock first (the same flip agent-socket's
-      // restoreRunning performs).
+      const activeAttempts = run.workerAttempts.filter((attempt) =>
+        ACTIVE_ATTEMPT_STATUSES.has(attempt.status),
+      );
+      if (activeAttempts.length === 0) continue; // report-blocked: answerable
+      if (activeAttempts.some((attempt) => pty.exists(attempt.id))) continue;
+      // Dead mid-ask worker(s): the table below funnels through
+      // finalizeDirectRun, which refuses blocked runs — unblock first (the same
+      // flip agent-socket's restoreRunning performs).
       await unblockRun(run.id);
     }
 
@@ -294,6 +243,33 @@ async function unblockRun(runId: string): Promise<void> {
 // Active attempt statuses also drive which attempts the inventory enumerates as
 // distinct workers (a parallel wave fans out N live attempts at once).
 
+/** A report-blocked node's question belongs to the exact attempt that emitted
+ * it. Current records encode that attempt in clientMessageId; legacy records
+ * fall back conservatively to the node's newest recorded attempt. */
+function terminalAttemptOwnsOpenQuestion(run: RunState, attempt: WorkerAttempt): boolean {
+  if (run.status !== "blocked" || ACTIVE_ATTEMPT_STATUSES.has(attempt.status)) return false;
+  const task = run.workerTasks.find((candidate) => candidate.id === attempt.workerTaskId);
+  const nodeId = task?.loomNodeId;
+  const question = resolveOpenRunQuestionForLoomNode(run, nodeId);
+  if (!question) return false;
+
+  if (nodeId) {
+    const expectedClientMessageId = `loom-question-${run.id}-${nodeId}-${attempt.id}`;
+    if (question.clientMessageId) return question.clientMessageId === expectedClientMessageId;
+    const nodeAttemptIds = run.loomPass?.nodeStates[nodeId]?.attemptIds;
+    if (nodeAttemptIds?.length) return nodeAttemptIds.at(-1) === attempt.id;
+    const taskAttempts = run.workerAttempts.filter(
+      (candidate) => candidate.workerTaskId === attempt.workerTaskId,
+    );
+    return taskAttempts.at(-1)?.id === attempt.id;
+  }
+
+  // Pre-graph direct runs had no node stamp. Their one report-blocked question
+  // stays attached to the newest attempt, preserving the legacy single-worker
+  // inventory behavior without guessing across multiple graph nodes.
+  return run.workerAttempts.at(-1)?.id === attempt.id;
+}
+
 /**
  * Live inventory for the Hub's Workers sub-tab. Slice 7: every LIVE attempt of a
  * non-terminal direct run is enumerated as its OWN worker entry — an N-node
@@ -320,11 +296,26 @@ export async function listActiveAutomationWorkers(): Promise<AutomationWorkerInf
     if (run.executionMode !== "direct" || !run.automationId) continue;
     if (TERMINAL_RUN_STATUSES.has(run.status) || run.status === "paused") continue;
     const job = jobById.get(run.automationId);
-    // Every LIVE attempt is its own worker. A run with no live attempt (between
-    // waves) still surfaces its newest attempt so the Hub doesn't drop the run
-    // mid-pass — single-node parity (one attempt either way).
-    const live = run.workerAttempts.filter((a) => ACTIVE_ATTEMPT_STATUSES.has(a.status));
-    const attempts = live.length > 0 ? live : run.workerAttempts.slice(-1);
+    // Every LIVE attempt is its own worker. Also retain every terminal attempt
+    // that owns an unresolved report-blocked node question: a later sibling may
+    // already have succeeded, but hiding the older owner makes the remaining
+    // question impossible to answer from LiveBoard. When neither category is
+    // present, keep the newest attempt so the Hub doesn't drop the run between
+    // waves (legacy single-node parity).
+    const selectedAttemptIds = new Set<string>();
+    for (const attempt of run.workerAttempts) {
+      if (
+        ACTIVE_ATTEMPT_STATUSES.has(attempt.status) ||
+        terminalAttemptOwnsOpenQuestion(run, attempt)
+      ) {
+        selectedAttemptIds.add(attempt.id);
+      }
+    }
+    if (selectedAttemptIds.size === 0) {
+      const newest = run.workerAttempts.at(-1);
+      if (newest) selectedAttemptIds.add(newest.id);
+    }
+    const attempts = run.workerAttempts.filter((attempt) => selectedAttemptIds.has(attempt.id));
     for (const attempt of attempts) {
       const worker = await describeWorker(run.id, attempt.id, job);
       if (worker) out.push(worker);
@@ -362,21 +353,16 @@ async function describeWorker(
   if (!attempt) return null;
   const task = run.workerTasks.find((t) => t.id === attempt.workerTaskId);
   const engine: LoomEngine = task?.runtimePreference === "codex" ? "codex" : "claude";
-  const blocked = run.status === "blocked";
   const nodeId = task?.loomNodeId;
-  // For a blocked run, prefer THIS node's question (a multi-node wave can block
-  // several nodes, each with a loomNodeId-stamped question); fall back to the
-  // newest unstamped question for a pre-graph single-node run.
-  const question = blocked
-    ? [...run.humanMessages]
-        .reverse()
-        .find(
-          (m) =>
-            m.author === "spark" &&
-            m.kind === "question" &&
-            (nodeId === undefined || m.loomNodeId === undefined || m.loomNodeId === nodeId),
-        )?.message
-    : undefined;
+  // Resolve THIS attempt's still-open question, not merely the run's newest
+  // historical question. Live attempts may own an active-RPC blocker; terminal
+  // attempts render a question only when they are the exact report-blocked owner.
+  const openQuestion =
+    run.status === "blocked" &&
+    (ACTIVE_ATTEMPT_STATUSES.has(attempt.status) || terminalAttemptOwnsOpenQuestion(run, attempt))
+      ? resolveOpenRunQuestionForLoomNode(run, nodeId)
+      : null;
+  const blocked = Boolean(openQuestion);
   let job = ownerJob;
   if (job === undefined) {
     try {
@@ -404,9 +390,13 @@ async function describeWorker(
     startedAt: attempt.startedAt,
     status: attempt.status,
     blocked,
-    question,
+    question: openQuestion?.message,
+    questionMessageId: openQuestion?.id,
     nodeId,
     nodeLabel: nodeLabelFor(job?.graph, nodeId),
+    transport: engine === "claude" ? "agent-sdk" : "app-server",
+    stdoutLogPath: attempt.stdoutLogPath,
+    rawLogPath: attempt.rawLogPath,
   };
 }
 

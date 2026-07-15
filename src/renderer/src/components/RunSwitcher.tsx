@@ -384,24 +384,22 @@ function RunRow({
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
 
-  // The exact one-click-answer sequence used by the chat composer
-  // (ChatConversation's QuestionChoices): record an `answer` human message,
-  // then resume the run. Guarded against double-fire; failures surface inline.
+  // The exact one-click-answer contract used by the chat composer. The main
+  // process validates the linked question and applies its stored resume strategy.
   const submitAnswer = async (option: RunQuestionOption) => {
     if (inFlight.current) return;
     inFlight.current = true;
     setBusy(true);
     setError(null);
     try {
-      await window.spark.orchestration.addRunMessage({
+      if (!question) throw new Error("This question is no longer open.");
+      const answered = await window.spark.orchestration.answerRunQuestion({
         runId: run.id,
+        questionMessageId: question.id,
         clientMessageId: makeId("client-msg"),
-        author: "user",
-        kind: "answer",
         message: option.answer,
       });
-      await window.spark.orchestration.resumeRun({ runId: run.id });
-      onAnswered?.(run);
+      onAnswered?.(answered);
       onClose();
     } catch (err) {
       setError((err as Error).message);

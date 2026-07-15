@@ -62,10 +62,10 @@ export interface RunGraphLayout {
 // ── Node dimensions (exported so the renderers paint at the laid-out size) ──
 export const SPARK_W = 122;
 export const SPARK_H = 98;
-export const STEP_W = 286;
-export const STEP_H = 150;
-export const WORKER_W = 226;
-export const WORKER_H = 66;
+export const STEP_W = 304;
+export const STEP_H = 164;
+export const WORKER_W = 258;
+export const WORKER_H = 82;
 export const END_W = 132;
 export const END_H = 86;
 
@@ -76,7 +76,7 @@ const UNDULATE = 26; // vertical offset that gives the spine its gentle wave
 const TRUNK_INSET = 42; // worker trunk x, measured from the step's left edge
 const RIB_RUN = 18; // horizontal gap from the trunk to a worker's left edge
 const WORKER_TOP_GAP = 32; // gap from the step's bottom edge to the first worker
-const WORKER_GAP = 12; // vertical gap between stacked workers
+const WORKER_GAP = 14; // vertical gap between stacked workers
 const TOP_PAD = 70;
 const BOTTOM_PAD = 80;
 

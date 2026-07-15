@@ -7,6 +7,7 @@ import type {
   PlannedStepAgent,
   RunState,
   RunMessageAttachment,
+  RunQuestionCategory,
   StepKind,
   TaskComplexity,
   WorkerRuntime,
@@ -58,6 +59,9 @@ export interface SparkManagerDecision {
   summary: string;
   question?: string;
   questionOptions?: SparkManagerQuestionOption[];
+  questionCategory?: RunQuestionCategory;
+  questionReason?: string;
+  recommendedOptionId?: string;
   steps: SparkManagerStepDecision[];
   tasks: SparkManagerTaskDecision[];
   /**
@@ -193,7 +197,20 @@ const DEFAULT_STRUCTURED_OUTPUT_FALLBACK_MODEL = "openai/gpt-4o-mini";
 const SPARK_MANAGER_DECISION_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["status", "summary", "question", "questionOptions", "chatReply", "steps", "tasks", "taskComplexity", "terminals"],
+  required: [
+    "status",
+    "summary",
+    "question",
+    "questionOptions",
+    "questionCategory",
+    "questionReason",
+    "recommendedOptionId",
+    "chatReply",
+    "steps",
+    "tasks",
+    "taskComplexity",
+    "terminals",
+  ],
   properties: {
     status: {
       type: "string",
@@ -212,7 +229,7 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
     questionOptions: {
       type: "array",
       description:
-        "Exactly three answer choices when status=ask_user, otherwise []. Mark exactly one recommended=true. The UI adds a fourth custom text answer.",
+        "Exactly three answer choices when status=ask_user and choices are bounded, otherwise []. Mark exactly one recommended=true whenever options are present. The UI adds a custom text answer.",
       items: {
         type: "object",
         additionalProperties: false,
@@ -240,6 +257,28 @@ const SPARK_MANAGER_DECISION_SCHEMA = {
           },
         },
       },
+    },
+    questionCategory: {
+      type: "string",
+      enum: [
+        "",
+        "credentials_access",
+        "destructive_irreversible",
+        "safety_policy",
+        "irreducible_product_scope",
+      ],
+      description:
+        "Required hard-blocker category when status=ask_user; empty otherwise. Reversible technical preferences are not blockers and must not use ask_user.",
+    },
+    questionReason: {
+      type: "string",
+      description:
+        "Why no safe default exists and human judgment is required. Non-empty only for status=ask_user.",
+    },
+    recommendedOptionId: {
+      type: "string",
+      description:
+        "Id of the single recommended option when questionOptions is non-empty; empty otherwise.",
     },
     chatReply: {
       type: "string",
@@ -763,6 +802,13 @@ function formatCompactRunState(
       finishedAt: attempt.finishedAt,
       hasFinalReport: Boolean(attempt.finalReportPath),
     })),
+    assumptions: (run.assumptions ?? []).slice(-8).map((assumption) => ({
+      question: truncate(assumption.question, 500),
+      selectedAnswer: truncate(assumption.selectedAnswer, 800),
+      source: assumption.source,
+      managerMode: assumption.managerMode,
+      signature: assumption.signature,
+    })),
     recentMessages,
   };
 }
@@ -1099,6 +1145,13 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
   const tasks = normalizeTasks(raw.tasks);
   const question = typeof raw.question === "string" ? raw.question.trim() : undefined;
   const questionOptions = normalizeQuestionOptions(raw.questionOptions);
+  const questionCategory = normalizeQuestionCategory(raw.questionCategory);
+  const questionReason =
+    typeof raw.questionReason === "string" ? raw.questionReason.trim() : undefined;
+  const recommendedOptionId =
+    typeof raw.recommendedOptionId === "string"
+      ? raw.recommendedOptionId.trim() || undefined
+      : undefined;
   const chatReply = typeof raw.chatReply === "string" ? raw.chatReply.trim() : undefined;
   const taskComplexity = normalizeTaskComplexity(raw.taskComplexity);
 
@@ -1108,6 +1161,9 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
       summary: normalizeText(raw.summary, "Cora needs user input before creating worker tasks."),
       question: question || "Please clarify the next decision Cora should make.",
       questionOptions,
+      questionCategory,
+      questionReason,
+      recommendedOptionId,
       chatReply,
       steps: [],
       tasks: [],
@@ -1202,6 +1258,9 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
       summary: "Cora could not produce a worker task from the plan.",
       question: question || "Please clarify the first concrete task to run.",
       questionOptions,
+      questionCategory,
+      questionReason,
+      recommendedOptionId,
       chatReply,
       steps: [],
       tasks: [],
@@ -1217,6 +1276,18 @@ function normalizeManagerDecision(raw: Record<string, unknown>, mode: OpenRouter
     tasks,
     taskComplexity,
   };
+}
+
+function normalizeQuestionCategory(value: unknown): RunQuestionCategory | undefined {
+  if (
+    value === "credentials_access" ||
+    value === "destructive_irreversible" ||
+    value === "safety_policy" ||
+    value === "irreducible_product_scope"
+  ) {
+    return value;
+  }
+  return undefined;
 }
 
 function normalizeTaskComplexity(value: unknown): TaskComplexity | undefined {

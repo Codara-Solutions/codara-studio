@@ -66,7 +66,6 @@ import type { CommandId } from "./shortcuts/commands";
 import { isRecording } from "./shortcuts/recording";
 import { usePreferences } from "./preferences/usePreferences";
 import {
-  buildClaudeLaunch,
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
   CURSOR_LAUNCH_COMMAND,
@@ -179,6 +178,11 @@ function collectTerminalPaneIds(node: PaneNode, ids: Set<string>): void {
   collectTerminalPaneIds(node.b, ids);
 }
 
+function countTerminalPanes(node: PaneNode): number {
+  if (node.kind === "leaf") return 1;
+  return countTerminalPanes(node.a) + countTerminalPanes(node.b);
+}
+
 function disposeTerminalPanesInTabs(tabs: Tab[]): void {
   const paneIds = new Set<string>();
   for (const tab of tabs) {
@@ -203,6 +207,18 @@ function disposePersistedWorkspaceTerminalPanes(workspaceId: string): void {
 function findLeafByPaneId(node: PaneNode, paneId: string): TerminalLeaf | null {
   if (node.kind === "leaf") return node.paneId === paneId ? node : null;
   return findLeafByPaneId(node.a, paneId) ?? findLeafByPaneId(node.b, paneId);
+}
+
+function findWorkerLeafByTaskId(node: PaneNode, workerTaskId: string): TerminalLeaf | null {
+  if (node.kind === "leaf") {
+    return node.worker?.workerTaskId === workerTaskId ? node : null;
+  }
+  // Prefer the later/right-most pane because retries are appended to the
+  // worker grid and should open the newest attempt for a task.
+  return (
+    findWorkerLeafByTaskId(node.b, workerTaskId) ??
+    findWorkerLeafByTaskId(node.a, workerTaskId)
+  );
 }
 
 function forEachTerminalLeaf(node: PaneNode, fn: (leaf: TerminalLeaf) => void): void {
@@ -240,6 +256,10 @@ export default function App() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showLeft, setShowLeft] = useState(true);
   const [showRight, setShowRight] = useState(true);
+  const [compactWorkbench, setCompactWorkbench] = useState(
+    () => window.matchMedia("(max-width: 1050px)").matches,
+  );
+  const [compactPanel, setCompactPanel] = useState<"left" | "right" | null>(null);
   // Runs for the currently active workspace, plus the user's selection. Lifted
   // here so the workbench RunsView and Codara chat tab both read from the same
   // source of truth: picking a chat updates the graph, deleting a chat removes
@@ -834,10 +854,24 @@ export default function App() {
     };
   }, [workspaces, activeId, booted]);
 
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 1050px)");
+    const sync = () => {
+      setCompactWorkbench(query.matches);
+      if (!query.matches) setCompactPanel(null);
+    };
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+
+  const leftPanelVisible = compactWorkbench ? compactPanel === "left" : showLeft;
+  const rightPanelVisible = compactWorkbench ? compactPanel === "right" : showRight;
+
   // Close editor when rail hidden — kept for parity with old behaviour.
   useEffect(() => {
-    if (!showLeft) setEditingId(null);
-  }, [showLeft]);
+    if (!leftPanelVisible) setEditingId(null);
+  }, [leftPanelVisible]);
 
   // Comma-joined sorted list of workspace cwds. Used as a stable dep for the
   // setAllowedRoots push so we only re-send when the actual cwd set changes
@@ -1229,6 +1263,13 @@ export default function App() {
       const payload = event.payload as Record<string, unknown> | undefined;
       if (payload?.automationId) return;
 
+      // A useTabs instance only owns the workspace currently loaded into its
+      // live store. A worker event for a background workspace must not create
+      // its pane in whichever project happens to be on screen; the durable
+      // reconciliation effect below will attach it when that workspace is
+      // selected.
+      if (tabsRef.current.tabsWorkspaceId !== event.workspaceId) return;
+
       const ws = workspacesRef.current.find((w) => w.id === event.workspaceId);
       if (!ws) return;
       const workspaceCwd = ws.cwd;
@@ -1248,6 +1289,11 @@ export default function App() {
       } catch {
         /* runtime is decorative */
       }
+
+      // getRun is asynchronous. The user may have switched workspaces while
+      // it was in flight, so repeat the ownership gate immediately before the
+      // tab mutation.
+      if (tabsRef.current.tabsWorkspaceId !== event.workspaceId) return;
 
       const workerMeta = {
         runtime,
@@ -1301,6 +1347,89 @@ export default function App() {
     });
   }, [booted]);
 
+  // Worker panes used to be edge-triggered: the renderer had exactly one
+  // chance to hear `worker_task.envelope_prepared`. If that event landed
+  // before this subscription mounted, during renderer reload, or while the
+  // worker's workspace was in the background, the PTY kept running but the
+  // Workers subtab never appeared. Reconcile the durable run snapshot against
+  // the level-triggered PTY registry so a missed event self-heals. The short
+  // poll remains armed only while this workspace has a non-terminal attempt;
+  // this also closes the small envelope -> PTY-spawn race where the first
+  // existence probe can legitimately return false.
+  useEffect(() => {
+    if (!booted || !activeId) return;
+
+    const workspaceId = activeId;
+    const liveAttempts = runs.flatMap((run) =>
+      run.workerAttempts
+        .filter((attempt) =>
+          ["preparing", "prompt_ready", "launching", "running", "finishing"].includes(
+            attempt.status,
+          ),
+        )
+        .map((attempt) => ({ run, attempt })),
+    );
+    if (liveAttempts.length === 0) return;
+
+    let disposed = false;
+    let reconciling = false;
+    const reconcile = async () => {
+      if (reconciling) return;
+      reconciling = true;
+      try {
+        await Promise.all(
+          liveAttempts.map(async ({ run, attempt }) => {
+            // Loom/direct automation workers have their own durable Workers
+            // surface and must never materialize as chat-owned terminal tabs.
+            if (run.automationId || run.workspaceId !== workspaceId) return;
+
+            const exists = await window.spark.pty.exists(attempt.id).catch(() => false);
+            if (!exists || disposed) return;
+            if (tabsRef.current.tabsWorkspaceId !== workspaceId) return;
+
+            const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
+            const runtime =
+              attempt.runtime === "claude" || attempt.runtime === "codex"
+                ? attempt.runtime
+                : task?.runtimePreference === "claude" || task?.runtimePreference === "codex"
+                  ? task.runtimePreference
+                  : undefined;
+            const snapshotCwd = run.settingsSnapshot?.workspaceCwd;
+            const cwd =
+              attempt.cwd ||
+              (typeof snapshotCwd === "string" ? snapshotCwd : undefined) ||
+              workspacesRef.current.find((workspace) => workspace.id === workspaceId)?.cwd;
+            const tabId = tabsRef.current.ensureWorkerTerminalTab(
+              run.id,
+              cwd,
+              attempt.id,
+              {
+                runtime,
+                runId: run.id,
+                workerTaskId: attempt.workerTaskId,
+                attemptId: attempt.id,
+                source: "spark",
+                state: "running",
+                runtimeState: attempt.runtimeState,
+              },
+              { focus: false },
+            );
+            if (cwd) tabsRef.current.setLeafCwd(tabId, attempt.id, cwd);
+          }),
+        );
+      } finally {
+        reconciling = false;
+      }
+    };
+
+    void reconcile();
+    const interval = window.setInterval(() => void reconcile(), 1_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+    };
+  }, [booted, activeId, runs]);
+
   // ── Terminal-agent notifications (manual claude/codex panes) ──────────────
   //
   // The main-process watcher (terminal-agent-notify.ts) taps the raw pty
@@ -1312,8 +1441,9 @@ export default function App() {
   //      which workspace/tab each lives in (for routing the click back).
   //      Cora-orchestrated worker panes register excluded: run-store events
   //      already alert for those.
-  //   2. The active context — which workspace + tab is on screen, so main
-  //      can apply the "never ping me about the tab I'm watching" rule.
+  //   2. The active context — which workspace + tab + split pane is selected,
+  //      so main can suppress only the terminal that can currently receive
+  //      input (a sibling permission prompt should still get attention).
   //   3. Click navigation — native-notification and toast clicks both land
   //      in focusTerminalTarget, which switches workspace if needed (queue +
   //      replay, same pattern as pendingSpawnTerminalsRef) and then activates
@@ -1650,11 +1780,9 @@ export default function App() {
   );
   useNotifyFocusRouting(navigateToNotifyTarget, booted);
 
-  // Shared by the toast cards and the notification center: resolve a blocked
-  // run's open-question options for inline answers, and decide whether an
-  // answer should resumeRun (loom-owned runs must not — the loop driver's
-  // answer seam consumes the recorded message). runsRef is a stable ref, so
-  // both callbacks stay referentially stable for WindowChrome's memo.
+  // Shared by the toast cards and the notification center: resolve the exact
+  // linked open question for inline answers. Main owns blocker clearing and the
+  // resume strategy, including direct Loom behavior.
   const resolveRunQuestion = useCallback(
     (runId: string) => {
       const run = globalRuns.runsRef.current.find((r) => r.id === runId);
@@ -1666,12 +1794,6 @@ export default function App() {
     },
     [globalRuns.runsRef],
   );
-  const shouldResumeOnAnswer = useCallback(
-    (runId: string) =>
-      !globalRuns.runsRef.current.find((r) => r.id === runId)?.automationId,
-    [globalRuns.runsRef],
-  );
-
   // WorkspaceRail prop callbacks. `setActiveId` / `setEditingId` are stable
   // React setters, so these can carry empty dep arrays and stay referentially
   // stable for the lifetime of the component — which lets the React.memo on
@@ -1696,12 +1818,20 @@ export default function App() {
   // React.memo on WindowChrome can skip re-renders triggered by unrelated
   // App state churn (color edits, orchestration events, run polls).
   const handleToggleLeft = useCallback(() => {
+    if (compactWorkbench) {
+      setCompactPanel((panel) => panel === "left" ? null : "left");
+      return;
+    }
     setShowLeft((v) => !v);
-  }, []);
+  }, [compactWorkbench]);
 
   const handleToggleRight = useCallback(() => {
+    if (compactWorkbench) {
+      setCompactPanel((panel) => panel === "right" ? null : "right");
+      return;
+    }
     setShowRight((v) => !v);
-  }, []);
+  }, [compactWorkbench]);
 
   // Panel resize: snapshot the panel's current width when a drag starts, then
   // translate the pointer delta the ResizeHandle reports into a new width.
@@ -2112,6 +2242,25 @@ export default function App() {
     tabsRef.current.openDiffTab(rel.replace(/\\/g, "/"), false);
   }, []);
 
+  // Result cards use window events so the deeply nested chat renderer stays
+  // reusable and does not need the entire tabs API threaded through it.
+  useEffect(() => {
+    const openFile = (event: Event) => {
+      const path = (event as CustomEvent<{ path?: string }>).detail?.path;
+      if (path) openFileByPath(path);
+    };
+    const openDiff = (event: Event) => {
+      const path = (event as CustomEvent<{ path?: string }>).detail?.path;
+      if (path) handleOpenDiffForPath(path);
+    };
+    window.addEventListener("spark:open-file", openFile);
+    window.addEventListener("spark:open-diff", openDiff);
+    return () => {
+      window.removeEventListener("spark:open-file", openFile);
+      window.removeEventListener("spark:open-diff", openDiff);
+    };
+  }, [handleOpenDiffForPath, openFileByPath]);
+
   // Which diff tab is focused — highlights its ChangeRow in the git panel.
   const activeDiffTarget = useMemo(
     () =>
@@ -2255,28 +2404,14 @@ export default function App() {
   // shell prompt is a place to run things, so the keybind runs the worker
   // there. Touched panes (active build output, half-typed command) still
   // get a fresh sibling pane so the user's work isn't disturbed.
-  // Prepare a worker launch command + a durable resume-pointer factory. For a
-  // Claude launch we mint a session id and force `--session-id`, so the pane can
-  // record its resume pointer synchronously at creation (deterministic transcript
-  // path) instead of relying on fragile post-hoc "newest .jsonl by mtime"
-  // discovery. Codex (no `--session-id`) and Cursor pass through with a null
-  // session; Codex is still captured later by the agent-state hook's discovery.
+  // Interactive worker panes launch exactly the command shown in the UI. The
+  // agent-state hook discovers Claude/Codex session ids after startup and then
+  // persists the resume pointer; a user-created pane must not silently change
+  // `claude --dangerously-skip-permissions` by appending a forced session id.
   const prepareWorkerLaunch = useCallback((autorun: string) => {
-    const claudeLaunch = autorun === CLAUDE_LAUNCH_COMMAND ? buildClaudeLaunch() : null;
     return {
-      command: claudeLaunch?.command ?? autorun,
-      makeSession: (cwd: string | undefined): TerminalAgentSession | null =>
-        claudeLaunch && cwd
-          ? {
-              runtime: "claude" as const,
-              sessionId: claudeLaunch.sessionId,
-              cwd,
-              capturedAt: new Date().toISOString(),
-              // The launch command is about to run; mark the pointer live so a
-              // quit before the poller's first report still restores it.
-              active: true,
-            }
-          : null,
+      command: autorun,
+      makeSession: (_cwd: string | undefined): TerminalAgentSession | null => null,
     };
   }, []);
 
@@ -2432,8 +2567,12 @@ export default function App() {
   );
 
   const openInSparkBrowser = useCallback(
-    (url: string) => {
+    (url: string, options?: { forceNew?: boolean }) => {
       if (!isBrowserUrl(url)) return;
+      if (options?.forceNew) {
+        tabs.newPreviewTab(url);
+        return;
+      }
       const existing = tabs.tabs.find(
         (t) => t.kind === "preview" && (t.url === url || sameOrigin(t.url, url)),
       );
@@ -2449,8 +2588,10 @@ export default function App() {
 
   useEffect(() => {
     const handler = (event: Event) => {
-      const url = (event as CustomEvent<{ url?: unknown }>).detail?.url;
-      if (typeof url === "string") openInSparkBrowser(url);
+      const detail = (event as CustomEvent<{ url?: unknown; forceNew?: unknown }>).detail;
+      if (typeof detail?.url === "string") {
+        openInSparkBrowser(detail.url, { forceNew: detail.forceNew === true });
+      }
     };
     window.addEventListener("spark:open-browser-url", handler);
     return () => window.removeEventListener("spark:open-browser-url", handler);
@@ -2544,11 +2685,11 @@ export default function App() {
         });
       },
       "sidebar.toggleLeft": () => {
-        setShowLeft((visible) => !visible);
+        handleToggleLeft();
         window.dispatchEvent(new CustomEvent("spark:toggle-left-sidebar"));
       },
       "sidebar.toggleRight": () => {
-        setShowRight((visible) => !visible);
+        handleToggleRight();
         window.dispatchEvent(new CustomEvent("spark:toggle-sidebar"));
       },
       "chat.new": () => handleNewChat(),
@@ -2608,7 +2749,9 @@ export default function App() {
         // strand the run's Runs/worker inner strip under no chat panel.
         // closeTab no-ops on chat tabs by design. Everything else closes
         // through the generic path.
-        if (active?.kind === "chat") {
+        if (active?.kind === "terminal" && countTerminalPanes(active.root) > 1) {
+          tabs.closeTerminalPane(active.id, active.activePaneId);
+        } else if (active?.kind === "chat") {
           handleCloseChatTab(active.id);
         } else {
           tabs.closeTab(activeVisibleTabId);
@@ -2672,6 +2815,8 @@ export default function App() {
       handleNewTerminalTab,
       handleNewWorkerTab,
       handleCloseChatTab,
+      handleToggleLeft,
+      handleToggleRight,
       activeVisibleTabId,
       tabs,
       visibleWorkbenchTabs,
@@ -3253,18 +3398,31 @@ export default function App() {
       <UpdateBanner />
       <WindowChrome
         platform={platform}
-        leftOn={showLeft}
-        rightOn={showRight}
+        leftOn={leftPanelVisible}
+        rightOn={rightPanelVisible}
         onToggleLeft={handleToggleLeft}
         onToggleRight={handleToggleRight}
         onOpenSettings={handleOpenSettings}
         notifyNavigateTo={navigateToNotifyTarget}
         notifyResolveQuestion={resolveRunQuestion}
-        notifyShouldResumeOnAnswer={shouldResumeOnAnswer}
       />
 
       <div style={{ flex: 1, display: "flex", minHeight: 0, position: "relative" }}>
-        {showLeft && (
+        {leftPanelVisible && (
+          <div
+            data-responsive-panel="left"
+            style={{
+              display: "flex",
+              minHeight: 0,
+              flex: "0 0 auto",
+              ...(compactWorkbench ? {
+                position: "absolute" as const,
+                inset: "0 auto 0 0",
+                zIndex: 30,
+                boxShadow: "var(--shadow-float)",
+              } : {}),
+            }}
+          >
           <WorkspaceRail
             side="left"
             toneByWorkspaceId={toneByWorkspaceId}
@@ -3309,8 +3467,6 @@ export default function App() {
             activeDiffTarget={activeDiffTarget}
             onOpenDiffForPath={handleOpenDiffForPath}
           />
-        )}
-        {showLeft && (
           <ResizeHandle
             orientation="col"
             accent={activeWorkspace?.color}
@@ -3318,6 +3474,7 @@ export default function App() {
             onResizeStart={handleLeftWidthStart}
             onResize={handleLeftWidthResize}
           />
+          </div>
         )}
 
         <main
@@ -3372,16 +3529,28 @@ export default function App() {
           )}
         </main>
 
-        {showRight && (
-          <ResizeHandle
-            orientation="col"
-            accent={activeWorkspace?.color}
-            ariaLabel="Resize the right panel"
-            onResizeStart={handleRightWidthStart}
-            onResize={handleRightWidthResize}
-          />
-        )}
-        {showRight && (
+        {rightPanelVisible && (
+          <div
+            data-responsive-panel="right"
+            style={{
+              display: "flex",
+              minHeight: 0,
+              flex: "0 0 auto",
+              ...(compactWorkbench ? {
+                position: "absolute" as const,
+                inset: "0 0 0 auto",
+                zIndex: 30,
+                boxShadow: "var(--shadow-float)",
+              } : {}),
+            }}
+          >
+            <ResizeHandle
+              orientation="col"
+              accent={activeWorkspace?.color}
+              ariaLabel="Resize the right panel"
+              onResizeStart={handleRightWidthStart}
+              onResize={handleRightWidthResize}
+            />
           <WorkspaceRail
             side="right"
             toneByWorkspaceId={toneByWorkspaceId}
@@ -3426,6 +3595,7 @@ export default function App() {
             activeDiffTarget={activeDiffTarget}
             onOpenDiffForPath={handleOpenDiffForPath}
           />
+          </div>
         )}
 
         {remoteConnectOpen && (
@@ -3501,7 +3671,6 @@ export default function App() {
         <ToastHost
           navigateTo={navigateToNotifyTarget}
           resolveQuestion={resolveRunQuestion}
-          shouldResumeOnAnswer={shouldResumeOnAnswer}
         />
         {awayDigest && (
           <AwayDigestCard
@@ -4088,6 +4257,23 @@ const Workspace = React.memo(function Workspace({
     (id: TabId) => setActiveTab(id),
     [setActiveTab],
   );
+  const handleOpenWorkerTerminal = useCallback(
+    (workerTaskId: string) => {
+      if (!activeRunId) return;
+      const workerTab = tabs.tabs.find(
+        (tab): tab is TerminalTab =>
+          tab.kind === "terminal" &&
+          tab.scope?.kind === "workers" &&
+          tab.scope.runId === activeRunId,
+      );
+      if (!workerTab) return;
+      const leaf = findWorkerLeafByTaskId(workerTab.root, workerTaskId);
+      if (!leaf) return;
+      setActiveTerminalPane(workerTab.id, leaf.paneId);
+      setActiveTab(workerTab.id);
+    },
+    [activeRunId, tabs.tabs, setActiveTab, setActiveTerminalPane],
+  );
   // When the underlying active tab is run-owned, the top strip should still
   // highlight the chat that owns it so the user keeps a "you're inside this
   // chat" anchor while viewing a worker / Runs / preview.
@@ -4138,38 +4324,9 @@ const Workspace = React.memo(function Workspace({
       direction: Parameters<typeof splitTerminalPane>[2],
       autorun?: string,
     ) => {
-      // Non-Claude split (plain shell / codex / cursor) — unchanged. Codex is
-      // captured post-hoc by the agent-state hook; only Claude gets a forced id.
-      if (autorun !== CLAUDE_LAUNCH_COMMAND) {
-        return splitTerminalPane(tabId, paneId, direction, autorun);
-      }
-      // Claude worker split (pane "+" → Claude picker). Force `--session-id` and
-      // record the resume pointer on the new pane, which inherits the SOURCE
-      // pane's cwd (splitTerminalPane) — so the pointer must use that same cwd to
-      // resolve the transcript bucket on reopen.
-      const launch = buildClaudeLaunch();
-      const sourceTab = tabs.tabs.find((t) => t.id === tabId);
-      const cwd =
-        (sourceTab && sourceTab.kind === "terminal"
-          ? findLeafByPaneId(sourceTab.root, paneId)?.cwd
-          : undefined) ??
-        workspace?.cwd ??
-        undefined;
-      const newPaneId = splitTerminalPane(tabId, paneId, direction, launch.command);
-      if (newPaneId && cwd) {
-        tabs.setLeafAgentSession(tabId, newPaneId, {
-          runtime: "claude",
-          sessionId: launch.sessionId,
-          cwd,
-          capturedAt: new Date().toISOString(),
-          // Same as prepareWorkerLaunch's makeSession: the autorun is about to
-          // run, so the pointer starts live.
-          active: true,
-        });
-      }
-      return newPaneId;
+      return splitTerminalPane(tabId, paneId, direction, autorun);
     },
-    [splitTerminalPane, tabs, workspace?.cwd],
+    [splitTerminalPane],
   );
   const handleMovePane = useCallback(
     (
@@ -4385,6 +4542,7 @@ const Workspace = React.memo(function Workspace({
               runs={runs}
               activeRunId={activeRunId}
               onSelectRun={onSelectRun}
+              onOpenWorkerTerminal={handleOpenWorkerTerminal}
             />
           </Suspense>
         )}

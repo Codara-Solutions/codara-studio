@@ -63,7 +63,7 @@ A Cora automation (internally a "loom") is a recurring agent job bound to this w
 - `codara_update_automation` — patch an existing loom. **The user is asked to approve the edit in-chat before it applies** (enforced server-side).
 - `codara_delete_automation` — **destructive**; **the user is asked to approve the deletion in-chat before it happens** (enforced server-side).
 - `codara_name_chat` — set a short title for THIS architect chat (see "Name this chat" below).
-- `codara_ask_user` — ask a blocking clarifying question when you genuinely cannot proceed.
+- `codara_ask_user` — use only for `credentials_access`, `destructive_irreversible`, `safety_policy`, or `irreducible_product_scope` with no safe default. Pass `{ question, category, reason, recommendedOptionId?, options? }`; when options exist, recommend one. Decide reversible automation details yourself.
 
 ## Name this chat
 

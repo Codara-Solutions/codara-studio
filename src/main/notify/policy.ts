@@ -35,6 +35,7 @@ const COMPLETION_KINDS: ReadonlySet<NotifyKind> = new Set([
   "run.complete",
   "run.failed",
   "terminal.agent.done",
+  "terminal.agent.failed",
 ]);
 
 export interface PolicyState {
@@ -52,7 +53,7 @@ export function createPolicyState(): PolicyState {
 
 export interface PolicyContext {
   // The user is focused on the exact surface that raised the event (the
-  // run's chat / the pane's tab). Computed by the caller from the attention
+  // run's chat / the exact selected terminal pane). Computed by the caller from the attention
   // tracker; always false for automation events.
   watching: boolean;
   // Do Not Disturb preference: mute delivery, still record unread.
@@ -90,6 +91,13 @@ export function decide(
 
   state.lastAlertedKind.set(sourceKey, kind);
   if (COMPLETION_KINDS.has(kind)) state.completedSources.add(sourceKey);
+
+  // Manual-terminal alerts are transient attention cues, not durable run
+  // history. If the user is already operating that exact pane, suppress them
+  // without adding read noise to the notification center.
+  if (ctx.watching && kind.startsWith("terminal.agent.")) {
+    return { deliver: false, record: false, read: true, reason: "watching" };
+  }
 
   // Watching suppresses everything except a run asking for the user —
   // rule 1 fires even on-screen so a blocked run is never missed.

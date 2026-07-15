@@ -23,7 +23,7 @@
 // surfaces a clean error if no main window / no renderer is available. All
 // op semantics live in the renderer module.
 
-import { BrowserWindow, ipcMain } from "electron";
+import { BrowserWindow, ipcMain, type WebContents } from "electron";
 import { randomBytes } from "node:crypto";
 
 export type PreviewOpName =
@@ -103,10 +103,13 @@ export async function requestPreviewOp<T = unknown>(
       "No Codara window is open. Open Codara and a preview tab before calling preview tools.",
     );
   }
-  if (win.webContents.isDestroyed() || win.webContents.isLoading()) {
-    // wait briefly for the renderer to be ready
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
-  }
+  if (win.webContents.isDestroyed()) throw new Error("The Codara window closed before the preview request could start.");
+  // The agent-socket handshake is written before the renderer bundle has
+  // necessarily installed previewBridge.onRequest. Sending during that gap
+  // loses the one-shot IPC message and used to produce a misleading 30-second
+  // timeout. did-finish-load happens after the renderer module (and its bridge
+  // registration) has evaluated, so it is the durable readiness boundary.
+  await waitForRendererLoad(win.webContents);
 
   const reqId = randomBytes(8).toString("hex");
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -129,6 +132,40 @@ export async function requestPreviewOp<T = unknown>(
       clearTimeout(timer);
       reject(err instanceof Error ? err : new Error(String(err)));
     }
+  });
+}
+
+async function waitForRendererLoad(webContents: WebContents): Promise<void> {
+  if (!webContents.isLoading()) return;
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      webContents.removeListener("did-finish-load", ready);
+      webContents.removeListener("destroyed", destroyed);
+      webContents.removeListener("render-process-gone", gone);
+    };
+    const ready = () => {
+      cleanup();
+      resolve();
+    };
+    const destroyed = () => {
+      cleanup();
+      reject(new Error("The Codara window closed while the preview bridge was loading."));
+    };
+    const gone = () => {
+      cleanup();
+      reject(new Error("The Codara renderer exited while the preview bridge was loading."));
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("Codara's renderer did not become ready for preview requests within 10 seconds."));
+    }, 10_000);
+    webContents.once("did-finish-load", ready);
+    webContents.once("destroyed", destroyed);
+    webContents.once("render-process-gone", gone);
+    // Close the race where loading ended between the initial check and the
+    // listener registration.
+    if (!webContents.isLoading()) ready();
   });
 }
 

@@ -1,5 +1,12 @@
 import type { SearchAddon } from "@xterm/addon-search";
-import { forwardRef, useImperativeHandle, useRef } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import type { RuntimeState, ShellInfo } from "@shared/types";
 import {
   useTerminalSession,
@@ -23,13 +30,24 @@ export interface TerminalPaneHandle {
   getSelection: () => string | null;
 }
 
+// Codara's intro is renderer-only: never write it into xterm or the PTY. That
+// keeps shell cursor state, SSH sessions, agent TUIs, and scrollback untouched.
+const CODARA_TERMINAL_INTRO = String.raw` ██████╗ ██████╗ ██████╗  █████╗ ██████╗  █████╗
+██╔════╝██╔═══██╗██╔══██╗██╔══██╗██╔══██╗██╔══██╗
+██║     ██║   ██║██║  ██║███████║██████╔╝███████║
+██║     ██║   ██║██║  ██║██╔══██║██╔══██╗██╔══██║
+╚██████╗╚██████╔╝██████╔╝██║  ██║██║  ██║██║  ██║
+ ╚═════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝`;
+const introShownSessions = new Set<string>();
+const INTRO_HOLD_MS = 1_800;
+const INTRO_FADE_MS = 400;
+
 interface Props {
   sessionId: string;
   shell: ShellInfo;
   visible: boolean;
   scrollbackLineLimit: number;
   initialCwd?: string;
-  initialScrollback?: string;
   initialCommand?: string;
   extraEnv?: Record<string, string>;
   // Mirror-pane mode. When true the xterm attaches to the PTY's data stream
@@ -58,6 +76,9 @@ interface Props {
   // funnel a long stream through the capped hidden buffer. See the option's
   // WHY-comment in useTerminalSession.ts.
   writeWhileHidden?: boolean;
+  // Decorative renderer-only intro for ordinary Codara shell panes. Other
+  // terminal hosts omit it so worker/backend/mirror TUIs stay unobstructed.
+  showCodaraIntro?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;
   onCwd?: (cwd: string) => void;
@@ -94,13 +115,13 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       visible,
       scrollbackLineLimit,
       initialCwd,
-      initialScrollback,
       initialCommand,
       extraEnv,
       readOnly,
       inputBlocked,
       rawTailReattach,
       writeWhileHidden,
+      showCodaraIntro = false,
       onSearchReady,
       onExit,
       onCwd,
@@ -119,6 +140,49 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
     ref,
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
+    const introEligible =
+      showCodaraIntro &&
+      !readOnly &&
+      !inputBlocked &&
+      !rawTailReattach &&
+      !writeWhileHidden &&
+      !initialCommand;
+    const [introState, setIntroState] = useState<"hidden" | "visible" | "fading">(
+      "hidden",
+    );
+    const showIntro = useCallback(() => {
+      if (introEligible) setIntroState("visible");
+    }, [introEligible]);
+    const dismissIntro = useCallback(() => {
+      setIntroState((current) => (current === "visible" ? "fading" : current));
+    }, []);
+
+    useEffect(() => {
+      if (!introEligible) setIntroState("hidden");
+    }, [introEligible]);
+
+    useEffect(() => {
+      if (!visible || !introEligible || introShownSessions.has(sessionId)) return;
+      introShownSessions.add(sessionId);
+      setIntroState("visible");
+    }, [introEligible, sessionId, visible]);
+
+    useEffect(() => {
+      if (introState !== "visible") return;
+      const fadeTimer = window.setTimeout(() => setIntroState("fading"), INTRO_HOLD_MS);
+      return () => window.clearTimeout(fadeTimer);
+    }, [introState]);
+
+    useEffect(() => {
+      if (introState !== "fading") return;
+      const hideTimer = window.setTimeout(() => setIntroState("hidden"), INTRO_FADE_MS);
+      return () => window.clearTimeout(hideTimer);
+    }, [introState]);
+
+    const handleUserInput = useCallback(() => {
+      dismissIntro();
+      onUserInput?.();
+    }, [dismissIntro, onUserInput]);
 
     const session = useTerminalSession({
       container: containerRef,
@@ -127,7 +191,6 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       shell,
       scrollbackLineLimit,
       initialCwd,
-      initialScrollback,
       initialCommand,
       extraEnv,
       readOnly,
@@ -140,7 +203,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onDetectedLocalUrl,
       onSparkOpen,
       onActivity,
-      onUserInput,
+      onClear: showIntro,
+      onUserInput: handleUserInput,
       onAgentState,
       onRuntimeState,
       agentSession,
@@ -163,26 +227,51 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
 
     return (
       <div
-        ref={containerRef}
-        className="xterm-host"
+        className="codara-terminal-session"
         style={{
           display: "flex",
           flex: 1,
           alignSelf: "stretch",
+          position: "relative",
           width: "100%",
           height: "100%",
           minWidth: 0,
           minHeight: 0,
+          overflow: "hidden",
           visibility: visible ? "visible" : "hidden",
           pointerEvents: visible ? "auto" : "none",
         }}
-        onMouseDown={() => {
-          // Defer to the next microtask so xterm's own click-to-position
-          // selection logic runs first. Without this, the focus call
-          // collapses the click into a single-cell selection.
-          queueMicrotask(() => session.focus());
-        }}
-      />
+      >
+        <div
+          ref={containerRef}
+          className="xterm-host"
+          style={{
+            display: "flex",
+            flex: 1,
+            alignSelf: "stretch",
+            width: "100%",
+            height: "100%",
+            minWidth: 0,
+            minHeight: 0,
+          }}
+          onMouseDown={() => {
+            dismissIntro();
+            // Defer to the next microtask so xterm's own click-to-position
+            // selection logic runs first. Without this, the focus call
+            // collapses the click into a single-cell selection.
+            queueMicrotask(() => session.focus());
+          }}
+        />
+        {introState !== "hidden" ? (
+          <pre
+            aria-hidden="true"
+            className={`codara-terminal-intro${introState === "fading" ? " is-fading" : ""}`}
+            data-testid="codara-terminal-intro"
+          >
+            {CODARA_TERMINAL_INTRO}
+          </pre>
+        ) : null}
+      </div>
     );
   },
 );

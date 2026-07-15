@@ -19,6 +19,7 @@ export function buildCodexManagerArgs(
   chat: CodexManagerLaunchConfig,
   promptPath: string,
   sparkHomeDir?: string,
+  runId?: string,
 ): string[] {
   const args: string[] = [];
   if (chat.sessionUuid) {
@@ -51,6 +52,13 @@ export function buildCodexManagerArgs(
   if (sparkHomeDir) {
     const escapedHome = sparkHomeDir.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
     args.push("-c", `mcp_servers.codara-studio.env.SPARK_HOME_DIR="${escapedHome}"`);
+  }
+  // The MCP process receives an explicit env block. Do not rely on it
+  // inheriting the manager process' SPARK_RUN_ID: Agent SDK / app-server
+  // transports may replace that environment rather than merge it.
+  if (runId) {
+    const escapedRunId = runId.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    args.push("-c", `mcp_servers.codara-studio.env.SPARK_RUN_ID="${escapedRunId}"`);
   }
 
   return args;

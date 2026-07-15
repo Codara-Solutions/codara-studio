@@ -23,6 +23,7 @@ export const NOTIFY_KIND_META: Record<NotifyKind, NotifyKindMeta> = {
   "run.failed": { label: "Run failed", tone: "danger", glyph: "cross" },
   "terminal.agent.needs-input": { label: "Agent needs input", tone: "warning", glyph: "alert" },
   "terminal.agent.done": { label: "Agent finished", tone: "success", glyph: "check" },
+  "terminal.agent.failed": { label: "Agent failed", tone: "danger", glyph: "cross" },
   // The automation family shares the "loop" glyph and the violet accent (see
   // accentVar) so it reads as its own group. The tone still drives the sound
   // and the a11y role; the title text ("Automation — finished/failed/needs
@@ -48,6 +49,8 @@ const COMPLETION_KINDS: ReadonlySet<NotifyKind> = new Set<NotifyKind>([
   "automation.failed",
   "run.complete",
   "run.failed",
+  "terminal.agent.done",
+  "terminal.agent.failed",
 ]);
 
 export function isCompletionKind(kind: NotifyKind): boolean {

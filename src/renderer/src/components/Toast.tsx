@@ -38,17 +38,11 @@ export interface ToastHostProps {
   // carries the runId — the options live in the run state, so the App
   // resolves them in the renderer (global runs feed + findOpenQuestion).
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
-  // Whether answering should also resumeRun (default true). Loom-owned runs
-  // must NOT be resumed from here: resume re-runs the direct-run finalizer
-  // against the already-blocked report (re-asking the question), while the
-  // loop driver's answer seam consumes the recorded message on its own.
-  shouldResumeOnAnswer?: (runId: string) => boolean;
 }
 
 export default function ToastHost({
   navigateTo,
   resolveQuestion,
-  shouldResumeOnAnswer,
 }: ToastHostProps) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   // One pending dismissal timer per on-screen toast, keyed by id. Held in a
@@ -146,7 +140,6 @@ export default function ToastHost({
           }
           navigateTo={navigateTo}
           resolveQuestion={resolveQuestion}
-          shouldResumeOnAnswer={shouldResumeOnAnswer}
         />
       ))}
     </div>
@@ -159,14 +152,12 @@ function ToastCard({
   onClose,
   navigateTo,
   resolveQuestion,
-  shouldResumeOnAnswer,
 }: {
   toast: Toast;
   depth: number;
   onClose: () => void;
   navigateTo?: NavigateTo;
   resolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
-  shouldResumeOnAnswer?: (runId: string) => boolean;
 }) {
   // In-flight guard so a fast double-click on an answer button (or two
   // different options) only fires one addRunMessage+resumeRun sequence.
@@ -186,9 +177,7 @@ function ToastCard({
   // Only "run.blocked" events carry a pending question, and the runId lives
   // on the navigation target; everything else renders no answer buttons.
   // A blocked run OR a blocked loom iteration both carry an answerable question
-  // on their runId — surface the same one-click answers for each. (Loom runs
-  // route their answer through the loop driver's seam, not resumeRun; the
-  // App-provided shouldResumeOnAnswer handles that distinction.)
+  // on their runId. The main-process blocker contract preserves the Loom seam.
   const questionRunId =
     toast.kind === "run.blocked" && toast.target.type === "run"
       ? toast.target.runId
@@ -205,11 +194,11 @@ function ToastCard({
     if (!questionRunId || answering.current) return;
     answering.current = true;
     try {
+      if (!resolvedQuestion) throw new Error("This question is no longer open.");
       await answerRunQuestion(
         questionRunId,
         option,
-        shouldResumeOnAnswer?.(questionRunId) ?? true,
-        resolvedQuestion?.questionMessageId,
+        resolvedQuestion.questionMessageId,
       );
       // Answering resolves the question in place — that's acting on it, so
       // drop the center entry too (same rationale as the card click-through).

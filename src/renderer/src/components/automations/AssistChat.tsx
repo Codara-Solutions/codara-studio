@@ -4,18 +4,10 @@ import type {
   AgentRuntimeDiagnostic,
   RunState,
 } from "@shared/types";
-import { backendPtySessionId } from "@shared/backend-pty";
 import ChatConversation from "../chat/ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "../chat/ChatComposer";
-import { BACKEND_TERMINAL_SHELL } from "../chat/ChatPanel";
-import { TerminalPane } from "../Terminal/TerminalPane";
 import { describeRunStatus, statusToneColor } from "../chat/timeline";
 import { CloseIcon, HistoryIcon, PlusIcon } from "../icons";
-
-// Chat vs. the raw backend Claude/Codex TUI, toggled in the header. Local to
-// this panel (mirrors ChatPanel's own ChatView) — the assist panel is not a
-// chat tab, so it never joins App's hoisted terminal-view machinery.
-type ChatView = "chat" | "terminal";
 
 // Stable short id for an assist chat: the tail segment of the run id, so
 // "run-mr7vuzog-1l3h2v" reads as "#1l3h2v". Run ids are `run-<time>-<rand>`, and
@@ -84,9 +76,6 @@ interface Props {
   // the panel opens on the draft composer. The user can still switch sessions
   // afterward.
   focusRunId?: string;
-  // Scrollback cap for the backend-terminal xterm (threaded from settings via
-  // AutomationsHub, same value ChatPanel's terminal uses).
-  terminalScrollbackLineLimit: number;
   onClose: () => void;
 }
 
@@ -109,7 +98,6 @@ export default function AssistChat({
   runtimes,
   active,
   focusRunId,
-  terminalScrollbackLineLimit,
   onClose,
 }: Props): React.ReactElement {
   // null = not loaded yet; afterwards always the latest fetched list, newest
@@ -174,80 +162,6 @@ export default function AssistChat({
     [assistRuns, selectedId],
   );
 
-  // ── Backend terminal view ────────────────────────────────────────────────
-  // Assist runs are ordinary runs with a claude/codex chat backend, so their
-  // CLI TUI lives in a headless PTY at backendPtySessionId(run.id, backend) —
-  // the very same one a normal chat surfaces via its Chat | Terminal toggle. We
-  // host it INLINE here rather than through App's hoisted ChatBackendTerminalStack
-  // because that layer decides WHEN to reveal a backend terminal purely from
-  // chat-tab identity (activeChatTabId / activeRunId), and an assist run has no
-  // chat tab — so the hoisted layer could never actually show it. Crucially, the
-  // hoisted stack would still *attach* a hidden warm xterm to this PTY anyway
-  // (its candidate set is keyed on run status, not chat tabs), and a SECOND
-  // canonical xterm on one session fights over main's single renderer sink and
-  // SIGWINCHes the live Ink TUI. So assist runs (chatMode "automation") are
-  // excluded from the hoisted stack's candidates (see ChatBackendTerminalStack),
-  // leaving THIS inline pane the sole attacher — which is why it mirrors the
-  // hoisted pane's proven props (inputBlocked + writeWhileHidden + rawTailReattach)
-  // rather than ChatPanel's thinner legacy inline set. OpenRouter chats have no
-  // PTY, so backendSessionId is null and the toggle never shows.
-  const backendSessionId = activeRun
-    ? backendPtySessionId(activeRun.id, activeRun.chatBackend)
-    : null;
-  const [chatView, setChatView] = useState<ChatView>("chat");
-  // The session id whose PTY the poll last CONFIRMED alive (null = none). We
-  // store the id rather than a bare boolean and DERIVE existence by matching it
-  // against the CURRENT backendSessionId: switching sessions or backends (a new
-  // id) therefore reads as "not confirmed" on the very first render — never a
-  // stale-true window that could mount the re-keyed pane against a not-yet-
-  // spawned session. Matches the hoisted stack's per-session immunity.
-  const [ptyAliveSessionId, setPtyAliveSessionId] = useState<string | null>(null);
-  const backendPtyExists = backendSessionId !== null && ptyAliveSessionId === backendSessionId;
-
-  // A fresh/switched SESSION starts on the chat view.
-  useEffect(() => {
-    setChatView("chat");
-  }, [activeRun?.id]);
-
-  // Poll whether the backend PTY exists so the header toggle only appears once
-  // the CLI session has actually spawned it — mounting TerminalPane earlier
-  // would try to renderer-spawn the placeholder "noop" shell and fail. Gated on
-  // `active` so a backgrounded Automations tab doesn't run a perpetual 1s
-  // pty.exists probe; while inactive the confirmed id is KEPT (not cleared), so
-  // tabbing away and back never drops a terminal the user was viewing. A THROWN
-  // probe (transient IPC hiccup) is ignored — only a definitive exists=false
-  // (main's Map.has miss) for THIS session clears it, so a blip can't eject the
-  // user from the terminal view.
-  useEffect(() => {
-    if (!backendSessionId || !active) return;
-    let disposed = false;
-    const check = async (): Promise<void> => {
-      try {
-        const exists = await window.spark.pty.exists(backendSessionId);
-        if (disposed) return;
-        setPtyAliveSessionId((prev) =>
-          exists ? backendSessionId : prev === backendSessionId ? null : prev,
-        );
-      } catch {
-        /* transient IPC failure — keep the last confirmed id, don't flip */
-      }
-    };
-    void check();
-    const interval = window.setInterval(check, 1000);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-    };
-  }, [active, backendSessionId]);
-
-  // If the PTY never existed or has died (OpenRouter run, backend switch, or a
-  // Codara restart before the next turn re-spawns it), fall back to the chat
-  // view so the user is never stranded on a terminal pane whose toggle — gated
-  // on backendPtyExists — has just disappeared.
-  useEffect(() => {
-    if (chatView === "terminal" && !backendPtyExists) setChatView("chat");
-  }, [chatView, backendPtyExists]);
-
   // Merge a fresh snapshot into the local list without waiting for the next
   // listRuns round-trip (used right after createRun/startAutopilot so the
   // conversation appears the instant the IPC resolves).
@@ -301,25 +215,16 @@ export default function AssistChat({
     [workspaceId, workspaceName, cwd, applySnapshot],
   );
 
-  // Stop = "give me my message back", byte-for-byte the chat tab's behavior:
-  // roll back to the pre-message checkpoint, interrupt the backend, and
-  // prefill the composer with the recovered text. Only this panel's composer
-  // is mounted while the Automations tab is active (ChatStack renders no
-  // hidden chat panels), so the window-level prefill event lands here.
+  // Stop is intentionally non-destructive: interrupt execution immediately
+  // but preserve the automation conversation and every completed change.
+  // Rewind remains an explicit Undo action, never a side effect of Stop.
   const forcePause = useCallback(() => {
     if (!activeRun) return;
     setError(null);
     void (async () => {
       try {
-        const result = await window.spark.orchestration.stopAndUndoPending(activeRun.id);
-        applySnapshot(result.run);
-        if (result.restoredText != null && result.restoredText.length > 0) {
-          window.dispatchEvent(
-            new CustomEvent("spark:prefill-composer", {
-              detail: { text: result.restoredText, replace: true },
-            }),
-          );
-        }
+        const run = await window.spark.orchestration.forcePauseRun(activeRun.id);
+        applySnapshot(run);
       } catch (err) {
         setError((err as Error).message);
       }
@@ -388,9 +293,26 @@ export default function AssistChat({
           background: "var(--bg)",
         }}
       >
+        <div
+          aria-hidden
+          style={{
+            width: 30,
+            height: 30,
+            borderRadius: 9,
+            display: "grid",
+            placeItems: "center",
+            color: "var(--accent)",
+            background: "color-mix(in oklch, var(--accent) 11%, var(--panel))",
+            border: "1px solid color-mix(in oklch, var(--accent) 28%, var(--rule-soft))",
+            boxShadow: "0 0 18px color-mix(in oklch, var(--accent) 10%, transparent)",
+            flex: "0 0 30px",
+          }}
+        >
+          ✦
+        </div>
         <div style={{ flex: "0 1 auto", minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
           <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)", whiteSpace: "nowrap" }}>
-            Create with Cora
+            Cora · Automation architect
           </span>
           <span
             className="spark-mono"
@@ -402,7 +324,7 @@ export default function AssistChat({
               textOverflow: "ellipsis",
             }}
           >
-            {activeRun ? <SessionStatusLine run={activeRun} /> : "New architect session"}
+            {activeRun ? <SessionStatusLine run={activeRun} /> : "Describe a workflow and Cora will design it with you"}
           </span>
         </div>
         {/* + lives beside the title (it acts on "this session" context); history
@@ -418,13 +340,6 @@ export default function AssistChat({
           <PlusIcon size={13} />
         </button>
         <span style={{ flex: 1 }} />
-        {/* Chat | Terminal — see the raw backend Claude/Codex TUI behind this
-            chat, just like a normal Cora chat. Sits left of the history icon.
-            Only shown once the run's PTY actually exists; falls back to chat
-            when it dies (see the terminal-state effects above). */}
-        {activeRun && backendSessionId && backendPtyExists && (
-          <ChatViewToggle view={chatView} onChange={setChatView} />
-        )}
         <AssistHistoryButton
           runs={assistRuns ?? []}
           activeRunId={activeRun?.id ?? null}
@@ -484,77 +399,8 @@ export default function AssistChat({
       )}
 
       {activeRun ? (
-        // Chat and (when the backend has a PTY) Terminal stack absolutely and
-        // switch by VISIBILITY — never by unmount — so ChatConversation keeps
-        // its streaming state and the xterm never remounts on a flip. Same
-        // visibility-stacking + terminal-safety contract ChatPanel uses; the
-        // inline-vs-hoisted rationale lives in the terminal-state block above.
-        <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              flexDirection: "column",
-              visibility: chatView === "chat" ? "visible" : "hidden",
-              pointerEvents: chatView === "chat" ? "auto" : "none",
-            }}
-          >
-            {/* Keyed on the run so switching sessions remounts the stream cleanly
-                (same contract as ChatPanel's `conversation:${id}` key). */}
-            <ChatConversation key={`assist-conversation:${activeRun.id}`} run={activeRun} />
-          </div>
-          {backendSessionId && (
-            <div
-              style={{
-                position: "absolute",
-                inset: 0,
-                display: "flex",
-                flexDirection: "column",
-                padding: 4,
-                background: "var(--bg)",
-                visibility: chatView === "terminal" ? "visible" : "hidden",
-                pointerEvents: chatView === "terminal" ? "auto" : "none",
-              }}
-            >
-              {backendPtyExists ? (
-                <TerminalPane
-                  // Keyed on sessionId so a backend switch (which changes the id)
-                  // remounts the pane cleanly against the new PTY.
-                  key={`assist-backend-term:${backendSessionId}`}
-                  sessionId={backendSessionId}
-                  shell={BACKEND_TERMINAL_SHELL}
-                  // Gated on `active` too: while the Automations tab is
-                  // backgrounded the pane isn't truly on screen, so it must not
-                  // count itself visible (which would fire resizes/flushes) — it
-                  // stays warm via writeWhileHidden instead.
-                  visible={active && chatView === "terminal"}
-                  scrollbackLineLimit={terminalScrollbackLineLimit}
-                  initialCwd={cwd}
-                  // inputBlocked (not readOnly): no keystrokes forwarded so the
-                  // user can't collide with the backend's bracketed paste + submit
-                  // Enter, but pty.resize IS allowed so the Ink REPL paints into
-                  // the real visible cols/rows.
-                  inputBlocked
-                  // writeWhileHidden: this pane eager-attaches the moment the PTY
-                  // exists — usually while the user is still on the Chat view — so
-                  // it must paint into xterm even while hidden. Without it, a
-                  // long-running session's first Terminal open would show the same
-                  // blank frame the hoisted stack exists to prevent. Matches the
-                  // hoisted PersistentBackendTerminal, whose role this pane takes
-                  // over for assist runs.
-                  writeWhileHidden
-                  // rawTailReattach: the residual genuine mount/unmount (first
-                  // attach after the PTY appears; teardown on session death)
-                  // replays main's RAW pty tail so attaching onto a live Ink TUI
-                  // renders cleanly (see useTerminalSession.ts).
-                  rawTailReattach
-                />
-              ) : (
-                <BackendTerminalPlaceholder backend={activeRun.chatBackend ?? null} />
-              )}
-            </div>
-          )}
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <ChatConversation key={`assist-conversation:${activeRun.id}`} run={activeRun} />
         </div>
       ) : (
         <AssistWelcome loading={loading} />
@@ -650,63 +496,6 @@ function AssistWelcome({ loading }: { loading: boolean }): React.ReactElement {
           </div>
         </>
       )}
-    </div>
-  );
-}
-
-// Compact Chat | Terminal segmented toggle for the header — reuses the shared
-// .spark-segmented control so it sits cleanly among the icon buttons.
-function ChatViewToggle({
-  view,
-  onChange,
-}: {
-  view: ChatView;
-  onChange: (view: ChatView) => void;
-}): React.ReactElement {
-  return (
-    <div
-      className="spark-segmented"
-      role="tablist"
-      aria-label="Chat or terminal view"
-      style={{ marginRight: 4 }}
-    >
-      <button
-        type="button"
-        role="tab"
-        aria-selected={view === "chat"}
-        className={`spark-segmented-item${view === "chat" ? " is-selected" : ""}`}
-        onClick={() => onChange("chat")}
-        title="The Cora conversation"
-      >
-        Chat
-      </button>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={view === "terminal"}
-        className={`spark-segmented-item${view === "terminal" ? " is-selected" : ""}`}
-        onClick={() => onChange("terminal")}
-        title="Live xterm attached to the backend Claude/Codex PTY for this chat — read-only."
-      >
-        Terminal
-      </button>
-    </div>
-  );
-}
-
-// Shown inside the Terminal view before the CLI session has spawned its PTY
-// (fresh chat, or after a Codara restart until the next turn re-spawns it). A
-// local twin of ChatPanel's BackendTerminalPlaceholder so this panel stays
-// self-contained.
-function BackendTerminalPlaceholder({ backend }: { backend: string | null }): React.ReactElement {
-  const label = backend === "codex" ? "Codex" : "Claude Code";
-  return (
-    <div className="spark-empty" style={{ flex: 1, minHeight: 0 }}>
-      <div className="spark-eyebrow">Terminal idle</div>
-      <div className="spark-empty__body">
-        {label} hasn't been spawned for this chat yet. Send a message to start the session — its
-        terminal will appear here.
-      </div>
     </div>
   );
 }

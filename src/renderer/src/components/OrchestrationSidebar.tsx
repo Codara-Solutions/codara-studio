@@ -205,24 +205,11 @@ export default function OrchestrationSidebar({
   const forcePauseRun = useCallback(() => {
     if (!activeRun) return;
     void mutate(async () => {
-      // Stop button = "give me my message back": rolls back to the checkpoint
-      // before the latest user-message AND interrupts CC/Codex AND kills
-      // workers AND prefills the composer with the original text so the user
-      // can edit and resubmit. Falls back to plain force-pause if there's no
-      // user-message checkpoint yet (e.g. a Stop fired in the first few ms of
-      // a fresh run before checkpoint creation completed).
-      const result = await window.spark.orchestration.stopAndUndoPending(activeRun.id);
-      // select:true re-selects the run and focuses its chat tab, so the
-      // prefilled "give me my message back" text lands in a VISIBLE composer
-      // even if a preview/terminal had stolen the active tab during the run.
-      onRunSnapshot(result.run, { select: true });
-      if (result.restoredText != null && result.restoredText.length > 0) {
-        window.dispatchEvent(
-          new CustomEvent("spark:prefill-composer", {
-            detail: { text: result.restoredText, replace: true },
-          }),
-        );
-      }
+      // Stop means stop in place: interrupt the active manager, kill live
+      // workers, and preserve every chat turn and completed workspace change.
+      // Conversation/code rewind belongs exclusively to the explicit Undo UI.
+      const run = await window.spark.orchestration.forcePauseRun(activeRun.id);
+      onRunSnapshot(run, { select: true });
     });
   }, [activeRun, mutate, onRunSnapshot]);
 

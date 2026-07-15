@@ -9,12 +9,14 @@
 
 import { basename } from "node:path";
 import type {
+  RunResultManifest,
   RunState,
   WorkerArtifactPaths,
   WorkerAttempt,
   WorkerReport,
 } from "@shared/types";
 import { readWorkerReport } from "./worker-report";
+import { renderRunResultManifestSummary } from "./result-manifest";
 
 type WorkerArtifactPathsResolver = (
   runId: string,
@@ -36,7 +38,9 @@ interface CompletionReportSummary {
 export async function buildCompletionSummaryMessage(
   run: RunState,
   workerArtifactPaths: WorkerArtifactPathsResolver,
+  manifest?: RunResultManifest,
 ): Promise<string> {
+  if (manifest) return renderRunResultManifestSummary(manifest);
   const reports = await collectCompletionReportSummaries(run, workerArtifactPaths);
   const lines: string[] = [COMPLETION_SUMMARY_PREFIX, ""];
 

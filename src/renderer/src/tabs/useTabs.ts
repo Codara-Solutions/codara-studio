@@ -62,8 +62,9 @@ const DRAFT_CHAT_PREFIX = "draft:";
 // by the App sync effect — editor/terminal/preview tabs survive. v4
 // introduced chat-scoped Runs tabs. v3 dropped the removed "project"/CRM
 // tab kind. v2 introduced the recursive PaneNode tree on TerminalTab.
-// v6: terminal leaves may carry a durable `agentSession` pointer (Claude/Codex
-// session id) that survives restart so a reopened pane can `--resume`.
+// v6 introduced terminal agent session pointers. They remain readable for
+// compatibility, but cold hydration now strips all terminal process state so a
+// full app relaunch always starts fresh shells while preserving the layout.
 const TAB_VERSION = 6;
 const MAX_TERMINAL_SCROLLBACK_CHARS = 40_000;
 
@@ -235,12 +236,10 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
     if (!parsed || parsed.v !== TAB_VERSION || !Array.isArray(parsed.tabs)) {
       return null;
     }
-    // Drop terminal-worker metadata from persisted layouts. Worker chips are
-    // live-session state: manual Claude/Codex chips disappear as soon as the
-    // agent returns to the shell, and Cora-owned "done" chips are shown only
-    // right after a real worker attempt finishes in this app session. Restored
-    // panes are fresh shells, so carrying old badges forward makes idle panes
-    // look like they still belong to Claude/Codex.
+    // Terminal processes are session-local. Preserve tabs, splits, and cwd, but
+    // never replay output or resume an agent after a full app relaunch.
+    // Workspace switches within this app run use the live in-memory layouts and
+    // mounted PTYs instead of this cold-hydration path.
     // Runs tabs are derived from the selected chat, not durable workspace
     // layout. Keep persisted editor/terminal/preview tabs, then recreate the
     // Runs tab only when App selects a chat.
@@ -294,16 +293,9 @@ export function cleanupTransientTerminalState(node: PaneNode): void {
   if (node.kind === "leaf") {
     delete node.worker;
     delete node.autorun;
-    // Boot-once restore marker: minted here — at hydration, once per workspace
-    // per app run — and nowhere else. Only a pointer whose agent was RUNNING at
-    // quit (active===true, real sessionId) earns it; anything else (old blobs
-    // without `active`, idle panes, pending Codex captures with sessionId "")
-    // hydrates without one and never auto-resumes.
-    if (node.agentSession?.active === true && node.agentSession.sessionId) {
-      node.bootResume = true;
-    } else {
-      delete node.bootResume;
-    }
+    delete node.scrollback;
+    delete node.agentSession;
+    delete node.bootResume;
     return;
   }
   cleanupTransientTerminalState(node.a);
@@ -357,8 +349,23 @@ function stripTransientTerminalState(tabs: Tab[]): Tab[] {
 // in production.
 export function stripTransientPaneState(node: PaneNode): PaneNode {
   if (node.kind === "leaf") {
-    if (!("worker" in node) && !("autorun" in node) && !("bootResume" in node)) return node;
-    const { worker: _worker, autorun: _autorun, bootResume: _bootResume, ...rest } = node;
+    if (
+      !("worker" in node) &&
+      !("autorun" in node) &&
+      !("scrollback" in node) &&
+      !("agentSession" in node) &&
+      !("bootResume" in node)
+    ) {
+      return node;
+    }
+    const {
+      worker: _worker,
+      autorun: _autorun,
+      scrollback: _scrollback,
+      agentSession: _agentSession,
+      bootResume: _bootResume,
+      ...rest
+    } = node;
     return rest;
   }
   const a = stripTransientPaneState(node.a);

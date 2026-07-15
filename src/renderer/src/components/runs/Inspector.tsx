@@ -23,6 +23,7 @@ import {
 } from "./run-format";
 import { ElapsedChip, ElapsedTime } from "./elapsed";
 import { StatusDot } from "./GraphNodes";
+import type { RunExecutionProjection } from "../../lib/useRunExecutionRecord";
 
 // The docked inspector. One panel, selection-driven: the run summary when
 // nothing is picked, a step's full detail when a step node is clicked, a
@@ -33,6 +34,7 @@ interface Props {
   run: RunState;
   maps: RunMaps;
   reportByAttempt: ReadonlyMap<string, WorkerReport>;
+  execution: RunExecutionProjection;
   selectedStepId: string | null;
   selectedWorkerTaskId: string | null;
   onSelectStep: (id: string) => void;
@@ -44,6 +46,7 @@ export default function Inspector({
   run,
   maps,
   reportByAttempt,
+  execution,
   selectedStepId,
   selectedWorkerTaskId,
   onSelectStep,
@@ -101,7 +104,12 @@ export default function Inspector({
             onSelectWorker={onSelectWorker}
           />
         ) : (
-          <RunSummary run={run} steps={orderedSteps} onSelectStep={onSelectStep} />
+          <RunSummary
+            run={run}
+            steps={orderedSteps}
+            onSelectStep={onSelectStep}
+            execution={execution}
+          />
         )}
       </div>
     </aside>
@@ -499,10 +507,12 @@ function RunSummary({
   run,
   steps,
   onSelectStep,
+  execution,
 }: {
   run: RunState;
   steps: StepState[];
   onSelectStep: (id: string) => void;
+  execution: RunExecutionProjection;
 }) {
   const liveStep =
     steps.find((step) => step.id === run.currentStepId) ??
@@ -546,6 +556,27 @@ function RunSummary({
           />
         </SnapshotCard>
       </Section>
+
+      {execution.result && (
+        <Section
+          title="Result evidence"
+          meta={<MetaCount value={`${execution.result.workspaceDelta.length} files`} />}
+        >
+          <SnapshotCard
+            title={execution.result.summary}
+            subtitle={`${execution.result.checks.filter((check) => check.result === "passed").length} passed checks · ${execution.result.evidence.length} evidence items · ${execution.result.workspace.mode.replace("_", " ")}`}
+            tone="var(--ok)"
+          >
+            <QuickStats
+              items={[
+                { label: "Files", value: execution.result.workspaceDelta.length },
+                { label: "Checks", value: execution.result.checks.length },
+                { label: "Risks", value: execution.result.risks.length, tone: execution.result.risks.length ? "var(--warn)" : undefined },
+              ]}
+            />
+          </SnapshotCard>
+        </Section>
+      )}
 
       <Section title="Context" meta={context ? <MetaCount value={`${context.percent}%`} /> : undefined}>
         {context ? (
@@ -1080,7 +1111,11 @@ function WorkerDetail({
             items={[
               { label: "Status", value: status, tone },
               { label: "Attempt", value: attempt ? String(attempt.attemptNumber) : "none" },
-              { label: "Report", value: report?.status ?? (attempt?.finalReportPath ? "loading" : "none"), tone: report ? tone : undefined },
+              {
+                label: "Report",
+                value: report?.status ?? (status === "running" || attempt?.finalReportPath ? "pending" : "none"),
+                tone: report ? tone : status === "running" ? "var(--info)" : undefined,
+              },
             ]}
           />
           {meta && (
@@ -1091,14 +1126,20 @@ function WorkerDetail({
         </SnapshotCard>
       </Section>
 
-      {task.description && (
-        <Section title="Task">
-          <MutedNote>{task.description}</MutedNote>
-        </Section>
-      )}
+      <Section title="Report">
+        {report ? (
+          <ReportView report={report} />
+        ) : status === "running" ? (
+          <PendingReport attempt={attempt} />
+        ) : attempt?.finalReportPath ? (
+          <ReportSkeleton />
+        ) : (
+          <MutedNote>This worker has not filed a structured report.</MutedNote>
+        )}
+      </Section>
 
       {(task.allowedPaths.length > 0 || task.forbiddenPaths.length > 0 || task.expectedOutputs.length > 0) && (
-        <Section title="Scope">
+        <Section title="Deliverables & scope">
           {task.allowedPaths.length > 0 && (
             <PathList label="allowed" tone="var(--ok)" paths={task.allowedPaths} />
           )}
@@ -1111,26 +1152,15 @@ function WorkerDetail({
         </Section>
       )}
 
+      {task.description && (
+        <Section title="Task brief">
+          <TaskBrief text={task.description} />
+        </Section>
+      )}
+
       {attempt && (attempt.command || attempt.error || typeof attempt.exitCode === "number") && (
         <Section title="Attempt">
-          {attempt.command && (
-            <code
-              style={{
-                display: "block",
-                padding: "8px 10px",
-                background: "color-mix(in oklch, var(--bg) 70%, transparent)",
-                border: "1px solid var(--rule-soft)",
-                borderRadius: 6,
-                color: "var(--ink-dim)",
-                fontFamily: "var(--font-mono)",
-                fontSize: 10.5,
-                lineHeight: 1.5,
-                wordBreak: "break-word",
-              }}
-            >
-              {attempt.command}
-            </code>
-          )}
+          {attempt.command && <AttemptCommand command={attempt.command} />}
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
             {typeof attempt.exitCode === "number" && (
               <KeyVal label="exit code" value={String(attempt.exitCode)} tone={attempt.exitCode === 0 ? "var(--ok)" : "var(--danger)"} />
@@ -1158,26 +1188,145 @@ function WorkerDetail({
         </Section>
       )}
 
-      <Section title="Report">
-        {report ? (
-          <ReportView report={report} />
-        ) : attempt?.finalReportPath ? (
-          <ReportSkeleton />
-        ) : (
-          <MutedNote>
-            {status === "running"
-              ? "Worker is still running. Its report lands here when it finishes."
-              : "This worker has not filed a structured report."}
-          </MutedNote>
-        )}
-      </Section>
-
       {attempt?.promptPath && (
         <Section title="Prompt">
           <PromptBlock path={attempt.promptPath} />
         </Section>
       )}
     </>
+  );
+}
+
+function PendingReport({ attempt }: { attempt: WorkerAttempt | null }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "10px 11px",
+        border: "1px solid color-mix(in oklch, var(--accent) 22%, var(--rule-soft))",
+        borderRadius: 8,
+        background: "color-mix(in oklch, var(--accent) 5%, transparent)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 7,
+          height: 7,
+          borderRadius: 999,
+          background: "var(--accent)",
+          boxShadow: "0 0 10px color-mix(in oklch, var(--accent) 65%, transparent)",
+          animation: "spark-pulse 1.3s ease-in-out infinite",
+          flex: "0 0 7px",
+        }}
+      />
+      <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+        <span style={{ color: "var(--ink)", fontSize: 11.5, fontWeight: 650 }}>
+          Work is still in progress
+        </span>
+        <span style={{ color: "var(--muted)", fontSize: 10.5, lineHeight: 1.45 }}>
+          The structured report and evidence will appear here when the worker finishes
+          {attempt?.startedAt ? "." : " and starts its attempt."}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function TaskBrief({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const normalized = text.trim();
+  const needsCollapse = normalized.length > 640 || normalized.split("\n").length > 7;
+  const preview = needsCollapse
+    ? `${normalized.slice(0, 620).replace(/\s+$/u, "")}…`
+    : normalized;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <div
+        style={{
+          color: "var(--ink-dim)",
+          fontSize: 11.5,
+          lineHeight: 1.58,
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          maxHeight: !expanded && needsCollapse ? 166 : undefined,
+          overflow: "hidden",
+          maskImage: !expanded && needsCollapse
+            ? "linear-gradient(to bottom, black 72%, transparent 100%)"
+            : undefined,
+        }}
+      >
+        {expanded ? normalized : preview}
+      </div>
+      {needsCollapse && (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          style={{
+            appearance: "none",
+            alignSelf: "flex-start",
+            border: 0,
+            background: "transparent",
+            color: "var(--accent)",
+            padding: 0,
+            fontFamily: "var(--font-sans)",
+            fontSize: 10.5,
+            fontWeight: 650,
+            cursor: "default",
+          }}
+        >
+          {expanded ? "Show less" : "Show full brief"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function AttemptCommand({ command }: { command: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        style={{
+          appearance: "none",
+          alignSelf: "flex-start",
+          border: "1px solid var(--rule-soft)",
+          borderRadius: 6,
+          background: "transparent",
+          color: "var(--ink-dim)",
+          padding: "5px 9px",
+          fontFamily: "var(--font-sans)",
+          fontSize: 10.5,
+          fontWeight: 600,
+          cursor: "default",
+        }}
+      >
+        {open ? "Hide launch command" : "Show launch command"}
+      </button>
+      {open && (
+        <code
+          style={{
+            display: "block",
+            padding: "8px 10px",
+            background: "color-mix(in oklch, var(--bg) 70%, transparent)",
+            border: "1px solid var(--rule-soft)",
+            borderRadius: 6,
+            color: "var(--ink-dim)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10.5,
+            lineHeight: 1.5,
+            wordBreak: "break-word",
+          }}
+        >
+          {command}
+        </code>
+      )}
+    </div>
   );
 }
 
