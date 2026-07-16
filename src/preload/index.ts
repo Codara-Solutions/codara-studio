@@ -92,6 +92,10 @@ import type {
 
 type PtyDataHandler = (data: Uint8Array | string) => void;
 type PtyExitHandler = (info: { exitCode: number; signal?: number }) => void;
+type HostResumeHandler = (info: {
+  reason: "resume" | "unlock-screen";
+  at: number;
+}) => void;
 type OrchestrationEventHandler = (event: SparkEvent) => void;
 type FsChangeHandler = (event: FsChangeEvent) => void;
 type WindowStateHandler = (state: { maximized: boolean }) => void;
@@ -613,6 +617,14 @@ const api = {
     exists: (id: string): Promise<boolean> => ipcRenderer.invoke("pty:exists", { id }),
     pause: (id: string): Promise<void> => ipcRenderer.invoke("pty:pause", { id }),
     resume: (id: string): Promise<void> => ipcRenderer.invoke("pty:resume", { id }),
+    onHostResume: (handler: HostResumeHandler): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        info: { reason: "resume" | "unlock-screen"; at: number },
+      ) => handler(info);
+      ipcRenderer.on("terminal:host-resumed", listener);
+      return () => ipcRenderer.off("terminal:host-resumed", listener);
+    },
     // Raw-tail-reattach variant of pause: drops main's renderer sink and
     // discards the pause/backlog state so the next spawn() replays the raw pty
     // tail into a fresh xterm (like a first attach). Used by ChatPanel's

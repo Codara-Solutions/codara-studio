@@ -56,17 +56,45 @@ const TRIGGER_KINDS: { value: AutomationTrigger["kind"]; label: string }[] = [
 ];
 
 const FOLDER_EVENTS: FolderTriggerEvent[] = ["add", "change", "unlink"];
-// Chip token + tooltip. The chip DISPLAYS uppercase (spark-badge's
-// text-transform) but inserts the literal lowercase token — the executor's
-// substitution is case-sensitive.
+// Prompt variables display uppercase (spark-badge's text-transform) but insert
+// the literal lowercase token — the executor's substitution is case-sensitive.
 const BASE_VARIABLES: { token: string; tip: string }[] = [
-  { token: "{{iteration}}", tip: "This pass's loop counter (starts at 0)" },
-  { token: "{{lastOutput}}", tip: "The last PASS's final summary — empty on pass 1. For the previous node's output in THIS pass, use {{incoming}}." },
-  { token: "{{file}}", tip: "The file path that fired a folder trigger — empty for other triggers" },
-  { token: "{{date}}", tip: "Today's date (YYYY-MM-DD)" },
-  { token: "{{name}}", tip: "This automation's name" },
-  { token: "{{incoming}}", tip: "Output of the upstream worker(s) in this pass, labeled per branch" },
+  { token: "{{iteration}}", tip: "The current loop pass number, starting at 0." },
+  { token: "{{lastOutput}}", tip: "The previous pass's final summary. It is empty on the first pass." },
+  { token: "{{file}}", tip: "The path that fired a folder trigger. It is empty for non-folder triggers." },
+  { token: "{{date}}", tip: "Today's local date in YYYY-MM-DD format." },
+  { token: "{{name}}", tip: "The name of this automation." },
+  { token: "{{incoming}}", tip: "Output from upstream workers in this pass, labeled by branch." },
 ];
+
+function PromptVariableChip({
+  token,
+  tip,
+  onInsert,
+}: {
+  token: string;
+  tip: string;
+  onInsert: () => void;
+}): React.ReactElement {
+  const tooltipId = `automation-variable-${token.replace(/[^a-z0-9]+/gi, "-")}`;
+  return (
+    <span className="automation-variable-chip">
+      <button
+        type="button"
+        className="spark-badge is-accent"
+        aria-describedby={tooltipId}
+        onClick={onInsert}
+      >
+        {token}
+      </button>
+      <span id={tooltipId} role="tooltip" className="automation-variable-chip__tooltip">
+        <span className="automation-variable-chip__token">{token}</span>
+        <span>{tip}</span>
+        <span className="automation-variable-chip__action">Click to insert into the prompt.</span>
+      </span>
+    </span>
+  );
+}
 
 export interface NodeContextPanelProps {
   node: FlowNode | null;
@@ -505,21 +533,20 @@ function WorkerForm({
       <Group label="Prompt">
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {BASE_VARIABLES.map((v) => (
-            <button key={v.token} type="button" className="spark-badge is-accent" style={{ cursor: "default" }} title={v.tip} onClick={() => insertVariable(v.token)}>
-              {v.token}
-            </button>
+            <PromptVariableChip
+              key={v.token}
+              token={v.token}
+              tip={v.tip}
+              onInsert={() => insertVariable(v.token)}
+            />
           ))}
           {upstream.map((nid) => (
-            <button
+            <PromptVariableChip
               key={nid}
-              type="button"
-              className="spark-badge"
-              style={{ cursor: "default" }}
-              title={`Output of the specific upstream node ${nid} in this pass`}
-              onClick={() => insertVariable(`{{node:${nid}}}`)}
-            >
-              {`{{node:${nid}}}`}
-            </button>
+              token={`{{node:${nid}}}`}
+              tip={`Output from upstream node ${nid} in the current pass.`}
+              onInsert={() => insertVariable(`{{node:${nid}}}`)}
+            />
           ))}
         </div>
         {upstream.length > 0 && (

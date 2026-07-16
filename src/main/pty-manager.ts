@@ -136,15 +136,17 @@ function consumeStrandedBinding(id: string): StrandedBinding | null {
 
 const FLUSH_MS = 16;
 const MAX_BUFFER_BYTES = 96_000;
-// Per-session tail buffer cap. 64 KB is enough for a few thousand text-mode
-// terminal lines (well past the 40-line agent-state-detection window) while
-// staying cheap in idle RAM even with many concurrent worker panes.
-const TAIL_BUFFER_BYTES = 64 * 1024;
+// Per-session tail buffer cap. Keep enough raw terminal history to reconstruct
+// a full-screen Claude/Codex TUI after a renderer/GPU restart on wake. This is
+// intentionally generous: a raw tail is the only lossless recovery source for
+// cursor-relative TUI frames, and the user explicitly prefers durability over
+// the few extra megabytes of RAM per busy terminal.
+const TAIL_BUFFER_BYTES = 4 * 1024 * 1024;
 // Per-session cap for bytes held while the renderer is detached (workspace
-// switched away). 2 MB covers a long Claude streaming response plus its
-// tool output without putting an unbounded amount of dead PTY data into
-// process memory. FIFO-trimmed past the cap.
-const DETACHED_BACKLOG_BYTES = 2 * 1024 * 1024;
+// switched away or the host is locked/asleep). 16 MB covers long tool output
+// accumulated over an extended laptop sleep while remaining bounded. The
+// backlog is FIFO-trimmed past the cap.
+const DETACHED_BACKLOG_BYTES = 16 * 1024 * 1024;
 
 // Env vars that agent-socket asks pty-manager to inject into every spawned
 // pty. Populated from src/main/index.ts via setAgentSocketEnv() once the
@@ -335,6 +337,14 @@ export async function spawn(
       }
       existing.pendingChunks = [];
       existing.pendingBytes = 0;
+      // A renderer can disappear while the session is host-sleep-paused. The
+      // raw tail below is authoritative on the replacement renderer, so reset
+      // both pause state and its backlog before live delivery resumes. Without
+      // this, `attached=false` survives the reattach and every future byte is
+      // silently accumulated in a backlog that nobody drains.
+      existing.attached = true;
+      existing.detachedBacklog = [];
+      existing.detachedBacklogBytes = 0;
       if (existing.tail.length > 0) {
         const snapshot = existing.tail.length === 1
           ? existing.tail[0]
@@ -1000,6 +1010,22 @@ export function pause(id: string): void {
   }
 }
 
+// Power events are main-process-owned, while xterm is renderer-owned. Before
+// macOS/Windows locks or suspends, stop delivering PTY bytes to Chromium and
+// retain them in the bounded detached backlog. On wake the renderer first
+// repairs/refits its xterm surface, then calls resume(id) to acknowledge that
+// it is ready for the backlog. This avoids racing the first post-wake bytes
+// against a sleeping, GPU-reset, or briefly unresponsive renderer.
+export function pauseAllForHostSuspend(): number {
+  let paused = 0;
+  for (const [id, s] of sessions) {
+    if (!s.webContents || s.webContents.isDestroyed() || !s.attached) continue;
+    pause(id);
+    paused += 1;
+  }
+  return paused;
+}
+
 // Called by the renderer when a TerminalPane (re)mounts. Drains the
 // detachedBacklog through the same webContents.send channel as live data so
 // the onData listener receives the missed bytes in arrival order, then flips
@@ -1292,8 +1318,19 @@ export function detachForWebContents(wc: WebContents): void {
   for (const s of sessions.values()) {
     if (s.webContents !== wc) continue;
     s.webContents = null;
+    // Match detach(): the next renderer attach replays the raw tail as its
+    // single source of truth. Clearing a sleep-era pause/backlog here prevents
+    // duplicate replay and, critically, prevents `attached=false` from
+    // stranding all future output after a renderer crash/reload.
+    s.attached = true;
+    s.detachedBacklog = [];
+    s.detachedBacklogBytes = 0;
     s.pendingChunks = [];
     s.pendingBytes = 0;
+    if (s.flushTimer) {
+      clearTimeout(s.flushTimer);
+      s.flushTimer = null;
+    }
   }
 }
 

@@ -1,4 +1,12 @@
-import { app, BrowserWindow, Tray, Menu, globalShortcut, nativeImage } from "electron";
+import {
+  app,
+  BrowserWindow,
+  Tray,
+  Menu,
+  globalShortcut,
+  nativeImage,
+  powerMonitor,
+} from "electron";
 import { join } from "node:path";
 import { registerIpc, setTrayHook } from "./ipc";
 import * as pty from "./pty-manager";
@@ -115,6 +123,16 @@ function sendWindowState(win: BrowserWindow): void {
   });
 }
 
+type HostResumeReason = "resume" | "unlock-screen";
+
+function notifyRenderersOfHostResume(reason: HostResumeReason): void {
+  const payload = { reason, at: Date.now() };
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) continue;
+    win.webContents.send("terminal:host-resumed", payload);
+  }
+}
+
 // Bring the main window back from the tray (or recreate it if it was somehow
 // destroyed). On Windows we re-show the taskbar button that hide-to-tray hid.
 function showMainWindow(): void {
@@ -216,6 +234,12 @@ function createWindow(): void {
       // sandboxed embedded browser with full Chromium controls (back/forward,
       // reload, devtools, capturePage). Without this flag <webview> is inert.
       webviewTag: true,
+      // Terminal PTYs remain live while the window is occluded, minimized, or
+      // behind the lock screen. Keep their renderer listeners and xterm buffer
+      // maintenance responsive instead of letting Chromium heavily throttle
+      // the page; this intentionally trades a little background CPU/RAM for
+      // terminal durability.
+      backgroundThrottling: false,
     },
   });
 
@@ -475,6 +499,19 @@ app.whenReady().then(async () => {
   await loadPreferences().catch(() => undefined);
 
   createWindow();
+
+  // Treat lock as the start of the vulnerable window too: macOS can lock a
+  // moment before the actual suspend event, and remote PTYs may emit final
+  // bytes during that gap. Main buffers those bytes until the renderer has
+  // repaired its xterm/WebGL surface and acknowledges wake via pty.resume().
+  const pauseTerminalDelivery = () => {
+    const count = pty.pauseAllForHostSuspend();
+    if (count > 0) console.log(`[main] buffered ${count} terminal session(s) for host sleep`);
+  };
+  powerMonitor.on("lock-screen", pauseTerminalDelivery);
+  powerMonitor.on("suspend", pauseTerminalDelivery);
+  powerMonitor.on("resume", () => notifyRenderersOfHostResume("resume"));
+  powerMonitor.on("unlock-screen", () => notifyRenderersOfHostResume("unlock-screen"));
 
   // System tray so the app stays reachable while running in the background
   // (close-to-tray). Only created when the user has opted into background

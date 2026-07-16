@@ -48,6 +48,7 @@ function AutomationsStack({ tabs, activeId, workspace, terminalScrollbackLineLim
           >
             {workspace ? (
               <AutomationsHub
+                key={workspace.id}
                 workspaceId={workspace.id}
                 workspaceName={workspace.name}
                 cwd={workspace.cwd}

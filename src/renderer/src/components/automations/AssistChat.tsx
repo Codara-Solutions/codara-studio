@@ -50,13 +50,12 @@ function formatRelativeTime(iso: string): string {
 // and this panel owns the run lifecycle instead of App's lifted runs state
 // (architect runs are filtered OUT of the chat tab; their home is here).
 //
-// Session model: one workspace can accumulate several architect chats. Every
-// entry via "Create with Cora" opens a FRESH draft session — the previous one
-// keeps running in the background and stays reachable from the history popover,
-// so on mount we sit on the draft composer rather than auto-resuming the latest.
-// The one exception is `focusRunId` (the loom detail's "Open chat" back-pointer),
-// which selects the exact authoring run. "New session" (+) drops back to the
-// draft composer, and the history button switches between past sessions.
+// Session model: one workspace can accumulate several architect chats. The hub
+// remembers the exact open session per workspace, so switching away and back —
+// or reopening the Automations tab — returns to the same live conversation.
+// `focusRunId` (the loom detail's "Open chat" back-pointer) can select a specific
+// authoring run. "New session" (+) explicitly drops to the draft composer, and
+// the history button switches between past sessions.
 
 interface Props {
   workspaceId: string;
@@ -72,10 +71,13 @@ interface Props {
   active: boolean;
   // When set (and it changes to a non-null value), select THAT run — the loom
   // detail's "Open chat" jumps back to the architect conversation that authored
-  // a loom. This is the ONLY path that auto-selects a run on mount; without it
-  // the panel opens on the draft composer. The user can still switch sessions
-  // afterward.
+  // a loom. It overrides the remembered initial selection; the user can still
+  // switch sessions afterward.
   focusRunId?: string;
+  // Workspace-scoped selection restored by AutomationsHub. Unlike focusRunId,
+  // this is only an initial value and never yanks the user away after mount.
+  initialRunId?: string | null;
+  onSelectedRunIdChange?: (runId: string | null) => void;
   onClose: () => void;
 }
 
@@ -98,16 +100,26 @@ export default function AssistChat({
   runtimes,
   active,
   focusRunId,
+  initialRunId,
+  onSelectedRunIdChange,
   onClose,
 }: Props): React.ReactElement {
   // null = not loaded yet; afterwards always the latest fetched list, newest
   // first. Kept fresh by the debounced orchestration-event refresh below.
   const [assistRuns, setAssistRuns] = useState<RunState[] | null>(null);
-  // Draft composer by default (null). Nothing auto-resumes a past session — a
-  // fresh "Create with Cora" entry always starts a new draft; only focusRunId
-  // and explicit history/​(+) selections change this.
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Restore the exact architect session that was open in this workspace. A
+  // brand-new workspace still starts on the draft composer; the explicit +
+  // action is how the user asks to leave a remembered session for a new one.
+  const [selectedId, setSelectedId] = useState<string | null>(initialRunId ?? null);
   const [error, setError] = useState<string | null>(null);
+
+  const selectRun = useCallback(
+    (runId: string | null) => {
+      setSelectedId(runId);
+      onSelectedRunIdChange?.(runId);
+    },
+    [onSelectedRunIdChange],
+  );
 
   // Parent-driven focus: "Open chat" from a loom's detail sets focusRunId to the
   // authoring run — the one path that selects a run on mount (otherwise we open
@@ -117,8 +129,8 @@ export default function AssistChat({
   useEffect(() => {
     if (!focusRunId || focusedRunRef.current === focusRunId) return;
     focusedRunRef.current = focusRunId;
-    setSelectedId(focusRunId);
-  }, [focusRunId]);
+    selectRun(focusRunId);
+  }, [focusRunId, selectRun]);
 
   const refresh = useCallback(async () => {
     try {
@@ -161,6 +173,15 @@ export default function AssistChat({
     () => assistRuns?.find((run) => run.id === selectedId) ?? null,
     [assistRuns, selectedId],
   );
+
+  // A remembered run can have been deleted in another surface or before an
+  // app restart. Once history has loaded, fall back honestly to a new draft
+  // instead of showing an empty conversation under a stale session id.
+  useEffect(() => {
+    if (assistRuns === null || !selectedId) return;
+    if (assistRuns.some((run) => run.id === selectedId)) return;
+    selectRun(null);
+  }, [assistRuns, selectedId, selectRun]);
 
   // Merge a fresh snapshot into the local list without waiting for the next
   // listRuns round-trip (used right after createRun/startAutopilot so the
@@ -209,10 +230,10 @@ export default function AssistChat({
         initialAttachments: attachments,
       });
       applySnapshot(run);
-      setSelectedId(run.id);
+      selectRun(run.id);
       return run;
     },
-    [workspaceId, workspaceName, cwd, applySnapshot],
+    [workspaceId, workspaceName, cwd, applySnapshot, selectRun],
   );
 
   // Stop is intentionally non-destructive: interrupt execution immediately
@@ -238,21 +259,21 @@ export default function AssistChat({
         try {
           await window.spark.orchestration.deleteRun(runId);
           setAssistRuns((current) => (current ?? []).filter((run) => run.id !== runId));
-          setSelectedId((current) => (current === runId ? null : current));
+          if (selectedId === runId) selectRun(null);
         } catch (err) {
           setError((err as Error).message);
         }
       })();
     },
-    [],
+    [selectedId, selectRun],
   );
 
   const newSession = useCallback(() => {
-    setSelectedId(null);
+    selectRun(null);
     window.requestAnimationFrame(() => {
       window.dispatchEvent(new Event("spark:focus-composer"));
     });
-  }, []);
+  }, [selectRun]);
 
   // The architect drives the spark_*_automation MCP tools, which only the
   // Claude Code / Codex CLI backends carry. OpenRouter-only setups get a
@@ -343,7 +364,7 @@ export default function AssistChat({
         <AssistHistoryButton
           runs={assistRuns ?? []}
           activeRunId={activeRun?.id ?? null}
-          onSelect={(runId) => setSelectedId(runId)}
+          onSelect={selectRun}
           onDelete={deleteSession}
         />
         <button

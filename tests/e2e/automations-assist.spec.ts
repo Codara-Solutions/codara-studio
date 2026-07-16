@@ -62,6 +62,62 @@ test("automations hub mounts the Create-with-Cora assist chat", async () => {
     await expect(page.getByRole("button", { name: /Fix until tests pass/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /Fan-out review/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /Start blank/ })).toBeVisible();
+
+    // Prompt variables explain their runtime value immediately on hover (and
+    // through aria-describedby for keyboard/screen-reader users).
+    await page.locator(".react-flow__node-worker").click();
+    const iterationVariable = page.getByRole("button", { name: "{{iteration}}", exact: true });
+    await iterationVariable.hover();
+    const iterationTooltip = page.getByRole("tooltip").filter({ hasText: "current loop pass number" });
+    await expect(iterationTooltip).toBeVisible();
+    await expect(iterationTooltip).toContainText("Click to insert");
+  } finally {
+    await app?.close();
+  }
+});
+
+test("automation architect restores its exact session after a workspace switch", async () => {
+  test.setTimeout(90_000);
+  const { userDataDir } = await prepareElectronWorkspace("spark-agent-assist-restore-e2e-");
+
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...process.env,
+        SPARK_USER_DATA_DIR: userDataDir,
+        SPARK_NO_SHELL_INTEGRATION: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+
+    await page.getByRole("button", { name: "New tab", exact: true }).click();
+    await page.getByText("New automations", { exact: true }).click();
+    await page.getByRole("button", { name: /Design with Cora/ }).click();
+
+    // Select a real persisted architect run, rather than merely proving that
+    // the empty draft surface survives. This is the session users previously
+    // had to rediscover manually in History after every workspace round-trip.
+    await page.getByRole("button", { name: "Session history", exact: true }).click();
+    await page.getByRole("option", { name: /Restore me/ }).click();
+    await expect(page.getByText("#restore", { exact: true })).toBeVisible();
+
+    await page.locator('[data-workspace-id="ws-assist-other"]').click();
+    await expect(page.locator(".cora-welcome__project-name")).toHaveText("other workspace");
+    await page.locator('[data-workspace-id="ws-assist-e2e"]').click();
+
+    await expect(page.getByText("Cora · Automation architect", { exact: true })).toBeVisible();
+    await expect(page.getByText("#restore", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
+
+    // An explicit Done remains authoritative: workspace restoration must not
+    // reopen a surface the user intentionally closed.
+    await page.getByRole("button", { name: /^Done — back to the looms view$/ }).click();
+    await page.locator('[data-workspace-id="ws-assist-other"]').click();
+    await page.locator('[data-workspace-id="ws-assist-e2e"]').click();
+    await expect(page.getByRole("button", { name: /Design with Cora/ })).toBeVisible();
   } finally {
     await app?.close();
   }
@@ -73,9 +129,42 @@ async function prepareElectronWorkspace(
   const root = await mkdtemp(join(tmpdir(), prefix));
   const userDataDir = join(root, "user-data");
   const workspaceDir = join(root, "workspace");
+  const otherWorkspaceDir = join(root, "other-workspace");
   await mkdir(userDataDir, { recursive: true });
   await mkdir(workspaceDir, { recursive: true });
+  await mkdir(otherWorkspaceDir, { recursive: true });
   await writeFile(join(workspaceDir, "README.md"), "# E2E workspace\n", "utf8");
+  await writeFile(join(otherWorkspaceDir, "README.md"), "# Other E2E workspace\n", "utf8");
+  const now = new Date().toISOString();
+  const assistRunId = "run-assist-e2e-restore";
+  const assistRunDir = join(userDataDir, "runs", assistRunId);
+  await mkdir(assistRunDir, { recursive: true });
+  await writeFile(
+    join(assistRunDir, "run.json"),
+    JSON.stringify(
+      {
+        id: assistRunId,
+        workspaceId: "ws-assist-e2e",
+        title: "Restore me",
+        status: "paused",
+        artifactDir: assistRunDir,
+        createdAt: now,
+        updatedAt: now,
+        plans: [],
+        steps: [],
+        workerTasks: [],
+        workerAttempts: [],
+        sparkCalls: [],
+        humanMessages: [],
+        chatMode: "automation",
+        chatBackend: "claude",
+        autopilot: { status: "paused", updatedAt: now },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
   await writeFile(
     join(userDataDir, "spark-state.json"),
     JSON.stringify(
@@ -86,6 +175,13 @@ async function prepareElectronWorkspace(
             name: "workspace",
             cwd: workspaceDir,
             color: "#F0C419",
+            workers: [],
+          },
+          {
+            id: "ws-assist-other",
+            name: "other workspace",
+            cwd: otherWorkspaceDir,
+            color: "#55C2B8",
             workers: [],
           },
         ],

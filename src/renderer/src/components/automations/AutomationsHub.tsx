@@ -68,6 +68,45 @@ type Mode =
 type SubTab = "looms" | "workers";
 
 const SUBTAB_STORAGE_KEY = "spark.automations.subtab";
+const VIEW_MEMORY_STORAGE_PREFIX = "spark.automations.view:";
+
+interface AutomationViewMemory {
+  assistOpen: boolean;
+  assistRunId: string | null;
+}
+
+function viewMemoryKey(workspaceId: string): string {
+  return `${VIEW_MEMORY_STORAGE_PREFIX}${workspaceId}`;
+}
+
+function subTabStorageKey(workspaceId: string): string {
+  return `${SUBTAB_STORAGE_KEY}:${workspaceId}`;
+}
+
+function readViewMemory(workspaceId: string): AutomationViewMemory {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(viewMemoryKey(workspaceId)) ?? "null") as
+      | Partial<AutomationViewMemory>
+      | null;
+    return {
+      assistOpen: parsed?.assistOpen === true,
+      assistRunId: typeof parsed?.assistRunId === "string" ? parsed.assistRunId : null,
+    };
+  } catch {
+    return { assistOpen: false, assistRunId: null };
+  }
+}
+
+function updateViewMemory(workspaceId: string, patch: Partial<AutomationViewMemory>): void {
+  try {
+    window.localStorage.setItem(
+      viewMemoryKey(workspaceId),
+      JSON.stringify({ ...readViewMemory(workspaceId), ...patch }),
+    );
+  } catch {
+    /* persistence is best-effort; the live hub still works without it */
+  }
+}
 
 // Attempt statuses that mean the worker process is still going. Mirrors the
 // module-private set in WorkersView / LiveBoard — one live-vs-done rule.
@@ -80,10 +119,13 @@ export default function AutomationsHub({
   active,
   terminalScrollbackLineLimit,
 }: Props): React.ReactElement {
+  const restoredViewMemory = useRef(readViewMemory(workspaceId)).current;
   const [jobs, setJobs] = useState<ScheduledJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [mode, setMode] = useState<Mode>({ kind: "view" });
+  const [mode, setMode] = useState<Mode>(
+    restoredViewMemory.assistOpen ? { kind: "assist" } : { kind: "view" },
+  );
   // The architect run "Open chat" jumps to. Cleared whenever we leave assist
   // mode (below) so re-opening the SAME creator run re-fires AssistChat's
   // value-guarded focus effect (null → runId is a change; runId → runId isn't).
@@ -92,7 +134,10 @@ export default function AutomationsHub({
   const [runtimes, setRuntimes] = useState<AgentRuntimeDiagnostic[]>([]);
   const [subTab, setSubTab] = useState<SubTab>(() => {
     try {
-      return window.localStorage.getItem(SUBTAB_STORAGE_KEY) === "workers" ? "workers" : "looms";
+      const remembered =
+        window.localStorage.getItem(subTabStorageKey(workspaceId)) ??
+        window.localStorage.getItem(SUBTAB_STORAGE_KEY);
+      return remembered === "workers" ? "workers" : "looms";
     } catch {
       return "looms";
     }
@@ -124,14 +169,23 @@ export default function AutomationsHub({
   const selectedIdRef = useRef<string | null>(null);
   selectedIdRef.current = selectedId;
 
+  // The tab store remembers which top-level tab belongs to each workspace.
+  // Remember the hub's inner surface too: otherwise switching workspaces
+  // remounts this component and strands an in-flight architect chat behind the
+  // launchpad. Create/edit drafts remain intentionally ephemeral; only the
+  // durable architect conversation is restored.
+  useEffect(() => {
+    updateViewMemory(workspaceId, { assistOpen: mode.kind === "assist" });
+  }, [workspaceId, mode.kind]);
+
   const switchSubTab = useCallback((next: SubTab) => {
     setSubTab(next);
     try {
-      window.localStorage.setItem(SUBTAB_STORAGE_KEY, next);
+      window.localStorage.setItem(subTabStorageKey(workspaceId), next);
     } catch {
       /* persistence is a nicety */
     }
-  }, []);
+  }, [workspaceId]);
 
   const refresh = useCallback(async () => {
     try {
@@ -672,6 +726,10 @@ export default function AutomationsHub({
               runtimes={runtimes}
               active={active && subTab === "looms"}
               focusRunId={focusAssistRunId ?? undefined}
+              initialRunId={restoredViewMemory.assistRunId}
+              onSelectedRunIdChange={(runId) =>
+                updateViewMemory(workspaceId, { assistRunId: runId })
+              }
               onClose={() => setMode({ kind: "view" })}
             />
           </div>

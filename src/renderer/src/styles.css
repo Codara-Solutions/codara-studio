@@ -1265,6 +1265,73 @@ a { color: inherit; }
   font-family: var(--font-mono);
   font-size: 9px;
 }
+
+/* Prompt-variable chips explain themselves on hover and keyboard focus. The
+   tooltip is a real DOM node (not only a native title) so it appears promptly,
+   matches the app, and is announced through aria-describedby. */
+.automation-variable-chip {
+  position: relative;
+  display: inline-flex;
+}
+
+.automation-variable-chip > button {
+  cursor: pointer;
+}
+
+.automation-variable-chip__tooltip {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 8px);
+  left: 0;
+  width: min(260px, calc(100vw - 40px));
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in oklch, var(--accent) 28%, var(--rule));
+  border-radius: var(--radius-control);
+  background: color-mix(in oklch, var(--panel-2) 96%, transparent);
+  box-shadow: var(--shadow-popover);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: normal;
+  text-transform: none;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-3px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease,
+    visibility 0s linear 120ms;
+}
+
+.automation-variable-chip:nth-last-child(-n + 2) .automation-variable-chip__tooltip {
+  right: 0;
+  left: auto;
+}
+
+.automation-variable-chip:hover .automation-variable-chip__tooltip,
+.automation-variable-chip:focus-within .automation-variable-chip__tooltip {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  transition-delay: 0s;
+}
+
+.automation-variable-chip__token {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.automation-variable-chip__action {
+  color: var(--muted);
+  font-size: 10px;
+}
 @media (max-width: 820px) {
   .automation-launchpad__actions { grid-template-columns: 1fr; }
 }

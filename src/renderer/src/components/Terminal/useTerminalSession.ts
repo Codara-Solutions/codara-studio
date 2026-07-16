@@ -419,11 +419,12 @@ export function useTerminalSession({
   const hiddenBufferRef = useRef<Uint8Array[]>([]);
   const hiddenBytesRef = useRef<number>(0);
   const hiddenLineBreaksRef = useRef<number>(0);
-  // Cap chosen to fit a few screens of dense TUI output (claude/codex full
-  // redraws on ~120-col panes are ~30-60 KB each). 256 KB ≈ 4-8 redraws,
-  // enough to preserve the most-recent visible state when the user flips
-  // back. FIFO trim past the cap — older bytes the user can't see anyway.
-  const HIDDEN_BUFFER_CAP = 256 * 1024;
+  // Keep a deep hidden-output reserve. A laptop can remain locked/asleep for
+  // hours while a remote PTY or buffered local process still has output ready
+  // on wake; a few full-screen TUI redraws are not enough to reconstruct the
+  // frame reliably. The larger bounded cap is an intentional durability-over-
+  // memory tradeoff (up to 4 MB for each busy hidden terminal).
+  const HIDDEN_BUFFER_CAP = 4 * 1024 * 1024;
   // Hysteresis slack above the byte cap before we pay for a precise merge. The
   // cheap FIFO path (shift whole chunks) keeps us under cap+slack amortized
   // O(1); without slack, once a chatty hidden pane sits exactly at the cap
@@ -2921,6 +2922,51 @@ export function useTerminalSession({
     if (!readOnlyRef.current && !inputBlockedRef.current) termRef.current?.focus();
     return () => window.cancelAnimationFrame(raf);
   }, [visible]);
+
+  // System sleep does not necessarily toggle React's `visible` prop, so the
+  // normal reveal recovery above may never run. Listen to Electron's explicit
+  // host-resume signal and browser focus/visibility as fallbacks. Repair the
+  // WebGL/DOM renderer first, re-fit the grid, force a full repaint, and only
+  // then acknowledge main's sleep pause so queued PTY bytes cannot race a
+  // blank or context-lost canvas.
+  useEffect(() => {
+    let recoveryFrame: number | null = null;
+    const recoverAfterHostWake = () => {
+      if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame);
+      recoveryFrame = window.requestAnimationFrame(() => {
+        recoveryFrame = null;
+        try {
+          fitRef.current?.fit();
+        } catch {
+          /* the host can still be transitioning from lock-screen geometry */
+        }
+        refitAndResizeRef.current?.();
+        recoverRendererRef.current?.();
+        const term = termRef.current;
+        if (term) {
+          try {
+            term.refresh(0, Math.max(0, term.rows - 1));
+          } catch {
+            /* terminal may be disposing during a simultaneous tab close */
+          }
+        }
+        if (!readOnlyRef.current) void window.spark.pty.resume(sessionId);
+      });
+    };
+    const offHostResume = window.spark.pty.onHostResume(recoverAfterHostWake);
+    const onFocus = () => recoverAfterHostWake();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") recoverAfterHostWake();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      offHostResume();
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame);
+    };
+  }, [sessionId]);
 
   const write = useCallback((data: string) => {
     void window.spark.pty.write(sessionId, data);
