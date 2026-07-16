@@ -236,7 +236,16 @@ export default function BranchMenu({
         onClick={() => {
           if (disabled) return;
           setError(null);
-          setOpen((v) => !v);
+          const nextOpen = !open;
+          setOpen(nextOpen);
+          if (nextOpen) {
+            // Branch refs commonly change outside Codara (terminal git, an
+            // agent, another worktree). The menu's mount-time snapshot can be
+            // arbitrarily old, so opening it is an explicit freshness boundary:
+            // refresh the shared status/ahead-behind header and, through its
+            // gitVersion bump, this menu's branch rows as well.
+            onChanged();
+          }
         }}
         style={{
           appearance: "none",
