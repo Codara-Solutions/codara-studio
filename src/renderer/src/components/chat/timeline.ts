@@ -9,6 +9,7 @@ import type {
   WorkerTask,
   WorkerTaskStatus,
 } from "@shared/types";
+import { resolveOpenRunQuestion } from "@shared/run-questions";
 
 // Timeline model for the chat conversation. A chat is a RunState: its
 // humanMessages are the back-and-forth, and its sparkCalls, worker attempts,
@@ -51,7 +52,13 @@ export type ChatTimelineItem =
       messageKind: HumanRunMessage["kind"];
       text: string;
       questionOptions: HumanRunMessage["questionOptions"];
+      answersMessageId: HumanRunMessage["answersMessageId"];
       attachments: HumanRunMessage["attachments"];
+      intent: HumanRunMessage["intent"];
+      deliveryState: HumanRunMessage["deliveryState"];
+      targetTurnId: HumanRunMessage["targetTurnId"];
+      backendTurnId: HumanRunMessage["backendTurnId"];
+      conversationEpoch: number;
       at: string;
       // How many identical copies of this message were collapsed into this
       // one entry. 1 means it stood alone.
@@ -98,7 +105,13 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       messageKind: message.kind,
       text,
       questionOptions: message.questionOptions ?? [],
+      answersMessageId: message.answersMessageId,
       attachments: message.attachments ?? [],
+      intent: message.intent,
+      deliveryState: message.deliveryState,
+      targetTurnId: message.targetTurnId,
+      backendTurnId: message.backendTurnId,
+      conversationEpoch: message.conversationEpoch ?? run.conversationEpoch ?? 0,
       at: message.createdAt,
       repeatCount: 1,
     });
@@ -190,7 +203,13 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       prev &&
       prev.kind === "message" &&
       prev.author === item.author &&
+      prev.messageKind === item.messageKind &&
+      item.messageKind !== "question" &&
       prev.text === item.text &&
+      prev.answersMessageId === item.answersMessageId &&
+      prev.intent === item.intent &&
+      prev.targetTurnId === item.targetTurnId &&
+      prev.conversationEpoch === item.conversationEpoch &&
       attachmentSignature(prev.attachments) === attachmentSignature(item.attachments)
     ) {
       prev.repeatCount += 1;
@@ -228,7 +247,16 @@ function sparkCallTimelineItem(call: SparkCall): Extract<ChatTimelineItem, { kin
     kind: "tool",
     id: `spark-call:${call.id}`,
     activity: "manager",
-    title: managerModeTitle(call.mode),
+    title:
+      call.mode === "chat"
+        ? live
+          ? "Working…"
+          : failed
+            ? "Turn failed"
+            : duration
+              ? `Worked for ${duration}`
+              : "Worked"
+        : managerModeTitle(call.mode),
     detail: failed
       ? call.error || "Manager call failed."
       : live
@@ -400,6 +428,10 @@ function collapseDuplicateMessages(
       message.author,
       message.messageKind,
       message.text.replace(/\s+/g, " ").trim(),
+      message.messageKind === "question" ? message.id : message.answersMessageId ?? "",
+      message.intent ?? "",
+      message.targetTurnId ?? "",
+      String(message.conversationEpoch),
       attachmentSignature(message.attachments),
     ].join("\u0000");
     const recent = recentBySignature.get(signature);
@@ -429,19 +461,11 @@ function attachmentSignature(
   return (attachments ?? []).map((attachment) => attachment.id || attachment.path).join("|");
 }
 
-// The most recent question Cora asked that the user has not yet answered.
-// Drives the composer's "answer and resume" behaviour.
+// The exact linked question currently blocking this run. Notes and answers to
+// other questions never close it; legacy unlinked answers are inferred only by
+// the shared compatibility policy.
 export function findOpenQuestion(run: RunState): HumanRunMessage | null {
-  for (let i = run.humanMessages.length - 1; i >= 0; i--) {
-    const message = run.humanMessages[i];
-    if (message.author === "spark" && message.kind === "question") {
-      const laterUserReply = run.humanMessages
-        .slice(i + 1)
-        .some((later) => later.author === "user");
-      return laterUserReply ? null : message;
-    }
-  }
-  return null;
+  return resolveOpenRunQuestion(run);
 }
 
 export type ChatStatusTone =

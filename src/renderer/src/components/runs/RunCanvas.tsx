@@ -11,6 +11,7 @@ import { buildRunMaps, useRunReports } from "./run-format";
 import RunGraph from "./RunGraph";
 import Inspector from "./Inspector";
 import { ResizeHandle } from "../../panels/ResizeHandle";
+import { useRunExecutionRecord } from "../../lib/useRunExecutionRecord";
 
 // The run canvas: a pan + zoom viewport holding the node graph, with a docked,
 // selection-driven inspector on the right edge. The transform engine writes
@@ -23,9 +24,10 @@ const DEFAULT_ZOOM = 1;
 const WHEEL_SENS = 0.0014;
 const ZOOM_EASE = 0.32;
 
-const MIN_INSPECTOR = 300;
-const MAX_INSPECTOR = 560;
-const INSPECTOR_STORAGE_KEY = "spark.runs.inspector:v1";
+const MIN_INSPECTOR = 340;
+const MAX_INSPECTOR = 640;
+const DEFAULT_INSPECTOR = 448;
+const INSPECTOR_STORAGE_KEY = "spark.runs.inspector:v2";
 
 interface InspectorPrefs {
   width: number;
@@ -37,24 +39,31 @@ function clampZoom(value: number): number {
 }
 
 function clampInspector(width: number): number {
-  if (!Number.isFinite(width)) return 372;
+  if (!Number.isFinite(width)) return DEFAULT_INSPECTOR;
   return Math.min(MAX_INSPECTOR, Math.max(MIN_INSPECTOR, Math.round(width)));
 }
 
 function loadInspectorPrefs(): InspectorPrefs {
   try {
     const raw = window.localStorage.getItem(INSPECTOR_STORAGE_KEY);
-    if (!raw) return { width: 372, collapsed: false };
+    if (!raw) return { width: DEFAULT_INSPECTOR, collapsed: false };
     const parsed = JSON.parse(raw) as Partial<InspectorPrefs>;
-    return { width: clampInspector(Number(parsed.width ?? 372)), collapsed: Boolean(parsed.collapsed) };
+    return { width: clampInspector(Number(parsed.width ?? DEFAULT_INSPECTOR)), collapsed: Boolean(parsed.collapsed) };
   } catch {
-    return { width: 372, collapsed: false };
+    return { width: DEFAULT_INSPECTOR, collapsed: false };
   }
 }
 
-export default function RunCanvas({ run }: { run: RunState }) {
+export default function RunCanvas({
+  run,
+  onOpenWorkerTerminal,
+}: {
+  run: RunState;
+  onOpenWorkerTerminal?: (workerTaskId: string) => void;
+}) {
   const maps = useMemo(() => buildRunMaps(run), [run]);
   const reportByAttempt = useRunReports(run);
+  const execution = useRunExecutionRecord(run);
 
   // Selecting a step and selecting a worker are mutually exclusive — one
   // "what's open" signal keeps the inspector from competing with itself.
@@ -340,6 +349,22 @@ export default function RunCanvas({ run }: { run: RunState }) {
     [revealInspector],
   );
 
+  const handleOpenWorker = useCallback(
+    (id: string) => {
+      if (suppressNextNodeClickRef.current) {
+        suppressNextNodeClickRef.current = false;
+        return;
+      }
+      // Double-click is the explicit navigation gesture. Keep the worker
+      // selected so returning to Runs preserves its inspector context.
+      setSelectedStepId(null);
+      setSelectedWorkerTaskId(id);
+      revealInspector();
+      onOpenWorkerTerminal?.(id);
+    },
+    [onOpenWorkerTerminal, revealInspector],
+  );
+
   const clearSelection = useCallback(() => {
     setSelectedStepId(null);
     setSelectedWorkerTaskId(null);
@@ -405,6 +430,7 @@ export default function RunCanvas({ run }: { run: RunState }) {
                 selectedWorkerTaskId={selectedWorkerTaskId}
                 onSelectStep={handleSelectStep}
                 onSelectWorker={handleSelectWorker}
+                onOpenWorker={handleOpenWorker}
               />
             </div>
           </div>
@@ -452,6 +478,7 @@ export default function RunCanvas({ run }: { run: RunState }) {
                 run={run}
                 maps={maps}
                 reportByAttempt={reportByAttempt}
+                execution={execution}
                 selectedStepId={selectedStepId}
                 selectedWorkerTaskId={selectedWorkerTaskId}
                 onSelectStep={handleSelectStep}

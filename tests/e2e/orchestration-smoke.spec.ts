@@ -150,6 +150,9 @@ test("spark chat renders as a workbench tab", async () => {
     await expect(page.getByRole("tab", { name: /terminals/ })).toBeVisible();
     // The rail header button's accessible name is "Explorer <workspace name>";
     // a bare /Explorer/ regex also matches the Refresh/Reveal icon buttons.
+    // At this 900px compact viewport the right rail starts collapsed and is
+    // available as an overlay through the window-chrome toggle.
+    await page.getByTitle("Toggle right sidebar").click();
     await expect(page.getByRole("button", { name: "Explorer workspace" })).toBeVisible();
   } finally {
     await app?.close();

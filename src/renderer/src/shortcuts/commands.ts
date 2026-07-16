@@ -140,6 +140,8 @@ export const COMMANDS: Command[] = [
     id: "search.open",
     label: "Search in files",
     group: "Navigation",
+    // Mod+Shift+F is the established project-wide content-search chord.
+    // Unshifted Mod+F remains local Find in the active terminal/editor.
     defaultChords: [mod("f", { shift: true })],
   },
   {
@@ -162,25 +164,25 @@ export const COMMANDS: Command[] = [
     id: "terminal.splitRight",
     label: "Split terminal pane right",
     group: "Terminal",
-    // App.tsx checks the active tab kind before dispatching. We still
-    // intercept the keystroke so it doesn't fall through to xterm.
-    defaultChords: [mod("\\")],
+    // Native macOS terminal convention: Cmd+D splits right. `mod` keeps the
+    // same discoverable default on other platforms while still allowing a
+    // user override in Settings.
+    defaultChords: [mod("d")],
   },
   {
     id: "terminal.splitDown",
     label: "Split terminal pane down",
     group: "Terminal",
-    defaultChords: [mod("\\", { shift: true })],
+    defaultChords: [mod("d", { shift: true })],
   },
   {
     id: "terminal.closePane",
     label: "Close active terminal pane",
     group: "Terminal",
-    // Mod+Shift+W — Windows Terminal's "Close pane". (Mod+W closes the whole
-    // tab.) Frees Mod+Shift+K, which is Delete Line in VS Code — the previous
-    // comment's claim that it mirrored VS Code's kill-terminal was wrong (that
-    // command ships unbound). tab.closeOthers moved to Mod+Alt+T.
-    defaultChords: [mod("w", { shift: true })],
+    // Mod+W is context-aware through tab.close: when a terminal tab has more
+    // than one pane it closes the selected pane. Keep this command available
+    // for custom bindings without imposing a second default close chord.
+    defaultChords: [],
   },
   {
     id: "terminal.toggleZoom",
@@ -239,9 +241,11 @@ export const COMMANDS: Command[] = [
   },
   {
     id: "tab.newEditor",
-    label: "Open file (search)",
+    label: "Quick Open file",
     group: "Tabs",
-    // Mod+P — the dominant "Go to File / quick open" chord (VS Code, Sublime).
+    // Mod+P — the dominant Quick Open / Go to File chord (VS Code, Sublime).
+    // This filters file names and paths; it is deliberately distinct from
+    // Mod+F local Find and Mod+Shift+F project-wide content search.
     defaultChords: [mod("p")],
   },
   {

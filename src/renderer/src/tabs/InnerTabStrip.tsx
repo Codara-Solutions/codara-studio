@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import type { PreviewTab, RunsTab, TabId, TerminalTab } from "./types";
 
 // The strip below the top TabBar that surfaces a chat's spawned tabs as
-// inline pills: Chat | Terminal | Workers | Runs | preview entries.
+// inline pills: Chat | Runs | Terminal | Workers | preview entries.
 //
 // Sits at the workspace level (between TabBar and the Stack content area) so
 // it stays visible when the user navigates from the chat view into a worker
@@ -72,6 +72,13 @@ export default function InnerTabStrip({
       }}
     >
       <Pill label="Chat" active={chatActive} onClick={onChatClick} />
+      {runsTab && (
+        <Pill
+          label="Runs"
+          active={runsActive}
+          onClick={() => onSelectTab(runsTab.id)}
+        />
+      )}
       {backendPtyExists && (
         <Pill
           label="Terminal"
@@ -86,13 +93,6 @@ export default function InnerTabStrip({
           activeWorkerId={activeWorker?.id ?? null}
           active={workersActive}
           onSelect={onSelectTab}
-        />
-      )}
-      {runsTab && (
-        <Pill
-          label="Runs"
-          active={runsActive}
-          onClick={() => onSelectTab(runsTab.id)}
         />
       )}
       {previews.map((preview) => (

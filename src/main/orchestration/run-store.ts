@@ -1,9 +1,11 @@
 import { promises as fs, createWriteStream } from "node:fs";
 import { randomBytes } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 import type {
   AddDirectIterationInput,
   AddRunMessageInput,
+  AnswerRunQuestionInput,
   AgentEffortLevel,
   AgentRuntimeDiagnostic,
   Checkpoint,
@@ -33,7 +35,17 @@ import type {
   PlannedStepAgent,
   PrepareWorkerTaskInput,
   RunArtifactPaths,
+  RunAssumption,
+  RunBlocker,
+  HumanRunMessage,
+  RunConversationMessageIntent,
+  RunMessageDeliveryState,
   RunMessageAttachment,
+  RunQuestionCategory,
+  RunQuestionContext,
+  RunQuestionOption,
+  RunQuestionResumeStrategy,
+  RunQuestionSource,
   RunState,
   RuntimeState,
   SparkCall,
@@ -54,6 +66,12 @@ import type {
   WorkerTaskEnvelope,
 } from "@shared/types";
 import { FAN_OUT_DIRECTIVE_MARKER } from "@shared/types";
+import {
+  normalizeHumanRunQuestionMessages,
+  resolveOpenRunQuestion as resolveOpenRunQuestionPure,
+  resolveSingleUnresolvedRunQuestion,
+  unresolvedRunQuestions,
+} from "@shared/run-questions";
 import { makeId } from "@shared/ids";
 import { stripAnsiAndControls } from "@shared/agent-patterns";
 import {
@@ -64,7 +82,8 @@ import {
 import { normalizeChatFeatureFlags } from "@shared/chat-policy";
 import { CODEX_MODEL_BY_TIER, normalizeCodexModelId } from "@shared/model-catalog";
 import {
-  appendEvent,
+  appendEvent as appendEventRaw,
+  appendEvents as appendEventsRaw,
   appendFanOutDirectiveForcedEvent,
   appendFanOutDowngradedEvent,
   appendRegressionRevertEvent,
@@ -74,6 +93,7 @@ import {
   runDir,
   runsRoot,
 } from "./event-log";
+import { buildRunStatusTransitionEvent } from "./run-lifecycle";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport } from "./worker-report";
 // Re-exported for external importers (ipc.ts reaches it via getRunStore()).
@@ -82,6 +102,7 @@ import {
   COMPLETION_SUMMARY_PREFIX,
   buildCompletionSummaryMessage,
 } from "./completion-summary";
+import { collectRunResultManifest } from "./result-manifest";
 import {
   readWorkerPromptForLaunch,
   renderWorkerPrompt,
@@ -149,6 +170,8 @@ import {
   rewindShadowRef,
   runCheckpointStartPoint,
 } from "./checkpoints";
+import { resolveConversationRewindTransaction } from "./conversation-rewind";
+import { createKeyedTaskQueue } from "./keyed-task-queue";
 import { createSandboxWorktree, mergeBackSandboxWorktree, removeSandboxWorktree } from "../git-worktrees";
 import { readGitText } from "../git-exec";
 import { sparkHome } from "../spark-home";
@@ -165,12 +188,33 @@ import {
   STUCK_REASON_PREFIX,
   type StuckWatchdog,
 } from "./worker-watchdog";
+import { runStructuredWorker } from "./structured-worker";
 import { applyAgentRuntimeSettings, detectAgentRuntimes } from "../agent-runtimes";
 import { renderAgentSyncManagerContext } from "../agent-sync";
 import { getProvider } from "../providers";
 import type { SpawnOpts } from "../providers/types";
-import { resolveChatBackendConfig, type ChatStreamEvent } from "./spark-agent-backend";
+import {
+  buildManagerTurnPrompt,
+  isCheckpointJobCurrent,
+  isManagerTurnCurrent,
+  resolveChatBackendConfig,
+  shouldIncludeCanonicalReplay,
+  type ChatStreamEvent,
+} from "./spark-agent-backend";
 import { getBackend } from "./backend-registry";
+import {
+  abandonRunQuestionOwnership,
+  applyRunQuestionAnswer,
+  applyRunQuestionBlocker,
+  claimPendingManagerResume,
+  clearRegisteredPendingManagerResume,
+  createRunBlocker,
+  decideRunManagerQuestion,
+  inferRunQuestionCategory,
+  normalizeRunQuestionSignature,
+  recoverPendingManagerResumeLease,
+  releaseRunQuestionBlocker,
+} from "./run-question-policy";
 
 const RUN_FILE = "run.json";
 const ESC_KEY = "\x1b";
@@ -225,6 +269,11 @@ const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
 const activeAutopilotCycles = new Map<string, Promise<void>>();
 const activeAutopilotPlans = new Map<string, Promise<void>>();
 const activeAutopilotReviews = new Map<string, Promise<void>>();
+const activeSteeringFollowups = new Map<string, Promise<void>>();
+const activeConversationRewinds = new Map<string, Promise<UndoToCheckpointResult>>();
+// Durable answer continuations are keyed by question identity until the intended
+// manager stage claims their persisted pendingManagerResume record.
+const activePendingManagerResumes = new Set<string>();
 // Guard so the fan-out serial-downgrade event is emitted at most once per
 // (run, task): pickAutopilotTasks is a PURE selector called every autopilot
 // tick, so without this the launch site would re-emit fanout.downgraded_to_serial
@@ -265,6 +314,52 @@ const SKIPPED_DIRECT_FILE_MENTION_DIRS = new Set([
 // only read snapshots and the IPC bridge structured-clones results across to
 // the renderer, so no caller relies on getRun handing back a fresh deep copy.
 const runCache = new Map<string, RunState>();
+
+interface ManagerDecisionMutationContext {
+  runId: string;
+  conversationEpoch: number;
+}
+
+const managerDecisionMutationContext =
+  new AsyncLocalStorage<ManagerDecisionMutationContext>();
+
+class StaleManagerDecisionError extends Error {
+  constructor(runId: string, expectedEpoch: number, actualEpoch: number) {
+    super(
+      `Manager decision for run ${runId} belongs to conversation epoch ${expectedEpoch}; current epoch is ${actualEpoch}.`,
+    );
+    this.name = "StaleManagerDecisionError";
+  }
+}
+
+function assertManagerDecisionMutationCurrent(runId: string | undefined): void {
+  const context = managerDecisionMutationContext.getStore();
+  if (!runId || !context || context.runId !== runId) return;
+  const current = runCache.get(runId);
+  if (!current) return;
+  const actualEpoch = conversationEpoch(current);
+  if (actualEpoch !== context.conversationEpoch) {
+    throw new StaleManagerDecisionError(
+      runId,
+      context.conversationEpoch,
+      actualEpoch,
+    );
+  }
+}
+
+const appendEvent = (
+  ...args: Parameters<typeof appendEventRaw>
+): ReturnType<typeof appendEventRaw> => {
+  assertManagerDecisionMutationCurrent(args[0].runId);
+  return appendEventRaw(...args);
+};
+
+const appendEvents = (
+  ...args: Parameters<typeof appendEventsRaw>
+): ReturnType<typeof appendEventsRaw> => {
+  for (const input of args[0]) assertManagerDecisionMutationCurrent(input.runId);
+  return appendEventsRaw(...args);
+};
 
 // One-shot per process: fired lazily from listRuns(). Keeps the runs/ dir
 // from growing unbounded (see RUN_RETENTION_KEEP).
@@ -313,6 +408,7 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     workerAttempts: [],
     sparkCalls: [],
     humanMessages: [],
+    conversationEpoch: 0,
     autopilot: {
       status: "idle",
       updatedAt: now,
@@ -359,6 +455,7 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     kind: "run-start",
     messagePointer: 0,
     label: "Chat start",
+    conversationEpoch: 0,
   });
 
   return run;
@@ -653,6 +750,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       kind: "note",
       message: initialNote,
       attachments: input.initialAttachments,
+      intent: "turn",
     });
     if (!planText && !fanOutDirective && !councilDirective) {
       scheduleInitialChatDecision(run.id, input);
@@ -705,11 +803,19 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   if (tasks.length === 0 && needsStepPlanning(run)) {
     const fastPathPlan = await tryTrivialFastPathStepPlanning(run);
     run = fastPathPlan ?? ((await askOpenRouterManager(run, input.cwd, "step_planning")) ?? run);
-    if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return run;
+    if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return run;
     tasks = pickAutopilotTasks(run);
   }
   if (tasks.length === 0) {
-    return askHumanQuestion(run.id, "I could not find a ready task to run. Please clarify the next goal.");
+    return askHumanQuestion(
+      run.id,
+      "I could not find a ready task to run. Please clarify the next goal.",
+      undefined,
+      {
+        reason: "No safe runnable task can be inferred from the current plan.",
+        managerMode: run.workerAttempts.length > 0 ? "worker_result_review" : "plan_analysis",
+      },
+    );
   }
 
   // Observability: if the next batch was collapsed to a single serial task only
@@ -1214,7 +1320,7 @@ async function launchDirectNodeTasks(
   // the worktree forks from the CURRENT tree: without this, pass 1 forks from
   // the default branch (empty shadow ref → resolveDefaultBranch) and chained
   // passes fork one pass stale, stranding the previous pass's merged work.
-  await (checkpointTaskQueue.get(runId) ?? Promise.resolve());
+  await withCheckpointLock.wait(runId);
 
   // unattended:true so the user's autopilotSandbox setting applies exactly as
   // it does for managed unattended workers (worktree isolation + merge-back
@@ -1309,9 +1415,8 @@ async function launchDirectNodeTasks(
 }
 
 // Force-fail a live (or stuck-preparing) attempt. Used by the automation-loop
-// watchdog (per-iteration timeout), the direct-worker spawn handler (pty spawn
-// threw — fail fast instead of eating the 30s waitForSpawn timeout), and boot
-// recovery. Ends with finalizeDirectRun so the loop driver sees a terminal run.
+// watchdog and boot recovery. Ends with finalizeDirectRun so the loop driver
+// sees a terminal run.
 export async function failWorkerAttempt(
   runId: string,
   attemptId: string,
@@ -1345,7 +1450,16 @@ export async function failWorkerAttempt(
         draft.updatedAt = timestamp;
       },
     });
-    // Kill the CLI process under the attempt's pty, if it is still alive.
+    // Kill either structured transport or legacy PTY, if it is still alive.
+    const active = activeWorkerProcesses.get(attemptId);
+    if (active) {
+      try {
+        active.kill();
+      } catch {
+        /* already gone */
+      }
+      activeWorkerProcesses.delete(attemptId);
+    }
     try {
       pty.dispose(attemptId);
     } catch {
@@ -1484,7 +1598,7 @@ export async function relaunchDirectAttempt(
 ): Promise<string | null> {
   const run = await requireRun(runId);
   if (run.executionMode !== "direct") return null;
-  if (run.status === "paused" || run.status === "cancelled" || isTerminalRunStatus(run.status)) {
+  if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || isTerminalRunStatus(run.status)) {
     return null;
   }
   const attempt = run.workerAttempts.find((a) => a.id === attemptId);
@@ -1625,7 +1739,7 @@ async function finalizeDirectRun(runId: string): Promise<void> {
   if (run.executionMode !== "direct") return;
   // paused/cancelled are user decisions; blocked/terminal mean this iteration
   // was already decided (idempotency under watchdog + cycle double-fires).
-  if (run.status === "paused" || run.status === "cancelled" || run.status === "blocked") return;
+  if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled") return;
   if (isTerminalRunStatus(run.status)) return;
 
   // The wave's pending nodes (the join barrier). When loomPass is present, the
@@ -2010,12 +2124,6 @@ async function finalizeDirectRun(runId: string): Promise<void> {
     if (hasBlockedSibling) committedStatus = "blocked";
   }
 
-  // Captured BEFORE the commit below: `run` is the shared cache object the
-  // commit mutates in place, so reading run.status afterwards would yield the
-  // post-flip value (and the blocked re-emit would self-suppress as a no-op
-  // blocked→blocked transition in the notification policy).
-  const previousStatus = run.status;
-
   // FIX 3(c) — duplicate-question dedupe. A node that settles "blocked" again
   // with the SAME question (e.g. an idempotent finalize re-entry, or a co-blocked
   // sibling whose state is re-walked) must NOT push a second identical question
@@ -2120,13 +2228,21 @@ async function finalizeDirectRun(runId: string): Promise<void> {
         const isDuplicateQuestion =
           eff === "blocked" && priorNote?.status === "blocked" && priorNote.message === s.summary;
         if (!isDuplicateQuestion) {
+          const messageId = makeId("msg");
           draft.humanMessages.push({
-            id: makeId("msg"),
+            id: messageId,
+            clientMessageId:
+              eff === "blocked"
+                ? `loom-question-${draft.id}-${s.nodeId}-${s.attempt.id}`
+                : undefined,
             runId: draft.id,
             author: "spark",
             kind: eff === "blocked" ? "question" : "note",
             message: s.summary,
             attachments: [],
+            intent: "answer",
+            deliveryState: "acknowledged",
+            conversationEpoch: conversationEpoch(draft),
             createdAt: timestamp,
             loomNodeId: s.nodeId,
           });
@@ -2226,6 +2342,9 @@ async function finalizeDirectRun(runId: string): Promise<void> {
           kind: "note",
           message: activationCapSummary,
           attachments: [],
+          intent: "answer",
+          deliveryState: "acknowledged",
+          conversationEpoch: conversationEpoch(draft),
           createdAt: timestamp,
         });
       }
@@ -2338,33 +2457,8 @@ async function finalizeDirectRun(runId: string): Promise<void> {
     return; // run stays live; the next wave's finalize will decide again
   }
 
-  // The worker exited DECLARING itself blocked — the run now waits on the
-  // user. Re-emit the canonical status signal so the notifier's "needs you"
-  // path fires (the finalize commit above is typed direct_run.finalized,
-  // which the notification policy deliberately ignores; per-iteration
-  // complete/failed staying silent there is what keeps loops from spamming).
-  // previousStatus can never be "blocked" here (the entry guard early-returns
-  // on blocked runs), so the payload is always a real transition. Gated on the
-  // commit having actually flipped the run (the mutator bails on pause/cancel
-  // landing mid-queue) so a stale running→blocked never fires. (We only reach
-  // here when NOT advancing, so committedStatus === aggregate.)
-  if (aggregate === "blocked") {
-    const latest = await getRun(runId);
-    if (latest?.status === "blocked") {
-      const blockedSummary =
-        settled.find((s) => s.nodeStatus === "blocked")?.summary ?? "Loom worker is blocked";
-      await appendEvent({
-        workspaceId: run.workspaceId,
-        runId: run.id,
-        type: "run.status_updated",
-        message: blockedSummary.split(/\r?\n/, 1)[0] ?? "Loom worker is blocked",
-        // automationId lets the notify run-adapter route this to the distinct
-        // "automation.blocked" alert (a blocked iteration still needs the user)
-        // instead of a generic run.blocked.
-        payload: { previousStatus, status: "blocked", automationId: run.automationId },
-      }).catch(() => undefined);
-    }
-  }
+  // commitRunChange emits the canonical blocked lifecycle event from the
+  // authoritative status transition. No compensating re-emit is needed here.
 }
 
 // Positioned tail read of a (possibly large) log file — never the whole file.
@@ -2411,12 +2505,19 @@ function scheduleInitialManagerDecision(
 ): void {
   const existing = activeAutopilotPlans.get(runId);
   if (existing && !opts?.afterCurrent) return;
+  const scheduledEpoch = runCache.get(runId)?.conversationEpoch ?? 0;
 
   const start = existing && opts?.afterCurrent ? existing.catch(() => undefined) : Promise.resolve();
   const cycle = start
     .then(async () => {
       const latest = await getRun(runId);
-      if (!latest || latest.status === "paused" || latest.status === "cancelled") return;
+      if (
+        !latest ||
+        conversationEpoch(latest) !== scheduledEpoch ||
+        latest.status === "paused" ||
+        latest.status === "blocked" ||
+        latest.status === "cancelled"
+      ) return;
       await runInitialAutopilotPlanning(runId, input, mode);
     })
     .catch(async (err) => {
@@ -2431,20 +2532,489 @@ function scheduleInitialManagerDecision(
   void cycle;
 }
 
+function hasQueuedSteering(run: RunState): boolean {
+  return queuedManagerInputMessages(run).some((message) => message.intent === "steer");
+}
+
+function scheduleQueuedSteeringFollowup(run: RunState): void {
+  if (run.executionMode === "direct" || !hasQueuedSteering(run)) return;
+  if (activeSteeringFollowups.has(run.id)) return;
+  const scheduledEpoch = conversationEpoch(run);
+  const waits = [activeAutopilotPlans.get(run.id), activeAutopilotReviews.get(run.id)].filter(
+    (promise): promise is Promise<void> => Boolean(promise),
+  );
+  const cycle = Promise.all(waits.map((promise) => promise.catch(() => undefined)))
+    .then(async () => {
+      let latest = await getRun(run.id);
+      if (
+        !latest ||
+        conversationEpoch(latest) !== scheduledEpoch ||
+        !hasQueuedSteering(latest)
+      ) return;
+      if (
+        latest.status === "paused" ||
+        latest.status === "blocked" ||
+        latest.status === "cancelled"
+      ) {
+        return;
+      }
+      if (latest.status === "complete" || latest.status === "failed") {
+        latest = await commitRunChange(latest, {
+          type: "run.steering_followup_started",
+          message: "Queued steering started a fresh Cora manager turn",
+          payload: { conversationEpoch: conversationEpoch(latest) },
+          mutate: (draft, timestamp) => {
+            if (!hasQueuedSteering(draft)) return false;
+            draft.status = "planning";
+            draft.autopilot = {
+              ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+              status: "running",
+              lastAction: "queued_steering_followup",
+              updatedAt: timestamp,
+            };
+            draft.updatedAt = timestamp;
+          },
+        });
+      }
+      await runInitialAutopilotPlanning(
+        latest.id,
+        autopilotInputFromRun(latest),
+        "chat",
+      );
+    })
+    .catch(async (err) => {
+      await markInitialAutopilotPlanningFailed(run.id, err);
+    })
+    .finally(() => {
+      if (activeSteeringFollowups.get(run.id) === cycle) {
+        activeSteeringFollowups.delete(run.id);
+        // Steering can arrive while this follow-up turn itself is active. The
+        // in-flight map dedupes that arrival; re-arm after settlement so it gets
+        // its own next Cora turn instead of remaining queued forever.
+        void getRun(run.id).then((latest) => {
+          if (
+            latest &&
+            conversationEpoch(latest) === scheduledEpoch &&
+            latest.status !== "paused" &&
+            latest.status !== "blocked" &&
+            latest.status !== "cancelled" &&
+            hasQueuedSteering(latest)
+          ) {
+            scheduleQueuedSteeringFollowup(latest);
+          }
+        });
+      }
+    });
+  activeSteeringFollowups.set(run.id, cycle);
+  void cycle;
+}
+
+function pendingManagerResumeKey(
+  runId: string,
+  pending: NonNullable<RunState["pendingManagerResume"]>,
+): string {
+  return `${runId}:${pending.questionMessageId}:${pending.managerMode}`;
+}
+
+async function claimScheduledManagerResume(
+  runId: string,
+  pending: NonNullable<RunState["pendingManagerResume"]>,
+): Promise<string | null> {
+  const run = await requireRun(runId);
+  const launchClaimId = makeId("resume");
+  let claimed = false;
+  await commitRunChange(run, {
+    type: "run.question_resume_claimed",
+    message: `Claimed manager continuation: ${pending.managerMode}`,
+    payload: {
+      questionMessageId: pending.questionMessageId,
+      managerMode: pending.managerMode,
+      launchClaimId,
+    },
+    mutate: (draft, timestamp) => {
+      claimed = claimPendingManagerResume(
+        draft,
+        pending.questionMessageId,
+        pending.managerMode,
+        launchClaimId,
+        timestamp,
+      );
+      if (!claimed) return false;
+      draft.updatedAt = timestamp;
+    },
+  });
+  return claimed ? launchClaimId : null;
+}
+
+async function clearRegisteredManagerResume(
+  runId: string,
+  launchClaimId: string,
+  sparkCallId: string,
+): Promise<void> {
+  const run = await requireRun(runId);
+  await commitRunChange(run, {
+    type: "run.question_resume_launched",
+    message: "Manager continuation launch registered",
+    payload: { launchClaimId, sparkCallId },
+    mutate: (draft, timestamp) => {
+      if (!clearRegisteredPendingManagerResume(draft, launchClaimId)) return false;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+async function finalizeAppliedManagerCall(
+  runId: string,
+  callId: string,
+  epoch: number,
+): Promise<RunState> {
+  const run = await requireRun(runId);
+  return commitRunChange(run, {
+    type: "spark_call.completed",
+    message: "Cora manager decision applied",
+    sparkCallId: callId,
+    payload: { callId, conversationEpoch: epoch },
+    mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== epoch) return false;
+      const call = draft.sparkCalls.find((entry) => entry.id === callId);
+      if (!call || call.status !== "started" || call.completedAt) return false;
+      call.status = "completed";
+      call.completedAt = timestamp;
+      recomputeRunCostRollups(draft);
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+async function runManagerStageAfterQuestion(
+  run: RunState,
+  cwd: string,
+  mode: SparkCall["mode"],
+  managerResumeClaimId: string,
+  autonomyRetryCount = 0,
+): Promise<void> {
+  if (mode === "chat" || mode === "plan_analysis") {
+    await runInitialAutopilotPlanning(
+      run.id,
+      autopilotInputFromRun(run),
+      mode,
+      managerResumeClaimId,
+      autonomyRetryCount,
+    );
+    return;
+  }
+  if (mode === "worker_result_review") {
+    await runAutopilotManagerReview(run.id, cwd, managerResumeClaimId);
+    return;
+  }
+
+  const decided = await askOpenRouterManager(
+    run,
+    cwd,
+    mode,
+    managerResumeClaimId,
+    autonomyRetryCount,
+  );
+  if (
+    !decided ||
+    decided.status === "paused" ||
+    decided.status === "blocked" ||
+    decided.status === "cancelled" ||
+    isTerminalRunStatus(decided.status)
+  ) {
+    return;
+  }
+  if (mode !== "final_summary" && mode !== "test") {
+    const input = autopilotInputFromRun(decided);
+    await startAutopilot({ ...input, cwd, runId: decided.id });
+  }
+}
+
+function schedulePendingManagerResume(run: RunState): void {
+  const pending = run.pendingManagerResume;
+  if (!pending || run.executionMode === "direct") return;
+  const key = pendingManagerResumeKey(run.id, pending);
+  const scheduledEpoch = conversationEpoch(run);
+  if (activePendingManagerResumes.has(key)) return;
+  activePendingManagerResumes.add(key);
+
+  const waits = [activeAutopilotPlans.get(run.id), activeAutopilotReviews.get(run.id)].filter(
+    (promise): promise is Promise<void> => Boolean(promise),
+  );
+  const start = Promise.all(waits.map((promise) => promise.catch(() => undefined))).then(
+    () => undefined,
+  );
+  const cycle = start
+    .then(async () => {
+      const beforeClaim = await getRun(run.id);
+      if (!beforeClaim || conversationEpoch(beforeClaim) !== scheduledEpoch) return;
+      const launchClaimId = await claimScheduledManagerResume(run.id, pending);
+      if (!launchClaimId) return;
+      const latest = await getRun(run.id);
+      if (
+        !latest ||
+        conversationEpoch(latest) !== scheduledEpoch ||
+        latest.status === "paused" ||
+        latest.status === "blocked" ||
+        latest.status === "cancelled" ||
+        isTerminalRunStatus(latest.status)
+      ) {
+        return;
+      }
+      await runManagerStageAfterQuestion(
+        latest,
+        autopilotInputFromRun(latest).cwd,
+        pending.managerMode,
+        launchClaimId,
+        pending.autonomyRetryCount ?? 0,
+      );
+    })
+    .catch(async (err) => {
+      await markInitialAutopilotPlanningFailed(run.id, err);
+    })
+    .finally(() => {
+      activePendingManagerResumes.delete(key);
+      if (activeAutopilotPlans.get(run.id) === cycle) {
+        activeAutopilotPlans.delete(run.id);
+      }
+      if (activeAutopilotReviews.get(run.id) === cycle) {
+        activeAutopilotReviews.delete(run.id);
+      }
+    });
+
+  if (pending.managerMode === "worker_result_review") {
+    activeAutopilotReviews.set(run.id, cycle);
+  } else {
+    activeAutopilotPlans.set(run.id, cycle);
+  }
+  void cycle;
+}
+
+/** Finish a rewind whose epoch barrier was durable when the prior process
+ * exited. Code restoration and ref movement are idempotent, so replaying the
+ * target is safer than exposing a mixed old-chat/new-epoch run. */
+export async function recoverPendingConversationRewinds(): Promise<void> {
+  const runs = await listRuns();
+  for (const run of runs) {
+    const pending = run.pendingConversationRewind;
+    if (!pending) continue;
+    const checkpoints = run.checkpoints ?? [];
+    const checkpointIndex = pending.checkpointId
+      ? checkpoints.findIndex((checkpoint) => checkpoint.id === pending.checkpointId)
+      : -1;
+    const checkpoint = checkpointIndex >= 0 ? checkpoints[checkpointIndex] : undefined;
+    try {
+      await queueConversationRewind(run.id, {
+        checkpoint,
+        checkpointId: pending.checkpointId,
+        checkpointIndex: pending.checkpointIndex,
+        messagePointer: pending.messagePointer,
+        messageId: pending.messageId,
+        scope: pending.scope,
+      });
+    } catch (error) {
+      console.warn(`[run-store] failed to recover conversation rewind for ${run.id}:`, error);
+    }
+  }
+}
+
+/** Repair manager turns that were durable but had no live driver after process
+ * exit. Claimed queued/submitted input is released, the orphaned call is marked
+ * failed, and answer-driven continuations are recreated from the exact linked
+ * answer so startup can safely retry them. */
+export async function recoverOrphanedManagerTurns(): Promise<void> {
+  const runs = await listRuns();
+  for (const run of runs) {
+    const epoch = conversationEpoch(run);
+    const orphaned = run.sparkCalls.filter(
+      (call) =>
+        call.status === "started" &&
+        !call.completedAt &&
+        (call.conversationEpoch ?? 0) === epoch,
+    );
+    if (orphaned.length === 0) continue;
+    const orphanedIds = new Set(orphaned.map((call) => call.id));
+
+    const recovered = await commitRunChange(run, {
+      type: "run.manager_turns_recovered",
+      message: `Recovered ${orphaned.length} interrupted manager turn(s) after restart`,
+      payload: { callIds: [...orphanedIds], conversationEpoch: epoch },
+      mutate: (draft, timestamp) => {
+        if (conversationEpoch(draft) !== epoch) return false;
+        let changed = false;
+        for (const call of draft.sparkCalls) {
+          if (!orphanedIds.has(call.id) || call.status !== "started") continue;
+          call.status = "failed";
+          call.error = "Manager turn interrupted by application restart.";
+          call.completedAt = timestamp;
+          changed = true;
+        }
+        for (const message of draft.humanMessages) {
+          if (!message.backendTurnId || !orphanedIds.has(message.backendTurnId)) continue;
+          if (message.deliveryState === "acknowledged" || message.deliveryState === "cancelled") continue;
+          message.deliveryState = "queued";
+          delete message.backendTurnId;
+          if (message.targetTurnId && orphanedIds.has(message.targetTurnId)) {
+            delete message.targetTurnId;
+          }
+          changed = true;
+        }
+
+        if (!draft.pendingManagerResume) {
+          const resumeCall = [...orphaned]
+            .reverse()
+            .find((call) => Boolean(call.managerResumeClaimId));
+          if (resumeCall) {
+            const linkedAnswer = [...draft.humanMessages]
+              .reverse()
+              .find(
+                (message) =>
+                  message.author === "user" &&
+                  message.kind === "answer" &&
+                  Boolean(message.answersMessageId) &&
+                  message.createdAt <= resumeCall.createdAt,
+              );
+            if (linkedAnswer?.answersMessageId) {
+              draft.pendingManagerResume = {
+                questionMessageId: linkedAnswer.answersMessageId,
+                managerMode: resumeCall.mode,
+                requestedAt: timestamp,
+                state: "pending",
+              };
+              changed = true;
+            }
+          }
+        }
+        if (!changed) return false;
+        draft.updatedAt = timestamp;
+      },
+    });
+
+    if (recovered.pendingManagerResume) {
+      schedulePendingManagerResume(recovered);
+    } else if (
+      recovered.executionMode !== "direct" &&
+      queuedManagerInputMessages(recovered).length > 0 &&
+      recovered.status !== "paused" &&
+      recovered.status !== "blocked" &&
+      recovered.status !== "cancelled" &&
+      !isTerminalRunStatus(recovered.status)
+    ) {
+      scheduleInitialChatDecision(recovered.id, autopilotInputFromRun(recovered), {
+        afterCurrent: true,
+      });
+    }
+  }
+}
+
+/** Re-arm durable queued input whose in-memory follow-up scheduler disappeared
+ * on process exit. Claimed orphaned input is released by
+ * recoverOrphanedManagerTurns first; this pass covers messages that were saved
+ * immediately before the process exited and were never claimed. */
+export async function recoverQueuedManagerInputs(): Promise<void> {
+  const runs = await listRuns();
+  for (const run of runs) {
+    if (
+      run.executionMode === "direct" ||
+      run.status === "paused" ||
+      run.status === "blocked" ||
+      run.status === "cancelled" ||
+      activeManagerCall(run)
+    ) continue;
+    const queued = queuedManagerInputMessages(run);
+    if (queued.length === 0) continue;
+    if (queued.some((message) => message.intent === "steer")) {
+      scheduleQueuedSteeringFollowup(run);
+    } else {
+      scheduleInitialChatDecision(run.id, autopilotInputFromRun(run), { afterCurrent: true });
+    }
+  }
+}
+
+/** Re-arm linked-answer manager continuations left by a prior process. Pending
+ * records schedule normally. A launching lease without a completed SparkCall
+ * returns to pending; only a completed call proves the continuation landed. */
+export async function recoverPendingManagerResumes(): Promise<void> {
+  const runs = await listRuns();
+  for (const run of runs) {
+    const pending = run.pendingManagerResume;
+    if (!pending) continue;
+    const key = pendingManagerResumeKey(run.id, pending);
+    if (activePendingManagerResumes.has(key)) continue;
+
+    const recovery: { action: "none" | "pending" | "registered" } = { action: "none" };
+    const recovered = await commitRunChange(run, {
+      type: "run.question_resume_recovered",
+      message: "Recovered manager continuation after process restart",
+      payload: {
+        questionMessageId: pending.questionMessageId,
+        managerMode: pending.managerMode,
+        priorState: pending.state ?? "pending",
+        launchClaimId: pending.launchClaimId,
+      },
+      mutate: (draft, timestamp) => {
+        recovery.action = recoverPendingManagerResumeLease(draft);
+        if (recovery.action === "none") return false;
+        draft.updatedAt = timestamp;
+      },
+    });
+    if (recovery.action === "pending" && recovered.pendingManagerResume) {
+      schedulePendingManagerResume(recovered);
+    }
+  }
+}
+
+/** A live MCP long-poll cannot survive process exit. Convert managed provider
+ * and consent questions to the durable scheduled-manager strategy; direct
+ * worker report blockers keep their Loom-owned continuation path. */
+export async function recoverAbandonedActiveRpcQuestions(): Promise<void> {
+  const runs = await listRuns();
+  for (const run of runs) {
+    const blocker = run.blockedOn;
+    if (
+      run.status !== "blocked" ||
+      run.executionMode === "direct" ||
+      blocker?.resumeStrategy !== "active_rpc"
+    ) continue;
+    await commitRunChange(run, {
+      type: "run.question_rpc_recovered",
+      message: "Recovered question whose live provider wait ended during restart",
+      payload: { questionMessageId: blocker.questionMessageId },
+      mutate: (draft, timestamp) => {
+        if (
+          draft.status !== "blocked" ||
+          draft.blockedOn?.questionMessageId !== blocker.questionMessageId ||
+          draft.blockedOn.resumeStrategy !== "active_rpc"
+        ) return false;
+        draft.blockedOn.resumeStrategy = "schedule_manager";
+        draft.blockedOn.managerMode ??=
+          [...draft.sparkCalls]
+            .reverse()
+            .find((call) => call.status === "started" && !call.completedAt)?.mode ??
+          "plan_analysis";
+        draft.updatedAt = timestamp;
+      },
+    });
+  }
+}
+
 async function runInitialAutopilotPlanning(
   runId: string,
   input: StartAutopilotInput,
   mode: "plan_analysis" | "chat" = "plan_analysis",
+  managerResumeClaimId?: string,
+  autonomyRetryCount = 0,
 ): Promise<void> {
   let run = await requireRun(runId);
-  if (run.status === "paused" || run.status === "cancelled") return;
+  if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled") return;
 
   let managerPlannedRun = mode === "chat"
-    ? await askOpenRouterManagerForChat(run, input.cwd)
-    : await askOpenRouterManagerForInitialTasks(run, input.cwd);
+    ? await askOpenRouterManager(run, input.cwd, "chat", managerResumeClaimId, autonomyRetryCount)
+    : await askOpenRouterManager(run, input.cwd, "plan_analysis", managerResumeClaimId, autonomyRetryCount);
   if (
     managerPlannedRun &&
     managerPlannedRun.status !== "paused" &&
+    managerPlannedRun.status !== "blocked" &&
     managerPlannedRun.status !== "cancelled" &&
     managerPlannedRun.status !== "failed" &&
     managerPlannedRun.steps.length > 0
@@ -2456,6 +3026,7 @@ async function runInitialAutopilotPlanning(
   if (
     managerPlannedRun &&
     managerPlannedRun.status !== "paused" &&
+    managerPlannedRun.status !== "blocked" &&
     managerPlannedRun.status !== "cancelled" &&
     managerPlannedRun.status !== "failed" &&
     managerPlannedRun.steps.length > 0 &&
@@ -2472,6 +3043,12 @@ async function runInitialAutopilotPlanning(
       mode === "chat"
         ? "OpenRouter is not configured, so Cora cannot think through this chat turn yet. Add the API key in Settings, then send the message again."
         : "OpenRouter is not configured, so Cora cannot plan Claude/Codex/Cursor worker tasks yet. Add the API key in Settings, then run the plan again.",
+      undefined,
+      {
+        category: "credentials_access",
+        reason: "The configured manager backend has no API credentials.",
+        managerMode: mode,
+      },
     );
     return;
   }
@@ -2482,6 +3059,7 @@ async function runInitialAutopilotPlanning(
   // into startAutopilot (which would flip it back to running and re-plan).
   if (
     run.status === "paused" ||
+    run.status === "blocked" ||
     run.status === "cancelled" ||
     run.status === "complete" ||
     run.status === "failed"
@@ -2500,6 +3078,14 @@ async function markInitialAutopilotPlanningFailed(runId: string, err: unknown): 
     message: `Autopilot planning failed: ${error}`,
     payload: { error },
     mutate: (draft, timestamp) => {
+      if (
+        draft.status === "paused" ||
+        draft.status === "blocked" ||
+        draft.status === "cancelled" ||
+        draft.status === "complete"
+      ) {
+        return false;
+      }
       draft.status = "failed";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
@@ -2535,6 +3121,7 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   const latest = await requireRun(launched.id);
   if (
     latest.status === "paused" ||
+    latest.status === "blocked" ||
     latest.status === "cancelled" ||
     latest.status === "complete" ||
     latest.status === "failed"
@@ -2698,7 +3285,7 @@ export function scheduleAutopilotCycles(runId: string, attemptIds: string[]): vo
     const cycle = Promise.resolve()
       .then(async () => {
         const run = await getRun(runId);
-        if (!run || run.status === "paused" || run.status === "cancelled") return;
+        if (!run || run.status === "paused" || run.status === "blocked" || run.status === "cancelled") return;
         await runAutopilotWorkerCycle(runId, attemptId);
       })
       .catch(async (err) => {
@@ -2717,26 +3304,42 @@ export function scheduleAutopilotCycles(runId: string, attemptIds: string[]): vo
   }
 }
 
-function scheduleAutopilotReview(runId: string, cwd: string): void {
-  if (activeAutopilotReviews.has(runId)) return;
-  const review = new Promise<void>((resolve, reject) => {
-    setTimeout(() => {
-      runAutopilotManagerReview(runId, cwd).then(resolve, reject);
-    }, 0);
-  })
+function scheduleAutopilotReview(
+  runId: string,
+  cwd: string,
+  opts?: { afterCurrent?: boolean },
+): void {
+  const existing = activeAutopilotReviews.get(runId);
+  if (existing && !opts?.afterCurrent) return;
+  const start = existing && opts?.afterCurrent ? existing.catch(() => undefined) : Promise.resolve();
+  const review = start
+    .then(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          setTimeout(() => {
+            runAutopilotManagerReview(runId, cwd).then(resolve, reject);
+          }, 0);
+        }),
+    )
     .catch(async (err) => {
       await markAutopilotCycleFailed(runId, "manager-review", err);
     })
     .finally(() => {
-      activeAutopilotReviews.delete(runId);
+      if (activeAutopilotReviews.get(runId) === review) {
+        activeAutopilotReviews.delete(runId);
+      }
     });
   activeAutopilotReviews.set(runId, review);
   void review;
 }
 
-async function runAutopilotManagerReview(runId: string, cwd: string): Promise<void> {
+async function runAutopilotManagerReview(
+  runId: string,
+  cwd: string,
+  managerResumeClaimId?: string,
+): Promise<void> {
   let run = await requireRun(runId);
-  if (run.status === "paused" || run.status === "cancelled") return;
+  if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled") return;
   if (hasAutopilotCycles(runId) || activeWorkersForRun(runId).length > 0) return;
 
   // Looms v2: direct runs never consult a manager — the worker's final report
@@ -2802,6 +3405,12 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
     await askHumanQuestion(
       run.id,
       "Worker results are ready, but OpenRouter is not configured for Cora manager review. Add the API key in Settings, then resume the run.",
+      undefined,
+      {
+        category: "credentials_access",
+        reason: "The manager review requires OpenRouter credentials.",
+        managerMode: "worker_result_review",
+      },
     );
     return;
   }
@@ -2839,11 +3448,16 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
   // terminal verdict), so enforcing it each review hop just closes any hole the
   // manager opened by accepting without spawning one.
   run = await ensureVerifierCoverage(run, cwd);
-  if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
+  if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
   const REVIEW_REPROMPT_CAP = 3;
   for (let attempt = 0; attempt < REVIEW_REPROMPT_CAP; attempt++) {
-    run = await askOpenRouterManager(run, cwd, "worker_result_review") ?? run;
-    if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
+    run = await askOpenRouterManager(
+      run,
+      cwd,
+      "worker_result_review",
+      attempt === 0 ? managerResumeClaimId : undefined,
+    ) ?? run;
+    if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
     const lastAction = run.autopilot?.lastAction;
     if (lastAction !== "completion_refused") break;
   }
@@ -2858,12 +3472,12 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
   // one of its tasks is terminal, so a same-step verifier still holds its step
   // open — making this safe to run regardless of queued follow-ups.
   run = await completeAcceptedReviewingSteps(run, "");
-  if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
+  if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
   // Brake checkpoint: if the next active step is a brake, resolve it and
   // re-invoke plan_analysis so the manager can extend the plan with prior
   // worker reports as evidence.
   run = await resolveActiveBrakeAndReplan(run, cwd);
-  if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
+  if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
   // Cross-step plan hint: when worker_result_review tried to queue work into
   // a non-existent step (a real-world Grok-4.3 behavior — exploration done,
   // model wants to add the "now implement it" step itself), applySparkManagerDecision
@@ -2873,7 +3487,7 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
   let tasks = pickAutopilotTasks(run);
   if (tasks.length === 0 && run.autopilot?.pendingPlanHint && !needsStepPlanning(run)) {
     run = (await askOpenRouterManager(run, cwd, "plan_analysis")) ?? run;
-    if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
+    if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
     tasks = pickAutopilotTasks(run);
   }
   // After advancing past a worker (and possibly a brake), the next active step
@@ -2883,7 +3497,7 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
   if (tasks.length === 0 && needsStepPlanning(run)) {
     const fastPathPlan = await tryTrivialFastPathStepPlanning(run);
     run = fastPathPlan ?? ((await askOpenRouterManager(run, cwd, "step_planning")) ?? run);
-    if (run.status === "paused" || run.status === "cancelled" || run.status === "complete") return;
+    if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled" || run.status === "complete") return;
     tasks = pickAutopilotTasks(run);
   }
   if (tasks.length === 0) {
@@ -2945,6 +3559,7 @@ async function runAutopilotManagerReview(runId: string, cwd: string): Promise<vo
           "Autopilot review found no remaining work and no workers in flight; pausing for input.",
         payload: { previousStatus: run.status },
         mutate: (draft, timestamp) => {
+          abandonRunQuestionOwnership(draft);
           draft.status = "paused";
           draft.autopilot = {
             ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
@@ -3039,6 +3654,159 @@ function manualFallbackEnabled(): boolean {
   return process.env.SPARK_ENABLE_MANUAL_FALLBACK === "1";
 }
 
+function conversationEpoch(run: RunState): number {
+  return run.conversationEpoch ?? 0;
+}
+
+function activeManagerCall(run: RunState): SparkCall | undefined {
+  const epoch = conversationEpoch(run);
+  for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
+    const call = run.sparkCalls[index];
+    if ((call.conversationEpoch ?? 0) !== epoch) continue;
+    if (call.status === "started" && !call.completedAt) return call;
+  }
+  return undefined;
+}
+
+function queuedManagerInputMessages(run: RunState): HumanRunMessage[] {
+  const epoch = conversationEpoch(run);
+  return run.humanMessages.filter(
+    (message) =>
+      message.author === "user" &&
+      (message.conversationEpoch ?? 0) === epoch &&
+      message.deliveryState === "queued" &&
+      !message.backendTurnId,
+  );
+}
+
+interface PreparedManagerTurn {
+  run: RunState;
+  call: SparkCall;
+  prompt: string;
+  inputMessages: HumanRunMessage[];
+  conversationEpoch: number;
+}
+
+async function prepareManagerTurn(
+  run: RunState,
+  call: SparkCall,
+  backend: ReturnType<typeof resolveChatBackendConfig>["backend"],
+): Promise<PreparedManagerTurn> {
+  let selectedIds: string[] = [];
+  let includeCanonicalReplay = false;
+  const epoch = conversationEpoch(run);
+  const prepared = await commitRunChange(run, {
+    type: "spark_call.started",
+    message: `Cora manager call started: ${call.model}`,
+    sparkCallId: call.id,
+    payload: {
+      mode: call.mode,
+      model: call.model,
+      conversationEpoch: epoch,
+    },
+    mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== epoch) return false;
+      includeCanonicalReplay = shouldIncludeCanonicalReplay(
+        draft,
+        backend,
+        epoch,
+      );
+      const selected = queuedManagerInputMessages(draft);
+      selectedIds = selected.map((message) => message.id);
+      call.inputMessageIds = selectedIds;
+      call.conversationEpoch = epoch;
+      call.createdAt = timestamp;
+      for (const message of selected) {
+        message.targetTurnId ??= call.id;
+        message.backendTurnId = call.id;
+      }
+      draft.sparkCalls.push(call);
+      draft.updatedAt = timestamp;
+    },
+  });
+  const persistedCall = prepared.sparkCalls.find((entry) => entry.id === call.id);
+  if (!persistedCall || conversationEpoch(prepared) !== epoch) {
+    throw new Error(`Manager turn ${call.id} became stale before backend startup.`);
+  }
+  const inputMessages = selectedIds
+    .map((id) => prepared.humanMessages.find((message) => message.id === id))
+    .filter((message): message is HumanRunMessage => Boolean(message));
+  return {
+    run: prepared,
+    call: persistedCall,
+    prompt: buildManagerTurnPrompt(prepared, inputMessages, { includeCanonicalReplay }),
+    inputMessages,
+    conversationEpoch: epoch,
+  };
+}
+
+const DELIVERY_RANK: Record<RunMessageDeliveryState, number> = {
+  queued: 0,
+  submitted: 1,
+  acknowledged: 2,
+  cancelled: 3,
+};
+
+async function releaseUnsubmittedManagerInput(
+  runId: string,
+  callId: string,
+  epoch: number,
+): Promise<void> {
+  const run = await getRun(runId);
+  if (!run || !isManagerTurnCurrent(run, callId, epoch)) return;
+  await commitRunChange(run, {
+    type: "run.manager_input_requeued",
+    message: "Manager input requeued after pre-submission failure",
+    payload: { callId, conversationEpoch: epoch },
+    mutate: (draft, timestamp) => {
+      if (!isManagerTurnCurrent(draft, callId, epoch)) return false;
+      let changed = false;
+      for (const message of draft.humanMessages) {
+        if (message.backendTurnId !== callId) continue;
+        if (message.deliveryState === "acknowledged" || message.deliveryState === "cancelled") continue;
+        message.deliveryState = "queued";
+        delete message.backendTurnId;
+        if (message.targetTurnId === callId) delete message.targetTurnId;
+        changed = true;
+      }
+      if (!changed) return false;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+async function updateManagerInputDelivery(
+  runId: string,
+  callId: string,
+  epoch: number,
+  state: "submitted" | "acknowledged",
+): Promise<void> {
+  const run = await getRun(runId);
+  if (!run || conversationEpoch(run) !== epoch) return;
+  const call = run.sparkCalls.find(
+    (entry) => entry.id === callId && (entry.conversationEpoch ?? 0) === epoch,
+  );
+  if (!call) return;
+  await commitRunChange(run, {
+    type: `run.manager_input_${state}`,
+    message: `Manager input ${state}`,
+    payload: { callId, inputMessageIds: call.inputMessageIds ?? [], conversationEpoch: epoch },
+    mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== epoch) return false;
+      let changed = false;
+      for (const message of draft.humanMessages) {
+        if (message.backendTurnId !== callId) continue;
+        const current = message.deliveryState ?? "queued";
+        if (current === "cancelled" || DELIVERY_RANK[current] >= DELIVERY_RANK[state]) continue;
+        message.deliveryState = state;
+        changed = true;
+      }
+      if (!changed) return false;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 function normalizeOpenRouterManagerMode(
   mode: SparkCall["mode"],
 ): "plan_analysis" | "chat" | "step_planning" | "worker_result_review" {
@@ -3072,13 +3840,21 @@ async function createFallbackAutopilotTask(run: RunState, input: StartAutopilotI
   });
 }
 
-async function askOpenRouterManagerForInitialTasks(run: RunState, cwd: string): Promise<RunState | null> {
-  return askOpenRouterManager(run, cwd, "plan_analysis");
+async function askOpenRouterManagerForInitialTasks(
+  run: RunState,
+  cwd: string,
+  managerResumeClaimId?: string,
+): Promise<RunState | null> {
+  return askOpenRouterManager(run, cwd, "plan_analysis", managerResumeClaimId);
 }
 
-async function askOpenRouterManagerForChat(run: RunState, cwd: string): Promise<RunState | null> {
+async function askOpenRouterManagerForChat(
+  run: RunState,
+  cwd: string,
+  managerResumeClaimId?: string,
+): Promise<RunState | null> {
   const enriched = await enrichLatestUserMessageWithMentionedFiles(run, cwd);
-  return askOpenRouterManager(enriched, cwd, "chat");
+  return askOpenRouterManager(enriched, cwd, "chat", managerResumeClaimId);
 }
 
 // Brake support: when the next active step has kind="brake", treat it as a
@@ -3121,6 +3897,7 @@ async function resolveActiveBrakeAndReplan(run: RunState, cwd: string): Promise<
 // ~6s rather than hanging the autopilot loop for the rest of the budget.
 const MANAGER_REQUEST_MAX_ATTEMPTS = 3;
 const MANAGER_REQUEST_BACKOFF_BASE_MS = 1500;
+const MAX_MANAGER_QUESTION_REPROMPTS = 2;
 
 function isTerminalManagerError(message: string): boolean {
   if (isStructuredOutputUnsupportedError(message)) return true;
@@ -3155,6 +3932,8 @@ async function askOpenRouterManager(
   run: RunState,
   cwd: string,
   mode: SparkCall["mode"],
+  managerResumeClaimId?: string,
+  autonomyRetryCount = 0,
 ): Promise<RunState | null> {
   // Defense in depth: a direct (loom) run must never reach a manager LLM. If
   // a code path gets here anyway, surface it loudly instead of silently
@@ -3179,7 +3958,15 @@ async function askOpenRouterManager(
   // through applySparkManagerDecision so downstream worker spawns + chat
   // replies work identically.
   if (chatConfig.backend !== "openrouter") {
-    return await askChatBackendNonOpenRouter(run, cwd, mode, chatConfig, settings);
+    return await askChatBackendNonOpenRouter(
+      run,
+      cwd,
+      mode,
+      chatConfig,
+      settings,
+      managerResumeClaimId,
+      autonomyRetryCount,
+    );
   }
 
   // Automation mode is a CLI-architect feature: it drives the spark_*_automation
@@ -3216,12 +4003,32 @@ async function askOpenRouterManager(
   const responsePath = join(callDir, "response.json");
   const parsedJsonPath = join(callDir, "parsed-decision.json");
   const contextPacketPath = join(callDir, "context-packet.json");
+  const sparkCall: SparkCall = {
+    id: callId,
+    runId: run.id,
+    stepId: run.currentStepId,
+    mode,
+    model: config.model,
+    status: "started",
+    managerResumeClaimId,
+    requestPath,
+    responsePath,
+    parsedJsonPath,
+    createdAt: new Date().toISOString(),
+  };
+  const preparedTurn = await prepareManagerTurn(run, sparkCall, "openrouter");
+  run = preparedTurn.run;
+  const startedAt = preparedTurn.call.createdAt;
+
+  // Build the stateless OpenRouter request once from the prepared run snapshot.
+  // Later steering remains queued for another SparkCall and cannot leak into it.
+  const frozenRun = structuredClone(run);
   const managerMode = normalizeOpenRouterManagerMode(mode);
-  const workerReports = await collectWorkerReportContext(run, managerMode);
+  const workerReports = await collectWorkerReportContext(frozenRun, managerMode);
   const availableRuntimes = await detectConfiguredAgentRuntimes(settings);
   const agentSyncContext = renderAgentSyncManagerContext({ cwd, settings });
   const requestBody = buildOpenRouterManagerRequest({
-    run,
+    run: frozenRun,
     cwd,
     model: config.model,
     mode: managerMode,
@@ -3229,6 +4036,30 @@ async function askOpenRouterManager(
     availableRuntimes,
     agentSyncContext,
   });
+  const requestUserMessage = [...requestBody.messages]
+    .reverse()
+    .find((message) => message.role === "user");
+  if (requestUserMessage && preparedTurn.inputMessages.length > 0) {
+    requestUserMessage.content += [
+      "",
+      "IMMUTABLE QUEUED TURN INPUT",
+      "The messages below are the exact FIFO bundle owned by this SparkCall. Process every entry exactly once; do not replace it with only the newest chat row.",
+      JSON.stringify(
+        preparedTurn.inputMessages.map((message) => ({
+          id: message.id,
+          kind: message.kind,
+          intent: message.intent,
+          message: message.message,
+          attachments: (message.attachments ?? []).map(
+            (attachment) =>
+              `${attachment.kind}:${attachment.name} (${attachment.path})`,
+          ),
+        })),
+        null,
+        2,
+      ),
+    ].join("\n");
+  }
   const contextWindow = contextWindowForModel(config.model);
   const contextPacket = buildContextPacket({
     runId: run.id,
@@ -3242,28 +4073,13 @@ async function askOpenRouterManager(
     fs.writeFile(requestPath, JSON.stringify(redactRequestBodyForArtifact(requestBody), null, 2), "utf8"),
     fs.writeFile(contextPacketPath, JSON.stringify(contextPacket, null, 2), "utf8"),
   ]);
-
-  const startedAt = new Date().toISOString();
-  const sparkCall: SparkCall = {
-    id: callId,
-    runId: run.id,
-    // Capture the active step at call-start so per-step cost rollups can
-    // attribute this call without replaying the event log. Undefined for
-    // plan_analysis calls that fire before any step exists.
-    stepId: run.currentStepId,
-    mode,
-    model: config.model,
-    status: "started",
-    contextPacketId: contextPacket.id,
-    requestPath,
-    responsePath,
-    parsedJsonPath,
-    promptTokenEstimate: contextPacket.tokenEstimate,
-    contextWindowTokens: contextWindow.tokens,
-    contextWindowSource: contextWindow.source,
-    createdAt: startedAt,
-  };
-  run.sparkCalls.push(sparkCall);
+  const preparedCall = run.sparkCalls.find((call) => call.id === callId);
+  if (preparedCall) {
+    preparedCall.contextPacketId = contextPacket.id;
+    preparedCall.promptTokenEstimate = contextPacket.tokenEstimate;
+    preparedCall.contextWindowTokens = contextWindow.tokens;
+    preparedCall.contextWindowSource = contextWindow.source;
+  }
   run.settingsSnapshot = {
     ...(run.settingsSnapshot ?? {}),
     openRouterModel: config.model,
@@ -3273,24 +4089,7 @@ async function askOpenRouterManager(
     agentMcpSyncEnabled: settings.agentMcpSyncEnabled,
     agentSkillSyncEnabled: settings.agentSkillSyncEnabled,
   };
-  run.updatedAt = startedAt;
   await saveRun(run);
-  await appendEvent({
-    timestamp: startedAt,
-    workspaceId: run.workspaceId,
-    runId: run.id,
-    sparkCallId: callId,
-    type: "spark_call.started",
-    message: `Cora manager call started: ${config.model}`,
-    payload: {
-      mode,
-      model: config.model,
-      requestPath,
-      contextPacketPath,
-      promptTokenEstimate: contextPacket.tokenEstimate,
-      contextWindowTokens: contextWindow.tokens,
-    },
-  });
 
   try {
     // Transient OpenRouter / provider errors (network, 5xx, provider-routed
@@ -3300,6 +4099,12 @@ async function askOpenRouterManager(
     // outage. Retry the inner request a small number of times with backoff;
     // re-throw structured-output-unsupported and other terminal errors
     // unchanged so the outer catch still routes them to the operator.
+    await updateManagerInputDelivery(
+      run.id,
+      callId,
+      preparedTurn.conversationEpoch,
+      "submitted",
+    );
     const result = await requestManagerWithRetries(config, requestBody, managerMode);
     await Promise.all([
       fs.writeFile(responsePath, JSON.stringify(result.rawResponse, null, 2), "utf8"),
@@ -3308,10 +4113,12 @@ async function askOpenRouterManager(
 
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
+    if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
+      return latest;
+    }
     const completedAt = new Date().toISOString();
     const completedContextWindow = contextWindowForModel(result.model);
     if (targetCall) {
-      targetCall.status = "completed";
       targetCall.model = result.model;
       targetCall.durationMs = result.durationMs;
       targetCall.promptTokens = result.promptTokens;
@@ -3328,7 +4135,6 @@ async function askOpenRouterManager(
       if (typeof result.cacheReadTokens === "number") {
         targetCall.cacheReadTokens = result.cacheReadTokens;
       }
-      targetCall.completedAt = completedAt;
     }
     // Recompute the run-level rollup + per-step rollups now that we have a
     // fresh call cost. Cheap (O(calls) per save) and keeps the pill reactive
@@ -3357,8 +4163,8 @@ async function askOpenRouterManager(
       workspaceId: latest.workspaceId,
       runId: latest.id,
       sparkCallId: callId,
-      type: "spark_call.completed",
-      message: `Cora manager call completed: ${result.decision.status}`,
+        type: "spark_call.decision_received",
+        message: `Cora manager decision received: ${result.decision.status}`,
       payload: {
         mode,
         model: result.model,
@@ -3383,10 +4189,42 @@ async function askOpenRouterManager(
       },
     });
 
-    return applySparkManagerDecision(latest, result.decision, mode, cwd);
+    const applied = await applySparkManagerDecision(
+      latest,
+      result.decision,
+      mode,
+      cwd,
+      callId,
+      preparedTurn.conversationEpoch,
+      autonomyRetryCount,
+    );
+    await updateManagerInputDelivery(
+      run.id,
+      callId,
+      preparedTurn.conversationEpoch,
+      "acknowledged",
+    );
+    const finalized = await finalizeAppliedManagerCall(
+      run.id,
+      callId,
+      preparedTurn.conversationEpoch,
+    );
+    if (managerResumeClaimId) {
+      await clearRegisteredManagerResume(run.id, managerResumeClaimId, callId);
+    }
+    scheduleQueuedSteeringFollowup(finalized);
+    return finalized;
   } catch (err) {
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
+    if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
+      return latest;
+    }
+    await releaseUnsubmittedManagerInput(
+      run.id,
+      callId,
+      preparedTurn.conversationEpoch,
+    );
     const completedAt = new Date().toISOString();
     const error = err instanceof Error ? err.message : String(err);
     if (targetCall) {
@@ -3420,6 +4258,11 @@ async function askOpenRouterManager(
           "The selected OpenRouter manager model does not support strict JSON Schema structured outputs.",
           "Choose a manager model that supports `response_format: json_schema` in Settings, then resume the run.",
         ].join(" "),
+        undefined,
+        {
+          reason: "The selected manager model cannot satisfy the required structured-output contract.",
+          managerMode: mode,
+        },
       );
     }
     return null;
@@ -3439,36 +4282,11 @@ async function askChatBackendNonOpenRouter(
   mode: SparkCall["mode"],
   chatConfig: ReturnType<typeof resolveChatBackendConfig>,
   settings: AppSettings,
+  managerResumeClaimId?: string,
+  autonomyRetryCount = 0,
 ): Promise<RunState | null> {
   const backend = getBackend(chatConfig.backend);
   const callId = makeId("spark");
-  const startedAt = new Date().toISOString();
-  // Once requestManagerDecision settles, that SparkCall owns no more stream
-  // events. This closes a lifecycle hole where a failed CLI's background
-  // transcript-discovery task could append assistant text or errors tens of
-  // seconds after the call had already been recorded as failed.
-  let acceptingStreamEvents = true;
-
-  // Stream events from the backend get appended to the run's event log so the
-  // renderer (which already subscribes to orchestration:event) can render
-  // partial assistant text, tool calls, and tool results as they arrive.
-  const onStream = (event: ChatStreamEvent): void => {
-    if (!acceptingStreamEvents) return;
-    void appendEvent({
-      timestamp: new Date().toISOString(),
-      workspaceId: run.workspaceId,
-      runId: run.id,
-      sparkCallId: callId,
-      type: `chat.${event.kind}`,
-      payload: event as unknown as Record<string, unknown>,
-    }).catch((err) => {
-      console.warn("[run-store] appendEvent for chat stream event failed:", err);
-    });
-  };
-
-  // Open the SparkCall record up front so the renderer's "manager is thinking"
-  // affordance has something to attach to. We fill in cost / duration once the
-  // backend resolves; the OpenRouter pipeline does the same.
   const sparkCall: SparkCall = {
     id: callId,
     runId: run.id,
@@ -3476,26 +4294,99 @@ async function askChatBackendNonOpenRouter(
     mode,
     model: chatConfig.model,
     status: "started",
-    createdAt: startedAt,
+    managerResumeClaimId,
+    createdAt: new Date().toISOString(),
   };
-  run.sparkCalls.push(sparkCall);
-  run.updatedAt = startedAt;
-  await saveRun(run);
+  const preparedTurn = await prepareManagerTurn(run, sparkCall, chatConfig.backend);
+  run = preparedTurn.run;
+  const startedAt = preparedTurn.call.createdAt;
+  const frozenRun = structuredClone(run);
+
+  // Once requestManagerDecision settles, that SparkCall owns no more stream
+  // events. Every callback also checks the epoch before it can reach the log.
+  let acceptingStreamEvents = true;
+  const onStream = (event: ChatStreamEvent): void => {
+    if (!acceptingStreamEvents) return;
+    void (async () => {
+      const current = await getRun(run.id);
+      if (!current || conversationEpoch(current) !== preparedTurn.conversationEpoch) return;
+      if (!current.sparkCalls.some(
+        (call) => call.id === callId && call.status === "started" && !call.completedAt,
+      )) return;
+      // Startup/system/tool stream records are not proof that the prompt reached
+      // the provider. Only the backend's explicit onPromptAccepted callback may
+      // advance input ownership to submitted.
+      const stillCurrent = await getRun(run.id);
+      if (
+        !acceptingStreamEvents ||
+        !stillCurrent ||
+        !isManagerTurnCurrent(stillCurrent, callId, preparedTurn.conversationEpoch) ||
+        !stillCurrent.sparkCalls.some(
+          (call) => call.id === callId && call.status === "started" && !call.completedAt,
+        )
+      ) return;
+      await appendEvent({
+        timestamp: new Date().toISOString(),
+        workspaceId: run.workspaceId,
+        runId: run.id,
+        sparkCallId: callId,
+        type: `chat.${event.kind}`,
+        payload: {
+          ...(event as unknown as Record<string, unknown>),
+          conversationEpoch: preparedTurn.conversationEpoch,
+        },
+      });
+    })().catch((err) => {
+      console.warn("[run-store] appendEvent for chat stream event failed:", err);
+    });
+  };
 
   const callStartedMs = Date.now();
   try {
     const result = await backend.requestManagerDecision(
-      { run, cwd, mode: normalizeOpenRouterManagerMode(mode), settings, chat: chatConfig },
+      {
+        run: frozenRun,
+        cwd,
+        mode: normalizeOpenRouterManagerMode(mode),
+        settings,
+        chat: { ...chatConfig },
+        prompt: preparedTurn.prompt,
+        inputMessageIds: preparedTurn.call.inputMessageIds ?? [],
+        conversationEpoch: preparedTurn.conversationEpoch,
+        onPromptAccepted: () => {
+          return updateManagerInputDelivery(
+            run.id,
+            callId,
+            preparedTurn.conversationEpoch,
+            "submitted",
+          );
+        },
+      },
       onStream,
     );
     acceptingStreamEvents = false;
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
+    if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
+      return latest;
+    }
     const completedAt = new Date().toISOString();
     const turnAborted = result.turnAborted === true;
     const turnFailed = !turnAborted && result.turnFailed === true;
+    if (turnFailed || turnAborted) {
+      // A failed/aborted turn did not produce a decision that Cora durably
+      // applied. Release both queued and submitted ownership so Resume/retry can
+      // deliver the user's input again instead of silently consuming it.
+      await releaseUnsubmittedManagerInput(
+        run.id,
+        callId,
+        preparedTurn.conversationEpoch,
+      );
+    }
     if (targetCall) {
-      targetCall.status = turnFailed ? "failed" : "completed";
+      // Successful decisions remain started until their run mutations land.
+      // Aborted/failed turns have no decision to apply and can settle now.
+      targetCall.status = turnFailed ? "failed" : turnAborted ? "completed" : "started";
       if (turnFailed) {
         targetCall.error = result.notice ?? "Chat turn failed.";
       }
@@ -3507,7 +4398,7 @@ async function askChatBackendNonOpenRouter(
       if (typeof result.inputTokens === "number") targetCall.inputTokens = result.inputTokens;
       if (typeof result.outputTokens === "number") targetCall.outputTokens = result.outputTokens;
       if (typeof result.cacheReadTokens === "number") targetCall.cacheReadTokens = result.cacheReadTokens;
-      targetCall.completedAt = completedAt;
+      if (turnFailed || turnAborted) targetCall.completedAt = completedAt;
     }
     if (result.newSessionUuid && result.newSessionUuid !== latest.chatSessionUuid) {
       latest.chatSessionUuid = result.newSessionUuid;
@@ -3574,15 +4465,21 @@ async function askChatBackendNonOpenRouter(
           author: "spark",
           kind: "note",
           message: replyText,
+          intent: "answer",
+          deliveryState: "acknowledged",
+          targetTurnId: callId,
+          backendTurnId: callId,
+          conversationEpoch: preparedTurn.conversationEpoch,
         });
       }
       return commitRunChange(failedRun, {
-        type: "run.status_updated",
+        type: "run.chat_turn_failed",
         message: `Cora's ${chatConfig.backend} chat turn failed: ${failureMessage}`,
-        // Carry automationId so the notify run-adapter can suppress the
-        // per-iteration ping for loom-owned runs (the loop-level
-        // automation.failed is the real end signal). Undefined for plain chats.
-        payload: { previousStatus: failedRun.status, status: "failed", automationId: failedRun.automationId },
+        payload: {
+          backend: chatConfig.backend,
+          sparkCallId: callId,
+          error: failureMessage,
+        },
         mutate: (draft, timestamp) => {
           draft.status = "failed";
           draft.autopilot = {
@@ -3639,11 +4536,66 @@ async function askChatBackendNonOpenRouter(
         payload: { backend: chatConfig.backend },
       });
     }
-    return applySparkManagerDecision(latest, result.decision, mode, cwd);
+    if (result.decisionAlreadyApplied) {
+      // Claude/Codex execute-mode MCP handlers mutate the run synchronously
+      // while the provider turn is live. Reapplying their synthesized
+      // spawn/ask/complete decision would duplicate workers or falsely finish
+      // a turn whose question merely settled.
+      const appliedLive = await requireRun(run.id);
+      await updateManagerInputDelivery(
+        run.id,
+        callId,
+        preparedTurn.conversationEpoch,
+        "acknowledged",
+      );
+      const finalized = await finalizeAppliedManagerCall(
+        run.id,
+        callId,
+        preparedTurn.conversationEpoch,
+      );
+      if (managerResumeClaimId) {
+        await clearRegisteredManagerResume(run.id, managerResumeClaimId, callId);
+      }
+      scheduleQueuedSteeringFollowup(finalized);
+      return finalized;
+    }
+    const applied = await applySparkManagerDecision(
+      latest,
+      result.decision,
+      mode,
+      cwd,
+      callId,
+      preparedTurn.conversationEpoch,
+      autonomyRetryCount,
+    );
+    await updateManagerInputDelivery(
+      run.id,
+      callId,
+      preparedTurn.conversationEpoch,
+      "acknowledged",
+    );
+    const finalized = await finalizeAppliedManagerCall(
+      run.id,
+      callId,
+      preparedTurn.conversationEpoch,
+    );
+    if (managerResumeClaimId) {
+      await clearRegisteredManagerResume(run.id, managerResumeClaimId, callId);
+    }
+    scheduleQueuedSteeringFollowup(finalized);
+    return finalized;
   } catch (err) {
     acceptingStreamEvents = false;
     const latest = await requireRun(run.id);
     const targetCall = latest.sparkCalls.find((call) => call.id === callId);
+    if (!targetCall || !isManagerTurnCurrent(latest, callId, preparedTurn.conversationEpoch)) {
+      return latest;
+    }
+    await releaseUnsubmittedManagerInput(
+      run.id,
+      callId,
+      preparedTurn.conversationEpoch,
+    );
     const completedAt = new Date().toISOString();
     const error = err instanceof Error ? err.message : String(err);
     if (targetCall) {
@@ -5407,11 +6359,68 @@ async function applySpawnTerminalsDecision(
   });
 }
 
+async function failManagerQuestionProtocol(
+  run: RunState,
+  decision: SparkManagerDecision,
+  mode: SparkCall["mode"],
+  error: string,
+): Promise<RunState> {
+  return commitRunChange(run, {
+    type: "spark_manager.question_protocol_failed",
+    message: `Cora manager question protocol failed: ${error}`,
+    payload: {
+      mode,
+      question: decision.question,
+      category: decision.questionCategory,
+      reason: decision.questionReason,
+      error,
+    },
+    mutate: (draft, timestamp) => {
+      draft.status = "failed";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "failed",
+        lastAction: "question_protocol_failed",
+        stopReason: error,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 async function applySparkManagerDecision(
   run: RunState,
   decision: SparkManagerDecision,
   mode: SparkCall["mode"],
   cwd: string,
+  backendTurnId?: string,
+  decisionEpoch: number = conversationEpoch(run),
+  autonomyRetryCount = 0,
+): Promise<RunState> {
+  if (conversationEpoch(run) !== decisionEpoch) return run;
+  return managerDecisionMutationContext.run(
+    { runId: run.id, conversationEpoch: decisionEpoch },
+    () => applySparkManagerDecisionCurrent(
+      run,
+      decision,
+      mode,
+      cwd,
+      backendTurnId,
+      decisionEpoch,
+      autonomyRetryCount,
+    ),
+  );
+}
+
+async function applySparkManagerDecisionCurrent(
+  run: RunState,
+  decision: SparkManagerDecision,
+  mode: SparkCall["mode"],
+  cwd: string,
+  backendTurnId: string | undefined,
+  decisionEpoch: number,
+  autonomyRetryCount: number,
 ): Promise<RunState> {
   // Defensive: if the run already reached a terminal state, drop the decision.
   // This guards against a race where an MCP tool call (e.g. codara_complete
@@ -5459,6 +6468,11 @@ async function applySparkManagerDecision(
         author: "spark",
         kind: "note",
         message: reply,
+        intent: "answer",
+        deliveryState: "acknowledged",
+        targetTurnId: backendTurnId,
+        backendTurnId,
+        conversationEpoch: decisionEpoch,
       });
     }
   }
@@ -5524,11 +6538,59 @@ async function applySparkManagerDecision(
         });
       }
     }
-    return askHumanQuestion(
-      run.id,
-      decision.question || "Please clarify what Cora should do next.",
-      decision.questionOptions,
-    );
+    const question =
+      decision.question || "Please clarify what Cora should do next.";
+    const policy = decideRunManagerQuestion({
+      question,
+      category: decision.questionCategory,
+      reason: decision.questionReason,
+      options: decision.questionOptions,
+      recommendedOptionId: decision.recommendedOptionId,
+      priorAssumptions: run.assumptions,
+    });
+    if (policy.action === "protocol_error") {
+      return failManagerQuestionProtocol(run, decision, mode, policy.error);
+    }
+    if (
+      policy.action === "assume" &&
+      autonomyRetryCount >= MAX_MANAGER_QUESTION_REPROMPTS
+    ) {
+      return failManagerQuestionProtocol(
+        run,
+        decision,
+        mode,
+        `Manager exceeded the ${MAX_MANAGER_QUESTION_REPROMPTS}-attempt autonomous question retry limit.`,
+      );
+    }
+    let resolved: ResolveManagerQuestionResult;
+    try {
+      resolved = await resolveManagerQuestion({
+        runId: run.id,
+        message: question,
+        questionOptions: decision.questionOptions,
+        category: decision.questionCategory,
+        reason: decision.questionReason,
+        recommendedOptionId: decision.recommendedOptionId,
+        source: "manager_decision",
+        resumeStrategy: "schedule_manager",
+        managerMode: mode,
+        backendTurnId,
+        conversationEpoch: decisionEpoch,
+        autonomyRetryCount,
+      });
+    } catch (error) {
+      return failManagerQuestionProtocol(
+        run,
+        decision,
+        mode,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    if (resolved.action === "blocked") return resolved.run;
+    // resolveManagerQuestion persisted and scheduled this exact same-stage
+    // continuation. Returning lets the current manager call settle before the
+    // durable queue launches the reprompt (and survives a process exit here).
+    return resolved.run;
   }
 
   if (decision.status === "complete") {
@@ -6374,6 +7436,405 @@ async function applySparkManagerDecision(
   return latest;
 }
 
+export interface PostRunQuestionInput {
+  runId: string;
+  clientMessageId?: string;
+  message: string;
+  questionOptions?: RunQuestionOption[];
+  category?: RunQuestionCategory;
+  reason?: string;
+  recommendedOptionId?: string;
+  source: RunQuestionSource;
+  resumeStrategy: RunQuestionResumeStrategy;
+  resumeStatus?: RunStatus;
+  managerMode?: SparkCall["mode"];
+  backendTurnId?: string;
+  conversationEpoch?: number;
+  autonomyRetryCount?: number;
+}
+
+export interface PostRunQuestionResult {
+  run: RunState;
+  questionMessageId: string;
+}
+
+export function resolveOpenRunQuestion(run: RunState) {
+  return resolveOpenRunQuestionPure(run);
+}
+
+export type ResolveManagerQuestionResult =
+  | { action: "blocked"; run: RunState; questionMessageId: string }
+  | { action: "assumed"; run: RunState; assumption: RunAssumption };
+
+/** Apply Cora's deterministic ask-versus-assume policy before any manager-owned
+ * question reaches the human. Consent gates deliberately bypass this helper. */
+export async function resolveManagerQuestion(
+  input: PostRunQuestionInput,
+): Promise<ResolveManagerQuestionResult> {
+  const run = await requireRun(input.runId);
+  const decision = decideRunManagerQuestion({
+    question: input.message,
+    category: input.category,
+    reason: input.reason,
+    options: input.questionOptions,
+    recommendedOptionId: input.recommendedOptionId,
+    priorAssumptions: run.assumptions,
+  });
+  if (decision.action === "protocol_error") {
+    throw new Error(decision.error);
+  }
+  if (decision.action === "block") {
+    const posted = await postRunQuestion({
+      ...input,
+      category: decision.category,
+      reason: decision.reason,
+      recommendedOptionId: decision.recommendedOptionId,
+    });
+    return {
+      action: "blocked",
+      run: posted.run,
+      questionMessageId: posted.questionMessageId,
+    };
+  }
+
+  // The budget is reconstructed from persisted assumptions, not the current
+  // JavaScript call stack. This covers restarts and live Claude/Codex MCP turns
+  // as well as OpenRouter recursion.
+  const durableRetryCount = (run.assumptions ?? []).filter(
+    (assumption) =>
+      assumption.managerMode === input.managerMode &&
+      (assumption.conversationEpoch ?? 0) ===
+        (input.conversationEpoch ?? conversationEpoch(run)),
+  ).length;
+  if (durableRetryCount >= MAX_MANAGER_QUESTION_REPROMPTS) {
+    throw new Error(
+      `Manager exceeded the ${MAX_MANAGER_QUESTION_REPROMPTS}-attempt autonomous question retry limit.`,
+    );
+  }
+
+  const assumptionId = makeId("assumption");
+  let assumption: RunAssumption | undefined;
+  const updated = await commitRunChange(run, {
+    type: "manager.assumption_applied",
+    message: decision.selectedAnswer.slice(0, 200),
+    payload: {
+      assumptionId,
+      question: input.message,
+      selectedAnswer: decision.selectedAnswer,
+      optionId: decision.optionId,
+      signature: decision.signature,
+      source: input.source,
+      managerMode: input.managerMode,
+      conversationEpoch: input.conversationEpoch ?? conversationEpoch(run),
+    },
+    mutate: (draft, timestamp) => {
+      if (
+        input.conversationEpoch !== undefined &&
+        conversationEpoch(draft) !== input.conversationEpoch
+      ) {
+        throw new StaleManagerDecisionError(
+          draft.id,
+          input.conversationEpoch,
+          conversationEpoch(draft),
+        );
+      }
+      const current = decideRunManagerQuestion({
+        question: input.message,
+        category: input.category,
+        reason: input.reason,
+        options: input.questionOptions,
+        recommendedOptionId: input.recommendedOptionId,
+        priorAssumptions: draft.assumptions,
+      });
+      if (current.action !== "assume") {
+        throw new Error(
+          current.action === "protocol_error"
+            ? current.error
+            : "Manager question policy changed while the assumption was being persisted.",
+        );
+      }
+      assumption = {
+        id: assumptionId,
+        question: input.message.trim(),
+        selectedAnswer: current.selectedAnswer,
+        source: input.source,
+        optionId: current.optionId,
+        signature: current.signature,
+        managerMode: input.managerMode,
+        conversationEpoch: input.conversationEpoch ?? conversationEpoch(draft),
+        createdAt: timestamp,
+      };
+      draft.assumptions ??= [];
+      draft.assumptions.push(assumption);
+      // Stateless manager decisions end the current call after an assumption.
+      // Persist the same-stage continuation before returning so a crash cannot
+      // strand the run between recording the assumption and re-prompting.
+      if (input.source === "manager_decision" && input.managerMode) {
+        draft.pendingManagerResume = {
+          questionMessageId: `assumption:${assumptionId}`,
+          assumptionId,
+          managerMode: input.managerMode,
+          autonomyRetryCount: durableRetryCount + 1,
+          requestedAt: timestamp,
+          state: "pending",
+        };
+      }
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        lastAction: "assumption_applied",
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+  if (!assumption) throw new Error("Manager assumption was not persisted.");
+  schedulePendingManagerResume(updated);
+  return { action: "assumed", run: updated, assumption };
+}
+
+/** Atomically persist one question and the blocker that owns its answer. */
+export async function postRunQuestion(input: PostRunQuestionInput): Promise<PostRunQuestionResult> {
+  const run = await requireRun(input.runId);
+  const message = input.message.trim();
+  if (!message) throw new Error("Question message is required.");
+  const questionMessageId = makeId("msg");
+  // Every new blocker needs a distinct normalization identity even when the
+  // producer did not supply an idempotency key. Otherwise equal question text
+  // can collapse while blockedOn still points at the removed second message.
+  const clientMessageId = input.clientMessageId?.trim() || `run-question-${questionMessageId}`;
+  const existing = run.humanMessages.find((entry) => entry.clientMessageId === clientMessageId);
+  if (existing) {
+    if (existing.author === "spark" && existing.kind === "question") {
+      if (run.status === "blocked" && run.blockedOn?.questionMessageId === existing.id) {
+        return { run, questionMessageId: existing.id };
+      }
+      throw new Error(`Run question is no longer active: ${existing.id}`);
+    }
+    throw new Error(`clientMessageId is already used by a non-question message: ${clientMessageId}`);
+  }
+
+  const questionOptions = normalizeQuestionOptionsForMessage(message, input.questionOptions);
+  const category = input.category ?? inferRunQuestionCategory(message, input.source);
+  const reason =
+    input.reason?.trim() || "Cora cannot safely continue without the user's answer.";
+  const recommendedOptionId =
+    input.recommendedOptionId?.trim() ||
+    questionOptions.find((option) => option.recommended)?.id;
+  const questionContext: RunQuestionContext = {
+    category,
+    reason,
+    recommendedOptionId,
+    source: input.source,
+  };
+  let posted = false;
+  let postedBlocker: RunBlocker | undefined;
+
+  const updated = await commitRunChange(run, {
+    type: "run.question_posted",
+    message: message.slice(0, 160),
+    payload: {
+      questionMessageId,
+      category,
+      source: input.source,
+      resumeStrategy: input.resumeStrategy,
+    },
+    mutate: (draft, timestamp) => {
+      if (
+        input.conversationEpoch !== undefined &&
+        conversationEpoch(draft) !== input.conversationEpoch
+      ) {
+        throw new StaleManagerDecisionError(
+          draft.id,
+          input.conversationEpoch,
+          conversationEpoch(draft),
+        );
+      }
+      if (
+        clientMessageId &&
+        draft.humanMessages.some((entry) => entry.clientMessageId === clientMessageId)
+      ) {
+        return false;
+      }
+      if (draft.status === "paused" || isTerminalRunStatus(draft.status)) {
+        throw new Error(`Cannot block inactive run ${draft.id} (${draft.status}).`);
+      }
+      const existingOpen = resolveOpenRunQuestionPure(draft);
+      if (existingOpen) {
+        throw new Error(`Run is already blocked on question ${existingOpen.id}.`);
+      }
+      const blocker = createRunBlocker({
+        questionMessageId,
+        category,
+        currentStatus: draft.status,
+        resumeStatus: input.resumeStatus,
+        source: input.source,
+        resumeStrategy: input.resumeStrategy,
+        managerMode: input.managerMode,
+        blockedAt: timestamp,
+      });
+      draft.humanMessages.push({
+        id: questionMessageId,
+        clientMessageId,
+        runId: draft.id,
+        author: "spark",
+        kind: "question",
+        message,
+        questionOptions,
+        questionContext,
+        attachments: [],
+        intent: "answer",
+        deliveryState: "acknowledged",
+        targetTurnId: input.backendTurnId,
+        backendTurnId: input.backendTurnId,
+        conversationEpoch: input.conversationEpoch ?? conversationEpoch(draft),
+        createdAt: timestamp,
+      });
+      applyRunQuestionBlocker(draft, blocker, reason, timestamp);
+      posted = true;
+      postedBlocker = blocker;
+    },
+  });
+  if (!posted) {
+    const existing = clientMessageId
+      ? updated.humanMessages.find((entry) => entry.clientMessageId === clientMessageId)
+      : undefined;
+    if (existing?.author === "spark" && existing.kind === "question") {
+      if (
+        updated.status === "blocked" &&
+        updated.blockedOn?.questionMessageId === existing.id
+      ) {
+        return { run: updated, questionMessageId: existing.id };
+      }
+      throw new Error(`Run question is no longer active: ${existing.id}`);
+    }
+  }
+  return {
+    run: updated,
+    questionMessageId: postedBlocker?.questionMessageId ?? questionMessageId,
+  };
+}
+
+/** Validate and answer exactly one question, then apply its resume strategy. */
+export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  if (activeConversationRewinds.has(run.id)) {
+    throw new Error("Conversation rewind is still in progress. Try answering again when it finishes.");
+  }
+  const questionMessageId = input.questionMessageId.trim();
+  if (!questionMessageId) throw new Error("questionMessageId is required.");
+  const attachmentInputs = input.attachments ?? [];
+  const message = input.message.trim() || fallbackMessageForAttachments(attachmentInputs);
+  if (!message) throw new Error("Answer message is required.");
+  const clientMessageId = input.clientMessageId?.trim();
+  if (
+    run.status === "paused" ||
+    run.status === "complete" ||
+    run.status === "failed" ||
+    run.status === "cancelled"
+  ) {
+    throw new Error(`Run question is no longer active: ${questionMessageId}`);
+  }
+  if (run.blockedOn && run.blockedOn.questionMessageId !== questionMessageId) {
+    throw new Error(
+      `Run is blocked on question ${run.blockedOn.questionMessageId}, not ${questionMessageId}.`,
+    );
+  }
+
+  if (clientMessageId) {
+    const existing = run.humanMessages.find((entry) => entry.clientMessageId === clientMessageId);
+    if (existing) {
+      if (
+        existing.author === "user" &&
+        existing.kind === "answer" &&
+        existing.answersMessageId === questionMessageId &&
+        existing.message === message
+      ) {
+        schedulePendingManagerResume(run);
+        return run;
+      }
+      throw new Error(`clientMessageId is already used by another message: ${clientMessageId}`);
+    }
+  }
+
+  const messageId = makeId("msg");
+  const answerDeliveryState: RunMessageDeliveryState =
+    run.blockedOn?.resumeStrategy === "active_rpc" ? "acknowledged" : "queued";
+  const attachments = await persistRunMessageAttachments(
+    run.id,
+    messageId,
+    attachmentInputs,
+  );
+  const answerMessage: RunState["humanMessages"][number] = {
+    id: messageId,
+    clientMessageId,
+    runId: run.id,
+    author: "user",
+    kind: "answer",
+    message,
+    attachments,
+    answersMessageId: questionMessageId,
+    intent: "answer",
+    deliveryState: answerDeliveryState,
+    targetTurnId: `question:${questionMessageId}`,
+    conversationEpoch: conversationEpoch(run),
+    createdAt: new Date().toISOString(),
+  };
+  let answerRecorded = false;
+  const updated = await commitRunChange(run, {
+    type: "human.answer",
+    message: `user: ${message.slice(0, 160)}`,
+    payload: { message: answerMessage, questionMessageId },
+    mutate: (draft, timestamp) => {
+      if (
+        clientMessageId &&
+        draft.humanMessages.some((entry) => entry.clientMessageId === clientMessageId)
+      ) {
+        return false;
+      }
+      const applied = applyRunQuestionAnswer(draft, answerMessage, timestamp);
+      if (applied.duplicate) return false;
+      answerRecorded = true;
+    },
+  });
+  if (!answerRecorded) {
+    schedulePendingManagerResume(updated);
+    return updated;
+  }
+
+  const cwd = workspaceCwdFromRun(updated);
+  if (cwd) {
+    const labelText = message.length > 60 ? `${message.slice(0, 60).trimEnd()}…` : message;
+    void recordCheckpointInBackground({
+      runId: updated.id,
+      cwd,
+      kind: "user-message",
+      messageId,
+      messagePointer: Math.max(0, updated.humanMessages.length - 1),
+      label: labelText,
+      conversationEpoch: conversationEpoch(updated),
+    });
+  }
+
+  schedulePendingManagerResume(updated);
+  return updated;
+}
+
+/** Release a live RPC blocker after disconnect/timeout without fabricating an answer. */
+export async function releaseRunQuestion(
+  runId: string,
+  questionMessageId: string,
+): Promise<RunState> {
+  const run = await requireRun(runId);
+  return commitRunChange(run, {
+    type: "run.question_released",
+    message: "Question wait ended without an answer",
+    payload: { questionMessageId },
+    mutate: (draft, timestamp) => {
+      if (!releaseRunQuestionBlocker(draft, questionMessageId, timestamp)) return false;
+    },
+  });
+}
+
 export async function pauseRun(input: PauseRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   const reason = input.reason?.trim() || "Paused by user";
@@ -6396,9 +7857,13 @@ export async function pauseRun(input: PauseRunInput): Promise<RunState> {
           author: "user",
           kind: "note",
           message: reason,
+          intent: "turn",
+          deliveryState: "acknowledged",
+          conversationEpoch: conversationEpoch(draft),
           createdAt: timestamp,
         });
       }
+      abandonRunQuestionOwnership(draft);
       draft.status = "paused";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
@@ -6434,9 +7899,13 @@ export async function pauseRunAfterCurrentWorkers(input: PauseRunInput): Promise
           author: "user",
           kind: "note",
           message: reason,
+          intent: "turn",
+          deliveryState: "acknowledged",
+          conversationEpoch: conversationEpoch(draft),
           createdAt: timestamp,
         });
       }
+      abandonRunQuestionOwnership(draft);
       draft.status = "paused";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
@@ -6458,7 +7927,12 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   if (activeWorkersForRun(run.id).length === 0 && shouldRoutePausedResumeToChat(run)) {
     const chatDecision = await askOpenRouterManagerForChat(run, resumeInput.cwd);
     if (chatDecision) {
-      if (chatDecision.status === "paused" || chatDecision.status === "cancelled" || chatDecision.status === "complete") {
+      if (
+        chatDecision.status === "paused" ||
+        chatDecision.status === "blocked" ||
+        chatDecision.status === "cancelled" ||
+        chatDecision.status === "complete"
+      ) {
         return chatDecision;
       }
       if (chatDecision.steps.length > 0 || chatDecision.workerTasks.length > 0) {
@@ -6525,6 +7999,7 @@ export async function cancelRun(input: CancelRunInput): Promise<RunState> {
     message: reason,
     payload: { reason },
     mutate: (draft, timestamp) => {
+      abandonRunQuestionOwnership(draft);
       draft.status = "cancelled";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
@@ -6563,12 +8038,96 @@ export async function cancelRun(input: CancelRunInput): Promise<RunState> {
   });
 }
 
+function classifyRunMessageIntent(
+  run: RunState,
+  input: AddRunMessageInput,
+): RunConversationMessageIntent {
+  if (input.intent) return input.intent;
+  if (input.author !== "user" || input.kind === "answer") return "answer";
+  if (
+    run.status === "planning" ||
+    run.status === "running" ||
+    run.status === "reviewing" ||
+    Boolean(activeManagerCall(run))
+  ) {
+    return "steer";
+  }
+  return "turn";
+}
+
+function targetTurnForMessage(
+  run: RunState,
+  intent: RunConversationMessageIntent,
+  explicit?: string,
+): string | undefined {
+  if (explicit) return explicit;
+  if (intent !== "steer") return undefined;
+  const active = activeManagerCall(run);
+  return active ? `after:${active.id}` : `epoch:${conversationEpoch(run)}:next`;
+}
+
+function sameMessageDeliverySignature(
+  message: HumanRunMessage,
+  input: {
+    author: HumanRunMessage["author"];
+    kind: HumanRunMessage["kind"];
+    text: string;
+    intent: RunConversationMessageIntent;
+    targetTurnId?: string;
+    conversationEpoch: number;
+    answersMessageId?: string;
+  },
+): boolean {
+  return (
+    message.author === input.author &&
+    message.kind === input.kind &&
+    message.message === input.text &&
+    message.intent === input.intent &&
+    message.targetTurnId === input.targetTurnId &&
+    (message.conversationEpoch ?? 0) === input.conversationEpoch &&
+    message.answersMessageId === input.answersMessageId
+  );
+}
+
 export async function addRunMessage(input: AddRunMessageInput): Promise<RunState> {
   const run = await requireRun(input.runId);
+  if (input.author === "user" && activeConversationRewinds.has(run.id)) {
+    throw new Error("Conversation rewind is still in progress. Try sending again when it finishes.");
+  }
+  if (input.kind === "answer") {
+    if (input.author !== "user") throw new Error("Run answers must be authored by the user.");
+    const question = input.answersMessageId
+      ? run.humanMessages.find(
+          (entry) =>
+            entry.id === input.answersMessageId &&
+            entry.author === "spark" &&
+            entry.kind === "question",
+        )
+      : resolveSingleUnresolvedRunQuestion(run);
+    if (!question) {
+      throw new Error(
+        input.answersMessageId
+          ? `Run question not found: ${input.answersMessageId}`
+          : "An answer must identify the one unresolved run question.",
+      );
+    }
+    return answerRunQuestion({
+      runId: input.runId,
+      questionMessageId: question.id,
+      clientMessageId: input.clientMessageId,
+      message: input.message,
+      attachments: input.attachments,
+    });
+  }
   const attachmentInputs = input.attachments ?? [];
   const message = input.message.trim() || fallbackMessageForAttachments(attachmentInputs);
   if (!message) throw new Error("Message is required.");
   const clientMessageId = input.clientMessageId?.trim();
+  const messageEpoch = input.conversationEpoch ?? conversationEpoch(run);
+  if (messageEpoch !== conversationEpoch(run)) return run;
+  const intent = classifyRunMessageIntent(run, input);
+  const targetTurnId = targetTurnForMessage(run, intent, input.targetTurnId);
+  const deliveryState = input.deliveryState ?? (input.author === "user" ? "queued" : "acknowledged");
 
   if (
     clientMessageId &&
@@ -6602,7 +8161,15 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
   if (
     attachmentInputs.length === 0 &&
     priorSameAuthor &&
-    priorSameAuthor.message === message &&
+    sameMessageDeliverySignature(priorSameAuthor, {
+      author: input.author,
+      kind: input.kind,
+      text: message,
+      intent,
+      targetTurnId,
+      conversationEpoch: messageEpoch,
+      answersMessageId: input.answersMessageId,
+    }) &&
     !answersDifferentQuestion &&
     !distinctQuestionRepost &&
     Date.now() - new Date(priorSameAuthor.createdAt).getTime() < 20000
@@ -6616,7 +8183,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     input.author === "spark" && input.kind === "question"
       ? normalizeQuestionOptionsForMessage(message, input.questionOptions)
       : undefined;
-  const humanMessage = {
+  const humanMessage: HumanRunMessage = {
     id: messageId,
     clientMessageId,
     runId: run.id,
@@ -6624,44 +8191,87 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     kind: input.kind,
     message,
     questionOptions,
+    questionContext:
+      input.author === "spark" && input.kind === "question"
+        ? input.questionContext
+        : undefined,
     attachments,
     answersMessageId: input.answersMessageId,
+    intent,
+    deliveryState,
+    targetTurnId,
+    backendTurnId: input.backendTurnId,
+    conversationEpoch: messageEpoch,
     createdAt: new Date().toISOString(),
   };
 
-  const wasTerminal = run.status === "complete" || run.status === "failed" || run.status === "cancelled";
   let messageRecorded = false;
+  let revivedTerminal = false;
+  let recordedIntent = intent;
   const updated = await commitRunChange(run, {
     type: `human.${input.kind}`,
     message: `${input.author}: ${message.slice(0, 160)}`,
     payload: { message: humanMessage },
     mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== messageEpoch) return false;
       if (
         clientMessageId &&
         draft.humanMessages.some((entry) => entry.clientMessageId === clientMessageId)
       ) {
         return false;
       }
+      const authoritativeIntent = classifyRunMessageIntent(draft, input);
+      const authoritativeTargetTurnId = targetTurnForMessage(
+        draft,
+        authoritativeIntent,
+        input.targetTurnId,
+      );
       const latestSameAuthor = [...draft.humanMessages]
         .reverse()
         .find((entry) => entry.author === input.author);
+      const answersDifferentQuestionInDraft =
+        Boolean(input.answersMessageId) &&
+        latestSameAuthor?.answersMessageId !== input.answersMessageId;
+      const distinctQuestionRepostInDraft =
+        input.kind === "question" &&
+        Boolean(clientMessageId) &&
+        latestSameAuthor?.clientMessageId !== clientMessageId;
       if (
         attachmentInputs.length === 0 &&
         latestSameAuthor &&
-        latestSameAuthor.message === message &&
+        sameMessageDeliverySignature(latestSameAuthor, {
+          author: input.author,
+          kind: input.kind,
+          text: message,
+          intent: authoritativeIntent,
+          targetTurnId: authoritativeTargetTurnId,
+          conversationEpoch: messageEpoch,
+          answersMessageId: input.answersMessageId,
+        }) &&
+        !answersDifferentQuestionInDraft &&
+        !distinctQuestionRepostInDraft &&
         Date.now() - new Date(latestSameAuthor.createdAt).getTime() < 20000
       ) {
         return false;
       }
       messageRecorded = true;
-      draft.humanMessages.push({ ...humanMessage, createdAt: timestamp });
+      recordedIntent = authoritativeIntent;
+      draft.humanMessages.push({
+        ...humanMessage,
+        intent: authoritativeIntent,
+        targetTurnId: authoritativeTargetTurnId,
+        createdAt: timestamp,
+      });
+      const draftWasTerminal =
+        draft.status === "complete" || draft.status === "failed" || draft.status === "cancelled";
       // When the user chats into a finished run, transition it back into a
       // planning state so the autopilot loop wakes up and the run badge shifts
       // off "complete" while the manager replans. Keep the prior terminal as
       // last_status if downstream code wants to know.
       // Direct (loom) runs are exempt: addDirectIteration owns their status
       // transitions, and a stray user note must never wake a manager.
-      if (input.author === "user" && wasTerminal && run.executionMode !== "direct") {
+      if (input.author === "user" && draftWasTerminal && draft.executionMode !== "direct") {
+        revivedTerminal = true;
         draft.status = "planning";
         draft.autopilot = {
           ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
@@ -6677,33 +8287,39 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
   });
   if (!messageRecorded) return updated;
 
-  // Re-engage the manager when the user chatted into a terminal run. Terminal
-  // follow-ups begin in chat-decision mode so Codara can either answer directly
-  // from context or choose worker orchestration when tools are useful.
-  // Never for direct (loom) runs — the loop driver decides what runs next.
-  if (input.author === "user" && wasTerminal && run.executionMode !== "direct") {
-    const autopilotInput = autopilotInputFromRun(updated);
-    scheduleInitialChatDecision(updated.id, autopilotInput, { afterCurrent: true });
-  }
-
-  // Snapshot the workspace asynchronously after the message lands. `git add -A`
-  // can take a beat on a large repo, and we don't want that latency hanging
-  // off the send button — the message itself is already saved, the manager
-  // can already start working. The checkpoint shows up a moment later via the
-  // orchestration event channel and the undo pill appears with it.
+  // Land the message checkpoint before any new manager turn is allowed to edit
+  // the workspace. This makes Chat+Code undo restore the send-time tree rather
+  // than a later tree captured after the requested work had already begun.
   if (input.author === "user") {
     const cwd = workspaceCwdFromRun(updated);
     if (cwd) {
       const labelText = message.length > 60 ? `${message.slice(0, 60).trimEnd()}…` : message;
-      void recordCheckpointInBackground({
+      await recordCheckpointInBackground({
         runId: updated.id,
         cwd,
         kind: "user-message",
         messageId,
         messagePointer: Math.max(0, updated.humanMessages.length - 1),
         label: labelText,
+        conversationEpoch: messageEpoch,
       });
     }
+  }
+
+  // Re-engage the manager only after the undo baseline is durable. Never for
+  // direct (loom) runs — the loop driver decides what runs next.
+  if (input.author === "user" && revivedTerminal && updated.executionMode !== "direct") {
+    const autopilotInput = autopilotInputFromRun(updated);
+    scheduleInitialChatDecision(updated.id, autopilotInput, { afterCurrent: true });
+  }
+  if (
+    input.author === "user" &&
+    recordedIntent === "steer" &&
+    (Boolean(activeManagerCall(updated)) ||
+      activeAutopilotPlans.has(updated.id) ||
+      activeAutopilotReviews.has(updated.id))
+  ) {
+    scheduleQueuedSteeringFollowup(updated);
   }
 
   return updated;
@@ -6714,7 +8330,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
 // invert the chronology (a "later" baseline ending up as the child of a
 // "newer" user-message commit). Serializing here keeps the git graph in the
 // same order the chat events fired.
-const checkpointTaskQueue = new Map<string, Promise<unknown>>();
+const withCheckpointLock = createKeyedTaskQueue();
 
 // Per-baseRepo merge-back chain (Looms v4 parallel fan-out). Two SAME-WAVE
 // sibling workers each ran in their OWN sandbox worktree forked off the run
@@ -6760,14 +8376,9 @@ function recordCheckpointInBackground(input: {
   messageId?: string;
   messagePointer: number;
   label: string;
+  conversationEpoch?: number;
 }): Promise<void> {
-  const prior = checkpointTaskQueue.get(input.runId) ?? Promise.resolve();
-  const task = prior
-    .catch(() => undefined)
-    .then(() => doRecordCheckpoint(input))
-    .catch(() => undefined);
-  checkpointTaskQueue.set(input.runId, task);
-  return task;
+  return withCheckpointLock(input.runId, () => doRecordCheckpoint(input)).catch(() => undefined);
 }
 
 function scheduleShadowRefRewind(input: {
@@ -6775,13 +8386,7 @@ function scheduleShadowRefRewind(input: {
   cwd: string;
   sha: string | null;
 }): Promise<void> {
-  const prior = checkpointTaskQueue.get(input.runId) ?? Promise.resolve();
-  const task = prior
-    .catch(() => undefined)
-    .then(() => rewindShadowRef(input))
-    .catch(() => undefined);
-  checkpointTaskQueue.set(input.runId, task);
-  return task;
+  return withCheckpointLock(input.runId, () => rewindShadowRef(input));
 }
 
 async function doRecordCheckpoint(input: {
@@ -6791,15 +8396,23 @@ async function doRecordCheckpoint(input: {
   messageId?: string;
   messagePointer: number;
   label: string;
+  conversationEpoch?: number;
 }): Promise<void> {
+  const messageId = input.kind === "user-message" ? input.messageId : undefined;
+  const before = await getRun(input.runId);
+  if (
+    !before ||
+    !isCheckpointJobCurrent(before, input.conversationEpoch, messageId)
+  ) return;
   const checkpoint = await createCheckpoint(input);
   const fresh = await getRun(input.runId);
-  if (!fresh) return;
+  if (!fresh || !isCheckpointJobCurrent(fresh, input.conversationEpoch, messageId)) return;
   await commitRunChange(fresh, {
     type: "run.checkpoint_created",
     message: `Checkpoint ${checkpoint.kind} ${checkpoint.id}`,
     payload: { checkpointId: checkpoint.id, sha: checkpoint.sha, kind: checkpoint.kind },
     mutate: (draft, timestamp) => {
+      if (!isCheckpointJobCurrent(draft, input.conversationEpoch, messageId)) return false;
       draft.checkpoints = [...(draft.checkpoints ?? []), checkpoint];
       draft.updatedAt = timestamp;
     },
@@ -7157,6 +8770,7 @@ export async function interruptRunWithMessage(
       interrupt: { mode, byMessage: true },
     },
     mutate: (draft, timestamp) => {
+      abandonRunQuestionOwnership(draft);
       draft.status = "paused";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
@@ -7235,18 +8849,22 @@ export async function interruptRunWithMessage(
 export async function updateRunStatus(input: UpdateRunStatusInput): Promise<RunState> {
   const run = await requireRun(input.runId);
   return commitRunChange(run, {
-    type: "run.status_updated",
+    type: "run.status_change_requested",
     message: `Run status changed to ${input.status}`,
     payload: {
-      previousStatus: run.status,
-      status: input.status,
+      requestedStatus: input.status,
       currentStepId: input.currentStepId ?? run.currentStepId,
-      // Loom-owned runs carry their automationId so the notify run-adapter
-      // suppresses the per-iteration run.complete/run.failed ping (this is the
-      // path automation workers transition through). Undefined for plain runs.
-      automationId: run.automationId,
     },
     mutate: (draft, timestamp) => {
+      if (input.status !== "blocked") delete draft.blockedOn;
+      if (
+        input.status === "paused" ||
+        input.status === "complete" ||
+        input.status === "failed" ||
+        input.status === "cancelled"
+      ) {
+        abandonRunQuestionOwnership(draft);
+      }
       draft.status = input.status;
       if (input.currentStepId !== undefined) draft.currentStepId = input.currentStepId;
       draft.updatedAt = timestamp;
@@ -7848,9 +9466,13 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     allowFable: isAutomationRun ? isAutomationLaunch : workerFableAllowed(run),
     extraWritableDirs,
   });
-  const command = launchCommand
-    ? `pwsh -> ${launchCommand}`
-    : "pwsh (manual)";
+  const command = isAutomationRun && task.runtimePreference === "claude"
+    ? "Claude Agent SDK (headless automation worker)"
+    : isAutomationRun && task.runtimePreference === "codex"
+      ? "Codex App Server (headless automation worker)"
+      : launchCommand
+        ? `pwsh -> ${launchCommand}`
+        : "pwsh (manual)";
   const launchTimestamp = new Date().toISOString();
   attempt.status = "launching";
   attempt.startedAt = launchTimestamp;
@@ -7898,13 +9520,15 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   if (taskWritesWorkspace(task)) {
     try {
       const cwd = workspaceCwdFromRun(run) ?? attempt.cwd;
-      const checkpoint = await createCheckpoint({
-        runId: run.id,
-        cwd,
-        kind: "pre-worker",
-        messagePointer: run.humanMessages.length,
-        label: `pre-worker ${task.title}`,
-      });
+      const checkpoint = await withCheckpointLock(run.id, () =>
+        createCheckpoint({
+          runId: run.id,
+          cwd,
+          kind: "pre-worker",
+          messagePointer: run.humanMessages.length,
+          label: `pre-worker ${task.title}`,
+        }),
+      );
       attempt.preWorkerCheckpointSha = checkpoint.sha;
       run.checkpoints = [...(run.checkpoints ?? []), checkpoint];
       run.updatedAt = new Date().toISOString();
@@ -7925,16 +9549,28 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     }
   }
 
-  const result = await runWorkerSession({
-    run,
-    task,
-    attemptId: attempt.id,
-    paths,
-    cwd: attempt.cwd,
-    launchCommand,
-    promptText,
-    command,
-  });
+  const result = isAutomationRun && (task.runtimePreference === "claude" || task.runtimePreference === "codex")
+    ? await runStructuredAutomationWorkerSession({
+        run,
+        task,
+        attemptId: attempt.id,
+        paths,
+        cwd: attempt.cwd,
+        promptText,
+        command,
+        sandboxed: Boolean(attempt.sandboxWorktreePath),
+        extraWritableDirs,
+      })
+    : await runWorkerSession({
+        run,
+        task,
+        attemptId: attempt.id,
+        paths,
+        cwd: attempt.cwd,
+        launchCommand,
+        promptText,
+        command,
+      });
 
   run = await requireRun(input.runId);
   const finishedAttempt = run.workerAttempts.find((item) => item.id === input.attemptId);
@@ -8137,143 +9773,307 @@ export async function deleteRun(runId: string): Promise<void> {
   runCache.delete(run.id);
 }
 
-// Rewind the run to a user-message checkpoint. The undo *removes* that
-// message: humanMessages is trimmed back to the checkpoint's index, the
-// checkpoint entry (and any later ones) is dropped, and the shadow ref is
-// rewound to the previous checkpoint's sha so future checkpoints don't get
-// parented to a stale tip. With scope='chat+code', the worktree is also
-// restored to the snapshot.
-//
-// Returns the restored message text so the renderer can drop it back into the
-// composer — the user can edit and resend, the same way an "edit your last
-// message" flow would feel.
-export async function undoToCheckpoint(input: UndoToCheckpointInput): Promise<UndoToCheckpointResult> {
-  const run = await requireRun(input.runId);
-  const checkpoints = run.checkpoints ?? [];
-  const checkpointIndex = checkpoints.findIndex((entry) => entry.id === input.checkpointId);
-  if (checkpointIndex < 0) throw new Error("Checkpoint not found on this run.");
-  const checkpoint = checkpoints[checkpointIndex];
+// Reliable Cora-owned rewind. The epoch barrier lands before any asynchronous
+// provider disposal or code restoration, so old provider callbacks immediately
+// become stale. The final commit then trims chat/downstream work atomically.
+interface ConversationRewindTarget {
+  checkpoint?: Checkpoint;
+  checkpointId?: string;
+  checkpointIndex?: number;
+  messagePointer: number;
+  messageId?: string;
+  scope: "chat" | "chat+code";
+}
 
-  if (input.scope === "chat+code") {
-    if (!checkpoint.sha) {
-      throw new Error("This checkpoint has no workspace snapshot — chat-only undo is still available.");
+function disposeManagerSessions(runId: string): Promise<void> {
+  for (const backendKind of ["claude", "codex"] as const) {
+    try {
+      getBackend(backendKind).interruptChat?.(runId);
+    } catch {
+      // Continue: epoch invalidation is authoritative even if ESC fails.
     }
-    const cwd = workspaceCwdFromRun(run);
-    if (!cwd) throw new Error("Workspace path missing — cannot restore code.");
-    await restoreCheckpointCode({ cwd, sha: checkpoint.sha });
   }
+  return Promise.all(
+    (["claude", "codex"] as const).map(async (backendKind) => {
+      try {
+        await getBackend(backendKind).disposeChat?.(runId);
+      } catch {
+        // Provider processes are best-effort cleanup; stale callbacks are still
+        // blocked by the epoch barrier below.
+      }
+    }),
+  ).then(() => undefined);
+}
 
-  const pointer = Math.max(0, Math.min(checkpoint.messagePointer, run.humanMessages.length));
-  const restoredMessage = checkpoint.messageId
-    ? run.humanMessages.find((entry) => entry.id === checkpoint.messageId) ?? null
-    : null;
+async function markConversationRewindFailed(
+  run: RunState,
+  error: unknown,
+  target: ConversationRewindTarget,
+): Promise<RunState> {
+  const message = error instanceof Error ? error.message : String(error);
+  return commitRunChange(run, {
+    type: "run.conversation_rewind_failed",
+    message: `Conversation rewind failed: ${message}`,
+    payload: {
+      error: message,
+      checkpointId: target.checkpoint?.id,
+      messageId: target.messageId,
+      scope: target.scope,
+    },
+    mutate: (draft, timestamp) => {
+      const activeCallIds = new Set(
+        draft.sparkCalls
+          .filter((call) => call.status === "started" && !call.completedAt)
+          .map((call) => call.id),
+      );
+      for (const call of draft.sparkCalls) {
+        if (!activeCallIds.has(call.id)) continue;
+        call.status = "failed";
+        call.error = `Conversation rewind failed after interrupt: ${message}`;
+        call.completedAt = timestamp;
+      }
+      for (const userMessage of draft.humanMessages) {
+        if (!userMessage.backendTurnId || !activeCallIds.has(userMessage.backendTurnId)) continue;
+        if (userMessage.deliveryState === "acknowledged" || userMessage.deliveryState === "cancelled") continue;
+        userMessage.deliveryState = "queued";
+        delete userMessage.backendTurnId;
+        if (userMessage.targetTurnId && activeCallIds.has(userMessage.targetTurnId)) {
+          delete userMessage.targetTurnId;
+        }
+      }
+      for (const attempt of draft.workerAttempts) {
+        if (["preparing", "prompt_ready", "launching", "running", "finishing"].includes(attempt.status)) {
+          attempt.status = "cancelled";
+          attempt.finishedAt = attempt.finishedAt ?? timestamp;
+        }
+      }
+      for (const task of draft.workerTasks) {
+        if (["created", "queued", "claimed", "running", "needs_review", "retry_queued"].includes(task.status)) {
+          task.status = "cancelled";
+          task.updatedAt = timestamp;
+        }
+      }
+      // Keep the durable rewind marker so startup or an explicit retry can
+      // finish the same oldEpoch -> newEpoch transaction without advancing the
+      // conversation generation again.
+      delete draft.chatSessionUuid;
+      delete draft.chatSessionMode;
+      draft.status = "paused";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "paused",
+        lastAction: "conversation_rewind_failed",
+        stopReason: `Rewind failed: ${message}`,
+        pausedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+async function performConversationRewind(
+  runId: string,
+  target: ConversationRewindTarget,
+): Promise<UndoToCheckpointResult> {
+  const original = await requireRun(runId);
+  const transaction = resolveConversationRewindTransaction({
+    conversationEpoch: conversationEpoch(original),
+    messageCount: original.humanMessages.length,
+    pending: original.pendingConversationRewind,
+    request: {
+      messagePointer: target.messagePointer,
+      messageId: target.messageId,
+      checkpointId: target.checkpointId ?? target.checkpoint?.id,
+      checkpointIndex: target.checkpointIndex,
+      scope: target.scope,
+    },
+  });
+  const { oldEpoch, newEpoch, pointer } = transaction;
+  const checkpointIndex = transaction.checkpointIndex ?? target.checkpointIndex;
+  const restoredMessage = target.messageId
+    ? original.humanMessages.find((message) => message.id === target.messageId) ?? null
+    : original.humanMessages[pointer] ?? null;
   const restoredText = restoredMessage?.message ?? null;
+  const cutoff = original.humanMessages[pointer]?.createdAt;
+  const priorPendingResume = original.pendingManagerResume;
+  const interruptedCall = activeManagerCall(original);
 
-  const parentCheckpoint = checkpoints
-    .slice(0, checkpointIndex)
-    .reverse()
-    .find((entry) => entry.sha);
-  const cwd = workspaceCwdFromRun(run);
-  if (cwd) {
-    void scheduleShadowRefRewind({
-      runId: run.id,
-      cwd,
-      sha: parentCheckpoint?.sha ?? null,
+  const keptCheckpoints = target.checkpoint
+    ? (original.checkpoints ?? []).slice(0, checkpointIndex ?? 0)
+    : (original.checkpoints ?? []).filter((checkpoint) =>
+        checkpoint.kind === "user-message"
+          ? checkpoint.messagePointer < pointer
+          : checkpoint.messagePointer <= pointer,
+      );
+  const parentCheckpoint = [...keptCheckpoints].reverse().find((checkpoint) => checkpoint.sha);
+
+  const activeWorkers = activeWorkersForRun(original.id);
+
+  // Epoch barrier first: callbacks that settle while provider processes are
+  // being disposed can no longer persist UUIDs, stream events, or decisions.
+  // Recovery resumes the already-durable barrier instead of advancing the
+  // conversation generation a second time.
+  let barrier = original;
+  if (!transaction.resuming) {
+    barrier = await commitRunChange(original, {
+    type: "run.conversation_rewind_started",
+    message: "Conversation rewind started",
+    payload: {
+      oldEpoch,
+      newEpoch,
+      checkpointId: target.checkpoint?.id,
+      messageId: restoredMessage?.id,
+      scope: target.scope,
+    },
+    mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== oldEpoch) return false;
+      draft.conversationEpoch = newEpoch;
+      delete draft.chatSessionUuid;
+      delete draft.chatSessionMode;
+      draft.pendingConversationRewind = {
+        oldEpoch,
+        newEpoch,
+        messagePointer: pointer,
+        messageId: restoredMessage?.id,
+        checkpointId: target.checkpoint?.id,
+        checkpointIndex: target.checkpointIndex,
+        scope: target.scope,
+        startedAt: timestamp,
+      };
+      draft.status = "paused";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "paused",
+        lastAction: "conversation_rewind_started",
+        stopReason: "Rewinding conversation",
+        pausedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
     });
   }
 
-  // Undo also force-pauses the run: kill in-flight workers, drop autopilot
-  // cycles, mark active attempts/tasks cancelled. Without this the workers
-  // keep running uphill against an undone chat, flooding the renderer with
-  // step/worker events and making the chat feel chaotic ("stutters and weird
-  // stuff"). One atomic commitRunChange below transitions all of that state
-  // in a single broadcast so the renderer sees one clean snapshot.
-  const activeWorkers = activeWorkersForRun(run.id);
   for (const worker of activeWorkers) {
     try {
       worker.kill();
     } catch {
-      /* worker.kill is best-effort */
+      // best-effort
     }
     try {
       pty.killImmediate(worker.attemptId);
     } catch {
-      /* session may have already exited */
+      // already gone
     }
     activeWorkerProcesses.delete(worker.attemptId);
   }
   for (const key of [...activeAutopilotCycles.keys()]) {
-    if (key.startsWith(`${run.id}:`)) activeAutopilotCycles.delete(key);
+    if (key.startsWith(`${original.id}:`)) activeAutopilotCycles.delete(key);
   }
-  activeAutopilotPlans.delete(run.id);
-  activeAutopilotReviews.delete(run.id);
+  activeAutopilotPlans.delete(original.id);
+  activeAutopilotReviews.delete(original.id);
+  activeSteeringFollowups.delete(original.id);
+  for (const key of [...activePendingManagerResumes]) {
+    if (key.startsWith(`${original.id}:`)) activePendingManagerResumes.delete(key);
+  }
+  await disposeManagerSessions(runId);
 
-  const cancelledAttemptIds = new Set(activeWorkers.map((w) => w.attemptId));
-  const cancelledTaskIds = new Set(
-    activeWorkers.map((w) => w.workerTaskId).filter((id): id is string => Boolean(id)),
-  );
+  try {
+    if (target.scope === "chat+code") {
+      if (!target.checkpoint?.sha) {
+        throw new Error("This checkpoint has no workspace snapshot — chat-only undo is still available.");
+      }
+      const cwd = workspaceCwdFromRun(barrier);
+      if (!cwd) throw new Error("Workspace path missing — cannot restore code.");
+      await restoreCheckpointCode({ cwd, sha: target.checkpoint.sha });
+    }
 
-  // Cutoff timestamp = the undone user message's createdAt. Anything created
-  // at or after that timestamp is downstream of the message and gets trimmed
-  // (steps, worker tasks, attempts, manager calls). Without this the chat
-  // timeline keeps rendering all the post-message work (step cards, tool
-  // rows, Codara's prose reply) even though humanMessages is trimmed —
-  // exactly the "agent's message still there after undo" the user reported.
-  const undoneMessage = run.humanMessages[pointer];
-  const cutoff = undoneMessage?.createdAt;
+    const rewindCwd = workspaceCwdFromRun(barrier);
+    if (rewindCwd) {
+      await scheduleShadowRefRewind({
+        runId: barrier.id,
+        cwd: rewindCwd,
+        sha: parentCheckpoint?.sha ?? null,
+      });
+    }
+  } catch (error) {
+    barrier = await markConversationRewindFailed(barrier, error, target);
+    throw error;
+  }
 
-  const updated = await commitRunChange(run, {
-    type: "run.checkpoint_restored",
-    message: `Undid checkpoint ${checkpoint.id} (${input.scope})`,
+  const removedForAudit = barrier.humanMessages.slice(pointer).map((message) => ({
+    id: message.id,
+    author: message.author,
+    kind: message.kind,
+    intent: message.intent,
+    priorDeliveryState: message.deliveryState,
+    deliveryState: "cancelled" as const,
+    targetTurnId: message.targetTurnId,
+    backendTurnId: message.backendTurnId,
+    conversationEpoch: message.conversationEpoch ?? oldEpoch,
+    message: message.message,
+  }));
+  const cancelledAttemptIds = new Set(activeWorkers.map((worker) => worker.attemptId));
+  const cancelledTaskIds = new Set(activeWorkers.map((worker) => worker.workerTaskId));
+  for (const attempt of barrier.workerAttempts) {
+    if (["preparing", "prompt_ready", "launching", "running", "finishing"].includes(attempt.status)) {
+      cancelledAttemptIds.add(attempt.id);
+    }
+  }
+  for (const task of barrier.workerTasks) {
+    if (["created", "queued", "claimed", "running", "needs_review", "retry_queued"].includes(task.status)) {
+      cancelledTaskIds.add(task.id);
+    }
+  }
+
+  const rewound = await commitRunChange(barrier, {
+    type: "run.conversation_rewound",
+    message: `Conversation rewound from epoch ${oldEpoch} to ${newEpoch}`,
     payload: {
-      checkpointId: checkpoint.id,
-      scope: input.scope,
+      oldEpoch,
+      newEpoch,
+      checkpointId: target.checkpoint?.id,
+      messageId: restoredMessage?.id,
       pointer,
-      sha: checkpoint.sha,
+      scope: target.scope,
+      removedMessages: removedForAudit,
       cancelledAttemptIds: [...cancelledAttemptIds],
       cancelledTaskIds: [...cancelledTaskIds],
     },
     mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== newEpoch) return false;
       draft.humanMessages = draft.humanMessages.slice(0, pointer);
-      draft.checkpoints = (draft.checkpoints ?? []).slice(0, checkpointIndex);
+      draft.checkpoints = keptCheckpoints;
+      delete draft.pendingManagerResume;
+      delete draft.pendingConversationRewind;
+      delete draft.blockedOn;
+      delete draft.chatSessionUuid;
+      delete draft.chatSessionMode;
 
       if (cutoff) {
         draft.steps = draft.steps.filter((step) => step.createdAt < cutoff);
         const keptStepIds = new Set(draft.steps.map((step) => step.id));
         draft.workerTasks = draft.workerTasks.filter((task) => task.createdAt < cutoff);
         const keptTaskIds = new Set(draft.workerTasks.map((task) => task.id));
-        // An attempt survives only if its task does. Anything left here whose
-        // status was still active gets flipped to cancelled below — the PTY
-        // is already dead from the kill loop above.
         draft.workerAttempts = draft.workerAttempts.filter((attempt) =>
           keptTaskIds.has(attempt.workerTaskId),
         );
-        draft.sparkCalls = draft.sparkCalls.filter((call) => call.createdAt < cutoff);
+        draft.sparkCalls = draft.sparkCalls.filter(
+          (call) => call.createdAt < cutoff && call.status !== "started",
+        );
+        draft.assumptions = (draft.assumptions ?? []).filter(
+          (assumption) => assumption.createdAt < cutoff,
+        );
         if (draft.currentStepId && !keptStepIds.has(draft.currentStepId)) {
           draft.currentStepId = undefined;
         }
+      } else {
+        draft.sparkCalls = draft.sparkCalls.filter((call) => call.status !== "started");
+        draft.assumptions = [];
       }
 
-      // "complete" gives a quiet "done" badge with no Resume button, and is a
-      // terminal status — so the user's next message goes through
-      // addRunMessage's wasTerminal branch and re-engages the manager from a
-      // clean slate. Semantically: the run finished what it was doing
-      // (forcibly, because the user undid), and is awaiting fresh input.
-      draft.status = "complete";
-      draft.completedAt = timestamp;
-      draft.seen = true;
-      draft.autopilot = {
-        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
-        status: "idle",
-        lastAction: "undo",
-        stopReason: "Undone by user",
-        updatedAt: timestamp,
-      };
-
-      // Flip any surviving active attempts/tasks to cancelled — the PTY is
-      // dead, leaving them as "running" would misrepresent the state.
       for (const attempt of draft.workerAttempts) {
-        if (!cancelledAttemptIds.has(attempt.id)) continue;
         if (
           attempt.status === "preparing" ||
           attempt.status === "prompt_ready" ||
@@ -8283,10 +10083,10 @@ export async function undoToCheckpoint(input: UndoToCheckpointInput): Promise<Un
         ) {
           attempt.status = "cancelled";
           attempt.finishedAt = attempt.finishedAt ?? timestamp;
+          cancelledAttemptIds.add(attempt.id);
         }
       }
       for (const task of draft.workerTasks) {
-        if (!cancelledTaskIds.has(task.id)) continue;
         if (
           task.status === "created" ||
           task.status === "queued" ||
@@ -8297,13 +10097,110 @@ export async function undoToCheckpoint(input: UndoToCheckpointInput): Promise<Un
         ) {
           task.status = "cancelled";
           task.updatedAt = timestamp;
+          cancelledTaskIds.add(task.id);
         }
+      }
+
+      const openQuestion = unresolvedRunQuestions(draft.humanMessages).at(-1) ?? null;
+      if (openQuestion) {
+        const source = openQuestion.questionContext?.source ??
+          (draft.executionMode === "direct" ? "direct_worker" : "manager_decision");
+        if (draft.executionMode === "direct" || source === "direct_worker") {
+          // A report-blocked direct run has no live RPC after rewind. Keep the
+          // question ownerless so the automation loop's exact linked-answer
+          // seam can launch the continuation; fabricating active_rpc ownership
+          // would restore the run to running and suppress that seam.
+          delete draft.blockedOn;
+          draft.status = "blocked";
+          draft.autopilot = {
+            ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+            status: "blocked",
+            lastAction: "waiting_for_user",
+            stopReason:
+              openQuestion.questionContext?.reason ?? "Cora still needs this answer.",
+            updatedAt: timestamp,
+          };
+          draft.updatedAt = timestamp;
+          return;
+        }
+        const managerMode =
+          priorPendingResume?.questionMessageId === openQuestion.id
+            ? priorPendingResume.managerMode
+            : interruptedCall?.mode;
+        const blocker = createRunBlocker({
+          questionMessageId: openQuestion.id,
+          category:
+            openQuestion.questionContext?.category ??
+            inferRunQuestionCategory(openQuestion.message, source),
+          currentStatus: "paused",
+          resumeStatus: "running",
+          source,
+          // Rewind always invalidates the provider session/RPC owner. Managed
+          // questions therefore resume through a fresh scheduled stage.
+          resumeStrategy: "schedule_manager",
+          managerMode,
+          blockedAt: openQuestion.createdAt,
+        });
+        applyRunQuestionBlocker(
+          draft,
+          blocker,
+          openQuestion.questionContext?.reason ?? "Cora still needs this answer.",
+          timestamp,
+        );
+      } else {
+        draft.status = "complete";
+        draft.completedAt = timestamp;
+        draft.seen = true;
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+          status: "idle",
+          lastAction: "undo",
+          stopReason: "Undone by user",
+          updatedAt: timestamp,
+        };
       }
       draft.updatedAt = timestamp;
     },
   });
 
-  return { run: updated, restoredText };
+  return { run: rewound, restoredText };
+}
+
+function queueConversationRewind(
+  runId: string,
+  target: ConversationRewindTarget,
+): Promise<UndoToCheckpointResult> {
+  const prior = activeConversationRewinds.get(runId);
+  const rewind = (prior ? prior.catch(() => undefined) : Promise.resolve()).then(() =>
+    performConversationRewind(runId, target),
+  );
+  const tail = rewind.finally(() => {
+    if (activeConversationRewinds.get(runId) === tail) {
+      activeConversationRewinds.delete(runId);
+    }
+  });
+  activeConversationRewinds.set(runId, tail);
+  return rewind;
+}
+
+export async function undoToCheckpoint(
+  input: UndoToCheckpointInput,
+): Promise<UndoToCheckpointResult> {
+  const run = await requireRun(input.runId);
+  const checkpoints = run.checkpoints ?? [];
+  const checkpointIndex = checkpoints.findIndex((checkpoint) => checkpoint.id === input.checkpointId);
+  if (checkpointIndex < 0) throw new Error("Checkpoint not found on this run.");
+  const checkpoint = checkpoints[checkpointIndex];
+  if (input.scope === "chat+code" && !checkpoint.sha) {
+    throw new Error("This checkpoint has no workspace snapshot — chat-only undo is still available.");
+  }
+  return queueConversationRewind(run.id, {
+    checkpoint,
+    checkpointIndex,
+    messagePointer: checkpoint.messagePointer,
+    messageId: checkpoint.messageId,
+    scope: input.scope,
+  });
 }
 
 // Force-pause: hard-kill every active worker for the run, stop all autopilot
@@ -8316,19 +10213,17 @@ export async function forcePauseRun(runId: string): Promise<RunState> {
   const run = await requireRun(runId);
   const reason = "Force-paused by user";
   const activeWorkers = activeWorkersForRun(run.id);
+  const oldEpoch = conversationEpoch(run);
+  const activeCallIds = new Set(
+    run.sparkCalls
+      .filter((call) => call.status === "started" && !call.completedAt)
+      .map((call) => call.id),
+  );
 
-  // 0. Interrupt the chat backend's live CC/Codex turn so the orchestrator
-  //    stops calling tools mid-stream. Without this, the model keeps firing
-  //    Edit/Bash/etc. for up to ~90s after the user clicked Stop while we're
-  //    still polling waitForTurnFile. Backends that don't have an active
-  //    session for this run no-op.
-  for (const backendKind of ["claude", "codex"] as const) {
-    try {
-      getBackend(backendKind).interruptChat?.(run.id);
-    } catch {
-      /* never let one backend's interrupt failure block the pause */
-    }
-  }
+  // 0. Dispose both provider sessions, not only the currently-installed PTY.
+  // Session generation invalidation also catches a turn still inside async
+  // startup/readiness, so it cannot submit after the pause commit.
+  await disposeManagerSessions(run.id);
 
   // 1. Kill every PTY immediately. No GRACE_MS, no taskkill race.
   for (const worker of activeWorkers) {
@@ -8367,6 +10262,27 @@ export async function forcePauseRun(runId: string): Promise<RunState> {
       cancelledTaskIds: [...cancelledTaskIds],
     },
     mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== oldEpoch) return false;
+      draft.conversationEpoch = oldEpoch + 1;
+      delete draft.chatSessionUuid;
+      delete draft.chatSessionMode;
+      for (const call of draft.sparkCalls) {
+        if (!activeCallIds.has(call.id) || call.status !== "started") continue;
+        call.status = "failed";
+        call.error = "Manager turn interrupted by force pause.";
+        call.completedAt = timestamp;
+      }
+      for (const message of draft.humanMessages) {
+        if (!message.backendTurnId || !activeCallIds.has(message.backendTurnId)) continue;
+        if (message.deliveryState === "acknowledged" || message.deliveryState === "cancelled") continue;
+        message.deliveryState = "queued";
+        message.conversationEpoch = oldEpoch + 1;
+        delete message.backendTurnId;
+        if (message.targetTurnId && activeCallIds.has(message.targetTurnId)) {
+          delete message.targetTurnId;
+        }
+      }
+      abandonRunQuestionOwnership(draft);
       draft.status = "paused";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
@@ -8408,55 +10324,57 @@ export async function forcePauseRun(runId: string): Promise<RunState> {
   });
 }
 
-// Stop-as-give-back: the Stop button in execute-mode chat. Combines force-pause
-// (ESC the CC/Codex turn + kill workers) with undo-to-checkpoint (trim the
-// pending user message and downstream state). When CC/Codex received the user
-// prompt but Codara was still mid-spawn or mid-turn, ESC alone leaves the
-// message visible in the timeline as if it had been processed — confusing
-// because the model never finished thinking about it. This wrapper rolls back
-// to the checkpoint BEFORE the latest user message and returns the original
-// text so the renderer can prefill the composer for editing/resubmit.
+// Legacy compound operation retained for API compatibility: force-pause, then
+// explicitly rewind pending chat. The renderer's Stop controls MUST NOT call
+// this — Stop preserves history and uses forcePauseRun; only a deliberately
+// named rewind/undo flow may remove conversation state.
 export async function stopAndUndoPending(
   runId: string,
 ): Promise<UndoToCheckpointResult> {
   const run = await requireRun(runId);
-  // Interrupt the chat backend's live CC/Codex turn FIRST, on every Stop path.
-  // The checkpoint-undo path below rolls back Codara's state and cancels workers
-  // but does NOT touch the chat CLI — so without this the claude/codex process
-  // keeps churning its turn in the terminal behind Codara after the user hit
-  // Stop. ESC aborts the in-flight turn; the session stays alive so the
-  // restored message can be resubmitted. Backends with no live session no-op.
-  for (const backendKind of ["claude", "codex"] as const) {
-    try {
-      getBackend(backendKind).interruptChat?.(run.id);
-    } catch {
-      /* never let one backend's interrupt failure block the Stop */
+  let lastUserIndex = -1;
+  for (let index = run.humanMessages.length - 1; index >= 0; index -= 1) {
+    if (run.humanMessages[index].author === "user") {
+      lastUserIndex = index;
+      break;
     }
   }
-  // Walk humanMessages backwards to find the latest one authored by the user.
-  const lastUserMessage = [...run.humanMessages].reverse().find((m) => m.author === "user");
-  if (!lastUserMessage) {
-    // No user message to undo (e.g. brand-new run, planning hasn't started).
-    // Fall back to force-pause so Stop still does SOMETHING visible.
-    const paused = await forcePauseRun(runId);
+  if (lastUserIndex < 0) {
+    const paused = await forcePauseRun(run.id);
     return { run: paused, restoredText: null };
   }
-  // Match the checkpoint by messageId — same lookup the renderer's
-  // UndoControl uses (ChatConversation:116-130).
-  const checkpoint = (run.checkpoints ?? []).find(
-    (c) => c.kind === "user-message" && c.messageId === lastUserMessage.id,
-  );
-  if (!checkpoint) {
-    // No checkpoint yet — checkpoint creation is async (recordCheckpointInBackground)
-    // so a Stop fired in the first few ms after send can race ahead of it.
-    // Fall back to force-pause; user can still retype if needed.
-    const paused = await forcePauseRun(runId);
-    return { run: paused, restoredText: null };
-  }
-  // scope="chat" deliberately — never auto-revert workspace edits the user
-  // might want to keep. ChatConversation's manual undo dropdown is the place
-  // for scope=chat+code if the user wants to also rewind the filesystem.
-  return undoToCheckpoint({ runId, checkpointId: checkpoint.id, scope: "chat" });
+  const epoch = conversationEpoch(run);
+  const activeCallId = activeManagerCall(run)?.id;
+  const pendingIndexes = run.humanMessages
+    .map((message, index) => ({ message, index }))
+    .filter(
+      ({ message }) =>
+        message.author === "user" &&
+        (message.conversationEpoch ?? 0) === epoch &&
+        (message.deliveryState === "queued" || message.deliveryState === "submitted") &&
+        (message.backendTurnId === activeCallId || message.intent === "steer"),
+    )
+    .map(({ index }) => index);
+  const rollbackIndex = pendingIndexes.length > 0
+    ? Math.min(...pendingIndexes)
+    : lastUserIndex;
+  // Stop rewinds from the earliest pending turn, so return every removed user
+  // message in FIFO order. Returning only the newest silently discarded older
+  // queued steering when the composer was restored.
+  const restoredMessages = run.humanMessages
+    .slice(rollbackIndex)
+    .filter((message) => message.author === "user")
+    .map((message) => message.message.trim())
+    .filter(Boolean);
+  const result = await queueConversationRewind(run.id, {
+    messagePointer: rollbackIndex,
+    messageId: run.humanMessages[rollbackIndex]?.id,
+    scope: "chat",
+  });
+  return {
+    ...result,
+    restoredText: restoredMessages.join("\n\n"),
+  };
 }
 
 // Recursively delete the run directory with retries. Windows will reject
@@ -8570,7 +10488,11 @@ async function reviewWorkerReportArtifact({
   //   3. FEEDBACK re-enqueue — deterministically re-run the impl worker with the
   //      verifier's corrective prompt, skipping a full manager round-trip.
   if (report.verifier) {
-    run = (await maybeRestoreGreenClaimRegression({ run, task, attempt, report })) ?? run;
+    const regressionRestore = await maybeRestoreGreenClaimRegression({ run, task, attempt, report });
+    if (regressionRestore) {
+      run = regressionRestore.run;
+      if (regressionRestore.restoreFailed) return run;
+    }
     run = await recordGreenClaims({ run, attempt, report });
     const feedbackRetry = await maybeQueueVerifierFeedbackRetry({
       run,
@@ -9213,7 +11135,7 @@ async function maybeRestoreGreenClaimRegression({
   task: WorkerTask;
   attempt: WorkerAttempt;
   report: WorkerReport;
-}): Promise<RunState | null> {
+}): Promise<{ run: RunState; restoreFailed: boolean } | null> {
   const green = run.greenClaims;
   if (!green) return null;
   const regressedKeys: string[] = [];
@@ -9241,7 +11163,7 @@ async function maybeRestoreGreenClaimRegression({
   if (!restoredSha || !cwd) {
     // Nothing to restore to (non-git workspace or no prior snapshot). Still drop
     // the stale green entries below so the regression isn't silently retained.
-    return commitRunChange(run, {
+    const unavailable = await commitRunChange(run, {
       type: "autopilot.green_claim_regression_detected",
       stepId: task.stepId,
       workerTaskId: task.id,
@@ -9254,9 +11176,42 @@ async function maybeRestoreGreenClaimRegression({
         draft.updatedAt = timestamp;
       },
     });
+    return { run: unavailable, restoreFailed: false };
   }
 
-  await restoreCheckpointCode({ cwd, sha: restoredSha }).catch(() => undefined);
+  try {
+    await restoreCheckpointCode({ cwd, sha: restoredSha });
+  } catch (error) {
+    const restoreError = error instanceof Error ? error.message : String(error);
+    const failed = await commitRunChange(run, {
+      type: "autopilot.green_claim_regression_restore_failed",
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      message: `Detected regression on ${regressedKeys.length} previously-verified claim(s), but the pre-worker snapshot could not be restored`,
+      payload: {
+        claims: regressedClaims,
+        restoredSha,
+        attemptId: attempt.id,
+        error: restoreError,
+      },
+      mutate: (draft, timestamp) => {
+        if (draft.greenClaims) {
+          for (const key of regressedKeys) delete draft.greenClaims[key];
+        }
+        draft.status = "paused";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+          status: "paused",
+          lastAction: "green_claim_regression_restore_failed",
+          stopReason: `Regression restore failed: ${restoreError}`,
+          pausedAt: timestamp,
+          updatedAt: timestamp,
+        };
+        draft.updatedAt = timestamp;
+      },
+    });
+    return { run: failed, restoreFailed: true };
+  }
   for (const claim of regressedClaims) {
     await appendRegressionRevertEvent({
       workspaceId: run.workspaceId,
@@ -9270,7 +11225,7 @@ async function maybeRestoreGreenClaimRegression({
   }
   // Drop the reverted claims from the green map so the next attempt re-verifies
   // and re-establishes green against the restored tree.
-  return commitRunChange(run, {
+  const reverted = await commitRunChange(run, {
     type: "autopilot.green_claim_regression_reverted",
     stepId: task.stepId,
     workerTaskId: task.id,
@@ -9283,6 +11238,7 @@ async function maybeRestoreGreenClaimRegression({
       draft.updatedAt = timestamp;
     },
   });
+  return { run: reverted, restoreFailed: false };
 }
 
 function buildContextPacket(input: {
@@ -9532,9 +11488,46 @@ async function requireRun(runId: string): Promise<RunState> {
 
 function normalizeRun(run: RunState): RunState {
   run.humanMessages ??= [];
-  run.humanMessages = dedupeHumanMessages(run.humanMessages);
+  run.sparkCalls ??= [];
+  run.conversationEpoch ??= 0;
+  const seenAssumptionSignatures = new Set<string>();
+  run.assumptions = (run.assumptions ?? []).filter((assumption) => {
+    if (!assumption?.question?.trim() || !assumption.selectedAnswer?.trim()) return false;
+    assumption.signature ??= normalizeRunQuestionSignature(assumption.question);
+    assumption.conversationEpoch ??= 0;
+    if (!assumption.signature || seenAssumptionSignatures.has(assumption.signature)) return false;
+    seenAssumptionSignatures.add(assumption.signature);
+    return true;
+  });
+  const migrateLegacyDirectLoomNotes =
+    run.executionMode === "direct" &&
+    Boolean(run.automationId) &&
+    run.status === "blocked" &&
+    !run.blockedOn &&
+    run.humanMessages.some(
+      (message) =>
+        message.author === "spark" &&
+        message.kind === "question" &&
+        Boolean(message.loomNodeId),
+    );
+  run.humanMessages = normalizeHumanRunQuestionMessages(run.humanMessages, {
+    migrateLegacyDirectLoomNotes,
+  });
   for (const message of run.humanMessages) {
+    const legacyMessage = message.conversationEpoch === undefined;
     message.attachments ??= [];
+    message.conversationEpoch ??= 0;
+    message.intent ??=
+      message.author === "user" && message.kind !== "answer"
+        ? "turn"
+        : "answer";
+    // Legacy inputs predate durable turn ownership and were already consumed;
+    // never queue them for redelivery merely because the app upgraded.
+    message.deliveryState ??= legacyMessage
+      ? "acknowledged"
+      : message.author === "user"
+        ? "queued"
+        : "acknowledged";
     if (message.author === "spark" && message.kind === "question") {
       message.questionOptions = normalizeQuestionOptionsForMessage(
         message.message,
@@ -9542,7 +11535,12 @@ function normalizeRun(run: RunState): RunState {
       );
     } else {
       delete message.questionOptions;
+      delete message.questionContext;
     }
+  }
+  for (const call of run.sparkCalls) {
+    call.inputMessageIds ??= [];
+    call.conversationEpoch ??= 0;
   }
   for (const step of run.steps ?? []) {
     step.plannedAgents ??= [];
@@ -9551,6 +11549,27 @@ function normalizeRun(run: RunState): RunState {
     status: run.status === "running" ? "running" : "idle",
     updatedAt: run.updatedAt,
   };
+  // A blocker owns only an actively blocked run. Old pause/cancel/status files
+  // sometimes retained it and could resurrect the pre-pause status on answer.
+  if (run.status !== "blocked") delete run.blockedOn;
+  // Backfill the pre-state-machine resume shape. A malformed launching lease
+  // cannot be safely identified after restart, so recover it as pending.
+  if (run.pendingManagerResume) {
+    const pending = run.pendingManagerResume;
+    if (pending.state !== "launching" || !pending.launchClaimId?.trim()) {
+      pending.state = "pending";
+      delete pending.launchClaimId;
+      delete pending.launchClaimedAt;
+    }
+  }
+  if (
+    run.executionMode === "direct" ||
+    run.status === "blocked" ||
+    run.status === "paused" ||
+    isTerminalRunStatus(run.status)
+  ) {
+    delete run.pendingManagerResume;
+  }
   // Older run.json files may carry legacy plan-mode fields; strip them so
   // consumers don't trip on stale state from the removed feature.
   delete (run as unknown as Record<string, unknown>).planMode;
@@ -9661,46 +11680,6 @@ function roundCost(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
-const NORMALIZE_DUPLICATE_MESSAGE_WINDOW_MS = 120_000;
-
-function dedupeHumanMessages(messages: RunState["humanMessages"]): RunState["humanMessages"] {
-  const deduped: RunState["humanMessages"] = [];
-  const byClientId = new Set<string>();
-  const recentByText = new Map<string, { at: number }>();
-
-  for (const message of messages) {
-    const clientMessageId = message.clientMessageId?.trim();
-    if (clientMessageId) {
-      if (byClientId.has(clientMessageId)) continue;
-      byClientId.add(clientMessageId);
-    }
-
-    const at = Date.parse(message.createdAt);
-    const signature = [
-      message.author,
-      message.kind,
-      message.message.replace(/\s+/g, " ").trim().toLowerCase(),
-      (message.attachments ?? []).map((attachment) => attachment.id || attachment.path).join("|"),
-    ].join("\u0000");
-    const recent = recentByText.get(signature);
-    if (
-      recent &&
-      Number.isFinite(at) &&
-      Number.isFinite(recent.at) &&
-      at - recent.at >= 0 &&
-      at - recent.at <= NORMALIZE_DUPLICATE_MESSAGE_WINDOW_MS
-    ) {
-      recent.at = at;
-      continue;
-    }
-
-    deduped.push(message);
-    recentByText.set(signature, { at });
-  }
-
-  return deduped;
-}
-
 async function commitRunChange(
   run: RunState,
   change: {
@@ -9709,6 +11688,7 @@ async function commitRunChange(
     stepId?: string;
     workerTaskId?: string;
     payload?: Record<string, unknown>;
+    sparkCallId?: string;
     mutate: (draft: RunState, timestamp: string) => void | false;
   },
 ): Promise<RunState> {
@@ -9723,10 +11703,13 @@ async function commitRunChange(
     })
     .then(async () => {
       const latest = await requireRun(run.id);
-      // Capture the pre-mutation status so we can detect transitions after
-      // persistence. The notifications module suppresses no-ops (rule 3), and
-      // the seen-flag reset below also needs the prior status.
+      assertManagerDecisionMutationCurrent(latest.id);
+      // The cached run supplied by the caller may be stale by the time this
+      // serialized mutation starts. Capture lifecycle ownership only here, from
+      // the authoritative queue head, so previousStatus and blocker metadata
+      // describe the transition that actually persisted.
       prevStatus = latest.status;
+      const previousBlocker = latest.blockedOn ? { ...latest.blockedOn } : undefined;
       const timestamp = new Date().toISOString();
       const changed = change.mutate(latest, timestamp);
       result = latest;
@@ -9744,16 +11727,47 @@ async function commitRunChange(
         latest.seen = false;
       }
       await saveRun(latest);
-      await appendEvent({
+
+      const domainEventId = makeId("evt");
+      const domainType =
+        change.type === "run.status_updated" ? "run.status_change_requested" : change.type;
+      const events: Parameters<typeof appendEvents>[0] = [
+        {
+          id: domainEventId,
+          timestamp,
+          workspaceId: latest.workspaceId,
+          runId: latest.id,
+          stepId: change.stepId,
+          workerTaskId: change.workerTaskId,
+          sparkCallId: change.sparkCallId,
+          type: domainType,
+          message: change.message,
+          payload: change.payload,
+        },
+      ];
+
+      const openQuestion =
+        latest.status === "blocked" ? resolveOpenRunQuestionPure(latest) : undefined;
+      const lifecycleEvent = buildRunStatusTransitionEvent({
+        run: latest,
+        previousStatus: prevStatus,
+        previousBlocker,
+        openQuestionMessageId: openQuestion?.id,
         timestamp,
-        workspaceId: latest.workspaceId,
-        runId: latest.id,
+        causeType: domainType,
+        causeEventId: domainEventId,
+        causeMessage: change.message,
+        eventId: makeId("evt"),
         stepId: change.stepId,
         workerTaskId: change.workerTaskId,
-        type: change.type,
-        message: change.message,
-        payload: change.payload,
+        sparkCallId: change.sparkCallId,
       });
+      if (lifecycleEvent) events.push(lifecycleEvent);
+
+      // Domain + lifecycle are one event-log batch. appendEvents serializes every
+      // same-run writer, persists both lines, then broadcasts in the identical
+      // sequence, so a direct append cannot split cause from transition.
+      await appendEvents(events);
       nextStatus = latest.status;
       persisted = true;
     });
@@ -9764,6 +11778,31 @@ async function commitRunChange(
     if (runMutationQueues.get(run.id) === next) runMutationQueues.delete(run.id);
   }
   if (persisted && prevStatus !== "complete" && nextStatus === "complete") {
+    try {
+      const completedRun = result ?? (await requireRun(run.id));
+      const manifest = await collectRunResultManifest(completedRun, workerArtifactPaths);
+      await fs.mkdir(completedRun.artifactDir, { recursive: true });
+      await writeFileAtomic(
+        join(completedRun.artifactDir, "result-manifest.json"),
+        `${JSON.stringify(manifest, null, 2)}\n`,
+      );
+      result = await commitRunChange(completedRun, {
+        type: "run.result_manifest_persisted",
+        message: "Persisted evidence-backed run result manifest",
+        payload: {
+          files: manifest.workspaceDelta.length,
+          checks: manifest.checks.length,
+          evidence: manifest.evidence.length,
+          workspaceMode: manifest.workspace.mode,
+        },
+        mutate: (draft, timestamp) => {
+          draft.resultManifest = manifest;
+          draft.updatedAt = timestamp;
+        },
+      });
+    } catch (err) {
+      console.error("[run-store] failed to collect result manifest", err);
+    }
     try {
       result = await appendCompletionSummaryMessage(run.id);
     } catch (err) {
@@ -9821,7 +11860,11 @@ async function appendCompletionSummaryMessage(runId: string): Promise<RunState> 
   });
   if (alreadyAppended) return run;
 
-  const message = await buildCompletionSummaryMessage(run, workerArtifactPaths);
+  const message = await buildCompletionSummaryMessage(
+    run,
+    workerArtifactPaths,
+    run.resultManifest,
+  );
   return addRunMessage({
     runId: run.id,
     author: "spark",
@@ -10173,18 +12216,27 @@ async function askHumanQuestion(
   runId: string,
   message: string,
   options?: SparkManagerQuestionOption[],
+  context?: {
+    category?: RunQuestionCategory;
+    reason?: string;
+    managerMode?: SparkCall["mode"];
+    backendTurnId?: string;
+    conversationEpoch?: number;
+  },
 ): Promise<RunState> {
-  const run = await addRunMessage({
+  const posted = await postRunQuestion({
     runId,
-    author: "spark",
-    kind: "question",
     message,
-    questionOptions: normalizeQuestionOptionsForMessage(message, options),
+    questionOptions: options,
+    category: context?.category,
+    reason: context?.reason,
+    source: "manager_decision",
+    resumeStrategy: "schedule_manager",
+    managerMode: context?.managerMode,
+    backendTurnId: context?.backendTurnId,
+    conversationEpoch: context?.conversationEpoch,
   });
-  return pauseRun({
-    runId: run.id,
-    reason: HUMAN_INPUT_PAUSE_REASON,
-  });
+  return posted.run;
 }
 
 function normalizeQuestionOptionsForMessage(
@@ -10192,7 +12244,7 @@ function normalizeQuestionOptionsForMessage(
   options: SparkManagerQuestionOption[] | undefined,
 ): SparkManagerQuestionOption[] {
   const normalized = (options ?? [])
-    .slice(0, 3)
+    .slice(0, 4)
     .map((option, index) => ({
       id: option.id?.trim() || `option_${index + 1}`,
       label: option.label?.trim() || `Option ${index + 1}`,
@@ -10201,7 +12253,7 @@ function normalizeQuestionOptionsForMessage(
       recommended: option.recommended === true,
     }))
     .filter((option) => option.label && option.answer);
-  if (normalized.length >= 3) {
+  if (normalized.length >= 2) {
     if (!normalized.some((option) => option.recommended)) normalized[0].recommended = true;
     let seenRecommended = false;
     for (const option of normalized) {
@@ -11019,6 +13071,93 @@ export async function readManagerInbox(
     }
   }
   return inbox;
+}
+
+// Loom iterations are unattended jobs, so they use the same structured
+// transports as Cora itself: Claude Agent SDK or Codex App Server. Ordinary
+// Cora implementation workers deliberately stay on the visible PTY path below
+// so the user can watch and interact with their real CLI UI.
+async function runStructuredAutomationWorkerSession({
+  run,
+  task,
+  attemptId,
+  paths,
+  cwd,
+  promptText,
+  command,
+  sandboxed,
+  extraWritableDirs,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attemptId: string;
+  paths: WorkerArtifactPaths;
+  cwd: string;
+  promptText: string;
+  command: string;
+  sandboxed: boolean;
+  extraWritableDirs: string[];
+}): Promise<{ exitCode: number; error?: string }> {
+  const runningTimestamp = new Date().toISOString();
+  await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
+  const transport = task.runtimePreference === "claude" ? "agent-sdk" : "app-server";
+  await appendEvent({
+    timestamp: runningTimestamp,
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    attemptId,
+    type: "worker_attempt.running",
+    message: `Automation worker running via ${transport}: ${task.title}`,
+    payload: {
+      command,
+      runtime: task.runtimePreference,
+      session: transport,
+      headless: true,
+    },
+  });
+  const step = run.steps.find((item) => item.id === task.stepId);
+  if (shouldUsePeerComms(run, step, task)) {
+    await updatePeerCommsRegistry(run, step, task, attemptId, paths, "running")
+      .catch(() => undefined);
+  }
+
+  let transportKill: (() => void) | null = null;
+  let interruptedBeforeStart = false;
+  const kill = () => {
+    interruptedBeforeStart = true;
+    transportKill?.();
+  };
+  activeWorkerProcesses.set(attemptId, {
+    runId: run.id,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    attemptId,
+    command,
+    write: () => undefined,
+    kill,
+  });
+
+  try {
+    const result = await runStructuredWorker({
+      runId: run.id,
+      automationId: run.automationId ?? "",
+      task,
+      cwd,
+      prompt: promptText,
+      paths,
+      sandboxed,
+      extraWritableDirs,
+      onStarted(nextKill) {
+        transportKill = nextKill;
+        if (interruptedBeforeStart) nextKill();
+      },
+    });
+    return { exitCode: result.exitCode, error: result.error };
+  } finally {
+    activeWorkerProcesses.delete(attemptId);
+  }
 }
 
 // The orchestration worker now uses the EXACT same pty path as a user-opened

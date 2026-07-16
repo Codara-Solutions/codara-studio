@@ -3,17 +3,12 @@ import type {
   AutomationStatus,
   AutomationWorkerInfo,
   ScheduledJob,
-  ShellInfo,
 } from "@shared/types";
-import { TerminalPane } from "../Terminal/TerminalPane";
 import { automationDotColor, fmtClock, fmtElapsed } from "./presentation";
-import { registerCanonicalWorkerPane } from "./worker-pane-registry";
 
-// The Workers sub-tab: every live automation worker as a full terminal pane,
-// attached to the headless pty main spawned for it (sessionId === attemptId).
-// The worker runs regardless of whether this view is mounted — pty-manager
-// replays the tail buffer on late attach, so switching here mid-pass shows
-// the CLI's banner + recent output instead of a black pane.
+// The Workers sub-tab: every live automation worker as an ordered activity
+// stream from Claude Agent SDK or Codex App Server. Ordinary Cora workers keep
+// their visible native CLI panes; unattended looms use structured transports.
 //
 // Two clarity layers on top of the raw grid:
 //   • panes are GROUPED into a collapsible section per automation, so a busy
@@ -21,18 +16,6 @@ import { registerCanonicalWorkerPane } from "./worker-pane-registry";
 //   • a FOCUS mode blows one pane up to fill the view while the rest shrink to a
 //     chip strip. Both are pure layout/visibility changes — every WorkerPane
 //     stays mounted the whole time so its live Ink TUI never has to reattach.
-
-// The pty already exists (direct-worker.ts spawned it). TerminalPane's shell
-// prop is required but ignored on attach; the noop exe means an id mismatch
-// could never accidentally spawn a real shell. Mirrors ChatPanel's
-// BACKEND_TERMINAL_SHELL.
-const ATTACHED_SHELL: ShellInfo = {
-  id: "spark-loom-worker-attached",
-  label: "Loom worker PTY",
-  exe: "noop",
-  args: [],
-  family: "other",
-};
 
 const LIVE_ATTEMPT = new Set(["preparing", "prompt_ready", "launching", "running", "finishing"]);
 
@@ -415,7 +398,6 @@ function WorkerPane({
   onSelectLoom: (automationId: string) => void;
 }): React.ReactElement {
   const [confirmStop, setConfirmStop] = useState(false);
-  const [ptyExists, setPtyExists] = useState(false);
   const live = LIVE_ATTEMPT.has(worker.status);
   const blocked = worker.blocked;
   const dot = blocked ? "var(--danger)" : live ? "var(--accent)" : "var(--muted)";
@@ -429,47 +411,12 @@ function WorkerPane({
   const focusedFill = focusMode && isFocused;
   const background = focusMode && !isFocused;
 
-  // Same guard ChatPanel's backend terminal uses: mounting TerminalPane before
-  // the pty exists would trigger a renderer-side spawn of the noop shell.
-  useEffect(() => {
-    let disposed = false;
-    const check = async (): Promise<void> => {
-      try {
-        const exists = await window.spark.pty.exists(worker.attemptId);
-        if (!disposed) setPtyExists(exists);
-      } catch {
-        // Keep the last known value on a transient IPC hiccup — flipping to
-        // false here would unmount (then remount) the TerminalPane and force a
-        // needless detach/raw-tail-reattach cycle. A genuinely gone pty is
-        // reported by a SUCCESSFUL exists() returning false above.
-      }
-    };
-    void check();
-    const interval = window.setInterval(check, 1000);
-    return () => {
-      disposed = true;
-      window.clearInterval(interval);
-    };
-  }, [worker.attemptId]);
-
   // Auto-clear the two-step stop confirmation.
   useEffect(() => {
     if (!confirmStop) return;
     const t = window.setTimeout(() => setConfirmStop(false), 2500);
     return () => window.clearTimeout(t);
   }, [confirmStop]);
-
-  // Publish "this attempt's CANONICAL TerminalPane is mounted" so the live
-  // board's read-only mirror pane (LiveBoard dock) can gate its own attach on
-  // it. Ordering contract: the TerminalPane child below commits in the SAME
-  // render that flips ptyExists, and child effects run before this one — so by
-  // the time a mirror sees the registry flip, the canonical pane's spawn timer
-  // is already armed ahead of the mirror's, and the canonical attach (raw-tail
-  // replay + pty sizing) always wins the race. See worker-pane-registry.ts.
-  useEffect(() => {
-    if (!ptyExists) return;
-    return registerCanonicalWorkerPane(worker.attemptId);
-  }, [ptyExists, worker.attemptId]);
 
   return (
     <div
@@ -541,10 +488,13 @@ function WorkerPane({
         </span>
         <span
           className={`spark-badge ${worker.engine === "claude" ? "is-accent" : "is-info"}`}
-          title={worker.model ?? "CLI default model"}
+          title={worker.model ?? "Default model"}
         >
           {worker.engine.toUpperCase()}
           {worker.model ? ` · ${worker.model}` : ""}
+        </span>
+        <span className="spark-badge" title="Structured automation transport">
+          {worker.transport === "agent-sdk" ? "AGENT SDK" : "APP SERVER"}
         </span>
         <span style={{ flex: 1 }} />
         <span className="spark-mono spark-num" style={{ fontSize: 10, color: "var(--muted-2)" }} title={`started ${fmtClock(worker.startedAt)}`}>
@@ -608,62 +558,75 @@ function WorkerPane({
             borderBottom: "1px solid color-mix(in oklch, var(--danger) 30%, transparent)",
           }}
         >
-          Waiting for you — answer via the question card in the loom's detail (this terminal is watch-only).
+          Waiting for you — answer via the question card in the loom's detail.
         </div>
       )}
 
-      {/* Body: the live CLI terminal */}
-      <div style={{ flex: 1, minHeight: 0, position: "relative", background: "var(--bg)", padding: 4 }}>
-        {ptyExists ? (
-          <TerminalPane
-            key={`loom-worker:${worker.attemptId}`}
-            sessionId={worker.attemptId}
-            shell={ATTACHED_SHELL}
-            visible={visible}
-            scrollbackLineLimit={scrollbackLineLimit}
-            initialCwd={worker.cwd}
-            // This xterm attaches onto a live Ink TUI (claude/codex). The panes
-            // stay mounted across Looms↔Workers flips, collapse, and focus now,
-            // but a genuine mount/unmount still happens (tab close/reopen, worker
-            // (re)start). rawTailReattach makes those replay main's RAW pty tail
-            // instead of a flattened-text snapshot — the latter garbles a
-            // cursor-relative TUI, the reported "terminal breaks when claude or
-            // codex start" bug. writeWhileHidden keeps xterm's buffer complete
-            // when the pane attaches while hidden (e.g. a worker starts while the
-            // Looms sub-tab is up), so the first reveal shows the full live frame
-            // rather than a capped-buffer remnant. Same contract as
-            // ChatBackendTerminalStack.
-            //
-            // inputBlocked (NOT readOnly): these panes are watch surfaces — a
-            // blocked worker is answered via the loom detail's question card or
-            // the board's answer strip (orchestration.addRunMessage), never by
-            // typing at the CLI, so keystrokes/paste/drops are dropped. readOnly
-            // would be wrong here: it is full mirror mode and would also strip
-            // the CANONICAL duties this pane owns — pty resize (fit → SIGWINCH),
-            // the raw-tail replay on attach, and the runtime-state reports main
-            // persists onto the attempt.
-            inputBlocked
-            rawTailReattach
-            writeWhileHidden
-          />
-        ) : (
-          <div
-            className="spark-mono"
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 11,
-              color: "var(--muted-2)",
-            }}
-          >
-            {live ? "Worker starting…" : "Worker exited — terminal released."}
-          </div>
-        )}
+      <div style={{ flex: 1, minHeight: 0, position: "relative", background: "var(--bg)" }}>
+        <StructuredWorkerActivity worker={worker} visible={visible} live={live} />
       </div>
     </div>
+  );
+}
+
+function StructuredWorkerActivity({
+  worker,
+  visible,
+  live,
+}: {
+  worker: AutomationWorkerInfo;
+  visible: boolean;
+  live: boolean;
+}): React.ReactElement {
+  const [content, setContent] = useState("");
+  useEffect(() => {
+    if (!worker.stdoutLogPath) return;
+    let disposed = false;
+    const refresh = async () => {
+      try {
+        const file = await window.spark.fs.readText(worker.stdoutLogPath!);
+        if (!disposed) setContent(file.content.slice(-80_000));
+      } catch {
+        /* The file may not exist during the first launch tick. */
+      }
+    };
+    void refresh();
+    if (!visible || !live) return () => { disposed = true; };
+    const timer = window.setInterval(() => void refresh(), 500);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [live, visible, worker.stdoutLogPath]);
+
+  if (!content.trim()) {
+    return (
+      <div
+        className="spark-mono"
+        style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "var(--muted-2)", fontSize: 11 }}
+      >
+        {live ? `Starting ${worker.transport === "agent-sdk" ? "Claude Agent SDK" : "Codex App Server"}…` : "No activity was recorded."}
+      </div>
+    );
+  }
+  return (
+    <pre
+      className="spark-mono"
+      style={{
+        position: "absolute",
+        inset: 0,
+        margin: 0,
+        padding: "14px 16px",
+        overflow: "auto",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        color: "var(--ink-dim)",
+        fontSize: 11.5,
+        lineHeight: 1.58,
+      }}
+    >
+      {content}
+    </pre>
   );
 }
 

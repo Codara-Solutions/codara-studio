@@ -34,6 +34,7 @@ interface Props {
   selectedWorkerTaskId: string | null;
   onSelectStep: (id: string) => void;
   onSelectWorker: (id: string) => void;
+  onOpenWorker: (id: string) => void;
 }
 
 // Absolute wrapper for one node — RunGraph positions, the node paints itself.
@@ -70,6 +71,7 @@ export default function RunGraph({
   selectedWorkerTaskId,
   onSelectStep,
   onSelectWorker,
+  onOpenWorker,
 }: Props) {
   const orderedSteps = useMemo(() => sortSteps(run.steps), [run.steps]);
 
@@ -152,6 +154,9 @@ export default function RunGraph({
                     selected={workerSelected}
                     onSelect={() => {
                       if (workerLayout.taskId) onSelectWorker(workerLayout.taskId);
+                    }}
+                    onOpen={() => {
+                      if (workerLayout.taskId) onOpenWorker(workerLayout.taskId);
                     }}
                   />
                 </NodeBox>

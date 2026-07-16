@@ -94,7 +94,15 @@ function fabricateRun(runId, extra) {
 async function main() {
   const electron = path.join(ROOT, "node_modules", ".bin", "electron");
   const app = spawn(electron, [path.join(ROOT, "out", "main", "index.js")], {
-    env: { ...process.env, CODARA_HOME_DIR: HOME, SPARK_NO_SHELL_INTEGRATION: "1" },
+    // Isolate both Codara's durable home and Electron's Chromium userData.
+    // Without the latter this integration process can contend with a running
+    // development app and start the socket before a usable renderer bridge.
+    env: {
+      ...process.env,
+      CODARA_HOME_DIR: HOME,
+      SPARK_USER_DATA_DIR: HOME,
+      SPARK_NO_SHELL_INTEGRATION: "1",
+    },
     stdio: "ignore",
   });
 

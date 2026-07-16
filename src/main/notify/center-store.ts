@@ -120,6 +120,15 @@ export async function recordToCenter(
   opts: { read: boolean; suppressed?: string },
 ): Promise<void> {
   const list = await ensureLoaded();
+  // A busy manual agent can finish dozens of turns in one afternoon. Keep
+  // only its latest terminal state instead of letting one pane dominate the
+  // center. A new completion also replaces a stale "needs input" entry, and
+  // vice versa, so the center never claims a pane still needs attention after
+  // it has resumed.
+  if (event.kind.startsWith("terminal.agent.")) {
+    const prior = list.findIndex((entry) => entry.sourceKey === event.sourceKey);
+    if (prior >= 0) list.splice(prior, 1);
+  }
   list.unshift({ ...event, read: opts.read, suppressed: opts.suppressed });
   if (list.length > CAP) list.length = CAP;
   schedulePersist();

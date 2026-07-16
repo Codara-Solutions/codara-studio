@@ -292,11 +292,8 @@ export interface AppPreferences {
   // regardless of this flag — Fable is only ever available to the main chat
   // and (when this is on) opt-in automations.
   fableEnabled?: boolean;
-  // When true (default), a manual "Worker — Claude/Codex" terminal pane that was
-  // running an agent when the app closed relaunches its prior conversation on the
-  // next open via `claude -r <id>` / `codex resume <id>`. The pane's CLI session
-  // id is captured at launch and persisted with the tab layout; no process is kept
-  // alive. Off: restored agent panes come back as plain shells.
+  // Legacy compatibility only. Cold terminal hydration always strips session
+  // pointers, so this no longer enables resume-after-relaunch behavior.
   restoreAgentSessions?: boolean;
 }
 
@@ -432,7 +429,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   autoOpenPreview: false,
   copyBranchSetupCommandByRepo: {},
   fableEnabled: false,
-  restoreAgentSessions: true,
+  restoreAgentSessions: false,
 };
 
 // Coarse needs-you-vs-finished classification, still carried by the
@@ -499,6 +496,7 @@ export type NotifyKind =
   | "run.failed"
   | "terminal.agent.needs-input"
   | "terminal.agent.done"
+  | "terminal.agent.failed"
   | "automation.finished"
   | "automation.failed"
   | "automation.blocked"
@@ -1020,6 +1018,87 @@ export type RunStatus =
   | "failed"
   | "cancelled";
 
+// Human input is reserved for choices Cora cannot safely infer. These four
+// categories are intentionally narrow; reversible engineering preferences are
+// recorded as assumptions instead of blockers.
+export type RunQuestionCategory =
+  | "credentials_access"
+  | "destructive_irreversible"
+  | "safety_policy"
+  | "irreducible_product_scope";
+
+export type RunQuestionSource =
+  | "manager_decision"
+  | "live_manager_rpc"
+  | "direct_worker"
+  | "consent_gate";
+
+export type RunQuestionResumeStrategy = "schedule_manager" | "active_rpc";
+
+export interface RunQuestionContext {
+  category: RunQuestionCategory;
+  reason: string;
+  recommendedOptionId?: string;
+  source: RunQuestionSource;
+}
+
+export interface RunBlocker {
+  questionMessageId: string;
+  category: RunQuestionCategory;
+  previousStatus: RunStatus;
+  resumeStatus: RunStatus;
+  source: RunQuestionSource;
+  resumeStrategy: RunQuestionResumeStrategy;
+  /** The OpenRouter manager stage to re-run after a scheduled-manager answer. */
+  managerMode?: SparkCall["mode"];
+  blockedAt: string;
+}
+
+/** Durable handoff from a linked answer to the exact manager stage it must
+ * restart. `launching` is a crash-safe lease: it is cleared only after the
+ * manager stage writes a durable launch registration. */
+export interface PendingManagerResume {
+  questionMessageId: string;
+  managerMode: SparkCall["mode"];
+  /** Persisted autonomous-question attempt number for this manager stage. */
+  autonomyRetryCount?: number;
+  /** Set when this continuation was created by an assumption, not an answer. */
+  assumptionId?: string;
+  requestedAt: string;
+  state: "pending" | "launching";
+  launchClaimId?: string;
+  launchClaimedAt?: string;
+}
+
+/** Durable intent for a conversation rewind that crossed its epoch barrier but
+ * has not yet completed transcript/code/ref reconciliation. Startup can safely
+ * replay the idempotent restore and finish the trim. */
+export interface PendingConversationRewind {
+  oldEpoch: number;
+  newEpoch: number;
+  messagePointer: number;
+  messageId?: string;
+  checkpointId?: string;
+  checkpointIndex?: number;
+  scope: "chat" | "chat+code";
+  startedAt: string;
+}
+
+export interface RunAssumption {
+  id: string;
+  question: string;
+  selectedAnswer: string;
+  source: RunQuestionSource;
+  optionId?: string;
+  /** Normalized identity used to reject repeated tactical-question loops. */
+  signature?: string;
+  /** Manager stage that selected this default, when applicable. */
+  managerMode?: SparkCall["mode"];
+  /** Conversation generation that owned the decision. */
+  conversationEpoch?: number;
+  createdAt: string;
+}
+
 // Which Cora manager backend drives this chat's manager decisions and (in Talk
 // mode) chat replies. Today this is OpenRouter via fetch() to an LLM API; the
 // two CLI options spawn a real `claude` or `codex` process under node-pty and
@@ -1178,6 +1257,26 @@ export interface RunState {
   workerAttempts: WorkerAttempt[];
   sparkCalls: SparkCall[];
   humanMessages: HumanRunMessage[];
+  /**
+   * Monotonic Cora-owned conversation generation. Reliable rewind increments
+   * this value before a fresh provider session is started; callbacks, stream
+   * events, checkpoints, and manager decisions from an older generation are
+   * ignored. Legacy persisted runs normalize an absent value to 0.
+   */
+  conversationEpoch?: number;
+  /** The one exact question currently blocking this run. Optional for legacy
+   * runs, whose open question is reconstructed from linked message history. */
+  blockedOn?: RunBlocker;
+  /** A linked answer that must restart one exact manager stage. Persisted until
+   * the scheduler claims it so app restart cannot strand the continuation. */
+  pendingManagerResume?: PendingManagerResume;
+  /** Crash-recoverable conversation rewind currently crossing its durable seam. */
+  pendingConversationRewind?: PendingConversationRewind;
+  /** Reversible defaults Cora selected without blocking the user. */
+  assumptions?: RunAssumption[];
+  /** Evidence-backed completion record. Generated from the run-start baseline,
+   * worker reports, verifier verdicts, and observed workspace state. */
+  resultManifest?: RunResultManifest;
   autopilot?: AutopilotState;
   /**
    * Complexity bucket the manager classified the run into during plan_analysis.
@@ -1334,6 +1433,53 @@ export interface RunState {
      */
     backEdgeVisits?: Record<string, number>;
   };
+}
+
+export type RunResultProvenance = "reported" | "observed" | "verified";
+
+export interface RunResultManifest {
+  version: 1;
+  runId: string;
+  status: RunStatus;
+  generatedAt: string;
+  summary: string;
+  workspace: {
+    cwd?: string;
+    mode: "git" | "non_git" | "unavailable";
+    baselineSha?: string;
+    note?: string;
+  };
+  workspaceDelta: Array<{
+    path: string;
+    status: "added" | "modified" | "deleted" | "renamed" | "untracked" | "reported";
+    provenance: RunResultProvenance;
+    reason?: string;
+  }>;
+  outcomes: Array<{
+    text: string;
+    provenance: RunResultProvenance;
+    attemptId?: string;
+  }>;
+  checks: Array<{
+    command: string;
+    result: "passed" | "failed" | "not_run" | "unknown";
+    provenance: RunResultProvenance;
+    exitCode?: number;
+    details?: string;
+    attemptId?: string;
+  }>;
+  evidence: Array<{
+    text: string;
+    provenance: RunResultProvenance;
+    attemptId?: string;
+  }>;
+  risks: string[];
+  followups: string[];
+  artifacts: Array<{
+    path: string;
+    kind: "file" | "report" | "semantic";
+    provenance: RunResultProvenance;
+  }>;
 }
 
 /**
@@ -1528,6 +1674,16 @@ export type HumanRunMessageAuthor = "user" | "spark" | "system";
 // kind="note" (author="spark") so it persists like any other assistant turn.
 export type HumanRunMessageKind = "note" | "question" | "answer" | "decision" | "assistant_stream";
 
+/** Cora-owned semantic role for a persisted conversation message. */
+export type RunConversationMessageIntent = "turn" | "steer" | "answer";
+
+/** Durable delivery lifecycle for user input attached to manager turns. */
+export type RunMessageDeliveryState =
+  | "queued"
+  | "submitted"
+  | "acknowledged"
+  | "cancelled";
+
 export type RunMessageAttachmentKind = "image" | "file";
 
 export interface RunQuestionOption {
@@ -1564,8 +1720,19 @@ export interface HumanRunMessage {
   kind: HumanRunMessageKind;
   message: string;
   questionOptions?: RunQuestionOption[];
+  questionContext?: RunQuestionContext;
   attachments?: RunMessageAttachment[];
   createdAt: string;
+  /** Normal user turn, queued mid-turn steering, or Cora/linked-answer reply. */
+  intent?: RunConversationMessageIntent;
+  /** User-input delivery lifecycle. Cora/system rows normalize to acknowledged. */
+  deliveryState?: RunMessageDeliveryState;
+  /** Logical destination reserved when steering is queued for a later turn. */
+  targetTurnId?: string;
+  /** SparkCall id that durably owns delivery of this message. */
+  backendTurnId?: string;
+  /** Conversation generation in which this message was authored. */
+  conversationEpoch?: number;
   /**
    * Looms v2.5: when this message is the iteration summary a graph node's
    * worker produced (pushed by finalizeDirectRun in the same commit that flips
@@ -1949,6 +2116,12 @@ export interface SparkCall {
     | "test";
   model: string;
   status: "started" | "completed" | "failed";
+  /** Ordered user-message ids frozen onto this manager turn before startup. */
+  inputMessageIds?: string[];
+  /** Conversation generation this call belongs to (legacy calls normalize to 0). */
+  conversationEpoch?: number;
+  /** Links a manager call to the durable answer-resume launch that registered it. */
+  managerResumeClaimId?: string;
   contextPacketId?: string;
   requestPath?: string;
   responsePath?: string;
@@ -1991,6 +2164,10 @@ export interface ContextPacket {
 export interface SparkEvent {
   id: string;
   timestamp: string;
+  /** Journal schema version. Optional so persisted pre-version events remain valid. */
+  eventVersion?: number;
+  /** Per-run journal order. Optional for broadcast-only and legacy persisted events. */
+  sequence?: number;
   workspaceId: string;
   runId?: string;
   stepId?: string;
@@ -2213,12 +2390,27 @@ export interface AddRunMessageInput {
   kind: HumanRunMessageKind;
   message: string;
   questionOptions?: RunQuestionOption[];
+  questionContext?: RunQuestionContext;
   attachments?: AddRunMessageAttachmentInput[];
+  /** Optional internal override; ordinary renderer sends are classified by run-store. */
+  intent?: RunConversationMessageIntent;
+  deliveryState?: RunMessageDeliveryState;
+  targetTurnId?: string;
+  backendTurnId?: string;
+  conversationEpoch?: number;
   /** For kind "answer": the message id of the question this answers. Consent
    *  gates (automation edit/delete approval) accept ONLY answers linked to
    *  their own question — an unlinked affirmative ("yes" to some other
    *  question, a casual "ok" note) must never approve a pending change. */
   answersMessageId?: string;
+}
+
+export interface AnswerRunQuestionInput {
+  runId: string;
+  questionMessageId: string;
+  clientMessageId?: string;
+  message: string;
+  attachments?: AddRunMessageAttachmentInput[];
 }
 
 export interface AddRunMessageAttachmentInput {
@@ -2582,7 +2774,6 @@ export interface AutomationWorkerInfo {
   automationName: string;
   runId: string;
   workerTaskId: string;
-  /** Doubles as the pty sessionId — TerminalPane attaches to it directly. */
   attemptId: string;
   iteration: number; // 0-based
   engine: LoomEngine;
@@ -2593,11 +2784,17 @@ export interface AutomationWorkerInfo {
   status: WorkerAttemptStatus;
   blocked: boolean; // run.status === "blocked"
   question?: string; // pending question text when blocked
+  questionMessageId?: string; // exact question identity for linked Hub answers
   /** Looms v2.5: which graph node this worker is executing (and its label).
    *  Fields only — population is a later slice (the single-node executor here
    *  leaves them undefined, which renders identically to today). */
   nodeId?: string;
   nodeLabel?: string;
+  /** Structured transport used by unattended automation workers. */
+  transport?: "agent-sdk" | "app-server";
+  /** Ordered human-readable activity and raw provider event logs. */
+  stdoutLogPath?: string;
+  rawLogPath?: string;
 }
 
 /** SparkEvent "automation.worker" payload (broadcast-only, not journaled —

@@ -63,7 +63,7 @@ const FIT_DEBOUNCE_MS = 8;
 // flake) doesn't thrash a new addon on every tab switch.
 const WEBGL_MAX_RELOADS = 3;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
-const RESTORE_NOTICE = "[restored from last Codara Studio session]";
+const PTY_MANAGER_RESET_SEQUENCE = "\x1bc\x1b[H\x1b[2J\x1b[3J\x1b[?1049l";
 
 // Shell-escape a dropped file path for insertion at the terminal cursor,
 // replicating iTerm2's default drag-and-drop behavior.
@@ -236,15 +236,10 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
   };
 }
 // In-memory cache of the full xterm buffer captured right before a TerminalPane
-// unmounts. Workspace switches unmount every pane of the previous workspace,
-// which disposes its xterm scrollback while the PTY keeps running in main. The
-// leaf-level `initialScrollback` persisted into localStorage is capped at ~40 KB
-// and sampled only every 2s — too small to hold a Claude session's worth of
-// output. Stashing the full buffer here on unmount and replaying it on the next
-// mount lets a workspace round-trip restore the scrollback the user was looking
-// at. One-shot per sessionId: consumed by the next mount. Capped per session by
-// the user-configured scrollback line limit so a chatty PTY can't pin arbitrary
-// RAM if the user never returns to its workspace.
+// unmounts. Workspace switches can dispose a pane's xterm while its PTY keeps
+// running in main. Stashing the full buffer here and replaying it on the next
+// mount preserves same-process workspace continuity. Cold app hydration
+// deliberately ignores persisted scrollback.
 const MAX_XTERM_BUFFER_SNAPSHOTS = 64;
 // A snapshot is the xterm buffer text captured at unmount PLUS any raw bytes
 // that arrived while the pane was hidden (and therefore never reached xterm,
@@ -286,7 +281,6 @@ interface Options {
   shell: ShellInfo;
   scrollbackLineLimit: number;
   initialCwd?: string;
-  initialScrollback?: string;
   // One-shot shell command auto-typed into the PTY once the shell prompt has
   // settled (rough heuristic: after spawn + ~1500ms). Used by the worker
   // entries in the in-pane add-pane menu to launch claude/codex without the
@@ -356,6 +350,9 @@ interface Options {
   // and therefore safe to take over for a worker. Throttled implicitly by
   // PTY chunk rate; consumers should still debounce if they push to React.
   onActivity?: () => void;
+  // A live, visible normal-screen CSI 2 J was parsed. Presentation stays
+  // renderer-owned; replayed output and internal PTY reset traffic are excluded.
+  onClear?: () => void;
   // Fires only when the user actually types into the pane (xterm onData,
   // which is a keyboard-only signal — programmatic pty.write, clipboard
   // paste via bracketed-paste, and the one-shot autorun all bypass it).
@@ -419,7 +416,6 @@ export function useTerminalSession({
   shell,
   scrollbackLineLimit,
   initialCwd,
-  initialScrollback,
   initialCommand,
   extraEnv,
   readOnly = false,
@@ -432,6 +428,7 @@ export function useTerminalSession({
   onDetectedLocalUrl,
   onSparkOpen,
   onActivity,
+  onClear,
   onUserInput,
   onAgentState,
   onRuntimeState,
@@ -496,6 +493,7 @@ export function useTerminalSession({
   const onSearchReadyRef = useRef(onSearchReady);
   const onSparkOpenRef = useRef(onSparkOpen);
   const onActivityRef = useRef(onActivity);
+  const onClearRef = useRef(onClear);
   const onUserInputRef = useRef(onUserInput);
   const onAgentStateRef = useRef(onAgentState);
   const onRuntimeStateRef = useRef(onRuntimeState);
@@ -509,13 +507,14 @@ export function useTerminalSession({
     onSearchReadyRef.current = onSearchReady;
     onSparkOpenRef.current = onSparkOpen;
     onActivityRef.current = onActivity;
+    onClearRef.current = onClear;
     onUserInputRef.current = onUserInput;
     onAgentStateRef.current = onAgentState;
     onRuntimeStateRef.current = onRuntimeState;
     onResumeUnavailableRef.current = onResumeUnavailable;
     onResumeFallbackRef.current = onResumeFallback;
     onBootResumeConsumedRef.current = onBootResumeConsumed;
-  }, [onDetectedLocalUrl, onCwd, onExit, onSearchReady, onSparkOpen, onActivity, onUserInput, onAgentState, onRuntimeState, onResumeUnavailable, onResumeFallback, onBootResumeConsumed]);
+  }, [onDetectedLocalUrl, onCwd, onExit, onSearchReady, onSparkOpen, onActivity, onClear, onUserInput, onAgentState, onRuntimeState, onResumeUnavailable, onResumeFallback, onBootResumeConsumed]);
 
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -640,6 +639,11 @@ export function useTerminalSession({
   useEffect(() => {
     visibleRef.current = visible;
   }, [visible]);
+  // Non-null only while xterm is parsing bytes that must not be treated as a
+  // fresh visible clear (a hidden-buffer flush or pty-manager's internal reset).
+  // Tokens prevent a late callback from an old write/session clearing a newer
+  // suppression window.
+  const clearNotificationSuppressionRef = useRef<object | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -701,6 +705,26 @@ export function useTerminalSession({
         },
       });
       termRef.current = term;
+
+      // Observe the erase sequence xterm actually parses rather than guessing
+      // from keyboard input or shell command names. Returning false keeps xterm's
+      // built-in erase handler in the chain, so painting remains unchanged.
+      const eraseDisplayDispose = term.parser.registerCsiHandler(
+        { final: "J" },
+        (params) => {
+          if (params[0] !== 2) return false;
+          if (
+            replayPending ||
+            clearNotificationSuppressionRef.current !== null ||
+            !visibleRef.current
+          ) {
+            return false;
+          }
+          if (term.buffer.active.type === "normal") onClearRef.current?.();
+          return false;
+        },
+      );
+      cleanups.push(() => eraseDisplayDispose.dispose());
 
       const fit = new FitAddon();
       fitRef.current = fit;
@@ -911,6 +935,8 @@ export function useTerminalSession({
         // pane owns input. Clipboard read is also skipped so a paste shortcut
         // in a mirror tile is a true no-op rather than a phantom read.
         if (readOnlyRef.current || inputBlockedRef.current) return;
+        onActivityRef.current?.();
+        onUserInputRef.current?.();
         void (async () => {
           const text = await window.spark.clipboard.readText();
           const sanitized = (text ?? "").replace(/\x00/g, "");
@@ -1336,20 +1362,6 @@ export function useTerminalSession({
           term.write(pendingBytes, finishReplay);
         } else {
           finishReplay();
-        }
-      } else if (!rawTailReattachRef.current && !readOnlyRef.current) {
-        // Non-raw path only: restore the sampled localStorage scrollback for the
-        // cold app-restart case. Raw mode never restores here — main's raw tail
-        // replay is authoritative and any text restore would sit under the live
-        // TUI's incremental repaint and garble it.
-        const restoredScrollback = trimTerminalScrollbackLines(
-          initialScrollback?.trimEnd() ?? "",
-          scrollbackLineLimitRef.current,
-        ).trimEnd();
-        if (restoredScrollback) {
-          term.write(
-            `${normalizeForTerminalReplay(restoredScrollback)}\r\n\x1b[2m${RESTORE_NOTICE}\x1b[0m\r\n`,
-          );
         }
       }
 
@@ -2284,7 +2296,25 @@ export function useTerminalSession({
           return;
         }
 
-        term.write(bytes);
+        const suppressInternalReset = containsPtyManagerReset(bytes);
+        if (suppressInternalReset) {
+          const token = {};
+          clearNotificationSuppressionRef.current = token;
+          try {
+            term.write(bytes, () => {
+              if (clearNotificationSuppressionRef.current === token) {
+                clearNotificationSuppressionRef.current = null;
+              }
+            });
+          } catch (error) {
+            if (clearNotificationSuppressionRef.current === token) {
+              clearNotificationSuppressionRef.current = null;
+            }
+            throw error;
+          }
+        } else {
+          term.write(bytes);
+        }
         onActivityRef.current?.();
 
         // URL sniffer. Byte-level prefilter (':' '/' '/') skips decode+regex
@@ -2960,6 +2990,7 @@ export function useTerminalSession({
 
     return () => {
       disposed = true;
+      clearNotificationSuppressionRef.current = null;
       window.clearTimeout(startTimer);
       // Tell main to stop firing pty bytes at the about-to-be-dead IPC
       // listener and instead accumulate them in a per-session backlog. The
@@ -3089,9 +3120,18 @@ export function useTerminalSession({
           merged.set(chunk, off);
           off += chunk.length;
         }
+        const token = {};
+        clearNotificationSuppressionRef.current = token;
         try {
-          term.write(merged);
+          term.write(merged, () => {
+            if (clearNotificationSuppressionRef.current === token) {
+              clearNotificationSuppressionRef.current = null;
+            }
+          });
         } catch {
+          if (clearNotificationSuppressionRef.current === token) {
+            clearNotificationSuppressionRef.current = null;
+          }
           /* xterm may dispose mid-flush during a fast tab switch */
         }
       }
@@ -3164,7 +3204,6 @@ export function useTerminalSession({
       const line = buf.getLine(i);
       if (!line) continue;
       const text = line.translateToString(true);
-      if (text.trim() === RESTORE_NOTICE) continue;
       if (line.isWrapped && lines.length > 0) {
         lines[lines.length - 1] += text;
       } else {
@@ -3246,7 +3285,6 @@ function captureXtermBuffer(term: Terminal, maxLines: number): string {
     const line = buf.getLine(i);
     if (!line) continue;
     const text = line.translateToString(true);
-    if (text.trim() === RESTORE_NOTICE) continue;
     if (line.isWrapped && lines.length > 0) {
       lines[lines.length - 1] += text;
     } else {
@@ -3259,6 +3297,21 @@ function captureXtermBuffer(term: Terminal, maxLines: number): string {
 
 function stripTrailingPunct(url: string): string {
   return url.replace(/[.,);\]]+$/, "");
+}
+
+function containsPtyManagerReset(bytes: Uint8Array): boolean {
+  const sequenceLength = PTY_MANAGER_RESET_SEQUENCE.length;
+  for (let i = 0; i <= bytes.length - sequenceLength; i++) {
+    let matches = true;
+    for (let j = 0; j < sequenceLength; j++) {
+      if (bytes[i + j] !== PTY_MANAGER_RESET_SEQUENCE.charCodeAt(j)) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return true;
+  }
+  return false;
 }
 
 // Looks for the literal byte sequence ":" "/" "/" — the cheapest signal that

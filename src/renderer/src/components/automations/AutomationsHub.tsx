@@ -11,6 +11,7 @@ import type {
   ScheduledJob,
   UpdateScheduledJobInput,
 } from "@shared/types";
+import { resolveOpenRunQuestion, runQuestionDraftScopeKey } from "@shared/run-questions";
 import { runStatusColor } from "../../lib/run-status";
 import {
   STOP_REASON_LABEL,
@@ -671,7 +672,6 @@ export default function AutomationsHub({
               runtimes={runtimes}
               active={active && subTab === "looms"}
               focusRunId={focusAssistRunId ?? undefined}
-              terminalScrollbackLineLimit={terminalScrollbackLineLimit}
               onClose={() => setMode({ kind: "view" })}
             />
           </div>
@@ -726,12 +726,11 @@ export default function AutomationsHub({
                 }
                 onOpenLiveBoard={openLiveBoard}
                 onOpenBoardFocused={openBoardFocused}
-                onAnswer={(runId, answer) =>
+                onAnswer={(runId, questionMessageId, answer) =>
                   void act(() =>
-                    window.spark.orchestration.addRunMessage({
+                    window.spark.orchestration.answerRunQuestion({
                       runId,
-                      author: "user",
-                      kind: "note",
+                      questionMessageId,
                       message: answer,
                     }),
                   )
@@ -777,12 +776,11 @@ export default function AutomationsHub({
               onClose={closeLiveBoard}
               onOpenWorkersGrid={() => switchSubTab("workers")}
               onStop={() => stopLoom(selected.id)}
-              onAnswer={(runId, answer) =>
+              onAnswer={(runId, questionMessageId, answer) =>
                 void act(() =>
-                  window.spark.orchestration.addRunMessage({
+                  window.spark.orchestration.answerRunQuestion({
                     runId,
-                    author: "user",
-                    kind: "note",
+                    questionMessageId,
                     message: answer,
                   }),
                 )
@@ -1079,7 +1077,7 @@ function AutomationDetail({
   onOpenLiveBoard: () => void;
   // Opens the board with its terminal sheet focused on one worker (by attemptId).
   onOpenBoardFocused: (attemptId: string) => void;
-  onAnswer: (runId: string, answer: string) => void;
+  onAnswer: (runId: string, questionMessageId: string, answer: string) => void;
 }): React.ReactElement {
   const status = job.state.status;
   const running = status === "running" || status === "blocked";
@@ -1586,7 +1584,7 @@ function LiveWorkerCard({
   job: ScheduledJob;
   liveRun: RunState | null;
   onOpenLiveBoard: () => void;
-  onAnswer: (runId: string, answer: string) => void;
+  onAnswer: (runId: string, questionMessageId: string, answer: string) => void;
 }): React.ReactElement {
   const [answerDraft, setAnswerDraft] = useState("");
   const status = job.state.status;
@@ -1594,11 +1592,16 @@ function LiveWorkerCard({
   const edge = liveRun ? runStatusColor(liveRun.status) : automationDotColor(status);
   const budget = job.loop?.stop?.budgetUsd;
 
-  // The blocked iteration's pending question (last spark question), if any.
-  const pendingQuestion =
-    liveRun && liveRun.status === "blocked"
-      ? [...liveRun.humanMessages].reverse().find((m) => m.author === "spark" && m.kind === "question")?.message
-      : undefined;
+  // The blocked iteration's exact unresolved question. Its id must travel with
+  // every answer; a historical same-text question is not interchangeable.
+  const pendingQuestion = liveRun ? resolveOpenRunQuestion(liveRun) : null;
+  const answerDraftScope = runQuestionDraftScopeKey(liveRun?.id, pendingQuestion?.id);
+  // The card stays mounted while runs/questions change. Clear local text on both
+  // identity boundaries, including question -> undefined when LiveBoard, a toast,
+  // or another surface answers the currently displayed question.
+  useEffect(() => {
+    setAnswerDraft("");
+  }, [answerDraftScope]);
 
   return (
     <div
@@ -1665,7 +1668,7 @@ function LiveWorkerCard({
             gap: 8,
           }}
         >
-          <span style={{ fontSize: 11.5, color: "var(--ink)", whiteSpace: "pre-wrap" }}>{pendingQuestion}</span>
+          <span style={{ fontSize: 11.5, color: "var(--ink)", whiteSpace: "pre-wrap" }}>{pendingQuestion.message}</span>
           <div style={{ display: "flex", gap: 6 }}>
             <input
               className="spark-input"
@@ -1675,7 +1678,7 @@ function LiveWorkerCard({
               style={{ flex: 1, height: 26 }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && answerDraft.trim()) {
-                  onAnswer(liveRun.id, answerDraft.trim());
+                  onAnswer(liveRun.id, pendingQuestion.id, answerDraft.trim());
                   setAnswerDraft("");
                 }
               }}
@@ -1686,7 +1689,7 @@ function LiveWorkerCard({
               style={{ height: 26, fontSize: 11 }}
               disabled={!answerDraft.trim()}
               onClick={() => {
-                onAnswer(liveRun.id, answerDraft.trim());
+                onAnswer(liveRun.id, pendingQuestion.id, answerDraft.trim());
                 setAnswerDraft("");
               }}
             >

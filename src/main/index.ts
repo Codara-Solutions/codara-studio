@@ -839,7 +839,8 @@ app.whenReady().then(async () => {
   if (!ok) console.warn("[main] failed to register global automations shortcut");
 
   // Forward chord keystrokes (Ctrl/Cmd/Alt/Meta + key) from any <webview>
-  // guest back to its host renderer so app-wide shortcuts (Ctrl+1, Ctrl+P,
+  // guest back to its host renderer so app-wide shortcuts (Ctrl+1, Ctrl+P
+  // Quick Open,
   // …) keep working when focus is inside the embedded page. Listening on
   // the webContents is the only place this fires — the webview *tag* in the
   // host renderer does NOT emit before-input-event, so the host-side
@@ -879,6 +880,19 @@ app.whenReady().then(async () => {
   // NOTE: these fire only while the app is open — surviving app-close is the
   // daemon split's job (docs/daemon-split-PLAN.md).
   void (async () => {
+    try {
+      // Re-arm manager stages whose linked answer was persisted before the
+      // previous process exited. The durable record is claimed idempotently by
+      // run-store immediately before the intended stage starts.
+      const runStore = await import("./orchestration/run-store");
+      await runStore.recoverPendingConversationRewinds();
+      await runStore.recoverAbandonedActiveRpcQuestions();
+      await runStore.recoverOrphanedManagerTurns();
+      await runStore.recoverPendingManagerResumes();
+      await runStore.recoverQueuedManagerInputs();
+    } catch (err) {
+      console.warn("[main] pending manager-resume recovery failed:", err);
+    }
     try {
       // Looms v2: claim direct-run worker ptys in main (no renderer tab) and
       // settle any direct runs orphaned by the previous session BEFORE the

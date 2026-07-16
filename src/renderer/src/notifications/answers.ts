@@ -1,29 +1,18 @@
 import { makeId } from "@shared/ids";
 import type { RunQuestionOption } from "@shared/types";
 
-// One-click answer flow for a blocked run, shared by the toast cards and the
-// notification center. Records the answer as a user message; `resume` is
-// false for loom-owned runs (the loop driver's answer seam consumes the
-// recorded message on its own — resumeRun would re-finalize the stale
-// blocked report and re-ask the question).
+// One-click answer flow shared by toasts and the notification center. The main
+// process owns blocker clearing and resume strategy, including the direct-Loom
+// seam where the run must remain blocked until the loop driver consumes it.
 export async function answerRunQuestion(
   runId: string,
   option: RunQuestionOption,
-  resume: boolean,
-  // The question message this answers. Consent gates (automation edit/delete
-  // approval) only accept answers linked to their own question, so every
-  // surface that knows the question must pass its id.
-  questionMessageId?: string,
+  questionMessageId: string,
 ): Promise<void> {
-  await window.spark.orchestration.addRunMessage({
+  await window.spark.orchestration.answerRunQuestion({
     runId,
+    questionMessageId,
     clientMessageId: makeId("client-msg"),
-    author: "user",
-    kind: "answer",
     message: option.answer,
-    answersMessageId: questionMessageId,
   });
-  if (resume) {
-    await window.spark.orchestration.resumeRun({ runId });
-  }
 }

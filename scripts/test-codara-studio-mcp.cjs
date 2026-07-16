@@ -106,11 +106,12 @@ function listTools(mode) {
         }
         if (msg.id === 1 && msg.result) serverName = msg.result.serverInfo && msg.result.serverInfo.name;
         if (msg.id === 2 && msg.result) {
-          tools = msg.result.tools.map((t) => t.name);
+          const definitions = msg.result.tools;
+          tools = definitions.map((t) => t.name);
           clearTimeout(timer);
           child.stdin.end();
           child.kill();
-          resolve({ serverName, tools });
+          resolve({ serverName, tools, definitions });
         }
       }
     });
@@ -140,6 +141,27 @@ function sortedEqual(actual, expected, label) {
     // Execute mode.
     const execute = await listTools("execute");
     sortedEqual(execute.tools, [...STUDIO_TOOLS, ...EXECUTE_TOOLS], "execute roster mismatch");
+    const askUser = execute.definitions.find((tool) => tool.name === "codara_ask_user");
+    assert.ok(askUser, "execute roster must expose codara_ask_user");
+    sortedEqual(
+      askUser.inputSchema.required,
+      ["question", "category", "reason"],
+      "codara_ask_user required fields mismatch",
+    );
+    assert.deepStrictEqual(
+      askUser.inputSchema.properties.category.enum,
+      [
+        "credentials_access",
+        "destructive_irreversible",
+        "safety_policy",
+        "irreducible_product_scope",
+      ],
+      "codara_ask_user category enum mismatch",
+    );
+    assert.ok(
+      askUser.inputSchema.properties.recommendedOptionId,
+      "codara_ask_user must expose recommendedOptionId",
+    );
 
     // Automation mode.
     const automation = await listTools("automation");

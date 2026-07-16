@@ -494,7 +494,7 @@ function TerminalSettings({
         />
         <NumberRow
           title="Scrollback lines"
-          desc={`Keep at most this many terminal output lines in memory and restored history. Range ${TERMINAL_SCROLLBACK_LINE_LIMIT_MIN.toLocaleString()}-${TERMINAL_SCROLLBACK_LINE_LIMIT_MAX.toLocaleString()} lines.`}
+          desc={`Keep at most this many terminal output lines in memory. Range ${TERMINAL_SCROLLBACK_LINE_LIMIT_MIN.toLocaleString()}-${TERMINAL_SCROLLBACK_LINE_LIMIT_MAX.toLocaleString()} lines.`}
           min={TERMINAL_SCROLLBACK_LINE_LIMIT_MIN}
           max={TERMINAL_SCROLLBACK_LINE_LIMIT_MAX}
           value={scrollbackLineLimit}
@@ -926,12 +926,6 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
             desc="Closing the window hides Codara Studio to the system tray instead of quitting, so automations keep running. Quit from the tray menu."
             checked={preferences.keepRunningInBackground !== false}
             onChange={(v) => void setPreference("keepRunningInBackground", v)}
-          />
-          <ToggleRow
-            title="Resume Claude/Codex terminal sessions on reopen"
-            desc="Terminal panes with a Claude or Codex session still running when you quit relaunch that conversation (claude --resume / codex resume) when Codara Studio reopens. When off, panes come back as plain shells."
-            checked={preferences.restoreAgentSessions !== false}
-            onChange={(v) => void setPreference("restoreAgentSessions", v)}
           />
           <ToggleRow
             title="Auto-open preview for local dev servers"

@@ -1,7 +1,7 @@
 // Runtime test for the Looms v2 direct-worker plumbing (src/main/orchestration/
-// direct-worker.ts): the headless pty spawn handler, the boot-recovery decision
-// table (report-first), and the live-worker inventory. esbuild bundles the REAL
-// direct-worker.ts and stubs pty-manager / shells / event-log / run-store /
+// direct-worker.ts): structured-worker lifecycle announcements, the boot-
+// recovery decision table (report-first), and the live-worker inventory. esbuild bundles the REAL
+// direct-worker.ts and stubs pty-manager / event-log / run-store /
 // scheduler so every decision is observable.
 //
 //   node scripts/test-direct-worker.cjs
@@ -147,60 +147,57 @@ async function main() {
     await sleep(60);
   };
 
-  // ── 1) spawn handler claims direct-run envelopes with the loom env ──
+  // ── 1) direct envelopes announce a structured worker without a PTY ──
   {
     dw.installAutomationWorkerSpawnHandler();
     const run = mkRun("run-a");
     run.workerAttempts.push({ id: "att-a", workerTaskId: "t1", attemptNumber: 1, status: "prompt_ready", cwd: tmp });
     await fireEnvelope("run-a", "att-a", { executionMode: "direct", automationId: "loom-1" });
-    const spawn = D.spawned.find((s) => s.id === "att-a");
-    ok("direct envelope spawns a headless pty (webContents null)", spawn && spawn.webContents === null);
-    ok(
-      "worker env carries SPARK_RUN_ID + SPARK_AUTOMATION_ID + no-shell-integration",
-      spawn.env.SPARK_RUN_ID === "run-a" &&
-        spawn.env.SPARK_AUTOMATION_ID === "loom-1" &&
-        spawn.env.SPARK_NO_SHELL_INTEGRATION === "1",
-    );
-    // Slice 7: a pre-graph task (no loomNodeId) omits SPARK_NODE_ID — parity.
-    ok("pre-graph attempt (no node) omits SPARK_NODE_ID", spawn.env.SPARK_NODE_ID === undefined);
+    ok("direct envelope does not spawn a hidden PTY", D.spawned.length === 0);
     ok(
       "spawn emits the automation.worker 'spawned' ping",
       D.events.some((e) => e.type === "automation.worker" && e.payload?.phase === "spawned"),
     );
   }
 
-  // ── 1b) SLICE 7: a node-stamped attempt exports SPARK_NODE_ID ──
+  // ── 1b) node identity survives in the structured worker inventory ──
   {
     const run = mkRun("run-node", {
       workerTasks: [{ id: "tN", loomNodeId: "B", runtimePreference: "claude" }],
     });
     run.workerAttempts.push({ id: "att-n", workerTaskId: "tN", attemptNumber: 1, status: "prompt_ready", cwd: tmp });
     await fireEnvelope("run-node", "att-n", { executionMode: "direct", automationId: "loom-1" });
-    const spawn = D.spawned.find((s) => s.id === "att-n");
+    const listed = await dw.listActiveAutomationWorkers();
+    const worker = listed.find((item) => item.attemptId === "att-n");
     ok(
-      "node-stamped attempt exports SPARK_NODE_ID for tool attribution",
-      spawn && spawn.env.SPARK_NODE_ID === "B" && spawn.env.SPARK_RUN_ID === "run-node",
+      "node-stamped attempt retains node id and structured transport",
+      worker?.nodeId === "B" && worker.transport === "agent-sdk",
     );
   }
 
   // ── 2) managed-run envelopes are ignored ──
   {
-    const before = D.spawned.length;
+    const before = D.events.length;
     mkRun("run-b", { executionMode: undefined, automationId: undefined });
     D.runs.get("run-b").workerAttempts.push({ id: "att-b", workerTaskId: "t1", attemptNumber: 1, status: "prompt_ready", cwd: tmp });
     await fireEnvelope("run-b", "att-b", {});
-    ok("managed-run envelope is left for the renderer", D.spawned.length === before);
+    ok("managed-run envelope is left for the renderer", D.events.length === before);
   }
 
-  // ── 3) pty spawn failure fails the attempt fast (no 30s timeout) ──
+  // ── 3) finished structured attempts emit the exited inventory ping ──
   {
-    D.spawnThrows = true;
     const run = mkRun("run-c");
     run.workerAttempts.push({ id: "att-c", workerTaskId: "t1", attemptNumber: 1, status: "prompt_ready", cwd: tmp });
     await fireEnvelope("run-c", "att-c", { executionMode: "direct", automationId: "loom-1" });
-    D.spawnThrows = false;
-    const failure = D.failed.find((f) => f.attemptId === "att-c");
-    ok("pty spawn failure force-fails the attempt", failure && failure.error.startsWith("pty-spawn-failed"));
+    run.workerAttempts[0].status = "succeeded";
+    for (const h of [...D.subs]) {
+      h({ type: "worker_attempt.finished", runId: "run-c", attemptId: "att-c", workerTaskId: "t1", workspaceId: "ws" });
+    }
+    await sleep(60);
+    ok(
+      "structured worker finish emits the automation.worker exited ping",
+      D.events.some((e) => e.type === "automation.worker" && e.payload?.phase === "exited" && e.payload?.worker?.attemptId === "att-c"),
+    );
   }
 
   // ── 4) recovery decision table ──
@@ -295,6 +292,34 @@ async function main() {
       D.statusUpdates.some((u) => u.runId === "rec-ask-dead" && u.status === "running") &&
         D.relaunched.some((r) => r.runId === "rec-ask-dead"),
     );
+
+    // A later sibling may have terminalized after the ask-owning worker blocked.
+    // Recovery must inspect the whole active frontier, not workerAttempts.at(-1).
+    const wave = mkRun("rec-ask-dead-before-terminal", {
+      status: "blocked",
+      workerTasks: [
+        { id: "tA", loomNodeId: "A", runtimePreference: "claude" },
+        { id: "tB", loomNodeId: "B", runtimePreference: "claude" },
+      ],
+    });
+    wave.workerAttempts.push(
+      {
+        id: "att-ask-A",
+        workerTaskId: "tA",
+        attemptNumber: 1,
+        status: "running",
+        cwd: tmp,
+        finalReportPath: path.join(tmp, "missing-ask-A.json"),
+      },
+      { id: "att-done-B", workerTaskId: "tB", attemptNumber: 1, status: "succeeded", cwd: tmp },
+    );
+    D.jobs = [{ id: "loom-1", name: "My Loom", state: { currentRunId: wave.id } }];
+    await dw.recoverDirectRuns();
+    ok(
+      "blocked recovery finds a dead live ask before a later terminal sibling",
+      D.statusUpdates.some((u) => u.runId === wave.id && u.status === "running") &&
+        D.relaunched.some((r) => r.runId === wave.id && r.attemptId === "att-ask-A"),
+    );
   }
 
   // ── 4c) relaunch never spends on a loom that no longer claims the run ──
@@ -371,7 +396,47 @@ async function main() {
       w.engine === "claude" && w.model === "claude-opus-4-8" && w.effort === "high" && w.automationName === "My Loom",
     );
     ok("inventory surfaces the blocked question", w.blocked === true && w.question === "Which file?");
-    ok("inventory attemptId doubles as the pty session id", w.attemptId === "att-i1");
+    ok("inventory retains exact attempt identity", w.attemptId === "att-i1");
+
+    // The actionable node can be an older terminal sibling. Keep its attempt in
+    // inventory even when a later sibling succeeded and became the newest row.
+    const blockedWave = mkRun("inv-blocked-wave", {
+      status: "blocked",
+      workerTasks: [
+        { id: "tA", loomNodeId: "A", runtimePreference: "claude" },
+        { id: "tB", loomNodeId: "B", runtimePreference: "claude" },
+      ],
+      loomPass: {
+        nodeStates: {
+          A: { status: "blocked", attemptIds: ["att-owner-A"] },
+          B: { status: "succeeded", attemptIds: ["att-newer-B"] },
+        },
+      },
+    });
+    blockedWave.humanMessages.push({
+      id: "q-owner-A",
+      clientMessageId: `loom-question-${blockedWave.id}-A-att-owner-A`,
+      author: "spark",
+      kind: "question",
+      message: "Which target should node A use?",
+      loomNodeId: "A",
+      createdAt: new Date().toISOString(),
+    });
+    blockedWave.workerAttempts.push(
+      { id: "att-owner-A", workerTaskId: "tA", attemptNumber: 1, status: "succeeded", cwd: tmp },
+      { id: "att-newer-B", workerTaskId: "tB", attemptNumber: 1, status: "succeeded", cwd: tmp },
+    );
+    const blockedWaveWorkers = (await dw.listActiveAutomationWorkers()).filter(
+      (worker) => worker.runId === blockedWave.id,
+    );
+    const owner = blockedWaveWorkers.find((worker) => worker.attemptId === "att-owner-A");
+    ok(
+      "inventory retains an older terminal attempt that owns an unresolved node question",
+      blockedWaveWorkers.length >= 1 &&
+        owner?.blocked === true &&
+        owner.questionMessageId === "q-owner-A" &&
+        owner.question === "Which target should node A use?",
+    );
   }
 
   // ── 6) SLICE 7: an N-attempt parallel wave shows N workers, each with its ───

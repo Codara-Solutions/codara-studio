@@ -9,7 +9,12 @@ import type {
 import { subscribeToEvents } from "../orchestration/event-log";
 import { getPreferenceCached, loadPreferences } from "../preferences-store";
 import { isWatchingPane, isWatchingRun } from "./attention";
-import { activeWindow, deliver, registerDeliveryWindow } from "./deliver";
+import {
+  activeWindow,
+  deliver,
+  registerDeliveryWindow,
+  signalTerminalAttention,
+} from "./deliver";
 import { recordToCenter } from "./center-store";
 import {
   clearLastAlerted,
@@ -46,7 +51,9 @@ export const automationSourceKey = (jobId: string): string => `automation:${jobI
 function watchingTarget(event: PublishInput): boolean {
   const target = event.target;
   if (target.type === "run") return isWatchingRun(target.runId);
-  if (target.type === "terminal") return isWatchingPane(target.workspaceId, target.tabId);
+  if (target.type === "terminal") {
+    return isWatchingPane(target.workspaceId, target.tabId, target.paneId);
+  }
   // No "watching an automation" surface exists; loop finishes always alert.
   return false;
 }
@@ -72,6 +79,15 @@ export function publish(input: PublishInput): void {
     }).catch((err) => {
       console.warn("[notify] center record failed:", err);
     });
+  }
+  // DND mutes intrusive channels, not passive workspace/pane attention. An
+  // unread terminal event still lights the rail so the user can find it later.
+  // Watching-suppressed events are read and intentionally need no marker.
+  if (
+    event.target.type === "terminal" &&
+    (decision.deliver || (decision.record && !decision.read))
+  ) {
+    signalTerminalAttention(event);
   }
   if (!decision.deliver) return;
   void loadPreferences()
@@ -108,6 +124,23 @@ function isActiveStatus(status: RunStatus): boolean {
 // observe; runs already mid-flight at subscribe time get no duration.
 const runActiveSince = new Map<string, number>();
 
+// Event IDs are the lifecycle adapter's idempotency key. The policy's existing
+// source/kind dedupe handles semantic re-emits; this bounded set additionally
+// prevents the exact same canonical journal event from being delivered twice
+// if a subscriber is registered twice or a bridge retries a live event.
+const handledLifecycleEventIds = new Set<string>();
+const MAX_HANDLED_LIFECYCLE_EVENT_IDS = 4_096;
+
+function claimLifecycleEvent(eventId: string): boolean {
+  if (handledLifecycleEventIds.has(eventId)) return false;
+  handledLifecycleEventIds.add(eventId);
+  if (handledLifecycleEventIds.size > MAX_HANDLED_LIFECYCLE_EVENT_IDS) {
+    const oldest = handledLifecycleEventIds.values().next().value as string | undefined;
+    if (oldest) handledLifecycleEventIds.delete(oldest);
+  }
+  return true;
+}
+
 function formatDuration(ms: number): string {
   const minutes = Math.round(ms / 60_000);
   if (minutes < 60) return `${minutes}m`;
@@ -120,7 +153,13 @@ function handleRunEvent(event: SparkEvent): void {
   if (event.type !== "run.status_updated") return;
 
   const payload = event.payload as
-    | { status?: unknown; previousStatus?: unknown; automationId?: unknown }
+    | {
+        status?: unknown;
+        previousStatus?: unknown;
+        automationId?: unknown;
+        questionMessageId?: unknown;
+        blocker?: unknown;
+      }
     | undefined;
   const status = typeof payload?.status === "string" ? (payload.status as RunStatus) : undefined;
   const prevStatus =
@@ -139,6 +178,7 @@ function handleRunEvent(event: SparkEvent): void {
   const runId = event.runId;
   if (!status || !runId) return;
   if (prevStatus === status) return;
+  if (!claimLifecycleEvent(event.id)) return;
 
   const sourceKey = runSourceKey(runId);
 
@@ -166,6 +206,10 @@ function handleRunEvent(event: SparkEvent): void {
   const workspaceId = event.workspaceId;
 
   if (status === "blocked") {
+    const hasUserBlocker =
+      (typeof payload?.questionMessageId === "string" && payload.questionMessageId.length > 0) ||
+      (typeof payload?.blocker === "object" && payload.blocker !== null);
+    if (!hasUserBlocker) return;
     if (automationId) {
       // A blocked loom iteration still needs the user (answer the question or
       // the loop hangs) — but it reads as its own automation family, and clicks

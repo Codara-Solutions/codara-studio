@@ -70,6 +70,7 @@ import {
   setAttention,
 } from "./notify";
 import {
+  noteTerminalWillDispose,
   noteTerminalUserInput,
   syncTerminalNotifyPanes,
   type TerminalNotifyPaneEntry,
@@ -159,6 +160,7 @@ async function getScheduler(): Promise<typeof import("./orchestration/scheduler"
 }
 import type {
   AddRunMessageInput,
+  AnswerRunQuestionInput,
   AppPreferences,
   AppSettings,
   AppState,
@@ -1085,6 +1087,14 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle(
+    "orchestration:answerRunQuestion",
+    async (_e, input: AnswerRunQuestionInput): Promise<RunState> => {
+      const { answerRunQuestion } = await getRunStore();
+      return answerRunQuestion(input);
+    },
+  );
+
+  ipcMain.handle(
     "orchestration:undoToCheckpoint",
     async (_e, input: UndoToCheckpointInput): Promise<UndoToCheckpointResult> => {
       const { undoToCheckpoint } = await getRunStore();
@@ -1328,6 +1338,7 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("pty:dispose", async (_e, args: { id: string }) => {
+    noteTerminalWillDispose(args.id);
     pty.dispose(args.id);
   });
 

@@ -11,6 +11,9 @@ export interface SectionHeaderDragProps {
 
 export interface SectionHeaderProps extends SectionHeaderDragProps {
   label: string;
+  // Optional shorter visual label for constrained headers. The full `label`
+  // remains the accessible name/title.
+  displayLabel?: string;
   collapsed: boolean;
   onToggleCollapse: () => void;
   collapsible?: boolean;
@@ -31,6 +34,7 @@ export interface SectionHeaderProps extends SectionHeaderDragProps {
 // the section body via a 1px top highlight and a hairline bottom rule.
 export function SectionHeader({
   label,
+  displayLabel,
   collapsed,
   onToggleCollapse,
   glyph,
@@ -77,6 +81,7 @@ export function SectionHeader({
       <button
         type="button"
         aria-expanded={collapsible ? !collapsed : undefined}
+        aria-label={displayLabel ? `${label}${typeof count === "number" ? `, ${count}` : ""}` : undefined}
         title={
           collapsible
             ? collapsed
@@ -168,11 +173,14 @@ export function SectionHeader({
             textTransform: "uppercase",
             color: hover ? "var(--ink-dim)" : "var(--muted)",
             whiteSpace: "nowrap",
-            flex: "0 0 auto",
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            flex: "0 1 auto",
             transition: "color var(--motion-fast) var(--ease-out)",
           }}
         >
-          {label}
+          {displayLabel ?? label}
         </span>
         {meta != null && (
           <span

@@ -196,6 +196,14 @@ export async function listJobs(): Promise<ScheduledJob[]> {
 
 export async function createJob(input: CreateScheduledJobInput): Promise<ScheduledJob> {
   const jobs = await loadJobs();
+  // A folder-triggered automation cannot arm against a path that does not yet
+  // exist. Creating the explicitly configured watch directory is a reversible
+  // part of creating the automation and avoids persisting a loom that silently
+  // never fires. Output directories remain worker-owned and can be created on
+  // the first iteration according to the prompt.
+  if (input.trigger.kind === "folder") {
+    await fs.mkdir(input.trigger.path, { recursive: true });
+  }
   let job: ScheduledJob = {
     id: makeId("job"),
     name: input.name,

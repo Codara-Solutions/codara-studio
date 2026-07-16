@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
 import type { RuntimeState, ShellInfo } from "@shared/types";
 import type { SparkOpenInput } from "../components/Terminal/useTerminalSession";
@@ -36,7 +37,6 @@ import {
 import {
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
-  CURSOR_LAUNCH_COMMAND,
 } from "../workers/launch-commands";
 
 // TerminalStack hosts every terminal tab in the workspace. Each tab carries a
@@ -1034,8 +1034,14 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 sessionId={leaf.paneId}
                 shell={shell}
                 initialCwd={leaf.cwd}
-                initialScrollback={leaf.scrollback}
                 initialCommand={leaf.autorun}
+                showCodaraIntro={
+                  !leaf.autorun &&
+                  !leaf.worker &&
+                  !leaf.agentSession &&
+                  tab.scope?.kind !== "workers" &&
+                  !tab.color
+                }
                 agentSession={leaf.agentSession}
                 bootResume={leaf.bootResume === true}
                 visible={visible && !placeOffScreen}
@@ -1063,6 +1069,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 onClose={bundle.onClose}
                 onToggleZoom={bundle.onToggleZoom}
                 isZoomed={isZoomed}
+                visible={visible && !placeOffScreen}
               />
             ) : null}
           </div>
@@ -1882,6 +1889,7 @@ interface PaneToolbarProps {
   onClose: () => void;
   onToggleZoom: () => void;
   isZoomed: boolean;
+  visible: boolean;
 }
 
 function PaneToolbar({
@@ -1892,6 +1900,7 @@ function PaneToolbar({
   onClose,
   onToggleZoom,
   isZoomed,
+  visible,
 }: PaneToolbarProps) {
   const stop = (e: React.MouseEvent | React.PointerEvent) => e.stopPropagation();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -1900,19 +1909,55 @@ function PaneToolbar({
   // mutation on mouseenter/leave (which bypassed React and could desync with
   // the menuOpen state).
   const [hovered, setHovered] = useState(false);
+  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const plusRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
-  // Close on outside click / Escape, matching the TabBar new-tab picker
-  // pattern. Outside-click checks the toolbar wrapper so clicking the +
-  // button itself (which toggles) doesn't immediately re-close the menu.
+  useEffect(() => {
+    if (!visible) setMenuOpen(false);
+  }, [visible]);
+
+  useEffect(() => {
+    if (!menuOpen) {
+      setMenuPosition(null);
+      return;
+    }
+    const updatePosition = () => {
+      const anchor = plusRef.current?.getBoundingClientRect();
+      if (!anchor) return;
+      const menuWidth = menuRef.current?.offsetWidth ?? 238;
+      const menuHeight = menuRef.current?.offsetHeight ?? 140;
+      const gap = 6;
+      const margin = 8;
+      const maxLeft = Math.max(margin, window.innerWidth - menuWidth - margin);
+      const left = Math.min(Math.max(margin, anchor.right - menuWidth), maxLeft);
+      const below = anchor.bottom + gap;
+      const top = below + menuHeight <= window.innerHeight - margin
+        ? below
+        : Math.max(margin, anchor.top - menuHeight - gap);
+      setMenuPosition({ top, left });
+    };
+    updatePosition();
+    const frame = window.requestAnimationFrame(updatePosition);
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [menuOpen]);
+
+  // Close on outside click / Escape. The menu is portaled out of the filtered
+  // toolbar, so both DOM islands count as inside.
   useEffect(() => {
     if (!menuOpen) return;
     const onDown = (e: MouseEvent) => {
       if (
-        wrapRef.current &&
         e.target instanceof Node &&
-        !wrapRef.current.contains(e.target)
+        !wrapRef.current?.contains(e.target) &&
+        !menuRef.current?.contains(e.target)
       ) {
         setMenuOpen(false);
       }
@@ -1978,6 +2023,7 @@ function PaneToolbar({
         title="Add pane…"
         onClick={() => setMenuOpen((o) => !o)}
         active={menuOpen}
+        hasPopup
       >
         <PlusIcon size={12} />
       </ToolbarButton>
@@ -2006,16 +2052,18 @@ function PaneToolbar({
       <ToolbarButton title="Close pane" onClick={onClose} danger>
         <CloseIcon size={12} />
       </ToolbarButton>
-      {menuOpen && (
+      {menuOpen && menuPosition && createPortal(
         <AddPaneMenu
+          ref={menuRef}
+          position={menuPosition}
           onPick={(kind) => {
             setMenuOpen(false);
             if (kind === "shell") onSmartAdd();
             else if (kind === "claude") onSmartAdd(CLAUDE_LAUNCH_COMMAND);
             else if (kind === "codex") onSmartAdd(CODEX_LAUNCH_COMMAND);
-            else if (kind === "cursor") onSmartAdd(CURSOR_LAUNCH_COMMAND);
           }}
-        />
+        />,
+        document.body,
       )}
     </div>
   );
@@ -2084,19 +2132,22 @@ function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }) {
   );
 }
 
-type AddPaneKind = "shell" | "claude" | "codex" | "cursor";
+type AddPaneKind = "shell" | "claude" | "codex";
 
 // Polished popover anchored to the toolbar's + button. The shell entry is the
 // default smart-add behavior (split the most spacious leaf); the two worker
 // entries do the same split but seed the new leaf with an `autorun` so the
 // shell auto-launches claude/codex once its prompt is ready.
-function AddPaneMenu({ onPick }: { onPick: (kind: AddPaneKind) => void }) {
+const AddPaneMenu = React.forwardRef<
+  HTMLDivElement,
+  { onPick: (kind: AddPaneKind) => void; position: { top: number; left: number } }
+>(function AddPaneMenu({ onPick, position }, ref) {
   const items: Array<{
     kind: AddPaneKind;
     title: string;
     hint: string;
     command?: string;
-    accent: "shell" | "claude" | "codex" | "cursor";
+    accent: "shell" | "claude" | "codex";
     glyph: React.ReactNode;
   }> = [
     {
@@ -2122,14 +2173,6 @@ function AddPaneMenu({ onPick }: { onPick: (kind: AddPaneKind) => void }) {
       accent: "codex",
       glyph: <RuntimeGlyph letter="X" />,
     },
-    {
-      kind: "cursor",
-      title: "Cursor worker",
-      hint: "worker",
-      command: CURSOR_LAUNCH_COMMAND,
-      accent: "cursor",
-      glyph: <RuntimeGlyph letter="U" />,
-    },
   ];
 
   return (
@@ -2137,13 +2180,14 @@ function AddPaneMenu({ onPick }: { onPick: (kind: AddPaneKind) => void }) {
     // --rule border, --shadow-2). Opaque on the tint ramp — no backdrop blur,
     // since menus are solid surfaces, not floating-over-live chrome.
     <div
+      ref={ref}
       role="menu"
       aria-label="Add terminal pane"
-      className="spark-menu spark-fade-in"
+      className="spark-menu"
       style={{
-        position: "absolute",
-        top: "calc(100% + 6px)",
-        right: 0,
+        position: "fixed",
+        top: position.top,
+        left: position.left,
         zIndex: 50,
         minWidth: 238,
       }}
@@ -2163,7 +2207,7 @@ function AddPaneMenu({ onPick }: { onPick: (kind: AddPaneKind) => void }) {
       </div>
     </div>
   );
-}
+});
 
 function AddPaneMenuItem({
   title,
@@ -2177,7 +2221,7 @@ function AddPaneMenuItem({
   hint: string;
   command?: string;
   glyph: React.ReactNode;
-  accent: "shell" | "claude" | "codex" | "cursor";
+  accent: "shell" | "claude" | "codex";
   onClick: () => void;
 }) {
   const [hover, setHover] = useState(false);
@@ -2291,7 +2335,7 @@ function AddPaneMenuItem({
   );
 }
 
-function menuItemTone(accent: "shell" | "claude" | "codex" | "cursor"): {
+function menuItemTone(accent: "shell" | "claude" | "codex"): {
   color: string;
   background: string;
   border: string;
@@ -2308,13 +2352,6 @@ function menuItemTone(accent: "shell" | "claude" | "codex" | "cursor"): {
       color: "var(--info)",
       background: "color-mix(in oklch, var(--info) 14%, transparent)",
       border: "color-mix(in oklch, var(--info) 30%, transparent)",
-    };
-  }
-  if (accent === "cursor") {
-    return {
-      color: "var(--warn)",
-      background: "color-mix(in oklch, var(--warn) 14%, transparent)",
-      border: "color-mix(in oklch, var(--warn) 30%, transparent)",
     };
   }
   return {
@@ -2352,9 +2389,10 @@ const ToolbarButton = React.forwardRef<
     onClick: () => void;
     danger?: boolean;
     active?: boolean;
+    hasPopup?: boolean;
     children: React.ReactNode;
   }
->(function ToolbarButton({ title, onClick, danger = false, active = false, children }, ref) {
+>(function ToolbarButton({ title, onClick, danger = false, active = false, hasPopup = false, children }, ref) {
   return (
     <button
       ref={ref}
@@ -2362,8 +2400,8 @@ const ToolbarButton = React.forwardRef<
       className={`spark-icon-btn${active ? " is-active" : ""}`}
       title={title}
       aria-label={title}
-      aria-haspopup={active !== undefined ? true : undefined}
-      aria-expanded={active}
+      aria-haspopup={hasPopup ? "menu" : undefined}
+      aria-expanded={hasPopup ? active : undefined}
       onClick={(e) => {
         e.stopPropagation();
         onClick();

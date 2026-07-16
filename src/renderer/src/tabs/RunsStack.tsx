@@ -15,6 +15,7 @@ interface Props {
   runs: RunState[];
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
+  onOpenWorkerTerminal?: (workerTaskId: string) => void;
 }
 
 // React.memo so RunsStack only re-renders when one of its real inputs
@@ -28,6 +29,7 @@ function RunsStack({
   runs,
   activeRunId,
   onSelectRun,
+  onOpenWorkerTerminal,
 }: Props) {
   // Memoize the filtered list so it isn't reallocated on every render.
   const runsTabs = useMemo(
@@ -63,6 +65,7 @@ function RunsStack({
               runs={runs}
               activeRunId={selectedRunId}
               onSelectRun={onSelectRun}
+              onOpenWorkerTerminal={onOpenWorkerTerminal}
             />
           </div>
         );

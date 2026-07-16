@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import type { RunState, SparkCall, SparkEvent } from "@shared/types";
+import { useRunExecutionRecord } from "../lib/useRunExecutionRecord";
 
 // A renderer-only diagnostic overlay over the active run. Pure presentation —
 // reads the same `RunState` ChatPanel sees, plus the orchestration event log
@@ -36,9 +37,7 @@ interface SessionInspectorProps {
 
 export default function SessionInspector({ run, onClose }: SessionInspectorProps) {
   const [activeTab, setActiveTab] = useState<InspectorTab>("costs");
-  const [events, setEvents] = useState<SparkEvent[]>([]);
-  const [eventsLoading, setEventsLoading] = useState(false);
-  const [eventsError, setEventsError] = useState<string | null>(null);
+  const execution = useRunExecutionRecord(run);
 
   // Esc closes — mirrors SettingsDialog's keyboard handling. Capture is fine
   // here; useGlobalShortcuts itself is also capture-phase but uses stop-
@@ -50,37 +49,6 @@ export default function SessionInspector({ run, onClose }: SessionInspectorProps
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
-
-  // Pull the event log over IPC. Run-state itself doesn't carry events —
-  // they live in the run's events.jsonl artifact, read by main and returned
-  // through `orchestration:listEvents`. We refetch when the active run
-  // changes or the user re-opens the inspector after closing it.
-  useEffect(() => {
-    if (!run) {
-      setEvents([]);
-      setEventsError(null);
-      return;
-    }
-    let cancelled = false;
-    setEventsLoading(true);
-    setEventsError(null);
-    void window.spark.orchestration
-      .listEvents(run.id)
-      .then((rows) => {
-        if (cancelled) return;
-        setEvents(rows);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setEventsError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
-        if (!cancelled) setEventsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [run?.id]);
 
   return (
     <div
@@ -140,18 +108,18 @@ export default function SessionInspector({ run, onClose }: SessionInspectorProps
             <CostsTab run={run} />
           ) : activeTab === "events" ? (
             <EventsTab
-              events={events}
-              loading={eventsLoading}
-              error={eventsError}
+              events={execution.events}
+              loading={execution.loading}
+              error={execution.error}
               filter={null}
             />
           ) : activeTab === "context" ? (
             <ContextWindowTab run={run} />
           ) : (
             <EventsTab
-              events={events}
-              loading={eventsLoading}
-              error={eventsError}
+              events={execution.events}
+              loading={execution.loading}
+              error={execution.error}
               filter="failures"
             />
           )}

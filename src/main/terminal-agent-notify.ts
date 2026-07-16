@@ -46,7 +46,9 @@ import type { RuntimeState } from "@shared/types";
 //
 // Suppression policy (the WezTerm `SuppressFromFocusedTab` model, per the
 // user's ask): an alert is dropped iff the app window is focused AND the
-// pane's workspace + tab are the active ones the renderer last reported.
+// pane itself is the active split in the workspace + tab the renderer last
+// reported. Visible sibling splits still alert because they cannot accept
+// keyboard input until selected.
 // That rule — plus the same-kind dedup and terminal-completion guard — now
 // lives in the unified notify policy (src/main/notify); this module only
 // detects turn boundaries and calls publish()/rearm().
@@ -121,7 +123,16 @@ interface PaneWatcher {
   // Tail of the previous chunk's raw text (see CARRY_MAX).
   carry: string;
   runtime: PublicAgentRuntime | null;
-  state: "idle" | "working" | "blocked";
+  state: "idle" | "working" | "blocked" | "failed";
+  // Set by a real user/injected write or an OSC shell command marker. This
+  // lets a launch-time trust/login/permission dialog alert even when the CLI
+  // never painted a working footer first. Consumed by the first terminal
+  // outcome so startup chrome alone cannot repeatedly notify.
+  userTurnArmed: boolean;
+  // Renderer-owned close/dispose in progress. A killed PTY can report a
+  // non-zero exit even though the user intentionally closed the pane; never
+  // mislabel that as an agent crash.
+  disposing: boolean;
   // When the current working phase began (state transition into "working").
   workingSince: number;
   lastWorkingAt: number;
@@ -229,6 +240,8 @@ export function syncTerminalNotifyPanes(input: {
       carry: "",
       runtime: null,
       state: "idle",
+      userTurnArmed: false,
+      disposing: false,
       workingSince: 0,
       lastWorkingAt: 0,
       lastOscNotifyAt: 0,
@@ -282,7 +295,18 @@ function attach(w: PaneWatcher): void {
       console.warn("[terminal-agent-notify] chunk handler failed:", err);
     }
   });
-  w.offExit = pty.onExit(w.paneId, () => {
+  w.offExit = pty.onExit(w.paneId, (info) => {
+    // The renderer owns the red chip because it has the authoritative PTY
+    // exit. The notifier owns off-screen attention: if a live manual agent's
+    // terminal process dies non-zero, tell the user instead of silently
+    // removing the watcher.
+    if (!w.excluded && !w.disposing && w.runtime && info.exitCode !== 0) {
+      deliver(
+        w,
+        "failed",
+        `${runtimeLabel(w.runtime)} terminal exited with code ${info.exitCode}.`,
+      );
+    }
     // The pty process itself died. We deliberately do NOT emit a chip state
     // here: the renderer receives its own `pty:exit:${id}` for this pane and
     // routes it through onTerminalPaneExit, which is the authoritative handler
@@ -362,6 +386,7 @@ function ensureSweep(): void {
       if (!workedLongEnough(w)) continue;
       if (now - w.lastOscNotifyAt < OSC_NOTIFY_MUTE_MS) continue;
       deliver(w, "done", null);
+      w.userTurnArmed = false;
     }
   }, SWEEP_MS);
   sweepTimer.unref();
@@ -397,6 +422,44 @@ const OSC21337_G = /\x1b\]21337;([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 // across PTY chunk boundaries, so no further carry change is needed here.
 const PROMPT_MARKER_G = /\x1b\]633;[ABDP](?:;|\x07|\x1b\\)|\x1b\]133;[AD](?:\x07|\x1b\\)/g;
 const ALT_SCREEN_LEAVE = "\x1b[?1049l";
+
+// High-confidence terminal problems that deserve a richer outcome than the
+// generic working→idle heuristic. Keep these deliberately narrow: agent
+// transcripts regularly contain words such as "error" and "authentication"
+// in ordinary prose, so only recognizable CLI failure/login copy qualifies.
+const CREDENTIAL_PROBLEM_RE = /(?:not\s*(?:logged|signed)\s*in|authentication\s*(?:is\s*)?(?:required|failed)|oauth\s*(?:token\s*)?(?:expired|invalid)|unauthorized\s*(?:request|account)?|invalid\s*(?:api\s*)?key)/i;
+const HARD_FAILURE_RE = /(?:you(?:'|’)ve\s*hit\s*your\s*(?:usage|rate)\s*limit|(?:usage|rate)\s*limit\s*(?:reached|exceeded|exhausted)|(?:credit|quota)\s*(?:is\s*)?(?:exhausted|exceeded)|(?:request|connection)\s*failed\s*after\s*\d+\s*retr(?:y|ies)|(?:fatal|unrecoverable)\s*error)/i;
+
+function regexEndsPast(re: RegExp, text: string, freshFrom: number): boolean {
+  const flags = re.flags.includes("g") ? re.flags : `${re.flags}g`;
+  const global = new RegExp(re.source, flags);
+  let match: RegExpExecArray | null;
+  while ((match = global.exec(text))) {
+    if (match.index + match[0].length > freshFrom) return true;
+    if (match[0].length === 0) global.lastIndex += 1;
+  }
+  return false;
+}
+
+function detectTerminalProblem(
+  text: string,
+  freshFrom: number,
+): { kind: "blocked" | "failed"; body: string } | null {
+  const plain = stripAnsi(text);
+  if (regexEndsPast(CREDENTIAL_PROBLEM_RE, plain, freshFrom)) {
+    return {
+      kind: "blocked",
+      body: "Authentication is required before the agent can continue.",
+    };
+  }
+  if (regexEndsPast(HARD_FAILURE_RE, plain, freshFrom)) {
+    return {
+      kind: "failed",
+      body: "The agent stopped because it hit a usage, quota, or unrecoverable service error.",
+    };
+  }
+  return null;
+}
 
 // Collect regex matches that END inside the newly arrived text (index >=
 // minEnd). Matches fully contained in the carry were already processed on a
@@ -445,7 +508,17 @@ function enterWorking(w: PaneWatcher, now: number): void {
 export function noteTerminalUserInput(paneId: string): void {
   const w = watchers.get(paneId);
   if (!w || w.excluded) return;
+  if (w.state !== "working") {
+    w.workingSince = 0;
+    w.lastWorkingAt = 0;
+  }
+  w.userTurnArmed = true;
   rearm(paneSourceKey(paneId));
+}
+
+export function noteTerminalWillDispose(paneId: string): void {
+  const w = watchers.get(paneId);
+  if (w) w.disposing = true;
 }
 
 // True when the current/just-ended working phase ran long enough to be a
@@ -485,12 +558,25 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
   // command marker beats banner sniffing), then live-state classification
   // while a first-party runtime is in the foreground.
   w.ring = (w.ring + decoded).slice(-RING_MAX);
-  if (!w.runtime) {
-    let sniffed: PublicAgentRuntime | null = null;
-    for (const m of newMatches(OSC633E_G, text, carryLen)) {
-      const fromCmd = runtimeFromCommandLine(unescapeOsc633(m[1] ?? ""));
-      if (fromCmd) sniffed = coercePublicRuntime(fromCmd) ?? sniffed;
+  let launchedRuntime: PublicAgentRuntime | null = null;
+  for (const m of newMatches(OSC633E_G, text, carryLen)) {
+    const fromCmd = runtimeFromCommandLine(unescapeOsc633(m[1] ?? ""));
+    const publicRuntime = fromCmd ? coercePublicRuntime(fromCmd) : null;
+    if (publicRuntime) launchedRuntime = publicRuntime;
+  }
+  if (launchedRuntime) {
+    // A shell command marker is stronger than heuristic output: the user has
+    // explicitly launched an agent in this pane. Arm startup prompts and clear
+    // any prior turn's completion guard.
+    w.userTurnArmed = true;
+    if (w.state !== "working") {
+      w.workingSince = 0;
+      w.lastWorkingAt = 0;
     }
+    rearm(paneSourceKey(w.paneId));
+  }
+  if (!w.runtime) {
+    let sniffed: PublicAgentRuntime | null = launchedRuntime;
     if (!sniffed) {
       const banner = sniffRuntime(w.ring);
       if (banner) sniffed = coercePublicRuntime(banner);
@@ -589,6 +675,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
           deliver(w, "done", null);
         }
         if (w.state === "working") w.state = "idle";
+        w.userTurnArmed = false;
         // Turn done = ready for input → chip "idle". Emit regardless of the
         // toast gate; the chip is focus-independent.
         emitPaneState(w, "idle");
@@ -603,12 +690,17 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
         enterWorking(w, now);
         chunkAssertedWorking = true;
       } else if (/waiting/i.test(status)) {
-        if (w.state === "working" && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
+        if (
+          w.state !== "blocked" &&
+          (w.state === "working" || w.userTurnArmed) &&
+          now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
+        ) {
           // A positive "waiting on the user" signal is never the previous
           // turn's tail — stand the completion guard down (a prior done on
           // this source would otherwise swallow it) so the alert delivers.
           rearm(paneSourceKey(w.paneId));
           deliver(w, "blocked", null);
+          w.userTurnArmed = false;
         }
         w.state = "blocked";
         emitPaneState(w, "blocked");
@@ -627,7 +719,25 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
           deliver(w, "done", null);
         }
         w.state = "idle";
+        w.userTurnArmed = false;
         emitPaneState(w, "idle");
+      }
+    }
+
+    const problem = detectTerminalProblem(text, fresh);
+    if (problem) {
+      const priorState = w.state;
+      const shouldAlert =
+        priorState !== problem.kind &&
+        (priorState === "working" || w.userTurnArmed);
+      w.state = problem.kind;
+      emitPaneState(w, problem.kind === "failed" ? "error" : "blocked");
+      if (shouldAlert && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
+        // This is a positive new terminal outcome, not the tail of a prior
+        // completion. Let it replace that state in policy + center history.
+        rearm(paneSourceKey(w.paneId));
+        deliver(w, problem.kind, problem.body);
+        w.userTurnArmed = false;
       }
     }
 
@@ -635,14 +745,18 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
     // the carry exists to bridge phrases split across chunk boundaries, but
     // a footer merely sitting in it (painted seconds ago) must not keep
     // re-asserting "working" off the back of unrelated idle repaints.
-    const cls = classifyTail(w.runtime, text, fresh);
+    const cls = problem ? null : classifyTail(w.runtime, text, fresh);
     if (cls === "blocked") {
       if (w.state !== "blocked") tanLog(`pane=${w.paneId} state -> blocked (was ${w.state})`);
       // Deliberately NOT gated on workedLongEnough: a permission prompt can
       // appear within the first second of a turn, and missing a real
       // "needs you" is worse than an occasional boot-menu alert (which the
       // suppress-while-watching rule already swallows in the common case).
-      if (w.state === "working" && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS) {
+      if (
+        w.state !== "blocked" &&
+        (w.state === "working" || w.userTurnArmed) &&
+        now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS
+      ) {
         // Same reasoning as the OSC 21337 waiting path: a blocked prompt in
         // a live working phase means the agent genuinely stopped for the
         // user, even if an earlier (possibly stall-ghost) done armed the
@@ -650,6 +764,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
         // worse than an occasional duplicate, so rearm before delivering.
         rearm(paneSourceKey(w.paneId));
         deliver(w, "blocked", null);
+        w.userTurnArmed = false;
       }
       w.state = "blocked";
       emitPaneState(w, "blocked");
@@ -670,6 +785,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
         deliver(w, "done", null);
       }
       w.state = "idle";
+      w.userTurnArmed = false;
       // Turn complete (positive done line) → chip ready, not exited. The TUI is
       // still up; the real "done" (TUI gone) is the exited block below.
       emitPaneState(w, "idle");
@@ -710,6 +826,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       w.lastChunkAssertedWorking = false;
       w.teammatesActive = 0;
       w.ring = "";
+      w.userTurnArmed = false;
     }
   }
 
@@ -788,6 +905,7 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
     kind === "done" && w.runtime !== null && /waiting\s*for\s*your\s*input/i.test(message);
   if (!isAgentIdleEcho) rearm(paneSourceKey(w.paneId));
   deliver(w, kind, message.length > 0 ? message : null);
+  w.userTurnArmed = false;
 }
 
 function runtimeLabel(runtime: PublicAgentRuntime | null): string {
@@ -821,31 +939,57 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
 }
 
 // Publish a turn-boundary alert into the unified pipeline. Suppression
-// (user watching this tab, same-kind re-emits, the terminal-completion
+// (user operating this exact pane, same-kind re-emits, the terminal-completion
 // guard) is the notify policy's job; enterWorking()/handleExplicitNotify()
 // rearm the pane's sourceKey where real new activity begins.
-function deliver(w: PaneWatcher, kind: "done" | "blocked", body: string | null): void {
+function compactDuration(ms: number): string | null {
+  if (!Number.isFinite(ms) || ms < 10_000) return null;
+  const seconds = Math.round(ms / 1_000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function deliver(
+  w: PaneWatcher,
+  kind: "done" | "blocked" | "failed",
+  body: string | null,
+): void {
   if (w.excluded) return;
   tanLog(`pane=${w.paneId} ALERT kind=${kind} runtime=${w.runtime} ws=${w.workspaceId} tab=${w.tabId}`);
   const label = runtimeLabel(w.runtime);
   const where = w.tabTitle ? `“${w.tabTitle}”` : "a terminal";
   const inWorkspace = w.workspaceName ? ` in workspace “${w.workspaceName}”` : "";
+  const duration = compactDuration(w.lastWorkingAt - w.workingSince);
+  const kindName =
+    kind === "done"
+      ? "terminal.agent.done"
+      : kind === "failed"
+        ? "terminal.agent.failed"
+        : "terminal.agent.needs-input";
   publish({
-    kind: kind === "done" ? "terminal.agent.done" : "terminal.agent.needs-input",
+    kind: kindName,
     sourceKey: paneSourceKey(w.paneId),
-    // Bug 2 — a blocked terminal agent is asking for input, not failing, so it
-    // reads amber (warning); a finished turn reads green (success). The
-    // terminal heuristic never produces a genuine "failure", so danger is
-    // reserved for orchestration run failures only.
-    tone: kind === "done" ? "success" : "warning",
-    title: kind === "done" ? `${label} — finished` : `${label} — needs you`,
+    // A prompt/question reads amber, a successful turn reads green, and a
+    // high-confidence limit/crash reads red. Generic heuristic silence never
+    // becomes failure; only explicit terminal evidence does.
+    tone: kind === "done" ? "success" : kind === "failed" ? "danger" : "warning",
+    title:
+      kind === "done"
+        ? `${label} — finished`
+        : kind === "failed"
+          ? `${label} — stopped`
+          : `${label} — needs you`,
     body: body
       ? w.workspaceName
-        ? `${body} — workspace “${w.workspaceName}”`
-        : body
+        ? `${body}${duration ? ` · worked ${duration}` : ""} — workspace “${w.workspaceName}”`
+        : `${body}${duration ? ` · worked ${duration}` : ""}`
       : kind === "done"
-        ? `Finished working in ${where}${inWorkspace}. Click to jump to the terminal.`
-        : `Waiting for your input in ${where}${inWorkspace}. Click to jump to the terminal.`,
+        ? `Finished${duration ? ` after ${duration}` : ""} in ${where}${inWorkspace}. Click to jump to the terminal.`
+        : kind === "failed"
+          ? `Stopped unexpectedly in ${where}${inWorkspace}. Click to inspect the terminal.`
+          : `Waiting for your input in ${where}${inWorkspace}. Click to jump to the terminal.`,
     soundKind: kind === "done" ? "done" : "needs-you",
     target: { type: "terminal", workspaceId: w.workspaceId, tabId: w.tabId, paneId: w.paneId },
   });

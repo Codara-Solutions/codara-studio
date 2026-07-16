@@ -56,6 +56,17 @@ const CASES = [
     steps: [{ kind: "run.complete", expect: { deliver: true } }],
   },
   {
+    name: "terminal alert while operating the exact pane is suppressed without center noise",
+    steps: [
+      {
+        kind: "terminal.agent.done",
+        sourceKey: "pane:p1",
+        watching: true,
+        expect: { deliver: false, record: false, read: true, reason: "watching" },
+      },
+    ],
+  },
+  {
     name: "duplicate kind for the same source is suppressed and not recorded",
     steps: [
       { kind: "run.blocked", expect: { deliver: true } },
@@ -142,6 +153,17 @@ const CASES = [
     steps: [
       { kind: "run.failed", expect: { deliver: true } },
       { kind: "run.blocked", expect: { deliver: false, reason: "completion-guard" } },
+    ],
+  },
+  {
+    name: "terminal failure arms its completion guard",
+    steps: [
+      { kind: "terminal.agent.failed", sourceKey: "pane:p1", expect: { deliver: true } },
+      {
+        kind: "terminal.agent.needs-input",
+        sourceKey: "pane:p1",
+        expect: { deliver: false, reason: "completion-guard" },
+      },
     ],
   },
   {

@@ -1545,7 +1545,7 @@ export default function FileTree({
                   setContextMenu(null);
                   try {
                     if (isPreviewFile(entry)) {
-                      await window.spark.openExternal(filePathToBrowserUrl(path));
+                      await window.spark.openInNewPreview(filePathToBrowserUrl(path));
                     } else {
                       await window.spark.fs.revealInOS(path);
                     }

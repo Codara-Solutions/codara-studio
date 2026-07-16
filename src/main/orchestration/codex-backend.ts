@@ -1,30 +1,16 @@
-// Codex backend — real implementation.
+// Codex backend.
 //
-// Spawns `codex` via cli-session (which wraps pty-manager) under SPARK_RUN_ID,
-// tails the per-session rollout at
-//   ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
-// and translates the JSONL event vocabulary into ChatStreamEvents.
-//
-// Per-chat lifecycle:
-//   1. First call for a runId spawns a fresh `codex --yolo …` session (or
-//      `codex resume <uuid> --yolo …` when chat.sessionUuid is set), writes a
-//      `[projects."<cwd>"]` trust block to ~/.codex/config.toml so the TUI
-//      doesn't prompt, and starts tailing the rollout. Subsequent calls reuse
-//      the same CliSession.
-//   2. Each turn writes the user prompt to PTY stdin (Codex submits on \r;
-//      no Ink bug). Multi-line prompts use bracketed paste so newlines don't
-//      submit early.
-//   3. We resolve when the rollout emits a task_complete event_msg. The waiter
-//      never times out on inactivity — a busy Codex can go silent for minutes;
-//      it only emits a throttled "still waiting" note and unblocks on
-//      task_complete, CLI exit, or a user interrupt.
-//
-// The map of runId -> CodexChatSession keeps the CLI process alive across
-// chat turns so users get true conversational continuity (the rollout is the
-// model's memory). disposeChat() tears it down.
+// Cora talks to `codex app-server` over its supported JSON-RPC stdio protocol.
+// Agent-message deltas, item lifecycle events, MCP calls, tool results, usage,
+// and turn completion are translated directly into durable ChatStreamEvents.
+// Each manager turn gets a short-lived app-server process and resumes the
+// provider thread by id, so no synthetic TUI terminal or rollout-file race is
+// involved. The older PTY/rollout implementation remains below as a dormant
+// compatibility fallback while the app-server path rolls out.
 
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { backendPtySessionId } from "@shared/backend-pty";
 import type { ChatMode } from "@shared/types";
@@ -38,12 +24,14 @@ import type {
 import {
   buildSparkRunContextBlock,
   buildTalkReplyDecision,
-  latestUserPromptFromRun,
   runDidPlanCouncil,
 } from "./spark-agent-backend";
 import { logConfigShieldOnce } from "./agent-config-shield";
-import { buildExecuteDecisionFromToolCalls } from "./claude-backend";
-import { startCliSession, type CliSession } from "./cli-session";
+import {
+  buildExecuteDecisionFromToolCalls,
+  executeDecisionWasAppliedDuringTurn,
+} from "./claude-backend";
+import { resolveLaunchTarget, startCliSession, type CliSession } from "./cli-session";
 import { buildCodexManagerArgs } from "./codex-manager-launch";
 import {
   discoverRolloutForCwd,
@@ -58,6 +46,8 @@ import {
 } from "../mcp-installer";
 import { codexProvider } from "../providers/codex";
 import { sparkHome } from "../spark-home";
+import { getEnrichedEnv } from "../path-reconstruction";
+import { sanitizeNestedAgentEnv } from "../env-sanitize";
 
 interface CodexChatSession {
   cli: CliSession;
@@ -129,6 +119,16 @@ interface CodexChatSession {
 }
 
 const SESSIONS = new Map<string, CodexChatSession>();
+const SESSION_GENERATIONS = new Map<string, number>();
+
+interface ActiveCodexAppServerTurn {
+  child: ChildProcessWithoutNullStreams;
+  threadId: string | null;
+  turnId: string | null;
+  interrupted: boolean;
+}
+
+const ACTIVE_APP_SERVER_TURNS = new Map<string, ActiveCodexAppServerTurn>();
 
 // Runs whose Codara plan-context block has already been injected into the chat
 // CLI. Module-scoped so it survives the session respawn a mode flip triggers
@@ -315,7 +315,7 @@ async function spawnSession(
       });
     });
   }
-  const args = buildCodexManagerArgs(input.chat, promptPath, sparkHome());
+  const args = buildCodexManagerArgs(input.chat, promptPath, sparkHome(), input.run.id);
   const spawnDate = new Date();
   // Fresh-session ownership starts with a filesystem snapshot. A personal
   // Codex window can update an old rollout after this manager starts; without
@@ -587,8 +587,8 @@ function handleEntry(
   }
 }
 
-async function submitPrompt(session: CodexChatSession, prompt: string): Promise<void> {
-  if (!prompt) return;
+async function submitPrompt(session: CodexChatSession, prompt: string): Promise<boolean> {
+  if (!prompt) return false;
   const cli = session.cli;
   if (prompt.includes("\n") || prompt.includes("\r")) {
     // Bracketed paste so embedded newlines don't submit early.
@@ -612,9 +612,10 @@ async function submitPrompt(session: CodexChatSession, prompt: string): Promise<
   cli.writeRaw("\r");
   for (let attempt = 0; attempt < CODEX_SUBMIT_RETRY_COUNT; attempt += 1) {
     await sleep(CODEX_SUBMIT_RETRY_INTERVAL_MS);
-    if (session.lastJsonlActivityAt !== activityBefore) return;
+    if (session.lastJsonlActivityAt !== activityBefore) return true;
     cli.writeRaw("\r");
   }
+  return session.lastJsonlActivityAt !== activityBefore;
 }
 
 
@@ -684,6 +685,474 @@ async function waitForTurnEnd(
   });
 }
 
+function useCodexAppServerTransport(): boolean {
+  return true;
+}
+
+function codexAppServerArgs(input: ManagerRequestInput): string[] {
+  const args = ["app-server", "--stdio", "-c", "project_doc_max_bytes=0"];
+  args.push(input.chat.fastMode ? "--enable" : "--disable", "fast_mode");
+  if (input.chat.mode === "execute" || input.chat.mode === "auto") {
+    args.push("-c", 'mcp_servers.codara-studio.env.SPARK_MCP_MODE="execute"');
+  } else if (input.chat.mode === "automation") {
+    args.push("-c", 'mcp_servers.codara-studio.env.SPARK_MCP_MODE="automation"');
+  }
+  const escapedHome = sparkHome().replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  args.push("-c", `mcp_servers.codara-studio.env.SPARK_HOME_DIR="${escapedHome}"`);
+  const escapedRunId = input.run.id.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  args.push("-c", `mcp_servers.codara-studio.env.SPARK_RUN_ID="${escapedRunId}"`);
+  return args;
+}
+
+async function codexManagerInstructions(input: ManagerRequestInput): Promise<string> {
+  const promptPath =
+    input.chat.mode === "execute"
+      ? resolveOrchestrationPromptPath(EXECUTE_PROMPT_RESOURCE_FILENAME)
+      : input.chat.mode === "auto"
+        ? resolveOrchestrationPromptPath(AUTO_PROMPT_RESOURCE_FILENAME)
+        : input.chat.mode === "automation"
+          ? resolveOrchestrationPromptPath(AUTOMATION_PROMPT_RESOURCE_FILENAME)
+          : await ensureTalkPromptFile();
+  return fs.readFile(promptPath, "utf8");
+}
+
+function appServerTool(item: Record<string, unknown>): {
+  name: string;
+  input: unknown;
+  output?: string;
+  isError?: boolean;
+} | null {
+  if (item.type === "mcpToolCall") {
+    return {
+      name: typeof item.tool === "string" ? item.tool : "mcp_tool",
+      input: item.arguments,
+      output: item.error ? asString(item.error) : item.result ? asString(item.result) : undefined,
+      isError: item.status === "failed" || Boolean(item.error),
+    };
+  }
+  if (item.type === "commandExecution") {
+    return {
+      name: "Shell",
+      input: { command: item.command, cwd: item.cwd },
+      output: typeof item.aggregatedOutput === "string" ? item.aggregatedOutput : undefined,
+      isError: item.status === "failed" || (typeof item.exitCode === "number" && item.exitCode !== 0),
+    };
+  }
+  if (item.type === "fileChange") {
+    return {
+      name: "File change",
+      input: { changes: item.changes },
+      output: item.status === "failed" ? "File change failed." : "File changes applied.",
+      isError: item.status === "failed",
+    };
+  }
+  if (item.type === "dynamicToolCall") {
+    return {
+      name: typeof item.tool === "string" ? item.tool : "tool",
+      input: item.arguments,
+      output: item.contentItems ? asString(item.contentItems) : undefined,
+      isError: item.status === "failed" || item.success === false,
+    };
+  }
+  return null;
+}
+
+async function requestCodexAppServerDecision(
+  input: ManagerRequestInput,
+  onStream?: ChatStreamHandler,
+): Promise<ManagerCallResult> {
+  const startedAt = Date.now();
+  const runId = input.run.id;
+  const generation = SESSION_GENERATIONS.get(runId) ?? 0;
+  const aborted = (notice: string): ManagerCallResult => ({
+    decision: buildTalkReplyDecision("Codex turn interrupted."),
+    durationMs: Date.now() - startedAt,
+    model: input.chat.model,
+    notice,
+    turnAborted: true,
+  });
+  let child: ChildProcessWithoutNullStreams | null = null;
+  let active: ActiveCodexAppServerTurn | null = null;
+  try {
+    await ensureCodexProjectTrust(input.cwd).catch(() => undefined);
+    if (
+      (input.chat.mode === "execute" ||
+        input.chat.mode === "auto" ||
+        input.chat.mode === "automation") &&
+      !(await isSparkOrchestratorMcpInstalled("codex"))
+    ) {
+      await installOrchestratorMcpForCodex();
+    }
+    const binary = await codexProvider.resolveBinary();
+    if (!binary) {
+      throw new Error("Codex CLI not found. Install Codex and run `codex` once to log in.");
+    }
+    const baseInstructions = await codexManagerInstructions(input);
+    let prompt = input.prompt;
+    let injectedPlanContext = false;
+    if (
+      input.chat.mode !== "plan" &&
+      !contextInjectedRuns.has(runId) &&
+      runDidPlanCouncil(input.run)
+    ) {
+      const block = buildSparkRunContextBlock(input.run, input.cwd);
+      if (block) {
+        prompt = `${block}\n\n${prompt}`;
+        injectedPlanContext = true;
+      }
+    }
+    if (!prompt.trim()) {
+      return {
+        decision: buildTalkReplyDecision("I didn't see a user message in this turn — try sending it again."),
+        durationMs: Date.now() - startedAt,
+        model: input.chat.model,
+      };
+    }
+
+    const launch = resolveLaunchTarget(binary, codexAppServerArgs(input));
+    const inherited = await getEnrichedEnv();
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(inherited)) {
+      if (typeof value === "string") env[key] = value;
+    }
+    env.SPARK_RUN_ID = runId;
+    sanitizeNestedAgentEnv(env);
+    onStream?.({
+      kind: "system_note",
+      message: `Starting Codex app server (mode=${input.chat.mode}).`,
+    });
+    logConfigShieldOnce();
+    child = spawn(launch.exe, launch.args, {
+      cwd: input.cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    active = { child, threadId: input.chat.sessionUuid ?? null, turnId: null, interrupted: false };
+    ACTIVE_APP_SERVER_TURNS.set(runId, active);
+
+    let requestSequence = 0;
+    const pending = new Map<
+      string,
+      { resolve: (value: unknown) => void; reject: (error: Error) => void }
+    >();
+    let stderr = "";
+    let stdoutBuffer = "";
+    let settledTurn = false;
+    let resolveTurn!: () => void;
+    let rejectTurn!: (error: Error) => void;
+    const turnDone = new Promise<void>((resolve, reject) => {
+      resolveTurn = resolve;
+      rejectTurn = reject;
+    });
+    const assistantOrder: string[] = [];
+    const assistantText = new Map<string, string>();
+    const assistantPhase = new Map<string, string>();
+    const startedTools = new Set<string>();
+    const turnToolCalls: Array<{ toolName: string; toolUseId: string; input: unknown }> = [];
+    let usageInitialized = false;
+    let cumulativeUsage = { input: 0, output: 0, cached: 0 };
+    const turnUsage = { input: 0, output: 0, cached: 0 };
+
+    const write = (message: unknown) => {
+      if (!child || child.stdin.destroyed) throw new Error("Codex app server stdin closed.");
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+    };
+    const request = <T,>(method: string, params: unknown): Promise<T> => {
+      const id = String(++requestSequence);
+      return new Promise<T>((resolve, reject) => {
+        pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
+        write({ method, id, params });
+      });
+    };
+    const replyToServerRequest = (message: Record<string, unknown>) => {
+      if (message.id == null) return;
+      const method = typeof message.method === "string" ? message.method : "";
+      if (method === "item/tool/requestUserInput") {
+        write({ id: message.id, result: { answers: {} } });
+      } else if (method === "mcpServer/elicitation/request") {
+        write({ id: message.id, result: { action: "cancel", content: null, _meta: null } });
+      } else if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
+        write({ id: message.id, result: { decision: "decline" } });
+      } else {
+        write({ id: message.id, error: { code: -32601, message: `Unsupported server request: ${method}` } });
+      }
+    };
+    const emitToolStart = (item: Record<string, unknown>) => {
+      const id = typeof item.id === "string" ? item.id : "";
+      const tool = appServerTool(item);
+      if (!id || !tool || startedTools.has(id)) return;
+      startedTools.add(id);
+      onStream?.({ kind: "tool_use", toolName: tool.name, input: tool.input, toolUseId: id });
+    };
+    const handleNotification = (method: string, params: Record<string, unknown>) => {
+      if (method === "item/agentMessage/delta") {
+        const itemId = typeof params.itemId === "string" ? params.itemId : "codex-message";
+        const delta = typeof params.delta === "string" ? params.delta : "";
+        if (!delta) return;
+        if (!assistantText.has(itemId)) assistantOrder.push(itemId);
+        assistantText.set(itemId, (assistantText.get(itemId) ?? "") + delta);
+        onStream?.({ kind: "assistant_block", messageId: itemId, text: delta });
+        return;
+      }
+      if (method === "item/started") {
+        const item = params.item;
+        if (item && typeof item === "object" && !Array.isArray(item)) {
+          const record = item as Record<string, unknown>;
+          if (record.type === "agentMessage" && typeof record.id === "string" && typeof record.phase === "string") {
+            assistantPhase.set(record.id, record.phase);
+          }
+          emitToolStart(record);
+        }
+        return;
+      }
+      if (method === "item/completed") {
+        const item = params.item;
+        if (!item || typeof item !== "object" || Array.isArray(item)) return;
+        const record = item as Record<string, unknown>;
+        const id = typeof record.id === "string" ? record.id : "";
+        if (record.type === "agentMessage" && id) {
+          if (typeof record.phase === "string") assistantPhase.set(id, record.phase);
+          const completeText = typeof record.text === "string" ? record.text : "";
+          const streamedText = assistantText.get(id) ?? "";
+          if (!assistantText.has(id)) assistantOrder.push(id);
+          if (completeText.startsWith(streamedText) && completeText.length > streamedText.length) {
+            onStream?.({ kind: "assistant_block", messageId: id, text: completeText.slice(streamedText.length) });
+          }
+          assistantText.set(id, completeText || streamedText);
+          return;
+        }
+        const tool = appServerTool(record);
+        if (!id || !tool) return;
+        emitToolStart(record);
+        const succeeded = !tool.isError && record.status === "completed";
+        if (record.type === "mcpToolCall" && succeeded) {
+          turnToolCalls.push({ toolName: tool.name, toolUseId: id, input: tool.input });
+        }
+        onStream?.({
+          kind: "tool_result",
+          toolUseId: id,
+          output: tool.output ?? (tool.isError ? "Tool failed." : "Tool completed."),
+          isError: tool.isError,
+        });
+        return;
+      }
+      if (method === "thread/tokenUsage/updated") {
+        const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
+        const total = tokenUsage?.total as Record<string, unknown> | undefined;
+        const last = tokenUsage?.last as Record<string, unknown> | undefined;
+        if (!total) return;
+        const totalInput = Number(total.inputTokens ?? 0);
+        const totalOutput = Number(total.outputTokens ?? 0);
+        const totalCached = Number(total.cachedInputTokens ?? 0);
+        const deltaInput = usageInitialized
+          ? Math.max(0, totalInput - cumulativeUsage.input)
+          : Math.max(0, Number(last?.inputTokens ?? totalInput));
+        const deltaOutput = usageInitialized
+          ? Math.max(0, totalOutput - cumulativeUsage.output)
+          : Math.max(0, Number(last?.outputTokens ?? totalOutput));
+        const deltaCached = usageInitialized
+          ? Math.max(0, totalCached - cumulativeUsage.cached)
+          : Math.max(0, Number(last?.cachedInputTokens ?? totalCached));
+        usageInitialized = true;
+        cumulativeUsage = { input: totalInput, output: totalOutput, cached: totalCached };
+        turnUsage.input += deltaInput;
+        turnUsage.output += deltaOutput;
+        turnUsage.cached += deltaCached;
+        onStream?.({
+          kind: "usage",
+          inputTokens: deltaInput,
+          outputTokens: deltaOutput,
+          cacheReadTokens: deltaCached,
+          contextTokens: Number(last?.inputTokens ?? 0) || undefined,
+          contextWindowTokens: Number(tokenUsage?.modelContextWindow ?? 0) || undefined,
+        });
+        return;
+      }
+      if (method === "turn/completed") {
+        const turn = params.turn as Record<string, unknown> | undefined;
+        if (active && typeof turn?.id === "string") active.turnId = turn.id;
+        if (!settledTurn) {
+          settledTurn = true;
+          if (turn?.status === "failed") {
+            rejectTurn(new Error(asString(turn.error) || "Codex turn failed."));
+          } else {
+            resolveTurn();
+          }
+        }
+        return;
+      }
+      if (method === "error" && !settledTurn) {
+        const message = typeof params.message === "string" ? params.message : asString(params);
+        settledTurn = true;
+        rejectTurn(new Error(message || "Codex app server error."));
+      }
+    };
+    const handleLine = (line: string) => {
+      if (!line.trim()) return;
+      let value: unknown;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (!value || typeof value !== "object" || Array.isArray(value)) return;
+      const message = value as Record<string, unknown>;
+      if (message.id != null && ("result" in message || "error" in message) && !message.method) {
+        const waiter = pending.get(String(message.id));
+        if (!waiter) return;
+        pending.delete(String(message.id));
+        if (message.error) waiter.reject(new Error(asString(message.error)));
+        else waiter.resolve(message.result);
+        return;
+      }
+      if (message.method && message.id != null) {
+        replyToServerRequest(message);
+        return;
+      }
+      if (typeof message.method === "string") {
+        handleNotification(
+          message.method,
+          message.params && typeof message.params === "object" && !Array.isArray(message.params)
+            ? (message.params as Record<string, unknown>)
+            : {},
+        );
+      }
+    };
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdoutBuffer += chunk;
+      for (;;) {
+        const newline = stdoutBuffer.indexOf("\n");
+        if (newline < 0) break;
+        const line = stdoutBuffer.slice(0, newline);
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        handleLine(line);
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr = `${stderr}${chunk}`.slice(-8_000);
+    });
+    child.once("error", (error) => {
+      for (const waiter of pending.values()) waiter.reject(error);
+      pending.clear();
+      if (!settledTurn) {
+        settledTurn = true;
+        rejectTurn(error);
+      }
+    });
+    child.once("exit", (code, signal) => {
+      const error = new Error(
+        stderr.trim() || `Codex app server exited (code=${code ?? "null"}${signal ? `, signal=${signal}` : ""}).`,
+      );
+      for (const waiter of pending.values()) waiter.reject(error);
+      pending.clear();
+      if (!settledTurn) {
+        settledTurn = true;
+        rejectTurn(error);
+      }
+    });
+
+    await request("initialize", {
+      clientInfo: { name: "codara", title: "Codara", version: "1.0.0" },
+      capabilities: { experimentalApi: true, requestAttestation: false },
+    });
+    write({ method: "initialized" });
+    const threadResponse = await request<Record<string, unknown>>(
+      input.chat.sessionUuid ? "thread/resume" : "thread/start",
+      input.chat.sessionUuid
+        ? {
+            threadId: input.chat.sessionUuid,
+            model: input.chat.model,
+            cwd: input.cwd,
+            approvalPolicy: "never",
+            sandbox: "danger-full-access",
+            baseInstructions,
+          }
+        : {
+            model: input.chat.model,
+            cwd: input.cwd,
+            approvalPolicy: "never",
+            sandbox: "danger-full-access",
+            baseInstructions,
+            threadSource: "startup",
+          },
+    );
+    const thread = threadResponse.thread as Record<string, unknown> | undefined;
+    const threadId = typeof thread?.id === "string" ? thread.id : input.chat.sessionUuid;
+    if (!threadId) throw new Error("Codex app server did not return a thread id.");
+    active.threadId = threadId;
+    const turnResponse = await request<Record<string, unknown>>("turn/start", {
+      threadId,
+      input: [{ type: "text", text: prompt, text_elements: [] }],
+      cwd: input.cwd,
+      approvalPolicy: "never",
+      sandboxPolicy: { type: "dangerFullAccess" },
+      model: input.chat.model,
+      effort: input.chat.effort,
+    });
+    const turn = turnResponse.turn as Record<string, unknown> | undefined;
+    if (typeof turn?.id === "string") active.turnId = turn.id;
+    if ((SESSION_GENERATIONS.get(runId) ?? 0) !== generation || active.interrupted) {
+      return aborted("Codex turn interrupted before prompt acceptance.");
+    }
+    if (injectedPlanContext) contextInjectedRuns.add(runId);
+    await input.onPromptAccepted?.();
+    await turnDone;
+    if ((SESSION_GENERATIONS.get(runId) ?? 0) !== generation || active.interrupted) {
+      return aborted("Codex turn interrupted by user.");
+    }
+    const finalMessages = assistantOrder
+      .filter((id) => assistantPhase.get(id) === "final_answer")
+      .map((id) => assistantText.get(id)?.trim() ?? "")
+      .filter(Boolean);
+    const fallbackMessage = [...assistantOrder]
+      .reverse()
+      .map((id) => assistantText.get(id)?.trim() ?? "")
+      .find(Boolean);
+    const finalText = finalMessages.join("\n\n") || fallbackMessage ||
+      "(Codex completed the turn without producing a visible message.)";
+    const newSessionUuid = threadId !== input.chat.sessionUuid ? threadId : undefined;
+    if (input.chat.mode === "execute" || input.chat.mode === "auto") {
+      return {
+        decision: buildExecuteDecisionFromToolCalls(turnToolCalls, finalText),
+        decisionAlreadyApplied: executeDecisionWasAppliedDuringTurn(turnToolCalls),
+        durationMs: Date.now() - startedAt,
+        model: input.chat.model,
+        newSessionUuid,
+        inputTokens: turnUsage.input,
+        outputTokens: turnUsage.output,
+        cacheReadTokens: turnUsage.cached,
+      };
+    }
+    return {
+      decision: buildTalkReplyDecision(finalText),
+      durationMs: Date.now() - startedAt,
+      model: input.chat.model,
+      newSessionUuid,
+      inputTokens: turnUsage.input,
+      outputTokens: turnUsage.output,
+      cacheReadTokens: turnUsage.cached,
+    };
+  } catch (error) {
+    if ((SESSION_GENERATIONS.get(runId) ?? 0) !== generation || active?.interrupted) {
+      return aborted("Codex turn interrupted by user.");
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    onStream?.({ kind: "error", message });
+    return {
+      decision: buildTalkReplyDecision(`Codex backend error: ${message}`),
+      durationMs: Date.now() - startedAt,
+      model: input.chat.model,
+      notice: message,
+      turnFailed: true,
+    };
+  } finally {
+    if (ACTIVE_APP_SERVER_TURNS.get(runId) === active) ACTIVE_APP_SERVER_TURNS.delete(runId);
+    if (child && child.exitCode == null && !child.killed) child.kill("SIGTERM");
+  }
+}
+
 export const codexBackend: SparkAgentBackend = {
   kind: "codex",
   displayName: "Codex CLI",
@@ -692,7 +1161,19 @@ export const codexBackend: SparkAgentBackend = {
     input: ManagerRequestInput,
     onStream?: ChatStreamHandler,
   ): Promise<ManagerCallResult> {
+    if (useCodexAppServerTransport()) {
+      return requestCodexAppServerDecision(input, onStream);
+    }
     const startedAt = Date.now();
+    const runId = input.run.id;
+    const requestGeneration = SESSION_GENERATIONS.get(runId) ?? 0;
+    const abortedResult = (): ManagerCallResult => ({
+      decision: buildTalkReplyDecision("Codex turn interrupted."),
+      durationMs: Date.now() - startedAt,
+      model: input.chat.model,
+      notice: "Codex turn interrupted by conversation rewind.",
+      turnAborted: true,
+    });
     try {
       let session = SESSIONS.get(input.run.id);
       if (session && session.exited) {
@@ -748,6 +1229,10 @@ export const codexBackend: SparkAgentBackend = {
       let freshSpawn = false;
       if (!session) {
         session = await spawnSession(input, onStream);
+        if ((SESSION_GENERATIONS.get(runId) ?? 0) !== requestGeneration) {
+          await session.cli.dispose().catch(() => undefined);
+          return abortedResult();
+        }
         SESSIONS.set(input.run.id, session);
         freshSpawn = true;
       }
@@ -760,7 +1245,9 @@ export const codexBackend: SparkAgentBackend = {
       // outcome as aborted.
       session.interruptedAt = null;
 
-      const userPrompt = latestUserPromptFromRun(input.run);
+      // run-store froze and durably attached this exact ordered bundle before
+      // any provider startup. Never reread mutable run.humanMessages here.
+      const userPrompt = input.prompt;
       if (!userPrompt.trim()) {
         return {
           decision: buildTalkReplyDecision(
@@ -778,6 +1265,7 @@ export const codexBackend: SparkAgentBackend = {
       // stays in history across the -r respawn a mode flip triggers. See
       // claude-backend for the matching logic.
       let prompt = userPrompt;
+      let injectedPlanContext = false;
       if (
         input.chat.mode !== "plan" &&
         !contextInjectedRuns.has(input.run.id) &&
@@ -786,7 +1274,7 @@ export const codexBackend: SparkAgentBackend = {
         const contextBlock = buildSparkRunContextBlock(input.run, input.cwd);
         if (contextBlock) {
           prompt = `${contextBlock}\n\n${userPrompt}`;
-          contextInjectedRuns.add(input.run.id);
+          injectedPlanContext = true;
         }
       }
 
@@ -816,8 +1304,34 @@ export const codexBackend: SparkAgentBackend = {
           session.exitMessage ?? "Codex session terminated before turn end.",
         );
       }
+      if ((SESSION_GENERATIONS.get(runId) ?? 0) !== requestGeneration) {
+        return abortedResult();
+      }
       const waiter = waitForTurnEnd(session, onStream);
-      await submitPrompt(session, prompt);
+      const submitted = await submitPrompt(session, prompt);
+      if (!submitted) {
+        try {
+          session.cli.interrupt();
+        } catch {
+          // The session may have exited while submission verification elapsed.
+        }
+        session.pendingReject?.(
+          new Error(
+            `Codex prompt submission could not be verified after ${CODEX_SUBMIT_RETRY_COUNT + 1} Enter attempts.`,
+          ),
+        );
+        await waiter;
+      }
+      if (
+        session.interruptedAt != null ||
+        (SESSION_GENERATIONS.get(runId) ?? 0) !== requestGeneration
+      ) {
+        session.pendingReject?.(new Error("Codex turn interrupted before prompt acceptance."));
+        await waiter.catch(() => undefined);
+        return abortedResult();
+      }
+      if (injectedPlanContext) contextInjectedRuns.add(input.run.id);
+      await input.onPromptAccepted?.();
       await waiter;
 
       const finalText =
@@ -837,6 +1351,9 @@ export const codexBackend: SparkAgentBackend = {
             session.turnToolCalls,
             session.accumulatedText.trim(),
           ),
+          decisionAlreadyApplied: executeDecisionWasAppliedDuringTurn(
+            session.turnToolCalls,
+          ),
           durationMs: Date.now() - startedAt,
           model: input.chat.model,
           newSessionUuid,
@@ -855,6 +1372,9 @@ export const codexBackend: SparkAgentBackend = {
         cacheReadTokens: session.turnUsage.cached,
       };
     } catch (err) {
+      if ((SESSION_GENERATIONS.get(runId) ?? 0) !== requestGeneration) {
+        return abortedResult();
+      }
       const message = err instanceof Error ? err.message : String(err);
       // User interrupt (Stop button) — not a failure. The Stop path
       // (forcePauseRun / stopAndUndoPending) already interrupted the CLI,
@@ -896,7 +1416,16 @@ export const codexBackend: SparkAgentBackend = {
   },
 
   async disposeChat(runId: string): Promise<void> {
+    SESSION_GENERATIONS.set(runId, (SESSION_GENERATIONS.get(runId) ?? 0) + 1);
     contextInjectedRuns.delete(runId);
+    const appServerTurn = ACTIVE_APP_SERVER_TURNS.get(runId);
+    if (appServerTurn) {
+      appServerTurn.interrupted = true;
+      ACTIVE_APP_SERVER_TURNS.delete(runId);
+      if (appServerTurn.child.exitCode == null && !appServerTurn.child.killed) {
+        appServerTurn.child.kill("SIGTERM");
+      }
+    }
     const session = SESSIONS.get(runId);
     if (!session) return;
     SESSIONS.delete(runId);
@@ -912,6 +1441,14 @@ export const codexBackend: SparkAgentBackend = {
   },
 
   interruptChat(runId: string): void {
+    const appServerTurn = ACTIVE_APP_SERVER_TURNS.get(runId);
+    if (appServerTurn) {
+      appServerTurn.interrupted = true;
+      if (appServerTurn.child.exitCode == null && !appServerTurn.child.killed) {
+        appServerTurn.child.kill("SIGTERM");
+      }
+      return;
+    }
     const session = SESSIONS.get(runId);
     if (!session) return;
     // Flag FIRST so the requestManagerDecision catch classifies the waiter

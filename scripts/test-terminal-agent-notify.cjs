@@ -41,7 +41,7 @@ const harnessPlugin = {
     }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
       const init =
-        "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), alerts: [], chips: [], focusedWindow: null, activeContext: { workspaceId: null, tabId: null } };\n";
+        "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), alerts: [], chips: [], focusedWindow: null, activeContext: { workspaceId: null, tabId: null, paneId: null } };\n";
       if (args.path === "electron") {
         return {
           contents:
@@ -76,10 +76,10 @@ const harnessPlugin = {
           "  const T = globalThis.__TAN;\n" +
           "  const t = event.target;\n" +
           "  const watching = T.focusedWindow !== null && t.type === 'terminal' &&\n" +
-          "    T.activeContext.workspaceId === t.workspaceId && T.activeContext.tabId === t.tabId;\n" +
+          "    T.activeContext.workspaceId === t.workspaceId && T.activeContext.tabId === t.tabId && T.activeContext.paneId === t.paneId;\n" +
           "  const d = decide({ kind: event.kind, sourceKey: event.sourceKey }, { watching, dnd: false }, state);\n" +
           "  if (!d.deliver) return;\n" +
-          "  T.alerts.push({ kind: event.kind === 'terminal.agent.done' ? 'complete' : 'blocked', title: event.title, body: event.body, target: t });\n" +
+          "  T.alerts.push({ kind: event.kind === 'terminal.agent.done' ? 'complete' : event.kind === 'terminal.agent.failed' ? 'failed' : 'blocked', title: event.title, body: event.body, target: t });\n" +
           "}\n",
         loader: "js",
         resolveDir: path.join(ROOT, "src", "main", "notify"),
@@ -127,15 +127,18 @@ async function main() {
       { paneId: "p1", tabId: "t1", tabTitle: "Terminal 1", excluded: false },
       { paneId: "p2", tabId: "t2", tabTitle: "Terminal 2", excluded: false },
       { paneId: "p3", tabId: "t3", tabTitle: "workers", excluded: true },
-      { paneId: "p4", tabId: "t4", tabTitle: "Terminal 4", excluded: false },
+      { paneId: "p4", tabId: "t2", tabTitle: "Terminal 2 split", excluded: false },
+      { paneId: "p5", tabId: "t5", tabTitle: "Terminal 5", excluded: false },
+      { paneId: "p6", tabId: "t6", tabTitle: "Terminal 6", excluded: false },
+      { paneId: "p7", tabId: "t7", tabTitle: "Terminal 7", excluded: false },
     ],
   });
   await sleep(50);
-  check("taps attached for all registered panes", T.taps.size === 4);
+  check("taps attached for all registered panes", T.taps.size === 7);
 
   // ── Scenario 1: turn finishes while the user is on ANOTHER tab ──
   // User is in the same workspace but looking at a chat tab; window focused.
-  T.activeContext = { workspaceId: "ws1", tabId: "chat-tab" };
+  T.activeContext = { workspaceId: "ws1", tabId: "chat-tab", paneId: null };
   T.focusedWindow = {};
   feed("p1", "\x1b]633;E;claude\x07");
   // v2.1.170 banner: word gaps are cursor-forward moves, not spaces.
@@ -163,7 +166,7 @@ async function main() {
   check("alert body names the workspace", /Fleet/.test(T.alerts[0].body));
 
   // ── Scenario 2: same flow, but the user IS watching that tab → suppressed ──
-  T.activeContext = { workspaceId: "ws1", tabId: "t1" };
+  T.activeContext = { workspaceId: "ws1", tabId: "t1", paneId: "p1" };
   // The user types the next prompt (they're at the pane) — user input is what
   // re-arms the pane's alert dedup now, NOT the stream re-matching "working".
   mod.noteTerminalUserInput("p1");
@@ -178,7 +181,7 @@ async function main() {
   // The AskUserQuestion selector (live-observed v2.1.170) arrives right after
   // a SHORT working burst — blocked alerts are deliberately NOT gated on
   // MIN_WORK_MS, so this must fire even though the turn just started.
-  T.activeContext = { workspaceId: "ws2", tabId: "elsewhere" };
+  T.activeContext = { workspaceId: "ws2", tabId: "elsewhere", paneId: null };
   feed("p1", "\x1b[2K\x1b[G✻ Pondering… (1s · ↑ 312 tokens)");
   feed(
     "p1",
@@ -219,7 +222,7 @@ async function main() {
   // silent for >3s mid-turn (hidden thinking, silent tool runs) with the
   // working footer as the last thing painted. That silence must ride the
   // longer stall window instead of alerting at 3s.
-  T.activeContext = { workspaceId: "ws2", tabId: "elsewhere" };
+  T.activeContext = { workspaceId: "ws2", tabId: "elsewhere", paneId: null };
   feed("p4", "\x1b]633;E;claude\x07");
   feed("p4", "Claude Code v2.1.170\r\n");
   feed("p4", "✻ Percolating… (2s · ↓ 10 tokens)");
@@ -285,7 +288,54 @@ async function main() {
   await sleep(4600);
   check("codex boot blip produced no spurious alert", alertCount() === beforeBlip);
 
-  // ── Scenario 8: pane closed → watcher cleaned up ──
+  // ── Scenario 8: a visible sibling split is not the selected input pane ──
+  const beforeSibling = alertCount();
+  T.activeContext = { workspaceId: "ws1", tabId: "t2", paneId: "p4" };
+  feed("p2", "\x1b]9;Codex: turn completed in sibling pane\x07");
+  check(
+    "same-tab sibling pane still alerts because it is not selected",
+    alertCount() === beforeSibling + 1 && T.alerts.at(-1).target.paneId === "p2",
+  );
+
+  // ── Scenario 9: startup prompts and hard failures are classified ──
+  T.activeContext = { workspaceId: "ws2", tabId: "elsewhere", paneId: null };
+  const beforeStartupPrompt = alertCount();
+  feed("p5", "\x1b]633;E;claude\x07Claude Code v2.1.209\r\n");
+  feed("p5", "Do you trust the files in this folder?\r\n❯ 1. Yes\r\n  2. No");
+  check(
+    "launch-time trust prompt alerts without a working-footer phase",
+    alertCount() === beforeStartupPrompt + 1 && T.alerts.at(-1).kind === "blocked",
+  );
+
+  mod.noteTerminalUserInput("p5");
+  const beforeLimit = alertCount();
+  feed("p5", "You've hit your usage limit · resets at 5pm");
+  check(
+    "usage-limit terminal outcome is a failure, not a successful completion",
+    alertCount() === beforeLimit + 1 && T.alerts.at(-1).kind === "failed",
+  );
+
+  // ── Scenario 10: non-zero PTY exit while an agent is live alerts ──
+  const beforeCrash = alertCount();
+  feed("p6", "\x1b]633;E;codex\x07OpenAI Codex (v0.144.4)\r\n");
+  T.exits.get("p6")?.({ exitCode: 9 });
+  check(
+    "live agent terminal crash alerts with failure details",
+    alertCount() === beforeCrash + 1 &&
+      T.alerts.at(-1).kind === "failed" &&
+      /code 9/.test(T.alerts.at(-1).body),
+  );
+
+  const beforeIntentionalClose = alertCount();
+  feed("p7", "\x1b]633;E;claude\x07Claude Code v2.1.209\r\n");
+  mod.noteTerminalWillDispose("p7");
+  T.exits.get("p7")?.({ exitCode: 9 });
+  check(
+    "intentional pane disposal never masquerades as an agent crash",
+    alertCount() === beforeIntentionalClose,
+  );
+
+  // ── Scenario 11: pane closed → watcher cleaned up ──
   T.exits.get("p1")?.({ exitCode: 0 });
   check("pty exit detached the tap", !T.taps.has("p1"));
 

@@ -70,9 +70,9 @@ export interface TerminalLeaf {
   kind: "leaf";
   paneId: string;
   cwd?: string;
-  // Last visible scrollback captured before/while the app was running. PTY
-  // processes cannot survive a full app quit, but replaying this snapshot
-  // gives restored panes their previous context before the fresh prompt.
+  // Runtime scrollback snapshot used to preserve context while panes move
+  // between mounted workspace layers. Cold hydration strips it, so a full app
+  // relaunch always starts with a clean shell.
   scrollback?: string;
   // Locally remembered URL sniffed on this leaf's stdout. Used to suppress
   // repeat preview-tab spawns from the same pane.
@@ -89,14 +89,12 @@ export interface TerminalLeaf {
   // any later re-mount (the PTY persists across remounts, so the command
   // should only fire once per session).
   autorun?: string;
-  // Durable Claude/Codex session pointer for this pane. Set when the pane is
-  // launched as a "Worker — Claude/Codex" agent; survives a full app quit (it is
-  // NOT stripped like `worker`/`autorun`) so reopen can relaunch via --resume.
+  // Runtime Claude/Codex session pointer for an agent launched in this pane.
+  // Cold hydration strips it; Codara never auto-resumes terminal agents after a
+  // full app relaunch.
   agentSession?: TerminalAgentSession | null;
-  // Transient one-shot restore marker set ONLY at hydration (loadPersisted),
-  // iff the persisted agentSession was active (agent running at quit). The
-  // pane's first mount after boot consumes it; it is never persisted, so
-  // nothing else in the app's lifetime can re-fire an auto-resume.
+  // Runtime-only legacy restore marker. Retained in the type while same-process
+  // agent plumbing is simplified, but stripped from persisted layouts.
   bootResume?: boolean;
 }
 

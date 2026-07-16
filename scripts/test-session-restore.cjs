@@ -1,17 +1,8 @@
-// Harness for the boot-once session-restore hydration/persist helpers in
-// src/renderer/src/tabs/useTabs.ts (cleanupTransientTerminalState /
-// stripTransientPaneState, exported for tests). Asserts the persisted-blob
-// contract behind "resume only what was RUNNING at quit":
-//   - hydration mints `bootResume` iff agentSession.active===true with a real
-//     sessionId, and deletes any stale marker that leaked into a blob
-//   - old blobs without `active` are NOT restore-eligible
-//   - persist strips bootResume (and worker/autorun) from every leaf
+// Harness for the cold terminal-layout hydration/persist helpers in
+// src/renderer/src/tabs/useTabs.ts. A full app relaunch keeps layout and cwd,
+// but never restores terminal output, worker state, or agent sessions.
 //
 //   node scripts/test-session-restore.cjs
-//
-// Mirrors scripts/test-terminal-agent-notify.cjs: esbuild-bundles the REAL
-// useTabs.ts with react stubbed (the module's top level never calls hooks;
-// only the pure exported helpers are exercised here).
 
 const path = require("node:path");
 const os = require("node:os");
@@ -28,10 +19,7 @@ const harnessPlugin = {
     build.onResolve({ filter: /^@shared\// }, (args) => ({
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
-    build.onResolve({ filter: /^react$/ }, (args) => ({
-      path: args.path,
-      namespace: "stub",
-    }));
+    build.onResolve({ filter: /^react$/ }, (args) => ({ path: args.path, namespace: "stub" }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
       contents:
         "export const useCallback = (fn) => fn;\n" +
@@ -45,7 +33,7 @@ const harnessPlugin = {
 };
 
 const leaf = (paneId, extra = {}) => ({ kind: "leaf", paneId, ...extra });
-const split = (a, b) => ({ kind: "split", direction: "horizontal", ratio: 0.5, a, b });
+const split = (a, b, ratio = 0.5) => ({ kind: "split", direction: "horizontal", ratio, a, b });
 const session = (extra = {}) => ({
   runtime: "claude",
   sessionId: "11111111-2222-3333-4444-555555555555",
@@ -58,14 +46,10 @@ async function main() {
   const outfile = path.join(os.tmpdir(), "spark-session-restore-test", "useTabs.cjs");
   fs.mkdirSync(path.dirname(outfile), { recursive: true });
   await esbuild.build({
-    entryPoints: [ENTRY],
-    bundle: true,
-    platform: "node",
-    format: "cjs",
-    outfile,
-    plugins: [harnessPlugin],
-    logLevel: "silent",
+    entryPoints: [ENTRY], bundle: true, platform: "node", format: "cjs", outfile,
+    plugins: [harnessPlugin], logLevel: "silent",
   });
+  delete require.cache[outfile];
   const { cleanupTransientTerminalState, stripTransientPaneState } = require(outfile);
 
   let failures = 0;
@@ -74,75 +58,74 @@ async function main() {
     console.log(`${cond ? "PASS" : "FAIL"} ${name}`);
   };
 
-  // ── hydration: bootResume minted only for active pointers with a real id ──
-  const active = leaf("p1", { worker: { runId: "manual" }, autorun: "claude", agentSession: session({ active: true }) });
+  const active = leaf("p1", {
+    cwd: "/tmp/kept",
+    scrollback: "OLD_OUTPUT",
+    worker: { runId: "manual" },
+    autorun: "claude",
+    bootResume: true,
+    agentSession: session({ active: true }),
+  });
   cleanupTransientTerminalState(active);
-  check("active:true pointer mints bootResume", active.bootResume === true);
-  check("hydration still deletes worker", !("worker" in active));
-  check("hydration still deletes autorun", !("autorun" in active));
+  check("cold hydration strips scrollback", !("scrollback" in active));
+  check("cold hydration strips worker", !("worker" in active));
+  check("cold hydration strips autorun", !("autorun" in active));
+  check("cold hydration strips agent session", !("agentSession" in active));
+  check("cold hydration strips boot resume", !("bootResume" in active));
+  check("cold hydration preserves cwd and pane id", active.cwd === "/tmp/kept" && active.paneId === "p1");
 
-  const inactive = leaf("p2", { agentSession: session({ active: false }) });
-  cleanupTransientTerminalState(inactive);
-  check("active:false pointer does not restore", !("bootResume" in inactive));
+  for (const [name, pointer] of [
+    ["inactive Claude", session({ active: false })],
+    ["legacy Claude", session()],
+    ["pending Claude", session({ active: true, sessionId: "" })],
+    ["active Codex", session({ runtime: "codex", active: true })],
+  ]) {
+    const item = leaf(name, { agentSession: pointer, bootResume: true, scrollback: name });
+    cleanupTransientTerminalState(item);
+    check(`${name} pointer never resumes`, !("agentSession" in item) && !("bootResume" in item));
+    check(`${name} scrollback never replays`, !("scrollback" in item));
+  }
 
-  const oldBlob = leaf("p3", { agentSession: session() });
-  cleanupTransientTerminalState(oldBlob);
-  check("old blob without `active` does not restore", !("bootResume" in oldBlob));
-
-  const pendingCapture = leaf("p4", { agentSession: session({ active: true, sessionId: "" }) });
-  cleanupTransientTerminalState(pendingCapture);
-  check("active pointer with empty sessionId does not restore", !("bootResume" in pendingCapture));
-
-  const staleMarker = leaf("p5", { bootResume: true, agentSession: session({ active: false }) });
-  cleanupTransientTerminalState(staleMarker);
-  check("stale bootResume in a blob is deleted at hydration", !("bootResume" in staleMarker));
-
-  const noSession = leaf("p6", { bootResume: true });
-  cleanupTransientTerminalState(noSession);
-  check("stale bootResume without a pointer is deleted", !("bootResume" in noSession));
-
-  // ── hydration recurses through splits ──
   const tree = split(
-    leaf("s1", { agentSession: session({ active: true }) }),
-    split(leaf("s2", { agentSession: session({ active: false }) }), leaf("s3", { bootResume: true })),
+    leaf("s1", { cwd: "/one", scrollback: "one", agentSession: session({ active: true }) }),
+    split(
+      leaf("s2", { cwd: "/two", scrollback: "two", autorun: "codex" }),
+      leaf("s3", { cwd: "/three", bootResume: true }),
+      0.35,
+    ),
+    0.62,
   );
   cleanupTransientTerminalState(tree);
-  check("split: active leaf mints bootResume", tree.a.bootResume === true);
-  check("split: inactive leaf stays quiet", !("bootResume" in tree.b.a));
-  check("split: stale marker deleted in nested leaf", !("bootResume" in tree.b.b));
+  check("nested hydration strips every leaf", !tree.a.scrollback && !tree.b.a.scrollback && !tree.b.b.bootResume);
+  check("nested hydration preserves split geometry", tree.ratio === 0.62 && tree.b.ratio === 0.35);
+  check("nested hydration preserves pane ids and cwd", tree.a.paneId === "s1" && tree.b.a.cwd === "/two" && tree.b.b.cwd === "/three");
 
-  // ── persist: bootResume stripped alongside worker/autorun ──
   const dirty = leaf("q1", {
+    cwd: "/persisted",
+    scrollback: "OLD_OUTPUT",
     worker: { runId: "manual" },
     autorun: "claude",
     bootResume: true,
     agentSession: session({ active: true }),
   });
   const stripped = stripTransientPaneState(dirty);
-  check("persist strips bootResume", !("bootResume" in stripped));
-  check("persist strips worker", !("worker" in stripped));
-  check("persist strips autorun", !("autorun" in stripped));
-  check("persist keeps agentSession (incl. active)", stripped.agentSession?.active === true);
+  check("persist strips every process-local field", ["scrollback", "worker", "autorun", "bootResume", "agentSession"].every((key) => !(key in stripped)));
+  check("persist preserves layout fields", stripped.paneId === "q1" && stripped.cwd === "/persisted");
 
-  const consumed = leaf("q2", { bootResume: false, agentSession: session({ active: true }) });
-  check("persist strips a consumed (false) marker too", !("bootResume" in stripTransientPaneState(consumed)));
+  const clean = leaf("q2", { cwd: "/clean" });
+  check("persist preserves clean leaf identity", stripTransientPaneState(clean) === clean);
 
-  const clean = leaf("q3", { agentSession: session({ active: true }) });
-  check("persist returns the same node when nothing to strip", stripTransientPaneState(clean) === clean);
-
-  const dirtyTree = split(leaf("q4", { bootResume: true }), leaf("q5"));
+  const dirtyTree = split(leaf("q3", { scrollback: "old" }), leaf("q4"), 0.4);
   const strippedTree = stripTransientPaneState(dirtyTree);
-  check("persist strips through splits", !("bootResume" in strippedTree.a));
+  check("persist strips recursively", !("scrollback" in strippedTree.a));
   check("persist keeps untouched sibling identity", strippedTree.b === dirtyTree.b);
+  check("persist keeps split ratio", strippedTree.ratio === 0.4);
 
   if (failures > 0) {
     console.error(`${failures} failure(s)`);
     process.exit(1);
   }
-  console.log("all session-restore checks passed");
+  console.log("all fresh-terminal restore checks passed");
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main().catch((err) => { console.error(err); process.exit(1); });

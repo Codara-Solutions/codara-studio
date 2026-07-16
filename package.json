@@ -33,6 +33,7 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.209",
     "@codemirror/lang-css": "^6.3.1",
     "@codemirror/lang-html": "^6.4.11",
     "@codemirror/lang-javascript": "^6.2.5",
@@ -107,6 +108,7 @@
       "!**/node_modules/node-pty/prebuilds/win32-ia32/**"
     ],
     "asarUnpack": [
+      "node_modules/@anthropic-ai/claude-agent-sdk-*/**",
       "node_modules/@vscode/ripgrep/**",
       "node_modules/@vscode/ripgrep-${os}-${arch}/**"
     ],

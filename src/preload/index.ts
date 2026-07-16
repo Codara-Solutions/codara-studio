@@ -8,6 +8,7 @@ import type {
 } from "@shared/remote";
 import type {
   AddRunMessageInput,
+  AnswerRunQuestionInput,
   AgentAssetDeleteResult,
   AgentAssetInstallResult,
   AgentAssetInventory,
@@ -521,6 +522,8 @@ const api = {
       ipcRenderer.invoke("orchestration:resumeRun", input),
     addRunMessage: (input: AddRunMessageInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:addRunMessage", input),
+    answerRunQuestion: (input: AnswerRunQuestionInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:answerRunQuestion", input),
     undoToCheckpoint: (input: UndoToCheckpointInput): Promise<UndoToCheckpointResult> =>
       ipcRenderer.invoke("orchestration:undoToCheckpoint", input),
     interruptRunWithMessage: (input: InterruptRunWithMessageInput): Promise<RunState> =>
@@ -995,6 +998,16 @@ const api = {
     }
     await ipcRenderer.invoke("app:openExternal", url);
   },
+  // Explicit user action: unlike a normal link navigation, this must never
+  // recycle an orchestration-owned/background preview. It creates a focused,
+  // workspace-level Preview tab with the normal top-strip controls.
+  openInNewPreview: async (url: string): Promise<void> => {
+    if (isBrowserUrl(url)) {
+      dispatchOpenInSparkBrowser(url, { forceNew: true });
+      return;
+    }
+    await ipcRenderer.invoke("app:openExternal", url);
+  },
   openInSystemBrowser: (url: string): Promise<void> =>
     ipcRenderer.invoke("app:openExternal", url),
   view: {
@@ -1018,13 +1031,16 @@ function isBrowserUrl(url: string): boolean {
   return /^(https?:|file:)/i.test(url);
 }
 
-function dispatchOpenInSparkBrowser(url: string): void {
+function dispatchOpenInSparkBrowser(
+  url: string,
+  options?: { forceNew?: boolean },
+): void {
   const rendererWindow = globalThis as unknown as {
     dispatchEvent: (event: CustomEvent) => boolean;
   };
   rendererWindow.dispatchEvent(
     new CustomEvent("spark:open-browser-url", {
-      detail: { url },
+      detail: { url, forceNew: options?.forceNew === true },
     }),
   );
 }
@@ -1040,7 +1056,7 @@ ipcRenderer.on("app:open-browser-url", (_event, url: string) => {
 // observes them via `before-input-event` (a WebContents-only event — the
 // <webview> tag does not surface it) and pushes the relevant fields here.
 // useGlobalShortcuts.ts registers a capture-phase listener on window, so
-// dispatching on window is what makes Ctrl+1, Cmd+P, … keep working when
+// dispatching on window is what makes Ctrl+1, Cmd+P Quick Open, … work when
 // focus is inside an embedded page.
 type WebviewChordKey = {
   key: string;

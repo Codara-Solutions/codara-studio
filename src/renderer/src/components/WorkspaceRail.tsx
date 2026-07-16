@@ -30,6 +30,10 @@ const WORKSPACE_COLORS = [
 
 const PANEL_SECTION_MIME = "application/x-spark-panel-section";
 const WORKSPACE_ROW_MIME = "application/x-spark-workspace-row";
+// Below this width the full tracked uppercase label no longer fits beside the
+// workspace count and three fixed 20px actions. Keep a little buffer above the
+// exact measured edge so a one-pixel resize cannot toggle into ellipsis.
+const COMPACT_WORKSPACE_HEADER_WIDTH = 224;
 
 const SECTION_LABELS: Record<PanelSectionKey, string> = {
   workspaces: "Workspaces",
@@ -137,6 +141,7 @@ function WorkspaceRail(props: RailProps) {
   const bodyHeightAtDragStart = useRef(1);
 
   const accent = props.activeWorkspace?.color || "var(--accent)";
+  const compactWorkspaceHeader = width < COMPACT_WORKSPACE_HEADER_WIDTH;
   const slots = sectionStackStyles(sections, split, collapsed);
   const canResizePair = sections.length === 2;
 
@@ -190,6 +195,7 @@ function WorkspaceRail(props: RailProps) {
           <>
             <SectionHeader
               label="Workspaces"
+              displayLabel={compactWorkspaceHeader ? "WS" : undefined}
               count={workspaces.length}
               collapsed={collapsed.workspaces}
               onToggleCollapse={() => onToggleSection("workspaces")}
