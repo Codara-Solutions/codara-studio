@@ -682,6 +682,11 @@ function parseDiff(relPath: string, raw: string): GitDiff {
 // diff straight from the file's contents. Exported so the commit-message
 // module can include untracked content in its prompt.
 export async function readUntrackedAsDiff(cwd: string, relPath: string): Promise<GitDiff> {
+  // Git reports a fully-untracked directory as a single "dir/" entry;
+  // readFile() on it throws EISDIR. List its untracked files instead. The
+  // trailing-slash check (git's own directory marker, same one discardChanges
+  // keys on) also holds on remote ssh:// workspaces where local fs calls don't.
+  if (relPath.endsWith("/")) return listUntrackedDirAsDiff(cwd, relPath);
   try {
     const buf = await readFile(join(cwd, relPath));
     if (buf.includes(0)) return { path: relPath, binary: true, lines: [] };
@@ -700,6 +705,38 @@ export async function readUntrackedAsDiff(cwd: string, relPath: string): Promise
         kind: "meta",
         text: `… ${textLines.length - MAX_DIFF_LINES} more lines`,
       });
+    }
+    return { path: relPath, binary: false, lines };
+  } catch (err) {
+    return { path: relPath, binary: false, lines: [], error: errorText(err) };
+  }
+}
+
+// The all-added "diff" for an untracked directory entry: the names of the
+// untracked files inside it, not file contents.
+async function listUntrackedDirAsDiff(cwd: string, relPath: string): Promise<GitDiff> {
+  try {
+    const { stdout } = await runGit(cwd, [
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+      "-z",
+      "--",
+      relPath,
+    ]);
+    const files = stdout.split("\0").filter(Boolean);
+    const lines: GitDiffLine[] = [
+      {
+        kind: "meta",
+        text: `Untracked directory — ${files.length} file${files.length === 1 ? "" : "s"}`,
+      },
+      { kind: "hunk", text: `@@ -0,0 +1,${files.length} @@` },
+    ];
+    for (const f of files.slice(0, MAX_DIFF_LINES)) {
+      lines.push({ kind: "add", text: `+${f}` });
+    }
+    if (files.length > MAX_DIFF_LINES) {
+      lines.push({ kind: "meta", text: `… ${files.length - MAX_DIFF_LINES} more files` });
     }
     return { path: relPath, binary: false, lines };
   } catch (err) {
