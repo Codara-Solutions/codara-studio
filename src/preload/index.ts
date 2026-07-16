@@ -142,6 +142,20 @@ function isMissingIpcHandlerError(err: unknown, channel: string): boolean {
   return message.includes(`No handler registered for '${channel}'`);
 }
 
+// One SessionStart hook record from the pane → session-identity registry
+// (src/main/agent-session-registry.ts). Mirrors that module's shape; kept
+// local so the preload stays free of main-process imports.
+interface AgentSessionStartRecord {
+  paneId: string;
+  runtime: "claude";
+  sessionId: string;
+  transcriptPath?: string;
+  cwd?: string;
+  // "startup" | "resume" | "clear" | "compact" (SessionStart's `source`).
+  source?: string;
+  timestamp: string;
+}
+
 const api = {
   state: {
     load: (): Promise<AppState> => ipcRenderer.invoke("state:load"),
@@ -655,8 +669,16 @@ const api = {
       runtime: "claude" | "codex";
       cwd: string;
       sinceMs: number;
+      // Session ids already bound to other panes — discovery must never rebind
+      // them to this pane (same-cwd concurrent-launch race).
+      excludeSessionIds?: string[];
     }): Promise<{ sessionId: string; transcriptPath: string } | null> =>
       ipcRenderer.invoke("agentSession:capture", args),
+    // Fire-and-forget diagnostic trail: restore decisions land in
+    // <sparkHome>/logs/main.log so "this pane didn't resume" is debuggable.
+    logRestore: (line: string): void => {
+      ipcRenderer.send("agentSession:logRestore", line);
+    },
     // Check a saved session's transcript still exists — and is resumable
     // (has a real user message; stillborn transcripts make `--resume` refuse)
     // — before resuming it.
@@ -665,11 +687,33 @@ const api = {
       sessionId: string;
       cwd: string;
       transcriptPath?: string;
-    }): Promise<{ exists: boolean; resumable?: boolean; transcriptPath?: string }> =>
+    }): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> =>
       ipcRenderer.invoke("agentSession:probe", args),
     // Pre-seed Codex directory trust before a `codex --yolo` (re)launch.
     ensureCodexTrust: (cwd: string): Promise<void> =>
       ipcRenderer.invoke("agentSession:ensureCodexTrust", { cwd }),
+    // Repair a Claude transcript whose tail a sleep/crash truncated, so
+    // `claude --resume` accepts it (keeps a .bak). No-op for Codex.
+    repairTranscript: (args: {
+      runtime: "claude" | "codex";
+      sessionId: string;
+      cwd: string;
+    }): Promise<{ repaired: boolean }> =>
+      ipcRenderer.invoke("agentSession:repairTranscript", args),
+    // Newest SessionStart hook record for a pane — the EXACT session identity
+    // last seen running there (covers in-TUI `/resume` and `/clear`, which
+    // filesystem discovery can't observe). Null when no hook ever fired for
+    // the pane (hooks not installed / python missing / external launch).
+    latestStart: (paneId: string): Promise<AgentSessionStartRecord | null> =>
+      ipcRenderer.invoke("agentSession:latestStart", { paneId }),
+    // Live SessionStart events, fired as Claude sessions start / resume /
+    // clear inside Codara panes. Returns an unsubscribe.
+    onStarted: (handler: (rec: AgentSessionStartRecord) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, rec: AgentSessionStartRecord) =>
+        handler(rec);
+      ipcRenderer.on("agentSession:started", listener);
+      return () => ipcRenderer.off("agentSession:started", listener);
+    },
   },
   terminalState: {
     /**
@@ -754,6 +798,30 @@ const api = {
     home: (): Promise<string> => ipcRenderer.invoke("app:home"),
     inspectorPreloadUrl: (): Promise<string> =>
       ipcRenderer.invoke("app:inspectorPreloadUrl"),
+    // Fired by main just before the OS suspends (system sleep). The renderer
+    // should synchronously flush any state it wouldn't want to lose if the
+    // process is torn down during sleep (terminal tab tree + scrollback).
+    // Returns an unsubscribe function.
+    onCheckpoint: (handler: () => void): (() => void) => {
+      const listener = () => handler();
+      ipcRenderer.on("app:checkpoint", listener);
+      return () => ipcRenderer.off("app:checkpoint", listener);
+    },
+    // Fired by main at the START of a quit (before-quit / window-all-closed),
+    // BEFORE it kills the PTYs, so the renderer can mark teardown and stop
+    // deactivating running agents' restore pointers as their shells die. Returns
+    // an unsubscribe function.
+    onBeforeQuit: (handler: () => void): (() => void) => {
+      const listener = () => handler();
+      ipcRenderer.on("app:before-quit", listener);
+      return () => ipcRenderer.off("app:before-quit", listener);
+    },
+    // Renderer boot handshake: App calls this once React has mounted. Main's
+    // boot watchdog escalates (reload → relaunch/dialog) if a loaded page never
+    // signals ready — the "splash breathing forever" hang after system sleep.
+    signalReady: (): void => {
+      ipcRenderer.send("app:renderer-ready");
+    },
   },
   ui: {
     // Tell main which filesystem roots the renderer considers in scope right
@@ -1021,6 +1089,17 @@ ipcRenderer.on("webview:chord-key", (_event, payload: WebviewChordKey) => {
     cancelable: true,
   });
   window.dispatchEvent(synth);
+});
+
+// Liveness pong. Main sends `app:health-ping` with a nonce on wake-from-sleep
+// (and can at any time) to check the renderer is still pumping its event loop;
+// we echo the nonce straight back. Handled here in preload rather than in React
+// so a healthy-but-mid-reload renderer still answers — and, crucially, a
+// renderer whose JS main thread is WEDGED (the "frozen/blank after sleep"
+// symptom) can't run this listener either, so main's ping simply times out and
+// it recovers the window. No React dependency, no per-component wiring.
+ipcRenderer.on("app:health-ping", (_event, nonce: number) => {
+  ipcRenderer.send("app:health-pong", nonce);
 });
 
 contextBridge.exposeInMainWorld("spark", api);

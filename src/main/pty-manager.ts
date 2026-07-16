@@ -70,6 +70,11 @@ interface Session {
   // mode-flip Talk↔Execute symptom: characters from the old assistant text
   // appear injected into the new turn's frames).
   disposed: boolean;
+  // Set true the first time an exit is emitted on exitChannel — by node-pty's
+  // real onExit OR by sweepDeadSessions synthesizing one on wake-from-sleep.
+  // Guards against a double exit event when the OS severed the ConPTY (sweep
+  // fires) and node-pty then fires its own onExit late for the same session.
+  exitEmitted: boolean;
 }
 
 const sessions = new Map<string, Session>();
@@ -476,6 +481,7 @@ async function doSpawnRemote(
     detachedBacklog: [],
     detachedBacklogBytes: 0,
     disposed: false,
+    exitEmitted: false,
   };
 
   handle.onData((data: string | Buffer) => {
@@ -487,7 +493,18 @@ async function doSpawnRemote(
     const current = sessions.get(opts.id);
     if (current && current !== session) return;
     const s = current ?? session;
+    if (s.exitEmitted) {
+      if (current === session) sessions.delete(opts.id);
+      const t0 = pendingKills.get(opts.id);
+      if (t0) {
+        clearTimeout(t0);
+        pendingKills.delete(opts.id);
+      }
+      exitWaiters.delete(opts.id);
+      return;
+    }
     if (s) {
+      s.exitEmitted = true;
       s.exited = true;
       flushDataNow(s);
       if (s.webContents && !s.webContents.isDestroyed()) {
@@ -753,6 +770,7 @@ function doSpawn(
     detachedBacklog: [],
     detachedBacklogBytes: 0,
     disposed: false,
+    exitEmitted: false,
   };
 
   // Capture the local session reference so we can identity-gate this closure.
@@ -800,7 +818,22 @@ function doSpawn(
     const current = sessions.get(opts.id);
     if (current && current !== session) return;
     const s = current ?? session;
+    if (s.exitEmitted) {
+      // sweepDeadSessions already synthesized this session's exit on wake (the
+      // OS severed the ConPTY during sleep and node-pty fired onExit only now).
+      // Don't emit a second exit — the renderer already reacted — just finish
+      // the map/waiter teardown idempotently.
+      if (current === session) sessions.delete(opts.id);
+      const t0 = pendingKills.get(opts.id);
+      if (t0) {
+        clearTimeout(t0);
+        pendingKills.delete(opts.id);
+      }
+      exitWaiters.delete(opts.id);
+      return;
+    }
     if (s) {
+      s.exitEmitted = true;
       s.exited = true;
       flushDataNow(s);
       if (s.webContents && !s.webContents.isDestroyed()) {
@@ -1332,6 +1365,62 @@ export function detachForWebContents(wc: WebContents): void {
       s.flushTimer = null;
     }
   }
+}
+
+// Wake-from-sleep recovery: the OS can sever a ConPTY across a suspend/resume
+// cycle without node-pty ever firing onExit, leaving a Session whose child
+// process is already dead but still registered — so the renderer never learns
+// its terminal died and (for an agent pane) never auto-resumes. Called on the
+// powerMonitor 'resume' event: for every LOCAL session whose pid is no longer
+// alive, synthesize the exit the renderer never got, mirroring the tail of the
+// real onExit handler. Idempotent with a late real onExit via Session.exitEmitted.
+// Returns the ids that were swept. Remote sessions (pid 0, ssh channel) are
+// skipped — their liveness isn't a local pid and their exit flows through the
+// ssh adapter's own onExit.
+export function sweepDeadSessions(): string[] {
+  const swept: string[] = [];
+  // Snapshot keys — the loop mutates the map.
+  for (const id of [...sessions.keys()]) {
+    const s = sessions.get(id);
+    if (!s) continue;
+    if (s.exited || s.exitEmitted || s.disposed) continue;
+    const pid = s.pty.pid;
+    if (typeof pid !== "number" || pid <= 0) continue;
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch {
+      alive = false;
+    }
+    if (alive) continue;
+    // Dead pid, no exit emitted → synthesize one so TerminalPane reacts.
+    s.exitEmitted = true;
+    s.exited = true;
+    flushDataNow(s);
+    if (s.webContents && !s.webContents.isDestroyed()) {
+      try {
+        // exitCode -1 marks a non-clean death (kill/sever), which the renderer's
+        // crash-vs-clean chip logic treats as an error — appropriate here.
+        s.webContents.send(s.exitChannel, { exitCode: -1 });
+      } catch {
+        /* webContents destroyed mid-send; harmless */
+      }
+    }
+    if (!strandedBindings.has(id)) stashWebContents(id, s);
+    if (s.flushTimer) clearTimeout(s.flushTimer);
+    sessions.delete(id);
+    const waiters = exitWaiters.get(id) ?? [];
+    exitWaiters.delete(id);
+    for (const w of waiters) {
+      try {
+        w({ exitCode: -1 });
+      } catch {
+        /* ignore */
+      }
+    }
+    swept.push(id);
+  }
+  return swept;
 }
 
 export function disposeAll(): void {

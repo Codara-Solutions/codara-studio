@@ -44,6 +44,7 @@ function assertLocalWorkspace(cwd: string, feature: string): void {
 }
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
 import { sparkHome } from "./spark-home";
+import { logMain } from "./file-log";
 import { detectAgentRuntimes } from "./agent-runtimes";
 import { loadPreferences, setPreference } from "./preferences-store";
 import * as pty from "./pty-manager";
@@ -51,8 +52,14 @@ import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import { remoteStreamGrep } from "./remote/remote-search";
 import { listEvents } from "./orchestration/event-log";
-import { claudeSessionTranscriptPath, discoverClaudeSessionForCwd } from "./orchestration/claude-paths";
+import {
+  claudeSessionTranscriptPath,
+  discoverClaudeSessionForCwd,
+  inspectClaudeTranscriptTail,
+  repairClaudeTranscriptTail,
+} from "./orchestration/claude-paths";
 import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex-sessions";
+import { latestSessionStart } from "./agent-session-registry";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import {
   clearCenter,
@@ -1374,21 +1381,34 @@ export function registerIpc(): void {
     "agentSession:capture",
     async (
       _e,
-      args: { runtime: "claude" | "codex"; cwd: string; sinceMs: number },
+      args: {
+        runtime: "claude" | "codex";
+        cwd: string;
+        sinceMs: number;
+        // Session ids already bound to OTHER panes. Two agents launched in the
+        // same cwd within the discovery window would otherwise both bind to the
+        // newest transcript — one pane silently stealing the other's session, so
+        // its own conversation is never restore-reachable again.
+        excludeSessionIds?: string[];
+      },
     ): Promise<{ sessionId: string; transcriptPath: string } | null> => {
       const since = args.sinceMs;
       const spawnDate = new Date(since);
       const deadline = Date.now() + 15_000;
+      const exclude = new Set(
+        (args.excludeSessionIds ?? []).map((id) => id.toLowerCase()).filter(Boolean),
+      );
       for (;;) {
         let found: { sessionId: string; transcriptPath: string } | null = null;
         if (args.runtime === "claude") {
-          found = await discoverClaudeSessionForCwd(args.cwd, since).catch(() => null);
+          found = await discoverClaudeSessionForCwd(args.cwd, since, exclude).catch(() => null);
         } else {
           // strict: an unmatched-cwd fallback here would bind the pane to some
           // OTHER session's rollout. This poll loop retries for 15s, so a
           // not-yet-flushed session_meta line just means "try again next tick".
           const path = await discoverRolloutForCwd(since, spawnDate, args.cwd, {
             strict: true,
+            excludeSessionIds: exclude,
           }).catch(() => null);
           if (path) {
             const sessionId = extractSessionUuid(path);
@@ -1400,6 +1420,23 @@ export function registerIpc(): void {
         await new Promise((resolve) => setTimeout(resolve, 400));
       }
     },
+  );
+
+  // Persistent trail of restore decisions (fire-and-forget from the renderer).
+  // "Some panes resume, some don't" is undebuggable without knowing what each
+  // pane decided at boot — this lands every decision in <sparkHome>/logs/main.log.
+  ipcMain.on("agentSession:logRestore", (_e, line: string) => {
+    if (typeof line === "string" && line.length < 2048) logMain("restore", line);
+  });
+
+  // Newest SessionStart hook record for a pane (see agent-session-registry.ts).
+  // The renderer consults this before every restore/hint so a pointer that
+  // went stale via in-TUI `/resume` or `/clear` heals to the session that
+  // ACTUALLY last ran in the pane, instead of resuming a dead id.
+  ipcMain.handle(
+    "agentSession:latestStart",
+    async (_e, args: { paneId: string }) =>
+      args?.paneId ? latestSessionStart(args.paneId) : null,
   );
 
   // Probe: on reopen, before a restored pane fires its `--resume` autorun, check
@@ -1414,7 +1451,7 @@ export function registerIpc(): void {
     async (
       _e,
       args: { runtime: "claude" | "codex"; sessionId: string; cwd: string; transcriptPath?: string },
-    ): Promise<{ exists: boolean; resumable?: boolean; transcriptPath?: string }> => {
+    ): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> => {
       if (!args.sessionId) return { exists: false };
       if (args.runtime === "claude") {
         const path = claudeSessionTranscriptPath(args.cwd, args.sessionId);
@@ -1435,7 +1472,14 @@ export function registerIpc(): void {
             }
           })
           .catch(() => true); // unreadable head → don't block the resume attempt
-        return { exists: true, resumable, transcriptPath: path };
+        if (!resumable) return { exists: true, resumable: false, transcriptPath: path };
+        // The head scan passes even when a sleep/crash cut the writer mid-line,
+        // leaving a truncated LAST record that `claude --resume` may refuse.
+        // Check the TAIL and flag it repairable so the renderer truncates the
+        // partial line (preserving the conversation) instead of self-healing
+        // into a fresh session and losing it.
+        const { repairable } = await inspectClaudeTranscriptTail(path);
+        return { exists: true, resumable: true, repairable, transcriptPath: path };
       }
       // Codex: sessions are date-bucketed, not addressable by cwd, so rely on the
       // transcript path captured at launch. Size floor stands in for the message
@@ -1454,6 +1498,24 @@ export function registerIpc(): void {
   ipcMain.handle("agentSession:ensureCodexTrust", async (_e, args: { cwd: string }): Promise<void> => {
     await ensureCodexProjectTrust(args.cwd).catch(() => undefined);
   });
+
+  // Repair a Claude transcript whose tail was truncated by an abrupt kill
+  // (sleep/crash mid-write) so `claude --resume` accepts it. Truncates the
+  // trailing partial JSON line, keeping a `<path>.bak`. Claude only — Codex
+  // rollout formats are not safely truncatable, so this is a no-op for them.
+  // Returns whether a repair was actually written.
+  ipcMain.handle(
+    "agentSession:repairTranscript",
+    async (
+      _e,
+      args: { runtime: "claude" | "codex"; sessionId: string; cwd: string },
+    ): Promise<{ repaired: boolean }> => {
+      if (args.runtime !== "claude" || !args.sessionId) return { repaired: false };
+      const path = claudeSessionTranscriptPath(args.cwd, args.sessionId);
+      const repaired = await repairClaudeTranscriptTail(path).catch(() => false);
+      return { repaired };
+    },
+  );
 
   // Live runtime-state report from the renderer-side terminal poller. Main
   // forwards the report into run-store (which finds the worker attempt by

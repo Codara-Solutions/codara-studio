@@ -3,10 +3,13 @@ import {
   BrowserWindow,
   Tray,
   Menu,
+  dialog,
   globalShortcut,
   nativeImage,
+  ipcMain,
   powerMonitor,
 } from "electron";
+import { logMain } from "./file-log";
 import { join } from "node:path";
 import { registerIpc, setTrayHook } from "./ipc";
 import * as pty from "./pty-manager";
@@ -14,7 +17,7 @@ import * as fsWatcher from "./fs-watcher";
 import { disposeAllConnections } from "./remote/connections";
 import { startAgentSocket, stopAgentSocket } from "./agent-socket";
 import { registerDaemonHostScaffold } from "./orchestration/daemon";
-import { ensureSparkHomeSync } from "./spark-home";
+import { ensureSparkHomeSync, sparkHome } from "./spark-home";
 import { flush, loadSettings, loadState } from "./storage";
 import {
   flushPreferences,
@@ -33,6 +36,7 @@ import { registerPreviewBridge } from "./preview-bridge";
 import { registerTerminalBridge } from "./terminal-bridge";
 import { registerPreviewInput } from "./preview-input";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
+import { initAgentSessionRegistry } from "./agent-session-registry";
 
 // run-store is heavy (loads openrouter and agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
@@ -101,6 +105,26 @@ const headlessArgs = readHeadlessEvalArgs(process.argv);
 // error and exits instead of accidentally opening the desktop UI.
 const isHeadlessEval = headlessArgs.enabled;
 
+// Single-instance lock: a second launch should focus the existing window, not
+// spin up a rival process that writes the SAME spark-state.json / preferences /
+// userData concurrently (a real risk after a sleep-freeze when the user, seeing
+// a dead-looking window, relaunches while the old process is still limping).
+// Skipped for headless eval (parallel eval runs are intentional) and behind
+// SPARK_ALLOW_MULTI=1 so a developer can run a packaged build alongside a dev
+// instance. `ownsSingleInstanceLock` gates the whenReady body below so a lost
+// lock exits cleanly even if 'ready' still fires before app.quit() lands.
+const ownsSingleInstanceLock =
+  isHeadlessEval ||
+  process.env.SPARK_ALLOW_MULTI === "1" ||
+  app.requestSingleInstanceLock();
+if (!ownsSingleInstanceLock) {
+  app.quit();
+} else if (!isHeadlessEval && process.env.SPARK_ALLOW_MULTI !== "1") {
+  app.on("second-instance", () => {
+    showMainWindow();
+  });
+}
+
 const isDev = !app.isPackaged;
 // On win32 use the .ico; on macOS/Linux use .png — icon.ico fails to load on
 // macOS in dev, which would prevent Tray creation and strand the process.
@@ -144,6 +168,206 @@ function showMainWindow(): void {
   mainWindow.show();
   if (process.platform === "win32") mainWindow.setSkipTaskbar(false);
   mainWindow.focus();
+}
+
+// ── Renderer liveness + crash recovery ────────────────────────────────────
+// The "frozen/blank window after sleep" symptom is a Chromium renderer/GPU
+// process that died (or wedged) across a suspend/resume cycle. Since every PTY
+// lives in the MAIN process, reloading the renderer re-hydrates the UI from
+// localStorage: panes with a live PTY reattach (spawn returns attached and the
+// tail replays), panes whose PTY died get the boot-once resume. So a reload is
+// nearly-free crash recovery — the machinery below decides WHEN to reload.
+let healthPingSeq = 0;
+const pendingPongs = new Map<number, () => void>();
+ipcMain.on("app:health-pong", (_e, nonce: number) => {
+  const resolve = pendingPongs.get(nonce);
+  if (resolve) {
+    pendingPongs.delete(nonce);
+    resolve();
+  }
+});
+
+// Send a ping and resolve true only if the renderer echoes the nonce within the
+// timeout. A crashed renderer short-circuits to false; a wedged one (JS main
+// thread blocked — it can't run preload's pong listener) simply times out.
+function pingRenderer(timeoutMs = 2000): Promise<boolean> {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return Promise.resolve(false);
+  const wc = win.webContents;
+  if (wc.isCrashed()) return Promise.resolve(false);
+  const nonce = ++healthPingSeq;
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      pendingPongs.delete(nonce);
+      resolve(ok);
+    };
+    pendingPongs.set(nonce, () => finish(true));
+    try {
+      wc.send("app:health-ping", nonce);
+    } catch {
+      finish(false);
+      return;
+    }
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref();
+  });
+}
+
+let recoveryTimestamps: number[] = [];
+let lastRecoveryAt = 0;
+// Pending unresponsive→force-recover timer (single window, so module-scoped).
+let unresponsiveTimer: NodeJS.Timeout | null = null;
+const RECOVERY_DEDUPE_MS = 1500;
+const RECOVERY_BUDGET = 3;
+const RECOVERY_WINDOW_MS = 60_000;
+
+// Recover a dead/wedged renderer by reloading it. Rapid duplicate calls (e.g.
+// forcefullyCrashRenderer → render-process-gone) are de-duped within a short
+// window. If reloads exceed the budget over RECOVERY_WINDOW_MS, the renderer is
+// crash-looping — destroy and recreate the whole window instead.
+function recoverRenderer(reason: string): void {
+  const now = Date.now();
+  if (now - lastRecoveryAt < RECOVERY_DEDUPE_MS) return; // recovery already in flight
+  lastRecoveryAt = now;
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) {
+    logMain("recover", `window gone (${reason}); recreating`);
+    mainWindow = null;
+    createWindow();
+    return;
+  }
+  const wc = win.webContents;
+  // Null main's renderer sink for every PTY BEFORE reload: reload() keeps the
+  // same webContents object, so without this a surviving PTY reattaches to a
+  // blank xterm. Detaching makes the next pty.spawn replay the raw tail (the
+  // `previouslyDetached` branch in pty-manager), repainting live panes.
+  try {
+    pty.detachForWebContents(wc);
+  } catch {
+    /* ignore */
+  }
+  recoveryTimestamps = recoveryTimestamps.filter((t) => now - t < RECOVERY_WINDOW_MS);
+  recoveryTimestamps.push(now);
+  if (recoveryTimestamps.length > RECOVERY_BUDGET) {
+    logMain("recover", `recovery budget exceeded (${reason}); recreating window`);
+    recoveryTimestamps = [];
+    try {
+      win.destroy();
+    } catch {
+      /* ignore */
+    }
+    mainWindow = null;
+    createWindow();
+    return;
+  }
+  logMain("recover", `reloading renderer (${reason})`);
+  try {
+    wc.reload();
+  } catch {
+    try {
+      win.destroy();
+    } catch {
+      /* ignore */
+    }
+    mainWindow = null;
+    createWindow();
+  }
+}
+
+// ── Renderer boot watchdog ─────────────────────────────────────────────────
+// The recovery reload above can land on a page that LOADS but never finishes
+// BOOTING — index.html paints its splash, but the app module graph never
+// executes (classic case: the Vite dev server wedged/died during system sleep,
+// so module requests hang; the user sees the "Codara Studio" breathing-square
+// splash forever). The renderer answers health pings from the preload in that
+// state, so ping-based recovery never fires. Instead: App.tsx sends
+// `app:renderer-ready` once React has mounted; every main-frame load arms a
+// timer, and if ready doesn't arrive in time we escalate — reload retries
+// first, then (packaged) a full app relaunch, i.e. exactly the manual
+// quit-and-restart the user does by hand today, or (dev) an explanatory dialog,
+// since relaunching cannot revive a dead external dev server.
+const BOOT_WATCHDOG_MS = 25_000;
+const RELAUNCHED_FLAG = "--spark-boot-relaunch";
+let bootWatchdog: NodeJS.Timeout | null = null;
+let bootFailures = 0;
+ipcMain.on("app:renderer-ready", () => {
+  if (bootWatchdog) {
+    clearTimeout(bootWatchdog);
+    bootWatchdog = null;
+  }
+  bootFailures = 0;
+  logMain("boot", "renderer ready");
+});
+
+function onBootFailure(reason: string): void {
+  bootFailures += 1;
+  logMain("boot", `renderer failed to boot (${reason}); failure #${bootFailures}`);
+  if (bootFailures <= 2) {
+    recoverRenderer(`boot-failure:${reason}`);
+    return;
+  }
+  // Reloads aren't fixing it. Automate the user's manual remedy.
+  if (app.isPackaged && !process.argv.includes(RELAUNCHED_FLAG)) {
+    logMain("boot", "escalating to full app relaunch");
+    app.relaunch({ args: [...process.argv.slice(1), RELAUNCHED_FLAG] });
+    // Skip quit-path cleanup semantics on purpose: nothing useful is running.
+    app.exit(0);
+    return;
+  }
+  logMain("boot", "relaunch unavailable (dev mode or already relaunched); surfacing dialog");
+  bootFailures = 0; // let the user retry after dismissing
+  dialog.showErrorBox(
+    "Codara Studio couldn't finish loading",
+    app.isPackaged
+      ? "The app failed to boot repeatedly. Please quit and start it again; if this persists, check <spark home>/logs/main.log."
+      : "The renderer loaded but the app never booted — in dev mode this usually means the Vite dev server died (e.g. during system sleep). Restart `npm run dev`.",
+  );
+}
+
+function armBootWatchdog(): void {
+  if (bootWatchdog) clearTimeout(bootWatchdog);
+  bootWatchdog = setTimeout(() => {
+    bootWatchdog = null;
+    // The renderer may legitimately still be loading a slow dev rebuild, but
+    // 25s without a mounted React tree is a hang, not a slow boot.
+    onBootFailure("watchdog-timeout");
+  }, BOOT_WATCHDOG_MS);
+  bootWatchdog.unref();
+}
+
+// Tell the renderer a quit is starting, BEFORE we kill any PTY. IPC is delivered
+// to the renderer in send order, so this lands before the pty:exit events that
+// disposeAllGraceful produces — letting the renderer mark teardown and NOT
+// deactivate running agents' restore pointers as their shells die (which would
+// drop the boot-once resume and reopen panes as plain shells). Best-effort.
+function signalRendererBeforeQuit(): void {
+  const wc = mainWindow?.webContents;
+  if (!wc || wc.isDestroyed()) return;
+  try {
+    wc.send("app:before-quit");
+  } catch {
+    /* renderer already gone; the pagehide path covers it */
+  }
+}
+
+// powerMonitor 'resume' handler (debounced by a settle delay at the call site).
+// Two jobs: (1) tell the renderer about PTYs the OS silently killed during
+// sleep so agent panes can auto-resume; (2) reload the window if it came back
+// unresponsive.
+async function onSystemResume(): Promise<void> {
+  try {
+    const swept = pty.sweepDeadSessions();
+    if (swept.length) logMain("power", `resume: swept ${swept.length} dead pty session(s): ${swept.join(", ")}`);
+    else logMain("power", "resume: all pty sessions alive");
+  } catch (err) {
+    logMain("power", `resume: pty sweep failed: ${(err as Error).message}`);
+  }
+  const alive = await pingRenderer();
+  logMain("power", `resume: renderer ping ${alive ? "ok" : "FAILED"}`);
+  if (!alive) recoverRenderer("resume-ping-failed");
 }
 
 // Remove the tray icon entirely (called when keepRunningInBackground is toggled
@@ -302,15 +526,65 @@ function createWindow(): void {
     fsWatcher.disposeForWebContents(windowForEvents.webContents);
   });
 
-  // Surface renderer process crashes (the "everything goes black" symptom).
-  // Without this, Chromium kills the renderer silently and the dev console
-  // appears empty because the page that owned it was killed.
-  mainWindow.webContents.on("render-process-gone", (_e, details) => {
-    console.error("[main] renderer process gone", details);
+  // Renderer process crash (the "everything goes black" symptom, classically
+  // triggered by a GPU/renderer death across a Windows sleep/resume cycle).
+  // Auto-recover by reloading — PTYs live in main, so the reloaded page
+  // re-hydrates and reattaches/resumes each pane. 'clean-exit' is our own
+  // reload/destroy, so don't fight it.
+  windowForEvents.webContents.on("render-process-gone", (_e, details) => {
+    logMain("crash", `renderer process gone: ${details.reason} (exitCode ${details.exitCode})`);
+    if (details.reason === "clean-exit") return;
+    recoverRenderer(`render-process-gone:${details.reason}`);
   });
-  mainWindow.webContents.on("unresponsive", () => {
-    console.error("[main] renderer unresponsive");
+  // Renderer wedged (JS main thread blocked). Give it a grace period to recover
+  // on its own; if it's still stuck, force a crash (→ render-process-gone →
+  // reload). Cleared the moment it becomes responsive again.
+  windowForEvents.webContents.on("unresponsive", () => {
+    logMain("crash", "renderer unresponsive");
+    if (unresponsiveTimer) return;
+    unresponsiveTimer = setTimeout(() => {
+      unresponsiveTimer = null;
+      const wc = mainWindow?.webContents;
+      if (!wc || wc.isDestroyed()) return;
+      logMain("crash", "renderer still unresponsive after grace; forcing recovery");
+      try {
+        // Fires render-process-gone(reason:'crashed'), which recovers. If it
+        // throws (already gone), recover directly.
+        wc.forcefullyCrashRenderer();
+      } catch {
+        recoverRenderer("unresponsive-timeout");
+      }
+    }, 5000);
+    unresponsiveTimer.unref();
   });
+  windowForEvents.webContents.on("responsive", () => {
+    if (unresponsiveTimer) {
+      clearTimeout(unresponsiveTimer);
+      unresponsiveTimer = null;
+    }
+  });
+  // Boot watchdog: every main-frame load must produce a mounted React app
+  // (app:renderer-ready) within the timeout, else onBootFailure escalates.
+  // did-finish-load fires for initial load AND every recovery reload.
+  windowForEvents.webContents.on("did-finish-load", () => {
+    armBootWatchdog();
+  });
+  // The page itself failed to load (dead dev server, missing asset). Retry via
+  // the same escalation ladder after a short delay — an immediate reload against
+  // a dead server would just fail again in a tight loop.
+  windowForEvents.webContents.on(
+    "did-fail-load",
+    (_e, errorCode, errorDescription, _validatedURL, isMainFrame) => {
+      if (!isMainFrame || errorCode === -3 /* ERR_ABORTED: reload/navigation race */) return;
+      logMain("boot", `main frame failed to load: ${errorCode} ${errorDescription}`);
+      if (bootWatchdog) {
+        clearTimeout(bootWatchdog);
+        bootWatchdog = null;
+      }
+      const retry = setTimeout(() => onBootFailure(`did-fail-load:${errorCode}`), 2000);
+      retry.unref();
+    },
+  );
   mainWindow.webContents.on("preload-error", (_e, preloadPath, error) => {
     console.error("[main] preload error", preloadPath, error);
   });
@@ -323,7 +597,15 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
+  // Lost the single-instance lock — another Codara Studio owns it. app.quit()
+  // was already called; bail before doing any startup work or opening a window.
+  if (!ownsSingleInstanceLock) return;
+
   ensureSparkHomeSync();
+  logMain(
+    "boot",
+    `app start pid=${process.pid} packaged=${app.isPackaged} relaunched=${process.argv.includes(RELAUNCHED_FLAG)}`,
+  );
 
   // Install Codara's Python hooks into ~/.claude/settings.json so every
   // Claude Code session pipes SessionStart / PreToolUse / Notification / Stop
@@ -481,6 +763,26 @@ app.whenReady().then(async () => {
     console.warn("[main] hook RPC failed to start:", err);
   }
 
+  // Pane → session-identity registry, fed by SessionStart hook events. Must
+  // be initialized (persisted map loaded) BEFORE the hook watcher below
+  // replays its boot backlog, so backlog records merge newest-wins against
+  // the previous run instead of racing an empty map. The broadcast lands in
+  // the renderer as `agentSession:started` so live panes track `/clear` and
+  // `/resume` id changes the moment they happen.
+  try {
+    await initAgentSessionRegistry({
+      dir: sparkHome(),
+      log: (line) => logMain("restore", line),
+      broadcast: (rec) => {
+        const wc = mainWindow?.webContents;
+        if (!wc || wc.isDestroyed()) return;
+        wc.send("agentSession:started", rec);
+      },
+    });
+  } catch (err) {
+    console.warn("[main] agent-session registry failed to init:", err);
+  }
+
   // CLI hook ingestion watcher (big-bet "CLI hook ingestion — free
   // observability"). The installer (called earlier in app.whenReady) drops
   // spark-hook.py into ~/.claude/settings.json; the watcher consumes the
@@ -500,18 +802,56 @@ app.whenReady().then(async () => {
 
   createWindow();
 
-  // Treat lock as the start of the vulnerable window too: macOS can lock a
-  // moment before the actual suspend event, and remote PTYs may emit final
-  // bytes during that gap. Main buffers those bytes until the renderer has
-  // repaired its xterm/WebGL surface and acknowledges wake via pty.resume().
-  const pauseTerminalDelivery = () => {
+  // System sleep/wake handling. On suspend, checkpoint renderer state (its tab
+  // tree + scrollback), flush main's stores, and pause PTY delivery into a
+  // bounded main-process backlog. Treat lock as the beginning of the vulnerable
+  // window too: macOS can lock before the actual suspend event while remote
+  // PTYs are still producing final bytes.
+  const pauseTerminalDelivery = (reason: "lock-screen" | "suspend") => {
     const count = pty.pauseAllForHostSuspend();
-    if (count > 0) console.log(`[main] buffered ${count} terminal session(s) for host sleep`);
+    if (count > 0) logMain("power", `${reason}: buffered ${count} terminal session(s)`);
   };
-  powerMonitor.on("lock-screen", pauseTerminalDelivery);
-  powerMonitor.on("suspend", pauseTerminalDelivery);
-  powerMonitor.on("resume", () => notifyRenderersOfHostResume("resume"));
-  powerMonitor.on("unlock-screen", () => notifyRenderersOfHostResume("unlock-screen"));
+  powerMonitor.on("lock-screen", () => pauseTerminalDelivery("lock-screen"));
+  powerMonitor.on("suspend", () => {
+    logMain("power", "system suspend");
+    pauseTerminalDelivery("suspend");
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+      try {
+        mainWindow.webContents.send("app:checkpoint");
+      } catch {
+        /* ignore */
+      }
+    }
+    void flushAllStores().catch(() => undefined);
+  });
+  let resumeTimer: NodeJS.Timeout | null = null;
+  powerMonitor.on("resume", () => {
+    logMain("power", "system resume");
+    // Repair/refit renderer-owned xterms before they acknowledge the pause and
+    // drain queued PTY bytes. The delayed sweep below separately handles PTYs
+    // the OS killed and a renderer/GPU process that returned wedged.
+    notifyRenderersOfHostResume("resume");
+    if (resumeTimer) return; // coalesce duplicate resume events
+    resumeTimer = setTimeout(() => {
+      resumeTimer = null;
+      void onSystemResume();
+    }, 1500);
+    resumeTimer.unref();
+  });
+  powerMonitor.on("unlock-screen", () =>
+    notifyRenderersOfHostResume("unlock-screen"),
+  );
+
+  // GPU process death is the classic post-sleep blank-window symptom on Windows
+  // (lost graphics context). Reloading re-initialises the WebGL contexts
+  // xterm's renderer uses. Ignore non-GPU utility-process deaths — they don't
+  // blank the UI and recover on their own.
+  app.on("child-process-gone", (_e, details) => {
+    if (details.type === "GPU") {
+      logMain("crash", `GPU process gone: ${details.reason} (exitCode ${details.exitCode})`);
+      recoverRenderer("gpu-process-gone");
+    }
+  });
 
   // System tray so the app stays reachable while running in the background
   // (close-to-tray). Only created when the user has opted into background
@@ -645,6 +985,9 @@ app.on("window-all-closed", async () => {
   if (!isQuitting && tray && getPreferenceCached("keepRunningInBackground")) {
     return;
   }
+  // Tell the renderer we're quitting BEFORE the PTY teardown flips any restore
+  // pointer inactive (must precede disposeAllGraceful's exit events).
+  signalRendererBeforeQuit();
   // Graceful (bounded) PTY teardown: closing the pseudo-console first lets
   // Claude/Codex CLIs flush their transcripts, so `--resume` works on the
   // next launch; stragglers still get taskkill'd. See disposeAllGraceful.
@@ -687,6 +1030,13 @@ app.on("before-quit", (event) => {
     process.exit(0);
   }, 5000);
   hardExitTimer.unref();
+
+  // Tell the renderer we're quitting BEFORE the async cleanup kills the PTYs, so
+  // it marks teardown and doesn't deactivate running agents' restore pointers as
+  // their shells die (which would drop the boot-once resume). Sent here — while
+  // the renderer is still alive — because on a Cmd+Q / tray Quit the PTYs are
+  // killed before any window unload fires.
+  signalRendererBeforeQuit();
 
   void (async () => {
     try {
