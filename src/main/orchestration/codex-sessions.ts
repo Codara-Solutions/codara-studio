@@ -227,6 +227,8 @@ export async function discoverRolloutForCwd(
     createdAfter?: number;
     /** Resume flows can bind safely by the exact persisted session UUID. */
     sessionUuid?: string;
+    /** Lowercased session UUIDs already bound to other panes — never rebind. */
+    excludeSessionIds?: ReadonlySet<string>;
   },
 ): Promise<string | null> {
   const candidates = await listCandidates(since, spawnDate, new Date());
@@ -235,6 +237,10 @@ export async function discoverRolloutForCwd(
   let fallback: string | null = null;
   for (const candidate of candidates) {
     if (opts?.excludePaths?.has(candidate.path)) continue;
+    if (opts?.excludeSessionIds?.size) {
+      const uuid = extractSessionUuid(candidate.path)?.toLowerCase();
+      if (uuid && opts.excludeSessionIds.has(uuid)) continue;
+    }
     if (
       opts?.sessionUuid &&
       extractSessionUuid(candidate.path)?.toLowerCase() !== opts.sessionUuid.toLowerCase()

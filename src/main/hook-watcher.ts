@@ -27,6 +27,7 @@ import { promises as fs, type FSWatcher } from "node:fs";
 import { watch as fsWatch } from "node:fs";
 import { join } from "node:path";
 
+import { recordSessionStart } from "./agent-session-registry";
 import { sparkHome } from "./spark-home";
 
 type RunStoreModule = typeof import("./orchestration/run-store");
@@ -406,13 +407,48 @@ async function dispatchEnvelope(state: WatcherState, envelope: HookFileEnvelope)
     return;
   }
 
-  const runStore = await loadRunStore(state);
-  if (!runStore) return;
-
   const payloadObj =
     envelope.payload && typeof envelope.payload === "object" && !Array.isArray(envelope.payload)
       ? (envelope.payload as Record<string, unknown>)
       : null;
+
+  // Bind pane → session identity BEFORE the run-store dispatch: the registry
+  // is what terminal-pane restore resumes from, and it must not lose a
+  // capture to a run-store import failure. SessionStart fires with the real
+  // session id on startup, `--resume`, in-TUI `/resume`, and `/clear` — the
+  // flows the filesystem-discovery heuristic can't see (they append to an
+  // old transcript or swap ids without creating a file). UserPromptSubmit and
+  // Stop feed the same map so the binding tracks the session the user is
+  // ACTUALLY talking to: a `claude -p` one-shot spawned inside the pane (an
+  // agent's Bash tool, a quick question) fires its own SessionStart with the
+  // same SPARK_PANE_ID, but the interactive session's next prompt/turn-end
+  // re-binds the pane, so the one-shot can't permanently steal restore.
+  if (
+    envelope.hookName === "SessionStart" ||
+    envelope.hookName === "UserPromptSubmit" ||
+    envelope.hookName === "Stop"
+  ) {
+    const boundSessionId = stringField(payloadObj, ["session_id", "sessionId", "id"]);
+    if (boundSessionId) {
+      recordSessionStart({
+        paneId: envelope.paneId,
+        runtime: "claude",
+        sessionId: boundSessionId,
+        transcriptPath: stringField(payloadObj, ["transcript_path", "transcriptPath"]),
+        cwd: stringField(payloadObj, ["cwd"]),
+        source:
+          envelope.hookName === "SessionStart"
+            ? stringField(payloadObj, ["source"])
+            : envelope.hookName === "Stop"
+              ? "stop"
+              : "prompt",
+        timestamp: envelope.timestamp,
+      });
+    }
+  }
+
+  const runStore = await loadRunStore(state);
+  if (!runStore) return;
 
   switch (envelope.hookName) {
     case "Notification": {

@@ -38,6 +38,7 @@ import TerminalStack from "./tabs/TerminalStack";
 import PreviewStack from "./tabs/PreviewStack";
 import { setOpenPreviewTabFn } from "./components/Preview/registry";
 import { setCloseAgentTerminalFn, setCreateAgentTerminalFn } from "./components/Terminal/terminalRegistry";
+import { mergeSessionStart } from "./components/Terminal/resume-policy";
 import DiffStack from "./tabs/DiffStack";
 import { useSharedGitStatus } from "./git/useSharedGitStatus";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
@@ -85,6 +86,7 @@ import {
 } from "./routing/enumerate-open-workers";
 import { useGlobalRuns } from "./lib/useGlobalRuns";
 import { isRunningStatus } from "./lib/run-status";
+import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
 import {
   buildAwayDigest,
   compareRunsByAttention,
@@ -1181,6 +1183,60 @@ export default function App() {
       tabsRef.current.openAutomationsTab();
     });
     return () => off();
+  }, []);
+
+  // Main signals a quit is starting BEFORE it kills the PTYs (before-quit /
+  // window-all-closed). Mark teardown so the pty:exit events that quit produces
+  // don't deactivate running agents' restore pointers — otherwise the boot-once
+  // resume is dropped and panes reopen as plain shells (the "resume only works
+  // sometimes" bug). pagehide/beforeunload also set this, but on a Cmd+Q / tray
+  // Quit the PTYs are killed while the renderer is still alive, before any
+  // unload fires — so this earlier main-driven signal is what makes it reliable.
+  useEffect(() => {
+    const off = window.spark.app.onBeforeQuit?.(() => {
+      markAppTearingDown();
+    });
+    return () => off?.();
+  }, []);
+
+  // Live pane → session-identity updates from the SessionStart hook. This is
+  // what keeps a pane's restore pointer tracking in-TUI `/resume` and `/clear`
+  // — both swap the session id with no filesystem signal, so the discovery
+  // capture below never sees them and the pointer would go stale until the
+  // next boot's registry heal. Panes in hidden workspace layers miss this
+  // write (setLeafAgentSession only reaches the active workspace); their
+  // pointers heal from the registry at next mount instead.
+  useEffect(() => {
+    const off = window.spark.agentSession.onStarted?.((rec) => {
+      const t = tabsRef.current;
+      for (const tab of t.tabs) {
+        if (tab.kind !== "terminal") continue;
+        const leaf = findLeafByPaneId(tab.root, rec.paneId);
+        if (!leaf) continue;
+        const healed = mergeSessionStart(leaf.agentSession ?? null, rec);
+        if (healed) {
+          t.setLeafAgentSession(tab.id, rec.paneId, {
+            ...healed,
+            // The hook fired because a session is starting in this pane right
+            // now, but `active` is the running-at-quit judgment the poller
+            // owns — only assert it when the TUI is already confirmed live
+            // (the poller's next tick keeps it correct either way).
+            active:
+              paneRuntimeRef.current.get(rec.paneId)?.altScreenActive === true ||
+              healed.active === true,
+          });
+        }
+        return;
+      }
+    });
+    return () => off?.();
+  }, []);
+
+  // Boot handshake for main's renderer watchdog: React is mounted, the boot
+  // splash is gone. If a loaded page never sends this, main escalates recovery
+  // instead of leaving the user staring at the breathing-square splash.
+  useEffect(() => {
+    window.spark.app.signalReady?.();
   }, []);
 
   // Theme the entire UI with the active workspace's color. Falls back to the
@@ -2723,7 +2779,15 @@ export default function App() {
       // `active` here would wrongly restore on the next boot. The poller's
       // running:false usually lands first; this covers a pty that dies without
       // the TUI ever leaving alt-screen (kill, crash, window-manager teardown).
-      if (leaf.agentSession?.active) {
+      //
+      // EXCEPT during app teardown: at quit, disposeAllGraceful kills every
+      // pane's shell, firing pty:exit into the still-alive renderer. Deactivating
+      // here would persist active:false and DROP the boot-once resume — the pane
+      // comes back a plain shell and the user has to `--resume` by hand. When the
+      // app is tearing down, the agent WAS running (we're the ones killing it),
+      // so keep active:true so the next launch resumes it. Which quit path won
+      // the race with the final persist was the "resume only works sometimes" bug.
+      if (leaf.agentSession?.active && !isAppTearingDown()) {
         t.setLeafAgentSession(tabId, paneId, { ...leaf.agentSession, active: false });
       }
       if (!leaf.worker) return;
@@ -2835,11 +2899,42 @@ export default function App() {
         const capCwd = leaf.cwd ?? paneRuntimeRef.current.get(paneId)?.cwd;
         if (capCwd) {
           capturingPanesRef.current.add(paneId);
+          // Session ids already bound to OTHER panes (any tab, any runtime).
+          // Discovery must never rebind one of these to this pane: two agents
+          // launched in the same cwd inside the discovery window would both
+          // bind the newest transcript, and the earlier pane's conversation
+          // would silently drop out of restore.
+          const excludeSessionIds: string[] = [];
+          const collectBoundSessions = (node: PaneNode): void => {
+            if (node.kind === "leaf") {
+              if (node.paneId !== paneId && node.agentSession?.sessionId) {
+                excludeSessionIds.push(node.agentSession.sessionId);
+              }
+              return;
+            }
+            collectBoundSessions(node.a);
+            collectBoundSessions(node.b);
+          };
+          for (const otherTab of t.tabs) {
+            if (otherTab.kind === "terminal") collectBoundSessions(otherTab.root);
+          }
+          const captureStartedAt = Date.now();
           void window.spark.agentSession
-            .capture({ runtime: capRuntime, cwd: capCwd, sinceMs: Date.now() - 60_000 })
+            .capture({ runtime: capRuntime, cwd: capCwd, sinceMs: Date.now() - 60_000, excludeSessionIds })
             .then((res) => {
               if (res) {
-                tabsRef.current.setLeafAgentSession(tabId, paneId, {
+                // Capture polls up to 15s; a SessionStart hook event (exact
+                // identity, agentSession.onStarted above) may have rebound the
+                // pane meanwhile. Never let this heuristic overwrite it.
+                const tNow = tabsRef.current;
+                const tabNow = tNow.tabs.find((item) => item.id === tabId);
+                const leafNow =
+                  tabNow?.kind === "terminal" ? findLeafByPaneId(tabNow.root, paneId) : null;
+                const pointerCapturedAt = leafNow?.agentSession?.capturedAt
+                  ? Date.parse(leafNow.agentSession.capturedAt)
+                  : 0;
+                if (pointerCapturedAt > captureStartedAt) return;
+                tNow.setLeafAgentSession(tabId, paneId, {
                   runtime: capRuntime,
                   sessionId: res.sessionId,
                   cwd: capCwd,

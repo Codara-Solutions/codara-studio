@@ -45,6 +45,11 @@ export function claudeSessionTranscriptPath(cwd: string, sessionId: string): str
 export async function discoverClaudeSessionForCwd(
   cwd: string,
   since: number,
+  // Lowercased session ids that can NOT be this pane's session (already bound to
+  // other panes). Without this, two `claude`s launched in the same cwd within
+  // the discovery window both bind to the newest transcript — one pane steals
+  // the other's session and its own conversation is lost to restore.
+  excludeSessionIds?: ReadonlySet<string>,
 ): Promise<{ sessionId: string; transcriptPath: string } | null> {
   const dir = claudeProjectsDirForCwd(cwd);
   let entries: string[];
@@ -57,6 +62,7 @@ export async function discoverClaudeSessionForCwd(
   let bestCreated = -1;
   for (const name of entries) {
     if (!name.endsWith(".jsonl")) continue;
+    if (excludeSessionIds?.has(basename(name, ".jsonl").toLowerCase())) continue;
     const path = join(dir, name);
     try {
       const stat = await fs.stat(path);
@@ -79,4 +85,101 @@ export async function discoverClaudeSessionForCwd(
   }
   if (!bestPath) return null;
   return { sessionId: basename(bestPath, ".jsonl"), transcriptPath: bestPath };
+}
+
+/**
+ * Read the tail of a transcript and report whether its final newline-terminated
+ * record is a complete JSON line. An abrupt kill (sleep/crash mid-write) leaves
+ * the head intact — so the head-only resumability scan passes — but truncates
+ * the LAST line, which `claude --resume` can then refuse. `repairable:true`
+ * means "resumable in principle, but the tail needs truncating first".
+ *
+ * Returns `{ repairable: false }` when the tail is clean (or the file can't be
+ * read / is empty), so a healthy transcript is never touched.
+ */
+export async function inspectClaudeTranscriptTail(
+  path: string,
+): Promise<{ repairable: boolean }> {
+  try {
+    const stat = await fs.stat(path);
+    if (!stat.size) return { repairable: false };
+    const handle = await fs.open(path, "r");
+    try {
+      const window = 65_536;
+      const readLen = Math.min(window, stat.size);
+      const buf = Buffer.alloc(readLen);
+      await handle.read(buf, 0, readLen, stat.size - readLen);
+      const text = buf.toString("utf8");
+      // The last record is everything after the final newline. A well-formed
+      // transcript ends with `}\n`, so a non-empty trailing fragment means the
+      // writer was cut mid-line. Verify the fragment is valid JSON; if it parses
+      // it's a complete-but-unterminated last line (harmless), otherwise repair.
+      const lastNl = text.lastIndexOf("\n");
+      const trailing = (lastNl === -1 ? text : text.slice(lastNl + 1)).trim();
+      if (!trailing) return { repairable: false };
+      try {
+        JSON.parse(trailing);
+        return { repairable: false };
+      } catch {
+        return { repairable: true };
+      }
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+  } catch {
+    // Unreadable → don't claim repairable; the resume attempt will surface any
+    // real problem and self-heal.
+    return { repairable: false };
+  }
+}
+
+/**
+ * Truncate a transcript's trailing partial JSON line so `claude --resume`
+ * accepts it. Keeps a `<path>.bak` copy first (best-effort), then rewrites the
+ * file up to and including the last newline that precedes a fully-parseable
+ * record. A no-op when the tail already parses. Claude only — Codex rollout
+ * formats are not safely truncatable this way.
+ *
+ * Returns true when a repair was written.
+ */
+export async function repairClaudeTranscriptTail(path: string): Promise<boolean> {
+  let content: string;
+  try {
+    content = await fs.readFile(path, "utf8");
+  } catch {
+    return false;
+  }
+  if (!content) return false;
+  // Split into lines, dropping a single trailing empty element from the final
+  // newline. Walk backwards to the last line that parses as JSON; everything
+  // after it (the truncated write) is discarded.
+  const hadTrailingNewline = content.endsWith("\n");
+  const lines = content.split("\n");
+  if (hadTrailingNewline) lines.pop(); // remove the empty element after the last \n
+  let lastGood = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    try {
+      JSON.parse(line);
+      lastGood = i;
+      break;
+    } catch {
+      /* keep walking up past truncated / partial lines */
+    }
+  }
+  if (lastGood === -1) return false; // nothing parseable — leave it for self-heal
+  // The last non-empty line already parses → nothing was truncated. A missing
+  // trailing newline is not corruption (`claude --resume` tolerates it), so
+  // don't rewrite just to normalize it.
+  if (lastGood === lines.length - 1) return false;
+  const repaired = lines.slice(0, lastGood + 1).join("\n") + "\n";
+  if (repaired === content) return false;
+  try {
+    await fs.copyFile(path, `${path}.bak`).catch(() => undefined);
+    await fs.writeFile(path, repaired, "utf8");
+    return true;
+  } catch {
+    return false;
+  }
 }

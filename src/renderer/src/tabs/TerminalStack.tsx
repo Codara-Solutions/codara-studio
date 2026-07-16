@@ -358,10 +358,22 @@ function TerminalStack({
     };
     window.addEventListener("pagehide", flushAllScrollback);
     window.addEventListener("beforeunload", flushAllScrollback);
+    // System-suspend checkpoint (main's powerMonitor 'suspend'): flush the same
+    // batch so a process torn down DURING sleep — before any pagehide fires —
+    // still persisted every pane's latest scrollback and its live agentSession
+    // pointers. Reuses the identical builder so the two paths can't drift.
+    const offCheckpoint = window.spark.app.onCheckpoint?.(flushAllScrollback);
+    // Quit-start (main's app:before-quit, BEFORE it kills the PTYs): persist now,
+    // while every running agent's pointer is still active:true (the pty:exit
+    // deactivation is suppressed during teardown). Deterministic persist of the
+    // resume-critical state at quit-start instead of racing the final pagehide.
+    const offBeforeQuit = window.spark.app.onBeforeQuit?.(flushAllScrollback);
     return () => {
       flushAllScrollback();
       window.removeEventListener("pagehide", flushAllScrollback);
       window.removeEventListener("beforeunload", flushAllScrollback);
+      offCheckpoint?.();
+      offBeforeQuit?.();
     };
   }, []);
 
