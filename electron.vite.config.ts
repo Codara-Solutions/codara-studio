@@ -108,6 +108,9 @@ export default defineConfig({
             // keeping it out of the eager "vendor" chunk means the ~1MB
             // library loads only when a PDF is first previewed.
             if (id.includes("pdfjs-dist")) return "pdfjs-vendor";
+            // docx-preview (+ its jszip dep) is only imported by the lazily-
+            // loaded DocxPreview chunk — same reasoning as pdfjs-vendor.
+            if (id.includes("docx-preview") || id.includes("jszip")) return "docx-vendor";
             return "vendor";
           },
         },

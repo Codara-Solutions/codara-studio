@@ -3,9 +3,10 @@ import type { PreviewKind } from "./previewKind";
 import { pathToFileUrl } from "../../lib/pathToFileUrl";
 import { isRemotePath } from "@shared/remote";
 
-// Heavy pdf.js chunk stays out of the eager bundle — same pattern as the
-// lazy mermaid renderer in markdown-preview/MermaidBlock.tsx.
+// Heavy pdf.js / docx-preview chunks stay out of the eager bundle — same
+// pattern as the lazy mermaid renderer in markdown-preview/MermaidBlock.tsx.
 const PdfPreview = lazy(() => import("./PdfPreview"));
+const DocxPreview = lazy(() => import("./DocxPreview"));
 
 interface Props {
   path: string;
@@ -29,7 +30,7 @@ const CHECKER_BG: React.CSSProperties = {
   backgroundPosition: "0 0, 0 8px, 8px -8px, -8px 0",
 };
 
-// FilePreview — visual host for image / svg / pdf / video / audio files.
+// FilePreview — visual host for image / svg / pdf / video / audio / docx files.
 // Content loads via file:// URLs (no byte round-trip through IPC), with a
 // blob-URL fallback fed by fs:readFileBytes for environments where file://
 // subresources are blocked (dev renderer served over http://localhost).
@@ -204,6 +205,22 @@ export default function FilePreview({ path, kind }: Props) {
           )}
         </div>
         {caption}
+      </div>
+    );
+  }
+
+  if (kind === "docx") {
+    return (
+      <div style={{ ...hostStyle, overflow: "hidden" }}>
+        <Suspense
+          fallback={
+            <div style={{ margin: "auto", color: "var(--muted)", fontSize: 12 }}>
+              Loading document viewer…
+            </div>
+          }
+        >
+          <DocxPreview path={path} mtimeMs={stat?.mtimeMs ?? 0} />
+        </Suspense>
       </div>
     );
   }
