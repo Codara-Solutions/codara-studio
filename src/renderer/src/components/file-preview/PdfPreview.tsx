@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import * as pdfjs from "pdfjs-dist";
+// Legacy build required: the modern build assumes Uint8Array.prototype.toHex
+// (Chromium 140+), but Electron 32 ships Chromium 128 — every document load
+// died with "a.toHex is not a function" while computing the fingerprint.
+import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 // Vite bundles the worker as a same-origin asset, so `script-src 'self'`
 // (which worker-src falls back to) covers it — no CDN, no CSP exception.
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
