@@ -67,9 +67,10 @@ export interface Workspace {
   // what makes delete remove the worktree instead of just dropping the row.
   copyBranch?: {
     repoCwd: string; // source repo the worktree was forked from
-    branch: string; // branch checked out in this worktree (== city in v1)
-    baseBranch: string; // what it forked from, e.g. "main"
-    city: string; // generated slug (directory + branch name)
+    branch: string; // branch checked out in this worktree
+    baseBranch?: string; // fork mode only: what it forked from, e.g. "main"
+    city: string; // directory slug (== branch name in fork mode)
+    mode?: "fork" | "checkout"; // absent (pre-existing workspaces) == "fork"
     createdAt: string; // ISO timestamp
     fileCount?: number; // tracked files copied into the worktree (chat banner)
   };
@@ -894,8 +895,18 @@ export interface GitDiff {
 export type GitOpResult = { ok: true } | { ok: false; error: string };
 
 // Result of git:createCopyWorktree. Shared so renderer + main agree on shape.
+// mode "fork" = new branch created from baseBranch (baseBranch present);
+// mode "checkout" = an existing branch checked out directly (no baseBranch).
 export type GitCopyWorktreeResult =
-  | { ok: true; path: string; branch: string; city: string; baseBranch: string; fileCount: number }
+  | {
+      ok: true;
+      path: string;
+      branch: string;
+      city: string;
+      baseBranch?: string;
+      mode: "fork" | "checkout";
+      fileCount: number;
+    }
   | { ok: false; error: string };
 
 /** Result of asking Inline AI to draft an editable commit message. */
@@ -945,6 +956,12 @@ export interface GitBranch {
   isRemote: boolean;
   lastCommitSubject?: string;
   lastCommitRelativeDate?: string;
+  /**
+   * Absolute path of the worktree this branch is checked out in — including
+   * the main repo's own checkout. Undefined when the branch is free (git
+   * forbids checking out one branch in two worktrees).
+   */
+  worktreePath?: string;
 }
 
 export interface GitBranchList {

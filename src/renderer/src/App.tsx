@@ -28,7 +28,8 @@ import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
 import ToastHost from "./components/Toast";
 import RunSwitcher from "./components/RunSwitcher";
-import { CopyBranchDeleteDialog, CopyBranchErrorToast } from "./components/CopyBranchDialogs";
+import { CopyBranchDeleteDialog } from "./components/CopyBranchDialogs";
+import CreateCopyDialog from "./components/CreateCopyDialog";
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar, { type PickerHints } from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
@@ -250,7 +251,9 @@ export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [copyBranchError, setCopyBranchError] = useState<string | null>(null);
+  const [createCopyDialogWs, setCreateCopyDialogWs] = useState<Workspace | null>(null);
+  const [createCopyBusy, setCreateCopyBusy] = useState(false);
+  const [createCopyError, setCreateCopyError] = useState<string | null>(null);
   const [pendingCopyDelete, setPendingCopyDelete] = useState<Workspace | null>(null);
   const [copyDeleteBusy, setCopyDeleteBusy] = useState(false);
   const [copyDeleteError, setCopyDeleteError] = useState<string | null>(null);
@@ -2115,16 +2118,26 @@ export default function App() {
   );
 
   const createCopyBranchWs = useCallback(
-    async (sourceWs: Workspace) => {
-      const res = await window.spark.git.createCopyWorktree(sourceWs.cwd);
+    async (
+      sourceWs: Workspace,
+      opts?: { baseBranch?: string; checkoutBranch?: string; checkoutIsRemote?: boolean },
+    ) => {
+      setCreateCopyBusy(true);
+      setCreateCopyError(null);
+      const res = await window.spark.git.createCopyWorktree(sourceWs.cwd, opts);
+      setCreateCopyBusy(false);
       if (!res.ok) {
-        setCopyBranchError(res.error);
+        // Surfaced inline by the still-open CreateCopyDialog.
+        setCreateCopyError(res.error);
         return;
       }
+      setCreateCopyDialogWs(null);
       setWorkspaces((list) => {
         const ws: Workspace = {
           id: makeId("ws"),
-          name: res.city,
+          // A checked-out existing branch names the workspace; a fork keeps
+          // the generated city name.
+          name: res.mode === "checkout" ? res.branch : res.city,
           cwd: res.path,
           // Inherit the parent's color so the copy reads as a branch of it.
           color: sourceWs.color,
@@ -2132,8 +2145,9 @@ export default function App() {
           copyBranch: {
             repoCwd: sourceWs.cwd,
             branch: res.branch,
-            baseBranch: res.baseBranch,
+            ...(res.baseBranch ? { baseBranch: res.baseBranch } : {}),
             city: res.city,
+            mode: res.mode,
             createdAt: new Date().toISOString(),
             fileCount: res.fileCount,
           },
@@ -2171,9 +2185,12 @@ export default function App() {
   const handleCreateCopyBranch = useCallback(
     (id: string) => {
       const ws = workspaces.find((w) => w.id === id);
-      if (ws) void createCopyBranchWs(ws);
+      if (ws) {
+        setCreateCopyError(null);
+        setCreateCopyDialogWs(ws);
+      }
     },
-    [workspaces, createCopyBranchWs],
+    [workspaces],
   );
 
   const confirmCopyDelete = useCallback(
@@ -3778,10 +3795,30 @@ export default function App() {
             onDismiss={() => setAwayDigest(null)}
           />
         )}
-        <CopyBranchErrorToast
-          message={copyBranchError}
-          onDismiss={() => setCopyBranchError(null)}
-        />
+        {createCopyDialogWs && (
+          <CreateCopyDialog
+            workspace={createCopyDialogWs}
+            busy={createCopyBusy}
+            error={createCopyError}
+            onDismissError={() => setCreateCopyError(null)}
+            onClose={() => {
+              if (!createCopyBusy) {
+                setCreateCopyDialogWs(null);
+                setCreateCopyError(null);
+              }
+            }}
+            onCreateDefault={() => void createCopyBranchWs(createCopyDialogWs)}
+            onOpenBranch={(b) =>
+              void createCopyBranchWs(createCopyDialogWs, {
+                checkoutBranch: b.name,
+                checkoutIsRemote: b.isRemote,
+              })
+            }
+            onForkFromBranch={(b) =>
+              void createCopyBranchWs(createCopyDialogWs, { baseBranch: b.name })
+            }
+          />
+        )}
         {pendingCopyDelete?.copyBranch && (
           <CopyBranchDeleteDialog
             workspaceName={pendingCopyDelete.name}

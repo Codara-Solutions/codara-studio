@@ -883,16 +883,30 @@ export function registerIpc(): void {
     "git:createCopyWorktree",
     async (
       _e,
-      input: { repoCwd: string; baseBranch?: string; city?: string },
+      input: {
+        repoCwd: string;
+        baseBranch?: string;
+        city?: string;
+        // When set, check this existing branch out instead of forking a new one.
+        checkoutBranch?: string;
+        checkoutIsRemote?: boolean;
+      },
     ): Promise<GitCopyWorktreeResult> => {
-      const { createCopyWorktree } = await getGitWorktrees();
+      const { createCopyWorktree, createCheckoutWorktree } = await getGitWorktrees();
       const worktreesRoot = join(sparkHome(), "worktrees", basename(input.repoCwd));
-      const result = await createCopyWorktree({
-        repoCwd: input.repoCwd,
-        worktreesRoot,
-        baseBranch: input.baseBranch,
-        city: input.city,
-      });
+      const result = input.checkoutBranch
+        ? await createCheckoutWorktree({
+            repoCwd: input.repoCwd,
+            worktreesRoot,
+            branch: input.checkoutBranch,
+            isRemote: input.checkoutIsRemote,
+          })
+        : await createCopyWorktree({
+            repoCwd: input.repoCwd,
+            worktreesRoot,
+            baseBranch: input.baseBranch,
+            city: input.city,
+          });
       if (result.ok) {
         // The new branch is a shared ref — refresh the source repo's panel.
         const { invalidateGitCache } = await getGitOps();

@@ -347,3 +347,70 @@ export function InitRepoIcon(): React.ReactElement {
     </>,
   );
 }
+
+// ── Shared list chrome ───────────────────────────────────────────────────────
+// Group headers, counts, and carets for grouped branch lists — shared by
+// BranchMenu and CreateCopyDialog so the two surfaces stay visually identical.
+
+export function GroupLabel({ text, count }: { text: string; count: number }): React.ReactElement {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        height: 22,
+        padding: "0 10px",
+        color: "var(--muted)",
+      }}
+    >
+      <span
+        style={{
+          fontFamily: "var(--font-sans)",
+          fontSize: 10,
+          letterSpacing: "0.1em",
+          fontWeight: 800,
+          textTransform: "uppercase",
+        }}
+      >
+        {text}
+      </span>
+      <span style={{ flex: 1 }} />
+      <Count value={count} />
+    </div>
+  );
+}
+
+export function Count({ value }: { value: number }): React.ReactElement {
+  return (
+    <span
+      style={{
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        fontVariantNumeric: "tabular-nums",
+        color: "var(--muted-2)",
+      }}
+    >
+      {String(value).padStart(2, "0")}
+    </span>
+  );
+}
+
+export function Empty({ text }: { text: string }): React.ReactElement {
+  return <div style={{ padding: "5px 12px 7px", color: "var(--muted-2)", fontSize: 11 }}>{text}</div>;
+}
+
+export function Caret({ open }: { open: boolean }): React.ReactElement {
+  return (
+    <span
+      aria-hidden
+      style={{
+        display: "inline-flex",
+        transform: open ? "rotate(180deg)" : "rotate(0deg)",
+        transition: "transform var(--motion-fast) var(--ease-out)",
+        color: "var(--muted)",
+      }}
+    >
+      {svg(<path d="M3.5 5.5 7 9l3.5-3.5" />, 1.3)}
+    </span>
+  );
+}

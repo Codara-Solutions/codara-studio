@@ -35,6 +35,7 @@ async function readRefs(cwd: string, namespace: string, isRemote: boolean): Prom
     "%(symref)",
     "%(contents:subject)",
     "%(committerdate:relative)",
+    "%(worktreepath)",
   ].join(UNIT);
 
   const { stdout } = await runGit(cwd, [
@@ -48,7 +49,7 @@ async function readRefs(cwd: string, namespace: string, isRemote: boolean): Prom
   for (const record of stdout.split(REC)) {
     const line = record.replace(/^\r?\n/, "");
     if (!line.trim()) continue;
-    const [name, head, upstream, track, symref, subject, date] = line.split(UNIT);
+    const [name, head, upstream, track, symref, subject, date, worktreePath] = line.split(UNIT);
     if (!name) continue;
     // Skip the symbolic "origin/HEAD -> origin/main" pointer. Its short name
     // collapses to just the remote ("origin"), so a name-shape regex can't see
@@ -64,6 +65,7 @@ async function readRefs(cwd: string, namespace: string, isRemote: boolean): Prom
       isRemote,
       lastCommitSubject: subject || undefined,
       lastCommitRelativeDate: date || undefined,
+      worktreePath: worktreePath?.trim() || undefined,
     });
   }
   return branches;

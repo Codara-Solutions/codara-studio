@@ -5,7 +5,7 @@
 // child_process); the @shared/types import is type-only and erased by esbuild.
 const assert = require("node:assert");
 const { execFileSync } = require("node:child_process");
-const { existsSync, mkdtempSync, writeFileSync, rmSync } = require("node:fs");
+const { existsSync, mkdirSync, mkdtempSync, writeFileSync, rmSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
@@ -15,20 +15,31 @@ function git(cwd, args) {
 
 async function main() {
   const esbuild = require("esbuild");
-  const outFile = path.join(os.tmpdir(), `spark-worktrees-${process.pid}.cjs`);
+  // The bundle must live under the repo so its external require("ssh2")
+  // resolves against our node_modules (os.tmpdir() has no such ancestor).
+  const cacheDir = path.join(__dirname, "..", "node_modules", ".cache");
+  mkdirSync(cacheDir, { recursive: true });
+  const outFile = path.join(cacheDir, `spark-worktrees-${process.pid}.cjs`);
   await esbuild.build({
     entryPoints: [path.join(__dirname, "..", "src", "main", "git-worktrees.ts")],
     bundle: true,
     platform: "node",
     format: "cjs",
     outfile: outFile,
-    external: ["electron"],
+    // git-exec routes ssh:// paths through the remote stack, which drags in
+    // @shared/remote (tsconfig path alias, unknown to esbuild) and ssh2
+    // (native deps). Alias the former, leave the latter a runtime require —
+    // these tests only exercise local paths, and ssh2 resolves from
+    // node_modules if it ever loads.
+    alias: { "@shared": path.join(__dirname, "..", "src", "shared") },
+    external: ["electron", "ssh2", "cpu-features"],
     logLevel: "silent",
   });
   const wt = require(outFile);
 
   const repo = mkdtempSync(path.join(os.tmpdir(), "spark-repo-"));
   const worktreesRoot = mkdtempSync(path.join(os.tmpdir(), "spark-wts-"));
+  const origin = mkdtempSync(path.join(os.tmpdir(), "spark-origin-"));
   try {
     execFileSync("git", ["init", "-b", "main", repo]);
     git(repo, ["config", "user.email", "test@example.com"]);
@@ -132,10 +143,136 @@ async function main() {
       deleteBranch: true,
     });
 
+    // --- createCheckoutWorktree: open an EXISTING branch as a worktree ------
+    assert.strictEqual(r.mode, "fork", "createCopyWorktree result should carry mode fork");
+
+    // Free local branch, slash in the name: real branch checked out, dir slug
+    // flattened.
+    git(repo, ["branch", "feature/topic"]);
+    const co1 = await wt.createCheckoutWorktree({
+      repoCwd: repo,
+      worktreesRoot,
+      branch: "feature/topic",
+    });
+    assert.ok(co1.ok, `checkout create failed: ${co1.ok ? "" : co1.error}`);
+    assert.strictEqual(co1.mode, "checkout", "mode should be checkout");
+    assert.strictEqual(co1.branch, "feature/topic", "branch should keep its real name");
+    assert.strictEqual(path.basename(co1.path), "feature-topic", "dir should be the flattened slug");
+    assert.strictEqual(
+      git(co1.path, ["rev-parse", "--abbrev-ref", "HEAD"]),
+      "feature/topic",
+      "worktree HEAD should be the existing branch",
+    );
+    assert.strictEqual(co1.baseBranch, undefined, "checkout mode has no baseBranch");
+
+    // Occupied local branch (main is checked out in the main repo): git's own
+    // atomic refusal must surface, nothing created.
+    const co2 = await wt.createCheckoutWorktree({ repoCwd: repo, worktreesRoot, branch: "main" });
+    assert.ok(!co2.ok, "checking out an occupied branch should fail");
+    assert.ok(
+      /already used by worktree|already checked out/i.test(co2.error),
+      `error should name the conflict, got: ${co2.error}`,
+    );
+
+    // Remote-tracking cases against a local bare origin.
+    execFileSync("git", ["init", "--bare", origin]);
+    git(repo, ["remote", "add", "origin", origin]);
+    git(repo, ["push", "origin", "main"]);
+    git(repo, ["branch", "shared-free"]);
+    git(repo, ["push", "origin", "shared-free"]);
+    git(repo, ["push", "origin", "main:remote-only"]);
+    git(repo, ["fetch", "origin"]);
+
+    // Remote branch with no local counterpart → new local tracking branch.
+    const co3 = await wt.createCheckoutWorktree({
+      repoCwd: repo,
+      worktreesRoot,
+      branch: "origin/remote-only",
+      isRemote: true,
+    });
+    assert.ok(co3.ok, `remote checkout failed: ${co3.ok ? "" : co3.error}`);
+    assert.strictEqual(co3.branch, "remote-only", "remote prefix should be stripped");
+    assert.strictEqual(
+      git(co3.path, ["rev-parse", "--abbrev-ref", "HEAD"]),
+      "remote-only",
+      "worktree HEAD should be the new local branch",
+    );
+    assert.strictEqual(
+      git(co3.path, ["rev-parse", "--abbrev-ref", "@{upstream}"]),
+      "origin/remote-only",
+      "new local branch should track the remote",
+    );
+
+    // Remote branch whose local counterpart exists and is free → reuse it, no
+    // duplicate branch.
+    const branchesBefore = git(repo, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+      .split("\n")
+      .filter(Boolean);
+    const co4 = await wt.createCheckoutWorktree({
+      repoCwd: repo,
+      worktreesRoot,
+      branch: "origin/shared-free",
+      isRemote: true,
+    });
+    assert.ok(co4.ok, `remote-with-local checkout failed: ${co4.ok ? "" : co4.error}`);
+    assert.strictEqual(co4.branch, "shared-free");
+    const branchesAfter = git(repo, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+      .split("\n")
+      .filter(Boolean);
+    assert.strictEqual(
+      branchesAfter.length,
+      branchesBefore.length,
+      "reusing a free local namesake must not create a duplicate branch",
+    );
+
+    // Remote branch whose local counterpart is occupied → clear refusal.
+    const co5 = await wt.createCheckoutWorktree({
+      repoCwd: repo,
+      worktreesRoot,
+      branch: "origin/main",
+      isRemote: true,
+    });
+    assert.ok(!co5.ok, "remote checkout with occupied local namesake should fail");
+    assert.ok(
+      /already checked out at/i.test(co5.error),
+      `error should name the occupying path, got: ${co5.error}`,
+    );
+
+    // Dir slug collision: a branch whose slug matches an existing worktree dir
+    // gets a numeric suffix.
+    git(repo, ["branch", "feature-topic"]);
+    const co6 = await wt.createCheckoutWorktree({
+      repoCwd: repo,
+      worktreesRoot,
+      branch: "feature-topic",
+    });
+    assert.ok(co6.ok, `slug-collision checkout failed: ${co6.ok ? "" : co6.error}`);
+    assert.strictEqual(
+      path.basename(co6.path),
+      "feature-topic-2",
+      "colliding dir slug should get a -2 suffix",
+    );
+
+    // Removing a checkout-mode workspace without deleteBranch keeps the
+    // pre-existing branch.
+    const coRm = await wt.removeCopyWorktree({
+      repoCwd: repo,
+      worktreePath: co6.path,
+      branch: co6.branch,
+    });
+    assert.ok(coRm.ok, `checkout remove failed: ${coRm.ok ? "" : coRm.error}`);
+    assert.ok(
+      git(repo, ["for-each-ref", "--format=%(refname:short)", "refs/heads"])
+        .split("\n")
+        .includes("feature-topic"),
+      "pre-existing branch must survive worktree removal",
+    );
+
     console.log("PASS: git-worktrees");
   } finally {
     rmSync(repo, { recursive: true, force: true });
     rmSync(worktreesRoot, { recursive: true, force: true });
+    rmSync(origin, { recursive: true, force: true });
     try {
       rmSync(outFile, { force: true });
     } catch {

@@ -60,6 +60,15 @@ export interface CreateCopyWorktreeInput {
   city?: string;
 }
 
+export interface CreateCheckoutWorktreeInput {
+  repoCwd: string;
+  worktreesRoot: string;
+  // Local branch name ("feature/x"), or a remote-tracking ref like
+  // "origin/feature/x" when isRemote is set.
+  branch: string;
+  isRemote?: boolean;
+}
+
 export interface RemoveCopyWorktreeInput {
   repoCwd: string;
   worktreePath: string;
@@ -170,7 +179,83 @@ export async function createCopyWorktree(
     mkdirSync(input.worktreesRoot, { recursive: true });
     await runGit(input.repoCwd, ["worktree", "add", path, "-b", city, baseBranch]);
     const fileCount = await countTrackedFiles(path);
-    return { ok: true, path, branch: city, city, baseBranch, fileCount };
+    return { ok: true, path, branch: city, city, baseBranch, mode: "fork", fileCount };
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
+}
+
+// Branch names may contain characters a directory name can't ("feature/x"),
+// so the worktree dir gets a flattened slug while git checks out the real name.
+export function slugifyBranchName(name: string): string {
+  const slug = name
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || "branch";
+}
+
+// Like pickCity, but seeded from the branch name. Only directory collisions
+// matter here — unlike a fork's city, this slug never becomes a branch name.
+async function pickCheckoutDirName(worktreesRoot: string, branchName: string): Promise<string> {
+  const used = await existingWorktreeDirs(worktreesRoot);
+  const base = slugifyBranchName(branchName);
+  if (!used.has(base)) return base;
+  for (let n = 2; ; n += 1) {
+    const candidate = `${base}-${n}`;
+    if (!used.has(candidate)) return candidate;
+  }
+}
+
+async function branchWorktreePath(repoCwd: string, name: string): Promise<string | null> {
+  const out = await readGitText(repoCwd, [
+    "for-each-ref",
+    "--format=%(worktreepath)",
+    `refs/heads/${name}`,
+  ]);
+  return out.trim() || null;
+}
+
+// Check an EXISTING branch out into a new worktree — the "open this branch as
+// a workspace" half of Create copy (createCopyWorktree is the fork half). For
+// a remote-tracking ref the local namesake is reused when free, or created
+// with tracking when absent. Occupied local branches are left to git's own
+// atomic refusal ("already used by worktree ...") rather than a racy pre-check.
+export async function createCheckoutWorktree(
+  input: CreateCheckoutWorktreeInput,
+): Promise<GitCopyWorktreeResult> {
+  try {
+    const branch = input.branch.trim();
+    if (!branch) return { ok: false, error: "No branch given." };
+    const shortName = input.isRemote ? branch.replace(/^[^/]+\//, "") : branch;
+
+    let addArgs: string[];
+    if (input.isRemote && !(await branchExists(input.repoCwd, shortName))) {
+      // Remote-only branch: create the local counterpart, tracking the remote.
+      addArgs = ["-b", shortName, branch];
+    } else {
+      if (input.isRemote) {
+        // The local namesake exists; only reusable when nothing has it checked
+        // out. Pre-checked here because the free case runs a different command.
+        const usedAt = await branchWorktreePath(input.repoCwd, shortName);
+        if (usedAt) {
+          return {
+            ok: false,
+            error: `Branch '${shortName}' is already checked out at ${usedAt}`,
+          };
+        }
+      }
+      addArgs = [shortName];
+    }
+
+    const dirName = await pickCheckoutDirName(input.worktreesRoot, shortName);
+    const path = join(input.worktreesRoot, dirName);
+    if (existsSync(path)) {
+      return { ok: false, error: `Worktree path already exists: ${path}` };
+    }
+    mkdirSync(input.worktreesRoot, { recursive: true });
+    await runGit(input.repoCwd, ["worktree", "add", path, ...addArgs]);
+    const fileCount = await countTrackedFiles(path);
+    return { ok: true, path, branch: shortName, city: dirName, mode: "checkout", fileCount };
   } catch (err) {
     return { ok: false, error: errorText(err) };
   }

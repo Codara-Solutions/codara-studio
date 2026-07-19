@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitBranch, GitBranchList, GitOpResult } from "@shared/types";
 import { InlineInput } from "../file-icons/InlineInput";
-import { BranchIcon, CheckoutIcon, IconButton, Spinner } from "./git-ui";
+import { BranchIcon, Caret, CheckoutIcon, Count, Empty, GroupLabel, IconButton, Spinner } from "./git-ui";
 
 interface Props {
   cwd: string;
@@ -662,53 +662,6 @@ function TrackBadges({ ahead, behind }: { ahead: number; behind: number }): Reac
   );
 }
 
-function GroupLabel({ text, count }: { text: string; count: number }): React.ReactElement {
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        height: 22,
-        padding: "0 10px",
-        color: "var(--muted)",
-      }}
-    >
-      <span
-        style={{
-          fontFamily: "var(--font-sans)",
-          fontSize: 10,
-          letterSpacing: "0.1em",
-          fontWeight: 800,
-          textTransform: "uppercase",
-        }}
-      >
-        {text}
-      </span>
-      <span style={{ flex: 1 }} />
-      <Count value={count} />
-    </div>
-  );
-}
-
-function Count({ value }: { value: number }): React.ReactElement {
-  return (
-    <span
-      style={{
-        fontFamily: "var(--font-mono)",
-        fontSize: 10,
-        fontVariantNumeric: "tabular-nums",
-        color: "var(--muted-2)",
-      }}
-    >
-      {String(value).padStart(2, "0")}
-    </span>
-  );
-}
-
-function Empty({ text }: { text: string }): React.ReactElement {
-  return <div style={{ padding: "5px 12px 7px", color: "var(--muted-2)", fontSize: 11 }}>{text}</div>;
-}
-
 function FooterButton({
   children,
   disabled,
@@ -822,22 +775,6 @@ function localSvg(children: React.ReactNode, strokeWidth = 1.2): React.ReactElem
     >
       {children}
     </svg>
-  );
-}
-
-function Caret({ open }: { open: boolean }): React.ReactElement {
-  return (
-    <span
-      aria-hidden
-      style={{
-        display: "inline-flex",
-        transform: open ? "rotate(180deg)" : "rotate(0deg)",
-        transition: "transform var(--motion-fast) var(--ease-out)",
-        color: "var(--muted)",
-      }}
-    >
-      {localSvg(<path d="M3.5 5.5 7 9l3.5-3.5" />, 1.3)}
-    </span>
   );
 }
 

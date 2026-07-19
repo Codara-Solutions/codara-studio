@@ -445,12 +445,19 @@ const api = {
     // Copy-branch worktrees
     createCopyWorktree: (
       repoCwd: string,
-      opts?: { baseBranch?: string; city?: string },
+      opts?: {
+        baseBranch?: string;
+        city?: string;
+        checkoutBranch?: string;
+        checkoutIsRemote?: boolean;
+      },
     ): Promise<GitCopyWorktreeResult> =>
       ipcRenderer.invoke("git:createCopyWorktree", {
         repoCwd,
         baseBranch: opts?.baseBranch,
         city: opts?.city,
+        checkoutBranch: opts?.checkoutBranch,
+        checkoutIsRemote: opts?.checkoutIsRemote,
       }),
     removeCopyWorktree: (input: {
       repoCwd: string;

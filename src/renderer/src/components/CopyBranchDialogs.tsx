@@ -1,11 +1,8 @@
 import { useEffect, useState } from "react";
 
-// Two small surfaces for the copy-branch workspace flow:
-//  - CopyBranchDeleteDialog: confirm removing a worktree-backed workspace,
-//    with an opt-in to also delete its branch.
-//  - CopyBranchErrorToast: a transient danger card for create/delete failures
-//    (the app has no generic renderer-side toast push; notifications only flow
-//    from the main process).
+// CopyBranchDeleteDialog: confirm removing a worktree-backed workspace, with
+// an opt-in to also delete its branch. (Create failures surface inline in
+// CreateCopyDialog.)
 
 export function CopyBranchDeleteDialog({
   workspaceName,
@@ -168,71 +165,5 @@ function DialogButton({
     >
       {label}
     </button>
-  );
-}
-
-export function CopyBranchErrorToast({
-  message,
-  onDismiss,
-}: {
-  message: string | null;
-  onDismiss: () => void;
-}) {
-  useEffect(() => {
-    if (!message) return undefined;
-    const id = window.setTimeout(onDismiss, 6_000);
-    return () => window.clearTimeout(id);
-  }, [message, onDismiss]);
-
-  if (!message) return null;
-  return (
-    <div
-      role="alert"
-      className="spark-fade-in"
-      style={{
-        position: "fixed",
-        bottom: 16,
-        left: 16,
-        zIndex: 1100,
-        maxWidth: "min(380px, calc(100vw - 32px))",
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 10,
-        padding: "10px 12px",
-        borderRadius: 8,
-        border: "1px solid color-mix(in oklch, var(--danger) 60%, var(--rule-strong))",
-        background: "color-mix(in oklch, var(--danger) 14%, var(--panel))",
-        boxShadow: "var(--shadow-2)",
-        fontFamily: "var(--font-sans)",
-      }}
-    >
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink)", marginBottom: 2 }}>
-          Copy branch failed
-        </div>
-        <div
-          style={{ fontSize: 12, color: "var(--ink-dim)", lineHeight: 1.4, overflowWrap: "anywhere" }}
-        >
-          {message}
-        </div>
-      </div>
-      <button
-        type="button"
-        aria-label="Dismiss"
-        onClick={onDismiss}
-        style={{
-          appearance: "none",
-          background: "transparent",
-          border: "none",
-          color: "var(--muted)",
-          cursor: "default",
-          fontSize: 16,
-          lineHeight: 1,
-          padding: 4,
-        }}
-      >
-        ×
-      </button>
-    </div>
   );
 }

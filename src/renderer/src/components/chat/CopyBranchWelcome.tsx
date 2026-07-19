@@ -1,9 +1,10 @@
 import type { Workspace } from "@shared/types";
 
 // Conductor-style provenance banner shown in the Codara chat when a freshly
-// created copy-branch workspace has no conversation yet. Mirrors Conductor's
-// three lines: "You're in a new copy of <repo> called <city>", "Branched
-// <branch> from <base>", and "Created <city> and copied N files".
+// created copy-branch workspace has no conversation yet. Fork mode mirrors
+// Conductor's three lines: "You're in a new copy of <repo> called <city>",
+// "Branched <branch> from <base>", "Created <city> and copied N files".
+// Checkout mode ("open an existing branch") rewords the first two.
 
 type CopyBranch = NonNullable<Workspace["copyBranch"]>;
 
@@ -15,6 +16,7 @@ function repoName(repoCwd: string): string {
 export default function CopyBranchWelcome({ copyBranch }: { copyBranch: CopyBranch }) {
   const repo = repoName(copyBranch.repoCwd);
   const files = typeof copyBranch.fileCount === "number" ? copyBranch.fileCount.toLocaleString("en-US") : null;
+  const checkout = copyBranch.mode === "checkout";
   return (
     <div
       style={{
@@ -40,11 +42,29 @@ export default function CopyBranchWelcome({ copyBranch }: { copyBranch: CopyBran
           boxShadow: "var(--lift-hi)",
         }}
       >
-        You're in a new copy of <Mono>{repo}</Mono> called <Mono accent>{copyBranch.city}</Mono>
+        {checkout ? (
+          <>
+            You're in a copy of <Mono>{repo}</Mono> on branch{" "}
+            <Mono accent>{copyBranch.branch}</Mono>
+          </>
+        ) : (
+          <>
+            You're in a new copy of <Mono>{repo}</Mono> called{" "}
+            <Mono accent>{copyBranch.city}</Mono>
+          </>
+        )}
       </div>
 
       <Line icon={<BranchIcon />}>
-        Branched <Mono accent>{copyBranch.branch}</Mono> from <Mono>{copyBranch.baseBranch}</Mono>
+        {checkout || !copyBranch.baseBranch ? (
+          <>
+            Opened existing branch <Mono accent>{copyBranch.branch}</Mono>
+          </>
+        ) : (
+          <>
+            Branched <Mono accent>{copyBranch.branch}</Mono> from <Mono>{copyBranch.baseBranch}</Mono>
+          </>
+        )}
       </Line>
 
       <Line icon={<FolderIcon />}>

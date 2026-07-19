@@ -99,16 +99,16 @@ function normalize(w: Workspace): Workspace {
     typeof cb === "object" &&
     typeof cb.repoCwd === "string" &&
     typeof cb.branch === "string" &&
-    typeof cb.baseBranch === "string" &&
     typeof cb.city === "string" &&
     typeof cb.createdAt === "string"
   ) {
     normalized.copyBranch = {
       repoCwd: cb.repoCwd,
       branch: cb.branch,
-      baseBranch: cb.baseBranch,
       city: cb.city,
       createdAt: cb.createdAt,
+      ...(typeof cb.baseBranch === "string" ? { baseBranch: cb.baseBranch } : {}),
+      ...(cb.mode === "fork" || cb.mode === "checkout" ? { mode: cb.mode } : {}),
       ...(typeof cb.fileCount === "number" ? { fileCount: cb.fileCount } : {}),
     };
   }
