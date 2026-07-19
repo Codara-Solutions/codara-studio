@@ -1,6 +1,6 @@
 {
   "name": "spark-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Codara Studio — cross-platform terminal multiplexer and agent cockpit, driven by Cora, its built-in agent",
   "main": "out/main/index.js",
   "author": "Etienne",
