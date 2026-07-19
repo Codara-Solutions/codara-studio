@@ -57,7 +57,7 @@ test("terminal content stays inside the pane after a WebGL→DOM renderer swap",
   try {
     app = await electron.launch({
       args: ["."],
-      env: { ...process.env, SPARK_USER_DATA_DIR: userDataDir },
+      env: { ...process.env, SPARK_USER_DATA_DIR: userDataDir, CODARA_HOME_DIR: userDataDir, SPARK_HOME_DIR: userDataDir, SPARK_SKIP_LEGACY_MIGRATION: "1" },
     });
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
@@ -161,7 +161,7 @@ test("terminal renderer survives repeated chat↔terminal tab switches", async (
   try {
     app = await electron.launch({
       args: ["."],
-      env: { ...process.env, SPARK_USER_DATA_DIR: userDataDir },
+      env: { ...process.env, SPARK_USER_DATA_DIR: userDataDir, CODARA_HOME_DIR: userDataDir, SPARK_HOME_DIR: userDataDir, SPARK_SKIP_LEGACY_MIGRATION: "1" },
     });
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");

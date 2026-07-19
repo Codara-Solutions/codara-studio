@@ -12,7 +12,13 @@ test("Cora messages keep a readable measure and the terminal remains healthy beh
       args: ["."],
       env: {
         ...process.env,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });
@@ -121,7 +127,13 @@ test("completed Cora turns retain provider-ordered text and tools without duplic
       args: ["."],
       env: {
         ...process.env,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });
@@ -173,7 +185,13 @@ test("message roles stay explicit, explicit rewind works, and Stop preserves cha
       args: ["."],
       env: {
         ...process.env,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });
@@ -313,7 +331,13 @@ test("a rejected Codex launch fails once, stays failed, and never adopts a forei
         HOME: fakeHome,
         SHELL: "/bin/false",
         PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ""}`,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });
@@ -452,7 +476,13 @@ test("Claude manager uses stream-json and preserves streamed text/tool order", a
         ...process.env,
         HOME: fakeHome,
         PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ""}`,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
         // This fixture validates the legacy stream-json parser with a fake
         // executable. Production defaults to the Claude Agent SDK.
@@ -543,7 +573,13 @@ test("Codex manager uses app-server deltas and preserves streamed text/tool orde
         ...process.env,
         HOME: fakeHome,
         PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ""}`,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });

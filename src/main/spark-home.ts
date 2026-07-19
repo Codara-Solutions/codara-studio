@@ -50,6 +50,10 @@ export function sparkHome(): string {
 export function ensureSparkHomeSync(): void {
   const dir = sparkHome();
   mkdirSync(dir, { recursive: true });
+  // Test escape hatch (e2e specs): an isolated throwaway home must stay
+  // pristine — importing the machine's real legacy state (~/.SparkAgent runs,
+  // run-queue) both defeats the isolation and can wedge boot replaying it.
+  if (process.env.SPARK_SKIP_LEGACY_MIGRATION === "1") return;
   const marker = path.join(dir, MIGRATION_MARKER);
   if (existsSync(marker)) return;
 

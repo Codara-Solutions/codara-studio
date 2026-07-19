@@ -179,7 +179,13 @@ function realUserFlowEnv(userDataDir: string): Record<string, string> {
     ...Object.fromEntries(
       Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
     ),
+    // Pin every home override the app honors: a shell inside the dev app
+    // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+    // point this instance at the user's real ~/.Codara state.
     SPARK_USER_DATA_DIR: userDataDir,
+    CODARA_HOME_DIR: userDataDir,
+    SPARK_HOME_DIR: userDataDir,
+    SPARK_SKIP_LEGACY_MIGRATION: "1",
   };
   delete env.SPARK_ENABLE_MANUAL_FALLBACK;
   delete env.SPARK_MANUAL_WORKER_DELAY_MS;

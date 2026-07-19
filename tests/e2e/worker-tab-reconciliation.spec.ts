@@ -15,7 +15,13 @@ test("a live worker pane returns after the renderer misses its preparation event
       args: ["."],
       env: {
         ...process.env,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: userDataDir,
+        CODARA_HOME_DIR: userDataDir,
+        SPARK_HOME_DIR: userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });

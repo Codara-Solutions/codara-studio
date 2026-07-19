@@ -21,7 +21,13 @@ test("autopilot runs from a selected markdown plan", async () => {
       args: ["."],
       env: {
         ...process.env,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: userDataDir,
+        CODARA_HOME_DIR: userDataDir,
+        SPARK_HOME_DIR: userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         // No OpenRouter key + manual fallback → one deterministic "manual"
         // worker task whose pane is a plain shell: nothing external spawns
         // and nothing completes until the test writes the report.
@@ -135,7 +141,13 @@ test("spark chat renders as a workbench tab", async () => {
       args: ["."],
       env: {
         ...process.env,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: userDataDir,
+        CODARA_HOME_DIR: userDataDir,
+        SPARK_HOME_DIR: userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
       },
     });
     const page = await app.firstWindow();
@@ -173,7 +185,13 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
       args: ["."],
       env: {
         ...process.env,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: userDataDir,
+        CODARA_HOME_DIR: userDataDir,
+        SPARK_HOME_DIR: userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
       },
     });
     const page = await app.firstWindow();
@@ -242,7 +260,13 @@ test("runs can be deleted from the run list inline", async () => {
       args: ["."],
       env: {
         ...process.env,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: userDataDir,
+        CODARA_HOME_DIR: userDataDir,
+        SPARK_HOME_DIR: userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
       },
     });
     const page = await app.firstWindow();
@@ -286,7 +310,13 @@ test("run uses the latest selected plan text instead of reusing old worker tasks
       args: ["."],
       env: {
         ...process.env,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: userDataDir,
+        CODARA_HOME_DIR: userDataDir,
+        SPARK_HOME_DIR: userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_ENABLE_MANUAL_FALLBACK: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
@@ -338,7 +368,13 @@ test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
       env: {
         ...process.env,
         PATH: `${fakeBin}${delimiter}${process.env.PATH ?? ""}`,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: userDataDir,
+        CODARA_HOME_DIR: userDataDir,
+        SPARK_HOME_DIR: userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_OPENROUTER_API_KEY: "test-key",
         SPARK_OPENROUTER_BASE_URL: server.baseUrl,
         SPARK_OPENROUTER_MODEL: "test/unsupported-manager",

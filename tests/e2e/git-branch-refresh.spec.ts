@@ -49,7 +49,13 @@ test("branch picker refreshes refs changed outside Codara when opened", async ()
       args: ["."],
       env: {
         ...process.env,
+        // Pin every home override the app honors: a shell inside the dev app
+        // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
+        // point this instance at the user's real ~/.Codara state.
         SPARK_USER_DATA_DIR: userDataDir,
+        CODARA_HOME_DIR: userDataDir,
+        SPARK_HOME_DIR: userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });
@@ -60,7 +66,9 @@ test("branch picker refreshes refs changed outside Codara when opened", async ()
     // two-branch snapshot. Delete through external git, just like a terminal or
     // this coding session would; opening the picker must invalidate that cache.
     const trigger = page.getByTitle(/On branch main/);
-    await expect(trigger).toBeVisible();
+    // First boot in a pristine isolated home does one-time work (path
+    // enrichment, shell probe) before the git panel settles — allow for it.
+    await expect(trigger).toBeVisible({ timeout: 30_000 });
     await execFileAsync("git", ["branch", "-D", "doomed-worktree-branch"], {
       cwd: workspaceDir,
     });

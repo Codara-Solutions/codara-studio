@@ -17,7 +17,7 @@ test("terminal output survives host suspend and resumes into the same xterm", as
   try {
     app = await electron.launch({
       args: ["."],
-      env: { ...process.env, SPARK_USER_DATA_DIR: userDataDir },
+      env: { ...process.env, SPARK_USER_DATA_DIR: userDataDir, CODARA_HOME_DIR: userDataDir, SPARK_HOME_DIR: userDataDir, SPARK_SKIP_LEGACY_MIGRATION: "1" },
     });
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
