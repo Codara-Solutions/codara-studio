@@ -50,6 +50,9 @@ interface RegistryDeps {
 let deps: RegistryDeps | null = null;
 let entries = new Map<string, SessionStartRecord>();
 let persistTimer: NodeJS.Timeout | null = null;
+// In-flight one-time backfill, exposed via agentSessionBackfillSettled() so
+// the test harness (and any shutdown flush) can await it — boot never does.
+let backfillPromise: Promise<void> | null = null;
 // Serialize writes so a slow disk can't interleave two JSON.stringify snapshots.
 let writeChain: Promise<void> = Promise.resolve();
 
@@ -137,6 +140,11 @@ async function loadFromDisk(): Promise<boolean> {
 }
 
 const BACKFILL_BATCH = 64;
+// Hard stop for the backfill sweep. The processed/ dir can hold thousands of
+// files (7-day retention on a busy machine), and a cold first read of them —
+// AV-scanned, just-migrated — has been measured north of 30s. The sweep runs
+// off the boot path, but past this budget the marginal heal isn't worth the IO.
+const BACKFILL_TIME_BUDGET_MS = 20_000;
 
 /**
  * One-time seed for installs that predate the registry: SessionStart events
@@ -155,8 +163,17 @@ async function backfillFromProcessedHooks(): Promise<void> {
   } catch {
     return; // no processed hooks yet — nothing to seed
   }
+  const deadline = Date.now() + BACKFILL_TIME_BUDGET_MS;
+  let scanned = 0;
   let applied = 0;
   for (let i = 0; i < names.length; i += BACKFILL_BATCH) {
+    if (Date.now() > deadline) {
+      deps.log?.(
+        `registry backfill budget hit: scanned ${scanned}/${names.length} processed hooks`,
+      );
+      break;
+    }
+    scanned += Math.min(BACKFILL_BATCH, names.length - i);
     await Promise.all(
       names.slice(i, i + BACKFILL_BATCH).map(async (name) => {
         if (!name.endsWith(".json")) return;
@@ -251,7 +268,21 @@ function schedulePersist(): void {
 export async function initAgentSessionRegistry(opts: RegistryDeps): Promise<void> {
   deps = opts;
   const hadFile = await loadFromDisk();
-  if (!hadFile) await backfillFromProcessedHooks();
+  if (!hadFile) {
+    // Deliberately NOT awaited. A just-migrated processed/ history (thousands
+    // of small files, cold AV-scanned reads) once stalled boot 30s+ before the
+    // first window existed. applySessionStart is newest-wins and order-
+    // independent, so this sweep merging concurrently with the hook watcher's
+    // live/backlog ingest is safe — it must never gate first paint.
+    backfillPromise = backfillFromProcessedHooks().catch((err) =>
+      deps?.log?.(`registry backfill failed: ${(err as Error)?.message ?? String(err)}`),
+    );
+  }
+}
+
+/** Resolves once the one-time backfill (if any started) has settled. */
+export function agentSessionBackfillSettled(): Promise<void> {
+  return backfillPromise ?? Promise.resolve();
 }
 
 /**
@@ -286,6 +317,7 @@ export function latestSessionStart(paneId: string): SessionStartRecord | null {
 export function __resetAgentSessionRegistryForTest(): void {
   deps = null;
   entries = new Map();
+  backfillPromise = null;
   if (persistTimer) {
     clearTimeout(persistTimer);
     persistTimer = null;

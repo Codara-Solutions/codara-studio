@@ -40,6 +40,7 @@ async function main() {
   const {
     applySessionStart,
     initAgentSessionRegistry,
+    agentSessionBackfillSettled,
     recordSessionStart,
     latestSessionStart,
     __resetAgentSessionRegistryForTest,
@@ -180,6 +181,9 @@ async function main() {
 
     __resetAgentSessionRegistryForTest();
     await initAgentSessionRegistry({ dir: seedDir });
+    // The backfill no longer blocks init (it once stalled boot 30s+ on a large
+    // migrated history) — tests await its settlement explicitly.
+    await agentSessionBackfillSettled();
     check(
       "backfill: newest processed SessionStart wins",
       latestSessionStart("pane-bf")?.sessionId === "sess-bf-2",
@@ -194,6 +198,7 @@ async function main() {
     });
     __resetAgentSessionRegistryForTest();
     await initAgentSessionRegistry({ dir: seedDir });
+    await agentSessionBackfillSettled();
     check(
       "backfill: runs once (persisted file is the marker)",
       latestSessionStart("pane-bf")?.sessionId === "sess-bf-2",
