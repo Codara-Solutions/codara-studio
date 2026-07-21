@@ -37,7 +37,10 @@ test("hidden workspace terminal chip keeps receiving agent state", async () => {
     // manual worker chip and the main notifier registers the pane naturally.
     await page.getByRole("tab", { name: /terminals/i }).click();
     const terminalInput = page.locator(".xterm-helper-textarea:visible").first();
-    await terminalInput.click();
+    // Focus directly: on compact Electron test windows the pane's drag handle
+    // can overlap the textarea's zero-width accessibility host even though the
+    // terminal itself is fully visible and interactive.
+    await terminalInput.focus();
     await terminalInput.pressSequentially(fixture.fakeCodex, { delay: 2 });
     await terminalInput.press("Enter");
     await expect(page.getByRole("status", { name: "CODEX working" })).toBeVisible({

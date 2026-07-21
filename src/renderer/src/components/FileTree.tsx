@@ -138,6 +138,53 @@ interface FileNode {
 
 type Node = (DirNode & { kind: "dir" }) | (FileNode & { kind: "file" });
 
+// Switching workspaces remounts FileTree to reset Virtuoso's DOM/scroll state,
+// but rebuilding the entire expanded tree made larger projects visibly lag
+// behind the workspace click. Retain a small LRU of the in-memory tree models:
+// returning to a recent workspace paints its files immediately, then the normal
+// async reload/watch path reconciles the snapshot with disk.
+const FILE_TREE_CACHE_LIMIT = 12;
+const fileTreeCache = new Map<string, DirNode & { kind: "dir" }>();
+const expandedPathsByWorkspace = new Map<string, Set<string>>();
+
+function restoreExpandedPaths(cwd: string, node: Node): void {
+  if (node.kind !== "dir") return;
+  if (node.entry.path !== cwd) {
+    node.open = expandedPathsByWorkspace.get(cwd)?.has(node.entry.path) ?? node.open;
+  }
+  for (const child of node.children) restoreExpandedPaths(cwd, child);
+}
+
+function rememberExpandedPath(cwd: string, path: string, expanded: boolean): void {
+  let paths = expandedPathsByWorkspace.get(cwd);
+  if (!paths) {
+    paths = new Set<string>();
+    expandedPathsByWorkspace.set(cwd, paths);
+  }
+  if (expanded) paths.add(path);
+  else paths.delete(path);
+}
+
+function cachedFileTree(cwd: string): (DirNode & { kind: "dir" }) | null {
+  const cached = fileTreeCache.get(cwd);
+  if (!cached) return null;
+  fileTreeCache.delete(cwd);
+  fileTreeCache.set(cwd, cached);
+  restoreExpandedPaths(cwd, cached);
+  return cached;
+}
+
+function rememberFileTree(cwd: string, root: DirNode & { kind: "dir" }): void {
+  fileTreeCache.delete(cwd);
+  fileTreeCache.set(cwd, root);
+  while (fileTreeCache.size > FILE_TREE_CACHE_LIMIT) {
+    const oldest = fileTreeCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    fileTreeCache.delete(oldest);
+    expandedPathsByWorkspace.delete(oldest);
+  }
+}
+
 interface Props {
   cwd: string;
   activePath?: string | null;
@@ -199,7 +246,13 @@ export default function FileTree({
   onToggleCollapse,
   headerDrag,
 }: Props) {
-  const [root, setRoot] = useState<DirNode & { kind: "dir" }>(() => makeDir({ name: basename(cwd), path: cwd, isDir: true }, true));
+  const [root, setRoot] = useState<DirNode & { kind: "dir" }>(() => {
+    const cached = cachedFileTree(cwd);
+    if (cached) return cached;
+    const initial = makeDir({ name: basename(cwd), path: cwd, isDir: true }, true);
+    rememberFileTree(cwd, initial);
+    return initial;
+  });
   const [contextMenu, setContextMenu] = useState<FileContextMenu | null>(null);
   // Minimal right-click menu for blank Explorer space (no row under the
   // pointer): a single Paste action. Row right-clicks use `contextMenu`
@@ -305,10 +358,13 @@ export default function FileTree({
   // Reload when cwd changes
   useEffect(() => {
     let cancelled = false;
-    const next: DirNode & { kind: "dir" } = makeDir(
-      { name: basename(cwd), path: cwd, isDir: true },
-      true,
-    );
+    const next =
+      cachedFileTree(cwd) ??
+      makeDir(
+        { name: basename(cwd), path: cwd, isDir: true },
+        true,
+      );
+    rememberFileTree(cwd, next);
     setRoot(next);
     setContextMenu(null);
     setRenamingPath(null);
@@ -318,7 +374,22 @@ export default function FileTree({
     setSelectionRect(null);
     marqueeSelectionRef.current = null;
     rowElementsRef.current.clear();
-    (async () => {
+    void (async () => {
+      if (next.loaded) {
+        // Paint the retained tree now; reconcile it in the background. The
+        // watcher effect below performs another safe reconciliation once the
+        // main-process watch root is armed, covering changes made while away.
+        try {
+          await reloadExpandedTreeInPlace(next);
+          if (!cancelled) {
+            restoreExpandedPaths(cwd, next);
+            force((n) => n + 1);
+          }
+        } catch {
+          // Keep the usable cached tree; the watcher/retry path can heal it.
+        }
+        return;
+      }
       // A freshly-created workspace can race the main-process read sandbox:
       // this effect runs before App finishes registering `cwd` as an allowed
       // root, so the first `fs:list` may reject with "Path not allowed". Retry
@@ -326,13 +397,26 @@ export default function FileTree({
       // lands in the allowlist a tick later, instead of sitting at "Loading…".
       const children = await loadDirWithRetry(cwd, () => cancelled);
       if (cancelled || children === null) return;
-      next.children = children;
+      // The watcher-arm reconciliation can finish before this initial read.
+      // Preserve any directory nodes it already installed (including a folder
+      // the user expanded meanwhile) instead of replacing them with closed
+      // nodes from the slower request.
+      const currentDirs = new Map(
+        next.children
+          .filter((child): child is DirNode & { kind: "dir" } => child.kind === "dir")
+          .map((child) => [child.entry.path, child]),
+      );
+      next.children = children.map((child) =>
+        child.kind === "dir" ? currentDirs.get(child.entry.path) ?? child : child,
+      );
+      restoreExpandedPaths(cwd, next);
       next.loaded = true;
       next.loading = false;
       force((n) => n + 1);
     })();
     return () => {
       cancelled = true;
+      rememberFileTree(cwd, next);
     };
   }, [cwd]);
 
@@ -350,8 +434,9 @@ export default function FileTree({
       node.loading = false;
     }
     node.open = !node.open;
+    rememberExpandedPath(cwd, node.entry.path, node.open);
     force((n) => n + 1);
-  }, []);
+  }, [cwd]);
 
   const expandDir = useCallback(async (node: DirNode & { kind: "dir" }) => {
     if (node.open && node.loaded) return;
@@ -410,8 +495,11 @@ export default function FileTree({
       );
       if (cancelled || armed === null) return;
       try {
-        await reloadDirInPlace(rootRef.current);
-        if (!cancelled) force((n) => n + 1);
+        await reloadExpandedTreeInPlace(rootRef.current);
+        if (!cancelled) {
+          restoreExpandedPaths(cwd, rootRef.current);
+          force((n) => n + 1);
+        }
       } catch {
         // Non-fatal: the watcher is armed, so subsequent changes still refresh.
       }
@@ -430,7 +518,10 @@ export default function FileTree({
       }
       if (matches.length === 0) return;
       void Promise.all(matches.map((d) => reloadDirInPlace(d))).then(() => {
-        if (!cancelled) force((n) => n + 1);
+        if (!cancelled) {
+          restoreExpandedPaths(cwd, rootRef.current);
+          force((n) => n + 1);
+        }
       });
     });
     return () => {
@@ -1795,6 +1886,19 @@ async function reloadDirInPlace(dir: DirNode & { kind: "dir" }): Promise<void> {
   });
   dir.loaded = true;
   dir.error = undefined;
+}
+
+// Reconcile everything the user can currently see, not just the root. Cached
+// expanded folders may have changed while another workspace owned the single
+// filesystem watcher; refreshing the open subtree makes the instant cached
+// paint converge without forcing the user to collapse/reopen each directory.
+async function reloadExpandedTreeInPlace(dir: DirNode & { kind: "dir" }): Promise<void> {
+  await reloadDirInPlace(dir);
+  const visibleChildren = dir.children.filter(
+    (child): child is DirNode & { kind: "dir" } =>
+      child.kind === "dir" && child.open && child.loaded,
+  );
+  await Promise.all(visibleChildren.map((child) => reloadExpandedTreeInPlace(child)));
 }
 
 function collectMatchingDirs(

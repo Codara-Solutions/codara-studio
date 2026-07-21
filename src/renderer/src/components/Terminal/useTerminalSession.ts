@@ -560,6 +560,11 @@ export function useTerminalSession({
   const hiddenBufferRef = useRef<Uint8Array[]>([]);
   const hiddenBytesRef = useRef<number>(0);
   const hiddenLineBreaksRef = useRef<number>(0);
+  // A visible pane can still be catching up on output accumulated while its
+  // workspace was hidden. Keep newly arriving bytes behind that backlog until
+  // the deferred replay has been enqueued, otherwise fresh output could reach
+  // xterm before the older bytes and render out of order.
+  const hiddenReplayPendingRef = useRef<boolean>(false);
   // Keep a deep hidden-output reserve. A laptop can remain locked/asleep for
   // hours while a remote PTY or buffered local process still has output ready
   // on wake; a few full-screen TUI redraws are not enough to reconstruct the
@@ -638,7 +643,7 @@ export function useTerminalSession({
   // (which is captured once per sessionId) reads the current flag instead
   // of the stale value from mount time.
   const visibleRef = useRef<boolean>(visible);
-  useEffect(() => {
+  useLayoutEffect(() => {
     visibleRef.current = visible;
   }, [visible]);
   // Non-null only while xterm is parsing bytes that must not be treated as a
@@ -2261,7 +2266,7 @@ export function useTerminalSession({
         // just stash the raw bytes. They'll be flushed in one write on the
         // next visible-transition. PTY keeps streaming; only the renderer-side
         // rendering cost is deferred.
-        if (!visibleRef.current) {
+        if (!visibleRef.current || hiddenReplayPendingRef.current) {
           // writeWhileHidden (persistent chat backend terminal): DON'T stash —
           // write straight into xterm even while hidden. This pane eager-attaches
           // when the PTY appears, usually before the user opens the Terminal
@@ -3094,31 +3099,54 @@ export function useTerminalSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
-  // Flush buffered PTY bytes the moment the pane comes back on screen.
-  // Runs BEFORE the fit/focus layout effect below so the visible buffer is
-  // populated when xterm reflows. Tracks the previous visibility in a ref
-  // so the flush only fires on a real false→true transition — the initial
-  // mount (prev=undefined, current=true) is treated as a no-op since the
-  // buffer is empty anyway, but the guard keeps that invariant explicit.
+  // Mark a hidden→visible transition synchronously with the commit so PTY
+  // bytes arriving before the post-paint drain stay ordered behind the hidden
+  // backlog. Crucially, this layout effect does NO merging or xterm writes:
+  // those were previously on React's pre-paint path, and a few busy panes with
+  // multi-megabyte backlogs made workspace clicks visibly stall.
   const prevVisibleRef = useRef<boolean | null>(null);
   useLayoutEffect(() => {
     const prev = prevVisibleRef.current;
     prevVisibleRef.current = visible;
-    if (!visible) return;
+    if (!visible) {
+      hiddenReplayPendingRef.current = false;
+      return;
+    }
     if (prev === false && hiddenBufferRef.current.length > 0) {
-      const term = termRef.current;
-      if (term) {
-        // Coalesce all chunks into one write so xterm's parser sees a single
-        // contiguous stream — partial ANSI sequences across chunk boundaries
-        // still reassemble correctly because the bytes are concatenated in
-        // arrival order.
+      hiddenReplayPendingRef.current = true;
+    }
+  }, [visible]);
+
+  // Let the newly selected workspace paint once, then coalesce and enqueue its
+  // hidden output. requestAnimationFrame + a zero-delay task is intentional:
+  // an rAF callback itself still runs before paint, while the following task
+  // runs after that frame has been presented. xterm preserves write ordering,
+  // and the pending flag above keeps live bytes in this same batch until the
+  // replay has entered xterm's queue.
+  useEffect(() => {
+    if (!visible || !hiddenReplayPendingRef.current) return;
+    let timer: number | null = null;
+    const frame = window.requestAnimationFrame(() => {
+      timer = window.setTimeout(() => {
+        timer = null;
+        if (!visibleRef.current || !hiddenReplayPendingRef.current) return;
+        const term = termRef.current;
         const total = hiddenBytesRef.current;
-        const merged = new Uint8Array(total);
-        let off = 0;
-        for (const chunk of hiddenBufferRef.current) {
-          merged.set(chunk, off);
-          off += chunk.length;
+        if (!term || total <= 0 || hiddenBufferRef.current.length === 0) {
+          hiddenReplayPendingRef.current = false;
+          return;
         }
+
+        const merged = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of hiddenBufferRef.current) {
+          merged.set(chunk, offset);
+          offset += chunk.length;
+        }
+        hiddenBufferRef.current = [];
+        hiddenBytesRef.current = 0;
+        hiddenLineBreaksRef.current = 0;
+
         const token = {};
         clearNotificationSuppressionRef.current = token;
         try {
@@ -3131,13 +3159,16 @@ export function useTerminalSession({
           if (clearNotificationSuppressionRef.current === token) {
             clearNotificationSuppressionRef.current = null;
           }
-          /* xterm may dispose mid-flush during a fast tab switch */
+          /* xterm may dispose mid-flush during a fast workspace switch */
+        } finally {
+          hiddenReplayPendingRef.current = false;
         }
-      }
-      hiddenBufferRef.current = [];
-      hiddenBytesRef.current = 0;
-      hiddenLineBreaksRef.current = 0;
-    }
+      }, 0);
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (timer !== null) window.clearTimeout(timer);
+    };
   }, [visible]);
 
   useLayoutEffect(() => {

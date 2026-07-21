@@ -487,44 +487,48 @@ function disposeTerminalTabPanes(tab: Tab): void {
 // JSON.parse + a recursive transient-terminal cleanup walk) only runs once per
 // mount/switch instead of three times. Falls back to the default tab set
 // when nothing is persisted (or the persisted blob is a stale version).
-function initialTabsState(
-  workspaceId: string | null,
-  defaultCwd: string | undefined,
-  scrollbackLineLimit: number,
-): {
+interface InitialTabsStateSnapshot {
   tabs: Tab[];
   activeId: TabId | null;
   closedChatRunIds: string[];
-} {
-  const loaded = loadPersisted(workspaceId, scrollbackLineLimit);
-  // A non-null `loaded` means this workspace HAS persisted tab state — even
+}
+
+function initialTabsStateFromPersisted(loaded: PersistedShape): InitialTabsStateSnapshot {
+  // This workspace HAS persisted tab state — even
   // when its stripped tab list is empty (the user closed every tab, including
   // the Cora chat). Restore exactly that, with no forced chat tab: the
   // App-level sync effect re-derives chat tabs for runs not in
   // closedChatRunIds, and an intentionally empty workspace stays empty. Only a
   // genuine FIRST RUN — loadPersisted returned null (nothing persisted, or a
   // stale-version blob) — gets the defaultTabs seed (draft chat + terminal).
-  if (loaded) {
-    let activeId =
-      loaded.activeId && loaded.tabs.some((t) => t.id === loaded.activeId)
-        ? loaded.activeId
-        : loaded.tabs[0]?.id ?? null;
-    // Never boot onto a restored preview: its dev server is almost certainly
-    // dead after a restart, and landing there hides the chat composer (the
-    // center routes everything through one active id). Prefer the chat tab so
-    // the app always opens on something the user can act in.
-    const resolved = activeId ? loaded.tabs.find((t) => t.id === activeId) : null;
-    if (resolved?.kind === "preview") {
-      activeId = loaded.tabs.find((t) => t.kind === "chat")?.id ?? activeId;
-    }
-    return {
-      tabs: loaded.tabs,
-      activeId,
-      closedChatRunIds: Array.isArray(loaded.closedChatRunIds)
-        ? loaded.closedChatRunIds.filter((id): id is string => typeof id === "string")
-        : [],
-    };
+  let activeId =
+    loaded.activeId && loaded.tabs.some((t) => t.id === loaded.activeId)
+      ? loaded.activeId
+      : loaded.tabs[0]?.id ?? null;
+  // Never boot onto a restored preview: its dev server is almost certainly
+  // dead after a restart, and landing there hides the chat composer (the
+  // center routes everything through one active id). Prefer the chat tab so
+  // the app always opens on something the user can act in.
+  const resolved = activeId ? loaded.tabs.find((t) => t.id === activeId) : null;
+  if (resolved?.kind === "preview") {
+    activeId = loaded.tabs.find((t) => t.kind === "chat")?.id ?? activeId;
   }
+  return {
+    tabs: loaded.tabs,
+    activeId,
+    closedChatRunIds: Array.isArray(loaded.closedChatRunIds)
+      ? loaded.closedChatRunIds.filter((id): id is string => typeof id === "string")
+      : [],
+  };
+}
+
+function initialTabsState(
+  workspaceId: string | null,
+  defaultCwd: string | undefined,
+  scrollbackLineLimit: number,
+): InitialTabsStateSnapshot {
+  const loaded = loadPersisted(workspaceId, scrollbackLineLimit);
+  if (loaded) return initialTabsStateFromPersisted(loaded);
   const seed = defaultTabs(defaultCwd);
   return { tabs: seed, activeId: seed[0].id, closedChatRunIds: [] };
 }
@@ -786,6 +790,15 @@ export function useTabs(
   const defaultCwdRef = useRef(defaultCwd);
   defaultCwdRef.current = defaultCwd;
   const liveWorkspaceTabsRef = useRef(new Map<string, { tabs: Tab[]; activeId: TabId | null }>());
+  // Persisted layouts can be large enough that JSON.parse + terminal-tree
+  // cleanup is noticeable on the first visit. Warm those blobs one at a time
+  // during browser idle time, then consume the prepared snapshot on click.
+  // Live workspace state remains authoritative once a workspace has been
+  // visited; this cache only covers cold, persisted layouts.
+  const preloadedWorkspaceTabsRef = useRef(new Map<
+    string,
+    { scrollbackLineLimit: number; state: InitialTabsStateSnapshot }
+  >());
   const tabsWorkspaceIdRef = useRef(workspaceId);
   if (tabsWorkspaceIdRef.current) {
     liveWorkspaceTabsRef.current.set(tabsWorkspaceIdRef.current, { tabs, activeId });
@@ -848,6 +861,68 @@ export function useTabs(
   terminalScrollbackLineLimitRef.current = normalizedTerminalScrollbackLineLimit;
   const quitActiveAgentPaneIdsRef = useRef<ReadonlySet<string>>(new Set());
 
+  // Cold-layout prefetch. Enumerating keys is cheap; each JSON parse is placed
+  // in its own idle callback so warming several large workspaces never becomes
+  // a single long main-thread task. Invalid/stale blobs are intentionally not
+  // cached, preserving initialTabsState's cwd-aware first-run fallback.
+  useEffect(() => {
+    preloadedWorkspaceTabsRef.current.clear();
+    const pendingWorkspaceIds: string[] = [];
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index);
+      if (!key?.startsWith(STORAGE_KEY_PREFIX)) continue;
+      const candidate = key.slice(STORAGE_KEY_PREFIX.length);
+      if (candidate) pendingWorkspaceIds.push(candidate);
+    }
+
+    let cancelled = false;
+    let idleHandle: number | null = null;
+    let timeoutHandle: number | null = null;
+    const scheduleNext = () => {
+      if (cancelled || pendingWorkspaceIds.length === 0) return;
+      const warmOne = () => {
+        idleHandle = null;
+        timeoutHandle = null;
+        if (cancelled) return;
+        while (pendingWorkspaceIds.length > 0) {
+          const candidate = pendingWorkspaceIds.shift();
+          if (!candidate) continue;
+          if (
+            candidate === tabsWorkspaceIdRef.current ||
+            liveWorkspaceTabsRef.current.has(candidate) ||
+            preloadedWorkspaceTabsRef.current.has(candidate)
+          ) {
+            continue;
+          }
+          const loaded = loadPersisted(candidate, normalizedTerminalScrollbackLineLimit);
+          if (loaded) {
+            preloadedWorkspaceTabsRef.current.set(candidate, {
+              scrollbackLineLimit: normalizedTerminalScrollbackLineLimit,
+              state: initialTabsStateFromPersisted(loaded),
+            });
+          }
+          break;
+        }
+        scheduleNext();
+      };
+
+      if (typeof window.requestIdleCallback === "function") {
+        idleHandle = window.requestIdleCallback(warmOne, { timeout: 1_000 });
+      } else {
+        timeoutHandle = window.setTimeout(warmOne, 50);
+      }
+    };
+
+    scheduleNext();
+    return () => {
+      cancelled = true;
+      if (idleHandle !== null && typeof window.cancelIdleCallback === "function") {
+        window.cancelIdleCallback(idleHandle);
+      }
+      if (timeoutHandle !== null) window.clearTimeout(timeoutHandle);
+    };
+  }, [normalizedTerminalScrollbackLineLimit]);
+
   // When the workspace switches, swap tabs to that workspace's live in-memory
   // snapshot first, then fall back to its persisted layout. Persistence strips
   // derived Runs tabs; the live snapshot keeps them so switching away from a
@@ -903,25 +978,28 @@ export function useTabs(
       return filtered;
     });
     const live = workspaceId ? liveWorkspaceTabsRef.current.get(workspaceId) : null;
-    if (workspaceId && !live && !closedChatRunIdsByWorkspaceRef.current.has(workspaceId)) {
-      // First time entering this workspace this session: load its persisted
-      // closed-run set alongside its layout.
-      const loadedState = initialTabsState(
+    const preloaded = workspaceId
+      ? preloadedWorkspaceTabsRef.current.get(workspaceId)
+      : null;
+    if (workspaceId && preloaded) preloadedWorkspaceTabsRef.current.delete(workspaceId);
+    const cold = live
+      ? null
+      : preloaded?.scrollbackLineLimit === terminalScrollbackLineLimitRef.current
+        ? preloaded.state
+        : initialTabsState(
+            workspaceId,
+            defaultCwdRef.current,
+            terminalScrollbackLineLimitRef.current,
+          );
+    const next = live ?? cold!;
+    if (workspaceId && !closedChatRunIdsByWorkspaceRef.current.has(workspaceId)) {
+      // First time entering this workspace this session: restore its persisted
+      // closed-run set alongside the preloaded or freshly parsed layout.
+      closedChatRunIdsByWorkspaceRef.current.set(
         workspaceId,
-        defaultCwdRef.current,
-        terminalScrollbackLineLimitRef.current,
+        new Set(cold?.closedChatRunIds ?? []),
       );
-      closedChatRunIdsByWorkspaceRef.current.set(workspaceId, new Set(loadedState.closedChatRunIds));
-      tabsWorkspaceIdRef.current = workspaceId;
-      setTabs(loadedState.tabs);
-      setActiveId(loadedState.activeId);
-      return;
     }
-    const next = live ?? initialTabsState(
-      workspaceId,
-      defaultCwdRef.current,
-      terminalScrollbackLineLimitRef.current,
-    );
     tabsWorkspaceIdRef.current = workspaceId;
     setTabs(next.tabs);
     setActiveId(next.activeId);
