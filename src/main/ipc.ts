@@ -885,11 +885,11 @@ export function registerIpc(): void {
       _e,
       input: {
         repoCwd: string;
-        baseBranch?: string;
-        city?: string;
-        // When set, check this existing branch out instead of forking a new one.
+        // Exactly one of these: check an existing branch out, or create a new
+        // user-named branch off the repo's default branch.
         checkoutBranch?: string;
         checkoutIsRemote?: boolean;
+        newBranch?: string;
       },
     ): Promise<GitCopyWorktreeResult> => {
       const { createCopyWorktree, createCheckoutWorktree } = await getGitWorktrees();
@@ -904,8 +904,7 @@ export function registerIpc(): void {
         : await createCopyWorktree({
             repoCwd: input.repoCwd,
             worktreesRoot,
-            baseBranch: input.baseBranch,
-            city: input.city,
+            newBranch: input.newBranch ?? "",
           });
       if (result.ok) {
         // The new branch is a shared ref — refresh the source repo's panel.

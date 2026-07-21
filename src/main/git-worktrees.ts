@@ -10,46 +10,6 @@ import { errorText, readGitText, runGit } from "./git-exec";
 // the caller (ipc.ts). Keep this dependency-light: the integration test bundles
 // it with esbuild and the only runtime import is ./git-exec.
 
-// Parody pun-names of famous people used to name copy-branch worktrees, à la
-// Conductor's cities — just sillier. Lowercase, hyphenated, filesystem- and
-// branch-name-safe. Public figures across the board (politicians of every
-// stripe, world leaders, tech, historical, science, pop) are fair game; the
-// list parodies individuals, not groups.
-const PARODY_NAMES = [
-  // US politics
-  "donald-trumpeta", "donald-dump", "the-donald", "joe-bidone", "sleepy-joe",
-  "barack-obummer", "hillary-clintonne", "bernie-sandwiches", "ted-cruz-control",
-  "mitch-mcconman", "nancy-pelosaur", "kamala-camela", "mike-pencewise",
-  "al-gore-rhythm", "mitt-romnoms", "sarah-failin",
-  // World leaders
-  "vladimir-putain", "boris-johnsoff", "nigel-farageddon", "rishi-sushi",
-  "liz-trussed", "theresa-maybe", "emmanuel-macroni", "angela-merkelwave",
-  "justin-trudough", "kim-jong-fun", "xi-jinpingpong", "recep-erdogone",
-  "bibi-netanyahoo", "narendra-moody",
-  // Tech
-  "elon-tusk", "elon-musket", "elon-muskrat", "mark-suckerberg", "the-zucc",
-  "jeff-bozos", "jeff-bezosaurus", "bill-grates", "bill-gatekeeper",
-  "steve-jobless", "steve-wozniyak", "sundar-pizzai", "tim-applesauce",
-  "jack-dorky", "sam-altmaniac", "jensen-leatherjacket", "satya-nutella",
-  "larry-pagefault", "sergey-brinng", "peter-thielish", "marc-andreessing",
-  // Historical
-  "napoleon-bone-apart", "julius-caesar-salad", "alexander-the-grape",
-  "genghis-can", "cleopatra-trick", "abraham-lincolnshire", "george-washingmachine",
-  "ben-franklinstein", "teddy-bearosevelt", "winston-churchillin",
-  "christopher-colombo", "marco-pollo",
-  // Science
-  "albert-einsteinway", "isaac-newtoff", "nikola-teslacoil", "charles-darwinning",
-  "stephen-hawkingradar", "marie-curious",
-  // Pop culture
-  "taylor-drift", "kanye-best", "snoop-doggo", "dwayne-the-pebble",
-  "leonardo-dicaprisun", "brad-pitstop", "keanu-greaves", "morgan-freebie",
-  "samuel-l-jacksonville", "arnold-schwarzenburger", "tom-cruisecontrol",
-  "will-smithereens", "beyon-slay", "lady-gigabyte", "freddie-mercurial",
-  "david-bowtie", "mick-jaggernaut",
-  // Infamous
-  "gordon-ramsay-spicy", "osama-bin-hidin",
-];
-
 export interface CreateCopyWorktreeInput {
   repoCwd: string;
   // Base dir for THIS repo's worktrees, e.g. ~/.SparkAgent/worktrees/<repo>.
@@ -57,7 +17,9 @@ export interface CreateCopyWorktreeInput {
   // electron-free and testable.
   worktreesRoot: string;
   baseBranch?: string;
-  city?: string;
+  // Name for the NEW branch the worktree is created on. User-provided for the
+  // Create copy dialog; generated ("sandbox-N") for autopilot sandboxes.
+  newBranch: string;
 }
 
 export interface CreateCheckoutWorktreeInput {
@@ -139,21 +101,16 @@ async function existingWorktreeDirs(worktreesRoot: string): Promise<Set<string>>
   }
 }
 
-// Pick a parody name not already used as a local branch name or an existing
-// worktree directory for this repo. If every base name is taken, append a
-// numeric suffix to a random base until one is free.
-export async function pickCity(repoCwd: string, worktreesRoot: string): Promise<string> {
+// Unique throwaway name for a sandbox worktree: "sandbox", "sandbox-2", … —
+// must be free both as a local branch name and as a worktree directory.
+async function pickSandboxBranchName(repoCwd: string, worktreesRoot: string): Promise<string> {
   const used = new Set<string>([
     ...(await localBranchNames(repoCwd)),
     ...(await existingWorktreeDirs(worktreesRoot)),
   ]);
-  const free = PARODY_NAMES.filter((c) => !used.has(c));
-  if (free.length > 0) {
-    return free[Math.floor(Math.random() * free.length)];
-  }
-  const base = PARODY_NAMES[Math.floor(Math.random() * PARODY_NAMES.length)];
+  if (!used.has("sandbox")) return "sandbox";
   for (let n = 2; ; n += 1) {
-    const candidate = `${base}-${n}`;
+    const candidate = `sandbox-${n}`;
     if (!used.has(candidate)) return candidate;
   }
 }
@@ -170,16 +127,21 @@ export async function createCopyWorktree(
   input: CreateCopyWorktreeInput,
 ): Promise<GitCopyWorktreeResult> {
   try {
+    const branch = input.newBranch.trim();
+    if (!branch) return { ok: false, error: "No branch name given." };
     const baseBranch = input.baseBranch?.trim() || (await resolveDefaultBranch(input.repoCwd));
-    const city = input.city?.trim() || (await pickCity(input.repoCwd, input.worktreesRoot));
-    const path = join(input.worktreesRoot, city);
+    const dirName = await pickCheckoutDirName(input.worktreesRoot, branch);
+    const path = join(input.worktreesRoot, dirName);
     if (existsSync(path)) {
       return { ok: false, error: `Worktree path already exists: ${path}` };
     }
     mkdirSync(input.worktreesRoot, { recursive: true });
-    await runGit(input.repoCwd, ["worktree", "add", path, "-b", city, baseBranch]);
+    // Invalid or already-taken branch names are left to git's own refusals —
+    // its messages ("a branch named 'x' already exists", "not a valid branch
+    // name") surface verbatim in the dialog.
+    await runGit(input.repoCwd, ["worktree", "add", path, "-b", branch, baseBranch]);
     const fileCount = await countTrackedFiles(path);
-    return { ok: true, path, branch: city, city, baseBranch, mode: "fork", fileCount };
+    return { ok: true, path, branch, city: dirName, baseBranch, mode: "fork", fileCount };
   } catch (err) {
     return { ok: false, error: errorText(err) };
   }
@@ -194,8 +156,9 @@ export function slugifyBranchName(name: string): string {
   return slug || "branch";
 }
 
-// Like pickCity, but seeded from the branch name. Only directory collisions
-// matter here — unlike a fork's city, this slug never becomes a branch name.
+// Worktree directory name for a branch: the slug, with a numeric suffix on
+// collision. Only directory collisions matter — the slug never becomes a
+// branch name (the real, possibly-slashed name is what git checks out).
 async function pickCheckoutDirName(worktreesRoot: string, branchName: string): Promise<string> {
   const used = await existingWorktreeDirs(worktreesRoot);
   const base = slugifyBranchName(branchName);
@@ -266,9 +229,9 @@ export async function createCheckoutWorktree(
 // to filesystem-isolate each unattended worker. The fork point is the run's
 // checkpoint (refs/spark/runs/{runId}, resolved to a ref/sha by the caller)
 // passed as `startPoint`; when omitted, createCopyWorktree falls back to
-// resolveDefaultBranch. The city is picked over the SANDBOX worktreesRoot the
-// caller hands in (kept distinct from the copy-branch root). Electron-free,
-// exactly like createCopyWorktree.
+// resolveDefaultBranch. The sandbox-N name is picked over the SANDBOX
+// worktreesRoot the caller hands in (kept distinct from the copy-branch
+// root). Electron-free, exactly like createCopyWorktree.
 
 export interface CreateSandboxWorktreeInput {
   repoCwd: string;
@@ -289,13 +252,13 @@ export interface RemoveSandboxWorktreeInput {
 export async function createSandboxWorktree(
   input: CreateSandboxWorktreeInput,
 ): Promise<GitCopyWorktreeResult> {
-  const city = await pickCity(input.repoCwd, input.worktreesRoot);
+  const name = await pickSandboxBranchName(input.repoCwd, input.worktreesRoot);
   return createCopyWorktree({
     repoCwd: input.repoCwd,
     worktreesRoot: input.worktreesRoot,
     // startPoint is the run checkpoint ref/sha; undefined => resolveDefaultBranch.
     baseBranch: input.startPoint,
-    city,
+    newBranch: name,
   });
 }
 

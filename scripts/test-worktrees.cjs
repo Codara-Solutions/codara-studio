@@ -54,13 +54,14 @@ async function main() {
       "default branch should be main",
     );
 
-    const r = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot });
+    const r = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot, newBranch: "copy-test" });
     assert.ok(r.ok, `create failed: ${r.ok ? "" : r.error}`);
     assert.ok(existsSync(r.path), "worktree path should exist");
+    assert.strictEqual(r.branch, "copy-test", "branch should be the given name");
     assert.strictEqual(
       git(r.path, ["rev-parse", "--abbrev-ref", "HEAD"]),
-      r.branch,
-      "worktree HEAD should be the city branch",
+      "copy-test",
+      "worktree HEAD should be the new named branch",
     );
     assert.strictEqual(
       git(r.path, ["status", "--porcelain"]),
@@ -70,8 +71,12 @@ async function main() {
     assert.strictEqual(r.baseBranch, "main", "baseBranch should be main");
     assert.ok(r.fileCount >= 1, `fileCount should be >= 1, got ${r.fileCount}`);
 
-    const city2 = await wt.pickCity(repo, worktreesRoot);
-    assert.notStrictEqual(city2, r.city, "pickCity should not reuse the created city");
+    // A taken name must surface git's refusal, not silently rename.
+    const dup = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot, newBranch: "main" });
+    assert.ok(!dup.ok, "creating a branch that already exists should fail");
+    assert.ok(/already exists/i.test(dup.error), `error should say so, got: ${dup.error}`);
+    const empty = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot, newBranch: "  " });
+    assert.ok(!empty.ok, "blank branch name should fail");
 
     const rm = await wt.removeCopyWorktree({
       repoCwd: repo,
@@ -93,7 +98,7 @@ async function main() {
     // whose git linkage is gone (admin entry pruned) but whose directory
     // lingers. The resilient removeCopyWorktree should clear it off disk
     // instead of dead-ending on git's error.
-    const orphan = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot });
+    const orphan = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot, newBranch: "orphan-test" });
     assert.ok(orphan.ok, `orphan create failed: ${orphan.ok ? "" : orphan.error}`);
     // Deregister it: drop the parent repo's admin entry so `git worktree
     // remove` rejects the path as "not a working tree", while the directory
@@ -124,7 +129,7 @@ async function main() {
     // --- Safety: a LIVE worktree git declines must NOT be silently nuked ----
     // A real worktree with uncommitted files should surface git's refusal and
     // stay on disk, not get force-deleted by the orphan fallback.
-    const live = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot });
+    const live = await wt.createCopyWorktree({ repoCwd: repo, worktreesRoot, newBranch: "live-test" });
     assert.ok(live.ok, `live create failed: ${live.ok ? "" : live.error}`);
     writeFileSync(path.join(live.path, "dirty.txt"), "uncommitted\n");
     const liveRm = await wt.removeCopyWorktree({

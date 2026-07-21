@@ -49,8 +49,8 @@ export default function CopyBranchWelcome({ copyBranch }: { copyBranch: CopyBran
           </>
         ) : (
           <>
-            You're in a new copy of <Mono>{repo}</Mono> called{" "}
-            <Mono accent>{copyBranch.city}</Mono>
+            You're in a copy of <Mono>{repo}</Mono> on new branch{" "}
+            <Mono accent>{copyBranch.branch}</Mono>
           </>
         )}
       </div>

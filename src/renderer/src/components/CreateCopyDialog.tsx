@@ -6,17 +6,18 @@ import {
   Count,
   Empty,
   GroupLabel,
-  IconButton,
+  PlusGlyph,
   Spinner,
   shortenRelative,
 } from "./git/git-ui";
+import { InlineInput } from "./file-icons/InlineInput";
 
 // Branch picker for the "Create copy" workspace action. Lists the source
 // repo's local + remote branches; a row click opens that exact branch as a new
-// worktree workspace, the hover action forks a fresh auto-named copy from it,
-// and the top button keeps the classic behavior (fork from the default
-// branch). Renders immediately from local refs, then re-reads once after a
-// background `git fetch --prune` so remote rows reflect the actual remote.
+// worktree workspace, and the top action creates a NEW branch with a name the
+// user types (branched from the repo's default branch). Renders immediately
+// from local refs, then re-reads once after a background `git fetch --prune`
+// so remote rows reflect the actual remote.
 
 export default function CreateCopyDialog({
   workspace,
@@ -24,23 +25,22 @@ export default function CreateCopyDialog({
   error,
   onDismissError,
   onClose,
-  onCreateDefault,
+  onCreateNew,
   onOpenBranch,
-  onForkFromBranch,
 }: {
   workspace: Workspace;
   busy: boolean;
   error: string | null;
   onDismissError: () => void;
   onClose: () => void;
-  onCreateDefault: () => void;
+  onCreateNew: (name: string) => void;
   onOpenBranch: (branch: GitBranch) => void;
-  onForkFromBranch: (branch: GitBranch) => void;
 }): React.ReactElement {
   const [list, setList] = useState<GitBranchList | null>(null);
   const [refreshing, setRefreshing] = useState(true);
   const [filter, setFilter] = useState("");
   const [remotesOpen, setRemotesOpen] = useState(true);
+  const [naming, setNaming] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -131,43 +131,71 @@ export default function CreateCopyDialog({
             {busy && <Spinner size={12} />}
           </div>
           <div style={{ fontSize: 12, color: "var(--ink-dim)", lineHeight: 1.5 }}>
-            Open an existing branch as a workspace, or start a fresh copy.
+            Open an existing branch as a workspace, or create a new branch.
           </div>
         </div>
 
-        {/* Classic behavior, promoted to the top */}
+        {/* Create a new branch — the user names it */}
         <div style={{ padding: "12px 18px 0" }}>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={onCreateDefault}
-            title="Create a new auto-named branch from the repo's default branch"
-            style={{
-              appearance: "none",
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              width: "100%",
-              padding: "8px 10px",
-              border: "1px solid var(--accent-edge)",
-              borderRadius: 8,
-              background: "color-mix(in oklch, var(--accent) 10%, transparent)",
-              color: "var(--ink)",
-              cursor: "default",
-              textAlign: "left",
-              opacity: busy ? 0.6 : 1,
-            }}
-          >
-            <span style={{ display: "inline-flex", color: "var(--accent)" }}>
-              <BranchIcon />
-            </span>
-            <span style={{ display: "grid", gap: 1, minWidth: 0 }}>
-              <span style={{ fontSize: 12, fontWeight: 650 }}>New copy on a fresh branch</span>
-              <span style={{ fontSize: 11, color: "var(--muted)" }}>
-                Auto-named, branched from the default branch
+          {naming ? (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "8px 10px",
+                border: "1px solid var(--accent-edge)",
+                borderRadius: 8,
+                background: "color-mix(in oklch, var(--accent) 10%, transparent)",
+              }}
+            >
+              <span style={{ display: "inline-flex", color: "var(--accent)" }}>
+                <BranchIcon />
               </span>
-            </span>
-          </button>
+              <InlineInput
+                initial=""
+                placeholder="New branch name (Enter to create)"
+                onCommit={(value) => {
+                  setNaming(false);
+                  const name = value.trim();
+                  if (name) onCreateNew(name);
+                }}
+                onCancel={() => setNaming(false)}
+              />
+            </div>
+          ) : (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setNaming(true)}
+              title="Create a new branch from the repo's default branch — you pick the name"
+              style={{
+                appearance: "none",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                width: "100%",
+                padding: "8px 10px",
+                border: "1px solid var(--accent-edge)",
+                borderRadius: 8,
+                background: "color-mix(in oklch, var(--accent) 10%, transparent)",
+                color: "var(--ink)",
+                cursor: "default",
+                textAlign: "left",
+                opacity: busy ? 0.6 : 1,
+              }}
+            >
+              <span style={{ display: "inline-flex", color: "var(--accent)" }}>
+                <PlusGlyph />
+              </span>
+              <span style={{ display: "grid", gap: 1, minWidth: 0 }}>
+                <span style={{ fontSize: 12, fontWeight: 650 }}>Create new branch…</span>
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                  You name it; it starts from the repo's default branch
+                </span>
+              </span>
+            </button>
+          )}
         </div>
 
         {/* Filter */}
@@ -268,7 +296,6 @@ export default function CreateCopyDialog({
                     branch={branch}
                     locked={busy}
                     onOpen={onOpenBranch}
-                    onFork={onForkFromBranch}
                   />
                 ))
               )}
@@ -323,7 +350,6 @@ export default function CreateCopyDialog({
                       branch={branch}
                       locked={busy}
                       onOpen={onOpenBranch}
-                      onFork={onForkFromBranch}
                     />
                   ))
                 ))}
@@ -336,21 +362,18 @@ export default function CreateCopyDialog({
 }
 
 // ── One branch row ───────────────────────────────────────────────────────────
-// Click = open the branch itself as a new workspace; hover action = fork a new
-// auto-named copy from it. Branches that are already checked out somewhere
-// (branch.worktreePath — git forbids a second checkout) keep only the fork
-// action.
+// Click = open the branch itself as a new workspace. Branches already checked
+// out somewhere (branch.worktreePath — git forbids a second checkout) are
+// inert and say so.
 
 const CopyBranchRow = React.memo(function CopyBranchRow({
   branch,
   locked,
   onOpen,
-  onFork,
 }: {
   branch: GitBranch;
   locked: boolean;
   onOpen: (b: GitBranch) => void;
-  onFork: (b: GitBranch) => void;
 }) {
   const [hover, setHover] = useState(false);
   const inUse = Boolean(branch.worktreePath);
@@ -360,7 +383,7 @@ const CopyBranchRow = React.memo(function CopyBranchRow({
     : "";
 
   const title = inUse
-    ? `Already checked out at ${branch.worktreePath} — fork a copy instead`
+    ? `Already checked out at ${branch.worktreePath}`
     : branch.isRemote
       ? `Open ${branch.name} as a new workspace (creates local branch ${short})${
           branch.lastCommitSubject ? `\n${branch.lastCommitSubject}` : ""
@@ -453,7 +476,7 @@ const CopyBranchRow = React.memo(function CopyBranchRow({
         </span>
       )}
 
-      {!hover && branch.lastCommitRelativeDate && (
+      {branch.lastCommitRelativeDate && (
         <span
           style={{
             flex: "0 0 auto",
@@ -466,45 +489,6 @@ const CopyBranchRow = React.memo(function CopyBranchRow({
           {shortenRelative(branch.lastCommitRelativeDate)}
         </span>
       )}
-
-      <span
-        onClick={(e) => e.stopPropagation()}
-        style={{ display: "inline-flex", alignItems: "center", flex: "0 0 auto" }}
-      >
-        {hover && !locked ? (
-          <IconButton
-            title={`Fork a new auto-named copy from ${branch.name}`}
-            size={20}
-            onClick={() => onFork(branch)}
-          >
-            <ForkGlyph />
-          </IconButton>
-        ) : null}
-      </span>
     </div>
   );
 });
-
-// Fork glyph: a commit splitting into two heads — distinct from BranchIcon so
-// the row's two actions read differently at a glance.
-function ForkGlyph(): React.ReactElement {
-  return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 14 14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <circle cx="7" cy="11" r="1.5" />
-      <circle cx="3.5" cy="3.5" r="1.5" />
-      <circle cx="10.5" cy="3.5" r="1.5" />
-      <path d="M3.5 5c0 2 1.4 2.8 3.5 3 2.1-.2 3.5-1 3.5-3" />
-      <path d="M7 8v1.5" />
-    </svg>
-  );
-}

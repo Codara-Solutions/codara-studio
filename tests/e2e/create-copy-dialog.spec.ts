@@ -9,15 +9,16 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-// "Create copy" branch picker: the dialog lists the repo's branches, a branch
-// already checked out elsewhere is only forkable (git forbids a second
-// checkout), and opening a free branch materializes a worktree on that EXACT
-// branch — no parody-named fork — and names the new workspace after it.
-test("create-copy dialog opens an existing branch as a worktree workspace", async () => {
-  test.setTimeout(120_000);
+// "Create copy" branch picker: a branch already checked out elsewhere is
+// inert, opening a REMOTE branch materializes a worktree on a local tracking
+// branch named after it (never an auto-generated name), and "Create new
+// branch…" asks for a name and creates exactly that branch.
+test("create-copy dialog opens remote branches and creates named branches", async () => {
+  test.setTimeout(180_000);
   const root = await mkdtemp(join(tmpdir(), "codara-create-copy-e2e-"));
   const userDataDir = join(root, "user-data");
   const workspaceDir = join(root, "workspace");
+  const originDir = join(root, "origin.git");
   const otherWorktree = join(root, "other-wt");
   await mkdir(userDataDir, { recursive: true });
   await mkdir(workspaceDir, { recursive: true });
@@ -28,10 +29,15 @@ test("create-copy dialog opens an existing branch as a worktree workspace", asyn
   await git(["config", "user.name", "Codara E2E"]);
   await git(["add", "README.md"]);
   await git(["commit", "-m", "initial"]);
-  await git(["branch", "free-branch"]);
   await git(["branch", "occupied-branch"]);
   // Fabricate the "already checked out" state before launch.
   await git(["worktree", "add", otherWorktree, "occupied-branch"]);
+  // A local bare origin with a remote-only branch — the dialog's Remote group.
+  await execFileAsync("git", ["init", "--bare", originDir]);
+  await git(["remote", "add", "origin", originDir]);
+  await git(["push", "origin", "main"]);
+  await git(["push", "origin", "main:origin-only"]);
+  await git(["fetch", "origin"]);
 
   await writeFile(
     join(userDataDir, "spark-state.json"),
@@ -73,34 +79,59 @@ test("create-copy dialog opens an existing branch as a worktree workspace", asyn
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
 
-    // Row "…" menu → Create copy opens the picker instead of instantly forking.
-    const menuTrigger = page.getByTitle("Workspace actions").first();
-    await expect(menuTrigger).toBeVisible({ timeout: 30_000 });
-    await menuTrigger.click();
-    await page.getByText("Create copy", { exact: true }).click();
-    await expect(page.getByText(/Create copy of/)).toBeVisible();
+    const worktreesRoot = join(userDataDir, "worktrees", basename(workspaceDir));
+    const openDialogForFirstRow = async (): Promise<void> => {
+      const menuTrigger = page.getByTitle("Workspace actions").first();
+      await expect(menuTrigger).toBeVisible({ timeout: 30_000 });
+      await menuTrigger.click();
+      await page.getByText("Create copy", { exact: true }).click();
+      await expect(page.getByText(/Create copy of/)).toBeVisible();
+    };
 
-    // Both branches list; the one checked out in the sibling worktree is
-    // marked unavailable for opening (its row title names the occupying path).
-    const freeRow = page.getByTitle(/^Open free-branch as a new workspace/);
-    await expect(freeRow).toBeVisible();
+    // ── Open a REMOTE branch: local tracking branch named after it ──────────
+    await openDialogForFirstRow();
     await expect(
-      page.getByTitle(/Already checked out at .*other-wt — fork a copy instead/),
+      page.getByTitle(/Already checked out at .*other-wt/),
     ).toBeVisible();
-
-    // Open the free branch: workspace named after the branch, checkout-mode
-    // welcome banner, and a real worktree on that exact branch (no new branch).
-    await freeRow.click();
+    await page
+      .getByTitle(/^Open origin\/origin-only as a new workspace/)
+      .click();
     await expect(page.getByText("Opened existing branch")).toBeVisible({ timeout: 15_000 });
 
-    const worktreePath = join(userDataDir, "worktrees", basename(workspaceDir), "free-branch");
-    expect(existsSync(worktreePath)).toBe(true);
-    const { stdout: head } = await execFileAsync(
+    const remoteWorktree = join(worktreesRoot, "origin-only");
+    expect(existsSync(remoteWorktree)).toBe(true);
+    const { stdout: remoteHead } = await execFileAsync(
       "git",
-      ["-C", worktreePath, "rev-parse", "--abbrev-ref", "HEAD"],
+      ["-C", remoteWorktree, "rev-parse", "--abbrev-ref", "HEAD"],
       {},
     );
-    expect(head.trim()).toBe("free-branch");
+    expect(remoteHead.trim()).toBe("origin-only");
+    const { stdout: upstream } = await execFileAsync(
+      "git",
+      ["-C", remoteWorktree, "rev-parse", "--abbrev-ref", "@{upstream}"],
+      {},
+    );
+    expect(upstream.trim()).toBe("origin/origin-only");
+
+    // ── Create a NEW branch: the dialog asks for a name and uses it ─────────
+    // Back on the source workspace (first rail row — copies insert below it).
+    await page.getByTitle("create-copy").first().click();
+    await openDialogForFirstRow();
+    await page.getByText("Create new branch…").click();
+    const nameInput = page.getByPlaceholder("New branch name (Enter to create)");
+    await expect(nameInput).toBeVisible();
+    await nameInput.fill("my-feature");
+    await nameInput.press("Enter");
+    await expect(page.getByText(/on new branch/)).toBeVisible({ timeout: 15_000 });
+
+    const namedWorktree = join(worktreesRoot, "my-feature");
+    expect(existsSync(namedWorktree)).toBe(true);
+    const { stdout: namedHead } = await execFileAsync(
+      "git",
+      ["-C", namedWorktree, "rev-parse", "--abbrev-ref", "HEAD"],
+      {},
+    );
+    expect(namedHead.trim()).toBe("my-feature");
   } finally {
     await app?.close();
   }

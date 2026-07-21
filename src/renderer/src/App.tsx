@@ -2120,7 +2120,7 @@ export default function App() {
   const createCopyBranchWs = useCallback(
     async (
       sourceWs: Workspace,
-      opts?: { baseBranch?: string; checkoutBranch?: string; checkoutIsRemote?: boolean },
+      opts?: { newBranch?: string; checkoutBranch?: string; checkoutIsRemote?: boolean },
     ) => {
       setCreateCopyBusy(true);
       setCreateCopyError(null);
@@ -2135,9 +2135,9 @@ export default function App() {
       setWorkspaces((list) => {
         const ws: Workspace = {
           id: makeId("ws"),
-          // A checked-out existing branch names the workspace; a fork keeps
-          // the generated city name.
-          name: res.mode === "checkout" ? res.branch : res.city,
+          // The branch is always user-meaningful now (picked or typed), so it
+          // names the workspace in both modes.
+          name: res.branch,
           cwd: res.path,
           // Inherit the parent's color so the copy reads as a branch of it.
           color: sourceWs.color,
@@ -3807,15 +3807,14 @@ export default function App() {
                 setCreateCopyError(null);
               }
             }}
-            onCreateDefault={() => void createCopyBranchWs(createCopyDialogWs)}
+            onCreateNew={(name) =>
+              void createCopyBranchWs(createCopyDialogWs, { newBranch: name })
+            }
             onOpenBranch={(b) =>
               void createCopyBranchWs(createCopyDialogWs, {
                 checkoutBranch: b.name,
                 checkoutIsRemote: b.isRemote,
               })
-            }
-            onForkFromBranch={(b) =>
-              void createCopyBranchWs(createCopyDialogWs, { baseBranch: b.name })
             }
           />
         )}
