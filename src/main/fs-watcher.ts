@@ -1,5 +1,6 @@
 import { watch, readdirSync, promises as fsp, FSWatcher } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { Worker } from "node:worker_threads";
 import type { WebContents } from "electron";
 import type { FsChangeEvent } from "@shared/types";
 
@@ -15,14 +16,48 @@ const IGNORED_TOP_LEVEL = new Set([
 const DEBOUNCE_MS = 200;
 const CHANNEL = "fs:changed";
 
+// Native recursive watcher registration may synchronously walk a large tree
+// before `fs.watch()` returns. Run those registrations in a Node worker so a
+// parent workspace containing several repositories cannot monopolize
+// Electron's browser/main thread. The worker sends only rename events back;
+// noisy content-write events never cross the thread boundary.
+const RECURSIVE_WATCHER_WORKER = String.raw`
+  const { watch } = require("node:fs");
+  const { parentPort, workerData } = require("node:worker_threads");
+  const watchers = new Map();
+
+  function add(dir) {
+    if (!dir || watchers.has(dir)) return;
+    try {
+      const watcher = watch(dir, { recursive: true, persistent: true });
+      watcher.on("change", (eventType, filename) => {
+        if (eventType !== "rename" || !filename) return;
+        parentPort.postMessage({ type: "change", base: dir, filename: String(filename) });
+      });
+      watcher.on("error", (error) => {
+        parentPort.postMessage({ type: "error", dir, message: String(error?.message || error) });
+      });
+      watchers.set(dir, watcher);
+    } catch (error) {
+      parentPort.postMessage({ type: "error", dir, message: String(error?.message || error) });
+    }
+  }
+
+  for (const dir of workerData.dirs) add(dir);
+  parentPort.on("message", (message) => {
+    if (message?.type === "watch") add(message.dir);
+  });
+`;
+
 interface State {
   root: string;
   // One non-recursive watcher on the root (catches top-level file changes and
-  // newly-created top-level directories) plus one recursive watcher per
-  // non-ignored top-level directory. Keyed by the absolute path being watched
-  // so we can avoid double-watching a directory we already cover and dispose
-  // every handle on stop. The root key is the `root` path itself.
+  // newly-created top-level directories). Recursive child watchers live in a
+  // worker thread because their native registration can be expensive. The map
+  // remains keyed by path so every main-thread handle is disposed on stop.
   watchers: Map<string, FSWatcher>;
+  recursiveWorker: Worker | null;
+  recursiveDirs: Set<string>;
   pendingDirs: Set<string>;
   flushTimer: NodeJS.Timeout | null;
 }
@@ -52,44 +87,62 @@ function scheduleFlush(state: State, webContents: WebContents): void {
   }, DEBOUNCE_MS);
 }
 
-// Create a recursive watcher for a single non-ignored top-level directory and
-// register it on the state. Returns true if a watcher was added (false if one
-// already exists for that path, or creation failed).
-function watchTopLevelDir(
-  state: State,
-  webContents: WebContents,
-  dirAbsolute: string,
-): boolean {
-  if (state.watchers.has(dirAbsolute)) return false;
-  let watcher: FSWatcher;
-  try {
-    watcher = watch(dirAbsolute, { recursive: true, persistent: true });
-  } catch (err) {
-    // fs.watch with { recursive: true } is unsupported on Linux; the manual
-    // refresh button is the fallback there.
-    console.warn("[fs-watcher] failed to watch", dirAbsolute, err);
-    return false;
-  }
-  watcher.on("error", (err) => {
-    console.warn("[fs-watcher] error", err);
-  });
-  watcher.on("change", (eventType, filename) => {
-    // 'change' events fire on file content writes (e.g. saving via the editor)
-    // and would force needless directory refreshes. Only react to 'rename',
-    // which covers creation, deletion, and renames.
-    if (eventType !== "rename" || !filename) return;
-    stageChange(state, dirAbsolute, String(filename));
-    scheduleFlush(state, webContents);
-  });
-  state.watchers.set(dirAbsolute, watcher);
-  return true;
+function watchTopLevelDir(state: State, dirAbsolute: string): void {
+  if (state.recursiveDirs.has(dirAbsolute)) return;
+  state.recursiveDirs.add(dirAbsolute);
+  state.recursiveWorker?.postMessage({ type: "watch", dir: dirAbsolute });
 }
 
-// How many top-level directory watchers to install before yielding the event
-// loop. Enumerating a large repo's root is cheap, but spinning up dozens of
-// recursive watchers in one synchronous burst can still stall; batching with a
-// setImmediate yield between chunks keeps the main thread responsive.
-const WATCH_INSTALL_BATCH = 16;
+function startRecursiveWatcher(state: State, webContents: WebContents): void {
+  if (state.recursiveWorker || state.recursiveDirs.size === 0) return;
+  const worker = new Worker(RECURSIVE_WATCHER_WORKER, {
+    eval: true,
+    workerData: { dirs: Array.from(state.recursiveDirs) },
+  });
+  state.recursiveWorker = worker;
+  worker.on("message", (message: unknown) => {
+    if (
+      !message ||
+      typeof message !== "object" ||
+      byContents.get(webContents.id) !== state ||
+      webContents.isDestroyed()
+    ) {
+      return;
+    }
+    const payload = message as Record<string, unknown>;
+    if (
+      payload.type === "change" &&
+      typeof payload.base === "string" &&
+      typeof payload.filename === "string"
+    ) {
+      stageChange(state, payload.base, payload.filename);
+      scheduleFlush(state, webContents);
+      return;
+    }
+    if (payload.type === "error") {
+      console.warn("[fs-watcher] recursive worker error", payload.dir, payload.message);
+    }
+  });
+  worker.on("error", (err) => {
+    if (byContents.get(webContents.id) === state) {
+      console.warn("[fs-watcher] recursive worker failed", err);
+    }
+  });
+  worker.on("exit", () => {
+    if (state.recursiveWorker === worker) state.recursiveWorker = null;
+  });
+}
+
+function disposeState(state: State): void {
+  if (state.flushTimer) clearTimeout(state.flushTimer);
+  for (const watcher of state.watchers.values()) {
+    try { watcher.close(); } catch { /* noop */ }
+  }
+  if (state.recursiveWorker) {
+    void state.recursiveWorker.terminate();
+    state.recursiveWorker = null;
+  }
+}
 
 export async function setWatchRoot(
   webContents: WebContents,
@@ -98,10 +151,7 @@ export async function setWatchRoot(
   const id = webContents.id;
   const existing = byContents.get(id);
   if (existing) {
-    if (existing.flushTimer) clearTimeout(existing.flushTimer);
-    for (const watcher of existing.watchers.values()) {
-      try { watcher.close(); } catch { /* noop */ }
-    }
+    disposeState(existing);
     byContents.delete(id);
   }
   if (!root) return;
@@ -109,6 +159,8 @@ export async function setWatchRoot(
   const state: State = {
     root,
     watchers: new Map<string, FSWatcher>(),
+    recursiveWorker: null,
+    recursiveDirs: new Set<string>(),
     pendingDirs: new Set<string>(),
     flushTimer: null,
   };
@@ -147,7 +199,8 @@ export async function setWatchRoot(
       // readdirSync only succeeds on directories; if it threw, the child is a
       // file (or was deleted) and needs no dedicated recursive watcher.
       void stat;
-      watchTopLevelDir(state, webContents, childAbsolute);
+      watchTopLevelDir(state, childAbsolute);
+      startRecursiveWatcher(state, webContents);
     } catch { /* not a directory (file change or deletion) — nothing to watch */ }
 
     stageChange(state, root, rel);
@@ -164,10 +217,9 @@ export async function setWatchRoot(
   // Enumerate the root's immediate entries and spin up one recursive watcher
   // per non-ignored top-level directory. This was a synchronous readdirSync +
   // a burst of recursive fs.watch calls, which froze the main thread when
-  // opening a large workspace. Do it with async fs.promises.readdir and batch
-  // the watcher installs (yielding via setImmediate between chunks) so opening
-  // a big repo doesn't block. Failures are non-fatal: the root watcher above
-  // still observes top-level activity.
+  // opening a large workspace. Enumerate asynchronously, then hand recursive
+  // registration to a worker thread. Failures are non-fatal: the root watcher
+  // above still observes top-level activity.
   let entries: import("node:fs").Dirent[];
   try {
     entries = await fsp.readdir(root, { withFileTypes: true });
@@ -181,35 +233,24 @@ export async function setWatchRoot(
   // readdir — installing watchers now would leak handles onto a dead state.
   if (byContents.get(id) !== state || webContents.isDestroyed()) return;
 
-  let installed = 0;
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     if (IGNORED_TOP_LEVEL.has(entry.name)) continue;
-    watchTopLevelDir(state, webContents, resolve(root, entry.name));
-    if (++installed % WATCH_INSTALL_BATCH === 0) {
-      await new Promise<void>((res) => setImmediate(res));
-      // Re-check supersession after each yield for the same reason as above.
-      if (byContents.get(id) !== state || webContents.isDestroyed()) return;
-    }
+    watchTopLevelDir(state, resolve(root, entry.name));
   }
+  startRecursiveWatcher(state, webContents);
 }
 
 export function disposeForWebContents(webContents: WebContents): void {
   const state = byContents.get(webContents.id);
   if (!state) return;
-  if (state.flushTimer) clearTimeout(state.flushTimer);
-  for (const watcher of state.watchers.values()) {
-    try { watcher.close(); } catch { /* noop */ }
-  }
+  disposeState(state);
   byContents.delete(webContents.id);
 }
 
 export function disposeAll(): void {
   for (const state of byContents.values()) {
-    if (state.flushTimer) clearTimeout(state.flushTimer);
-    for (const watcher of state.watchers.values()) {
-      try { watcher.close(); } catch { /* noop */ }
-    }
+    disposeState(state);
   }
   byContents.clear();
 }

@@ -323,28 +323,16 @@ export default function ChatComposer({
   useEffect(() => {
     setFileReferences([]);
     setMentionQuery(null);
-    if (!cwd) {
-      setFileMentions([]);
-      setFilesLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setFilesLoading(true);
-    void collectWorkspaceFiles(cwd)
-      .then((files) => {
-        if (!cancelled) setFileMentions(files);
-      })
-      .catch(() => {
-        if (!cancelled) setFileMentions([]);
-      })
-      .finally(() => {
-        if (!cancelled) setFilesLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    setFileMentions([]);
+    setFilesLoading(false);
   }, [cwd]);
 
+  // Building the @file index is intentionally lazy. Eagerly walking every
+  // directory whenever a workspace became active flooded the main process
+  // with hundreds of fs:list IPC calls—even when the composer was hidden or
+  // the user never typed "@". This is especially noticeable for parent
+  // workspaces that contain several repositories. The first mention opens the
+  // picker immediately in its loading state and populates it in the background.
   useEffect(() => {
     if (!cwd || !mentionQuery) return;
     let cancelled = false;

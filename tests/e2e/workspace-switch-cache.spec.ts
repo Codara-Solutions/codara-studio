@@ -50,6 +50,14 @@ test("workspace switches retain the expanded Explorer and refresh it in the back
     await sourceRow.click();
     await expect(page.getByText("cached.ts", { exact: true })).toBeVisible();
 
+    // The composer no longer indexes every file during the workspace switch.
+    // Starting an @mention must still lazily build the index and show results.
+    const composer = page.locator(".composer-shell textarea");
+    await composer.fill("@cached");
+    const mentionMenu = page.locator(".composer-shell .spark-glass").filter({ hasText: "Files" });
+    await expect(mentionMenu.getByText("cached.ts", { exact: true })).toBeVisible();
+    await composer.fill("");
+
     await page.locator('[data-workspace-id="ws-b"]').click();
     await expect(page.getByText("only-b.txt", { exact: true })).toBeVisible();
     await writeFile(join(sourceDir, "arrived-while-away.ts"), "export const fresh = true;\n", "utf8");
@@ -60,6 +68,14 @@ test("workspace switches retain the expanded Explorer and refresh it in the back
     await expect(page.getByText("cached.ts", { exact: true })).toBeVisible();
     // The cached paint is only the fast path; disk reconciliation still lands.
     await expect(page.getByText("arrived-while-away.ts", { exact: true })).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // Recursive registrations live in a worker thread now. Confirm their
+    // events still reach the active Explorer, not just the switch-time disk
+    // reconciliation exercised above.
+    await writeFile(join(sourceDir, "arrived-while-active.ts"), "export const live = true;\n", "utf8");
+    await expect(page.getByText("arrived-while-active.ts", { exact: true })).toBeVisible({
       timeout: 10_000,
     });
   } finally {
