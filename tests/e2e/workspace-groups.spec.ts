@@ -62,7 +62,10 @@ test("workspace folders persist, collapse, move workspaces, and delete without d
     await dispatchWorkspaceDrag(
       page,
       archiveGroup,
-      page.locator('[data-workspace-rail-drop-index="0"]'),
+      // Exercise the normal row-sized target a user hits when dragging a
+      // folder above a loose workspace. The narrow inter-item gap is still a
+      // valid target, but relying on it hid the snap-back bug in real use.
+      page.locator('[data-workspace-id="ws-alpha"]'),
     );
     await expect.poll(async () =>
       page.locator('[data-workspace-rail-drop-index="0"]').evaluate((dropZone) =>

@@ -331,6 +331,20 @@ function WorkspaceRail(props: RailProps) {
             setWsDragId(w.id);
           }}
           onRowDragOver={(event) => {
+            if (topLevel && isWorkspaceGroupDrag(event)) {
+              event.preventDefault();
+              event.stopPropagation();
+              event.dataTransfer.dropEffect = "move";
+              const rect = event.currentTarget.getBoundingClientRect();
+              const targetIndex = topLevelItemIds.indexOf(w.id);
+              setWsDropMarker(null);
+              setRailDropIndex(
+                event.clientY < rect.top + rect.height / 2
+                  ? targetIndex
+                  : targetIndex + 1,
+              );
+              return;
+            }
             if (!isWorkspaceDrag(event)) return;
             event.preventDefault();
             event.stopPropagation();
@@ -342,6 +356,21 @@ function WorkspaceRail(props: RailProps) {
             });
           }}
           onRowDrop={(event) => {
+            if (topLevel && isWorkspaceGroupDrag(event)) {
+              event.preventDefault();
+              event.stopPropagation();
+              const sourceId = draggedWorkspaceGroupId(event);
+              if (sourceId) {
+                const rect = event.currentTarget.getBoundingClientRect();
+                const targetIndex = topLevelItemIds.indexOf(w.id);
+                const beforeItemId = event.clientY < rect.top + rect.height / 2
+                  ? w.id
+                  : topLevelItemIds[targetIndex + 1] ?? null;
+                props.onReorderWorkspaceRailItem(sourceId, beforeItemId);
+              }
+              clearWorkspaceGroupDrag();
+              return;
+            }
             if (!isWorkspaceDrag(event)) return;
             event.preventDefault();
             event.stopPropagation();
