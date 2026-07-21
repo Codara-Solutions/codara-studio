@@ -34,9 +34,10 @@ export interface EditorTab extends BaseTab {
   preview?: boolean;
 }
 
-// Durable pointer to a Claude/Codex CLI session that was launched in a terminal
-// leaf via the "Worker — Claude/Codex" entries. Persisted with the tab layout so
-// a reopen can relaunch the same conversation with `claude -r <id>` /
+// Durable pointer to a Claude/Codex CLI session detected in a terminal leaf,
+// whether it came from Codara's launcher or a command typed by the user.
+// Persisted with the tab layout so a reopen can relaunch the same conversation
+// with `claude --resume <id>` /
 // `codex resume <id>`. Only the session id (+ its cwd) is stored — the transcript
 // itself lives in the CLI's own on-disk history and is rehydrated by --resume.
 // Unlike `worker`/`autorun` (transient, stripped on save), this survives restart.
@@ -89,17 +90,18 @@ export interface TerminalLeaf {
   // any later re-mount (the PTY persists across remounts, so the command
   // should only fire once per session).
   autorun?: string;
-  // Runtime Claude/Codex session pointer for an agent launched in this pane.
-  // Cold hydration strips it; Codara never auto-resumes terminal agents after a
-  // full app relaunch.
+  // Durable Claude/Codex session pointer for an agent running in this pane.
+  // Cold hydration validates it and marks an active session as eligible for the
+  // opt-in resume-on-launch flow; the preference is checked before any command
+  // is started.
   agentSession?: TerminalAgentSession | null;
-  // Runtime-only legacy restore marker. Retained in the type while same-process
-  // agent plumbing is simplified, but stripped from persisted layouts.
+  // Runtime-only, one-shot cold-restore marker. It is derived from a validated
+  // active agentSession during hydration and is never written to localStorage.
   bootResume?: boolean;
 }
 
 export interface TerminalLeafWorker {
-  runtime?: "claude" | "codex" | "cursor" | "opencode";
+  runtime?: "claude" | "codex" | "opencode";
   runId: string;
   workerTaskId: string;
   attemptId: string;

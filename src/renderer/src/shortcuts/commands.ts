@@ -40,7 +40,6 @@ export type CommandId =
   | "tab.cyclePrev"
   | "worker.newClaude"
   | "worker.newCodex"
-  | "worker.newCursor"
   | "markdown.togglePreview";
 
 export type CommandGroup = "General" | "Navigation" | "View" | "Tabs" | "Terminal" | "Workers";
@@ -115,7 +114,7 @@ export const COMMANDS: Command[] = [
     id: "composer.focus",
     label: "Focus chat composer",
     group: "Navigation",
-    // Mod+L — the "focus AI chat" convention (Cursor, Windsurf). Frees Mod+/
+    // Mod+L — a familiar "focus AI chat" convention. Frees Mod+/
     // for the universal Toggle Line Comment chord that editors expect.
     defaultChords: [mod("l")],
   },
@@ -295,12 +294,6 @@ export const COMMANDS: Command[] = [
   {
     id: "worker.newCodex",
     label: "New Codex worker pane",
-    group: "Workers",
-    defaultChords: [],
-  },
-  {
-    id: "worker.newCursor",
-    label: "New Cursor worker pane",
     group: "Workers",
     defaultChords: [],
   },

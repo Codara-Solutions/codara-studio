@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import type { ChatBackendKind, FsEntry, GitFileChange, RunState, Workspace } from "@shared/types";
+import type { ChatBackendKind, FsEntry, GitFileChange, RunState, Workspace, WorkspaceGroup } from "@shared/types";
 import type { SharedGitStatus } from "../git/useSharedGitStatus";
 import type { ChatStatusTone } from "./chat/timeline";
 import { statusToneColor } from "./chat/timeline";
@@ -28,12 +28,13 @@ const WORKSPACE_COLORS = [
   "#5DD6D6",
 ];
 
-const PANEL_SECTION_MIME = "application/x-spark-panel-section";
-const WORKSPACE_ROW_MIME = "application/x-spark-workspace-row";
+const PANEL_SECTION_MIME = "application/x-codara-panel-section";
+const WORKSPACE_ROW_MIME = "application/x-codara-workspace-row";
+const WORKSPACE_GROUP_MIME = "application/x-codara-workspace-group";
 // Below this width the full tracked uppercase label no longer fits beside the
-// workspace count and three fixed 20px actions. Keep a little buffer above the
+// workspace count and four fixed 20px actions. Keep a little buffer above the
 // exact measured edge so a one-pixel resize cannot toggle into ellipsis.
-const COMPACT_WORKSPACE_HEADER_WIDTH = 224;
+const COMPACT_WORKSPACE_HEADER_WIDTH = 250;
 
 const SECTION_LABELS: Record<PanelSectionKey, string> = {
   workspaces: "Workspaces",
@@ -46,6 +47,8 @@ interface RailProps {
   sections: PanelSectionKey[];
   draggingSection: PanelSectionKey | null;
   workspaces: Workspace[];
+  workspaceGroups: WorkspaceGroup[];
+  workspaceRailOrder: string[];
   activeId: string | null;
   editingId: string | null;
   width: number;
@@ -70,7 +73,15 @@ interface RailProps {
   onPreviewColor: (id: string, color: string) => void;
   onCreateCopyBranch: (id: string) => void;
   onDelete: (id: string) => void;
-  onReorder: (fromIndex: number, toIndex: number) => void;
+  onMoveWorkspace: (
+    workspaceId: string,
+    groupId: string | null,
+    beforeWorkspaceId: string | null,
+  ) => void;
+  onCreateWorkspaceGroup: () => string;
+  onChangeWorkspaceGroup: (id: string, patch: Partial<WorkspaceGroup>) => void;
+  onReorderWorkspaceRailItem: (id: string, beforeItemId: string | null) => void;
+  onDeleteWorkspaceGroup: (id: string) => void;
   onCloseEditor: () => void;
   onCreate: () => void;
   // Opens the SSH connect dialog to add a remote (VPS) workspace.
@@ -120,13 +131,19 @@ function WorkspaceRail(props: RailProps) {
     onSectionDragEnd,
   } = props;
   const [dropIndex, setDropIndex] = useState<number | null>(null);
-  // ── Workspace row reorder ────────────────────────────────────────────────
-  // `wsDragIndex` is the index of the row currently being dragged (so it can
-  // render dimmed); `wsDropIndex` is the insertion index where a drop would
-  // land (a small horizontal line is drawn before that index, or after the
-  // last row when equal to workspaces.length).
-  const [wsDragIndex, setWsDragIndex] = useState<number | null>(null);
-  const [wsDropIndex, setWsDropIndex] = useState<number | null>(null);
+  // Workspace rows can be reordered within a folder or dropped onto another
+  // folder. The transfer payload makes the gesture work even when Workspaces
+  // is rendered in the opposite rail; local state is only visual feedback.
+  const [wsDragId, setWsDragId] = useState<string | null>(null);
+  const wsDragIdRef = useRef<string | null>(null);
+  const [wsDropMarker, setWsDropMarker] = useState<{
+    workspaceId: string;
+    position: "before" | "after";
+  } | null>(null);
+  const [groupDragId, setGroupDragId] = useState<string | null>(null);
+  const groupDragIdRef = useRef<string | null>(null);
+  const [railDropIndex, setRailDropIndex] = useState<number | null>(null);
+  const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const deleteActiveWorkspace = () => {
     if (!props.activeId) return;
     props.onCloseEditor();
@@ -141,6 +158,22 @@ function WorkspaceRail(props: RailProps) {
   const bodyHeightAtDragStart = useRef(1);
 
   const accent = props.activeWorkspace?.color || "var(--accent)";
+  const workspaceGroupIds = new Set(props.workspaceGroups.map((group) => group.id));
+  const unfiledWorkspaces = workspaces.filter((workspace) =>
+    !workspace.groupId || !workspaceGroupIds.has(workspace.groupId));
+  const unfiledWorkspaceById = new Map(unfiledWorkspaces.map((workspace) => [workspace.id, workspace]));
+  const workspaceGroupById = new Map(props.workspaceGroups.map((group) => [group.id, group]));
+  const eligibleRailIds = new Set([...unfiledWorkspaceById.keys(), ...workspaceGroupById.keys()]);
+  const topLevelItemIds: string[] = [];
+  const seenRailIds = new Set<string>();
+  for (const id of props.workspaceRailOrder) {
+    if (!eligibleRailIds.has(id) || seenRailIds.has(id)) continue;
+    seenRailIds.add(id);
+    topLevelItemIds.push(id);
+  }
+  for (const id of eligibleRailIds) {
+    if (!seenRailIds.has(id)) topLevelItemIds.push(id);
+  }
   const compactWorkspaceHeader = width < COMPACT_WORKSPACE_HEADER_WIDTH;
   const slots = sectionStackStyles(sections, split, collapsed);
   const canResizePair = sections.length === 2;
@@ -188,6 +221,157 @@ function WorkspaceRail(props: RailProps) {
     },
   });
 
+  const isWorkspaceDrag = (event: React.DragEvent): boolean => {
+    if (draggingSection) return false;
+    if (
+      groupDragIdRef.current !== null ||
+      Array.from(event.dataTransfer.types).includes(WORKSPACE_GROUP_MIME)
+    ) {
+      return false;
+    }
+    return wsDragIdRef.current !== null || Array.from(event.dataTransfer.types).some((type) =>
+      type === WORKSPACE_ROW_MIME || type === "text/plain");
+  };
+
+  const isWorkspaceGroupDrag = (event: React.DragEvent): boolean => {
+    if (draggingSection || wsDragIdRef.current !== null) return false;
+    return groupDragIdRef.current !== null ||
+      Array.from(event.dataTransfer.types).includes(WORKSPACE_GROUP_MIME);
+  };
+
+  const draggedWorkspaceGroupId = (event: React.DragEvent): string | null => {
+    const candidate = event.dataTransfer.getData(WORKSPACE_GROUP_MIME) || groupDragIdRef.current;
+    return candidate && props.workspaceGroups.some((group) => group.id === candidate)
+      ? candidate
+      : null;
+  };
+
+  const draggedWorkspaceId = (event: React.DragEvent): string | null => {
+    for (const candidate of [
+      event.dataTransfer.getData(WORKSPACE_ROW_MIME),
+      event.dataTransfer.getData("text/plain"),
+      wsDragIdRef.current,
+    ]) {
+      if (candidate && workspaces.some((workspace) => workspace.id === candidate)) return candidate;
+    }
+    return null;
+  };
+
+  const clearWorkspaceDrag = () => {
+    wsDragIdRef.current = null;
+    setWsDragId(null);
+    setWsDropMarker(null);
+    setRailDropIndex(null);
+  };
+
+  const clearWorkspaceGroupDrag = () => {
+    groupDragIdRef.current = null;
+    setGroupDragId(null);
+    setRailDropIndex(null);
+  };
+
+  const markRailDropAt = (event: React.DragEvent, index: number) => {
+    if (!isWorkspaceDrag(event) && !isWorkspaceGroupDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    setRailDropIndex(index);
+  };
+
+  const dropRailItemAt = (event: React.DragEvent, index: number) => {
+    if (!isWorkspaceDrag(event) && !isWorkspaceGroupDrag(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const beforeItemId = topLevelItemIds[index] ?? null;
+    const workspaceId = draggedWorkspaceId(event);
+    if (workspaceId) {
+      props.onMoveWorkspace(workspaceId, null, null);
+      props.onReorderWorkspaceRailItem(workspaceId, beforeItemId);
+      clearWorkspaceDrag();
+      return;
+    }
+    const groupId = draggedWorkspaceGroupId(event);
+    if (groupId) props.onReorderWorkspaceRailItem(groupId, beforeItemId);
+    clearWorkspaceGroupDrag();
+  };
+
+  const renderWorkspaceRows = (
+    items: Workspace[],
+    groupId: string | null,
+    topLevel = false,
+  ): React.ReactNode =>
+    items.map((w, index) => (
+      <React.Fragment key={w.id}>
+        {wsDropMarker?.workspaceId === w.id && wsDropMarker.position === "before" && (
+          <RowDropIndicator accent={accent} />
+        )}
+        <WorkspaceRow
+          ws={w}
+          workspaceGroups={props.workspaceGroups}
+          active={w.id === props.activeId}
+          editing={w.id === props.editingId}
+          dragging={wsDragId === w.id}
+          tone={props.toneByWorkspaceId?.[w.id] ?? null}
+          working={props.workingByWorkspaceId?.[w.id] ?? false}
+          onActivate={() => props.onActivate(w.id)}
+          onEdit={() => props.onEdit(w.id)}
+          onChange={(patch) => props.onChange(w.id, patch)}
+          onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
+          onCloseEditor={props.onCloseEditor}
+          onCreateCopyBranch={() => props.onCreateCopyBranch(w.id)}
+          onDelete={() => props.onDelete(w.id)}
+          onMoveToGroup={(nextGroupId) => props.onMoveWorkspace(w.id, nextGroupId, null)}
+          onRowDragStart={(event) => {
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData(WORKSPACE_ROW_MIME, w.id);
+            // text/plain is a compatibility transport for WebDriver/native
+            // drag implementations that discard custom MIME payloads.
+            event.dataTransfer.setData("text/plain", w.id);
+            wsDragIdRef.current = w.id;
+            setWsDragId(w.id);
+          }}
+          onRowDragOver={(event) => {
+            if (!isWorkspaceDrag(event)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            event.dataTransfer.dropEffect = "move";
+            const rect = event.currentTarget.getBoundingClientRect();
+            setWsDropMarker({
+              workspaceId: w.id,
+              position: event.clientY < rect.top + rect.height / 2 ? "before" : "after",
+            });
+          }}
+          onRowDrop={(event) => {
+            if (!isWorkspaceDrag(event)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const sourceId = draggedWorkspaceId(event);
+            if (!sourceId) return clearWorkspaceDrag();
+            const rect = event.currentTarget.getBoundingClientRect();
+            if (topLevel) {
+              const targetIndex = topLevelItemIds.indexOf(w.id);
+              const beforeItemId = event.clientY < rect.top + rect.height / 2
+                ? w.id
+                : topLevelItemIds[targetIndex + 1] ?? null;
+              props.onMoveWorkspace(sourceId, null, null);
+              props.onReorderWorkspaceRailItem(sourceId, beforeItemId);
+              clearWorkspaceDrag();
+              return;
+            }
+            const before = event.clientY < rect.top + rect.height / 2
+              ? w.id
+              : items[index + 1]?.id ?? null;
+            props.onMoveWorkspace(sourceId, groupId, before);
+            clearWorkspaceDrag();
+          }}
+          onRowDragEnd={clearWorkspaceDrag}
+        />
+        {wsDropMarker?.workspaceId === w.id && wsDropMarker.position === "after" && (
+          <RowDropIndicator accent={accent} />
+        )}
+      </React.Fragment>
+    ));
+
   const renderSection = (section: PanelSectionKey): React.ReactNode => {
     switch (section) {
       case "workspaces":
@@ -202,6 +386,12 @@ function WorkspaceRail(props: RailProps) {
               {...headerDrag("workspaces")}
               actions={
                 <>
+                  <RailIconButton
+                    title="New workspace folder"
+                    onClick={() => setEditingGroupId(props.onCreateWorkspaceGroup())}
+                  >
+                    <FolderPlusGlyph />
+                  </RailIconButton>
                   <RailIconButton title="New workspace" onClick={onCreate}>
                     <PlusIcon size={11} />
                   </RailIconButton>
@@ -227,85 +417,114 @@ function WorkspaceRail(props: RailProps) {
               <div
                 style={{ flex: 1, overflow: "auto", minHeight: 0, padding: "6px 8px 10px" }}
                 onDragOver={(event) => {
-                  if (wsDragIndex === null) return;
-                  // Drop into the empty space below the last row → append.
+                  if (!isWorkspaceDrag(event)) return;
                   if (event.target === event.currentTarget) {
                     event.preventDefault();
                     event.stopPropagation();
                     event.dataTransfer.dropEffect = "move";
-                    setWsDropIndex(workspaces.length);
+                    setWsDropMarker(null);
                   }
                 }}
                 onDrop={(event) => {
-                  if (wsDragIndex === null) return;
+                  if (!isWorkspaceDrag(event) || event.target !== event.currentTarget) return;
                   event.preventDefault();
                   event.stopPropagation();
-                  const to = wsDropIndex ?? workspaces.length;
-                  if (wsDragIndex !== to && wsDragIndex + 1 !== to) {
-                    props.onReorder(wsDragIndex, to);
-                  }
-                  setWsDragIndex(null);
-                  setWsDropIndex(null);
+                  const sourceId = draggedWorkspaceId(event);
+                  if (sourceId) props.onMoveWorkspace(sourceId, null, null);
+                  clearWorkspaceDrag();
                 }}
               >
-                {workspaces.length === 0 && <EmptyState onCreate={onCreate} />}
-                {workspaces.map((w, index) => (
-                  <React.Fragment key={w.id}>
-                    {wsDropIndex === index && wsDragIndex !== null && (
-                      <RowDropIndicator accent={accent} />
-                    )}
-                    <WorkspaceRow
-                      ws={w}
-                      active={w.id === props.activeId}
-                      editing={w.id === props.editingId}
-                      dragging={wsDragIndex === index}
-                      tone={props.toneByWorkspaceId?.[w.id] ?? null}
-                      working={props.workingByWorkspaceId?.[w.id] ?? false}
-                      onActivate={() => props.onActivate(w.id)}
-                      onEdit={() => props.onEdit(w.id)}
-                      onChange={(patch) => props.onChange(w.id, patch)}
-                      onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
-                      onCloseEditor={props.onCloseEditor}
-                      onCreateCopyBranch={() => props.onCreateCopyBranch(w.id)}
-                      onDelete={() => props.onDelete(w.id)}
-                      onRowDragStart={(event) => {
-                        event.dataTransfer.effectAllowed = "move";
-                        event.dataTransfer.setData(WORKSPACE_ROW_MIME, w.id);
-                        event.dataTransfer.setData("text/plain", w.name);
-                        setWsDragIndex(index);
-                      }}
-                      onRowDragOver={(event) => {
-                        if (wsDragIndex === null) return;
-                        event.preventDefault();
-                        event.stopPropagation();
-                        event.dataTransfer.dropEffect = "move";
-                        const rect = event.currentTarget.getBoundingClientRect();
-                        const insertIndex =
-                          event.clientY < rect.top + rect.height / 2 ? index : index + 1;
-                        setWsDropIndex(insertIndex);
-                      }}
-                      onRowDrop={(event) => {
-                        if (wsDragIndex === null) return;
-                        event.preventDefault();
-                        event.stopPropagation();
-                        const rect = event.currentTarget.getBoundingClientRect();
-                        const to =
-                          event.clientY < rect.top + rect.height / 2 ? index : index + 1;
-                        if (wsDragIndex !== to && wsDragIndex + 1 !== to) {
-                          props.onReorder(wsDragIndex, to);
-                        }
-                        setWsDragIndex(null);
-                        setWsDropIndex(null);
-                      }}
-                      onRowDragEnd={() => {
-                        setWsDragIndex(null);
-                        setWsDropIndex(null);
-                      }}
-                    />
-                  </React.Fragment>
-                ))}
-                {wsDropIndex === workspaces.length && wsDragIndex !== null && (
-                  <RowDropIndicator accent={accent} />
+                {workspaces.length === 0 && props.workspaceGroups.length === 0 && (
+                  <EmptyState onCreate={onCreate} />
+                )}
+                {topLevelItemIds.map((itemId, itemIndex) => {
+                  const workspace = unfiledWorkspaceById.get(itemId);
+                  const group = workspaceGroupById.get(itemId);
+                  if (!workspace && !group) return null;
+                  const members = group
+                    ? workspaces.filter((candidate) => candidate.groupId === group.id)
+                    : [];
+                  return (
+                    <React.Fragment key={itemId}>
+                      <RailItemDropZone
+                        index={itemIndex}
+                        active={railDropIndex === itemIndex}
+                        accent={accent}
+                        onDragOver={(event) => markRailDropAt(event, itemIndex)}
+                        onDrop={(event) => dropRailItemAt(event, itemIndex)}
+                      />
+                      {workspace
+                        ? renderWorkspaceRows([workspace], null, true)
+                        : group ? (
+                          <WorkspaceFolder
+                            group={group}
+                            name={group.name}
+                            count={members.length}
+                            accent={accent}
+                            editing={editingGroupId === group.id}
+                            dragging={groupDragId === group.id}
+                            isWorkspaceDrag={isWorkspaceDrag}
+                            isWorkspaceGroupDrag={isWorkspaceGroupDrag}
+                            onGroupDragStart={(event) => {
+                              event.dataTransfer.effectAllowed = "move";
+                              event.dataTransfer.setData(WORKSPACE_GROUP_MIME, group.id);
+                              groupDragIdRef.current = group.id;
+                              setGroupDragId(group.id);
+                            }}
+                            onGroupDragOver={(event) => {
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              setRailDropIndex(
+                                event.clientY < rect.top + rect.height / 2
+                                  ? itemIndex
+                                  : itemIndex + 1,
+                              );
+                            }}
+                            onGroupDrop={(event) => {
+                              const sourceId = draggedWorkspaceGroupId(event);
+                              if (sourceId) {
+                                const rect = event.currentTarget.getBoundingClientRect();
+                                const insertAt = event.clientY < rect.top + rect.height / 2
+                                  ? itemIndex
+                                  : itemIndex + 1;
+                                props.onReorderWorkspaceRailItem(
+                                  sourceId,
+                                  topLevelItemIds[insertAt] ?? null,
+                                );
+                              }
+                              clearWorkspaceGroupDrag();
+                            }}
+                            onGroupDragEnd={clearWorkspaceGroupDrag}
+                            onToggle={() => props.onChangeWorkspaceGroup(group.id, { collapsed: !group.collapsed })}
+                            onRename={(name) => {
+                              props.onChangeWorkspaceGroup(group.id, { name });
+                              setEditingGroupId(null);
+                            }}
+                            onStartRename={() => setEditingGroupId(group.id)}
+                            onCancelRename={() => setEditingGroupId(null)}
+                            onDelete={() => {
+                              props.onDeleteWorkspaceGroup(group.id);
+                              setEditingGroupId(null);
+                            }}
+                            onDropWorkspace={(event) => {
+                              const sourceId = draggedWorkspaceId(event);
+                              if (sourceId) props.onMoveWorkspace(sourceId, group.id, null);
+                              clearWorkspaceDrag();
+                            }}
+                          >
+                            {!group.collapsed && renderWorkspaceRows(members, group.id)}
+                          </WorkspaceFolder>
+                        ) : null}
+                    </React.Fragment>
+                  );
+                })}
+                {topLevelItemIds.length > 0 && (
+                  <RailItemDropZone
+                    index={topLevelItemIds.length}
+                    active={railDropIndex === topLevelItemIds.length}
+                    accent={accent}
+                    onDragOver={(event) => markRailDropAt(event, topLevelItemIds.length)}
+                    onDrop={(event) => dropRailItemAt(event, topLevelItemIds.length)}
+                  />
                 )}
               </div>
             )}
@@ -471,6 +690,360 @@ function sectionStackStyles(
   return sections.map((section) => (collapsed[section] ? collapsedSlot : fillSlot));
 }
 
+function WorkspaceFolder({
+  group,
+  name,
+  count,
+  accent,
+  editing = false,
+  dragging = false,
+  isWorkspaceDrag,
+  isWorkspaceGroupDrag,
+  onDropWorkspace,
+  onGroupDragStart,
+  onGroupDragOver,
+  onGroupDrop,
+  onGroupDragEnd,
+  onToggle,
+  onRename,
+  onStartRename,
+  onCancelRename,
+  onDelete,
+  children,
+}: {
+  group?: WorkspaceGroup;
+  name: string;
+  count: number;
+  accent: string;
+  editing?: boolean;
+  dragging?: boolean;
+  isWorkspaceDrag: (event: React.DragEvent) => boolean;
+  isWorkspaceGroupDrag: (event: React.DragEvent) => boolean;
+  onDropWorkspace: (event: React.DragEvent) => void;
+  onGroupDragStart?: (event: React.DragEvent<Element>) => void;
+  onGroupDragOver?: (event: React.DragEvent<Element>) => void;
+  onGroupDrop?: (event: React.DragEvent<Element>) => void;
+  onGroupDragEnd?: () => void;
+  onToggle?: () => void;
+  onRename?: (name: string) => void;
+  onStartRename?: () => void;
+  onCancelRename?: () => void;
+  onDelete?: () => void;
+  children: React.ReactNode;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [draftName, setDraftName] = useState(name);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [dropActive, setDropActive] = useState(false);
+  const collapsed = group?.collapsed === true;
+
+  useEffect(() => setDraftName(name), [name]);
+  useEffect(() => {
+    if (!editing) return;
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, [editing]);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (event: MouseEvent) => {
+      if (menuRef.current && event.target instanceof Node && !menuRef.current.contains(event.target)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
+
+  // Row drops stop propagation after moving the workspace, so the folder's
+  // own onDrop is not guaranteed to run. Clear the transient drop wash at the
+  // document boundary too, preventing a destination folder from remaining
+  // highlighted until the next reload.
+  useEffect(() => {
+    if (!dropActive) return;
+    const clearDropState = () => setDropActive(false);
+    document.addEventListener("drop", clearDropState, true);
+    document.addEventListener("dragend", clearDropState, true);
+    document.addEventListener("pointerdown", clearDropState, true);
+    window.addEventListener("blur", clearDropState);
+    return () => {
+      document.removeEventListener("drop", clearDropState, true);
+      document.removeEventListener("dragend", clearDropState, true);
+      document.removeEventListener("pointerdown", clearDropState, true);
+      window.removeEventListener("blur", clearDropState);
+    };
+  }, [dropActive]);
+
+  const commitRename = () => {
+    const next = draftName.trim();
+    if (next) onRename?.(next);
+    else {
+      setDraftName(name);
+      onCancelRename?.();
+    }
+  };
+
+  const dragHandlers = {
+    onDragStart: (event: React.DragEvent<HTMLElement>) => {
+      if (!group || editing) return;
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest("[data-workspace-id], button, input, [role='menu']")
+      ) {
+        event.preventDefault();
+        return;
+      }
+      onGroupDragStart?.(event);
+    },
+    onDragOver: (event: React.DragEvent) => {
+      if (isWorkspaceGroupDrag(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = "move";
+        onGroupDragOver?.(event);
+        return;
+      }
+      if (!isWorkspaceDrag(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = "move";
+      setDropActive(true);
+    },
+    onDragLeave: (event: React.DragEvent) => {
+      const next = event.relatedTarget;
+      if (next instanceof Node && event.currentTarget.contains(next)) return;
+      setDropActive(false);
+    },
+    onDrop: (event: React.DragEvent) => {
+      if (isWorkspaceGroupDrag(event)) {
+        event.preventDefault();
+        event.stopPropagation();
+        onGroupDrop?.(event);
+        return;
+      }
+      if (!isWorkspaceDrag(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setDropActive(false);
+      onDropWorkspace(event);
+    },
+    onDragEnd: () => onGroupDragEnd?.(),
+  };
+
+  return (
+    <section
+      className="spark-workspace-folder"
+      data-workspace-group-id={group?.id ?? ""}
+      draggable={Boolean(group) && !editing}
+      style={{
+        position: "relative",
+        marginBottom: 8,
+        padding: 4,
+        borderRadius: "var(--radius-surface, 10px)",
+        border: dropActive
+          ? `1px solid color-mix(in oklab, ${accent} 54%, var(--rule))`
+          : "1px solid color-mix(in oklab, var(--rule) 72%, transparent)",
+        background: dropActive
+          ? `color-mix(in oklab, ${accent} 12%, var(--panel))`
+          : "color-mix(in oklab, var(--panel-raised, var(--panel)) 78%, transparent)",
+        boxShadow: dropActive ? `0 0 18px color-mix(in oklab, ${accent} 18%, transparent)` : "var(--lift-hi)",
+        opacity: dragging ? 0.46 : 1,
+        backdropFilter: "blur(18px) saturate(125%)",
+        WebkitBackdropFilter: "blur(18px) saturate(125%)",
+        transition:
+          "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
+      }}
+      {...dragHandlers}
+    >
+      <div
+        style={{
+          minHeight: 28,
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          padding: "2px 4px",
+          color: "var(--ink-dim)",
+        }}
+      >
+        {group ? (
+          <button
+            type="button"
+            onClick={onToggle}
+            title={collapsed ? `Expand ${name}` : `Collapse ${name}`}
+            style={{
+              appearance: "none",
+              border: "none",
+              background: "transparent",
+              color: "var(--muted)",
+              width: 14,
+              height: 18,
+              padding: 0,
+              display: "grid",
+              placeItems: "center",
+              cursor: "default",
+            }}
+          >
+            <ChevronGlyph collapsed={collapsed} />
+          </button>
+        ) : (
+          <span style={{ width: 14 }} />
+        )}
+        <FolderGlyph color={group ? accent : "var(--muted)"} open={!collapsed} />
+        {editing ? (
+          <input
+            ref={inputRef}
+            value={draftName}
+            onChange={(event) => setDraftName(event.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") commitRename();
+              if (event.key === "Escape") {
+                setDraftName(name);
+                onCancelRename?.();
+              }
+            }}
+            aria-label="Workspace folder name"
+            style={{
+              minWidth: 0,
+              flex: 1,
+              appearance: "none",
+              background: "transparent",
+              color: "var(--ink)",
+              border: "none",
+              borderBottom: `1px solid ${accent}`,
+              outline: "none",
+              padding: "1px 0",
+              fontFamily: "inherit",
+              fontSize: 11,
+              fontWeight: 700,
+            }}
+          />
+        ) : group ? (
+          <button
+            type="button"
+            onClick={onToggle}
+            style={{
+              minWidth: 0,
+              flex: 1,
+              appearance: "none",
+              border: "none",
+              background: "transparent",
+              color: "var(--ink-dim)",
+              textAlign: "left",
+              padding: 0,
+              fontFamily: "inherit",
+              fontSize: 10,
+              fontWeight: 750,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              cursor: "default",
+            }}
+            title={name}
+          >
+            {name}
+          </button>
+        ) : (
+          <span
+            title={name}
+            style={{
+              minWidth: 0,
+              flex: 1,
+              color: "var(--ink-dim)",
+              fontSize: 10,
+              fontWeight: 750,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {name}
+          </span>
+        )}
+        <span style={{ fontSize: 10, color: "var(--muted-2)", fontVariantNumeric: "tabular-nums" }}>
+          {count}
+        </span>
+        {group && !editing && (
+          <div ref={menuRef} style={{ position: "relative", flex: "0 0 18px" }}>
+            <button
+              type="button"
+              className="spark-icon-btn"
+              title="Folder actions"
+              onClick={() => setMenuOpen((open) => !open)}
+              style={{
+                ["--spark-icon-btn-size" as string]: "18px",
+                color: menuOpen ? "var(--ink)" : "var(--muted)",
+                borderRadius: "var(--radius-control, 7px)",
+              }}
+            >
+              <svg width="11" height="11" viewBox="0 0 10 10" fill="currentColor">
+                <circle cx="2" cy="5" r="1" />
+                <circle cx="5" cy="5" r="1" />
+                <circle cx="8" cy="5" r="1" />
+              </svg>
+            </button>
+            {menuOpen && (
+              <div
+                role="menu"
+                className="spark-menu"
+                style={{ position: "absolute", top: 21, right: 0, minWidth: 160, padding: 4, zIndex: 30 }}
+              >
+                <RowMenuItem
+                  label="Rename folder"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onStartRename?.();
+                  }}
+                />
+                <RowMenuItem
+                  label="Delete folder"
+                  danger
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onDelete?.();
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      {!collapsed && (
+        <div style={{ paddingTop: count > 0 ? 2 : 0 }}>
+          {children}
+          {count === 0 && (
+            <div
+              style={{
+                margin: "2px 3px 3px",
+                padding: "7px 8px",
+                borderRadius: "var(--radius-control, 7px)",
+                border: "1px dashed color-mix(in oklab, var(--rule) 75%, transparent)",
+                color: dropActive ? accent : "var(--muted-2)",
+                fontSize: 10,
+                textAlign: "center",
+              }}
+            >
+              Drop workspaces here
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function RowDropIndicator({ accent }: { accent: string }) {
   return (
     <div
@@ -486,6 +1059,51 @@ function RowDropIndicator({ accent }: { accent: string }) {
         pointerEvents: "none",
       }}
     />
+  );
+}
+
+function RailItemDropZone({
+  index,
+  active,
+  accent,
+  onDragOver,
+  onDrop,
+}: {
+  index: number;
+  active: boolean;
+  accent: string;
+  onDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
+  onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
+}) {
+  return (
+    <div
+      aria-hidden
+      data-workspace-rail-drop-index={index}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      style={{
+        height: 8,
+        margin: "-2px 0",
+        position: "relative",
+        zIndex: active ? 12 : 1,
+      }}
+    >
+      {active && (
+        <div
+          style={{
+            position: "absolute",
+            left: 8,
+            right: 8,
+            top: 3,
+            height: 2,
+            borderRadius: 999,
+            background: accent,
+            boxShadow: `0 0 12px ${accent}`,
+            pointerEvents: "none",
+          }}
+        />
+      )}
+    </div>
   );
 }
 
@@ -518,7 +1136,7 @@ function EmptyPanelDropTarget({ active, accent }: { active: boolean; accent: str
         minHeight: 0,
         margin: 8,
         border: active ? `1px dashed ${accent}` : "1px dashed transparent",
-        background: active ? `color-mix(in oklch, ${accent} 8%, transparent)` : "transparent",
+        background: active ? `color-mix(in oklab, ${accent} 8%, transparent)` : "transparent",
         transition:
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out)",
       }}
@@ -634,6 +1252,7 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
 
 interface RowProps {
   ws: Workspace;
+  workspaceGroups: WorkspaceGroup[];
   active: boolean;
   editing: boolean;
   dragging: boolean;
@@ -646,6 +1265,7 @@ interface RowProps {
   onCloseEditor: () => void;
   onCreateCopyBranch: () => void;
   onDelete: () => void;
+  onMoveToGroup: (groupId: string | null) => void;
   onRowDragStart: (event: React.DragEvent<HTMLDivElement>) => void;
   onRowDragOver: (event: React.DragEvent<HTMLDivElement>) => void;
   onRowDrop: (event: React.DragEvent<HTMLDivElement>) => void;
@@ -654,6 +1274,7 @@ interface RowProps {
 
 function WorkspaceRow({
   ws,
+  workspaceGroups,
   active,
   editing,
   dragging,
@@ -666,6 +1287,7 @@ function WorkspaceRow({
   onCloseEditor,
   onCreateCopyBranch,
   onDelete,
+  onMoveToGroup,
   onRowDragStart,
   onRowDragOver,
   onRowDrop,
@@ -801,13 +1423,13 @@ function WorkspaceRow({
   // shares that color wash (a touch lighter) so a rename never changes the
   // surface. No left-edge bar, no stacked halo: the color carries it quietly.
   const background = rowPressed
-    ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+    ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
     : active
-      ? `color-mix(in oklch, ${accent} 14%, var(--panel))`
+      ? `color-mix(in oklab, ${accent} 14%, var(--panel))`
       : editing
-        ? `color-mix(in oklch, ${accent} 9%, var(--panel))`
+        ? `color-mix(in oklab, ${accent} 9%, var(--panel))`
         : rowHover
-          ? "var(--hover, color-mix(in oklch, var(--ink) 5%, transparent))"
+          ? "var(--hover, color-mix(in oklab, var(--ink) 5%, transparent))"
           : "transparent";
 
   return (
@@ -850,7 +1472,7 @@ function WorkspaceRow({
         // (the soft color fill IS the selection); only editing keeps a faint,
         // very soft color edge as a "this is being renamed" affordance.
         border: editing
-          ? `1px solid color-mix(in oklch, ${accent} 24%, var(--rule-soft))`
+          ? `1px solid color-mix(in oklab, ${accent} 24%, var(--rule-soft))`
           : "1px solid transparent",
         // Generous, calm rounding — de-boxed. Surfaces sit at the surface rung.
         borderRadius: "var(--radius-surface, 10px)",
@@ -896,7 +1518,7 @@ function WorkspaceRow({
               height: 8,
               borderRadius: 999,
               background: working
-                ? `color-mix(in oklch, ${accent} 30%, transparent)`
+                ? `color-mix(in oklab, ${accent} 30%, transparent)`
                 : accent,
               flex: "0 0 8px",
               cursor: "default",
@@ -906,9 +1528,9 @@ function WorkspaceRow({
               // editing dot earns a SOFT COLORED GLOW RING in its own color so
               // the eye lands on it; the 8px advance never changes (glow only).
               boxShadow: editing
-                ? `0 0 0 3px color-mix(in oklch, ${accent} 26%, transparent)`
+                ? `0 0 0 3px color-mix(in oklab, ${accent} 26%, transparent)`
                 : active
-                  ? `0 0 0 3px color-mix(in oklch, ${accent} 22%, transparent), 0 0 10px color-mix(in oklch, ${accent} 50%, transparent)`
+                  ? `0 0 0 3px color-mix(in oklab, ${accent} 22%, transparent), 0 0 10px color-mix(in oklab, ${accent} 50%, transparent)`
                   : "none",
             }}
           >
@@ -920,7 +1542,7 @@ function WorkspaceRow({
                   position: "absolute",
                   inset: -2, // 12px visual ring over the 8px slot
                   borderRadius: 999,
-                  background: `conic-gradient(from 0deg, transparent 0deg 70deg, color-mix(in oklch, ${accent} 35%, transparent) 120deg, ${accent} 330deg, transparent 330deg 360deg)`,
+                  background: `conic-gradient(from 0deg, transparent 0deg 70deg, color-mix(in oklab, ${accent} 35%, transparent) 120deg, ${accent} 330deg, transparent 330deg 360deg)`,
                   WebkitMask:
                     "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
                   mask: "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
@@ -1106,6 +1728,9 @@ function WorkspaceRow({
                 top: 24,
                 right: 0,
                 minWidth: 168,
+                maxWidth: 240,
+                maxHeight: 280,
+                overflowY: "auto",
                 padding: 4,
                 zIndex: 20,
                 display: "grid",
@@ -1128,6 +1753,33 @@ function WorkspaceRow({
                   }}
                 />
               )}
+              {workspaceGroups.length > 0 && (
+                <div
+                  role="separator"
+                  style={{ height: 1, margin: "3px 5px", background: "var(--rule-soft)" }}
+                />
+              )}
+              {workspaceGroups.length > 0 && ws.groupId && (
+                <RowMenuItem
+                  label="Move out of folder"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onMoveToGroup(null);
+                  }}
+                />
+              )}
+              {workspaceGroups
+                .filter((group) => group.id !== ws.groupId)
+                .map((group) => (
+                  <RowMenuItem
+                    key={group.id}
+                    label={`Move to ${group.name}`}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onMoveToGroup(group.id);
+                    }}
+                  />
+                ))}
               <RowMenuItem
                 label="Delete"
                 danger
@@ -1216,7 +1868,7 @@ function StatusDot({ tone }: { tone?: ChatStatusTone | null }) {
         height: 6,
         borderRadius: 999,
         background: color,
-        boxShadow: `0 0 0 2px color-mix(in oklch, ${color} 18%, transparent)`,
+        boxShadow: `0 0 0 2px color-mix(in oklab, ${color} 18%, transparent)`,
       }}
     />
   );
@@ -1252,7 +1904,7 @@ function BranchGlyph({
         // Mirrors the color dot's active treatment: a soft glow in the row's
         // own color so the branch glyph reads as the selected mark, no halo.
         filter: active
-          ? `drop-shadow(0 0 6px color-mix(in oklch, ${color} 50%, transparent))`
+          ? `drop-shadow(0 0 6px color-mix(in oklab, ${color} 50%, transparent))`
           : "none",
       }}
     >
@@ -1273,7 +1925,7 @@ function BranchGlyph({
             marginLeft: -9,
             marginTop: -9,
             borderRadius: 999,
-            background: `conic-gradient(from 0deg, transparent 0deg 70deg, color-mix(in oklch, ${color} 35%, transparent) 120deg, ${color} 330deg, transparent 330deg 360deg)`,
+            background: `conic-gradient(from 0deg, transparent 0deg 70deg, color-mix(in oklab, ${color} 35%, transparent) 120deg, ${color} 330deg, transparent 330deg 360deg)`,
             WebkitMask:
               "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
             mask: "radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px))",
@@ -1297,6 +1949,54 @@ function BranchGlyph({
         <path d="M18 9a9 9 0 0 1-9 9" />
       </svg>
     </span>
+  );
+}
+
+function ChevronGlyph({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg
+      width="10"
+      height="10"
+      viewBox="0 0 10 10"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform 120ms ease" }}
+    >
+      <path d="M2 3.5 5 6.5 8 3.5" />
+    </svg>
+  );
+}
+
+function FolderGlyph({ color, open }: { color: string; open: boolean }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 18 18"
+      fill="none"
+      stroke={color}
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      style={{ flex: "0 0 14px", filter: open ? `drop-shadow(0 0 5px color-mix(in oklab, ${color} 30%, transparent))` : "none" }}
+    >
+      <path d="M2.25 5.25h5l1.4 1.6h7.1v6.4a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5v-8Z" />
+      <path d="M2.25 5.25V4.6a1.35 1.35 0 0 1 1.35-1.35h3.05l1.3 1.5h6.3a1.5 1.5 0 0 1 1.5 1.5v.6" opacity=".72" />
+    </svg>
+  );
+}
+
+function FolderPlusGlyph() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2.25 5.4h5l1.4 1.55h7.1v6.15a1.5 1.5 0 0 1-1.5 1.5H3.75a1.5 1.5 0 0 1-1.5-1.5V5.4Z" />
+      <path d="M2.25 5.4v-.65A1.35 1.35 0 0 1 3.6 3.4h3.05l1.3 1.5h3.1" />
+      <path d="M12.8 2.8v4.3M10.65 4.95h4.3" />
+    </svg>
   );
 }
 

@@ -1944,16 +1944,16 @@ const Row = React.memo(function Row({
         ? "color-mix(in oklch, var(--accent) 18%, transparent)"
         : "color-mix(in oklch, var(--accent) 12%, transparent)"
       : active
-        ? "color-mix(in oklch, var(--ink) 9%, transparent)"
+        ? "color-mix(in oklab, var(--ink) 9%, transparent)"
         : hover
-          ? "color-mix(in oklch, var(--ink) 4%, transparent)"
+          ? "color-mix(in oklab, var(--ink) 4%, transparent)"
           : "transparent";
   const rowShadow = isDropTarget
     ? "inset 0 0 0 1px color-mix(in oklch, var(--accent) 55%, transparent)"
     : selected
       ? "inset 0 0 0 1px color-mix(in oklch, var(--accent) 38%, transparent)"
       : active
-        ? "inset 0 0 0 1px color-mix(in oklch, var(--ink) 10%, transparent)"
+        ? "inset 0 0 0 1px color-mix(in oklab, var(--ink) 10%, transparent)"
         : "none";
 
   // Stable wrappers so this row invokes the shared parent handlers with its

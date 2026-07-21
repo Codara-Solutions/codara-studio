@@ -234,7 +234,7 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
           // leave dark-theme labels sitting on a light backdrop — or vanish
           // entirely at low user tint settings. Readability exception: keep a
           // near-opaque panel face.
-          background: "color-mix(in oklch, var(--panel-2) 92%, transparent)",
+          background: "color-mix(in oklab, var(--panel-2) 92%, transparent)",
           border: "1px solid var(--rule)",
           borderRadius: "var(--radius-popover, 9px)",
           boxShadow: "var(--shadow-2)",
@@ -266,7 +266,7 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
               gap: 4,
               height: 24,
               padding: "0 5px",
-              background: "color-mix(in oklch, var(--ink) 5%, transparent)",
+              background: "color-mix(in oklab, var(--ink) 5%, transparent)",
               border: "1px solid var(--rule-soft)",
               borderRadius: 999,
               boxShadow: "var(--well)",
@@ -292,7 +292,7 @@ export default function DrawOverlay({ active, busy, preparePayload, onClose }: P
                     // pigment circle never resizes on select — selection is
                     // signalled purely by the outer ring below. (Was 1px<->2px,
                     // which shrank the swatch: the one true layout shift.)
-                    border: "1px solid color-mix(in oklch, var(--ink) 25%, transparent)",
+                    border: "1px solid color-mix(in oklab, var(--ink) 25%, transparent)",
                     background: color,
                     // Selected: a crisp accent ring hugging the swatch, no
                     // size change. The 1px panel-tinted gap separates the ring

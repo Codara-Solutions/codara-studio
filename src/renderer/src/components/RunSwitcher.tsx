@@ -587,7 +587,7 @@ function AnswerButton({
           ? "var(--hover)"
           : option.recommended
             ? "var(--accent-soft)"
-            : "color-mix(in oklch, var(--ink) 2%, transparent)",
+            : "color-mix(in oklab, var(--ink) 2%, transparent)",
         color: disabled ? "var(--muted-2)" : "var(--ink)",
         fontFamily: "var(--font-sans)",
         fontSize: 11,

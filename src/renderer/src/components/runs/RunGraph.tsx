@@ -262,7 +262,7 @@ function SkeletonStep({ index, dim }: { index: number; dim: boolean }) {
         boxSizing: "border-box",
         borderRadius: 12,
         border: "1px dashed var(--rule)",
-        background: "color-mix(in oklch, var(--panel) 64%, transparent)",
+        background: "color-mix(in oklab, var(--panel) 64%, transparent)",
         opacity: dim ? 0.5 : 0.85,
         padding: "13px 15px",
         display: "flex",
@@ -311,7 +311,7 @@ function Shimmer({ width, height }: { width: number | string; height: number }) 
         height,
         borderRadius: 999,
         background:
-          "linear-gradient(90deg, color-mix(in oklch, var(--ink) 5%, transparent) 0%, color-mix(in oklch, var(--ink) 13%, transparent) 50%, color-mix(in oklch, var(--ink) 5%, transparent) 100%)",
+          "linear-gradient(90deg, color-mix(in oklab, var(--ink) 5%, transparent) 0%, color-mix(in oklab, var(--ink) 13%, transparent) 50%, color-mix(in oklab, var(--ink) 5%, transparent) 100%)",
         backgroundSize: "220% 100%",
         animation: "spark-shimmer 2.1s ease-in-out infinite",
       }}
@@ -417,7 +417,7 @@ function OutcomeNode({ run }: { run: RunState }) {
         boxSizing: "border-box",
         borderRadius: 12,
         border: `1px solid ${tone}`,
-        background: `linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 86%, ${tone} 7%), color-mix(in oklch, var(--panel) 86%, transparent))`,
+        background: `linear-gradient(150deg, color-mix(in oklab, var(--panel-2) 86%, ${tone} 7%), color-mix(in oklab, var(--panel) 86%, transparent))`,
         boxShadow: "var(--lift-hi), var(--shadow-2)",
         padding: "14px 16px",
         display: "flex",

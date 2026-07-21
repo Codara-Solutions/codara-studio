@@ -1,7 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
-import type { RuntimeState, ShellInfo } from "@shared/types";
+import type {
+  RuntimeState,
+  ShellInfo,
+  TerminalAgentForegroundState,
+  WorkerSessionRuntime,
+} from "@shared/types";
 import type { SparkOpenInput } from "../components/Terminal/useTerminalSession";
 import {
   findLeaf,
@@ -77,6 +82,12 @@ interface Props {
     paneId: string,
     direction: TerminalSplit["direction"],
     autorun?: string,
+    agentSession?: TerminalAgentSession | null,
+  ) => void;
+  onOpenWorkerSessionPicker: (
+    runtime: WorkerSessionRuntime,
+    cwd: string | undefined,
+    launch: (command: string, session: TerminalAgentSession | null) => void,
   ) => void;
   onMovePane: (
     payload: TerminalPaneDragPayload,
@@ -103,7 +114,7 @@ interface Props {
   onPaneAgentState: (
     tabId: TabId,
     paneId: string,
-    state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean },
+    state: TerminalAgentForegroundState,
   ) => void;
   // Finer live agent state (working / blocked / idle / done) from the
   // per-pane runtime poller, used to colour + label the worker chip. Distinct
@@ -131,13 +142,14 @@ type Bundle = {
   onActivate: () => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
-  onSmartAdd: (autorun?: string) => void;
+  onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null) => void;
+  onOpenWorkerSessions: (runtime: WorkerSessionRuntime) => void;
   onClose: () => void;
   onToggleZoom: () => void;
   onCwd: (cwd: string) => void;
   onActivity: () => void;
   onUserInput: () => void;
-  onAgentState: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
+  onAgentState: (state: TerminalAgentForegroundState) => void;
   onRuntimeState: (state: RuntimeState) => void;
   onResumeUnavailable: () => void;
   onResumeFallback: (session: TerminalAgentSession) => void;
@@ -160,6 +172,7 @@ function TerminalStack({
   onActivatePane,
   onSplitRatioChange,
   onSplitPane,
+  onOpenWorkerSessionPicker,
   onMovePane,
   onClosePane,
   onTabZoomToggle,
@@ -191,6 +204,7 @@ function TerminalStack({
   const activateRef = useRef(onActivatePane);
   const ratioRef = useRef(onSplitRatioChange);
   const splitRef = useRef(onSplitPane);
+  const openWorkerSessionPickerRef = useRef(onOpenWorkerSessionPicker);
   const moveRef = useRef(onMovePane);
   const closeRef = useRef(onClosePane);
   const zoomToggleRef = useRef(onTabZoomToggle);
@@ -212,6 +226,7 @@ function TerminalStack({
     activateRef.current = onActivatePane;
     ratioRef.current = onSplitRatioChange;
     splitRef.current = onSplitPane;
+    openWorkerSessionPickerRef.current = onOpenWorkerSessionPicker;
     moveRef.current = onMovePane;
     closeRef.current = onClosePane;
     zoomToggleRef.current = onTabZoomToggle;
@@ -226,7 +241,7 @@ function TerminalStack({
     resumeUnavailableRef.current = onPaneResumeUnavailable;
     resumeFallbackRef.current = onPaneResumeFallback;
     bootResumeConsumedRef.current = onPaneBootResumeConsumed;
-  }, [workspaceVisible, onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
+  }, [workspaceVisible, onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onOpenWorkerSessionPicker, onMovePane, onClosePane, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
 
   // Latest tab roots so the + smart-add button can read whichever PaneNode
   // tree is current at click time (a stale capture would split a tree that
@@ -251,9 +266,9 @@ function TerminalStack({
   // useCallback (reads only refs, so empty deps): the per-pane bundles
   // close over this, and the memoized TerminalTabPane below takes it as a
   // prop — both need it to be referentially stable.
-  const smartAddInTab = useCallback((tabId: TabId, autorun?: string): void => {
+  const smartAddTargetInTab = useCallback((tabId: TabId) => {
     const tab = tabsRef.current.find((t) => t.id === tabId);
-    if (!tab) return;
+    if (!tab) return null;
     const el = tabRootsRef.current.get(tabId);
     const rect = el?.getBoundingClientRect();
     // Sensible fallback for the rare case where the ref hasn't attached yet
@@ -261,10 +276,18 @@ function TerminalStack({
     // still leans toward horizontal splits on wide workspaces.
     const W = rect && rect.width > 0 ? rect.width : 1600;
     const H = rect && rect.height > 0 ? rect.height : 900;
-    const target = smartAddTarget(tab.root, W, H);
-    if (!target) return;
-    splitRef.current(tabId, target.paneId, target.direction, autorun);
+    return smartAddTarget(tab.root, W, H);
   }, []);
+
+  const smartAddInTab = useCallback((
+    tabId: TabId,
+    autorun?: string,
+    agentSession?: TerminalAgentSession | null,
+  ): void => {
+    const target = smartAddTargetInTab(tabId);
+    if (!target) return;
+    splitRef.current(tabId, target.paneId, target.direction, autorun, agentSession);
+  }, [smartAddTargetInTab]);
 
   const handlesRef = useRef<Map<string, TerminalPaneHandle | null>>(new Map());
   const lastScrollbackSnapshotRef = useRef<Map<string, number>>(new Map());
@@ -291,7 +314,26 @@ function TerminalStack({
           onActivate: () => activateRef.current(tabId, paneId),
           onSplitRight: () => splitRef.current(tabId, paneId, "horizontal"),
           onSplitDown: () => splitRef.current(tabId, paneId, "vertical"),
-          onSmartAdd: (autorun?: string) => smartAddInTab(tabId, autorun),
+          onSmartAdd: (autorun, agentSession) => smartAddInTab(tabId, autorun, agentSession),
+          onOpenWorkerSessions: (runtime) => {
+            const target = smartAddTargetInTab(tabId);
+            if (!target) return;
+            const tab = tabsRef.current.find((item) => item.id === tabId);
+            const targetLeaf = tab ? findLeaf(tab.root, target.paneId) : null;
+            openWorkerSessionPickerRef.current(
+              runtime,
+              targetLeaf?.cwd,
+              (command, session) => {
+                splitRef.current(
+                  tabId,
+                  target.paneId,
+                  target.direction,
+                  command,
+                  session,
+                );
+              },
+            );
+          },
           onClose: () => closeRef.current(tabId, paneId),
           onToggleZoom: () => zoomToggleRef.current(tabId, paneId),
           onCwd: (cwd: string) => cwdRef.current(tabId, paneId, cwd),
@@ -315,7 +357,7 @@ function TerminalStack({
       }
       return b;
     },
-    [smartAddInTab, snapshotScrollback],
+    [smartAddInTab, smartAddTargetInTab, snapshotScrollback],
   );
 
   // Garbage-collect bundles for panes that no longer exist anywhere.
@@ -1064,6 +1106,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               <PaneToolbar
                 dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
                 onSmartAdd={bundle.onSmartAdd}
+                onOpenWorkerSessions={bundle.onOpenWorkerSessions}
                 onSplitRight={bundle.onSplitRight}
                 onSplitDown={bundle.onSplitDown}
                 onClose={bundle.onClose}
@@ -1537,7 +1580,7 @@ function TerminalDragGhost({ x, y }: { x: number; y: number }) {
         pointerEvents: "none",
         borderRadius: "var(--terminal-pane-radius)",
         border: "1px solid var(--accent)",
-        background: "color-mix(in oklch, var(--panel) 88%, var(--accent) 12%)",
+        background: "color-mix(in oklab, var(--panel) 88%, var(--accent) 12%)",
         boxShadow: [
           "0 0 0 1px color-mix(in oklch, var(--accent) 22%, transparent)",
           "var(--shadow-2)",
@@ -1554,7 +1597,7 @@ function TerminalDragGhost({ x, y }: { x: number; y: number }) {
           inset: 0,
           borderRadius: "inherit",
           background:
-            "repeating-linear-gradient(0deg, color-mix(in oklch, var(--ink) 4%, transparent) 0 2px, transparent 2px 18px)",
+            "repeating-linear-gradient(0deg, color-mix(in oklab, var(--ink) 4%, transparent) 0 2px, transparent 2px 18px)",
           opacity: 0.55,
         }}
       />
@@ -1852,10 +1895,10 @@ function ResizeIntersectionGrip({
         justifyContent: "center",
         background: active
           ? "color-mix(in oklch, var(--accent) 16%, var(--panel))"
-          : "color-mix(in oklch, var(--panel) 82%, transparent)",
+          : "color-mix(in oklab, var(--panel) 82%, transparent)",
         border: active
           ? "1px solid color-mix(in oklch, var(--accent) 58%, transparent)"
-          : "1px solid color-mix(in oklch, var(--rule-strong) 74%, transparent)",
+          : "1px solid color-mix(in oklab, var(--rule-strong) 74%, transparent)",
         boxShadow: dragging ? "0 0 12px var(--accent-glow)" : "none",
         opacity: active ? 1 : 0.58,
         transition:
@@ -1883,7 +1926,8 @@ function ResizeIntersectionGrip({
 
 interface PaneToolbarProps {
   dragPayload: TerminalPaneDragPayload;
-  onSmartAdd: (autorun?: string) => void;
+  onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null) => void;
+  onOpenWorkerSessions: (runtime: WorkerSessionRuntime) => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
   onClose: () => void;
@@ -1895,6 +1939,7 @@ interface PaneToolbarProps {
 function PaneToolbar({
   dragPayload,
   onSmartAdd,
+  onOpenWorkerSessions,
   onSplitRight,
   onSplitDown,
   onClose,
@@ -1994,10 +2039,10 @@ function PaneToolbar({
         // Subtle pill background so the toolbar reads as a single grouped
         // affordance instead of three loose buttons floating over the
         // terminal canvas.
-        background: "color-mix(in oklch, var(--panel) 78%, transparent)",
+        background: "color-mix(in oklab, var(--panel) 78%, transparent)",
         backdropFilter: "blur(6px)",
         WebkitBackdropFilter: "blur(6px)",
-        border: "1px solid color-mix(in oklch, var(--rule-soft) 70%, transparent)",
+        border: "1px solid color-mix(in oklab, var(--rule-soft) 70%, transparent)",
         boxShadow: "var(--lift-hi)",
         // Single React-owned opacity source: dim at rest, full on hover or
         // while the add-pane menu is open. (No .spark-fade-in here — its
@@ -2015,7 +2060,7 @@ function PaneToolbar({
           width: 1,
           alignSelf: "stretch",
           margin: "2px 1px",
-          background: "color-mix(in oklch, var(--rule-soft) 70%, transparent)",
+          background: "color-mix(in oklab, var(--rule-soft) 70%, transparent)",
         }}
       />
       <ToolbarButton
@@ -2033,7 +2078,7 @@ function PaneToolbar({
           width: 1,
           alignSelf: "stretch",
           margin: "2px 1px",
-          background: "color-mix(in oklch, var(--rule-soft) 70%, transparent)",
+          background: "color-mix(in oklab, var(--rule-soft) 70%, transparent)",
         }}
       />
       <ToolbarButton title="Split right (Ctrl+\\)" onClick={onSplitRight}>
@@ -2059,8 +2104,7 @@ function PaneToolbar({
           onPick={(kind) => {
             setMenuOpen(false);
             if (kind === "shell") onSmartAdd();
-            else if (kind === "claude") onSmartAdd(CLAUDE_LAUNCH_COMMAND);
-            else if (kind === "codex") onSmartAdd(CODEX_LAUNCH_COMMAND);
+            else onOpenWorkerSessions(kind);
           }}
         />,
         document.body,
@@ -2356,8 +2400,8 @@ function menuItemTone(accent: "shell" | "claude" | "codex"): {
   }
   return {
     color: "var(--ink-dim)",
-    background: "color-mix(in oklch, var(--ink) 7%, transparent)",
-    border: "color-mix(in oklch, var(--rule-soft) 90%, transparent)",
+    background: "color-mix(in oklab, var(--ink) 7%, transparent)",
+    border: "color-mix(in oklab, var(--rule-soft) 90%, transparent)",
   };
 }
 
@@ -2661,7 +2705,7 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
         // Earned mild-glass chip: a panel veil over the terminal canvas so
         // the label stays legible without baking white/black (which invert
         // on the light themes).
-        background: "color-mix(in oklch, var(--panel-2) 82%, transparent)",
+        background: "color-mix(in oklab, var(--panel-2) 82%, transparent)",
         // Glows live, calms when done: a working worker carries the accent
         // (edge + text + halo), a blocked one carries amber to flag it needs
         // you, and an idle / finished one drops to a neutral --rule border +

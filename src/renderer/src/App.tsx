@@ -12,7 +12,11 @@ import type {
   ShellInfo,
   SparkEvent,
   TerminalAgentTarget,
+  TerminalAgentForegroundState,
+  WorkerSessionRuntime,
+  WorkerSessionSummary,
   Workspace,
+  WorkspaceGroup,
 } from "@shared/types";
 import {
   DEFAULT_COPY_BRANCH_SETUP_COMMAND,
@@ -27,6 +31,9 @@ import UpdateBanner from "./components/UpdateBanner";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
 import ToastHost from "./components/Toast";
+import WorkerSessionPicker, {
+  type WorkerSessionPickerRequest,
+} from "./components/WorkerSessionPicker";
 import RunSwitcher from "./components/RunSwitcher";
 import { CopyBranchDeleteDialog, CopyBranchErrorToast } from "./components/CopyBranchDialogs";
 import { playNotificationSound } from "./components/notification-sounds";
@@ -69,7 +76,7 @@ import { usePreferences } from "./preferences/usePreferences";
 import {
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
-  CURSOR_LAUNCH_COMMAND,
+  buildAgentResumeCommand,
 } from "./workers/launch-commands";
 import { usePanelLayout, type PanelSectionKey, type PanelSide } from "./panels/usePanelLayout";
 import ResizeHandle from "./panels/ResizeHandle";
@@ -246,10 +253,34 @@ function countRunningTerminalWorkers(tabs: Tab[]): number {
   );
 }
 
+function normalizedWorkspaceRailOrder(
+  order: readonly string[],
+  workspaces: readonly Workspace[],
+  groups: readonly WorkspaceGroup[],
+): string[] {
+  const eligible = new Set([
+    ...workspaces.filter((workspace) => !workspace.groupId).map((workspace) => workspace.id),
+    ...groups.map((group) => group.id),
+  ]);
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const id of order) {
+    if (!eligible.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    result.push(id);
+  }
+  for (const id of eligible) {
+    if (!seen.has(id)) result.push(id);
+  }
+  return result;
+}
+
 export default function App() {
   const [bootError, setBootError] = useState<string | null>(null);
   const [booted, setBooted] = useState(false);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspaceGroups, setWorkspaceGroups] = useState<WorkspaceGroup[]>([]);
+  const [workspaceRailOrder, setWorkspaceRailOrder] = useState<string[]>([]);
   const [copyBranchError, setCopyBranchError] = useState<string | null>(null);
   const [pendingCopyDelete, setPendingCopyDelete] = useState<Workspace | null>(null);
   const [copyDeleteBusy, setCopyDeleteBusy] = useState(false);
@@ -288,6 +319,8 @@ export default function App() {
   const [remoteConnectOpen, setRemoteConnectOpen] = useState(false);
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [workerSessionPicker, setWorkerSessionPicker] =
+    useState<WorkerSessionPickerRequest | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   // Pure renderer overlay — reads the active run, displays cost / events /
@@ -361,6 +394,10 @@ export default function App() {
   // Panes with an in-flight session-id capture (post agent-detection), so
   // repeated "agent running" events don't kick off duplicate discovery calls.
   const capturingPanesRef = useRef<Set<string>>(new Set());
+  // Session discovery can take up to 15 seconds. Track only positively
+  // confirmed exits during that window so a visibility/terminal-tail false
+  // negative cannot make a still-running session permanently non-resumable.
+  const confirmedAgentExitAtRef = useRef<Map<string, number>>(new Map());
   const handlePaneCwd = useCallback(
     (tabId: string, paneId: string, cwd: string) => {
       const entry = paneRuntimeRef.current.get(paneId) ?? { lastActivityAt: 0 };
@@ -802,6 +839,8 @@ export default function App() {
         ]);
         if (cancelled) return;
         setWorkspaces(state.workspaces);
+        setWorkspaceGroups(state.workspaceGroups ?? []);
+        setWorkspaceRailOrder(state.workspaceRailOrder ?? []);
         setActiveId(state.activeWorkspaceId);
         setSettings(appSettings);
         setShells(sh);
@@ -848,13 +887,30 @@ export default function App() {
       window.clearTimeout(saveTimer.current);
     }
     saveTimer.current = window.setTimeout(() => {
-      const state: AppState = { workspaces, activeWorkspaceId: activeId };
+      const state: AppState = {
+        workspaces,
+        workspaceGroups,
+        workspaceRailOrder,
+        activeWorkspaceId: activeId,
+      };
       void window.spark.state.save(state);
     }, 200);
     return () => {
       if (saveTimer.current !== null) window.clearTimeout(saveTimer.current);
     };
-  }, [workspaces, activeId, booted]);
+  }, [workspaces, workspaceGroups, workspaceRailOrder, activeId, booted]);
+
+  // Keep the mixed top-level rail sequence complete as workspaces are created,
+  // grouped, ungrouped, or deleted. The equality guard makes this a no-op for
+  // ordinary renders and preserves every explicit drag order.
+  useEffect(() => {
+    setWorkspaceRailOrder((current) => {
+      const next = normalizedWorkspaceRailOrder(current, workspaces, workspaceGroups);
+      return next.length === current.length && next.every((id, index) => id === current[index])
+        ? current
+        : next;
+    });
+  }, [workspaces, workspaceGroups]);
 
   useEffect(() => {
     const query = window.matchMedia("(max-width: 1050px)");
@@ -1227,8 +1283,33 @@ export default function App() {
   // Quit the PTYs are killed while the renderer is still alive, before any
   // unload fires — so this earlier main-driven signal is what makes it reliable.
   useEffect(() => {
-    const off = window.spark.app.onBeforeQuit?.(() => {
+    const off = window.spark.app.onBeforeQuit?.(({ activeAgentPaneIds }) => {
       markAppTearingDown();
+      const active = new Set(activeAgentPaneIds);
+      for (const [paneId, runtime] of paneRuntimeRef.current) {
+        if (runtime.altScreenActive === true) active.add(paneId);
+      }
+      // The worker chip is a third independent liveness signal. It covers a
+      // just-launched agent whose raw-stream watcher has not identified its
+      // banner yet and a TUI that does not use the alternate screen.
+      const collectLiveWorkers = (node: PaneNode): void => {
+        if (node.kind === "leaf") {
+          if (
+            node.agentSession?.sessionId &&
+            node.worker?.state === "running" &&
+            node.worker.agentRunning !== false
+          ) {
+            active.add(node.paneId);
+          }
+          return;
+        }
+        collectLiveWorkers(node.a);
+        collectLiveWorkers(node.b);
+      };
+      for (const tab of tabsRef.current.tabs) {
+        if (tab.kind === "terminal") collectLiveWorkers(tab.root);
+      }
+      tabsRef.current.flushAgentSessionsNow(Array.from(active));
     });
     return () => off?.();
   }, []);
@@ -1489,8 +1570,8 @@ export default function App() {
   // ── Terminal-agent notifications (manual claude/codex panes) ──────────────
   //
   // The main-process watcher (terminal-agent-notify.ts) taps the raw pty
-  // streams of user-facing terminal panes and alerts when a Claude/Codex/
-  // Cursor CLI finishes a turn or stops for permission while the user isn't
+  // streams of user-facing terminal panes and alerts when a Claude/Codex CLI
+  // finishes a turn or stops for permission while the user isn't
   // looking at that tab. The renderer owns three pieces of the loop:
   //
   //   1. The pane registry — which pty sessions are user terminal panes, and
@@ -1980,31 +2061,78 @@ export default function App() {
     setWorkspaces((ws) => ws.map((w) => (w.id === id ? { ...w, ...patch } : w)));
   }, []);
 
-  const reorderWs = useCallback((fromIndex: number, toIndex: number) => {
+  const moveWs = useCallback((workspaceId: string, groupId: string | null, beforeWorkspaceId: string | null) => {
     setWorkspaces((list) => {
-      if (
-        fromIndex < 0 ||
-        fromIndex >= list.length ||
-        toIndex < 0 ||
-        toIndex > list.length
-      ) {
+      const sourceIndex = list.findIndex((workspace) => workspace.id === workspaceId);
+      if (sourceIndex < 0 || beforeWorkspaceId === workspaceId) return list;
+      const source = list[sourceIndex];
+      const remaining = list.filter((workspace) => workspace.id !== workspaceId);
+      const moved: Workspace = groupId
+        ? { ...source, groupId }
+        : (() => {
+          const { groupId: _discarded, ...ungrouped } = source;
+          return ungrouped;
+        })();
+
+      let insertAt = beforeWorkspaceId
+        ? remaining.findIndex((workspace) => workspace.id === beforeWorkspaceId)
+        : -1;
+      if (insertAt < 0) {
+        let lastInDestination = -1;
+        for (let index = 0; index < remaining.length; index += 1) {
+          if ((remaining[index].groupId ?? null) === groupId) lastInDestination = index;
+        }
+        insertAt = lastInDestination >= 0 ? lastInDestination + 1 : remaining.length;
+      }
+      const next = remaining.slice();
+      next.splice(insertAt, 0, moved);
+      if (next.length === list.length && next.every((workspace, index) =>
+        workspace.id === list[index].id && workspace.groupId === list[index].groupId)) {
         return list;
       }
-      const next = list.slice();
-      const [moved] = next.splice(fromIndex, 1);
-      const adjusted = toIndex > fromIndex ? toIndex - 1 : toIndex;
-      next.splice(adjusted, 0, moved);
-      // No-op if nothing actually moved (preserve referential equality so memoized
-      // children don't re-render).
-      let changed = false;
-      for (let i = 0; i < list.length; i += 1) {
-        if (list[i].id !== next[i].id) {
-          changed = true;
-          break;
-        }
-      }
-      return changed ? next : list;
+      return next;
     });
+  }, []);
+
+  const createWorkspaceGroup = useCallback(() => {
+    const id = makeId("workspace-group");
+    setWorkspaceGroups((groups) => {
+      const names = new Set(groups.map((group) => group.name.trim().toLocaleLowerCase()));
+      let name = "New folder";
+      for (let suffix = 2; names.has(name.toLocaleLowerCase()); suffix += 1) {
+        name = `New folder ${suffix}`;
+      }
+      return [...groups, { id, name, collapsed: false }];
+    });
+    return id;
+  }, []);
+
+  const updateWorkspaceGroup = useCallback((id: string, patch: Partial<WorkspaceGroup>) => {
+    setWorkspaceGroups((groups) => groups.map((group) =>
+      group.id === id ? { ...group, ...patch } : group));
+  }, []);
+
+  const reorderWorkspaceRailItem = useCallback((id: string, beforeItemId: string | null) => {
+    setWorkspaceRailOrder((order) => {
+      if (beforeItemId === id) return order;
+      const remaining = order.filter((itemId) => itemId !== id);
+      const insertAt = beforeItemId ? remaining.indexOf(beforeItemId) : remaining.length;
+      if (beforeItemId && insertAt < 0) return order;
+      const next = remaining.slice();
+      next.splice(insertAt, 0, id);
+      return next.length === order.length && next.every((itemId, index) => itemId === order[index])
+        ? order
+        : next;
+    });
+  }, []);
+
+  const deleteWorkspaceGroup = useCallback((id: string) => {
+    setWorkspaceGroups((groups) => groups.filter((group) => group.id !== id));
+    setWorkspaces((items) => items.map((workspace) => {
+      if (workspace.groupId !== id) return workspace;
+      const { groupId: _discarded, ...ungrouped } = workspace;
+      return ungrouped;
+    }));
   }, []);
 
   const previewWsColor = useCallback((id: string, color: string) => {
@@ -2129,6 +2257,7 @@ export default function App() {
           // Inherit the parent's color so the copy reads as a branch of it.
           color: sourceWs.color,
           workers: [],
+          ...(sourceWs.groupId ? { groupId: sourceWs.groupId } : {}),
           copyBranch: {
             repoCwd: sourceWs.cwd,
             branch: res.branch,
@@ -2464,16 +2593,25 @@ export default function App() {
   // agent-state hook discovers Claude/Codex session ids after startup and then
   // persists the resume pointer; a user-created pane must not silently change
   // `claude --dangerously-skip-permissions` by appending a forced session id.
-  const prepareWorkerLaunch = useCallback((autorun: string) => {
-    return {
-      command: autorun,
-      makeSession: (_cwd: string | undefined): TerminalAgentSession | null => null,
-    };
-  }, []);
+  const prepareWorkerLaunch = useCallback(
+    (autorun: string, session?: TerminalAgentSession | null) => {
+      return {
+        command: autorun,
+        makeSession: (_cwd: string | undefined): TerminalAgentSession | null => session ?? null,
+      };
+    },
+    [],
+  );
 
   const handleNewWorkerTab = useCallback(
-    (autorun: string) => {
-      const { command: launchCommand, makeSession } = prepareWorkerLaunch(autorun);
+    (
+      autorun: string,
+      options?: { cwd?: string; session?: TerminalAgentSession | null },
+    ) => {
+      const { command: launchCommand, makeSession } = prepareWorkerLaunch(
+        autorun,
+        options?.session,
+      );
       const active = tabs.tabs.find((t) => t.id === tabs.activeId);
       const target =
         active?.kind === "terminal"
@@ -2482,7 +2620,7 @@ export default function App() {
             // so the worker pane lands in a visible top-strip terminal.
             tabs.tabs.find((t) => t.kind === "terminal" && t.scope?.kind !== "workers");
       if (!target || target.kind !== "terminal") {
-        const seedCwd = activeWorkspace?.cwd ?? undefined;
+        const seedCwd = options?.cwd ?? activeWorkspace?.cwd ?? undefined;
         tabs.newTerminalTab(seedCwd, launchCommand, {
           agentSession: makeSession(seedCwd),
         });
@@ -2491,6 +2629,7 @@ export default function App() {
 
       const activeLeaf = findLeafByPaneId(target.root, target.activePaneId);
       const runtime = paneRuntimeRef.current.get(target.activePaneId);
+      const currentCwd = runtime?.cwd ?? activeLeaf?.cwd ?? activeWorkspace?.cwd ?? undefined;
       // Three independent "this pane is in use" signals, any of which is
       // enough to skip the inject and split a fresh pane instead:
       //   - leaf.worker:        banner-based agent detection fired
@@ -2506,15 +2645,15 @@ export default function App() {
         !activeLeaf.worker &&
         !activeLeaf.autorun &&
         !runtime?.userInputAt &&
-        !runtime?.altScreenActive;
+        !runtime?.altScreenActive &&
+        (!options?.cwd || currentCwd === options.cwd);
       if (isUnusedPane) {
         tabs.setActiveTab(target.id);
         tabs.setActiveTerminalPane(target.id, target.activePaneId);
         // Record the resume pointer on the reused pane before launching, so a
-        // reopen can `--resume` this exact session (Claude only; Codex/Cursor
-        // get a null session and are handled by discovery / not at all).
-        const injectCwd =
-          runtime?.cwd ?? activeLeaf?.cwd ?? activeWorkspace?.cwd ?? undefined;
+        // reopen can `--resume` this exact session. Runtime discovery fills
+        // the pointer after the CLI starts.
+        const injectCwd = options?.cwd ?? currentCwd;
         const injectSession = makeSession(injectCwd);
         if (injectSession) {
           tabs.setLeafAgentSession(target.id, target.activePaneId, injectSession);
@@ -2529,11 +2668,7 @@ export default function App() {
       }
 
       const paneId = makeId("pane");
-      const cwd =
-        runtime?.cwd ??
-        activeLeaf?.cwd ??
-        activeWorkspace?.cwd ??
-        undefined;
+      const cwd = options?.cwd ?? currentCwd;
       const added = tabs.addPaneInTab(target.id, paneId, {
         cwd,
         autorun: launchCommand,
@@ -2549,6 +2684,152 @@ export default function App() {
     },
     [tabs, activeWorkspace?.cwd, prepareWorkerLaunch],
   );
+
+  const resolveWorkerLaunchCwd = useCallback((): string | null => {
+    const current = tabsRef.current;
+    const active = current.tabs.find((tab) => tab.id === current.activeId);
+    const target =
+      active?.kind === "terminal"
+        ? active
+        : current.tabs.find((tab) => tab.kind === "terminal" && tab.scope?.kind !== "workers");
+    if (target?.kind === "terminal") {
+      const leaf = findLeafByPaneId(target.root, target.activePaneId);
+      return (
+        paneRuntimeRef.current.get(target.activePaneId)?.cwd ??
+        leaf?.cwd ??
+        activeWorkspace?.cwd ??
+        null
+      );
+    }
+    return activeWorkspace?.cwd ?? null;
+  }, [activeWorkspace?.cwd]);
+
+  const openShortcutWorkerSessions = useCallback(
+    (runtime: WorkerSessionRuntime) => {
+      const cwd = resolveWorkerLaunchCwd();
+      const freshCommand =
+        runtime === "claude" ? CLAUDE_LAUNCH_COMMAND : CODEX_LAUNCH_COMMAND;
+      if (!cwd) {
+        handleNewWorkerTab(freshCommand);
+        return;
+      }
+      setWorkerSessionPicker({
+        runtime,
+        cwd,
+        launch: (command, session) => handleNewWorkerTab(command, { cwd, session }),
+      });
+    },
+    [handleNewWorkerTab, resolveWorkerLaunchCwd],
+  );
+
+  const openPaneWorkerSessions = useCallback(
+    (
+      runtime: WorkerSessionRuntime,
+      cwd: string | undefined,
+      launch: WorkerSessionPickerRequest["launch"],
+    ) => {
+      if (!cwd) {
+        launch(runtime === "claude" ? CLAUDE_LAUNCH_COMMAND : CODEX_LAUNCH_COMMAND, null);
+        return;
+      }
+      setWorkerSessionPicker({ runtime, cwd, launch });
+    },
+    [],
+  );
+
+  const pendingSettingsSessionLaunchRef = useRef<{
+    workspaceId: string;
+    runtime: WorkerSessionRuntime;
+    cwd: string;
+    session: WorkerSessionSummary | null;
+  } | null>(null);
+
+  const launchSettingsSession = useCallback(
+    async (request: {
+      runtime: WorkerSessionRuntime;
+      cwd: string;
+      session: WorkerSessionSummary | null;
+    }) => {
+      if (request.runtime === "codex") {
+        await window.spark.agentSession.ensureCodexTrust(request.cwd).catch(() => undefined);
+      }
+      const pointer: TerminalAgentSession | null = request.session
+        ? {
+            runtime: request.runtime,
+            sessionId: request.session.sessionId,
+            cwd: request.cwd,
+            transcriptPath: request.session.transcriptPath,
+            capturedAt: new Date().toISOString(),
+            active: false,
+          }
+        : null;
+      const command = pointer
+        ? buildAgentResumeCommand(pointer)
+        : request.runtime === "claude"
+          ? CLAUDE_LAUNCH_COMMAND
+          : CODEX_LAUNCH_COMMAND;
+      tabsRef.current.newTerminalTab(request.cwd, command, { agentSession: pointer });
+    },
+    [],
+  );
+
+  const handleSettingsOpenWorkerSession = useCallback(
+    async (
+      runtime: WorkerSessionRuntime,
+      cwd: string,
+      session: WorkerSessionSummary | null,
+    ) => {
+      const normalized = (value: string) => {
+        const path = value.replace(/\\/g, "/").replace(/\/+$/, "");
+        return platform === "win32" ? path.toLowerCase() : path;
+      };
+      const currentWorkspaces = workspacesRef.current;
+      let workspace = currentWorkspaces.find((item) => normalized(item.cwd) === normalized(cwd));
+
+      if (!workspace) {
+        const usedColors = new Set(currentWorkspaces.map((item) => item.color.toLowerCase()));
+        const color =
+          WORKSPACE_COLORS.find((item) => !usedColors.has(item.toLowerCase())) ??
+          WORKSPACE_COLORS[0];
+        workspace = {
+          id: makeId("ws"),
+          name: basename(cwd) || "workspace",
+          cwd,
+          color,
+          workers: [],
+        };
+        await window.spark.ui
+          ?.setAllowedRoots([...currentWorkspaces.map((item) => item.cwd), cwd])
+          .catch(() => undefined);
+        const created = workspace;
+        setWorkspaces((items) =>
+          items.some((item) => normalized(item.cwd) === normalized(cwd))
+            ? items
+            : [...items, created],
+        );
+        activeRunIdsByWorkspaceRef.current[workspace.id] = null;
+      }
+
+      const request = { runtime, cwd, session };
+      setSettingsOpen(false);
+      if (tabsRef.current.tabsWorkspaceId === workspace.id) {
+        window.setTimeout(() => void launchSettingsSession(request), 0);
+        return;
+      }
+      pendingSettingsSessionLaunchRef.current = { workspaceId: workspace.id, ...request };
+      setActiveId(workspace.id);
+    },
+    [launchSettingsSession, platform],
+  );
+
+  useEffect(() => {
+    const pending = pendingSettingsSessionLaunchRef.current;
+    if (!pending || pending.workspaceId !== tabs.tabsWorkspaceId) return;
+    pendingSettingsSessionLaunchRef.current = null;
+    window.setTimeout(() => {
+      void launchSettingsSession(pending);
+    }, 0);
+  }, [launchSettingsSession, tabs.tabsWorkspaceId]);
 
   const handleNewEditorTab = useCallback(() => {
     setSearchOpen(false);
@@ -2792,9 +3073,8 @@ export default function App() {
       "terminal.newBalancedPane": handleNewBalancedTerminalPane,
       "tab.newEditor": handleNewEditorTab,
       "tab.newPreview": handleNewPreviewTab,
-      "worker.newClaude": () => handleNewWorkerTab(CLAUDE_LAUNCH_COMMAND),
-      "worker.newCodex": () => handleNewWorkerTab(CODEX_LAUNCH_COMMAND),
-      "worker.newCursor": () => handleNewWorkerTab(CURSOR_LAUNCH_COMMAND),
+      "worker.newClaude": () => openShortcutWorkerSessions("claude"),
+      "worker.newCodex": () => openShortcutWorkerSessions("codex"),
       "tab.close": () => {
         if (!activeVisibleTabId) return;
         const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
@@ -2870,6 +3150,7 @@ export default function App() {
       handleNewPreviewTab,
       handleNewTerminalTab,
       handleNewWorkerTab,
+      openShortcutWorkerSessions,
       handleCloseChatTab,
       handleToggleLeft,
       handleToggleRight,
@@ -2915,6 +3196,7 @@ export default function App() {
   const onTerminalPaneExit = useCallback(
     (tabId: string, paneId: string, info?: { exitCode: number; signal?: number }) => {
       paneRuntimeRef.current.delete(paneId);
+      if (!isAppTearingDown()) confirmedAgentExitAtRef.current.set(paneId, Date.now());
       const t = tabsRef.current;
       const tab = t.tabs.find((item) => item.id === tabId);
       if (!tab || tab.kind !== "terminal") return;
@@ -2988,12 +3270,17 @@ export default function App() {
     (
       tabId: string,
       paneId: string,
-      state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean },
+      state: TerminalAgentForegroundState,
     ) => {
+      if (state.running) {
+        confirmedAgentExitAtRef.current.delete(paneId);
+      } else if (state.exitConfirmed === true) {
+        confirmedAgentExitAtRef.current.set(paneId, Date.now());
+      }
       // Mirror alt-screen / TUI activity into the pane runtime tracker so
       // the worker keybind has a foolproof "do not take over" signal even
       // when banner detection didn't recognise the runtime. Updated for
-      // both known (claude/codex/cursor) and unknown (runtime=null)
+      // both known (claude/codex) and unknown (runtime=null)
       // TUIs — the moment the PTY enters alt-screen mode it's no longer
       // safe to inject the launch command.
       const runtimeEntry =
@@ -3086,12 +3373,13 @@ export default function App() {
                   transcriptPath: res.transcriptPath,
                   capturedAt: new Date().toISOString(),
                   // Capture polls up to 15s; the agent may have exited in the
-                  // meantime (its running:false already deactivated the OLD
-                  // pointer). Read the live alt-screen state instead of
-                  // assuming true so this late write can't resurrect `active`
-                  // on a dead pane.
+                  // meantime. Only a positively confirmed exit after capture
+                  // began can make this new pointer inactive: the visible-tail
+                  // poller may briefly report UI absence for a live TUI, which
+                  // must not reproduce the reopen-as-a-shell failure.
                   active:
-                    paneRuntimeRef.current.get(paneId)?.altScreenActive === true,
+                    (confirmedAgentExitAtRef.current.get(paneId) ?? 0) <=
+                    captureStartedAt,
                 });
               }
             })
@@ -3124,7 +3412,11 @@ export default function App() {
         leaf.agentSession.active !== true
       ) {
         t.setLeafAgentSession(tabId, paneId, { ...leaf.agentSession, active: true });
-      } else if (!state.running && leaf.agentSession?.active) {
+      } else if (
+        !state.running &&
+        state.exitConfirmed === true &&
+        leaf.agentSession?.active
+      ) {
         t.setLeafAgentSession(tabId, paneId, { ...leaf.agentSession, active: false });
       }
       const existing = leaf.worker;
@@ -3525,6 +3817,8 @@ export default function App() {
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
+            workspaceGroups={workspaceGroups}
+            workspaceRailOrder={workspaceRailOrder}
             activeId={activeId}
             activeWorkspace={activeWorkspace}
             editingId={editingId}
@@ -3541,7 +3835,11 @@ export default function App() {
             onChange={updateWs}
             onPreviewColor={previewWsColor}
             onDelete={deleteWs}
-            onReorder={reorderWs}
+            onMoveWorkspace={moveWs}
+            onCreateWorkspaceGroup={createWorkspaceGroup}
+            onChangeWorkspaceGroup={updateWorkspaceGroup}
+            onReorderWorkspaceRailItem={reorderWorkspaceRailItem}
+            onDeleteWorkspaceGroup={deleteWorkspaceGroup}
             onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
             onCreateRemote={() => setRemoteConnectOpen(true)}
@@ -3608,6 +3906,7 @@ export default function App() {
               onPaneScrollback={handlePaneScrollback}
               onTerminalPaneAgentState={onTerminalPaneAgentState}
               onTerminalPaneRuntimeState={onTerminalPaneRuntimeState}
+              onOpenWorkerSessionPicker={openPaneWorkerSessions}
               onNewTerminalTab={handleNewTerminalTab}
               onNewEditorTab={handleNewEditorTab}
               onNewPreviewTab={handleNewPreviewTab}
@@ -3653,6 +3952,8 @@ export default function App() {
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
+            workspaceGroups={workspaceGroups}
+            workspaceRailOrder={workspaceRailOrder}
             activeId={activeId}
             activeWorkspace={activeWorkspace}
             editingId={editingId}
@@ -3669,7 +3970,11 @@ export default function App() {
             onChange={updateWs}
             onPreviewColor={previewWsColor}
             onDelete={deleteWs}
-            onReorder={reorderWs}
+            onMoveWorkspace={moveWs}
+            onCreateWorkspaceGroup={createWorkspaceGroup}
+            onChangeWorkspaceGroup={updateWorkspaceGroup}
+            onReorderWorkspaceRailItem={reorderWorkspaceRailItem}
+            onDeleteWorkspaceGroup={deleteWorkspaceGroup}
             onCloseEditor={handleCloseWorkspaceEditor}
             onCreate={createWs}
             onCreateRemote={() => setRemoteConnectOpen(true)}
@@ -3711,6 +4016,7 @@ export default function App() {
               onClose={closeSettings}
               onSave={handleSaveSettings}
               onOpenRun={handleSettingsOpenRun}
+              onOpenWorkerSession={handleSettingsOpenWorkerSession}
             />
           </Suspense>
         )}
@@ -3738,6 +4044,11 @@ export default function App() {
         <ShortcutsDialog
           open={shortcutsOpen}
           onClose={closeShortcuts}
+        />
+
+        <WorkerSessionPicker
+          request={workerSessionPicker}
+          onClose={() => setWorkerSessionPicker(null)}
         />
 
         <RunSwitcher
@@ -4069,9 +4380,14 @@ interface WorkspaceProps {
   onTerminalPaneAgentState: (
     tabId: string,
     paneId: string,
-    state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean },
+    state: TerminalAgentForegroundState,
   ) => void;
   onTerminalPaneRuntimeState: (tabId: string, paneId: string, state: RuntimeState) => void;
+  onOpenWorkerSessionPicker: (
+    runtime: WorkerSessionRuntime,
+    cwd: string | undefined,
+    launch: WorkerSessionPickerRequest["launch"],
+  ) => void;
   onNewTerminalTab: () => void;
   onNewEditorTab: () => void;
   onNewPreviewTab: () => void;
@@ -4120,6 +4436,7 @@ const Workspace = React.memo(function Workspace({
   onPaneScrollback,
   onTerminalPaneAgentState,
   onTerminalPaneRuntimeState,
+  onOpenWorkerSessionPicker,
   onNewTerminalTab,
   onNewEditorTab,
   onNewPreviewTab,
@@ -4418,8 +4735,9 @@ const Workspace = React.memo(function Workspace({
       paneId: string,
       direction: Parameters<typeof splitTerminalPane>[2],
       autorun?: string,
+      agentSession?: TerminalAgentSession | null,
     ) => {
-      return splitTerminalPane(tabId, paneId, direction, autorun);
+      return splitTerminalPane(tabId, paneId, direction, autorun, agentSession);
     },
     [splitTerminalPane],
   );
@@ -4616,6 +4934,9 @@ const Workspace = React.memo(function Workspace({
                 }
                 onPaneAgentState={isActive ? onTerminalPaneAgentState : noopTerminalCb}
                 onPaneRuntimeState={isActive ? onTerminalPaneRuntimeState : noopTerminalCb}
+                onOpenWorkerSessionPicker={
+                  isActive ? onOpenWorkerSessionPicker : noopTerminalCb
+                }
                 onPaneResumeUnavailable={isActive ? handleLeafResumeUnavailable : noopTerminalCb}
                 onPaneResumeFallback={isActive ? handleLeafResumeFallback : noopTerminalCb}
                 onPaneBootResumeConsumed={isActive ? handleLeafBootResumeConsumed : noopTerminalCb}

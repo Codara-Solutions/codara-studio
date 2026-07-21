@@ -49,7 +49,7 @@ export default function RemoteAuthPrompt() {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "color-mix(in oklch, var(--bg) 55%, transparent)",
+        background: "color-mix(in oklab, var(--bg) 55%, transparent)",
         backdropFilter: "blur(2px)",
       }}
       onClick={() => submit(true)}

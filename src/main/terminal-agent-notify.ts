@@ -15,7 +15,7 @@ import * as pty from "./pty-manager";
 import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify";
 import type { RuntimeState } from "@shared/types";
 
-// Terminal-agent notifier: tells the user when a Claude / Codex / Cursor CLI
+// Terminal-agent notifier: tells the user when a Claude / Codex CLI
 // they ran in a NORMAL terminal pane stops working — finished a turn, or
 // stopped to ask for permission — while they are looking somewhere else.
 // Orchestration runs already alert through run-store events; this module
@@ -521,6 +521,19 @@ export function noteTerminalWillDispose(paneId: string): void {
   if (w) w.disposing = true;
 }
 
+// Snapshot foreground agent panes before app-level PTY teardown begins. The
+// main watcher reads raw PTY bytes even for hidden panes, so it is a stronger
+// quit-time liveness signal than the renderer's visibility-gated xterm poller.
+export function activeTerminalAgentPaneIds(): string[] {
+  const active: string[] = [];
+  for (const watcher of watchers.values()) {
+    if (!watcher.disposing && watcher.runtime && pty.hasSession(watcher.paneId)) {
+      active.push(watcher.paneId);
+    }
+  }
+  return active;
+}
+
 // True when the current/just-ended working phase ran long enough to be a
 // real turn rather than a boot blip or pattern flap (see MIN_WORK_MS).
 function workedLongEnough(w: PaneWatcher): boolean {
@@ -911,7 +924,6 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
 function runtimeLabel(runtime: PublicAgentRuntime | null): string {
   if (runtime === "claude") return "Claude Code";
   if (runtime === "codex") return "Codex";
-  if (runtime === "cursor") return "Cursor";
   return "Terminal";
 }
 

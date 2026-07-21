@@ -147,7 +147,7 @@ export function runtimeTone(runtime: WorkerRuntime): RuntimeTone {
       return {
         label: "var(--ink-dim)",
         border: "var(--rule-strong)",
-        bg: "color-mix(in oklch, var(--ink) 5%, transparent)",
+        bg: "color-mix(in oklab, var(--ink) 5%, transparent)",
       };
   }
 }

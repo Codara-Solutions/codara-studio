@@ -420,7 +420,7 @@ function RowButton({
           : "1px solid var(--rule-strong)",
         borderRadius: 999,
         background: primary
-          ? "color-mix(in oklch, var(--ink) 3%, transparent)"
+          ? "color-mix(in oklab, var(--ink) 3%, transparent)"
           : "transparent",
         color: disabled ? "var(--muted)" : "var(--ink)",
         padding: "3px 10px",

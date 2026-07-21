@@ -493,7 +493,7 @@ export function ChatHistoryButton({
           background: open
             ? "var(--accent-soft)"
             : pressed
-              ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+              ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
               : hover
                 ? "var(--hover-strong)"
                 : "transparent",
@@ -629,7 +629,7 @@ function ChatHistoryRow({
         background: active
           ? "var(--accent-soft)"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
               : "transparent",

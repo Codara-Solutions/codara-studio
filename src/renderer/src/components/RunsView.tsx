@@ -147,7 +147,7 @@ function RunHeader({ run }: { run: RunState }) {
         position: "relative",
         overflow: "hidden",
         background:
-          "linear-gradient(115deg, color-mix(in oklch, var(--panel-2) 88%, var(--accent) 4%), var(--panel) 56%, color-mix(in oklch, var(--panel) 94%, var(--bg)))",
+          "linear-gradient(115deg, color-mix(in oklab, var(--panel-2) 88%, var(--accent) 4%), var(--panel) 56%, color-mix(in oklab, var(--panel) 94%, var(--bg)))",
         borderBottom: "1px solid var(--rule)",
         boxShadow: "var(--lift-hi)",
         padding: "14px 20px 15px",
@@ -255,7 +255,7 @@ function RunHeader({ run }: { run: RunState }) {
               height: 3,
               overflow: "hidden",
               borderRadius: 999,
-              background: "color-mix(in oklch, var(--ink) 9%, transparent)",
+              background: "color-mix(in oklab, var(--ink) 9%, transparent)",
             }}
           >
             <span
@@ -348,7 +348,7 @@ function TerminalSpawnState({ run }: { run: RunState }) {
         justifyContent: "center",
         padding: 32,
         backgroundImage:
-          "radial-gradient(circle, color-mix(in oklch, var(--ink) 10%, transparent) 1px, transparent 1px)",
+          "radial-gradient(circle, color-mix(in oklab, var(--ink) 10%, transparent) 1px, transparent 1px)",
         backgroundSize: "24px 24px",
       }}
     >
@@ -445,7 +445,7 @@ function TelemetryMetric({
         padding: "7px 11px 8px",
         borderLeft: "1px solid var(--rule-soft)",
         background:
-          "linear-gradient(180deg, color-mix(in oklch, var(--ink) 2.5%, transparent), transparent)",
+          "linear-gradient(180deg, color-mix(in oklab, var(--ink) 2.5%, transparent), transparent)",
       }}
     >
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>

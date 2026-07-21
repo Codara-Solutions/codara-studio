@@ -9,6 +9,7 @@ import {
   type AppSettings,
   type AppState,
   type Workspace,
+  type WorkspaceGroup,
 } from "@shared/types";
 import { sparkHome } from "./spark-home";
 import { writeFileAtomic } from "./fs-atomic";
@@ -17,7 +18,12 @@ const STATE_FILE = "spark-state.json";
 const SETTINGS_FILE = "spark-settings.json";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-flash-latest";
 
-const EMPTY: AppState = { workspaces: [], activeWorkspaceId: null };
+const EMPTY: AppState = {
+  workspaces: [],
+  workspaceGroups: [],
+  workspaceRailOrder: [],
+  activeWorkspaceId: null,
+};
 const EMPTY_SETTINGS: AppSettings = {
   defaultShellId: null,
   terminalScrollbackLineLimit: TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
@@ -52,7 +58,19 @@ async function readFromDisk(): Promise<AppState> {
   try {
     const raw = await fs.readFile(statePath(), "utf8");
     const parsed = JSON.parse(raw) as Partial<AppState>;
-    const workspaces = Array.isArray(parsed.workspaces) ? parsed.workspaces.map(normalize) : [];
+    const workspaceGroups = normalizeWorkspaceGroups(parsed.workspaceGroups);
+    const groupIds = new Set(workspaceGroups.map((group) => group.id));
+    const workspaces = Array.isArray(parsed.workspaces)
+      ? parsed.workspaces.map(normalize).map((workspace) =>
+        workspace.groupId && !groupIds.has(workspace.groupId)
+          ? { ...workspace, groupId: undefined }
+          : workspace)
+      : [];
+    const workspaceRailOrder = normalizeWorkspaceRailOrder(
+      parsed.workspaceRailOrder,
+      workspaces,
+      workspaceGroups,
+    );
     // Coerce a dangling activeWorkspaceId (points at a workspace that no longer
     // exists) to a real one. Otherwise the renderer resolves the active
     // workspace to null while workspaces still exist, which disables the chat
@@ -61,7 +79,7 @@ async function readFromDisk(): Promise<AppState> {
       parsed.activeWorkspaceId && workspaces.some((w) => w.id === parsed.activeWorkspaceId)
         ? parsed.activeWorkspaceId
         : workspaces[0]?.id ?? null;
-    return { workspaces, activeWorkspaceId };
+    return { workspaces, workspaceGroups, workspaceRailOrder, activeWorkspaceId };
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return { ...EMPTY };
     console.error("[storage] failed to read state, starting empty:", err);
@@ -89,6 +107,9 @@ function normalize(w: Workspace): Workspace {
     workers: Array.isArray(w.workers)
       ? w.workers.filter((worker) => worker.kind !== "orchestration")
       : [],
+    ...(typeof w.groupId === "string" && w.groupId.trim()
+      ? { groupId: w.groupId.trim() }
+      : {}),
   };
   // Carry copy-branch provenance through verbatim when it is a well-formed
   // object; without this the field is silently dropped on every state:save and
@@ -119,6 +140,51 @@ function normalize(w: Workspace): Workspace {
     normalized.remote = { hostId: remote.hostId };
   }
   return normalized;
+}
+
+function normalizeWorkspaceGroups(value: unknown): WorkspaceGroup[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const groups: WorkspaceGroup[] = [];
+  for (const candidate of value) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const raw = candidate as Partial<WorkspaceGroup>;
+    const id = typeof raw.id === "string" ? raw.id.trim() : "";
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    groups.push({
+      id,
+      name: typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : "Workspace group",
+      collapsed: raw.collapsed === true,
+    });
+  }
+  return groups;
+}
+
+function normalizeWorkspaceRailOrder(
+  value: unknown,
+  workspaces: Workspace[],
+  groups: WorkspaceGroup[],
+): string[] {
+  const eligible = new Set([
+    ...workspaces.filter((workspace) => !workspace.groupId).map((workspace) => workspace.id),
+    ...groups.map((group) => group.id),
+  ]);
+  const result: string[] = [];
+  const seen = new Set<string>();
+  if (Array.isArray(value)) {
+    for (const candidate of value) {
+      if (typeof candidate !== "string" || !eligible.has(candidate) || seen.has(candidate)) continue;
+      seen.add(candidate);
+      result.push(candidate);
+    }
+  }
+  // Migration preserves the previous visual order: ordinary workspaces first,
+  // then folders. Once persisted, the mixed sequence is fully user-controlled.
+  for (const id of eligible) {
+    if (!seen.has(id)) result.push(id);
+  }
+  return result;
 }
 
 function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
@@ -156,11 +222,9 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
 function normalizeAgentRuntimeSelection(value: unknown): AgentRuntimeSelection {
   const allKinds: AgentRuntimeKind[] = ["claude", "codex"];
   // Legacy single-string formats migrate to the array form so the rest of
-  // the app only has to handle one shape. The "cursor" string is silently
-  // dropped — Codara only supports Claude + Codex now.
+  // the app only has to handle one shape.
   if (value === "claude") return ["claude"];
   if (value === "codex") return ["codex"];
-  if (value === "cursor") return [...allKinds];
   if (value === "both") return ["claude", "codex"];
   if (value === "auto") return [...allKinds];
   if (Array.isArray(value)) {
@@ -178,6 +242,12 @@ function normalizeStringArray(value: unknown): string[] {
 async function writeToDisk(state: AppState): Promise<void> {
   const persisted: AppState = {
     activeWorkspaceId: state.activeWorkspaceId,
+    workspaceGroups: normalizeWorkspaceGroups(state.workspaceGroups),
+    workspaceRailOrder: normalizeWorkspaceRailOrder(
+      state.workspaceRailOrder,
+      state.workspaces,
+      state.workspaceGroups,
+    ),
     workspaces: state.workspaces.map((workspace) => ({
       ...workspace,
       workers: workspace.workers.filter((worker) => worker.kind !== "orchestration"),
@@ -199,12 +269,24 @@ export async function loadState(): Promise<AppState> {
 }
 
 export async function saveState(state: AppState): Promise<void> {
-  cache = state;
+  // Accept pre-folder renderer/CLI payloads during rolling upgrades while
+  // keeping the in-memory state on the current shape immediately (not only
+  // after the next process restart/readFromDisk pass).
+  const normalizedState: AppState = {
+    ...state,
+    workspaceGroups: normalizeWorkspaceGroups(state.workspaceGroups),
+    workspaceRailOrder: normalizeWorkspaceRailOrder(
+      state.workspaceRailOrder,
+      state.workspaces,
+      state.workspaceGroups,
+    ),
+  };
+  cache = normalizedState;
   // Serialize writes to avoid races. Keep two handles on the chain: `write`
   // (which rejects on disk failure) is awaited so the IPC caller learns the
   // save never hit disk, while `writing` swallows the rejection so a single
   // failure doesn't poison every subsequent queued save.
-  const write = writing.then(() => writeToDisk(state));
+  const write = writing.then(() => writeToDisk(normalizedState));
   writing = write.catch((err) => {
     console.error("[storage] write failed:", err);
   });

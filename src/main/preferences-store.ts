@@ -251,9 +251,10 @@ function normalize(
       typeof src.fableEnabled === "boolean"
         ? src.fableEnabled
         : DEFAULT_PREFERENCES.fableEnabled,
-    // Retain the key for old preference files/API consumers, but the fresh-shell
-    // contract permanently disables cold agent-session restoration.
-    restoreAgentSessions: false,
+    restoreAgentSessions:
+      typeof src.restoreAgentSessions === "boolean"
+        ? src.restoreAgentSessions
+        : DEFAULT_PREFERENCES.restoreAgentSessions,
   };
 }
 

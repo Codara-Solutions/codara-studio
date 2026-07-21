@@ -977,9 +977,9 @@ function InstallChip({
   const deleteBg = confirming
     ? "var(--danger-soft)"
     : pressed && !disabledDelete
-      ? "color-mix(in oklch, var(--ink) 13%, transparent)"
+      ? "color-mix(in oklab, var(--ink) 13%, transparent)"
       : hover && !disabledDelete
-        ? "color-mix(in oklch, var(--ink) 9%, transparent)"
+        ? "color-mix(in oklab, var(--ink) 9%, transparent)"
         : "transparent";
 
   return (
@@ -1164,7 +1164,7 @@ function SwitchTrack({ checked, disabled }: { checked: boolean; disabled?: boole
           : "1px solid var(--rule-strong)",
         background: checked
           ? "color-mix(in oklch, var(--accent) 32%, var(--panel))"
-          : "color-mix(in oklch, var(--ink) 5%, transparent)",
+          : "color-mix(in oklab, var(--ink) 5%, transparent)",
         opacity: disabled ? 0.55 : 1,
         transition:
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
@@ -1520,7 +1520,7 @@ const subsectionStyle: React.CSSProperties = {
   alignContent: "start",
   padding: 14,
   borderRadius: "var(--radius-surface, 10px)",
-  background: "color-mix(in oklch, var(--panel-2) 60%, transparent)",
+  background: "color-mix(in oklab, var(--panel-2) 60%, transparent)",
 };
 
 const capabilityPanelStyle: React.CSSProperties = {
@@ -1610,7 +1610,7 @@ const statTileStyle: React.CSSProperties = {
   border: "1px solid var(--rule-soft)",
   borderRadius: "var(--radius-surface, 10px)",
   padding: "10px 11px",
-  background: "color-mix(in oklch, var(--bg) 30%, transparent)",
+  background: "color-mix(in oklab, var(--bg) 30%, transparent)",
 };
 
 const compactStatTileStyle: React.CSSProperties = {
@@ -1664,7 +1664,7 @@ const tableShellStyle: React.CSSProperties = {
   border: "1px solid var(--rule-soft)",
   borderRadius: "var(--radius-control, 7px)",
   overflow: "auto",
-  background: "color-mix(in oklch, var(--bg) 22%, transparent)",
+  background: "color-mix(in oklab, var(--bg) 22%, transparent)",
   boxShadow: "var(--well)",
 };
 
@@ -1679,7 +1679,7 @@ const tableHeaderStyle: React.CSSProperties = {
   gap: 8,
   padding: "8px 10px",
   borderBottom: "1px solid var(--rule-soft)",
-  background: "color-mix(in oklch, var(--panel) 90%, var(--bg))",
+  background: "color-mix(in oklab, var(--panel) 90%, var(--bg))",
   color: "var(--muted)",
   fontFamily: "var(--font-mono)",
   fontSize: 10,
@@ -1834,7 +1834,7 @@ const builtinTileStyle: React.CSSProperties = {
   border: "1px solid var(--rule-soft)",
   borderRadius: "var(--radius-control, 7px)",
   padding: "9px 10px",
-  background: "color-mix(in oklch, var(--bg) 30%, transparent)",
+  background: "color-mix(in oklab, var(--bg) 30%, transparent)",
   display: "grid",
   gap: 8,
 };
@@ -1916,7 +1916,7 @@ const installChipStyle: React.CSSProperties = {
   padding: "5px 6px 5px 7px",
   borderRadius: "var(--radius-control, 7px)",
   border: "1px solid var(--rule-soft)",
-  background: "color-mix(in oklch, var(--bg) 36%, transparent)",
+  background: "color-mix(in oklab, var(--bg) 36%, transparent)",
   minWidth: 0,
 };
 

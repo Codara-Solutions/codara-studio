@@ -1566,7 +1566,7 @@ function AttachmentChip({
         height: 24,
         border: "1px solid var(--rule-soft)",
         borderRadius: "var(--radius-control, 7px)",
-        background: "color-mix(in oklch, var(--ink) 4%, transparent)",
+        background: "color-mix(in oklab, var(--ink) 4%, transparent)",
         boxShadow: "var(--lift-hi)",
         padding: "0 4px 0 7px",
         color: "var(--ink-dim)",
@@ -1654,7 +1654,7 @@ function IconButton({
         borderRadius: "var(--radius-control, 7px)",
         background:
           pressed && live
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover && live
               ? "var(--hover)"
               : "transparent",
@@ -1796,7 +1796,7 @@ function SendButton({
         border: "none",
         borderRadius: "var(--radius-control, 7px)",
         background: disabled
-          ? "color-mix(in oklch, var(--ink) 7%, transparent)"
+          ? "color-mix(in oklab, var(--ink) 7%, transparent)"
           : hover
             ? "color-mix(in oklch, var(--accent) 88%, var(--ink))"
             : "var(--accent)",

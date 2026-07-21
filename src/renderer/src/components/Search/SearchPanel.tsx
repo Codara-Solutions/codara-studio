@@ -636,7 +636,7 @@ function Toggle({
           ? "1px solid var(--accent-edge)"
           : "1px solid var(--rule-soft)",
         borderRadius: 6,
-        background: active ? "var(--accent-soft)" : "color-mix(in oklch, var(--ink) 2%, transparent)",
+        background: active ? "var(--accent-soft)" : "color-mix(in oklab, var(--ink) 2%, transparent)",
         color: active ? "var(--ink)" : "var(--muted)",
         fontFamily: "var(--font-mono)",
         fontSize: 11,
@@ -654,7 +654,7 @@ function Toggle({
       }}
       onMouseLeave={(e) => {
         if (!active) {
-          e.currentTarget.style.background = "color-mix(in oklch, var(--ink) 2%, transparent)";
+          e.currentTarget.style.background = "color-mix(in oklab, var(--ink) 2%, transparent)";
           e.currentTarget.style.color = "var(--muted)";
         }
       }}
@@ -785,7 +785,7 @@ function FileHeader({
           padding: "1px 6px",
           border: "1px solid var(--rule-soft)",
           borderRadius: 4,
-          background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+          background: "color-mix(in oklab, var(--ink) 3%, transparent)",
           color: "var(--muted)",
           fontFamily: "var(--font-mono)",
           fontSize: 10,

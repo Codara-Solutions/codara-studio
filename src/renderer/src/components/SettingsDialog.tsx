@@ -8,6 +8,9 @@ import type {
   RunState,
   ShellInfo,
   ThemePref,
+  WorkerSessionMemoryScope,
+  WorkerSessionRuntime,
+  WorkerSessionSummary,
 } from "@shared/types";
 import {
   APP_THEME_IDS,
@@ -36,6 +39,7 @@ type SettingsTab =
   | "terminal"
   | "api"
   | "agents"
+  | "sessions"
   | "keybindings"
   | "runs"
   | "about";
@@ -46,6 +50,7 @@ const TABS: ReadonlyArray<{ id: SettingsTab; label: string }> = [
   { id: "terminal", label: "Default terminal" },
   { id: "api", label: "API and model" },
   { id: "agents", label: "Agents" },
+  { id: "sessions", label: "Sessions" },
   { id: "keybindings", label: "Keybindings" },
   { id: "runs", label: "Runs" },
   { id: "about", label: "About" },
@@ -171,6 +176,15 @@ function NavIcon({ tab }: { tab: SettingsTab }) {
           <circle cx="14.5" cy="14" r="1" />
         </svg>
       );
+    case "sessions": // stacked conversation cards
+      return (
+        <svg {...common}>
+          <rect x="4" y="5" width="16" height="11" rx="2.5" />
+          <path d="M8 16v3l4-3" />
+          <line x1="8" y1="9" x2="16" y2="9" />
+          <line x1="8" y1="12" x2="13" y2="12" />
+        </svg>
+      );
     case "keybindings": // command key (⌘) drawn as SVG, not a glyph
       return (
         <svg {...common}>
@@ -211,6 +225,11 @@ interface SettingsDialogProps {
   // Click "Open" on a row in the Runs tab. Caller is expected to switch
   // active workspace, select the run, and close this dialog.
   onOpenRun: (runId: string, workspaceId: string) => void;
+  onOpenWorkerSession: (
+    runtime: WorkerSessionRuntime,
+    cwd: string,
+    session: WorkerSessionSummary | null,
+  ) => void;
 }
 
 export default function SettingsDialog({
@@ -222,6 +241,7 @@ export default function SettingsDialog({
   onClose,
   onSave,
   onOpenRun,
+  onOpenWorkerSession,
 }: SettingsDialogProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
   const [draft, setDraft] = useState<AppSettings>(settings);
@@ -235,7 +255,7 @@ export default function SettingsDialog({
   // The runs tab has its own scrolling list and per-row destructive actions;
   // the global Save/Cancel footer would be misleading there. Hide the
   // footer entirely on tabs that manage their own persistence semantics.
-  const hideFooter = activeTab === "runs";
+  const hideFooter = activeTab === "runs" || activeTab === "sessions";
 
   useEffect(() => {
     setDraft(settings);
@@ -345,7 +365,7 @@ export default function SettingsDialog({
               borderRight: "1px solid var(--rule-soft)",
               // Translucent so the dialog's glass face shows through; over the
               // opaque fallback face it reads like the old --bg/--panel mix.
-              background: "color-mix(in oklch, var(--bg) 45%, transparent)",
+              background: "color-mix(in oklab, var(--bg) 45%, transparent)",
               padding: "12px 10px",
               display: "flex",
               flexDirection: "column",
@@ -389,6 +409,12 @@ export default function SettingsDialog({
             {activeTab === "api" && <ApiSettings draft={draft} onChange={setDraft} />}
             {activeTab === "agents" && (
               <AgentsSettings draft={draft} onChange={setDraft} />
+            )}
+            {activeTab === "sessions" && (
+              <SessionsSettings
+                workspaceCwd={workspaceCwd}
+                onOpenWorkerSession={onOpenWorkerSession}
+              />
             )}
             {activeTab === "keybindings" && <KeybindingsTab />}
             {activeTab === "runs" && <RunsSettings onOpenRun={onOpenRun} />}
@@ -536,10 +562,10 @@ function ShellOption({
         background: selected
           ? "var(--accent-soft)"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
-              : "color-mix(in oklch, var(--ink) 2%, transparent)",
+              : "color-mix(in oklab, var(--ink) 2%, transparent)",
         color: "var(--ink)",
         padding: "10px 11px",
         fontFamily: "var(--font-sans)",
@@ -663,9 +689,9 @@ function TabButton({
         border: "1px solid transparent",
         borderRadius: "var(--radius-control, 5px)",
         background: active
-          ? "color-mix(in oklch, var(--ink) 7%, var(--panel))"
+          ? "color-mix(in oklab, var(--ink) 7%, var(--panel))"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
               : "transparent",
@@ -1126,7 +1152,7 @@ function DefaultModelButton({ active, onClick }: { active: boolean; onClick: () 
         background: active
           ? "var(--accent-soft)"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
               : "var(--bg)",
@@ -1484,7 +1510,7 @@ function AgentsSettings({
           border: "1px solid var(--rule-soft)",
           borderRadius: "var(--radius-surface, 7px)",
           padding: 12,
-          background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+          background: "color-mix(in oklab, var(--ink) 3%, transparent)",
           color: "var(--muted)",
           fontFamily: "var(--font-sans)",
           fontSize: 12,
@@ -1789,12 +1815,12 @@ function RuntimeDiagnosticRow({
         background: active
           ? "var(--accent-soft)"
           : !canToggle
-            ? "color-mix(in oklch, var(--ink) 2%, transparent)"
+            ? "color-mix(in oklab, var(--ink) 2%, transparent)"
             : pressed
-              ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+              ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
               : hover
                 ? "var(--hover)"
-                : "color-mix(in oklch, var(--ink) 3%, transparent)",
+                : "color-mix(in oklab, var(--ink) 3%, transparent)",
         // Default arrow cursor when togglable (matching the .spark-* utility
         // classes); a not-allowed cue only when the runtime can't be enabled.
         cursor: canToggle ? "default" : "not-allowed",
@@ -1921,6 +1947,400 @@ function KeybindingsTab() {
     );
   }
   return <KeybindingsSection preferences={preferences} setPreference={setPreference} />;
+}
+
+function SessionsSettings({
+  workspaceCwd,
+  onOpenWorkerSession,
+}: {
+  workspaceCwd?: string | null;
+  onOpenWorkerSession: (
+    runtime: WorkerSessionRuntime,
+    cwd: string,
+    session: WorkerSessionSummary | null,
+  ) => void;
+}) {
+  const { preferences, setPreference, hydrated } = usePreferences();
+  const [sessions, setSessions] = useState<WorkerSessionSummary[] | null>(null);
+  const [filter, setFilter] = useState("");
+  const [runtimeFilter, setRuntimeFilter] = useState<"all" | WorkerSessionRuntime>("all");
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<WorkerSessionSummary | null>(null);
+  const [deleteMemory, setDeleteMemory] = useState(false);
+
+  const refresh = async () => {
+    const bridge = window.spark.agentSession as Partial<typeof window.spark.agentSession>;
+    try {
+      if (typeof bridge.listAll !== "function") {
+        setSessions([]);
+        setError("Restart Codara once to finish enabling the all-project session index.");
+        return;
+      }
+      const next = await bridge.listAll();
+      setSessions(next);
+      setError(null);
+    } catch (err) {
+      setSessions([]);
+      setError(
+        /no handler registered/i.test((err as Error).message)
+          ? "Restart Codara once to finish enabling the all-project session index."
+          : (err as Error).message,
+      );
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const filtered = useMemo(() => {
+    if (!sessions) return [];
+    const query = filter.trim().toLowerCase();
+    return sessions.filter((session) => {
+      if (runtimeFilter !== "all" && session.runtime !== runtimeFilter) return false;
+      if (!query) return true;
+      return (
+        session.title.toLowerCase().includes(query) ||
+        session.cwd.toLowerCase().includes(query) ||
+        session.sessionId.toLowerCase().includes(query)
+      );
+    });
+  }, [filter, runtimeFilter, sessions]);
+
+  const startNew = async (runtime: WorkerSessionRuntime) => {
+    const cwd = await window.spark.dialog.openDirectory(workspaceCwd ?? undefined);
+    if (cwd) onOpenWorkerSession(runtime, cwd, null);
+  };
+
+  const confirmDelete = async () => {
+    const session = pendingDelete;
+    if (!session) return;
+    const deleteSession = (
+      window.spark.agentSession as Partial<typeof window.spark.agentSession>
+    ).delete;
+    if (typeof deleteSession !== "function") {
+      setPendingDelete(null);
+      setDeleteMemory(false);
+      setError("Restart Codara once to enable session deletion.");
+      return;
+    }
+    const memoryScope: WorkerSessionMemoryScope = deleteMemory
+      ? session.runtime === "claude"
+        ? "claude-project"
+        : "codex-all"
+      : "none";
+    setBusyId(`${session.runtime}:${session.sessionId}`);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await deleteSession({
+        runtime: session.runtime,
+        sessionId: session.sessionId,
+        cwd: session.cwd,
+        transcriptPath: session.transcriptPath,
+        memoryScope,
+      });
+      setPendingDelete(null);
+      setDeleteMemory(false);
+      setNotice(
+        result.warnings.length > 0
+          ? result.warnings.join(" ")
+          : result.memoryDeleted
+            ? "Session and the selected local memory scope were deleted."
+            : "Session deleted.",
+      );
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <SectionTitle
+        title="Agent sessions"
+        detail="Start or resume Claude and Codex sessions from any local project. Opening a session switches to its workspace—or creates the workspace in Codara first."
+      />
+
+      {hydrated ? (
+        <ToggleRow
+          title="Resume running agent sessions when Codara reopens"
+          desc="Reopens terminal tabs that still had Claude or Codex running and resumes their exact local session. Shell tabs and agents you already exited still start normally."
+          checked={preferences.restoreAgentSessions === true}
+          onChange={(next) => void setPreference("restoreAgentSessions", next)}
+        />
+      ) : null}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <FooterButton primary onClick={() => void startNew("claude")}>New Claude</FooterButton>
+        <FooterButton primary onClick={() => void startNew("codex")}>New Codex</FooterButton>
+        <div style={{ flex: 1 }} />
+        <FooterButton onClick={() => void refresh()}>Refresh</FooterButton>
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input
+          className="spark-input"
+          type="text"
+          value={filter}
+          onChange={(event) => setFilter(event.currentTarget.value)}
+          placeholder="Filter by title, directory, or session id"
+          style={{ flex: 1, width: "auto" }}
+        />
+        <select
+          className="spark-input"
+          aria-label="Filter sessions by provider"
+          value={runtimeFilter}
+          onChange={(event) =>
+            setRuntimeFilter(event.currentTarget.value as "all" | WorkerSessionRuntime)
+          }
+          style={{ width: 112 }}
+        >
+          <option value="all">All agents</option>
+          <option value="claude">Claude</option>
+          <option value="codex">Codex</option>
+        </select>
+      </div>
+
+      {error ? <SessionManagerMessage tone="danger">{error}</SessionManagerMessage> : null}
+      {notice ? <SessionManagerMessage tone="info">{notice}</SessionManagerMessage> : null}
+
+      {pendingDelete ? (
+        <div
+          role="alertdialog"
+          aria-label="Confirm session deletion"
+          style={{
+            display: "grid",
+            gap: 10,
+            padding: "12px 13px",
+            borderRadius: "var(--radius-surface, 7px)",
+            border: "1px solid color-mix(in oklch, var(--danger) 42%, var(--rule-soft))",
+            background: "color-mix(in oklch, var(--danger) 8%, var(--bg))",
+          }}
+        >
+          <div style={{ color: "var(--ink)", fontSize: 12, fontWeight: 700 }}>
+            Permanently delete “{pendingDelete.title}”?
+          </div>
+          <div style={{ color: "var(--muted)", fontSize: 10, lineHeight: 1.45 }}>
+            This removes the local transcript and cannot be undone. Close a running copy of the
+            session before deleting it.
+          </div>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 8,
+              color: deleteMemory ? "var(--danger)" : "var(--ink-dim)",
+              fontSize: 10,
+              lineHeight: 1.4,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={deleteMemory}
+              onChange={(event) => setDeleteMemory(event.currentTarget.checked)}
+            />
+            <span>
+              {pendingDelete.runtime === "claude"
+                ? "Also delete this Claude project's auto-memory. This affects every Claude session sharing that project memory."
+                : "Also delete ALL local Codex memories. This affects every Codex project and session on this machine."}
+            </span>
+          </label>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 7 }}>
+            <FooterButton
+              onClick={() => {
+                setPendingDelete(null);
+                setDeleteMemory(false);
+              }}
+            >
+              Cancel
+            </FooterButton>
+            <DangerButton
+              disabled={busyId !== null}
+              onClick={() => void confirmDelete()}
+            >
+              {busyId ? "Deleting…" : deleteMemory ? "Delete session + memory" : "Delete session"}
+            </DangerButton>
+          </div>
+        </div>
+      ) : null}
+
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+          maxHeight: 430,
+          overflow: "auto",
+          paddingRight: 2,
+        }}
+      >
+        {sessions === null ? (
+          <SessionsEmptyMessage text="Reading local session stores…" />
+        ) : filtered.length === 0 ? (
+          <SessionsEmptyMessage
+            text={sessions.length === 0 ? "No local agent sessions found." : "No sessions match that filter."}
+          />
+        ) : (
+          filtered.map((session) => {
+            const key = `${session.runtime}:${session.sessionId}`;
+            return (
+              <SessionManagerRow
+                key={key}
+                session={session}
+                busy={busyId === key}
+                onOpen={() => onOpenWorkerSession(session.runtime, session.cwd, session)}
+                onDelete={() => {
+                  setPendingDelete(session);
+                  setDeleteMemory(false);
+                  setNotice(null);
+                }}
+              />
+            );
+          })
+        )}
+      </div>
+
+      <div style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 9 }}>
+        {sessions ? `${filtered.length} of ${sessions.length} sessions` : ""}
+      </div>
+    </div>
+  );
+}
+
+function SessionManagerRow({
+  session,
+  busy,
+  onOpen,
+  onDelete,
+}: {
+  session: WorkerSessionSummary;
+  busy: boolean;
+  onOpen: () => void;
+  onDelete: () => void;
+}) {
+  const providerColor = session.runtime === "claude" ? "var(--accent)" : "var(--info)";
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "auto minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 11,
+        padding: "9px 10px",
+        background: "color-mix(in oklab, var(--bg) 82%, transparent)",
+        border: "1px solid var(--rule-soft)",
+        borderRadius: "var(--radius-surface, 7px)",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 26,
+          height: 26,
+          display: "grid",
+          placeItems: "center",
+          borderRadius: 8,
+          color: providerColor,
+          background: `color-mix(in oklch, ${providerColor} 11%, transparent)`,
+          border: `1px solid color-mix(in oklch, ${providerColor} 30%, transparent)`,
+          fontFamily: "var(--font-mono)",
+          fontWeight: 800,
+          fontSize: 11,
+        }}
+      >
+        {session.runtime === "claude" ? "C" : "X"}
+      </span>
+      <div style={{ minWidth: 0, display: "grid", gap: 3 }}>
+        <div
+          title={session.title}
+          style={{
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            color: "var(--ink)",
+            fontSize: 12,
+            fontWeight: 650,
+          }}
+        >
+          {session.title}
+        </div>
+        <div
+          title={session.cwd}
+          style={{
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            color: session.cwdExists ? "var(--muted)" : "var(--danger)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 9,
+          }}
+        >
+          {session.cwdExists ? session.cwd : `${session.cwd} · directory missing`}
+        </div>
+        <div style={{ display: "flex", gap: 7, color: "var(--muted)", fontSize: 9 }}>
+          <span>{session.runtime === "claude" ? "Claude" : "Codex"}</span>
+          <span>·</span>
+          <span title={session.sessionId}>{shortWorkerSessionId(session.sessionId)}</span>
+          <span>·</span>
+          <span>{formatSessionUpdated(session.updatedAt)}</span>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <FooterButton onClick={onOpen} disabled={!session.cwdExists || busy}>Open</FooterButton>
+        <DangerButton onClick={onDelete} disabled={busy}>Delete</DangerButton>
+      </div>
+    </div>
+  );
+}
+
+function SessionManagerMessage({
+  tone,
+  children,
+}: {
+  tone: "danger" | "info";
+  children: React.ReactNode;
+}) {
+  const color = tone === "danger" ? "var(--danger)" : "var(--info)";
+  return (
+    <div
+      role={tone === "danger" ? "alert" : "status"}
+      style={{
+        color,
+        fontSize: 10,
+        lineHeight: 1.45,
+        border: `1px solid color-mix(in oklch, ${color} 34%, transparent)`,
+        background: `color-mix(in oklch, ${color} 8%, transparent)`,
+        borderRadius: "var(--radius-surface, 7px)",
+        padding: "7px 10px",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function shortWorkerSessionId(id: string): string {
+  return id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+}
+
+function formatSessionUpdated(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "Recently";
+  const minutes = Math.round((timestamp - Date.now()) / 60_000);
+  if (Math.abs(minutes) < 1) return "Just now";
+  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  if (Math.abs(minutes) < 60) return formatter.format(minutes, "minute");
+  const hours = Math.round(minutes / 60);
+  if (Math.abs(hours) < 24) return formatter.format(hours, "hour");
+  const days = Math.round(hours / 24);
+  if (Math.abs(days) < 30) return formatter.format(days, "day");
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" })
+    .format(timestamp);
 }
 
 // Cross-workspace runs index. Shows every run on disk with its status,
@@ -2209,7 +2629,7 @@ function RunRow({
               flex: "0 0 auto",
               padding: "1px 6px",
               borderRadius: "var(--radius-control, 5px)",
-              background: "color-mix(in oklch, var(--ink) 6%, transparent)",
+              background: "color-mix(in oklab, var(--ink) 6%, transparent)",
               color: "var(--ink-dim)",
             }}
           >
@@ -2270,6 +2690,14 @@ function DangerButton({
 }
 
 function RunsEmptyMessage({ text }: { text: string }) {
+  return <SettingsEmptyMessage label="Runs" text={text} />;
+}
+
+function SessionsEmptyMessage({ text }: { text: string }) {
+  return <SettingsEmptyMessage label="Sessions" text={text} />;
+}
+
+function SettingsEmptyMessage({ label, text }: { label: string; text: string }) {
   return (
     <div
       className="spark-empty"
@@ -2279,7 +2707,7 @@ function RunsEmptyMessage({ text }: { text: string }) {
         borderRadius: "var(--radius-surface, 7px)",
       }}
     >
-      <span className="spark-eyebrow">Runs</span>
+      <span className="spark-eyebrow">{label}</span>
       <span className="spark-empty__body">{text}</span>
     </div>
   );
@@ -2392,10 +2820,10 @@ function ThemeCard({
         background: active
           ? "var(--accent-soft)"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
-              : "color-mix(in oklch, var(--panel) 70%, transparent)",
+              : "color-mix(in oklab, var(--panel) 70%, transparent)",
         // Surface rung — a card sits on the 7px ladder step.
         borderRadius: "var(--radius-surface, 7px)",
         padding: 10,
@@ -2618,7 +3046,7 @@ function CustomSelect({
           // Default arrow cursor, matching the .spark-* utility classes.
           cursor: "default",
           background: pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
               : "var(--bg)",
@@ -2697,7 +3125,7 @@ function SelectOption({
         // Pressed beat for rows where the .spark-btn transform would break the
         // menu seam — a momentary darker fill instead.
         background: pressed
-          ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+          ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
           : undefined,
       }}
     >
@@ -2734,10 +3162,10 @@ function TimingPresetButton({
         background: active
           ? "var(--accent-soft)"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
-              : "color-mix(in oklch, var(--ink) 2%, transparent)",
+              : "color-mix(in oklab, var(--ink) 2%, transparent)",
         color: "var(--ink)",
         padding: "7px 9px",
         // Default arrow cursor, matching the .spark-* utility classes.
@@ -2809,10 +3237,10 @@ function ModelPresetCard({
         background: active
           ? "var(--accent-soft)"
           : pressed
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover
               ? "var(--hover)"
-              : "color-mix(in oklch, var(--ink) 2%, transparent)",
+              : "color-mix(in oklab, var(--ink) 2%, transparent)",
         color: "var(--ink)",
         padding: "9px 11px",
         // Default arrow cursor, matching the .spark-* utility classes.
@@ -3006,7 +3434,7 @@ function SwitchTrack({ checked, disabled }: { checked: boolean; disabled?: boole
           : "1px solid var(--rule-strong)",
         background: checked
           ? "color-mix(in oklch, var(--accent) 32%, var(--panel))"
-          : "color-mix(in oklch, var(--ink) 5%, transparent)",
+          : "color-mix(in oklab, var(--ink) 5%, transparent)",
         opacity: disabled ? 0.55 : 1,
         transition:
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",

@@ -7,7 +7,11 @@ import {
   useRef,
   useState,
 } from "react";
-import type { RuntimeState, ShellInfo } from "@shared/types";
+import type {
+  RuntimeState,
+  ShellInfo,
+  TerminalAgentForegroundState,
+} from "@shared/types";
 import {
   useTerminalSession,
   type SparkOpenInput,
@@ -86,7 +90,7 @@ interface Props {
   onSparkOpen?: (input: SparkOpenInput) => void;
   onActivity?: () => void;
   onUserInput?: () => void;
-  onAgentState?: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
+  onAgentState?: (state: TerminalAgentForegroundState) => void;
   // Forwarded straight to useTerminalSession: fires when the live-state poller
   // confirms a new RuntimeState (working / blocked / idle / done) for the
   // foreground agent. Lets the owning stack surface the finer state on a chip.

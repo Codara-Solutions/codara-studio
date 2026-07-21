@@ -1,6 +1,7 @@
 // Harness for the cold terminal-layout hydration/persist helpers in
-// src/renderer/src/tabs/useTabs.ts. A full app relaunch keeps layout and cwd,
-// but never restores terminal output, worker state, or agent sessions.
+// src/renderer/src/tabs/useTabs.ts. A full app relaunch keeps layout/cwd and a
+// validated Claude/Codex session pointer, while process-local fields and output
+// are always removed. Active pointers receive a one-shot resume marker.
 //
 //   node scripts/test-session-restore.cjs
 
@@ -24,6 +25,7 @@ const harnessPlugin = {
       contents:
         "export const useCallback = (fn) => fn;\n" +
         "export const useEffect = () => {};\n" +
+        "export const useLayoutEffect = () => {};\n" +
         "export const useMemo = (fn) => fn();\n" +
         "export const useRef = (v) => ({ current: v });\n" +
         "export const useState = (v) => [typeof v === 'function' ? v() : v, () => {}];\n",
@@ -50,7 +52,11 @@ async function main() {
     plugins: [harnessPlugin], logLevel: "silent",
   });
   delete require.cache[outfile];
-  const { cleanupTransientTerminalState, stripTransientPaneState } = require(outfile);
+  const {
+    cleanupTransientTerminalState,
+    markTerminalAgentSessionsActive,
+    stripTransientPaneState,
+  } = require(outfile);
 
   let failures = 0;
   const check = (name, cond) => {
@@ -70,20 +76,31 @@ async function main() {
   check("cold hydration strips scrollback", !("scrollback" in active));
   check("cold hydration strips worker", !("worker" in active));
   check("cold hydration strips autorun", !("autorun" in active));
-  check("cold hydration strips agent session", !("agentSession" in active));
-  check("cold hydration strips boot resume", !("bootResume" in active));
+  check("cold hydration retains a validated active session", active.agentSession?.sessionId === session().sessionId);
+  check("cold hydration derives the one-shot resume marker", active.bootResume === true);
   check("cold hydration preserves cwd and pane id", active.cwd === "/tmp/kept" && active.paneId === "p1");
 
-  for (const [name, pointer] of [
-    ["inactive Claude", session({ active: false })],
-    ["legacy Claude", session()],
-    ["pending Claude", session({ active: true, sessionId: "" })],
-    ["active Codex", session({ runtime: "codex", active: true })],
+  for (const [name, pointer, resumes] of [
+    ["inactive Claude", session({ active: false }), false],
+    ["legacy Claude", session(), false],
+    ["active Codex", session({ runtime: "codex", active: true }), true],
   ]) {
-    const item = leaf(name, { agentSession: pointer, bootResume: true, scrollback: name });
+    const item = leaf(name, { agentSession: pointer, bootResume: !resumes, scrollback: name });
     cleanupTransientTerminalState(item);
-    check(`${name} pointer never resumes`, !("agentSession" in item) && !("bootResume" in item));
+    check(`${name} keeps its validated pointer`, item.agentSession === pointer);
+    check(`${name} resume eligibility follows active state`, (item.bootResume === true) === resumes);
     check(`${name} scrollback never replays`, !("scrollback" in item));
+  }
+
+  for (const [name, pointer] of [
+    ["pending session", session({ active: true, sessionId: "" })],
+    ["control-character id", session({ active: true, sessionId: "bad\ncommand" })],
+    ["unknown runtime", session({ runtime: "other", active: true })],
+    ["missing cwd", session({ active: true, cwd: "" })],
+  ]) {
+    const item = leaf(name, { agentSession: pointer, bootResume: true });
+    cleanupTransientTerminalState(item);
+    check(`${name} pointer is rejected`, !("agentSession" in item) && !("bootResume" in item));
   }
 
   const tree = split(
@@ -96,7 +113,8 @@ async function main() {
     0.62,
   );
   cleanupTransientTerminalState(tree);
-  check("nested hydration strips every leaf", !tree.a.scrollback && !tree.b.a.scrollback && !tree.b.b.bootResume);
+  check("nested hydration strips process-local fields", !tree.a.scrollback && !tree.b.a.scrollback && !tree.b.b.bootResume);
+  check("nested hydration marks active pointer", tree.a.agentSession?.active === true && tree.a.bootResume === true);
   check("nested hydration preserves split geometry", tree.ratio === 0.62 && tree.b.ratio === 0.35);
   check("nested hydration preserves pane ids and cwd", tree.a.paneId === "s1" && tree.b.a.cwd === "/two" && tree.b.b.cwd === "/three");
 
@@ -109,8 +127,23 @@ async function main() {
     agentSession: session({ active: true }),
   });
   const stripped = stripTransientPaneState(dirty);
-  check("persist strips every process-local field", ["scrollback", "worker", "autorun", "bootResume", "agentSession"].every((key) => !(key in stripped)));
+  check("persist strips every process-local field", ["scrollback", "worker", "autorun", "bootResume"].every((key) => !(key in stripped)));
+  check("persist retains the validated session pointer", stripped.agentSession === dirty.agentSession);
   check("persist preserves layout fields", stripped.paneId === "q1" && stripped.cwd === "/persisted");
+
+  const malformed = leaf("bad", { agentSession: session({ sessionId: "" }), bootResume: true });
+  const malformedStripped = stripTransientPaneState(malformed);
+  check("persist rejects malformed pointers", !("agentSession" in malformedStripped));
+  check("persist never writes boot resume", !("bootResume" in malformedStripped));
+
+  const quitTree = split(
+    leaf("running-pane", { agentSession: session({ active: false }) }),
+    leaf("idle-pane", { agentSession: session({ runtime: "codex", active: false }) }),
+  );
+  const quitMarked = markTerminalAgentSessionsActive(quitTree, new Set(["running-pane"]));
+  check("quit-time liveness promotes the reported pane", quitMarked.a.agentSession?.active === true);
+  check("quit-time liveness leaves other pointers inactive", quitMarked.b.agentSession?.active === false);
+  check("quit-time liveness preserves untouched leaf identity", quitMarked.b === quitTree.b);
 
   const clean = leaf("q2", { cwd: "/clean" });
   check("persist preserves clean leaf identity", stripTransientPaneState(clean) === clean);
@@ -125,7 +158,7 @@ async function main() {
     console.error(`${failures} failure(s)`);
     process.exit(1);
   }
-  console.log("all fresh-terminal restore checks passed");
+  console.log("all opt-in session restore checks passed");
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });

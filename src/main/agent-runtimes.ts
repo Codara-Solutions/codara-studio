@@ -133,9 +133,7 @@ export function enabledAgentRuntimeKinds(
   // Legacy string tokens kept for backwards-compat reads from older settings.
   if (selection === "claude") return new Set<AgentRuntimeKind>(["claude"]);
   if (selection === "codex") return new Set<AgentRuntimeKind>(["codex"]);
-  // "auto" and "both" both mean "every runtime Codara knows about". The
-  // historical "cursor" token migrates here implicitly (we no longer support
-  // Cursor as a runtime — Codara only spawns Claude or Codex workers).
+  // "auto" and "both" both mean "every runtime Codara knows about".
   return new Set<AgentRuntimeKind>(ALL_RUNTIMES);
 }
 

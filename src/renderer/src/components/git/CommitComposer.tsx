@@ -349,7 +349,7 @@ export default function CommitComposer({
               fontVariantNumeric: "tabular-nums",
               padding: "1px 6px",
               borderRadius: 999,
-              background: "color-mix(in oklch, var(--ink) 12%, transparent)",
+              background: "color-mix(in oklab, var(--ink) 12%, transparent)",
               color: "var(--ink-dim)",
             }}
           >

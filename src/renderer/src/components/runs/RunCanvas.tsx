@@ -665,7 +665,7 @@ function CollapsedRail({ onExpand }: { onExpand: () => void }) {
         gap: 12,
         paddingTop: 11,
         borderLeft: "1px solid var(--rule)",
-        background: hover ? "color-mix(in oklch, var(--ink) 3%, var(--panel))" : "var(--panel)",
+        background: hover ? "color-mix(in oklab, var(--ink) 3%, var(--panel))" : "var(--panel)",
         color: hover ? "var(--ink-dim)" : "var(--muted)",
         cursor: "default",
         transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",

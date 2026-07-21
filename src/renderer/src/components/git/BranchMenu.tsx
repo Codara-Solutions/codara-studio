@@ -257,7 +257,7 @@ export default function BranchMenu({
           padding: "0 8px 0 10px",
           border: "none",
           borderBottom: "none",
-          background: open ? "color-mix(in oklch, var(--ink) 4%, transparent)" : "transparent",
+          background: open ? "color-mix(in oklab, var(--ink) 4%, transparent)" : "transparent",
           color: "var(--ink-dim)",
           cursor: "default",
           textAlign: "left",
@@ -529,7 +529,7 @@ const BranchRow = React.memo(function BranchRow({
         background: isCurrent
           ? "color-mix(in oklch, var(--accent) 12%, transparent)"
           : hover
-            ? "color-mix(in oklch, var(--ink) 5%, transparent)"
+            ? "color-mix(in oklab, var(--ink) 5%, transparent)"
             : "transparent",
         boxShadow: isCurrent ? "inset 2px 0 0 var(--accent)" : "none",
         transition:

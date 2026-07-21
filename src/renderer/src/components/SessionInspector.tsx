@@ -207,7 +207,7 @@ function Header({
           gap: 2,
           padding: "0 12px",
           borderTop: "1px solid var(--rule-soft)",
-          background: "color-mix(in oklch, var(--bg) 60%, var(--panel))",
+          background: "color-mix(in oklab, var(--bg) 60%, var(--panel))",
         }}
       >
         {TABS.map((tab) => (
@@ -394,7 +394,7 @@ function CostsTab({ run }: { run: RunState }) {
           fontFamily: "var(--font-mono)",
           fontSize: 11,
           color: "var(--ink-dim)",
-          background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+          background: "color-mix(in oklab, var(--ink) 2%, transparent)",
           border: "1px solid var(--rule-soft)",
           borderRadius: 8,
           boxShadow: "var(--well)",
@@ -456,7 +456,7 @@ function HeaderCell({
         textTransform: "uppercase",
         letterSpacing: "0.08em",
         color: "var(--muted)",
-        background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+        background: "color-mix(in oklab, var(--ink) 3%, transparent)",
         borderBottom: "1px solid var(--rule-soft)",
         fontSize: 10,
         fontWeight: 600,
@@ -654,7 +654,7 @@ function EventRow({ event, highlight }: { event: SparkEvent; highlight: boolean 
           tone === "danger"
             ? "color-mix(in oklch, var(--danger) 6%, transparent)"
             : hover
-              ? "color-mix(in oklch, var(--ink) 3%, transparent)"
+              ? "color-mix(in oklab, var(--ink) 3%, transparent)"
               : "transparent",
         transition: "background var(--motion-fast) var(--ease-out)",
       }}
@@ -717,7 +717,7 @@ function EventRow({ event, highlight }: { event: SparkEvent; highlight: boolean 
             fontSize: 11,
             whiteSpace: "pre-wrap",
             wordBreak: "break-word",
-            background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+            background: "color-mix(in oklab, var(--ink) 2%, transparent)",
             borderTop: "1px solid var(--rule-soft)",
             paddingTop: 8,
           }}
@@ -841,7 +841,7 @@ function ContextWindowTab({ run }: { run: RunState }) {
             width: "100%",
             height: 8,
             borderRadius: 999,
-            background: "color-mix(in oklch, var(--ink) 6%, transparent)",
+            background: "color-mix(in oklab, var(--ink) 6%, transparent)",
             boxShadow: "var(--well)",
             overflow: "hidden",
           }}

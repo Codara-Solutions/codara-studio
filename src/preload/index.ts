@@ -28,6 +28,8 @@ import type {
   CreateRunInput,
   CreateScheduledJobInput,
   CreateWorkerTaskInput,
+  DeleteWorkerSessionInput,
+  DeleteWorkerSessionResult,
   EnqueueRunInput,
   FileListResult,
   FsChangeEvent,
@@ -56,6 +58,8 @@ import type {
   NotificationSoundKind,
   NotifyEvent,
   UpdateChatBackendInput,
+  WorkerSessionRuntime,
+  WorkerSessionSummary,
   PauseRunInput,
   PlanFile,
   PrefKey,
@@ -160,6 +164,14 @@ const api = {
   state: {
     load: (): Promise<AppState> => ipcRenderer.invoke("state:load"),
     save: (state: AppState): Promise<void> => ipcRenderer.invoke("state:save", state),
+    // Main-side clients such as the `cora` CLI can create a workspace while
+    // the renderer is already open. Push the authoritative state immediately
+    // so the new Cora session appears without requiring an app restart.
+    onChanged: (handler: (state: AppState) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, state: AppState) => handler(state);
+      ipcRenderer.on("state:changed", listener);
+      return () => ipcRenderer.off("state:changed", listener);
+    },
   },
   settings: {
     load: (): Promise<AppSettings> => ipcRenderer.invoke("settings:load"),
@@ -662,6 +674,16 @@ const api = {
   // session's id, probe whether it still exists before resuming, and pre-seed
   // Codex directory trust. See src/main/ipc.ts "agentSession:*" handlers.
   agentSession: {
+    // List resumable sessions whose recorded cwd matches the worker launch
+    // directory. The main process reads CLI-owned JSONL metadata; transcript
+    // contents remain on disk.
+    list: (args: {
+      runtime: WorkerSessionRuntime;
+      cwd: string;
+    }): Promise<WorkerSessionSummary[]> => ipcRenderer.invoke("agentSession:list", args),
+    listAll: (): Promise<WorkerSessionSummary[]> => ipcRenderer.invoke("agentSession:listAll"),
+    delete: (input: DeleteWorkerSessionInput): Promise<DeleteWorkerSessionResult> =>
+      ipcRenderer.invoke("agentSession:delete", input),
     // Discover the session id of a Claude/Codex agent just detected running in a
     // pane, by finding the transcript it started writing for this cwd. Resolves
     // null on timeout.
@@ -811,8 +833,20 @@ const api = {
     // BEFORE it kills the PTYs, so the renderer can mark teardown and stop
     // deactivating running agents' restore pointers as their shells die. Returns
     // an unsubscribe function.
-    onBeforeQuit: (handler: () => void): (() => void) => {
-      const listener = () => handler();
+    onBeforeQuit: (
+      handler: (payload: { activeAgentPaneIds: string[] }) => void,
+    ): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload?: { activeAgentPaneIds?: unknown },
+      ) =>
+        handler({
+          activeAgentPaneIds: Array.isArray(payload?.activeAgentPaneIds)
+            ? payload.activeAgentPaneIds.filter(
+                (paneId): paneId is string => typeof paneId === "string" && paneId.length > 0,
+              )
+            : [],
+        });
       ipcRenderer.on("app:before-quit", listener);
       return () => ipcRenderer.off("app:before-quit", listener);
     },

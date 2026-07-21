@@ -62,6 +62,11 @@ import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex
 import { latestSessionStart } from "./agent-session-registry";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import {
+  deleteWorkerSession,
+  listAllWorkerSessions,
+  listWorkerSessions,
+} from "./worker-sessions";
+import {
   clearCenter,
   listCenterEntries,
   markCenterAllRead,
@@ -224,6 +229,10 @@ import type {
   UpdateScheduledJobInput,
   UpdateStepInput,
   UpdateWorkerTaskInput,
+  DeleteWorkerSessionInput,
+  DeleteWorkerSessionResult,
+  WorkerSessionRuntime,
+  WorkerSessionSummary,
 } from "@shared/types";
 
 // A small document glyph used as the drag image for `webContents.startDrag`.
@@ -1370,6 +1379,34 @@ export function registerIpc(): void {
   });
 
   // ── Agent session restore (manual Claude/Codex terminal panes) ──────────
+  ipcMain.handle(
+    "agentSession:list",
+    async (
+      _e,
+      args: { runtime: WorkerSessionRuntime; cwd: string },
+    ): Promise<WorkerSessionSummary[]> => {
+      if (!args || (args.runtime !== "claude" && args.runtime !== "codex")) return [];
+      if (typeof args.cwd !== "string" || !args.cwd.trim()) return [];
+      assertLocalWorkspace(args.cwd, "Worker session history");
+      return listWorkerSessions(args.runtime, args.cwd);
+    },
+  );
+
+  ipcMain.handle(
+    "agentSession:listAll",
+    async (): Promise<WorkerSessionSummary[]> => listAllWorkerSessions(),
+  );
+
+  ipcMain.handle(
+    "agentSession:delete",
+    async (_e, input: DeleteWorkerSessionInput): Promise<DeleteWorkerSessionResult> => {
+      if (typeof input?.cwd === "string") {
+        assertLocalWorkspace(input.cwd, "Worker session deletion");
+      }
+      return deleteWorkerSession(input);
+    },
+  );
+
   // Capture: when the renderer detects a `claude`/`codex` agent running in a
   // pane, find the transcript it just started writing and return its session id
   // so a future reopen can `--resume` it. Neither CLI reports its id back over

@@ -145,9 +145,6 @@ const folderIcons: FolderIcons = {
       "__integration-tests__",
     ],
   },
-  cursor: {
-    folderNames: [".cursor"],
-  },
   cypress: {
     folderNames: ["cypress", ".cypress"],
   },

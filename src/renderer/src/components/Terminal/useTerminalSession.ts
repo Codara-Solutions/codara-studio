@@ -9,6 +9,7 @@ import {
   trimTerminalScrollbackLines,
   type RuntimeState,
   type ShellInfo,
+  type TerminalAgentForegroundState,
 } from "@shared/types";
 import {
   absenceResetSafe,
@@ -102,7 +103,7 @@ function shellEscapePath(path: string, isWindows: boolean): string {
   // so no backslash can land between surrogate halves).
   return path.replace(/[^A-Za-z0-9_./\-\u{0080}-\u{10FFFF}]/gu, "\\$&");
 }
-// After an agent turn is interrupted with Ctrl+C, Codex/Claude/Cursor often
+// After an agent turn is interrupted with Ctrl+C, Claude/Codex often
 // keep their TUI input box open without re-emitting the launch banner or
 // alt-screen-enter sequence. Keep Shift+Enter routed as an agent newline for a
 // bounded grace window, while prompt/alt-screen exit markers clear it sooner.
@@ -367,7 +368,7 @@ interface Options {
   // first-party agent pane. `runtime` is best-effort sniffed from surrounding
   // banner text; `null` means the TUI started but we couldn't identify which
   // one.
-  onAgentState?: (state: { runtime: "claude" | "codex" | "cursor" | null; running: boolean }) => void;
+  onAgentState?: (state: TerminalAgentForegroundState) => void;
   // Fires whenever the live-state poller confirms a new RuntimeState for the
   // foreground agent (working / blocked / idle / done). This is the SAME value
   // the hook reports to main via window.spark.terminalState.report — surfaced
@@ -1091,7 +1092,7 @@ export function useTerminalSession({
         }
         // Shift+Enter: insert a line break instead of submitting. The right
         // byte sequence depends on what's reading the PTY:
-        //   - Ink-based agent TUIs (Claude Code / Codex / Cursor) read
+        //   - Ink-based agent TUIs (Claude Code / Codex) read
         //     `\x1b\r` (ESC + CR — the standard Alt+Enter / iTerm2
         //     shift-enter convention, same thing claude's `/terminal-setup`
         //     binds Shift+Enter to) as "insert newline in input box".
@@ -1407,7 +1408,7 @@ export function useTerminalSession({
       //
       // Phase machine:
       //   "idle"  → no agent running chip/state is currently advertised
-      //   "agent" → a Claude / Codex / Cursor CLI is in the foreground;
+      //   "agent" → a Claude / Codex CLI is in the foreground;
       //             running=true has been emitted. We stay here until an exit
       //             signal or a forwarded Ctrl+C interrupts the active turn.
       //
@@ -1457,11 +1458,11 @@ export function useTerminalSession({
       let genericArmRingFrom = 0;
       let genericArmBudget = 0;
       let agentPhase: "idle" | "agent" = "idle";
-      // Tracks the first-party runtime ("claude"|"codex"|"cursor") if the
+      // Tracks the first-party runtime ("claude"|"codex") if the
       // detected runtime maps to one — drives the state poller below, which
       // only has regex tables for those three. Non-first-party runtimes still
       // fire onAgentState (running=true) but skip the poller.
-      let activeRuntime: "claude" | "codex" | "cursor" | null = null;
+      let activeRuntime: PublicAgentRuntime | null = null;
       // Separate input-routing memory from the chip/running phase. Ctrl+C can
       // end the active turn (so the chip must clear) while leaving an agent TUI
       // focused on its prompt; Shift+Enter should still insert a TUI newline
@@ -1488,7 +1489,7 @@ export function useTerminalSession({
       // re-detection and Fix 3 Shift+Enter) so a still-visible idle agent is
       // recognised even when agentPhase has (wrongly or after a remount) lapsed
       // back to "idle" and activeRuntime is therefore null.
-      const KNOWN_RUNTIMES = ["claude", "codex", "cursor"] as const;
+      const KNOWN_RUNTIMES = ["claude", "codex"] as const;
       // Which first-party runtime's persistent chrome is currently visible in
       // `tail` (the BOTTOM rows), if any. Returns null when no agent chrome is
       // on the bottom of the screen. Deliberately checks the bottom tail only:
@@ -1578,9 +1579,9 @@ export function useTerminalSession({
       // re-promote to "working" while the tail is byte-identical to it: a genuine
       // new turn repaints the footer (fresh spinner / "(0s ·" / the echoed prompt)
       // so the tail differs and promotion proceeds normally. Cleared when we leave
-      // idle and reset across agent enter/exit. Claude-only, mirroring D4: Codex/
-      // Cursor turn-completion is driven by the focus-independent notifier, and
-      // their idle composer doesn't classify as "working" anyway.
+      // idle and reset across agent enter/exit. Claude-only, mirroring D4:
+      // Codex turn-completion is driven by the focus-independent notifier, and
+      // its idle composer doesn't classify as "working" anyway.
       let idleFrozenTail: string | null = null;
       // Bug B (baseline idle): a launched-but-never-worked agent (the user
       // typed `claude`, the idle box is up, nothing run yet) classifies as
@@ -1657,7 +1658,7 @@ export function useTerminalSession({
         // CLAUDE ONLY. Claude repaints its footer's elapsed-seconds counter at
         // least once a second while working, so a live turn's tail always changes
         // within the 1.2s idle debounce — a byte-identical tail reliably means the
-        // turn finished. Codex/Cursor repaint their footer RARELY (Codex only
+        // turn finished. Codex repaints its footer rarely (it only
         // shimmers the word "Working" between full repaints; see the note in
         // terminal-agent-notify.ts), so a quiet 20-30s tool call would go
         // byte-identical mid-turn and false-flip to "ready". For those runtimes we
@@ -1713,8 +1714,8 @@ export function useTerminalSession({
         // processAgentChunkText instead, and otherwise resolves once refocused.
         //
         // FAIL-SAFE: this pure-absence reset only runs for runtimes whose IDLE
-        // chrome is VERIFIED (absenceResetSafe — Claude only today). For Codex /
-        // Cursor, whose idle-composer anchors are unverified, anchor-absence
+        // chrome is VERIFIED (absenceResetSafe — Claude only today). For Codex,
+        // whose idle-composer anchors are unverified, anchor-absence
         // alone must NOT clear the chip: an idle agent with mismatched anchors
         // would otherwise be killed ~1.2s after a turn. Those clear via positive
         // signals (OSC prompt markers, alt-screen-leave, pty exit) instead.
@@ -1816,7 +1817,7 @@ export function useTerminalSession({
           reportRuntimeState(effectiveRaw);
         }
       };
-      const startStatePoller = (runtime: "claude" | "codex" | "cursor") => {
+      const startStatePoller = (runtime: PublicAgentRuntime) => {
         activeRuntime = runtime;
         pendingState = null;
         confirmedState = null;
@@ -1848,7 +1849,7 @@ export function useTerminalSession({
         agentMarkerCarry = "";
         // Coerce non-first-party runtimes down to `null` at the boundary so
         // App.tsx / TerminalStack / run-store keep seeing the existing public
-        // surface ("claude" | "codex" | "cursor" | null) without growing new
+        // surface ("claude" | "codex" | null) without growing new
         // cases for every newly detected CLI. running=true still fires so the
         // activity indicator tracks correctly. A null `runtime` argument
         // means "something is interactive but we don't know what" — used by
@@ -1904,7 +1905,11 @@ export function useTerminalSession({
         const runtimeForRecentInput = activeRuntime ?? recentAgentInputRuntime;
         if (agentPhase === "agent") {
           agentRunningRef.current = false;
-          onAgentStateRef.current?.({ runtime: null, running: false });
+          onAgentStateRef.current?.({
+            runtime: null,
+            running: false,
+            exitConfirmed: options.exitSignal === true,
+          });
           // The TUI just exited or the active turn was interrupted; flip the
           // live state to "done" so any UI subscriber sees the transition
           // immediately. The poller stops here — we don't keep scanning a
@@ -1930,7 +1935,7 @@ export function useTerminalSession({
       const handleAgentInterruptKey = () => {
         if (readOnlyRef.current || inputBlockedRef.current) return;
         if (agentPhase !== "agent" || !activeRuntime) return;
-        // A single Ctrl+C in Claude Code / Codex / Cursor almost never exits
+        // A single Ctrl+C in Claude Code / Codex almost never exits
         // the TUI — it clears the input box, interrupts the current turn, or
         // prints "press again to exit". Flipping agentPhase to idle here used
         // to fire reportRuntimeState('done'), which run-store persisted as a
@@ -1958,7 +1963,7 @@ export function useTerminalSession({
         // sample, so it carries the same "unverified idle anchors → false UI
         // gone → kill a live agent" risk as the poller path. Only arm it for
         // runtimes whose idle chrome is verified (absenceResetSafe — Claude).
-        // Codex / Cursor clear via positive exit signals only.
+        // Codex clears via positive exit signals only.
         if (!absenceResetSafe(activeRuntime)) return;
         clearCtrlCExitTimer();
         ctrlCExitTimer = window.setTimeout(() => {
@@ -1995,13 +2000,6 @@ export function useTerminalSession({
             exe?.endsWith("\\codex")
           ) {
             setAgentRunning("codex");
-          } else if (
-            exe === "agent" ||
-            exe?.endsWith("/agent") ||
-            exe?.endsWith("\\agent")
-          ) {
-            // Cursor's CLI ships as the `agent` binary.
-            setAgentRunning("cursor");
           }
           return false;
         }
@@ -2076,7 +2074,7 @@ export function useTerminalSession({
             setAgentRunning(runtime);
           } else if (chunkText.includes("\x1b[?1049h")) {
             // Generic alt-screen TUI fallback. Every Ink-based CLI
-            // (Claude / Codex / Cursor) and every classic fullscreen tool
+            // (Claude / Codex) and every classic fullscreen tool
             // (vim, less, htop, fzf) emits `ESC[?1049h` on entry. If banner
             // detection hasn't matched, fall back to this byte signal so
             // the pane still reports running=true. The worker keybind
@@ -2211,7 +2209,7 @@ export function useTerminalSession({
             // startStatePoller sets activeRuntime, so this promotion fires at
             // most once per generic arm. Mirrors setAgentRunning's known-runtime
             // tail: re-emit onAgentState with the now-known runtime (App.tsx
-            // sprouts the CLAUDE/CODEX/CURSOR chip in place of the suppressed
+            // sprouts the CLAUDE/CODEX chip in place of the suppressed
             // null one), refresh the recent-input grace so Shift+Enter keeps
             // sending the TUI newline, start the state poller, and report
             // "launching" so the chip reads "starting" until the first real
@@ -2401,7 +2399,7 @@ export function useTerminalSession({
         if (!session?.sessionId) return;
         if (readOnlyRef.current || inputBlockedRef.current) return;
         const prefs = await window.spark.preferences.load().catch(() => null);
-        if (prefs && prefs.restoreAgentSessions === false) return;
+        if (prefs?.restoreAgentSessions !== true) return;
         if (disposed) return;
         // Heal from the SessionStart hook trail: the live-event path usually
         // keeps agentSessionRef current, but an id change that happened while
@@ -2559,7 +2557,7 @@ export function useTerminalSession({
         let restore = agentSession;
         logRestore(`pane=${sessionId} boot-resume gate entered (${restore.runtime} id=${restore.sessionId})`);
         const prefs = await window.spark.preferences.load().catch(() => null);
-        if (!(prefs && prefs.restoreAgentSessions === false)) {
+        if (prefs?.restoreAgentSessions === true) {
           // Heal the pointer from the SessionStart hook trail first, so the
           // resume targets the session that ACTUALLY last ran here (in-TUI
           // `/resume` and `/clear` moved the id without discovery noticing).
@@ -2681,7 +2679,7 @@ export function useTerminalSession({
       ) {
         resumeHintShown.add(sessionId);
         const hintPrefs = await window.spark.preferences.load().catch(() => null);
-        if (!(hintPrefs && hintPrefs.restoreAgentSessions === false) && !disposed) {
+        if (hintPrefs?.restoreAgentSessions === true && !disposed) {
           // Heal before hinting, so the printed command reopens the session
           // the user actually left here (not one they `/resume`d away from).
           let hintSession = agentSession;

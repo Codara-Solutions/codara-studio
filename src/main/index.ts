@@ -37,6 +37,7 @@ import { registerTerminalBridge } from "./terminal-bridge";
 import { registerPreviewInput } from "./preview-input";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry } from "./agent-session-registry";
+import { activeTerminalAgentPaneIds } from "./terminal-agent-notify";
 
 // run-store is heavy (loads openrouter and agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
@@ -56,10 +57,67 @@ app.setName("Codara Studio");
 //   HardwareMediaKeyHandling    — global media-key listener
 //   MediaSessionService         — system "now playing" integration
 // None of these are needed for an editor/terminal UI.
-app.commandLine.appendSwitch(
-  "disable-features",
-  "CalculateNativeWinOcclusion,HardwareMediaKeyHandling,MediaSessionService",
+//
+// Electron 38+ selects native Wayland automatically in a Wayland session. In
+// current Chromium, native Ozone/Wayland and Vulkan surfaces are explicitly an
+// unsupported combination. Letting Chromium probe that path was observed to
+// disconnect Codara's Wayland event watcher while a workspace swap rapidly
+// tears down/recreates xterm WebGL surfaces, killing the *main* process with
+// "Fatal Wayland communication error: Broken pipe".
+//
+// Stay on native Wayland, but use its software compositor by default. On the
+// machine that produced the crash, XWayland's Mesa/GBM process also crashes at
+// startup, so forcing X11 merely trades one unstable graphics backend for
+// another. Software compositing avoids both driver paths, while xterm already
+// has a tested DOM-renderer fallback when WebGL is unavailable. Explicit x11
+// and non-Wayland sessions remain untouched. Developers can opt back into the
+// native hardware path with CODARA_WAYLAND_HARDWARE_ACCELERATION=1.
+const requestedOzonePlatform = app.commandLine.getSwitchValue("ozone-platform").toLowerCase();
+const isWaylandSession = process.platform === "linux" && process.env.XDG_SESSION_TYPE === "wayland";
+const usesNativeWayland =
+  isWaylandSession &&
+  requestedOzonePlatform !== "x11";
+const usesWaylandSoftwareFallback =
+  usesNativeWayland && process.env.CODARA_WAYLAND_HARDWARE_ACCELERATION !== "1";
+const disabledChromiumFeatures = new Set(
+  app.commandLine
+    .getSwitchValue("disable-features")
+    .split(",")
+    .map((feature) => feature.trim())
+    .filter(Boolean),
 );
+for (const feature of [
+  "CalculateNativeWinOcclusion",
+  "HardwareMediaKeyHandling",
+  "MediaSessionService",
+]) {
+  disabledChromiumFeatures.add(feature);
+}
+if (usesNativeWayland) {
+  // Vulkan controls compositor/raster Vulkan. The other two prevent ANGLE
+  // (used by xterm's WebGL renderer) from selecting Vulkan behind the GL API.
+  disabledChromiumFeatures.add("Vulkan");
+  disabledChromiumFeatures.add("DefaultANGLEVulkan");
+  disabledChromiumFeatures.add("VulkanFromANGLE");
+
+  // Chromium can still instantiate (and log from) its Vulkan implementation
+  // while probing the available Wayland backends even with the Vulkan feature
+  // disabled. Pin ANGLE explicitly so both the probe and actual WebGL contexts
+  // use the native OpenGL/EGL path. Do not apply this on X11, Windows, or macOS.
+  app.commandLine.removeSwitch("use-gl");
+  app.commandLine.removeSwitch("use-angle");
+  app.commandLine.appendSwitch("use-gl", "angle");
+  app.commandLine.appendSwitch("use-angle", "gl");
+}
+app.commandLine.removeSwitch("disable-features");
+app.commandLine.appendSwitch("disable-features", [...disabledChromiumFeatures].join(","));
+
+if (usesWaylandSoftwareFallback) {
+  // This is a pre-ready API. Calling it here ensures Chromium never creates
+  // a hardware context in the GPU process whose Wayland/Vulkan surface
+  // teardown killed the app.
+  app.disableHardwareAcceleration();
+}
 
 // Honour the disable-hardware-acceleration preference at startup. Chromium
 // only reads this flag during process initialisation, so we have to consult
@@ -347,7 +405,9 @@ function signalRendererBeforeQuit(): void {
   const wc = mainWindow?.webContents;
   if (!wc || wc.isDestroyed()) return;
   try {
-    wc.send("app:before-quit");
+    wc.send("app:before-quit", {
+      activeAgentPaneIds: activeTerminalAgentPaneIds(),
+    });
   } catch {
     /* renderer already gone; the pagehide path covers it */
   }
@@ -494,11 +554,25 @@ function createWindow(): void {
   // window, but a tray is the reliable always-visible re-entry point, so we
   // require it before going headless. On Windows we also drop the taskbar
   // button so the hidden window doesn't linger there.
+  let closeFlushPending = false;
   mainWindow.on("close", (e) => {
     if (!isQuitting && tray && getPreferenceCached("keepRunningInBackground")) {
       e.preventDefault();
       mainWindow?.hide();
       if (process.platform === "win32") mainWindow?.setSkipTaskbar(true);
+      return;
+    }
+    // A direct window close destroys the renderer before window-all-closed can
+    // query main's raw PTY watchers. Give the quit-start IPC one short event
+    // loop window to synchronously persist those live pane ids, then close for
+    // real. Explicit app.quit() already sends the same signal in before-quit.
+    if (!isQuitting && !closeFlushPending) {
+      e.preventDefault();
+      closeFlushPending = true;
+      signalRendererBeforeQuit();
+      setTimeout(() => {
+        if (!windowForEvents.isDestroyed()) windowForEvents.close();
+      }, 50);
     }
   });
 
@@ -606,6 +680,11 @@ app.whenReady().then(async () => {
     "boot",
     `app start pid=${process.pid} packaged=${app.isPackaged} relaunched=${process.argv.includes(RELAUNCHED_FLAG)}`,
   );
+  if (usesWaylandSoftwareFallback) {
+    logMain("boot", "graphics backend=wayland-software (automatic crash-safety fallback)");
+  } else if (usesNativeWayland) {
+    logMain("boot", "graphics backend=wayland-hardware (Vulkan disabled, ANGLE=OpenGL)");
+  }
 
   // Install Codara's Python hooks into ~/.claude/settings.json so every
   // Claude Code session pipes SessionStart / PreToolUse / Notification / Stop

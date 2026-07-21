@@ -62,6 +62,10 @@ export interface Workspace {
   cwd: string;
   color: string;
   workers: Worker[];
+  // Optional logical folder in the workspace rail. This never changes cwd or
+  // filesystem ownership; it is presentation-only organization persisted in
+  // AppState so local, remote, and copy-branch workspaces can be mixed.
+  groupId?: string;
   // Present only on workspaces created via "Create copy branch": this
   // workspace's cwd is a git worktree forked from `repoCwd`. Its presence is
   // what makes delete remove the worktree instead of just dropping the row.
@@ -81,8 +85,19 @@ export interface Workspace {
   };
 }
 
+export interface WorkspaceGroup {
+  id: string;
+  name: string;
+  collapsed: boolean;
+}
+
 export interface AppState {
   workspaces: Workspace[];
+  workspaceGroups: WorkspaceGroup[];
+  // Mixed top-level ordering for ungrouped workspaces and workspace folders.
+  // Missing/stale ids are normalized on load; grouped workspaces are ordered
+  // by the workspace array inside their folder and do not appear here.
+  workspaceRailOrder?: string[];
   activeWorkspaceId: string | null;
 }
 
@@ -292,8 +307,10 @@ export interface AppPreferences {
   // regardless of this flag — Fable is only ever available to the main chat
   // and (when this is on) opt-in automations.
   fableEnabled?: boolean;
-  // Legacy compatibility only. Cold terminal hydration always strips session
-  // pointers, so this no longer enables resume-after-relaunch behavior.
+  // When enabled, terminal tabs that still had a Claude or Codex CLI in the
+  // foreground when Codara quit resume that exact CLI session on next launch.
+  // Ordinary shell tabs and agent sessions that had already exited still open
+  // as fresh shells.
   restoreAgentSessions?: boolean;
 }
 
@@ -480,7 +497,7 @@ export interface TerminalAgentStatePayload {
   workspaceId: string;
   tabId: string;
   paneId: string;
-  runtime: "claude" | "codex" | "cursor" | null;
+  runtime: "claude" | "codex" | null;
   state: RuntimeState;
 }
 
@@ -561,13 +578,42 @@ export interface PreferencesChange<K extends PrefKey = PrefKey> {
 
 export type AgentRuntimeKind = "claude" | "codex";
 
+export type WorkerSessionRuntime = "claude" | "codex";
+
+// Lightweight metadata read from the CLI-owned transcript stores for the
+// manual-worker session picker. The transcript itself never crosses IPC.
+export interface WorkerSessionSummary {
+  runtime: WorkerSessionRuntime;
+  sessionId: string;
+  title: string;
+  cwd: string;
+  cwdExists: boolean;
+  updatedAt: string;
+  transcriptPath: string;
+}
+
+export type WorkerSessionMemoryScope = "none" | "claude-project" | "codex-all";
+
+export interface DeleteWorkerSessionInput {
+  runtime: WorkerSessionRuntime;
+  sessionId: string;
+  cwd: string;
+  transcriptPath: string;
+  memoryScope: WorkerSessionMemoryScope;
+}
+
+export interface DeleteWorkerSessionResult {
+  deleted: boolean;
+  memoryDeleted: boolean;
+  memoryScope: WorkerSessionMemoryScope;
+  warnings: string[];
+}
+
 // "auto" means "use every installed runtime" (Codara detects what is on PATH).
 // An array enumerates the exact runtimes the user opted in to — deselecting a
 // runtime in Settings removes it from this array so Codara will not spawn
-// workers on it even if the CLI is installed. The legacy string variants
-// ("both", "claude", "codex", "cursor") are accepted on read for migration
-// from earlier settings files; writes always use the array form. "cursor"
-// is silently dropped on read — Codara only supports Claude + Codex now.
+// workers on it even if the CLI is installed. Legacy string variants are
+// accepted on read for migration; writes always use the array form.
 export type AgentRuntimeSelection =
   | "auto"
   | "both"
@@ -595,9 +641,8 @@ export interface AgentRuntimeModel {
   tier?: AgentModelTier;
 }
 
-// Per-runtime feature flags. Different CLIs expose different capabilities
-// (Codex doesn't surface cost or context-window data, Cursor doesn't support
-// hook status or planMode, etc.). Renderer code uses these flags via the
+// Per-runtime feature flags. Different CLIs expose different capabilities.
+// Renderer code uses these flags via the
 // <Capability /> wrapper to conditionally render runtime-specific UI.
 export interface AgentRuntimeCapabilities {
   sessionResume: boolean;
@@ -1203,6 +1248,17 @@ export type WorkerAttemptStatus =
 //                 crashed rather than finishing cleanly. Chip reads red.
 // null means "no detection has fired yet" — treat as unknown.
 export type RuntimeState = "launching" | "working" | "blocked" | "idle" | "done" | "error";
+
+// Binary foreground-agent lifecycle emitted by a terminal pane. A false state
+// can be heuristic (the visible UI disappeared briefly) or confirmed (the
+// shell prompt/alt-screen exit was positively observed). Durable session
+// pointers are deactivated only for confirmed exits; heuristic loss still
+// clears the cosmetic worker chip but must not disable restart restoration.
+export interface TerminalAgentForegroundState {
+  runtime: "claude" | "codex" | null;
+  running: boolean;
+  exitConfirmed?: boolean;
+}
 
 export type ReviewDecisionType =
   | "accept"

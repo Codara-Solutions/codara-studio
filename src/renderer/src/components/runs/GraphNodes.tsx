@@ -361,7 +361,7 @@ export const SparkNode = React.memo(function SparkNode({
         borderRadius: 999,
         border: `1px solid ${live ? "var(--accent-edge)" : failed ? "var(--danger)" : "var(--rule-strong)"}`,
         background:
-          "linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 84%, var(--accent) 8%), color-mix(in oklch, var(--panel) 78%, var(--bg) 22%))",
+          "linear-gradient(150deg, color-mix(in oklab, var(--panel-2) 84%, var(--accent) 8%), color-mix(in oklab, var(--panel) 78%, var(--bg) 22%))",
         boxShadow: live
           ? "var(--lift-hi), 0 0 24px var(--accent-glow), var(--shadow-2)"
           : "var(--lift-hi), var(--shadow-2)",
@@ -492,10 +492,10 @@ function WorkerBatchNode({
           ? "var(--rule-strong)"
           : "var(--rule)";
   const background = attention
-    ? "linear-gradient(150deg, color-mix(in oklch, var(--panel) 88%, var(--danger) 9%), color-mix(in oklch, var(--panel) 84%, var(--bg) 16%))"
+    ? "linear-gradient(150deg, color-mix(in oklab, var(--panel) 88%, var(--danger) 9%), color-mix(in oklab, var(--panel) 84%, var(--bg) 16%))"
     : live
-      ? "linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 82%, var(--accent) 9%), color-mix(in oklch, var(--panel) 86%, transparent))"
-      : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 92%, var(--ink) 2%), color-mix(in oklch, var(--panel) 84%, var(--bg) 16%))";
+      ? "linear-gradient(150deg, color-mix(in oklab, var(--panel-2) 82%, var(--accent) 9%), color-mix(in oklab, var(--panel) 86%, transparent))"
+      : "linear-gradient(150deg, color-mix(in oklab, var(--panel) 92%, var(--ink) 2%), color-mix(in oklab, var(--panel) 84%, var(--bg) 16%))";
   const shadow = [
     selected ? "0 0 0 1.5px var(--accent)" : null,
     selected || live ? "0 0 22px var(--accent-glow)" : null,
@@ -676,7 +676,7 @@ function WorkerBatchNode({
           right: 0,
           bottom: 0,
           height: 3,
-          background: "color-mix(in oklch, var(--ink) 8%, transparent)",
+          background: "color-mix(in oklab, var(--ink) 8%, transparent)",
         }}
       >
         <span
@@ -731,7 +731,7 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
         borderRadius: 14,
         border: `1px dashed ${border}`,
         background:
-          "linear-gradient(150deg, color-mix(in oklch, var(--panel) 84%, var(--ink) 1%), color-mix(in oklch, var(--panel) 80%, var(--bg) 18%))",
+          "linear-gradient(150deg, color-mix(in oklab, var(--panel) 84%, var(--ink) 1%), color-mix(in oklab, var(--panel) 80%, var(--bg) 18%))",
         boxShadow: selected
           ? "0 0 0 1.5px var(--accent), 0 0 20px var(--accent-glow), var(--shadow-1)"
           : live
@@ -765,7 +765,7 @@ function CheckpointNode({ step, index, active, selected, onSelect }: StepNodePro
             borderRadius: 8,
             flex: "0 0 auto",
             border: `1px solid ${tone}`,
-            background: complete ? "var(--ok-soft)" : "color-mix(in oklch, var(--ink) 4%, transparent)",
+            background: complete ? "var(--ok-soft)" : "color-mix(in oklab, var(--ink) 4%, transparent)",
             color: tone,
             display: "inline-flex",
             alignItems: "center",
@@ -920,11 +920,8 @@ export const WorkerNode = React.memo(function WorkerNode({
   const status = deriveAgentStatus(task, attempt, stepStatus);
   // The badge must reflect the runtime that actually ran the worker, not just
   // the manager's original plan. Manager rewrites and rerouteUnavailableAgent-
-  // Runtimes can swap the runtime at spawn time (e.g. plan said claude but the
-  // selection only enables cursor, so the worker actually spawns on cursor with
-  // composer-2.5-fast). Reading agent.runtimePreference would render CLAUDE
-  // while the terminal shows composer-2.5-fast — exactly the mismatch the user
-  // reported in the runs graph. Prefer the live attempt.runtime, fall back to
+  // Runtimes can swap the runtime at spawn time when the planned CLI is not
+  // enabled. Prefer the live attempt.runtime, fall back to
   // the routed task.runtimePreference, and only use the planned-agent value
   // when nothing has spawned yet (queued).
   const liveRuntime = attempt?.runtime ?? task?.runtimePreference ?? agent.runtimePreference;
@@ -992,10 +989,10 @@ export const WorkerNode = React.memo(function WorkerNode({
         borderRadius: 14,
         border: `1px solid ${border}`,
         background: blocked
-          ? "linear-gradient(150deg, color-mix(in oklch, var(--panel) 88%, var(--danger) 8%), color-mix(in oklch, var(--panel) 82%, var(--bg) 18%))"
+          ? "linear-gradient(150deg, color-mix(in oklab, var(--panel) 88%, var(--danger) 8%), color-mix(in oklab, var(--panel) 82%, var(--bg) 18%))"
           : running
-            ? "linear-gradient(150deg, color-mix(in oklch, var(--panel-2) 84%, var(--accent) 7%), color-mix(in oklch, var(--panel) 86%, transparent))"
-            : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 90%, var(--ink) 2%), color-mix(in oklch, var(--panel) 82%, var(--bg) 18%))",
+            ? "linear-gradient(150deg, color-mix(in oklab, var(--panel-2) 84%, var(--accent) 7%), color-mix(in oklab, var(--panel) 86%, transparent))"
+            : "linear-gradient(150deg, color-mix(in oklab, var(--panel) 90%, var(--ink) 2%), color-mix(in oklab, var(--panel) 82%, var(--bg) 18%))",
         // The runtime-colored left edge is the worker card's silhouette cue —
         // same left-rule convention as the LiveBoard worker nodes.
         boxShadow: `inset 3px 0 0 color-mix(in oklch, ${tone.label} 78%, transparent), ${
@@ -1186,10 +1183,10 @@ export const EndNode = React.memo(function EndNode({
         borderRadius: 999,
         border: `1px solid ${complete ? "var(--ok)" : failed ? "var(--danger)" : "var(--rule)"}`,
         background: complete
-          ? "linear-gradient(150deg, color-mix(in oklch, var(--ok) 16%, var(--panel)), color-mix(in oklch, var(--panel) 86%, transparent))"
+          ? "linear-gradient(150deg, color-mix(in oklch, var(--ok) 16%, var(--panel)), color-mix(in oklab, var(--panel) 86%, transparent))"
           : failed
-            ? "linear-gradient(150deg, color-mix(in oklch, var(--danger) 14%, var(--panel)), color-mix(in oklch, var(--panel) 86%, transparent))"
-            : "linear-gradient(150deg, color-mix(in oklch, var(--panel) 90%, var(--ink) 1%), color-mix(in oklch, var(--panel) 82%, var(--bg) 18%))",
+            ? "linear-gradient(150deg, color-mix(in oklch, var(--danger) 14%, var(--panel)), color-mix(in oklab, var(--panel) 86%, transparent))"
+            : "linear-gradient(150deg, color-mix(in oklab, var(--panel) 90%, var(--ink) 1%), color-mix(in oklab, var(--panel) 82%, var(--bg) 18%))",
         boxShadow: complete
           ? "var(--lift-hi), 0 0 22px color-mix(in oklch, var(--ok) 30%, transparent), var(--shadow-2)"
           : "var(--lift-hi), var(--shadow-1)",

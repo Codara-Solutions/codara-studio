@@ -43,7 +43,7 @@ export function CopyBranchDeleteDialog({
       style={{
         position: "absolute",
         inset: 0,
-        background: "color-mix(in oklch, var(--bg) 70%, transparent)",
+        background: "color-mix(in oklab, var(--bg) 70%, transparent)",
         display: "grid",
         placeItems: "center",
         zIndex: 1200,

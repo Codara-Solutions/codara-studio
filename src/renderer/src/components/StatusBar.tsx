@@ -42,7 +42,7 @@ function StatusBar({ workspace, defaultShell, platform, workerCount }: Props) {
           // Soft inner highlight so the workspace-color chip reads as a
           // deliberate state marker, not a raw stripe. Token-mix keeps the
           // sheen legible on light themes.
-          boxShadow: "inset 0 1px 0 color-mix(in oklch, var(--bg) 35%, transparent)",
+          boxShadow: "inset 0 1px 0 color-mix(in oklab, var(--bg) 35%, transparent)",
           flex: "0 0 6px",
         }}
         title={workspace?.name ? `Workspace: ${workspace.name}` : "No workspace"}

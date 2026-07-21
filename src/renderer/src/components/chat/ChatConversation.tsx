@@ -573,7 +573,7 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
           ? "color-mix(in oklch, var(--danger) 5%, transparent)"
           : finished
             ? open
-              ? "color-mix(in oklch, var(--ink) 3%, transparent)"
+              ? "color-mix(in oklab, var(--ink) 3%, transparent)"
               : "transparent"
             : "color-mix(in oklch, var(--accent) 7%, transparent)",
       }}
@@ -1031,8 +1031,8 @@ function QuestionOptionButton({
             ? "color-mix(in oklch, var(--accent) 13%, var(--panel))"
             : "color-mix(in oklch, var(--accent) 9%, var(--panel))"
           : active
-            ? "color-mix(in oklch, var(--ink) 6%, transparent)"
-            : "color-mix(in oklch, var(--ink) 2%, transparent)",
+            ? "color-mix(in oklab, var(--ink) 6%, transparent)"
+            : "color-mix(in oklab, var(--ink) 2%, transparent)",
         // No hover lift (it nudged every sibling option). Depth comes from a
         // brighter fill + the --lift-hi top highlight on hover; transform is
         // reserved for the 0.5px press settle.
@@ -1114,7 +1114,7 @@ function AttachmentStrip({
             maxWidth: 210,
             border: "1px solid var(--rule-soft)",
             borderRadius: "var(--radius-control, 7px)",
-            background: "color-mix(in oklch, var(--ink) 5%, transparent)",
+            background: "color-mix(in oklab, var(--ink) 5%, transparent)",
             color: "var(--ink-dim)",
             padding: "4px 7px",
             textDecoration: "none",
@@ -1281,7 +1281,7 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
           : live
             ? "color-mix(in oklch, var(--accent) 7%, transparent)"
             : open
-              ? "color-mix(in oklch, var(--ink) 3%, transparent)"
+              ? "color-mix(in oklab, var(--ink) 3%, transparent)"
               : "transparent",
       }}
     >
@@ -1354,7 +1354,7 @@ function ManagerActivityDisclosure({
         background: item.status === "failed"
           ? "color-mix(in oklch, var(--danger) 7%, transparent)"
           : open
-            ? "color-mix(in oklch, var(--ink) 2.5%, transparent)"
+            ? "color-mix(in oklab, var(--ink) 2.5%, transparent)"
             : "transparent",
       }}
     >
@@ -1566,7 +1566,7 @@ function WorkerChip({ worker }: { worker: ChatWorker }) {
         padding: "2px 7px",
         borderRadius: 999,
         border: "1px solid var(--rule-soft)",
-        background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+        background: "color-mix(in oklab, var(--ink) 3%, transparent)",
         fontSize: 10,
         color: "var(--ink-dim)",
         maxWidth: 150,
@@ -1733,7 +1733,7 @@ function UndoControl({ runId, checkpoint }: { runId: string; checkpoint: Checkpo
           // renders for keyboard users. Press gets a momentary darker fill.
           background:
             pressed && !busy
-              ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+              ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
               : open || hover
                 ? "var(--hover)"
                 : "transparent",
@@ -1831,7 +1831,7 @@ function UndoMenuRow({
         borderRadius: "var(--radius-control, 7px)",
         background:
           pressed && live
-            ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
             : hover && live
               ? "var(--hover)"
               : "transparent",
@@ -1883,7 +1883,7 @@ function RepeatChip({ count }: { count: number }) {
         fontSize: 9.5,
         fontWeight: 600,
         color: "var(--muted)",
-        background: "color-mix(in oklch, var(--ink) 6%, transparent)",
+        background: "color-mix(in oklab, var(--ink) 6%, transparent)",
         border: "1px solid var(--rule-soft)",
         borderRadius: 999,
         padding: "1px 6px",
@@ -1966,7 +1966,7 @@ function DisclosureButton({
       style={{
         ...baseStyle,
         background: pressed
-          ? "var(--press, color-mix(in oklch, var(--ink) 12%, transparent))"
+          ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
           : hover
             ? "var(--hover)"
             : (baseStyle.background ?? "transparent"),
@@ -2130,7 +2130,7 @@ const RESULT_FILE_ROW_STYLE: React.CSSProperties = {
   alignItems: "center",
   padding: "5px 7px",
   borderRadius: 6,
-  background: "color-mix(in oklch, var(--bg) 54%, transparent)",
+  background: "color-mix(in oklab, var(--bg) 54%, transparent)",
 };
 
 const RESULT_ACTION_STYLE: React.CSSProperties = {
@@ -2194,7 +2194,7 @@ const DELIVERY_CHIP_STYLE: React.CSSProperties = {
 
 const USER_BUBBLE_STYLE: React.CSSProperties = {
   maxWidth: "min(72%, 720px)",
-  background: "color-mix(in oklch, var(--ink) 4%, var(--panel-2))",
+  background: "color-mix(in oklab, var(--ink) 4%, var(--panel-2))",
   // One soft hairline; the recede stays on --rule-soft so the bubble reads as a
   // calm premium surface rather than a hard-outlined box.
   border: "1px solid var(--rule-soft)",
@@ -2347,7 +2347,7 @@ const SYSTEM_PILL_STYLE: React.CSSProperties = {
   padding: "3px 8px",
   borderRadius: 999,
   background: "transparent",
-  border: "1px solid color-mix(in oklch, var(--rule-soft) 70%, transparent)",
+  border: "1px solid color-mix(in oklab, var(--rule-soft) 70%, transparent)",
   color: "var(--muted)",
   fontSize: 10,
   lineHeight: 1.35,
@@ -2390,7 +2390,7 @@ const ASK_CARD_STYLE: React.CSSProperties = {
   border: "1px solid var(--rule-soft)",
   borderRadius: "var(--radius-surface, 10px)",
   overflow: "hidden",
-  background: "color-mix(in oklch, var(--ink) 2.5%, var(--panel))",
+  background: "color-mix(in oklab, var(--ink) 2.5%, var(--panel))",
   // Raised band: tint-first depth via the --lift-hi top highlight plus the
   // soft float shadow, not a hard outline.
   boxShadow: "var(--lift-hi), var(--shadow-1)",
@@ -2595,11 +2595,11 @@ const QUESTION_ERROR_STYLE: React.CSSProperties = {
 };
 
 const STEP_CARD_STYLE: React.CSSProperties = {
-  border: "1px solid color-mix(in oklch, var(--rule-soft) 78%, transparent)",
+  border: "1px solid color-mix(in oklab, var(--rule-soft) 78%, transparent)",
   // Cards sit on the surface rung (10px) — softer corners, concentric with the
   // tool rows nested inside.
   borderRadius: "var(--radius-surface, 10px)",
-  background: "color-mix(in oklch, var(--bg) 42%, var(--panel))",
+  background: "color-mix(in oklab, var(--bg) 42%, var(--panel))",
   overflow: "hidden",
   boxSizing: "border-box",
   boxShadow: "var(--lift-hi)",
@@ -2769,7 +2769,7 @@ const MANAGER_DISCLOSURE_TITLE_STYLE: React.CSSProperties = {
 };
 
 const MANAGER_DISCLOSURE_BODY_STYLE: React.CSSProperties = {
-  borderTop: "1px solid color-mix(in oklch, var(--rule-soft) 62%, transparent)",
+  borderTop: "1px solid color-mix(in oklab, var(--rule-soft) 62%, transparent)",
   padding: "10px 12px 11px",
 };
 
@@ -2856,7 +2856,7 @@ const TOOL_STATUS_STYLE: React.CSSProperties = {
 };
 
 const TOOL_DETAILS_STYLE: React.CSSProperties = {
-  borderTop: "1px solid color-mix(in oklch, var(--rule-soft) 62%, transparent)",
+  borderTop: "1px solid color-mix(in oklab, var(--rule-soft) 62%, transparent)",
   padding: "7px 8px 8px 26px",
   display: "flex",
   flexDirection: "column",
@@ -2865,7 +2865,7 @@ const TOOL_DETAILS_STYLE: React.CSSProperties = {
 
 const TOOL_DETAILS_COMPACT_STYLE: React.CSSProperties = {
   marginTop: 9,
-  borderTop: "1px solid color-mix(in oklch, var(--rule-soft) 48%, transparent)",
+  borderTop: "1px solid color-mix(in oklab, var(--rule-soft) 48%, transparent)",
   padding: "8px 0 0",
 };
 
@@ -2889,7 +2889,7 @@ const TOOL_FILE_STYLE: React.CSSProperties = {
   minHeight: 25,
   border: "1px solid var(--rule-soft)",
   borderRadius: "var(--radius-control, 7px)",
-  background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+  background: "color-mix(in oklab, var(--ink) 2%, transparent)",
   color: "var(--ink-dim)",
   padding: "0 7px",
   textDecoration: "none",
@@ -3082,7 +3082,7 @@ const LIVE_TOOL_PRE_STYLE: React.CSSProperties = {
   fontSize: 10.5,
   lineHeight: 1.45,
   color: "var(--ink-dim)",
-  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+  background: "color-mix(in oklab, var(--ink) 3%, transparent)",
   border: "1px solid var(--rule-soft)",
   borderRadius: "var(--radius-control, 7px)",
   padding: "6px 8px",
@@ -3101,7 +3101,7 @@ const LIVE_NOTE_LIST_STYLE: React.CSSProperties = {
 
 const LIVE_DETAILS_STYLE: React.CSSProperties = {
   marginTop: 2,
-  borderTop: "1px solid color-mix(in oklch, var(--rule-soft) 72%, transparent)",
+  borderTop: "1px solid color-mix(in oklab, var(--rule-soft) 72%, transparent)",
   paddingTop: 6,
 };
 
@@ -3128,7 +3128,7 @@ const LIVE_NOTE_STYLE: React.CSSProperties = {
   gap: 6,
   border: "1px solid var(--rule-soft)",
   borderRadius: "var(--radius-control, 7px)",
-  background: "color-mix(in oklch, var(--ink) 3%, transparent)",
+  background: "color-mix(in oklab, var(--ink) 3%, transparent)",
   color: "var(--muted)",
   fontSize: 11,
   lineHeight: 1.4,

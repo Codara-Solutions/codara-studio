@@ -157,7 +157,7 @@ export default function NotificationCenter({
               padding: "0 2px",
               borderRadius: 6,
               background: "var(--accent)",
-              color: "color-mix(in oklch, var(--bg) 92%, var(--accent))",
+              color: "color-mix(in oklab, var(--bg) 92%, var(--accent))",
               fontSize: center.unread > 99 ? 7 : 8,
               fontWeight: 700,
               lineHeight: "12px",
@@ -359,7 +359,7 @@ function DndSwitch({ on, onToggle }: { on: boolean; onToggle: () => void }) {
           height: 12,
           borderRadius: "50%",
           background: on
-            ? "color-mix(in oklch, var(--bg) 92%, var(--accent))"
+            ? "color-mix(in oklab, var(--bg) 92%, var(--accent))"
             : "var(--ink-dim)",
           transition: "left var(--motion-fast) var(--ease-out)",
         }}

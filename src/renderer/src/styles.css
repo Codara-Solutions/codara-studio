@@ -93,9 +93,14 @@
   --motion: 200ms;
   --motion-slow: 360ms;
 
-  /* Surface treatments */
-  --hover: color-mix(in oklch, var(--ink) 5%, transparent);
-  --hover-strong: color-mix(in oklch, var(--ink) 9%, transparent);
+  /* Surface treatments. Neutral-led blends use OKLab, not OKLCH. Dracula's
+     low-chroma purple panels and warm near-white ink sit on opposite sides of
+     the OKLCH hue seam; Chromium interpolates them through red (and does the
+     same for a neutral mixed with transparent). Cartesian OKLab keeps neutral
+     elevation neutral. Semantic hue-led blends below still use OKLCH so
+     workspace/status accents retain their intended chroma. */
+  --hover: color-mix(in oklab, var(--ink) 5%, transparent);
+  --hover-strong: color-mix(in oklab, var(--ink) 9%, transparent);
   --focus-ring: 0 0 0 1px color-mix(in oklch, var(--accent) 70%, transparent),
                 0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent);
   --shadow-1: 0 1px 0 oklch(1 0 0 / 0.02), 0 8px 22px rgba(0, 0, 0, 0.28);
@@ -128,12 +133,12 @@
   /* The active-tab top seam highlight — ink-based so it stays in-key on light
      paper (a white inset smudges on bright surfaces). Re-tinted under each
      light theme block exactly as --lift-hi is. */
-  --tab-active-hi: inset 0 1px 0 color-mix(in oklch, var(--ink) 6%, transparent);
+  --tab-active-hi: inset 0 1px 0 color-mix(in oklab, var(--ink) 6%, transparent);
 
   /* The universal pressed-fill tint for surfaces/rows/tabs/pills that cannot
      use the .spark-btn translateY+well press (a transform there would break a
      seam). Gives every interactive element a tactile :active beat. */
-  --press: color-mix(in oklch, var(--ink) 12%, transparent);
+  --press: color-mix(in oklab, var(--ink) 12%, transparent);
 
   /* Notification surface + status edge — a calm neutral popover face so "done"
      toasts stop glowing; status is carried only by a 3px inset left rule
@@ -166,9 +171,9 @@
   /* --glass-veil-scale / --glass-blur-scale are user tuning knobs (Settings →
      Appearance), set on <html> by ThemeProvider as factors of 1; the lens
      bend/chroma knobs live on the SVG filter's scale attributes. */
-  --glass-bg: color-mix(in oklch, var(--bg) min(calc(34% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-bg-strong: color-mix(in oklch, var(--bg) min(calc(48% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-bg-faint: color-mix(in oklch, var(--bg) min(calc(25% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg: color-mix(in oklab, var(--bg) min(calc(34% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-strong: color-mix(in oklab, var(--bg) min(calc(48% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-faint: color-mix(in oklab, var(--bg) min(calc(25% * var(--glass-veil-scale, 1)), 98%), transparent);
   --glass-blur: calc(3px * var(--glass-blur-scale, 1));
   --glass-blur-strong: calc(7px * var(--glass-blur-scale, 1));
   --glass-blur-faint: calc(3px * var(--glass-blur-scale, 1));
@@ -182,7 +187,7 @@
   /* Whisper of top sheen (shader's topSheen ≈ 0.055) — must stay faint or the
      core stops reading as clear glass. */
   --glass-sheen: linear-gradient(180deg, oklch(1 0 0 / 0.05), transparent 30%);
-  --glass-border: color-mix(in oklch, var(--ink) 20%, transparent);
+  --glass-border: color-mix(in oklab, var(--ink) 20%, transparent);
   --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.45), 0 2px 8px oklch(0 0 0 / 0.25);
   /* Refraction lens (SVG feDisplacementMap chain in index.html): bends the
      backdrop at the rim only, with a chromatic fringe. Kept as a token so
@@ -194,14 +199,14 @@
    a bright specular top edge, hairline border, and much softer shadows —
    mirrors how --lift-hi / --shadow-1 are re-tinted per light palette. */
 :root[data-theme-mode="light"] {
-  --glass-bg: color-mix(in oklch, var(--panel) min(calc(38% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-bg-strong: color-mix(in oklch, var(--panel) min(calc(54% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-bg-faint: color-mix(in oklch, var(--panel) min(calc(28% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg: color-mix(in oklab, var(--panel) min(calc(38% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-strong: color-mix(in oklab, var(--panel) min(calc(54% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-faint: color-mix(in oklab, var(--panel) min(calc(28% * var(--glass-veil-scale, 1)), 98%), transparent);
   --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.85), inset 0 0 0 1px oklch(1 0 0 / 0.30);
   --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.08);
   --glass-bloom: inset 0 0 20px oklch(1 0 0 / 0.15);
   --glass-sheen: linear-gradient(180deg, oklch(1 0 0 / 0.30), transparent 30%);
-  --glass-border: color-mix(in oklch, var(--ink) 12%, transparent);
+  --glass-border: color-mix(in oklab, var(--ink) 12%, transparent);
   --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
 }
 
@@ -308,16 +313,16 @@
   --info: #2e6f9e;
   --warn: #b8790a;
 
-  --hover: color-mix(in oklch, var(--ink) 5%, transparent);
-  --hover-strong: color-mix(in oklch, var(--ink) 9%, transparent);
+  --hover: color-mix(in oklab, var(--ink) 5%, transparent);
+  --hover-strong: color-mix(in oklab, var(--ink) 9%, transparent);
   --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.7), 0 8px 24px rgba(33, 31, 26, 0.1);
   --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.8), 0 18px 48px rgba(33, 31, 26, 0.16);
   --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.7);
-  --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 12%, transparent);
+  --well: inset 0 1px 2px color-mix(in oklab, var(--ink) 12%, transparent);
   /* Re-tint the seam + press on bright paper: a 6% ink inset vanishes here,
      so lean a touch stronger (as --lift-hi flips white→ink). */
-  --tab-active-hi: inset 0 1px 0 color-mix(in oklch, var(--ink) 9%, transparent);
-  --press: color-mix(in oklch, var(--ink) 10%, transparent);
+  --tab-active-hi: inset 0 1px 0 color-mix(in oklab, var(--ink) 9%, transparent);
+  --press: color-mix(in oklab, var(--ink) 10%, transparent);
 }
 
 :root[data-theme="github-light"] {
@@ -343,14 +348,14 @@
   --info: #0969da;
   --warn: #9a6700;
 
-  --hover: color-mix(in oklch, var(--ink) 5%, transparent);
-  --hover-strong: color-mix(in oklch, var(--ink) 8%, transparent);
+  --hover: color-mix(in oklab, var(--ink) 5%, transparent);
+  --hover-strong: color-mix(in oklab, var(--ink) 8%, transparent);
   --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.9), 0 8px 24px rgba(31, 35, 40, 0.08);
   --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.95), 0 18px 48px rgba(31, 35, 40, 0.12);
   --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.85);
-  --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 10%, transparent);
-  --tab-active-hi: inset 0 1px 0 color-mix(in oklch, var(--ink) 9%, transparent);
-  --press: color-mix(in oklch, var(--ink) 9%, transparent);
+  --well: inset 0 1px 2px color-mix(in oklab, var(--ink) 10%, transparent);
+  --tab-active-hi: inset 0 1px 0 color-mix(in oklab, var(--ink) 9%, transparent);
+  --press: color-mix(in oklab, var(--ink) 9%, transparent);
 }
 
 :root[data-theme="rose-pine-dawn"] {
@@ -376,14 +381,14 @@
   --info: #286983;
   --warn: #ea9d34;
 
-  --hover: color-mix(in oklch, var(--ink) 6%, transparent);
-  --hover-strong: color-mix(in oklch, var(--ink) 10%, transparent);
+  --hover: color-mix(in oklab, var(--ink) 6%, transparent);
+  --hover-strong: color-mix(in oklab, var(--ink) 10%, transparent);
   --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.7), 0 8px 24px rgba(87, 82, 121, 0.1);
   --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.8), 0 18px 48px rgba(87, 82, 121, 0.16);
   --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.7);
-  --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 11%, transparent);
-  --tab-active-hi: inset 0 1px 0 color-mix(in oklch, var(--ink) 9%, transparent);
-  --press: color-mix(in oklch, var(--ink) 10%, transparent);
+  --well: inset 0 1px 2px color-mix(in oklab, var(--ink) 11%, transparent);
+  --tab-active-hi: inset 0 1px 0 color-mix(in oklab, var(--ink) 9%, transparent);
+  --press: color-mix(in oklab, var(--ink) 10%, transparent);
 }
 
 :root[data-theme="catppuccin-latte"] {
@@ -410,14 +415,14 @@
   --info: #1e66f5;
   --warn: #df8e1d;
 
-  --hover: color-mix(in oklch, var(--ink) 6%, transparent);
-  --hover-strong: color-mix(in oklch, var(--ink) 10%, transparent);
+  --hover: color-mix(in oklab, var(--ink) 6%, transparent);
+  --hover-strong: color-mix(in oklab, var(--ink) 10%, transparent);
   --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.78), 0 8px 24px rgba(76, 79, 105, 0.12);
   --shadow-2: 0 1px 0 rgba(255, 255, 255, 0.88), 0 18px 48px rgba(76, 79, 105, 0.18);
   --lift-hi: inset 0 1px 0 oklch(1 0 0 / 0.78);
-  --well: inset 0 1px 2px color-mix(in oklch, var(--ink) 11%, transparent);
-  --tab-active-hi: inset 0 1px 0 color-mix(in oklch, var(--ink) 9%, transparent);
-  --press: color-mix(in oklch, var(--ink) 10%, transparent);
+  --well: inset 0 1px 2px color-mix(in oklab, var(--ink) 11%, transparent);
+  --tab-active-hi: inset 0 1px 0 color-mix(in oklab, var(--ink) 9%, transparent);
+  --press: color-mix(in oklab, var(--ink) 10%, transparent);
 }
 
 /* Light palettes need a darker violet for the automation family so the stripe +
@@ -479,7 +484,7 @@ a { color: inherit; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: color-mix(in oklch, var(--rule) 70%, transparent);
+  background: color-mix(in oklab, var(--rule) 70%, transparent);
   border: 2px solid transparent;
   background-clip: content-box;
   border-radius: 999px;
@@ -591,7 +596,7 @@ a { color: inherit; }
   border: 1px solid transparent;
   border-bottom: none;
   border-radius: var(--tab-radius) var(--tab-radius) 0 0;
-  background: color-mix(in oklch, var(--ink) 3%, var(--panel));
+  background: color-mix(in oklab, var(--ink) 3%, var(--panel));
   /* Inactive tabs rest a step dimmer (--muted) so the active tab clearly leads
      by ink alone, without spending any color. */
   color: var(--muted);
@@ -607,7 +612,7 @@ a { color: inherit; }
 }
 
 .spark-tab:hover:not(.spark-tab--active) {
-  background: color-mix(in oklch, var(--ink) 6%, var(--panel));
+  background: color-mix(in oklab, var(--ink) 6%, var(--panel));
   color: var(--ink-dim);
 }
 
@@ -616,7 +621,7 @@ a { color: inherit; }
    full --press tint (ink 12%) over the panel so it reads a clear step below
    the hover fill (ink 6%). */
 .spark-tab:active:not(.spark-tab--active) {
-  background: color-mix(in oklch, var(--ink) 12%, var(--panel));
+  background: color-mix(in oklab, var(--ink) 12%, var(--panel));
   color: var(--ink);
 }
 
@@ -758,7 +763,7 @@ a { color: inherit; }
   margin-bottom: 5px;
   border: none;
   border-radius: 50%;
-  background: color-mix(in oklch, var(--ink) 4%, transparent);
+  background: color-mix(in oklab, var(--ink) 4%, transparent);
   color: var(--ink-dim);
   display: flex;
   align-items: center;
@@ -969,7 +974,7 @@ a { color: inherit; }
   padding: 5px 9px;
   border: 1px solid var(--rule-soft);
   border-radius: 999px;
-  background: color-mix(in oklch, var(--ink) 3%, transparent);
+  background: color-mix(in oklab, var(--ink) 3%, transparent);
   box-shadow: var(--lift-hi);
   font-family: var(--font-mono);
   font-size: 10px;
@@ -1011,7 +1016,7 @@ a { color: inherit; }
   padding: 11px 34px 11px 12px;
   border: 1px solid var(--rule-soft);
   border-radius: var(--radius-surface, 10px);
-  background: color-mix(in oklch, var(--ink) 2.5%, var(--panel));
+  background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
   box-shadow: var(--lift-hi);
   color: var(--ink);
   font-family: var(--font-sans);
@@ -1118,7 +1123,7 @@ a { color: inherit; }
   padding: 8px 10px;
   border: 1px solid var(--rule-soft);
   border-radius: var(--radius-surface, 10px);
-  background: color-mix(in oklch, var(--ink) 2.5%, var(--panel));
+  background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
   box-shadow: var(--lift-hi);
   color: var(--ink-dim);
   font-family: var(--font-sans);
@@ -1180,7 +1185,7 @@ a { color: inherit; }
   padding: 14px 38px 14px 14px;
   border: 1px solid var(--rule);
   border-radius: var(--radius-popover, 12px);
-  background: color-mix(in oklch, var(--ink) 2.5%, var(--panel));
+  background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
   box-shadow: var(--lift-hi);
   color: var(--ink);
   font-family: var(--font-sans);
@@ -1289,7 +1294,7 @@ a { color: inherit; }
   padding: 9px 10px;
   border: 1px solid color-mix(in oklch, var(--accent) 28%, var(--rule));
   border-radius: var(--radius-control);
-  background: color-mix(in oklch, var(--panel-2) 96%, transparent);
+  background: color-mix(in oklab, var(--panel-2) 96%, transparent);
   box-shadow: var(--shadow-popover);
   color: var(--ink);
   font-family: var(--font-sans);
@@ -1379,7 +1384,7 @@ a { color: inherit; }
   padding: 10px 11px;
   border: 1px solid var(--rule-soft);
   border-radius: var(--radius-surface, 10px);
-  background: color-mix(in oklch, var(--ink) 2%, var(--panel));
+  background: color-mix(in oklab, var(--ink) 2%, var(--panel));
   box-shadow: var(--lift-hi);
   color: var(--ink);
   font-family: var(--font-sans);
@@ -1446,7 +1451,7 @@ a { color: inherit; }
   outline: 1px solid var(--rule-soft);
   outline-offset: -1px;
   border-radius: var(--radius-surface, 10px);
-  background: color-mix(in oklch, var(--ink) 3%, var(--panel));
+  background: color-mix(in oklab, var(--ink) 3%, var(--panel));
   padding: 7px;
   position: relative;
   box-shadow: none;
@@ -1724,7 +1729,7 @@ a { color: inherit; }
 .composer-mode-cycle.is-talk:hover {
   color: var(--ink);
   border-color: var(--rule);
-  background: color-mix(in oklch, var(--ink) 9%, transparent);
+  background: color-mix(in oklab, var(--ink) 9%, transparent);
 }
 /* Plan — info-blue, distinct from Execute's gold. */
 .composer-mode-cycle.is-plan {
@@ -1854,7 +1859,7 @@ a { color: inherit; }
   gap: 6px;
   padding: 3px 8px;
   border-radius: 999px;
-  background: color-mix(in oklch, var(--ink) 4%, transparent);
+  background: color-mix(in oklab, var(--ink) 4%, transparent);
   border: 1px solid var(--rule-soft);
   font-size: 10px;
   color: var(--ink-dim);
@@ -1864,7 +1869,7 @@ a { color: inherit; }
   width: 44px;
   height: 4px;
   border-radius: 999px;
-  background: color-mix(in oklch, var(--ink) 12%, transparent);
+  background: color-mix(in oklab, var(--ink) 12%, transparent);
   overflow: hidden;
 }
 .composer-context-bar > div {
@@ -1972,7 +1977,7 @@ a { color: inherit; }
   /* On the surface rung (7px) so a button is concentric with the .spark-input
      fields and .spark-empty cards it sits beside — no 6px seam vs the ladder. */
   border-radius: var(--radius-surface, 7px);
-  background: color-mix(in oklch, var(--ink) 4%, var(--panel));
+  background: color-mix(in oklab, var(--ink) 4%, var(--panel));
   color: var(--ink);
   font-family: var(--font-sans);
   font-size: 12px;
@@ -1989,12 +1994,12 @@ a { color: inherit; }
     transform var(--motion-fast) var(--ease-out);
 }
 .spark-btn:hover {
-  background: color-mix(in oklch, var(--ink) 9%, var(--panel));
+  background: color-mix(in oklab, var(--ink) 9%, var(--panel));
   border-color: var(--rule-strong);
 }
 .spark-btn:active {
   transform: translateY(0.5px);
-  background: color-mix(in oklch, var(--ink) 12%, var(--panel));
+  background: color-mix(in oklab, var(--ink) 12%, var(--panel));
   box-shadow: var(--well);
 }
 .spark-btn:disabled,
@@ -2028,6 +2033,13 @@ a { color: inherit; }
    Square glyph button for toolbars and row affordances. Transparent at rest,
    ink-tint on hover — matches the .spark-tab__close / .composer-fast idiom.
    Size via --spark-icon-btn-size (default 22px) for 20-26px targets. */
+/* Folder cards use backdrop-filter, which creates a stacking context. Lift the
+   focused card so a workspace/folder action menu can float over the following
+   folder instead of being visually present but pointer-blocked by it. */
+.spark-workspace-folder:focus-within {
+  z-index: 40;
+}
+
 .spark-icon-btn {
   --spark-icon-btn-size: 22px;
   display: inline-flex;
@@ -2047,11 +2059,11 @@ a { color: inherit; }
     color var(--motion-fast) var(--ease-out);
 }
 .spark-icon-btn:hover {
-  background: color-mix(in oklch, var(--ink) 9%, transparent);
+  background: color-mix(in oklab, var(--ink) 9%, transparent);
   color: var(--ink);
 }
 .spark-icon-btn:active {
-  background: color-mix(in oklch, var(--ink) 13%, transparent);
+  background: color-mix(in oklab, var(--ink) 13%, transparent);
 }
 .spark-icon-btn.is-active {
   color: var(--accent);
@@ -2198,7 +2210,7 @@ a { color: inherit; }
   padding: 0 6px;
   border: 1px solid var(--rule-soft);
   border-radius: 6px;
-  background: color-mix(in oklch, var(--ink) 5%, transparent);
+  background: color-mix(in oklab, var(--ink) 5%, transparent);
   color: var(--muted);
   font-size: 9px;
   font-weight: 600;
@@ -2371,7 +2383,7 @@ a { color: inherit; }
 .spark-scrim {
   position: absolute;
   inset: 0;
-  background: color-mix(in oklch, var(--bg) 64%, transparent);
+  background: color-mix(in oklab, var(--bg) 64%, transparent);
   animation: spark-fade-in var(--motion-fast) var(--ease-out) both;
 }
 
@@ -2440,7 +2452,7 @@ a { color: inherit; }
      a heavy scrim would pre-flatten the backdrop so the glass has nothing
      left to refract. */
   html:not([data-glass="off"]) .spark-scrim {
-    background: color-mix(in oklch, var(--bg) 32%, transparent);
+    background: color-mix(in oklab, var(--bg) 32%, transparent);
     -webkit-backdrop-filter: blur(3px) saturate(1.1);
     backdrop-filter: blur(3px) saturate(1.1);
   }
@@ -2525,7 +2537,7 @@ a { color: inherit; }
   border-radius: var(--radius-control);
 }
 .loom-flow .react-flow__minimap-mask {
-  fill: color-mix(in oklch, var(--bg) 62%, transparent);
+  fill: color-mix(in oklab, var(--bg) 62%, transparent);
 }
 /* Selected edge / connection-in-progress use the accent, never purple. */
 .loom-flow .react-flow__edge-path {

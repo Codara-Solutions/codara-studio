@@ -22,10 +22,10 @@ function formatBytes(n: number): string {
 // Subtle checkerboard so transparent images/SVGs read against something.
 const CHECKER_BG: React.CSSProperties = {
   backgroundImage:
-    "linear-gradient(45deg, color-mix(in oklch, var(--ink) 5%, transparent) 25%, transparent 25%)," +
-    "linear-gradient(-45deg, color-mix(in oklch, var(--ink) 5%, transparent) 25%, transparent 25%)," +
-    "linear-gradient(45deg, transparent 75%, color-mix(in oklch, var(--ink) 5%, transparent) 75%)," +
-    "linear-gradient(-45deg, transparent 75%, color-mix(in oklch, var(--ink) 5%, transparent) 75%)",
+    "linear-gradient(45deg, color-mix(in oklab, var(--ink) 5%, transparent) 25%, transparent 25%)," +
+    "linear-gradient(-45deg, color-mix(in oklab, var(--ink) 5%, transparent) 25%, transparent 25%)," +
+    "linear-gradient(45deg, transparent 75%, color-mix(in oklab, var(--ink) 5%, transparent) 75%)," +
+    "linear-gradient(-45deg, transparent 75%, color-mix(in oklab, var(--ink) 5%, transparent) 75%)",
   backgroundSize: "16px 16px",
   backgroundPosition: "0 0, 0 8px, 8px -8px, -8px 0",
 };

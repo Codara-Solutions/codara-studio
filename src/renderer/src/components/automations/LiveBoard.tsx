@@ -545,7 +545,7 @@ export default function LiveBoard({
             border: "1px solid var(--rule)",
             borderBottom: "none",
             borderRadius: "14px 14px 0 0",
-            boxShadow: "var(--lift-hi), 0 -14px 36px color-mix(in oklch, var(--bg) 60%, transparent)",
+            boxShadow: "var(--lift-hi), 0 -14px 36px color-mix(in oklab, var(--bg) 60%, transparent)",
             overflow: "hidden",
             visibility: sheetOpen ? "inherit" : "hidden",
             pointerEvents: sheetOpen ? "inherit" : "none",

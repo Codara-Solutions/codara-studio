@@ -306,7 +306,7 @@ function SnapshotCard({
       style={{
         border: `1px solid color-mix(in oklch, ${tone} 42%, var(--rule))`,
         borderRadius: 9,
-        background: `linear-gradient(150deg, color-mix(in oklch, ${tone} 9%, var(--panel-2)), color-mix(in oklch, var(--panel) 88%, transparent))`,
+        background: `linear-gradient(150deg, color-mix(in oklch, ${tone} 9%, var(--panel-2)), color-mix(in oklab, var(--panel) 88%, transparent))`,
         boxShadow: `var(--lift-hi), 0 10px 24px color-mix(in oklch, ${tone} 8%, transparent)`,
         padding: "12px 13px",
         display: "flex",
@@ -953,7 +953,7 @@ function StepDetail({
                 style={{
                   display: "block",
                   padding: "7px 9px",
-                  background: "color-mix(in oklch, var(--bg) 70%, transparent)",
+                  background: "color-mix(in oklab, var(--bg) 70%, transparent)",
                   border: "1px solid var(--rule-soft)",
                   borderRadius: 6,
                   color: "var(--ink-dim)",
@@ -989,7 +989,7 @@ function StepDetail({
                     textAlign: "left",
                     border: "1px solid var(--rule-soft)",
                     borderRadius: 7,
-                    background: "color-mix(in oklch, var(--ink) 2%, transparent)",
+                    background: "color-mix(in oklab, var(--ink) 2%, transparent)",
                     padding: "8px 10px",
                     display: "flex",
                     flexDirection: "column",
@@ -1002,7 +1002,7 @@ function StepDetail({
                     e.currentTarget.style.borderColor = "var(--rule)";
                   }}
                   onMouseLeave={(e) => {
-                    e.currentTarget.style.background = "color-mix(in oklch, var(--ink) 2%, transparent)";
+                    e.currentTarget.style.background = "color-mix(in oklab, var(--ink) 2%, transparent)";
                     e.currentTarget.style.borderColor = "var(--rule-soft)";
                   }}
                 >
@@ -1313,7 +1313,7 @@ function AttemptCommand({ command }: { command: string }) {
           style={{
             display: "block",
             padding: "8px 10px",
-            background: "color-mix(in oklch, var(--bg) 70%, transparent)",
+            background: "color-mix(in oklab, var(--bg) 70%, transparent)",
             border: "1px solid var(--rule-soft)",
             borderRadius: 6,
             color: "var(--ink-dim)",
@@ -1557,7 +1557,7 @@ function ReportSkeleton() {
             height: 9,
             borderRadius: 999,
             background:
-              "linear-gradient(90deg, color-mix(in oklch, var(--ink) 5%, transparent), color-mix(in oklch, var(--ink) 12%, transparent), color-mix(in oklch, var(--ink) 5%, transparent))",
+              "linear-gradient(90deg, color-mix(in oklab, var(--ink) 5%, transparent), color-mix(in oklab, var(--ink) 12%, transparent), color-mix(in oklab, var(--ink) 5%, transparent))",
             backgroundSize: "220% 100%",
             animation: "spark-shimmer 2.1s ease-in-out infinite",
           }}
@@ -1646,7 +1646,7 @@ function PromptBlock({ path }: { path: string }) {
           style={{
             margin: 0,
             padding: "11px 12px",
-            background: "color-mix(in oklch, var(--bg) 72%, transparent)",
+            background: "color-mix(in oklab, var(--bg) 72%, transparent)",
             border: "1px solid var(--rule-soft)",
             borderRadius: 7,
             color: "var(--ink-dim)",
