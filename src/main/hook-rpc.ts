@@ -1,4 +1,4 @@
-// Hook RPC — a tiny HTTP server that sub-agents (Claude Code, Codex, Cursor,
+// Hook RPC — a tiny HTTP server that sub-agents (Claude Code, Codex,
 // etc.) can POST to in order to self-report their state ("working / blocked /
 // idle / done"). This is the authoritative state source per the big-bet:
 // regex-tail detection (big bet A) is the FALLBACK for CLIs that can't or

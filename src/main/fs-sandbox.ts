@@ -60,7 +60,6 @@ function staticAllowed(): string[] {
   return [
     home(".claude"),
     home(".codex"),
-    home(".cursor"),
     home(".cache/spark"),
     app.getPath("userData"),
     app.getPath("temp"),
