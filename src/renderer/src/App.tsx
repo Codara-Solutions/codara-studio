@@ -298,6 +298,11 @@ export default function App() {
   // source of truth: picking a chat updates the graph, deleting a chat removes
   // it everywhere.
   const [runs, setRuns] = useState<RunState[]>([]);
+  // Identifies which workspace the async `runs` payload belongs to. During a
+  // workspace switch the previous payload remains in state until listRuns
+  // resolves; consumers use this owner id to retain the destination chat's
+  // last snapshot instead of briefly painting an empty/new conversation.
+  const [runsWorkspaceId, setRunsWorkspaceId] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   // Each workspace has its own Codara chat selection. The visible state stays
   // as a single activeRunId, but this map lets workspace switches restore the
@@ -534,6 +539,8 @@ export default function App() {
   // the latest chat titles without taking `runs` as a dependency.
   const runsRef = useRef(runs);
   runsRef.current = runs;
+  const runsWorkspaceIdRef = useRef(runsWorkspaceId);
+  runsWorkspaceIdRef.current = runsWorkspaceId;
 
   // Cross-workspace runs feed for the walk-away cockpit surfaces (run
   // switcher, rail tone dots, focus digest). Independent of the lifted `runs`
@@ -548,13 +555,19 @@ export default function App() {
       // Loom-owned runs never enter the lifted chat state (defensive — the
       // listRuns filter is the primary gate).
       if (run.automationId) return;
-      setRuns((current) => {
-        if (run.workspaceId !== activeIdRef.current) return current;
-        const withoutRun = current.filter((item) => item.id !== run.id);
-        const next = [run, ...withoutRun];
-        next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-        return next;
-      });
+      if (run.workspaceId === activeIdRef.current) {
+        const sameWorkspace = runsWorkspaceIdRef.current === run.workspaceId;
+        runsWorkspaceIdRef.current = run.workspaceId;
+        setRunsWorkspaceId(run.workspaceId);
+        setRuns((current) => {
+          const withoutRun = (sameWorkspace ? current : []).filter(
+            (item) => item.id !== run.id,
+          );
+          const next = [run, ...withoutRun];
+          next.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+          return next;
+        });
+      }
 
       if (!options?.select) return;
       const workspaceId = run.workspaceId;
@@ -858,6 +871,23 @@ export default function App() {
     };
   }, []);
 
+  // The `cora start --cwd …` path can register or activate a workspace from
+  // the main process while this renderer is already mounted. The main process
+  // changes activeWorkspaceId only for executable sessions whose visible
+  // worker PTYs must belong to that workspace; Talk/Plan starts preserve the
+  // existing active id. Mirror that authoritative selection here.
+  useEffect(() => {
+    const off = window.spark.state.onChanged?.((state) => {
+      setWorkspaces(state.workspaces);
+      setWorkspaceGroups(state.workspaceGroups ?? []);
+      setWorkspaceRailOrder(state.workspaceRailOrder ?? []);
+      const next = state.activeWorkspaceId;
+      activeIdRef.current = next;
+      setActiveId(next);
+    });
+    return () => off?.();
+  }, []);
+
   // Resolve the integrated-shell launch profile lazily. Materializing the
   // bundled scripts touches the user's home directory; no need to block
   // initial paint on it. A failure here just means the strip falls back to
@@ -963,6 +993,8 @@ export default function App() {
   // the workspaceId explicitly to avoid stale-closure issues in subscriptions.
   const refreshRunsFor = useCallback(async (workspaceId: string | null) => {
     if (!workspaceId) {
+      runsWorkspaceIdRef.current = null;
+      setRunsWorkspaceId(null);
       setRuns([]);
       return;
     }
@@ -972,6 +1004,8 @@ export default function App() {
       // Loom-owned runs live inside the Automations tab (Workers sub-tab +
       // per-loom history) — keeping them out of the lifted list is what keeps
       // chat tabs / RunsStack rows from materializing for them.
+      runsWorkspaceIdRef.current = workspaceId;
+      setRunsWorkspaceId(workspaceId);
       setRuns(next.filter((run) => !run.automationId));
     } catch {
       /* Surface details elsewhere; this is opportunistic. */
@@ -3889,6 +3923,7 @@ export default function App() {
               shell={terminalShell}
               terminalScrollbackLineLimit={settings.terminalScrollbackLineLimit}
               runs={runs}
+              runsWorkspaceId={runsWorkspaceId}
               activeRunId={activeRunId}
               onSelectRun={handleSelectRun}
               onRunSnapshot={handleRunSnapshot}
@@ -4351,6 +4386,7 @@ interface WorkspaceProps {
   shell: ShellInfo | null;
   terminalScrollbackLineLimit: number;
   runs: RunState[];
+  runsWorkspaceId: string | null;
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
   onRunSnapshot: (
@@ -4419,6 +4455,7 @@ const Workspace = React.memo(function Workspace({
   shell,
   terminalScrollbackLineLimit,
   runs,
+  runsWorkspaceId,
   activeRunId,
   onSelectRun,
   onRunSnapshot,
@@ -4838,7 +4875,9 @@ const Workspace = React.memo(function Workspace({
           tabs={visibleTabs}
           activeId={effectiveActiveId}
           workspace={workspace}
+          validWorkspaceIds={validWorkspaceIds}
           runs={runs}
+          runsWorkspaceId={runsWorkspaceId}
           activeRunId={activeRunId}
           terminalScrollbackLineLimit={terminalScrollbackLineLimit}
           chatView={chatView}

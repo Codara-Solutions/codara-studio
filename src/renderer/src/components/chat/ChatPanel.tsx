@@ -34,6 +34,8 @@ interface Props {
   workspace: Workspace | null;
   runs: RunState[];
   activeRun: RunState | null;
+  composerDraftKey?: string;
+  suspendGlobalEvents?: boolean;
   terminalScrollbackLineLimit: number;
   error: string | null;
   collapsed: boolean;
@@ -69,6 +71,8 @@ export default function ChatPanel({
   workspace,
   runs,
   activeRun,
+  composerDraftKey,
+  suspendGlobalEvents,
   terminalScrollbackLineLimit,
   error,
   collapsed,
@@ -311,6 +315,8 @@ export default function ChatPanel({
               key={`composer:${activeRun?.id ?? "new-chat"}`}
               run={activeRun}
               cwd={workspace?.cwd ?? null}
+              draftKey={composerDraftKey}
+              suspendGlobalEvents={suspendGlobalEvents}
               // Only block input when there's genuinely nothing to send to:
               // no workspace AND no active run. A follow-up to an existing run
               // goes through addRunMessage({runId}) and needs no workspace, so

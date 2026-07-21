@@ -60,6 +60,11 @@ export interface ChatComposerStartConfig {
 interface Props {
   run: RunState | null;
   cwd: string | null;
+  // Stable identity supplied by the workbench (`workspaceId:chatTabId`). The
+  // chat panel is deliberately unmounted while an editor/terminal/other
+  // workspace is active, so local React state alone cannot preserve an
+  // unfinished prompt across navigation.
+  draftKey?: string;
   disabled?: boolean;
   // Pin the manager mode: the PlanModeToggle is hidden and every send (draft
   // and follow-up alike) carries exactly this mode. Used by embedded surfaces
@@ -121,37 +126,85 @@ interface MentionQuery {
   query: string;
 }
 
+interface ChatComposerDraftSnapshot {
+  draft: string;
+  images: AddRunMessageAttachmentInput[];
+  fileReferences: FileMention[];
+  backend: ChatBackendKind;
+  model: string;
+  mode: ChatMode;
+  effort: AgentEffortLevel;
+  fastMode: boolean;
+  oneMillionContext: boolean;
+}
+
+// Navigation-only draft cache. It intentionally lives outside React so it
+// survives ChatStack returning null for a file/terminal tab and survives the
+// active Workspace component switching to another project. It is not written
+// to disk: successful sends clear it, and quitting Codara discards unsent text.
+const chatComposerDrafts = new Map<string, ChatComposerDraftSnapshot>();
+const MAX_CACHED_CHAT_DRAFTS = 100;
+
+function rememberChatComposerDraft(key: string, snapshot: ChatComposerDraftSnapshot): void {
+  // Refresh insertion order so the bounded map behaves as a small LRU cache.
+  chatComposerDrafts.delete(key);
+  chatComposerDrafts.set(key, snapshot);
+  while (chatComposerDrafts.size > MAX_CACHED_CHAT_DRAFTS) {
+    const oldest = chatComposerDrafts.keys().next().value as string | undefined;
+    if (!oldest) break;
+    chatComposerDrafts.delete(oldest);
+  }
+}
+
 export default function ChatComposer({
   run,
   cwd,
+  draftKey,
   disabled,
   lockedMode,
   suspendGlobalEvents,
   onStartChat,
   onForcePauseRun,
 }: Props) {
-  const [draft, setDraft] = useState("");
-  const [images, setImages] = useState<AddRunMessageAttachmentInput[]>([]);
+  const restoredDraft = draftKey ? chatComposerDrafts.get(draftKey) : undefined;
+  const [draft, setDraft] = useState(() => restoredDraft?.draft ?? "");
+  const [images, setImages] = useState<AddRunMessageAttachmentInput[]>(() =>
+    restoredDraft?.images ? [...restoredDraft.images] : [],
+  );
   const [fileMentions, setFileMentions] = useState<FileMention[]>([]);
-  const [fileReferences, setFileReferences] = useState<FileMention[]>([]);
+  const [fileReferences, setFileReferences] = useState<FileMention[]>(() =>
+    restoredDraft?.fileReferences ? [...restoredDraft.fileReferences] : [],
+  );
   const [mentionQuery, setMentionQuery] = useState<MentionQuery | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [filesLoading, setFilesLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [pastingImages, setPastingImages] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [draftChatBackend, setDraftChatBackend] = useState<ChatBackendKind>(DEFAULT_CHAT_BACKEND);
-  const [draftChatModel, setDraftChatModel] = useState<string>(DEFAULT_CHAT_MODEL);
-  const [draftChatMode, setDraftChatMode] = useState<ChatMode>(lockedMode ?? DEFAULT_CHAT_MODE);
-  const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(DEFAULT_CHAT_EFFORT);
+  const [draftChatBackend, setDraftChatBackend] = useState<ChatBackendKind>(
+    run?.chatBackend ?? restoredDraft?.backend ?? DEFAULT_CHAT_BACKEND,
+  );
+  const [draftChatModel, setDraftChatModel] = useState<string>(
+    run?.chatModel ?? restoredDraft?.model ?? DEFAULT_CHAT_MODEL,
+  );
+  const [draftChatMode, setDraftChatMode] = useState<ChatMode>(
+    lockedMode ?? run?.chatMode ?? (run ? "execute" : restoredDraft?.mode ?? DEFAULT_CHAT_MODE),
+  );
+  const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(
+    run?.chatEffort ?? restoredDraft?.effort ?? DEFAULT_CHAT_EFFORT,
+  );
   // Tracks whether the draft default has been resolved from settings + runtime
   // diagnostics. The first paint uses the hardcoded fallbacks above; once the
   // IPC round-trip returns we replace them with the actual first visible
   // model so the bar doesn't open on a model the user can't see in the
   // dropdown (e.g. the legacy Gemini default when no OpenRouter is configured).
-  const draftDefaultsResolved = useRef(false);
-  const [draftFastMode, setDraftFastMode] = useState<boolean>(false);
-  const [draftOneMillionContext, setDraftOneMillionContext] = useState<boolean>(false);
+  const draftDefaultsResolved = useRef(Boolean(restoredDraft || run));
+  const [draftFastMode, setDraftFastMode] = useState<boolean>(
+    run?.chatFastMode ?? restoredDraft?.fastMode ?? false,
+  );
+  const [draftOneMillionContext, setDraftOneMillionContext] = useState<boolean>(
+    run?.chat1mContext ?? restoredDraft?.oneMillionContext ?? false,
+  );
   // Latest model-context occupancy from chat.usage SparkEvents. This is a
   // gauge, not a billing counter: each update replaces the prior value so a
   // CLI that reports cumulative usage repeatedly cannot inflate the pill into
@@ -164,6 +217,59 @@ export default function ChatComposer({
   // repeat would otherwise slip through into a duplicate message.
   const inFlight = useRef(false);
   const suppressMentionUpdate = useRef(false);
+
+  // Snapshot every meaningful composer change, INCLUDING the selector state of
+  // an empty composer. A user can choose a model before typing; dropping that
+  // empty snapshot made a remount paint the generic model first and only switch
+  // back once the run/settings IPC caught up.
+  useEffect(() => {
+    if (!draftKey) return;
+    rememberChatComposerDraft(draftKey, {
+      draft,
+      images: [...images],
+      fileReferences: [...fileReferences],
+      backend: draftChatBackend,
+      model: draftChatModel,
+      mode: draftChatMode,
+      effort: draftChatEffort,
+      fastMode: draftFastMode,
+      oneMillionContext: draftOneMillionContext,
+    });
+  }, [
+    draftKey,
+    draft,
+    images,
+    fileReferences,
+    draftChatBackend,
+    draftChatModel,
+    draftChatMode,
+    draftChatEffort,
+    draftFastMode,
+    draftOneMillionContext,
+  ]);
+
+  // Existing runs are authoritative, but mirror their selector fields into
+  // the local fallback too. The visible chips normally read `run` directly;
+  // this mirror matters during a transient run-list refresh where `run` can be
+  // null for one render. Keeping the last known values prevents a one-frame
+  // jump to the generic draft model.
+  useEffect(() => {
+    if (!run) return;
+    if (run.chatBackend !== undefined) setDraftChatBackend(run.chatBackend);
+    if (run.chatModel !== undefined) setDraftChatModel(run.chatModel);
+    if (run.chatMode !== undefined) setDraftChatMode(run.chatMode);
+    if (run.chatEffort !== undefined) setDraftChatEffort(run.chatEffort);
+    if (run.chatFastMode !== undefined) setDraftFastMode(run.chatFastMode);
+    if (run.chat1mContext !== undefined) setDraftOneMillionContext(run.chat1mContext);
+  }, [
+    run?.id,
+    run?.chatBackend,
+    run?.chatModel,
+    run?.chatMode,
+    run?.chatEffort,
+    run?.chatFastMode,
+    run?.chat1mContext,
+  ]);
 
   // Focus on the global composer shortcut (App broadcasts spark:focus-composer).
   useEffect(() => {
@@ -487,6 +593,7 @@ export default function ChatComposer({
           attachments,
         });
       }
+      if (draftKey) chatComposerDrafts.delete(draftKey);
       setDraft("");
       setImages([]);
       setFileReferences([]);

@@ -8,6 +8,8 @@ interface Props {
   workspace: Workspace | null;
   runs: RunState[];
   activeRunId: string | null;
+  composerDraftKey?: string;
+  suspendGlobalEvents?: boolean;
   terminalScrollbackLineLimit: number;
   // Chat / backend-PTY view mode — driven by the workspace's hoisted inner
   // tab strip so the toggle survives navigating from the chat tab to a worker
@@ -35,6 +37,8 @@ export default function OrchestrationSidebar({
   workspace,
   runs,
   activeRunId,
+  composerDraftKey,
+  suspendGlobalEvents,
   terminalScrollbackLineLimit,
   chatView,
   onChatViewChange,
@@ -218,6 +222,8 @@ export default function OrchestrationSidebar({
       workspace={workspace}
       runs={chatHistoryRuns}
       activeRun={activeRun}
+      composerDraftKey={composerDraftKey}
+      suspendGlobalEvents={suspendGlobalEvents}
       terminalScrollbackLineLimit={terminalScrollbackLineLimit}
       error={error}
       collapsed={collapsed}
