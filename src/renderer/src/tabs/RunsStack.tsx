@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useRef } from "react";
 import RunsView from "../components/RunsView";
 import type { RunState, Workspace } from "@shared/types";
 import type { RunsTab, Tab, TabId } from "./types";
@@ -13,6 +13,11 @@ interface Props {
   activeId: TabId | null;
   workspace: Workspace | null;
   runs: RunState[];
+  // Which workspace `runs` belongs to. During a workspace switch the lifted
+  // payload still holds the LEAVING workspace's list until listRuns resolves;
+  // deriving empty states from it would flash "No runs yet" for a workspace
+  // that has runs (mirrors ChatStack's runsWorkspaceId ownership gate).
+  runsWorkspaceId: string | null;
   activeRunId: string | null;
   onSelectRun: (id: string | null) => void;
   onOpenWorkerTerminal?: (workerTaskId: string) => void;
@@ -27,6 +32,7 @@ function RunsStack({
   activeId,
   workspace,
   runs,
+  runsWorkspaceId,
   activeRunId,
   onSelectRun,
   onOpenWorkerTerminal,
@@ -36,6 +42,23 @@ function RunsStack({
     () => tabs.filter((t): t is RunsTab => t.kind === "runs"),
     [tabs],
   );
+  // Retain each workspace's last OWNED payload so the stale window renders the
+  // workspace's own runs (or a neutral surface when none were ever owned),
+  // never another workspace's list.
+  const retainedByWorkspaceRef = useRef(
+    new Map<string, { runs: RunState[]; activeRunId: string | null }>(),
+  );
+  const ownsRunPayload = workspace !== null && runsWorkspaceId === workspace.id;
+  if (ownsRunPayload) {
+    retainedByWorkspaceRef.current.set(workspace.id, { runs, activeRunId });
+  }
+  const retained = workspace
+    ? retainedByWorkspaceRef.current.get(workspace.id)
+    : undefined;
+  const effectiveRuns = ownsRunPayload ? runs : (retained?.runs ?? null);
+  const effectiveActiveRunId = ownsRunPayload
+    ? activeRunId
+    : (retained?.activeRunId ?? null);
   if (runsTabs.length === 0) return null;
   return (
     // pointer-events:none on the outer so this stack's empty space doesn't
@@ -46,7 +69,7 @@ function RunsStack({
         const visible = t.id === activeId;
         // A runs tab with a pinned runId selects that run; the default
         // "all runs" tab tracks whatever's selected from the right panel.
-        const selectedRunId = t.runId ?? activeRunId;
+        const selectedRunId = t.runId ?? effectiveActiveRunId;
         return (
           <div
             key={t.id}
@@ -60,13 +83,20 @@ function RunsStack({
               pointerEvents: visible ? "auto" : "none",
             }}
           >
-            <RunsView
-              workspace={workspace}
-              runs={runs}
-              activeRunId={selectedRunId}
-              onSelectRun={onSelectRun}
-              onOpenWorkerTerminal={onOpenWorkerTerminal}
-            />
+            {effectiveRuns ? (
+              <RunsView
+                workspace={workspace}
+                runs={effectiveRuns}
+                activeRunId={selectedRunId}
+                onSelectRun={onSelectRun}
+                onOpenWorkerTerminal={onOpenWorkerTerminal}
+              />
+            ) : (
+              // No owned payload yet for this workspace (first visit, list
+              // still loading): a blank surface, never empty states derived
+              // from another workspace's runs.
+              <div style={{ flex: 1, background: "var(--bg)" }} />
+            )}
           </div>
         );
       })}

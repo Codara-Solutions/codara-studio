@@ -72,7 +72,7 @@ export const END_H = 86;
 // ── Spacing ─────────────────────────────────────────────────────────────────
 const COL_GAP = 134; // horizontal wire run between spine columns
 const PAD_X = 56; // canvas padding before SPARK / after COMPLETE
-const UNDULATE = 26; // vertical offset that gives the spine its gentle wave
+const UNDULATE = 0; // straight spine baseline; worker stacks provide the vertical rhythm
 const TRUNK_INSET = 42; // worker trunk x, measured from the step's left edge
 const RIB_RUN = 18; // horizontal gap from the trunk to a worker's left edge
 const WORKER_TOP_GAP = 32; // gap from the step's bottom edge to the first worker

@@ -104,7 +104,7 @@ function RunHeader({ run }: { run: RunState }) {
   const activeStepNumber = activeStep ? orderedSteps.indexOf(activeStep) + 1 : 0;
 
   const nowText = activeStep
-    ? `Step ${String(activeStepNumber).padStart(2, "0")} — ${activeStep.title}`
+    ? `Step ${activeStepNumber} — ${activeStep.title}`
     : run.status === "complete"
       ? "Run complete"
       : "Waiting for Cora to plan the first step";
@@ -141,13 +141,12 @@ function RunHeader({ run }: { run: RunState }) {
 
   return (
     <header
-      className="runs-mission-header"
+      className="runs-header"
       style={{
         flex: "0 0 auto",
         position: "relative",
         overflow: "hidden",
-        background:
-          "linear-gradient(115deg, color-mix(in oklab, var(--panel-2) 88%, var(--accent) 4%), var(--panel) 56%, color-mix(in oklab, var(--panel) 94%, var(--bg)))",
+        background: "var(--panel)",
         borderBottom: "1px solid var(--rule)",
         boxShadow: "var(--lift-hi)",
         padding: "14px 20px 15px",
@@ -157,36 +156,7 @@ function RunHeader({ run }: { run: RunState }) {
         alignItems: "center",
       }}
     >
-      <span
-        aria-hidden
-        style={{
-          position: "absolute",
-          inset: "0 auto 0 0",
-          width: 2,
-          background: `linear-gradient(180deg, transparent, ${runStatusColor(run.status)}, transparent)`,
-          boxShadow: `0 0 14px ${runStatusColor(run.status)}`,
-        }}
-      />
       <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 7 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            color: "var(--muted-2)",
-            fontFamily: "var(--font-mono)",
-            fontSize: 8.5,
-            fontWeight: 700,
-            letterSpacing: "0.16em",
-            textTransform: "uppercase",
-          }}
-        >
-          <span>Run telemetry</span>
-          <span style={{ width: 20, height: 1, background: "var(--rule-strong)" }} />
-          <span style={{ color: "var(--muted)", letterSpacing: "0.08em" }}>
-            {run.id.length > 18 ? `${run.id.slice(0, 10)}…${run.id.slice(-5)}` : run.id}
-          </span>
-        </div>
         <div style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0 }}>
           <StatusDot status={run.status} size={8} />
           <span
@@ -222,9 +192,9 @@ function RunHeader({ run }: { run: RunState }) {
           <span
             style={{
               fontFamily: "var(--font-sans)",
-              fontSize: 9,
-              fontWeight: 700,
-              letterSpacing: "0.14em",
+              fontSize: 10,
+              fontWeight: 600,
+              letterSpacing: "0.06em",
               textTransform: "uppercase",
               color: "var(--muted-2)",
               flex: "0 0 auto",
@@ -269,8 +239,7 @@ function RunHeader({ run }: { run: RunState }) {
                     ? "var(--danger)"
                     : terminal
                       ? "var(--ok)"
-                      : "linear-gradient(90deg, var(--accent), color-mix(in oklch, var(--accent) 62%, white))",
-                boxShadow: terminal ? "none" : "0 0 9px var(--accent-glow)",
+                      : "var(--accent)",
                 transition: "width var(--motion) var(--ease-out)",
               }}
             />
@@ -279,7 +248,7 @@ function RunHeader({ run }: { run: RunState }) {
             style={{
               color: "var(--muted)",
               fontFamily: "var(--font-mono)",
-              fontSize: 9,
+              fontSize: 10,
               fontVariantNumeric: "tabular-nums",
               whiteSpace: "nowrap",
             }}
@@ -290,7 +259,7 @@ function RunHeader({ run }: { run: RunState }) {
       </div>
 
       <div
-        className="runs-telemetry-grid"
+        className="runs-stats"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
@@ -298,32 +267,32 @@ function RunHeader({ run }: { run: RunState }) {
           minWidth: 0,
         }}
       >
-        <TelemetryMetric
+        <StatMetric
           label="Progress"
           value={`${completedSteps}/${orderedSteps.length || "—"}`}
-          detail={`${progressPercent}% landed`}
+          detail={`${progressPercent}% complete`}
           tone={terminal ? "var(--ok)" : "var(--accent)"}
         />
-        <TelemetryMetric
+        <StatMetric
           label="Live"
           value={liveAttempts.length}
-          detail={liveAttempts.length === 1 ? "worker active" : liveAttempts.length > 1 ? "workers active" : "all settled"}
+          detail={liveAttempts.length === 1 ? "worker active" : liveAttempts.length > 1 ? "workers active" : "none active"}
           tone={liveAttempts.length > 0 ? "var(--accent)" : "var(--ink)"}
           live={liveAttempts.length > 0}
         />
-        <TelemetryMetric
+        <StatMetric
           label="Engine"
           value={engine}
           detail={model ?? "default model"}
           text
         />
-        <TelemetryMetric
+        <StatMetric
           label="Elapsed"
           value={<ElapsedTime startedAt={run.createdAt} finishedAt={run.completedAt} />}
           detail={terminal ? "total runtime" : "wall clock"}
           text
         />
-        <TelemetryMetric
+        <StatMetric
           label="Evidence"
           value={manifest ? manifest.workspaceDelta.length : "—"}
           detail={evidenceDetail}
@@ -383,8 +352,8 @@ function TerminalSpawnState({ run }: { run: RunState }) {
             color: "var(--muted-2)",
             fontFamily: "var(--font-sans)",
             fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: "0.16em",
+            fontWeight: 600,
+            letterSpacing: "0.06em",
             textTransform: "uppercase",
           }}
         >
@@ -417,7 +386,7 @@ function TerminalGlyph({ size = 18 }: { size?: number }) {
   );
 }
 
-function TelemetryMetric({
+function StatMetric({
   label,
   value,
   detail,
@@ -444,8 +413,6 @@ function TelemetryMetric({
         minHeight: 54,
         padding: "7px 11px 8px",
         borderLeft: "1px solid var(--rule-soft)",
-        background:
-          "linear-gradient(180deg, color-mix(in oklab, var(--ink) 2.5%, transparent), transparent)",
       }}
     >
       <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -457,8 +424,6 @@ function TelemetryMetric({
               height: 4,
               borderRadius: 999,
               background: "var(--accent)",
-              boxShadow: "0 0 7px var(--accent)",
-              animation: "spark-pulse 1.4s ease-in-out infinite",
             }}
           />
         )}
@@ -466,9 +431,9 @@ function TelemetryMetric({
           style={{
             color: "var(--muted-2)",
             fontFamily: "var(--font-sans)",
-            fontSize: 8,
-            fontWeight: 700,
-            letterSpacing: "0.14em",
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: "0.06em",
             textTransform: "uppercase",
           }}
         >
@@ -496,8 +461,8 @@ function TelemetryMetric({
         style={{
           color: "var(--muted)",
           fontFamily: "var(--font-sans)",
-          fontSize: 8.5,
-          lineHeight: 1.1,
+          fontSize: 10,
+          lineHeight: 1.2,
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
@@ -511,6 +476,7 @@ function TelemetryMetric({
 
 function StatusPill({ status }: { status: RunState["status"] }) {
   const color = runStatusColor(status);
+  const label = status.replace(/[_-]+/g, " ");
   return (
     <span
       style={{
@@ -520,15 +486,13 @@ function StatusPill({ status }: { status: RunState["status"] }) {
         gap: 6,
         color,
         border: `1px solid color-mix(in oklch, ${color} 50%, var(--rule))`,
-        background: `linear-gradient(180deg, color-mix(in oklch, ${color} 15%, transparent), color-mix(in oklch, ${color} 7%, transparent))`,
-        boxShadow: isRunningStatus(status) ? `inset 0 0 12px color-mix(in oklch, ${color} 10%, transparent), 0 0 12px color-mix(in oklch, ${color} 12%, transparent)` : "inset 0 1px 0 color-mix(in oklch, white 8%, transparent)",
-        padding: "4px 10px",
+        background: `color-mix(in oklch, ${color} 10%, transparent)`,
+        padding: "3px 10px",
         borderRadius: 999,
         fontFamily: "var(--font-sans)",
-        fontSize: 9.5,
-        fontWeight: 700,
-        letterSpacing: "0.1em",
-        textTransform: "uppercase",
+        fontSize: 10.5,
+        fontWeight: 600,
+        letterSpacing: "0.02em",
       }}
     >
       {isRunningStatus(status) && (
@@ -538,11 +502,10 @@ function StatusPill({ status }: { status: RunState["status"] }) {
             height: 5,
             borderRadius: 999,
             background: color,
-            animation: "spark-pulse 1.4s ease-in-out infinite",
           }}
         />
       )}
-      {status}
+      {label.charAt(0).toUpperCase() + label.slice(1)}
     </span>
   );
 }
@@ -569,8 +532,8 @@ function EmptyState({ text, heading }: { text: string; heading?: string }) {
           color: "var(--muted-2)",
           fontFamily: "var(--font-sans)",
           fontSize: 10,
-          fontWeight: 700,
-          letterSpacing: "0.16em",
+          fontWeight: 600,
+          letterSpacing: "0.06em",
           textTransform: "uppercase",
         }}
       >

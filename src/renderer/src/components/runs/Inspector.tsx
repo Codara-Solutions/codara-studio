@@ -16,6 +16,7 @@ import {
   isRunStillTicking,
   type RunMaps,
   runtimeTone,
+  sentenceCase,
   sortSteps,
   statusColor,
   stepStatusColor,
@@ -39,6 +40,7 @@ interface Props {
   selectedWorkerTaskId: string | null;
   onSelectStep: (id: string) => void;
   onSelectWorker: (id: string) => void;
+  onOpenWorkerTerminal?: (workerTaskId: string) => void;
   onClear: () => void;
 }
 
@@ -51,6 +53,7 @@ export default function Inspector({
   selectedWorkerTaskId,
   onSelectStep,
   onSelectWorker,
+  onOpenWorkerTerminal,
   onClear,
 }: Props) {
   const orderedSteps = useMemo(() => sortSteps(run.steps), [run.steps]);
@@ -94,6 +97,9 @@ export default function Inspector({
             attempt={maps.attemptByTask.get(selectedTask.id) ?? null}
             step={selectedStep}
             reportByAttempt={reportByAttempt}
+            onOpenTerminal={onOpenWorkerTerminal
+              ? () => onOpenWorkerTerminal(selectedTask.id)
+              : undefined}
           />
         ) : mode === "step" && selectedStep ? (
           <StepDetail
@@ -151,8 +157,8 @@ function Header({
           color: "var(--muted)",
           fontFamily: "var(--font-sans)",
           fontSize: 10,
-          fontWeight: 700,
-          letterSpacing: "0.15em",
+          fontWeight: 600,
+          letterSpacing: "0.08em",
           textTransform: "uppercase",
         }}
       >
@@ -275,8 +281,8 @@ function Section({
             color: "var(--muted)",
             fontFamily: "var(--font-sans)",
             fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: "0.14em",
+            fontWeight: 600,
+            letterSpacing: "0.06em",
             textTransform: "uppercase",
           }}
         >
@@ -306,8 +312,8 @@ function SnapshotCard({
       style={{
         border: `1px solid color-mix(in oklch, ${tone} 42%, var(--rule))`,
         borderRadius: 9,
-        background: `linear-gradient(150deg, color-mix(in oklch, ${tone} 9%, var(--panel-2)), color-mix(in oklab, var(--panel) 88%, transparent))`,
-        boxShadow: `var(--lift-hi), 0 10px 24px color-mix(in oklch, ${tone} 8%, transparent)`,
+        background: `color-mix(in oklch, ${tone} 6%, var(--panel))`,
+        boxShadow: "var(--shadow-1)",
         padding: "12px 13px",
         display: "flex",
         flexDirection: "column",
@@ -324,7 +330,6 @@ function SnapshotCard({
             flex: "0 0 auto",
             borderRadius: 999,
             background: tone,
-            boxShadow: `0 0 12px color-mix(in oklch, ${tone} 40%, transparent)`,
           }}
         />
         <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
@@ -452,7 +457,6 @@ function Mark({ kind }: { kind: "done" | "failed" | "running" | "pending" }) {
             height: 5,
             borderRadius: 999,
             background: color,
-            animation: "spark-pulse 1.4s ease-in-out infinite",
           }}
         />
       )}
@@ -472,9 +476,9 @@ function RuntimeTag({ runtime }: { runtime: WorkerTask["runtimePreference"] }) {
         borderRadius: 4,
         padding: "2px 6px",
         fontFamily: "var(--font-mono)",
-        fontSize: 8.5,
-        fontWeight: 800,
-        letterSpacing: "0.06em",
+        fontSize: 9,
+        fontWeight: 650,
+        letterSpacing: "0.04em",
         textTransform: "uppercase",
       }}
     >
@@ -610,7 +614,7 @@ function RunSummary({
               border: "1px solid var(--accent-edge)",
               borderRadius: 8,
               background: "color-mix(in oklch, var(--accent) 7%, var(--panel-2))",
-              boxShadow: "var(--shadow-glow)",
+              boxShadow: "var(--shadow-1)",
               padding: "11px 12px",
               display: "flex",
               flexDirection: "column",
@@ -630,14 +634,13 @@ function RunSummary({
               <span
                 style={{
                   color: "var(--accent)",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 9.5,
-                  fontWeight: 700,
-                  letterSpacing: "0.1em",
-                  textTransform: "uppercase",
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 10,
+                  fontWeight: 600,
+                  letterSpacing: "0.03em",
                 }}
               >
-                Step {pad(steps.indexOf(liveStep) + 1)} · {stepStatusLabel(liveStep.status)}
+                Step {pad(steps.indexOf(liveStep) + 1)} · {sentenceCase(stepStatusLabel(liveStep.status))}
               </span>
             </div>
             <span style={{ color: "var(--ink)", fontSize: 12.5, fontWeight: 600, lineHeight: 1.35 }}>
@@ -680,10 +683,6 @@ function RunSummary({
                     step.status === "running" || step.status === "reviewing"
                       ? "var(--accent)"
                       : stepStatusColor(step.status),
-                  boxShadow:
-                    step.status === "running" || step.status === "reviewing"
-                      ? "0 0 8px var(--accent-glow)"
-                      : "none",
                   transition: "opacity var(--motion-fast) var(--ease-out)",
                 }}
                 onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.8")}
@@ -694,11 +693,11 @@ function RunSummary({
         )}
       </Section>
 
-      <Section title="Needs you" meta={attention.length > 0 ? <MetaCount value={attention.length} /> : undefined}>
+      <Section title="Needs attention" meta={attention.length > 0 ? <MetaCount value={attention.length} /> : undefined}>
         {attention.length === 0 ? (
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Mark kind="done" />
-            <span style={{ color: "var(--ink-dim)", fontSize: 11.5 }}>Nothing needs you right now.</span>
+            <span style={{ color: "var(--ink-dim)", fontSize: 11.5 }}>Nothing needs attention.</span>
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
@@ -784,14 +783,13 @@ function RunSummary({
                 <span
                   style={{
                     color: item.tone,
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 9,
-                    fontWeight: 700,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.05em",
+                    fontFamily: "var(--font-sans)",
+                    fontSize: 10,
+                    fontWeight: 600,
+                    letterSpacing: "0.02em",
                   }}
                 >
-                  {item.state}
+                  {sentenceCase(item.state)}
                 </span>
               </div>
             ))}
@@ -847,9 +845,9 @@ function MetricCell({
         style={{
           color: "var(--muted)",
           fontFamily: "var(--font-sans)",
-          fontSize: 8.5,
+          fontSize: 10,
           fontWeight: 600,
-          letterSpacing: "0.1em",
+          letterSpacing: "0.05em",
           textTransform: "uppercase",
         }}
       >
@@ -1025,14 +1023,23 @@ function StepDetail({
                     <StatusDot status={status === "done" ? "complete" : status === "blocked" ? "failed" : status === "running" ? "running" : "queued"} size={6} />
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                    <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 9.5 }}>
-                      {attempt?.status ?? task.status}
+                    <span style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 10 }}>
+                      {sentenceCase(attempt?.status ?? task.status)}
                     </span>
-                    <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 9.5 }}>
+                    <span
+                      style={{
+                        color: "var(--muted)",
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 10,
+                        fontVariantNumeric: "tabular-nums",
+                        minWidth: 34,
+                        textAlign: "right",
+                      }}
+                    >
                       {attempt ? (
-                        <ElapsedTime startedAt={attempt.startedAt} finishedAt={attempt.finishedAt} placeholder="--:--" />
+                        <ElapsedTime startedAt={attempt.startedAt} finishedAt={attempt.finishedAt} placeholder="—" />
                       ) : (
-                        "--:--"
+                        "—"
                       )}
                     </span>
                   </div>
@@ -1065,12 +1072,11 @@ function StatusWord({ label, tone }: { label: string; tone: string }) {
         color: tone,
         fontFamily: "var(--font-sans)",
         fontSize: 10,
-        fontWeight: 700,
-        letterSpacing: "0.1em",
-        textTransform: "uppercase",
+        fontWeight: 600,
+        letterSpacing: "0.02em",
       }}
     >
-      {label}
+      {sentenceCase(label)}
     </span>
   );
 }
@@ -1082,11 +1088,13 @@ function WorkerDetail({
   attempt,
   step,
   reportByAttempt,
+  onOpenTerminal,
 }: {
   task: WorkerTask;
   attempt: WorkerAttempt | null;
   step: StepState | null;
   reportByAttempt: ReadonlyMap<string, WorkerReport>;
+  onOpenTerminal?: () => void;
 }) {
   const status = deriveAgentStatus(task, attempt ?? undefined, step?.status ?? "running");
   const report = attempt ? reportByAttempt.get(attempt.id) : undefined;
@@ -1106,6 +1114,39 @@ function WorkerDetail({
               finishedAt={attempt?.finishedAt}
               tone={status === "running" ? "var(--accent)" : "var(--ink-dim)"}
             />
+            {onOpenTerminal && (
+              <button
+                type="button"
+                aria-label="Open worker terminal"
+                title="Open this worker's terminal"
+                onClick={onOpenTerminal}
+                style={{
+                  marginLeft: "auto",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  padding: "4px 9px",
+                  border: "1px solid var(--rule)",
+                  borderRadius: 7,
+                  background: "var(--bg)",
+                  color: "var(--ink-dim)",
+                  fontSize: 10.5,
+                  fontWeight: 600,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Open terminal
+                <svg width={10} height={10} viewBox="0 0 12 12" fill="none" aria-hidden>
+                  <path
+                    d="M4 3h5v5M9 3 3 9"
+                    stroke="currentColor"
+                    strokeWidth="1.4"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            )}
           </div>
           <QuickStats
             items={[
@@ -1190,7 +1231,11 @@ function WorkerDetail({
 
       {attempt?.promptPath && (
         <Section title="Prompt">
-          <PromptBlock path={attempt.promptPath} />
+          <PromptBlock
+            key={`${task.runId}:${attempt.id}`}
+            runId={task.runId}
+            attemptId={attempt.id}
+          />
         </Section>
       )}
     </>
@@ -1217,8 +1262,6 @@ function PendingReport({ attempt }: { attempt: WorkerAttempt | null }) {
           height: 7,
           borderRadius: 999,
           background: "var(--accent)",
-          boxShadow: "0 0 10px color-mix(in oklch, var(--accent) 65%, transparent)",
-          animation: "spark-pulse 1.3s ease-in-out infinite",
           flex: "0 0 7px",
         }}
       />
@@ -1333,7 +1376,7 @@ function AttemptCommand({ command }: { command: string }) {
 function KeyVal({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return (
     <span style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
-      <span style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 8.5, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+      <span style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 10, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase" }}>
         {label}
       </span>
       <span style={{ color: tone ?? "var(--ink-dim)", fontFamily: "var(--font-mono)", fontSize: 11.5, fontVariantNumeric: "tabular-nums" }}>
@@ -1347,7 +1390,7 @@ function PathList({ label, tone, paths }: { label: string; tone: string; paths: 
   const shown = paths.slice(0, 8);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-      <span style={{ color: tone, fontFamily: "var(--font-mono)", fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+      <span style={{ color: tone, fontFamily: "var(--font-sans)", fontSize: 10, fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase" }}>
         {label}
       </span>
       {shown.map((path, i) => (
@@ -1385,14 +1428,13 @@ function ReportView({ report, compact }: { report: WorkerReport; compact?: boole
             border: `1px solid color-mix(in oklch, ${tone} 45%, var(--rule))`,
             borderRadius: 4,
             padding: "1px 6px",
-            fontFamily: "var(--font-mono)",
-            fontSize: 9,
-            fontWeight: 700,
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: "0.02em",
           }}
         >
-          {report.status}
+          {sentenceCase(report.status)}
         </span>
         {report.verifier && <VerdictPill confidence={report.verifier.confidence} />}
       </div>
@@ -1422,14 +1464,13 @@ function ReportView({ report, compact }: { report: WorkerReport; compact?: boole
                 style={{
                   color:
                     test.result === "passed" ? "var(--ok)" : test.result === "failed" ? "var(--danger)" : "var(--muted)",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 9,
-                  fontWeight: 700,
-                  textTransform: "uppercase",
+                  fontFamily: "var(--font-sans)",
+                  fontSize: 10,
+                  fontWeight: 600,
                   flex: "0 0 auto",
                 }}
               >
-                {test.result}
+                {sentenceCase(test.result)}
               </span>
               <span style={{ color: "var(--ink-dim)", fontFamily: "var(--font-mono)", fontSize: 10.5, wordBreak: "break-word" }}>
                 {test.command}
@@ -1513,14 +1554,13 @@ function VerdictPill({ confidence }: { confidence: VerifierVerdict["confidence"]
         border: `1px solid color-mix(in oklch, ${tone} 45%, var(--rule))`,
         borderRadius: 4,
         padding: "1px 6px",
-        fontFamily: "var(--font-mono)",
-        fontSize: 9,
-        fontWeight: 700,
-        textTransform: "uppercase",
-        letterSpacing: "0.06em",
+        fontFamily: "var(--font-sans)",
+        fontSize: 10,
+        fontWeight: 600,
+        letterSpacing: "0.02em",
       }}
     >
-      verifier · {confidence}
+      Verifier · {sentenceCase(confidence)}
     </span>
   );
 }
@@ -1532,9 +1572,9 @@ function ReportGroup({ label, children }: { label: string; children: React.React
         style={{
           color: "var(--muted)",
           fontFamily: "var(--font-sans)",
-          fontSize: 9,
-          fontWeight: 700,
-          letterSpacing: "0.12em",
+          fontSize: 10,
+          fontWeight: 600,
+          letterSpacing: "0.06em",
           textTransform: "uppercase",
         }}
       >
@@ -1569,7 +1609,7 @@ function ReportSkeleton() {
 
 // ── Prompt block ─────────────────────────────────────────────────────────────
 
-function PromptBlock({ path }: { path: string }) {
+function PromptBlock({ runId, attemptId }: { runId: string; attemptId: string }) {
   const [open, setOpen] = useState(false);
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1580,10 +1620,10 @@ function PromptBlock({ path }: { path: string }) {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    void window.spark.fs
-      .readText(path)
-      .then((file) => {
-        if (!cancelled) setContent(file.content);
+    void window.spark.orchestration
+      .readWorkerPrompt(runId, attemptId)
+      .then((prompt) => {
+        if (!cancelled) setContent(prompt);
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -1594,7 +1634,7 @@ function PromptBlock({ path }: { path: string }) {
     return () => {
       cancelled = true;
     };
-  }, [open, path, content, loading]);
+  }, [open, runId, attemptId, content, loading]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -1673,8 +1713,8 @@ type FriendlyWorkerStatus = "queued" | "running" | "done" | "blocked";
 function friendlyRunLine(run: RunState, liveStep: StepState | undefined, attentionCount: number): string {
   if (attentionCount > 0) {
     return attentionCount === 1
-      ? "One item needs attention before the run can move cleanly."
-      : `${attentionCount} items need attention before the run can move cleanly.`;
+      ? "One item needs attention before the run can continue."
+      : `${attentionCount} items need attention before the run can continue.`;
   }
   if (liveStep) {
     return `Working on ${liveStep.title}.`;
@@ -1719,8 +1759,10 @@ function friendlyWorkerLine(
   return "Queued and waiting for Cora to launch it.";
 }
 
+// Plain unpadded index — "Step 1", queue count "2". Zero-padding read as
+// cockpit decoration.
 function pad(value: number): string {
-  return String(Math.max(0, value)).padStart(2, "0");
+  return String(Math.max(0, value));
 }
 
 function stepMark(status: StepState["status"]): "done" | "failed" | "running" | "pending" {

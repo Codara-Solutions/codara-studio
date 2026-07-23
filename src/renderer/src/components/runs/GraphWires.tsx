@@ -84,7 +84,6 @@ function Wire({ d, state }: { d: string; state: WireState }) {
           strokeWidth={1.9}
           strokeLinecap="round"
           vectorEffect="non-scaling-stroke"
-          style={{ filter: "drop-shadow(0 0 3px var(--accent-glow))" }}
         />
       </g>
     );
@@ -97,13 +96,7 @@ function Wire({ d, state }: { d: string; state: WireState }) {
       strokeWidth={state === "done" ? 1.7 : 1.5}
       strokeLinecap="round"
       vectorEffect="non-scaling-stroke"
-      style={
-        state === "blocked"
-          ? { filter: "drop-shadow(0 0 2px color-mix(in oklch, var(--danger) 38%, transparent))" }
-          : state === "done"
-            ? { opacity: 0.82 }
-            : undefined
-      }
+      style={state === "done" ? { opacity: 0.82 } : undefined}
     />
   );
 }
@@ -121,7 +114,6 @@ function Port({ x, y, state }: { x: number; y: number; state: WireState }) {
       stroke={color}
       strokeWidth={1.4}
       vectorEffect="non-scaling-stroke"
-      style={state === "active" ? { filter: "drop-shadow(0 0 3px var(--accent-glow))" } : undefined}
     />
   );
 }
@@ -214,6 +206,7 @@ function WorkerBranch({
   const trunkTop = box.y + box.h;
   const trunkBottom = lastWorker.box.y + lastWorker.box.h / 2;
   const corner = 12;
+  const cardUnderlap = 2;
 
   return (
     <g>
@@ -234,10 +227,9 @@ function WorkerBranch({
         return (
           <g key={worker.rowKey}>
             <Wire
-              d={`M ${trunkX},${wcy - corner} Q ${trunkX},${wcy} ${trunkX + corner},${wcy} L ${worker.box.x},${wcy}`}
+              d={`M ${trunkX},${wcy - corner} Q ${trunkX},${wcy} ${trunkX + corner},${wcy} L ${worker.box.x + cardUnderlap},${wcy}`}
               state={ribState}
             />
-            <Port x={worker.box.x} y={wcy} state={ribState} />
           </g>
         );
       })}

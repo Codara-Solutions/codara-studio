@@ -111,6 +111,15 @@ export function stepStatusLabel(status: StepState["status"]): string {
   }
 }
 
+// Sentence-case a status word for display: "running" -> "Running",
+// "retry_queued" -> "Retry queued". Status words render in quiet sentence-case
+// chips rather than ALL-CAPS mono.
+export function sentenceCase(value: string): string {
+  const text = value.replace(/[_-]+/g, " ").trim();
+  if (!text) return text;
+  return text.charAt(0).toUpperCase() + text.slice(1).toLowerCase();
+}
+
 // A step is "attention" when it has stalled in a state only the operator can
 // clear. Drives the loud danger treatment on the node and the inspector list.
 export function stepNeedsAttention(status: StepState["status"]): boolean {
@@ -333,7 +342,7 @@ export function formatTime(value: string): string {
 
 export function formatClock(value: string): string {
   const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return "--:--:--";
+  if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
@@ -342,25 +351,29 @@ export function formatClock(value: string): string {
   });
 }
 
+// Compact Vercel-build-style duration: "32s", "4m 32s", "1h 04m". Consumers
+// keep tabular-nums so the digits stay column-stable while ticking.
 export function formatDurationMs(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
 }
 
 export function formatSince(value: string): string {
   const start = new Date(value).getTime();
-  if (Number.isNaN(start)) return "--:--:--";
+  if (Number.isNaN(start)) return "—";
   return formatDurationMs(Math.max(0, Date.now() - start));
 }
 
 export function formatDuration(startedAt?: string, finishedAt?: string): string {
-  if (!startedAt) return "--:--:--";
+  if (!startedAt) return "—";
   const start = new Date(startedAt).getTime();
   const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
-  if (Number.isNaN(start) || Number.isNaN(end)) return "--:--:--";
+  if (Number.isNaN(start) || Number.isNaN(end)) return "—";
   return formatDurationMs(Math.max(0, end - start));
 }
 

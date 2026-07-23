@@ -343,7 +343,10 @@ export default function RunCanvas({
         return;
       }
       setSelectedStepId(null);
-      setSelectedWorkerTaskId((current) => (current === id ? null : id));
+      // Single click selects and opens the inspector only. The terminal is
+      // reached deliberately — the card's arrow, the inspector's "Open
+      // terminal" action, or a double click — never as a click side effect.
+      setSelectedWorkerTaskId(id);
       revealInspector();
     },
     [revealInspector],
@@ -355,8 +358,8 @@ export default function RunCanvas({
         suppressNextNodeClickRef.current = false;
         return;
       }
-      // Double-click is the explicit navigation gesture. Keep the worker
-      // selected so returning to Runs preserves its inspector context.
+      // Keep legacy double-click routing equivalent to the new single-click
+      // path. The selection survives so returning to Runs preserves context.
       setSelectedStepId(null);
       setSelectedWorkerTaskId(id);
       revealInspector();
@@ -400,6 +403,7 @@ export default function RunCanvas({
       >
         <div
           ref={viewportRef}
+          data-testid="run-canvas-viewport"
           onPointerDown={startPanning}
           onPointerMove={movePanning}
           onPointerUp={stopPanning}
@@ -483,6 +487,7 @@ export default function RunCanvas({
                 selectedWorkerTaskId={selectedWorkerTaskId}
                 onSelectStep={handleSelectStep}
                 onSelectWorker={handleSelectWorker}
+                onOpenWorkerTerminal={onOpenWorkerTerminal}
                 onClear={clearSelection}
               />
             </div>
@@ -685,8 +690,8 @@ function CollapsedRail({ onExpand }: { onExpand: () => void }) {
           writingMode: "vertical-rl",
           fontFamily: "var(--font-sans)",
           fontSize: 10,
-          fontWeight: 700,
-          letterSpacing: "0.16em",
+          fontWeight: 600,
+          letterSpacing: "0.08em",
           textTransform: "uppercase",
         }}
       >

@@ -287,7 +287,7 @@ function SkeletonStep({ index, dim }: { index: number; dim: boolean }) {
             fontWeight: 700,
           }}
         >
-          {String(index).padStart(2, "0")}
+          {index}
         </span>
         <Shimmer width={150} height={9} />
       </div>
@@ -402,8 +402,8 @@ function OutcomeNode({ run }: { run: RunState }) {
   const title = spawned ? "Standing terminals" : failed ? "Run failed" : "No steps run";
   const detail = spawned
     ? count > 0
-      ? `Cora opened ${count} interactive ${count === 1 ? "terminal" : "terminals"} in the workbench for you to drive.`
-      : "Cora opened standing terminals in the workbench for you to drive."
+      ? `Cora opened ${count} ${count === 1 ? "terminal" : "terminals"} in the workbench.`
+      : "Cora opened standing terminals in the workbench."
     : failed
       ? "Cora stopped before running any worker steps."
       : "Cora finished this chat without running any worker steps.";
@@ -417,7 +417,7 @@ function OutcomeNode({ run }: { run: RunState }) {
         boxSizing: "border-box",
         borderRadius: 12,
         border: `1px solid ${tone}`,
-        background: `linear-gradient(150deg, color-mix(in oklab, var(--panel-2) 86%, ${tone} 7%), color-mix(in oklab, var(--panel) 86%, transparent))`,
+        background: `color-mix(in oklab, ${tone} 5%, var(--panel))`,
         boxShadow: "var(--lift-hi), var(--shadow-2)",
         padding: "14px 16px",
         display: "flex",
@@ -447,11 +447,10 @@ function OutcomeNode({ run }: { run: RunState }) {
           <span
             style={{
               color: "var(--muted)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 9,
+              fontFamily: "var(--font-sans)",
+              fontSize: 10,
               fontWeight: 600,
-              letterSpacing: "0.13em",
-              textTransform: "uppercase",
+              letterSpacing: "0.04em",
             }}
           >
             Outcome
