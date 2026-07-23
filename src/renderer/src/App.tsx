@@ -460,7 +460,12 @@ export default function App() {
 
   // Tabs are scoped per-workspace so each workspace remembers its own layout.
   // useTabs internally swaps tab lists when the workspaceId argument changes.
-  const tabs = useTabs(activeId, activeWorkspace?.cwd, settings.terminalScrollbackLineLimit);
+  const tabs = useTabs(
+    activeId,
+    activeWorkspace?.cwd,
+    settings.terminalScrollbackLineLimit,
+    preferences.restoreAgentSessions === true,
+  );
 
   // One shared git status/log poll per active workspace — feeds the Source
   // Control panel, the explorer's changed-file decorations, and the diff

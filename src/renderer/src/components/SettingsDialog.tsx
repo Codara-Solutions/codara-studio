@@ -939,6 +939,23 @@ function GeneralSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
       <hr className="spark-divider" style={{ margin: "2px 0" }} />
 
       <SectionTitle
+        title="Agent sessions"
+        detail="Continue Claude/Codex terminal conversations across app restarts."
+      />
+      {hydrated ? (
+        <div style={{ display: "grid", gap: 6 }}>
+          <ToggleRow
+            title="Resume agent sessions on relaunch"
+            desc="Panes whose Claude/Codex agent was running at quit relaunch it with --resume, terminal output is restored, and a pane whose shell dies under a live agent (sleep, crash) resumes in place. When off, every relaunch starts fresh shells."
+            checked={preferences.restoreAgentSessions === true}
+            onChange={(v) => void setPreference("restoreAgentSessions", v)}
+          />
+        </div>
+      ) : null}
+
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+
+      <SectionTitle
         title="Performance"
         detail="Tune renderer resource usage. Some flags only apply after restart."
       />

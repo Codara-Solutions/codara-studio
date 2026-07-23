@@ -293,8 +293,10 @@ export interface AppPreferences {
   // regardless of this flag — Fable is only ever available to the main chat
   // and (when this is on) opt-in automations.
   fableEnabled?: boolean;
-  // Legacy compatibility only. Cold terminal hydration always strips session
-  // pointers, so this no longer enables resume-after-relaunch behavior.
+  // Opt-in (default off): persist terminal agent-session pointers + scrollback
+  // and resume Claude/Codex sessions after a full app relaunch (boot-once
+  // restore, in-place auto-resume after an unexpected pty death, and the
+  // "previous session available" hint). Off = fresh shells on every relaunch.
   restoreAgentSessions?: boolean;
 }
 

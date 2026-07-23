@@ -62,9 +62,11 @@ const DRAFT_CHAT_PREFIX = "draft:";
 // by the App sync effect — editor/terminal/preview tabs survive. v4
 // introduced chat-scoped Runs tabs. v3 dropped the removed "project"/CRM
 // tab kind. v2 introduced the recursive PaneNode tree on TerminalTab.
-// v6 introduced terminal agent session pointers. They remain readable for
-// compatibility, but cold hydration now strips all terminal process state so a
-// full app relaunch always starts fresh shells while preserving the layout.
+// v6: terminal leaves may carry a durable `agentSession` pointer (Claude/Codex
+// session id) and scrollback that survive restart so a reopened pane can
+// `--resume`. Persisting that process state is gated on the
+// `restoreAgentSessions` preference (default off = fresh shells on relaunch);
+// hydration reads whatever the last persist kept.
 const TAB_VERSION = 6;
 const MAX_TERMINAL_SCROLLBACK_CHARS = 40_000;
 
@@ -293,9 +295,17 @@ export function cleanupTransientTerminalState(node: PaneNode): void {
   if (node.kind === "leaf") {
     delete node.worker;
     delete node.autorun;
-    delete node.scrollback;
-    delete node.agentSession;
-    delete node.bootResume;
+    // Boot-once restore marker: minted here — at hydration, once per workspace
+    // per app run — and nowhere else. Only a pointer whose agent was RUNNING at
+    // quit (active===true, real sessionId) earns it; anything else (old blobs
+    // without `active`, idle panes, pending Codex captures with sessionId "")
+    // hydrates without one and never auto-resumes. When the restore preference
+    // is off, persist() already stripped the pointer, so nothing mints here.
+    if (node.agentSession?.active === true && node.agentSession.sessionId) {
+      node.bootResume = true;
+    } else {
+      delete node.bootResume;
+    }
     return;
   }
   cleanupTransientTerminalState(node.a);
@@ -307,6 +317,7 @@ function persist(
   tabs: Tab[],
   activeId: TabId | null,
   scrollbackLineLimit: number,
+  persistAgentState: boolean,
   closedChatRunIds?: string[],
 ): void {
   const key = storageKey(workspaceId);
@@ -315,7 +326,7 @@ function persist(
     const payload: PersistedShape = {
       v: TAB_VERSION,
       tabs: trimTabsScrollback(
-        stripTransientTerminalState(normalizeTerminalTitles(tabs)),
+        stripTransientTerminalState(normalizeTerminalTitles(tabs), persistAgentState),
         scrollbackLineLimit,
       ),
       activeId,
@@ -329,7 +340,7 @@ function persist(
   }
 }
 
-function stripTransientTerminalState(tabs: Tab[]): Tab[] {
+function stripTransientTerminalState(tabs: Tab[], persistAgentState: boolean): Tab[] {
   let changed = false;
   const next = tabs.flatMap((tab): Tab[] => {
     if (tab.kind === "terminal" && tab.scope?.kind === "workers") {
@@ -337,7 +348,7 @@ function stripTransientTerminalState(tabs: Tab[]): Tab[] {
       return [];
     }
     if (tab.kind !== "terminal") return [tab];
-    const root = stripTransientPaneState(tab.root);
+    const root = stripTransientPaneState(tab.root, persistAgentState);
     if (root === tab.root) return [tab];
     changed = true;
     return [{ ...tab, root }];
@@ -346,30 +357,36 @@ function stripTransientTerminalState(tabs: Tab[]): Tab[] {
 }
 
 // Exported for tests (scripts/test-session-restore.cjs); only persist calls it
-// in production.
-export function stripTransientPaneState(node: PaneNode): PaneNode {
+// in production. `keepAgentState` mirrors the restoreAgentSessions preference:
+// worker chips, autorun, and the boot-once marker are ALWAYS process-local and
+// stripped, but the durable resume pointer + scrollback survive persist only
+// when the user opted into resume-on-relaunch. Off keeps the fresh-shell
+// contract: a relaunch restores layout and cwd, never process state.
+export function stripTransientPaneState(node: PaneNode, keepAgentState = false): PaneNode {
   if (node.kind === "leaf") {
+    const dropProcessState = !keepAgentState && ("scrollback" in node || "agentSession" in node);
     if (
       !("worker" in node) &&
       !("autorun" in node) &&
-      !("scrollback" in node) &&
-      !("agentSession" in node) &&
-      !("bootResume" in node)
+      !("bootResume" in node) &&
+      !dropProcessState
     ) {
       return node;
     }
     const {
       worker: _worker,
       autorun: _autorun,
-      scrollback: _scrollback,
-      agentSession: _agentSession,
       bootResume: _bootResume,
       ...rest
     } = node;
+    if (!keepAgentState) {
+      delete rest.scrollback;
+      delete rest.agentSession;
+    }
     return rest;
   }
-  const a = stripTransientPaneState(node.a);
-  const b = stripTransientPaneState(node.b);
+  const a = stripTransientPaneState(node.a, keepAgentState);
+  const b = stripTransientPaneState(node.b, keepAgentState);
   return a === node.a && b === node.b ? node : { ...node, a, b };
 }
 
@@ -693,6 +710,11 @@ export function useTabs(
   workspaceId: string | null,
   defaultCwd?: string,
   terminalScrollbackLineLimit = TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
+  // Mirrors the restoreAgentSessions preference: when true, persisted layouts
+  // keep each pane's scrollback + agent-session pointer so a relaunch can
+  // replay output and `--resume`. False (default, and pre-preferences-load)
+  // persists layout/cwd only — the fresh-shell contract.
+  persistAgentState = false,
 ): UseTabsApi {
   const normalizedTerminalScrollbackLineLimit = normalizeTerminalScrollbackLineLimit(
     terminalScrollbackLineLimit,
@@ -772,6 +794,8 @@ export function useTabs(
   activeIdRef.current = activeId;
   const terminalScrollbackLineLimitRef = useRef(normalizedTerminalScrollbackLineLimit);
   terminalScrollbackLineLimitRef.current = normalizedTerminalScrollbackLineLimit;
+  const persistAgentStateRef = useRef(persistAgentState);
+  persistAgentStateRef.current = persistAgentState;
 
   // When the workspace switches, swap tabs to that workspace's live in-memory
   // snapshot first, then fall back to its persisted layout. Persistence strips
@@ -803,7 +827,7 @@ export function useTabs(
       persistTimer.current = null;
       const { workspaceId: ws, tabs: t, activeId: a } = persistPayloadRef.current;
       const closed = ws ? closedChatRunIdsByWorkspaceRef.current.get(ws) : null;
-      persist(ws, t, a, terminalScrollbackLineLimitRef.current, closed ? Array.from(closed) : undefined);
+      persist(ws, t, a, terminalScrollbackLineLimitRef.current, persistAgentStateRef.current, closed ? Array.from(closed) : undefined);
     }
     // Keep the inactive-layout mirror in sync with this switch: the workspace
     // we're LEAVING (with its final live tabs) becomes a hidden mounted stack,
@@ -895,12 +919,15 @@ export function useTabs(
       // pairs `tabs` with the workspace they actually belong to.
       const { workspaceId: ws, tabs: t, activeId: a } = persistPayloadRef.current;
       const closed = ws ? closedChatRunIdsByWorkspaceRef.current.get(ws) : null;
-      persist(ws, t, a, normalizedTerminalScrollbackLineLimit, closed ? Array.from(closed) : undefined);
+      persist(ws, t, a, normalizedTerminalScrollbackLineLimit, persistAgentStateRef.current, closed ? Array.from(closed) : undefined);
     }, 300);
     return () => {
       if (persistTimer.current !== null) window.clearTimeout(persistTimer.current);
     };
-  }, [tabs, activeId, workspaceId, normalizedTerminalScrollbackLineLimit]);
+    // persistAgentState in the deps: flipping the Settings toggle re-persists
+    // promptly, so turning restore OFF scrubs pointers/scrollback from storage
+    // instead of leaving them until the next layout change.
+  }, [tabs, activeId, workspaceId, normalizedTerminalScrollbackLineLimit, persistAgentState]);
 
   // Flush any pending persist on unmount so a layout change made just
   // before the component tears down isn't lost. Empty deps → runs only on
@@ -913,7 +940,7 @@ export function useTabs(
         persistTimer.current = null;
         const { workspaceId: ws, tabs: t, activeId: a } = persistPayloadRef.current;
         const closed = ws ? closedChatRunIdsByWorkspaceRef.current.get(ws) : null;
-        persist(ws, t, a, terminalScrollbackLineLimitRef.current, closed ? Array.from(closed) : undefined);
+        persist(ws, t, a, terminalScrollbackLineLimitRef.current, persistAgentStateRef.current, closed ? Array.from(closed) : undefined);
       }
     };
   }, []);
@@ -1936,6 +1963,7 @@ export function useTabs(
         tabsRef.current,
         activeIdRef.current,
         terminalScrollbackLineLimitRef.current,
+        persistAgentStateRef.current,
         closedChatRunIdsArray(),
       );
     }
@@ -2157,7 +2185,7 @@ export function useTabs(
         return { ...t, root };
       });
       if (!changed) return;
-      persist(tabsWorkspaceIdRef.current, next, activeIdRef.current, limit, closedChatRunIdsArray());
+      persist(tabsWorkspaceIdRef.current, next, activeIdRef.current, limit, persistAgentStateRef.current, closedChatRunIdsArray());
       setTabs(next);
     },
     [],
@@ -2202,7 +2230,7 @@ export function useTabs(
       const next = { ...live, tabs: nextTabs };
       liveWorkspaceTabsRef.current.set(targetWorkspaceId, next);
       const closed = closedChatRunIdsByWorkspaceRef.current.get(targetWorkspaceId);
-      persist(targetWorkspaceId, nextTabs, next.activeId, limit, closed ? Array.from(closed) : undefined);
+      persist(targetWorkspaceId, nextTabs, next.activeId, limit, persistAgentStateRef.current, closed ? Array.from(closed) : undefined);
       setInactiveWorkspaceLayouts((current) =>
         current.map((layout) =>
           layout.workspaceId === targetWorkspaceId ? { ...layout, tabs: nextTabs } : layout,

@@ -251,9 +251,13 @@ function normalize(
       typeof src.fableEnabled === "boolean"
         ? src.fableEnabled
         : DEFAULT_PREFERENCES.fableEnabled,
-    // Retain the key for old preference files/API consumers, but the fresh-shell
-    // contract permanently disables cold agent-session restoration.
-    restoreAgentSessions: false,
+    // Opt-in: relaunches only resume agent sessions when the user enabled the
+    // Settings toggle. Absent/invalid values fall back to the default (off),
+    // which preserves the fresh-shell behavior for existing preference files.
+    restoreAgentSessions:
+      typeof src.restoreAgentSessions === "boolean"
+        ? src.restoreAgentSessions
+        : DEFAULT_PREFERENCES.restoreAgentSessions,
   };
 }
 
