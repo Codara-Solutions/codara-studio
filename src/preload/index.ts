@@ -156,6 +156,18 @@ interface AgentSessionStartRecord {
   timestamp: string;
 }
 
+// One past conversation for a workspace cwd (src/main/agent-history.ts).
+// Mirrors that module's AgentHistoryEntry; kept local so the preload stays
+// free of main-process imports.
+interface AgentHistoryEntry {
+  runtime: "claude" | "codex";
+  sessionId: string;
+  cwd: string;
+  title: string;
+  lastActivityAt: string;
+  transcriptPath: string;
+}
+
 const api = {
   state: {
     load: (): Promise<AppState> => ipcRenderer.invoke("state:load"),
@@ -711,6 +723,10 @@ const api = {
     // the pane (hooks not installed / python missing / external launch).
     latestStart: (paneId: string): Promise<AgentSessionStartRecord | null> =>
       ipcRenderer.invoke("agentSession:latestStart", { paneId }),
+    // Every resumable Claude/Codex conversation recorded for a workspace cwd,
+    // newest activity first — the pane-toolbar history menu's data source.
+    history: (args: { cwd: string; limit?: number }): Promise<AgentHistoryEntry[]> =>
+      ipcRenderer.invoke("agentSession:history", args),
     // Live SessionStart events, fired as Claude sessions start / resume /
     // clear inside Codara panes. Returns an unsubscribe.
     onStarted: (handler: (rec: AgentSessionStartRecord) => void): (() => void) => {

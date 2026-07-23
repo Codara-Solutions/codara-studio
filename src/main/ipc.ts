@@ -60,6 +60,7 @@ import {
 } from "./orchestration/claude-paths";
 import { discoverRolloutForCwd, extractSessionUuid } from "./orchestration/codex-sessions";
 import { latestSessionStart } from "./agent-session-registry";
+import { listAgentHistoryForCwd } from "./agent-history";
 import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import {
   clearCenter,
@@ -1503,6 +1504,18 @@ export function registerIpc(): void {
         if (stat) return { exists: true, resumable: stat.size >= 1_024, transcriptPath: path };
       }
       return { exists: false };
+    },
+  );
+
+  // Per-workspace conversation history for the pane-toolbar history menu:
+  // every resumable Claude/Codex session recorded for this cwd, newest first.
+  // Read-only listing; the renderer resumes by injecting the CLI's own
+  // resume command into a pane, so no session state changes here.
+  ipcMain.handle(
+    "agentSession:history",
+    async (_e, args: { cwd: string; limit?: number }) => {
+      if (!args?.cwd || typeof args.cwd !== "string") return [];
+      return listAgentHistoryForCwd(args.cwd, { limit: args.limit }).catch(() => []);
     },
   );
 

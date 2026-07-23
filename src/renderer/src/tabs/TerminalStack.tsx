@@ -20,7 +20,7 @@ import type {
   TerminalSplit,
   TerminalTab,
 } from "./types";
-import { CloseIcon, DragHandleIcon, PlusIcon, SplitDownIcon, SplitRightIcon, ZoomPaneIcon } from "../components/icons";
+import { CloseIcon, DragHandleIcon, HistoryIcon, PlusIcon, SplitDownIcon, SplitRightIcon, ZoomPaneIcon } from "../components/icons";
 import {
   TERMINAL_PANE_DRAG_MIME,
   beginTerminalPaneDrag,
@@ -37,6 +37,7 @@ import {
 import {
   CLAUDE_LAUNCH_COMMAND,
   CODEX_LAUNCH_COMMAND,
+  buildAgentResumeCommand,
 } from "../workers/launch-commands";
 
 // TerminalStack hosts every terminal tab in the workspace. Each tab carries a
@@ -1063,6 +1064,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
             {!placeOffScreen ? (
               <PaneToolbar
                 dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
+                cwd={leaf.cwd}
                 onSmartAdd={bundle.onSmartAdd}
                 onSplitRight={bundle.onSplitRight}
                 onSplitDown={bundle.onSplitDown}
@@ -1883,6 +1885,9 @@ function ResizeIntersectionGrip({
 
 interface PaneToolbarProps {
   dragPayload: TerminalPaneDragPayload;
+  // The pane's working directory — scopes the history menu's conversation
+  // listing to this workspace. Undefined until the shell reports a cwd.
+  cwd?: string;
   onSmartAdd: (autorun?: string) => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
@@ -1894,6 +1899,7 @@ interface PaneToolbarProps {
 
 function PaneToolbar({
   dragPayload,
+  cwd,
   onSmartAdd,
   onSplitRight,
   onSplitDown,
@@ -1903,7 +1909,10 @@ function PaneToolbar({
   visible,
 }: PaneToolbarProps) {
   const stop = (e: React.MouseEvent | React.PointerEvent) => e.stopPropagation();
-  const [menuOpen, setMenuOpen] = useState(false);
+  // One popover at a time: the add-pane picker or the conversation-history
+  // list. Both portal to the same anchored position machinery below.
+  const [openMenu, setOpenMenu] = useState<null | "add" | "history">(null);
+  const menuOpen = openMenu !== null;
   // Declarative hover state drives the toolbar's rest/hover opacity from one
   // React-owned source, replacing the imperative e.currentTarget.style.opacity
   // mutation on mouseenter/leave (which bypassed React and could desync with
@@ -1912,10 +1921,11 @@ function PaneToolbar({
   const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const plusRef = useRef<HTMLButtonElement | null>(null);
+  const historyRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (!visible) setMenuOpen(false);
+    if (!visible) setOpenMenu(null);
   }, [visible]);
 
   useEffect(() => {
@@ -1924,7 +1934,8 @@ function PaneToolbar({
       return;
     }
     const updatePosition = () => {
-      const anchor = plusRef.current?.getBoundingClientRect();
+      const anchorButton = openMenu === "history" ? historyRef.current : plusRef.current;
+      const anchor = anchorButton?.getBoundingClientRect();
       if (!anchor) return;
       const menuWidth = menuRef.current?.offsetWidth ?? 238;
       const menuHeight = menuRef.current?.offsetHeight ?? 140;
@@ -1947,7 +1958,7 @@ function PaneToolbar({
       window.removeEventListener("resize", updatePosition);
       window.removeEventListener("scroll", updatePosition, true);
     };
-  }, [menuOpen]);
+  }, [openMenu]);
 
   // Close on outside click / Escape. The menu is portaled out of the filtered
   // toolbar, so both DOM islands count as inside.
@@ -1959,11 +1970,11 @@ function PaneToolbar({
         !wrapRef.current?.contains(e.target) &&
         !menuRef.current?.contains(e.target)
       ) {
-        setMenuOpen(false);
+        setOpenMenu(null);
       }
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenuOpen(false);
+      if (e.key === "Escape") setOpenMenu(null);
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
@@ -2021,11 +2032,20 @@ function PaneToolbar({
       <ToolbarButton
         ref={plusRef}
         title="Add pane…"
-        onClick={() => setMenuOpen((o) => !o)}
-        active={menuOpen}
+        onClick={() => setOpenMenu((o) => (o === "add" ? null : "add"))}
+        active={openMenu === "add"}
         hasPopup
       >
         <PlusIcon size={12} />
+      </ToolbarButton>
+      <ToolbarButton
+        ref={historyRef}
+        title="Previous conversations…"
+        onClick={() => setOpenMenu((o) => (o === "history" ? null : "history"))}
+        active={openMenu === "history"}
+        hasPopup
+      >
+        <HistoryIcon size={12} />
       </ToolbarButton>
       <span
         aria-hidden
@@ -2052,15 +2072,31 @@ function PaneToolbar({
       <ToolbarButton title="Close pane" onClick={onClose} danger>
         <CloseIcon size={12} />
       </ToolbarButton>
-      {menuOpen && menuPosition && createPortal(
+      {openMenu === "add" && menuPosition && createPortal(
         <AddPaneMenu
           ref={menuRef}
           position={menuPosition}
           onPick={(kind) => {
-            setMenuOpen(false);
+            setOpenMenu(null);
             if (kind === "shell") onSmartAdd();
             else if (kind === "claude") onSmartAdd(CLAUDE_LAUNCH_COMMAND);
             else if (kind === "codex") onSmartAdd(CODEX_LAUNCH_COMMAND);
+          }}
+        />,
+        document.body,
+      )}
+      {openMenu === "history" && menuPosition && createPortal(
+        <HistoryMenu
+          ref={menuRef}
+          position={menuPosition}
+          cwd={cwd}
+          onPick={(entry) => {
+            setOpenMenu(null);
+            // Resume in a pane via the same smart-add path as the worker
+            // launchers: an untouched focused pane gets the command injected,
+            // a busy one gets a fresh sibling pane. The command carries the
+            // CLI's permission-skip flags (see launch-commands.ts).
+            onSmartAdd(buildAgentResumeCommand(entry));
           }}
         />,
         document.body,
@@ -2330,6 +2366,196 @@ function AddPaneMenuItem({
         }}
       >
         &gt;
+      </span>
+    </button>
+  );
+}
+
+// One past conversation for this pane's cwd. Mirrors main's AgentHistoryEntry
+// (src/main/agent-history.ts) via the preload contract.
+interface PaneHistoryEntry {
+  runtime: "claude" | "codex";
+  sessionId: string;
+  cwd: string;
+  title: string;
+  lastActivityAt: string;
+  transcriptPath: string;
+}
+
+// Compact "3h" / "2d" age label for history rows (same scale as the chat
+// panel's relative timestamps).
+function formatHistoryAge(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "";
+  const diffMs = Date.now() - t;
+  if (diffMs < 45_000) return "now";
+  const min = Math.floor(diffMs / 60_000);
+  if (min < 60) return `${min}m`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d`;
+  const wk = Math.floor(day / 7);
+  if (wk < 5) return `${wk}w`;
+  const mo = Math.floor(day / 30);
+  return mo < 12 ? `${mo}mo` : `${Math.floor(day / 365)}y`;
+}
+
+// Conversation-history popover for the pane toolbar's clock button: every
+// resumable Claude/Codex session recorded for this pane's cwd, newest first.
+// Picking one relaunches it via the CLI's own resume command (smart-add).
+const HistoryMenu = React.forwardRef<
+  HTMLDivElement,
+  {
+    position: { top: number; left: number };
+    cwd?: string;
+    onPick: (entry: PaneHistoryEntry) => void;
+  }
+>(function HistoryMenu({ position, cwd, onPick }, ref) {
+  const [entries, setEntries] = useState<PaneHistoryEntry[] | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    if (!cwd) {
+      setEntries([]);
+      return;
+    }
+    window.spark.agentSession
+      .history({ cwd, limit: 30 })
+      .then((list) => {
+        if (!disposed) setEntries(list);
+      })
+      .catch(() => {
+        if (!disposed) setEntries([]);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [cwd]);
+
+  return (
+    <div
+      ref={ref}
+      role="menu"
+      aria-label="Previous conversations"
+      className="spark-menu"
+      style={{
+        position: "fixed",
+        top: position.top,
+        left: position.left,
+        zIndex: 50,
+        minWidth: 300,
+        maxWidth: 380,
+        maxHeight: 380,
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      <div
+        style={{
+          padding: "5px 9px 4px",
+          fontSize: 10,
+          fontWeight: 600,
+          letterSpacing: 0.4,
+          textTransform: "uppercase",
+          color: "var(--muted)",
+        }}
+      >
+        Previous conversations
+      </div>
+      <div style={{ display: "grid", gap: 1, overflowY: "auto", minHeight: 0 }}>
+        {entries === null ? (
+          <div style={{ padding: "8px 9px 10px", fontSize: 12, color: "var(--muted)" }}>
+            Loading…
+          </div>
+        ) : entries.length === 0 ? (
+          <div style={{ padding: "8px 9px 10px", fontSize: 12, color: "var(--muted)" }}>
+            No previous conversations in this workspace.
+          </div>
+        ) : (
+          entries.map((entry) => (
+            <HistoryMenuItem
+              key={`${entry.runtime}:${entry.sessionId}`}
+              entry={entry}
+              onClick={() => onPick(entry)}
+            />
+          ))
+        )}
+      </div>
+    </div>
+  );
+});
+
+function HistoryMenuItem({
+  entry,
+  onClick,
+}: {
+  entry: PaneHistoryEntry;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  const [focus, setFocus] = useState(false);
+  const active = hover || focus;
+  const tone = menuItemTone(entry.runtime);
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      className="spark-menu-item"
+      title={`Resume this ${entry.runtime === "claude" ? "Claude" : "Codex"} conversation in a pane`}
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onFocus={() => setFocus(true)}
+      onBlur={() => setFocus(false)}
+      style={{
+        textAlign: "left",
+        ...(focus ? { background: "var(--hover)" } : null),
+        padding: "5px 7px",
+        cursor: "default",
+        display: "grid",
+        gridTemplateColumns: "22px minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 8,
+        minHeight: 32,
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 22,
+          height: 22,
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          borderRadius: 6,
+          color: tone.color,
+          background: tone.background,
+          border: `1px solid ${tone.border}`,
+        }}
+      >
+        <RuntimeGlyph letter={entry.runtime === "claude" ? "C" : "X"} />
+      </span>
+      <span
+        style={{
+          fontSize: 12,
+          lineHeight: 1.25,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {entry.title}
+      </span>
+      <span
+        style={{
+          color: active ? "var(--ink-dim)" : "var(--muted)",
+          fontSize: 10,
+          fontFamily: "var(--font-mono)",
+          flex: "0 0 auto",
+        }}
+      >
+        {formatHistoryAge(entry.lastActivityAt)}
       </span>
     </button>
   );
