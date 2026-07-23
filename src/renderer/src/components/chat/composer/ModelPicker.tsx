@@ -4,6 +4,7 @@ import { usePreferences } from "../../../preferences/usePreferences";
 import {
   buildVisibleGroups,
   composeModelId,
+  findOptionInCatalog,
   type ChatBackendGroup,
   type ChatModelOption,
 } from "./types";
@@ -74,7 +75,12 @@ export default function ModelPicker({
     fableEnabled: preferences.fableEnabled === true,
   });
   const activeCompoundId = composeModelId(activeModelId, activeOneMillion);
-  const activeLabel = labelFor(groups, activeBackend, activeCompoundId, activeModelId);
+  // Claude/Codex labels come from the static catalog immediately. Waiting for
+  // runtime diagnostics made the pill first paint a raw/default id and then
+  // replace it with the friendly saved-model label a moment later.
+  const activeLabel =
+    findOptionInCatalog(activeBackend, activeModelId, activeOneMillion)?.label ??
+    labelFor(groups, activeBackend, activeCompoundId, activeModelId);
 
   const select = (model: ChatModelOption) => {
     onPick(model);
@@ -107,7 +113,7 @@ export default function ModelPicker({
         {activeLabel}
       </button>
       {open && (
-        <div className="composer-model-menu" role="listbox">
+        <div className="composer-model-menu spark-menu" role="listbox">
           {groups.length === 0 && (
             <div className="composer-model-empty">
               No models available — install Claude/Codex CLI or set an OpenRouter model in Settings.

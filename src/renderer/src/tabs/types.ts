@@ -208,7 +208,24 @@ export interface AutomationsTab extends BaseTab {
   kind: "automations";
 }
 
-export type Tab = ChatTab | EditorTab | TerminalTab | PreviewTab | RunsTab | AutomationsTab | DiffTab;
+// An untitled whiteboard draft opened from the "+" picker. The board content
+// itself is runtime-only (a module-level draft map in WhiteboardFilePreview
+// keyed by this tab's id), so these tabs are never restored from a persisted
+// layout — the first save-as replaces the draft tab with a regular editor tab
+// bound to the saved .coraboard file, which IS durable.
+export interface WhiteboardTab extends BaseTab {
+  kind: "whiteboard";
+}
+
+export type Tab =
+  | ChatTab
+  | EditorTab
+  | TerminalTab
+  | PreviewTab
+  | RunsTab
+  | AutomationsTab
+  | WhiteboardTab
+  | DiffTab;
 
 export type TabKind = Tab["kind"];
 

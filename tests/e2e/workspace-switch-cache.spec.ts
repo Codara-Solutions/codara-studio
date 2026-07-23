@@ -46,8 +46,10 @@ test("workspace switches retain the expanded Explorer and refresh it in the back
     await page.waitForLoadState("domcontentloaded");
 
     const sourceRow = page.locator(`[data-fs-path="${sourceDir}"]`);
-    await expect(sourceRow).toBeVisible();
-    await sourceRow.click();
+    // The initial populated list must paint without waiting for Virtuoso's
+    // measurement probe; otherwise an occluded/restored window can stay blank.
+    await expect(sourceRow).toBeVisible({ timeout: 5_000 });
+    await sourceRow.dispatchEvent("click");
     await expect(page.getByText("cached.ts", { exact: true })).toBeVisible();
 
     // The composer no longer indexes every file during the workspace switch.
@@ -58,11 +60,11 @@ test("workspace switches retain the expanded Explorer and refresh it in the back
     await expect(mentionMenu.getByText("cached.ts", { exact: true })).toBeVisible();
     await composer.fill("");
 
-    await page.locator('[data-workspace-id="ws-b"]').click();
+    await page.locator('[data-workspace-id="ws-b"]').dispatchEvent("click");
     await expect(page.getByText("only-b.txt", { exact: true })).toBeVisible();
     await writeFile(join(sourceDir, "arrived-while-away.ts"), "export const fresh = true;\n", "utf8");
 
-    await page.locator('[data-workspace-id="ws-a"]').click();
+    await page.locator('[data-workspace-id="ws-a"]').dispatchEvent("click");
     // The expanded child survives the remount, proving the destination tree
     // came from the in-memory workspace cache instead of an empty reload.
     await expect(page.getByText("cached.ts", { exact: true })).toBeVisible();

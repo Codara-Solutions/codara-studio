@@ -250,7 +250,7 @@ function sparkCallTimelineItem(call: SparkCall): Extract<ChatTimelineItem, { kin
     title:
       call.mode === "chat"
         ? live
-          ? "Working…"
+          ? "Cora is working"
           : failed
             ? "Turn failed"
             : duration
@@ -260,7 +260,7 @@ function sparkCallTimelineItem(call: SparkCall): Extract<ChatTimelineItem, { kin
     detail: failed
       ? call.error || "Manager call failed."
       : live
-        ? `Calling ${call.model || "manager"}`
+        ? "Following the thread and choosing the next useful action"
         : managerModeCompletedDetail(call),
     status: call.status,
     tone: failed ? "failed" : live ? "live" : "done",

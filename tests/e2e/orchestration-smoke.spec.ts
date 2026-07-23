@@ -1,4 +1,4 @@
-import { test, expect, type ElectronApplication, type Page } from "@playwright/test";
+import { test, expect, type ElectronApplication, type Locator, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
 import { mkdtemp, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -26,6 +26,7 @@ test("autopilot runs from a selected markdown plan", async () => {
         // worker task whose pane is a plain shell: nothing external spawns
         // and nothing completes until the test writes the report.
         SPARK_ENABLE_MANUAL_FALLBACK: "1",
+        SPARK_E2E_LEGACY_WORKER_HARNESS: "1",
         // Worker panes must stay open until the test writes their report;
         // shell-integration injection can crash zsh startup in the Playwright
         // env ("Worker pane closed before final report", exit 1 within ~1s).
@@ -95,7 +96,7 @@ test("autopilot runs from a selected markdown plan", async () => {
     // which swaps the composer into its note-and-resume form. (A blocked
     // AUTOPILOT with a "reviewing" RUN still shows the normal composer — only
     // run.status paused/blocked does.)
-    await page.getByRole("button", { name: "Stop run" }).click();
+    await clickAttached(page.getByRole("button", { name: "Stop run" }));
     await expectRunEvent(page, runId, "run.force_paused", 15_000);
 
     // Two human notes while paused, then resume.
@@ -152,7 +153,9 @@ test("spark chat renders as a workbench tab", async () => {
     // a bare /Explorer/ regex also matches the Refresh/Reveal icon buttons.
     // At this 900px compact viewport the right rail starts collapsed and is
     // available as an overlay through the window-chrome toggle.
-    await page.getByTitle("Toggle right sidebar").click();
+    const rightSidebarToggle = page.getByTitle("Toggle right sidebar");
+    await expect(rightSidebarToggle).toBeAttached();
+    await rightSidebarToggle.dispatchEvent("click");
     await expect(page.getByRole("button", { name: "Explorer workspace" })).toBeVisible();
   } finally {
     await app?.close();
@@ -161,6 +164,26 @@ test("spark chat renders as a workbench tab", async () => {
 
 test("settings dialog saves default terminal, OpenRouter, and inline model settings", async () => {
   const { userDataDir } = await prepareElectronWorkspace("spark-agent-settings-e2e-");
+  const piAuthDir = join(userDataDir, "pi-agent");
+  await mkdir(piAuthDir, { recursive: true });
+  await writeFile(
+    join(piAuthDir, "auth.json"),
+    JSON.stringify({
+      anthropic: {
+        type: "oauth",
+        access: "synthetic-anthropic-access-never-cross-ipc",
+        refresh: "synthetic-anthropic-refresh-never-cross-ipc",
+        expires: Date.now() + 60 * 60 * 1000,
+      },
+      "openai-codex": {
+        type: "oauth",
+        access: "synthetic-openai-access-never-cross-ipc",
+        refresh: "synthetic-openai-refresh-never-cross-ipc",
+        expires: Date.now() + 60 * 60 * 1000,
+      },
+    }),
+    { encoding: "utf8", mode: 0o600 },
+  );
   await writeFile(
     join(userDataDir, "spark-preferences.json"),
     JSON.stringify({ inlineAutocompleteModelId: "google/gemini-3.1-flash-lite" }, null, 2),
@@ -179,33 +202,86 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
 
-    await page.getByRole("button", { name: "Settings" }).click();
+    const settingsButton = page.getByRole("button", { name: "Settings" });
+    await expect(settingsButton).toBeAttached();
+    const settingsOpenLatencyMs = await settingsButton.evaluate((button) => new Promise<number>((resolve) => {
+      const startedAt = performance.now();
+      const existing = document.querySelector("[data-settings-surface]");
+      if (existing) {
+        resolve(0);
+        return;
+      }
+      const observer = new MutationObserver(() => {
+        if (!document.querySelector("[data-settings-surface]")) return;
+        observer.disconnect();
+        resolve(performance.now() - startedAt);
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }));
+    expect(settingsOpenLatencyMs).toBeLessThan(250);
     await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
+    const settingsGlass = await page.evaluate(() => {
+      const surface = document.querySelector<HTMLElement>("[data-settings-surface]");
+      const scrim = document.querySelector<HTMLElement>(".settings-dialog-scrim");
+      if (!surface || !scrim) return null;
+      return {
+        surfaceBackdrop: getComputedStyle(surface).backdropFilter,
+        scrimBackdrop: getComputedStyle(scrim).backdropFilter,
+      };
+    });
+    expect(settingsGlass).not.toBeNull();
+    expect(settingsGlass!.surfaceBackdrop).not.toContain("url(");
+    expect(settingsGlass!.scrimBackdrop).toBe("none");
 
-    await page.getByRole("button", { name: "Editor" }).click();
+    await clickAttached(page.getByRole("button", { name: "Agents" }));
+    await expect(page.getByText("Cora subscriptions", { exact: true })).toBeVisible();
+    await expect(page.getByText("ChatGPT Plus / Pro", { exact: true })).toBeVisible();
+    await expect(page.getByText("Claude Pro / Max", { exact: true })).toBeVisible();
+    await expect(page.getByText(/one auth store for manager \+ workers/)).toBeVisible();
+    await expect(page.getByText(/GPT-5\.6 Sol · Connected/)).toBeVisible();
+    await expect(page.getByText(/Fable 5 · Connected/)).toBeVisible();
+    const serializedSubscriptionStatus = await page.evaluate(async () => {
+      const spark = (window as unknown as { spark: any }).spark;
+      return JSON.stringify(await spark.piSubscriptions.status());
+    });
+    expect(serializedSubscriptionStatus).not.toContain("synthetic-anthropic-access");
+    expect(serializedSubscriptionStatus).not.toContain("synthetic-anthropic-refresh");
+    expect(serializedSubscriptionStatus).not.toContain("synthetic-openai-access");
+    expect(serializedSubscriptionStatus).not.toContain("synthetic-openai-refresh");
+
+    await clickAttached(page.getByRole("button", { name: "Sessions" }));
+    const restoreSessions = page.getByRole("switch", {
+      name: "Resume running agent sessions when Codara reopens",
+    });
+    await expect(restoreSessions).toHaveAttribute("aria-checked", "false");
+    await clickAttached(restoreSessions);
+    await expect(restoreSessions).toHaveAttribute("aria-checked", "true");
+
+    await clickAttached(page.getByRole("button", { name: "Editor" }));
     const inlineModelInput = page.getByRole("textbox", { name: "Inline AI model" });
     await expect(inlineModelInput).toHaveValue("google/gemini-3.5-flash");
     await expect(page.getByRole("button", { name: "Use Gemini 3.5 Flash for Inline AI" })).toHaveAttribute(
       "aria-pressed",
       "true",
     );
-    await page.getByRole("button", { name: "Use Gemini 3.5 Flash Nitro for Inline AI" }).click();
+    await clickAttached(page.getByRole("button", { name: "Use Gemini 3.5 Flash Nitro for Inline AI" }));
     await expect(inlineModelInput).toHaveValue("google/gemini-3.5-flash:nitro");
-    await page.getByRole("button", { name: "Use GLM-4.7 Nitro for Inline AI" }).click();
+    await clickAttached(page.getByRole("button", { name: "Use GLM-4.7 Nitro for Inline AI" }));
     await expect(inlineModelInput).toHaveValue("z-ai/glm-4.7:nitro");
-    await page.getByRole("button", { name: "Use default Inline AI model" }).click();
+    await clickAttached(page.getByRole("button", { name: "Use default Inline AI model" }));
     await expect(inlineModelInput).toHaveValue("google/gemini-3.5-flash");
     const inlineWaitInput = page.getByLabel("Inline AI wait time");
     await expect(inlineWaitInput).toHaveValue("0");
-    await page.getByRole("button", { name: /After pause/ }).click();
+    await clickAttached(page.getByRole("button", { name: /After pause/ }));
     await expect(inlineWaitInput).toHaveValue("1500");
 
-    await page.getByRole("button", { name: "Default terminal" }).click();
+    await clickAttached(page.getByRole("button", { name: "Default terminal" }));
     const terminalButton = page.getByRole("button", { name: /Use .* as default terminal/ }).first();
     await expect(terminalButton).toBeVisible();
-    await terminalButton.click();
+    await clickAttached(terminalButton);
 
-    await page.getByRole("button", { name: "API and model" }).click();
+    await clickAttached(page.getByRole("button", { name: "API and model" }));
     await page.getByLabel("OPENROUTER API KEY").fill("test-openrouter-key");
     await page.getByLabel("MODEL").fill("test/settings-model");
     await clickButton(page, "Save");
@@ -224,10 +300,64 @@ test("settings dialog saves default terminal, OpenRouter, and inline model setti
       .poll(async () => {
         const preferences = JSON.parse(
           await readFile(join(userDataDir, "spark-preferences.json"), "utf8"),
-        ) as { inlineAutocompleteDelayMs?: number; inlineAutocompleteModelId?: string };
-        return `${preferences.inlineAutocompleteModelId}:${preferences.inlineAutocompleteDelayMs}`;
+        ) as {
+          inlineAutocompleteDelayMs?: number;
+          inlineAutocompleteModelId?: string;
+          restoreAgentSessions?: boolean;
+        };
+        return `${preferences.inlineAutocompleteModelId}:${preferences.inlineAutocompleteDelayMs}:${preferences.restoreAgentSessions}`;
       })
-      .toBe("google/gemini-3.5-flash:1500");
+      .toBe("google/gemini-3.5-flash:1500:true");
+
+    // The Capability Center shares Settings' footprint. Its shell must also
+    // paint without the SVG lens/full-screen blur combination that made
+    // opening and typing visibly trail the pointer.
+    const capabilityOpenLatencyMs = await page.getByTitle("MCP and skills").evaluate((button) => new Promise<number>((resolve) => {
+      const startedAt = performance.now();
+      const observer = new MutationObserver(() => {
+        if (!document.querySelector("[data-agent-capabilities-surface]")) return;
+        observer.disconnect();
+        resolve(performance.now() - startedAt);
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }));
+    expect(capabilityOpenLatencyMs).toBeLessThan(250);
+    await expect(page.getByRole("dialog", { name: "Capability Center" })).toBeVisible();
+    const capabilityGlass = await page.evaluate(() => {
+      const surface = document.querySelector<HTMLElement>("[data-agent-capabilities-surface]");
+      const scrim = document.querySelector<HTMLElement>(".agent-capabilities-scrim");
+      if (!surface || !scrim) return null;
+      return {
+        surfaceBackdrop: getComputedStyle(surface).backdropFilter,
+        scrimBackdrop: getComputedStyle(scrim).backdropFilter,
+        scrollContain: getComputedStyle(document.querySelector<HTMLElement>(".agent-capabilities-scroll")!).contain,
+        cardVisibility: getComputedStyle(document.querySelector<HTMLElement>(".agent-capability-card")!).contentVisibility,
+        width: surface.getBoundingClientRect().width,
+        height: surface.getBoundingClientRect().height,
+        borderRadius: getComputedStyle(surface).borderRadius,
+        expectedWidth: Math.min(860, window.innerWidth - 44),
+        expectedHeight: Math.min(760, window.innerHeight - 44),
+      };
+    });
+    expect(capabilityGlass).not.toBeNull();
+    expect(capabilityGlass!.surfaceBackdrop).toBe("none");
+    expect(capabilityGlass!.scrimBackdrop).toBe("none");
+    expect(capabilityGlass!.scrollContain).toMatch(/content|paint/);
+    expect(capabilityGlass!.cardVisibility).toBe("auto");
+    expect(capabilityGlass!.width).toBe(capabilityGlass!.expectedWidth);
+    expect(capabilityGlass!.height).toBe(capabilityGlass!.expectedHeight);
+    expect(capabilityGlass!.borderRadius).toBe("12px");
+    if (process.env.SPARK_CAPABILITY_SCREENSHOT) {
+      await page.screenshot({ path: process.env.SPARK_CAPABILITY_SCREENSHOT });
+    }
+    const capabilityNavigation = page.getByRole("navigation", { name: "Capability Center navigation" });
+    await expect(capabilityNavigation.getByRole("button", { name: /Overview/ })).toHaveAttribute("aria-current", "page");
+    await capabilityNavigation.getByRole("button", { name: /MCP servers/ }).dispatchEvent("click");
+    const capabilitySearch = page.getByPlaceholder("Filter MCP servers by name or path");
+    await capabilitySearch.fill("playwright");
+    await expect(capabilitySearch).toHaveValue("playwright");
+    await page.getByRole("button", { name: "Close", exact: true }).click();
   } finally {
     await app?.close();
   }
@@ -255,7 +385,7 @@ test("runs can be deleted from the run list inline", async () => {
     // Runs are now deleted inline from the chat-history popover (header button
     // "Open chat history") with a two-step arm/confirm on each row, replacing
     // the old DELETE RUN / CONFIRM DELETE run-list buttons.
-    await page.getByRole("button", { name: "Open chat history" }).click();
+    await clickAttached(page.getByRole("button", { name: "Open chat history" }));
     const deleteChat = page.getByRole("button", { name: "Delete chat", exact: true });
     await expect(deleteChat).toBeVisible({ timeout: 10_000 });
     // dispatchEvent, not click(): the popover rows re-render on run-store sync
@@ -288,6 +418,7 @@ test("run uses the latest selected plan text instead of reusing old worker tasks
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,
         SPARK_ENABLE_MANUAL_FALLBACK: "1",
+        SPARK_E2E_LEGACY_WORKER_HARNESS: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });
@@ -343,6 +474,7 @@ test("OpenRouter manager can plan Claude and Codex worker tasks", async () => {
         SPARK_OPENROUTER_BASE_URL: server.baseUrl,
         SPARK_OPENROUTER_MODEL: "test/unsupported-manager",
         SPARK_OPENROUTER_STRUCTURED_FALLBACK_MODEL: "test/spark-manager",
+        SPARK_E2E_LEGACY_WORKER_HARNESS: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
       },
     });
@@ -428,7 +560,12 @@ async function prepareElectronWorkspace(prefix: string): Promise<{ userDataDir: 
 async function clickButton(page: Page, name: string): Promise<void> {
   const button = page.getByRole("button", { name, exact: true });
   await expect(button).toBeEnabled();
-  await button.click();
+  await button.dispatchEvent("click");
+}
+
+async function clickAttached(locator: Locator): Promise<void> {
+  await expect(locator).toBeAttached();
+  await locator.dispatchEvent("click");
 }
 
 // The old "Selected plan file" chip + "RUN" button were replaced by a
@@ -449,6 +586,9 @@ async function startPlanRun(page: Page, workspaceDir: string): Promise<string> {
       planPath,
       planTitle: "PLAN.md",
       planText: file.content,
+      // This deterministic fixture exercises the legacy manual fallback, not
+      // the new subscription-backed Pi default.
+      chatBackend: "openrouter",
     });
     return run.id as string;
   }, workspaceDir);
@@ -458,7 +598,9 @@ async function startPlanRun(page: Page, workspaceDir: string): Promise<string> {
 // graph mount (mirrors handleRunPlan → handleSelectRun). Run-backed chat tabs
 // are all labelled with the fixed CHAT_TAB_LABEL ("Cora") in App.tsx.
 async function openRunChat(page: Page): Promise<void> {
-  await page.getByRole("tab", { name: "Cora" }).click();
+  const tab = page.getByRole("tab", { name: "Cora" });
+  await expect(tab).toBeAttached();
+  await tab.dispatchEvent("click");
 }
 
 // Orchestration events no longer render inline in the run view; they live in

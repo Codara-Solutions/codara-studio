@@ -164,7 +164,7 @@ export default function GitPanel({
           planTitle: smartMergePlanTitle(result.context),
           planText: buildSmartMergePlan(result.context),
           // Hand the merge to the engine the user picked from the caret
-          // (undefined = the default Codara / OpenRouter manager).
+          // (undefined is normalized to the bundled Cora · Pi manager).
           chatBackend: backend,
           initialUserNote:
             "This is a smart merge. Take a look at what's coming in from the upstream below, tell me in chat what you plan to do, and ask me if anything looks risky or ambiguous before you proceed — then carry out the merge yourself. You can run git directly. Protect my local work first (a recoverable stash is fine) and don't push, force-push, or reset --hard.",

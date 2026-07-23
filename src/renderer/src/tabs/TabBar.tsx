@@ -48,6 +48,8 @@ interface Props {
   onNewChat: () => void;
   // Opens (or focuses) the workspace's Automations tab from the "+" dropdown.
   onNewAutomations: () => void;
+  // Appends a fresh untitled whiteboard tab from the "+" dropdown.
+  onNewWhiteboard: () => void;
   // Chat-tab-specific affordances: hover-revealed rename and close. Generic
   // tabs continue to use the existing onClose path.
   onRenameChat: (id: TabId, title: string) => void;
@@ -72,6 +74,7 @@ export interface PickerHints {
   openFile?: string;
   preview?: string;
   automations?: string;
+  whiteboard?: string;
 }
 
 // React.memo: TabBar's props from App.tsx are referentially stable (the
@@ -88,6 +91,7 @@ function TabBar({
   onNewEditor,
   onNewChat,
   onNewAutomations,
+  onNewWhiteboard,
   onRenameChat,
   onCloseChat,
   onTerminalPaneDrop,
@@ -444,6 +448,14 @@ function TabBar({
               onClick={() => {
                 setPickerOpen(false);
                 onNewPreview();
+              }}
+            />
+            <PickerItem
+              label="New whiteboard"
+              hint={pickerHints?.whiteboard}
+              onClick={() => {
+                setPickerOpen(false);
+                onNewWhiteboard();
               }}
             />
             <PickerItem
@@ -965,6 +977,27 @@ function KindIcon({ tab }: { tab: Tab }) {
     return <GlyphIcon glyph="❯" color={tab.color ?? "var(--accent)"} />;
   if (tab.kind === "preview") return <GlyphIcon glyph="◉" color="var(--accent)" />;
   if (tab.kind === "automations") return <GlyphIcon glyph="◷" color="var(--accent)" />;
+  if (tab.kind === "whiteboard") {
+    return (
+      <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent)" }}>
+        <svg
+          aria-hidden
+          width="12"
+          height="12"
+          viewBox="0 0 14 14"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.4"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <rect x="1.5" y="2.5" width="11" height="9" rx="1.5" />
+          <rect x="3.5" y="4.5" width="3" height="2.4" rx="0.6" />
+          <path d="M6.5 5.7h2.2M8.7 5.7v2.2M7 7.9h1.7" />
+        </svg>
+      </span>
+    );
+  }
   if (tab.kind === "diff") return <GlyphIcon glyph="±" color="var(--accent)" />;
   return <GlyphIcon glyph="◆" color="var(--accent)" />;
 }

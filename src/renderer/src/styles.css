@@ -507,6 +507,13 @@ a { color: inherit; }
   50% { opacity: 0.45; transform: scale(0.7); }
 }
 
+/* The run canvas' single live indicator: an opacity-only pulse — no scale,
+   no glow. (spark-pulse keeps its scale for its non-runs consumers.) */
+@keyframes runs-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
 @keyframes spark-fade-in {
   from { opacity: 0; transform: translateY(2px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -526,11 +533,6 @@ a { color: inherit; }
    .spark-wire-flow utility below; the reduced-motion block collapses it. */
 @keyframes spark-wire-flow {
   to { stroke-dashoffset: 0; }
-}
-
-@keyframes runs-node-scan {
-  from { transform: translateX(-120%); }
-  to { transform: translateX(365%); }
 }
 
 /* ── Tab strip (macOS-style) ─────────────────────────────────────────────── */
@@ -863,9 +865,98 @@ a { color: inherit; }
   transform: translate(-50%, calc(-50% - 4px));
 }
 
+/* Cora worker terminals open as observation surfaces. The veil makes the
+   safety state unmistakable while staying transparent enough to watch live
+   output; pointer events pass through so protected panes can still be
+   selected, copied, and scrolled. TerminalPane's inputBlocked gate is what
+   prevents keyboard/paste bytes from reaching the PTY. */
+.cora-worker-terminal-guard {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  pointer-events: none;
+}
+
+.cora-worker-terminal-veil {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--terminal-pane-radius);
+  background: rgb(112 118 130 / 22%);
+  box-shadow: inset 0 0 0 1px rgb(210 214 222 / 6%);
+  pointer-events: none;
+  animation: spark-fade-in var(--motion-fast) var(--ease-out) both;
+}
+
+.cora-worker-terminal-controls {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--panel-2) 94%, transparent);
+  box-shadow: var(--lift-hi), var(--shadow-1);
+  pointer-events: auto;
+}
+
+.cora-worker-terminal-control {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  font-weight: 620;
+  white-space: nowrap;
+  cursor: default;
+  transition:
+    color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+
+.cora-worker-terminal-control:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
+
+.cora-worker-terminal-control:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.cora-worker-terminal-control.is-protected {
+  color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-edge);
+}
+
+.cora-worker-terminal-control:not(.is-protected):last-child {
+  color: var(--warn);
+  background: color-mix(in oklch, var(--warn) 8%, transparent);
+}
+
+.cora-worker-terminal-control-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--rule-soft);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .codara-terminal-intro {
     transition: none;
+  }
+
+  .cora-worker-terminal-veil {
+    animation: none;
   }
 }
 
@@ -881,27 +972,21 @@ a { color: inherit; }
 }
 .spark-fade-in { animation: spark-fade-in var(--motion) var(--ease-out) both; }
 
-/* Travelling dash on a live run-graph wire — see GraphWires.tsx. */
+/* Travelling dash on a live run-graph wire — see GraphWires.tsx. Slow and
+   glow-free: the dash locates the live path without reading arcade. */
 .spark-wire-flow {
   stroke-dasharray: 18 220;
   stroke-dashoffset: 238;
-  animation: spark-wire-flow 1.5s linear infinite;
-}
-
-/* Active run cards carry one restrained telemetry sweep. It is deliberately
-   subtle: state and numbers do the communicating; motion only locates the
-   live node in a wide graph. */
-.runs-node-scan {
-  animation: runs-node-scan 3.8s linear infinite;
+  animation: spark-wire-flow 2.6s linear infinite;
 }
 
 @media (max-width: 940px) {
-  .runs-mission-header {
+  .runs-header {
     grid-template-columns: minmax(0, 1fr) !important;
     gap: 12px !important;
   }
 
-  .runs-telemetry-grid {
+  .runs-stats {
     grid-template-columns: repeat(5, minmax(70px, 1fr)) !important;
   }
 }
@@ -1447,14 +1532,14 @@ a { color: inherit; }
    the user sees at a glance that workers will spawn on send. */
 
 .composer-shell {
-  border: 2px solid transparent;
-  outline: 1px solid var(--rule-soft);
-  outline-offset: -1px;
-  border-radius: var(--radius-surface, 10px);
-  background: color-mix(in oklab, var(--ink) 3%, var(--panel));
-  padding: 7px;
+  border: 1px solid var(--rule-soft);
+  outline: 1px solid transparent;
+  outline-offset: 0;
+  border-radius: 20px;
+  background: color-mix(in oklab, var(--panel-2) 78%, transparent);
+  padding: 11px 12px 10px;
   position: relative;
-  box-shadow: none;
+  box-shadow: var(--lift-hi), var(--shadow-float);
   /* Flex column so a short chat dock shrinks the textarea (which scrolls
      internally) instead of overflowing the whole shell upward and clipping
      the attachment chips off the top — see ChatComposer layout. */
@@ -1467,9 +1552,160 @@ a { color: inherit; }
     background var(--motion-fast) var(--ease-out);
 }
 .composer-shell.is-execute-mode {
-  border-color: var(--accent);
-  border-style: dashed;
-  outline-color: transparent;
+  border-color: color-mix(in oklch, var(--accent) 72%, var(--rule-soft));
+  outline-color: color-mix(in oklch, var(--accent) 20%, transparent);
+  box-shadow: var(--lift-hi), 0 10px 28px color-mix(in oklch, var(--accent) 10%, transparent);
+}
+
+.cora-user-turn__meta {
+  opacity: 0;
+  transform: translateY(-2px);
+  pointer-events: none;
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
+}
+.cora-user-turn:hover .cora-user-turn__meta,
+.cora-user-turn:focus-within .cora-user-turn__meta,
+.cora-user-turn__meta.has-status {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.cora-message-ghost-action {
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--muted);
+  font: 600 10px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-message-ghost-action:hover {
+  background: var(--hover);
+  color: var(--ink-dim);
+}
+
+.cora-assistant-turn__meta {
+  min-height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.cora-turn:hover .cora-assistant-turn__meta,
+.cora-turn:focus-within .cora-assistant-turn__meta {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.cora-working-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 14px;
+  padding-left: 2px;
+}
+.cora-working-dots > span {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--muted);
+  opacity: 0.45;
+  animation: spark-pulse 1.2s ease-in-out infinite;
+}
+.cora-working-dots > span:nth-child(2) { animation-delay: 0.2s; }
+.cora-working-dots > span:nth-child(3) { animation-delay: 0.4s; }
+
+.cora-timeline-minimap {
+  display: none;
+}
+@container (min-width: 720px) {
+  .cora-timeline-minimap {
+    position: absolute;
+    z-index: 8;
+    top: 24px;
+    bottom: 24px;
+    left: 10px;
+    width: 38px;
+    display: block;
+    opacity: 0.38;
+    transition: opacity var(--motion-fast) var(--ease-out);
+  }
+  .cora-timeline-minimap:hover,
+  .cora-timeline-minimap:focus-within {
+    opacity: 1;
+  }
+  .cora-timeline-minimap__rail {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 17px;
+    width: 1px;
+    background: color-mix(in oklab, var(--rule-soft) 55%, transparent);
+  }
+  .cora-timeline-minimap__mark {
+    position: absolute;
+    left: 10px;
+    width: 9px;
+    height: 2px;
+    padding: 0;
+    transform: translateY(-50%);
+    border: 0;
+    border-radius: 999px;
+    background: var(--muted);
+    opacity: 0.72;
+    cursor: default;
+    transition:
+      width var(--motion-fast) var(--ease-out),
+      background var(--motion-fast) var(--ease-out),
+      opacity var(--motion-fast) var(--ease-out);
+  }
+  .cora-timeline-minimap__mark.is-visible {
+    width: 16px;
+    background: var(--ink-dim);
+    opacity: 1;
+  }
+  .cora-timeline-minimap__mark.is-active {
+    width: 24px;
+    background: var(--accent);
+    opacity: 1;
+  }
+  .cora-timeline-minimap__preview {
+    position: absolute;
+    left: 34px;
+    width: min(310px, calc(100cqw - 110px));
+    padding: 10px 12px;
+    transform: translateY(-50%);
+    border: 1px solid var(--rule-soft);
+    border-radius: 12px;
+    box-shadow: var(--shadow-float);
+    pointer-events: none;
+  }
+  .cora-timeline-minimap__preview strong,
+  .cora-timeline-minimap__preview span {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+  }
+  .cora-timeline-minimap__preview strong {
+    color: var(--ink);
+    font: 650 12px/1.4 var(--font-sans);
+    -webkit-line-clamp: 2;
+  }
+  .cora-timeline-minimap__preview span {
+    margin-top: 4px;
+    color: var(--muted);
+    font: 400 11px/1.4 var(--font-sans);
+    -webkit-line-clamp: 3;
+  }
 }
 
 .composer-pill {
@@ -1588,6 +1824,46 @@ a { color: inherit; }
   gap: 4px;
   flex: 0 0 auto;
   padding-top: 1px;
+}
+
+.composer-policy-menu {
+  min-width: 370px;
+  overflow: visible;
+}
+.composer-policy-pill {
+  position: relative;
+}
+.composer-policy-pill.is-frontier {
+  border-color: color-mix(in oklch, var(--accent) 55%, var(--rule-soft));
+}
+.composer-policy-glyph {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  height: 10px;
+}
+.composer-policy-glyph > span {
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 5px color-mix(in oklch, currentColor 45%, transparent);
+}
+.composer-policy-glyph > span:nth-child(2) {
+  width: 4px;
+  height: 4px;
+}
+.composer-policy-glyph > span:nth-child(3) {
+  width: 5px;
+  height: 5px;
+}
+.composer-policy-footnote {
+  margin: 4px 5px 3px;
+  padding: 7px 8px 5px;
+  border-top: 1px solid var(--rule-soft);
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
 }
 
 .composer-thinking-wrap,
@@ -1902,7 +2178,16 @@ a { color: inherit; }
 }
 .composer-badge.is-family {
   color: var(--ink-dim);
-  background: color-mix(in oklch, var(--ink) 4%, transparent);
+  background: color-mix(in oklab, var(--ink) 4%, transparent);
+}
+.composer-badge.is-policy-deep {
+  color: var(--ink-dim);
+  background: color-mix(in oklab, var(--ink) 5%, transparent);
+}
+.composer-badge.is-policy-frontier {
+  color: var(--accent);
+  border-color: var(--accent-edge);
+  background: var(--accent-soft);
 }
 .composer-model-empty {
   padding: 8px;
@@ -2456,6 +2741,44 @@ a { color: inherit; }
     -webkit-backdrop-filter: blur(3px) saturate(1.1);
     backdrop-filter: blur(3px) saturate(1.1);
   }
+  /* Settings and Capability Center cover most of the viewport and stay open
+     while controls update. Running the three-channel SVG refraction lens over
+     those large surfaces on top of a full-window blurred scrim forces
+     continuous GPU re-rasterization.
+     Keep the same liquid-glass tint, sheen, edge and strong blur, but use one
+     composited blur layer and an unfiltered scrim. Small popovers retain the
+     richer lens material. */
+  html:not([data-glass="off"]) .settings-dialog-surface {
+    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    contain: paint;
+  }
+  /* The Capability Center scrolls a dense inventory. Chromium/Wayland
+     re-rasterizes a viewport-sized backdrop-filter whenever that inventory
+     moves, producing visible half-second wheel lag on otherwise fast PCs.
+     Preserve the liquid-glass sheen, rim, bloom, and translucent material,
+     but preblend its face instead of filtering the live workbench underneath. */
+  html:not([data-glass="off"]) .agent-capabilities-surface {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: color-mix(in oklab, var(--panel) 94%, var(--bg));
+    contain: layout paint style;
+    isolation: isolate;
+  }
+  html:not([data-glass="off"]) .settings-dialog-scrim,
+  html:not([data-glass="off"]) .agent-capabilities-scrim {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: color-mix(in oklab, var(--bg) 44%, transparent);
+  }
+  html:not([data-glass="off"]) .settings-dialog-surface .spark-glass,
+  html:not([data-glass="off"]) .settings-dialog-surface .spark-glass--strong,
+  html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass,
+  html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass--strong {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: color-mix(in oklab, var(--panel) 78%, transparent);
+  }
   /* Glass surfaces appear instantly — no entry animation on the lens carrier.
      The --glass-lens SVG reference filter can't be composited by Chromium while
      the element carrying it runs a (compositor-driven) opacity/transform entry
@@ -2474,6 +2797,432 @@ a { color: inherit; }
   html:not([data-glass="off"]) .spark-glass--strong,
   html:not([data-glass="off"]) .spark-menu {
     animation: none !important;
+  }
+}
+
+/* Keep Capability Center scrolling on a single compositor layer. Rows and
+   cards below the viewport skip layout/paint until they approach view. */
+.agent-capabilities-scroll {
+  contain: layout paint style;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  transform: translateZ(0);
+}
+.agent-capability-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 62px;
+  contain: layout paint style;
+}
+.agent-capability-card,
+.agent-capability-panel {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 180px;
+  contain: layout paint style;
+}
+
+/* ── Capability Center ──────────────────────────────────────────────────────
+   The Center is a small app, not a settings dump: persistent navigation at
+   left, one focused inventory at a time, and a lightweight glass overview.
+   The outer surface intentionally stays pre-blended (see the performance gate
+   above) so scrolling never re-rasterizes the entire workbench on Wayland. */
+.agent-capabilities-surface {
+  position: relative;
+}
+.agent-capabilities-surface::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background:
+    linear-gradient(135deg, color-mix(in oklab, white 8%, transparent), transparent 22%),
+    radial-gradient(75% 55% at 7% 0%, color-mix(in oklab, var(--accent) 9%, transparent), transparent 72%);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklab, white 17%, transparent),
+    inset 0 -1px 0 color-mix(in oklab, var(--ink) 6%, transparent);
+}
+.agent-capabilities-surface > * {
+  position: relative;
+  z-index: 1;
+}
+.agent-capabilities-header {
+  background: color-mix(in oklab, var(--panel) 42%, transparent);
+}
+.agent-capabilities-footer {
+  background: color-mix(in oklab, var(--panel) 52%, transparent);
+  -webkit-backdrop-filter: blur(10px) saturate(1.15);
+  backdrop-filter: blur(10px) saturate(1.15);
+}
+.agent-capabilities-layout {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 222px minmax(0, 1fr);
+}
+.agent-capabilities-rail {
+  min-height: 0;
+  padding: 18px 12px 14px;
+  border-right: 1px solid var(--rule-soft);
+  background:
+    linear-gradient(180deg, color-mix(in oklab, var(--accent) 5%, transparent), transparent 38%),
+    color-mix(in oklab, var(--panel-2) 34%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.agent-capabilities-rail__summary {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 4px 7px 10px;
+}
+.agent-capabilities-rail__summary > div:last-child {
+  display: grid;
+  gap: 1px;
+}
+.agent-capabilities-rail__summary strong {
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.agent-capabilities-rail__summary span {
+  color: var(--muted);
+  font-size: 10px;
+}
+.agent-capabilities-orbit {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  border: 1px solid color-mix(in oklab, var(--accent) 28%, var(--rule-soft));
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--accent) 7%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklab, white 14%, transparent),
+    0 0 24px color-mix(in oklab, var(--accent) 9%, transparent);
+}
+.agent-capabilities-orbit > span {
+  position: absolute;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--accent) 58%, transparent);
+}
+.agent-capabilities-orbit > span:nth-child(1) {
+  width: 7px;
+  height: 7px;
+  left: 15px;
+  top: 15px;
+}
+.agent-capabilities-orbit > span:nth-child(2) {
+  width: 4px;
+  height: 4px;
+  left: 7px;
+  top: 8px;
+  opacity: 0.68;
+}
+.agent-capabilities-orbit > span:nth-child(3) {
+  width: 4px;
+  height: 4px;
+  right: 6px;
+  bottom: 8px;
+  opacity: 0.46;
+}
+.agent-capabilities-nav {
+  display: grid;
+  gap: 4px;
+}
+.agent-capabilities-nav__item {
+  width: 100%;
+  min-height: 52px;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--muted);
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  font: inherit;
+  cursor: default;
+  transition:
+    color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
+}
+.agent-capabilities-nav__item:hover {
+  color: var(--ink);
+  background: color-mix(in oklab, var(--ink) 7%, transparent);
+}
+.agent-capabilities-nav__item:active {
+  transform: translateY(1px);
+}
+.agent-capabilities-nav__item.is-active {
+  color: var(--ink);
+  border-color: color-mix(in oklab, var(--accent) 25%, var(--rule-soft));
+  background:
+    linear-gradient(105deg, color-mix(in oklab, var(--accent) 13%, transparent), transparent 80%),
+    color-mix(in oklab, var(--panel-2) 52%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklab, white 10%, transparent),
+    0 8px 24px color-mix(in oklab, var(--bg) 16%, transparent);
+}
+.agent-capabilities-nav__item > svg {
+  color: var(--accent);
+}
+.agent-capabilities-nav__copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.agent-capabilities-nav__copy strong {
+  color: inherit;
+  font-size: 12px;
+  font-weight: 650;
+}
+.agent-capabilities-nav__copy > span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-capabilities-nav__count {
+  min-width: 21px;
+  padding: 2px 5px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-align: center;
+}
+.agent-capabilities-nav__item.is-active .agent-capabilities-nav__count {
+  border-color: color-mix(in oklab, var(--accent) 24%, var(--rule-soft));
+  color: var(--accent);
+}
+.agent-capabilities-rail__footer {
+  margin-top: auto;
+  padding: 10px 9px 2px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.agent-capabilities-rail__pulse {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 8px color-mix(in oklab, var(--ok) 45%, transparent);
+}
+.agent-capabilities-view-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 18px;
+}
+.agent-capabilities-view-heading h2 {
+  margin: 5px 0 0;
+  color: var(--ink);
+  font-size: 19px;
+  font-weight: 630;
+  letter-spacing: -0.015em;
+}
+.agent-capabilities-view-heading p {
+  max-width: 680px;
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.agent-capabilities-view-heading__count {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding-bottom: 2px;
+}
+.agent-capabilities-view-heading__count strong {
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 19px;
+}
+.agent-capabilities-view-heading__count span {
+  color: var(--muted);
+  font-size: 10px;
+}
+.agent-capabilities-hero {
+  min-height: 124px;
+  padding: 18px 20px;
+  border-radius: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 24px;
+  overflow: hidden;
+  background-image:
+    radial-gradient(90% 160% at 100% 0%, color-mix(in oklab, var(--accent) 15%, transparent), transparent 64%),
+    linear-gradient(120deg, color-mix(in oklab, white 5%, transparent), transparent 40%);
+}
+.agent-capabilities-hero__copy {
+  display: grid;
+  gap: 5px;
+}
+.agent-capabilities-hero__copy > strong {
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 620;
+}
+.agent-capabilities-hero__copy p {
+  max-width: 600px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.agent-capabilities-hero__metrics {
+  display: flex;
+  gap: 8px;
+}
+.agent-capabilities-hero__metrics > div {
+  min-width: 80px;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in oklab, var(--glass-border) 72%, var(--rule-soft));
+  border-radius: 11px;
+  background: color-mix(in oklab, var(--bg) 26%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in oklab, white 9%, transparent);
+  display: grid;
+  gap: 4px;
+}
+.agent-capabilities-hero__metrics span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.agent-capabilities-hero__metrics strong {
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+.agent-capabilities-browse-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.agent-capabilities-browse-card {
+  min-width: 0;
+  padding: 13px 14px;
+  border-radius: 12px;
+  color: var(--ink);
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  font: inherit;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-out);
+}
+.agent-capabilities-browse-card:hover {
+  border-color: color-mix(in oklab, var(--accent) 28%, var(--rule-soft));
+  background-color: color-mix(in oklab, var(--accent) 7%, var(--panel-2));
+}
+.agent-capabilities-browse-card:active {
+  transform: translateY(1px);
+}
+.agent-capabilities-browse-card__glyph {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+  display: grid;
+  place-items: center;
+}
+.agent-capabilities-browse-card__copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.agent-capabilities-browse-card__copy strong {
+  font-size: 12px;
+}
+.agent-capabilities-browse-card__copy span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-capabilities-browse-card__meta {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+.agent-capabilities-browse-card__meta strong {
+  color: var(--ink);
+  font-size: 14px;
+}
+.agent-capabilities-browse-card__meta > span:last-child {
+  margin-left: 5px;
+  color: var(--accent);
+  font-family: var(--font-sans);
+  font-size: 14px;
+}
+.agent-capability-overview-card,
+.agent-capabilities-builtins .agent-capability-card,
+.agent-capability-panel {
+  border-radius: 12px !important;
+}
+.agent-capabilities-filter-bar {
+  position: sticky;
+  top: -20px;
+  z-index: 4;
+  margin: 0 -4px;
+  padding: 10px 4px;
+  background: color-mix(in oklab, var(--panel) 88%, transparent);
+  -webkit-backdrop-filter: blur(10px) saturate(1.12);
+  backdrop-filter: blur(10px) saturate(1.12);
+}
+
+@media (max-width: 900px) {
+  .agent-capabilities-layout {
+    grid-template-columns: 76px minmax(0, 1fr);
+  }
+  .agent-capabilities-rail {
+    padding-inline: 8px;
+  }
+  .agent-capabilities-rail__summary {
+    display: flex;
+    justify-content: center;
+    padding-inline: 0;
+  }
+  .agent-capabilities-rail__summary > div:last-child,
+  .agent-capabilities-nav__copy,
+  .agent-capabilities-nav__count,
+  .agent-capabilities-rail__footer {
+    display: none;
+  }
+  .agent-capabilities-nav__item {
+    min-height: 46px;
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+  .agent-capabilities-browse-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -2648,4 +3397,994 @@ a { color: inherit; }
   color: var(--md-tone);
   background: color-mix(in oklch, var(--md-tone) 9%, var(--panel-2));
   border: 1px solid color-mix(in oklch, var(--md-tone) 22%, var(--rule-soft));
+}
+
+/* ── Cora whiteboard ───────────────────────────────────────────────────────
+   The board is a React Flow infinite document surface. Its chrome follows the
+   app's restrained flat language: opaque panels, 1px rules, accent reserved
+   for selection. Kind identity lives in one small icon + label per card. */
+.cora-whiteboard-surface {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  color: var(--ink);
+  background: var(--bg);
+  container-type: inline-size;
+}
+
+/* ChatStack deliberately retains every visited Cora surface. React Flow sets
+   visibility on promoted node layers, so inherited visibility alone can leak
+   those descendants over Runs/Editor tabs. aria-hidden is set in lockstep with
+   every retained wrapper; force every board paint layer off while any such
+   wrapper is hidden. */
+[aria-hidden="true"] .cora-whiteboard-surface,
+[aria-hidden="true"] .cora-whiteboard-surface * {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
+
+/* ── Header: one quiet row — title/summary, save state, actions ─────────── */
+
+.cora-whiteboard-header {
+  flex: 0 0 auto;
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel);
+}
+
+.cora-whiteboard-header__heading {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.cora-whiteboard-header__heading h2 {
+  margin: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 13.5px;
+  font-weight: 640;
+  letter-spacing: -.005em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cora-whiteboard-header__heading p {
+  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cora-whiteboard-header__status {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.cora-whiteboard-header__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--ok);
+}
+
+.cora-whiteboard-header__dot.is-saving {
+  background: var(--accent);
+}
+
+/* File boards (.coraboard editor): pending manual Ctrl+S. Accent, not danger —
+   unsaved is attention, not a failure. */
+.cora-whiteboard-header__dot.is-unsaved {
+  background: var(--accent);
+}
+
+.cora-whiteboard-header__dot.is-error {
+  background: var(--danger);
+}
+
+.cora-whiteboard-header__state {
+  color: var(--ink-dim);
+  font-weight: 550;
+}
+
+.cora-whiteboard-header__state.is-error {
+  color: var(--danger);
+}
+
+.cora-whiteboard-header__facts {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.cora-whiteboard-header__actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cora-whiteboard-header__actions button,
+.cora-board-editor__toolbar button,
+.cora-board-inspector button,
+.cora-board-editor__empty button {
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  color: var(--ink-dim);
+  background: var(--panel);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 550;
+  cursor: default;
+  transition:
+    color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out);
+}
+
+.cora-whiteboard-header__actions button {
+  height: 26px;
+  padding: 0 10px;
+}
+
+.cora-whiteboard-header__actions button:hover,
+.cora-board-editor__toolbar button:hover:not(:disabled),
+.cora-board-inspector button:hover,
+.cora-board-editor__empty button:hover {
+  color: var(--ink);
+  border-color: var(--rule-strong);
+  background: var(--hover);
+}
+
+/* Export menu — the header's Export button opens a standard .spark-menu
+   popover anchored under it. The item rules undo the shared header-button
+   styling the descendant selectors above would otherwise apply. */
+.cora-whiteboard-header__export {
+  position: relative;
+  display: inline-flex;
+}
+
+.cora-whiteboard-header__export-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 40;
+  min-width: 150px;
+}
+
+.cora-whiteboard-header__actions .spark-menu-item {
+  height: auto;
+  padding: 5px 8px;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 400;
+  text-align: left;
+}
+
+.cora-whiteboard-header__actions .spark-menu-item:hover {
+  border: none;
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.cora-whiteboard-surface__canvas {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+/* ── Editor shell ────────────────────────────────────────────────────────── */
+
+.cora-board-editor {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg);
+  /* Categorical kind palette. Structural kinds get distinct hues; semantic
+     state colors stay reserved for condition/decision/risk. */
+  --wb-topic: var(--accent);
+  --wb-group: var(--muted-2);
+  --wb-file: oklch(66% 0.125 255);
+  --wb-symbol: oklch(66% 0.125 300);
+  --wb-flow: var(--ok);
+  --wb-condition: var(--warn);
+  --wb-decision: var(--warn);
+  --wb-risk: var(--danger);
+  --wb-note: var(--muted);
+  --wb-edge: color-mix(in oklab, var(--muted) 78%, transparent);
+}
+
+/* The fixed-hue kinds re-tint for light like the engine tones above — the
+   66%-lightness dark values wash out on a light canvas. */
+:root[data-theme-mode="light"] .cora-board-editor {
+  --wb-file: oklch(50% 0.13 255);
+  --wb-symbol: oklch(48% 0.13 300);
+}
+
+.cora-board-editor__flow {
+  position: absolute;
+  inset: 0;
+}
+
+.cora-board-editor .react-flow {
+  background: transparent;
+}
+
+.cora-board-editor .react-flow__pane {
+  cursor: grab;
+}
+
+/* Hold-to-pan: Ctrl/Space turns every surface into a hand tool. */
+.cora-board-editor.is-pan-mode .react-flow__pane,
+.cora-board-editor.is-pan-mode .react-flow__node {
+  cursor: grab;
+}
+
+.cora-board-editor .react-flow__pane.dragging {
+  cursor: grabbing;
+}
+
+/* ── Toolbar ─────────────────────────────────────────────────────────────── */
+
+.cora-board-editor__toolbar {
+  position: absolute;
+  z-index: 20;
+  top: 10px;
+  left: 50%;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 24px);
+  padding: 0 5px;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  background: var(--panel);
+  box-shadow: var(--shadow-1);
+  transform: translateX(-50%);
+}
+
+.cora-board-editor__toolbar button {
+  height: 25px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border-color: transparent;
+  background: transparent;
+  white-space: nowrap;
+}
+
+.cora-board-editor__toolbar button:hover:not(:disabled) {
+  border-color: transparent;
+}
+
+.cora-board-editor__toolbar button:disabled {
+  cursor: default;
+  opacity: .4;
+}
+
+.cora-board-editor__separator {
+  width: 1px;
+  height: 15px;
+  margin: 0 2px;
+  background: var(--rule);
+  flex: 0 0 auto;
+}
+
+.cora-board-editor__search {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 25px;
+  padding: 0 7px;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  color: var(--muted);
+  background: var(--bg);
+}
+
+.cora-board-editor__search:focus-within {
+  border-color: var(--accent);
+  color: var(--ink-dim);
+}
+
+.cora-board-editor__search input {
+  width: 108px;
+  border: 0;
+  outline: none;
+  color: var(--ink);
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: 11px;
+}
+
+.cora-board-editor__search input::placeholder {
+  color: var(--muted);
+}
+
+.cora-board-editor__search-count {
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cora-board-editor__search button {
+  height: 16px;
+  width: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.cora-board-editor__search button:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
+
+/* ── Cards ───────────────────────────────────────────────────────────────── */
+
+.cora-board-card {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px 11px;
+  overflow: hidden;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  color: var(--ink);
+  background: var(--panel);
+  box-shadow: var(--shadow-1);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+/* The kind hue lives in a 3px inset bar on the left edge plus the header
+   icon/label — cards themselves stay neutral so dense boards read calmly. */
+.cora-board-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: color-mix(in oklab, var(--board-tone) 78%, transparent);
+}
+
+.cora-board-card.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1.5px var(--accent), var(--shadow-1);
+}
+
+.cora-board-card__head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 6px;
+  color: color-mix(in oklab, var(--board-tone) 84%, var(--ink));
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .03em;
+}
+
+.cora-board-card__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.cora-board-card__title {
+  overflow: hidden;
+  display: -webkit-box;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.3;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  word-break: break-word;
+}
+
+.cora-board-card__body {
+  display: -webkit-box;
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+/* Topic cards are hubs: slightly larger title, centered. */
+.cora-board-card.kind-topic {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  border-color: color-mix(in oklab, var(--board-tone) 34%, var(--rule));
+}
+
+.cora-board-card.kind-topic .cora-board-card__title {
+  font-size: 14.5px;
+}
+
+/* Risk cards carry a soft danger tint — the one allowed card tint. */
+.cora-board-card.kind-risk {
+  background: color-mix(in oklab, var(--danger) 4%, var(--panel));
+}
+
+/* Groups are background containers, not cards: tinted wash, dashed rule,
+   label pinned top-left, no shadow, no body. */
+.cora-board-card.kind-group {
+  padding: 12px 14px;
+  border: 1px dashed color-mix(in oklab, var(--board-tone) 46%, var(--rule));
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--board-tone) 5%, transparent);
+  box-shadow: none;
+}
+
+.cora-board-card.kind-group::before {
+  display: none;
+}
+
+.cora-board-card.kind-group .cora-board-card__head {
+  margin-bottom: 3px;
+}
+
+.cora-board-card.kind-group .cora-board-card__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-dim);
+  -webkit-line-clamp: 1;
+}
+
+/* Focus + search emphasis. */
+.cora-board-editor .react-flow__node.is-dim {
+  opacity: .22;
+  transition: opacity 140ms ease;
+}
+
+.cora-board-editor .react-flow__node.is-hit .cora-board-card {
+  border-color: color-mix(in oklab, var(--accent) 55%, var(--rule));
+}
+
+.cora-board-editor .react-flow__edge.is-dim {
+  opacity: .14;
+}
+
+.cora-board-editor .react-flow__edge.is-related .react-flow__edge-path {
+  stroke-width: 2px;
+}
+
+/* Handles stay invisible until the card is hovered or selected. */
+.cora-board-card .react-flow__handle {
+  z-index: 4;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--panel);
+  background: var(--muted);
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.cora-board-card:hover .react-flow__handle,
+.cora-board-card.is-selected .react-flow__handle {
+  opacity: .9;
+}
+
+.is-readonly .cora-board-card .react-flow__handle {
+  opacity: 0 !important;
+}
+
+.cora-board-card .react-flow__resize-control {
+  z-index: 5;
+}
+
+/* ── Edges ───────────────────────────────────────────────────────────────── */
+
+.cora-board-editor .react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--accent);
+  stroke-width: 2px;
+}
+
+/* ── Multi-selection ─────────────────────────────────────────────────────── */
+
+/* Shift+drag rubber band. */
+.cora-board-editor .react-flow__selection {
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  background: color-mix(in oklab, var(--accent) 8%, transparent);
+}
+
+/* Committed multi-selection rect (draggable as one unit). */
+.cora-board-editor .react-flow__nodesselection-rect {
+  border: 1px dashed color-mix(in oklab, var(--accent) 55%, transparent);
+  border-radius: 4px;
+  background: transparent;
+}
+
+/* Snap alignment guides while dragging; coordinates are wrapper-local. */
+.cora-board-guides {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.cora-board-guides line {
+  stroke: var(--accent);
+  stroke-width: 1;
+  /* Dashed so the transient snap guide never reads as a selection edge. */
+  stroke-dasharray: 4 3;
+}
+
+/* Zoom-adaptive detail. Mid distance: body prose is subpixel-illegible, so it
+   steps back and the title carries the card; heads and edge labels remain. */
+.cora-board-editor[data-zoom="mid"] .cora-board-card__body {
+  display: none;
+}
+
+.cora-board-editor[data-zoom="mid"] .cora-board-card__title {
+  -webkit-line-clamp: 4;
+}
+
+.cora-board-editor[data-zoom="mid"] .cora-board-card.kind-group .cora-board-card__title {
+  -webkit-line-clamp: 1;
+}
+
+/* Far out, bodies, heads, and edge labels only add noise. */
+.cora-board-editor[data-zoom="far"] .cora-board-card__body,
+.cora-board-editor[data-zoom="far"] .cora-board-card__head,
+.cora-board-editor[data-zoom="far"] .react-flow__edge-textbg,
+.cora-board-editor[data-zoom="far"] .react-flow__edge-text {
+  display: none;
+}
+
+.cora-board-editor[data-zoom="far"] .cora-board-card__title {
+  font-size: 16px;
+  -webkit-line-clamp: 3;
+}
+
+.cora-board-editor[data-zoom="far"] .cora-board-card.kind-group .cora-board-card__title {
+  font-size: 15px;
+}
+
+/* ── Controls + minimap ──────────────────────────────────────────────────── */
+
+.cora-board-editor .react-flow__controls,
+.cora-board-editor .react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  background: var(--panel);
+  box-shadow: var(--shadow-1);
+}
+
+.cora-board-editor .react-flow__controls-button {
+  border-bottom-color: var(--rule-soft);
+  color: var(--ink-dim);
+  background: transparent;
+}
+
+.cora-board-editor .react-flow__controls-button:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
+
+.cora-board-editor .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+.cora-board-editor .react-flow__minimap {
+  right: 12px;
+  bottom: 12px;
+  width: 164px;
+  height: 104px;
+  transition: right 140ms ease;
+}
+
+.cora-board-editor:has(> .cora-board-inspector) .react-flow__minimap {
+  right: 312px;
+}
+
+.cora-board-editor .react-flow__minimap-node {
+  opacity: .85;
+}
+
+/* ── Inspector ───────────────────────────────────────────────────────────── */
+
+.cora-board-inspector {
+  position: absolute;
+  z-index: 21;
+  /* Below the toolbar row so the two never overlap in narrow windows. */
+  top: 54px;
+  right: 12px;
+  width: 288px;
+  max-height: calc(100% - 64px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 11px 12px 12px;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow-2);
+}
+
+.cora-board-inspector__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cora-board-inspector__header > span {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.cora-board-inspector__header > div {
+  display: inline-flex;
+  gap: 5px;
+}
+
+.cora-board-inspector__header button {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 10.5px;
+}
+
+.cora-board-inspector__header button:last-child {
+  width: 22px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.cora-board-inspector label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cora-board-inspector label > span,
+.cora-board-kind-field > span {
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  font-weight: 570;
+}
+
+.cora-board-inspector input,
+.cora-board-inspector textarea,
+.cora-board-inspector select {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--bg);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.cora-board-inspector input:focus-visible,
+.cora-board-inspector textarea:focus-visible,
+.cora-board-inspector select:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 0;
+  border-color: var(--accent);
+}
+
+.cora-board-inspector textarea {
+  resize: vertical;
+  min-height: 64px;
+}
+
+.cora-board-kind-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.cora-board-kind-picker {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+}
+
+.cora-board-kind-picker button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: var(--bg);
+  font-size: 10.5px;
+}
+
+.cora-board-kind-picker button i {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.cora-board-kind-picker button i.kind-topic { color: var(--wb-topic); }
+.cora-board-kind-picker button i.kind-group { color: var(--wb-group); }
+.cora-board-kind-picker button i.kind-file { color: var(--wb-file); }
+.cora-board-kind-picker button i.kind-symbol { color: var(--wb-symbol); }
+.cora-board-kind-picker button i.kind-flow { color: var(--wb-flow); }
+.cora-board-kind-picker button i.kind-condition { color: var(--wb-condition); }
+.cora-board-kind-picker button i.kind-decision { color: var(--wb-decision); }
+.cora-board-kind-picker button i.kind-risk { color: var(--wb-risk); }
+.cora-board-kind-picker button i.kind-note { color: var(--wb-note); }
+
+.cora-board-kind-picker button.is-active {
+  border-color: var(--accent);
+  color: var(--ink);
+  background: var(--accent-soft);
+}
+
+.cora-board-tone-picker {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+}
+
+.cora-board-tone-picker button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 2px 4px;
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: var(--bg);
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.cora-board-tone-picker button i {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+}
+
+.cora-board-tone-picker button.is-active {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.cora-board-inspector__action {
+  height: 26px;
+  padding: 0 10px;
+}
+
+.cora-board-inspector__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.cora-board-inspector__meta > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Selection toolbar ───────────────────────────────────────────────────── */
+/* Replaces the single-card inspector when 2+ cards are selected. */
+
+.cora-board-selection {
+  position: absolute;
+  z-index: 21;
+  top: 54px;
+  right: 12px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 6px;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  background: var(--panel);
+  box-shadow: var(--shadow-2);
+}
+
+.cora-board-selection__count {
+  padding: 0 5px 0 3px;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  font-weight: 570;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.cora-board-selection button {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--ink-dim);
+  background: transparent;
+  cursor: default;
+  transition:
+    color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
+}
+
+.cora-board-selection button:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--hover);
+}
+
+.cora-board-selection button:disabled {
+  opacity: .4;
+}
+
+/* ── Empty state ─────────────────────────────────────────────────────────── */
+
+.cora-board-editor__empty {
+  position: absolute;
+  z-index: 15;
+  left: 50%;
+  top: 44%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 22px 28px;
+  border: 1px dashed var(--rule-strong);
+  border-radius: 12px;
+  background: var(--panel);
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
+.cora-board-editor__empty strong {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.cora-board-editor__empty span {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.cora-board-editor__empty button {
+  margin-top: 8px;
+  height: 27px;
+  padding: 0 12px;
+}
+
+/* ── Save notice ─────────────────────────────────────────────────────────── */
+
+.cora-whiteboard-notice {
+  position: absolute;
+  z-index: 30;
+  left: 50%;
+  bottom: 14px;
+  max-width: min(560px, calc(100% - 28px));
+  overflow: hidden;
+  padding: 7px 12px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  color: var(--ink-dim);
+  background: var(--panel);
+  box-shadow: var(--shadow-2);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  cursor: default;
+}
+
+.cora-whiteboard-notice.is-error {
+  border-color: color-mix(in oklab, var(--danger) 45%, var(--rule-strong));
+  color: var(--danger);
+}
+
+/* ── File boards (.coraboard editor tabs + untitled drafts) ──────────────────
+   The editable file surface reuses the .cora-whiteboard-surface shell and
+   .cora-whiteboard-header family wholesale; only load/error states remain. */
+
+.cora-whiteboard-file-error,
+.cora-whiteboard-file-loading {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.cora-whiteboard-file-error strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────────── */
+
+@container (max-width: 760px) {
+  .cora-whiteboard-header__facts {
+    display: none;
+  }
+}
+
+/* Narrow surfaces: toolbar buttons collapse to icons (aria-labels keep their
+   accessible names) so the whole row always fits without clipping. */
+@container (max-width: 900px) {
+  .cora-board-editor__btn-label {
+    display: none;
+  }
+  .cora-board-editor__search input {
+    width: 84px;
+  }
+}
+
+@container (max-width: 610px) {
+  .cora-board-editor .react-flow__minimap {
+    display: none;
+  }
+  .cora-board-editor__search input {
+    width: 64px;
+  }
+  .cora-board-selection__count {
+    display: none;
+  }
 }

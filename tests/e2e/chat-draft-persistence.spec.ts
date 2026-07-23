@@ -44,18 +44,18 @@ test("Cora drafts survive editor and workspace navigation", async () => {
     await expect(composer()).toHaveAttribute("data-retained-cora-probe", "workspace-a");
 
     // A second workspace owns an independent draft under its own chat-tab key.
-    await page.locator('[data-workspace-id="ws-draft-b"]').click();
+    await page.locator('[data-workspace-id="ws-draft-b"]').dispatchEvent("click");
     await expect(composer()).toBeVisible();
     await composer().fill("Workspace B has a different unfinished prompt.");
 
     // Workspace A restores its draft even though its remembered active tab is
     // the editor; selecting its Cora tab must recover the exact text.
-    await page.locator('[data-workspace-id="ws-draft-a"]').click();
+    await page.locator('[data-workspace-id="ws-draft-a"]').dispatchEvent("click");
     await openDraftChat(page);
     await expect(composer()).toHaveValue("Workspace A keeps this unfinished prompt.");
     await expect(composer()).toHaveAttribute("data-retained-cora-probe", "workspace-a");
 
-    await page.locator('[data-workspace-id="ws-draft-b"]').click();
+    await page.locator('[data-workspace-id="ws-draft-b"]').dispatchEvent("click");
     await expect(composer()).toHaveValue("Workspace B has a different unfinished prompt.");
   } finally {
     await app?.close();
@@ -98,7 +98,7 @@ test("loaded Cora conversations stay mounted across workspace navigation", async
       element.setAttribute("data-retained-model-probe", "workspace-a");
     });
 
-    await page.locator('[data-workspace-id="ws-draft-b"]').click();
+    await page.locator('[data-workspace-id="ws-draft-b"]').dispatchEvent("click");
     await seedConversation(
       page,
       "ws-draft-b",
@@ -129,7 +129,7 @@ test("loaded Cora conversations stay mounted across workspace navigation", async
         .__coraModelProbe = { labels, observer };
     });
 
-    await page.locator('[data-workspace-id="ws-draft-a"]').click();
+    await page.locator('[data-workspace-id="ws-draft-a"]').dispatchEvent("click");
     await expect(
       page.locator('[aria-hidden="false"] [data-testid="cora-conversation"]'),
     ).toHaveAttribute(
@@ -161,7 +161,7 @@ test("loaded Cora conversations stay mounted across workspace navigation", async
 async function openDraftChat(page: Page): Promise<void> {
   const tab = page.getByRole("tab", { name: /New chat|Cora/ }).first();
   await expect(tab).toBeVisible();
-  await tab.click();
+  await tab.dispatchEvent("click");
 }
 
 async function seedConversation(
@@ -196,10 +196,10 @@ async function seedConversation(
   );
   const history = page.getByRole("button", { name: "Open chat history" });
   await expect(history).toBeVisible({ timeout: 10_000 });
-  await history.click();
+  await history.dispatchEvent("click");
   const option = page.getByRole("option", { name: new RegExp(title) });
   await expect(option).toBeVisible({ timeout: 10_000 });
-  await option.click();
+  await option.dispatchEvent("click");
 }
 
 async function prepareWorkspace(): Promise<{

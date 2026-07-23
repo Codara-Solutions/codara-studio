@@ -13,6 +13,7 @@ import type {
   SparkEvent,
   TerminalAgentTarget,
   TerminalAgentForegroundState,
+  TerminalAgentStatePayload,
   WorkerSessionRuntime,
   WorkerSessionSummary,
   Workspace,
@@ -65,6 +66,7 @@ import type {
   TerminalTab,
 } from "./tabs/types";
 import { isRunOwnedTab } from "./tabs/types";
+import type { CoraView } from "./components/chat/cora-view";
 import { basename } from "./path-utils";
 import ShortcutsDialog from "./shortcuts/ShortcutsDialog";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
@@ -72,6 +74,7 @@ import { buildBindingTable, type BindingTable } from "./shortcuts/bindings";
 import { chordToHint } from "./shortcuts/chord";
 import type { CommandId } from "./shortcuts/commands";
 import { isRecording } from "./shortcuts/recording";
+import { IS_MAC } from "./shortcuts/platform";
 import { usePreferences } from "./preferences/usePreferences";
 import {
   CLAUDE_LAUNCH_COMMAND,
@@ -103,12 +106,19 @@ import {
   type ChatStatusTone,
 } from "./components/chat/timeline";
 
-const SettingsDialog = lazy(() => import("./components/SettingsDialog"));
+// Keep the heavyweight settings surfaces out of the startup bundle, but warm
+// their chunks as soon as the workbench has an idle slice. Without this, the
+// first click has to fetch, parse, and evaluate several thousand lines before
+// React can paint anything, which reads as a missed/laggy click.
+const loadSettingsDialog = () => import("./components/SettingsDialog");
+const loadAgentCapabilitiesDialog = () => import("./components/AgentCapabilitiesDialog");
+const SettingsDialog = lazy(loadSettingsDialog);
 const SessionInspector = lazy(() => import("./components/SessionInspector"));
-const AgentCapabilitiesDialog = lazy(() => import("./components/AgentCapabilitiesDialog"));
+const AgentCapabilitiesDialog = lazy(loadAgentCapabilitiesDialog);
 const EditorStack = lazy(() => import("./tabs/EditorStack"));
 const RunsStack = lazy(() => import("./tabs/RunsStack"));
 const AutomationsStack = lazy(() => import("./tabs/AutomationsStack"));
+const WhiteboardStack = lazy(() => import("./tabs/WhiteboardStack"));
 
 // Stable brand label for every chat tab in the top strip. The first-message-
 // derived run.title is kept on the RunState for the chat panel header and the
@@ -170,12 +180,11 @@ function isBrowserUrl(url: string): boolean {
   return /^(https?:|file:)/i.test(url);
 }
 
-// A run only needs a workbench tab once it has actual orchestrated work to
-// show: at least one step or worker task. Pure chat-mode answers (e.g.
-// "what is X?") leave both arrays empty and live entirely in the right-side
-// chat conversation — no node graph tab for them.
+// Every real Cora chat owns stable run surfaces from its first snapshot. Runs
+// and Whiteboard must not pop into the navigation several seconds later just
+// because planning or delegation finally produced an artifact.
 function runHasWorkbench(run: RunState): boolean {
-  return run.steps.length > 0 || run.workerTasks.length > 0;
+  return Boolean(run.id);
 }
 
 function collectTerminalPaneIds(node: PaneNode, ids: Set<string>): void {
@@ -363,6 +372,11 @@ export default function App() {
   // fire dozens of IPC round-trips. We coalesce a burst into one refresh.
   const runRefreshTimer = useRef<number | null>(null);
   const processedSpawnTerminalEventsRef = useRef<Set<string>>(new Set());
+  // Edge events close failed worker panes immediately, while the debounced run
+  // snapshot can still describe the attempt as live for another render. Keep a
+  // short bounded tombstone so level-triggered reconciliation cannot recreate
+  // that dead pane during the gap.
+  const finishedWorkerAttemptsRef = useRef<Set<string>>(new Set());
   // Spawn-terminal specs that arrived for a workspace that wasn't active at the
   // time. We can't drop them into tabsRef (that's the ACTIVE workspace's tab
   // store), so we queue them per workspace and replay when that workspace is
@@ -541,6 +555,23 @@ export default function App() {
   runsRef.current = runs;
   const runsWorkspaceIdRef = useRef(runsWorkspaceId);
   runsWorkspaceIdRef.current = runsWorkspaceId;
+  // Run selection can happen while a debounced orchestration-event refresh is
+  // still carrying an older snapshot (for example, run.created immediately
+  // followed by human.note). The history picker refreshes through this ref so
+  // the selected conversation always converges on its durable run.json state.
+  const refreshRunsForRef = useRef<(workspaceId: string | null) => Promise<void>>(
+    async () => undefined,
+  );
+  // Several sources can request the same list concurrently (workspace
+  // activation, orchestration events, and an explicit history selection).
+  // Only the newest request may publish its result; otherwise a slower read
+  // that started before a message was persisted can overwrite the fresher
+  // conversation with its older snapshot.
+  const runsRefreshGenerationRef = useRef(0);
+  // Distinguish a genuine later user selection from the runs[] reconciliation
+  // effect temporarily clearing a just-selected id while React is applying a
+  // previously queued list snapshot.
+  const runSelectionGenerationRef = useRef(0);
 
   // Cross-workspace runs feed for the walk-away cockpit surfaces (run
   // switcher, rail tone dots, focus digest). Independent of the lifted `runs`
@@ -572,9 +603,13 @@ export default function App() {
       if (!options?.select) return;
       const workspaceId = run.workspaceId;
       activeRunIdsByWorkspaceRef.current[workspaceId] = run.id;
+      // A retained background panel can deliver this snapshot after the user
+      // switched workspaces (its startAutopilot/forcePauseRun IPC was still in
+      // flight). Remember the run for its own workspace above, but never
+      // repoint the live selection of the workspace on screen now.
+      if (workspaceId !== activeIdRef.current) return;
       activeRunIdRef.current = run.id;
       setActiveRunId(run.id);
-      if (workspaceId !== activeIdRef.current) return;
       const focusRuns = options.focusRuns ?? false;
       // If the user sent their first message from a draft chat tab, repurpose
       // that tab for this run instead of creating a sibling tab — otherwise
@@ -610,12 +645,52 @@ export default function App() {
       options?: { focus?: "chat" | "runs" | "none" },
     ) => {
       const targetWorkspaceId = workspaceId ?? activeIdRef.current;
+      // The Settings run manager lists runs of deleted workspaces by design.
+      // There is no workspace to restore such a selection into, so it must be
+      // a no-op — recording it or touching the live selection would blank the
+      // workspace currently on screen.
+      if (
+        targetWorkspaceId &&
+        !workspacesRef.current.some((w) => w.id === targetWorkspaceId)
+      ) {
+        return;
+      }
+      const selectionGeneration = ++runSelectionGenerationRef.current;
       if (targetWorkspaceId) {
         activeRunIdsByWorkspaceRef.current[targetWorkspaceId] = runId;
+        // A history row may have arrived from the run.created event just
+        // before the first human.note event. Refresh the collection, then
+        // read the chosen run directly so selecting it always converges on
+        // the latest durable run.json rather than displaying that stale row.
+        void (async () => {
+          await refreshRunsForRef.current(targetWorkspaceId);
+          if (!runId) return;
+          const fresh = await window.spark.orchestration.getRun(runId).catch(() => null);
+          if (
+            !fresh ||
+            fresh.workspaceId !== targetWorkspaceId ||
+            activeIdRef.current !== targetWorkspaceId ||
+            runSelectionGenerationRef.current !== selectionGeneration
+          ) {
+            return;
+          }
+          // A runs[] reconciliation scheduled before this click may have
+          // temporarily cleared the id because that older list did not yet
+          // contain the run. Reassert the still-current user intent alongside
+          // the exact durable snapshot. A later user selection increments the
+          // generation and prevents this from stealing focus back.
+          activeRunIdsByWorkspaceRef.current[targetWorkspaceId] = runId;
+          activeRunIdRef.current = runId;
+          setActiveRunId(runId);
+          handleRunSnapshot(fresh);
+        })();
       }
+      // A selection targeting a background workspace (mid-await workspace
+      // switch, handleSelectRunAnywhere) only records intent in the restore
+      // map above — the workspace-switch effect re-applies it on activation.
+      if (targetWorkspaceId !== activeIdRef.current) return;
       activeRunIdRef.current = runId;
       setActiveRunId(runId);
-      if (targetWorkspaceId !== activeIdRef.current) return;
       const focus = options?.focus ?? "chat";
       if (runId === null) {
         tabsRef.current.hideRunsTabs();
@@ -633,7 +708,7 @@ export default function App() {
         tabsRef.current.openChatTab({ runId, focus: true });
       }
     },
-    [],
+    [handleRunSnapshot],
   );
 
   // Cross-workspace run selection used by the global RunSwitcher and the
@@ -681,6 +756,36 @@ export default function App() {
   const [terminalWorking, setTerminalWorking] = useState<
     Record<string, Record<string, true>>
   >({});
+
+  // Keep the rail's per-pane activity map level-triggered and idempotent. Both
+  // detectors feed this: the main-process PTY monitor covers hidden workspaces,
+  // while the visible terminal poller is the authoritative fallback for the
+  // pane currently drawing the worker chip. If either one confirms working,
+  // the workspace dot animates; any non-working state from that same detector
+  // clears its pane entry.
+  const setTerminalPaneWorking = useCallback(
+    (workspaceId: string, paneId: string, active: boolean) => {
+      if (!workspaceId || !paneId) return;
+      setTerminalWorking((current) => {
+        const workspace = current[workspaceId];
+        if (active) {
+          if (workspace?.[paneId]) return current;
+          return {
+            ...current,
+            [workspaceId]: { ...(workspace ?? {}), [paneId]: true },
+          };
+        }
+        if (!workspace?.[paneId]) return current;
+        const { [paneId]: _droppedPane, ...remainingPanes } = workspace;
+        if (Object.keys(remainingPanes).length === 0) {
+          const { [workspaceId]: _droppedWorkspace, ...remainingWorkspaces } = current;
+          return remainingWorkspaces;
+        }
+        return { ...current, [workspaceId]: remainingPanes };
+      });
+    },
+    [],
+  );
 
   // Per-workspace status-tone for the WorkspaceRail dots: the tone of each
   // workspace's highest-attention run (blocked > done-unseen > live > …),
@@ -730,16 +835,30 @@ export default function App() {
 
   // Per-workspace "something inside is working" flag for the rail's activity
   // spin. Unlike toneByWorkspaceId this does NOT filter out automation (loom)
-  // runs — a running loom pass still counts as work in progress.
+  // runs — a running loom pass still counts as work in progress. The active
+  // workspace also derives directly from the same leaf.runtimeState that
+  // paints each visible worker chip. That direct path is the final invariant:
+  // if a pane says "CLAUDE working" / "CODEX working", its workspace ring
+  // animates even if the independent main-process state event was missed.
   const workingByWorkspaceId = useMemo(() => {
     const m: Record<string, boolean> = {};
+    let activeLayerHasWorkingTerminal = false;
+    for (const tab of tabs.tabs) {
+      if (tab.kind !== "terminal" || activeLayerHasWorkingTerminal) continue;
+      forEachTerminalLeaf(tab.root, (leaf) => {
+        if (leaf.worker?.runtimeState === "working") {
+          activeLayerHasWorkingTerminal = true;
+        }
+      });
+    }
     for (const w of workspaces) {
       m[w.id] =
         globalRuns.runs.some((r) => r.workspaceId === w.id && isRunningStatus(r.status)) ||
-        Object.keys(terminalWorking[w.id] ?? {}).length > 0;
+        Object.keys(terminalWorking[w.id] ?? {}).length > 0 ||
+        (w.id === tabs.tabsWorkspaceId && activeLayerHasWorkingTerminal);
     }
     return m;
-  }, [workspaces, globalRuns.runs, terminalWorking]);
+  }, [workspaces, globalRuns.runs, terminalWorking, tabs.tabs, tabs.tabsWorkspaceId]);
 
   // Reclaim activity-spin records for workspaces that no longer exist: a
   // workspace deleted while a hidden pane was mid-turn never receives a
@@ -759,16 +878,20 @@ export default function App() {
     });
   }, [workspaces]);
 
-  // Keep the active chat's node-graph tab in existence without stealing
-  // focus. Chat-only runs (no steps, no worker tasks) intentionally have NO
-  // workbench tab — the answer lives in the right-panel conversation only.
-  // When such a run later sprouts steps (e.g. user follows up with "do it"),
-  // this effect lazily opens the tab on the next runs update.
+  // Keep every active chat's stable Runs surface in existence without stealing
+  // focus. Whiteboard lives beside it in the inner strip, so no
+  // destination appears late when planning or delegation starts.
   useEffect(() => {
     if (!activeRunId) {
       tabsRef.current.hideRunsTabs();
       return;
     }
+    // During a workspace switch `runs` still holds the previous workspace's
+    // payload until listRuns resolves; resolving the restored selection
+    // against that stale list would tear down the just-restored Runs tab.
+    // refreshRunsFor publishes runsWorkspaceId and runs together, so the
+    // effect re-fires against the owned payload once it lands.
+    if (runsWorkspaceIdRef.current !== activeIdRef.current) return;
     const target = runsRef.current.find((r) => r.id === activeRunId) ?? null;
     if (target && runHasWorkbench(target)) {
       tabsRef.current.openRunsTab(activeRunId, "Runs", false);
@@ -992,6 +1115,7 @@ export default function App() {
   // Reads activeId via the closure, so wrap the body in a function that takes
   // the workspaceId explicitly to avoid stale-closure issues in subscriptions.
   const refreshRunsFor = useCallback(async (workspaceId: string | null) => {
+    const generation = ++runsRefreshGenerationRef.current;
     if (!workspaceId) {
       runsWorkspaceIdRef.current = null;
       setRunsWorkspaceId(null);
@@ -1000,7 +1124,12 @@ export default function App() {
     }
     try {
       const next = await window.spark.orchestration.listRuns(workspaceId);
-      if (activeIdRef.current !== workspaceId) return;
+      if (
+        generation !== runsRefreshGenerationRef.current ||
+        activeIdRef.current !== workspaceId
+      ) {
+        return;
+      }
       // Loom-owned runs live inside the Automations tab (Workers sub-tab +
       // per-loom history) — keeping them out of the lifted list is what keeps
       // chat tabs / RunsStack rows from materializing for them.
@@ -1011,6 +1140,7 @@ export default function App() {
       /* Surface details elsewhere; this is opportunistic. */
     }
   }, []);
+  refreshRunsForRef.current = refreshRunsFor;
 
   // Initial load + reload on workspace change. Run selection is scoped per
   // workspace, so coming back to a project restores the chat the user was
@@ -1129,6 +1259,15 @@ export default function App() {
           // leaks a dead id into the active workspace's dismissed-set.
           if (event.workspaceId === activeIdRef.current) {
             tabsRef.current.closeChatTabForRun(event.runId);
+          }
+          // The runs[] reconciliation only maintains the ACTIVE workspace's
+          // remembered selection; scrub the dead id from every workspace's
+          // restore map so switching into a background workspace can't
+          // resurrect the deleted chat as its selection.
+          for (const wsId of Object.keys(activeRunIdsByWorkspaceRef.current)) {
+            if (activeRunIdsByWorkspaceRef.current[wsId] === event.runId) {
+              activeRunIdsByWorkspaceRef.current[wsId] = null;
+            }
           }
         }
         const deletedWorkspaceId = event.workspaceId;
@@ -1402,10 +1541,28 @@ export default function App() {
   // dialog so users only see one settings UI.
   useEffect(() => {
     const handler = () => {
+      void loadSettingsDialog();
       setSettingsOpen(true);
     };
     window.addEventListener("spark:open-settings", handler);
     return () => window.removeEventListener("spark:open-settings", handler);
+  }, []);
+
+  // Warm both large dialog chunks after the initial workbench paint. The
+  // timeout keeps this deterministic on a busy renderer where requestIdleCallback
+  // might otherwise wait indefinitely. Dynamic imports are module-cached, so
+  // the explicit preload and React.lazy always share the same evaluation.
+  useEffect(() => {
+    const preload = () => {
+      void loadSettingsDialog();
+      void loadAgentCapabilitiesDialog();
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      const id = window.requestIdleCallback(preload, { timeout: 1200 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const id = window.setTimeout(preload, 250);
+    return () => window.clearTimeout(id);
   }, []);
 
   // Mirror the workspaces list through a ref so the orchestration listener
@@ -1484,19 +1641,39 @@ export default function App() {
       t.setActiveTerminalPane(tabId, event.attemptId);
     };
 
-    // Mark the worker pane "done" on attempt finish — keeps the xterm
-    // visible (so the user can read the report) but releases the leaf so
-    // the next worker can claim it.
+    // Keep successful worker evidence inspectable, but close failed worker
+    // panes immediately. The run transcript owns the durable error + retry
+    // lineage; a dead red terminal only looks like a provider is still live.
     const handleAttemptFinished = (event: SparkEvent) => {
       if (event.type !== "worker_attempt.finished") return;
       const attemptId = event.attemptId;
       if (!attemptId) return;
+      finishedWorkerAttemptsRef.current.add(attemptId);
+      if (finishedWorkerAttemptsRef.current.size > 1_000) {
+        const ids = Array.from(finishedWorkerAttemptsRef.current);
+        finishedWorkerAttemptsRef.current = new Set(ids.slice(ids.length - 500));
+      }
+      const payload = event.payload as Record<string, unknown> | undefined;
+      const exitCode = typeof payload?.exitCode === "number" ? payload.exitCode : 0;
+      const failed =
+        exitCode !== 0 ||
+        (typeof payload?.error === "string" && payload.error.length > 0);
+      // Kill by durable attempt id even if renderer tab metadata was lost
+      // during reload. The run transcript still owns the failure, and the
+      // tombstone above prevents the reconciliation loop from respawning it.
+      if (failed) {
+        void window.spark.pty.dispose(attemptId).catch(() => undefined);
+      }
       const t = tabsRef.current;
       if (!t) return;
       for (const tab of t.tabs) {
         if (tab.kind !== "terminal") continue;
         const leaf = findLeafByPaneId(tab.root, attemptId);
         if (leaf) {
+          if (failed) {
+            t.closeTerminalPane(tab.id, attemptId);
+            return;
+          }
           const prior = leaf.worker;
           t.setLeafWorker(tab.id, attemptId, {
             runtime: prior?.runtime,
@@ -1507,9 +1684,29 @@ export default function App() {
             state: "done",
             agentRunning: prior?.agentRunning,
           });
-          break;
+          return;
         }
       }
+      // Not in the active workspace's store: the attempt's pane may live in a
+      // mounted-but-hidden workspace's frozen layout. Apply the same cleanup
+      // there, or switching back would restore a failed pane verbatim with its
+      // chip stuck on "running" — the attempt is terminal and tombstoned, so
+      // no reconcile pass ever heals it.
+      const hidden = t.findTerminalPaneInInactiveWorkspaces(attemptId);
+      if (!hidden) return;
+      if (failed) {
+        t.closeTerminalPaneInWorkspace(hidden.workspaceId, hidden.tabId, attemptId);
+        return;
+      }
+      t.updateLeafWorkerInWorkspace(hidden.workspaceId, hidden.tabId, attemptId, (prior) => ({
+        runtime: prior?.runtime,
+        runId: event.runId ?? prior?.runId ?? "",
+        workerTaskId: event.workerTaskId ?? prior?.workerTaskId ?? "",
+        attemptId,
+        source: "spark",
+        state: "done",
+        agentRunning: prior?.agentRunning,
+      }));
     };
 
     return window.spark.orchestration.onEvent((event) => {
@@ -1521,12 +1718,12 @@ export default function App() {
   // Worker panes used to be edge-triggered: the renderer had exactly one
   // chance to hear `worker_task.envelope_prepared`. If that event landed
   // before this subscription mounted, during renderer reload, or while the
-  // worker's workspace was in the background, the PTY kept running but the
-  // Workers subtab never appeared. Reconcile the durable run snapshot against
-  // the level-triggered PTY registry so a missed event self-heals. The short
-  // poll remains armed only while this workspace has a non-terminal attempt;
-  // this also closes the small envelope -> PTY-spawn race where the first
-  // existence probe can legitimately return false.
+  // worker's workspace was in the background, no pane existed to call
+  // pty:spawn and main eventually timed the worker out. Reconcile the durable
+  // run snapshot itself: every non-terminal attempt gets a pane whether or not
+  // its PTY exists yet. TerminalPane then creates a missing PTY or attaches to
+  // a main-owned one, making the launch level-triggered instead of a one-shot
+  // renderer event.
   useEffect(() => {
     if (!booted || !activeId) return;
 
@@ -1553,9 +1750,9 @@ export default function App() {
             // Loom/direct automation workers have their own durable Workers
             // surface and must never materialize as chat-owned terminal tabs.
             if (run.automationId || run.workspaceId !== workspaceId) return;
+            if (finishedWorkerAttemptsRef.current.has(attempt.id)) return;
 
-            const exists = await window.spark.pty.exists(attempt.id).catch(() => false);
-            if (!exists || disposed) return;
+            if (disposed) return;
             if (tabsRef.current.tabsWorkspaceId !== workspaceId) return;
 
             const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
@@ -1601,6 +1798,80 @@ export default function App() {
     };
   }, [booted, activeId, runs]);
 
+  // Apply both live daemon events and level-triggered snapshots through one
+  // idempotent path. Cold hydration intentionally strips transient worker
+  // metadata, so a known-active durable session is the one safe case where a
+  // main-process state may recreate the manual chip instead of merely updating
+  // an existing one.
+  const reconcileTerminalAgentState = useCallback((payload: TerminalAgentStatePayload) => {
+    if (payload?.workspaceId && payload.paneId && payload.state) {
+      setTerminalPaneWorking(
+        payload.workspaceId,
+        payload.paneId,
+        payload.state === "working",
+      );
+    }
+    if (!payload?.tabId || !payload.paneId || !payload.state) return;
+    const t = tabsRef.current;
+    const targetWorkspaceId = payload.workspaceId ?? t.tabsWorkspaceId;
+    if (!targetWorkspaceId) return;
+
+    // Only inspect the active in-memory layer for mint authority. Hidden
+    // workspace caches still receive updates to existing workers through
+    // updateLeafWorkerInWorkspace, but cannot accidentally resurrect one from
+    // a stale daemon event. They reconcile when their layer mounts.
+    const activeTab =
+      targetWorkspaceId === t.tabsWorkspaceId
+        ? t.tabs.find((item) => item.id === payload.tabId && item.kind === "terminal")
+        : null;
+    const activeLeaf =
+      activeTab?.kind === "terminal"
+        ? findLeafByPaneId(activeTab.root, payload.paneId)
+        : null;
+    const sessionRuntime = activeLeaf?.agentSession?.active
+      ? activeLeaf.agentSession.runtime
+      : null;
+    const canRehydrateManualWorker =
+      payload.state !== "done" &&
+      sessionRuntime !== null &&
+      (payload.runtime === null || payload.runtime === sessionRuntime);
+
+    t.updateLeafWorkerInWorkspace(
+      targetWorkspaceId,
+      payload.tabId,
+      payload.paneId,
+      (existing) => {
+        if (!existing) {
+          if (!canRehydrateManualWorker || !sessionRuntime) return existing;
+          return {
+            runtime: payload.runtime ?? sessionRuntime,
+            runId: "manual",
+            workerTaskId: `manual-${payload.paneId}`,
+            attemptId: payload.paneId,
+            source: "manual",
+            state: "running",
+            agentRunning: true,
+            runtimeState: payload.state,
+          };
+        }
+        // A pane already flipped to "error" is showing a PTY crash. Preserve
+        // that authoritative exit state against delayed notifier snapshots.
+        if (existing.runtimeState === "error") return existing;
+        if (payload.state === "done") {
+          if (existing.source === "spark") {
+            return existing.agentRunning === false
+              ? existing
+              : { ...existing, agentRunning: false };
+          }
+          return null;
+        }
+        return existing.runtimeState === payload.state
+          ? existing
+          : { ...existing, runtimeState: payload.state };
+      },
+    );
+  }, [setTerminalPaneWorking]);
+
   // ── Terminal-agent notifications (manual claude/codex panes) ──────────────
   //
   // The main-process watcher (terminal-agent-notify.ts) taps the raw pty
@@ -1623,8 +1894,13 @@ export default function App() {
     if (!booted) return;
     const workspaceId = tabs.tabsWorkspaceId;
     if (!workspaceId) return;
-    const panes: Array<{ paneId: string; tabId: string; tabTitle: string; excluded: boolean }> =
-      [];
+    const panes: Array<{
+      paneId: string;
+      tabId: string;
+      tabTitle: string;
+      excluded: boolean;
+      runtimeHint?: "claude" | "codex" | null;
+    }> = [];
     for (const tab of tabs.tabs) {
       if (tab.kind !== "terminal") continue;
       const workersTab = tab.scope?.kind === "workers";
@@ -1664,6 +1940,13 @@ export default function App() {
           // path and the bogus-alert fix is worth it; if it ever needs alerts,
           // clear leaf.worker on detach so the pane reads as a plain terminal.
           excluded: workersTab || leaf.worker?.source === "spark",
+          runtimeHint:
+            leaf.agentSession?.active === true
+              ? leaf.agentSession.runtime
+              : leaf.worker?.agentRunning !== false &&
+                  (leaf.worker?.runtime === "claude" || leaf.worker?.runtime === "codex")
+                ? leaf.worker.runtime
+                : null,
         });
       });
     }
@@ -1694,10 +1977,13 @@ export default function App() {
     const workspaceName = workspaces.find((w) => w.id === workspaceId)?.name ?? "";
     window.spark.terminalNotify
       ?.sync?.({ workspaceId, workspaceName, panes })
+      ?.then((states) => {
+        for (const state of states ?? []) reconcileTerminalAgentState(state);
+      })
       ?.catch(() => {
         /* registry sync is best-effort; the next layout change retries */
       });
-  }, [booted, tabs.tabs, tabs.tabsWorkspaceId, workspaces]);
+  }, [booted, tabs.tabs, tabs.tabsWorkspaceId, workspaces, reconcileTerminalAgentState]);
 
   useEffect(() => {
     if (!booted) return;
@@ -1753,90 +2039,32 @@ export default function App() {
   // from the RAW pty stream, so this fires even while the pane is hidden/
   // unfocused — exactly when the renderer's own visible-buffer poller is frozen
   // and the chip would otherwise stay stuck on "working". We write the state
-  // onto the matching leaf.worker.runtimeState the same way
-  // onTerminalPaneRuntimeState does, with two differences:
-  //   1. We accept EVERY RuntimeState (incl. "idle"/"done"/"launching"). Unlike
-  //      the synchronous poller path, this is a separate IPC turn — it is not in
-  //      the resurrection-hazard stack onTerminalPaneRuntimeState guards against
-  //      (where a same-tick "done" would re-mint a just-removed chip).
-  //   2. We NEVER mint a worker (guard `if (!existing) return`). A late
-  //      "done"/"idle" arriving after the manual chip was already removed (by
-  //      onTerminalPaneAgentState running:false, or onTerminalPaneExit) must
-  //      no-op rather than resurrect a dead chip.
-  // Reconciliation with the visible poller: both writers just set runtimeState.
-  // When the pane is visible the fast poller dominates (300ms ticks); when
-  // hidden these notifier events are the only updates arriving. Neither
-  // resurrects a removed worker, so they coexist without precedence logic.
+  // onto the matching leaf.worker.runtimeState. Live IPC is the fast path;
+  // snapshot reconciliation makes the channel level-triggered so a renderer
+  // restart cannot permanently miss an already-working transition.
   useEffect(() => {
-    const off = window.spark.terminalNotify?.onState?.((payload) => {
-      // Rail activity spin: track manual panes whose agent is working across
-      // ALL workspaces (this event fires for panes in hidden workspaces too).
-      // "blocked" clears the spin deliberately — a blocked agent is waiting on
-      // the user, not working. "launching" deliberately does NOT spin: a
-      // launched-but-never-prompted agent parks on that state indefinitely
-      // (nothing on the main side ever demotes it while the agent sits idle at
-      // its input box), so counting it would spin the rail forever. Returns
-      // the SAME object when nothing changed so this per-transition effect
-      // never churns renders.
-      if (payload?.workspaceId && payload.paneId && payload.state) {
-        const wsId = payload.workspaceId;
-        const paneId = payload.paneId;
-        const active = payload.state === "working";
-        setTerminalWorking((current) => {
-          const ws = current[wsId];
-          if (active) {
-            if (ws?.[paneId]) return current;
-            return { ...current, [wsId]: { ...(ws ?? {}), [paneId]: true } };
-          }
-          if (!ws?.[paneId]) return current;
-          const { [paneId]: _dropped, ...restPanes } = ws;
-          if (Object.keys(restPanes).length === 0) {
-            const { [wsId]: _droppedWs, ...restWorkspaces } = current;
-            return restWorkspaces;
-          }
-          return { ...current, [wsId]: restPanes };
+    if (!booted) return;
+    const off = window.spark.terminalNotify?.onState?.(reconcileTerminalAgentState);
+    let disposed = false;
+    const reconcile = () => {
+      void window.spark.terminalNotify
+        ?.snapshot?.()
+        ?.then((states) => {
+          if (disposed) return;
+          for (const state of states ?? []) reconcileTerminalAgentState(state);
+        })
+        ?.catch(() => {
+          /* daemon reconciliation is best-effort; the next tick retries */
         });
-      }
-      if (!payload?.tabId || !payload.paneId || !payload.state) return;
-      const t = tabsRef.current;
-      const targetWorkspaceId = payload.workspaceId ?? t.tabsWorkspaceId;
-      if (!targetWorkspaceId) return;
-      t.updateLeafWorkerInWorkspace(
-        targetWorkspaceId,
-        payload.tabId,
-        payload.paneId,
-        (existing) => {
-          // Never mint a worker — a late event after the chip was removed no-ops.
-          if (!existing) return existing;
-          // A pane already flipped to "error" is showing a crash (non-zero pty
-          // exit, set by onTerminalPaneExit, which owns the pty-death case because
-          // it has the exit code). That red "exited" chip must persist until the
-          // user closes the pane, so ignore ANY later notifier state event for it —
-          // a notifier "exited"-block "done" arriving on the same teardown must not
-          // race in and tear the error chip back down.
-          if (existing.runtimeState === "error") return existing;
-          // "done" = the foreground TUI exited. Mirror onTerminalPaneAgentState's
-          // running:false teardown rather than writing runtimeState:"done" onto a
-          // live chip (which `visibleWorkerChip` would keep showing as a stale grey
-          // badge while the lifecycle `state` is still "running"). Manual chips have
-          // no lifecycle outside the pane → clear them; Codara chips keep their run
-          // metadata but drop agentRunning so the run store owns completion.
-          if (payload.state === "done") {
-            if (existing.source === "spark") {
-              return existing.agentRunning === false
-                ? existing
-                : { ...existing, agentRunning: false };
-            }
-            return null;
-          }
-          return existing.runtimeState === payload.state
-            ? existing
-            : { ...existing, runtimeState: payload.state };
-        },
-      );
-    });
-    return () => off?.();
-  }, []);
+    };
+    reconcile();
+    const interval = window.setInterval(reconcile, 1_500);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      off?.();
+    };
+  }, [booted, reconcileTerminalAgentState]);
 
   // Attention is "seen" once the user lands on the pane's tab — also prune
   // entries whose tab no longer exists so a closed tab can't pin the dot
@@ -2037,10 +2265,12 @@ export default function App() {
   }, []);
 
   const handleOpenSettings = useCallback(() => {
+    void loadSettingsDialog();
     setSettingsOpen(true);
   }, []);
 
   const handleOpenCapabilities = useCallback(() => {
+    void loadAgentCapabilitiesDialog();
     setCapabilitiesOpen(true);
   }, []);
 
@@ -2416,11 +2646,13 @@ export default function App() {
           planPath: entry.path,
           planTitle: entry.name,
           planText: file.content,
-          // Engine picked from the explorer's Run plan flyout (undefined = the
-          // default Codara / OpenRouter manager).
+          // Engine picked from the explorer's Run plan flyout. Undefined is
+          // normalized to the bundled Cora · Pi route by createRun.
           chatBackend: backend,
         });
-        handleSelectRun(run.id);
+        // Bind the selection to the originating workspace: the user may have
+        // switched away during the startAutopilot await.
+        handleSelectRun(run.id, ws.id);
         void refreshRunsFor(ws.id);
       } catch (err) {
         // A pre-run failure here is rare (the file vanished between the
@@ -2893,6 +3125,12 @@ export default function App() {
     tabs.openAutomationsTab();
   }, [tabs]);
 
+  // Top tab strip "+" → "New whiteboard" — append a fresh untitled whiteboard
+  // draft tab. The first Ctrl+S save binds it to a .coraboard file.
+  const handleNewWhiteboard = useCallback(() => {
+    tabs.newWhiteboardTab();
+  }, [tabs]);
+
   // Chat-tab "×" — close-only, and it STICKS (no auto-respawn). Drafts dissolve
   // locally; run-backed chats only have their top-strip tab removed and a
   // closedChatRunIds marker recorded so the runs-sync effect won't resurrect
@@ -2974,15 +3212,19 @@ export default function App() {
   // the new tab id; the bridge then waits for PreviewStack to mount its
   // BrowserPaneHandle and drives the navigation.
   useEffect(() => {
-    // MCP-driven preview spawns happen during orchestration, so the new tab
-    // inherits whichever run is currently active. Reading the ref at call
-    // time avoids rebinding the registry hook on every activeRunId change.
+    // MCP-driven preview spawns are tagged with the CALLING run's id (threaded
+    // from the MCP server's SPARK_RUN_ID stamp through previewRpc.navigate) so
+    // another run/workspace being selected can't adopt — or, on its deletion,
+    // destroy — a preview a background run is driving. Only when no run
+    // identity arrives (user-facing agents) does the tab inherit the active
+    // run; reading the ref at call time avoids rebinding the registry hook on
+    // every activeRunId change.
     // focus:false — an agent-driven preview spawns in the background (it
-    // surfaces in the active run's inner tab strip) instead of pulling the
+    // surfaces in the owning run's inner tab strip) instead of pulling the
     // user off their chat mid-run. The bridge drives navigation by tab id, so
     // the preview need not be the active tab.
-    setOpenPreviewTabFn((url: string) =>
-      tabs.newPreviewTab(url, { runId: activeRunIdRef.current, focus: false }),
+    setOpenPreviewTabFn((url: string, runId?: string | null) =>
+      tabs.newPreviewTab(url, { runId: runId ?? activeRunIdRef.current, focus: false }),
     );
     return () => setOpenPreviewTabFn(null);
   }, [tabs]);
@@ -2990,10 +3232,40 @@ export default function App() {
   // codara-studio MCP terminal.create bridge: an agent asks for a new terminal
   // tab; we mint an agent-tinted, UNFOCUSED tab (newAgentTerminalTab never steals
   // focus) and hand the paneId back so the agent can write/read the PTY. cwd
-  // defaults to the active workspace's cwd when the agent doesn't pass one.
+  // defaults to the calling run's workspace cwd (threaded through the bridge),
+  // else the active workspace's cwd.
+  //
+  // Remembers where each agent tab was minted (survives the effect re-running
+  // on tab-state changes) so the failed-spawn destroy path can reach a tab that
+  // lives in a background workspace's layout — plain closeTab only mutates the
+  // active store.
+  const agentTerminalPlacementsRef = useRef(
+    new Map<string, { workspaceId: string; paneId: string }>(),
+  );
   useEffect(() => {
     setCreateAgentTerminalFn((input) => {
-      const cwd = input.cwd || activeWorkspace?.cwd || home;
+      const cwd = input.cwd || input.workspaceCwd || activeWorkspace?.cwd || home;
+      // A background run's terminal must not land in the ACTIVE workspace's
+      // strip (same invariant as the spawn_terminals queue path). The hidden
+      // mounted stack picks the tab up from its frozen layout and spawns the
+      // PTY, so the returned paneId still comes online for write/read.
+      if (input.workspaceId && input.workspaceId !== tabs.tabsWorkspaceId) {
+        const minted = tabs.newAgentTerminalTabInWorkspace(input.workspaceId, {
+          cwd,
+          autorun: input.command,
+          title: input.title,
+        });
+        if (minted) {
+          agentTerminalPlacementsRef.current.set(minted.tabId, {
+            workspaceId: input.workspaceId,
+            paneId: minted.paneId,
+          });
+          return { ...minted, cwd };
+        }
+        // Workspace never visited this session — no hidden stack is mounted to
+        // spawn the pane, so fall through to the active store (cwd above still
+        // points at the run's workspace root).
+      }
       const { tabId, paneId } = tabs.newAgentTerminalTab({
         cwd,
         autorun: input.command,
@@ -3003,7 +3275,16 @@ export default function App() {
     });
     // Cleanup path for terminal.create: if the PTY never spawns (bad cwd), main
     // asks us to close the orphan tab so a failed create leaves nothing behind.
-    setCloseAgentTerminalFn((tabId) => tabs.closeTab(tabId));
+    setCloseAgentTerminalFn((tabId) => {
+      const placed = agentTerminalPlacementsRef.current.get(tabId);
+      agentTerminalPlacementsRef.current.delete(tabId);
+      if (placed && placed.workspaceId !== tabs.tabsWorkspaceId) {
+        // Closing the tab's only pane drops the tab from the frozen layout.
+        tabs.closeTerminalPaneInWorkspace(placed.workspaceId, tabId, placed.paneId);
+        return;
+      }
+      tabs.closeTab(tabId);
+    });
     return () => {
       setCreateAgentTerminalFn(null);
       setCloseAgentTerminalFn(null);
@@ -3107,6 +3388,7 @@ export default function App() {
       "terminal.newBalancedPane": handleNewBalancedTerminalPane,
       "tab.newEditor": handleNewEditorTab,
       "tab.newPreview": handleNewPreviewTab,
+      "tab.newWhiteboard": handleNewWhiteboard,
       "worker.newClaude": () => openShortcutWorkerSessions("claude"),
       "worker.newCodex": () => openShortcutWorkerSessions("codex"),
       "tab.close": () => {
@@ -3183,6 +3465,7 @@ export default function App() {
       handleNewEditorTab,
       handleNewPreviewTab,
       handleNewTerminalTab,
+      handleNewWhiteboard,
       handleNewWorkerTab,
       openShortcutWorkerSessions,
       handleCloseChatTab,
@@ -3203,7 +3486,28 @@ export default function App() {
     // While the Keybindings settings recorder is active, suppress all
     // shortcuts so chords like Ctrl+Tab can be captured for rebinding
     // instead of triggering their currently bound command.
-    isDisabled: () => isRecording(),
+    isDisabled: (id, event) => {
+      if (isRecording()) return true;
+      // The terminal split chords only act on terminal tabs; swallowing them
+      // at capture phase elsewhere would kill surface-local bindings that
+      // share the chord (the whiteboard's Ctrl+D duplicate).
+      if (
+        (id === "terminal.splitRight" || id === "terminal.splitDown") &&
+        visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId)?.kind !== "terminal"
+      ) {
+        return true;
+      }
+      // Ctrl+L is the native readline/terminal clear chord on Windows and
+      // Linux. The app-level "focus Cora" binding also resolves to Ctrl+L on
+      // those platforms, so let xterm own it while a terminal has focus. On
+      // macOS the Cora binding is Cmd+L and does not conflict with Ctrl+L.
+      return (
+        id === "composer.focus" &&
+        !IS_MAC &&
+        event.target instanceof Element &&
+        event.target.closest(".xterm") !== null
+      );
+    },
   });
 
   // Resolved keybind hints for the tab-strip "+" picker. Derived from the
@@ -3219,6 +3523,7 @@ export default function App() {
       openFile: hintForCommand(bindingTable, "tab.newEditor"),
       preview: hintForCommand(bindingTable, "tab.newPreview"),
       automations: hintForCommand(bindingTable, "automations.open"),
+      whiteboard: hintForCommand(bindingTable, "tab.newWhiteboard"),
     }),
     [bindingTable],
   );
@@ -3512,8 +3817,15 @@ export default function App() {
   // tree. The chip's "done" look is already driven by the worker lifecycle.
   const onTerminalPaneRuntimeState = useCallback(
     (tabId: string, paneId: string, state: RuntimeState) => {
-      if (state === "done") return;
       const t = tabsRef.current;
+      // The chip and workspace ring must never disagree for the visible pane.
+      // Main's raw-PTY monitor remains responsible while this workspace is
+      // hidden, but the local poller is already the source that painted the
+      // chip the user sees here, so mirror its confirmed state into the rail.
+      if (t.tabsWorkspaceId) {
+        setTerminalPaneWorking(t.tabsWorkspaceId, paneId, state === "working");
+      }
+      if (state === "done") return;
       const tab = t.tabs.find((item) => item.id === tabId);
       if (!tab || tab.kind !== "terminal") return;
       const leaf = findLeafByPaneId(tab.root, paneId);
@@ -3522,7 +3834,7 @@ export default function App() {
       if (existing.runtimeState === state) return;
       t.setLeafWorker(tabId, paneId, { ...existing, runtimeState: state });
     },
-    [],
+    [setTerminalPaneWorking],
   );
 
   // Total live worker count for the status bar. `countRunningTerminalWorkers`
@@ -3689,7 +4001,9 @@ export default function App() {
           initialUserNoteClientMessageId: makeId("client-msg"),
           initialAttachments: attachments,
         });
-        handleSelectRun(run.id);
+        // Bind the selection to the originating workspace: the user may have
+        // switched away during the startAutopilot await.
+        handleSelectRun(run.id, ws.id);
         void refreshRunsFor(ws.id);
         return;
       }
@@ -3947,6 +4261,7 @@ export default function App() {
               onNewPreviewTab={handleNewPreviewTab}
               onNewChat={handleNewChat}
               onNewAutomations={handleNewAutomations}
+              onNewWhiteboard={handleNewWhiteboard}
               onRenameChat={handleRenameChatTab}
               onCloseChat={handleCloseChatTab}
               onTerminalPaneDrop={handleTerminalPaneDropToTab}
@@ -4429,6 +4744,7 @@ interface WorkspaceProps {
   onNewPreviewTab: () => void;
   onNewChat: () => void;
   onNewAutomations: () => void;
+  onNewWhiteboard: () => void;
   onRenameChat: (id: TabId, title: string) => void;
   onCloseChat: (id: TabId) => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: string) => void;
@@ -4479,6 +4795,7 @@ const Workspace = React.memo(function Workspace({
   onNewPreviewTab,
   onNewChat,
   onNewAutomations,
+  onNewWhiteboard,
   onRenameChat,
   onCloseChat,
   onTerminalPaneDrop,
@@ -4502,6 +4819,8 @@ const Workspace = React.memo(function Workspace({
     moveTerminalPane,
     closeTerminalPane,
     toggleTerminalPaneZoom,
+    openEditorTab,
+    registerDispose,
   } = tabs;
   const visibleTabs = useMemo(
     () => tabs.tabs.filter((tab) => isTabVisibleForRun(tab, activeRunId)),
@@ -4573,36 +4892,34 @@ const Workspace = React.memo(function Workspace({
   // Lifted from ChatPanel so the hoisted inner tab strip can drive the chat /
   // backend-PTY view toggle without ChatPanel keeping a separate state.
   // Resets when the active run changes (a fresh chat starts in "chat" view).
-  const [chatView, setChatView] = useState<"chat" | "terminal">("chat");
+  const [chatView, setChatView] = useState<CoraView>("chat");
   useEffect(() => {
     setChatView("chat");
   }, [activeRunId]);
 
   // Tabs owned by the active run, grouped by kind. These power the inner tab
-  // strip: workers section, Runs section, preview entries.
+  // strip: Runs section and preview entries. Worker terminals stay run-owned,
+  // but are entered directly from the worker nodes on the Runs canvas.
   const runOwnedTabs = useMemo(() => {
     if (!activeRunId) {
-      return { workers: [] as TerminalTab[], runs: null as RunsTab | null, previews: [] as PreviewTab[] };
+      return { runs: null as RunsTab | null, previews: [] as PreviewTab[] };
     }
-    const workers: TerminalTab[] = [];
     let runsTab: RunsTab | null = null;
     const previews: PreviewTab[] = [];
     for (const tab of tabs.tabs) {
-      if (tab.kind === "terminal" && tab.scope?.kind === "workers" && tab.scope.runId === activeRunId) {
-        workers.push(tab);
-      } else if (tab.kind === "runs" && tab.runId === activeRunId) {
+      if (tab.kind === "runs" && tab.runId === activeRunId) {
         runsTab = tab;
       } else if (tab.kind === "preview" && tab.runId === activeRunId) {
         previews.push(tab);
       }
     }
-    return { workers, runs: runsTab, previews };
+    return { runs: runsTab, previews };
   }, [tabs.tabs, activeRunId]);
 
   // Is there anything to show in the inner tab strip? The Chat / Terminal
   // toggle appears once the chat has at least one message (its backend PTY
-  // session id is known). Workers / Runs / preview pills appear when the
-  // active run has spawned that artifact. When none of these is true the
+  // session id is known). Runs / preview pills appear when the active run has
+  // spawned that artifact. When none of these is true the
   // inner strip stays hidden.
   //
   // But artifacts existing is not enough: the strip is the chat tab's own
@@ -4688,12 +5005,7 @@ const Workspace = React.memo(function Workspace({
     (runOwnedTabRunId(activeTabForStrip) === activeRunId ||
       (activeTabForStrip.kind === "chat" &&
         activeTabForStrip.id === activeRunId));
-  const innerStripVisible =
-    activeViewBelongsToRun &&
-    (backendPtyExists ||
-      runOwnedTabs.workers.length > 0 ||
-      runOwnedTabs.runs !== null ||
-      runOwnedTabs.previews.length > 0);
+  const innerStripVisible = activeViewBelongsToRun;
   const handleInnerChatClick = useCallback(() => {
     if (activeChatTabId) setActiveTab(activeChatTabId);
     setChatView("chat");
@@ -4702,6 +5014,73 @@ const Workspace = React.memo(function Workspace({
     if (activeChatTabId) setActiveTab(activeChatTabId);
     setChatView("terminal");
   }, [activeChatTabId, setActiveTab]);
+  const handleBackToRuns = useCallback(() => {
+    if (runOwnedTabs.runs) {
+      setActiveTab(runOwnedTabs.runs.id);
+      return;
+    }
+    if (activeChatTabId) setActiveTab(activeChatTabId);
+    setChatView("chat");
+  }, [activeChatTabId, runOwnedTabs.runs, setActiveTab]);
+  const handleInnerWhiteboardClick = useCallback(() => {
+    if (activeChatTabId) setActiveTab(activeChatTabId);
+    setChatView("whiteboard");
+  }, [activeChatTabId, setActiveTab]);
+  // The Whiteboard pill exists only while this chat actually has a board —
+  // an unused surface must not clutter the workbench strip.
+  const whiteboardAvailable = Boolean(activeRunForStrip?.whiteboard);
+  // Attention dot: Cora updated the board while the user was looking at
+  // another surface. Baselined per run on first sight so history never
+  // badges; visiting the whiteboard (or any non-Cora edit) marks it seen.
+  const whiteboardRevision = activeRunForStrip?.whiteboard?.revision ?? null;
+  const whiteboardEditor = activeRunForStrip?.whiteboard?.lastEditedBy ?? null;
+  const [whiteboardAttention, setWhiteboardAttention] = useState(false);
+  const seenWhiteboardRevisionRef = useRef<Map<string, number>>(new Map());
+  const attentionRunRef = useRef<string | null>(null);
+  useEffect(() => {
+    // On the commit where the active run just changed, chatView still belongs
+    // to the previous run (its reset lands one commit later) — a stale
+    // "whiteboard" view must not mark the new run's board as seen.
+    const runJustChanged = attentionRunRef.current !== activeRunId;
+    attentionRunRef.current = activeRunId;
+    if (!activeRunId || !activeRunForStrip) {
+      setWhiteboardAttention(false);
+      return;
+    }
+    const seenMap = seenWhiteboardRevisionRef.current;
+    if (!seenMap.has(activeRunId)) {
+      seenMap.set(activeRunId, whiteboardRevision ?? -1);
+      setWhiteboardAttention(false);
+      return;
+    }
+    if (whiteboardRevision === null) {
+      seenMap.set(activeRunId, -1);
+      setWhiteboardAttention(false);
+      return;
+    }
+    // A revision below the seen baseline means the board was cleared and
+    // rebuilt from scratch (revisions restart at 1) — an entirely new board
+    // deserves attention like any other unseen update.
+    if (whiteboardRevision < (seenMap.get(activeRunId) ?? -1)) {
+      seenMap.set(activeRunId, -1);
+    }
+    const viewingWhiteboard =
+      chatView === "whiteboard" && effectiveActiveId === activeChatTabId && !runJustChanged;
+    if (viewingWhiteboard || whiteboardEditor !== "cora") {
+      seenMap.set(activeRunId, whiteboardRevision);
+      setWhiteboardAttention(false);
+      return;
+    }
+    setWhiteboardAttention(whiteboardRevision > (seenMap.get(activeRunId) ?? -1));
+  }, [
+    activeRunId,
+    activeRunForStrip,
+    whiteboardRevision,
+    whiteboardEditor,
+    chatView,
+    effectiveActiveId,
+    activeChatTabId,
+  ]);
   const handleInnerSelectTab = useCallback(
     (id: TabId) => setActiveTab(id),
     [setActiveTab],
@@ -4824,6 +5203,24 @@ const Workspace = React.memo(function Workspace({
     },
     [tabs],
   );
+  // First save of an untitled whiteboard draft: rebind by swapping the draft
+  // tab for a regular editor tab on the saved .coraboard file (openEditorTab
+  // dedupes by path, so a later explorer click lands on this same tab). The
+  // swap runs on a fresh tick: openEditorTab captures the new tab's id inside
+  // its setTabs updater, which React only evaluates eagerly when it is the
+  // FIRST queued update — the save path has already queued dirty/git updates
+  // this tick, and a missed capture would leave the new tab unfocused and let
+  // closeTab reroute to an unrelated neighbor. Open before close so the
+  // editor is already active when the draft goes away (no reroute flicker).
+  const handleWhiteboardSavedAs = useCallback(
+    (id: TabId, path: string) => {
+      window.setTimeout(() => {
+        openEditorTab(entryFromPath(path));
+        closeTab(id);
+      }, 0);
+    },
+    [openEditorTab, closeTab],
+  );
 
   return (
     <div
@@ -4845,6 +5242,7 @@ const Workspace = React.memo(function Workspace({
         onNewPreview={onNewPreviewTab}
         onNewChat={onNewChat}
         onNewAutomations={onNewAutomations}
+        onNewWhiteboard={onNewWhiteboard}
         onRenameChat={onRenameChat}
         onCloseChat={onCloseChat}
         onTerminalPaneDrop={onTerminalPaneDrop}
@@ -4859,11 +5257,13 @@ const Workspace = React.memo(function Workspace({
           activeChatTabId={activeChatTabId}
           chatView={chatView}
           backendPtyExists={backendPtyExists}
-          workers={runOwnedTabs.workers}
+          whiteboardAvailable={whiteboardAvailable}
+          whiteboardAttention={whiteboardAttention}
           runsTab={runOwnedTabs.runs}
           previews={runOwnedTabs.previews}
           onChatClick={handleInnerChatClick}
           onTerminalClick={handleInnerTerminalClick}
+          onWhiteboardClick={handleInnerWhiteboardClick}
           onSelectTab={handleInnerSelectTab}
         />
       )}
@@ -4875,6 +5275,7 @@ const Workspace = React.memo(function Workspace({
           tabs={visibleTabs}
           activeId={effectiveActiveId}
           workspace={workspace}
+          tabsWorkspaceId={tabs.tabsWorkspaceId}
           validWorkspaceIds={validWorkspaceIds}
           runs={runs}
           runsWorkspaceId={runsWorkspaceId}
@@ -4928,8 +5329,9 @@ const Workspace = React.memo(function Workspace({
             one is visible/interactive; the rest stay mounted-but-hidden so
             their live xterms + PTYs survive a workspace switch (no dispose, no
             lossy gray snapshot/replay). Hidden stacks get null activeId (every
-            pane hidden → buffering) and no-op write-backs so they can't corrupt
-            the active workspace's tab store. */}
+            pane is non-interactive) but continue writing into their in-memory
+            xterm buffers; no-op write-backs keep them from corrupting the active
+            workspace's tab store. */}
         {terminalWorkspaceLayers.map((layer) => {
           const isActive = layer.active;
           return (
@@ -4979,6 +5381,7 @@ const Workspace = React.memo(function Workspace({
                 onPaneResumeUnavailable={isActive ? handleLeafResumeUnavailable : noopTerminalCb}
                 onPaneResumeFallback={isActive ? handleLeafResumeFallback : noopTerminalCb}
                 onPaneBootResumeConsumed={isActive ? handleLeafBootResumeConsumed : noopTerminalCb}
+                onBackToRuns={isActive ? handleBackToRuns : noopTerminalCb}
               />
             </div>
           );
@@ -4995,6 +5398,7 @@ const Workspace = React.memo(function Workspace({
               activeId={effectiveActiveId}
               workspace={workspace}
               runs={runs}
+              runsWorkspaceId={runsWorkspaceId}
               activeRunId={activeRunId}
               onSelectRun={onSelectRun}
               onOpenWorkerTerminal={handleOpenWorkerTerminal}
@@ -5008,6 +5412,18 @@ const Workspace = React.memo(function Workspace({
               activeId={effectiveActiveId}
               workspace={workspace}
               terminalScrollbackLineLimit={terminalScrollbackLineLimit}
+            />
+          </Suspense>
+        )}
+        {visibleTabs.some((tab) => tab.kind === "whiteboard") && (
+          <Suspense fallback={null}>
+            <WhiteboardStack
+              tabs={visibleTabs}
+              activeId={effectiveActiveId}
+              workspacePath={workspace?.cwd ?? null}
+              registerDispose={registerDispose}
+              onSavedAs={handleWhiteboardSavedAs}
+              onSaved={onFileSaved}
             />
           </Suspense>
         )}

@@ -4,6 +4,7 @@ import type {
   AgentEffortLevel,
   ChatBackendKind,
   ChatMode,
+  CoraExecutionPolicy,
   FsEntry,
   RunState,
   SparkEvent,
@@ -16,11 +17,16 @@ import {
   effectiveChatOneMillionContext,
   normalizeChatFeatureFlags,
 } from "@shared/chat-policy";
+import {
+  DEFAULT_CORA_EXECUTION_POLICY,
+  normalizeCoraExecutionPolicy,
+} from "@shared/cora-execution-policy";
 import { findOpenQuestion } from "./timeline";
 import ContextPill from "./composer/ContextPill";
 import ModelPicker from "./composer/ModelPicker";
 import PlanModeToggle from "./composer/PlanModeToggle";
 import ThinkingControl from "./composer/ThinkingControl";
+import ExecutionPolicyPicker from "./composer/ExecutionPolicyPicker";
 import {
   ALL_EFFORTS,
   DEFAULT_CHAT_BACKEND,
@@ -44,6 +50,7 @@ export interface ChatComposerStartConfig {
   model?: string;
   mode?: ChatMode;
   effort?: AgentEffortLevel;
+  executionPolicy?: CoraExecutionPolicy;
   fastMode?: boolean;
   oneMillionContext?: boolean;
 }
@@ -134,6 +141,7 @@ interface ChatComposerDraftSnapshot {
   model: string;
   mode: ChatMode;
   effort: AgentEffortLevel;
+  executionPolicy: CoraExecutionPolicy;
   fastMode: boolean;
   oneMillionContext: boolean;
 }
@@ -193,6 +201,11 @@ export default function ChatComposer({
   const [draftChatEffort, setDraftChatEffort] = useState<AgentEffortLevel>(
     run?.chatEffort ?? restoredDraft?.effort ?? DEFAULT_CHAT_EFFORT,
   );
+  const [draftExecutionPolicy, setDraftExecutionPolicy] = useState<CoraExecutionPolicy>(
+    normalizeCoraExecutionPolicy(
+      run?.coraExecutionPolicy ?? restoredDraft?.executionPolicy ?? DEFAULT_CORA_EXECUTION_POLICY,
+    ),
+  );
   // Tracks whether the draft default has been resolved from settings + runtime
   // diagnostics. The first paint uses the hardcoded fallbacks above; once the
   // IPC round-trip returns we replace them with the actual first visible
@@ -218,35 +231,42 @@ export default function ChatComposer({
   const inFlight = useRef(false);
   const suppressMentionUpdate = useRef(false);
 
-  // Snapshot every meaningful composer change, INCLUDING the selector state of
-  // an empty composer. A user can choose a model before typing; dropping that
-  // empty snapshot made a remount paint the generic model first and only switch
-  // back once the run/settings IPC caught up.
-  useEffect(() => {
-    if (!draftKey) return;
-    rememberChatComposerDraft(draftKey, {
-      draft,
-      images: [...images],
-      fileReferences: [...fileReferences],
-      backend: draftChatBackend,
-      model: draftChatModel,
-      mode: draftChatMode,
-      effort: draftChatEffort,
-      fastMode: draftFastMode,
-      oneMillionContext: draftOneMillionContext,
-    });
-  }, [
-    draftKey,
+  // Latest snapshot of every meaningful composer field, INCLUDING the selector
+  // state of an empty composer. A user can choose a model before typing;
+  // dropping that empty snapshot made a remount paint the generic model first
+  // and only switch back once the run/settings IPC caught up. Captured each
+  // render so the save-on-key-change cleanup below reads fresh state without
+  // re-registering per keystroke.
+  const draftSnapshotRef = useRef<ChatComposerDraftSnapshot | null>(null);
+  draftSnapshotRef.current = {
     draft,
-    images,
-    fileReferences,
-    draftChatBackend,
-    draftChatModel,
-    draftChatMode,
-    draftChatEffort,
-    draftFastMode,
-    draftOneMillionContext,
-  ]);
+    images: [...images],
+    fileReferences: [...fileReferences],
+    backend: draftChatBackend,
+    model: draftChatModel,
+    mode: draftChatMode,
+    effort: draftChatEffort,
+    executionPolicy: draftExecutionPolicy,
+    fastMode: draftFastMode,
+    oneMillionContext: draftOneMillionContext,
+  };
+  // This instance's draft state belongs to the key it restored from at mount.
+  // On a chat-tab switch the parent updates draftKey one commit BEFORE the
+  // composer remounts (activeRunId syncs from the tab strip a render later),
+  // so the live draftKey transiently names the NEXT chat — writing under it
+  // would leak this chat's unsent draft into that chat. The snapshot is
+  // therefore written in the effect CLEANUP, closing over the previous key,
+  // and only registered while draftKey still matches the mount-time key, so a
+  // stale instance can never write its state under another chat's key.
+  const boundDraftKeyRef = useRef(draftKey);
+  useEffect(() => {
+    const key = draftKey;
+    if (!key || key !== boundDraftKeyRef.current) return;
+    return () => {
+      const snapshot = draftSnapshotRef.current;
+      if (snapshot) rememberChatComposerDraft(key, snapshot);
+    };
+  }, [draftKey]);
 
   // Existing runs are authoritative, but mirror their selector fields into
   // the local fallback too. The visible chips normally read `run` directly;
@@ -259,6 +279,9 @@ export default function ChatComposer({
     if (run.chatModel !== undefined) setDraftChatModel(run.chatModel);
     if (run.chatMode !== undefined) setDraftChatMode(run.chatMode);
     if (run.chatEffort !== undefined) setDraftChatEffort(run.chatEffort);
+    if (run.coraExecutionPolicy !== undefined) {
+      setDraftExecutionPolicy(normalizeCoraExecutionPolicy(run.coraExecutionPolicy));
+    }
     if (run.chatFastMode !== undefined) setDraftFastMode(run.chatFastMode);
     if (run.chat1mContext !== undefined) setDraftOneMillionContext(run.chat1mContext);
   }, [
@@ -267,6 +290,7 @@ export default function ChatComposer({
     run?.chatModel,
     run?.chatMode,
     run?.chatEffort,
+    run?.coraExecutionPolicy,
     run?.chatFastMode,
     run?.chat1mContext,
   ]);
@@ -280,7 +304,7 @@ export default function ChatComposer({
   }, [suspendGlobalEvents]);
 
   // Resolve the draft default from settings + runtimes. The hardcoded
-  // fallback above (OpenRouter + Gemini Flash) only matters before this
+  // fallback above (Pi + GPT-5.6 Sol/high) only matters before this
   // resolves: once we know what's actually available we land on the first
   // visible model (Claude Opus 4.8 in the common case), so the bar never
   // opens on a model the user can't see in the dropdown. Runs once per
@@ -571,6 +595,7 @@ export default function ChatComposer({
           model: draftChatModel,
           mode: lockedMode ?? draftChatMode,
           effort: draftChatEffort,
+          executionPolicy: draftExecutionPolicy,
           fastMode: draftFastMode,
           oneMillionContext: draftOneMillionContext,
         };
@@ -834,6 +859,9 @@ export default function ChatComposer({
   const activeChatMode: ChatMode =
     lockedMode ?? run_?.chatMode ?? (run_ ? "execute" : draftChatMode);
   const activeChatEffort: AgentEffortLevel = run_?.chatEffort ?? draftChatEffort;
+  const activeExecutionPolicy: CoraExecutionPolicy = normalizeCoraExecutionPolicy(
+    run_?.coraExecutionPolicy ?? draftExecutionPolicy,
+  );
   const rawFastMode: boolean = run_?.chatFastMode ?? draftFastMode;
   const rawOneMillionContext: boolean = run_?.chat1mContext ?? draftOneMillionContext;
   const activeFastMode: boolean = effectiveChatFastMode(activeChatBackend, rawFastMode);
@@ -864,6 +892,7 @@ export default function ChatComposer({
     chatModel?: string;
     chatMode?: ChatMode;
     chatEffort?: AgentEffortLevel;
+    coraExecutionPolicy?: CoraExecutionPolicy;
     chatFastMode?: boolean;
     chat1mContext?: boolean;
   }) => {
@@ -889,6 +918,9 @@ export default function ChatComposer({
     if (normalizedChanges.chatModel !== undefined) setDraftChatModel(normalizedChanges.chatModel);
     if (normalizedChanges.chatMode !== undefined) setDraftChatMode(normalizedChanges.chatMode);
     if (normalizedChanges.chatEffort !== undefined) setDraftChatEffort(normalizedChanges.chatEffort);
+    if (normalizedChanges.coraExecutionPolicy !== undefined) {
+      setDraftExecutionPolicy(normalizeCoraExecutionPolicy(normalizedChanges.coraExecutionPolicy));
+    }
     if (normalizedChanges.chatFastMode !== undefined) setDraftFastMode(normalizedChanges.chatFastMode);
     if (normalizedChanges.chat1mContext !== undefined) setDraftOneMillionContext(normalizedChanges.chat1mContext);
     if (!run_) return;
@@ -928,6 +960,10 @@ export default function ChatComposer({
 
   const onPickEffort = (effort: AgentEffortLevel) => {
     applyChatBackendChange({ chatEffort: effort });
+  };
+
+  const onPickExecutionPolicy = (policy: CoraExecutionPolicy) => {
+    applyChatBackendChange({ coraExecutionPolicy: policy });
   };
 
   const onSelectMode = (mode: ChatMode) => {
@@ -974,35 +1010,35 @@ export default function ChatComposer({
         minHeight: 0,
         display: "flex",
         flexDirection: "column",
-        padding: "8px 12px 10px",
-        background: "var(--panel)",
-        borderTop: "1px solid var(--rule-soft)",
+        padding: "8px clamp(14px, 3vw, 42px) 12px",
+        background: "linear-gradient(to bottom, transparent, color-mix(in oklab, var(--panel) 88%, transparent) 38%)",
       }}
     >
-      {error && (
+      <div style={{ width: "100%", maxWidth: 768, margin: "0 auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {error && (
+          <div
+            role="alert"
+            style={{
+              flex: "0 0 auto",
+              marginBottom: 8,
+              padding: "6px 9px",
+              borderRadius: "var(--radius-surface, 10px)",
+              border: "1px solid color-mix(in oklch, var(--danger) 35%, transparent)",
+              background: "var(--danger-soft)",
+              color: "var(--danger)",
+              fontSize: 11,
+              lineHeight: 1.4,
+            }}
+          >
+            {error}
+          </div>
+        )}
         <div
-          role="alert"
-          style={{
-            flex: "0 0 auto",
-            marginBottom: 8,
-            padding: "6px 9px",
-            borderRadius: "var(--radius-surface, 10px)",
-            border: "1px solid color-mix(in oklch, var(--danger) 35%, transparent)",
-            background: "var(--danger-soft)",
-            color: "var(--danger)",
-            fontSize: 11,
-            lineHeight: 1.4,
-          }}
+          className={`composer-shell spark-glass--strong${activeChatMode === "execute" ? " is-execute-mode" : ""}`}
+          onMouseDown={focusComposerShell}
+          onDragOver={onComposerDragOver}
+          onDrop={onComposerDrop}
         >
-          {error}
-        </div>
-      )}
-      <div
-        className={`composer-shell${activeChatMode === "execute" ? " is-execute-mode" : ""}`}
-        onMouseDown={focusComposerShell}
-        onDragOver={onComposerDragOver}
-        onDrop={onComposerDrop}
-      >
         {mentionQuery && (
           <MentionPopover
             query={mentionQuery.query}
@@ -1105,6 +1141,12 @@ export default function ChatComposer({
               activeOneMillion={activeOneMillionContext}
               onPick={onPickModel}
             />
+            {activeChatBackend === "pi" && (
+              <ExecutionPolicyPicker
+                value={activeExecutionPolicy}
+                onPick={onPickExecutionPolicy}
+              />
+            )}
             <ThinkingControl
               effort={visibleEffort}
               availableEfforts={availableEfforts}
@@ -1195,6 +1237,7 @@ export default function ChatComposer({
             />
             {isActive && <StopButton onClick={onForcePauseRun} />}
           </div>
+        </div>
         </div>
       </div>
     </div>
@@ -1503,7 +1546,7 @@ function MentionPopover({
   const empty = !loading && suggestions.length === 0;
   return (
     <div
-      className="spark-glass"
+      className="spark-menu"
       style={{
         position: "absolute",
         left: 8,

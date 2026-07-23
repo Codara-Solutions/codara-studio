@@ -8,12 +8,18 @@
 
 export interface CreateAgentTerminalInput {
   // Working directory for the new terminal. Undefined → the adapter defaults it
-  // to the active workspace cwd.
+  // to the calling run's workspace cwd (below), else the active workspace cwd.
   cwd?: string;
   // Optional command autorun into the pane once its shell prompt settles.
   command?: string;
   // Optional tab title; defaults to the usual "terminals" numbering.
   title?: string;
+  // Calling run's workspace, resolved by agent-socket from the SPARK_RUN_ID the
+  // MCP server stamped on terminal.create. When it names a background
+  // workspace, the adapter mints the tab into THAT workspace's layout instead
+  // of the active one. Absent for user-facing/non-run agents.
+  workspaceId?: string;
+  workspaceCwd?: string;
 }
 
 export interface CreateAgentTerminalResult {

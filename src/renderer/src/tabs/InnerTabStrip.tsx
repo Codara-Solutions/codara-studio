@@ -1,8 +1,10 @@
-import React, { useEffect, useRef, useState } from "react";
-import type { PreviewTab, RunsTab, TabId, TerminalTab } from "./types";
+import React from "react";
+import type { PreviewTab, RunsTab, TabId } from "./types";
+import type { CoraView } from "../components/chat/cora-view";
 
-// The strip below the top TabBar that surfaces a chat's spawned tabs as
-// inline pills: Chat | Runs | Terminal | Workers | preview entries.
+// The strip below the top TabBar that gives every real Cora run a stable
+// workbench: Chat | Runs, plus the optional surfaces that exist for this run —
+// the backend Terminal, the Whiteboard, and agent-opened previews.
 //
 // Sits at the workspace level (between TabBar and the Stack content area) so
 // it stays visible when the user navigates from the chat view into a worker
@@ -10,11 +12,12 @@ import type { PreviewTab, RunsTab, TabId, TerminalTab } from "./types";
 // highlight as soon as activeId becomes a run-owned tab, but this strip
 // keeps the "you are inside Chat X" anchor.
 //
-// Visibility is decided by the parent: the strip is only rendered when there
-// is at least one entry worth showing (a backend PTY, a worker terminal, a
-// Runs tab, or a tagged preview). When the user has not started the chat
-// yet, the parent hides the whole strip so a brand-new chat is not visually
-// noisy.
+// Visibility is decided by the parent: it appears as soon as a draft becomes
+// a real run. Chat and Runs never pop in late as planning or delegation
+// advances. The Whiteboard pill is deliberately conditional: it appears only
+// while a board actually exists for this chat (or the user is creating one),
+// so chats that never use the whiteboard don't carry a dead destination.
+// A quiet "New whiteboard" affordance keeps manual creation reachable.
 
 interface Props {
   // Currently active workspace tab id (effective, after stack-visibility
@@ -27,16 +30,22 @@ interface Props {
   // The chat view mode inside the chat panel — "chat" shows the conversation,
   // "terminal" shows the backend Claude/Codex PTY. Lifted from ChatPanel so
   // the strip can drive it without ChatPanel keeping a duplicate state.
-  chatView: "chat" | "terminal";
+  chatView: CoraView;
   // True when the active run's backend PTY is actually alive (not just when
   // its deterministic session id is computable). The Terminal pill only
   // appears once this is true so xterm never mounts on a ghost session.
   backendPtyExists: boolean;
-  workers: TerminalTab[];
+  // True when the active run has a persisted whiteboard. The pill hides when
+  // no board exists so unused surfaces don't clutter the workbench.
+  whiteboardAvailable: boolean;
+  // True when Cora updated the board while the user was looking elsewhere —
+  // renders a small attention dot on the pill until the surface is visited.
+  whiteboardAttention: boolean;
   runsTab: RunsTab | null;
   previews: PreviewTab[];
   onChatClick: () => void;
   onTerminalClick: () => void;
+  onWhiteboardClick: () => void;
   onSelectTab: (id: TabId) => void;
 }
 
@@ -45,18 +54,23 @@ export default function InnerTabStrip({
   activeChatTabId,
   chatView,
   backendPtyExists,
-  workers,
+  whiteboardAvailable,
+  whiteboardAttention,
   runsTab,
   previews,
   onChatClick,
   onTerminalClick,
+  onWhiteboardClick,
   onSelectTab,
 }: Props) {
   const chatActive = activeId === activeChatTabId && chatView === "chat";
   const terminalActive = activeId === activeChatTabId && chatView === "terminal";
-  const activeWorker = workers.find((w) => w.id === activeId) ?? null;
-  const workersActive = activeWorker !== null;
   const runsActive = runsTab !== null && activeId === runsTab.id;
+  const whiteboardActive = activeId === activeChatTabId && chatView === "whiteboard";
+  // Keep the pill while the user is on the surface even before the first card
+  // persists, so opening a fresh board doesn't leave the strip highlighting
+  // nothing.
+  const showWhiteboardPill = whiteboardAvailable || whiteboardActive;
 
   return (
     <div
@@ -87,12 +101,13 @@ export default function InnerTabStrip({
           title="Live xterm attached to the backend Claude/Codex PTY for this chat — read-only."
         />
       )}
-      {workers.length > 0 && (
-        <WorkersPill
-          workers={workers}
-          activeWorkerId={activeWorker?.id ?? null}
-          active={workersActive}
-          onSelect={onSelectTab}
+      {showWhiteboardPill && (
+        <Pill
+          label="Whiteboard"
+          active={whiteboardActive}
+          onClick={onWhiteboardClick}
+          title="A persisted visual explanation Cora and you share"
+          attention={whiteboardAttention && !whiteboardActive}
         />
       )}
       {previews.map((preview) => (
@@ -104,6 +119,9 @@ export default function InnerTabStrip({
           title={preview.url}
         />
       ))}
+      {!showWhiteboardPill && (
+        <NewWhiteboardButton onClick={onWhiteboardClick} />
+      )}
     </div>
   );
 }
@@ -113,11 +131,13 @@ function Pill({
   active,
   onClick,
   title,
+  attention = false,
 }: {
   label: string;
   active: boolean;
   onClick: () => void;
   title?: string;
+  attention?: boolean;
 }) {
   return (
     <button
@@ -125,8 +145,11 @@ function Pill({
       role="tab"
       aria-selected={active}
       onClick={onClick}
-      title={title ?? label}
+      title={attention ? `${title ?? label} — updated by Cora` : title ?? label}
       style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
         padding: "4px 10px",
         fontSize: 11,
         // Constant weight across active/inactive — selection is signalled by
@@ -176,172 +199,72 @@ function Pill({
       }}
     >
       {label}
+      {attention && (
+        <span
+          // aria-hidden (not aria-label): the dot must never pollute the tab's
+          // accessible name — assistive tech gets the update via the title.
+          aria-hidden
+          style={{
+            width: 5,
+            height: 5,
+            flex: "0 0 auto",
+            borderRadius: 999,
+            background: "var(--accent)",
+          }}
+        />
+      )}
     </button>
   );
 }
 
-// Workers pill: behaves as a single pill that selects the only worker when
-// there is exactly one, and as a dropdown when there are two or more. The
-// dropdown lists each worker by title so the user can switch quickly without
-// returning to the top tab strip.
-function WorkersPill({
-  workers,
-  activeWorkerId,
-  active,
-  onSelect,
-}: {
-  workers: TerminalTab[];
-  activeWorkerId: TabId | null;
-  active: boolean;
-  onSelect: (id: TabId) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (event: MouseEvent) => {
-      if (
-        ref.current &&
-        event.target instanceof Node &&
-        !ref.current.contains(event.target)
-      ) {
-        setOpen(false);
-      }
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  if (workers.length === 1) {
-    const worker = workers[0];
-    return (
-      <Pill
-        label="Workers"
-        active={active}
-        onClick={() => onSelect(worker.id)}
-        title={worker.title || "worker"}
-      />
-    );
-  }
-
-  // Multiple workers — render as a dropdown trigger. A chevron hints at the
-  // menu; the menu lists each worker and selects on click.
+// Quiet icon-only affordance to start a whiteboard when none exists yet. Kept
+// deliberately smaller and dimmer than the pills so an unused surface never
+// competes with the real destinations.
+function NewWhiteboardButton({ onClick }: { onClick: () => void }) {
   return (
-    <div ref={ref} style={{ position: "relative" }}>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={active}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-        title="Switch worker"
-        style={{
-          padding: "4px 10px",
-          fontSize: 11,
-          // Constant weight — same reflow-free rule as Pill above.
-          fontWeight: 550,
-          fontFamily: "var(--font-sans)",
-          background: active
-            ? "var(--accent-soft)"
-            : open
-              ? "var(--hover-strong)"
-              : "transparent",
-          color: active ? "var(--accent)" : "var(--muted)",
-          // Borderless like Pill — active is a soft tinted fill, never an
-          // outlined box. The 1px transparent border holds width constant
-          // across active/inactive/open.
-          border: "1px solid transparent",
-          borderRadius: "var(--radius-control, 7px)",
-          cursor: "default",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 4,
-          transition:
-            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-        }}
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label="New whiteboard"
+      title="New whiteboard"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 22,
+        height: 22,
+        padding: 0,
+        border: "1px solid transparent",
+        borderRadius: "var(--radius-control, 7px)",
+        background: "transparent",
+        color: "var(--muted-2)",
+        cursor: "default",
+        transition:
+          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = "var(--hover)";
+        e.currentTarget.style.color = "var(--ink-dim)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "transparent";
+        e.currentTarget.style.color = "var(--muted-2)";
+      }}
+    >
+      <svg
+        width={12}
+        height={12}
+        viewBox="0 0 14 14"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.4}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden
       >
-        <span>Workers</span>
-        {/* Crisp SVG chevron at currentColor (replaces the unicode "▾", which
-            sat on a text baseline and rendered heavier than the app's other
-            glyphs). Rotates to point up while the menu is open. */}
-        <span
-          aria-hidden
-          style={{
-            display: "inline-flex",
-            opacity: 0.7,
-            transform: open ? "rotate(180deg)" : "none",
-            transition: "transform var(--motion-fast) var(--ease-out)",
-          }}
-        >
-          <svg
-            width="9"
-            height="9"
-            viewBox="0 0 12 12"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M3 4.5 6 7.5 9 4.5" />
-          </svg>
-        </span>
-      </button>
-      {open && (
-        // One popover language: .spark-menu (--panel-2 face, 9px radius, --rule
-        // hairline, --shadow-2) + .spark-menu-item (--hover on hover,
-        // .is-active = accent text + --accent-soft fill). Replaces the
-        // hand-rolled menu (divergent --rule-strong border + extra --lift-hi)
-        // and holds item weight constant so the active worker never reflows.
-        <div
-          role="menu"
-          className="spark-menu spark-fade-in"
-          style={{
-            position: "absolute",
-            top: "calc(100% + 4px)",
-            left: 0,
-            zIndex: 30,
-            display: "flex",
-            flexDirection: "column",
-            gap: 1,
-          }}
-        >
-          {workers.map((worker) => {
-            const isActive = worker.id === activeWorkerId;
-            return (
-              <button
-                key={worker.id}
-                type="button"
-                role="menuitem"
-                className={isActive ? "spark-menu-item is-active" : "spark-menu-item"}
-                onClick={() => {
-                  setOpen(false);
-                  onSelect(worker.id);
-                }}
-                title={worker.title || "worker"}
-                style={{
-                  color: isActive ? "var(--accent)" : "var(--ink)",
-                  fontSize: 11.5,
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                }}
-              >
-                {worker.title || "worker"}
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
+        <rect x="1.8" y="2.6" width="10.4" height="8.8" rx="1.6" />
+        <path d="M7 5.4v3.2M5.4 7h3.2" />
+      </svg>
+    </button>
   );
 }

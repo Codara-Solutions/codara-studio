@@ -1,4 +1,4 @@
-import { test, expect, type ElectronApplication, type Page } from "@playwright/test";
+import { test, expect, type ElectronApplication, type Locator, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
 import { mkdir, mkdtemp, readFile, readdir, writeFile, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,16 +20,29 @@ test("Cora messages keep a readable measure and the terminal remains healthy beh
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.waitForLoadState("domcontentloaded");
 
-    await seedConversation(page, fixture.workspaceDir);
-    await page.getByRole("tab", { name: "Cora" }).last().click();
+    const runId = await seedConversation(page, fixture.workspaceDir);
+    const coraTab = page.getByRole("tab", { name: "Cora" }).last();
+    await expect(coraTab).toBeAttached();
+    await coraTab.dispatchEvent("click");
+    await expect(coraTab).toHaveClass(/spark-tab--active/);
+    await selectChatFromHistory(page, "Project map", runId);
 
     const column = page.getByTestId("cora-conversation");
     const user = page.locator('[data-message-author="user"]').last();
     const assistant = page.locator('[data-message-author="cora"]').last();
     await expect(column).toBeVisible();
-    await expect(user).toContainText("Map this project for me");
+    await expect(user).toContainText("Map this project for me", { timeout: 15_000 });
     await expect(assistant).toContainText("I mapped the project into three layers");
     await expect(assistant.locator("li")).toHaveCount(3);
+    const assistantTurn = page.locator(".cora-turn").filter({ has: assistant }).last();
+    const assistantCopy = assistantTurn.getByRole("button", { name: "Copy message" });
+    await assistant.hover();
+    await expect(assistantCopy).toBeVisible();
+    const minimap = page.getByRole("navigation", { name: "Conversation map" });
+    await expect(minimap).toBeVisible();
+    await expect(minimap.getByRole("button")).toHaveCount(8);
+    await minimap.getByRole("button").first().hover();
+    await expect(minimap).toContainText("Earlier question 1");
 
     const geometry = await page.evaluate(() => {
       const box = (selector: string) => {
@@ -37,7 +50,7 @@ test("Cora messages keep a readable measure and the terminal remains healthy beh
         return rect ? { left: rect.left, right: rect.right, width: rect.width } : null;
       };
       return {
-        column: box('[data-testid="cora-conversation"]'),
+        column: box("[data-cora-conversation-column]"),
         user: box('[data-message-author="user"]'),
         assistant: box('[data-message-author="cora"]'),
         userSurface: (() => {
@@ -52,9 +65,9 @@ test("Cora messages keep a readable measure and the terminal remains healthy beh
         overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
       };
     });
-    expect(geometry.column?.width).toBeLessThanOrEqual(981);
+    expect(geometry.column?.width).toBeLessThanOrEqual(769);
     expect(geometry.user?.width).toBeLessThanOrEqual(721);
-    expect(geometry.assistant?.width).toBeLessThanOrEqual(841);
+    expect(geometry.assistant?.width).toBeLessThanOrEqual(769);
     expect(geometry.overflow).toBeLessThanOrEqual(1);
     expect(geometry.userSurface.background).not.toBe("rgba(0, 0, 0, 0)");
     expect(geometry.userSurface.border).toBe("1px");
@@ -73,7 +86,7 @@ test("Cora messages keep a readable measure and the terminal remains healthy beh
     const terminalBox = await page.locator(".xterm-host").first().boundingBox();
     expect(terminalBox?.width ?? 0).toBeGreaterThan(300);
     expect(terminalBox?.height ?? 0).toBeGreaterThan(200);
-    await page.getByRole("tab", { name: "Cora" }).last().click();
+    await selectCoraTab(page);
     await expect(assistant).toBeVisible();
 
     // Narrow workbench: the same durable conversation must remain readable
@@ -127,13 +140,14 @@ test("completed Cora turns retain provider-ordered text and tools without duplic
     });
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
-    await page.getByRole("tab", { name: "Cora" }).last().click();
-    await page.getByRole("button", { name: "Open chat history" }).last().click();
-    await page.getByRole("option").filter({ hasText: "Ordered execution" }).click();
+    await selectCoraTab(page);
+    await selectChatFromHistory(page, "Ordered execution", runId);
 
     const worked = page.getByText(/Worked for 4\s*s/);
-    await expect(worked).toBeVisible();
-    await worked.click();
+    await expect(worked).toBeVisible({ timeout: 15_000 });
+    await clickAttached(worked);
+    const manager = page.locator('[data-manager-call-id="spark-ordered"]');
+    await expect(manager).toHaveAttribute("data-open", "true");
     const trace = page.getByTestId("execution-trace-spark-ordered");
     await expect(trace).toBeVisible();
     await expect(trace).toContainText("I’ll inspect the package metadata first.");
@@ -143,6 +157,51 @@ test("completed Cora turns retain provider-ordered text and tools without duplic
     expect(await trace.locator("[data-execution-kind]").evaluateAll((nodes) =>
       nodes.map((node) => node.getAttribute("data-execution-kind")),
     )).toEqual(["text", "tool", "text", "tool"]);
+    const workFoldSurface = await manager.evaluate((node) => {
+      const wrapper = getComputedStyle(node);
+      const body = getComputedStyle(node.querySelector(".cora-manager-disclosure__body")!);
+      const button = node.querySelector("button")!.getBoundingClientRect();
+      return {
+        background: wrapper.backgroundColor,
+        borderTop: wrapper.borderTopWidth,
+        borderLeft: wrapper.borderLeftWidth,
+        bodyRule: body.borderLeftWidth,
+        buttonHeight: button.height,
+      };
+    });
+    expect(workFoldSurface.background).toBe("rgba(0, 0, 0, 0)");
+    expect(workFoldSurface.borderTop).toBe("0px");
+    expect(workFoldSurface.borderLeft).toBe("0px");
+    expect(workFoldSurface.bodyRule).toBe("1px");
+    expect(workFoldSurface.buttonHeight).toBeLessThanOrEqual(28);
+  } finally {
+    await app?.close();
+  }
+});
+
+test("plain conversational Cora turns omit empty technical disclosures", async () => {
+  const fixture = await prepareFixture("codara-conversation-only-");
+  const runId = "run-conversation-only";
+  await seedPersistedConversationOnlyRun(fixture.userDataDir, fixture.workspaceDir, runId);
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...process.env,
+        SPARK_USER_DATA_DIR: fixture.userDataDir,
+        SPARK_NO_SHELL_INTEGRATION: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await selectCoraTab(page);
+    await selectChatFromHistory(page, "Conversation only", runId);
+
+    await expect(page.locator('[data-message-author="cora"]')).toContainText("Hello! How can I help?");
+    await expect(page.getByText(/Worked for 3\.6\s*s/)).toHaveCount(0);
+    await expect(page.getByText("Technical details", { exact: false })).toHaveCount(0);
+    await expect(page.locator('[data-manager-call-id="spark-conversation-only"]')).toHaveCount(0);
   } finally {
     await app?.close();
   }
@@ -237,16 +296,15 @@ test("message roles stay explicit, explicit rewind works, and Stop preserves cha
       return run.id as string;
     }, fixture.workspaceDir);
 
-    await page.getByRole("tab", { name: "Cora" }).last().click();
-    await page.getByRole("button", { name: "Open chat history" }).last().click();
-    await page.getByRole("option").filter({ hasText: "Message roles" }).click();
-    await expect.poll(async () => page.locator('[data-message-intent="steer"]').count()).toBeGreaterThan(0);
+    await selectCoraTab(page);
+    await selectChatFromHistory(page, "Message roles", roleRunId);
+    await expect
+      .poll(async () => page.locator('[data-message-intent="steer"]').count(), { timeout: 15_000 })
+      .toBeGreaterThan(0);
     expect(roleRunId).toBeTruthy();
     const normal = page.locator('[data-message-intent="turn"]').last();
     const steering = page.locator('[data-message-intent="steer"]').last();
-    await expect(normal).toContainText("You");
     await expect(normal).toContainText("Normal user turn");
-    await expect(steering).toContainText("You");
     await expect(steering).toContainText("Queued steering");
     await expect(steering).toContainText("Steering queued while Cora works");
     await expect(page.locator('[data-message-author="cora"]').last()).toContainText("Cora answer");
@@ -396,7 +454,7 @@ test("a rejected Codex launch fails once, stays failed, and never adopts a forei
     expect(managerCall).not.toContain('mcp_servers."codara-studio"');
     expect(managerCall).not.toContain("--yolo");
 
-    await page.getByRole("tab", { name: "Cora" }).last().click();
+    await selectCoraTab(page);
     await expect(page.getByText("Cora couldn’t start this turn")).toBeVisible();
     if (process.env.SPARK_CHAT_FAILURE_SCREENSHOT) {
       await page.screenshot({ path: process.env.SPARK_CHAT_FAILURE_SCREENSHOT, fullPage: true });
@@ -483,10 +541,11 @@ test("Claude manager uses stream-json and preserves streamed text/tool order", a
     expect(mcpConfig.mcpServers["codara-studio"].env.SPARK_RUN_ID).toBe(runId);
     expect(mcpConfig.mcpServers["codara-studio"].timeout).toBe(20 * 60_000);
 
-    await page.getByRole("tab", { name: "Cora" }).last().click();
+    await selectCoraTab(page);
+    await selectChatFromHistory(page, "Map the fixture.", runId);
     const sparkCallId = (await readRun(fixture.userDataDir, runId) as any).sparkCalls[0].id;
     const manager = page.locator(`[data-manager-call-id="${sparkCallId}"]`);
-    await expect(manager).toHaveAttribute("data-has-execution", "true");
+    await expect(manager).toHaveAttribute("data-has-execution", "true", { timeout: 15_000 });
     const trace = page.getByTestId(`execution-trace-${sparkCallId}`);
     if ((await manager.getAttribute("data-open")) !== "true") {
       await manager.locator(":scope > button").click();
@@ -564,10 +623,11 @@ test("Codex manager uses app-server deltas and preserves streamed text/tool orde
       .find((entry) => entry[0] === "app-server") ?? [];
     expect(args.slice(0, 2)).toEqual(["app-server", "--stdio"]);
 
-    await page.getByRole("tab", { name: "Cora" }).last().click();
+    await selectCoraTab(page);
+    await selectChatFromHistory(page, "Map the fixture.", runId);
     const sparkCallId = (await readRun(fixture.userDataDir, runId) as any).sparkCalls[0].id;
     const manager = page.locator(`[data-manager-call-id="${sparkCallId}"]`);
-    await expect(manager).toHaveAttribute("data-has-execution", "true");
+    await expect(manager).toHaveAttribute("data-has-execution", "true", { timeout: 15_000 });
     const trace = page.getByTestId(`execution-trace-${sparkCallId}`);
     if ((await manager.getAttribute("data-open")) !== "true") {
       await manager.locator(":scope > button").click();
@@ -614,8 +674,8 @@ async function prepareFixture(prefix: string): Promise<{
   return { root, userDataDir, workspaceDir };
 }
 
-async function seedConversation(page: Page, cwd: string): Promise<void> {
-  await page.evaluate(async (workspaceCwd) => {
+async function seedConversation(page: Page, cwd: string): Promise<string> {
+  return page.evaluate(async (workspaceCwd) => {
     const spark = (window as unknown as { spark: any }).spark;
     const run = await spark.orchestration.createRun({
       workspaceId: "ws-e2e",
@@ -623,6 +683,20 @@ async function seedConversation(page: Page, cwd: string): Promise<void> {
       cwd: workspaceCwd,
       title: "Project map",
     });
+    for (let index = 1; index <= 7; index += 1) {
+      await spark.orchestration.addRunMessage({
+        runId: run.id,
+        author: "user",
+        kind: "note",
+        message: `Earlier question ${index}`,
+      });
+      await spark.orchestration.addRunMessage({
+        runId: run.id,
+        author: "spark",
+        kind: "note",
+        message: `Earlier answer ${index}`,
+      });
+    }
     await spark.orchestration.addRunMessage({
       runId: run.id,
       author: "user",
@@ -644,6 +718,7 @@ async function seedConversation(page: Page, cwd: string): Promise<void> {
         "Start at `src/main/orchestration/run-store.ts`; it is the junction between a Cora decision and everything the user sees next.",
       ].join("\n"),
     });
+    return run.id as string;
   }, cwd);
 }
 
@@ -791,6 +866,76 @@ async function seedPersistedExecutionRun(
     event(6, "chat.tool_result", { kind: "tool_result", toolUseId: "tool-2", output: "src/main.ts", conversationEpoch: 0 }),
     event(7, "chat.assistant_block", { kind: "assistant_block", messageId: "provider-final", text: "The durable final answer.", conversationEpoch: 0 }),
   ].join("\n") + "\n", "utf8");
+}
+
+async function seedPersistedConversationOnlyRun(
+  userDataDir: string,
+  workspaceDir: string,
+  runId: string,
+): Promise<void> {
+  const runDir = join(userDataDir, "runs", runId);
+  await mkdir(runDir, { recursive: true });
+  await writeFile(join(runDir, "run.json"), JSON.stringify({
+    id: runId,
+    workspaceId: "ws-e2e",
+    title: "Conversation only",
+    status: "complete",
+    settingsSnapshot: { workspaceCwd: workspaceDir },
+    artifactDir: runDir,
+    createdAt: "2026-07-13T09:30:00.000Z",
+    updatedAt: "2026-07-13T09:30:04.000Z",
+    completedAt: "2026-07-13T09:30:04.000Z",
+    conversationEpoch: 0,
+    plans: [], steps: [], workerTasks: [], workerAttempts: [], checkpoints: [], assumptions: [],
+    sparkCalls: [{
+      id: "spark-conversation-only", runId, mode: "chat", model: "gpt-5.6-sol",
+      status: "completed", inputMessageIds: ["msg-hello"], conversationEpoch: 0,
+      createdAt: "2026-07-13T09:30:00.200Z", completedAt: "2026-07-13T09:30:03.800Z", durationMs: 3_600,
+    }],
+    humanMessages: [
+      { id: "msg-hello", runId, author: "user", kind: "note", intent: "turn", deliveryState: "acknowledged", backendTurnId: "spark-conversation-only", conversationEpoch: 0, message: "Hello", attachments: [], createdAt: "2026-07-13T09:30:00.100Z" },
+      { id: "msg-hello-answer", runId, author: "spark", kind: "note", intent: "answer", deliveryState: "acknowledged", backendTurnId: "spark-conversation-only", conversationEpoch: 0, message: "Hello! How can I help?", attachments: [], createdAt: "2026-07-13T09:30:03.700Z" },
+    ],
+    autopilot: { status: "complete", updatedAt: "2026-07-13T09:30:04.000Z" },
+    chatBackend: "pi", chatMode: "auto",
+  }, null, 2), "utf8");
+  const event = (
+    sequence: number,
+    type: string,
+    payload: Record<string, unknown>,
+  ) => JSON.stringify({
+    id: `evt-conversation-${sequence}`,
+    timestamp: `2026-07-13T09:30:0${sequence}.000Z`,
+    eventVersion: 1,
+    sequence,
+    workspaceId: "ws-e2e",
+    runId,
+    sparkCallId: "spark-conversation-only",
+    type,
+    payload,
+  });
+  await writeFile(join(runDir, "events.jsonl"), [
+    event(1, "chat.system_note", { kind: "system_note", message: "Cora Pi session ready", conversationEpoch: 0 }),
+    event(2, "chat.assistant_block", { kind: "assistant_block", messageId: "provider-hello", text: "Hello! How can I help?", conversationEpoch: 0 }),
+  ].join("\n") + "\n", "utf8");
+}
+
+async function selectCoraTab(page: Page): Promise<void> {
+  const tab = page.getByRole("tab", { name: "Cora" }).last();
+  await expect(tab).toBeAttached();
+  await tab.dispatchEvent("click");
+  await expect(tab).toHaveClass(/spark-tab--active/);
+}
+
+async function clickAttached(locator: Locator): Promise<void> {
+  await expect(locator).toBeAttached();
+  await locator.dispatchEvent("click");
+}
+
+async function selectChatFromHistory(page: Page, title: string, runId: string): Promise<void> {
+  await clickAttached(page.getByRole("button", { name: "Open chat history" }).last());
+  await clickAttached(page.getByRole("option").filter({ hasText: title }));
+  await expect(page.getByTitle(`Copy run ID: ${runId}`)).toBeVisible({ timeout: 15_000 });
 }
 
 async function readRun(

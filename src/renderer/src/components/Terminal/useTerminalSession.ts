@@ -327,19 +327,10 @@ interface Options {
   // full-screen TUI, so the snapshot/backlog replay path is correct for them.
   rawTailReattach?: boolean;
   // Write PTY bytes into xterm even while the pane is hidden. Opt-in, default
-  // off — used by the live-TUI hosts that EAGER-ATTACH the moment the PTY exists,
-  // typically before their pane is ever revealed: the persistent chat backend
-  // terminal (ChatBackendTerminalStack) and the automation Workers panes (which
-  // attach whenever the Automations tab is active, even on the Looms sub-tab). A
-  // normal hidden pane stashes incoming bytes in hiddenBufferRef (256 KB, head-
-  // dropped) and flushes them on the first reveal — but for a live Ink TUI that
-  // cap would discard the boot draw + <Static> transcript + input-box frame of a
-  // session that has been streaming for minutes, so the first reveal would replay
-  // only recent repaint churn and render blank (the very bug the persistent layer
-  // exists to prevent). With this flag the pane keeps xterm's own buffer +
-  // scrollback authoritative from first attach, so any later reveal just shows
-  // the accumulated frame. Costs continuous xterm.write while hidden — acceptable
-  // for the handful of concurrent live agent panes, NOT for a wall of shell panes.
+  // off. Persistent live-TUI hosts use this because they eager-attach before
+  // their first reveal; normal TerminalStack panes also opt in so every opened
+  // workspace terminal stays a fully live in-memory surface. That trades some
+  // background renderer work for instant, lossless tab/workspace returns.
   writeWhileHidden?: boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: { exitCode: number; signal?: number }) => void;
@@ -464,8 +455,7 @@ export function useTerminalSession({
   }, [rawTailReattach]);
   // Same latest-value pattern for writeWhileHidden. Read on the pty-onData hot
   // path (captured once per sessionId), so a ref keeps it fresh without
-  // re-running the setup effect. Set statically true by the persistent chat
-  // backend pane.
+  // re-running the setup effect. Persistent terminal hosts set it statically.
   const writeWhileHiddenRef = useRef<boolean>(writeWhileHidden);
   useEffect(() => {
     writeWhileHiddenRef.current = writeWhileHidden;
@@ -2254,9 +2244,9 @@ export function useTerminalSession({
             : new TextEncoder().encode(String(data));
 
         // Keep the agent lifecycle sniffer running even while the pane is
-        // hidden. Hidden panes skip xterm.write(), so parser OSC handlers do
-        // not run; byte-level detection is what clears stale Codex/Claude chips
-        // and preserves agent Shift+Enter behavior when the user returns.
+        // hidden. Some hosts defer hidden xterm writes, so byte-level detection
+        // remains the reliable path for clearing stale Codex/Claude chips and
+        // preserving agent Shift+Enter behavior when the user returns.
         if (onAgentStateRef.current) {
           processAgentChunkText(agentDecoder.decode(bytes, { stream: true }));
         }
@@ -2267,23 +2257,11 @@ export function useTerminalSession({
         // next visible-transition. PTY keeps streaming; only the renderer-side
         // rendering cost is deferred.
         if (!visibleRef.current || hiddenReplayPendingRef.current) {
-          // writeWhileHidden (persistent chat backend terminal): DON'T stash —
-          // write straight into xterm even while hidden. This pane eager-attaches
-          // when the PTY appears, usually before the user opens the Terminal
-          // sub-view, so the raw-tail replay at mount and every byte after it
-          // must land in xterm's own buffer to keep its scrollback authoritative.
-          // Stashing instead would funnel them through hiddenBufferRef's 256 KB
-          // head-dropped cap, discarding a long-streaming Ink TUI's boot draw +
-          // <Static> transcript + input-box frame, so the first reveal would
-          // paint only recent repaint churn → blank (the exact bug the persistent
-          // layer prevents). We deliberately do NOT flip visibleRef.current: real
-          // visibility still gates term.focus at spawn and on the visible-flip so
-          // a PTY appearing while the user is typing in the composer can't steal
-          // focus. INVARIANTS in this mode: hiddenBufferRef stays empty, so the
-          // visible-flip flush is a no-op and the unmount snapshot's hidden-byte
-          // merge has nothing to fold (it's also skipped outright, since
-          // writeWhileHidden is only ever set alongside rawTailReattach). URL
-          // sniffing stays visible-only, exactly as in the stash path.
+          // writeWhileHidden: keep the real xterm buffer authoritative instead
+          // of accumulating a bounded replay queue. We deliberately do NOT flip
+          // visibleRef.current: real visibility still gates focus and URL UI.
+          // INVARIANT: hiddenBufferRef stays empty, so reveal is a repaint of the
+          // same xterm instance rather than a replay step.
           if (writeWhileHiddenRef.current) {
             term.write(bytes);
             onActivityRef.current?.();
@@ -2643,6 +2621,18 @@ export function useTerminalSession({
         startupCommandHandled = Boolean(spawnResult.startupCommandHandled);
         attachedExistingSession = Boolean(spawnResult.attached);
         if (startupCommandHandled) autorunFiredSessions.add(sessionId);
+        // Cold hydration deliberately strips the transient worker chip, but a
+        // successfully delivered resume already gives us authoritative runtime
+        // identity from the durable session pointer. Re-arm the renderer state
+        // immediately instead of waiting to rediscover a banner/alt-screen
+        // frame that may have been emitted before onData was attached. The
+        // normal poller promotes this launching state to working/idle/blocked.
+        if (resumeCommand !== null && startupCommandHandled) {
+          const restoredRuntime = agentSessionRef.current?.runtime ?? agentSession?.runtime;
+          if (restoredRuntime === "claude" || restoredRuntime === "codex") {
+            setAgentRunning(restoredRuntime);
+          }
+        }
       } catch (err) {
         term.write(`\r\n\x1b[31mfailed to spawn: ${(err as Error).message}\x1b[0m\r\n`);
         consumeBootResume();
@@ -2961,12 +2951,14 @@ export function useTerminalSession({
         typedCommand.length > 0 &&
         !startupCommandHandled &&
         !autorunFiredSessions.has(sessionId) &&
-        !readOnlyRef.current &&
-        !inputBlockedRef.current
+        !readOnlyRef.current
       ) {
         const autorunTimer = window.setTimeout(() => {
           if (disposed) return;
-          if (readOnlyRef.current || inputBlockedRef.current) return;
+          // inputBlocked gates USER keyboard/paste bytes, not the pane's
+          // renderer-owned startup command. A protected Cora worker must still
+          // launch when the PTY host asks this fallback path to type autorun.
+          if (readOnlyRef.current) return;
           autorunFiredSessions.add(sessionId);
           void window.spark.pty.write(sessionId, `${typedCommand}\r`);
         }, 1500);
@@ -3220,10 +3212,19 @@ export function useTerminalSession({
   // blank or context-lost canvas.
   useEffect(() => {
     let recoveryFrame: number | null = null;
+    let recoveryTimer: number | null = null;
+    let recoveryGeneration = 0;
     const recoverAfterHostWake = () => {
+      recoveryGeneration += 1;
+      const generation = recoveryGeneration;
       if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame);
-      recoveryFrame = window.requestAnimationFrame(() => {
+      if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
+      const finishRecovery = () => {
+        if (generation !== recoveryGeneration) return;
+        if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame);
+        if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
         recoveryFrame = null;
+        recoveryTimer = null;
         try {
           fitRef.current?.fit();
         } catch {
@@ -3240,7 +3241,14 @@ export function useTerminalSession({
           }
         }
         if (!readOnlyRef.current) void window.spark.pty.resume(sessionId);
-      });
+      };
+      // Prefer the next paint so xterm repairs before queued bytes drain. A
+      // fully occluded Electron window may pause requestAnimationFrame despite
+      // backgroundThrottling:false, however; never let that leave the PTY
+      // backlog paused indefinitely. The timer drains data into xterm's buffer
+      // and a later focus/visibility recovery repaints it if necessary.
+      recoveryFrame = window.requestAnimationFrame(finishRecovery);
+      recoveryTimer = window.setTimeout(finishRecovery, 250);
     };
     const offHostResume = window.spark.pty.onHostResume(recoverAfterHostWake);
     const onFocus = () => recoverAfterHostWake();
@@ -3250,10 +3258,12 @@ export function useTerminalSession({
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      recoveryGeneration += 1;
       offHostResume();
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
       if (recoveryFrame !== null) window.cancelAnimationFrame(recoveryFrame);
+      if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
     };
   }, [sessionId]);
 

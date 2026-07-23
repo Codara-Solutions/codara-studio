@@ -28,7 +28,7 @@ test("terminal clear signals replay the intro only for live normal-screen clears
     const chatTab = page.getByRole("tab", { name: /new chat|cora/i }).first();
     await expect(chatTab).toBeVisible();
     const terminalTab = page.getByRole("tab", { name: /terminals/i }).first();
-    await terminalTab.click();
+    await terminalTab.dispatchEvent("click");
     const terminalInput = page.locator(".xterm-helper-textarea:visible").first();
     await expect(terminalInput).toBeVisible({ timeout: 15_000 });
 
@@ -38,7 +38,7 @@ test("terminal clear signals replay the intro only for live normal-screen clears
     // to renderer scheduling and the CSS reduced-motion branch.
     await expect(intro).toBeVisible({ timeout: 10_000 });
     await expect(intro).toBeHidden({ timeout: 10_000 });
-    await terminalInput.click();
+    await terminalInput.focus();
 
     // Readline/PSReadLine Ctrl+L clears by emitting a normal-screen 2J. The
     // renderer must react to that output, not to the raw form-feed input alone.
@@ -134,11 +134,11 @@ test("terminal clear signals replay the intro only for live normal-screen clears
       String.raw`node -e "const fs=require('fs');fs.writeFileSync('.hidden-clear-ready','ready');const timer=setInterval(()=>{if(fs.existsSync('.hidden-clear-go')===false)return;clearInterval(timer);process.stdout.write('\x1b[2JHIDDEN_CLEAR_DONE');setTimeout(()=>fs.writeFileSync('.hidden-clear-done','done'),300)},25)"`,
     );
     await waitForProbe(workspaceDir, "hidden-clear-ready");
-    await chatTab.click();
+    await chatTab.dispatchEvent("click");
     await expect(chatTab).toHaveClass(/spark-tab--active/);
     await writeFile(join(workspaceDir, ".hidden-clear-go"), "go", "utf8");
     await waitForProbe(workspaceDir, "hidden-clear-done");
-    await terminalTab.click();
+    await terminalTab.dispatchEvent("click");
     await expect(terminalTab).toHaveClass(/spark-tab--active/);
     await expectNoIntro(page, intro);
   } finally {

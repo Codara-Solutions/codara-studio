@@ -3,6 +3,7 @@ import type { AddRunMessageAttachmentInput, RunState, Workspace } from "@shared/
 import type { SectionHeaderDragProps } from "../panels/SectionHeader";
 import ChatPanel from "./chat/ChatPanel";
 import type { ChatComposerStartConfig } from "./chat/ChatComposer";
+import type { CoraView } from "./chat/cora-view";
 
 interface Props {
   workspace: Workspace | null;
@@ -15,8 +16,8 @@ interface Props {
   // tab strip so the toggle survives navigating from the chat tab to a worker
   // or back. Optional during the transition; ChatPanel falls back to its own
   // local state when this is not provided.
-  chatView?: "chat" | "terminal";
-  onChatViewChange?: (view: "chat" | "terminal") => void;
+  chatView?: CoraView;
+  onChatViewChange?: (view: CoraView) => void;
   onSelectRun: (id: string | null) => void;
   onRunSnapshot: (
     run: RunState,
@@ -152,6 +153,7 @@ export default function OrchestrationSidebar({
             chatConfig.model !== undefined ||
             chatConfig.mode !== undefined ||
             chatConfig.effort !== undefined ||
+            chatConfig.executionPolicy !== undefined ||
             chatConfig.fastMode !== undefined ||
             chatConfig.oneMillionContext !== undefined),
       );
@@ -166,6 +168,7 @@ export default function OrchestrationSidebar({
           chatModel: chatConfig?.model,
           chatMode: chatConfig?.mode,
           chatEffort: chatConfig?.effort,
+          coraExecutionPolicy: chatConfig?.executionPolicy,
           chatFastMode: chatConfig?.fastMode,
           chat1mContext: chatConfig?.oneMillionContext,
         });

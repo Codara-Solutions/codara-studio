@@ -63,10 +63,14 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
   const cwd = readString(params, "cwd");
   const command = readString(params, "command");
   const title = readString(params, "title");
+  const workspaceId = readString(params, "workspaceId");
+  const workspaceCwd = readString(params, "workspaceCwd");
   return createAgentTerminal({
     cwd: cwd ?? undefined,
     command: command ?? undefined,
     title: title ?? undefined,
+    workspaceId: workspaceId ?? undefined,
+    workspaceCwd: workspaceCwd ?? undefined,
   });
 }
 

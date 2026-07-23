@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentAssetInventory,
   AgentAssetInventoryItem,
@@ -22,6 +22,7 @@ interface Props {
 }
 
 type CapabilityKind = "mcp" | "skill";
+type CapabilityView = "overview" | CapabilityKind;
 type RuntimeColumn = "claude" | "codex" | "shared";
 type RuntimeFilter = "all" | RuntimeColumn | "both";
 
@@ -34,11 +35,43 @@ interface NameGroup {
 }
 
 const RUNTIME_COLUMNS: RuntimeColumn[] = ["claude", "codex", "shared"];
+const CAPABILITY_PAGE_SIZE = 40;
 const RUNTIME_LABEL: Record<RuntimeColumn, string> = {
   claude: "Claude",
   codex: "Codex",
   shared: "Shared",
 };
+
+// React StrictMode intentionally mounts effects twice in development. Asset
+// discovery walks the local Claude/Codex skill trees, so issuing the same IPC
+// twice makes the Capability Center feel frozen even though the renderer is
+// technically responsive. Coalesce only identical in-flight reads; completed
+// reads are not cached, so reopening still observes external config changes.
+let assetsInFlight: { key: string; promise: Promise<AgentAssetInventory> } | null = null;
+let builtinsInFlight: Promise<SparkBuiltinMcpStatus[]> | null = null;
+
+function requestAssets(cwd: string | null): Promise<AgentAssetInventory> {
+  const key = cwd ?? "";
+  if (assetsInFlight?.key === key) return assetsInFlight.promise;
+  const promise = window.spark.agents.assets({ cwd });
+  assetsInFlight = { key, promise };
+  const clear = () => {
+    if (assetsInFlight?.promise === promise) assetsInFlight = null;
+  };
+  void promise.then(clear, clear);
+  return promise;
+}
+
+function requestBuiltins(): Promise<SparkBuiltinMcpStatus[]> {
+  if (builtinsInFlight) return builtinsInFlight;
+  const promise = window.spark.agents.builtins();
+  builtinsInFlight = promise;
+  const clear = () => {
+    if (builtinsInFlight === promise) builtinsInFlight = null;
+  };
+  void promise.then(clear, clear);
+  return promise;
+}
 
 // ── Shared interaction state ─────────────────────────────────────────────────
 // Hand-rolled buttons in this dialog set an inline box-shadow, which silently
@@ -97,20 +130,21 @@ export default function AgentCapabilitiesDialog({
   const [status, setStatus] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [runtimeFilter, setRuntimeFilter] = useState<RuntimeFilter>("all");
+  const [activeView, setActiveView] = useState<CapabilityView>("overview");
+  const deferredSearch = useDeferredValue(search);
+  const deferredRuntimeFilter = useDeferredValue(runtimeFilter);
 
-  const refreshAssets = () => {
-    void window.spark.agents
-      .assets({ cwd: workspaceCwd })
+  const refreshAssets = useCallback(() => {
+    void requestAssets(workspaceCwd)
       .then(setAssets)
       .catch((err) => setStatus((err as Error).message));
-  };
+  }, [workspaceCwd]);
 
-  const refreshBuiltins = () => {
-    void window.spark.agents
-      .builtins()
+  const refreshBuiltins = useCallback(() => {
+    void requestBuiltins()
       .then(setBuiltins)
       .catch((err) => setStatus((err as Error).message));
-  };
+  }, []);
 
   useEffect(() => {
     setDraft(settings);
@@ -118,13 +152,11 @@ export default function AgentCapabilitiesDialog({
 
   useEffect(() => {
     refreshAssets();
-  }, [workspaceCwd, draft.agentDisabledMcpIds, draft.agentDisabledSkillIds]);
+  }, [refreshAssets]);
 
   useEffect(() => {
     refreshBuiltins();
-    // Re-read built-in state when the auto-install policy changes so the
-    // "auto" hint and install buttons reflect the live setting.
-  }, [workspaceCwd, draft.playwrightMcpAutoInstall]);
+  }, [refreshBuiltins]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -155,12 +187,12 @@ export default function AgentCapabilitiesDialog({
   const mcpGroups = useMemo(() => groupByName(mcp, "mcp"), [mcp]);
   const skillGroups = useMemo(() => groupByName(skills, "skill"), [skills]);
   const filteredMcp = useMemo(
-    () => filterGroups(mcpGroups, search, runtimeFilter),
-    [mcpGroups, search, runtimeFilter],
+    () => filterGroups(mcpGroups, deferredSearch, deferredRuntimeFilter),
+    [mcpGroups, deferredSearch, deferredRuntimeFilter],
   );
   const filteredSkills = useMemo(
-    () => filterGroups(skillGroups, search, runtimeFilter),
-    [skillGroups, search, runtimeFilter],
+    () => filterGroups(skillGroups, deferredSearch, deferredRuntimeFilter),
+    [skillGroups, deferredSearch, deferredRuntimeFilter],
   );
   const claudeInstallCount = useMemo(
     () => countInstalls([...mcpGroups, ...skillGroups], "claude"),
@@ -279,16 +311,17 @@ export default function AgentCapabilitiesDialog({
     <div style={overlayStyle} onMouseDown={onClose}>
       {/* Scrim + dialog face come from the shared glass classes (frosted in
           glass mode, opaque panel look otherwise). */}
-      <div className="spark-scrim" style={{ zIndex: 0 }} />
+      <div className="spark-scrim agent-capabilities-scrim" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Capability Center"
-        className="spark-glass--strong"
+        className="spark-glass--strong agent-capabilities-surface"
+        data-agent-capabilities-surface
         style={dialogStyle}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <header style={headerStyle}>
+        <header className="agent-capabilities-header" style={headerStyle}>
           <div style={{ minWidth: 0 }}>
             <div className="spark-eyebrow" style={{ fontFamily: "var(--font-sans)" }}>
               Agent Capabilities
@@ -304,126 +337,245 @@ export default function AgentCapabilitiesDialog({
           </div>
         </header>
 
-        <main style={mainStyle}>
-          <SparkBuiltinsSection
-            builtins={builtins}
-            busyKey={builtinBusy}
-            autoInstallEnabled={draft.playwrightMcpAutoInstall}
-            onInstall={installBuiltin}
-            onUninstall={uninstallBuiltin}
-          />
-
-          <section style={summaryGridStyle}>
-            <div style={subsectionStyle}>
-              <Section title="Session Policy" detail="Compact awareness only; full docs stay out of prompts until a task needs them." />
-              <hr className="spark-divider" />
-              <div style={policyListStyle}>
-                <PolicyToggle
-                  title="MCP awareness"
-                  detail="Let Cora mention available MCP server names during agent planning."
-                  checked={draft.agentMcpSyncEnabled}
-                  onChange={(agentMcpSyncEnabled) => setDraft((d) => ({ ...d, agentMcpSyncEnabled }))}
-                />
-                <PolicyToggle
-                  title="Skill awareness"
-                  detail="Let workers discover named workflows and load their docs on demand."
-                  checked={draft.agentSkillSyncEnabled}
-                  onChange={(agentSkillSyncEnabled) => setDraft((d) => ({ ...d, agentSkillSyncEnabled }))}
-                />
-                <PolicyToggle
-                  title="Auto-install Codara Studio MCP"
-                  detail="Register the codara-studio MCP so agents can drive the live <preview> tab and open agent-owned terminal tabs inside Codara — same DOM the user sees, no extra browser window."
-                  checked={draft.playwrightMcpAutoInstall}
-                  onChange={(playwrightMcpAutoInstall) => setDraft((d) => ({ ...d, playwrightMcpAutoInstall }))}
-                />
+        <div className="agent-capabilities-layout">
+          <aside className="agent-capabilities-rail">
+            <div className="agent-capabilities-rail__summary">
+              <div className="agent-capabilities-orbit" aria-hidden>
+                <span />
+                <span />
+                <span />
+              </div>
+              <div>
+                <strong>{activeCount}</strong>
+                <span>of {totalCount} available</span>
               </div>
             </div>
 
-            <div style={subsectionStyle}>
-              <Section title="Inventory" detail="Each row shows where an MCP or skill is installed. Uninstall removes it from that runtime only." />
-              <hr className="spark-divider" />
-              <div style={metricGridStyle}>
-                <StatTile label="Claude installs" value={claudeInstallCount.total} detail={`${claudeInstallCount.mcp} MCP · ${claudeInstallCount.skill} skill`} />
-                <StatTile label="Codex installs" value={codexInstallCount.total} detail={`${codexInstallCount.mcp} MCP · ${codexInstallCount.skill} skill`} />
-              </div>
-              <div style={syncBarStyle}>
-                <button
-                  type="button"
-                  className="spark-btn"
-                  disabled={syncing}
-                  onClick={syncAssets}
-                >
-                  {syncing ? "Syncing" : "Sync"}
-                </button>
-                <div style={syncCopyStyle}>Copy missing compatible entries from one runtime to the other.</div>
-              </div>
-            </div>
-          </section>
-
-          <section style={filterBarStyle}>
-            <div style={searchWrapStyle}>
-              <SearchGlyph />
-              <input
-                type="search"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Filter by name or path"
-                className="spark-input"
-                style={searchInputStyle}
-                spellCheck={false}
+            <nav className="agent-capabilities-nav" aria-label="Capability Center navigation">
+              <CapabilityNavButton
+                view="overview"
+                activeView={activeView}
+                label="Overview"
+                detail="Policy and built-ins"
+                count={activeCount}
+                onSelect={setActiveView}
               />
-            </div>
-            <div
-              className="spark-segmented"
-              role="group"
-              aria-label="Filter by runtime"
-              style={filterSegmentedStyle}
-            >
-              <FilterSegment label="All" active={runtimeFilter === "all"} onClick={() => setRuntimeFilter("all")} />
-              <FilterSegment label="Claude only" active={runtimeFilter === "claude"} onClick={() => setRuntimeFilter("claude")} />
-              <FilterSegment label="Codex only" active={runtimeFilter === "codex"} onClick={() => setRuntimeFilter("codex")} />
-              <FilterSegment label="Both" active={runtimeFilter === "both"} onClick={() => setRuntimeFilter("both")} />
-              <FilterSegment label="Shared" active={runtimeFilter === "shared"} onClick={() => setRuntimeFilter("shared")} />
-            </div>
-          </section>
+              <CapabilityNavButton
+                view="mcp"
+                activeView={activeView}
+                label="MCP servers"
+                detail="Tools and connectors"
+                count={mcpGroups.length}
+                onSelect={setActiveView}
+              />
+              <CapabilityNavButton
+                view="skill"
+                activeView={activeView}
+                label="Skills"
+                detail="Reusable workflows"
+                count={skillGroups.length}
+                onSelect={setActiveView}
+              />
+            </nav>
 
-          <section style={capabilityGridStyle}>
-            <CapabilityGroup
-              kind="mcp"
-              title="MCP Servers"
-              detail="Tool connectors exposed by workspace and user runtime configs."
-              groups={filteredMcp}
-              totalGroups={mcpGroups.length}
-              activeCount={activeMcpCount}
-              totalItems={mcp.length}
-              disabled={disabled}
-              busyId={busyId}
-              emptyText={mcpGroups.length === 0 ? "No MCP servers found for this workspace." : "No MCP servers match the current filter."}
-              installBusy={installBusy}
-              onToggle={toggleItem}
-              onDelete={deleteItem}
-              onInstall={installToRuntime}
-            />
-            <CapabilityGroup
-              kind="skill"
-              title="Skills"
-              detail="Reusable workflows workers can load only when they are relevant."
-              groups={filteredSkills}
-              totalGroups={skillGroups.length}
-              activeCount={activeSkillCount}
-              totalItems={skills.length}
-              disabled={disabled}
-              busyId={busyId}
-              emptyText={skillGroups.length === 0 ? "No shareable skills found for this workspace." : "No skills match the current filter."}
-              installBusy={installBusy}
-              onToggle={toggleItem}
-              onDelete={deleteItem}
-              onInstall={installToRuntime}
-            />
-          </section>
-        </main>
+            <div className="agent-capabilities-rail__footer">
+              <span className="agent-capabilities-rail__pulse" aria-hidden />
+              Cora loads capability details only when the task needs them.
+            </div>
+          </aside>
 
-        <footer style={footerStyle}>
+          <main className="agent-capabilities-scroll" style={mainStyle}>
+            <div className="agent-capabilities-view-heading">
+              <div>
+                <div className="spark-eyebrow">
+                  {activeView === "overview" ? "Capability overview" : activeView === "mcp" ? "Tool connections" : "Agent workflows"}
+                </div>
+                <h2>
+                  {activeView === "overview" ? "Cora’s toolkit" : activeView === "mcp" ? "MCP servers" : "Skills"}
+                </h2>
+                <p>
+                  {activeView === "overview"
+                    ? "Control what Cora and her workers can discover, then keep Claude and Codex in sync."
+                    : activeView === "mcp"
+                      ? "Manage the tool servers Cora can discover and use across each runtime."
+                      : "Manage the reusable instructions Cora can load when a task matches."}
+                </p>
+              </div>
+              {activeView !== "overview" ? (
+                <div className="agent-capabilities-view-heading__count">
+                  <strong>{activeView === "mcp" ? activeMcpCount : activeSkillCount}</strong>
+                  <span>enabled</span>
+                </div>
+              ) : null}
+            </div>
+
+            {activeView === "overview" ? (
+              <>
+                <section className="agent-capabilities-hero spark-glass">
+                  <div className="agent-capabilities-hero__copy">
+                    <span className="spark-eyebrow">Ready for Cora</span>
+                    <strong>{activeCount} capabilities are in her reach</strong>
+                    <p>
+                      Awareness stays lightweight. Full tool schemas and skill instructions are loaded only when they
+                      are relevant to the work.
+                    </p>
+                  </div>
+                  <div className="agent-capabilities-hero__metrics">
+                    <div>
+                      <span>MCP</span>
+                      <strong>{activeMcpCount}</strong>
+                    </div>
+                    <div>
+                      <span>Skills</span>
+                      <strong>{activeSkillCount}</strong>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="agent-capabilities-browse-grid" aria-label="Browse capabilities">
+                  <CapabilityBrowseCard
+                    view="mcp"
+                    title="MCP servers"
+                    detail="Connect tools, browsers, data, and app surfaces."
+                    enabled={activeMcpCount}
+                    total={mcp.length}
+                    onSelect={setActiveView}
+                  />
+                  <CapabilityBrowseCard
+                    view="skill"
+                    title="Skills"
+                    detail="Give workers focused workflows without bloating every prompt."
+                    enabled={activeSkillCount}
+                    total={skills.length}
+                    onSelect={setActiveView}
+                  />
+                </section>
+
+                <section style={summaryGridStyle}>
+                  <div className="agent-capability-card agent-capability-overview-card spark-glass" style={subsectionStyle}>
+                    <Section title="Session policy" detail="Choose what Cora can discover while planning and delegating." />
+                    <hr className="spark-divider" />
+                    <div style={policyListStyle}>
+                      <PolicyToggle
+                        title="MCP awareness"
+                        detail="Let Cora mention available MCP server names during agent planning."
+                        checked={draft.agentMcpSyncEnabled}
+                        onChange={(agentMcpSyncEnabled) => setDraft((d) => ({ ...d, agentMcpSyncEnabled }))}
+                      />
+                      <PolicyToggle
+                        title="Skill awareness"
+                        detail="Let workers discover named workflows and load their docs on demand."
+                        checked={draft.agentSkillSyncEnabled}
+                        onChange={(agentSkillSyncEnabled) => setDraft((d) => ({ ...d, agentSkillSyncEnabled }))}
+                      />
+                      <PolicyToggle
+                        title="Auto-install Codara Studio MCP"
+                        detail="Let agents drive Codara’s live preview and agent-owned terminals in the workspace."
+                        checked={draft.playwrightMcpAutoInstall}
+                        onChange={(playwrightMcpAutoInstall) => setDraft((d) => ({ ...d, playwrightMcpAutoInstall }))}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="agent-capability-card agent-capability-overview-card spark-glass" style={subsectionStyle}>
+                    <Section title="Runtime coverage" detail="See how capabilities are distributed, or copy compatible entries across runtimes." />
+                    <hr className="spark-divider" />
+                    <div style={metricGridStyle}>
+                      <StatTile label="Claude installs" value={claudeInstallCount.total} detail={`${claudeInstallCount.mcp} MCP · ${claudeInstallCount.skill} skill`} />
+                      <StatTile label="Codex installs" value={codexInstallCount.total} detail={`${codexInstallCount.mcp} MCP · ${codexInstallCount.skill} skill`} />
+                    </div>
+                    <div style={syncBarStyle}>
+                      <button type="button" className="spark-btn" disabled={syncing} onClick={syncAssets}>
+                        {syncing ? "Syncing" : "Sync runtimes"}
+                      </button>
+                      <div style={syncCopyStyle}>Copy missing compatible entries from one runtime to the other.</div>
+                    </div>
+                  </div>
+                </section>
+
+                <SparkBuiltinsSection
+                  builtins={builtins}
+                  busyKey={builtinBusy}
+                  autoInstallEnabled={draft.playwrightMcpAutoInstall}
+                  onInstall={installBuiltin}
+                  onUninstall={uninstallBuiltin}
+                />
+              </>
+            ) : (
+              <>
+                <section className="agent-capabilities-filter-bar" style={filterBarStyle}>
+                  <div style={searchWrapStyle}>
+                    <SearchGlyph />
+                    <input
+                      type="search"
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      placeholder={`Filter ${activeView === "mcp" ? "MCP servers" : "skills"} by name or path`}
+                      className="spark-input"
+                      style={searchInputStyle}
+                      spellCheck={false}
+                    />
+                  </div>
+                  <div
+                    className="spark-segmented"
+                    role="group"
+                    aria-label="Filter by runtime"
+                    style={filterSegmentedStyle}
+                  >
+                    <FilterSegment label="All" active={runtimeFilter === "all"} onClick={() => setRuntimeFilter("all")} />
+                    <FilterSegment label="Claude" active={runtimeFilter === "claude"} onClick={() => setRuntimeFilter("claude")} />
+                    <FilterSegment label="Codex" active={runtimeFilter === "codex"} onClick={() => setRuntimeFilter("codex")} />
+                    <FilterSegment label="Both" active={runtimeFilter === "both"} onClick={() => setRuntimeFilter("both")} />
+                    <FilterSegment label="Shared" active={runtimeFilter === "shared"} onClick={() => setRuntimeFilter("shared")} />
+                  </div>
+                </section>
+
+                <section
+                  style={capabilityGridStyle}
+                  aria-busy={deferredSearch !== search || deferredRuntimeFilter !== runtimeFilter}
+                >
+                  {activeView === "mcp" ? (
+                    <CapabilityGroup
+                      kind="mcp"
+                      title="MCP servers"
+                      detail="Tool connectors exposed by workspace and user runtime configs."
+                      groups={filteredMcp}
+                      totalGroups={mcpGroups.length}
+                      activeCount={activeMcpCount}
+                      totalItems={mcp.length}
+                      disabled={disabled}
+                      busyId={busyId}
+                      emptyText={mcpGroups.length === 0 ? "No MCP servers found for this workspace." : "No MCP servers match the current filter."}
+                      installBusy={installBusy}
+                      onToggle={toggleItem}
+                      onDelete={deleteItem}
+                      onInstall={installToRuntime}
+                    />
+                  ) : (
+                    <CapabilityGroup
+                      kind="skill"
+                      title="Skills"
+                      detail="Reusable workflows workers can load only when they are relevant."
+                      groups={filteredSkills}
+                      totalGroups={skillGroups.length}
+                      activeCount={activeSkillCount}
+                      totalItems={skills.length}
+                      disabled={disabled}
+                      busyId={busyId}
+                      emptyText={skillGroups.length === 0 ? "No shareable skills found for this workspace." : "No skills match the current filter."}
+                      installBusy={installBusy}
+                      onToggle={toggleItem}
+                      onDelete={deleteItem}
+                      onInstall={installToRuntime}
+                    />
+                  )}
+                </section>
+              </>
+            )}
+          </main>
+        </div>
+
+        <footer className="agent-capabilities-footer" style={footerStyle}>
           <div
             style={{
               ...statusStyle,
@@ -460,6 +612,102 @@ function CloseButton({ onClick }: { onClick: () => void }) {
   );
 }
 
+function CapabilityNavButton({
+  view,
+  activeView,
+  label,
+  detail,
+  count,
+  onSelect,
+}: {
+  view: CapabilityView;
+  activeView: CapabilityView;
+  label: string;
+  detail: string;
+  count: number;
+  onSelect: (view: CapabilityView) => void;
+}) {
+  const active = view === activeView;
+  return (
+    <button
+      type="button"
+      className={`agent-capabilities-nav__item${active ? " is-active" : ""}`}
+      aria-current={active ? "page" : undefined}
+      onClick={() => onSelect(view)}
+    >
+      <CapabilityViewGlyph view={view} />
+      <span className="agent-capabilities-nav__copy">
+        <strong>{label}</strong>
+        <span>{detail}</span>
+      </span>
+      <span className="agent-capabilities-nav__count">{count}</span>
+    </button>
+  );
+}
+
+function CapabilityBrowseCard({
+  view,
+  title,
+  detail,
+  enabled,
+  total,
+  onSelect,
+}: {
+  view: Exclude<CapabilityView, "overview">;
+  title: string;
+  detail: string;
+  enabled: number;
+  total: number;
+  onSelect: (view: CapabilityView) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="agent-capabilities-browse-card spark-glass"
+      onClick={() => onSelect(view)}
+    >
+      <span className="agent-capabilities-browse-card__glyph">
+        <CapabilityViewGlyph view={view} />
+      </span>
+      <span className="agent-capabilities-browse-card__copy">
+        <strong>{title}</strong>
+        <span>{detail}</span>
+      </span>
+      <span className="agent-capabilities-browse-card__meta">
+        <strong>{enabled}</strong>
+        <span>/ {total}</span>
+        <span aria-hidden>→</span>
+      </span>
+    </button>
+  );
+}
+
+function CapabilityViewGlyph({ view }: { view: CapabilityView }) {
+  if (view === "mcp") {
+    return (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+        <path d="M5.25 3.25v2.1M10.75 3.25v2.1M4 5.35h8v1.9A4 4 0 0 1 8 11.2a4 4 0 0 1-4-3.95v-1.9Z" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+        <path d="M8 11.25v2" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (view === "skill") {
+    return (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+        <path d="m8 2 1.15 3.1L12.5 6.3 9.7 8.15 9.6 11.5 8 10.45 6.4 11.5l-.1-3.35L3.5 6.3l3.35-1.2L8 2Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+        <path d="M5.65 12.2 4.8 14M10.35 12.2l.85 1.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="5.25" stroke="currentColor" strokeWidth="1.25" />
+      <circle cx="8" cy="8" r="1.65" fill="currentColor" />
+      <path d="M8 2.75v2M13.25 8h-2M8 13.25v-2M2.75 8h2" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function SparkBuiltinsSection({
   builtins,
   busyKey,
@@ -474,7 +722,7 @@ function SparkBuiltinsSection({
   onUninstall: (id: SparkBuiltinMcpId, runtime: SparkBuiltinRuntime) => void;
 }) {
   return (
-    <section style={builtinSectionStyle}>
+    <section className="agent-capabilities-builtins" style={builtinSectionStyle}>
       <div style={builtinSectionHeaderStyle}>
         <div className="spark-eyebrow" style={builtinEyebrowStyle}>
           <SparkGlyph />
@@ -524,7 +772,7 @@ function BuiltinCard({
   const runtimes: SparkBuiltinRuntime[] = ["claude", "codex"];
   const showAutoHint = builtin.id === "codara-studio" && autoInstallEnabled;
   return (
-    <div style={builtinCardStyle}>
+    <div className="agent-capability-card spark-glass" style={builtinCardStyle}>
       <div style={{ minWidth: 0 }}>
         <div style={builtinCardTitleRowStyle}>
           <span style={builtinNameStyle}>{builtin.name}</span>
@@ -757,8 +1005,15 @@ function CapabilityGroup({
   onDelete: (item: AgentAssetInventoryItem) => void;
   onInstall: (group: NameGroup, target: "claude" | "codex") => void;
 }) {
+  const [visibleLimit, setVisibleLimit] = useState(CAPABILITY_PAGE_SIZE);
+  useEffect(() => {
+    setVisibleLimit(CAPABILITY_PAGE_SIZE);
+  }, [groups]);
+  const visibleGroups = groups.slice(0, visibleLimit);
+  const hiddenCount = Math.max(0, groups.length - visibleGroups.length);
+
   return (
-    <div style={capabilityPanelStyle}>
+    <div className="agent-capability-panel spark-glass" style={capabilityPanelStyle}>
       <div style={capabilityHeaderStyle}>
         <Section title={title} detail={detail} />
         <div style={groupCountStyle} title={`${groups.length} of ${totalGroups} shown`}>
@@ -781,7 +1036,7 @@ function CapabilityGroup({
             <span className="spark-empty__body">{emptyText}</span>
           </div>
         ) : (
-          groups.map((group) => (
+          visibleGroups.map((group) => (
             <GroupRow
               key={`${group.kind}:${group.name}`}
               kind={kind}
@@ -795,6 +1050,18 @@ function CapabilityGroup({
             />
           ))
         )}
+        {hiddenCount > 0 ? (
+          <div style={loadMoreStyle}>
+            <span>{visibleGroups.length} of {groups.length} shown</span>
+            <button
+              type="button"
+              className="spark-btn"
+              onClick={() => setVisibleLimit((current) => current + CAPABILITY_PAGE_SIZE)}
+            >
+              Show {Math.min(CAPABILITY_PAGE_SIZE, hiddenCount)} more
+            </button>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -837,7 +1104,7 @@ function GroupRow({
     group.any.compatibility !== (rt === "claude" ? "codex" : "claude");
 
   return (
-    <div style={{ ...rowStyle, opacity: enabled ? 1 : 0.5 }}>
+    <div className="agent-capability-row" style={{ ...rowStyle, opacity: enabled ? 1 : 0.5 }}>
       <div style={{ minWidth: 0 }}>
         <div style={nameStyle} title={group.name}>
           {group.name}
@@ -1397,11 +1664,11 @@ const dialogStyle: React.CSSProperties = {
   // Face/border/shadow come from .spark-glass--strong (frosted in glass mode,
   // the old --panel dialog recipe otherwise).
   zIndex: 1,
-  width: "min(1240px, calc(100vw - 44px))",
-  height: "min(840px, calc(100vh - 44px))",
+  width: "min(860px, calc(100vw - 44px))",
+  height: "min(760px, calc(100vh - 44px))",
   display: "grid",
   gridTemplateRows: "auto minmax(0, 1fr) auto",
-  borderRadius: 16,
+  borderRadius: 12,
   overflow: "hidden",
   animation: "spark-fade-in var(--motion) var(--ease-out)",
 };
@@ -1445,7 +1712,7 @@ const mainStyle: React.CSSProperties = {
   // MCP/Skills tables below the tall built-ins section.)
   minHeight: 0,
   overflowY: "auto",
-  padding: 16,
+  padding: "20px 22px 24px",
   display: "flex",
   flexDirection: "column",
   gap: 14,
@@ -1498,13 +1765,8 @@ const filterSegmentedStyle: React.CSSProperties = {
 };
 
 const panelStyle: React.CSSProperties = {
-  // One hairline + one soft cue (the top-highlight). No accent wash. Softened
-  // to the surface rung so the card reads calm, not boxy.
-  border: "1px solid var(--rule-soft)",
   borderRadius: "var(--radius-surface, 10px)",
   padding: 14,
-  background: "var(--panel-2)",
-  boxShadow: "var(--lift-hi)",
   display: "grid",
   gap: 10,
 };
@@ -1520,7 +1782,6 @@ const subsectionStyle: React.CSSProperties = {
   alignContent: "start",
   padding: 14,
   borderRadius: "var(--radius-surface, 10px)",
-  background: "color-mix(in oklab, var(--panel-2) 60%, transparent)",
 };
 
 const capabilityPanelStyle: React.CSSProperties = {
@@ -1695,6 +1956,23 @@ const rowStyle: React.CSSProperties = {
   padding: "9px 10px",
   borderBottom: "1px solid var(--rule-soft)",
   transition: "opacity var(--motion-fast) var(--ease-out)",
+  // Chromium can skip layout/paint for rows below the scroll viewport. This
+  // complements progressive rendering when an installation has hundreds of
+  // plugin-provided skills.
+  contentVisibility: "auto",
+  containIntrinsicSize: "56px",
+};
+
+const loadMoreStyle: React.CSSProperties = {
+  minHeight: 46,
+  padding: "8px 10px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 10,
+  color: "var(--muted)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 10,
 };
 
 const nameStyle: React.CSSProperties = {
@@ -1776,14 +2054,8 @@ const builtinCardGridStyle: React.CSSProperties = {
 };
 
 const builtinCardStyle: React.CSSProperties = {
-  // One hairline + one soft cue (the top-highlight), calm panel-2 surface,
-  // softened to the surface rung. Tighter internal rhythm so the two built-in
-  // cards read breathable rather than dense.
-  border: "1px solid var(--rule-soft)",
   borderRadius: "var(--radius-surface, 10px)",
   padding: 14,
-  background: "var(--panel-2)",
-  boxShadow: "var(--lift-hi)",
   display: "grid",
   gap: 10,
   alignContent: "start",
@@ -1961,7 +2233,6 @@ const footerStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 8,
-  background: "var(--panel)",
 };
 
 const statusStyle: React.CSSProperties = {

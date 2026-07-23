@@ -34,6 +34,7 @@ export type CommandId =
   | "tab.newTerminal"
   | "tab.newEditor"
   | "tab.newPreview"
+  | "tab.newWhiteboard"
   | "tab.close"
   | "tab.closeOthers"
   | "tab.cycleNext"
@@ -253,6 +254,15 @@ export const COMMANDS: Command[] = [
     group: "Tabs",
     // Mod+E — swapped with Open File (which took the standard Mod+P quick-open).
     defaultChords: [mod("e")],
+  },
+  {
+    id: "tab.newWhiteboard",
+    label: "New whiteboard",
+    group: "Tabs",
+    // Mod+Shift+W — free chord: Mod+W is Close tab, and nothing binds the
+    // shifted variant by default (terminal.closePane ships unbound; no main-
+    // process accelerator claims it either).
+    defaultChords: [mod("w", { shift: true })],
   },
   {
     id: "tab.close",

@@ -90,10 +90,29 @@ const CODEX_MODELS: ChatModelOption[] = CODEX_MODEL_CATALOG.map((model) => ({
         : "Fast",
 }));
 
-export const DEFAULT_CHAT_BACKEND: ChatBackendKind = "openrouter";
-export const DEFAULT_CHAT_MODEL = "google/gemini-flash-latest";
+const PI_MODELS: ChatModelOption[] = [
+  {
+    id: "gpt-5.6-sol",
+    label: "GPT-5.6 Sol",
+    backend: "pi",
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+    description: "Cora's pinned Pi runtime using the Codex subscription. The default route for serious project work.",
+    badge: "Recommended",
+  },
+  {
+    id: "claude-fable-5",
+    label: "Claude Fable 5",
+    backend: "pi",
+    effortLevels: ["low", "medium", "high", "xhigh", "max"],
+    description: "Cora's pinned Pi runtime using the Claude subscription for the hardest work.",
+    badge: "Premium",
+  },
+];
+
+export const DEFAULT_CHAT_BACKEND: ChatBackendKind = "pi";
+export const DEFAULT_CHAT_MODEL = "gpt-5.6-sol";
 export const DEFAULT_CHAT_MODE: ChatMode = "auto";
-export const DEFAULT_CHAT_EFFORT: AgentEffortLevel = "medium";
+export const DEFAULT_CHAT_EFFORT: AgentEffortLevel = "high";
 
 export const EFFORT_LABELS: Record<AgentEffortLevel, string> = {
   minimal: "Minimal",
@@ -177,6 +196,14 @@ export function buildVisibleGroups({
   fableEnabled?: boolean;
 }): ChatBackendGroup[] {
   const groups: ChatBackendGroup[] = [];
+  // Pi is bundled and version-pinned with Studio. OAuth readiness is checked
+  // at launch so the picker can expose the experimental backend without
+  // pretending it is one of the native worker CLIs.
+  groups.push({
+    backend: "pi",
+    label: "Cora · Pi",
+    models: fableEnabled ? PI_MODELS : PI_MODELS.filter((model) => !/fable/i.test(model.id)),
+  });
   if (isAvailable(diagnostics, "claude")) {
     const claudeModels = fableEnabled
       ? CLAUDE_MODELS
@@ -304,6 +331,9 @@ export function findOptionInCatalog(
   }
   if (backend === "codex") {
     return CODEX_MODELS.find((m) => m.id === compoundId) ?? null;
+  }
+  if (backend === "pi") {
+    return PI_MODELS.find((m) => m.id === compoundId) ?? null;
   }
   return null;
 }

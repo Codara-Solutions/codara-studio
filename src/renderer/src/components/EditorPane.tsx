@@ -164,6 +164,18 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const prefsRef = useRef(preferences);
   prefsRef.current = preferences;
 
+  // Whiteboard (.coraboard) tabs render an editable board through FilePreview;
+  // these adapters map its dirty/saved reports onto the editor-tab callbacks
+  // so the strip's dirty dot and the shared git refresh keep working.
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  onDirtyChangeRef.current = onDirtyChange;
+  const handleWhiteboardDirty = useCallback((dirty: boolean) => {
+    onDirtyChangeRef.current?.(pathRef.current, dirty);
+  }, []);
+  const handleWhiteboardSaved = useCallback((savedPath: string) => {
+    onSavedRef.current?.(savedPath);
+  }, []);
+
   const extensions = useMemo(
     () => [
       // basicSetup is added before user extensions by @uiw/react-codemirror,
@@ -384,7 +396,14 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             onSetMode={setViewMode}
           />
         )}
-        {previewOnly && <FilePreview path={path} kind={previewKind!} />}
+        {previewOnly && (
+          <FilePreview
+            path={path}
+            kind={previewKind!}
+            onWhiteboardDirtyChange={handleWhiteboardDirty}
+            onWhiteboardSaved={handleWhiteboardSaved}
+          />
+        )}
         {previewKind === "svg" && viewMode === "preview" && (
           <FilePreview path={path} kind="svg" />
         )}

@@ -4,6 +4,7 @@ import { backendPtySessionId } from "@shared/backend-pty";
 import { TerminalPane } from "../components/Terminal/TerminalPane";
 import { BACKEND_TERMINAL_SHELL } from "../components/chat/ChatPanel";
 import { PANEL_HEADER_H } from "../panels/usePanelLayout";
+import type { CoraView } from "../components/chat/cora-view";
 
 // App-level persistent host for the Cora chat backend terminals (the read-only
 // xterm attached to each chat's live Claude/Codex Ink TUI, pty session
@@ -75,7 +76,7 @@ interface Props {
   // relevant stack paints instead and this layer stays hidden (but mounted).
   activeChatTabId: string | null;
   effectiveActiveId: string | null;
-  chatView: "chat" | "terminal";
+  chatView: CoraView;
   terminalScrollbackLineLimit: number;
   // Only used by the placeholder-shell spawn guard inside TerminalPane; the
   // backend PTY already exists (we gate mount on that), so main's existing-

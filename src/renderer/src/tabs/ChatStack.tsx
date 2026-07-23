@@ -2,11 +2,16 @@ import React, { useCallback, useMemo, useRef } from "react";
 import type { RunState, Workspace } from "@shared/types";
 import OrchestrationSidebar from "../components/OrchestrationSidebar";
 import type { ChatTab, Tab, TabId } from "./types";
+import type { CoraView } from "../components/chat/cora-view";
 
 interface Props {
   tabs: Tab[];
   activeId: TabId | null;
   workspace: Workspace | null;
+  // Which workspace `tabs`/`activeId` belong to. During a workspace switch the
+  // tab store lags `workspace` by one render, so retention must not mix the
+  // entering workspace's id with the leaving workspace's tabs.
+  tabsWorkspaceId: string | null;
   validWorkspaceIds: ReadonlySet<string>;
   runs: RunState[];
   runsWorkspaceId: string | null;
@@ -14,8 +19,8 @@ interface Props {
   terminalScrollbackLineLimit: number;
   // Chat / backend-PTY view mode, lifted into App so the inner tab strip can
   // drive it without ChatPanel keeping a duplicate state.
-  chatView: "chat" | "terminal";
-  onChatViewChange: (view: "chat" | "terminal") => void;
+  chatView: CoraView;
+  onChatViewChange: (view: CoraView) => void;
   onSelectRun: (id: string | null) => void;
   onRunSnapshot: (
     run: RunState,
@@ -27,6 +32,7 @@ function ChatStack({
   tabs,
   activeId,
   workspace,
+  tabsWorkspaceId,
   validWorkspaceIds,
   runs,
   runsWorkspaceId,
@@ -59,7 +65,11 @@ function ChatStack({
     if (!validWorkspaceIds.has(workspaceId)) retained.delete(workspaceId);
   }
 
-  if (workspace) {
+  // Skip retention on the one flip render where `tabs` still belongs to the
+  // leaving workspace — writing then would point the entering workspace's
+  // retained entry at a tab id from another workspace (mirrors the
+  // runsWorkspaceId ownership gate below).
+  if (workspace && tabsWorkspaceId === workspace.id) {
     const previous = retained.get(workspace.id);
     const selectedTab =
       chatTabs.find((tab) => tab.id === activeId) ??

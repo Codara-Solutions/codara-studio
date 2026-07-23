@@ -1,10 +1,15 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentRuntimeDiagnostic,
   AgentRuntimeKind,
   AgentRuntimeSelection,
   AppSettings,
   EditorThemeId,
+  PiSubscriptionAuthEvent,
+  PiSubscriptionConnection,
+  PiSubscriptionOverview,
+  PiSubscriptionPrompt,
+  PiSubscriptionProvider,
   RunState,
   ShellInfo,
   ThemePref,
@@ -244,6 +249,11 @@ export default function SettingsDialog({
   onOpenWorkerSession,
 }: SettingsDialogProps) {
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
+  // Selecting a section should acknowledge the click before a large section
+  // (Runs, Sessions, Agents, or the theme gallery) builds its DOM and starts
+  // background IPC. The nav follows activeTab immediately while React renders
+  // the section body at deferred priority.
+  const renderedTab = useDeferredValue(activeTab);
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -307,12 +317,13 @@ export default function SettingsDialog({
     >
       {/* Scrim + dialog face come from the shared glass classes (frosted in
           glass mode, opaque panel look otherwise). */}
-      <div className="spark-scrim" style={{ zIndex: 0 }} />
+      <div className="spark-scrim settings-dialog-scrim" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
         aria-label="Settings"
-        className="spark-glass--strong"
+        className="spark-glass--strong settings-dialog-surface"
+        data-settings-surface
         style={{
           zIndex: 1,
           // Fixed footprint — switching tabs (or resizing the inner content)
@@ -346,6 +357,8 @@ export default function SettingsDialog({
           {/* A real System-Settings title: title case at 15px/600, not an
               all-caps tracked eyebrow. The accent dot supplies the brand mark. */}
           <div
+            data-settings-tab={renderedTab}
+            aria-busy={renderedTab !== activeTab}
             style={{
               fontFamily: "var(--font-sans)",
               fontSize: 15,
@@ -391,9 +404,9 @@ export default function SettingsDialog({
               overflow: "auto",
             }}
           >
-            {activeTab === "general" && <GeneralSettings workspaceCwd={workspaceCwd} />}
-            {activeTab === "editor" && <EditorSettings />}
-            {activeTab === "terminal" && (
+            {renderedTab === "general" && <GeneralSettings workspaceCwd={workspaceCwd} />}
+            {renderedTab === "editor" && <EditorSettings />}
+            {renderedTab === "terminal" && (
               <TerminalSettings
                 shells={shells}
                 selectedShellId={selectedShell?.id ?? null}
@@ -406,19 +419,19 @@ export default function SettingsDialog({
                 }
               />
             )}
-            {activeTab === "api" && <ApiSettings draft={draft} onChange={setDraft} />}
-            {activeTab === "agents" && (
+            {renderedTab === "api" && <ApiSettings draft={draft} onChange={setDraft} />}
+            {renderedTab === "agents" && (
               <AgentsSettings draft={draft} onChange={setDraft} />
             )}
-            {activeTab === "sessions" && (
+            {renderedTab === "sessions" && (
               <SessionsSettings
                 workspaceCwd={workspaceCwd}
                 onOpenWorkerSession={onOpenWorkerSession}
               />
             )}
-            {activeTab === "keybindings" && <KeybindingsTab />}
-            {activeTab === "runs" && <RunsSettings onOpenRun={onOpenRun} />}
-            {activeTab === "about" && <AboutSettings />}
+            {renderedTab === "keybindings" && <KeybindingsTab />}
+            {renderedTab === "runs" && <RunsSettings onOpenRun={onOpenRun} />}
+            {renderedTab === "about" && <AboutSettings />}
           </div>
         </div>
 
@@ -1439,6 +1452,427 @@ function EditorSettings() {
 
 const ALL_AGENT_RUNTIME_KINDS: ReadonlyArray<AgentRuntimeKind> = ["claude", "codex"];
 
+interface PiLoginView {
+  requestId: string;
+  provider: PiSubscriptionProvider;
+  status: "running" | "completed" | "failed" | "cancelled";
+  message: string;
+  url?: string;
+  deviceCode?: string;
+  promptId?: string;
+  prompt?: PiSubscriptionPrompt;
+}
+
+function PiSubscriptionSettings() {
+  const [overview, setOverview] = useState<PiSubscriptionOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [login, setLogin] = useState<PiLoginView | null>(null);
+  const [promptValue, setPromptValue] = useState("");
+
+  const refresh = () => {
+    setLoading(true);
+    setError(null);
+    void window.spark.piSubscriptions
+      .status()
+      .then(setOverview)
+      .catch((err) => setError((err as Error).message))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    refresh();
+    const remove = window.spark.piSubscriptions.onEvent((event) => {
+      setPromptValue("");
+      if (event.type === "completed") {
+        setOverview(event.overview);
+        setLogin({
+          requestId: event.requestId,
+          provider: event.provider,
+          status: "completed",
+          message: event.message,
+        });
+        return;
+      }
+      if (event.type === "failed" || event.type === "cancelled") {
+        setLogin((current) => ({
+          requestId: event.requestId,
+          provider: event.provider,
+          status: event.type,
+          message: event.message,
+          ...(current?.requestId === event.requestId && current.url ? { url: current.url } : {}),
+        }));
+        return;
+      }
+      setLogin((current) => {
+        const base: PiLoginView = current?.requestId === event.requestId
+          ? current
+          : {
+              requestId: event.requestId,
+              provider: event.provider,
+              status: "running",
+              message: "Connecting subscription…",
+            };
+        if (event.type === "auth_url") {
+          return {
+            ...base,
+            status: "running",
+            message: event.instructions || "Finish signing in in your browser.",
+            url: event.url,
+          };
+        }
+        if (event.type === "device_code") {
+          return {
+            ...base,
+            status: "running",
+            message: "Enter this code in the browser to finish connecting.",
+            url: event.verificationUri,
+            deviceCode: event.userCode,
+          };
+        }
+        if (event.type === "prompt") {
+          return {
+            ...base,
+            status: "running",
+            message: event.prompt.message,
+            promptId: event.promptId,
+            prompt: event.prompt,
+          };
+        }
+        return { ...base, status: "running", message: event.message };
+      });
+    });
+    return remove;
+  }, []);
+
+  const connect = (provider: PiSubscriptionProvider) => {
+    setError(null);
+    setLogin({
+      requestId: "starting",
+      provider,
+      status: "running",
+      message: "Preparing secure browser login…",
+    });
+    void window.spark.piSubscriptions.connect(provider).catch((err) => {
+      setLogin({
+        requestId: "failed-to-start",
+        provider,
+        status: "failed",
+        message: (err as Error).message,
+      });
+    });
+  };
+
+  const disconnect = (provider: PiSubscriptionProvider) => {
+    setLoading(true);
+    setError(null);
+    void window.spark.piSubscriptions
+      .disconnect(provider)
+      .then((next) => {
+        setOverview(next);
+        setLogin(null);
+      })
+      .catch((err) => setError((err as Error).message))
+      .finally(() => setLoading(false));
+  };
+
+  const submitPrompt = (value: string) => {
+    if (!login?.promptId || !value.trim()) return;
+    const { requestId, promptId } = login;
+    setLogin((current) => current ? {
+      ...current,
+      message: "Finishing secure login…",
+      prompt: undefined,
+      promptId: undefined,
+    } : current);
+    setPromptValue("");
+    void window.spark.piSubscriptions.respond({ requestId, promptId, value }).catch((err) => {
+      setLogin((current) => current ? {
+        ...current,
+        status: "failed",
+        message: (err as Error).message,
+      } : current);
+    });
+  };
+
+  const busyProvider = login?.status === "running" ? login.provider : null;
+
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <SectionTitle
+        title="Cora subscriptions"
+        detail="Connect the subscriptions Pi uses for Cora chat, planning, and every worker. Credentials stay in Codara's private Pi store; API-key environment variables are stripped from every launch."
+      />
+      <div
+        className="spark-glass"
+        style={{
+          display: "grid",
+          gap: 8,
+          padding: 10,
+          borderRadius: "var(--radius-surface, 7px)",
+          border: "1px solid var(--rule-soft)",
+          boxShadow: "var(--well)",
+        }}
+      >
+        {overview?.connections.map((connection) => (
+          <PiSubscriptionRow
+            key={connection.provider}
+            connection={connection}
+            busy={busyProvider === connection.provider}
+            disabled={busyProvider !== null && busyProvider !== connection.provider}
+            onConnect={() => connect(connection.provider)}
+            onDisconnect={() => disconnect(connection.provider)}
+          />
+        ))}
+        {!overview && loading ? <RuntimeDiagnosticSkeleton /> : null}
+        {overview?.runtimeInstalled ? (
+          <div
+            style={{
+              padding: "3px 3px 0",
+              color: "var(--muted)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+            }}
+          >
+            Pinned Pi {overview.runtimeVersion} · one auth store for manager + workers
+          </div>
+        ) : overview ? (
+          <div style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 11 }}>
+            {overview.runtimeError || "Codara's pinned Pi runtime is unavailable."}
+          </div>
+        ) : null}
+      </div>
+
+      {login ? (
+        <PiLoginPanel
+          login={login}
+          promptValue={promptValue}
+          onPromptValue={setPromptValue}
+          onSubmitPrompt={submitPrompt}
+          onCancel={() => {
+            if (login.status === "running" && login.requestId !== "starting") {
+              void window.spark.piSubscriptions.cancel(login.requestId);
+            } else {
+              setLogin(null);
+            }
+          }}
+        />
+      ) : null}
+
+      {error ? (
+        <div style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 12 }}>
+          {error}
+        </div>
+      ) : null}
+
+      <div
+        style={{
+          color: "var(--muted)",
+          fontFamily: "var(--font-sans)",
+          fontSize: 11,
+          lineHeight: 1.45,
+        }}
+      >
+        Claude note: Pi documents that third-party Claude Pro/Max harness use may draw from Anthropic Extra Usage.
+        Codara never substitutes an Anthropic API key, but you should keep Extra Usage disabled if you require a hard
+        no-metered-usage boundary.
+      </div>
+    </div>
+  );
+}
+
+function PiSubscriptionRow({
+  connection,
+  busy,
+  disabled,
+  onConnect,
+  onDisconnect,
+}: {
+  connection: PiSubscriptionConnection;
+  busy: boolean;
+  disabled: boolean;
+  onConnect: () => void;
+  onDisconnect: () => void;
+}) {
+  // A stored refresh token is not proof that the provider will accept it.
+  // Treat an expired access token as needing attention until a real launch or
+  // reconnect succeeds; the previous "Refresh ready" green state hid broken
+  // Anthropic refresh credentials behind a healthy-looking row.
+  const healthy = connection.connected && !connection.expired;
+  const status = busy
+    ? "Connecting…"
+    : connection.connected
+      ? connection.expired
+        ? connection.canRefresh ? "Expired · reconnect recommended" : "Expired"
+        : "Connected"
+      : "Not connected";
+  const expiry = connection.expiresAt
+    ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+        .format(new Date(connection.expiresAt))
+    : null;
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "10px minmax(0, 1fr) auto",
+        alignItems: "center",
+        gap: 10,
+        padding: "10px 10px",
+        borderRadius: "var(--radius-control, 5px)",
+        border: healthy ? "1px solid var(--accent-edge)" : "1px solid var(--rule-soft)",
+        background: healthy ? "var(--accent-soft)" : "color-mix(in oklab, var(--ink) 3%, transparent)",
+        boxShadow: healthy ? "var(--lift-hi)" : "none",
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 8,
+          height: 8,
+          borderRadius: 99,
+          background: healthy ? "var(--accent)" : connection.error ? "var(--danger)" : "var(--muted)",
+          boxShadow: healthy ? "0 0 8px var(--accent-glow)" : "none",
+        }}
+      />
+      <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
+        <span style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 13, fontWeight: 650 }}>
+          {connection.label}
+        </span>
+        <span style={{ color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 11 }}>
+          {connection.model} · {status}{expiry && connection.connected ? ` · token ${connection.expired ? "expired" : `until ${expiry}`}` : ""}
+        </span>
+        {connection.error ? (
+          <span style={{ color: "var(--danger)", fontFamily: "var(--font-sans)", fontSize: 10 }}>
+            {connection.error}
+          </span>
+        ) : null}
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <FooterButton onClick={onConnect} disabled={disabled || busy} primary={!connection.connected}>
+          {busy ? "Opening…" : connection.connected ? "Reconnect" : "Connect"}
+        </FooterButton>
+        {connection.connected ? (
+          <FooterButton onClick={onDisconnect} disabled={disabled || busy}>Disconnect</FooterButton>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function PiLoginPanel({
+  login,
+  promptValue,
+  onPromptValue,
+  onSubmitPrompt,
+  onCancel,
+}: {
+  login: PiLoginView;
+  promptValue: string;
+  onPromptValue: (value: string) => void;
+  onSubmitPrompt: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const done = login.status === "completed";
+  const failed = login.status === "failed";
+  const tone = done ? "var(--ok)" : failed ? "var(--danger)" : "var(--accent)";
+  const select = login.prompt?.type === "select" ? login.prompt : null;
+  const textPrompt = login.prompt && login.prompt.type !== "select" ? login.prompt : null;
+  return (
+    <div
+      className="spark-glass--strong"
+      aria-live="polite"
+      style={{
+        display: "grid",
+        gap: 10,
+        padding: 12,
+        borderRadius: "var(--radius-surface, 7px)",
+        border: `1px solid color-mix(in oklab, ${tone} 42%, var(--rule-soft))`,
+        boxShadow: "var(--lift-hi)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 9 }}>
+        <span
+          aria-hidden
+          style={{
+            width: 8,
+            height: 8,
+            marginTop: 4,
+            borderRadius: 99,
+            background: tone,
+            boxShadow: login.status === "running" ? `0 0 10px ${tone}` : "none",
+          }}
+        />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ color: "var(--ink)", fontFamily: "var(--font-sans)", fontSize: 12, fontWeight: 650 }}>
+            {done ? "Subscription connected" : failed ? "Could not connect" : "Secure subscription login"}
+          </div>
+          <div style={{ marginTop: 2, color: "var(--muted)", fontFamily: "var(--font-sans)", fontSize: 11, lineHeight: 1.45 }}>
+            {login.message}
+          </div>
+        </div>
+      </div>
+
+      {login.deviceCode ? (
+        <div
+          className="spark-mono"
+          style={{
+            justifySelf: "start",
+            padding: "7px 10px",
+            borderRadius: "var(--radius-control, 5px)",
+            border: "1px solid var(--accent-edge)",
+            background: "var(--accent-soft)",
+            color: "var(--ink)",
+            fontSize: 14,
+            letterSpacing: "0.14em",
+          }}
+        >
+          {login.deviceCode}
+        </div>
+      ) : null}
+
+      {select ? (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {select.options.map((option, index) => (
+            <FooterButton key={option.id} primary={index === 0} onClick={() => onSubmitPrompt(option.id)}>
+              {option.label}
+            </FooterButton>
+          ))}
+        </div>
+      ) : null}
+
+      {textPrompt ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSubmitPrompt(promptValue);
+          }}
+          style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", gap: 7 }}
+        >
+          <input
+            autoFocus
+            className="spark-input spark-mono"
+            type={textPrompt.type === "secret" ? "password" : "text"}
+            value={promptValue}
+            onChange={(event) => onPromptValue(event.currentTarget.value)}
+            placeholder={textPrompt.placeholder || "Paste the authorization code"}
+            style={inputShellStyle}
+          />
+          <button type="submit" className="spark-btn is-primary" disabled={!promptValue.trim()}>
+            Continue
+          </button>
+        </form>
+      ) : null}
+
+      <div style={{ display: "flex", gap: 6 }}>
+        {login.url ? (
+          <FooterButton onClick={() => void window.spark.openExternal(login.url!)}>Open browser again</FooterButton>
+        ) : null}
+        <FooterButton onClick={onCancel}>{login.status === "running" ? "Cancel" : "Dismiss"}</FooterButton>
+      </div>
+    </div>
+  );
+}
+
 function AgentsSettings({
   draft,
   onChange,
@@ -1481,6 +1915,10 @@ function AgentsSettings({
 
   return (
     <div style={{ display: "grid", gap: 18 }}>
+      <PiSubscriptionSettings />
+
+      <hr className="spark-divider" style={{ margin: "2px 0" }} />
+
       <div style={{ display: "grid", gap: 12 }}>
         <SectionTitle
           title="Agent runtimes"
@@ -1570,7 +2008,7 @@ function AgentsSettings({
         />
         <ToggleRow
           title="Allow Fable 5"
-          desc="Fable 5 is Anthropic's top-tier model — significantly more expensive than Opus 4.8. Off by default: when off it is hidden from the chat model picker and any automation that requests it falls back to Opus 4.8."
+          desc="Fable 5 is Anthropic's top-tier model — significantly more expensive than Opus 4.8. Off by default: when off it is hidden from the chat model picker and Cora workers or automations that request it fall back to Opus 4.8."
           checked={preferences.fableEnabled === true}
           onChange={(v) => void setPreference("fableEnabled", v)}
         />
@@ -3336,9 +3774,10 @@ function ModelPresetCard({
   );
 }
 
-// One liquid-glass tuning slider: 0–200% of the design default. Lives right
-// under the glass toggle; changes apply live (ThemeProvider maps the pref to
-// CSS scale vars / SVG lens attributes), so the dialog itself is the preview.
+// One liquid-glass tuning slider: 0–200% of the design default. Keep drag state
+// local and persist once on release/blur. Sending an IPC preference write for
+// every pointer sample forced the whole themed app (including SVG lens filters)
+// to repaint dozens of times per second and made Settings feel sticky.
 function GlassSliderRow({
   label,
   hint,
@@ -3352,6 +3791,24 @@ function GlassSliderRow({
   value: number;
   onChange: (next: number) => void;
 }) {
+  const [draftValue, setDraftValue] = useState(value);
+  const dragging = useRef(false);
+  const committedValue = useRef(value);
+
+  useEffect(() => {
+    committedValue.current = value;
+    if (!dragging.current) setDraftValue(value);
+  }, [value]);
+
+  const commit = (next: number) => {
+    dragging.current = false;
+    setDraftValue(next);
+    if (next !== committedValue.current) {
+      committedValue.current = next;
+      onChange(next);
+    }
+  };
+
   return (
     <div
       style={{
@@ -3370,8 +3827,15 @@ function GlassSliderRow({
         min={min}
         max={200}
         step={5}
-        value={value}
-        onChange={(event) => onChange(Number(event.currentTarget.value))}
+        value={draftValue}
+        onPointerDown={() => {
+          dragging.current = true;
+        }}
+        onChange={(event) => setDraftValue(Number(event.currentTarget.value))}
+        onPointerUp={(event) => commit(Number(event.currentTarget.value))}
+        onPointerCancel={(event) => commit(Number(event.currentTarget.value))}
+        onBlur={(event) => commit(Number(event.currentTarget.value))}
+        onKeyUp={(event) => commit(Number(event.currentTarget.value))}
         style={{ width: "100%", accentColor: "var(--accent)" }}
       />
       <span
@@ -3383,7 +3847,7 @@ function GlassSliderRow({
           textAlign: "right",
         }}
       >
-        {value}%
+        {draftValue}%
       </span>
     </div>
   );

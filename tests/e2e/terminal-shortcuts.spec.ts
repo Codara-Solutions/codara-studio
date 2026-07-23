@@ -20,10 +20,12 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     await page.waitForLoadState("domcontentloaded");
 
     const terminalTab = page.getByRole("tab", { name: /terminals/i }).first();
-    await terminalTab.click();
+    await expect(terminalTab).toBeAttached();
+    await terminalTab.dispatchEvent("click");
+    await expect(terminalTab).toHaveClass(/spark-tab--active/);
     const panes = page.locator(".spark-terminal-pane:visible");
     await expect(panes).toHaveCount(1);
-    await terminalInput(panes.first()).click();
+    await focusTerminal(panes.first());
 
     await page.keyboard.press(modKey("d"));
     await expect(panes).toHaveCount(2);
@@ -32,12 +34,12 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     expect(Math.abs(rightBoxes[0]!.y - rightBoxes[1]!.y)).toBeLessThan(10);
     expect(Math.abs(rightBoxes[0]!.x - rightBoxes[1]!.x)).toBeGreaterThan(100);
 
-    await terminalInput(panes.nth(1)).click();
+    await focusTerminal(panes.nth(1));
     await page.keyboard.press(modKey("w"));
     await expect(panes).toHaveCount(1);
     await expect(terminalTab).toHaveClass(/spark-tab--active/);
 
-    await terminalInput(panes.first()).click();
+    await focusTerminal(panes.first());
     await page.keyboard.press(modKey("d", true));
     await expect(panes).toHaveCount(2);
     const downBoxes = await Promise.all([panes.nth(0).boundingBox(), panes.nth(1).boundingBox()]);
@@ -49,21 +51,28 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     //   Mod+F       local Find in the active pane
     //   Mod+P       Quick Open by file name/path
     //   Mod+Shift+F project-wide content search
-    await terminalInput(panes.nth(1)).click();
+    await focusTerminal(panes.nth(1));
     await page.keyboard.press(modKey("f"));
     await expect(panes.nth(1).getByPlaceholder("Find")).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(panes.nth(1).getByPlaceholder("Find")).toBeHidden();
 
     await page.keyboard.press(modKey("p"));
-    await expect(page.getByRole("dialog", { name: "Open file" })).toBeVisible();
+    const openFileDialog = page.getByRole("dialog", { name: "Open file" });
+    await expect(openFileDialog).toBeVisible();
+    // The dialog moves focus on a zero-delay effect. Wait for that user-facing
+    // ready state before sending Escape; otherwise the key can still land in
+    // xterm during the same event-loop turn that opened the overlay.
+    await expect(openFileDialog.getByPlaceholder("Open file...")).toBeFocused();
     await page.keyboard.press("Escape");
-    await expect(page.getByRole("dialog", { name: "Open file" })).toHaveCount(0);
+    await expect(openFileDialog).toHaveCount(0);
 
     await page.keyboard.press(modKey("f", true));
-    await expect(page.getByRole("dialog", { name: "Search in files" })).toBeVisible();
+    const searchDialog = page.getByRole("dialog", { name: "Search in files" });
+    await expect(searchDialog).toBeVisible();
+    await expect(searchDialog.getByPlaceholder("Search in files…")).toBeFocused();
     await page.keyboard.press("Escape");
-    await expect(page.getByRole("dialog", { name: "Search in files" })).toHaveCount(0);
+    await expect(searchDialog).toHaveCount(0);
 
     // The custom worker shortcut must launch the exact public command. In
     // particular, interactive panes must not acquire a generated --session-id.
@@ -75,8 +84,11 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
         state.__coraInjects?.push(args);
       });
     });
-    await terminalInput(panes.nth(1)).click();
+    await focusTerminal(panes.nth(1));
     await page.keyboard.press("Control+Alt+g");
+    const claudeSessions = page.getByRole("dialog", { name: "Claude Code sessions" });
+    await expect(claudeSessions).toBeVisible();
+    await claudeSessions.getByRole("button", { name: "New session" }).dispatchEvent("click");
     await expect.poll(
       async () => app!.evaluate(() => {
         const state = globalThis as typeof globalThis & { __coraInjects?: unknown[] };
@@ -100,6 +112,15 @@ function modKey(key: string, shift = false): string {
 
 function terminalInput(pane: Locator): Locator {
   return pane.locator(".xterm-helper-textarea");
+}
+
+async function focusTerminal(pane: Locator): Promise<void> {
+  // The helper textarea is intentionally a zero-sized xterm accessibility
+  // input. Dispatch the same mousedown TerminalPane handles rather than
+  // waiting on Playwright's compositor-frame stability gate: fully occluded
+  // Electron test windows can pause rAF even while the DOM is responsive.
+  await pane.locator(".xterm-host").dispatchEvent("mousedown", { button: 0 });
+  await expect(terminalInput(pane)).toBeFocused();
 }
 
 async function prepareFixture(): Promise<{

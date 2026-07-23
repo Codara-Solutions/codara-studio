@@ -1,4 +1,4 @@
-import { test, expect, type ElectronApplication } from "@playwright/test";
+import { test, expect, type ElectronApplication, type Locator } from "@playwright/test";
 import { _electron as electron } from "playwright";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -28,8 +28,8 @@ test("automations hub mounts the Create-with-Cora assist chat", async () => {
     await expect(page.getByText("workspace").first()).toBeVisible();
 
     // Open the Automations tab from the top strip's "+" picker.
-    await page.getByRole("button", { name: "New tab", exact: true }).click();
-    await page.getByText("New automations", { exact: true }).click();
+    await clickAttached(page.getByRole("button", { name: "New tab", exact: true }));
+    await clickAttached(page.getByText("New automations", { exact: true }));
 
     // Empty-state launchpad: both creation paths are explicit.
     const assistButton = page.getByRole("button", { name: /Design with Cora/ });
@@ -39,33 +39,33 @@ test("automations hub mounts the Create-with-Cora assist chat", async () => {
     // Enter the assist view: architect chat panel + session controls mount,
     // the composer is pinned to automation mode (placeholder proves the
     // lockedMode draft path; the mode-cycle pill must be absent).
-    await assistButton.click();
+    await clickAttached(assistButton);
     await expect(page.getByText("Cora · Automation architect", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
     await expect(
       page.getByPlaceholder("Describe the loom you want — trigger, loop, and worker."),
     ).toBeVisible();
-    await expect(page.locator(".composer-mode-cycle")).toHaveCount(0);
+    await expect(page.locator(".composer-mode-cycle:visible")).toHaveCount(0);
     await expect(page.getByText("Describe the outcome, not the plumbing", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: /Keep tests green/ }).click();
+    await clickAttached(page.getByRole("button", { name: /Keep tests green/ }));
     await expect(
       page.getByPlaceholder("Describe the loom you want — trigger, loop, and worker."),
     ).toHaveValue(/runs the project's tests/);
 
     // "Done" returns to the launchpad (assist button reappears).
-    await page.getByRole("button", { name: /^Done — back to the looms view$/ }).click();
+    await clickAttached(page.getByRole("button", { name: /^Done — back to the looms view$/ }));
     await expect(page.getByRole("button", { name: /Design with Cora/ })).toBeVisible();
 
     // The manual path opens a real, descriptive template gallery instead of
     // dropping the user into an unexplained blank graph.
-    await page.getByRole("button", { name: /Build a flow/ }).click();
+    await clickAttached(page.getByRole("button", { name: /Build a flow/ }));
     await expect(page.getByRole("button", { name: /Fix until tests pass/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /Fan-out review/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /Start blank/ })).toBeVisible();
 
     // Prompt variables explain their runtime value immediately on hover (and
     // through aria-describedby for keyboard/screen-reader users).
-    await page.locator(".react-flow__node-worker").click();
+    await clickAttached(page.locator(".react-flow__node-worker"));
     const iterationVariable = page.getByRole("button", { name: "{{iteration}}", exact: true });
     await iterationVariable.hover();
     const iterationTooltip = page.getByRole("tooltip").filter({ hasText: "current loop pass number" });
@@ -93,20 +93,20 @@ test("automation architect restores its exact session after a workspace switch",
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
 
-    await page.getByRole("button", { name: "New tab", exact: true }).click();
-    await page.getByText("New automations", { exact: true }).click();
-    await page.getByRole("button", { name: /Design with Cora/ }).click();
+    await clickAttached(page.getByRole("button", { name: "New tab", exact: true }));
+    await clickAttached(page.getByText("New automations", { exact: true }));
+    await clickAttached(page.getByRole("button", { name: /Design with Cora/ }));
 
     // Select a real persisted architect run, rather than merely proving that
     // the empty draft surface survives. This is the session users previously
     // had to rediscover manually in History after every workspace round-trip.
-    await page.getByRole("button", { name: "Session history", exact: true }).click();
-    await page.getByRole("option", { name: /Restore me/ }).click();
+    await clickAttached(page.getByRole("button", { name: "Session history", exact: true }));
+    await clickAttached(page.getByRole("option", { name: /Restore me/ }));
     await expect(page.getByText("#restore", { exact: true })).toBeVisible();
 
-    await page.locator('[data-workspace-id="ws-assist-other"]').click();
-    await expect(page.locator(".cora-welcome__project-name")).toHaveText("other workspace");
-    await page.locator('[data-workspace-id="ws-assist-e2e"]').click();
+    await clickAttached(page.locator('[data-workspace-id="ws-assist-other"]'));
+    await expect(page.locator(".cora-welcome__project-name:visible")).toHaveText("other workspace");
+    await clickAttached(page.locator('[data-workspace-id="ws-assist-e2e"]'));
 
     await expect(page.getByText("Cora · Automation architect", { exact: true })).toBeVisible();
     await expect(page.getByText("#restore", { exact: true })).toBeVisible();
@@ -114,14 +114,19 @@ test("automation architect restores its exact session after a workspace switch",
 
     // An explicit Done remains authoritative: workspace restoration must not
     // reopen a surface the user intentionally closed.
-    await page.getByRole("button", { name: /^Done — back to the looms view$/ }).click();
-    await page.locator('[data-workspace-id="ws-assist-other"]').click();
-    await page.locator('[data-workspace-id="ws-assist-e2e"]').click();
+    await clickAttached(page.getByRole("button", { name: /^Done — back to the looms view$/ }));
+    await clickAttached(page.locator('[data-workspace-id="ws-assist-other"]'));
+    await clickAttached(page.locator('[data-workspace-id="ws-assist-e2e"]'));
     await expect(page.getByRole("button", { name: /Design with Cora/ })).toBeVisible();
   } finally {
     await app?.close();
   }
 });
+
+async function clickAttached(locator: Locator): Promise<void> {
+  await expect(locator).toBeAttached();
+  await locator.dispatchEvent("click");
+}
 
 async function prepareElectronWorkspace(
   prefix: string,

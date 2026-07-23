@@ -35,6 +35,7 @@ import type {
   TerminalLeafWorker,
   TerminalSplit,
   TerminalTab,
+  WhiteboardTab,
 } from "./types";
 import { isRunOwnedTab } from "./types";
 
@@ -261,6 +262,10 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
             // Runs), not durable layout — they re-open on demand via the "+"
             // picker rather than restoring from a persisted blob.
             tab.kind !== "automations" &&
+            // Untitled whiteboard drafts hold their board in renderer memory
+            // only; restoring the tab shell after a relaunch would open an
+            // empty husk. Saved boards come back as editor tabs instead.
+            tab.kind !== "whiteboard" &&
             tab.kind !== "chat" &&
             !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
         )
@@ -588,6 +593,21 @@ export interface UseTabsApi {
     title?: string;
     color?: string;
   }) => { tabId: TabId; paneId: string };
+  // Cross-workspace variant of newAgentTerminalTab: mint the agent tab into a
+  // BACKGROUND workspace's frozen layout so a run's terminal.create never lands
+  // in whichever workspace is on screen. The hidden mounted stack picks the new
+  // pane up and spawns its PTY, so the returned paneId still comes online for
+  // terminal.write/read. Returns null when the workspace has no live snapshot
+  // this session (nothing mounted to spawn the pane) — callers fall back.
+  newAgentTerminalTabInWorkspace: (
+    workspaceId: string,
+    options?: {
+      cwd?: string;
+      autorun?: string;
+      title?: string;
+      color?: string;
+    },
+  ) => { tabId: TabId; paneId: string } | null;
   // Open ONE terminal tab whose panes are split into a grid — used when Cora
   // spawns a batch of standing agent terminals, so the user sees them all at
   // once. One pane per spec, each autorunning its agent command.
@@ -639,6 +659,18 @@ export interface UseTabsApi {
     agentSession?: TerminalAgentSession | null,
   ) => string | null;
   closeTerminalPane: (tabId: TabId, paneId: string) => void;
+  // closeTerminalPane for a pane living in either the active workspace or a
+  // mounted-but-hidden one (worker_attempt.finished / failed agent creates keep
+  // firing while their workspace is in the background). Dropping the tab's last
+  // pane removes the tab from the frozen layout, rerouting a stranded frozen
+  // activeId the same way pruneDeletedRunTabsFromInactiveWorkspaces does.
+  closeTerminalPaneInWorkspace: (workspaceId: string, tabId: TabId, paneId: string) => void;
+  // Locate a terminal pane in the mounted-but-hidden workspace layouts (the
+  // active store is searched by callers directly). Returns the owning
+  // workspace/tab so cross-workspace cleanup can target the right layout.
+  findTerminalPaneInInactiveWorkspaces: (
+    paneId: string,
+  ) => { workspaceId: string; tabId: TabId } | null;
   // Flip `zoomedPaneId` for a tab: sets it to `paneId` if currently null or a
   // different pane, clears it if `paneId` is already the zoomed one. Stored
   // on the tab so it persists across tab switches.
@@ -742,6 +774,9 @@ export interface UseTabsApi {
   // append a fresh one and focus it. Singleton-ish like the Runs tab — there
   // is only ever one Automations surface per workspace.
   openAutomationsTab: () => TabId;
+  // Append a fresh untitled whiteboard tab and focus it (one draft per call,
+  // not a singleton). See WhiteboardTab in types.ts for the draft contract.
+  newWhiteboardTab: () => TabId;
   // Open (or focus) the diff tab for a changed file. Identity is
   // (path, staged) — the same file can have a Working Tree tab and a Staged
   // tab open side by side, exactly like VS Code's separate diff editors.
@@ -1280,6 +1315,57 @@ export function useTabs(
     [],
   );
 
+  // See UseTabsApi: agent tab minted into a background workspace's frozen
+  // layout. Mirrors updateLeafWorkerInWorkspace's write pattern — ref first so
+  // back-to-back bridge calls compose, then the render-driving mirror so the
+  // hidden mounted stack mounts the pane (which is what spawns its PTY).
+  const newAgentTerminalTabInWorkspace = useCallback(
+    (
+      targetWorkspaceId: string,
+      options?: {
+        cwd?: string;
+        autorun?: string;
+        title?: string;
+        color?: string;
+      },
+    ): { tabId: TabId; paneId: string } | null => {
+      if (tabsWorkspaceIdRef.current === targetWorkspaceId) {
+        return newAgentTerminalTab(options);
+      }
+      const live = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+      if (!live) return null;
+      const id = makeId("term");
+      const paneId = makeId("pane");
+      const tab: TerminalTab = {
+        id,
+        kind: "terminal",
+        title: options?.title?.trim() || "terminals",
+        root: leaf(paneId, options?.cwd, options?.autorun),
+        activePaneId: paneId,
+        color: options?.color ?? "var(--agent-tab-accent)",
+      };
+      // The frozen activeId is deliberately untouched — an agent-spawned
+      // terminal never steals focus, not even inside its own hidden workspace.
+      const nextTabs = normalizeTerminalTitles([...live.tabs, tab]);
+      liveWorkspaceTabsRef.current.set(targetWorkspaceId, { ...live, tabs: nextTabs });
+      setInactiveWorkspaceLayouts((current) => {
+        const latest = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+        if (!latest) return current;
+        let changed = false;
+        const next = current.map((layout) => {
+          if (layout.workspaceId !== targetWorkspaceId || layout.tabs === latest.tabs) {
+            return layout;
+          }
+          changed = true;
+          return { ...layout, tabs: latest.tabs };
+        });
+        return changed ? next : current;
+      });
+      return { tabId: id, paneId };
+    },
+    [newAgentTerminalTab],
+  );
+
   const newTerminalGrid = useCallback(
     (
       cwd: string | undefined,
@@ -1671,6 +1757,86 @@ export function useTabs(
         }
         return normalizeTerminalTitles(next);
       });
+    },
+    [],
+  );
+
+  // See UseTabsApi: close a pane inside a mounted-but-hidden workspace's frozen
+  // layout. Mirrors pruneDeletedRunTabsFromInactiveWorkspaces' write pattern
+  // (ref first, then the render-driving mirror). No reseed on an emptied
+  // layout — hidden layouts are allowed to go empty, same contract as the run
+  // pruner.
+  const closeTerminalPaneInWorkspace = useCallback(
+    (targetWorkspaceId: string, tabId: TabId, paneId: string) => {
+      if (tabsWorkspaceIdRef.current === targetWorkspaceId) {
+        closeTerminalPane(tabId, paneId);
+        return;
+      }
+      // Same best-effort PTY teardown as closeTerminalPane (dispose is
+      // idempotent for already-dead sessions).
+      void window.spark.pty.dispose(paneId).catch(() => undefined);
+      const live = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+      if (!live) return;
+      let changed = false;
+      let droppedTabId: TabId | null = null;
+      const nextTabs: Tab[] = [];
+      for (const t of live.tabs) {
+        if (t.id !== tabId || t.kind !== "terminal" || !findLeaf(t.root, paneId)) {
+          nextTabs.push(t);
+          continue;
+        }
+        changed = true;
+        const root = removeLeaf(t.root, paneId);
+        if (root === null) {
+          // Last pane — drop the tab from the frozen layout entirely.
+          droppedTabId = t.id;
+          continue;
+        }
+        let activePaneId = t.activePaneId;
+        if (activePaneId === paneId) {
+          const fallback = nextLeafAfter(root, paneId);
+          activePaneId = fallback?.paneId ?? activePaneId;
+        }
+        const zoomedPaneId = t.zoomedPaneId === paneId ? null : t.zoomedPaneId;
+        nextTabs.push({ ...t, root, activePaneId, zoomedPaneId });
+      }
+      if (!changed) return;
+      let nextActive = live.activeId;
+      if (droppedTabId && nextActive === droppedTabId) {
+        const fallbackChat = nextTabs.find((t) => t.kind === "chat");
+        const fallbackFree = nextTabs.find((t) => !isRunOwnedTab(t));
+        nextActive = fallbackChat?.id ?? fallbackFree?.id ?? null;
+      }
+      const pruned = { tabs: normalizeTerminalTitles(nextTabs), activeId: nextActive };
+      liveWorkspaceTabsRef.current.set(targetWorkspaceId, pruned);
+      setInactiveWorkspaceLayouts((current) => {
+        const latest = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+        if (!latest) return current;
+        let mirrorChanged = false;
+        const next = current.map((layout) => {
+          if (layout.workspaceId !== targetWorkspaceId || layout.tabs === latest.tabs) {
+            return layout;
+          }
+          mirrorChanged = true;
+          return { ...layout, tabs: latest.tabs, activeId: latest.activeId };
+        });
+        return mirrorChanged ? next : current;
+      });
+    },
+    [closeTerminalPane],
+  );
+
+  // See UseTabsApi: resolve which hidden workspace/tab owns a pane id.
+  const findTerminalPaneInInactiveWorkspaces = useCallback(
+    (paneId: string): { workspaceId: string; tabId: TabId } | null => {
+      for (const [workspaceId, layout] of liveWorkspaceTabsRef.current) {
+        if (workspaceId === tabsWorkspaceIdRef.current) continue;
+        for (const t of layout.tabs) {
+          if (t.kind !== "terminal") continue;
+          if (findLeaf(t.root, paneId)) return { workspaceId, tabId: t.id };
+        }
+      }
+      return null;
     },
     [],
   );
@@ -2227,6 +2393,18 @@ export function useTabs(
     return resultId;
   }, []);
 
+  // Append a fresh untitled whiteboard tab and focus it. NOT a singleton:
+  // each "+ New whiteboard" starts its own draft board. The board content is
+  // owned by the WhiteboardFilePreview draft map (keyed by this tab id); the
+  // first save-as swaps the tab for an editor tab bound to the file.
+  const newWhiteboardTab = useCallback((): TabId => {
+    const id = makeId("board");
+    const tab: WhiteboardTab = { id, kind: "whiteboard", title: "Untitled whiteboard" };
+    setTabs((curr) => [...curr, tab]);
+    setActiveId(id);
+    return id;
+  }, []);
+
   // Open (or focus) a changed file's diff tab. Existence check + setActiveId
   // both run INSIDE the updater (same double-click race note as
   // openAutomationsTab above).
@@ -2764,6 +2942,7 @@ export function useTabs(
       setDetectedUrl,
       newTerminalTab,
       newAgentTerminalTab,
+      newAgentTerminalTabInWorkspace,
       newTerminalGrid,
       addAgentGridToTab,
       addBalancedPaneToTab,
@@ -2772,6 +2951,8 @@ export function useTabs(
       moveTerminalPane,
       splitTerminalPane,
       closeTerminalPane,
+      closeTerminalPaneInWorkspace,
+      findTerminalPaneInInactiveWorkspaces,
       toggleTerminalPaneZoom,
       setActiveTerminalPane,
       setTerminalSplitRatio,
@@ -2796,6 +2977,7 @@ export function useTabs(
       openRunsTab,
       hideRunsTabs,
       openAutomationsTab,
+      newWhiteboardTab,
       openDiffTab,
       closeRunsTabFor,
       closeWorkerTerminalTabFor,

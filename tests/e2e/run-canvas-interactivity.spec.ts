@@ -10,7 +10,10 @@ test("run graph can be dragged and zoomed from the node surface", async () => {
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({
-      args: ["."],
+      // --ozone-platform=x11 keeps Linux launches deterministic: Chromium's
+      // Wayland auto-detection can hang the whole app when the compositor
+      // is unavailable to new clients (headless CI, stale sessions).
+      args: [".", "--ozone-platform=x11"],
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,
@@ -128,9 +131,10 @@ async function seedWorkbenchRun(page: Page, cwd: string): Promise<void> {
 
 async function graphTransform(page: Page): Promise<string> {
   return page.evaluate(() => {
-    const viewport = Array.from(document.querySelectorAll("div")).find(
-      (el) => getComputedStyle(el).cursor === "grab" || getComputedStyle(el).cursor === "grabbing",
-    ) as HTMLElement | undefined;
+    // Target the Runs viewport by id: other canvases (the whiteboard's React
+    // Flow pane) also carry a grab cursor, and a cursor scan can find those
+    // first even while they are hidden.
+    const viewport = document.querySelector('[data-testid="run-canvas-viewport"]');
     const pan = viewport?.firstElementChild as HTMLElement | null | undefined;
     return pan?.style.transform ?? "";
   });
@@ -138,7 +142,7 @@ async function graphTransform(page: Page): Promise<string> {
 
 async function zoomLabel(page: Page): Promise<string> {
   return page
-    .locator("span")
+    .locator("span:visible")
     .filter({ hasText: /^\d+%$/ })
     .first()
     .textContent()

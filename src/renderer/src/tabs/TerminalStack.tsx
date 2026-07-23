@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
 import type {
@@ -25,7 +25,7 @@ import type {
   TerminalSplit,
   TerminalTab,
 } from "./types";
-import { CloseIcon, DragHandleIcon, PlusIcon, SplitDownIcon, SplitRightIcon, ZoomPaneIcon } from "../components/icons";
+import { BackIcon, CloseIcon, DragHandleIcon, LockIcon, PlusIcon, SplitDownIcon, SplitRightIcon, ZoomPaneIcon } from "../components/icons";
 import {
   TERMINAL_PANE_DRAG_MIME,
   beginTerminalPaneDrag,
@@ -129,6 +129,9 @@ interface Props {
   // A restored pane's first mount made its boot-restore attempt — clear the
   // leaf's one-shot `bootResume` hydration marker.
   onPaneBootResumeConsumed: (tabId: TabId, paneId: string) => void;
+  // Run-owned worker terminals are an observation surface by default. This
+  // returns to the owning run canvas without tearing down the xterm or its PTY.
+  onBackToRuns: () => void;
 }
 
 // Per-pane bundle of stable callbacks. Cached per `tabId:paneId` so a
@@ -186,6 +189,7 @@ function TerminalStack({
   onPaneResumeUnavailable,
   onPaneResumeFallback,
   onPaneBootResumeConsumed,
+  onBackToRuns,
 }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
   // unrelated tab kind mutates, and so the bundle-GC effect (keyed on
@@ -453,103 +457,6 @@ function TerminalStack({
     [],
   );
 
-  // ── Staggered pane warm-up (cold-boot cost control) ─────────────────────
-  // Mounting a <TerminalPane> is expensive: PTY spawn + xterm + a WebGL
-  // context each. At boot, every pane of every persisted tab used to mount
-  // simultaneously — a startup spike plus a burst of simultaneous
-  // `claude --resume` launches. Instead, panes that start out in HIDDEN tabs
-  // are marked dormant (render nothing — their tab is CSS-hidden anyway) and
-  // wake a couple at a time in the background, or instantly when their tab
-  // becomes visible (the mounted pane replays the persisted scrollback, so
-  // the user still sees the previous output immediately).
-  //
-  // Dormancy is decided ONCE, from the layout present at stack mount: any
-  // pane created afterwards (splits, worker launches, drag-routing) mounts
-  // immediately like before. The set only shrinks, so a woken pane can never
-  // go dormant again — the workspace keep-alive contract (panes stay mounted
-  // across tab/workspace switches) is untouched.
-  const [dormantPanes, setDormantPanes] = useState<ReadonlySet<string>>(() => {
-    const dormant = new Set<string>();
-    for (const t of terminals) {
-      if (t.id === activeId) continue;
-      for (const id of collectTerminalPaneIds(t.root)) dormant.add(id);
-    }
-    return dormant;
-  });
-  const dormantPanesRef = useRef(dormantPanes);
-  dormantPanesRef.current = dormantPanes;
-  const warmupTabsRef = useRef(terminals);
-  warmupTabsRef.current = terminals;
-
-  const wakePanes = useCallback((ids: readonly string[]) => {
-    setDormantPanes((prev) => {
-      if (prev.size === 0) return prev;
-      let next: Set<string> | null = null;
-      for (const id of ids) {
-        if (!prev.has(id)) continue;
-        if (!next) next = new Set(prev);
-        next.delete(id);
-      }
-      return next ?? prev;
-    });
-  }, []);
-
-  // Activating a tab wakes all of its panes at once. (The render gate below
-  // already treats visible-tab panes as open, so this just makes the wake
-  // permanent for when the user switches away again mid-warm-up.)
-  useEffect(() => {
-    if (dormantPanes.size === 0 || !activeId) return;
-    const active = terminals.find((t) => t.id === activeId);
-    if (!active) return;
-    const ids = collectTerminalPaneIds(active.root).filter((id) => dormantPanes.has(id));
-    if (ids.length > 0) wakePanes(ids);
-  }, [terminals, activeId, dormantPanes, wakePanes]);
-
-  // Background warm-up: starting shortly after mount, wake 2 dormant panes
-  // per tick (front-to-back tab order) until none remain. Reads live state
-  // through refs so the interval never goes stale; stops itself when the
-  // boot-time dormant set is drained (nothing is ever added back).
-  useEffect(() => {
-    if (dormantPanesRef.current.size === 0) return;
-    let interval: number | null = null;
-    const stop = () => {
-      if (interval !== null) {
-        window.clearInterval(interval);
-        interval = null;
-      }
-    };
-    const tick = () => {
-      const dormant = dormantPanesRef.current;
-      if (dormant.size === 0) {
-        stop();
-        return;
-      }
-      const batch: string[] = [];
-      for (const t of warmupTabsRef.current) {
-        for (const id of collectTerminalPaneIds(t.root)) {
-          if (dormant.has(id) && batch.length < 2) batch.push(id);
-        }
-        if (batch.length >= 2) break;
-      }
-      if (batch.length === 0) {
-        // Every remaining dormant pane's tab was closed while dormant —
-        // clear the set so the interval terminates.
-        setDormantPanes(new Set());
-        stop();
-        return;
-      }
-      wakePanes(batch);
-    };
-    const start = window.setTimeout(() => {
-      tick();
-      interval = window.setInterval(tick, 800);
-    }, 1200);
-    return () => {
-      window.clearTimeout(start);
-      stop();
-    };
-  }, [wakePanes]);
-
   useEffect(() => {
     // Only the visible workspace's stack owns the global drag listeners.
     // Hidden (kept-alive) workspace stacks skip them so a single pane drag
@@ -632,7 +539,6 @@ function TerminalStack({
           key={t.id}
           tab={t}
           visible={t.id === activeId}
-          dormantPanes={dormantPanes}
           shell={shell}
           scrollbackLineLimit={scrollbackLineLimit}
           getBundle={getBundle}
@@ -641,6 +547,7 @@ function TerminalStack({
           getTabRoot={getTabRoot}
           onRatioChange={onPaneRatioChange}
           onPaneDrop={onPaneDrop}
+          onBackToRuns={onBackToRuns}
         />
       ))}
     </div>
@@ -652,10 +559,6 @@ export default React.memo(TerminalStack);
 interface TerminalTabPaneProps {
   tab: TerminalTab;
   visible: boolean;
-  // Boot-time dormant panes (see the warm-up block in TerminalStack). A leaf
-  // in this set renders no <TerminalPane> until woken; visible tabs are
-  // always fully open regardless.
-  dormantPanes: ReadonlySet<string>;
   shell: ShellInfo;
   scrollbackLineLimit: number;
   getBundle: (tabId: TabId, paneId: string) => Bundle;
@@ -673,19 +576,7 @@ interface TerminalTabPaneProps {
       mode: "split" | "line";
     },
   ) => void;
-}
-
-// Every leaf paneId in a tab's pane tree, in tree order. Used by the
-// staggered warm-up above to enumerate a tab's panes without building the
-// full layout geometry.
-function collectTerminalPaneIds(node: PaneNode, out: string[] = []): string[] {
-  if (node.kind === "leaf") {
-    out.push(node.paneId);
-    return out;
-  }
-  collectTerminalPaneIds(node.a, out);
-  collectTerminalPaneIds(node.b, out);
-  return out;
+  onBackToRuns: () => void;
 }
 
 // One terminal tab's flattened pane area. Extracted from TerminalStack and
@@ -696,7 +587,6 @@ function collectTerminalPaneIds(node: PaneNode, out: string[] = []): string[] {
 const TerminalTabPane = React.memo(function TerminalTabPane({
   tab,
   visible,
-  dormantPanes,
   shell,
   scrollbackLineLimit,
   getBundle,
@@ -705,6 +595,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   getTabRoot,
   onRatioChange,
   onPaneDrop,
+  onBackToRuns,
 }: TerminalTabPaneProps) {
   const tabRootRef = useRef<HTMLDivElement | null>(null);
   const reducedMotion = usePrefersReducedMotion();
@@ -715,6 +606,21 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   );
   const drag = dragState?.payload ?? null;
   const ghostPos = dragState ? dragGhostPosition(dragState) : null;
+  const workerTerminal = tab.scope?.kind === "workers";
+  // Worker terminals open in observation mode. Keep this renderer-local: it
+  // is a safety latch for the current view, not durable run state, so every
+  // fresh app/tab mount returns to protected input automatically.
+  const [workerInputProtected, setWorkerInputProtected] = useState(true);
+  const workerWasVisibleRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (!workerTerminal) return;
+    // Treat each navigation into the worker terminal as a fresh observation
+    // visit. An explicit unlock lasts for the current visit only; returning
+    // from Runs (or any other tab) restores the safe default.
+    if (visible && !workerWasVisibleRef.current) setWorkerInputProtected(true);
+    workerWasVisibleRef.current = visible;
+  }, [visible, workerTerminal]);
 
   useEffect(() => subscribeTerminalPaneDrag(setDragState), []);
 
@@ -1070,39 +976,42 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
           >
             {!placeOffScreen && isActive ? <PaneFocusRing /> : null}
             {!placeOffScreen && isZoomed ? <PaneZoomedRing /> : null}
-            {visible || !dormantPanes.has(leaf.paneId) ? (
-              <TerminalPane
-                ref={(h) => setHandle(leaf.paneId, h)}
-                sessionId={leaf.paneId}
-                shell={shell}
-                initialCwd={leaf.cwd}
-                initialCommand={leaf.autorun}
-                showCodaraIntro={
-                  !leaf.autorun &&
-                  !leaf.worker &&
-                  !leaf.agentSession &&
-                  tab.scope?.kind !== "workers" &&
-                  !tab.color
-                }
-                agentSession={leaf.agentSession}
-                bootResume={leaf.bootResume === true}
-                visible={visible && !placeOffScreen}
-                scrollbackLineLimit={scrollbackLineLimit}
-                onDetectedLocalUrl={bundle.onDetectedUrl}
-                onSparkOpen={bundle.onSparkOpen}
-                onExit={bundle.onExit}
-                onCwd={bundle.onCwd}
-                onActivity={bundle.onActivity}
-                onUserInput={bundle.onUserInput}
-                onAgentState={bundle.onAgentState}
-                onRuntimeState={bundle.onRuntimeState}
-                onResumeUnavailable={bundle.onResumeUnavailable}
-                onResumeFallback={bundle.onResumeFallback}
-                onBootResumeConsumed={bundle.onBootResumeConsumed}
-              />
-            ) : null}
+            <TerminalPane
+              ref={(h) => setHandle(leaf.paneId, h)}
+              sessionId={leaf.paneId}
+              shell={shell}
+              initialCwd={leaf.cwd}
+              initialCommand={leaf.autorun}
+              showCodaraIntro={
+                !leaf.autorun &&
+                !leaf.worker &&
+                !leaf.agentSession &&
+                tab.scope?.kind !== "workers" &&
+                !tab.color
+              }
+              agentSession={leaf.agentSession}
+              bootResume={leaf.bootResume === true}
+              visible={visible && !placeOffScreen}
+              // An opened workspace terminal is a live in-memory surface, even
+              // while another tab or workspace is selected. Keep feeding its
+              // xterm so returning reveals the existing buffer immediately.
+              writeWhileHidden
+              scrollbackLineLimit={scrollbackLineLimit}
+              onDetectedLocalUrl={bundle.onDetectedUrl}
+              onSparkOpen={bundle.onSparkOpen}
+              onExit={bundle.onExit}
+              onCwd={bundle.onCwd}
+              onActivity={bundle.onActivity}
+              onUserInput={bundle.onUserInput}
+              onAgentState={bundle.onAgentState}
+              onRuntimeState={bundle.onRuntimeState}
+              onResumeUnavailable={bundle.onResumeUnavailable}
+              onResumeFallback={bundle.onResumeFallback}
+              onBootResumeConsumed={bundle.onBootResumeConsumed}
+              inputBlocked={workerTerminal && workerInputProtected}
+            />
             {!placeOffScreen && workerChip ? <WorkerChip worker={workerChip} /> : null}
-            {!placeOffScreen ? (
+            {!placeOffScreen && !workerTerminal ? (
               <PaneToolbar
                 dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
                 onSmartAdd={bundle.onSmartAdd}
@@ -1118,6 +1027,18 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
           </div>
         );
       })}
+      {workerTerminal && visible ? (
+        <WorkerTerminalGuard
+          protectedInput={workerInputProtected}
+          onToggleProtection={() => setWorkerInputProtected((current) => !current)}
+          onBackToRuns={() => {
+            // Lock before leaving so the still-mounted xterm can never remain
+            // writable behind the Runs surface or on the next visit.
+            setWorkerInputProtected(true);
+            onBackToRuns();
+          }}
+        />
+      ) : null}
       {dropSlotRect ? (
         <PaneDropSlot rect={dropSlotRect} reducedMotion={reducedMotion} />
       ) : null}
@@ -1147,6 +1068,62 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
     </div>
   );
 });
+
+function WorkerTerminalGuard({
+  protectedInput,
+  onToggleProtection,
+  onBackToRuns,
+}: {
+  protectedInput: boolean;
+  onToggleProtection: () => void;
+  onBackToRuns: () => void;
+}) {
+  return (
+    <div
+      className="cora-worker-terminal-guard"
+      data-testid="cora-worker-terminal-guard"
+      data-input-protected={protectedInput ? "true" : "false"}
+    >
+      {protectedInput ? (
+        <div
+          className="cora-worker-terminal-veil"
+          data-testid="cora-worker-terminal-veil"
+          aria-hidden="true"
+        />
+      ) : null}
+      <div
+        className="cora-worker-terminal-controls"
+        role="toolbar"
+        aria-label="Worker terminal controls"
+      >
+        <button
+          type="button"
+          className="cora-worker-terminal-control"
+          onClick={onBackToRuns}
+          title="Return to the run graph"
+        >
+          <BackIcon size={12} />
+          <span>Back to Runs</span>
+        </button>
+        <span className="cora-worker-terminal-control-divider" aria-hidden="true" />
+        <button
+          type="button"
+          className={`cora-worker-terminal-control${protectedInput ? " is-protected" : ""}`}
+          aria-pressed={protectedInput}
+          onClick={onToggleProtection}
+          title={
+            protectedInput
+              ? "Input is protected. Click to type in this worker terminal."
+              : "Input is enabled. Click to protect this worker terminal."
+          }
+        >
+          <LockIcon size={12} />
+          <span>{protectedInput ? "Input protected" : "Input enabled"}</span>
+        </button>
+      </div>
+    </div>
+  );
+}
 
 // A rectangle inside a tab's pane area, expressed as fractions (0..1) so the
 // layout is resolution-independent and maps directly onto CSS percentages.
@@ -2637,7 +2614,13 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
 // as "done" after the attempt-finished event, then disappear once the
 // foreground agent has returned to the shell prompt.
 function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
-  const label = worker.runtime ? worker.runtime.toUpperCase() : "WORKER";
+  // A Cora-owned PI pane is a Cora worker, not an interactive provider
+  // session. Keep Claude/Codex labels only for terminals the user launched.
+  const label = worker.source === "spark"
+    ? "CORA"
+    : worker.runtime
+      ? worker.runtime.toUpperCase()
+      : "WORKER";
   const tone = deriveChipTone(worker);
   const accent = tone.frame === "accent";
   const warn = tone.frame === "warn";

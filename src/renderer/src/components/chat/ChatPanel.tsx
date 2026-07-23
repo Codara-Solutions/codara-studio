@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { AddRunMessageAttachmentInput, RunState, ShellInfo, Workspace } from "@shared/types";
 import { backendPtySessionId } from "@shared/backend-pty";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
@@ -8,6 +9,8 @@ import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
 import CopyBranchWelcome from "./CopyBranchWelcome";
 import { TerminalPane } from "../Terminal/TerminalPane";
 import { describeRunStatus, statusToneColor } from "./timeline";
+import CoraWhiteboardSurface from "./CoraWhiteboard";
+import type { CoraView } from "./cora-view";
 
 // Placeholder ShellInfo passed to TerminalPane when the underlying PTY was
 // already spawned by main-process backend code (claude-backend, codex-backend).
@@ -22,8 +25,6 @@ export const BACKEND_TERMINAL_SHELL: ShellInfo = {
   args: [],
   family: "other",
 };
-
-type ChatView = "chat" | "terminal";
 
 // The Cora chat panel: the workspace's chats live here, one conversation at
 // a time. The header carries the live status; a switcher bar swaps between
@@ -46,8 +47,8 @@ interface Props {
   // provided, ChatPanel keeps a local state fallback and renders its own
   // inline Chat | Terminal strip (legacy path). When the hoisted inner tab
   // strip drives the mode, the legacy strip stays hidden.
-  chatView?: ChatView;
-  onChatViewChange?: (view: ChatView) => void;
+  chatView?: CoraView;
+  onChatViewChange?: (view: CoraView) => void;
   onStartChat: (
     message: string,
     clientMessageId: string,
@@ -92,10 +93,10 @@ export default function ChatPanel({
   // provides chatViewProp + onChatViewChange. Local state is the fallback
   // for callers that have not lifted the toggle (kept so the component
   // stays usable in isolation, e.g. tests).
-  const [localChatView, setLocalChatView] = useState<ChatView>("chat");
+  const [localChatView, setLocalChatView] = useState<CoraView>("chat");
   const chatView = chatViewProp ?? localChatView;
   const setChatView = useCallback(
-    (next: ChatView) => {
+    (next: CoraView) => {
       if (onChatViewChange) onChatViewChange(next);
       else setLocalChatView(next);
     },
@@ -111,13 +112,19 @@ export default function ChatPanel({
   }, [activeRun?.id, usingHoistedChatView]);
 
   // OpenRouter chats have no PTY to attach to — force back to Chat view if
-  // the backend doesn't support the terminal tab.
+  // the backend doesn't support the terminal tab. Local-state path only: in
+  // the hoisted path chatView is shared across every retained workspace
+  // panel and App owns this reset for the ACTIVE run — a hidden panel with a
+  // PTY-less chat firing it would bounce the visible workspace out of its
+  // Terminal sub-view on every pass.
   const backendSessionId = activeRun
     ? backendPtySessionId(activeRun.id, activeRun.chatBackend)
     : null;
   useEffect(() => {
-    if (!backendSessionId && chatView === "terminal") setChatView("chat");
-  }, [backendSessionId, chatView]);
+    if (!usingHoistedChatView && !backendSessionId && chatView === "terminal") {
+      setChatView("chat");
+    }
+  }, [backendSessionId, chatView, usingHoistedChatView]);
 
   // Poll for the backend PTY's existence. Mounting TerminalPane before the
   // cli-session has spawned the PTY triggers a renderer-side pty.spawn for
@@ -215,8 +222,13 @@ export default function ChatPanel({
                   inset: 0,
                   display: "flex",
                   flexDirection: "column",
-                  visibility: chatView === "chat" ? "visible" : "hidden",
-                  pointerEvents: chatView === "chat" ? "auto" : "none",
+                  // Inherit (undefined) when active, never an explicit
+                  // "visible"/"auto": visibility and pointer-events are
+                  // child-overridable, so an explicit value here would defeat
+                  // ChatStack's hidden wrapper and paint/hit-test this
+                  // retained panel over the active workspace's Cora.
+                  visibility: chatView === "chat" ? undefined : "hidden",
+                  pointerEvents: chatView === "chat" ? undefined : "none",
                 }}
               >
                 <ChatConversation
@@ -233,8 +245,8 @@ export default function ChatPanel({
                     flexDirection: "column",
                     padding: 4,
                     background: "var(--bg)",
-                    visibility: chatView === "terminal" ? "visible" : "hidden",
-                    pointerEvents: chatView === "terminal" ? "auto" : "none",
+                    visibility: chatView === "terminal" ? undefined : "hidden",
+                    pointerEvents: chatView === "terminal" ? undefined : "none",
                   }}
                 >
                   {backendPtyExists && !usingHoistedChatView ? (
@@ -289,6 +301,35 @@ export default function ChatPanel({
                   )}
                 </div>
               )}
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  visibility: chatView === "whiteboard" ? undefined : "hidden",
+                  pointerEvents: chatView === "whiteboard" ? undefined : "none",
+                }}
+                aria-hidden={chatView !== "whiteboard"}
+              >
+                <CoraWhiteboardSurface
+                  // Keyed like ChatConversation: the canvas holds optimistic
+                  // board state, and reusing the instance across runs could
+                  // persist run A's board into run B.
+                  key={activeRun.id}
+                  run={activeRun}
+                  workspacePath={workspace?.cwd}
+                  onAskCora={(prompt) => {
+                    setChatView("chat");
+                    window.requestAnimationFrame(() => {
+                      window.dispatchEvent(
+                        new CustomEvent("spark:prefill-composer", {
+                          detail: { text: prompt, replace: true },
+                        }),
+                      );
+                      window.dispatchEvent(new Event("spark:focus-composer"));
+                    });
+                  }}
+                />
+              </div>
             </div>
           ) : workspace?.copyBranch ? (
             <CopyBranchWelcome copyBranch={workspace.copyBranch} />
@@ -308,7 +349,7 @@ export default function ChatPanel({
               them act on visible UI, so there's nothing to gate. */}
           <div
             style={{
-              display: chatView === "terminal" ? "none" : "contents",
+              display: chatView === "chat" ? "contents" : "none",
             }}
           >
             <ChatComposer
@@ -445,6 +486,11 @@ export function ChatHistoryButton({
   const [hover, setHover] = useState(false);
   const [pressed, setPressed] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+  // Anchor rect measured at open time; the popover renders through a body
+  // portal so no ancestor stacking context (SectionHeader's z-index, the
+  // whiteboard surface layers) can paint over it.
+  const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null);
 
   // Close on outside click or Escape — same pattern as TabBar's "+" picker.
   useEffect(() => {
@@ -452,6 +498,7 @@ export function ChatHistoryButton({
     const onPointerDown = (e: PointerEvent) => {
       const node = wrapperRef.current;
       if (node && e.target instanceof Node && node.contains(e.target)) return;
+      if (popoverRef.current && e.target instanceof Node && popoverRef.current.contains(e.target)) return;
       setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
@@ -478,7 +525,11 @@ export function ChatHistoryButton({
     <div ref={wrapperRef} style={{ position: "relative", display: "inline-flex" }}>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          const rect = wrapperRef.current?.getBoundingClientRect();
+          setAnchor(rect ? { top: rect.bottom + 4, right: Math.max(8, window.innerWidth - rect.right) } : null);
+          setOpen((v) => !v);
+        }}
         title="Chat history"
         aria-label="Open chat history"
         aria-expanded={open}
@@ -515,8 +566,10 @@ export function ChatHistoryButton({
       >
         <HistoryIcon size={12} />
       </button>
-      {open && (
+      {open && anchor && createPortal(
         <ChatHistoryPopover
+          popRef={popoverRef}
+          anchor={anchor}
           runs={sortedRuns}
           activeRunId={activeRunId}
           onPick={(id) => {
@@ -524,18 +577,23 @@ export function ChatHistoryButton({
             onSelect(id);
           }}
           onDelete={onDelete}
-        />
+        />,
+        document.body,
       )}
     </div>
   );
 }
 
 function ChatHistoryPopover({
+  popRef,
+  anchor,
   runs,
   activeRunId,
   onPick,
   onDelete,
 }: {
+  popRef: React.MutableRefObject<HTMLDivElement | null>;
+  anchor: { top: number; right: number };
   runs: RunState[];
   activeRunId: string | null;
   onPick: (runId: string) => void;
@@ -543,14 +601,15 @@ function ChatHistoryPopover({
 }) {
   return (
     <div
+      ref={(node) => { popRef.current = node; }}
       role="listbox"
       aria-label="Recent chats"
       className="spark-menu"
       style={{
-        position: "absolute",
-        top: "calc(100% + 4px)",
-        right: 0,
-        zIndex: 50,
+        position: "fixed",
+        top: anchor.top,
+        right: anchor.right,
+        zIndex: 1000,
         width: 300,
         maxHeight: "min(50vh, 420px)",
         overflowY: "auto",
@@ -1051,8 +1110,8 @@ function ChatViewTabStrip({
   view,
   onChange,
 }: {
-  view: ChatView;
-  onChange: (view: ChatView) => void;
+  view: CoraView;
+  onChange: (view: CoraView) => void;
 }) {
   return (
     <div

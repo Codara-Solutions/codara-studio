@@ -34,6 +34,17 @@ type ActivityGroupItem = {
   items: ToolItem[];
 };
 type ConversationItem = ChatTimelineItem | ActivityGroupItem;
+type ConversationRenderContext = {
+  executionByCallId: Map<string, ExecutionTurn>;
+  finalAnswerByCallId: Map<string, string>;
+};
+
+interface ConversationMinimapEntry {
+  id: string;
+  index: number;
+  userText: string;
+  assistantText: string | null;
+}
 
 // In-flight assistant turn streamed from a Claude/Codex backend via
 // `chat.*` orchestration events. Lives only in renderer state; once the
@@ -68,7 +79,22 @@ function liveTextFromState(state: LiveStreamState): string {
 }
 
 export default function ChatConversation({ run }: { run: RunState }) {
-  const items = useMemo(() => groupCompletedActivity(buildChatTimeline(run)), [run]);
+  // One durable projection owns both history hydration and live frames. Build
+  // it before the timeline so completed conversational turns can omit their
+  // otherwise-empty manager disclosure without guessing from prose.
+  const execution = useRunExecutionRecord(run);
+  const executionByCallId = useMemo(
+    () => new Map(execution.turns.map((turn) => [turn.sparkCallId, turn])),
+    [execution.turns],
+  );
+  const items = useMemo(
+    () =>
+      groupCompletedActivity(
+        buildChatTimeline(run).filter((item) =>
+          shouldRenderTimelineItem(item, executionByCallId, execution.hydrated)),
+      ),
+    [execution.hydrated, executionByCallId, run],
+  );
   const openQuestion = useMemo(() => findOpenQuestion(run), [run]);
   // On a completed run, stamp a tiny "done" marker under the LAST Cora prose
   // message so the user sees the run finished without a separate completion
@@ -125,16 +151,12 @@ export default function ChatConversation({ run }: { run: RunState }) {
   }, [run.checkpoints, run.humanMessages]);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const [readerAtBottom, setReaderAtBottom] = useState(true);
+  const [visibleRange, setVisibleRange] = useState({ startIndex: 0, endIndex: 0 });
 
   // One durable projection owns history hydration and live frames. It
   // subscribes before loading events, buffers during hydration, merges by id,
   // and rejects stale run-switch loads. Chat, Session Inspector, and other run
   // surfaces now read the same ordered record.
-  const execution = useRunExecutionRecord(run);
-  const executionByCallId = useMemo(
-    () => new Map(execution.turns.map((turn) => [turn.sparkCallId, turn])),
-    [execution.turns],
-  );
   const finalAnswerByCallId = useMemo(() => {
     const answers = new Map<string, string>();
     for (const message of run.humanMessages) {
@@ -144,6 +166,17 @@ export default function ChatConversation({ run }: { run: RunState }) {
     }
     return answers;
   }, [run.humanMessages]);
+  // Virtuoso keeps mounted rows alive while its item count/key are stable.
+  // Execution events and the durable answer arrive through independent IPC
+  // updates, so a row can otherwise retain the itemContent closure from the
+  // event-only render and briefly show the final prose twice. Context is the
+  // virtualizer-supported reactive input for data that changes without adding
+  // a row; changing it refreshes visible rows without remounting the list or
+  // disturbing the reader's scroll position.
+  const renderContext = useMemo<ConversationRenderContext>(
+    () => ({ executionByCallId, finalAnswerByCallId }),
+    [executionByCallId, finalAnswerByCallId],
+  );
   const manifest = execution.result;
   // A completed chat gets a manifest for durable inspection even when it only
   // answered a question. Do not turn an observed dirty working tree into a
@@ -163,29 +196,59 @@ export default function ChatConversation({ run }: { run: RunState }) {
     );
   const resultIndex = items.length;
   const rowCount = items.length + (showResult ? 1 : 0);
+  const minimapEntries = useMemo(() => buildConversationMinimap(items), [items]);
 
   return (
     <div style={SCROLL_STYLE} data-testid="cora-conversation">
       {rowCount === 0 ? (
         <div style={{ ...CONVERSATION_COLUMN_STYLE, padding: "24px 18px" }}><ConversationEmpty /></div>
       ) : (
-        <Virtuoso
-          key={run.id}
+        <Virtuoso<unknown, ConversationRenderContext>
+          // A selected run can first arrive as the empty run.created snapshot
+          // and gain its first message a moment later. In an occluded Electron
+          // window Virtuoso's zero-item measurement probe may never receive a
+          // compositor frame, leaving the populated conversation blank. Remount
+          // only across that empty -> populated boundary and seed enough rows
+          // to paint without waiting for a probe.
+          key={`${run.id}:${rowCount === 0 ? "empty" : "populated"}`}
           ref={virtuosoRef}
+          context={renderContext}
           style={{ height: "100%", width: "100%" }}
           totalCount={rowCount}
+          initialItemCount={Math.min(rowCount, 12)}
+          defaultItemHeight={96}
           initialTopMostItemIndex={Math.max(0, rowCount - 1)}
           followOutput={readerAtBottom ? "smooth" : false}
           atBottomStateChange={setReaderAtBottom}
+          rangeChanged={setVisibleRange}
           increaseViewportBy={{ top: 600, bottom: 400 }}
           computeItemKey={(index) =>
             index < items.length ? timelineItemKey(items[index]) : index === resultIndex && showResult ? "result-manifest" : "live"
           }
-          itemContent={(index) => {
+          itemContent={(index, _data, context) => {
             const item = items[index];
+            const rowKind = index === resultIndex && showResult
+              ? "result"
+              : item?.kind === "activity-group"
+                ? "work"
+                : item?.kind ?? "empty";
+            const compactRow = rowKind === "tool" || rowKind === "work" || rowKind === "step";
             return (
-              <div style={{ ...CONVERSATION_COLUMN_STYLE, padding: index === 0 ? "24px clamp(18px, 3vw, 42px) 0" : "0 clamp(18px, 3vw, 42px)" }}>
-                <div style={CHAT_ITEM_STYLE}>
+              <div
+                className="cora-conversation-column"
+                data-cora-conversation-column
+                style={{
+                  ...CONVERSATION_COLUMN_STYLE,
+                  padding: index === 0
+                    ? "20px clamp(12px, 2.4vw, 20px) 0"
+                    : "0 clamp(12px, 2.4vw, 20px)",
+                }}
+              >
+                <div
+                  className={`cora-timeline-row cora-timeline-row--${rowKind}`}
+                  data-timeline-kind={rowKind}
+                  style={{ ...CHAT_ITEM_STYLE, marginBottom: compactRow ? 8 : CHAT_ITEM_STYLE.marginBottom }}
+                >
                   {index === resultIndex && showResult && manifest ? (
                     <ResultManifestCard manifest={manifest} />
                   ) : item?.kind === "message" ? (
@@ -200,8 +263,8 @@ export default function ChatConversation({ run }: { run: RunState }) {
                   ) : item?.kind === "tool" ? (
                     <ToolActivityRow
                       item={item}
-                      executionTurn={item.activity === "manager" ? executionByCallId.get(item.id.slice("spark-call:".length)) : undefined}
-                      finalAnswer={item.activity === "manager" ? finalAnswerByCallId.get(item.id.slice("spark-call:".length)) : undefined}
+                      executionTurn={item.activity === "manager" ? context.executionByCallId.get(item.id.slice("spark-call:".length)) : undefined}
+                      finalAnswer={item.activity === "manager" ? context.finalAnswerByCallId.get(item.id.slice("spark-call:".length)) : undefined}
                     />
                   ) : item?.kind === "activity-group" ? (
                     <ActivityGroup item={item} />
@@ -215,6 +278,13 @@ export default function ChatConversation({ run }: { run: RunState }) {
           components={{ Footer: () => <div style={{ height: 24 }} /> }}
         />
       )}
+      <ConversationMinimap
+        entries={minimapEntries}
+        visibleRange={visibleRange}
+        onSelect={(index) => {
+          virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" });
+        }}
+      />
       {!readerAtBottom && rowCount > 0 && (
         <button
           type="button"
@@ -225,6 +295,93 @@ export default function ChatConversation({ run }: { run: RunState }) {
         </button>
       )}
     </div>
+  );
+}
+
+function buildConversationMinimap(items: ConversationItem[]): ConversationMinimapEntry[] {
+  const entries: ConversationMinimapEntry[] = [];
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (item.kind !== "message" || item.author !== "user") continue;
+    let assistantText: string | null = null;
+    for (let next = index + 1; next < items.length; next += 1) {
+      const candidate = items[next];
+      if (candidate.kind !== "message") continue;
+      if (candidate.author === "user") break;
+      if (candidate.author === "spark") {
+        assistantText = minimapText(candidate.text);
+        break;
+      }
+    }
+    entries.push({
+      id: item.id,
+      index,
+      userText: minimapText(item.text) || "User message",
+      assistantText,
+    });
+  }
+  return entries;
+}
+
+function minimapText(value: string): string {
+  return value
+    .replace(/```[\s\S]*?```/g, " code ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^[#>*+-]+\s*/gm, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 220);
+}
+
+function ConversationMinimap({
+  entries,
+  visibleRange,
+  onSelect,
+}: {
+  entries: ConversationMinimapEntry[];
+  visibleRange: { startIndex: number; endIndex: number };
+  onSelect: (index: number) => void;
+}) {
+  const [activeId, setActiveId] = useState<string | null>(null);
+  if (entries.length < 7) return null;
+  const active = entries.find((entry) => entry.id === activeId) ?? null;
+  return (
+    <nav
+      className="cora-timeline-minimap"
+      aria-label="Conversation map"
+      onMouseLeave={() => setActiveId(null)}
+    >
+      <div className="cora-timeline-minimap__rail" aria-hidden />
+      {entries.map((entry, entryIndex) => {
+        const inView = entry.index >= visibleRange.startIndex && entry.index <= visibleRange.endIndex;
+        const selected = activeId === entry.id;
+        return (
+          <button
+            key={entry.id}
+            type="button"
+            className={`cora-timeline-minimap__mark${inView ? " is-visible" : ""}${selected ? " is-active" : ""}`}
+            style={{ top: `${entries.length === 1 ? 0 : (entryIndex / (entries.length - 1)) * 100}%` }}
+            aria-label={`Jump to: ${entry.userText}`}
+            onMouseEnter={() => setActiveId(entry.id)}
+            onFocus={() => setActiveId(entry.id)}
+            onBlur={() => setActiveId(null)}
+            onClick={() => onSelect(entry.index)}
+          />
+        );
+      })}
+      {active ? (
+        <div
+          className="cora-timeline-minimap__preview spark-glass--strong"
+          style={{
+            top: `${entries.length === 1 ? 0 : (entries.findIndex((entry) => entry.id === active.id) / (entries.length - 1)) * 100}%`,
+          }}
+        >
+          <strong>{active.userText}</strong>
+          {active.assistantText ? <span>{active.assistantText}</span> : null}
+        </div>
+      ) : null}
+    </nav>
   );
 }
 
@@ -274,6 +431,35 @@ function ResultAction({ label, onClick }: { label: string; onClick: () => void }
 
 function timelineItemKey(item: ConversationItem): string {
   return `${item.kind}:${item.id}`;
+}
+
+function shouldRenderTimelineItem(
+  item: ChatTimelineItem,
+  executionByCallId: ReadonlyMap<string, ExecutionTurn>,
+  executionHydrated: boolean,
+): boolean {
+  if (
+    item.kind !== "tool" ||
+    item.activity !== "manager" ||
+    item.status !== "completed" ||
+    toolMetaValue(item, "Mode") !== "chat"
+  ) {
+    return true;
+  }
+
+  // A plain conversational answer (for example "Hello!") has only streamed
+  // text plus a backend/session note. Its answer is already a first-class chat
+  // message; a separate "Worked for…" disclosure adds empty chrome. Retain
+  // completed manager disclosures only when the turn performed inspectable
+  // tool work. Failed and in-flight turns are handled by the early return.
+  if (!executionHydrated) return false;
+  const callId = item.id.startsWith("spark-call:")
+    ? item.id.slice("spark-call:".length)
+    : item.id;
+  const turn = executionByCallId.get(callId);
+  return Boolean(
+    turn?.blocks.some((block) => block.kind === "tool" || block.kind === "error"),
+  );
 }
 
 function groupCompletedActivity(items: ChatTimelineItem[]): ConversationItem[] {
@@ -336,15 +522,32 @@ const MessageTurn = React.memo(function MessageTurn({
 
   if (item.author === "user") {
     const steering = item.intent === "steer";
+    const hasPersistentStatus = steering || Boolean(item.deliveryState && item.deliveryState !== "acknowledged");
     return (
       <div
         className={`cora-user-turn${steering ? " cora-user-turn--steering" : ""}`}
         data-message-intent={item.intent ?? "turn"}
         data-delivery-state={item.deliveryState ?? "acknowledged"}
-        style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}
+        style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}
       >
-        <div style={USER_HEADER_STYLE}>
-          <span style={USER_SPEAKER_STYLE}>You</span>
+        <div
+          className={`cora-message cora-message--user${steering ? " cora-message--steering" : ""}`}
+          data-message-author="user"
+          style={{
+            ...USER_BUBBLE_STYLE,
+            ...(steering ? USER_STEERING_BUBBLE_STYLE : null),
+          }}
+        >
+          <div>{item.text}</div>
+          <AttachmentStrip attachments={item.attachments} align="end" />
+        </div>
+        <div
+          className={`cora-user-turn__meta${hasPersistentStatus ? " has-status" : ""}`}
+          style={USER_HEADER_STYLE}
+        >
+          <time dateTime={item.at} title={new Date(item.at).toLocaleString()} style={USER_TIME_STYLE}>
+            {formatMessageTime(item.at)}
+          </time>
           {steering && (
             <span style={STEERING_CHIP_STYLE}>
               {item.deliveryState === "queued"
@@ -357,20 +560,10 @@ const MessageTurn = React.memo(function MessageTurn({
           {item.deliveryState && item.deliveryState !== "acknowledged" && (
             <span style={DELIVERY_CHIP_STYLE}>{deliveryStateLabel(item.deliveryState)}</span>
           )}
+          {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
+          <CopyMessageControl text={item.text} />
+          {checkpoint && <UndoControl runId={runId} checkpoint={checkpoint} />}
         </div>
-        <div
-          className={`cora-message cora-message--user${steering ? " cora-message--steering" : ""}`}
-          data-message-author="user"
-          style={{
-            ...USER_BUBBLE_STYLE,
-            ...(steering ? USER_STEERING_BUBBLE_STYLE : null),
-          }}
-        >
-          <div>{item.text}</div>
-          <AttachmentStrip attachments={item.attachments} align="end" />
-        </div>
-        {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
-        {checkpoint && <UndoControl runId={runId} checkpoint={checkpoint} />}
       </div>
     );
   }
@@ -386,14 +579,17 @@ const MessageTurn = React.memo(function MessageTurn({
   if (isCompletion) {
     return (
       <SparkTurn repeatCount={item.repeatCount}>
-        <CompletionMessage text={displayText} />
+        <div data-message-author="cora">
+          <CompletionMessage text={displayText} />
+        </div>
+        <AssistantMessageMeta text={displayText} at={item.at} />
       </SparkTurn>
     );
   }
   if (backendFailure) {
     return (
       <SparkTurn tag={<IssueChip />}>
-        <BackendFailureMessage detail={backendFailure} />
+        <BackendFailureMessage detail={backendFailure.detail} hint={backendFailure.hint} />
       </SparkTurn>
     );
   }
@@ -425,9 +621,69 @@ const MessageTurn = React.memo(function MessageTurn({
           {completionVerdict !== "none" && <VerdictPill kind={completionVerdict} compact />}
         </div>
       )}
+      <AssistantMessageMeta text={displayText} at={item.at} />
     </SparkTurn>
   );
 });
+
+function formatMessageTime(iso: string): string {
+  const time = new Date(iso);
+  if (!Number.isFinite(time.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(time);
+}
+
+function CopyMessageControl({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+  }, []);
+  return (
+    <button
+      type="button"
+      className="cora-message-ghost-action"
+      aria-label="Copy message"
+      title={copied ? "Copied" : "Copy message"}
+      onClick={() => {
+        void window.spark.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          if (timer.current !== null) window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(() => setCopied(false), 1200);
+        });
+      }}
+    >
+      {copied ? <CheckGlyph /> : <CopyGlyph />}
+    </button>
+  );
+}
+
+function AssistantMessageMeta({ text, at }: { text: string; at: string }) {
+  return (
+    <div className="cora-assistant-turn__meta">
+      <CopyMessageControl text={text} />
+      <time dateTime={at} title={new Date(at).toLocaleString()} style={USER_TIME_STYLE}>
+        {formatMessageTime(at)}
+      </time>
+    </div>
+  );
+}
+
+function CopyGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect x="5.25" y="5.25" width="7.5" height="7.5" rx="1.5" stroke="currentColor" strokeWidth="1.25" />
+      <path d="M10.5 5.25V4A1.75 1.75 0 0 0 8.75 2.25H4A1.75 1.75 0 0 0 2.25 4v4.75A1.75 1.75 0 0 0 4 10.5h1.25" stroke="currentColor" strokeWidth="1.25" />
+    </svg>
+  );
+}
+
+function CheckGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path d="m3 8.2 3.1 3.1L13 4.7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
 
 // The in-flight assistant bubble — one bubble per turn, even if the backend
 // emitted multiple `chat.assistant_block` events with different messageIds.
@@ -439,6 +695,7 @@ function LiveAssistantTurn({ live }: { live: LiveStreamState }) {
   const liveText = liveTextFromState(live);
   const hasErrors = live.errors.length > 0;
   const onlyFailure = hasErrors && liveText.length === 0 && live.toolCalls.length === 0;
+  const showTechnicalNotes = live.toolCalls.length > 0 || hasErrors;
 
   return (
     <SparkTurn tag={hasErrors ? <IssueChip /> : <LiveTypingPip />}>
@@ -456,7 +713,7 @@ function LiveAssistantTurn({ live }: { live: LiveStreamState }) {
             ))}
           </div>
         )}
-        {live.notes.length > 0 && (
+        {showTechnicalNotes && live.notes.length > 0 && (
           <LiveSessionDetails notes={live.notes} />
         )}
         {live.errors.length > 0 && (
@@ -476,12 +733,32 @@ function LiveAssistantTurn({ live }: { live: LiveStreamState }) {
   );
 }
 
-function backendFailureDetails(text: string): string | null {
-  const match = /^(?:Codex|Claude Code) backend error:\s*(.+)$/is.exec(text.trim());
-  return match?.[1]?.trim() || null;
+function backendFailureDetails(text: string): { detail: string; hint: string } | null {
+  const match = /^(Codex|Claude Code|Cora Pi) backend error:\s*(.+)$/is.exec(text.trim());
+  const source = match?.[1]?.trim();
+  const detail = match?.[2]?.trim();
+  if (!source || !detail) return null;
+  if (/OAuth refresh failed for anthropic/i.test(detail)) {
+    return {
+      detail,
+      hint: "Reconnect your Anthropic subscription for Cora · Pi, then retry this message.",
+    };
+  }
+  if (/OAuth refresh failed for openai-codex/i.test(detail)) {
+    return {
+      detail,
+      hint: "Reconnect your Codex subscription for Cora · Pi, then retry this message.",
+    };
+  }
+  return {
+    detail,
+    hint: source === "Cora Pi"
+      ? "Check the selected model's subscription sign-in, then retry this message."
+      : `Retry the message after the ${source} session is available.`,
+  };
 }
 
-function BackendFailureMessage({ detail }: { detail: string }) {
+function BackendFailureMessage({ detail, hint }: { detail: string; hint: string }) {
   return (
     <div
       className="cora-message cora-message--error"
@@ -491,7 +768,7 @@ function BackendFailureMessage({ detail }: { detail: string }) {
     >
       <div style={BACKEND_FAILURE_TITLE_STYLE}>Cora couldn’t start this turn</div>
       <div style={BACKEND_FAILURE_DETAIL_STYLE}>{detail}</div>
-      <div style={BACKEND_FAILURE_HINT_STYLE}>Retry the message after the Codex session is available.</div>
+      <div style={BACKEND_FAILURE_HINT_STYLE}>{hint}</div>
     </div>
   );
 }
@@ -500,7 +777,7 @@ function LiveSessionDetails({ notes }: { notes: LiveStreamState["notes"] }) {
   return (
     <details style={LIVE_DETAILS_STYLE}>
       <summary style={LIVE_DETAILS_SUMMARY_STYLE}>
-        Session details <span style={LIVE_DETAILS_COUNT_STYLE}>{notes.length}</span>
+        Technical details <span style={LIVE_DETAILS_COUNT_STYLE}>{notes.length}</span>
       </summary>
       <div style={LIVE_NOTE_LIST_STYLE}>
         {notes.map((note) => (
@@ -520,7 +797,7 @@ function LiveTypingPip() {
   return (
     <span style={LIVE_PIP_STYLE} title="Streaming...">
       <span style={LIVE_PIP_DOT_STYLE} />
-      <span>typing</span>
+      <span>working</span>
     </span>
   );
 }
@@ -644,6 +921,8 @@ function toolDisplayName(toolName: string): string {
     codara_check_messages: "Check worker messages",
     codara_complete: "Complete run",
     codara_ask_user: "Ask for a decision",
+    codara_whiteboard_get: "Read whiteboard",
+    codara_whiteboard_update: "Update whiteboard",
   };
   const knownName = known[normalized];
   if (knownName) return knownName;
@@ -676,6 +955,13 @@ function toolInputSummary(toolName: string, input: unknown): string {
     return `${value.worker_task_ids.length} ${value.worker_task_ids.length === 1 ? "worker" : "workers"} · ${value.mode === "any" ? "first result" : "all results"}`;
   }
   if (normalized === "codara_get_worker_status") return "Refresh execution state";
+  if (normalized === "codara_whiteboard_get") return "Read the current visual explanation";
+  if (normalized === "codara_whiteboard_update") {
+    const nodes = Array.isArray(value.nodes) ? value.nodes.length : 0;
+    const edges = Array.isArray(value.edges) ? value.edges.length : 0;
+    const verb = value.action === "merge" ? "Extend" : value.action === "clear" ? "Clear" : "Build";
+    return `${verb} board${nodes ? ` · ${nodes} cards` : ""}${edges ? ` · ${edges} links` : ""}`;
+  }
   if ((normalized === "Shell" || normalized === "Bash") && typeof value.command === "string") {
     const command = value.command;
     if (/\b(find|rg|grep|ls)\b/.test(command)) return "Read project structure";
@@ -874,6 +1160,7 @@ function QuestionChoices({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlight = useRef(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   const submitAnswer = async (answer: string) => {
     const message = answer.trim();
@@ -904,6 +1191,18 @@ function QuestionChoices({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      // ChatStack keeps hidden workspaces' conversations mounted, so only the
+      // visible card may answer — otherwise a digit aimed at the active
+      // workspace resumes another workspace's blocked run. Same gate as
+      // CoraWhiteboard's Ctrl+S shortcut.
+      const root = rootRef.current;
+      if (
+        !root ||
+        root.closest('[aria-hidden="true"]') ||
+        getComputedStyle(root).visibility === "hidden"
+      ) {
+        return;
+      }
       const active = document.activeElement as HTMLElement | null;
       const tag = active?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || active?.isContentEditable) return;
@@ -920,7 +1219,7 @@ function QuestionChoices({
   const canSend = custom.trim().length > 0 && !busy;
 
   return (
-    <div style={ASK_CARD_STYLE}>
+    <div ref={rootRef} style={ASK_CARD_STYLE}>
       <div style={ASK_HEAD_STYLE}>
         <span style={ASK_EYEBROW_STYLE}>Choose an option</span>
         <span style={ASK_HINT_STYLE}>
@@ -1255,7 +1554,6 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
         open={open}
         setOpen={setOpen}
         hasDetails={hasDetails}
-        color={color}
         live={live}
         executionTurn={executionTurn}
         finalAnswer={finalAnswer}
@@ -1321,7 +1619,6 @@ function ManagerActivityDisclosure({
   open,
   setOpen,
   hasDetails,
-  color,
   live,
   executionTurn,
   finalAnswer,
@@ -1330,7 +1627,6 @@ function ManagerActivityDisclosure({
   open: boolean;
   setOpen: React.Dispatch<React.SetStateAction<boolean>>;
   hasDetails: boolean;
-  color: string;
   live: boolean;
   executionTurn?: ExecutionTurn;
   finalAnswer?: string;
@@ -1340,47 +1636,65 @@ function ManagerActivityDisclosure({
     : item.id;
   return (
     <div
+      className={`cora-manager-disclosure${item.status === "failed" ? " is-failed" : ""}${live ? " is-live" : ""}`}
       data-manager-call-id={sparkCallId}
       data-has-execution={executionTurn?.blocks.length ? "true" : "false"}
       data-open={open ? "true" : "false"}
       style={{
         ...MANAGER_DISCLOSURE_STYLE,
-        width: open ? "100%" : "fit-content",
-        borderColor: item.status === "failed"
-          ? "color-mix(in oklch, var(--danger) 30%, transparent)"
-          : open
-            ? "var(--rule-soft)"
-            : "transparent",
-        background: item.status === "failed"
-          ? "color-mix(in oklch, var(--danger) 7%, transparent)"
-          : open
-            ? "color-mix(in oklab, var(--ink) 2.5%, transparent)"
-            : "transparent",
+        width: "100%",
+        borderBottom: open
+          ? `1px solid ${item.status === "failed"
+            ? "color-mix(in oklch, var(--danger) 25%, transparent)"
+            : "color-mix(in oklab, var(--rule-soft) 62%, transparent)"}`
+          : "1px solid transparent",
       }}
     >
       <DisclosureButton
         onClick={() => {
           if (hasDetails) setOpen((value) => !value);
         }}
-        baseStyle={MANAGER_DISCLOSURE_BUTTON_STYLE}
+        baseStyle={{
+          ...MANAGER_DISCLOSURE_BUTTON_STYLE,
+        }}
         title={item.detail || item.title}
       >
-        {live && <StatusDot color={color} pulse size={5} />}
-        <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
+        {live ? (
+          <>
+            <WorkingDots />
+            <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>Working…</span>
+            <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail || item.title}</span>
+          </>
+        ) : (
+          <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
+        )}
         {item.status === "failed" && (
           <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: "var(--danger)" }}>{item.detail}</span>
         )}
         {hasDetails && <Caret open={open} />}
       </DisclosureButton>
       {open && hasDetails && (
-        <div style={MANAGER_DISCLOSURE_BODY_STYLE}>
+        <div className="cora-manager-disclosure__body" style={MANAGER_DISCLOSURE_BODY_STYLE}>
           {executionTurn && executionTurn.blocks.length > 0 && (
             <ExecutionTrace turn={executionTurn} finalAnswer={finalAnswer} />
           )}
-          <ToolDetails item={item} compact={Boolean(executionTurn?.blocks.length)} />
+          <ToolDetails
+            item={live ? { ...item, detail: "" } : item}
+            compact={Boolean(executionTurn?.blocks.length)}
+          />
         </div>
       )}
     </div>
+  );
+}
+
+function WorkingDots() {
+  return (
+    <span className="cora-working-dots" aria-hidden>
+      <span />
+      <span />
+      <span />
+    </span>
   );
 }
 
@@ -2078,6 +2392,7 @@ const SCROLL_STYLE: React.CSSProperties = {
   position: "relative",
   overflow: "hidden",
   background: "var(--panel)",
+  containerType: "inline-size",
 };
 
 // A readable conversation measure inside wide desktop windows. The workbench
@@ -2086,12 +2401,12 @@ const SCROLL_STYLE: React.CSSProperties = {
 // instead of unrelated panels pinned to opposite edges.
 const CONVERSATION_COLUMN_STYLE: React.CSSProperties = {
   width: "100%",
-  maxWidth: 980,
+  maxWidth: 768,
   margin: "0 auto",
 };
 
 const CHAT_ITEM_STYLE: React.CSSProperties = {
-  marginBottom: 18,
+  marginBottom: 16,
 };
 
 const NEW_ACTIVITY_BUTTON_STYLE: React.CSSProperties = {
@@ -2152,13 +2467,14 @@ const USER_HEADER_STYLE: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "flex-end",
   gap: 6,
-  minHeight: 18,
+  minHeight: 20,
 };
 
-const USER_SPEAKER_STYLE: React.CSSProperties = {
-  color: "var(--ink)",
-  fontSize: 11.5,
-  fontWeight: 700,
+const USER_TIME_STYLE: React.CSSProperties = {
+  color: "var(--muted)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 9.5,
+  fontVariantNumeric: "tabular-nums",
 };
 
 const STEERING_CHIP_STYLE: React.CSSProperties = {
@@ -2193,24 +2509,19 @@ const DELIVERY_CHIP_STYLE: React.CSSProperties = {
 };
 
 const USER_BUBBLE_STYLE: React.CSSProperties = {
-  maxWidth: "min(72%, 720px)",
+  maxWidth: "80%",
   background: "color-mix(in oklab, var(--ink) 4%, var(--panel-2))",
   // One soft hairline; the recede stays on --rule-soft so the bubble reads as a
   // calm premium surface rather than a hard-outlined box.
   border: "1px solid var(--rule-soft)",
-  // A generously rounded bubble silhouette with an asymmetric bottom-right
-  // "tail" so a user turn still reads as a message (not a neutral system panel)
-  // even with the calm de-accented fill. The tail nests on the control rung
-  // (7px) so the corner stays concentric with the bubble's softer body.
   borderRadius: 16,
-  borderBottomRightRadius: "var(--radius-control, 7px)",
-  padding: "10px 14px",
+  padding: 12,
   color: "var(--ink)",
   fontSize: 13.5,
   lineHeight: 1.55,
   whiteSpace: "pre-wrap",
   wordBreak: "break-word",
-  boxShadow: "var(--lift-hi)",
+  boxShadow: "none",
 };
 
 const USER_STEERING_BUBBLE_STYLE: React.CSSProperties = {
@@ -2225,7 +2536,7 @@ const SPARK_TURN_STYLE: React.CSSProperties = {
 
 const SPARK_MAIN_STYLE: React.CSSProperties = {
   minWidth: 0,
-  maxWidth: 840,
+  maxWidth: "100%",
   display: "flex",
   flexDirection: "column",
   gap: 7,
@@ -2241,13 +2552,13 @@ const SPARK_HEADER_STYLE: React.CSSProperties = {
 
 const SPARK_BUBBLE_STYLE: React.CSSProperties = {
   width: "100%",
-  maxWidth: "78ch",
+  maxWidth: "100%",
   boxSizing: "border-box",
   color: "var(--ink)",
   background: "transparent",
   border: "none",
   borderRadius: 0,
-  padding: 0,
+  padding: "2px 4px",
   boxShadow: "none",
   overflowWrap: "anywhere",
 };
@@ -2739,24 +3050,25 @@ const TOOL_ROW_STANDALONE_STYLE: React.CSSProperties = {
 };
 
 const MANAGER_DISCLOSURE_STYLE: React.CSSProperties = {
-  width: "fit-content",
-  maxWidth: 840,
-  border: "1px solid transparent",
-  borderRadius: "var(--radius-control, 7px)",
-  overflow: "hidden",
+  width: "100%",
+  maxWidth: "100%",
+  border: "none",
+  borderRadius: 0,
+  overflow: "visible",
   boxSizing: "border-box",
 };
 
 const MANAGER_DISCLOSURE_BUTTON_STYLE: React.CSSProperties = {
   appearance: "none",
-  minHeight: 28,
+  width: "100%",
+  minHeight: 24,
   border: "none",
   background: "transparent",
   color: "inherit",
   display: "flex",
   alignItems: "center",
   gap: 7,
-  padding: "3px 6px 3px 0",
+  padding: "2px 4px",
   cursor: "default",
   textAlign: "left",
 };
@@ -2769,14 +3081,15 @@ const MANAGER_DISCLOSURE_TITLE_STYLE: React.CSSProperties = {
 };
 
 const MANAGER_DISCLOSURE_BODY_STYLE: React.CSSProperties = {
-  borderTop: "1px solid color-mix(in oklab, var(--rule-soft) 62%, transparent)",
-  padding: "10px 12px 11px",
+  margin: "2px 0 5px 8px",
+  borderLeft: "1px solid color-mix(in oklab, var(--rule-soft) 66%, transparent)",
+  padding: "3px 0 3px 13px",
 };
 
 const EXECUTION_TRACE_STYLE: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  gap: 9,
+  gap: 5,
   minWidth: 0,
 };
 
