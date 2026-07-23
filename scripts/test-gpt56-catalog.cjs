@@ -91,8 +91,16 @@ async function main() {
   );
   check(
     "premium Fable opt-in does not replace Opus as the default Claude row",
-    composer.buildVisibleGroups({ diagnostics, openRouterModel: "", fableEnabled: true })[0]
-      ?.models[0]?.id === "claude-opus-4-8:1m",
+    composer.buildVisibleGroups({ diagnostics, openRouterModel: "", fableEnabled: true })
+      .find((group) => group.backend === "claude")?.models[0]?.id === "claude-opus-4-8:1m",
+  );
+  const piWithoutFable = groups.find((group) => group.backend === "pi");
+  const piWithFable = composer.buildVisibleGroups({ diagnostics, openRouterModel: "", fableEnabled: true })
+    .find((group) => group.backend === "pi");
+  check(
+    "experimental Pi picker defaults to Sol and gates Fable behind the premium opt-in",
+    piWithoutFable?.models.map((model) => model.id).join(",") === "gpt-5.6-sol" &&
+      piWithFable?.models.map((model) => model.id).join(",") === "gpt-5.6-sol,claude-fable-5",
   );
 
   check(

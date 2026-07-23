@@ -72,12 +72,8 @@ function buildScorecard(results) {
 }
 
 // Sum the per-worker runtime breakdown across a variant's runs, so the
-// scorecard shows how often the manager actually routed to claude vs codex
-// vs cursor. The "cursor" runtime (CLI binary `agent`, model
-// composer-2.5-fast) was added as a third worker option, so it gets a
-// pre-allocated 0 bucket alongside claude and codex to keep the breakdown
-// shape stable across runs.
-const KNOWN_RUNTIMES = ["claude", "codex", "cursor"];
+// scorecard shows how often the manager routed to each supported runtime.
+const KNOWN_RUNTIMES = ["claude", "codex"];
 
 function emptyRuntimeMix() {
   return {

@@ -78,6 +78,7 @@ import {
   noteTerminalWillDispose,
   noteTerminalUserInput,
   syncTerminalNotifyPanes,
+  terminalAgentStateSnapshot,
   type TerminalNotifyPaneEntry,
 } from "./terminal-agent-notify";
 import type {
@@ -146,6 +147,12 @@ async function getInlineAi(): Promise<typeof import("./inline-ai")> {
   return inlineAiMod;
 }
 
+let piSubscriptionAuthMod: typeof import("./orchestration/pi-subscription-auth") | undefined;
+async function getPiSubscriptionAuth(): Promise<typeof import("./orchestration/pi-subscription-auth")> {
+  piSubscriptionAuthMod ??= await import("./orchestration/pi-subscription-auth");
+  return piSubscriptionAuthMod;
+}
+
 let runStoreMod: typeof import("./orchestration/run-store") | undefined;
 async function getRunStore(): Promise<typeof import("./orchestration/run-store")> {
   runStoreMod ??= await import("./orchestration/run-store");
@@ -198,6 +205,10 @@ import type {
   LaunchWorkerAttemptInput,
   MarkRunSeenInput,
   UpdateChatBackendInput,
+  UpdateCoraWhiteboardInput,
+  ExportCoraWhiteboardFileInput,
+  ExportFileDialogInput,
+  ImportedCoraWhiteboardFile,
   PauseRunInput,
   PrefKey,
   PreferencesChange,
@@ -234,6 +245,12 @@ import type {
   WorkerSessionRuntime,
   WorkerSessionSummary,
 } from "@shared/types";
+import {
+  parseCoraWhiteboard,
+  parseCoraWhiteboardFile,
+  serializeCoraWhiteboardFile,
+  whiteboardFileName,
+} from "@shared/cora-whiteboard-file";
 
 // A small document glyph used as the drag image for `webContents.startDrag`.
 // Windows rejects an empty icon ("Must specify non-empty 'icon' option"), so
@@ -302,6 +319,30 @@ export function registerIpc(): void {
 
   ipcMain.handle("settings:save", async (_e, settings: AppSettings): Promise<AppSettings> => {
     return saveSettings(settings);
+  });
+
+  ipcMain.handle("pi-subscriptions:status", async () => {
+    const { inspectPiSubscriptions } = await getPiSubscriptionAuth();
+    return inspectPiSubscriptions();
+  });
+  ipcMain.handle("pi-subscriptions:connect", async (event, input?: { provider?: unknown }) => {
+    const { startPiSubscriptionLogin } = await getPiSubscriptionAuth();
+    return startPiSubscriptionLogin(input?.provider, event.sender);
+  });
+  ipcMain.handle(
+    "pi-subscriptions:respond",
+    async (event, input?: { requestId?: unknown; promptId?: unknown; value?: unknown }) => {
+      const { answerPiSubscriptionPrompt } = await getPiSubscriptionAuth();
+      answerPiSubscriptionPrompt(input ?? {}, event.sender);
+    },
+  );
+  ipcMain.handle("pi-subscriptions:cancel", async (event, input?: { requestId?: unknown }) => {
+    const { cancelPiSubscriptionLogin } = await getPiSubscriptionAuth();
+    cancelPiSubscriptionLogin(input?.requestId, event.sender);
+  });
+  ipcMain.handle("pi-subscriptions:disconnect", async (_event, input?: { provider?: unknown }) => {
+    const { disconnectPiSubscription } = await getPiSubscriptionAuth();
+    return disconnectPiSubscription(input?.provider);
   });
 
   ipcMain.handle(
@@ -458,6 +499,89 @@ export function registerIpc(): void {
     if (result.canceled) return [];
     return result.filePaths;
   });
+
+  ipcMain.handle(
+    "dialog:exportWhiteboard",
+    async (e, input: ExportCoraWhiteboardFileInput): Promise<string | null> => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      const board = parseCoraWhiteboard(input?.board);
+      const suggestedName = whiteboardFileName(input?.suggestedName || board.title);
+      const result = await dialog.showSaveDialog(win!, {
+        title: "Export Cora whiteboard",
+        defaultPath: input?.defaultPath || join(app.getPath("documents"), suggestedName),
+        filters: [{ name: "Codara Whiteboard", extensions: ["coraboard"] }],
+      });
+      if (result.canceled || !result.filePath) return null;
+      const destination = result.filePath.toLowerCase().endsWith(".coraboard")
+        ? result.filePath
+        : `${result.filePath}.coraboard`;
+      await fs.writeFile(destination, serializeCoraWhiteboardFile(board), "utf8");
+      return destination;
+    },
+  );
+
+  ipcMain.handle(
+    "dialog:importWhiteboard",
+    async (e, defaultPath?: string): Promise<ImportedCoraWhiteboardFile | null> => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      const result = await dialog.showOpenDialog(win!, {
+        title: "Import Cora whiteboard",
+        properties: ["openFile"],
+        defaultPath: defaultPath || app.getPath("documents"),
+        filters: [
+          { name: "Codara Whiteboard", extensions: ["coraboard"] },
+          { name: "JSON", extensions: ["json"] },
+        ],
+      });
+      if (result.canceled || result.filePaths.length === 0) return null;
+      const path = result.filePaths[0];
+      const stat = await fs.stat(path);
+      if (stat.size > 4 * 1024 * 1024) throw new Error("Whiteboard files must be smaller than 4 MB.");
+      const board = parseCoraWhiteboardFile(await fs.readFile(path, "utf8"));
+      return { path, board };
+    },
+  );
+
+  // Generic dialog-based export: prompt for a destination and write a
+  // renderer-produced payload (board SVG/PNG images today). One narrow channel
+  // instead of one IPC surface per format; the extension is forced onto the
+  // chosen name exactly like dialog:exportWhiteboard does for .coraboard.
+  ipcMain.handle(
+    "dialog:exportFile",
+    async (e, input: ExportFileDialogInput): Promise<string | null> => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      if (typeof input?.data !== "string") throw new Error("Export payload must be a string.");
+      if (input.data.length > 64 * 1024 * 1024) throw new Error("Export payload is too large.");
+      const filters = (Array.isArray(input.filters) ? input.filters : []).filter(
+        (filter) =>
+          filter &&
+          typeof filter.name === "string" &&
+          Array.isArray(filter.extensions) &&
+          filter.extensions.every((ext) => typeof ext === "string" && /^[a-z0-9]+$/i.test(ext)) &&
+          filter.extensions.length > 0,
+      );
+      if (filters.length === 0) throw new Error("Export requires at least one file filter.");
+      const extensions = filters.flatMap((filter) => filter.extensions.map((ext) => ext.toLowerCase()));
+      const result = await dialog.showSaveDialog(win!, {
+        title: input.title || "Export file",
+        defaultPath:
+          input.defaultPath ||
+          join(app.getPath("documents"), input.suggestedName || `export.${extensions[0]}`),
+        filters,
+      });
+      if (result.canceled || !result.filePath) return null;
+      const lower = result.filePath.toLowerCase();
+      const destination = extensions.some((ext) => lower.endsWith(`.${ext}`))
+        ? result.filePath
+        : `${result.filePath}.${extensions[0]}`;
+      if (input.encoding === "base64") {
+        await fs.writeFile(destination, Buffer.from(input.data, "base64"));
+      } else {
+        await fs.writeFile(destination, input.data, "utf8");
+      }
+      return destination;
+    },
+  );
 
   ipcMain.handle(
     "attachments:savePastedImage",
@@ -1037,6 +1161,17 @@ export function registerIpc(): void {
     return getRun(runId);
   });
 
+  ipcMain.handle(
+    "orchestration:readWorkerPrompt",
+    async (_e, input: { runId: string; attemptId: string }): Promise<string> => {
+      if (!input || typeof input.runId !== "string" || typeof input.attemptId !== "string") {
+        throw new Error("Invalid worker prompt request.");
+      }
+      const { readWorkerAttemptPrompt } = await getRunStore();
+      return readWorkerAttemptPrompt(input.runId, input.attemptId);
+    },
+  );
+
   ipcMain.handle("orchestration:listRuns", async (_e, workspaceId?: string): Promise<RunState[]> => {
     const { listRuns } = await getRunStore();
     return listRuns(workspaceId);
@@ -1133,6 +1268,14 @@ export function registerIpc(): void {
     const { renameRun } = await getRunStore();
     return renameRun(input);
   });
+
+  ipcMain.handle(
+    "orchestration:updateWhiteboard",
+    async (_e, input: UpdateCoraWhiteboardInput): Promise<RunState> => {
+      const { updateCoraWhiteboard } = await getRunStore();
+      return updateCoraWhiteboard(input);
+    },
+  );
 
   ipcMain.handle(
     "orchestration:updateChatBackend",
@@ -1578,9 +1721,10 @@ export function registerIpc(): void {
       _e,
       input: { workspaceId: string; workspaceName?: string; panes: TerminalNotifyPaneEntry[] },
     ) => {
-      syncTerminalNotifyPanes(input);
+      return syncTerminalNotifyPanes(input);
     },
   );
+  ipcMain.handle("terminalNotify:snapshot", async () => terminalAgentStateSnapshot());
 
   // Renderer reports what the user is looking at (focus + active workspace/
   // tab/run/pane) in one snapshot; the notify policy suppresses alerts for

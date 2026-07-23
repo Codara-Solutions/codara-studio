@@ -9,6 +9,9 @@ import type {
   AgentEffortLevel,
   AgentRuntimeDiagnostic,
   Checkpoint,
+  CoraWhiteboard,
+  CoraWhiteboardEdge,
+  CoraWhiteboardNode,
   UndoToCheckpointInput,
   UndoToCheckpointResult,
   AgentRuntimeModel,
@@ -24,6 +27,7 @@ import type {
   PauseRunInput,
   RenameRunInput,
   UpdateChatBackendInput,
+  UpdateCoraWhiteboardInput,
   CancelRunInput,
   ContextPacket,
   ResumeRunInput,
@@ -80,6 +84,12 @@ import {
   estimateTokensFromText,
 } from "@shared/context-window";
 import { normalizeChatFeatureFlags } from "@shared/chat-policy";
+import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
+import {
+  CORA_WHITEBOARD_NODE_DEFAULT_SIZES,
+  whiteboardNodeSizeLimits,
+} from "@shared/cora-whiteboard-file";
+import { selectLargestCompatibleWave } from "@shared/parallel-wave";
 import { CODEX_MODEL_BY_TIER, normalizeCodexModelId } from "@shared/model-catalog";
 import {
   appendEvent as appendEventRaw,
@@ -94,6 +104,7 @@ import {
   runsRoot,
 } from "./event-log";
 import { buildRunStatusTransitionEvent } from "./run-lifecycle";
+import { reconcileAcceptedVerifierOnlySteps } from "./step-lifecycle";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
 import { decideWorkerReport, readWorkerReport } from "./worker-report";
 // Re-exported for external importers (ipc.ts reaches it via getRunStore()).
@@ -175,6 +186,7 @@ import { createKeyedTaskQueue } from "./keyed-task-queue";
 import { createSandboxWorktree, mergeBackSandboxWorktree, removeSandboxWorktree } from "../git-worktrees";
 import { readGitText } from "../git-exec";
 import { sparkHome } from "../spark-home";
+import { defaultShell } from "../shells";
 import { getPreferenceCached } from "../preferences-store";
 import {
   sanitizeWorkerModelHint,
@@ -202,6 +214,9 @@ import {
   type ChatStreamEvent,
 } from "./spark-agent-backend";
 import { getBackend } from "./backend-registry";
+import { createCodaraPiWorkerLaunchPlan } from "./pi-runtime-electron";
+import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
+import type { PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
 import {
   abandonRunQuestionOwnership,
   applyRunQuestionAnswer,
@@ -384,7 +399,8 @@ async function detectConfiguredAgentRuntimes(
 
 export async function createRun(input: CreateRunInput): Promise<RunState> {
   const now = new Date().toISOString();
-  const initialChatFlags = normalizeChatFeatureFlags(input.chatBackend ?? "openrouter", {
+  const initialBackend = input.chatBackend ?? "pi";
+  const initialChatFlags = normalizeChatFeatureFlags(initialBackend, {
     chatFastMode: input.chatFastMode,
     chat1mContext: input.chat1mContext,
   });
@@ -416,12 +432,16 @@ export async function createRun(input: CreateRunInput): Promise<RunState> {
     // Stamp the chip's draft selections onto the fresh run so the chip's
     // backend/model/mode/effort survive the draft→live transition without an
     // extra updateChatBackend round-trip. Fields are individually optional
-    // because pre-feature callers pass none of them; resolveChatBackendConfig
-    // falls back to OpenRouter + the global default model in that case.
-    chatBackend: input.chatBackend,
-    chatModel: input.chatModel?.trim() || undefined,
+    // because pre-feature callers pass none of them. New runs stamp Pi so
+    // ordinary Cora sessions use the bundled subscription harness unless the
+    // caller explicitly selects a legacy backend.
+    chatBackend: initialBackend,
+    chatModel: input.chatModel?.trim() || (initialBackend === "pi" ? "gpt-5.6-sol" : undefined),
     chatMode: input.chatMode,
-    chatEffort: input.chatEffort,
+    chatEffort: input.chatEffort ?? (initialBackend === "pi" ? "high" : undefined),
+    coraExecutionPolicy: input.coraExecutionPolicy === undefined
+      ? undefined
+      : normalizeCoraExecutionPolicy(input.coraExecutionPolicy),
     chatFastMode: initialChatFlags.chatFastMode,
     chat1mContext: initialChatFlags.chat1mContext,
     // Looms v2: ownership + execution mode are stamped at creation (not
@@ -482,6 +502,33 @@ export async function getRun(runId: string): Promise<RunState | null> {
     }
     throw err;
   }
+}
+
+export async function readWorkerAttemptPrompt(
+  runId: string,
+  attemptId: string,
+): Promise<string> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((candidate) => candidate.id === attemptId);
+  if (!attempt?.promptPath) {
+    throw new Error(`Worker prompt not found: ${attemptId}`);
+  }
+
+  // This API deliberately reads only the prompt recorded for this attempt.
+  // Resolve real paths as well as lexical paths so a symlink inside the run
+  // directory cannot turn this narrow reader into a general filesystem API.
+  const artifactRoot = await fs.realpath(runDir(run.id));
+  const promptPath = await fs.realpath(resolvePath(attempt.promptPath));
+  const relativePrompt = relative(artifactRoot, promptPath);
+  if (
+    relativePrompt === "" ||
+    relativePrompt.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+    relativePrompt === ".." ||
+    isAbsolute(relativePrompt)
+  ) {
+    throw new Error("Worker prompt path is outside its run artifacts.");
+  }
+  return fs.readFile(promptPath, "utf8");
 }
 
 async function purgeTerminalRunForRetention(runId: string): Promise<void> {
@@ -674,6 +721,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       chatModel: input.chatModel,
       chatMode: input.chatMode,
       chatEffort: input.chatEffort,
+      coraExecutionPolicy: input.coraExecutionPolicy,
     });
   }
 
@@ -741,11 +789,24 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   const fanOutDirective = resolveFanOutDirective(input);
   const councilDirective = resolveCouncilDirective(run, input);
 
-  const initialNote = input.initialUserNote?.trim();
+  // OpenRouter's manager request includes the active plan directly, but the
+  // Claude/Codex manager transports intentionally consume only durable queued
+  // human messages. A "Run plan" invocation historically persisted planText
+  // in run.plans without queueing a turn, so a CLI-backed manager received
+  // "There is no new user message" and could mark untouched work complete.
+  // Mirror the plan into one stable user turn for those transports. A stable
+  // client id makes re-entered startAutopilot calls idempotent.
+  const cliManagerNeedsPlanTurn =
+    Boolean(planText) &&
+    (run.chatBackend === "claude" || run.chatBackend === "codex" || run.chatBackend === "pi");
+  const initialNote = input.initialUserNote?.trim() ||
+    (cliManagerNeedsPlanTurn ? planText : undefined);
   if (initialNote) {
     run = await addRunMessage({
       runId: run.id,
-      clientMessageId: input.initialUserNoteClientMessageId,
+      clientMessageId:
+        input.initialUserNoteClientMessageId ??
+        (cliManagerNeedsPlanTurn ? `plan-turn-${run.planId ?? run.id}` : undefined),
       author: "user",
       kind: "note",
       message: initialNote,
@@ -3042,7 +3103,7 @@ async function runInitialAutopilotPlanning(
       run.id,
       mode === "chat"
         ? "OpenRouter is not configured, so Cora cannot think through this chat turn yet. Add the API key in Settings, then send the message again."
-        : "OpenRouter is not configured, so Cora cannot plan Claude/Codex/Cursor worker tasks yet. Add the API key in Settings, then run the plan again.",
+        : "OpenRouter is not configured, so Cora cannot plan Claude/Codex worker tasks yet. Add the API key in Settings, then run the plan again.",
       undefined,
       {
         category: "credentials_access",
@@ -3140,7 +3201,7 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   // decideWorkerReport is explicitly skipped below. So auto-accept on
   // success here; the CC manager will inspect the report and judge quality.
   const isExecuteModeCliManager =
-    (latest.chatBackend === "claude" || latest.chatBackend === "codex") &&
+    (latest.chatBackend === "claude" || latest.chatBackend === "codex" || latest.chatBackend === "pi") &&
     (latest.chatMode === "execute" || latest.chatMode === "auto");
   const finishedAttempt = latest.workerAttempts.find((a) => a.id === attemptId);
   const finishedTaskId = finishedAttempt?.workerTaskId;
@@ -3191,6 +3252,33 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   });
 
   if (!hasOtherActiveCycles && !hasOtherActiveWorkers) {
+    // A completed worker can deterministically queue its own continuation:
+    // verifier FEEDBACK re-queues the matching implementation task, and an
+    // environmental CLI failure queues an opposite-runtime fallback. Those
+    // tasks previously remained parked forever for execute-mode CLI managers,
+    // because the code below intentionally skips a second manager prompt. Run
+    // the pending wave directly before deciding whether manager review is due.
+    const settled = await requireRun(runId);
+    const pendingContinuationTasks = pickAutopilotTasks(settled);
+    if (pendingContinuationTasks.length > 0) {
+      await appendEvent({
+        workspaceId: settled.workspaceId,
+        runId: settled.id,
+        type: "autopilot.worker_continuation_started",
+        message: `Launching ${pendingContinuationTasks.length} worker continuation task(s) queued by the completed cycle`,
+        payload: {
+          taskIds: pendingContinuationTasks.map((task) => task.id),
+          taskTitles: pendingContinuationTasks.map((task) => task.title),
+        },
+      });
+      const input = autopilotInputFromRun(settled);
+      await startAutopilot({
+        ...input,
+        cwd: cwd || input.cwd,
+        runId: settled.id,
+      });
+      return;
+    }
     // Skip the autopilot's worker_result_review re-prompt when the chat
     // backend is a long-lived CC/Codex execute session. In that flow the
     // manager is ALREADY waiting on codara_wait_for_workers in its current
@@ -3228,6 +3316,11 @@ async function maybeAutoRetryStuckAttempt(
 
   const task = run.workerTasks.find((t) => t.id === failed.workerTaskId);
   if (!task) return null;
+  // reviewWorkerReportArtifact may already have converted this environmental
+  // failure into an opposite-runtime fallback and cancelled the original
+  // task. Do not also revive the cancelled task: that creates two retry
+  // lineages, strands one queued, and blocks codara_complete forever.
+  if (task.status === "cancelled") return null;
   const stuckCount = run.workerAttempts.filter(
     (a) => a.workerTaskId === task.id && a.error?.startsWith(STUCK_REASON_PREFIX),
   ).length;
@@ -4630,9 +4723,6 @@ const TRIVIAL_TOP_TIER_BY_RUNTIME: Record<string, { modelHint: string; effortHin
 
 // Top-tier model identifiers (post-normalization). Anything else for a
 // claude/codex runtime is treated as mid-tier and gets promoted on trivial.
-// Cursor has a single model (composer-2.5-fast) with no effort levels, so it
-// is absent from this table on purpose — promoteForTrivial leaves cursor
-// agents alone.
 // We compare on the base model only — `@<effort>` suffixes are stripped first
 // because grok-4.3 has shipped both `"claude-sonnet-4-6"` and
 // `"claude-sonnet-4-6@medium"` as the modelHint string across runs, and an
@@ -4662,17 +4752,15 @@ function isTopTierModel(hint: string | undefined): boolean {
 // run-store namespace.
 export { sanitizeWorkerModelHint } from "./worker-model-hint";
 
-// A Cora-spawned worker may run Fable 5 whenever the user explicitly named Fable
-// in their OWN message this run. The "Allow Fable 5" setting does NOT gate this
-// worker path — an explicit user request is sufficient (the setting still governs
-// the main-chat model, standing terminals, and automation launches, which have
-// their own checks). The manager LLM cannot self-authorize the most expensive
-// tier — runUserRequestedFable scans user-authored chat only, never
-// manager/worker output. Callers pass the result as
+// A Cora-spawned worker may run Fable 5 only when BOTH gates are open: the user
+// enabled the premium model in Settings and explicitly named Fable in their OWN
+// message this run. The manager LLM cannot self-authorize the most expensive
+// tier, and leaving the setting off is an unconditional veto. Callers pass this
+// combined result as
 // `sanitizeWorkerModelHint(hint, { allowFable })` so a fable hint passes through
 // unchanged; otherwise it is downgraded to Opus 4.8 with a visible note.
 export function workerFableAllowed(run: RunState): boolean {
-  return runUserRequestedFable(run);
+  return getPreferenceCached("fableEnabled") === true && runUserRequestedFable(run);
 }
 
 function promoteForTrivial(agent: PlannedStepAgent): PlannedStepAgent {
@@ -4957,7 +5045,7 @@ function shouldEnforceHybridParallelRuntimes(
   runtimes: { ui: WorkerRuntime; logic: WorkerRuntime; integrator: WorkerRuntime },
 ): boolean {
   if (runtimes.ui === runtimes.logic) return false;
-  if (!/\b(different agents?|claude|codex|cursor|hybrid)\b/i.test(intent)) return false;
+  if (!/\b(different agents?|claude|codex|hybrid)\b/i.test(intent)) return false;
   const parallelStep = decision.steps.find((step) => {
     const text = [
       step.title,
@@ -4998,8 +5086,8 @@ function latestUserRunMessageText(run: RunState): string {
 function hasExplicitParallelAgentIntent(text: string): boolean {
   const lower = text.toLowerCase();
   const asksForAgents =
-    /\bspawn\b[\s\S]{0,80}\b(agent|worker|codex|claude|cursor)s?\b/.test(lower) ||
-    /\b(agent|worker|codex|claude|cursor)s?\b[\s\S]{0,80}\b(simultaneous|parallel|at the same time)\b/.test(lower) ||
+    /\bspawn\b[\s\S]{0,80}\b(agent|worker|codex|claude)s?\b/.test(lower) ||
+    /\b(agent|worker|codex|claude)s?\b[\s\S]{0,80}\b(simultaneous|parallel|at the same time)\b/.test(lower) ||
     /\bdifferent agent\b/.test(lower);
   const asksForParallel = /\b(simultaneous|parallel|at the same time)\b/.test(lower);
   const asksForCombine = /\b(combine|integrate|merge|assemble)\b/.test(lower);
@@ -5258,6 +5346,9 @@ function councilTaskFromRun(run: RunState): string {
 function councilSynthesisRuntime(run: RunState): WorkerRuntime | null {
   if (run.chatBackend === "claude") return "claude";
   if (run.chatBackend === "codex") return "codex";
+  if (run.chatBackend === "pi") {
+    return run.chatModel?.startsWith("claude-") ? "claude" : "codex";
+  }
   return null;
 }
 
@@ -5532,8 +5623,8 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
   // composer (e.g. Opus 4.8 @ medium) — it's the one that decides what to keep
   // from each candidate. Fall back to a top-tier default only if the run didn't
   // record a selection. The judge is a Cora-spawned WORKER, so a fable pick is
-  // downgraded to Opus 4.8 UNLESS the user explicitly asked for Fable this run
-  // (workerFableAllowed; the setting doesn't gate this worker path). Sanitize the hint and surface any
+  // downgraded to Opus 4.8 UNLESS the setting is enabled and the user explicitly
+  // asked for Fable this run (workerFableAllowed). Sanitize the hint and surface any
   // downgrade so it isn't a silent swap by the launch-command backstop.
   const judgeModel = sanitizeWorkerModelHint(run.chatModel ?? COUNCIL_TOP_TIER_MODEL[runtime], {
     allowFable: workerFableAllowed(run),
@@ -5544,7 +5635,7 @@ async function prepareCouncilSynthesis(run: RunState, cwd: string): Promise<RunS
       author: "spark",
       kind: "note",
       message:
-        "Fable is the premium tier and you didn't ask for it here, so the plan-council synthesis judge runs on Opus 4.8 instead.",
+        "Fable is the premium tier and its Settings + explicit-request gate was not satisfied, so the plan-council synthesis judge runs on Opus 4.8 instead.",
     });
   }
 
@@ -5775,17 +5866,17 @@ function detectPlanRuntimeMandate(run: RunState): WorkerRuntime | null {
   const runtimes: WorkerRuntime[] = ["claude", "codex"];
   for (const rt of runtimes) {
     const patterns = [
-      // "all/every/only the workers ... cursor"
+      // "all/every/only the workers ... <runtime>"
       new RegExp(`\\b(all|every|only|each)\\s+(the\\s+|of\\s+the\\s+)?(worker|workers|agent|agents)\\b[^.\\n]{0,80}\\b${rt}\\b`, "i"),
-      // "cursor only" / "cursor exclusively"
+      // "<runtime> only" / "<runtime> exclusively"
       new RegExp(`\\b${rt}\\s+(only|exclusively|throughout)\\b`, "i"),
-      // "only cursor" / "exclusively cursor"
+      // "only <runtime>" / "exclusively <runtime>"
       new RegExp(`\\b(only|exclusively)\\s+${rt}\\b`, "i"),
-      // "use (only) cursor for/workers/agents"
+      // "use (only) <runtime> for/workers/agents"
       new RegExp(`\\buse\\s+(only\\s+)?${rt}\\b`, "i"),
-      // "(workers|agents) (should|must|to) be cursor"
+      // "(workers|agents) (should|must|to) be <runtime>"
       new RegExp(`\\b(worker|workers|agent|agents)\\s+(should|must|need(s)?\\s+to|have\\s+to|to)\\s+be\\s+${rt}\\b`, "i"),
-      // "I want ... workers ... be cursor"
+      // "I want ... workers ... be <runtime>"
       new RegExp(`\\b(want|need|require)\\s+(all\\s+)?(the\\s+)?(worker|workers|agent|agents)\\s+(to\\s+)?be\\s+${rt}\\b`, "i"),
     ];
     for (const re of patterns) {
@@ -6127,7 +6218,7 @@ function dropVerifierTasksWithExistingPeer(
 //   - run.taskComplexity === 'trivial'
 //   - active step has exactly 1 plannedAgent (parallel work goes through manager)
 //   - active step has no queueable worker tasks yet
-//   - the agent is non-verifier and runs on claude/codex/cursor
+//   - the agent is non-verifier and runs on claude/codex
 //
 // Saves ~3 minutes (manager call 2 was 2992 reasoning tokens / ~3 min on
 // bjgp3uso7).
@@ -6449,6 +6540,41 @@ async function applySparkManagerDecisionCurrent(
       },
     });
     return run;
+  }
+  // Execute-mode planning must never turn a prose-only promise into a green
+  // run. CLI managers synthesize a status=complete talk decision when no Cora
+  // tool was called; with an empty run that used to produce "done" after zero
+  // workers, zero edits, and zero checks. Real codara_spawn_workers calls
+  // mutate the run live before this decision is applied, so an untouched
+  // plan_analysis completion is unambiguously a manager protocol failure.
+  if (
+    mode === "plan_analysis" &&
+    decision.status === "complete" &&
+    run.steps.length === 0 &&
+    run.workerTasks.length === 0
+  ) {
+    return commitRunChange(run, {
+      type: "spark_manager.empty_execution_refused",
+      message: "Cora refused an execute-mode completion with no worker activity",
+      payload: {
+        summary: decision.summary,
+        reply: decision.chatReply,
+        mode,
+        reason: "no_steps_or_workers",
+      },
+      mutate: (draft, timestamp) => {
+        draft.status = "failed";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+          status: "failed",
+          lastAction: "empty_execution_refused",
+          stopReason:
+            "The manager finished without calling a Cora orchestration tool or creating any worker task.",
+          updatedAt: timestamp,
+        };
+        draft.updatedAt = timestamp;
+      },
+    });
   }
   // Surface the manager's natural-language reply to the user as a Codara chat
   // bubble before applying the structural decision. Avoids dupes by skipping
@@ -7126,9 +7252,8 @@ async function applySparkManagerDecisionCurrent(
           .reverse()
           .find((t) => t.taskClass !== "verifier");
         const implRuntime = recentImpl?.runtimePreference;
-        // Prefer ANY verifier whose runtime differs from the impl's. With
-        // three runtimes (claude/codex/cursor) there are two valid
-        // cross-provider picks per impl; either is acceptable.
+        // Prefer any verifier whose runtime differs from the implementation
+        // worker's; either supported cross-provider direction is acceptable.
         const kept =
           (implRuntime && list.find((t) => t.runtimePreference && t.runtimePreference !== implRuntime)) ||
           list[0];
@@ -7973,7 +8098,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   // scheduler (scheduleAutopilotReview is never used for them — see the worker
   // cycle path). The scheduler itself dedupes, so this can't double-drive.
   const isExecuteModeCliManager =
-    (resumed.chatBackend === "claude" || resumed.chatBackend === "codex") &&
+    (resumed.chatBackend === "claude" || resumed.chatBackend === "codex" || resumed.chatBackend === "pi") &&
     (resumed.chatMode === "execute" || resumed.chatMode === "auto");
   const shouldScheduleDriver =
     !isExecuteModeCliManager && activeWorkersForRun(resumed.id).length === 0;
@@ -8872,6 +8997,255 @@ export async function updateRunStatus(input: UpdateRunStatusInput): Promise<RunS
   });
 }
 
+const WHITEBOARD_MAX_NODES = 500;
+const WHITEBOARD_MAX_EDGES = 1_000;
+const WHITEBOARD_COORDINATE_LIMIT = 100_000;
+
+/** Persist the visual model Cora and the renderer share for one chat. */
+export async function updateCoraWhiteboard(
+  input: UpdateCoraWhiteboardInput,
+): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const action = input.action ?? "replace";
+  if (action !== "replace" && action !== "merge" && action !== "clear") {
+    throw new Error(`Unsupported whiteboard action: ${String(action)}`);
+  }
+
+  return commitRunChange(run, {
+    type: "run.whiteboard_updated",
+    message: action === "clear" ? "Cleared Cora whiteboard" : "Updated Cora whiteboard",
+    payload: {
+      action,
+      editor: input.editor ?? "cora",
+      baseRevision: input.baseRevision,
+      nodeCount: input.nodes?.length ?? 0,
+      edgeCount: input.edges?.length ?? 0,
+    },
+    mutate: (draft, timestamp) => {
+      const currentRevision = draft.whiteboard?.revision ?? 0;
+      if (
+        input.baseRevision !== undefined &&
+        Math.max(0, Math.floor(input.baseRevision)) !== currentRevision
+      ) {
+        throw new Error(
+          `Whiteboard changed since revision ${input.baseRevision}. Read it again and apply the update to revision ${currentRevision}.`,
+        );
+      }
+      if (action === "clear") {
+        if (!draft.whiteboard) return false;
+        delete draft.whiteboard;
+        draft.updatedAt = timestamp;
+        return;
+      }
+
+      const prior = action === "merge" ? draft.whiteboard : undefined;
+      const removedNodes = new Set((input.removeNodeIds ?? []).map(sanitizeWhiteboardId).filter(Boolean));
+      const removedEdges = new Set((input.removeEdgeIds ?? []).map(sanitizeWhiteboardId).filter(Boolean));
+      const nodesById = new Map<string, CoraWhiteboardNode>();
+      const edgesById = new Map<string, CoraWhiteboardEdge>();
+      // Sanitization maps distinct raw ids like "step 1"/"step-1" to the same
+      // id; silently upserting one over the other would lose a card, so two
+      // different raw ids colliding is an input error.
+      const rawIdBySanitized = new Map<string, string>();
+      const guardIdCollision = (sanitized: string, raw: unknown, what: "node" | "edge") => {
+        const rawId = typeof raw === "string" ? raw.trim() : "";
+        const existing = rawIdBySanitized.get(`${what}:${sanitized}`);
+        if (existing !== undefined && existing !== rawId) {
+          throw new Error(
+            `Whiteboard ${what} ids "${existing}" and "${rawId}" both normalize to "${sanitized}". Use ids made of letters, digits, and . _ : - so they stay distinct.`,
+          );
+        }
+        rawIdBySanitized.set(`${what}:${sanitized}`, rawId);
+      };
+
+      for (const node of prior?.nodes ?? []) {
+        if (!removedNodes.has(node.id)) nodesById.set(node.id, node);
+      }
+      for (const node of input.nodes ?? []) {
+        // Merge upserts by id: fields omitted from the payload keep the prior
+        // node's values instead of silently resetting to defaults.
+        const priorNode = prior ? nodesById.get(sanitizeWhiteboardId(node?.id)) : undefined;
+        const normalized = normalizeWhiteboardNode(node, priorNode);
+        guardIdCollision(normalized.id, node?.id, "node");
+        if (removedNodes.has(normalized.id)) continue;
+        nodesById.set(normalized.id, normalized);
+      }
+      if (nodesById.size > WHITEBOARD_MAX_NODES) {
+        throw new Error(
+          `The whiteboard would hold ${nodesById.size} nodes; the limit is ${WHITEBOARD_MAX_NODES}. Remove nodes or rebuild a smaller board.`,
+        );
+      }
+      const nodes = Array.from(nodesById.values());
+      const validNodeIds = new Set(nodes.map((node) => node.id));
+
+      for (const edge of prior?.edges ?? []) {
+        if (!removedEdges.has(edge.id) && validNodeIds.has(edge.from) && validNodeIds.has(edge.to)) {
+          edgesById.set(edge.id, edge);
+        }
+      }
+      for (const edge of input.edges ?? []) {
+        const priorEdge = prior ? edgesById.get(sanitizeWhiteboardId(edge?.id)) : undefined;
+        const normalized = normalizeWhiteboardEdge(edge, priorEdge);
+        guardIdCollision(normalized.id, edge?.id, "edge");
+        if (removedEdges.has(normalized.id)) continue;
+        if (!validNodeIds.has(normalized.from) || !validNodeIds.has(normalized.to)) {
+          throw new Error(`Whiteboard edge ${normalized.id} references a missing node.`);
+        }
+        edgesById.set(normalized.id, normalized);
+      }
+      if (edgesById.size > WHITEBOARD_MAX_EDGES) {
+        throw new Error(
+          `The whiteboard would hold ${edgesById.size} edges; the limit is ${WHITEBOARD_MAX_EDGES}. Remove edges or rebuild a smaller board.`,
+        );
+      }
+
+      const title = sanitizeWhiteboardText(input.title ?? prior?.title ?? "Cora whiteboard", 100);
+      const summary = sanitizeWhiteboardText(input.summary ?? prior?.summary ?? "", 700) || undefined;
+      draft.whiteboard = {
+        version: 1,
+        revision: currentRevision + 1,
+        lastEditedBy: input.editor ?? "cora",
+        title: title || "Cora whiteboard",
+        summary,
+        nodes,
+        edges: Array.from(edgesById.values()),
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+function sanitizeWhiteboardId(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.trim().replace(/[^a-zA-Z0-9._:-]+/g, "-").slice(0, 80);
+}
+
+function sanitizeWhiteboardText(value: unknown, maxLength: number): string {
+  if (typeof value !== "string") return "";
+  return value.replace(/\r\n/g, "\n").trim().slice(0, maxLength);
+}
+
+function finiteWhiteboardNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const number = typeof value === "number" ? value : Number(value);
+  // The fallback is clamped too: a merge that changes a node's kind inherits
+  // the prior size, which may sit outside the new kind's limits.
+  const chosen = Number.isFinite(number) ? number : fallback;
+  return Math.max(min, Math.min(max, Math.round(chosen)));
+}
+
+const WHITEBOARD_TONES: readonly NonNullable<CoraWhiteboardEdge["tone"]>[] = [
+  "default", "accent", "success", "warning", "danger",
+];
+
+/**
+ * Sanitize one node. When `prior` is present (a merge upsert over an existing
+ * node), omitted fields inherit the prior value; explicitly provided empty
+ * strings still clear a field.
+ */
+function normalizeWhiteboardNode(
+  node: CoraWhiteboardNode,
+  prior?: CoraWhiteboardNode,
+): CoraWhiteboardNode {
+  const id = sanitizeWhiteboardId(node?.id);
+  const title = sanitizeWhiteboardText(node?.title, 120) || prior?.title || "";
+  if (!id || !title) throw new Error("Every whiteboard node needs a non-empty id and title.");
+  const allowedKinds: CoraWhiteboardNode["kind"][] = [
+    "topic", "group", "file", "symbol", "flow", "condition", "decision", "risk", "note",
+  ];
+  const kind = allowedKinds.includes(node.kind) ? node.kind : prior?.kind ?? "note";
+  const defaultSize = CORA_WHITEBOARD_NODE_DEFAULT_SIZES[kind];
+  const limits = whiteboardNodeSizeLimits(kind);
+  const body = node.body === undefined
+    ? prior?.body
+    : sanitizeWhiteboardText(node.body, 900) || undefined;
+  const tone = node.tone === undefined
+    ? prior?.tone
+    : WHITEBOARD_TONES.includes(node.tone) ? node.tone : undefined;
+  return {
+    id,
+    kind,
+    title,
+    body,
+    x: finiteWhiteboardNumber(
+      node.x,
+      prior?.x ?? 80,
+      -WHITEBOARD_COORDINATE_LIMIT,
+      WHITEBOARD_COORDINATE_LIMIT,
+    ),
+    y: finiteWhiteboardNumber(
+      node.y,
+      prior?.y ?? 80,
+      -WHITEBOARD_COORDINATE_LIMIT,
+      WHITEBOARD_COORDINATE_LIMIT,
+    ),
+    width: finiteWhiteboardNumber(
+      node.width,
+      prior?.width ?? defaultSize.width,
+      limits.minWidth,
+      limits.maxWidth,
+    ),
+    height: finiteWhiteboardNumber(
+      node.height,
+      prior?.height ?? defaultSize.height,
+      limits.minHeight,
+      limits.maxHeight,
+    ),
+    tone,
+  };
+}
+
+function normalizeWhiteboardEdge(
+  edge: CoraWhiteboardEdge,
+  prior?: CoraWhiteboardEdge,
+): CoraWhiteboardEdge {
+  const id = sanitizeWhiteboardId(edge?.id);
+  const from = sanitizeWhiteboardId(edge?.from);
+  const to = sanitizeWhiteboardId(edge?.to);
+  if (!id || !from || !to) throw new Error("Every whiteboard edge needs id, from, and to fields.");
+  const label = edge.label === undefined
+    ? prior?.label
+    : sanitizeWhiteboardText(edge.label, 100) || undefined;
+  const tone = edge.tone === undefined
+    ? prior?.tone
+    : WHITEBOARD_TONES.includes(edge.tone) ? edge.tone : undefined;
+  const style = edge.style === undefined
+    ? prior?.style
+    : edge.style === "dashed" ? "dashed" : undefined;
+  return { id, from, to, label, tone, style };
+}
+
+/**
+ * Terminalize a run after codara_complete has passed the socket's worker and
+ * verification invariants. Unlike the generic status editor, this keeps the
+ * autopilot projection and completed timestamp consistent with run.status.
+ */
+export async function completeRunFromOrchestrator(runId: string): Promise<RunState> {
+  const run = await requireRun(runId);
+  return commitRunChange(run, {
+    type: "run.status_change_requested",
+    message: "Cora marked the run complete",
+    payload: {
+      requestedStatus: "complete",
+      source: "codara_complete",
+      currentStepId: run.currentStepId,
+    },
+    mutate: (draft, timestamp) => {
+      delete draft.blockedOn;
+      abandonRunQuestionOwnership(draft);
+      draft.status = "complete";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "complete",
+        lastAction: "manager_marked_complete",
+        updatedAt: timestamp,
+      };
+      draft.completedAt = timestamp;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 // Persist the composer chip's backend/model/mode/effort selection onto the
 // run. The fields are all optional on the input — passing only `chatMode`
 // toggles Execute<->Talk without touching the others. The mutator does
@@ -8885,14 +9259,18 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
     input.chatModel === undefined &&
     input.chatMode === undefined &&
     input.chatEffort === undefined &&
+    input.coraExecutionPolicy === undefined &&
     input.chatFastMode === undefined &&
     input.chat1mContext === undefined;
   if (noChange) return run;
-  const nextBackend = input.chatBackend ?? run.chatBackend ?? "openrouter";
+  const nextBackend = input.chatBackend ?? run.chatBackend ?? "pi";
   const nextFeatureFlags = normalizeChatFeatureFlags(nextBackend, {
     chatFastMode: input.chatFastMode ?? run.chatFastMode,
     chat1mContext: input.chat1mContext ?? run.chat1mContext,
   });
+  const nextExecutionPolicy = normalizeCoraExecutionPolicy(
+    input.coraExecutionPolicy ?? run.coraExecutionPolicy,
+  );
   return commitRunChange(run, {
     type: "run.chat_backend_updated",
     message: "Chat backend / model / mode / effort updated",
@@ -8902,6 +9280,7 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
         chatModel: run.chatModel,
         chatMode: run.chatMode,
         chatEffort: run.chatEffort,
+        coraExecutionPolicy: run.coraExecutionPolicy,
         chatFastMode: run.chatFastMode,
         chat1mContext: run.chat1mContext,
       },
@@ -8910,6 +9289,7 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
         chatModel: input.chatModel ?? run.chatModel,
         chatMode: input.chatMode ?? run.chatMode,
         chatEffort: input.chatEffort ?? run.chatEffort,
+        coraExecutionPolicy: nextExecutionPolicy,
         chatFastMode: nextFeatureFlags.chatFastMode,
         chat1mContext: nextFeatureFlags.chat1mContext,
       },
@@ -8919,12 +9299,26 @@ export async function updateChatBackend(input: UpdateChatBackendInput): Promise<
       if (input.chatModel !== undefined) draft.chatModel = input.chatModel.trim() || undefined;
       if (input.chatMode !== undefined) draft.chatMode = input.chatMode;
       if (input.chatEffort !== undefined) draft.chatEffort = input.chatEffort;
+      if (input.coraExecutionPolicy !== undefined) {
+        draft.coraExecutionPolicy = nextExecutionPolicy;
+      }
       draft.chatFastMode = nextFeatureFlags.chatFastMode;
       draft.chat1mContext = nextFeatureFlags.chat1mContext;
       // Switching backend invalidates the prior session UUID — the new
       // backend would mis-resume otherwise. Selected per the answers: no
       // cross-backend handoff; each backend gets its own fresh thread.
       if (input.chatBackend !== undefined && input.chatBackend !== run.chatBackend) {
+        draft.chatSessionUuid = undefined;
+        draft.chatSessionMode = undefined;
+      }
+      // A Pi policy change alters the active system contract and extension
+      // set. Rotate the provider session instead of letting Deep/Frontier
+      // inherit a transcript created under Fast (or vice versa).
+      if (
+        nextBackend === "pi" &&
+        input.coraExecutionPolicy !== undefined &&
+        nextExecutionPolicy !== normalizeCoraExecutionPolicy(run.coraExecutionPolicy)
+      ) {
         draft.chatSessionUuid = undefined;
         draft.chatSessionMode = undefined;
       }
@@ -9447,6 +9841,13 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
   const isAutomationLaunch =
     getPreferenceCached("fableEnabled") === true && isAutomationRun;
+  const usePiWorkerHarness =
+    process.env.SPARK_E2E_LEGACY_WORKER_HARNESS !== "1" &&
+    !isAutomationRun &&
+    (task.runtimePreference === "claude" || task.runtimePreference === "codex");
+  const piWorkerModel = usePiWorkerHarness
+    ? piModelForWorker(task, workerFableAllowed(run))
+    : undefined;
   // Dirs a sandboxed codex worker must be able to WRITE despite them living
   // outside the workspace: the attempt dir (holds final-report.json + logs) and,
   // for a chat participant, the shared board. buildLaunchCommandLine --add-dir's
@@ -9458,15 +9859,14 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   const launchCommand = buildLaunchCommandLine(task, attempt.cwd, {
     sandboxDir: attempt.sandboxWorktreePath,
     isAutomation: isAutomationLaunch,
-    // Cora-spawned worker: honor a fable hint whenever the user explicitly asked
-    // for Fable this run (workerFableAllowed). Automation runs stay setting-gated
-    // via isAutomationLaunch — they must NOT inherit the request-only worker gate,
-    // so for an automation run allowFable follows the setting (isAutomationLaunch)
-    // rather than the user-request gate.
+    // Cora-spawned workers require both the setting and an explicit user request
+    // (workerFableAllowed). Automation launches use their existing setting gate.
     allowFable: isAutomationRun ? isAutomationLaunch : workerFableAllowed(run),
     extraWritableDirs,
   });
-  const command = isAutomationRun && task.runtimePreference === "claude"
+  const command = usePiWorkerHarness
+    ? `Pi harness (${task.runtimePreference}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
+    : isAutomationRun && task.runtimePreference === "claude"
     ? "Claude Agent SDK (headless automation worker)"
     : isAutomationRun && task.runtimePreference === "codex"
       ? "Codex App Server (headless automation worker)"
@@ -9549,7 +9949,17 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     }
   }
 
-  const result = isAutomationRun && (task.runtimePreference === "claude" || task.runtimePreference === "codex")
+  const result = usePiWorkerHarness
+    ? await runPiWorkerSession({
+        run,
+        task,
+        attemptId: attempt.id,
+        paths,
+        cwd: attempt.cwd,
+        promptText,
+        command,
+      })
+    : isAutomationRun && (task.runtimePreference === "claude" || task.runtimePreference === "codex")
     ? await runStructuredAutomationWorkerSession({
         run,
         task,
@@ -9786,7 +10196,7 @@ interface ConversationRewindTarget {
 }
 
 function disposeManagerSessions(runId: string): Promise<void> {
-  for (const backendKind of ["claude", "codex"] as const) {
+  for (const backendKind of ["claude", "codex", "pi"] as const) {
     try {
       getBackend(backendKind).interruptChat?.(runId);
     } catch {
@@ -9794,7 +10204,7 @@ function disposeManagerSessions(runId: string): Promise<void> {
     }
   }
   return Promise.all(
-    (["claude", "codex"] as const).map(async (backendKind) => {
+    (["claude", "codex", "pi"] as const).map(async (backendKind) => {
       try {
         await getBackend(backendKind).disposeChat?.(runId);
       } catch {
@@ -10886,6 +11296,20 @@ async function maybeQueueCliLaunchFallback({
   report: WorkerReport;
 }): Promise<RunState | null> {
   if (report.status !== "failed") return null;
+  const failureContext = [
+    attempt.error ?? "",
+    report.summary,
+    ...report.risks,
+  ].join("\n");
+  // A user stop/pause is control flow, not evidence that the provider or CLI
+  // is broken. Never turn it into an automatic cross-provider retry.
+  if (
+    /(?:worker (?:was )?interrupted|user (?:stop|pause)|force[- ]paused|run (?:was )?paused|stopped by (?:the )?user)/i.test(
+      failureContext,
+    )
+  ) {
+    return null;
+  }
   const isLaunchFailure = report.risks.some((risk) =>
     /CLI failed (?:to launch|before producing a final report)|runtime API error|socket connection/i.test(risk),
   );
@@ -10937,11 +11361,12 @@ async function maybeQueueCliLaunchFallback({
       const fallbackTask: WorkerTask = {
         id: fallbackId,
         runId: draft.id,
+        supersedesTaskId: task.id,
         stepId: task.stepId,
         title: task.title,
         description: task.description,
         runtimePreference: opposite,
-        modelHint: fallbackModelHintForRuntime(opposite),
+        modelHint: fallbackModelHintForRuntime(opposite, task.modelHint),
         effortHint: fallbackEffortHintForRuntime(opposite, task.effortHint),
         status: "queued",
         allowedPaths: task.allowedPaths,
@@ -11007,9 +11432,11 @@ async function maybeQueueVerifierFeedbackRetry({
   if (!correctivePrompt) return null;
 
   // Resolve the impl task to fix. Prefer a non-verifier, non-cancelled task in
-  // the same step (the impl the verifier was checking). If the reporting task is
-  // itself the impl (no separate verifier split), target it.
-  const target =
+  // the same step (the impl the verifier was checking). Managers may also put a
+  // verifier in its own follow-up step; in that shape, match the failed claims
+  // and corrective prompt against prior tasks' scoped paths/outputs instead of
+  // dropping a perfectly actionable verdict.
+  let target =
     task.taskClass !== "verifier" && task.status !== "cancelled"
       ? task
       : run.workerTasks.find(
@@ -11018,6 +11445,42 @@ async function maybeQueueVerifierFeedbackRetry({
             t.taskClass !== "verifier" &&
             t.status !== "cancelled",
         );
+  if (!target && task.taskClass === "verifier") {
+    const feedbackText = [
+      correctivePrompt,
+      ...(verdict.atomicClaims ?? [])
+        .filter((claim) => claim.verdict === "failed")
+        .flatMap((claim) => [claim.claim, claim.evidence]),
+    ].join("\n").toLowerCase();
+    const candidates = run.workerTasks.filter(
+      (candidate) =>
+        candidate.taskClass !== "verifier" &&
+        candidate.status !== "cancelled",
+    );
+    const scored = candidates
+      .map((candidate, index) => {
+        const scopedPaths = [
+          ...(candidate.allowedPaths ?? []),
+          ...(candidate.expectedOutputs ?? []),
+        ].filter((path) => path.trim().length > 0);
+        const pathScore = scopedPaths.reduce(
+          (score, path) => score + (feedbackText.includes(path.toLowerCase()) ? 10 : 0),
+          0,
+        );
+        const titleTokens = candidate.title
+          .toLowerCase()
+          .split(/[^a-z0-9]+/)
+          .filter((token) => token.length >= 4);
+        const titleScore = titleTokens.reduce(
+          (score, token) => score + (feedbackText.includes(token) ? 1 : 0),
+          0,
+        );
+        return { candidate, index, score: pathScore + titleScore };
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score || right.index - left.index);
+    target = scored[0]?.candidate ?? (candidates.length === 1 ? candidates[0] : undefined);
+  }
   if (!target) return null;
   const retriesUsed = countWorkerAttempts(run, target.id);
   if (retriesUsed >= MAX_WORKER_ATTEMPTS) return null;
@@ -11070,6 +11533,23 @@ async function maybeQueueVerifierFeedbackRetry({
       }
       targetTask.status = "retry_queued";
       targetTask.updatedAt = timestamp;
+      // The verifier successfully completed its job even though the code did
+      // not pass. Terminalize that verifier so a live CLI manager waiting on
+      // codara_wait_for_workers can receive the verdict while the corrective
+      // implementation task is launched independently.
+      if (task.taskClass === "verifier" && task.id !== targetTask.id) {
+        const verifierTask = draft.workerTasks.find((candidate) => candidate.id === task.id);
+        if (verifierTask) {
+          verifierTask.status = "accepted";
+          verifierTask.updatedAt = timestamp;
+        }
+      }
+      // A manager may put verification in its own follow-up step. FEEDBACK
+      // means the implementation needs another pass, not that the verifier
+      // failed its job. Close a now-settled verifier-only step before reopening
+      // the implementation step, otherwise the graph permanently shows the
+      // old verification step as REVIEWING while later steps execute.
+      reconcileAcceptedVerifierOnlySteps(draft, timestamp);
       // Re-open the target's step so pickAutopilotTasks will relaunch it.
       const step = targetTask.stepId
         ? draft.steps.find((s) => s.id === targetTask.stepId)
@@ -11327,9 +11807,25 @@ function estimateTextSections(
   });
 }
 
-function fallbackModelHintForRuntime(runtime: WorkerRuntime): string | undefined {
-  if (runtime === "claude") return "claude-opus-4-8";
-  if (runtime === "codex") return CODEX_MODEL_BY_TIER.top;
+function fallbackModelHintForRuntime(
+  runtime: WorkerRuntime,
+  previousModelHint?: string,
+): string | undefined {
+  const prior = previousModelHint?.trim().toLowerCase() ?? "";
+  // Preserve the manager's intended price/speed tier across providers. A
+  // Terra verifier failing to launch should become Sonnet, not silently jump
+  // to Opus; likewise Sonnet should become Terra. Unknown/top-tier hints keep
+  // the conservative flagship fallback.
+  if (runtime === "claude") {
+    if (prior.includes("luna") || prior.includes("haiku")) return "claude-haiku-4-5";
+    if (prior.includes("terra") || prior.includes("sonnet")) return "claude-sonnet-5";
+    return "claude-opus-4-8";
+  }
+  if (runtime === "codex") {
+    if (prior.includes("haiku") || prior.includes("luna")) return CODEX_MODEL_BY_TIER.cheap;
+    if (prior.includes("sonnet") || prior.includes("terra")) return CODEX_MODEL_BY_TIER.mid;
+    return CODEX_MODEL_BY_TIER.top;
+  }
   return undefined;
 }
 
@@ -11490,6 +11986,42 @@ function normalizeRun(run: RunState): RunState {
   run.humanMessages ??= [];
   run.sparkCalls ??= [];
   run.conversationEpoch ??= 0;
+  if (run.whiteboard) {
+    const normalizedNodes: CoraWhiteboardNode[] = [];
+    for (const node of run.whiteboard.nodes ?? []) {
+      try {
+        normalizedNodes.push(normalizeWhiteboardNode(node));
+      } catch {
+        /* discard malformed legacy/external nodes instead of losing the run */
+      }
+    }
+    const nodes = normalizedNodes.slice(0, WHITEBOARD_MAX_NODES);
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    const edges: CoraWhiteboardEdge[] = [];
+    for (const edge of run.whiteboard.edges ?? []) {
+      try {
+        const normalized = normalizeWhiteboardEdge(edge);
+        if (nodeIds.has(normalized.from) && nodeIds.has(normalized.to)) edges.push(normalized);
+      } catch {
+        /* discard malformed legacy/external edges */
+      }
+    }
+    run.whiteboard = {
+      version: 1,
+      revision: Math.max(0, Math.floor(run.whiteboard.revision ?? 0)),
+      lastEditedBy:
+        run.whiteboard.lastEditedBy === "user" ||
+        run.whiteboard.lastEditedBy === "import" ||
+        run.whiteboard.lastEditedBy === "cora"
+          ? run.whiteboard.lastEditedBy
+          : "cora",
+      title: sanitizeWhiteboardText(run.whiteboard.title, 100) || "Cora whiteboard",
+      summary: sanitizeWhiteboardText(run.whiteboard.summary, 700) || undefined,
+      nodes,
+      edges: edges.slice(0, WHITEBOARD_MAX_EDGES),
+      updatedAt: run.whiteboard.updatedAt || run.updatedAt,
+    };
+  }
   const seenAssumptionSignatures = new Set<string>();
   run.assumptions = (run.assumptions ?? []).filter((assumption) => {
     if (!assumption?.question?.trim() || !assumption.selectedAnswer?.trim()) return false;
@@ -11545,6 +12077,10 @@ function normalizeRun(run: RunState): RunState {
   for (const step of run.steps ?? []) {
     step.plannedAgents ??= [];
   }
+  // Repair runs written by the verifier-feedback fast path before it learned
+  // to close a standalone verifier step. The verifier did finish and its task
+  // was accepted; only the step status was stranded at `reviewing`.
+  reconcileAcceptedVerifierOnlySteps(run);
   run.autopilot ??= {
     status: run.status === "running" ? "running" : "idle",
     updatedAt: run.updatedAt,
@@ -12008,16 +12544,13 @@ function pickAutopilotTasksWithReason(run: RunState): {
     return { tasks: [first], downgrade: { task: first, reason: "no_concrete_scope" } };
   }
 
-  const selected: WorkerTask[] = [];
-  for (const task of candidates) {
-    if (!task.canRunParallel) continue;
-    if (!hasConcreteParallelScope(task)) continue;
-    if (selected.some((other) => tasksConflictForParallelLaunch(other, task))) {
-      continue;
-    }
-    selected.push(task);
-    if (cap && selected.length >= cap) break;
-  }
+  const parallelCandidates = candidates.filter(
+    (task) => task.canRunParallel && hasConcreteParallelScope(task),
+  );
+  const selected = selectLargestCompatibleWave(parallelCandidates, {
+    cap,
+    conflicts: tasksConflictForParallelLaunch,
+  });
   return selected.length > 0 ? { tasks: selected, downgrade: null } : { tasks: [first], downgrade: null };
 }
 
@@ -12932,7 +13465,7 @@ const MANAGER_PEER_ID = "manager";
 // predicate in sync with isExecuteModeCliManager (worker auto-accept path).
 export function runHasMcpManager(run: RunState): boolean {
   return (
-    (run.chatBackend === "claude" || run.chatBackend === "codex") &&
+    (run.chatBackend === "claude" || run.chatBackend === "codex" || run.chatBackend === "pi") &&
     (run.chatMode === "execute" || run.chatMode === "auto")
   );
 }
@@ -13160,6 +13693,452 @@ async function runStructuredAutomationWorkerSession({
   }
 }
 
+async function readWorkerReportWithWorkspaceShadowRecovery(
+  cwd: string,
+  expectedPath: string,
+): Promise<{ report: WorkerReport | null; relocatedFrom: string | null }> {
+  const expected = await readWorkerReport(expectedPath);
+  if (expected) return { report: expected, relocatedFrom: null };
+
+  // Claude occasionally abbreviates the absolute report target from the
+  // prompt to `.Codara/runs/...` and therefore writes it under the workspace
+  // instead of SPARK_HOME. Recover only the exact run-relative path; never
+  // scan or move arbitrary workspace JSON. The parsed report proves the file
+  // is complete before we copy it, and unlinking that exact shadow keeps the
+  // generated artifact out of the user's git status.
+  const home = sparkHome();
+  const reportRelative = relative(home, expectedPath);
+  if (
+    !reportRelative ||
+    reportRelative === ".." ||
+    reportRelative.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+    isAbsolute(reportRelative)
+  ) {
+    return { report: null, relocatedFrom: null };
+  }
+  const shadowPath = join(cwd, basename(home), reportRelative);
+  if (shadowPath === expectedPath) return { report: null, relocatedFrom: null };
+  const shadowReport = await readWorkerReport(shadowPath);
+  if (!shadowReport) return { report: null, relocatedFrom: null };
+
+  const raw = await fs.readFile(shadowPath, "utf8");
+  await fs.mkdir(dirname(expectedPath), { recursive: true });
+  await writeFileAtomic(expectedPath, raw);
+  await fs.unlink(shadowPath).catch(() => undefined);
+  return { report: shadowReport, relocatedFrom: shadowPath };
+}
+
+function piProviderForWorker(task: WorkerTask): PiSubscriptionProvider {
+  return task.runtimePreference === "claude" ? "anthropic" : "openai-codex";
+}
+
+function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
+  const effort = task.effortHint;
+  if (
+    effort === "minimal" || effort === "low" || effort === "medium" ||
+    effort === "high" || effort === "xhigh" || effort === "max"
+  ) return effort;
+  return "high";
+}
+
+function piModelForWorker(task: WorkerTask, allowFable: boolean): string | undefined {
+  const model = task.modelHint?.trim();
+  // Never let Pi choose Anthropic's subscription default implicitly. That
+  // default can be Fable 5, which would bypass Codara's visible premium-model
+  // setting whenever a planner omitted modelHint. Opus 4.8 is the documented
+  // worker fallback; an allowed, explicit Fable hint still passes below.
+  if (!model) {
+    return task.runtimePreference === "claude"
+      ? SPARK_WORKER_FABLE_FALLBACK
+      : undefined;
+  }
+  if (task.runtimePreference === "claude" && model.startsWith("claude-")) {
+    return sanitizeWorkerModelHint(model, { allowFable }).hint ?? SPARK_WORKER_FABLE_FALLBACK;
+  }
+  if (task.runtimePreference === "codex" && model.startsWith("gpt-")) return model;
+  return task.runtimePreference === "claude"
+    ? SPARK_WORKER_FABLE_FALLBACK
+    : undefined;
+}
+
+function piWorkerToolLabel(value: unknown): string {
+  const name = typeof value === "string" ? value : "tool";
+  const normalized = name.replace(/^mcp__codara-studio__/, "");
+  const known: Record<string, string> = {
+    read: "Read context",
+    write: "Write file",
+    edit: "Edit file",
+    bash: "Run command",
+    grep: "Search code",
+    find: "Find files",
+    ls: "List files",
+    codara_preview_screenshot: "Inspect preview",
+    codara_preview_navigate: "Open preview",
+    codara_whiteboard_update: "Update whiteboard",
+  };
+  return known[normalized] ?? normalized
+    .replace(/^codara_/, "")
+    .split("_")
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`)
+    .join(" ");
+}
+
+function piWorkerSafeText(value: unknown, maxLength = 260): string {
+  let text = "";
+  if (typeof value === "string") text = value;
+  else if (value !== undefined) {
+    try { text = JSON.stringify(value); } catch { text = String(value); }
+  }
+  text = text
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function piWorkerToolDetail(event: PiRpcEvent): string {
+  const args = event.args && typeof event.args === "object" && !Array.isArray(event.args)
+    ? event.args as Record<string, unknown>
+    : {};
+  const name = typeof event.toolName === "string"
+    ? event.toolName.replace(/^mcp__codara-studio__/, "").toLowerCase()
+    : "";
+  const keys = name === "bash"
+    ? ["command"]
+    : name === "grep"
+      ? ["pattern", "path"]
+      : name === "find"
+        ? ["pattern", "path"]
+        : name === "read" || name === "write" || name === "edit"
+          ? ["path", "file_path", "filePath"]
+          : name === "ls"
+            ? ["path"]
+            : ["path", "command", "query", "pattern", "url"];
+  const pieces = keys
+    .map((key) => piWorkerSafeText(args[key], name === "bash" ? 320 : 160))
+    .filter(Boolean);
+  if (pieces.length > 0) return pieces.join(" · ");
+  return piWorkerSafeText(event.args, 220);
+}
+
+function piWorkerResultText(result: unknown): string {
+  if (typeof result === "string") return piWorkerSafeText(result, 700);
+  if (!result || typeof result !== "object") return "";
+  const record = result as Record<string, unknown>;
+  if (Array.isArray(record.content)) {
+    const text = record.content
+      .map((item) => {
+        if (!item || typeof item !== "object") return "";
+        const candidate = (item as Record<string, unknown>).text;
+        return typeof candidate === "string" ? candidate : "";
+      })
+      .filter(Boolean)
+      .join(" ");
+    if (text) return piWorkerSafeText(text, 700);
+  }
+  return piWorkerSafeText(result, 700);
+}
+
+function piWorkerEventFailure(event: PiRpcEvent): string | null {
+  if (event.type === "message_end") {
+    const message = event.message && typeof event.message === "object" && !Array.isArray(event.message)
+      ? event.message as Record<string, unknown>
+      : null;
+    if (message?.stopReason === "error") {
+      return typeof message.errorMessage === "string" && message.errorMessage.trim()
+        ? message.errorMessage.trim()
+        : "Pi provider turn failed.";
+    }
+  }
+  if (event.type === "auto_retry_end" && event.success === false) {
+    return typeof event.finalError === "string" && event.finalError.trim()
+      ? event.finalError.trim()
+      : "Pi exhausted its provider retries.";
+  }
+  if (event.type === "extension_error") {
+    return typeof event.error === "string" && event.error.trim()
+      ? event.error.trim()
+      : "Pi worker extension failed.";
+  }
+  return null;
+}
+
+async function waitForPiWorkerTurn(client: PiRpcClient, prompt: string): Promise<void> {
+  let timer: NodeJS.Timeout | null = null;
+  let poll: NodeJS.Timeout | null = null;
+  let unsubscribe: () => void = () => undefined;
+  try {
+    const settled = new Promise<void>((resolve, reject) => {
+      let providerFailure: string | null = null;
+      unsubscribe = client.onEvent((event) => {
+        providerFailure = piWorkerEventFailure(event) ?? providerFailure;
+        if (event.type === "agent_settled") {
+          if (providerFailure) reject(new Error(providerFailure));
+          else resolve();
+        }
+      });
+      poll = setInterval(() => {
+        const state = client.state();
+        if (state.phase === "failed" || state.phase === "stopped") {
+          reject(new Error(state.failure?.message || `Pi worker runtime ${state.phase}.`));
+        }
+      }, 500);
+      poll.unref();
+      timer = setTimeout(() => reject(new Error("Pi worker timed out after 90 minutes.")), 90 * 60 * 1000);
+      timer.unref();
+    });
+    await client.prompt(prompt);
+    await settled;
+  } finally {
+    unsubscribe();
+    if (poll) clearInterval(poll);
+    if (timer) clearTimeout(timer);
+  }
+}
+
+const PI_WORKER_RENDERER_PTY_GRACE_MS = 1_500;
+const PI_WORKER_FALLBACK_COLS = 110;
+const PI_WORKER_FALLBACK_ROWS = 32;
+
+/**
+ * Pi runs in a main-process RPC client; its PTY is only a durable activity
+ * display. Give the renderer a short chance to create the normal visible
+ * pane, then create a headless display PTY ourselves. A later TerminalPane
+ * attaches to this same session and receives its tail, so background
+ * workspaces and missed envelope events keep running instead of failing a
+ * provider that was never launched.
+ */
+async function ensurePiWorkerDisplayPty(attemptId: string, cwd: string): Promise<boolean> {
+  if (await pty.waitForSpawn(attemptId, PI_WORKER_RENDERER_PTY_GRACE_MS)) return false;
+  const shell = await defaultShell();
+  if (!shell) throw new Error("No default shell is available for the Cora worker display.");
+  await pty.spawn({
+    id: attemptId,
+    shell,
+    cwd,
+    cols: PI_WORKER_FALLBACK_COLS,
+    rows: PI_WORKER_FALLBACK_ROWS,
+    webContents: null,
+    env: { SPARK_NO_SHELL_INTEGRATION: "1" },
+  });
+  pty.resize(attemptId, PI_WORKER_FALLBACK_COLS, PI_WORKER_FALLBACK_ROWS);
+  return true;
+}
+
+/**
+ * Ordinary Cora workers now use Pi as their coding harness while retaining
+ * the existing WorkerTask/Attempt/report/review contract. The renderer-owned
+ * PTY becomes a live activity display; the actual model process is Pi RPC so
+ * provider subscriptions, native tools, and extension behavior are uniform
+ * with the Cora manager.
+ */
+async function runPiWorkerSession({
+  run,
+  task,
+  attemptId,
+  paths,
+  cwd,
+  promptText,
+  command,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attemptId: string;
+  paths: WorkerArtifactPaths;
+  cwd: string;
+  promptText: string;
+  command: string;
+}): Promise<{ exitCode: number; error?: string }> {
+  const displayPtyRecovered = await ensurePiWorkerDisplayPty(attemptId, cwd);
+  if (displayPtyRecovered) {
+    await appendEvent({
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId,
+      type: "worker_attempt.display_pty_recovered",
+      message: "Cora created a main-owned worker display after the renderer missed the launch event",
+      payload: { cwd, graceMs: PI_WORKER_RENDERER_PTY_GRACE_MS },
+    });
+  }
+  await pty.waitForResize(attemptId, 5_000);
+
+  const provider = piProviderForWorker(task);
+  const model = piModelForWorker(task, workerFableAllowed(run));
+  const thinking = piThinkingForWorker(task);
+  const modelLabel = model ?? (provider === "anthropic" ? "Claude subscription default" : "Codex subscription default");
+  pty.publishOutput(
+    attemptId,
+    `\x1b[2J\x1b[H\r\n\x1b[38;2;74;222;208m  ✦  CORA PI WORKER\x1b[0m\r\n` +
+      `\x1b[2m     ${task.title}\x1b[0m\r\n\x1b[2m     ${modelLabel} · ${thinking}\x1b[0m\r\n\r\n` +
+      `\x1b[38;2;74;222;208m  ●\x1b[0m Starting the pinned Pi harness…\r\n`,
+  );
+
+  let client: PiRpcClient | null = null;
+  let unsubscribe: (() => void) | null = null;
+  let interrupted = false;
+  let logQueue: Promise<void> = Promise.resolve();
+  const appendWorkerLog = (text: string) => {
+    logQueue = logQueue
+      .catch(() => undefined)
+      .then(async () => {
+        await Promise.all([
+          fs.appendFile(paths.stdoutLog, text, "utf8"),
+          fs.appendFile(paths.rawLog, `[${new Date().toISOString()}] pi-rpc\n${text}\n`, "utf8"),
+        ]);
+      });
+  };
+  const paint = (text: string) => {
+    pty.publishOutput(attemptId, text);
+    appendWorkerLog(text.replace(/\x1b\[[0-9;]*m/g, ""));
+  };
+
+  try {
+    const plan = await createCodaraPiWorkerLaunchPlan({
+      provider,
+      runId: run.id,
+      attemptId,
+      cwd,
+      model,
+      thinking,
+      sessionName: task.title,
+    });
+    client = new PiRpcClient(plan, {
+      requestTimeoutMs: 120_000,
+      shutdownGraceMs: 2_000,
+    });
+    await client.start();
+
+    const runningTimestamp = new Date().toISOString();
+    await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
+    await appendEvent({
+      timestamp: runningTimestamp,
+      workspaceId: run.workspaceId,
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId,
+      type: "worker_attempt.running",
+      message: `Worker attempt running through Pi: ${task.title}`,
+      payload: {
+        command,
+        runtime: task.runtimePreference,
+        harness: "pi",
+        provider,
+        model: plan.model,
+        thinking: plan.thinking,
+        session: "pi-rpc",
+      },
+    });
+    const step = run.steps.find((item) => item.id === task.stepId);
+    if (shouldUsePeerComms(run, step, task)) {
+      await updatePeerCommsRegistry(run, step, task, attemptId, paths, "running").catch(() => undefined);
+    }
+
+    activeWorkerProcesses.set(attemptId, {
+      runId: run.id,
+      stepId: task.stepId,
+      workerTaskId: task.id,
+      attemptId,
+      command,
+      write: (input) => {
+        if (!client) return;
+        if (input === ESC_KEY) {
+          void client.abort().catch(() => undefined);
+          return;
+        }
+        const steering = input.replace(/[\r\n]+$/g, "").trim();
+        if (steering) void client.prompt(steering, "steer").catch(() => undefined);
+      },
+      kill: () => {
+        interrupted = true;
+        void client?.abort().catch(() => undefined);
+        void client?.stop().catch(() => undefined);
+      },
+    });
+    applyHookStateReport({ paneId: attemptId, state: "working", note: "Pi harness" });
+
+    let assistantLineOpen = false;
+    unsubscribe = client.onEvent((event: PiRpcEvent) => {
+      if (event.type === "tool_execution_start") {
+        assistantLineOpen = false;
+        const detail = piWorkerToolDetail(event);
+        paint(
+          `\r\n  \x1b[38;2;74;222;208m◇\x1b[0m ${piWorkerToolLabel(event.toolName)}` +
+          `${detail ? `\r\n    \x1b[2m${detail}\x1b[0m` : ""}\r\n`,
+        );
+      } else if (event.type === "tool_execution_end") {
+        const failed = event.isError === true;
+        const detail = failed ? piWorkerResultText(event.result) : "";
+        paint(
+          `  ${failed ? "\x1b[31m× failed\x1b[0m" : "\x1b[32m✓ done\x1b[0m"}` +
+          `${detail ? `\r\n    \x1b[31m${detail}\x1b[0m` : ""}\r\n`,
+        );
+      } else if (event.type === "message_update") {
+        const delta = event.assistantMessageEvent as Record<string, unknown> | undefined;
+        if (delta?.type === "text_delta" && typeof delta.delta === "string" && delta.delta) {
+          if (!assistantLineOpen) {
+            paint("\r\n  ");
+            assistantLineOpen = true;
+          }
+          paint(delta.delta.replace(/\n/g, "\r\n  "));
+        }
+      } else if (event.type === "message_end") {
+        if (assistantLineOpen) {
+          paint("\r\n");
+          assistantLineOpen = false;
+        }
+        const failure = piWorkerEventFailure(event);
+        if (failure) paint(`\r\n  \x1b[31mProvider error: ${piWorkerSafeText(failure, 700)}\x1b[0m\r\n`);
+      } else if (event.type === "auto_retry_start") {
+        paint("\r\n  \x1b[33m↻ Provider retry…\x1b[0m\r\n");
+      } else if (event.type === "auto_retry_end" && event.success === false) {
+        paint(`\r\n  \x1b[31mProvider retry failed: ${piWorkerSafeText(event.finalError, 700)}\x1b[0m\r\n`);
+      } else if (event.type === "extension_error") {
+        paint(`\r\n  \x1b[31mExtension error: ${String(event.error ?? "unknown")}\x1b[0m\r\n`);
+      }
+    });
+
+    paint(`  \x1b[32m✓ Pi ready\x1b[0m · ${plan.provider}/${plan.model}\r\n`);
+    await waitForPiWorkerTurn(client, promptText);
+    if (interrupted) throw new Error("Pi worker was interrupted.");
+
+    let report = await readWorkerReport(paths.finalReportJson);
+    if (!report) {
+      paint("\r\n  \x1b[33m↻ Finalizing the evidence report…\x1b[0m\r\n");
+      await waitForPiWorkerTurn(
+        client,
+        `Your task turn ended without a parseable final report at ${paths.finalReportJson}. ` +
+          "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON.",
+      );
+      report = await readWorkerReport(paths.finalReportJson);
+    }
+    if (!report) throw new Error("Pi worker completed without a parseable final-report.json.");
+
+    applyHookStateReport({ paneId: attemptId, state: "done", note: "Pi worker report ready" });
+    paint("\r\n\x1b[32m  ✓  REPORT READY\x1b[0m\r\n\x1b[2m     Cora is reviewing the evidence.\x1b[0m\r\n");
+    await logQueue.catch(() => undefined);
+    return { exitCode: 0 };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    applyHookStateReport({ paneId: attemptId, state: interrupted ? "done" : "error", note: message });
+    paint(`\r\n\x1b[31m  ×  PI WORKER STOPPED\x1b[0m\r\n  ${message}\r\n`);
+    await writeAutoFailureReport(paths, task, message, { interrupted }).catch(() => undefined);
+    await logQueue.catch(() => undefined);
+    return { exitCode: 1, error: message };
+  } finally {
+    unsubscribe?.();
+    activeWorkerProcesses.delete(attemptId);
+    await client?.stop().catch(() => undefined);
+    // Keep the completed frame in xterm; disposing the idle host shell matches
+    // the former CLI worker lifecycle and prevents one process per old worker.
+    try { pty.killImmediate(attemptId); } catch { /* already closed */ }
+  }
+}
+
 // The orchestration worker now uses the EXACT same pty path as a user-opened
 // terminal (and the TEST CLAUDE button): the renderer's TerminalView spawns
 // pwsh via pty-manager, sizes it to its real pane, and we just type into it
@@ -13193,7 +14172,7 @@ async function runWorkerSession({
   }
 
   // Hold off on typing until the renderer has reported a real pane size, so
-  // claude/codex/cursor paint at the correct width from the very first frame.
+  // claude/codex paint at the correct width from the very first frame.
   await pty.waitForResize(attemptId, 5_000);
 
   // Mirror the worker's pty byte stream to raw.log so a hung worker is
@@ -13318,8 +14297,26 @@ async function runWorkerSession({
       void (async () => {
         for (let i = 0; i < 4 && !settled; i++) {
           try {
-            const report = await readWorkerReport(paths.finalReportJson);
-            if (report) {
+            const located = await readWorkerReportWithWorkspaceShadowRecovery(
+              cwd,
+              paths.finalReportJson,
+            );
+            if (located.report) {
+              if (located.relocatedFrom) {
+                await appendEvent({
+                  workspaceId: run.workspaceId,
+                  runId: run.id,
+                  stepId: task.stepId,
+                  workerTaskId: task.id,
+                  attemptId,
+                  type: "worker_attempt.report_path_recovered",
+                  message: "Recovered a final report written to a workspace-relative .Codara path",
+                  payload: {
+                    relocatedFrom: located.relocatedFrom,
+                    finalReportPath: paths.finalReportJson,
+                  },
+                }).catch(() => undefined);
+              }
               finish({ exitCode: 0 });
               return;
             }
@@ -13342,10 +14339,25 @@ async function runWorkerSession({
       // existence check first (the file is absent for most of the session), then
       // attempt the read+parse; a partially-written file fails JSON.parse and is
       // retried on the next tick.
-      void fs.access(paths.finalReportJson)
-        .then(() => readWorkerReport(paths.finalReportJson))
-        .then((report) => {
-          if (report) finish({ exitCode: 0 });
+      void readWorkerReportWithWorkspaceShadowRecovery(cwd, paths.finalReportJson)
+        .then(async ({ report, relocatedFrom }) => {
+          if (!report) return;
+          if (relocatedFrom) {
+            await appendEvent({
+              workspaceId: run.workspaceId,
+              runId: run.id,
+              stepId: task.stepId,
+              workerTaskId: task.id,
+              attemptId,
+              type: "worker_attempt.report_path_recovered",
+              message: "Recovered a final report written to a workspace-relative .Codara path",
+              payload: {
+                relocatedFrom,
+                finalReportPath: paths.finalReportJson,
+              },
+            }).catch(() => undefined);
+          }
+          finish({ exitCode: 0 });
         })
         .catch(() => {
           /* not yet written / not yet parseable */
@@ -13406,7 +14418,7 @@ async function runWorkerSession({
   // Stagger launch + prompt the same way the TEST CLAUDE button does:
   //  1. wait 1.5s for pwsh to render its prompt,
   //  2. type `claude --dangerously-skip-permissions ...\r`,
-  //  3. sniff pty output for the agent's TUI banner (claude/codex/cursor), with a
+  //  3. sniff pty output for the agent's TUI banner (claude/codex), with a
   //     hard timeout so a bad launch command (codex not installed, wrong
   //     model id, etc.) fails the worker fast instead of hanging the whole
   //     run waiting for a final report that will never come,
@@ -13555,7 +14567,10 @@ function buildLaunchCommandLine(
     const launchModel = opts?.isAutomation
       ? rawModel
       : sanitizeWorkerModelHint(rawModel, { allowFable: opts?.allowFable }).hint;
-    if (launchModel) args.push("--model", quoteShellArg(launchModel));
+    // A missing hint must not delegate model choice to Claude's current CLI
+    // default: that default may be Fable 5 and would bypass the off-by-default
+    // premium-model gate. Pin the documented worker fallback instead.
+    args.push("--model", quoteShellArg(launchModel || SPARK_WORKER_FABLE_FALLBACK));
     const claudeEffort = mapClaudeEffort(task.effortHint);
     if (claudeEffort) args.push("--effort", claudeEffort);
     // Tool fence LAST: --dangerously-skip-permissions suppresses the prompts, but
@@ -13632,13 +14647,6 @@ function buildLaunchCommandLine(
   return null;
 }
 
-// Cursor's interactive TUI rejects --trust (only valid with --print) and so
-// prompts for workspace trust on every fresh cwd. The CLI persists trust as
-// a sentinel file at ~/.cursor/projects/<encoded-cwd>/.workspace-trusted
-// where <encoded-cwd> replaces ':' and '\' and '/' with '-'. Codara writes
-// this file before spawning the worker so node-pty never sees the prompt.
-// Trust grants are per-cwd, so an eval that materializes 500 fresh repos
-// would otherwise need 500 human clicks; this writes them all in one place.
 // Translate Codara's internal effort scale to the values the claude CLI
 // actually accepts: low, medium, high, xhigh, max. Codara's manager profile
 // emits "minimal" for the cheapest/quickest leaf tasks, which the CLI

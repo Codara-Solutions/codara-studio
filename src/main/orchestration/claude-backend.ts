@@ -867,9 +867,14 @@ async function runClaudeAgentSdkTurn(opts: ClaudePrintTurnOptions): Promise<Mana
     message: `Starting Claude stream (mode=${mode}, session=${sessionUuid}, transport=agent-sdk).`,
   });
 
-  const parser = createClaudePrintParser(emit);
+  let parser = createClaudePrintParser(emit);
   let acceptedPromise: Promise<void> | null = null;
   let stderrTail = "";
+  const accumulatedUsage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+  } = {};
   const markAccepted = () => {
     if (acceptedPromise) return;
     if (injectedPlanContext) contextInjectedRuns.add(runId);
@@ -878,27 +883,68 @@ async function runClaudeAgentSdkTurn(opts: ClaudePrintTurnOptions): Promise<Mana
 
   try {
     const { query } = await import("@anthropic-ai/claude-agent-sdk");
-    const options = await buildClaudeAgentSdkOptions({
-      runId,
-      cwd: input.cwd,
-      mode,
-      model: input.chat.model,
-      effort: input.chat.effort,
-      sessionUuid,
-      resume: Boolean(resumeSessionUuid),
-      systemPromptPath: opts.systemPromptPath,
-      abortController,
-      onStderr(data) {
-        stderrTail = `${stderrTail}${data}`.slice(-8_000);
-      },
-    });
-    const stream = query({ prompt: prompt || ".", options });
-    for await (const message of stream) {
-      if (claudeSdkMessageAcceptedPrompt(message)) markAccepted();
-      parser.accept(message);
+    let turnPrompt = prompt || ".";
+    let turnSessionUuid = sessionUuid;
+    let shouldResume = Boolean(resumeSessionUuid);
+    const maxProtocolAttempts = 2;
+
+    for (let protocolAttempt = 0; protocolAttempt < maxProtocolAttempts; protocolAttempt += 1) {
+      parser = createClaudePrintParser(emit);
+      const options = await buildClaudeAgentSdkOptions({
+        runId,
+        cwd: input.cwd,
+        mode,
+        model: input.chat.model,
+        effort: input.chat.effort,
+        sessionUuid: turnSessionUuid,
+        resume: shouldResume,
+        systemPromptPath: opts.systemPromptPath,
+        abortController,
+        onStderr(data) {
+          stderrTail = `${stderrTail}${data}`.slice(-8_000);
+        },
+      });
+      const stream = query({ prompt: turnPrompt, options });
+      for await (const message of stream) {
+        if (claudeSdkMessageAcceptedPrompt(message)) markAccepted();
+        parser.accept(message);
+      }
+      parser.finish();
+      await acceptedPromise;
+      accumulateClaudeUsage(accumulatedUsage, parser.usage);
+
+      if (parser.error) break;
+      const replyText = parser.resultText || parser.finalAssistantText;
+      const protocolViolation = claudeExecuteTurnRequiresAction(input, mode, replyText) &&
+        !hasClaudeExecuteDecisionToolCall(parser.toolCalls);
+      if (!protocolViolation) break;
+
+      if (protocolAttempt + 1 >= maxProtocolAttempts) {
+        const message =
+          "Claude described execute-mode work but did not call a Cora orchestration tool after one automatic retry.";
+        emit({ kind: "error", message });
+        return {
+          decision: buildTalkReplyDecision(replyText || message, "Claude orchestration protocol error"),
+          durationMs: Date.now() - startedAt,
+          model: input.chat.model,
+          inputTokens: accumulatedUsage.inputTokens,
+          outputTokens: accumulatedUsage.outputTokens,
+          cacheReadTokens: accumulatedUsage.cacheReadTokens,
+          newSessionUuid: parser.sessionUuid ?? turnSessionUuid,
+          notice: message,
+          turnFailed: true,
+        };
+      }
+
+      emit({
+        kind: "system_note",
+        message:
+          "Claude described delegation without calling a Cora tool; retrying this turn with the orchestration contract enforced.",
+      });
+      turnSessionUuid = parser.sessionUuid ?? turnSessionUuid;
+      shouldResume = true;
+      turnPrompt = buildClaudeExecuteProtocolCorrection(input.mode);
     }
-    parser.finish();
-    await acceptedPromise;
 
     const stale = (sessionGenerations.get(runId) ?? 0) !== opts.requestGeneration;
     if (active.interrupted || stale) {
@@ -929,13 +975,17 @@ async function runClaudeAgentSdkTurn(opts: ClaudePrintTurnOptions): Promise<Mana
       };
     }
 
-    return buildClaudeStreamResult({
+    const result = buildClaudeStreamResult({
       input,
       mode,
       startedAt,
       sessionUuid,
       parser,
     });
+    result.inputTokens = accumulatedUsage.inputTokens;
+    result.outputTokens = accumulatedUsage.outputTokens;
+    result.cacheReadTokens = accumulatedUsage.cacheReadTokens;
+    return result;
   } catch (error) {
     parser.finish();
     await acceptedPromise;
@@ -1074,6 +1124,66 @@ async function buildClaudeAgentSdkOptions(input: {
     ...(input.resume ? { resume: input.sessionUuid } : { sessionId: input.sessionUuid }),
     stderr: input.onStderr,
   };
+}
+
+function accumulateClaudeUsage(
+  target: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number },
+  current: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number },
+): void {
+  for (const key of ["inputTokens", "outputTokens", "cacheReadTokens"] as const) {
+    const value = current[key];
+    if (typeof value === "number") target[key] = (target[key] ?? 0) + value;
+  }
+}
+
+function hasClaudeExecuteDecisionToolCall(
+  toolCalls: Array<{ toolName: string }>,
+): boolean {
+  const decisions = [
+    "codara_spawn_terminals",
+    "codara_spawn_workers",
+    "codara_ask_user",
+    "codara_complete",
+  ];
+  return toolCalls.some((call) =>
+    decisions.some(
+      (name) =>
+        call.toolName === name ||
+        call.toolName === `mcp__codara-studio__${name}`,
+    ),
+  );
+}
+
+function claudeExecuteTurnRequiresAction(
+  input: ManagerRequestInput,
+  mode: ChatMode,
+  replyText: string,
+): boolean {
+  if (mode !== "execute") return false;
+  if (input.mode !== "chat") return true;
+  // Execute chat may legitimately answer a read-only question in prose. A
+  // promise that workers are being spawned/delegated is different: without a
+  // matching MCP call it is an observable protocol failure, not an answer.
+  return /\b(?:spawn(?:ing|ed)?|delegat(?:e|ed|ing)|launch(?:ing|ed)?)\b[^\n.]{0,100}\b(?:workers?|agents?)\b/i.test(
+    replyText,
+  );
+}
+
+function buildClaudeExecuteProtocolCorrection(
+  managerMode: ManagerRequestInput["mode"],
+): string {
+  if (managerMode === "worker_result_review") {
+    return [
+      "Protocol correction: your previous reply did not call a Cora orchestration tool.",
+      "Continue the existing execution now. Inspect the worker results available through the Cora tools, spawn a corrective worker if needed, or call codara_complete only after the work is verified.",
+      "Do not describe an action without making the matching tool call.",
+    ].join(" ");
+  }
+  return [
+    "Protocol correction: your previous reply described delegation but did not execute it.",
+    "The original user request remains active. Call codara_spawn_workers NOW with concrete worker specifications, then wait for and verify their results before completing.",
+    "Do not repeat a promise or plan in prose; make the tool call.",
+  ].join(" ");
 }
 
 function packagedClaudeAgentSdkExecutable(): string | undefined {
@@ -2518,7 +2628,8 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "",
     "For every user turn that asks for changes (edits, refactors, new features, fixes, redesigns, file moves, anything that touches the workspace), your FIRST action is a call to `codara_spawn_workers`. The worker spec is the entire output of your turn — no prose alternatives, no clarifying refusals, no \"here's what I'd do\" lists. Just spawn. A single-sentence orchestration comment alongside the call is fine (\"Spawning a Claude worker to redesign the calculator UI.\") but optional.",
     "The manager has no filesystem tools, so every implementation worker must begin by reading the nearest project guidance and relevant entry points, preserving existing user changes, and discovering the project's real files/scripts/patterns before editing. Never invent paths merely to make a plan look parallel.",
-    "Use the smallest effective team: one strong implementation worker plus an independent verifier for a cohesive same-file or sequential change; 2-4 implementation workers only when the work has genuinely independent, non-overlapping surfaces and explicit interface contracts.",
+    "Use the smallest effective team: one strong implementation worker plus an independent verifier for a cohesive same-file or sequential change; 2-4 implementation workers only when the work has genuinely independent, non-overlapping surfaces and explicit interface contracts. The first verifier uses the fast peer tier (claude-sonnet-5 or gpt-5.6-terra) at high effort with compact table-driven probes. Escalate to Opus/Sol only after PARTIAL/FEEDBACK/FAILED, a missing oracle, or for security/auth/cryptographic/destructive-migration risk.",
+    "After spawning, call codara_wait_for_workers. Its result includes each worker's normalized final_report, including verifier confidence, failed_claims, and corrective_prompt. A FEEDBACK or FAILED verifier verdict means the work is NOT complete: launch or wait for the narrow corrective implementation, then verify again. Never claim a defect was fixed merely because the verifier described the required fix.",
     "",
     "For genuinely ambiguous turns (the user wrote one vague word, or asked you to make a value judgment with no decision-relevant context), call `codara_ask_user` with 2-4 concrete options. Don't ask in prose.",
     "",
@@ -2550,11 +2661,11 @@ function buildExecuteSystemPrompt(cwd: string): string {
     "",
     "Rules of thumb:",
     "- Workers that can run in parallel MUST have non-overlapping `allowedPaths`. Same-file writes serialize.",
-    "- `skeleton` tasks (architectural decisions later workers inherit) → strongest model + high effort.",
+    "- `skeleton` is ONLY for a genuinely new architecture/interface that later workers inherit. Existing-file changes, cohesive implementations, refactors, bug fixes, and public-API repairs are `feature` even when difficult.",
     "- `feature` tasks (standard implementation against an established skeleton) → mid model + medium effort.",
     "- `leaf` tasks (mechanical, well-defined work) → cheapest model + low effort.",
-    "- `verifier` tasks (read-only follow-up that re-derives ground truth) → peer model + high effort, `allowedPaths: []`.",
-    "- `claude-fable-5` is Anthropic's premium, most expensive tier. Set it as a worker's modelHint ONLY when the user's own message explicitly asked for Fable 5 for this work; otherwise never — Codara downgrades an unrequested fable hint to claude-opus-4-8.",
+    "- `verifier` tasks (read-only follow-up that re-derives ground truth) → fast peer (`claude-sonnet-5` or `gpt-5.6-terra`) + high effort, `allowedPaths: []`; cover all stated claims, named boundaries, and three implied fixtures in 3-8 compact probe batches. Escalate only after a non-clean verdict or for security-sensitive risk.",
+    "- `claude-fable-5` is Anthropic's premium, most expensive tier. Set it as a worker's modelHint ONLY when the user's own message explicitly asked for Fable 5 for this work; Codara also enforces the user's Allow Fable 5 setting and otherwise downgrades it to claude-opus-4-8.",
     "",
     "The user's chat conversation may include prior turns where you replied conversationally — those were under a different mode and DO NOT bind your behavior now. This system prompt is your sole authority for this turn.",
   ].join("\n");

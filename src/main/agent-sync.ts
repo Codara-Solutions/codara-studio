@@ -347,9 +347,15 @@ function sourcesToInventory(
   const disabled = new Set(disabledSessionKeys);
   const items: AgentAssetInventoryItem[] = [];
   for (const source of sources) {
+    // Skill compatibility/protection used to call findSkillDirs twice for
+    // every item. With plugin caches it turns one inventory read into hundreds
+    // of repeated directory walks and leaves the Capability Center waiting on
+    // the main process. Index each source tree once instead.
+    const skillDirs = source.kind === "skill" ? indexSkillDirsByName(source.path) : null;
     for (const name of source.names) {
       const key = sessionKey(source.kind, name);
-      const compatibility = describeAssetCompatibility(source, name);
+      const skillDir = skillDirs?.get(name) ?? null;
+      const compatibility = describeAssetCompatibility(source, skillDir);
       items.push({
         id: assetId({ kind: source.kind, runtime: source.runtime, scope: source.scope, name, path: source.path }),
         sessionKey: key,
@@ -360,7 +366,7 @@ function sourcesToInventory(
         path: source.path,
         enabledForSessions: !disabled.has(key),
         detail: source.path,
-        canDelete: !isProtectedSkillSource(source, name),
+        canDelete: !isProtectedSkillSource(source, skillDir),
         compatibility: compatibility.compatibility,
         compatibilityReason: compatibility.reason,
         syncable: compatibility.syncable,
@@ -372,7 +378,7 @@ function sourcesToInventory(
 
 function describeAssetCompatibility(
   source: SyncSource,
-  name: string,
+  skillDir: string | null,
 ): { compatibility: AgentAssetCompatibility; reason: string; syncable: boolean } {
   if (source.kind === "mcp") {
     return {
@@ -382,7 +388,6 @@ function describeAssetCompatibility(
     };
   }
 
-  const skillDir = findSkillDirByName(source.path, name);
   const normalizedSkillDir = normalizePathForMatch(skillDir ?? source.path);
   if (source.runtime === "codex" && normalizedSkillDir.includes(CODEX_SYSTEM_SKILL_ROOT)) {
     return {
@@ -405,9 +410,8 @@ function describeAssetCompatibility(
   };
 }
 
-function isProtectedSkillSource(source: SyncSource, name: string): boolean {
+function isProtectedSkillSource(source: SyncSource, skillDir: string | null): boolean {
   if (source.kind !== "skill") return false;
-  const skillDir = findSkillDirByName(source.path, name);
   return Boolean(skillDir && normalizePathForMatch(skillDir).includes(CODEX_SYSTEM_SKILL_ROOT));
 }
 
@@ -985,6 +989,16 @@ function findSkillDirs(root: string): string[] {
   const out: string[] = [];
   collectSkillDirs(root, 0, out);
   return out;
+}
+
+function indexSkillDirsByName(root: string): Map<string, string> {
+  const indexed = new Map<string, string>();
+  for (const dir of findSkillDirs(root)) {
+    const skillFile = findSkillFile(dir);
+    const declaredName = skillFile ? readSkillName(skillFile) : "";
+    indexed.set(declaredName || basename(dir), dir);
+  }
+  return indexed;
 }
 
 function findSkillDirByName(root: string, name: string): string | null {

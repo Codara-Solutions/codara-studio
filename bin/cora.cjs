@@ -53,11 +53,20 @@ PREVIEW (the in-app browser tab; navigate opens one if none exists)
   network                             recent network requests
   url                                 current page URL
 
+CORA SESSIONS
+  start <prompt> [--cwd DIR] [--title TITLE] [--backend ENGINE]
+                 [--model MODEL] [--mode MODE] [--effort LEVEL] [--wait]
+                                      create and run a Cora session; creates the
+                                      Codara workspace when DIR is not registered
+  send <runId> <message> [--wait]     continue a session or answer its question
+  wait <runId> [--timeout SECONDS]    wait until done, failed, paused, or blocked
+  cancel <runId> [reason]             stop a session and its active workers
+
 RUNS & TERMINALS
   runs                                list runs (reads run.json files; works offline)
   run <id>                            one run's summary (id prefix ok)
   read <paneId> [--lines N]           tail a terminal pane
-  say <runId> <message>               append a note to a run's chat
+  say <runId> <message>               append an internal/system note to a run
 
 ESCAPE HATCH
   rpc <method> [params-json]          raw JSON-RPC, e.g. cora rpc preview.list '{}'
@@ -187,6 +196,47 @@ function output(flags, result, pretty) {
     return;
   }
   pretty(result);
+}
+
+function flagText(flags, key) {
+  return typeof flags[key] === "string" && flags[key].trim() ? flags[key].trim() : undefined;
+}
+
+function copyTextFlag(flags, target, key) {
+  const value = flagText(flags, key);
+  if (value !== undefined) target[key] = value;
+}
+
+function timeoutParams(flags) {
+  if (flags.timeout === undefined) return {};
+  const seconds = Number(flags.timeout);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    fail(`invalid --timeout ${JSON.stringify(flags.timeout)} (expected non-negative seconds)`);
+  }
+  return { timeoutMs: Math.round(seconds * 1000) };
+}
+
+function printCoraSession(result) {
+  const run = result?.run ?? result;
+  if (!run?.id) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(`${run.id}  ${run.status}`);
+  console.log(`title      ${run.title ?? "(untitled)"}`);
+  const cwd = run.settingsSnapshot?.workspaceCwd ?? run.cwd ?? "?";
+  console.log(`workspace  ${run.workspaceId ?? "?"}  cwd ${cwd}`);
+  if (result.workspaceCreated) console.log("registered new Codara workspace");
+  if (result.truncated) console.log("warning: message truncated to the CLI safety limit");
+  if (result.timedOut) console.log("wait timed out; the session is still running");
+  const messages = run.humanMessages ?? run.messages ?? [];
+  const lastCora = [...messages].reverse().find((message) => message.author === "spark");
+  if (lastCora?.message) console.log(`cora       ${String(lastCora.message).slice(0, 1200)}`);
+  if (run.status === "blocked" || run.status === "paused") {
+    console.log(`continue   cora send ${run.id} "<your response>" --wait`);
+  } else if (!result.timedOut && run.status !== "complete" && run.status !== "failed" && run.status !== "cancelled") {
+    console.log(`follow     cora wait ${run.id}`);
+  }
 }
 
 // Results carrying a dataUrl (app.screenshot / preview.screenshot) get the
@@ -384,6 +434,67 @@ async function main() {
     case "url": {
       const result = await call(flags, "preview.url", {});
       output(flags, result, (r) => console.log(r.url ?? JSON.stringify(r)));
+      return;
+    }
+
+    // ── Cora sessions ──
+    case "start": {
+      if (args.length === 0) fail("usage: cora start <prompt> [--cwd DIR] [--backend ENGINE] [--wait]");
+      const params = {
+        cwd: path.resolve(flagText(flags, "cwd") || process.cwd()),
+        prompt: args.join(" "),
+      };
+      copyTextFlag(flags, params, "title");
+      copyTextFlag(flags, params, "workspaceName");
+      copyTextFlag(flags, params, "backend");
+      copyTextFlag(flags, params, "model");
+      copyTextFlag(flags, params, "mode");
+      copyTextFlag(flags, params, "effort");
+      const started = await call(flags, "chat.create", params);
+      if (flags.wait) {
+        const waited = await call(flags, "chat.wait", {
+          runId: started.run.id,
+          ...timeoutParams(flags),
+        });
+        output(flags, waited, printCoraSession);
+      } else {
+        output(flags, started, printCoraSession);
+      }
+      return;
+    }
+    case "send": {
+      if (!args[0] || !args[1]) fail("usage: cora send <runId> <message> [--wait]");
+      const sent = await call(flags, "chat.send", {
+        runId: args[0],
+        content: args.slice(1).join(" "),
+      });
+      if (flags.wait) {
+        const waited = await call(flags, "chat.wait", {
+          runId: sent.run.id,
+          ...timeoutParams(flags),
+        });
+        output(flags, waited, printCoraSession);
+      } else {
+        output(flags, sent, printCoraSession);
+      }
+      return;
+    }
+    case "wait": {
+      if (!args[0]) fail("usage: cora wait <runId> [--timeout SECONDS]");
+      const waited = await call(flags, "chat.wait", {
+        runId: args[0],
+        ...timeoutParams(flags),
+      });
+      output(flags, waited, printCoraSession);
+      return;
+    }
+    case "cancel": {
+      if (!args[0]) fail("usage: cora cancel <runId> [reason]");
+      const cancelled = await call(flags, "chat.cancel", {
+        runId: args[0],
+        reason: args.slice(1).join(" ") || undefined,
+      });
+      output(flags, cancelled, printCoraSession);
       return;
     }
 

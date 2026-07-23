@@ -457,7 +457,7 @@ const TERMINAL_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        cwd: { type: "string", description: "Working directory for the new terminal. Pass an absolute path that exists. Defaults to the active workspace root when omitted." },
+        cwd: { type: "string", description: "Working directory for the new terminal. Pass an absolute path that exists. Defaults to the calling run's workspace root (or the active workspace root when no run identity is available) when omitted." },
         command: { type: "string", description: "Optional shell command to run immediately after the terminal opens." },
         title: { type: "string", description: "Optional tab title." },
       },
@@ -489,6 +489,107 @@ const TERMINAL_TOOLS = [
       properties: {
         paneId: { type: "string", description: "Pane id returned from codara_terminal_create." },
         lines: { type: "number", description: "How many trailing lines to return (default 100)." },
+      },
+      additionalProperties: false,
+    },
+  },
+];
+
+// A run-owned visual explanation surface available in every Cora mode. It is
+// part of the studio roster (rather than Execute-only orchestration) because a
+// Talk-mode explanation can be the best use of a whiteboard too.
+const WHITEBOARD_TOOLS = [
+  {
+    name: "codara_whiteboard_get",
+    description:
+      "Read this Cora chat's current editable whiteboard, including its revision and the user's latest manual edits. Returns null when no board exists. Always call this immediately before changing a board: the human can move, rewrite, connect, add, or delete items at any time.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runId: {
+          type: "string",
+          description: "Codara run id. Defaults to SPARK_RUN_ID when omitted.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_whiteboard_update",
+    description:
+      "Create, replace, extend, or clear this chat's persisted infinite whiteboard. First call codara_whiteboard_get, preserve the user's edits, and pass its revision as baseRevision so a concurrent human edit cannot be overwritten. Coordinates are unbounded logical canvas positions. " +
+      "Design for legibility, not density: lay nodes out left-to-right in stages (columns roughly 380px apart, ~40px vertical gaps, card widths 240-320). Cluster related nodes inside a 'group' node drawn behind them (give the group generous width/height and place members fully inside its bounds) instead of connecting everything with edges. Keep titles under ~6 words and bodies to 1-2 short sentences. Prefer few, meaningful edges over exhaustive wiring; label an edge only when the relationship is not obvious; use style 'dashed' for soft/optional relations. Model if/case decisions with a condition node and clearly labeled outgoing edges.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        runId: {
+          type: "string",
+          description: "Codara run id. Defaults to SPARK_RUN_ID when omitted.",
+        },
+        action: {
+          type: "string",
+          enum: ["replace", "merge", "clear"],
+          description: "replace rebuilds the board, merge upserts by id (fields omitted from a merged node/edge keep their existing values), clear removes it. Defaults to replace.",
+        },
+        baseRevision: {
+          type: "number",
+          minimum: 0,
+          description: "Revision returned by the immediately preceding whiteboard_get. The update is rejected if the board changed meanwhile.",
+        },
+        title: { type: "string", description: "Short whiteboard title." },
+        summary: { type: "string", description: "One concise sentence explaining what the board shows." },
+        nodes: {
+          type: "array",
+          maxItems: 500,
+          items: {
+            type: "object",
+            required: ["id", "kind", "title", "x", "y"],
+            properties: {
+              id: { type: "string", description: "Stable node id used by edges and future merges." },
+              kind: {
+                type: "string",
+                enum: ["topic", "group", "file", "symbol", "flow", "condition", "decision", "risk", "note"],
+                description:
+                  "Semantic role, rendered as a color-coded card: topic=major subject, group=large background container that visually clusters the nodes placed inside its bounds (use one per module/area), file=document or artifact, symbol=code entity, flow=process or action, condition=branch point, decision=resolved choice, risk=warning or blocker, note=annotation.",
+              },
+              title: { type: "string" },
+              body: { type: "string", description: "Compact supporting detail; avoid long prose." },
+              x: { type: "number", minimum: -100000, maximum: 100000 },
+              y: { type: "number", minimum: -100000, maximum: 100000 },
+              width: { type: "number", minimum: 180, maximum: 2400, description: "Cards clamp to 180-520; group nodes clamp to 220-2400." },
+              height: { type: "number", minimum: 96, maximum: 1600, description: "Cards clamp to 96-520; group nodes clamp to 140-1600." },
+              tone: {
+                type: "string",
+                enum: ["default", "accent", "success", "warning", "danger"],
+                description: "Optional status accent overriding the kind color, e.g. success on a completed flow node.",
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+        edges: {
+          type: "array",
+          maxItems: 1000,
+          items: {
+            type: "object",
+            required: ["id", "from", "to"],
+            properties: {
+              id: { type: "string" },
+              from: { type: "string", description: "Source node id." },
+              to: { type: "string", description: "Target node id." },
+              label: { type: "string" },
+              tone: { type: "string", enum: ["default", "accent", "success", "warning", "danger"] },
+              style: {
+                type: "string",
+                enum: ["solid", "dashed"],
+                description: "dashed marks soft/optional relations; default is solid.",
+              },
+            },
+            additionalProperties: false,
+          },
+        },
+        removeNodeIds: { type: "array", items: { type: "string" } },
+        removeEdgeIds: { type: "array", items: { type: "string" } },
       },
       additionalProperties: false,
     },
@@ -579,7 +680,7 @@ const WORKER_SCHEMA = {
     model: {
       type: "string",
       description:
-        "Engine-native model id (REQUIRED): 'claude-opus-4-8' or 'claude-sonnet-5' for claude; 'gpt-5.6-sol', 'gpt-5.6-terra', or 'gpt-5.6-luna' for codex. Use Sol for flagship/complex work, Terra for balanced everyday work, and Luna for fast repeatable work. NOTE: 'claude-fable-5' (Fable 5, premium top-tier) IS permitted as a worker model ONLY when the user's own message explicitly asked for Fable for this work; Codara honors an explicitly-requested fable hint. Otherwise it is downgraded to claude-opus-4-8.",
+        "Engine-native model id (REQUIRED): 'claude-opus-4-8' or 'claude-sonnet-5' for claude; 'gpt-5.6-sol', 'gpt-5.6-terra', or 'gpt-5.6-luna' for codex. Use Sol for flagship/complex work, Terra for balanced everyday work, and Luna for fast repeatable work. NOTE: 'claude-fable-5' (Fable 5, premium top-tier) is permitted only when Allow Fable 5 is enabled in Settings AND the user's own message explicitly asked for Fable for this work. Otherwise Codara downgrades it to claude-opus-4-8.",
     },
     effort: { type: "string", enum: ["minimal", "low", "medium", "high", "xhigh", "max"], description: "Reasoning effort (REQUIRED)." },
     timeoutMinutes: { type: "number", description: "Hard per-iteration wall-clock ceiling in minutes." },
@@ -1020,7 +1121,7 @@ const EXECUTE_TOOLS = [
   {
     name: "codara_complete",
     description:
-      "Mark the Codara run as complete. Optionally include a short summary of what was accomplished — it is posted as a system note in the chat. Call this exactly once at the very end of the orchestrator turn after all work has settled.",
+      "Mark a managed execution run as complete. Call this exactly once only after at least one coding worker was spawned for the active implementation request, all worker work settled, and its evidence was verified. Never call it for greetings, conversation, explanations, advice, read-only questions, or any Auto-mode turn with no worker; a natural-language answer ends those turns. Optionally include a short summary of what was accomplished — it is posted as a system note in the chat.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1219,6 +1320,11 @@ const EXECUTE_TOOL_TO_RPC = {
   codara_check_messages: "orchestrator.check_messages",
 };
 
+const WHITEBOARD_TOOL_TO_RPC = {
+  codara_whiteboard_get: "orchestrator.whiteboard_get",
+  codara_whiteboard_update: "orchestrator.whiteboard_update",
+};
+
 const AUTOMATION_TOOL_TO_RPC = {
   codara_list_automations: "automation.list",
   codara_get_automation: "automation.get",
@@ -1240,8 +1346,8 @@ const AUTOMATION_TOOL_TO_RPC = {
 // studio (preview + terminal) tools are always present; the mode only adds the
 // orchestration layer on top.
 // ===========================================================================
-const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS];
-const STUDIO_TOOL_TO_RPC = { ...PREVIEW_TOOL_TO_RPC, ...TERMINAL_TOOL_TO_RPC };
+const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS];
+const STUDIO_TOOL_TO_RPC = { ...PREVIEW_TOOL_TO_RPC, ...TERMINAL_TOOL_TO_RPC, ...WHITEBOARD_TOOL_TO_RPC };
 
 let TOOLS;
 let TOOL_TO_RPC;
@@ -1262,6 +1368,19 @@ if (IS_AUTOMATION_MODE) {
 // no injection.
 function isOrchestrationRpc(rpc) {
   return typeof rpc === "string" && (rpc.startsWith("orchestrator.") || rpc.startsWith("automation."));
+}
+
+// terminal.create and preview.navigate can MINT a new renderer tab. Stamp the
+// calling run's identity (SPARK_RUN_ID, injected by pty-manager at spawn) so
+// the tab is attributed to — and routed into — that run's workspace rather
+// than whichever run/workspace the user happens to be viewing when the RPC
+// lands. Caller-supplied runId always wins; user-facing agents with no
+// SPARK_RUN_ID keep the active-workspace behavior.
+function injectRunIdForTabMint(rpc, args) {
+  if (rpc !== "terminal.create" && rpc !== "preview.navigate") return;
+  if (typeof args.runId === "string" && args.runId.trim().length > 0) return;
+  const envRunId = process.env.SPARK_RUN_ID;
+  if (envRunId && envRunId.trim().length > 0) args.runId = envRunId.trim();
 }
 
 function resolveSparkHome() {
@@ -1351,28 +1470,30 @@ function postJsonRpc(method, params, timeoutMs) {
 
 // MCP stdio framing: each message is a JSON-RPC object on its own line.
 let buffer = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-  buffer += chunk;
-  let idx;
-  while ((idx = buffer.indexOf("\n")) >= 0) {
-    const line = buffer.slice(0, idx).trim();
-    buffer = buffer.slice(idx + 1);
-    if (!line) continue;
-    handleLine(line).catch((err) => {
-      const message = err && err.message ? err.message : String(err);
-      writeLine({
-        jsonrpc: "2.0",
-        id: null,
-        error: { code: -32603, message },
+function startStdioServer() {
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    buffer += chunk;
+    let idx;
+    while ((idx = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!line) continue;
+      handleLine(line).catch((err) => {
+        const message = err && err.message ? err.message : String(err);
+        writeLine({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32603, message },
+        });
       });
-    });
-  }
-});
+    }
+  });
 
-process.stdin.on("end", () => {
-  process.exit(0);
-});
+  process.stdin.on("end", () => {
+    process.exit(0);
+  });
+}
 
 function writeLine(payload) {
   process.stdout.write(JSON.stringify(payload) + "\n");
@@ -1463,6 +1584,7 @@ async function callTool(params) {
       }
     }
   }
+  injectRunIdForTabMint(rpc, args);
 
   const timeoutMs = isOrchestrationRpc(rpc) ? ORCHESTRATION_TIMEOUT_MS : PREVIEW_TERMINAL_TIMEOUT_MS;
   try {
@@ -1504,6 +1626,9 @@ async function callRunBatch(args) {
     const { action: _omitAction, label, ...rest } = step;
     const rpcArgs = { ...rest };
     if (defaultTabId && rpcArgs.tabId === undefined) rpcArgs.tabId = defaultTabId;
+    // A batched navigate step can auto-open a preview tab exactly like the
+    // single-shot tool; stamp the same run identity.
+    injectRunIdForTabMint(rpc, rpcArgs);
     const entry = { index: i, action };
     if (label) entry.label = label;
     try {
@@ -1556,3 +1681,19 @@ function mkErr(code, message) {
   err.code = code;
   return err;
 }
+
+// Pi has a native extension API but no built-in MCP client. Export the exact
+// same roster and call path so Codara's bundled Pi extension can register these
+// tools without duplicating schemas or bypassing the authenticated agent socket.
+// Requiring this module is side-effect free; direct execution retains the stdio
+// MCP behavior used by Claude Code and Codex.
+module.exports = {
+  listTools() {
+    return TOOLS.map((tool) => ({ ...tool }));
+  },
+  callToolByName(name, args) {
+    return callTool({ name, arguments: args });
+  },
+};
+
+if (require.main === module) startStdioServer();

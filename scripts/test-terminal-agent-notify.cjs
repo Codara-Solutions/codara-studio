@@ -41,7 +41,7 @@ const harnessPlugin = {
     }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
       const init =
-        "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), alerts: [], chips: [], focusedWindow: null, activeContext: { workspaceId: null, tabId: null, paneId: null } };\n";
+        "globalThis.__TAN ??= { taps: new Map(), exits: new Map(), tails: new Map(), alerts: [], chips: [], focusedWindow: null, activeContext: { workspaceId: null, tabId: null, paneId: null } };\n";
       if (args.path === "electron") {
         return {
           contents:
@@ -57,6 +57,7 @@ const harnessPlugin = {
             "export function hasSession(){ return true; }\n" +
             "export function tap(id, h){ globalThis.__TAN.taps.set(id, h); return () => globalThis.__TAN.taps.delete(id); }\n" +
             "export function onExit(id, h){ globalThis.__TAN.exits.set(id, h); return () => globalThis.__TAN.exits.delete(id); }\n" +
+            "export function readTailChunks(id){ return globalThis.__TAN.tails.get(id) ?? []; }\n" +
             "export function waitForSpawn(){ return Promise.resolve(true); }\n",
           loader: "js",
         };
@@ -120,7 +121,15 @@ async function main() {
   };
 
   // ── Register three user panes + one excluded spark-worker pane ──
-  mod.syncTerminalNotifyPanes({
+  // p8 models a cold-restored Claude whose first busy frame was already
+  // emitted before the notifier registry hydrated. The durable session gives
+  // us runtimeHint; tail replay must recover working without a future byte and
+  // must not replay historic notifications as fresh toasts.
+  T.tails.set("p8", [
+    Buffer.from("\x1b]9;Claude: an old turn completed\x07", "utf8"),
+    Buffer.from("✻ Restoring… (4s · ↓ 12 tokens)", "utf8"),
+  ]);
+  const initialSnapshot = mod.syncTerminalNotifyPanes({
     workspaceId: "ws1",
     workspaceName: "Fleet",
     panes: [
@@ -131,10 +140,16 @@ async function main() {
       { paneId: "p5", tabId: "t5", tabTitle: "Terminal 5", excluded: false },
       { paneId: "p6", tabId: "t6", tabTitle: "Terminal 6", excluded: false },
       { paneId: "p7", tabId: "t7", tabTitle: "Terminal 7", excluded: false },
+      { paneId: "p8", tabId: "t8", tabTitle: "Restored Claude", excluded: false, runtimeHint: "claude" },
     ],
   });
   await sleep(50);
-  check("taps attached for all registered panes", T.taps.size === 7);
+  check("taps attached for all registered panes", T.taps.size === 8);
+  check(
+    "cold restore replays pre-registration output into working state",
+    initialSnapshot.some((state) => state.paneId === "p8" && state.runtime === "claude" && state.state === "working"),
+  );
+  check("cold restore replay does not emit historic notifications", T.alerts.length === 0);
 
   // ── Scenario 1: turn finishes while the user is on ANOTHER tab ──
   // User is in the same workspace but looking at a chat tab; window focused.
@@ -335,11 +350,12 @@ async function main() {
     alertCount() === beforeIntentionalClose,
   );
 
-  // ── Scenario 11: pane closed → watcher cleaned up ──
+  // ── Scenario 11: unexpected exit preserves same-id respawn monitoring ──
   T.exits.get("p1")?.({ exitCode: 0 });
-  check("pty exit detached the tap", !T.taps.has("p1"));
+  check("unexpected pty exit re-arms the tap for a same-id respawn", T.taps.has("p1"));
 
   mod.disposeAllTerminalAgentWatchers();
+  check("explicit watcher disposal detaches every tap", T.taps.size === 0);
   console.log(`\nAll ${pass} terminal-agent-notify checks passed.`);
 }
 

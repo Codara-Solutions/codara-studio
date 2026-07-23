@@ -1,7 +1,7 @@
 // OpenRouter backend — adapter from the existing openrouter-manager helpers
 // to the SparkAgentBackend interface. No behaviour change: this is the path
 // every chat hit before the backend-abstraction split, and remains the
-// default for chats whose `chatBackend` is undefined.
+// explicit API option for chats whose `chatBackend` is openrouter.
 //
 // Talk mode is handled by passing managerMode="chat" through to the existing
 // pipeline — that mode already returns a chatReply in the SparkManagerDecision

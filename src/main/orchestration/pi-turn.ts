@@ -1,0 +1,231 @@
+import type { ChatStreamHandler } from "./spark-agent-backend";
+import type { PiRpcEvent } from "./pi-rpc-client";
+import type { CoraExecutionPolicy } from "@shared/types";
+
+export interface PiTurnToolCall {
+  toolName: string;
+  toolUseId: string;
+  input: unknown;
+}
+
+export interface PiTurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+}
+
+export interface PiTurnResult {
+  finalText: string;
+  toolCalls: PiTurnToolCall[];
+  successfulToolCalls: PiTurnToolCall[];
+  usage: PiTurnUsage;
+  failure: string | null;
+  settled: boolean;
+}
+
+/** A Frontier Execute turn is not complete merely because the model stopped
+ * after final-safe. The Codara completion tool must itself have succeeded;
+ * otherwise run-store would apply a synthetic complete decision even though
+ * the live orchestration seam rejected the completion. Contract blockers are
+ * the sole intentional no-completion terminal outcome. */
+export function frontierTurnHasRequiredCompletion(
+  policy: CoraExecutionPolicy,
+  contractBlocked: boolean,
+  successfulToolCalls: readonly Pick<PiTurnToolCall, "toolName">[],
+): boolean {
+  if (policy !== "frontier" || contractBlocked) return true;
+  return successfulToolCalls.some((call) => call.toolName === "codara_complete" ||
+    call.toolName === "mcp__codara-studio__codara_complete");
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function finiteCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : 0;
+}
+
+function textBlocks(value: unknown): string {
+  const record = asRecord(value);
+  const content = Array.isArray(record?.content) ? record.content : [];
+  return content
+    .map((item) => {
+      const block = asRecord(item);
+      return block?.type === "text" && typeof block.text === "string" ? block.text : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function assistantText(messageValue: unknown): string {
+  const message = asRecord(messageValue);
+  if (message?.role !== "assistant") return "";
+  return textBlocks(message);
+}
+
+function assistantMessageId(messageValue: unknown, fallback: string): string {
+  const message = asRecord(messageValue);
+  if (typeof message?.id === "string" && message.id) return message.id;
+  if (typeof message?.timestamp === "number" && Number.isFinite(message.timestamp)) {
+    return `pi-assistant-${message.timestamp}`;
+  }
+  return fallback;
+}
+
+function toolOutput(resultValue: unknown): string {
+  const text = textBlocks(resultValue);
+  if (text) return text;
+  if (resultValue === undefined) return "";
+  try { return JSON.stringify(resultValue); }
+  catch { return String(resultValue); }
+}
+
+/**
+ * Deterministically converts one Pi RPC turn into Codara's existing stream and
+ * manager-decision inputs. It deliberately consumes only documented RPC
+ * fields; unknown future events are ignored instead of corrupting a run.
+ */
+export class PiTurnAccumulator {
+  private readonly onStream?: ChatStreamHandler;
+  private readonly toolCalls: PiTurnToolCall[] = [];
+  private readonly toolIds = new Set<string>();
+  private readonly completedToolIds = new Set<string>();
+  private readonly failedToolIds = new Set<string>();
+  private readonly streamedText = new Map<string, string>();
+  private readonly completedText = new Map<string, string>();
+  private readonly assistantOrder: string[] = [];
+  private assistantSequence = 0;
+  private currentAssistantId: string | null = null;
+  private usage: PiTurnUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+  private failure: string | null = null;
+  private settled = false;
+
+  constructor(onStream?: ChatStreamHandler) {
+    this.onStream = onStream;
+  }
+
+  consume(event: PiRpcEvent): void {
+    if (event.type === "message_start") {
+      const message = asRecord(event.message);
+      if (message?.role === "assistant") this.ensureAssistant(message, true);
+      return;
+    }
+
+    if (event.type === "message_update") {
+      const message = asRecord(event.message);
+      const delta = asRecord(event.assistantMessageEvent);
+      if (message?.role !== "assistant" || delta?.type !== "text_delta" || typeof delta.delta !== "string") {
+        return;
+      }
+      const messageId = this.ensureAssistant(message);
+      this.streamedText.set(messageId, `${this.streamedText.get(messageId) ?? ""}${delta.delta}`);
+      this.onStream?.({ kind: "assistant_block", messageId, text: delta.delta });
+      return;
+    }
+
+    if (event.type === "message_end") {
+      const message = asRecord(event.message);
+      if (message?.role !== "assistant") return;
+      const messageId = this.ensureAssistant(message);
+      const complete = assistantText(message);
+      if (complete) this.completedText.set(messageId, complete);
+      const usage = asRecord(message.usage);
+      this.usage = {
+        inputTokens: this.usage.inputTokens + finiteCount(usage?.input),
+        outputTokens: this.usage.outputTokens + finiteCount(usage?.output),
+        cacheReadTokens: this.usage.cacheReadTokens + finiteCount(
+          usage?.cacheRead ?? usage?.cache_read ?? usage?.cached,
+        ),
+      };
+      if (message.stopReason === "error") {
+        this.failure = typeof message.errorMessage === "string" && message.errorMessage.trim()
+          ? message.errorMessage.trim()
+          : "Pi provider turn failed.";
+      }
+      this.onStream?.({ kind: "usage", ...this.usage });
+      return;
+    }
+
+    if (event.type === "tool_execution_start") {
+      if (typeof event.toolCallId !== "string" || !event.toolCallId ||
+          typeof event.toolName !== "string" || !event.toolName || this.toolIds.has(event.toolCallId)) {
+        return;
+      }
+      this.toolIds.add(event.toolCallId);
+      const call = {
+        toolName: event.toolName,
+        toolUseId: event.toolCallId,
+        input: event.args,
+      };
+      this.toolCalls.push(call);
+      this.onStream?.({ kind: "tool_use", ...call });
+      return;
+    }
+
+    if (event.type === "tool_execution_end") {
+      if (typeof event.toolCallId !== "string" || !event.toolCallId) return;
+      this.completedToolIds.add(event.toolCallId);
+      if (event.isError === true) this.failedToolIds.add(event.toolCallId);
+      this.onStream?.({
+        kind: "tool_result",
+        toolUseId: event.toolCallId,
+        output: toolOutput(event.result),
+        isError: event.isError === true,
+      });
+      return;
+    }
+
+    if (event.type === "extension_error") {
+      const detail = typeof event.error === "string" && event.error.trim()
+        ? event.error.trim()
+        : "Pi extension failed.";
+      this.failure = detail;
+      this.onStream?.({ kind: "error", message: detail });
+      return;
+    }
+
+    if (event.type === "auto_retry_end" && event.success === false) {
+      const detail = typeof event.finalError === "string" && event.finalError.trim()
+        ? event.finalError.trim()
+        : "Pi exhausted automatic retries.";
+      this.failure = detail;
+      this.onStream?.({ kind: "error", message: detail });
+      return;
+    }
+
+    if (event.type === "agent_settled") this.settled = true;
+  }
+
+  result(): PiTurnResult {
+    const finalText = this.assistantOrder
+      .map((id) => (this.completedText.get(id) ?? this.streamedText.get(id) ?? "").trim())
+      .filter(Boolean)
+      .join("\n\n");
+    return {
+      finalText,
+      toolCalls: this.toolCalls.map((call) => ({ ...call })),
+      successfulToolCalls: this.toolCalls
+        .filter((call) => this.completedToolIds.has(call.toolUseId) && !this.failedToolIds.has(call.toolUseId))
+        .map((call) => ({ ...call })),
+      usage: { ...this.usage },
+      failure: this.failure,
+      settled: this.settled,
+    };
+  }
+
+  private ensureAssistant(message: Record<string, unknown>, begin = false): string {
+    if (!begin && typeof message.id !== "string" && typeof message.timestamp !== "number" && this.currentAssistantId) {
+      return this.currentAssistantId;
+    }
+    const fallback = `pi-assistant-${++this.assistantSequence}`;
+    const id = assistantMessageId(message, fallback);
+    if (!this.assistantOrder.includes(id)) this.assistantOrder.push(id);
+    this.currentAssistantId = id;
+    return id;
+  }
+}

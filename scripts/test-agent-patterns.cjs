@@ -52,6 +52,26 @@ check(
   "working",
 );
 check(
+  "worker submit accepts Codex 0.144 bare Working shimmer",
+  ap.workerSubmitTurnStarted("codex", "\x1b[27;3H\x1b[38;2;128;128;128mWorking"),
+  true,
+);
+check(
+  "worker submit rejects an active MCP startup spinner",
+  ap.workerSubmitTurnStarted("codex", "Starting MCP servers (2/5) (0s • esc to interrupt)"),
+  false,
+);
+check(
+  "worker submit lets newer Working beat a stale MCP startup line",
+  ap.workerSubmitTurnStarted("codex", "Starting MCP servers (3/3)\nready\nWorking"),
+  true,
+);
+check(
+  "worker submit rejects idle Codex composer",
+  ap.workerSubmitTurnStarted("codex", "Ask about this codebase  Context 0% used"),
+  false,
+);
+check(
   "claude permission prompt beats working footer",
   ap.classifyTail(
     "claude",

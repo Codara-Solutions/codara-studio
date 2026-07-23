@@ -44,6 +44,7 @@ const RECURSIVE_WATCHER_WORKER = String.raw`
   }
 
   for (const dir of workerData.dirs) add(dir);
+  parentPort.postMessage({ type: "ready" });
   parentPort.on("message", (message) => {
     if (message?.type === "watch") add(message.dir);
   });
@@ -57,6 +58,7 @@ interface State {
   // remains keyed by path so every main-thread handle is disposed on stop.
   watchers: Map<string, FSWatcher>;
   recursiveWorker: Worker | null;
+  recursiveReady: Promise<void> | null;
   recursiveDirs: Set<string>;
   pendingDirs: Set<string>;
   flushTimer: NodeJS.Timeout | null;
@@ -93,8 +95,26 @@ function watchTopLevelDir(state: State, dirAbsolute: string): void {
   state.recursiveWorker?.postMessage({ type: "watch", dir: dirAbsolute });
 }
 
-function startRecursiveWatcher(state: State, webContents: WebContents): void {
-  if (state.recursiveWorker || state.recursiveDirs.size === 0) return;
+function startRecursiveWatcher(state: State, webContents: WebContents): Promise<void> {
+  if (state.recursiveWorker) return state.recursiveReady ?? Promise.resolve();
+  if (state.recursiveDirs.size === 0) return Promise.resolve();
+  let settleReady: () => void = () => undefined;
+  const ready = new Promise<void>((resolveReady) => {
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolveReady();
+    }, 1_500);
+    timeout.unref?.();
+    settleReady = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolveReady();
+    };
+  });
+  state.recursiveReady = ready;
   const worker = new Worker(RECURSIVE_WATCHER_WORKER, {
     eval: true,
     workerData: { dirs: Array.from(state.recursiveDirs) },
@@ -110,6 +130,11 @@ function startRecursiveWatcher(state: State, webContents: WebContents): void {
       return;
     }
     const payload = message as Record<string, unknown>;
+    if (payload.type === "ready") {
+      settleReady();
+      state.recursiveReady = null;
+      return;
+    }
     if (
       payload.type === "change" &&
       typeof payload.base === "string" &&
@@ -124,13 +149,18 @@ function startRecursiveWatcher(state: State, webContents: WebContents): void {
     }
   });
   worker.on("error", (err) => {
+    settleReady();
+    state.recursiveReady = null;
     if (byContents.get(webContents.id) === state) {
       console.warn("[fs-watcher] recursive worker failed", err);
     }
   });
   worker.on("exit", () => {
+    settleReady();
     if (state.recursiveWorker === worker) state.recursiveWorker = null;
+    state.recursiveReady = null;
   });
+  return ready;
 }
 
 function disposeState(state: State): void {
@@ -160,6 +190,7 @@ export async function setWatchRoot(
     root,
     watchers: new Map<string, FSWatcher>(),
     recursiveWorker: null,
+    recursiveReady: null,
     recursiveDirs: new Set<string>(),
     pendingDirs: new Set<string>(),
     flushTimer: null,
@@ -200,7 +231,7 @@ export async function setWatchRoot(
       // file (or was deleted) and needs no dedicated recursive watcher.
       void stat;
       watchTopLevelDir(state, childAbsolute);
-      startRecursiveWatcher(state, webContents);
+      void startRecursiveWatcher(state, webContents);
     } catch { /* not a directory (file change or deletion) — nothing to watch */ }
 
     stageChange(state, root, rel);
@@ -238,7 +269,13 @@ export async function setWatchRoot(
     if (IGNORED_TOP_LEVEL.has(entry.name)) continue;
     watchTopLevelDir(state, resolve(root, entry.name));
   }
-  startRecursiveWatcher(state, webContents);
+  // The root watcher is already active, but nested directory events are not
+  // observable until the worker has actually registered its fs.watch handles.
+  // Await its ready handshake (bounded inside startRecursiveWatcher) so the
+  // renderer's post-arm reconciliation happens after that blind window. Any
+  // file created while the worker starts is then caught by the reconciliation;
+  // anything created after readiness is caught by the watcher.
+  await startRecursiveWatcher(state, webContents);
 }
 
 export function disposeForWebContents(webContents: WebContents): void {

@@ -83,6 +83,17 @@ function taskContextText(step: StepState | undefined, task: WorkerTask): string 
   ].join("\n");
 }
 
+const COORDINATOR_ONLY_ACCEPTANCE = new Set([
+  "all spawned worker tasks complete.",
+  "the selected worker tasks complete and report final evidence.",
+]);
+
+function workerAcceptanceCriteria(step: StepState | undefined): string[] {
+  return (step?.acceptanceCriteria ?? []).filter(
+    (criterion) => !COORDINATOR_ONLY_ACCEPTANCE.has(criterion.trim().toLowerCase()),
+  );
+}
+
 function shouldOfferRuntimeDelegation(step: StepState | undefined, task: WorkerTask): boolean {
   const text = taskContextText(step, task);
   if (/\b(subagent|sub-agent|delegate|delegation|agent team|worktree|parallel probes?|independent probes?)\b/i.test(text)) {
@@ -182,8 +193,8 @@ function renderPeerCommsGuidance(
   const self = task.id;
   return [
     managerReachable
-      ? "Cora may be running several Claude/Codex/Cursor workers for this same step, plus the `manager` that spawned this batch. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, ask a peer for a second opinion, or reach the manager when blocked or at a milestone."
-      : "Cora may be running several Claude/Codex/Cursor workers for this same step. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, or ask a peer for a second opinion.",
+      ? "Cora may be running several Claude/Codex workers for this same step, plus the `manager` that spawned this batch. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, ask a peer for a second opinion, or reach the manager when blocked or at a milestone."
+      : "Cora may be running several Claude/Codex workers for this same step. Use this mailbox to coordinate: prevent duplicated work, settle a shared interface/contract, share a narrow finding, or ask a peer for a second opinion.",
     "This is a run-artifact mailbox, not the project source tree; using it is allowed even for read-only verifier tasks.",
     managerReachable
       ? "Addressable recipients: any peer worker task id shown by `list`, `all` (every peer), or `manager` (the orchestrator that spawned you)."
@@ -210,11 +221,11 @@ function renderPeerCommsGuidance(
 }
 
 // Mirror of run-store's runHasMcpManager (kept local to avoid an import cycle;
-// see that function's comment for WHY the manager is only reachable in CC/Codex
+// see that function's comment for WHY the manager is only reachable in CLI/Pi
 // execute/auto-manager runs). Keep the two predicates in sync.
 function managerInboxIsRead(run: RunState): boolean {
   return (
-    (run.chatBackend === "claude" || run.chatBackend === "codex") &&
+    (run.chatBackend === "claude" || run.chatBackend === "codex" || run.chatBackend === "pi") &&
     (run.chatMode === "execute" || run.chatMode === "auto")
   );
 }
@@ -387,8 +398,9 @@ function renderImplementationWorkerPrompt({
     );
   }
 
-  if (step?.acceptanceCriteria?.length) {
-    lines.push("", "## ACCEPTANCE", ...step.acceptanceCriteria.map((c) => `- ${c}`));
+  const acceptanceCriteria = workerAcceptanceCriteria(step);
+  if (acceptanceCriteria.length) {
+    lines.push("", "## ACCEPTANCE", ...acceptanceCriteria.map((c) => `- ${c}`));
   }
 
   lines.push(
@@ -545,12 +557,13 @@ function renderVerifierWorkerPrompt({
     );
   }
 
-  if (step?.acceptanceCriteria?.length) {
+  const acceptanceCriteria = workerAcceptanceCriteria(step);
+  if (acceptanceCriteria.length) {
     lines.push(
       "",
       "## ACCEPTANCE CRITERIA — your ground truth",
       "These are the claims you must independently prove or disprove. Decompose each into atomic sub-claims and verify each one.",
-      ...step.acceptanceCriteria.map((c) => `- ${c}`),
+      ...acceptanceCriteria.map((c) => `- ${c}`),
     );
   }
 

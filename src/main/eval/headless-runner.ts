@@ -29,13 +29,22 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import * as pty from "../pty-manager";
 import { defaultShell } from "../shells";
 import { applyInMemorySettingsOverride, flush as flushStorage } from "../storage";
+import { setPreference } from "../preferences-store";
 import { detectAgentRuntimes } from "../agent-runtimes";
 import { startAutopilot, getRun, cancelRun } from "../orchestration/run-store";
 import { sanitizeWorkspace } from "../workspace-sanitize";
 import { runDir } from "../orchestration/event-log";
 import { subscribeToEvents } from "../orchestration/event-log";
 import { loadManagerPromptProfileFromPath } from "../orchestration/prompt-profile";
-import type { RunState, RunStatus, ShellInfo, SparkEvent } from "@shared/types";
+import type {
+  AgentEffortLevel,
+  ChatBackendKind,
+  ChatMode,
+  RunState,
+  RunStatus,
+  ShellInfo,
+  SparkEvent,
+} from "@shared/types";
 import type { HeadlessEvalArgs } from "./headless-args";
 
 // Variant config schema mirrored loosely from evals/lib/variant-config.js.
@@ -46,8 +55,10 @@ interface VariantConfig {
   variantId?: string;
   agent?: string;
   manager?: {
+    backend?: string;
     model?: string;
     effort?: string;
+    mode?: string;
     profilePath?: string;
   };
   workerPolicy?: {
@@ -125,6 +136,9 @@ export async function runHeadlessEval(args: HeadlessEvalArgs): Promise<HeadlessO
 
   let run: RunState;
   try {
+    const managerBackend = normalizeManagerBackend(config?.manager?.backend);
+    const managerMode = normalizeManagerMode(config?.manager?.mode);
+    const managerEffort = normalizeManagerEffort(config?.manager?.effort);
     run = await startAutopilot({
       workspaceId: `eval-${makeShortId()}`,
       workspaceName: `eval-${config?.variantId ?? "spark"}`,
@@ -132,6 +146,10 @@ export async function runHeadlessEval(args: HeadlessEvalArgs): Promise<HeadlessO
       planPath,
       planText,
       planTitle: deriveTitle(planText) || "Eval plan",
+      chatBackend: managerBackend,
+      chatModel: config?.manager?.model?.trim() || undefined,
+      chatMode: managerMode,
+      chatEffort: managerEffort,
     });
   } catch (err) {
     stopEvents();
@@ -146,6 +164,15 @@ export async function runHeadlessEval(args: HeadlessEvalArgs): Promise<HeadlessO
   // updates (commitRunChange) which the event bus also signals — the polling
   // is just a safety net so a missed event still lets the runner exit.
   const finalStatus = await waitForTerminalStatus(run.id, budgetMs);
+
+  // A CLI manager's codara_complete MCP call flips the run terminal slightly
+  // before the provider stream returns its final usage/result frame. Give that
+  // already-finished turn a short grace to settle so the mirrored run contains
+  // truthful manager token telemetry and a completed SparkCall instead of
+  // exiting the Electron process with the call still marked started.
+  if (finalStatus.kind === "complete") {
+    await waitForManagerCallSettlement(run.id, 10_000);
+  }
 
   // If we exited because the budget elapsed (or the run paused indefinitely),
   // the run-store still thinks it is running. Mark it cancelled so run.json
@@ -255,6 +282,20 @@ export async function runHeadlessEval(args: HeadlessEvalArgs): Promise<HeadlessO
 // harness has no operator to answer questions.
 type TerminalKind = "complete" | "failed" | "cancelled" | "timed_out" | "paused_blocked";
 const PAUSED_GRACE_MS = 60_000;
+
+async function waitForManagerCallSettlement(runId: string, graceMs: number): Promise<void> {
+  const deadline = Date.now() + graceMs;
+  while (Date.now() < deadline) {
+    const snapshot = await getRun(runId);
+    if (!snapshot) return;
+    const hasActiveCall = snapshot.sparkCalls.some(
+      (call) => call.status === "started" && !call.completedAt,
+    );
+    if (!hasActiveCall) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  emitEvent("eval.manager_settlement_timeout", { runId, graceMs });
+}
 
 async function waitForTerminalStatus(
   runId: string,
@@ -405,9 +446,20 @@ function installWorkerSpawnHandler(_planPath: string): () => void {
 // disk; affects only the running process. Returns nothing — the caches are
 // shared module state already inspected by orchestration call paths.
 async function applyVariantConfig(config: VariantConfig, configPath: string): Promise<void> {
+  // A headless variant explicitly pinning Fable is the operator's consent for
+  // that isolated evaluation. Persist the opt-in only inside this process's
+  // SPARK_HOME_DIR; ordinary desktop preferences are never read or changed.
+  if (/fable/i.test(config.manager?.model ?? "")) {
+    await setPreference("fableEnabled", true);
+    emitEvent("eval.fable_enabled_by_variant", { model: config.manager?.model });
+  }
   // Manager model overrides remain on the AppSettings struct.
   const settingsOverride: Record<string, unknown> = {};
-  if (config.manager?.model && config.manager.model.trim()) {
+  if (
+    (!config.manager?.backend || config.manager.backend === "openrouter") &&
+    config.manager?.model &&
+    config.manager.model.trim()
+  ) {
     settingsOverride.openRouterModel = config.manager.model.trim();
   }
   if (Object.keys(settingsOverride).length > 0) {
@@ -466,6 +518,29 @@ async function applyVariantConfig(config: VariantConfig, configPath: string): Pr
   // an accurate INSTALLED list and the manager picks workers from the pool's
   // runtimes by capability rather than guessing.
   await detectAgentRuntimes(true).catch(() => undefined);
+}
+
+function normalizeManagerBackend(value: string | undefined): ChatBackendKind | undefined {
+  return value === "openrouter" || value === "claude" || value === "codex" || value === "pi"
+    ? value
+    : undefined;
+}
+
+function normalizeManagerMode(value: string | undefined): ChatMode | undefined {
+  return value === "auto" || value === "execute" || value === "talk" || value === "plan"
+    ? value
+    : undefined;
+}
+
+function normalizeManagerEffort(value: string | undefined): AgentEffortLevel | undefined {
+  return value === "minimal" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh" ||
+    value === "max"
+    ? value
+    : undefined;
 }
 
 function deriveTitle(planText: string): string {

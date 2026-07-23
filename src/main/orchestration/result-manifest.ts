@@ -70,6 +70,9 @@ export async function collectRunResultManifest(
       attemptId: entry.attemptId,
     }))
     .filter((item) => item.text);
+  const managerSummary = [...(run.humanMessages ?? [])]
+    .reverse()
+    .find((message) => message.author === "spark" && compact(message.message))?.message;
   const checks: RunResultManifest["checks"] = [];
   const evidence: RunResultManifest["evidence"] = [];
   const risks = new Set<string>();
@@ -127,7 +130,11 @@ export async function collectRunResultManifest(
     runId: run.id,
     status: run.status,
     generatedAt,
-    summary: outcomes[0]?.text || run.title,
+    // The manager owns the run-level conclusion; worker reports are scoped
+    // evidence and remain listed under outcomes. Using a worker summary here
+    // can invert perspective (for example, "no workers were spawned" means no
+    // subworkers inside that worker, not no workers in the Cora run).
+    summary: compact(managerSummary) || outcomes[0]?.text || run.title,
     workspace: {
       cwd,
       mode: workspace.mode,

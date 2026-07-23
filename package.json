@@ -14,6 +14,21 @@
     "build:safe": "cmd /c start /b /wait /affinity FFFFF0FF cmd /c electron-vite build",
     "start": "electron-vite preview",
     "cora": "node bin/cora.cjs",
+    "test:cora-cli": "node scripts/test-cora-cli.cjs",
+    "test:step-lifecycle": "node scripts/test-step-lifecycle.cjs",
+    "test:parallel-wave": "node scripts/test-parallel-wave.cjs",
+    "test:outcome-memory": "node scripts/test-outcome-memory.cjs",
+    "test:pi-runtime": "node scripts/test-pi-runtime.cjs && node scripts/test-pi-verification.cjs && node scripts/test-pi-admission-cache.mjs && node scripts/test-pi-frontier-evidence.cjs && node scripts/test-pi-frontier-gate.mjs",
+    "test:pi-frontier-gate": "node scripts/test-pi-frontier-gate.mjs",
+    "test:pi-rpc": "node scripts/test-pi-rpc-client.cjs",
+    "test:pi-turn": "node scripts/test-pi-turn.cjs && node scripts/test-pi-cora-extension.cjs",
+    "smoke:pi-live": "node scripts/smoke-pi-live.cjs",
+    "smoke:pi-worker-live": "node scripts/smoke-pi-worker-live.cjs",
+    "smoke:pi-frontier-live": "node scripts/smoke-pi-frontier-live.cjs",
+    "smoke:pi-frontier-admission-live": "node scripts/smoke-pi-frontier-live.cjs",
+    "smoke:pi-frontier-blocker-live": "node scripts/smoke-pi-frontier-blocker-live.cjs",
+    "smoke:pi-frontier-contract-revision-live": "node scripts/smoke-pi-frontier-contract-revision-live.cjs",
+    "profile:pi-subagent-lifecycle": "node scripts/profile-pi-subagent-lifecycle.cjs",
     "inspect-run": "node scripts/inspect-run.cjs",
     "test:worktrees": "node scripts/test-worktrees.cjs",
     "eval:v2:noop": "node evals-v2/run-benchmark.cjs --adapter noop --repetitions 1",
@@ -46,6 +61,7 @@
     "@codemirror/search": "^6.7.0",
     "@codemirror/state": "^6.6.0",
     "@codemirror/view": "^6.42.1",
+    "@earendil-works/pi-coding-agent": "0.80.10",
     "@iconify-json/catppuccin": "^1.2.17",
     "@replit/codemirror-vim": "^6.3.0",
     "@uiw/codemirror-theme-atomone": "^4.25.9",
@@ -86,7 +102,7 @@
     "@types/react-dom": "^18.3.0",
     "@types/ssh2": "^1.15.5",
     "@vitejs/plugin-react": "^4.3.1",
-    "electron": "^32.0.0",
+    "electron": "43.1.1",
     "electron-builder": "^26.15.3",
     "electron-vite": "^2.3.0",
     "react": "^18.3.1",
@@ -109,6 +125,7 @@
     ],
     "asarUnpack": [
       "node_modules/@anthropic-ai/claude-agent-sdk-*/**",
+      "node_modules/@earendil-works/pi-coding-agent/node_modules/**/*.node",
       "node_modules/@vscode/ripgrep/**",
       "node_modules/@vscode/ripgrep-${os}-${arch}/**"
     ],
@@ -130,6 +147,10 @@
       {
         "from": "resources/codara-studio-mcp",
         "to": "codara-studio-mcp"
+      },
+      {
+        "from": "resources/pi-cora",
+        "to": "pi-cora"
       },
       {
         "from": "resources/sounds",
@@ -162,5 +183,13 @@
       "owner": "Codara-Solutions",
       "repo": "codara-studio"
     }
+  },
+  "allowScripts": {
+    "cpu-features@0.0.10": true,
+    "electron@43.1.1": true,
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.21.5": true,
+    "node-pty@1.1.0": true,
+    "ssh2@1.17.0": true
   }
 }

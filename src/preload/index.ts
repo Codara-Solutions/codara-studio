@@ -58,9 +58,16 @@ import type {
   NotificationSoundKind,
   NotifyEvent,
   UpdateChatBackendInput,
+  UpdateCoraWhiteboardInput,
+  ExportCoraWhiteboardFileInput,
+  ExportFileDialogInput,
+  ImportedCoraWhiteboardFile,
   WorkerSessionRuntime,
   WorkerSessionSummary,
   PauseRunInput,
+  PiSubscriptionAuthEvent,
+  PiSubscriptionOverview,
+  PiSubscriptionProvider,
   PlanFile,
   PrefKey,
   PreferencesChange,
@@ -176,6 +183,25 @@ const api = {
   settings: {
     load: (): Promise<AppSettings> => ipcRenderer.invoke("settings:load"),
     save: (settings: AppSettings): Promise<AppSettings> => ipcRenderer.invoke("settings:save", settings),
+  },
+  piSubscriptions: {
+    status: (): Promise<PiSubscriptionOverview> => ipcRenderer.invoke("pi-subscriptions:status"),
+    connect: (
+      provider: PiSubscriptionProvider,
+    ): Promise<{ requestId: string; provider: PiSubscriptionProvider }> =>
+      ipcRenderer.invoke("pi-subscriptions:connect", { provider }),
+    respond: (input: { requestId: string; promptId: string; value: string }): Promise<void> =>
+      ipcRenderer.invoke("pi-subscriptions:respond", input),
+    cancel: (requestId: string): Promise<void> =>
+      ipcRenderer.invoke("pi-subscriptions:cancel", { requestId }),
+    disconnect: (provider: PiSubscriptionProvider): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:disconnect", { provider }),
+    onEvent: (handler: (event: PiSubscriptionAuthEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, authEvent: PiSubscriptionAuthEvent) =>
+        handler(authEvent);
+      ipcRenderer.on("pi-subscriptions:event", listener);
+      return () => ipcRenderer.off("pi-subscriptions:event", listener);
+    },
   },
   agents: {
     runtimes: (force = false): Promise<AgentRuntimeDiagnostic[]> =>
@@ -317,6 +343,15 @@ const api = {
       ipcRenderer.invoke("dialog:openDirectory", defaultPath),
     openImages: (defaultPath?: string): Promise<string[]> =>
       ipcRenderer.invoke("dialog:openImages", defaultPath),
+    exportWhiteboard: (input: ExportCoraWhiteboardFileInput): Promise<string | null> =>
+      ipcRenderer.invoke("dialog:exportWhiteboard", input),
+    importWhiteboard: (defaultPath?: string): Promise<ImportedCoraWhiteboardFile | null> =>
+      ipcRenderer.invoke("dialog:importWhiteboard", defaultPath),
+    // Generic dialog-based export for renderer-produced artifacts (board
+    // images, …): prompts for a destination and writes utf8 text or base64
+    // bytes. See dialog:exportFile in ipc.ts.
+    exportFile: (input: ExportFileDialogInput): Promise<string | null> =>
+      ipcRenderer.invoke("dialog:exportFile", input),
   },
   attachments: {
     savePastedImage: (input: { dataUrl: string; name?: string }): Promise<string> =>
@@ -516,6 +551,8 @@ const api = {
       ipcRenderer.invoke("orchestration:createRun", input),
     getRun: (runId: string): Promise<RunState | null> =>
       ipcRenderer.invoke("orchestration:getRun", runId),
+    readWorkerPrompt: (runId: string, attemptId: string): Promise<string> =>
+      ipcRenderer.invoke("orchestration:readWorkerPrompt", { runId, attemptId }),
     listRuns: (workspaceId?: string): Promise<RunState[]> =>
       ipcRenderer.invoke("orchestration:listRuns", workspaceId),
     listEvents: (runId: string): Promise<SparkEvent[]> =>
@@ -550,6 +587,8 @@ const api = {
       ipcRenderer.invoke("orchestration:markRunSeen", input),
     renameRun: (input: RenameRunInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:renameRun", input),
+    updateWhiteboard: (input: UpdateCoraWhiteboardInput): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:updateWhiteboard", input),
     updateChatBackend: (input: UpdateChatBackendInput): Promise<RunState> =>
       ipcRenderer.invoke("orchestration:updateChatBackend", input),
     createStep: (input: CreateStepInput): Promise<RunState> =>
@@ -760,8 +799,19 @@ const api = {
     sync: (input: {
       workspaceId: string;
       workspaceName?: string;
-      panes: Array<{ paneId: string; tabId: string; tabTitle: string; excluded: boolean }>;
-    }): Promise<void> => ipcRenderer.invoke("terminalNotify:sync", input),
+      panes: Array<{
+        paneId: string;
+        tabId: string;
+        tabTitle: string;
+        excluded: boolean;
+        runtimeHint?: "claude" | "codex" | null;
+      }>;
+    }): Promise<TerminalAgentStatePayload[]> => ipcRenderer.invoke("terminalNotify:sync", input),
+    // Level-triggered recovery for renderer reload/cold hydration. Live events
+    // stay the fast path; this snapshot repairs any transition emitted before
+    // the listener or restored worker chip existed.
+    snapshot: (): Promise<TerminalAgentStatePayload[]> =>
+      ipcRenderer.invoke("terminalNotify:snapshot"),
     // Fires alongside every terminal-agent alert (regardless of channel
     // settings) so the workspace rail can mark the owning workspace as
     // needing attention until the user visits the pane's tab.

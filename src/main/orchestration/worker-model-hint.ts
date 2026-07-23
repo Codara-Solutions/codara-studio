@@ -11,10 +11,9 @@ import { normalizeCodexModelId } from "@shared/model-catalog";
 // Fable 5 (`claude-fable-5`) is Anthropic's top, most expensive tier. Cora-
 // spawned workers (execute-mode codara_spawn_workers, plan-council judges,
 // autopilot worker tasks) default to Opus 4.8 for a fable hint; they may run
-// fable whenever the user explicitly asked for it in their own message this run
-// (see runUserRequestedFable / workerFableAllowed in run-store.ts, and the
-// `allowFable` option below). The "Allow Fable 5" setting does NOT gate this
-// worker path — an explicit user request is sufficient. A manager LLM may
+// fable only when the user enabled it in Settings AND explicitly asked for it
+// in their own message this run (see runUserRequestedFable /
+// workerFableAllowed in run-store.ts, and the `allowFable` option below). A manager LLM may
 // nonetheless emit a fable modelHint; this helper downgrades any such hint to
 // Opus 4.8 unless the caller has cleared the gate. Case-insensitive substring
 // match on "fable" so
@@ -41,9 +40,8 @@ export function sanitizeWorkerModelHint(
 ): { hint: string | undefined; downgraded: boolean } {
   if (hint && /fable/i.test(hint)) {
     // Pass a fable hint through UNCHANGED only when the caller has cleared the
-    // explicit-request gate (workerFableAllowed): the user named Fable in their
-    // own message this run. Otherwise downgrade to Opus 4.8 and report it so the
-    // swap isn't silent.
+    // combined settings + explicit-request gate (workerFableAllowed). Otherwise
+    // downgrade to Opus 4.8 and report it so the swap isn't silent.
     if (opts?.allowFable) return { hint, downgraded: false };
     return { hint: SPARK_WORKER_FABLE_FALLBACK, downgraded: true };
   }
@@ -68,8 +66,8 @@ export function sanitizeWorkerModelHint(
 // report cannot self-authorize the most expensive tier. Any user message that
 // mentions fable latches the allowance on for the rest of the run (matching
 // "use it only if I explicitly tell it"). For Cora-spawned workers this is the
-// whole gate (see workerFableAllowed in run-store.ts) — the "fableEnabled"
-// preference does not further restrict the worker path.
+// user-intent half of the gate; workerFableAllowed in run-store.ts also checks
+// the live "fableEnabled" preference.
 export function runUserRequestedFable(run: RunState): boolean {
   return run.humanMessages.some(
     (m) =>

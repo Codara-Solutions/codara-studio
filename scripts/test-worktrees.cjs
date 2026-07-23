@@ -1,8 +1,9 @@
 // Integration test for src/main/git-worktrees.ts. There is no unit runner in
 // this repo, so we bundle the TS module with esbuild (a vite dependency, so
 // already in node_modules) into a temp CJS file and exercise it against a
-// throwaway git repo. The module's only runtime import is ./git-exec (node
-// child_process); the @shared/types import is type-only and erased by esbuild.
+// throwaway git repo. git-exec also supports remote workspaces now, so keep
+// its optional Electron/SSH dependencies external and resolve the same
+// @shared alias as the production build.
 const assert = require("node:assert");
 const { execFileSync } = require("node:child_process");
 const { existsSync, mkdtempSync, writeFileSync, rmSync } = require("node:fs");
@@ -15,14 +16,19 @@ function git(cwd, args) {
 
 async function main() {
   const esbuild = require("esbuild");
-  const outFile = path.join(os.tmpdir(), `spark-worktrees-${process.pid}.cjs`);
+  // Keep the bundle below the project root so external packages resolve from
+  // this repository's node_modules. A bundle in /tmp cannot require ssh2.
+  const outFile = path.join(__dirname, `.codara-worktrees-${process.pid}.cjs`);
   await esbuild.build({
     entryPoints: [path.join(__dirname, "..", "src", "main", "git-worktrees.ts")],
     bundle: true,
     platform: "node",
     format: "cjs",
     outfile: outFile,
-    external: ["electron"],
+    alias: {
+      "@shared": path.join(__dirname, "..", "src", "shared"),
+    },
+    external: ["electron", "ssh2"],
     logLevel: "silent",
   });
   const wt = require(outFile);

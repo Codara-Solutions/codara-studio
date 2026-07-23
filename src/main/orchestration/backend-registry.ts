@@ -12,12 +12,14 @@ import type { ChatBackendKind } from "@shared/types";
 import { openRouterBackend } from "./openrouter-backend";
 import { claudeBackend } from "./claude-backend";
 import { codexBackend } from "./codex-backend";
+import { piBackend } from "./pi-backend";
 import type { SparkAgentBackend } from "./spark-agent-backend";
 
 const REGISTRY: Record<ChatBackendKind, SparkAgentBackend> = {
   openrouter: openRouterBackend,
   claude: claudeBackend,
   codex: codexBackend,
+  pi: piBackend,
 };
 
 export function getBackend(kind: ChatBackendKind): SparkAgentBackend {

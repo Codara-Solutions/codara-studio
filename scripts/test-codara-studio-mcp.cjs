@@ -46,7 +46,8 @@ const PREVIEW_TOOLS = [
   "codara_preview_run",
 ];
 const TERMINAL_TOOLS = ["codara_terminal_create", "codara_terminal_write", "codara_terminal_read"];
-const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS];
+const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update"];
+const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS];
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -161,6 +162,12 @@ function sortedEqual(actual, expected, label) {
     assert.ok(
       askUser.inputSchema.properties.recommendedOptionId,
       "codara_ask_user must expose recommendedOptionId",
+    );
+    const complete = execute.definitions.find((tool) => tool.name === "codara_complete");
+    assert.match(
+      complete?.description ?? "",
+      /Never call it for greetings, conversation, explanations, advice, read-only questions/,
+      "codara_complete must not instruct Auto conversations to enter execution completion",
     );
 
     // Automation mode.

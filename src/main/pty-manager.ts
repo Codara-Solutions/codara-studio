@@ -603,18 +603,27 @@ function withStartupCommand(
     // shell with a fresh interactive one so Ctrl+C from the TUI lands at
     // a prompt instead of exiting the pane.
     const exe = shell.family === "zsh" ? "zsh" : "bash";
+    const startupArgs =
+      noShellIntegration && shell.family === "bash"
+        ? ["--noprofile", "--norc", "-ic"]
+        : noShellIntegration
+          ? ["-f", "-ic"]
+          : ["-ic"];
     return {
-      shell: { ...shell, args: ["-ic", `${startup}; exec ${exe} -i`] },
+      shell: { ...shell, args: [...startupArgs, `${startup}; exec ${exe} -i`] },
       handled: true,
-      skipsProfile: false,
+      skipsProfile: noShellIntegration,
     };
   }
 
   if (shell.family === "sh") {
     return {
-      shell: { ...shell, args: ["-ic", `${startup}; exec sh -i`] },
+      shell: {
+        ...shell,
+        args: [noShellIntegration ? "-fic" : "-ic", `${startup}; exec sh -i`],
+      },
       handled: true,
-      skipsProfile: false,
+      skipsProfile: noShellIntegration,
     };
   }
 
@@ -1162,6 +1171,17 @@ export function write(id: string, data: string): void {
   s.pty.write(data);
 }
 
+/**
+ * Paint process-owned status/output into an attached terminal without sending
+ * it to the shell as keyboard input. Cora's Pi workers run over structured RPC
+ * in main but retain the familiar live Workers terminal; this bridge lets that
+ * terminal display their human-readable activity while the idle shell remains
+ * only the renderer-owned PTY host.
+ */
+export function publishOutput(id: string, data: string | Buffer): void {
+  enqueueData(id, data);
+}
+
 // Inject text as a bracketed paste (CSI 200~ ... CSI 201~) followed by an
 // optional submit (CR). Every "write to a running CLI" feature needs this —
 // element inspector, drag-drop file paths, slash commands, persona
@@ -1263,6 +1283,34 @@ export function readTail(id: string, maxBytes: number): Buffer | null {
   const merged = s.tail.length === 1 ? s.tail[0] : Buffer.concat(s.tail, s.tailBytes);
   if (merged.length <= cap) return merged;
   return merged.subarray(merged.length - cap);
+}
+
+// Snapshot recent raw output while preserving the PTY's original chunk
+// boundaries. The terminal-agent monitor uses this when it attaches after a
+// restored pane has already started producing output: replaying the chunks in
+// order rebuilds the same runtime state it would have observed live. Returning
+// a copied array (rather than the Session's mutable ring) also makes it safe for
+// the caller to iterate while future onData callbacks append new chunks.
+export function readTailChunks(id: string, maxBytes: number): Buffer[] | null {
+  const s = sessions.get(id);
+  if (!s) return null;
+  const cap = Math.max(0, Math.min(maxBytes | 0, TAIL_BUFFER_BYTES));
+  if (cap === 0 || s.tail.length === 0) return [];
+
+  const out: Buffer[] = [];
+  let remaining = cap;
+  for (let index = s.tail.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const chunk = s.tail[index];
+    if (!chunk) continue;
+    if (chunk.length <= remaining) {
+      out.unshift(chunk);
+      remaining -= chunk.length;
+      continue;
+    }
+    out.unshift(chunk.subarray(chunk.length - remaining));
+    remaining = 0;
+  }
+  return out;
 }
 
 // Subscribe to the raw byte stream of a session. Returns an unsubscribe fn.

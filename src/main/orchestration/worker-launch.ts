@@ -13,7 +13,7 @@
 
 import { promises as fs } from "node:fs";
 import type { WorkerArtifactPaths, WorkerReport, WorkerTask } from "@shared/types";
-import { stripAnsiWorkerTap } from "@shared/agent-patterns";
+import { stripAnsiWorkerTap, workerSubmitTurnStarted } from "@shared/agent-patterns";
 import * as pty from "../pty-manager";
 
 // Local copy of run-store's delay — replicated here rather than imported to
@@ -226,20 +226,26 @@ export async function writeAutoFailureReport(
   paths: WorkerArtifactPaths,
   task: WorkerTask,
   reason: string,
+  options?: { interrupted?: boolean },
 ): Promise<void> {
+  const interrupted = options?.interrupted === true;
   const report: WorkerReport = {
     status: "failed",
-    summary: `Cora could not complete the ${task.runtimePreference} CLI worker for this task: ${reason}.`,
+    summary: interrupted
+      ? `The ${task.runtimePreference} worker was stopped before it could finish: ${reason}.`
+      : `Cora could not complete the ${task.runtimePreference} CLI worker for this task: ${reason}.`,
     filesChanged: [],
     commandsRun: [],
     tests: [],
     proof: [],
-    risks: [
-      `${task.runtimePreference} CLI failed before producing a final report: ${reason}. Verify it is installed, logged in, reachable, and the model id is valid.`,
-    ],
-    followups: [
-      "Verify the CLI is installed, on PATH, and logged in, then re-run.",
-    ],
+    risks: interrupted
+      ? [`The worker was interrupted by a user stop or run pause before producing a final report: ${reason}.`]
+      : [
+          `${task.runtimePreference} CLI failed before producing a final report: ${reason}. Verify it is installed, logged in, reachable, and the model id is valid.`,
+        ],
+    followups: interrupted
+      ? ["Resume the run or retry the worker when you want it to continue."]
+      : ["Verify the CLI is installed, on PATH, and logged in, then re-run."],
   };
   try {
     await fs.writeFile(paths.finalReportJson, JSON.stringify(report, null, 2), "utf8");
@@ -269,8 +275,7 @@ export async function pasteAndSubmit(
     // still settling, leaving the prompt visible-but-unsent — that hangs the
     // whole run until the 90-minute watchdog. The agent has started its turn
     // once it paints a working/interrupt indicator or its context usage
-    // moves off 0%. Cursor's working indicator is the "Composing" line plus
-    // "ctrl+c to stop" in the follow-up footer. The tap is installed now
+    // moves off 0%. The tap is installed now
     // (input is idle post-startup) so no stale "esc to interrupt" from the
     // startup phase is captured.
     let visible = "";
@@ -278,19 +283,7 @@ export async function pasteAndSubmit(
       visible = (visible + stripAnsiWorkerTap(chunk.toString("utf8"))).slice(-6000);
     });
     const startedTurn = (): boolean => {
-      // Codex's MCP-startup spinner prints "(Ns • esc to interrupt)" too, so
-      // "esc to interrupt" only means a real turn once that startup line is
-      // gone. Without this guard a paste dropped during startup is read as a
-      // started turn (false positive) and the run hangs at an empty prompt.
-      const mcpStarting = /Starting MCP servers/i.test(visible);
-      return (
-        (!mcpStarting && /esc to interrupt/i.test(visible)) ||
-        /Context\s+[1-9][0-9]?%\s+used/i.test(visible) ||
-        /\btokens used\b/i.test(visible) ||
-        /\bComposing\b/.test(visible) ||
-        /ctrl\+c to stop/i.test(visible) ||
-        /Composer\s+2\.5\s+Fast\s+·\s+[0-9]+(?:\.[0-9]+)?%/i.test(visible)
-      );
+      return workerSubmitTurnStarted(runtime, visible);
     };
 
     try {

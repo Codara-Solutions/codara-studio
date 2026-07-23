@@ -413,6 +413,43 @@ export function classifyTail(
   return null;
 }
 
+// Narrow post-submit detector for Cora's worker launch driver. Unlike the
+// always-on terminal classifier, its input tap starts only after the agent TUI
+// is input-ready and immediately before Codara pastes a worker prompt. That
+// makes Codex 0.144's bare shimmer word "Working" a safe positive here even
+// though it is deliberately too broad for general terminal polling.
+export function workerSubmitTurnStarted(
+  runtime: PublicAgentRuntime,
+  visible: string,
+): boolean {
+  const stripped = stripAnsi(visible);
+  const lastMcpStartup = stripped.toLowerCase().lastIndexOf("starting mcp servers");
+  // A completed startup line can remain in the rolling buffer after the turn
+  // begins. Only let it veto signals that occur at/before that line; a newer
+  // Codex shimmer or composer marker proves the prompt was submitted.
+  const afterLastMcp = lastMcpStartup >= 0 ? stripped.slice(lastMcpStartup + 20) : stripped;
+  if (lastMcpStartup >= 0) {
+    return (
+      (runtime === "codex" && /\bWorking\b/i.test(afterLastMcp)) ||
+      /Context\s+[1-9][0-9]?%\s+used/i.test(afterLastMcp) ||
+      /\btokens used\b/i.test(afterLastMcp) ||
+      /\bComposing\b/.test(afterLastMcp) ||
+      /ctrl\+c to stop/i.test(afterLastMcp) ||
+      /Composer\s+2\.5\s+Fast\s+·\s+[0-9]+(?:\.[0-9]+)?%/i.test(afterLastMcp)
+    );
+  }
+  return (
+    classifyTail(runtime, stripped) === "working" ||
+    (runtime === "codex" && /\bWorking\b/i.test(stripped)) ||
+    /esc to interrupt/i.test(stripped) ||
+    /Context\s+[1-9][0-9]?%\s+used/i.test(stripped) ||
+    /\btokens used\b/i.test(stripped) ||
+    /\bComposing\b/.test(stripped) ||
+    /ctrl\+c to stop/i.test(stripped) ||
+    /Composer\s+2\.5\s+Fast\s+·\s+[0-9]+(?:\.[0-9]+)?%/i.test(stripped)
+  );
+}
+
 // ── Teammate lifecycle events ─────────────────────────────────────────────
 // Claude Code ≥2.1.2x background agents / Task-tool teammates print parseable
 // transcript lines when they start and finish. Counted from the stream so the

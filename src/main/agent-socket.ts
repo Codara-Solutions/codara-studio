@@ -2,7 +2,7 @@ import { app, BrowserWindow } from "electron";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { promises as fsp } from "node:fs";
-import { join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import * as pty from "./pty-manager";
 import { sparkHome } from "./spark-home";
@@ -11,7 +11,10 @@ import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./pr
 import { requestTerminalOp } from "./terminal-bridge";
 import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
 import { loadPreferences, setPreference } from "./preferences-store";
+import { loadSettings, loadState, saveState } from "./storage";
+import { setAllowedRoots } from "./fs-sandbox";
 import { validateWorkerAccessFields } from "./orchestration/worker-access";
+import { findLiveVerifierFeedbackRetry } from "./orchestration/step-lifecycle";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import {
   CODEX_MODEL_CATALOG,
@@ -20,6 +23,10 @@ import {
 } from "@shared/model-catalog";
 import type {
   AppPreferences,
+  AppState,
+  AgentEffortLevel,
+  ChatBackendKind,
+  ChatMode,
   InAppNotificationTone,
   NotificationSoundKind,
   NotifyKind,
@@ -33,6 +40,8 @@ import type {
   RunState,
   ScheduledJob,
   UpdateScheduledJobInput,
+  UpdateCoraWhiteboardInput,
+  Workspace,
 } from "@shared/types";
 
 const HANDSHAKE_FILE = "agent-socket.json";
@@ -351,6 +360,14 @@ async function dispatch(
         return await handleTerminalWrite(params, id);
       case "chat.append":
         return await handleChatAppend(params, id);
+      case "chat.create":
+        return await handleChatCreate(params, id);
+      case "chat.send":
+        return await handleChatSend(params, id);
+      case "chat.wait":
+        return await handleChatWait(params, id, res);
+      case "chat.cancel":
+        return await handleChatCancel(params, id);
       case "app.info":
         return handleAppInfo(id);
       case "app.screenshot":
@@ -410,6 +427,10 @@ async function dispatch(
         return await handleOrchestratorCheckMessages(params, id);
       case "orchestrator.name_chat":
         return await handleOrchestratorNameChat(params, id);
+      case "orchestrator.whiteboard_get":
+        return await handleOrchestratorWhiteboardGet(params, id);
+      case "orchestrator.whiteboard_update":
+        return await handleOrchestratorWhiteboardUpdate(params, id);
       case "automation.list":
         return await handleAutomationList(params, id);
       case "automation.get":
@@ -502,6 +523,32 @@ async function handleTerminalCreate(
   const cwd = stringParam(params, "cwd");
   const command = stringParam(params, "command");
   const title = stringParam(params, "title");
+  // The MCP server stamps SPARK_RUN_ID onto terminal.create so a background
+  // run's terminal lands in — and defaults its cwd to — the RUN's workspace,
+  // not whichever workspace the user happens to be viewing. Resolution is
+  // best-effort: no runId (user-facing/non-run agents) or an unknown run keeps
+  // the active-workspace behavior.
+  const runId = stringParam(params, "runId");
+  let workspaceId: string | null = null;
+  let workspaceCwd: string | null = null;
+  if (runId) {
+    try {
+      const run = await (await getRunStore()).getRun(runId);
+      if (run) {
+        workspaceId = run.workspaceId ?? null;
+        workspaceCwd =
+          typeof run.settingsSnapshot?.workspaceCwd === "string"
+            ? run.settingsSnapshot.workspaceCwd
+            : null;
+        if (workspaceId && !workspaceCwd) {
+          const state = await loadState();
+          workspaceCwd = state.workspaces.find((w) => w.id === workspaceId)?.cwd ?? null;
+        }
+      }
+    } catch {
+      /* identity resolution is best-effort */
+    }
+  }
   try {
     const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string }>(
       "create",
@@ -509,6 +556,8 @@ async function handleTerminalCreate(
         ...(cwd ? { cwd } : {}),
         ...(command ? { command } : {}),
         ...(title ? { title } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
+        ...(workspaceCwd ? { workspaceCwd } : {}),
       },
     );
     // The renderer resolves as soon as the tab is added to state, but the PTY
@@ -661,6 +710,299 @@ async function handleChatAppend(
       return errorResponse(id, ERR_INVALID_PARAMS, message);
     }
     return errorResponse(id, ERR_INTERNAL, message);
+  }
+}
+
+const CLI_CHAT_BACKENDS = new Set<ChatBackendKind>(["openrouter", "claude", "codex", "pi"]);
+const CLI_CHAT_MODES = new Set<ChatMode>(["auto", "execute", "talk", "plan"]);
+const CLI_CHAT_EFFORTS = new Set<AgentEffortLevel>([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+const CLI_WAIT_STOP_STATUSES = new Set<RunState["status"]>([
+  "blocked",
+  "paused",
+  "complete",
+  "failed",
+  "cancelled",
+]);
+
+function enumParam<T extends string>(
+  params: Record<string, unknown>,
+  key: string,
+  allowed: ReadonlySet<T>,
+): T | null | undefined {
+  const value = params[key];
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || !allowed.has(value as T)) return null;
+  return value as T;
+}
+
+async function canonicalWorkspaceDirectory(rawCwd: string): Promise<string> {
+  const requested = resolve(rawCwd);
+  let cwd: string;
+  try {
+    cwd = await fsp.realpath(requested);
+  } catch {
+    throw new Error(`Workspace directory does not exist: ${requested}`);
+  }
+  const stat = await fsp.stat(cwd).catch(() => null);
+  if (!stat?.isDirectory()) throw new Error(`Workspace path is not a directory: ${cwd}`);
+  return cwd;
+}
+
+async function workspacePathMatches(candidate: string, cwd: string): Promise<boolean> {
+  try {
+    return (await fsp.realpath(resolve(candidate))) === cwd;
+  } catch {
+    return resolve(candidate) === cwd;
+  }
+}
+
+function broadcastStateChanged(state: AppState): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    const wc = window.webContents;
+    if (wc.isDestroyed()) continue;
+    try {
+      wc.send("state:changed", state);
+    } catch {
+      /* A window may disappear between enumeration and send. */
+    }
+  }
+}
+
+async function ensureCliWorkspace(
+  rawCwd: string,
+  requestedName?: string,
+): Promise<{ workspace: Workspace; created: boolean }> {
+  const cwd = await canonicalWorkspaceDirectory(rawCwd);
+  const state = await loadState();
+  for (const workspace of state.workspaces) {
+    if (await workspacePathMatches(workspace.cwd, cwd)) {
+      return { workspace, created: false };
+    }
+  }
+
+  const workspace: Workspace = {
+    id: `ws-cli-${randomBytes(8).toString("hex")}`,
+    name: requestedName?.trim() || basename(cwd) || "workspace",
+    cwd,
+    color: "#2AA298",
+    workers: [],
+  };
+  const next: AppState = {
+    workspaces: [...state.workspaces, workspace],
+    workspaceGroups: state.workspaceGroups,
+    workspaceRailOrder: [...(state.workspaceRailOrder ?? []), workspace.id],
+    activeWorkspaceId: state.activeWorkspaceId ?? workspace.id,
+  };
+  await saveState(next);
+  setAllowedRoots(next.workspaces.map((item) => item.cwd));
+  broadcastStateChanged(next);
+  return { workspace, created: true };
+}
+
+async function activateCliWorkspace(workspaceId: string): Promise<void> {
+  const state = await loadState();
+  if (state.activeWorkspaceId === workspaceId) return;
+  const next: AppState = { ...state, activeWorkspaceId: workspaceId };
+  await saveState(next);
+  broadcastStateChanged(next);
+}
+
+async function resolveCliRun(runIdOrPrefix: string): Promise<RunState | null> {
+  const runStore = await getRunStore();
+  const exact = await runStore.getRun(runIdOrPrefix);
+  if (exact) return exact;
+  const matches = (await runStore.listRuns()).filter((run) => run.id.startsWith(runIdOrPrefix));
+  return matches.length === 1 ? matches[0] : null;
+}
+
+// Public headless Cora lifecycle used by bin/cora.cjs. Unlike orchestrator.*,
+// these methods represent the human at the top of a chat: create starts a real
+// managed run, send appends a user turn (or answers the current question), and
+// wait blocks without consuming manager tokens until the run needs attention.
+async function handleChatCreate(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const rawCwd = stringParam(params, "cwd");
+  if (!rawCwd) return errorResponse(id, ERR_INVALID_PARAMS, "cwd is required");
+  const rawPrompt = stringParam(params, "prompt");
+  if (!rawPrompt) return errorResponse(id, ERR_INVALID_PARAMS, "prompt is required");
+
+  const backend = enumParam(params, "backend", CLI_CHAT_BACKENDS);
+  if (backend === null) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "backend must be openrouter, claude, codex, or pi");
+  }
+  const mode = enumParam(params, "mode", CLI_CHAT_MODES);
+  if (mode === null) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "mode must be auto, execute, talk, or plan");
+  }
+  const effort = enumParam(params, "effort", CLI_CHAT_EFFORTS);
+  if (effort === null) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      "effort must be minimal, low, medium, high, xhigh, or max",
+    );
+  }
+
+  let binding: { workspace: Workspace; created: boolean };
+  try {
+    binding = await ensureCliWorkspace(rawCwd, stringParam(params, "workspaceName") ?? undefined);
+  } catch (err) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  // Visible Claude/Codex worker panes are owned by the renderer workspace
+  // store. An Execute run left in a background workspace can create task
+  // envelopes, but the renderer correctly refuses to put their PTYs in the
+  // currently active project's tab store. Activate only modes that can spawn
+  // workers; conversational Talk/Plan sessions stay non-disruptive.
+  const effectiveMode = mode ?? "execute";
+  if (effectiveMode === "execute" || effectiveMode === "auto") {
+    await activateCliWorkspace(binding.workspace.id);
+  }
+
+  const prompt = rawPrompt.slice(0, CHAT_APPEND_MAX_CHARS);
+  const title = stringParam(params, "title")?.trim();
+  const model = stringParam(params, "model")?.trim();
+  const runStore = await getRunStore();
+  try {
+    let runId: string | undefined;
+    if (title) {
+      const seeded = await runStore.createRun({
+        workspaceId: binding.workspace.id,
+        workspaceName: binding.workspace.name,
+        cwd: binding.workspace.cwd,
+        title,
+        chatBackend: backend,
+        chatModel: model,
+        chatMode: mode,
+        chatEffort: effort,
+      });
+      runId = seeded.id;
+    }
+    const run = await runStore.startAutopilot({
+      runId,
+      workspaceId: binding.workspace.id,
+      workspaceName: binding.workspace.name,
+      cwd: binding.workspace.cwd,
+      initialUserNote: prompt,
+      initialUserNoteClientMessageId: `cli-${randomBytes(8).toString("hex")}`,
+      chatBackend: backend,
+      chatModel: model,
+      chatMode: mode,
+      chatEffort: effort,
+    });
+    return successResponse(id, {
+      run,
+      workspace: binding.workspace,
+      workspaceCreated: binding.created,
+      truncated: prompt.length < rawPrompt.length,
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function handleChatSend(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runIdOrPrefix = stringParam(params, "runId");
+  if (!runIdOrPrefix) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const rawContent = stringParam(params, "content");
+  if (!rawContent) return errorResponse(id, ERR_INVALID_PARAMS, "content is required");
+  const run = await resolveCliRun(runIdOrPrefix);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found or prefix is ambiguous: ${runIdOrPrefix}`);
+
+  const content = rawContent.slice(0, CHAT_APPEND_MAX_CHARS);
+  const runStore = await getRunStore();
+  try {
+    const questionMessageId = run.blockedOn?.questionMessageId;
+    const updated = questionMessageId
+      ? await runStore.answerRunQuestion({
+          runId: run.id,
+          questionMessageId,
+          clientMessageId: `cli-${randomBytes(8).toString("hex")}`,
+          message: content,
+        })
+      : await runStore.addRunMessage({
+          runId: run.id,
+          clientMessageId: `cli-${randomBytes(8).toString("hex")}`,
+          author: "user",
+          kind: "note",
+          message: content,
+        });
+    return successResponse(id, {
+      run: updated,
+      answeredQuestion: Boolean(questionMessageId),
+      truncated: content.length < rawContent.length,
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function handleChatWait(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const runIdOrPrefix = stringParam(params, "runId");
+  if (!runIdOrPrefix) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const requestedTimeout = optionalNumberParam(params, "timeoutMs");
+  const timeoutMs = Math.max(0, Math.min(requestedTimeout ?? 20 * 60_000, 60 * 60_000));
+  const deadline = Date.now() + timeoutMs;
+  let run = await resolveCliRun(runIdOrPrefix);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found or prefix is ambiguous: ${runIdOrPrefix}`);
+
+  while (!CLI_WAIT_STOP_STATUSES.has(run.status) && Date.now() < deadline) {
+    if (res.destroyed) {
+      return errorResponse(id, ERR_INTERNAL, "client disconnected while waiting");
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+    const fresh = await (await getRunStore()).getRun(run.id);
+    if (!fresh) return errorResponse(id, ERR_INVALID_PARAMS, `Run disappeared while waiting: ${run.id}`);
+    run = fresh;
+  }
+  return successResponse(id, {
+    run,
+    timedOut: !CLI_WAIT_STOP_STATUSES.has(run.status),
+    needsAttention: run.status === "blocked" || run.status === "paused",
+  });
+}
+
+async function handleChatCancel(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runIdOrPrefix = stringParam(params, "runId");
+  if (!runIdOrPrefix) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const run = await resolveCliRun(runIdOrPrefix);
+  if (!run) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `Run not found or prefix is ambiguous: ${runIdOrPrefix}`,
+    );
+  }
+  const reason = stringParam(params, "reason")?.slice(0, CHAT_APPEND_MAX_CHARS);
+  try {
+    const updated = await (await getRunStore()).cancelRun({ runId: run.id, reason });
+    return successResponse(id, { run: updated });
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
   }
 }
 
@@ -914,6 +1256,33 @@ interface OrchestratorWorkerInput {
   taskClass?: "skeleton" | "feature" | "leaf" | "verifier";
 }
 
+function crossProviderPeerModel(
+  runtime: "claude" | "codex",
+  requestedModel?: string,
+): string {
+  const model = requestedModel?.trim().toLowerCase() ?? "";
+  if (runtime === "codex") {
+    if (model.includes("haiku") || model.includes("luna")) return CODEX_MODEL_BY_TIER.cheap;
+    if (model.includes("sonnet") || model.includes("terra")) return CODEX_MODEL_BY_TIER.mid;
+    return CODEX_MODEL_BY_TIER.top;
+  }
+  if (model.includes("luna") || model.includes("haiku")) return "claude-haiku-4-5";
+  if (model.includes("terra") || model.includes("sonnet")) return "claude-sonnet-5";
+  return "claude-opus-4-8";
+}
+
+function runtimeHadEnvironmentalFailure(
+  run: RunState,
+  runtime: "claude" | "codex",
+): boolean {
+  return run.workerAttempts.some((attempt) =>
+    attempt.runtime === runtime &&
+    attempt.status === "failed" &&
+    /oauth|auth(?:entication|orization)?|subscription|provider|cli|failed to launch|parseable final-report/i
+      .test(attempt.error ?? ""),
+  );
+}
+
 // Declarative counterpart to orchestrator.spawn_workers. This RPC validates
 // and acknowledges the requested standing-terminal groups, but deliberately
 // does not mutate the run here. The active Claude/Codex backend records the
@@ -982,6 +1351,102 @@ async function handleOrchestratorSpawnWorkers(
     ? run.settingsSnapshot.workspaceCwd
     : process.cwd();
 
+  // A wait on a failed worker may unblock just as run-store queues its
+  // opposite-runtime fallback. The manager can then immediately request a
+  // semantically identical verifier while the fallback is already queued or
+  // running. Reuse that live verifier instead of creating a second step and
+  // spending twice for the same evidence. Multi-verifier batches remain
+  // supported: this guard only handles a later, single-verifier spawn.
+  const onlyRequestedWorker = rawWorkers.length === 1 && rawWorkers[0] && typeof rawWorkers[0] === "object"
+    ? rawWorkers[0] as Record<string, unknown> & OrchestratorWorkerInput
+    : null;
+  if (onlyRequestedWorker?.taskClass === "verifier") {
+    const liveVerifier = [...run.workerTasks].reverse().find((task) => {
+      if (task.taskClass !== "verifier" || TERMINAL_WORKER_TASK_STATUSES.has(task.status)) return false;
+      const verifierBeganAt = Date.parse(task.createdAt);
+      return !run.workerAttempts.some((attempt) => {
+        const implementation = run.workerTasks.find(
+          (candidate) => candidate.id === attempt.workerTaskId && candidate.taskClass !== "verifier",
+        );
+        const finishedAt = attempt.finishedAt ? Date.parse(attempt.finishedAt) : Number.NaN;
+        return Boolean(implementation) && Number.isFinite(finishedAt) && finishedAt > verifierBeganAt;
+      });
+    });
+    if (liveVerifier) {
+      return successResponse(id, {
+        worker_task_ids: [liveVerifier.id],
+        reused_existing_verifier: true,
+        note:
+          `Reused live verifier ${liveVerifier.id} (${liveVerifier.status}) instead of creating duplicate ` +
+          "verification work. Wait for this worker before deciding whether another verifier is needed.",
+      });
+    }
+  }
+
+  if (onlyRequestedWorker && onlyRequestedWorker.taskClass !== "verifier") {
+    const liveFeedbackRetry = findLiveVerifierFeedbackRetry(run, onlyRequestedWorker);
+    if (liveFeedbackRetry) {
+      return successResponse(id, {
+        worker_task_ids: [liveFeedbackRetry.id],
+        reused_feedback_retry: true,
+        note:
+          `Reused verifier-feedback retry ${liveFeedbackRetry.id} (${liveFeedbackRetry.status}) instead of ` +
+          "starting another corrective worker on the same files. Wait for this worker before deciding " +
+          "whether more implementation work is needed.",
+      });
+    }
+  }
+
+  // Cross-provider verification is a control-plane invariant, not merely a
+  // prompt suggestion. For the common single-verifier follow-up, reroute a
+  // same-provider request to the installed/enabled peer and translate the
+  // requested model to the equivalent tier. Multi-verifier batches are left
+  // untouched so complex work can deliberately request one peer from each
+  // provider.
+  let verifierPeerOverride: {
+    runtime: "claude" | "codex";
+    modelHint: string;
+    note: string;
+  } | null = null;
+  if (
+    onlyRequestedWorker?.taskClass === "verifier" &&
+    (onlyRequestedWorker.runtimePreference === "claude" || onlyRequestedWorker.runtimePreference === "codex")
+  ) {
+    const latestImplementation = [...run.workerTasks].reverse().find(
+      (task) =>
+        task.taskClass !== "verifier" &&
+        (task.runtimePreference === "claude" || task.runtimePreference === "codex"),
+    );
+    if (latestImplementation?.runtimePreference === onlyRequestedWorker.runtimePreference) {
+      const opposite = latestImplementation.runtimePreference === "claude" ? "codex" : "claude";
+      const [{ applyAgentRuntimeSettings, detectAgentRuntimes }, settings] = await Promise.all([
+        import("./agent-runtimes"),
+        loadSettings(),
+      ]);
+      const runtimes = applyAgentRuntimeSettings(
+        await detectAgentRuntimes(),
+        settings,
+      );
+      // Cross-provider verification is valuable only when that provider is
+      // healthy. If it already failed environmentally in this run (expired
+      // OAuth, launch failure, etc.), keep the manager's requested runtime
+      // instead of deterministically sending another worker into the same
+      // broken subscription—as happened twice in run-mrwp6vfh-wkticw.
+      const oppositeAvailable =
+        runtimes.some((runtime) => runtime.kind === opposite && runtime.installed) &&
+        !runtimeHadEnvironmentalFailure(run, opposite);
+      if (oppositeAvailable) {
+        verifierPeerOverride = {
+          runtime: opposite,
+          modelHint: crossProviderPeerModel(opposite, onlyRequestedWorker.modelHint),
+          note:
+            `Rerouted the verifier from ${latestImplementation.runtimePreference} to ${opposite} so the ` +
+            "implementation is checked by an independent provider family.",
+        };
+      }
+    }
+  }
+
   // Execute-mode workers don't belong to a planned step; the manager
   // spawns them ad-hoc. RunGraph.tsx renders FROM run.steps, so without a
   // step entry the graph falls through to OutcomeGraph's "No steps run"
@@ -1022,9 +1487,9 @@ async function handleOrchestratorSpawnWorkers(
   // find the surviving worker's class for the solo-spawn advisory below).
   const createdTaskClasses: (string | undefined)[] = [];
   const attemptIdsToLaunch: string[] = [];
-  // Fable 5 is the premium tier — a Cora-spawned worker may run it whenever the
-  // user explicitly asked for Fable this run (workerFableAllowed; the setting does
-  // not gate this worker path). Otherwise downgrade any fable modelHint the manager emits to Opus 4.8 here
+  // Fable 5 is the premium tier — a Cora-spawned worker may run it only when
+  // the setting is enabled AND the user explicitly asked for Fable this run.
+  // Otherwise downgrade any fable modelHint the manager emits to Opus 4.8 here
   // (the spawn chokepoint) and remember the titles so we can surface ONE visible
   // system note after the loop. Computed once per spawn RPC — the run's
   // user-authored messages don't change mid-call.
@@ -1042,8 +1507,11 @@ async function handleOrchestratorSpawnWorkers(
     const title = typeof w.title === "string" ? w.title.trim() : "";
     if (!title) continue;
     const description = typeof w.description === "string" ? w.description : "";
+    const effectiveRuntime = verifierPeerOverride?.runtime ?? w.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK;
+    const effectiveModelHint = verifierPeerOverride?.modelHint ??
+      (typeof w.modelHint === "string" ? w.modelHint : undefined);
     const sanitizedModel = runStore.sanitizeWorkerModelHint(
-      typeof w.modelHint === "string" ? w.modelHint : undefined,
+      effectiveModelHint,
       { allowFable },
     );
     if (sanitizedModel.downgraded) downgradedFableTitles.push(title);
@@ -1052,7 +1520,7 @@ async function handleOrchestratorSpawnWorkers(
       stepId: synthStepId,
       title,
       description,
-      runtimePreference: (w.runtimePreference ?? ORCHESTRATOR_RUNTIME_FALLBACK) as
+      runtimePreference: effectiveRuntime as
         | "claude" | "codex" | "shell" | "manual",
       modelHint: sanitizedModel.hint,
       effortHint: w.effortHint,
@@ -1098,8 +1566,8 @@ async function handleOrchestratorSpawnWorkers(
   if (downgradedFableTitles.length > 0) {
     const list = downgradedFableTitles.map((t) => `"${t}"`).join(", ");
     const note =
-      `Fable 5 (claude-fable-5) is the premium tier — a worker runs it only when you ` +
-      `explicitly ask for Fable in your message. ` +
+      `Fable 5 (claude-fable-5) is the premium tier — a worker runs it only when “Allow Fable 5” ` +
+      `is enabled in Settings → Agents and you explicitly ask for Fable in your message. ` +
       `Downgraded ${downgradedFableTitles.length === 1 ? "worker" : "workers"} ${list} to Opus 4.8 (claude-opus-4-8).`;
     try {
       await runStore.addRunMessage({
@@ -1120,9 +1588,10 @@ async function handleOrchestratorSpawnWorkers(
   // this response is the ONLY channel that reaches managers of long-lived
   // runs when fleet/model policy evolves underneath them.
   const notes: string[] = [];
+  if (verifierPeerOverride) notes.push(verifierPeerOverride.note);
   if (downgradedFableTitles.length > 0) {
     notes.push(
-      `Fable 5 (claude-fable-5) is the premium tier; ${downgradedFableTitles.length} worker model hint(s) were downgraded to claude-opus-4-8 because the user did not explicitly request Fable this run. Only assign claude-fable-5 to a worker when the user's own message explicitly asks for Fable 5 — and when they do, it IS available; assign it rather than telling them it is unavailable.`,
+      `Fable 5 (claude-fable-5) is the premium tier; ${downgradedFableTitles.length} worker model hint(s) were downgraded to claude-opus-4-8 because Codara's two-part gate was not satisfied. Fable workers require BOTH “Allow Fable 5” in Settings and an explicit Fable request in the user's own message.`,
     );
   }
   // Solo-spawn advisory. Legitimate solo spawns exist — a lone verifier or
@@ -1326,6 +1795,22 @@ async function handleOrchestratorComplete(
   if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   const blocked = rejectIfAutomationRun(run, id, "codara_complete");
   if (blocked) return blocked;
+  // `codara_complete` is the terminal half of the managed execution protocol,
+  // not a substitute for spawning work. Rejecting it before any worker has
+  // existed prevents a manager from turning a prose-only "I'll spawn..."
+  // response into a successful zero-edit run. Read-only chat answers do not
+  // call this tool, and completed managed runs always retain worker history.
+  if (
+    (run.chatMode === "execute" || run.chatMode === "auto") &&
+    (run.workerTasks ?? []).length === 0
+  ) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      "Cannot complete an execute-mode run before any worker task exists. " +
+        "Call codara_spawn_workers for the active user request, wait for the workers, verify their reports, then call codara_complete.",
+    );
+  }
   // Guard: never complete the run while a worker task the coordinator spawned is
   // still in-flight. Completing here flips the run to `complete`, which fires the
   // "done" toast and tears the run down mid-flight — observed live: a corrective
@@ -1350,8 +1835,43 @@ async function handleOrchestratorComplete(
       id,
       ERR_INVALID_PARAMS,
       `Cannot complete: ${pendingTasks.length} worker task(s) still pending/running: ${detail}. ` +
-        `Call codara_wait_for_workers with worker_task_ids [${ids}] first, then read each report and call ` +
+      `Call codara_wait_for_workers with worker_task_ids [${ids}] first, then read each report and call ` +
         `codara_complete once every worker has reached a terminal state (accepted/failed/cancelled).`,
+    );
+  }
+  // Verification freshness invariant: an earlier green verifier does not
+  // cover a later corrective edit, and a FEEDBACK report is evidence of a
+  // defect rather than permission to land. Compare report timestamps so every
+  // files-changing implementation has a terminal-OK verifier after it.
+  let latestChangedImplementationAt = 0;
+  let latestPassingVerifierAt = 0;
+  let latestVerifierConfidence: string | null = null;
+  for (const attempt of run.workerAttempts ?? []) {
+    if (!attempt.finalReportPath) continue;
+    const task = (run.workerTasks ?? []).find((candidate) => candidate.id === attempt.workerTaskId);
+    if (!task) continue;
+    const report = await runStore.readWorkerReport(attempt.finalReportPath).catch(() => null);
+    if (!report) continue;
+    const finishedAt = Date.parse(attempt.finishedAt ?? attempt.startedAt ?? "") || 0;
+    if (task.taskClass === "verifier" && report.verifier) {
+      latestVerifierConfidence = report.verifier.confidence;
+      if (["PERFECT", "VERIFIED", "PARTIAL"].includes(report.verifier.confidence)) {
+        latestPassingVerifierAt = Math.max(latestPassingVerifierAt, finishedAt);
+      }
+    } else if (report.filesChanged.length > 0) {
+      latestChangedImplementationAt = Math.max(latestChangedImplementationAt, finishedAt);
+    }
+  }
+  if (
+    latestChangedImplementationAt > 0 &&
+    latestPassingVerifierAt < latestChangedImplementationAt
+  ) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      "Cannot complete: the latest files-changing implementation does not have a newer passing verifier verdict. " +
+        `Latest verifier confidence: ${latestVerifierConfidence ?? "none"}. ` +
+        "Spawn a read-only verifier for the corrected workspace, wait for it, and address any FEEDBACK/FAILED claims before calling codara_complete.",
     );
   }
   try {
@@ -1363,7 +1883,7 @@ async function handleOrchestratorComplete(
         message: summary,
       });
     }
-    await runStore.updateRunStatus({ runId, status: "complete" });
+    await runStore.completeRunFromOrchestrator(runId);
     return successResponse(id, { ok: true });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
@@ -1481,33 +2001,76 @@ async function handleOrchestratorWaitForWorkers(
       : WAIT_FOR_WORKERS_DEFAULT_TIMEOUT_MS;
   const runStore = await getRunStore();
   const deadline = Date.now() + requestedTimeout;
-  const snapshotWorkers = (run: RunState): {
+  const resolveLatestReplacement = (run: RunState, requestedTaskId: string) => {
+    let current = run.workerTasks.find((task) => task.id === requestedTaskId) ?? null;
+    const seen = new Set<string>();
+    while (current && !seen.has(current.id)) {
+      seen.add(current.id);
+      const replacement = [...run.workerTasks]
+        .reverse()
+        .find((task) => task.supersedesTaskId === current?.id);
+      if (!replacement) break;
+      current = replacement;
+    }
+    return current;
+  };
+  const snapshotWorkers = async (run: RunState): Promise<{
     worker_task_id: string;
+    requested_worker_task_id?: string;
     task_status: string | null;
     attempt_status: string | null;
     runtime: string | null;
     started_at: string | null;
     finished_at: string | null;
     final_report_path: string | null;
+    final_report: unknown;
     is_terminal: boolean;
-  }[] =>
-    workerTaskIds.map((wtid) => {
-      const task = run.workerTasks.find((wt) => wt.id === wtid);
+  }[]> =>
+    Promise.all(workerTaskIds.map(async (wtid) => {
+      const task = resolveLatestReplacement(run, wtid);
       const lastAttempt = task
-        ? [...run.workerAttempts].reverse().find((a) => a.workerTaskId === wtid)
+        ? [...run.workerAttempts].reverse().find((a) => a.workerTaskId === task.id)
         : null;
       const taskStatus = task ? task.status : null;
+      const report = lastAttempt?.finalReportPath
+        ? await runStore.readWorkerReport(lastAttempt.finalReportPath).catch(() => null)
+        : null;
       return {
-        worker_task_id: wtid,
+        worker_task_id: task?.id ?? wtid,
+        ...(task && task.id !== wtid ? { requested_worker_task_id: wtid } : {}),
         task_status: taskStatus,
         attempt_status: lastAttempt?.status ?? null,
         runtime: lastAttempt?.runtime ?? task?.runtimePreference ?? null,
         started_at: lastAttempt?.startedAt ?? null,
         finished_at: lastAttempt?.finishedAt ?? null,
         final_report_path: lastAttempt?.finalReportPath ?? null,
+        final_report: report
+          ? {
+              status: report.status,
+              summary: report.summary,
+              files_changed: report.filesChanged,
+              proof: report.proof.slice(0, 8),
+              risks: report.risks.slice(0, 6),
+              followups: report.followups.slice(0, 6),
+              verifier: report.verifier
+                ? {
+                    status: report.verifier.status,
+                    confidence: report.verifier.confidence,
+                    failed_claims: report.verifier.atomicClaims
+                      .filter((claim) => claim.verdict === "failed")
+                      .slice(0, 8),
+                    unsure_claims: report.verifier.atomicClaims
+                      .filter((claim) => claim.verdict === "unsure")
+                      .slice(0, 8),
+                    corrective_prompt: report.verifier.correctivePrompt ?? null,
+                    missing_oracle: report.verifier.missingOracle ?? null,
+                  }
+                : null,
+            }
+          : null,
         is_terminal: taskStatus !== null && TERMINAL_WORKER_TASK_STATUSES.has(taskStatus),
       };
-    });
+    }));
   const firstRun = await runStore.getRun(runId);
   if (!firstRun) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
   const blocked = rejectIfAutomationRun(firstRun, id, "codara_wait_for_workers");
@@ -1529,7 +2092,7 @@ async function handleOrchestratorWaitForWorkers(
     }
     const run = await runStore.getRun(runId);
     if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run vanished mid-wait: ${runId}`);
-    const snapshot = snapshotWorkers(run);
+    const snapshot = await snapshotWorkers(run);
     const terminalCount = snapshot.filter((w) => w.is_terminal).length;
     if (mode === "any" && terminalCount > 0) {
       return successResponse(id, {
@@ -1548,7 +2111,7 @@ async function handleOrchestratorWaitForWorkers(
     await new Promise<void>((resolve) => setTimeout(resolve, WAIT_FOR_WORKERS_POLL_MS));
   }
   const finalRun = await runStore.getRun(runId);
-  const finalSnapshot = finalRun ? snapshotWorkers(finalRun) : snapshotWorkers(firstRun);
+  const finalSnapshot = await snapshotWorkers(finalRun ?? firstRun);
   return successResponse(id, {
     workers: finalSnapshot.map(({ is_terminal: _t, ...rest }) => rest),
     manager_messages: await peekManagerInbox(runStore, runId),
@@ -2839,6 +3402,67 @@ async function handleOrchestratorNameChat(
     // the chat history popover.
     const updated = await runStore.renameRun({ runId: run.id, title });
     return successResponse(id, { ok: true, run_id: updated.id, title: updated.title });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleOrchestratorWhiteboardGet(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  return successResponse(id, {
+    run_id: run.id,
+    whiteboard: run.whiteboard ?? null,
+  });
+}
+
+async function handleOrchestratorWhiteboardUpdate(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const rawAction = stringParam(params, "action") ?? "replace";
+  if (rawAction !== "replace" && rawAction !== "merge" && rawAction !== "clear") {
+    return errorResponse(id, ERR_INVALID_PARAMS, "action must be replace, merge, or clear");
+  }
+  const input: UpdateCoraWhiteboardInput = {
+    runId,
+    action: rawAction,
+    editor: "cora",
+    baseRevision:
+      typeof params.baseRevision === "number" && Number.isFinite(params.baseRevision)
+        ? Math.max(0, Math.floor(params.baseRevision))
+        : undefined,
+    title: stringParam(params, "title") ?? undefined,
+    summary: stringParam(params, "summary") ?? undefined,
+    nodes: Array.isArray(params.nodes)
+      ? params.nodes as UpdateCoraWhiteboardInput["nodes"]
+      : undefined,
+    edges: Array.isArray(params.edges)
+      ? params.edges as UpdateCoraWhiteboardInput["edges"]
+      : undefined,
+    removeNodeIds: Array.isArray(params.removeNodeIds)
+      ? params.removeNodeIds.filter((value): value is string => typeof value === "string")
+      : undefined,
+    removeEdgeIds: Array.isArray(params.removeEdgeIds)
+      ? params.removeEdgeIds.filter((value): value is string => typeof value === "string")
+      : undefined,
+  };
+  try {
+    const runStore = await getRunStore();
+    const updated = await runStore.updateCoraWhiteboard(input);
+    return successResponse(id, {
+      ok: true,
+      run_id: updated.id,
+      whiteboard: updated.whiteboard ?? null,
+    });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }

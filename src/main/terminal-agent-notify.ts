@@ -13,7 +13,7 @@ import {
 } from "@shared/agent-patterns";
 import * as pty from "./pty-manager";
 import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify";
-import type { RuntimeState } from "@shared/types";
+import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 
 // Terminal-agent notifier: tells the user when a Claude / Codex CLI
 // they ran in a NORMAL terminal pane stops working — finished a turn, or
@@ -97,9 +97,11 @@ const OSC_NOTIFY_MUTE_MS = 10_000;
 // teammate can go 20s+ between paints — but an idle teammate's turn IS over,
 // so clearing the counter on total byte-silence is correct in both cases.
 const TEAMMATE_SILENCE_MS = 15_000;
-// How long to wait for the renderer-side TerminalPane to actually spawn the
-// pty after the pane registers. Panes spawn on mount, so this is generous.
-const SPAWN_WAIT_MS = 120_000;
+// Late registration is most visible during cold restore: the shell can print
+// the resume banner + first busy frame before the renderer has hydrated its
+// terminal registry. Replaying a bounded recent tail closes that gap without
+// scanning the full 4 MB PTY history on every workspace switch.
+const BOOTSTRAP_TAIL_BYTES = 256 * 1024;
 
 interface PaneWatcher {
   paneId: string;
@@ -114,7 +116,10 @@ interface PaneWatcher {
   // every worker turn would be pure noise.
   excluded: boolean;
   attached: boolean;
-  awaitingSpawn: boolean;
+  // True only while rebuilding state from output that predates this watcher.
+  // Historic bytes may contain old completion/permission frames; they are
+  // useful for reconstructing the current chip but must never create toasts.
+  replayingTail: boolean;
   untap: (() => void) | null;
   offExit: (() => void) | null;
   decoder: TextDecoder;
@@ -123,6 +128,7 @@ interface PaneWatcher {
   // Tail of the previous chunk's raw text (see CARRY_MAX).
   carry: string;
   runtime: PublicAgentRuntime | null;
+  runtimeHint: PublicAgentRuntime | null;
   state: "idle" | "working" | "blocked" | "failed";
   // Set by a real user/injected write or an OSC shell command marker. This
   // lets a launch-time trust/login/permission dialog alert even when the CLI
@@ -195,6 +201,10 @@ export interface TerminalNotifyPaneEntry {
   tabId: string;
   tabTitle: string;
   excluded: boolean;
+  // Restore already knows which CLI owns this pane from its durable session
+  // pointer. Supplying that fact avoids depending on a banner that may have
+  // been printed before the watcher attached (or omitted by a resume redraw).
+  runtimeHint?: PublicAgentRuntime | null;
 }
 
 // Renderer-driven registry sync, one call per workspace layout change. The
@@ -207,8 +217,8 @@ export function syncTerminalNotifyPanes(input: {
   workspaceId: string;
   workspaceName?: string;
   panes: TerminalNotifyPaneEntry[];
-}): void {
-  if (!input || typeof input.workspaceId !== "string" || !Array.isArray(input.panes)) return;
+}): TerminalAgentStatePayload[] {
+  if (!input || typeof input.workspaceId !== "string" || !Array.isArray(input.panes)) return [];
   const workspaceName = typeof input.workspaceName === "string" ? input.workspaceName : "";
   const seen = new Set<string>();
   for (const entry of input.panes) {
@@ -221,6 +231,11 @@ export function syncTerminalNotifyPanes(input: {
       existing.tabId = String(entry.tabId ?? "");
       existing.tabTitle = String(entry.tabTitle ?? "Terminal");
       existing.excluded = Boolean(entry.excluded);
+      existing.runtimeHint =
+        entry.runtimeHint === "claude" || entry.runtimeHint === "codex"
+          ? entry.runtimeHint
+          : null;
+      if (!existing.runtime && existing.runtimeHint) existing.runtime = existing.runtimeHint;
       if (!existing.attached) attach(existing);
       continue;
     }
@@ -232,13 +247,20 @@ export function syncTerminalNotifyPanes(input: {
       tabTitle: String(entry.tabTitle ?? "Terminal"),
       excluded: Boolean(entry.excluded),
       attached: false,
-      awaitingSpawn: false,
+      replayingTail: false,
       untap: null,
       offExit: null,
       decoder: new TextDecoder("utf-8", { fatal: false }),
       ring: "",
       carry: "",
-      runtime: null,
+      runtime:
+        entry.runtimeHint === "claude" || entry.runtimeHint === "codex"
+          ? entry.runtimeHint
+          : null,
+      runtimeHint:
+        entry.runtimeHint === "claude" || entry.runtimeHint === "codex"
+          ? entry.runtimeHint
+          : null,
       state: "idle",
       userTurnArmed: false,
       disposing: false,
@@ -268,25 +290,14 @@ export function syncTerminalNotifyPanes(input: {
       .join(" ")} watchers=${watchers.size}`,
   );
   ensureSweep();
+  return terminalAgentStateSnapshot(input.workspaceId);
 }
 
 function attach(w: PaneWatcher): void {
-  if (w.attached || w.awaitingSpawn) return;
-  if (!pty.hasSession(w.paneId)) {
-    // Registration usually lands before useTerminalSession's pty:spawn call.
-    // waitForSpawn cleans its own waiter list on timeout, so a pane that
-    // never spawns costs nothing past the timeout.
-    w.awaitingSpawn = true;
-    tanLog(`pane=${w.paneId} awaiting pty spawn`);
-    void pty.waitForSpawn(w.paneId, SPAWN_WAIT_MS).then((ok) => {
-      const current = watchers.get(w.paneId);
-      if (!current || current !== w) return;
-      w.awaitingSpawn = false;
-      tanLog(`pane=${w.paneId} spawn wait resolved ok=${ok}`);
-      if (ok) attach(w);
-    });
-    return;
-  }
+  if (w.attached) return;
+  // pty.tap/onExit deliberately accept ids before the underlying session
+  // exists. Register immediately so a cold-restored agent cannot print its
+  // one-shot banner between pty:spawn and a waitForSpawn continuation.
   tanLog(`pane=${w.paneId} tap attached (excluded=${w.excluded})`);
   w.untap = pty.tap(w.paneId, (chunk) => {
     try {
@@ -307,18 +318,69 @@ function attach(w: PaneWatcher): void {
         `${runtimeLabel(w.runtime)} terminal exited with code ${info.exitCode}.`,
       );
     }
-    // The pty process itself died. We deliberately do NOT emit a chip state
-    // here: the renderer receives its own `pty:exit:${id}` for this pane and
-    // routes it through onTerminalPaneExit, which is the authoritative handler
-    // for a pty death — it has the EXIT CODE, so it can distinguish a clean
-    // teardown (remove the chip) from a crash (keep a red "error" chip). A
-    // "done" emit from here would race that handler over a separate IPC message
-    // and could tear an "error" chip back down. The chip-relevant exit cases
-    // the notifier owns (agent TUI left but pty alive) are handled by the
-    // prompt-marker / alt-screen-leave `exited` block in onChunk instead.
-    removeWatcher(w.paneId);
+    if (w.disposing) {
+      removeWatcher(w.paneId);
+      return;
+    }
+
+    // Clear the rail spinner immediately. The renderer's pty:exit handler
+    // remains authoritative for the chip's clean-vs-crash presentation; this
+    // state event is also what prevents a dead pane from leaving its workspace
+    // activity ring spinning indefinitely.
+    emitPaneState(w, info.exitCode === 0 ? "done" : "error");
+
+    // Keep the desired watcher registration alive across an unexpected
+    // same-id respawn. useTerminalSession can auto-resume a live agent after a
+    // PTY death; deleting the watcher here meant the replacement went unseen
+    // whenever no tab-state mutation happened to trigger another registry
+    // sync. pty.tap/onExit both support pre-registration, so reset the parser
+    // and attach again immediately, before the replacement process exists.
+    try {
+      w.untap?.();
+    } catch {
+      /* ignore */
+    }
+    w.untap = null;
+    w.offExit = null;
+    w.attached = false;
+    w.decoder = new TextDecoder("utf-8", { fatal: false });
+    w.ring = "";
+    w.carry = "";
+    w.runtime = w.runtimeHint;
+    w.state = "idle";
+    w.userTurnArmed = false;
+    w.workingSince = 0;
+    w.lastWorkingAt = 0;
+    w.lastOscNotifyAt = 0;
+    w.lastChunkAssertedWorking = false;
+    w.teammatesActive = 0;
+    w.lastOutputAt = 0;
+    w.lastEmittedState = null;
+    attach(w);
   });
   w.attached = true;
+
+  // The tap is installed first. Node's event loop cannot interleave another
+  // pty onData callback while the synchronous snapshot below is replayed, so
+  // bytes are observed exactly once with no read→subscribe race. Preserve the
+  // original chunks: onChunk's carry/fresh-boundary logic then reconstructs
+  // the same state transitions it would have seen live.
+  const recent = pty.readTailChunks(w.paneId, BOOTSTRAP_TAIL_BYTES) ?? [];
+  if (recent.length > 0) {
+    w.replayingTail = true;
+    try {
+      for (const chunk of recent) onChunk(w, chunk);
+    } catch (err) {
+      console.warn("[terminal-agent-notify] tail replay failed:", err);
+    } finally {
+      w.replayingTail = false;
+      // Replayed user-input / command markers belong to history. They may
+      // identify the foreground runtime, but must not arm a future alert as if
+      // the user had just typed into the pane now.
+      w.userTurnArmed = false;
+      w.lastOscNotifyAt = 0;
+    }
+  }
 }
 
 function removeWatcher(paneId: string): void {
@@ -349,12 +411,10 @@ function ensureSweep(): void {
   sweepTimer = setInterval(() => {
     const now = Date.now();
     for (const w of watchers.values()) {
-      // Self-heal: a pane whose pty spawned after the one-shot waitForSpawn
-      // window (or whose spawn wait resolved false) re-attaches here instead
-      // of waiting for the next renderer layout change. attach() early-returns
-      // when already attached or still awaiting spawn, so this is one Map
-      // lookup per pane per second.
-      if (!w.attached && !w.awaitingSpawn) attach(w);
+      // Self-heal a watcher whose transport was reset by an unexpected PTY
+      // exit or a transient attach failure instead of waiting for another
+      // renderer layout change.
+      if (!w.attached) attach(w);
       if (w.excluded || !w.runtime) continue;
       if (w.teammatesActive > 0) {
         if (now - w.lastOutputAt >= TEAMMATE_SILENCE_MS) {
@@ -950,6 +1010,26 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
   });
 }
 
+// Level-triggered companion to the live terminal-agent:state event. Renderer
+// reloads and cold hydration can subscribe after a transition already fired;
+// querying this snapshot lets them reconcile to the daemon's current truth
+// instead of waiting for a future edge that may never come.
+export function terminalAgentStateSnapshot(workspaceId?: string): TerminalAgentStatePayload[] {
+  const out: TerminalAgentStatePayload[] = [];
+  for (const w of watchers.values()) {
+    if (w.excluded || w.lastEmittedState === null) continue;
+    if (workspaceId && w.workspaceId !== workspaceId) continue;
+    out.push({
+      workspaceId: w.workspaceId,
+      tabId: w.tabId,
+      paneId: w.paneId,
+      runtime: w.runtime,
+      state: w.lastEmittedState,
+    });
+  }
+  return out;
+}
+
 // Publish a turn-boundary alert into the unified pipeline. Suppression
 // (user operating this exact pane, same-kind re-emits, the terminal-completion
 // guard) is the notify policy's job; enterWorking()/handleExplicitNotify()
@@ -969,6 +1049,10 @@ function deliver(
   body: string | null,
 ): void {
   if (w.excluded) return;
+  if (w.replayingTail) {
+    tanLog(`pane=${w.paneId} replay suppressed alert kind=${kind}`);
+    return;
+  }
   tanLog(`pane=${w.paneId} ALERT kind=${kind} runtime=${w.runtime} ws=${w.workspaceId} tab=${w.tabId}`);
   const label = runtimeLabel(w.runtime);
   const where = w.tabTitle ? `“${w.tabTitle}”` : "a terminal";

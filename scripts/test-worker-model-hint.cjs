@@ -4,10 +4,9 @@
 // That module imports ONLY types (@shared/types), all erased by esbuild, so
 // this harness bundles it with no stubs (same approach as
 // scripts/test-loom-model.cjs) and exercises the REAL sanitizeWorkerModelHint /
-// runUserRequestedFable. workerFableAllowed(run) in run-store.ts is now exactly
-// `runUserRequestedFable(run)` — the "fableEnabled" setting NO LONGER gates the
-// Cora-spawned worker path, so an explicit user request is sufficient regardless
-// of the setting. We reproduce that one-liner here and cover the worker gate:
+// runUserRequestedFable. workerFableAllowed(run) in run-store.ts combines the
+// live "fableEnabled" preference with explicit user intent. We reproduce that
+// conjunction here and cover the worker gate:
 // user-requested/not × setting on/off × fable hint → pass/downgrade.
 //
 //   node scripts/test-worker-model-hint.cjs
@@ -56,9 +55,9 @@ async function main() {
   const mod = require(outfile);
   const { sanitizeWorkerModelHint, runUserRequestedFable, SPARK_WORKER_FABLE_FALLBACK } = mod;
 
-  // The worker gate as it lives in run-store.ts (workerFableAllowed): the setting
-  // does NOT gate the worker path, so this is just runUserRequestedFable(run).
-  const workerFableAllowed = (run) => runUserRequestedFable(run);
+  // The worker gate as it lives in run-store.ts (workerFableAllowed): both the
+  // preference and the user's own explicit request are required.
+  const workerFableAllowed = (run, fableEnabled) => fableEnabled === true && runUserRequestedFable(run);
 
   let pass = 0;
   const check = (name, cond) => {
@@ -128,29 +127,27 @@ async function main() {
   const sonnetEffort = sanitizeWorkerModelHint("sonnet-4-6@medium");
   check("superseded sonnet keeps @effort suffix", sonnetEffort.hint === "claude-sonnet-5@medium");
 
-  // ── The end-to-end worker gate: request × fable hint (setting no longer gates) ──
+  // ── The end-to-end worker gate: setting × request × fable hint ──
   const requested = runWith([userMsg("use fable 5 for the worker")]);
   const notRequested = runWith([userMsg("just build it")]);
 
   // (1) fable hint + no explicit request → downgraded
   {
-    const allow = workerFableAllowed(notRequested);
+    const allow = workerFableAllowed(notRequested, true);
     const res = sanitizeWorkerModelHint("claude-fable-5", { allowFable: allow });
     check("gate: fable hint + no request → downgraded", allow === false && res.downgraded === true && res.hint === "claude-opus-4-8");
   }
   // (2) fable hint + explicit request → passes through
   {
-    const allow = workerFableAllowed(requested);
+    const allow = workerFableAllowed(requested, true);
     const res = sanitizeWorkerModelHint("claude-fable-5", { allowFable: allow });
     check("gate: fable hint + request → passes", allow === true && res.downgraded === false && res.hint === "claude-fable-5");
   }
-  // (3) THE BUG FIX: explicit request is now sufficient even though the "Allow
-  // Fable 5" setting plays no part in the worker gate. This case downgraded
-  // before the gate change (setting off) and now PASSES.
+  // (3) Explicit request + setting OFF → still downgraded.
   {
-    const allow = workerFableAllowed(requested);
+    const allow = workerFableAllowed(requested, false);
     const res = sanitizeWorkerModelHint("claude-fable-5", { allowFable: allow });
-    check("gate: fable hint + request + setting irrelevant → passes", allow === true && res.downgraded === false && res.hint === "claude-fable-5");
+    check("gate: fable hint + request + setting off → downgraded", allow === false && res.downgraded === true && res.hint === "claude-opus-4-8");
   }
 
   console.log(`\nAll ${pass} worker-model-hint checks passed.`);

@@ -149,6 +149,91 @@ export interface AppSettings {
   autopilotSandbox: boolean;
 }
 
+// Cora runs its manager and implementation workers through one pinned Pi
+// runtime. Subscription credentials deliberately live outside AppSettings in
+// Pi's private auth.json; these shapes expose status and the interactive OAuth
+// ceremony without ever crossing IPC with access or refresh tokens.
+export type PiSubscriptionProvider = "anthropic" | "openai-codex";
+
+export interface PiSubscriptionConnection {
+  provider: PiSubscriptionProvider;
+  label: string;
+  model: string;
+  connected: boolean;
+  expired: boolean;
+  canRefresh: boolean;
+  expiresAt: number | null;
+  error?: string;
+}
+
+export interface PiSubscriptionOverview {
+  runtimeInstalled: boolean;
+  runtimeVersion: string | null;
+  runtimeError?: string;
+  connections: PiSubscriptionConnection[];
+}
+
+export type PiSubscriptionPrompt =
+  | {
+      type: "text" | "secret" | "manual_code";
+      message: string;
+      placeholder?: string;
+    }
+  | {
+      type: "select";
+      message: string;
+      options: Array<{ id: string; label: string; description?: string }>;
+    };
+
+export type PiSubscriptionAuthEvent =
+  | {
+      type: "started";
+      requestId: string;
+      provider: PiSubscriptionProvider;
+      message: string;
+    }
+  | {
+      type: "auth_url";
+      requestId: string;
+      provider: PiSubscriptionProvider;
+      url: string;
+      instructions?: string;
+    }
+  | {
+      type: "device_code";
+      requestId: string;
+      provider: PiSubscriptionProvider;
+      userCode: string;
+      verificationUri: string;
+      expiresInSeconds?: number;
+    }
+  | {
+      type: "progress";
+      requestId: string;
+      provider: PiSubscriptionProvider;
+      message: string;
+    }
+  | {
+      type: "prompt";
+      requestId: string;
+      promptId: string;
+      provider: PiSubscriptionProvider;
+      prompt: PiSubscriptionPrompt;
+    }
+  | {
+      type: "completed";
+      requestId: string;
+      provider: PiSubscriptionProvider;
+      message: string;
+      overview: PiSubscriptionOverview;
+    }
+  | {
+      type: "cancelled" | "failed";
+      requestId: string;
+      provider: PiSubscriptionProvider;
+      message: string;
+    };
+
 // User-facing preferences (theme, editor flags, etc.) live in a separate
 // JSON file from AppSettings so the per-window settings UI can read/write
 // them without needing access to the integration credentials. Future agents
@@ -303,9 +388,9 @@ export interface AppPreferences {
   // Gate for Fable 5 (`claude-fable-5`), Anthropic's top-tier and most
   // expensive model. Default OFF: when false Fable is hidden from every model
   // picker and automations that request it fall back to Opus 4.8. Flip on to
-  // opt into the extra cost. The Cora-spawned-worker downgrade is unconditional
-  // regardless of this flag — Fable is only ever available to the main chat
-  // and (when this is on) opt-in automations.
+  // opt into the extra cost. When false it is also an unconditional veto for
+  // Cora-spawned workers; when true, a worker still requires an explicit Fable
+  // request in the user's own message.
   fableEnabled?: boolean;
   // When enabled, terminal tabs that still had a Claude or Codex CLI in the
   // foreground when Codara quit resume that exact CLI session on next launch.
@@ -1151,7 +1236,13 @@ export interface RunAssumption {
 // subscription instead of API credits). When the chat-level field is unset on
 // a RunState, callers fall back to OpenRouter for backwards compatibility with
 // pre-feature runs.
-export type ChatBackendKind = "openrouter" | "claude" | "codex";
+export type ChatBackendKind = "openrouter" | "claude" | "codex" | "pi";
+
+// Cora's Pi execution depth is a first-class, per-chat policy rather than a
+// model alias. Fast minimizes coordination overhead; Deep adds explicit
+// contract mapping and falsification; Frontier uses the strongest bounded
+// evidence contract and is the only route eligible for audited-state reuse.
+export type CoraExecutionPolicy = "fast" | "deep" | "frontier";
 
 // Manager behaviour mode chosen per chat:
 //   auto    — Cora routes each message herself: answer directly, spawn workers,
@@ -1314,6 +1405,12 @@ export interface RunState {
   sparkCalls: SparkCall[];
   humanMessages: HumanRunMessage[];
   /**
+   * Cora-owned visual explanation for this chat. The whiteboard is stored in
+   * run.json so it survives reloads and is shared by the renderer, Pi, Claude,
+   * and Codex rather than living in browser-only component state.
+   */
+  whiteboard?: CoraWhiteboard;
+  /**
    * Monotonic Cora-owned conversation generation. Reliable rewind increments
    * this value before a fresh provider session is started; callbacks, stream
    * events, checkpoints, and manager decisions from an older generation are
@@ -1394,6 +1491,10 @@ export interface RunState {
   /** Reasoning-effort level forwarded to the backend (Claude `--effort`, Codex
    * `-c model_reasoning_effort=...`). Undefined leaves it at the CLI default. */
   chatEffort?: AgentEffortLevel;
+  /** Configurable Pi orchestration depth. Undefined migrates to Fast. Other
+   * manager backends persist the value but ignore it, so switching back to Pi
+   * restores the user's chosen policy. */
+  coraExecutionPolicy?: CoraExecutionPolicy;
   /**
    * Provider-side session UUID for the CC/Codex CLI backing this chat. Stored
    * so the next spawn can `claude -r <uuid>` or `codex resume <uuid>` and
@@ -1572,6 +1673,13 @@ export interface WorkspaceRunMemoryRecord {
    * Lets a later run weigh whether the chosen complexity actually held up.
    */
   verificationSurvived: boolean;
+  /** Outcome-conditioned proof state. Missing on v1 records and therefore
+   * treated as unverified by the reader rather than trusted optimistically. */
+  verificationStatus?: "verified" | "mixed" | "unverified";
+  /** Accepted verifier evidence retained without the surrounding transcript. */
+  verifiedClaimCount?: number;
+  failedClaimCount?: number;
+  oracleEvidence?: string[];
   /** Per-runtime implementation -> verifier outcomes distilled from attempts. */
   runtimeOutcomes: WorkspaceRunMemoryRuntimeOutcome[];
   /** Build/test commands distilled from reports that passed verification. */
@@ -1639,6 +1747,7 @@ export interface UpdateChatBackendInput {
   chatModel?: string;
   chatMode?: ChatMode;
   chatEffort?: AgentEffortLevel;
+  coraExecutionPolicy?: CoraExecutionPolicy;
   chatFastMode?: boolean;
   chat1mContext?: boolean;
 }
@@ -1960,6 +2069,10 @@ export type WriteScopeSource = "manager" | "derived" | "fan-out";
 export interface WorkerTask {
   id: string;
   runId: string;
+  // Explicit retry/fallback lineage. When a task is replaced because its
+  // runtime failed environmentally, orchestration waits follow this pointer
+  // instead of treating the cancelled predecessor as the final result.
+  supersedesTaskId?: string;
   stepId?: string;
   title: string;
   description: string;
@@ -2250,6 +2363,7 @@ export interface CreateRunInput {
   chatModel?: string;
   chatMode?: ChatMode;
   chatEffort?: AgentEffortLevel;
+  coraExecutionPolicy?: CoraExecutionPolicy;
   chatFastMode?: boolean;
   chat1mContext?: boolean;
   // Looms v2: stamp automation ownership + direct execution at creation so
@@ -2271,6 +2385,109 @@ export interface MarkRunSeenInput {
 export interface RenameRunInput {
   runId: string;
   title: string;
+}
+
+export type CoraWhiteboardNodeKind =
+  | "topic"
+  | "group"
+  | "file"
+  | "symbol"
+  | "flow"
+  | "condition"
+  | "decision"
+  | "risk"
+  | "note";
+
+export type CoraWhiteboardEdgeTone = "default" | "accent" | "success" | "warning" | "danger";
+export type CoraWhiteboardEdgeStyle = "solid" | "dashed";
+export type CoraWhiteboardEditor = "cora" | "user" | "import";
+
+export interface CoraWhiteboardNode {
+  id: string;
+  kind: CoraWhiteboardNodeKind;
+  title: string;
+  body?: string;
+  /** Infinite-canvas coordinates in logical CSS pixels. */
+  x: number;
+  y: number;
+  width?: number;
+  height?: number;
+  /**
+   * Optional status accent overriding the kind's default color — e.g. a green
+   * "done" flow node or a red "broken" file node. Absent = kind color.
+   */
+  tone?: CoraWhiteboardEdgeTone;
+}
+
+export interface CoraWhiteboardEdge {
+  id: string;
+  from: string;
+  to: string;
+  label?: string;
+  tone?: CoraWhiteboardEdgeTone;
+  /** dashed marks soft/optional relations; absent renders solid. */
+  style?: CoraWhiteboardEdgeStyle;
+}
+
+export interface CoraWhiteboard {
+  version: 1;
+  /** Monotonic edit revision used to prevent Cora and a human overwriting each other. */
+  revision?: number;
+  lastEditedBy?: CoraWhiteboardEditor;
+  title: string;
+  summary?: string;
+  nodes: CoraWhiteboardNode[];
+  edges: CoraWhiteboardEdge[];
+  updatedAt: string;
+}
+
+export interface UpdateCoraWhiteboardInput {
+  runId: string;
+  action?: "replace" | "merge" | "clear";
+  /** Reject the update when the persisted board has changed since this revision. */
+  baseRevision?: number;
+  editor?: CoraWhiteboardEditor;
+  title?: string;
+  summary?: string;
+  nodes?: CoraWhiteboardNode[];
+  edges?: CoraWhiteboardEdge[];
+  removeNodeIds?: string[];
+  removeEdgeIds?: string[];
+}
+
+/** Portable, repository-friendly representation written to *.coraboard files. */
+export interface CoraWhiteboardFile {
+  format: "codara.whiteboard";
+  version: 1;
+  exportedAt: string;
+  board: CoraWhiteboard;
+}
+
+export interface ExportCoraWhiteboardFileInput {
+  board: CoraWhiteboard;
+  defaultPath?: string;
+  suggestedName?: string;
+}
+
+export interface ImportedCoraWhiteboardFile {
+  path: string;
+  board: CoraWhiteboard;
+}
+
+/**
+ * Generic dialog-based file export (dialog:exportFile): prompt for a
+ * destination and write a renderer-produced payload — board images today,
+ * any small artifact tomorrow. `data` is utf8 text or base64 bytes per
+ * `encoding`.
+ */
+export interface ExportFileDialogInput {
+  title?: string;
+  /** Full default path including file name; falls back to Documents + suggestedName. */
+  defaultPath?: string;
+  suggestedName?: string;
+  filters: { name: string; extensions: string[] }[];
+  data: string;
+  encoding?: "utf8" | "base64";
 }
 
 export interface CreateStepInput {
@@ -2384,10 +2601,10 @@ export interface StartAutopilotInput {
   // Which Cora manager backend should drive this run. Set by the explorer's
   // "Run plan" engine flyout and the Source Control "Smart Merge" engine
   // picker. Only applied when startAutopilot creates the run itself (no
-  // runId) — it threads into createRun so the manager dispatches to Claude
-  // Code / Codex instead of the default OpenRouter manager. Undefined keeps
-  // the legacy OpenRouter behaviour.
+  // runId) — it threads into createRun so the manager dispatches to the
+  // selected route. Undefined selects the bundled Cora · Pi manager.
   chatBackend?: ChatBackendKind;
+  coraExecutionPolicy?: CoraExecutionPolicy;
   // Per-automation engine selection. An automation pins these so each iteration
   // (when it creates a fresh run via isolate / first launch) runs on the chosen
   // model / mode / effort. Forwarded into createRun, which already stamps them

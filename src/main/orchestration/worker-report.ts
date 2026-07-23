@@ -140,7 +140,7 @@ function normalizeStringList(value: unknown): string[] {
 
 export function decideWorkerReport(report: WorkerReport): ReviewDecision {
   if (report.status === "complete") {
-    // Trust complete-status reports. Workers are full Claude/Codex/Cursor harnesses
+    // Trust complete-status reports. Workers are full Claude/Codex harnesses
     // and can run their own verification — risks/followups are advisory, not
     // blockers. The manager loop reviews them when planning the next step.
     return {

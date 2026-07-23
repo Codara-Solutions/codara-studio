@@ -21,7 +21,7 @@
 //       thread resume, usage, interruption, and turn completion directly.
 //
 // The dispatch lives in run-store.ts: when the manager pipeline is about to
-// fire, it picks the backend from `run.chatBackend` (defaulting to OpenRouter
+// fire, it picks the backend from `run.chatBackend` (defaulting to Pi
 // for legacy / unset chats) and calls one of the methods below.
 
 import { dirname, isAbsolute, join, relative } from "node:path";
@@ -31,6 +31,7 @@ import type {
   AgentRuntimeDiagnostic,
   ChatBackendKind,
   ChatMode,
+  CoraExecutionPolicy,
   HumanRunMessage,
   RunState,
 } from "@shared/types";
@@ -44,6 +45,7 @@ import {
   effectiveChatFastMode,
   effectiveChatOneMillionContext,
 } from "@shared/chat-policy";
+import { effectiveCoraExecutionPolicy } from "@shared/cora-execution-policy";
 
 /**
  * Per-chat configuration passed into every backend call. Resolved by
@@ -57,6 +59,8 @@ export interface ChatBackendConfig {
   model: string;
   mode: ChatMode;
   effort: AgentEffortLevel;
+  /** Per-chat Pi execution depth. Non-Pi backends always resolve to Fast. */
+  executionPolicy: CoraExecutionPolicy;
   /** Provider-side session UUID, when this chat already has one. Empty on
    *  the first call; the backend populates it onto the RunState on first
    *  spawn so subsequent calls can resume. */
@@ -306,25 +310,27 @@ export interface SparkAgentBackend {
  * manager turn so every backend sees a fully-populated config.
  *
  * Defaults:
- *   - backend: openrouter (preserves pre-feature behaviour)
- *   - model:   backend-specific default (OpenRouter from settings,
- *              Claude=opus-4-8, Codex=GPT-5.6 Sol)
+ *   - backend: Pi (the bundled, subscription-only Cora harness)
+ *   - model:   backend-specific default (Pi/Codex=GPT-5.6 Sol,
+ *              OpenRouter from settings, Claude=opus-4-8)
  *   - mode:    execute (the original behaviour)
- *   - effort:  medium
+ *   - effort:  high for Pi, medium for explicitly selected legacy backends
  */
 export function resolveChatBackendConfig(
   run: RunState,
   settings: AppSettings,
 ): ChatBackendConfig {
-  const backend: ChatBackendKind = run.chatBackend ?? "openrouter";
+  const backend: ChatBackendKind = run.chatBackend ?? "pi";
   const mode: ChatMode = run.chatMode ?? "execute";
-  const effort: AgentEffortLevel = run.chatEffort ?? "medium";
+  const effort: AgentEffortLevel = run.chatEffort ?? (backend === "pi" ? "high" : "medium");
   let model = run.chatModel?.trim();
   if (!model) {
     if (backend === "openrouter") {
       model = settings.openRouterModel || "google/gemini-flash-latest";
     } else if (backend === "claude") {
       model = "claude-opus-4-8";
+    } else if (backend === "pi") {
+      model = DEFAULT_CODEX_CHAT_MODEL;
     } else {
       model = DEFAULT_CODEX_CHAT_MODEL;
     }
@@ -334,6 +340,7 @@ export function resolveChatBackendConfig(
     model,
     mode,
     effort,
+    executionPolicy: effectiveCoraExecutionPolicy(backend, run.coraExecutionPolicy),
     sessionUuid: run.chatSessionUuid,
     sessionMode: run.chatSessionMode,
     fastMode: effectiveChatFastMode(backend, run.chatFastMode),
