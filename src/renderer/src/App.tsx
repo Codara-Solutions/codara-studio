@@ -1425,6 +1425,47 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [booted]);
 
+  // Visiting a workspace answers its rail dot. The teal done-unseen cue exists
+  // to pull the user TO the workspace; once they have dwelt there a beat, its
+  // finished-unseen chats are acknowledged even if each one was never opened —
+  // otherwise a chat that completed in the background keeps the dot lit
+  // forever for a user who never blurs the window long enough for the away
+  // digest to sweep it.
+  const activeDoneUnseenCount = useMemo(
+    () =>
+      globalRuns.runs.filter(
+        (r) =>
+          r.workspaceId === activeId &&
+          !r.automationId &&
+          r.status === "complete" &&
+          r.seen !== true,
+      ).length,
+    [globalRuns.runs, activeId],
+  );
+  useEffect(() => {
+    if (!booted || !activeId || activeDoneUnseenCount === 0) return undefined;
+    const workspaceId = activeId;
+    const timer = window.setTimeout(() => {
+      // An unfocused window is not "looking" — leave the cue for the digest.
+      if (!document.hasFocus()) return;
+      const pending = globalRuns.runsRef.current.filter(
+        (r) =>
+          r.workspaceId === workspaceId &&
+          !r.automationId &&
+          r.status === "complete" &&
+          r.seen !== true,
+      );
+      if (pending.length === 0) return;
+      void Promise.allSettled(
+        pending.map((run) => window.spark.orchestration.markRunSeen({ runId: run.id })),
+      ).then(() => globalRuns.refresh());
+    }, 2500);
+    return () => window.clearTimeout(timer);
+    // runsRef/refresh are stable; the unseen count re-arms the dwell timer
+    // when a run finishes while this workspace is already active.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [booted, activeId, activeDoneUnseenCount]);
+
   // Subscribe to renderer-side notification channels. The toast channel is
   // owned by <ToastHost/> below; this effect handles the embedded-sound
   // channel by playing the right WAV clip whenever main fires

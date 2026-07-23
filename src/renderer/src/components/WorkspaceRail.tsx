@@ -270,6 +270,27 @@ function WorkspaceRail(props: RailProps) {
     setRailDropIndex(null);
   };
 
+  // Safety net: dragend is delivered to the drag SOURCE row, and a row that
+  // unmounts mid-drag (a folder popover closing, a row re-parenting between
+  // group and top level) never receives it — wedging the dimmed "dragging"
+  // ghost on that row indefinitely. While any rail drag is live, also listen
+  // at the window so every way a drag can end clears the visual state.
+  useEffect(() => {
+    if (wsDragId === null && groupDragId === null) return undefined;
+    const end = () => {
+      clearWorkspaceDrag();
+      clearWorkspaceGroupDrag();
+    };
+    window.addEventListener("dragend", end);
+    window.addEventListener("drop", end);
+    return () => {
+      window.removeEventListener("dragend", end);
+      window.removeEventListener("drop", end);
+    };
+    // The clear helpers only touch stable refs/setters — ids are the gate.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsDragId, groupDragId]);
+
   const markRailDropAt = (event: React.DragEvent, index: number) => {
     if (!isWorkspaceDrag(event) && !isWorkspaceGroupDrag(event)) return;
     event.preventDefault();
