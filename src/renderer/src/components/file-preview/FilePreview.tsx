@@ -7,10 +7,16 @@ import { isRemotePath } from "@shared/remote";
 // pattern as the lazy mermaid renderer in markdown-preview/MermaidBlock.tsx.
 const PdfPreview = lazy(() => import("./PdfPreview"));
 const DocxPreview = lazy(() => import("./DocxPreview"));
+const WhiteboardFilePreview = lazy(() => import("./WhiteboardFilePreview"));
 
 interface Props {
   path: string;
   kind: PreviewKind;
+  // Whiteboard-only (kind === "whiteboard"): the .coraboard surface is an
+  // editable board, so it reports dirty/saved state up to the hosting editor
+  // tab (dirty dot in the strip, git refresh on save).
+  onWhiteboardDirtyChange?: (dirty: boolean) => void;
+  onWhiteboardSaved?: (path: string) => void;
 }
 
 function formatBytes(n: number): string {
@@ -34,7 +40,12 @@ const CHECKER_BG: React.CSSProperties = {
 // Content loads via file:// URLs (no byte round-trip through IPC), with a
 // blob-URL fallback fed by fs:readFileBytes for environments where file://
 // subresources are blocked (dev renderer served over http://localhost).
-export default function FilePreview({ path, kind }: Props) {
+export default function FilePreview({
+  path,
+  kind,
+  onWhiteboardDirtyChange,
+  onWhiteboardSaved,
+}: Props) {
   const [stat, setStat] = useState<{ size: number; mtimeMs: number } | null>(null);
   const [missing, setMissing] = useState(false);
   const [dimensions, setDimensions] = useState<{ w: number; h: number } | null>(null);
@@ -107,6 +118,29 @@ export default function FilePreview({ path, kind }: Props) {
     return stat ? `${base}?t=${Math.round(stat.mtimeMs)}` : base;
   }, [path, stat]);
   const src = blobUrl ?? fileUrl;
+
+  // Whiteboard first — before the `missing` branch. The board surface is an
+  // EDITOR, so an external delete must not unmount it and drop unsaved edits;
+  // the next Ctrl+S simply recreates the file (last write wins).
+  if (kind === "whiteboard") {
+    return (
+      <div style={{ ...hostStyle, overflow: "hidden" }}>
+        <Suspense
+          fallback={
+            <div style={{ margin: "auto", color: "var(--muted)", fontSize: 12 }}>
+              Loading whiteboard…
+            </div>
+          }
+        >
+          <WhiteboardFilePreview
+            path={path}
+            onDirtyChange={onWhiteboardDirtyChange}
+            onSaved={onWhiteboardSaved}
+          />
+        </Suspense>
+      </div>
+    );
+  }
 
   if (missing) {
     return (
