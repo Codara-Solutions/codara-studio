@@ -33,6 +33,14 @@ const run = {
   humanMessages: [],
 };
 
+// Per-scenario overrides: eventBatches is a queue drained one response per
+// chat.events call; waitResult/sendResult replace the default canned replies.
+const state = {
+  eventBatches: [],
+  waitResult: null,
+  sendResult: null,
+};
+
 const server = http.createServer((req, res) => {
   let body = "";
   req.on("data", (chunk) => (body += chunk));
@@ -43,9 +51,15 @@ const server = http.createServer((req, res) => {
     if (parsed.method === "chat.create") {
       result = { run, workspaceCreated: true, workspace: { id: run.workspaceId, cwd: WORKSPACE } };
     } else if (parsed.method === "chat.send") {
-      result = { run: { ...run, humanMessages: [{ author: "user", message: parsed.params.content }] } };
+      result = state.sendResult ?? {
+        run: { ...run, humanMessages: [{ author: "user", message: parsed.params.content }] },
+      };
     } else if (parsed.method === "chat.wait") {
-      result = { run: { ...run, status: "complete" }, timedOut: false, needsAttention: false };
+      result = state.waitResult ?? { run: { ...run, status: "complete" }, timedOut: false, needsAttention: false };
+    } else if (parsed.method === "chat.events") {
+      result = state.eventBatches.length
+        ? state.eventBatches.shift()
+        : { runId: run.id, cursor: 0, events: [], status: "complete" };
     } else if (parsed.method === "chat.cancel") {
       result = { run: { ...run, status: "cancelled", autopilot: { stopReason: parsed.params.reason } } };
     } else {
@@ -151,6 +165,177 @@ async function main() {
     JSON.stringify(requests[0]),
   );
   check("cancel prints the cancelled run", JSON.parse(cancelled.stdout).run.status === "cancelled");
+
+  // tail: bootstrap → cursor-advancing long-polls → footer from a zero wait.
+  requests.length = 0;
+  state.eventBatches = [
+    { runId: run.id, cursor: 3, events: [], status: "running" },
+    {
+      runId: run.id,
+      cursor: 5,
+      events: [
+        { id: "e4", sequence: 4, type: "chat.assistant_block", payload: { messageId: "m1", text: "Working on it." } },
+        { id: "e5", sequence: 5, type: "chat.tool_use", payload: { toolName: "read_file", input: { path: "src/app.ts" } } },
+      ],
+      status: "running",
+    },
+    {
+      runId: run.id,
+      cursor: 6,
+      events: [{ id: "e6", sequence: 6, type: "worker_attempt.running", message: "Worker attempt 1 running" }],
+      status: "complete",
+    },
+  ];
+  const tailed = await runCli(["tail", "run-cli"]);
+  check("tail exits successfully", tailed.code === 0, tailed.stderr);
+  const eventCalls = requests.filter((request) => request.method === "chat.events");
+  check(
+    "tail bootstraps without a cursor",
+    eventCalls[0] && eventCalls[0].params.afterSequence === undefined,
+    JSON.stringify(eventCalls[0]?.params),
+  );
+  check(
+    "tail advances the cursor across polls",
+    eventCalls[1]?.params?.afterSequence === 3 && eventCalls[2]?.params?.afterSequence === 5,
+    JSON.stringify(eventCalls.map((request) => request.params?.afterSequence)),
+  );
+  check("tail streams assistant text", tailed.stdout.includes("Working on it."));
+  check("tail prints quiet tool lines", tailed.stdout.includes("read_file"));
+  check("tail prints worker status lines", tailed.stdout.includes("Worker attempt 1 running"));
+  check(
+    "tail fetches the final snapshot with a zero wait",
+    requests.some((request) => request.method === "chat.wait" && request.params.timeoutMs === 0),
+  );
+  check("tail prints the final status footer", tailed.stdout.includes(`${run.id}  complete`));
+
+  // wait consumes the same stream in pretty mode.
+  requests.length = 0;
+  state.eventBatches = [
+    { runId: run.id, cursor: 9, events: [], status: "running" },
+    {
+      runId: run.id,
+      cursor: 10,
+      events: [{ id: "e10", sequence: 10, type: "chat.assistant_block", payload: { messageId: "m9", text: "All wrapped up." } }],
+      status: "complete",
+    },
+  ];
+  const streamedWait = await runCli(["wait", "run-cli"]);
+  check("wait exits successfully", streamedWait.code === 0, streamedWait.stderr);
+  check("wait consumes the event stream", requests.some((request) => request.method === "chat.events"));
+  check("wait streams assistant text before the footer", streamedWait.stdout.includes("All wrapped up."));
+
+  // Truncated replay: the server caps chat.events batches at 500 and flags
+  // the overflow with hasMore. A terminal status on a truncated batch must
+  // not stop the tail — the client keeps draining until a batch comes back
+  // non-truncated.
+  requests.length = 0;
+  const backlog = Array.from({ length: 500 }, (_, index) => ({
+    id: `t${index + 1}`,
+    sequence: index + 1,
+    type: "worker_attempt.running",
+    message: `Backlog event ${index + 1}`,
+  }));
+  state.eventBatches = [
+    { runId: run.id, cursor: 0, events: [], status: "running" },
+    { runId: run.id, cursor: 500, events: backlog, hasMore: true, status: "complete" },
+    {
+      runId: run.id,
+      cursor: 501,
+      events: [
+        { id: "t501", sequence: 501, type: "chat.assistant_block", payload: { messageId: "mt", text: "Tail end reached." } },
+      ],
+      hasMore: false,
+      status: "complete",
+    },
+  ];
+  const truncatedTail = await runCli(["tail", "run-cli"]);
+  check("truncated tail exits successfully", truncatedTail.code === 0, truncatedTail.stderr);
+  const truncatedCalls = requests.filter((request) => request.method === "chat.events");
+  check(
+    "truncated batch keeps polling despite the terminal status",
+    truncatedCalls.length === 3 && truncatedCalls[2]?.params?.afterSequence === 500,
+    JSON.stringify(truncatedCalls.map((request) => request.params?.afterSequence)),
+  );
+  check("truncated tail renders the capped batch", truncatedTail.stdout.includes("Backlog event 500"));
+  check("truncated tail renders the drained remainder", truncatedTail.stdout.includes("Tail end reached."));
+
+  // A blocked run's option-set question renders numbered, and a bare number answers by index.
+  const questionRun = {
+    ...run,
+    status: "blocked",
+    blockedOn: { questionMessageId: "q1" },
+    humanMessages: [
+      {
+        id: "q1",
+        author: "spark",
+        kind: "question",
+        message: "Which database should this use?",
+        questionOptions: [
+          { id: "opt-a", label: "Postgres", description: "Managed instance", answer: "Use Postgres" },
+          { id: "opt-b", label: "SQLite", description: "Local file", answer: "Use SQLite" },
+        ],
+      },
+    ],
+  };
+  requests.length = 0;
+  state.waitResult = { run: questionRun, timedOut: true, needsAttention: true };
+  const numbered = await runCli(["send", "run-cli", "2", "--json"]);
+  check("numbered send exits successfully", numbered.code === 0, numbered.stderr);
+  check(
+    "numbered send probes the run with a zero wait",
+    requests[0]?.method === "chat.wait" && requests[0]?.params?.timeoutMs === 0,
+    JSON.stringify(requests[0]),
+  );
+  check(
+    "numbered send resolves option 2 to its canned answer",
+    requests[1]?.method === "chat.send" && requests[1]?.params?.content === "Use SQLite",
+    JSON.stringify(requests[1]),
+  );
+  state.waitResult = null;
+
+  state.sendResult = { run: questionRun };
+  const blockedOut = await runCli(["send", "run-cli", "Reply", "please"]);
+  check("blocked session prints the question", blockedOut.stdout.includes("Which database should this use?"));
+  check(
+    "blocked session numbers the options",
+    blockedOut.stdout.includes("1. Postgres") && blockedOut.stdout.includes("2. SQLite"),
+    blockedOut.stdout,
+  );
+  check("blocked session suggests a numbered answer", blockedOut.stdout.includes(`cora send ${run.id}`));
+  state.sendResult = null;
+
+  // log reads run.json from disk — no server involved.
+  const logRunId = "run-log-fixture-1";
+  const logDir = path.join(TEST_HOME, "runs", logRunId);
+  fs.mkdirSync(logDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(logDir, "run.json"),
+    JSON.stringify({
+      id: logRunId,
+      status: "complete",
+      title: "Log fixture",
+      updatedAt: "2026-07-24T10:00:00Z",
+      humanMessages: [
+        { id: "m1", author: "user", message: "Ship the feature", createdAt: "2026-07-24T09:00:00Z" },
+        {
+          id: "m2",
+          author: "spark",
+          message: "Done. Two files changed.",
+          createdAt: "2026-07-24T09:05:00Z",
+          questionOptions: [{ id: "o1", label: "Looks good" }],
+        },
+      ],
+    }),
+  );
+  const logged = await runCli(["log", "run-log"]);
+  check("log resolves an id prefix offline", logged.code === 0, logged.stderr);
+  check(
+    "log prints the full transcript",
+    logged.stdout.includes("Ship the feature") && logged.stdout.includes("Done. Two files changed."),
+    logged.stdout,
+  );
+  check("log labels authors in sentence case", logged.stdout.includes("you") && logged.stdout.includes("cora"));
+  check("log numbers question options", logged.stdout.includes("1. Looks good"));
 
   if (failures) {
     console.error(`\n${failures} Cora CLI check(s) failed.`);

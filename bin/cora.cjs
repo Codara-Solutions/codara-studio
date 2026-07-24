@@ -59,12 +59,16 @@ CORA SESSIONS
                                       create and run a Cora session; creates the
                                       Codara workspace when DIR is not registered
   send <runId> <message> [--wait]     continue a session or answer its question
-  wait <runId> [--timeout SECONDS]    wait until done, failed, paused, or blocked
+                                      (a bare number picks a numbered option)
+  wait <runId> [--timeout SECONDS]    follow live output until it stops or needs you
+  tail <runId> [--all]                stream a session as it happens (--all replays
+                                      from the start; --timeout SECONDS to bound it)
   cancel <runId> [reason]             stop a session and its active workers
 
 RUNS & TERMINALS
   runs                                list runs (reads run.json files; works offline)
   run <id>                            one run's summary (id prefix ok)
+  log <id>                            full transcript of a run (works offline)
   read <paneId> [--lines N]           tail a terminal pane
   say <runId> <message>               append an internal/system note to a run
 
@@ -104,7 +108,7 @@ function readHandshake(flags) {
   return handshake;
 }
 
-function rpc(flags, method, params) {
+function rpc(flags, method, params, opts = {}) {
   const handshake = readHandshake(flags);
   const target = new URL(handshake.url + "/rpc");
   const payload = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params: params ?? {} });
@@ -133,6 +137,11 @@ function rpc(flags, method, params) {
         });
       },
     );
+    if (opts.timeoutMs) {
+      req.setTimeout(opts.timeoutMs, () => {
+        req.destroy(new Error(`${method} got no response after ${Math.round(opts.timeoutMs / 1000)}s`));
+      });
+    }
     req.on("error", (err) => {
       if (err.code === "ECONNREFUSED") {
         reject(
@@ -150,6 +159,40 @@ async function call(flags, method, params) {
   const res = await rpc(flags, method, params);
   if (res.error) fail(`${method} failed: ${res.error.message}`);
   return res.result;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Transport-level retry: the handshake is re-read on every attempt, so a
+// dropped socket or an app restart resumes instead of losing the wait.
+// RPC-level errors still fail immediately.
+async function callWithRetry(flags, method, params, opts = {}) {
+  const retries = opts.retries ?? 3;
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (attempt > 0) await sleep(Math.min(attempt, 5) * 1000);
+    try {
+      const res = await rpc(flags, method, params, opts);
+      if (res.error) fail(`${method} failed: ${res.error.message}`);
+      return res.result;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  fail(lastErr?.message ?? String(lastErr));
+}
+
+// Mirrors the server's chat.wait default so client deadlines line up.
+const DEFAULT_WAIT_MS = 20 * 60_000;
+const WAIT_STOP_STATUSES = new Set(["blocked", "paused", "complete", "failed", "cancelled"]);
+// Mirrors the server's CHAT_EVENTS_MAX_BATCH: a batch this full may have been
+// truncated by an older app build that sends no hasMore flag.
+const EVENTS_MAX_BATCH = 500;
+
+function waitCall(flags, params) {
+  return callWithRetry(flags, "chat.wait", params, {
+    timeoutMs: (params.timeoutMs ?? DEFAULT_WAIT_MS) + 30_000,
+  });
 }
 
 function fail(message) {
@@ -216,6 +259,31 @@ function timeoutParams(flags) {
   return { timeoutMs: Math.round(seconds * 1000) };
 }
 
+// The run's pending question, resolved from blockedOn to the actual question
+// message (text + option set), so the CLI can render choices and map a
+// numbered answer back to the option's canned reply.
+function blockedQuestion(run) {
+  const questionMessageId = run?.blockedOn?.questionMessageId;
+  if (!questionMessageId) return null;
+  const messages = run.humanMessages ?? run.messages ?? [];
+  const question = messages.find((message) => message.id === questionMessageId);
+  if (!question?.message) return null;
+  return { text: String(question.message), options: question.questionOptions ?? [] };
+}
+
+function printBlockedQuestion(run) {
+  const question = blockedQuestion(run);
+  if (!question) return false;
+  console.log(`question   ${question.text.trim().slice(0, 2000)}`);
+  question.options.forEach((option, index) => {
+    console.log(`  ${index + 1}. ${option.label}${option.recommended ? "  (recommended)" : ""}`);
+    if (option.description) console.log(`     ${option.description}`);
+  });
+  const hint = question.options.length > 0 ? "<number or text>" : '"<your response>"';
+  console.log(`answer     cora send ${run.id} ${hint} --wait`);
+  return true;
+}
+
 function printCoraSession(result) {
   const run = result?.run ?? result;
   if (!run?.id) {
@@ -230,13 +298,195 @@ function printCoraSession(result) {
   if (result.truncated) console.log("warning: message truncated to the CLI safety limit");
   if (result.timedOut) console.log("wait timed out; the session is still running");
   const messages = run.humanMessages ?? run.messages ?? [];
-  const lastCora = [...messages].reverse().find((message) => message.author === "spark");
+  // Skip the question message itself — it renders structured below.
+  const lastCora = [...messages]
+    .reverse()
+    .find((message) => message.author === "spark" && message.id !== run.blockedOn?.questionMessageId);
   if (lastCora?.message) console.log(`cora       ${String(lastCora.message).slice(0, 1200)}`);
   if (run.status === "blocked" || run.status === "paused") {
-    console.log(`continue   cora send ${run.id} "<your response>" --wait`);
+    if (!printBlockedQuestion(run)) {
+      console.log(`continue   cora send ${run.id} "<your response>" --wait`);
+    }
   } else if (!result.timedOut && run.status !== "complete" && run.status !== "failed" && run.status !== "cancelled") {
     console.log(`follow     cora wait ${run.id}`);
   }
+}
+
+// Compact footer after a streamed follow — the transcript already scrolled by,
+// so repeat only the status, the open question, and the next command.
+function printRunFooter(result) {
+  const run = result?.run ?? result;
+  if (!run?.id) return;
+  console.log("");
+  console.log(`${run.id}  ${run.status}`);
+  if (result.timedOut) console.log("wait timed out; the session is still running");
+  if (run.status === "blocked" || run.status === "paused") {
+    if (!printBlockedQuestion(run)) {
+      console.log(`continue   cora send ${run.id} "<your response>" --wait`);
+    }
+  } else if (run.status !== "complete" && run.status !== "failed" && run.status !== "cancelled") {
+    console.log(`follow     cora tail ${run.id}`);
+  }
+}
+
+// ── event streaming (chat.events) ───────────────────────────────────────────
+
+// Journal event types worth a quiet status line (rendered from the event's own
+// human-readable message). Everything else is either streamed specially
+// (chat.*) or too internal for terminal output.
+const EVENT_LINE_TYPES = new Set([
+  "run.status_updated",
+  "run.paused",
+  "run.resumed",
+  "run.cancelled",
+  "run.question_posted",
+  "run.chat_turn_failed",
+  "autopilot.started",
+]);
+const EVENT_LINE_PREFIXES = ["step.", "worker_attempt.", "worker_task.", "worker_report."];
+
+function toolInputSummary(input) {
+  if (input === undefined || input === null) return "";
+  const text = typeof input === "string" ? input : JSON.stringify(input);
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (!flat) return "";
+  return `  ${flat.slice(0, 100)}${flat.length > 100 ? "…" : ""}`;
+}
+
+function firstLine(text) {
+  return String(text ?? "").split("\n", 1)[0].slice(0, 160);
+}
+
+// Incremental renderer: assistant text streams as it arrives, tool calls and
+// worker/step transitions become quiet one-liners. Tracks whether stdout is
+// mid-paragraph so status lines never splice into assistant text.
+function createEventRenderer(json) {
+  let midText = false;
+  let lastMessageId;
+  const breakText = () => {
+    if (midText) {
+      process.stdout.write("\n");
+      midText = false;
+    }
+  };
+  const line = (text) => {
+    breakText();
+    console.log(text);
+  };
+  return {
+    render(event) {
+      if (json) {
+        console.log(JSON.stringify(event));
+        return;
+      }
+      const type = event.type ?? "";
+      const payload = event.payload ?? {};
+      if (type === "chat.assistant_block") {
+        const text = typeof payload.text === "string" ? payload.text : "";
+        if (!text) return;
+        if (payload.messageId !== lastMessageId) {
+          breakText();
+          if (lastMessageId !== undefined) process.stdout.write("\n");
+          lastMessageId = payload.messageId;
+        }
+        process.stdout.write(text);
+        midText = !text.endsWith("\n");
+        return;
+      }
+      if (type === "chat.tool_use") {
+        line(`  → ${payload.toolName ?? "tool"}${toolInputSummary(payload.input)}`);
+        return;
+      }
+      if (type === "chat.tool_result") {
+        if (payload.isError) line(`  → tool error: ${firstLine(payload.output)}`);
+        return;
+      }
+      if (!event.message) return;
+      if (EVENT_LINE_TYPES.has(type) || EVENT_LINE_PREFIXES.some((prefix) => type.startsWith(prefix))) {
+        line(`  · ${event.message}`);
+      }
+    },
+    note(text) {
+      if (!json) line(`  · ${text}`);
+    },
+    flush: breakText,
+  };
+}
+
+// Follow a run over chat.events long-polls, rendering incrementally. Keyed on
+// runId + cursor, so a dropped connection retries and resumes exactly where it
+// left off. Returns { runId, status } on a stop status, { timedOut } past the
+// deadline, or { unsupported } when the app predates chat.events.
+async function followRun(flags, runId, opts = {}) {
+  const renderer = createEventRenderer(Boolean(opts.json));
+  let cursor = opts.startCursor;
+  if (cursor === undefined && opts.fromStart) cursor = 0;
+  let canonicalId = runId;
+  let failures = 0;
+  for (;;) {
+    const remaining = (opts.deadline ?? Infinity) - Date.now();
+    if (remaining <= 0) {
+      renderer.flush();
+      return { runId: canonicalId, timedOut: true };
+    }
+    const waitMs = Math.min(25_000, Math.max(1_000, remaining));
+    let res;
+    try {
+      res = await rpc(
+        flags,
+        "chat.events",
+        { runId: canonicalId, ...(cursor === undefined ? {} : { afterSequence: cursor }), waitMs },
+        { timeoutMs: waitMs + 15_000 },
+      );
+      failures = 0;
+    } catch (err) {
+      failures += 1;
+      if (failures > 12) {
+        renderer.flush();
+        throw err;
+      }
+      if (failures === 1) renderer.note("connection lost; retrying");
+      await sleep(Math.min(failures, 5) * 1000);
+      continue;
+    }
+    if (res.error) {
+      renderer.flush();
+      // -32601 method-not-found / -32004 not-implemented: app build predates
+      // chat.events — callers fall back to the blocking chat.wait.
+      if (res.error.code === -32601 || res.error.code === -32004) {
+        return { runId: canonicalId, unsupported: true };
+      }
+      fail(`chat.events failed: ${res.error.message}`);
+    }
+    const result = res.result ?? {};
+    if (typeof result.runId === "string") canonicalId = result.runId;
+    for (const event of result.events ?? []) renderer.render(event);
+    if (typeof result.cursor === "number") cursor = result.cursor;
+    else if (cursor === undefined) cursor = 0;
+    // A truncated batch means more journal is waiting behind the cursor: keep
+    // draining before honoring a terminal status, or the rest of the
+    // transcript is silently dropped. Older app builds send no hasMore flag,
+    // so a full batch is treated as possibly truncated too.
+    const truncated = result.hasMore === true || (result.events ?? []).length >= EVENTS_MAX_BATCH;
+    if (!truncated && WAIT_STOP_STATUSES.has(result.status)) {
+      renderer.flush();
+      return { runId: canonicalId, status: result.status };
+    }
+  }
+}
+
+// Stream the run to completion (or deadline), then print the footer from a
+// fresh snapshot. Falls back to the blocking chat.wait on older app builds.
+async function followAndPrint(flags, runId, opts = {}) {
+  const followed = await followRun(flags, runId, opts);
+  if (followed.unsupported) {
+    const waited = await waitCall(flags, { runId: followed.runId, ...timeoutParams(flags) });
+    output(flags, waited, printCoraSession);
+    return;
+  }
+  const finalState = await waitCall(flags, { runId: followed.runId, timeoutMs: 0 });
+  if (followed.timedOut) finalState.timedOut = true;
+  printRunFooter(finalState);
 }
 
 // Results carrying a dataUrl (app.screenshot / preview.screenshot) get the
@@ -452,11 +702,19 @@ async function main() {
       copyTextFlag(flags, params, "effort");
       const started = await call(flags, "chat.create", params);
       if (flags.wait) {
-        const waited = await call(flags, "chat.wait", {
-          runId: started.run.id,
-          ...timeoutParams(flags),
-        });
-        output(flags, waited, printCoraSession);
+        if (flags.json) {
+          const waited = await waitCall(flags, { runId: started.run.id, ...timeoutParams(flags) });
+          output(flags, waited, printCoraSession);
+        } else {
+          console.log(`${started.run.id}  started`);
+          if (started.workspaceCreated) console.log("registered new Codara workspace");
+          console.log("");
+          const timeout = timeoutParams(flags);
+          await followAndPrint(flags, started.run.id, {
+            fromStart: true,
+            deadline: Date.now() + (timeout.timeoutMs ?? DEFAULT_WAIT_MS),
+          });
+        }
       } else {
         output(flags, started, printCoraSession);
       }
@@ -464,16 +722,36 @@ async function main() {
     }
     case "send": {
       if (!args[0] || !args[1]) fail("usage: cora send <runId> <message> [--wait]");
-      const sent = await call(flags, "chat.send", {
-        runId: args[0],
-        content: args.slice(1).join(" "),
-      });
+      let content = args.slice(1).join(" ");
+      // A bare number answers the pending option-set question by index; when no
+      // options are pending (or the index is out of range) it stays free text.
+      const optionIndex = /^\d+$/.test(content.trim()) ? Number(content.trim()) : null;
+      if (optionIndex !== null && optionIndex >= 1) {
+        const snapshot = await rpc(flags, "chat.wait", { runId: args[0], timeoutMs: 0 }).catch(() => null);
+        const option = blockedQuestion(snapshot?.result?.run)?.options?.[optionIndex - 1];
+        if (option) {
+          content = option.answer || option.label;
+          if (!flags.json) console.log(`option ${optionIndex}: ${option.label}`);
+        }
+      }
+      let startCursor;
+      if (flags.wait && !flags.json) {
+        // Grab the cursor before sending so the reply streams from its first event.
+        const boot = await rpc(flags, "chat.events", { runId: args[0] }).catch(() => null);
+        if (typeof boot?.result?.cursor === "number") startCursor = boot.result.cursor;
+      }
+      const sent = await call(flags, "chat.send", { runId: args[0], content });
       if (flags.wait) {
-        const waited = await call(flags, "chat.wait", {
-          runId: sent.run.id,
-          ...timeoutParams(flags),
-        });
-        output(flags, waited, printCoraSession);
+        if (flags.json) {
+          const waited = await waitCall(flags, { runId: sent.run.id, ...timeoutParams(flags) });
+          output(flags, waited, printCoraSession);
+        } else {
+          const timeout = timeoutParams(flags);
+          await followAndPrint(flags, sent.run.id, {
+            startCursor,
+            deadline: Date.now() + (timeout.timeoutMs ?? DEFAULT_WAIT_MS),
+          });
+        }
       } else {
         output(flags, sent, printCoraSession);
       }
@@ -481,11 +759,30 @@ async function main() {
     }
     case "wait": {
       if (!args[0]) fail("usage: cora wait <runId> [--timeout SECONDS]");
-      const waited = await call(flags, "chat.wait", {
-        runId: args[0],
-        ...timeoutParams(flags),
+      if (flags.json) {
+        const waited = await waitCall(flags, { runId: args[0], ...timeoutParams(flags) });
+        output(flags, waited, printCoraSession);
+        return;
+      }
+      const timeout = timeoutParams(flags);
+      await followAndPrint(flags, args[0], {
+        deadline: Date.now() + (timeout.timeoutMs ?? DEFAULT_WAIT_MS),
       });
-      output(flags, waited, printCoraSession);
+      return;
+    }
+    case "tail": {
+      if (!args[0]) fail("usage: cora tail <runId> [--all] [--timeout SECONDS]");
+      const timeout = timeoutParams(flags);
+      const followed = await followRun(flags, args[0], {
+        fromStart: Boolean(flags.all),
+        deadline: timeout.timeoutMs === undefined ? Infinity : Date.now() + timeout.timeoutMs,
+        json: Boolean(flags.json),
+      });
+      if (followed.unsupported) fail("this app build has no chat.events — update the app, or use cora wait");
+      if (flags.json) return;
+      const finalState = await waitCall(flags, { runId: followed.runId, timeoutMs: 0 });
+      if (followed.timedOut) finalState.timedOut = true;
+      printRunFooter(finalState);
       return;
     }
     case "cancel": {
@@ -511,9 +808,7 @@ async function main() {
     }
     case "run": {
       if (!args[0]) fail("usage: cora run <id-or-prefix>");
-      const runs = listRuns(flags);
-      const match = runs.find((r) => r.id === args[0]) ?? runs.find((r) => r.id.startsWith(args[0]));
-      if (!match) fail(`no run matching "${args[0]}"`);
+      const match = findRunOffline(flags, args[0]);
       output(flags, match, (r) => {
         console.log(`${r.id}  ${r.status}`);
         console.log(`title     ${r.title ?? "(untitled)"}`);
@@ -522,6 +817,25 @@ async function main() {
         const tail = (r.messages ?? []).slice(-5);
         for (const m of tail) console.log(`  [${m.author ?? "?"}] ${String(m.message ?? "").slice(0, 120)}`);
         console.log(`(deep dive: npm run inspect-run -- ${r.id})`);
+      });
+      return;
+    }
+    case "log": {
+      if (!args[0]) fail("usage: cora log <id-or-prefix>");
+      const match = findRunOffline(flags, args[0]);
+      output(flags, match, (r) => {
+        console.log(`${r.id}  ${r.status}  ${r.title ?? "(untitled)"}`);
+        const messages = r.humanMessages ?? r.messages ?? [];
+        if (messages.length === 0) return console.log("(no messages)");
+        for (const m of messages) {
+          const when = String(m.createdAt ?? "").slice(0, 16).replace("T", " ");
+          console.log("");
+          console.log(`${authorLabel(m.author)}${when ? `  ${when}` : ""}`);
+          for (const text of String(m.message ?? "").split("\n")) console.log(`  ${text}`);
+          (m.questionOptions ?? []).forEach((option, index) => {
+            console.log(`    ${index + 1}. ${option.label}${option.recommended ? "  (recommended)" : ""}`);
+          });
+        }
       });
       return;
     }
@@ -571,6 +885,19 @@ function listRuns(flags) {
     }
   }
   return runs.sort((a, b) => String(a.updatedAt ?? "").localeCompare(String(b.updatedAt ?? "")));
+}
+
+function findRunOffline(flags, idOrPrefix) {
+  const runs = listRuns(flags);
+  const match = runs.find((r) => r.id === idOrPrefix) ?? runs.find((r) => r.id.startsWith(idOrPrefix));
+  if (!match) fail(`no run matching "${idOrPrefix}"`);
+  return match;
+}
+
+function authorLabel(author) {
+  if (author === "spark") return "cora";
+  if (author === "user") return "you";
+  return author ?? "?";
 }
 
 function formatUptime(sec) {
