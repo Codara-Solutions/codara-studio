@@ -9,6 +9,7 @@ import {
   statusColor,
   stepStatusColor,
   stepStatusLabel,
+  WORKER_ATTEMPT_CAP,
 } from "./run-format";
 import { ElapsedTime } from "./elapsed";
 
@@ -481,6 +482,13 @@ function WorkerBatchNode({
     (row) => deriveAgentStatus(row.task, row.attempt, status) === "done",
   ).length;
   const progress = total > 0 ? done / total : complete ? 1 : 0;
+  // Retries hide behind logical worker rows; surface the raw try count when
+  // it outgrows the worker count so the step admits its rework.
+  const spawned = rows.filter((row) => row.task).length;
+  const attemptTotal = rows.reduce(
+    (sum, row) => sum + (row.attemptCount ?? (row.attempt ? 1 : 0)),
+    0,
+  );
 
   const attempts = rows
     .map((row) => row.attempt)
@@ -616,6 +624,20 @@ function WorkerBatchNode({
           value={total > 0 ? `${done}/${total}` : "—"}
           tone={total > 0 && done === total ? "var(--ok)" : "var(--ink-dim)"}
         />
+        {attemptTotal > spawned && spawned > 0 && (
+          <span
+            title={`${spawned} workers ran ${attemptTotal} attempts, retries included`}
+            style={{
+              color: "var(--muted)",
+              fontFamily: "var(--font-sans)",
+              fontSize: 10,
+              fontWeight: 500,
+              whiteSpace: "nowrap",
+            }}
+          >
+            · {attemptTotal} attempts
+          </span>
+        )}
         <Stat
           icon={<FilesGlyph />}
           label="Files"
@@ -908,6 +930,18 @@ export const WorkerNode = React.memo(function WorkerNode({
   const model = task?.modelHint ?? "default model";
   const stateColor = statusColor(status);
 
+  // Attempt lineage: ordinal counts every try across the task's supersedes
+  // chain; the tooltip recounts the earlier tries so rework is inspectable
+  // without opening the inspector.
+  const attemptOrdinal = row.attemptCount ?? attempt?.attemptNumber ?? 0;
+  const priorAttempts = (row.attempts ?? []).filter((entry) => entry.id !== attempt?.id);
+  const attemptHistory =
+    priorAttempts.length > 0
+      ? priorAttempts
+          .map((entry, i) => `Attempt ${i + 1} · ${entry.runtime} · ${sentenceCase(entry.status)}`)
+          .join("\n")
+      : undefined;
+
   return (
     <button
       type="button"
@@ -929,7 +963,7 @@ export const WorkerNode = React.memo(function WorkerNode({
       title={
         queued
           ? `${label}\n\nQueued — Cora has not spawned this worker yet.`
-          : `${label}\n\nClick to open this worker's terminal.`
+          : `${label}${row.retryNote ? `\n${row.retryNote}` : ""}\n\nClick to open this worker's terminal.`
       }
       style={{
         appearance: "none",
@@ -945,11 +979,20 @@ export const WorkerNode = React.memo(function WorkerNode({
             ? "color-mix(in oklab, var(--accent) 5%, var(--panel))"
             : "var(--panel)",
         // The runtime-colored left edge is the worker card's silhouette cue —
-        // same left-rule convention as the LiveBoard worker nodes.
-        boxShadow: `inset 3px 0 0 color-mix(in oklch, ${tone.label} 78%, transparent), ${
+        // same left-rule convention as the LiveBoard worker nodes. While the
+        // worker runs, the edge turns accent and the card lifts a level: the
+        // working lane must be structural, not just a tint. Runtime identity
+        // stays on the chip.
+        boxShadow: `${
+          running
+            ? "inset 2px 0 0 var(--accent)"
+            : `inset 3px 0 0 color-mix(in oklch, ${tone.label} 78%, transparent)`
+        }, ${
           selected
             ? "0 0 0 1.5px var(--accent), var(--shadow-1)"
-            : "var(--lift-hi), var(--shadow-1)"
+            : running
+              ? "var(--lift-hi), var(--shadow-2)"
+              : "var(--lift-hi), var(--shadow-1)"
         }`,
         opacity: queued ? 0.62 : 1,
         padding: "8px 10px 8px 14px",
@@ -1075,8 +1118,12 @@ export const WorkerNode = React.memo(function WorkerNode({
         >
           {model}
         </span>
-        {(attempt?.attemptNumber ?? 0) > 1 && (
+        {attemptOrdinal > 1 && (
           <span
+            title={
+              attemptHistory ??
+              `${attemptOrdinal - 1} earlier ${attemptOrdinal === 2 ? "attempt" : "attempts"}`
+            }
             style={{
               flex: "0 0 auto",
               color: "var(--muted-2)",
@@ -1084,7 +1131,7 @@ export const WorkerNode = React.memo(function WorkerNode({
               fontSize: 10,
             }}
           >
-            attempt {attempt?.attemptNumber}
+            attempt {attemptOrdinal} of {Math.max(WORKER_ATTEMPT_CAP, attemptOrdinal)}
           </span>
         )}
         <span
@@ -1095,6 +1142,7 @@ export const WorkerNode = React.memo(function WorkerNode({
             color: running ? "var(--accent)" : stateColor,
             fontFamily: "var(--font-mono)",
             fontSize: 10,
+            fontWeight: running ? 600 : undefined,
             fontVariantNumeric: "tabular-nums",
           }}
         >

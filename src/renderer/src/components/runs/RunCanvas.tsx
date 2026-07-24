@@ -223,8 +223,10 @@ export default function RunCanvas({
 
   useEffect(() => () => stopAnimation(), [stopAnimation]);
 
-  // Frame the graph the first time a given run is shown: 100% zoom, the start
-  // of the spine kept in view at the left, vertically centred.
+  // Frame the graph the first time a given run is shown: fit the whole
+  // orchestration so parallel branches read at a glance, but never below a
+  // legibility floor — a graph still wider than the floor allows stays
+  // left-anchored so the spine is entered from its start.
   useLayoutEffect(() => {
     if (centeredRunIdRef.current === run.id) return;
     const viewport = viewportRef.current;
@@ -237,7 +239,9 @@ export default function RunCanvas({
     const vh = viewport.clientHeight;
     if (naturalW <= 0 || naturalH <= 0 || vw <= 0 || vh <= 0) return;
     centeredRunIdRef.current = run.id;
-    const z = clampZoom(DEFAULT_ZOOM);
+    const FIT_FLOOR = 0.45;
+    const fit = Math.min(DEFAULT_ZOOM, (vw - 96) / naturalW, (vh - 96) / naturalH);
+    const z = clampZoom(Math.max(FIT_FLOOR, fit));
     stopAnimation();
     zRef.current = z;
     targetZRef.current = z;

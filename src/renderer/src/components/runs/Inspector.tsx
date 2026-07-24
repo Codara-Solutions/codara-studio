@@ -13,6 +13,7 @@ import {
   attemptStatusColor,
   deriveAgentStatus,
   formatClock,
+  formatDuration,
   isRunStillTicking,
   type RunMaps,
   runtimeTone,
@@ -21,7 +22,9 @@ import {
   statusColor,
   stepStatusColor,
   stepStatusLabel,
+  WORKER_ATTEMPT_CAP,
 } from "./run-format";
+import { attemptsForTask, logicalWorkers, logicalWorkersForStep } from "../../lib/worker-identity";
 import { ElapsedChip, ElapsedTime } from "./elapsed";
 import { StatusDot } from "./GraphNodes";
 import type { RunExecutionProjection } from "../../lib/useRunExecutionRecord";
@@ -63,13 +66,40 @@ export default function Inspector({
     return map;
   }, [orderedSteps]);
 
-  const selectedTask = selectedWorkerTaskId ? maps.taskById.get(selectedWorkerTaskId) ?? null : null;
+  // Resolve the selection through the supersedes chain: a selection made
+  // before a runtime-fallback clone points at the cancelled predecessor, which
+  // the collapsed graph no longer renders — follow it to the surviving task
+  // instead of opening a phantom worker.
+  const selectedWorker = useMemo(() => {
+    if (!selectedWorkerTaskId) return null;
+    return (
+      logicalWorkers(run).find(
+        (worker) =>
+          worker.task.id === selectedWorkerTaskId ||
+          worker.supersededTasks.some((superseded) => superseded.id === selectedWorkerTaskId),
+      ) ?? null
+    );
+  }, [run, selectedWorkerTaskId]);
+  const selectedTask =
+    selectedWorker?.task ??
+    (selectedWorkerTaskId ? maps.taskById.get(selectedWorkerTaskId) ?? null : null);
+  // Full attempt history for the selected worker — the detail pane shows every
+  // try across the supersedes chain (predecessor attempts included), not just
+  // the latest attempt the maps collapse to.
+  const selectedAttempts = useMemo(
+    () =>
+      selectedWorker
+        ? selectedWorker.attempts
+        : selectedTask
+          ? attemptsForTask(run, selectedTask.id)
+          : [],
+    [selectedWorker, run, selectedTask],
+  );
   const selectedStep = selectedTask?.stepId
     ? run.steps.find((step) => step.id === selectedTask.stepId) ?? null
     : selectedStepId
       ? run.steps.find((step) => step.id === selectedStepId) ?? null
       : null;
-
   const mode: "run" | "step" | "worker" = selectedTask ? "worker" : selectedStepId ? "step" : "run";
 
   return (
@@ -95,6 +125,7 @@ export default function Inspector({
           <WorkerDetail
             task={selectedTask}
             attempt={maps.attemptByTask.get(selectedTask.id) ?? null}
+            attempts={selectedAttempts}
             step={selectedStep}
             reportByAttempt={reportByAttempt}
             onOpenTerminal={onOpenWorkerTerminal
@@ -103,6 +134,7 @@ export default function Inspector({
           />
         ) : mode === "step" && selectedStep ? (
           <StepDetail
+            run={run}
             step={selectedStep}
             index={stepIndex.get(selectedStep.id) ?? 0}
             maps={maps}
@@ -800,8 +832,18 @@ function RunSummary({
       <Section title="Run">
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 1, background: "var(--rule-soft)", border: "1px solid var(--rule-soft)", borderRadius: 7, overflow: "hidden" }}>
           <MetricCell label="Steps" value={String(run.steps.length)} />
-          <MetricCell label="Workers" value={String(run.workerTasks.length)} />
-          <MetricCell label="Attempts" value={String(run.workerAttempts.length)} />
+          {/* Workers counts logical workers (supersedes chains collapsed);
+              the attempts cell owns the raw try count, retries included. */}
+          <MetricCell
+            label="Workers"
+            value={String(logicalWorkers(run).length)}
+            title="Logical workers — a retried or replaced task still counts once"
+          />
+          <MetricCell
+            label="All attempts"
+            value={String(run.workerAttempts.length)}
+            title="Every attempt, retries included"
+          />
           <MetricCell label="Autopilot" value={run.autopilot?.status ?? "idle"} />
           <MetricCell label="Complexity" value={run.taskComplexity ?? "—"} />
           <MetricCell
@@ -824,14 +866,17 @@ function MetricCell({
   value,
   tone,
   compact,
+  title,
 }: {
   label: string;
   value: React.ReactNode;
   tone?: string;
   compact?: boolean;
+  title?: string;
 }) {
   return (
     <div
+      title={title}
       style={{
         background: "var(--panel)",
         padding: compact ? "8px 9px" : "9px 10px",
@@ -874,12 +919,14 @@ function MetricCell({
 // ── Step detail ──────────────────────────────────────────────────────────────
 
 function StepDetail({
+  run,
   step,
   index,
   maps,
   reportByAttempt,
   onSelectWorker,
 }: {
+  run: RunState;
   step: StepState;
   index: number;
   maps: RunMaps;
@@ -887,9 +934,10 @@ function StepDetail({
   onSelectWorker: (id: string) => void;
 }) {
   const tone = stepStatusColor(step.status);
-  const tasks = step.workerTaskIds
-    .map((id) => maps.taskById.get(id))
-    .filter((task): task is WorkerTask => Boolean(task));
+  // Logical workers only: a task superseded by a runtime-fallback clone folds
+  // into its replacement, matching the collapsed lanes the graph renders — the
+  // list, counts and progress must not resurrect phantom cancelled tasks.
+  const tasks = logicalWorkersForStep(run, step.id).map((worker) => worker.task);
   const done = tasks.filter(
     (task) => deriveAgentStatus(task, maps.attemptByTask.get(task.id), step.status) === "done",
   ).length;
@@ -1086,19 +1134,32 @@ function StatusWord({ label, tone }: { label: string; tone: string }) {
 function WorkerDetail({
   task,
   attempt,
+  attempts,
   step,
   reportByAttempt,
   onOpenTerminal,
 }: {
   task: WorkerTask;
   attempt: WorkerAttempt | null;
+  // Every attempt across the worker's supersedes chain, oldest first — the
+  // full retry lineage, predecessor tasks included.
+  attempts: WorkerAttempt[];
   step: StepState | null;
   reportByAttempt: ReadonlyMap<string, WorkerReport>;
   onOpenTerminal?: () => void;
 }) {
   const status = deriveAgentStatus(task, attempt ?? undefined, step?.status ?? "running");
   const report = attempt ? reportByAttempt.get(attempt.id) : undefined;
-  const meta = [task.modelHint, task.effortHint, task.taskClass, attempt ? `attempt ${attempt.attemptNumber}` : null]
+  // Ordinal of the current attempt within the chain-wide lineage. Attempt
+  // numbers restart at 1 on a fallback clone, so the raw attemptNumber would
+  // contradict the graph card's chain-summed count.
+  const attemptIndex = attempt ? attempts.findIndex((entry) => entry.id === attempt.id) : -1;
+  const attemptOrdinal = attempt
+    ? attemptIndex >= 0
+      ? attemptIndex + 1
+      : attempt.attemptNumber
+    : 0;
+  const meta = [task.modelHint, task.effortHint, task.taskClass, attempt ? `attempt ${attemptOrdinal}` : null]
     .filter(Boolean)
     .join(" · ");
   const tone = statusColor(status);
@@ -1151,7 +1212,14 @@ function WorkerDetail({
           <QuickStats
             items={[
               { label: "Status", value: status, tone },
-              { label: "Attempt", value: attempt ? String(attempt.attemptNumber) : "none" },
+              {
+                label: "Attempt",
+                value: attempt
+                  ? attempts.length > 1
+                    ? `${attemptOrdinal} of ${Math.max(WORKER_ATTEMPT_CAP, attempts.length)}`
+                    : String(attemptOrdinal)
+                  : "none",
+              },
               {
                 label: "Report",
                 value: report?.status ?? (status === "running" || attempt?.finalReportPath ? "pending" : "none"),
@@ -1166,6 +1234,96 @@ function WorkerDetail({
           )}
         </SnapshotCard>
       </Section>
+
+      {attempts.length > 1 && (
+        <Section title="Attempts" meta={<MetaCount value={attempts.length} />}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+            {attempts.map((entry, i) => {
+              const verdict = reportByAttempt.get(entry.id)?.verifier?.confidence;
+              const current = entry.id === attempt?.id;
+              return (
+                <div
+                  key={entry.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "baseline",
+                    gap: 8,
+                    padding: "6px 9px",
+                    border: `1px solid ${current ? "var(--rule)" : "var(--rule-soft)"}`,
+                    borderRadius: 6,
+                    background: current
+                      ? "color-mix(in oklab, var(--ink) 3%, transparent)"
+                      : "transparent",
+                    minWidth: 0,
+                  }}
+                >
+                  <span
+                    style={{
+                      color: "var(--muted)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 10,
+                      fontVariantNumeric: "tabular-nums",
+                      flex: "0 0 auto",
+                    }}
+                  >
+                    {i + 1}
+                  </span>
+                  <span
+                    style={{
+                      color: "var(--ink-dim)",
+                      fontFamily: "var(--font-sans)",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      flex: "0 0 auto",
+                    }}
+                  >
+                    {entry.runtime}
+                  </span>
+                  <span
+                    style={{
+                      color: attemptStatusColor(entry.status),
+                      fontFamily: "var(--font-sans)",
+                      fontSize: 10.5,
+                      fontWeight: 600,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      minWidth: 0,
+                    }}
+                  >
+                    {sentenceCase(entry.status)}
+                  </span>
+                  <span style={{ flex: 1 }} />
+                  {verdict && (
+                    <span
+                      title="Verifier verdict for this attempt"
+                      style={{
+                        color: "var(--muted)",
+                        fontFamily: "var(--font-sans)",
+                        fontSize: 10,
+                        flex: "0 0 auto",
+                      }}
+                    >
+                      {sentenceCase(verdict)}
+                    </span>
+                  )}
+                  <span
+                    style={{
+                      color: "var(--muted)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 10,
+                      fontVariantNumeric: "tabular-nums",
+                      flex: "0 0 auto",
+                    }}
+                  >
+                    {formatDuration(entry.startedAt, entry.finishedAt)}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </Section>
+      )}
 
       <Section title="Report">
         {report ? (

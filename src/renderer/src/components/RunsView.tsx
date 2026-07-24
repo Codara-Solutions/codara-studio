@@ -1,6 +1,7 @@
 import { useMemo, type ReactNode } from "react";
 import type { RunState, Workspace } from "@shared/types";
 import { isRunningStatus, runStatusColor } from "../lib/run-status";
+import { logicalWorkers } from "../lib/worker-identity";
 import { sortSteps } from "./runs/run-format";
 import { StatusDot } from "./runs/GraphNodes";
 import { ElapsedTime } from "./runs/elapsed";
@@ -64,6 +65,28 @@ export default function RunsView({
       </div>
     );
   }
+  if (isConversationRun(activeRun)) {
+    // A pure conversation is not orchestration — no canvas, no inspector,
+    // no phantom pipeline. The graph appears the moment Cora delegates
+    // real work.
+    return (
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          minWidth: 0,
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+          background: "var(--bg)",
+          color: "var(--ink)",
+        }}
+      >
+        <RunHeader run={activeRun} />
+        <ConversationRestState run={activeRun} />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -93,6 +116,14 @@ function isTerminalSpawnRun(run: RunState): boolean {
   );
 }
 
+// A run whose only activity is conversational manager turns — Cora talking,
+// not delegating. The Runs tab stays quiet for these; a plan-first run (any
+// non-chat manager call) still gets the forming-pipeline canvas.
+function isConversationRun(run: RunState): boolean {
+  if (run.steps.length > 0 || run.workerTasks.length > 0) return false;
+  return run.sparkCalls.every((call) => call.mode === "chat");
+}
+
 // ── Header ───────────────────────────────────────────────────────────────────
 
 function RunHeader({ run }: { run: RunState }) {
@@ -103,11 +134,35 @@ function RunHeader({ run }: { run: RunState }) {
     orderedSteps.find((step) => step.status !== "complete" && step.status !== "skipped");
   const activeStepNumber = activeStep ? orderedSteps.indexOf(activeStep) + 1 : 0;
 
-  const nowText = activeStep
-    ? `Step ${activeStepNumber} — ${activeStep.title}`
-    : run.status === "complete"
-      ? "Run complete"
-      : "Waiting for Cora to plan the first step";
+  // A stepless run with conversational manager turns is a session, not a
+  // pipeline that failed to start — the glance header talks about turns, not
+  // phantom steps.
+  const turnCalls = useMemo(
+    () =>
+      run.sparkCalls
+        .filter((call) => call.mode === "chat")
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    [run.sparkCalls],
+  );
+  const conversational =
+    orderedSteps.length === 0 &&
+    run.workerTasks.length === 0 &&
+    run.sparkCalls.every((call) => call.mode === "chat");
+  const liveTurn = turnCalls.find((call) => call.status === "started") ?? null;
+  const tokensIn = turnCalls.reduce((sum, call) => sum + (call.promptTokens ?? 0), 0);
+  const tokensOut = turnCalls.reduce((sum, call) => sum + (call.completionTokens ?? 0), 0);
+
+  const nowText = conversational
+    ? liveTurn
+      ? `Turn ${turnCalls.indexOf(liveTurn) + 1} — Cora is answering in chat`
+      : run.status === "complete"
+        ? "Conversation finished"
+        : "Waiting for your next message"
+    : activeStep
+      ? `Step ${activeStepNumber} — ${activeStep.title}`
+      : run.status === "complete"
+        ? "Run complete"
+        : "Waiting for Cora to plan the first step";
 
   const completedSteps = orderedSteps.filter((step) =>
     ["complete", "completed_unverified", "skipped"].includes(step.status),
@@ -121,7 +176,17 @@ function RunHeader({ run }: { run: RunState }) {
     "running",
     "finishing",
   ]);
-  const liveAttempts = run.workerAttempts.filter((attempt) => liveAttemptStatuses.has(attempt.status));
+  // "Live" counts logical workers (tasks collapsed over supersedes chains)
+  // with an attempt in flight — never raw attempts, so a retry can't read as
+  // an extra worker. The retry itself is named in the detail line instead.
+  const workers = useMemo(() => logicalWorkers(run), [run]);
+  const liveWorkers = workers.filter(
+    (worker) => worker.latestAttempt && liveAttemptStatuses.has(worker.latestAttempt.status),
+  );
+  const liveRetryOrdinal = liveWorkers.reduce(
+    (max, worker) => Math.max(max, worker.attempts.length),
+    0,
+  );
   const latestAttempt = [...run.workerAttempts]
     .reverse()
     .find((attempt) => liveAttemptStatuses.has(attempt.status)) ?? run.workerAttempts.at(-1);
@@ -214,48 +279,50 @@ function RunHeader({ run }: { run: RunState }) {
             {nowText}
           </span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 9, marginTop: 1 }}>
-          <span
-            aria-label={`${progressPercent}% complete`}
-            style={{
-              position: "relative",
-              flex: 1,
-              minWidth: 80,
-              maxWidth: 400,
-              height: 3,
-              overflow: "hidden",
-              borderRadius: 999,
-              background: "color-mix(in oklab, var(--ink) 9%, transparent)",
-            }}
-          >
+        {!conversational && (
+          <div style={{ display: "flex", alignItems: "center", gap: 9, marginTop: 1 }}>
+            <span
+              aria-label={`${progressPercent}% complete`}
+              style={{
+                position: "relative",
+                flex: 1,
+                minWidth: 80,
+                maxWidth: 400,
+                height: 3,
+                overflow: "hidden",
+                borderRadius: 999,
+                background: "color-mix(in oklab, var(--ink) 9%, transparent)",
+              }}
+            >
+              <span
+                style={{
+                  display: "block",
+                  width: `${progressPercent}%`,
+                  height: "100%",
+                  borderRadius: "inherit",
+                  background:
+                    run.status === "failed" || run.status === "blocked"
+                      ? "var(--danger)"
+                      : terminal
+                        ? "var(--ok)"
+                        : "var(--accent)",
+                  transition: "width var(--motion) var(--ease-out)",
+                }}
+              />
+            </span>
             <span
               style={{
-                display: "block",
-                width: `${progressPercent}%`,
-                height: "100%",
-                borderRadius: "inherit",
-                background:
-                  run.status === "failed" || run.status === "blocked"
-                    ? "var(--danger)"
-                    : terminal
-                      ? "var(--ok)"
-                      : "var(--accent)",
-                transition: "width var(--motion) var(--ease-out)",
+                color: "var(--muted)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 10,
+                fontVariantNumeric: "tabular-nums",
+                whiteSpace: "nowrap",
               }}
-            />
-          </span>
-          <span
-            style={{
-              color: "var(--muted)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 10,
-              fontVariantNumeric: "tabular-nums",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {completedSteps}/{orderedSteps.length || "—"} · {progressPercent}%
-          </span>
-        </div>
+            >
+              {completedSteps}/{orderedSteps.length || "—"} · {progressPercent}%
+            </span>
+          </div>
+        )}
       </div>
 
       <div
@@ -267,19 +334,43 @@ function RunHeader({ run }: { run: RunState }) {
           minWidth: 0,
         }}
       >
-        <StatMetric
-          label="Progress"
-          value={`${completedSteps}/${orderedSteps.length || "—"}`}
-          detail={`${progressPercent}% complete`}
-          tone={terminal ? "var(--ok)" : "var(--accent)"}
-        />
-        <StatMetric
-          label="Live"
-          value={liveAttempts.length}
-          detail={liveAttempts.length === 1 ? "worker active" : liveAttempts.length > 1 ? "workers active" : "none active"}
-          tone={liveAttempts.length > 0 ? "var(--accent)" : "var(--ink)"}
-          live={liveAttempts.length > 0}
-        />
+        {conversational ? (
+          <StatMetric
+            label="Turns"
+            value={turnCalls.length}
+            detail={liveTurn ? "Cora is answering" : "conversation"}
+            tone={liveTurn ? "var(--accent)" : terminal ? "var(--ok)" : "var(--ink)"}
+            live={Boolean(liveTurn)}
+          />
+        ) : (
+          <StatMetric
+            label="Progress"
+            value={`${completedSteps}/${orderedSteps.length || "—"}`}
+            detail={`${progressPercent}% complete`}
+            tone={terminal ? "var(--ok)" : "var(--accent)"}
+          />
+        )}
+        {conversational ? (
+          <StatMetric
+            label="Tokens"
+            value={tokensIn + tokensOut > 0 ? formatTokenCount(tokensIn + tokensOut) : "—"}
+            detail={tokensIn + tokensOut > 0 ? `${formatTokenCount(tokensIn)} in / ${formatTokenCount(tokensOut)} out` : "no usage yet"}
+          />
+        ) : (
+          <StatMetric
+            label="Live"
+            value={liveWorkers.length}
+            detail={
+              liveWorkers.length === 0
+                ? "none active"
+                : `${liveWorkers.length === 1 ? "worker" : "workers"} active${
+                    liveRetryOrdinal > 1 ? ` · attempt ${liveRetryOrdinal} running` : ""
+                  }`
+            }
+            tone={liveWorkers.length > 0 ? "var(--accent)" : "var(--ink)"}
+            live={liveWorkers.length > 0}
+          />
+        )}
         <StatMetric
           label="Engine"
           value={engine}
@@ -292,14 +383,128 @@ function RunHeader({ run }: { run: RunState }) {
           detail={terminal ? "total runtime" : "wall clock"}
           text
         />
-        <StatMetric
-          label="Evidence"
-          value={manifest ? manifest.workspaceDelta.length : "—"}
-          detail={evidenceDetail}
-          tone={manifest && manifest.checks.some((check) => check.result === "failed") ? "var(--danger)" : undefined}
-        />
+        {conversational ? (
+          <StatMetric
+            label="Context"
+            value={latestContextPercent(turnCalls) ?? "—"}
+            detail="of model window"
+          />
+        ) : (
+          <StatMetric
+            label="Evidence"
+            value={manifest ? manifest.workspaceDelta.length : "—"}
+            detail={evidenceDetail}
+            tone={manifest && manifest.checks.some((check) => check.result === "failed") ? "var(--danger)" : undefined}
+          />
+        )}
       </div>
     </header>
+  );
+}
+
+function formatTokenCount(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1).replace(/\.0$/, "")}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1).replace(/\.0$/, "")}k`;
+  return String(Math.round(value));
+}
+
+// Context pressure of the most recent turn that reported usage, as "42%".
+function latestContextPercent(turnCalls: RunState["sparkCalls"]): string | null {
+  for (let index = turnCalls.length - 1; index >= 0; index -= 1) {
+    const call = turnCalls[index];
+    const used = call.promptTokens ?? call.promptTokenEstimate;
+    const total = call.contextWindowTokens;
+    if (typeof used === "number" && typeof total === "number" && total > 0) {
+      return `${Math.max(0, Math.min(100, Math.round((used / total) * 100)))}%`;
+    }
+  }
+  return null;
+}
+
+// The quiet state for a chat that has not delegated any work: no canvas, no
+// inspector — one calm line, and the promise of what this surface becomes.
+function ConversationRestState({ run }: { run: RunState }) {
+  const live = run.sparkCalls.some((call) => call.mode === "chat" && call.status === "started");
+  return (
+    <div
+      style={{
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 32,
+        backgroundImage:
+          "radial-gradient(circle, color-mix(in oklab, var(--ink) 10%, transparent) 1px, transparent 1px)",
+        backgroundSize: "24px 24px",
+      }}
+    >
+      <div
+        style={{
+          width: "min(460px, 100%)",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 10,
+          textAlign: "center",
+        }}
+      >
+        <span
+          style={{
+            width: 38,
+            height: 38,
+            borderRadius: 9,
+            border: "1px solid var(--rule)",
+            background: "var(--panel)",
+            color: live ? "var(--accent)" : "var(--muted)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            boxShadow: "var(--lift-hi)",
+          }}
+        >
+          <FanGlyph />
+        </span>
+        <span
+          style={{
+            color: "var(--muted-2)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10,
+            fontWeight: 600,
+            letterSpacing: "0.06em",
+            textTransform: "uppercase",
+          }}
+        >
+          Orchestration
+        </span>
+        <div style={{ color: "var(--ink)", fontSize: 15, fontWeight: 700 }}>
+          {live ? "Cora is answering in chat" : "Just a conversation so far"}
+        </div>
+        <div style={{ color: "var(--muted)", fontSize: 12.5, lineHeight: 1.5, maxWidth: 380 }}>
+          The moment Cora delegates real work — parallel workers, steps,
+          verification — the orchestration graph appears here.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// A small fan-out mark: one node branching into three parallel lanes.
+function FanGlyph({ size = 18 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 18 18" fill="none" aria-hidden>
+      <circle cx="4" cy="9" r="2.1" stroke="currentColor" strokeWidth="1.5" />
+      <path
+        d="M6.1 9h2.1M8.2 9c1.7 0 1.7-4 3.4-4M8.2 9c1.7 0 1.7 4 3.4 4M8.2 9h3.4"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+      <circle cx="14" cy="5" r="1.6" stroke="currentColor" strokeWidth="1.5" />
+      <circle cx="14" cy="9" r="1.6" stroke="currentColor" strokeWidth="1.5" />
+      <circle cx="14" cy="13" r="1.6" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
   );
 }
 

@@ -32,13 +32,29 @@ export type AnyStatus = RunState["status"] | StepState["status"] | AgentStatusKi
 export interface AgentRow {
   agent: PlannedStepAgent;
   task?: WorkerTask;
+  // The surviving task's own latest attempt — status derivation keys off this,
+  // never off a superseded predecessor's dead attempt.
   attempt?: WorkerAttempt;
+  // Every attempt across the task's supersedes chain, oldest first.
+  attempts?: WorkerAttempt[];
+  // Total tries across the chain — the honest number behind "attempt N of 3".
+  attemptCount?: number;
+  // Cancelled predecessors this row absorbed (runtime-fallback clones).
+  supersededTasks?: WorkerTask[];
+  // e.g. "retried on codex" when the chain switched runtime.
+  retryNote?: string;
 }
 
 export interface RunMaps {
   taskById: Map<string, WorkerTask>;
   attemptByTask: Map<string, WorkerAttempt>;
+  // Full per-task attempt lists, ordered by attemptNumber — retry lineage.
+  attemptsByTask: Map<string, WorkerAttempt[]>;
 }
+
+// Renderer-side mirror of run-store's MAX_WORKER_ATTEMPTS. Display copy only
+// ("attempt 2 of 3") — the main process is the one that enforces the cap.
+export const WORKER_ATTEMPT_CAP = 3;
 
 export interface RuntimeTone {
   label: string;
@@ -163,17 +179,35 @@ export function runtimeTone(runtime: WorkerRuntime): RuntimeTone {
 
 // ── Run -> graph data shaping ────────────────────────────────────────────────
 
+// buildRunMaps derives the full per-task attempt lists alongside the
+// latest-attempt map. RunGraph still calls agentRowsForStep with the two bare
+// maps, so the lists ride this registry rather than a call-signature change;
+// the registry entry lives exactly as long as the attemptByTask instance.
+const attemptListsRegistry = new WeakMap<
+  Map<string, WorkerAttempt>,
+  Map<string, WorkerAttempt[]>
+>();
+
 export function buildRunMaps(run: RunState): RunMaps {
   const taskById = new Map<string, WorkerTask>();
   for (const task of run.workerTasks) taskById.set(task.id, task);
-  const attemptByTask = new Map<string, WorkerAttempt>();
+  const attemptsByTask = new Map<string, WorkerAttempt[]>();
   for (const attempt of run.workerAttempts) {
-    const prev = attemptByTask.get(attempt.workerTaskId);
-    if (!prev || attempt.attemptNumber >= prev.attemptNumber) {
-      attemptByTask.set(attempt.workerTaskId, attempt);
-    }
+    const list = attemptsByTask.get(attempt.workerTaskId);
+    if (list) list.push(attempt);
+    else attemptsByTask.set(attempt.workerTaskId, [attempt]);
   }
-  return { taskById, attemptByTask };
+  const attemptByTask = new Map<string, WorkerAttempt>();
+  for (const [taskId, list] of attemptsByTask) {
+    list.sort(
+      (a, b) =>
+        a.attemptNumber - b.attemptNumber ||
+        (a.startedAt ?? "").localeCompare(b.startedAt ?? ""),
+    );
+    attemptByTask.set(taskId, list[list.length - 1]);
+  }
+  attemptListsRegistry.set(attemptByTask, attemptsByTask);
+  return { taskById, attemptByTask, attemptsByTask };
 }
 
 export function sortSteps(steps: StepState[]): StepState[] {
@@ -198,58 +232,113 @@ export function displayAgentLabel(
   return trimmed || `worker ${stepIndex}.${agentIndex}`;
 }
 
-// One row per worker the step will run: a planned agent paired with its task
-// and latest attempt. Tasks queued after planning (a verifier follow-up, say)
-// outnumber the planned agents and get their own rows so the graph reflects
-// every worker the manager actually spawned.
+// One row per LOGICAL worker the step will run: a planned agent paired with
+// its task, latest attempt and full attempt lineage. A task superseded by a
+// runtime-fallback clone folds into its replacement's row (never a row of its
+// own), while tasks queued after planning (a verifier follow-up, say)
+// outnumber the planned agents and get their own rows — so the graph reflects
+// every worker the manager actually spawned, counted the way the user counts.
 export function agentRowsForStep(
   step: StepState,
   taskById: Map<string, WorkerTask>,
   attemptByTask: Map<string, WorkerAttempt>,
   displayIndex: number,
 ): AgentRow[] {
+  const attemptLists = attemptListsRegistry.get(attemptByTask);
+  // Ids any task in the run supersedes — those tasks fold into their
+  // replacement instead of rendering as a phantom extra worker.
+  const supersededIds = new Set<string>();
+  for (const candidate of taskById.values()) {
+    if (candidate.supersedesTaskId && taskById.has(candidate.supersedesTaskId)) {
+      supersededIds.add(candidate.supersedesTaskId);
+    }
+  }
+
   const tasks = step.workerTaskIds
     .map((id) => taskById.get(id))
-    .filter((task): task is WorkerTask => Boolean(task));
+    .filter((task): task is WorkerTask => task !== undefined && !supersededIds.has(task.id));
+
+  const rowFor = (agent: PlannedStepAgent, task: WorkerTask | undefined): AgentRow => {
+    if (!task) return { agent };
+    // Walk the supersedes chain back to the original task, oldest first.
+    const chain: WorkerTask[] = [];
+    const seen = new Set<string>([task.id]);
+    let cursor: WorkerTask | undefined = task;
+    while (cursor?.supersedesTaskId && !seen.has(cursor.supersedesTaskId)) {
+      seen.add(cursor.supersedesTaskId);
+      const previous = taskById.get(cursor.supersedesTaskId);
+      if (!previous) break;
+      chain.unshift(previous);
+      cursor = previous;
+    }
+    const members = [...chain, task];
+    const attempts = members.flatMap((member) => {
+      const list = attemptLists?.get(member.id);
+      if (list) return list;
+      const latest = attemptByTask.get(member.id);
+      return latest ? [latest] : [];
+    });
+    // attemptNumber is serial per task, so the chain's true try count survives
+    // even when only each member's latest attempt is at hand.
+    const attemptCount = members.reduce(
+      (sum, member) => sum + (attemptByTask.get(member.id)?.attemptNumber ?? 0),
+      0,
+    );
+    const attempt = attemptByTask.get(task.id);
+    const retryNote =
+      chain.length > 0
+        ? `retried on ${attempt?.runtime ?? task.runtimePreference}`
+        : undefined;
+    return {
+      agent,
+      task,
+      attempt,
+      attempts,
+      attemptCount,
+      supersededTasks: chain.length > 0 ? chain : undefined,
+      retryNote,
+    };
+  };
+
   const planned = step.plannedAgents ?? [];
 
   if (planned.length > 0) {
-    const rows: AgentRow[] = planned.map((agent, index) => {
-      const task = tasks[index];
-      return {
-        agent: { ...agent, label: displayAgentLabel(agent.label, displayIndex, index + 1) },
-        task,
-        attempt: task ? attemptByTask.get(task.id) : undefined,
-      };
-    });
+    const rows: AgentRow[] = planned.map((agent, index) =>
+      rowFor(
+        { ...agent, label: displayAgentLabel(agent.label, displayIndex, index + 1) },
+        tasks[index],
+      ),
+    );
     for (let index = planned.length; index < tasks.length; index++) {
       const task = tasks[index];
-      rows.push({
-        agent: {
-          label: displayAgentLabel(undefined, displayIndex, index + 1),
-          summary: task.description,
-          runtimePreference: task.runtimePreference,
-          modelHint: task.modelHint,
-          effortHint: task.effortHint,
-        },
-        task,
-        attempt: attemptByTask.get(task.id),
-      });
+      rows.push(
+        rowFor(
+          {
+            label: displayAgentLabel(undefined, displayIndex, index + 1),
+            summary: task.description,
+            runtimePreference: task.runtimePreference,
+            modelHint: task.modelHint,
+            effortHint: task.effortHint,
+          },
+          task,
+        ),
+      );
     }
     return rows;
   }
 
-  return tasks.map((task, index) => ({
-    agent: {
-      label: displayAgentLabel(task.title, displayIndex, index + 1),
-      summary: task.description,
-      runtimePreference: task.runtimePreference,
-      modelHint: task.modelHint,
-      effortHint: task.effortHint,
-    },
-    task,
-    attempt: attemptByTask.get(task.id),
-  }));
+  return tasks.map((task, index) =>
+    rowFor(
+      {
+        label: displayAgentLabel(task.title, displayIndex, index + 1),
+        summary: task.description,
+        runtimePreference: task.runtimePreference,
+        modelHint: task.modelHint,
+        effortHint: task.effortHint,
+      },
+      task,
+    ),
+  );
 }
 
 // Collapse a worker's task + attempt + parent-step state into one of the four

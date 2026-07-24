@@ -94,7 +94,9 @@ export default function RunGraph({
   if (orderedSteps.length === 0) {
     // A finished run with no steps did its work outside the worker pipeline
     // (a spawn_terminals decision). Show that outcome rather than the planning
-    // skeletons, which would falsely imply work is still forming.
+    // skeletons, which would falsely imply work is still forming. (Pure
+    // conversations never reach this component — RunsView shows its quiet
+    // rest state instead of the canvas for those.)
     const settled =
       run.status === "complete" ||
       run.status === "failed" ||

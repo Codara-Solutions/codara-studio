@@ -1,13 +1,14 @@
 import React, { useMemo } from "react";
 import type { RunState, StepState } from "@shared/types";
-import type { RunGraphLayout, SpineWire, StepLayout } from "./graph-layout";
+import type { FanWire, RunGraphLayout, SpineWire } from "./graph-layout";
 import { deriveAgentStatus, type RunMaps } from "./run-format";
 
 // The wire layer. One SVG sized to the whole graph, drawn beneath the nodes:
-// curved bezier spine wires between SPARK / steps / COMPLETE, and a trunk with
-// rounded-corner ribs hanging the workers under each step. Every wire carries
-// one of four states; the live path animates a flowing dash.
-
+// curved bezier spine wires running SPARK → step → … → COMPLETE, and one fan
+// wire per worker branching off its step — each parallel agent's branch
+// lights up independently, so a running batch reads as simultaneous live
+// lanes hanging off the line. Every wire carries one of four states; the
+// live path animates a flowing dash.
 type WireState = "pending" | "done" | "active" | "blocked";
 
 const WIRE_COLOR: Record<WireState, string> = {
@@ -16,6 +17,13 @@ const WIRE_COLOR: Record<WireState, string> = {
   active: "var(--accent)",
   blocked: "var(--danger)",
 };
+
+// The dash flow collapses via CSS for prefers-reduced-motion; the travelling
+// dot is SMIL, so it needs an explicit gate. Snapshot at load — a live
+// listener is not worth the churn for an accessibility preference.
+const REDUCE_MOTION =
+  typeof window !== "undefined" &&
+  !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 
 interface Props {
   layout: RunGraphLayout;
@@ -28,8 +36,8 @@ interface Props {
 
 // Horizontal-flow cubic bezier: control handles pulled along x so the wire
 // leaves and enters its ports flat and curves smoothly through the middle
-// whenever the two ends sit at different heights (the spine's undulation).
-function spinePath(wire: SpineWire): string {
+// whenever the two ends sit at different heights (a fan-out sweep).
+function flowPath(wire: { from: { x: number; y: number }; to: { x: number; y: number } }): string {
   const { from, to } = wire;
   const dx = Math.max(46, Math.abs(to.x - from.x) * 0.5);
   return `M ${from.x},${from.y} C ${from.x + dx},${from.y} ${to.x - dx},${to.y} ${to.x},${to.y}`;
@@ -63,8 +71,21 @@ function stepWireState(status: StepState["status"]): WireState {
 
 // A single wire. The live state lays a flowing dashed stroke over a dim base
 // so the spark reads as travelling along the path; the dash animation is a
-// CSS keyframe, so prefers-reduced-motion collapses it for free.
-function Wire({ d, state }: { d: string; state: WireState }) {
+// CSS keyframe, so prefers-reduced-motion collapses it for free. `emphasis`
+// (active worker lanes) widens the stroke and adds a travelling dot so the
+// working branch is unmistakable; `dimmed` recedes a running step's still-
+// pending sibling lanes so contrast, not just hue, carries the signal.
+function Wire({
+  d,
+  state,
+  emphasis = false,
+  dimmed = false,
+}: {
+  d: string;
+  state: WireState;
+  emphasis?: boolean;
+  dimmed?: boolean;
+}) {
   if (state === "active") {
     return (
       <g>
@@ -72,7 +93,7 @@ function Wire({ d, state }: { d: string; state: WireState }) {
           d={d}
           fill="none"
           stroke="color-mix(in oklch, var(--accent) 32%, transparent)"
-          strokeWidth={1.6}
+          strokeWidth={emphasis ? 2.5 : 1.6}
           strokeLinecap="round"
           vectorEffect="non-scaling-stroke"
         />
@@ -81,10 +102,15 @@ function Wire({ d, state }: { d: string; state: WireState }) {
           className="spark-wire-flow"
           fill="none"
           stroke="var(--accent)"
-          strokeWidth={1.9}
+          strokeWidth={emphasis ? 2.5 : 1.9}
           strokeLinecap="round"
           vectorEffect="non-scaling-stroke"
         />
+        {emphasis && !REDUCE_MOTION && (
+          <circle r={2.4} fill="var(--accent)">
+            <animateMotion dur="2.6s" repeatCount="indefinite" path={d} />
+          </circle>
+        )}
       </g>
     );
   }
@@ -96,7 +122,7 @@ function Wire({ d, state }: { d: string; state: WireState }) {
       strokeWidth={state === "done" ? 1.7 : 1.5}
       strokeLinecap="round"
       vectorEffect="non-scaling-stroke"
-      style={state === "done" ? { opacity: 0.82 } : undefined}
+      style={dimmed ? { opacity: 0.55 } : state === "done" ? { opacity: 0.82 } : undefined}
     />
   );
 }
@@ -139,24 +165,36 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
         pointerEvents: "none",
       }}
     >
-      {/* Spine wires — SPARK -> steps -> COMPLETE. */}
+      {/* Spine wires — links with no fan between them. */}
       {layout.spineWires.map((wire) => {
         const state = spineWireState(wire, stepById, runStatus, promptStepId);
-        return <Wire key={wire.id} d={spinePath(wire)} state={state} />;
+        return <Wire key={wire.id} d={flowPath(wire)} state={state} />;
       })}
 
-      {/* Worker trunks + ribs. */}
-      {layout.steps.map((stepLayout) => {
-        if (stepLayout.workers.length === 0) return null;
+      {/* Fan wires — one out-and-back branch per parallel worker lane. The
+          working lanes render last in their own group so they paint on top of
+          idle siblings; pending lanes of a running step recede. */}
+      {layout.fanWires.map((wire) => {
+        const step = stepById.get(wire.stepId);
+        const state = fanWireState(wire, step, maps);
+        if (state === "active") return null;
+        const stepLive = step?.status === "running" || step?.status === "reviewing";
         return (
-          <WorkerBranch
-            key={stepLayout.stepId}
-            stepLayout={stepLayout}
-            step={stepById.get(stepLayout.stepId)}
-            maps={maps}
+          <Wire
+            key={wire.id}
+            d={flowPath(wire)}
+            state={state}
+            dimmed={stepLive && state === "pending"}
           />
         );
       })}
+      <g>
+        {layout.fanWires.map((wire) => {
+          const state = fanWireState(wire, stepById.get(wire.stepId), maps);
+          if (state !== "active") return null;
+          return <Wire key={wire.id} d={flowPath(wire)} state="active" emphasis />;
+        })}
+      </g>
 
       {/* Ports — drawn last so they sit crisply on top of every wire end. */}
       {layout.spineWires.length > 0 && (
@@ -177,6 +215,27 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
               y={stepLayout.box.y + stepLayout.box.h / 2}
               state={step?.status === "complete" ? "done" : state}
             />
+            {stepLayout.workers.map((worker) => {
+              const task = worker.taskId ? maps.taskById.get(worker.taskId) : undefined;
+              const attempt = worker.taskId ? maps.attemptByTask.get(worker.taskId) : undefined;
+              const agentStatus = deriveAgentStatus(task, attempt, step?.status ?? "queued");
+              const laneState: WireState =
+                agentStatus === "running"
+                  ? "active"
+                  : agentStatus === "done"
+                    ? "done"
+                    : agentStatus === "blocked"
+                      ? "blocked"
+                      : "pending";
+              return (
+                <Port
+                  key={`wports-${worker.rowKey}`}
+                  x={worker.box.x}
+                  y={worker.box.y + worker.box.h / 2}
+                  state={laneState}
+                />
+              );
+            })}
           </g>
         );
       })}
@@ -189,52 +248,18 @@ function GraphWiresImpl({ layout, steps, maps, promptStepId, runStatus }: Props)
   );
 }
 
-// The trunk + ribs for one step's worker column.
-function WorkerBranch({
-  stepLayout,
-  step,
-  maps,
-}: {
-  stepLayout: StepLayout;
-  step?: StepState;
-  maps: RunMaps;
-}) {
-  const { trunkX, box, workers } = stepLayout;
+// State for one worker's branch: it mirrors the agent's live state, so a
+// running agent's branch flows, a finished one sits lit, a blocked one goes
+// red — each satellite independent of its siblings.
+function fanWireState(wire: FanWire, step: StepState | undefined, maps: RunMaps): WireState {
   const stepStatus = step?.status ?? "queued";
-  const trunkState = stepWireState(stepStatus);
-  const lastWorker = workers[workers.length - 1];
-  const trunkTop = box.y + box.h;
-  const trunkBottom = lastWorker.box.y + lastWorker.box.h / 2;
-  const corner = 12;
-  const cardUnderlap = 2;
-
-  return (
-    <g>
-      <Wire d={`M ${trunkX},${trunkTop} L ${trunkX},${trunkBottom}`} state={trunkState} />
-      {workers.map((worker) => {
-        const wcy = worker.box.y + worker.box.h / 2;
-        const task = worker.taskId ? maps.taskById.get(worker.taskId) : undefined;
-        const attempt = worker.taskId ? maps.attemptByTask.get(worker.taskId) : undefined;
-        const agentStatus = deriveAgentStatus(task, attempt, stepStatus);
-        const ribState: WireState =
-          agentStatus === "running"
-            ? "active"
-            : agentStatus === "done"
-              ? "done"
-              : agentStatus === "blocked"
-                ? "blocked"
-                : "pending";
-        return (
-          <g key={worker.rowKey}>
-            <Wire
-              d={`M ${trunkX},${wcy - corner} Q ${trunkX},${wcy} ${trunkX + corner},${wcy} L ${worker.box.x + cardUnderlap},${wcy}`}
-              state={ribState}
-            />
-          </g>
-        );
-      })}
-    </g>
-  );
+  const task = wire.taskId ? maps.taskById.get(wire.taskId) : undefined;
+  const attempt = wire.taskId ? maps.attemptByTask.get(wire.taskId) : undefined;
+  const agentStatus = deriveAgentStatus(task, attempt, stepStatus);
+  if (agentStatus === "running") return "active";
+  if (agentStatus === "done") return "done";
+  if (agentStatus === "blocked") return "blocked";
+  return "pending";
 }
 
 export const GraphWires = React.memo(GraphWiresImpl);
