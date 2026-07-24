@@ -4,6 +4,7 @@ import { makeId } from "@shared/ids";
 import {
   buildChatTimeline,
   findOpenQuestion,
+  runtimeLabel,
   stepStatusColor,
   workerStatusColor,
   workerStatusLabel,
@@ -13,6 +14,7 @@ import {
 import { buildRunMaps, useRunReports } from "../runs/run-format";
 import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
 import Markdown from "./Markdown";
+import { compactPreview, formatToolPayload, toolCallHeadline } from "./tool-labels";
 import {
   useRunExecutionRecord,
   type ExecutionBlock,
@@ -46,37 +48,11 @@ interface ConversationMinimapEntry {
   assistantText: string | null;
 }
 
-// In-flight assistant turn streamed from a Claude/Codex backend via
-// `chat.*` orchestration events. Lives only in renderer state; once the
-// turn finishes the run-store rewrites it as a persisted spark "note"
-// message and we drop this buffer.
+// Tool call streamed from a Claude/Codex/Pi backend via `chat.*`
+// orchestration events, reconstructed by useRunExecutionRecord.
 type LiveToolCall = ExecutionToolCall;
 
-interface LiveStreamState {
-  // Most recent messageId seen on a `chat.assistant_block`. Successive
-  // blocks with the same id concatenate; a new id starts a fresh segment
-  // (each segment is its own paragraph under one bubble for the turn).
-  segments: Array<{ messageId: string; text: string }>;
-  toolCalls: LiveToolCall[];
-  notes: Array<{ id: string; message: string; tone: "system" | "backend" }>;
-  errors: Array<{ id: string; message: string }>;
-  // Latest event timestamp — used to detect when a persisted spark
-  // message has surpassed the live buffer and we can clear it.
-  lastEventAt: string;
-}
-
-function hasLiveContent(state: LiveStreamState): boolean {
-  return (
-    state.segments.length > 0 ||
-    state.toolCalls.length > 0 ||
-    state.notes.length > 0 ||
-    state.errors.length > 0
-  );
-}
-
-function liveTextFromState(state: LiveStreamState): string {
-  return state.segments.map((segment) => segment.text).join("\n\n").trim();
-}
+type SessionNote = { id: string; message: string; tone: "system" | "backend" };
 
 export default function ChatConversation({ run }: { run: RunState }) {
   // One durable projection owns both history hydration and live frames. Build
@@ -218,7 +194,12 @@ export default function ChatConversation({ run }: { run: RunState }) {
           initialItemCount={Math.min(rowCount, 12)}
           defaultItemHeight={96}
           initialTopMostItemIndex={Math.max(0, rowCount - 1)}
-          followOutput={readerAtBottom ? "smooth" : false}
+          // "auto" (instant) rather than "smooth": while a turn streams, a new
+          // frame lands several times a second, and queueing an animated
+          // scroll for each one is exactly the compounding jank a pinned
+          // reader feels as lag. An instant follow is imperceptible at the
+          // bottom edge and never falls behind.
+          followOutput={readerAtBottom ? "auto" : false}
           atBottomStateChange={setReaderAtBottom}
           rangeChanged={setVisibleRange}
           increaseViewportBy={{ top: 600, bottom: 400 }}
@@ -613,12 +594,9 @@ const MessageTurn = React.memo(function MessageTurn({
           />
         )}
       </div>
-      {showDoneMarker && (
+      {showDoneMarker && completionVerdict !== "none" && (
         <div style={DONE_MARKER_ROW_STYLE}>
-          <span style={{ display: "inline-flex", flex: "0 0 auto" }}>
-            <DoneMarker />
-          </span>
-          {completionVerdict !== "none" && <VerdictPill kind={completionVerdict} compact />}
+          <VerdictPill kind={completionVerdict} compact />
         </div>
       )}
       <AssistantMessageMeta text={displayText} at={item.at} />
@@ -685,54 +663,6 @@ function CheckGlyph() {
   );
 }
 
-// The in-flight assistant bubble — one bubble per turn, even if the backend
-// emitted multiple `chat.assistant_block` events with different messageIds.
-// Distinct from a finalised message: thin accent border on the left edge +
-// a "typing…" pip in the header. Tool calls render as collapsible rows
-// directly under the prose; system notes and errors get their own muted /
-// danger-tone bubbles.
-function LiveAssistantTurn({ live }: { live: LiveStreamState }) {
-  const liveText = liveTextFromState(live);
-  const hasErrors = live.errors.length > 0;
-  const onlyFailure = hasErrors && liveText.length === 0 && live.toolCalls.length === 0;
-  const showTechnicalNotes = live.toolCalls.length > 0 || hasErrors;
-
-  return (
-    <SparkTurn tag={hasErrors ? <IssueChip /> : <LiveTypingPip />}>
-      <div
-        className={`cora-message cora-message--live${onlyFailure ? " cora-message--error" : ""}`}
-        role={onlyFailure ? "alert" : undefined}
-        style={onlyFailure ? LIVE_FAILURE_STYLE : LIVE_BUBBLE_STYLE}
-      >
-        {onlyFailure && <div style={BACKEND_FAILURE_TITLE_STYLE}>Cora couldn’t start this turn</div>}
-        {liveText.length > 0 ? <Markdown text={liveText} /> : !hasErrors ? <LiveEllipsis /> : null}
-        {live.toolCalls.length > 0 && (
-          <div style={LIVE_TOOL_LIST_STYLE}>
-            {live.toolCalls.map((call) => (
-              <LiveToolRow key={call.toolUseId} call={call} />
-            ))}
-          </div>
-        )}
-        {showTechnicalNotes && live.notes.length > 0 && (
-          <LiveSessionDetails notes={live.notes} />
-        )}
-        {live.errors.length > 0 && (
-          <div style={LIVE_ERROR_LIST_STYLE}>
-            {live.errors.map((err) => (
-              <div
-                key={err.id}
-                style={onlyFailure ? BACKEND_FAILURE_DETAIL_STYLE : LIVE_ERROR_STYLE}
-              >
-                {err.message}
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </SparkTurn>
-  );
-}
-
 function backendFailureDetails(text: string): { detail: string; hint: string } | null {
   const match = /^(Codex|Claude Code|Cora Pi) backend error:\s*(.+)$/is.exec(text.trim());
   const source = match?.[1]?.trim();
@@ -773,7 +703,7 @@ function BackendFailureMessage({ detail, hint }: { detail: string; hint: string 
   );
 }
 
-function LiveSessionDetails({ notes }: { notes: LiveStreamState["notes"] }) {
+function LiveSessionDetails({ notes }: { notes: SessionNote[] }) {
   return (
     <details style={LIVE_DETAILS_STYLE}>
       <summary style={LIVE_DETAILS_SUMMARY_STYLE}>
@@ -790,15 +720,6 @@ function LiveSessionDetails({ notes }: { notes: LiveStreamState["notes"] }) {
         ))}
       </div>
     </details>
-  );
-}
-
-function LiveTypingPip() {
-  return (
-    <span style={LIVE_PIP_STYLE} title="Streaming...">
-      <span style={LIVE_PIP_DOT_STYLE} />
-      <span>working</span>
-    </span>
   );
 }
 
@@ -828,11 +749,9 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
   // Keep even failures collapsed initially; the clean headline carries the
   // useful cause and raw JSON remains available on demand.
   const [open, setOpen] = useState(false);
-  const displayName = toolDisplayName(call.toolName);
-  const inputPreview = toolInputSummary(call.toolName, call.input);
+  const headline = toolCallHeadline(call.toolName, call.input);
   const readableOutput = finished ? readableToolOutput(call.output ?? "") : "";
-  const outputPreview = finished ? compactPreview(readableOutput) : "In progress";
-  const inlineDetail = failed ? outputPreview : inputPreview || outputPreview;
+  const inlineDetail = failed ? compactPreview(readableOutput) || "failed" : headline.detail;
   const color = failed ? "var(--danger)" : finished ? "var(--muted-2)" : "var(--accent)";
 
   return (
@@ -841,41 +760,29 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
         ...LIVE_TOOL_ROW_STYLE,
         borderColor: failed
           ? "color-mix(in oklch, var(--danger) 24%, transparent)"
-          : finished
-            ? open
-              ? "var(--rule-soft)"
-              : "transparent"
-            : "color-mix(in oklch, var(--accent) 34%, transparent)",
+          : open
+            ? "var(--rule-soft)"
+            : "transparent",
         background: failed
           ? "color-mix(in oklch, var(--danger) 5%, transparent)"
-          : finished
-            ? open
-              ? "color-mix(in oklab, var(--ink) 3%, transparent)"
-              : "transparent"
-            : "color-mix(in oklch, var(--accent) 7%, transparent)",
+          : open
+            ? "color-mix(in oklab, var(--ink) 3%, transparent)"
+            : "transparent",
       }}
     >
       <DisclosureButton
         onClick={() => setOpen((value) => !value)}
         baseStyle={TOOL_ROW_BUTTON_STYLE}
-        title={`${displayName} · ${call.toolName}`}
+        title={`${headline.title} · ${call.toolName}`}
       >
         <StatusDot color={color} pulse={!finished} size={5} />
-        <span style={TOOL_KIND_STYLE}>TOOL</span>
-        <span style={TOOL_TITLE_STYLE}>{displayName}</span>
+        <span style={{ ...TOOL_TITLE_STYLE, color: failed ? "var(--danger)" : undefined }}>
+          {headline.title}
+        </span>
         <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: failed ? "var(--danger)" : undefined }}>
           {inlineDetail}
         </span>
-        <span
-          style={{
-            ...TOOL_STATUS_STYLE,
-            color,
-            borderColor: `color-mix(in oklch, ${color} 30%, transparent)`,
-            background: `color-mix(in oklch, ${color} 7%, transparent)`,
-          }}
-        >
-          {!finished ? "running" : failed ? "failed" : "done"}
-        </span>
+        {finished && <ToolOutcomeGlyph failed={failed} />}
         <Caret open={open} />
       </DisclosureButton>
       {open && (
@@ -907,68 +814,31 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
   );
 }
 
-function toolDisplayName(toolName: string): string {
-  const normalized = toolName.replace(/^mcp__codara-studio__/, "");
-  const known: Record<string, string> = {
-    Shell: "Inspect workspace",
-    Bash: "Run command",
-    codara_name_chat: "Name this chat",
-    codara_spawn_workers: "Delegate workers",
-    codara_spawn_terminals: "Open terminals",
-    codara_wait_for_workers: "Wait for workers",
-    codara_get_worker_status: "Check worker status",
-    codara_message_workers: "Message workers",
-    codara_check_messages: "Check worker messages",
-    codara_complete: "Complete run",
-    codara_ask_user: "Ask for a decision",
-    codara_whiteboard_get: "Read whiteboard",
-    codara_whiteboard_update: "Update whiteboard",
-  };
-  const knownName = known[normalized];
-  if (knownName) return knownName;
-  return normalized
-    .replace(/^codara_/, "")
-    .split("_")
-    .filter(Boolean)
-    .map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`)
-    .join(" ") || toolName;
-}
 
-function toolInputSummary(toolName: string, input: unknown): string {
-  const value = input && typeof input === "object" && !Array.isArray(input)
-    ? input as Record<string, unknown>
-    : null;
-  if (!value) return compactPreview(formatToolPayload(input));
-  const normalized = toolName.replace(/^mcp__codara-studio__/, "");
-  if (normalized === "codara_name_chat" && typeof value.title === "string") {
-    return `“${value.title}”`;
-  }
-  if (normalized === "codara_spawn_workers" && Array.isArray(value.workers)) {
-    const titles = value.workers
-      .map((worker) => worker && typeof worker === "object" && typeof (worker as Record<string, unknown>).title === "string"
-        ? String((worker as Record<string, unknown>).title)
-        : "")
-      .filter(Boolean);
-    return `${value.workers.length} ${value.workers.length === 1 ? "worker" : "workers"}${titles.length ? ` · ${titles.join(", ")}` : ""}`;
-  }
-  if (normalized === "codara_wait_for_workers" && Array.isArray(value.worker_task_ids)) {
-    return `${value.worker_task_ids.length} ${value.worker_task_ids.length === 1 ? "worker" : "workers"} · ${value.mode === "any" ? "first result" : "all results"}`;
-  }
-  if (normalized === "codara_get_worker_status") return "Refresh execution state";
-  if (normalized === "codara_whiteboard_get") return "Read the current visual explanation";
-  if (normalized === "codara_whiteboard_update") {
-    const nodes = Array.isArray(value.nodes) ? value.nodes.length : 0;
-    const edges = Array.isArray(value.edges) ? value.edges.length : 0;
-    const verb = value.action === "merge" ? "Extend" : value.action === "clear" ? "Clear" : "Build";
-    return `${verb} board${nodes ? ` · ${nodes} cards` : ""}${edges ? ` · ${edges} links` : ""}`;
-  }
-  if ((normalized === "Shell" || normalized === "Bash") && typeof value.command === "string") {
-    const command = value.command;
-    if (/\b(find|rg|grep|ls)\b/.test(command)) return "Read project structure";
-    if (/\b(pwd)\b/.test(command)) return "Confirm workspace context";
-    return `$ ${compactPreview(command)}`;
-  }
-  return compactPreview(formatToolPayload(input));
+// Tiny check / cross at the row's trailing edge once a call settles — status
+// as a glyph, not a text chip, so the line stays quiet. The title carries the
+// words for anyone who hovers.
+function ToolOutcomeGlyph({ failed }: { failed: boolean }) {
+  return (
+    <span
+      title={failed ? "This action failed" : "This action completed"}
+      style={{
+        flex: "0 0 auto",
+        display: "inline-flex",
+        color: failed ? "var(--danger)" : "var(--muted-2)",
+      }}
+    >
+      {failed ? (
+        <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+          <path d="m3 3 6 6M9 3 3 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+        </svg>
+      ) : (
+        <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+          <path d="m2.4 6.3 2.3 2.3 4.9-5.2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )}
+    </span>
+  );
 }
 
 function readableToolOutput(output: string): string {
@@ -997,30 +867,6 @@ function readableToolOutput(output: string): string {
   return trimmed;
 }
 
-function compactPreview(text: string): string {
-  const flat = text.replace(/\s+/g, " ").trim();
-  if (flat.length <= 96) return flat;
-  return `${flat.slice(0, 93)}...`;
-}
-
-function formatToolPayload(input: unknown): string {
-  if (input == null) return "";
-  if (typeof input === "string") return input;
-  try {
-    return JSON.stringify(input, null, 2);
-  } catch {
-    return String(input);
-  }
-}
-
-function DoneMarker() {
-  return (
-    <div style={DONE_MARKER_STYLE}>
-      <span style={DONE_MARKER_DOT_STYLE} />
-      <span>done</span>
-    </div>
-  );
-}
 
 function CompletionMessage({ text }: { text: string }) {
   const body = completionBodyText(text);
@@ -1446,6 +1292,9 @@ function fileUrl(path: string): string {
   return `file:///${parts.map(encodeURIComponent).join("/")}`;
 }
 
+// A step is a flat quiet row in the same language as the tool rows — status
+// dot, sentence-case title with the index as plain muted text, inline goal,
+// and a right-aligned worker progress. No card, no chips.
 const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
   const live =
     item.status === "running" ||
@@ -1457,26 +1306,36 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
   const doneWorkers = item.workers.filter(
     (worker) => worker.status === "accepted",
   ).length;
+  const hasBody = Boolean(item.goal) || item.workers.length > 0;
 
   return (
-    <div style={STEP_CARD_STYLE}>
+    <div
+      style={{
+        ...TOOL_ROW_STYLE,
+        ...TOOL_ROW_STANDALONE_STYLE,
+        borderColor: open ? "var(--rule-soft)" : "transparent",
+        background: open ? "color-mix(in oklab, var(--ink) 3%, transparent)" : "transparent",
+      }}
+    >
       <DisclosureButton
-        onClick={() => setOpen((value) => !value)}
-        baseStyle={STEP_HEADER_STYLE}
+        onClick={() => {
+          if (hasBody) setOpen((value) => !value);
+        }}
+        baseStyle={TOOL_ROW_BUTTON_STYLE}
         title={item.goal || item.title}
       >
         <StatusDot color={color} pulse={live} size={6} />
-        <span style={STEP_INDEX_STYLE}>STEP {String(item.index).padStart(2, "0")}</span>
+        <span style={STEP_INDEX_TEXT_STYLE}>Step {item.index} ·</span>
         <span style={STEP_TITLE_STYLE}>{item.title}</span>
-        {item.goal && <span style={STEP_GOAL_INLINE_STYLE}>{item.goal}</span>}
+        <span style={STEP_GOAL_INLINE_STYLE}>{item.goal}</span>
         {item.workers.length > 0 && (
-          <span style={STEP_COUNT_STYLE}>
-            {doneWorkers}/{item.workers.length}
+          <span style={STEP_PROGRESS_STYLE}>
+            {doneWorkers} of {item.workers.length} {item.workers.length === 1 ? "worker" : "workers"}
           </span>
         )}
-        <Caret open={open} />
+        {hasBody && <Caret open={open} />}
       </DisclosureButton>
-      {open && (
+      {open && hasBody && (
         <div style={STEP_BODY_STYLE}>
           {item.goal && (
             <div style={{ fontSize: 12, lineHeight: 1.45, color: "var(--ink-dim)" }}>
@@ -1484,9 +1343,9 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
             </div>
           )}
           {item.workers.length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               {item.workers.map((worker) => (
-                <WorkerChip key={worker.id} worker={worker} />
+                <StepWorkerRow key={worker.id} worker={worker} />
               ))}
             </div>
           )}
@@ -1508,9 +1367,8 @@ const ActivityGroup = React.memo(function ActivityGroup({ item }: { item: Activi
         title={summary.detail}
       >
         <StatusDot color="var(--muted-2)" pulse={false} size={5} />
-        <span style={TOOL_KIND_STYLE}>LOG</span>
         <span style={ACTIVITY_GROUP_TITLE_STYLE}>{summary.title}</span>
-        {summary.detail && <span style={ACTIVITY_GROUP_DETAIL_STYLE}>{summary.detail}</span>}
+        {summary.detail && <span style={TOOL_INLINE_DETAIL_STYLE}>{summary.detail}</span>}
         <Caret open={open} />
       </DisclosureButton>
       {open && (
@@ -1539,22 +1397,26 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
   // Failures stay compact by default: the headline already carries the exact
   // error and status, while the verbose manager metadata remains one click
   // away. Auto-expanding every failure produced the oversized red slabs seen
-  // in Cora's error state.
-  const [open, setOpen] = useState(live);
+  // in Cora's error state. Manager turns never auto-open at all — while live
+  // the turn streams as first-class prose (AssistantLiveTurn below) and the
+  // completed disclosure is a single collapsed "Worked for…" line.
+  const [open, setOpen] = useState(live && item.activity !== "manager");
   const color = toolToneColor(item);
-  const statusLabel = toolStatusLabel(item.status);
   const stats = compactToolStats(item);
   const hasDetails = item.detail.length > 0 || item.files.length > 0 || item.meta.length > 0 || Boolean(executionTurn?.blocks.length);
-  const loud = live || item.status === "failed";
 
   if (item.activity === "manager" && !embedded) {
+    if (live) {
+      return (
+        <AssistantLiveTurn item={item} executionTurn={executionTurn} finalAnswer={finalAnswer} />
+      );
+    }
     return (
       <ManagerActivityDisclosure
         item={item}
         open={open}
         setOpen={setOpen}
         hasDetails={hasDetails}
-        live={live}
         executionTurn={executionTurn}
         finalAnswer={finalAnswer}
       />
@@ -1567,20 +1429,18 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
         ...TOOL_ROW_STYLE,
         ...(embedded ? TOOL_ROW_EMBEDDED_STYLE : {}),
         ...(!embedded ? TOOL_ROW_STANDALONE_STYLE : {}),
+        // Same chrome discipline as LiveToolRow: transparent until opened,
+        // the pulsing dot alone says "running"; only failure earns a tint.
         borderColor: item.status === "failed"
           ? "color-mix(in oklch, var(--danger) 38%, transparent)"
-          : live
-            ? "color-mix(in oklch, var(--accent) 34%, transparent)"
-            : open
-              ? "var(--rule-soft)"
-              : "transparent",
+          : open
+            ? "var(--rule-soft)"
+            : "transparent",
         background: item.status === "failed"
           ? "color-mix(in oklch, var(--danger) 9%, transparent)"
-          : live
-            ? "color-mix(in oklch, var(--accent) 7%, transparent)"
-            : open
-              ? "color-mix(in oklab, var(--ink) 3%, transparent)"
-              : "transparent",
+          : open
+            ? "color-mix(in oklab, var(--ink) 3%, transparent)"
+            : "transparent",
       }}
     >
       <DisclosureButton
@@ -1591,22 +1451,10 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
         title={item.detail || item.title}
       >
         <StatusDot color={color} pulse={live} size={5} />
-        <span style={TOOL_KIND_STYLE}>{toolKindLabel(item.activity)}</span>
         <span style={TOOL_TITLE_STYLE}>{item.title}</span>
-        {item.detail && <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>}
+        <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>
         {stats && <span style={TOOL_STATS_STYLE}>{stats}</span>}
-        {loud && (
-          <span
-            style={{
-              ...TOOL_STATUS_STYLE,
-              color,
-              borderColor: `color-mix(in oklch, ${color} 38%, transparent)`,
-              background: `color-mix(in oklch, ${color} 8%, transparent)`,
-            }}
-          >
-            {statusLabel}
-          </span>
-        )}
+        {item.status !== "started" && <ToolOutcomeGlyph failed={item.status === "failed"} />}
         {hasDetails && <Caret open={open} />}
       </DisclosureButton>
       {open && hasDetails && <ToolDetails item={item} />}
@@ -1619,7 +1467,6 @@ function ManagerActivityDisclosure({
   open,
   setOpen,
   hasDetails,
-  live,
   executionTurn,
   finalAnswer,
 }: {
@@ -1627,16 +1474,16 @@ function ManagerActivityDisclosure({
   open: boolean;
   setOpen: React.Dispatch<React.SetStateAction<boolean>>;
   hasDetails: boolean;
-  live: boolean;
   executionTurn?: ExecutionTurn;
   finalAnswer?: string;
 }) {
   const sparkCallId = item.id.startsWith("spark-call:")
     ? item.id.slice("spark-call:".length)
     : item.id;
+  const actionCount = executionTurn?.blocks.filter((block) => block.kind === "tool").length ?? 0;
   return (
     <div
-      className={`cora-manager-disclosure${item.status === "failed" ? " is-failed" : ""}${live ? " is-live" : ""}`}
+      className={`cora-manager-disclosure${item.status === "failed" ? " is-failed" : ""}`}
       data-manager-call-id={sparkCallId}
       data-has-execution={executionTurn?.blocks.length ? "true" : "false"}
       data-open={open ? "true" : "false"}
@@ -1659,14 +1506,11 @@ function ManagerActivityDisclosure({
         }}
         title={item.detail || item.title}
       >
-        {live ? (
-          <>
-            <WorkingDots />
-            <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>Working…</span>
-            <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail || item.title}</span>
-          </>
-        ) : (
-          <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
+        <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
+        {actionCount > 0 && item.status !== "failed" && (
+          <span style={TOOL_INLINE_DETAIL_STYLE}>
+            {actionCount === 1 ? "1 action" : `${actionCount} actions`}
+          </span>
         )}
         {item.status === "failed" && (
           <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: "var(--danger)" }}>{item.detail}</span>
@@ -1678,14 +1522,160 @@ function ManagerActivityDisclosure({
           {executionTurn && executionTurn.blocks.length > 0 && (
             <ExecutionTrace turn={executionTurn} finalAnswer={finalAnswer} />
           )}
-          <ToolDetails
-            item={live ? { ...item, detail: "" } : item}
-            compact={Boolean(executionTurn?.blocks.length)}
-          />
+          <ToolDetails item={item} compact={Boolean(executionTurn?.blocks.length)} />
         </div>
       )}
     </div>
   );
+}
+
+// The in-flight assistant turn, rendered as a first-class chat turn rather
+// than a disclosure. Streamed prose is full-size Markdown identical to the
+// final persisted message (so completion causes no visual jump); tool calls
+// appear as quiet single lines in provider order, with earlier calls of a
+// burst folded behind a "+N earlier actions" toggle; backend/system notes
+// stay behind the same "Technical details" affordance the completed trace
+// uses. The slim "Working for Ns" header hands off to the completed
+// disclosure's "Worked for Ns" line in the same position.
+function AssistantLiveTurn({
+  item,
+  executionTurn,
+  finalAnswer,
+}: {
+  item: ToolItem;
+  executionTurn?: ExecutionTurn;
+  finalAnswer?: string;
+}) {
+  const sparkCallId = item.id.startsWith("spark-call:")
+    ? item.id.slice("spark-call:".length)
+    : item.id;
+  const blocks = executionTurn
+    ? omitDuplicatedFinalAnswer(executionTurn.blocks, finalAnswer)
+    : [];
+  const notes = blocks.filter(
+    (block): block is Extract<ExecutionBlock, { kind: "note" }> => block.kind === "note",
+  );
+  const segments = liveTurnSegments(blocks);
+  const waiting = segments.length === 0;
+  return (
+    <SparkTurn>
+      <div
+        className="cora-live-turn"
+        data-manager-call-id={sparkCallId}
+        style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}
+      >
+        <div style={WORKING_LINE_STYLE}>
+          <WorkingDots />
+          <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>
+            Working<ElapsedSince since={item.at} />
+          </span>
+          {waiting && (item.detail || item.title) ? (
+            <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail || item.title}</span>
+          ) : null}
+        </div>
+        {segments.map((segment) => {
+          if (segment.kind === "text") {
+            return (
+              <div
+                key={segment.id}
+                className="cora-message cora-message--assistant"
+                data-message-author="cora"
+                style={SPARK_BUBBLE_STYLE}
+              >
+                <Markdown text={segment.text} />
+              </div>
+            );
+          }
+          if (segment.kind === "tools") {
+            return <ToolCluster key={segment.id} calls={segment.calls} />;
+          }
+          return (
+            <div key={segment.id} role="alert" style={LIVE_ERROR_STYLE}>
+              {segment.message}
+            </div>
+          );
+        })}
+        {notes.length > 0 && <LiveSessionDetails notes={notes} />}
+      </div>
+    </SparkTurn>
+  );
+}
+
+type LiveTurnSegment =
+  | { kind: "text"; id: string; text: string }
+  | { kind: "tools"; id: string; calls: Array<Extract<ExecutionBlock, { kind: "tool" }>> }
+  | { kind: "error"; id: string; message: string };
+
+// Provider order, with consecutive tool calls merged into one cluster so a
+// burst of file reads renders as one place in the turn instead of a wall.
+function liveTurnSegments(blocks: ExecutionBlock[]): LiveTurnSegment[] {
+  const segments: LiveTurnSegment[] = [];
+  for (const block of blocks) {
+    if (block.kind === "note") continue;
+    if (block.kind === "text") {
+      if (block.text.trim().length === 0) continue;
+      segments.push({ kind: "text", id: block.id, text: block.text });
+      continue;
+    }
+    if (block.kind === "error") {
+      segments.push({ kind: "error", id: block.id, message: block.message });
+      continue;
+    }
+    const prev = segments[segments.length - 1];
+    if (prev?.kind === "tools") prev.calls.push(block);
+    else segments.push({ kind: "tools", id: block.id, calls: [block] });
+  }
+  return segments;
+}
+
+// A burst of consecutive tool calls: only the most recent line shows while
+// the turn streams; the earlier ones sit behind one quiet "+N earlier
+// actions" toggle. The toggle is two-way — once expanded it becomes
+// "Show fewer", collapsing the burst back down to the latest line.
+function ToolCluster({ calls }: { calls: Array<Extract<ExecutionBlock, { kind: "tool" }>> }) {
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll ? calls : calls.slice(-1);
+  const hiddenCount = calls.length - visible.length;
+  const foldable = calls.length > 1;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
+      {foldable && (
+        <button
+          type="button"
+          onClick={() => setShowAll((value) => !value)}
+          style={TOOL_CLUSTER_TOGGLE_STYLE}
+        >
+          {showAll
+            ? "Show fewer"
+            : `+${hiddenCount} earlier ${hiddenCount === 1 ? "action" : "actions"}`}
+        </button>
+      )}
+      {visible.map((call) => (
+        <LiveToolRow key={call.toolUseId} call={call} />
+      ))}
+    </div>
+  );
+}
+
+// Ticks " for 12s" onto the Working header without re-rendering the turn each
+// second: the interval writes textContent through a ref (same trick t3code
+// uses for its Working timer).
+function ElapsedSince({ since }: { since: string }) {
+  const ref = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    const started = Date.parse(since);
+    if (!Number.isFinite(started)) return undefined;
+    const update = () => {
+      if (!ref.current) return;
+      const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+      const label = seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
+      ref.current.textContent = seconds > 0 ? ` for ${label}` : "…";
+    };
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [since]);
+  return <span ref={ref} style={{ fontVariantNumeric: "tabular-nums" }}>…</span>;
 }
 
 function WorkingDots() {
@@ -1754,9 +1744,39 @@ function normalizeComparableText(text: string): string {
 }
 
 function ToolDetails({ item, compact = false }: { item: ToolItem; compact?: boolean }) {
+  // One quiet sentence-case line replaces the old all-caps meta grid. Labels
+  // stay in the data as lookup keys (compactToolStats, shouldRenderTimelineItem
+  // match them by string); values are already self-describing. "Files" is
+  // skipped — the file list below carries it.
+  const metaLine = item.meta
+    .filter((meta) => meta.label !== "Files")
+    .map((meta) => meta.value)
+    .join(" · ");
+  const lineage = item.attempts && item.attempts.length > 1 ? item.attempts : null;
   return (
     <div style={{ ...TOOL_DETAILS_STYLE, ...(compact ? TOOL_DETAILS_COMPACT_STYLE : {}) }}>
-      {item.detail && <div style={TOOL_DETAIL_STYLE}>{item.detail}</div>}
+      {lineage && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          {lineage.map((attempt, index) => (
+            <div
+              key={attempt.id}
+              style={{
+                ...TOOL_META_LINE_STYLE,
+                color: attempt.failed
+                  ? "var(--danger)"
+                  : index === lineage.length - 1
+                    ? "var(--ink-dim)"
+                    : "var(--muted)",
+              }}
+            >
+              Attempt {attempt.number} — {attempt.outcome}
+            </div>
+          ))}
+        </div>
+      )}
+      {item.detail && !metaLine.includes(item.detail) && (
+        <div style={TOOL_DETAIL_STYLE}>{item.detail}</div>
+      )}
       {item.files.length > 0 && (
         <div style={TOOL_FILE_LIST_STYLE}>
           {item.files.map((file) => (
@@ -1776,32 +1796,34 @@ function ToolDetails({ item, compact = false }: { item: ToolItem; compact?: bool
           ))}
         </div>
       )}
-      {item.meta.length > 0 && (
-        <div style={TOOL_META_GRID_STYLE}>
-          {item.meta.map((meta) => (
-            <span key={`${meta.label}:${meta.value}`} style={TOOL_META_STYLE}>
-              <span style={TOOL_META_LABEL_STYLE}>{meta.label}</span>
-              <span style={TOOL_META_VALUE_STYLE}>{meta.value}</span>
-            </span>
-          ))}
-        </div>
-      )}
+      {metaLine && <div style={TOOL_META_LINE_STYLE}>{metaLine}</div>}
     </div>
   );
 }
 
 function activityGroupSummary(items: ToolItem[]): { title: string; detail: string } {
-  const counts = {
-    context: 0,
-    manager: 0,
-    worker: 0,
-  };
-  for (const item of items) counts[item.activity] += 1;
+  // Workers are counted as logical workers (one row per task); attempts are
+  // mentioned only when retries make them exceed the worker count.
+  let workers = 0;
+  let attempts = 0;
+  let model = 0;
+  let context = 0;
+  for (const item of items) {
+    if (item.activity === "worker") {
+      workers += 1;
+      attempts += item.attempts?.length ?? 1;
+    } else if (item.activity === "manager") {
+      model += 1;
+    } else {
+      context += 1;
+    }
+  }
   const detail = [
-    counts.manager > 0 ? `${counts.manager} model` : null,
-    counts.worker > 0 ? `${counts.worker} worker` : null,
-    counts.context > 0 ? `${counts.context} context` : null,
-  ].filter((part): part is string => Boolean(part)).join(" / ");
+    workers > 0 ? `${workers} ${workers === 1 ? "worker" : "workers"}` : null,
+    attempts > workers ? `${attempts} attempts` : null,
+    model > 0 ? `${model} model` : null,
+    context > 0 ? `${context} context` : null,
+  ].filter((part): part is string => Boolean(part)).join(" · ");
   return {
     title: `${items.length} ${items.length === 1 ? "action" : "actions"} completed`,
     detail,
@@ -1818,18 +1840,13 @@ function compactToolStats(item: ToolItem): string {
     const tokens = toolMetaValue(item, "Tokens");
     return [duration, tokens].filter(Boolean).join(" / ");
   }
+  // The Exit meta value is already self-describing ("exit 1").
   const exit = toolMetaValue(item, "Exit");
-  return [duration, exit ? `exit ${exit}` : null].filter(Boolean).join(" / ");
+  return [duration, exit].filter(Boolean).join(" · ");
 }
 
 function toolMetaValue(item: ToolItem, label: string): string | null {
   return item.meta.find((meta) => meta.label === label)?.value ?? null;
-}
-
-function toolStatusLabel(status: ToolItem["status"]): string {
-  if (status === "started") return "running";
-  if (status === "failed") return "failed";
-  return "done";
 }
 
 function toolToneColor(item: ToolItem): string {
@@ -1837,12 +1854,6 @@ function toolToneColor(item: ToolItem): string {
   if (item.tone === "live") return "var(--accent)";
   if (item.activity === "context") return "var(--info)";
   return "var(--muted-2)";
-}
-
-function toolKindLabel(activity: ToolItem["activity"]): string {
-  if (activity === "manager") return "MODEL";
-  if (activity === "worker") return "WORKER";
-  return "CTX";
 }
 
 function formatBytes(bytes: number): string {
@@ -1856,13 +1867,15 @@ function trimByteNumber(value: number): string {
   return value >= 10 ? value.toFixed(0) : value.toFixed(1).replace(/\.0$/, "");
 }
 
-function WorkerChip({ worker }: { worker: ChatWorker }) {
+// One quiet line per logical worker inside an expanded step — dot, task
+// title, muted runtime/status detail. Same language as the tool rows.
+function StepWorkerRow({ worker }: { worker: ChatWorker }) {
   // runtimeState (from the live terminal poller) wins over the static
   // workerTask status for the dot tone, because it reflects what the agent
   // is doing *right now* — accept ("blocked" → steady red) is more urgent
   // than the task-status colour. Falls back to the task-status colour when
-  // no live state has been reported yet. The chip's text label still uses
-  // the task status so the orchestration lifecycle stays readable.
+  // no live state has been reported yet. The text still uses the task
+  // status so the orchestration lifecycle stays readable.
   const liveColor = runtimeStateColor(worker.runtimeState);
   const color = liveColor ?? workerStatusColor(worker.status);
   // Only animate "working". The other live states (blocked / idle / done)
@@ -1870,44 +1883,26 @@ function WorkerChip({ worker }: { worker: ChatWorker }) {
   // herdr-validated: pulsing everything makes nothing read as urgent.
   const pulse = worker.runtimeState === "working";
   const titleSuffix = worker.runtimeState ? ` · ${worker.runtimeState}` : "";
+  const detail = [
+    runtimeLabel(worker.runtime),
+    workerStatusLabel(worker.status),
+    (worker.attemptCount ?? 0) > 1 ? `attempt ${worker.attemptCount}` : null,
+  ].filter(Boolean).join(" · ");
   return (
-    <span
+    <div
       title={`${worker.title} — ${worker.status}${titleSuffix}`}
       style={{
-        display: "inline-flex",
+        display: "flex",
         alignItems: "center",
-        gap: 5,
-        padding: "2px 7px",
-        borderRadius: 999,
-        border: "1px solid var(--rule-soft)",
-        background: "color-mix(in oklab, var(--ink) 3%, transparent)",
-        fontSize: 10,
-        color: "var(--ink-dim)",
-        maxWidth: 150,
+        gap: 7,
+        minHeight: 20,
+        minWidth: 0,
       }}
     >
-      <span
-        aria-hidden
-        style={{
-          width: 6,
-          height: 6,
-          borderRadius: 999,
-          background: color,
-          flex: "0 0 6px",
-          animation: pulse ? "spark-pulse 1.3s ease-in-out infinite" : undefined,
-        }}
-      />
-      <span
-        style={{
-          fontFamily: "var(--font-mono)",
-          textTransform: "uppercase",
-          letterSpacing: "0.04em",
-        }}
-      >
-        {worker.runtime}
-      </span>
-      <span style={{ color: "var(--muted)" }}>{workerStatusLabel(worker.status)}</span>
-    </span>
+      <StatusDot color={color} pulse={pulse} size={5} />
+      <span style={{ ...TOOL_TITLE_STYLE, fontWeight: 500 }}>{worker.title}</span>
+      <span style={TOOL_INLINE_DETAIL_STYLE}>{detail}</span>
+    </div>
   );
 }
 
@@ -2599,37 +2594,15 @@ const BACKEND_FAILURE_HINT_STYLE: React.CSSProperties = {
   lineHeight: 1.4,
 };
 
-const DONE_MARKER_STYLE: React.CSSProperties = {
-  marginTop: 4,
-  flexBasis: "100%",
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 5,
-  color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 9,
-  fontWeight: 700,
-  letterSpacing: "0.08em",
-  textTransform: "uppercase",
-};
-
-// Wraps the "done" marker and the run-level verdict pill on one full-width row
-// under the final Cora bubble. flexBasis:100% breaks them onto their own line
-// within SparkTurn's flex column (mirroring the bare DoneMarker's old role);
-// the inner marker keeps its own marginTop, so this row carries none.
+// The run-level verdict pill on its own full-width row under the final Cora
+// bubble of a completed run. flexBasis:100% breaks it onto its own line
+// within SparkTurn's flex column.
 const DONE_MARKER_ROW_STYLE: React.CSSProperties = {
+  marginTop: 4,
   flexBasis: "100%",
   display: "flex",
   alignItems: "center",
   gap: 6,
-};
-
-const DONE_MARKER_DOT_STYLE: React.CSSProperties = {
-  width: 5,
-  height: 5,
-  borderRadius: 999,
-  background: "var(--ok)",
-  display: "inline-block",
 };
 
 const COMPLETION_INLINE_STYLE: React.CSSProperties = {
@@ -2905,38 +2878,11 @@ const QUESTION_ERROR_STYLE: React.CSSProperties = {
   lineHeight: 1.4,
 };
 
-const STEP_CARD_STYLE: React.CSSProperties = {
-  border: "1px solid color-mix(in oklab, var(--rule-soft) 78%, transparent)",
-  // Cards sit on the surface rung (10px) — softer corners, concentric with the
-  // tool rows nested inside.
-  borderRadius: "var(--radius-surface, 10px)",
-  background: "color-mix(in oklab, var(--bg) 42%, var(--panel))",
-  overflow: "hidden",
-  boxSizing: "border-box",
-  boxShadow: "var(--lift-hi)",
-};
-
-const STEP_HEADER_STYLE: React.CSSProperties = {
-  appearance: "none",
-  width: "100%",
-  minHeight: 31,
-  border: "none",
-  background: "transparent",
-  color: "inherit",
-  display: "flex",
-  alignItems: "center",
-  gap: 8,
-  padding: "6px 9px",
-  cursor: "default",
-  textAlign: "left",
-};
-
-const STEP_INDEX_STYLE: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 9,
-  fontWeight: 700,
-  letterSpacing: "0.08em",
+// The step index rides in front of the title as plain muted text — never a
+// chip.
+const STEP_INDEX_TEXT_STYLE: React.CSSProperties = {
   color: "var(--muted)",
+  fontSize: 11,
   flex: "0 0 auto",
 };
 
@@ -2961,16 +2907,21 @@ const STEP_GOAL_INLINE_STYLE: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-const STEP_COUNT_STYLE: React.CSSProperties = {
+// Right-aligned quiet worker progress ("2 of 3 workers") on the step row.
+const STEP_PROGRESS_STYLE: React.CSSProperties = {
   flex: "0 0 auto",
+  marginLeft: "auto",
   color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10,
+  fontSize: 10.5,
   fontVariantNumeric: "tabular-nums",
+  whiteSpace: "nowrap",
 };
 
+// Expanded step content is indentation under the row, not a boxed body.
+// Left padding lines the body up with the header title (7px button padding +
+// 6px dot + 7px gap).
 const STEP_BODY_STYLE: React.CSSProperties = {
-  padding: "0 9px 9px 23px",
+  padding: "2px 9px 8px 20px",
   display: "flex",
   flexDirection: "column",
   gap: 7,
@@ -3003,17 +2954,6 @@ const ACTIVITY_GROUP_TITLE_STYLE: React.CSSProperties = {
   fontWeight: 600,
   minWidth: 0,
   flex: "0 1 auto",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
-};
-
-const ACTIVITY_GROUP_DETAIL_STYLE: React.CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  color: "var(--muted-2)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 9.5,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
@@ -3114,18 +3054,6 @@ const TOOL_ROW_BUTTON_STYLE: React.CSSProperties = {
   textAlign: "left",
 };
 
-// The KIND tag is a quiet category label — 700 muted-2 so the tool TITLE
-// beside it carries the contrast and the stream stays scannable by what
-// happened, not by the tag.
-const TOOL_KIND_STYLE: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 8.5,
-  fontWeight: 700,
-  letterSpacing: "0.08em",
-  color: "var(--muted-2)",
-  flex: "0 0 auto",
-};
-
 const TOOL_TITLE_STYLE: React.CSSProperties = {
   color: "var(--ink-dim)",
   fontSize: 11.5,
@@ -3154,18 +3082,6 @@ const TOOL_STATS_STYLE: React.CSSProperties = {
   fontVariantNumeric: "tabular-nums",
   flex: "0 0 auto",
   whiteSpace: "nowrap",
-};
-
-const TOOL_STATUS_STYLE: React.CSSProperties = {
-  flex: "0 0 auto",
-  border: "1px solid var(--rule-soft)",
-  borderRadius: 999,
-  padding: "1px 5px",
-  fontFamily: "var(--font-mono)",
-  fontSize: 8,
-  fontWeight: 700,
-  letterSpacing: "0.04em",
-  textTransform: "uppercase",
 };
 
 const TOOL_DETAILS_STYLE: React.CSSProperties = {
@@ -3224,100 +3140,39 @@ const TOOL_FILE_SIZE_STYLE: React.CSSProperties = {
   fontSize: 10,
 };
 
-const TOOL_META_GRID_STYLE: React.CSSProperties = {
-  display: "flex",
-  flexWrap: "wrap",
-  // A touch more breathing room so the MODE / MODEL / DURATION pairs read as a
-  // calm, scannable meta row rather than a cramped run-on.
-  rowGap: 6,
-  columnGap: 16,
-};
-
-const TOOL_META_STYLE: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "baseline",
-  gap: 6,
-  border: "none",
-  borderRadius: 0,
-  background: "transparent",
-  padding: 0,
-  maxWidth: "100%",
-};
-
-const TOOL_META_LABEL_STYLE: React.CSSProperties = {
+// One sentence-case muted line of metadata ("Claude · attempt 2 of 3 ·
+// running · 5.7 s") — replaces the old all-caps label/value grid.
+const TOOL_META_LINE_STYLE: React.CSSProperties = {
   color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 8.5,
-  fontWeight: 700,
-  letterSpacing: "0.1em",
-  textTransform: "uppercase",
-};
-
-const TOOL_META_VALUE_STYLE: React.CSSProperties = {
-  color: "var(--ink-dim)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 9.5,
+  fontSize: 10.5,
+  lineHeight: 1.4,
   fontVariantNumeric: "tabular-nums",
-  overflow: "hidden",
-  textOverflow: "ellipsis",
-  whiteSpace: "nowrap",
 };
 
-// Live streaming bubble — distinct from the finalised SPARK_BUBBLE_STYLE by
-// the thin accent left border + soft accent wash. The header still uses the
-// standard SPARK_HEADER_STYLE so the speaker label keeps its place, but the
-// added "typing" pip in the header and the border treatment here make the
-// in-flight state read at a glance.
-const LIVE_BUBBLE_STYLE: React.CSSProperties = {
-  width: "100%",
-  maxWidth: "78ch",
-  boxSizing: "border-box",
-  color: "var(--ink)",
-  background: "transparent",
-  border: "none",
-  borderRadius: 0,
-  padding: 0,
+// The slim in-flight header: pulsing dots + "Working for Ns". Sits where the
+// completed turn's "Worked for Ns" disclosure line will land, so the
+// live → done transition swaps copy without moving anything.
+const WORKING_LINE_STYLE: React.CSSProperties = {
   display: "flex",
-  flexDirection: "column",
-  gap: 6,
-  overflowWrap: "anywhere",
-  // The one live turn carries the rationed accent: an accent-edge hairline
-  // plus a single accent cue — a 3px inset left status rule (--status-edge)
-  // and a soft accent glow. Borders stay 1px in every state (the left edge is
-  // an inset shadow, not a 2px border), so nothing reflows. No keyframe here,
-  // so it's reduced-motion-safe by construction (the moving cue is the
-  // pulsing typing pip in the header).
-  boxShadow: "none",
-  transition:
-    "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-};
-
-const LIVE_FAILURE_STYLE: React.CSSProperties = {
-  ...BACKEND_FAILURE_STYLE,
-};
-
-const LIVE_PIP_STYLE: React.CSSProperties = {
-  display: "inline-flex",
   alignItems: "center",
-  gap: 4,
-  fontFamily: "var(--font-mono)",
-  fontSize: 8.5,
-  fontWeight: 700,
-  letterSpacing: "0.08em",
-  textTransform: "uppercase",
-  color: "var(--accent)",
-  border: "1px solid color-mix(in oklch, var(--accent) 40%, transparent)",
-  borderRadius: 999,
-  padding: "1px 6px",
+  gap: 7,
+  minHeight: 22,
 };
 
-const LIVE_PIP_DOT_STYLE: React.CSSProperties = {
-  width: 5,
-  height: 5,
-  borderRadius: 999,
-  background: "var(--accent)",
-  display: "inline-block",
-  animation: "spark-pulse 1.3s ease-in-out infinite",
+// The "+N earlier actions" fold inside a live tool burst — a quiet text
+// affordance, not a boxed control.
+const TOOL_CLUSTER_TOGGLE_STYLE: React.CSSProperties = {
+  appearance: "none",
+  alignSelf: "flex-start",
+  border: "none",
+  background: "transparent",
+  color: "var(--muted)",
+  padding: "2px 7px 2px 19px",
+  fontFamily: "var(--font-sans)",
+  fontSize: 10.5,
+  fontWeight: 600,
+  cursor: "default",
+  textAlign: "left",
 };
 
 const ISSUE_PIP_STYLE: React.CSSProperties = {
@@ -3358,16 +3213,6 @@ const LIVE_ELLIPSIS_DOT_STYLE: React.CSSProperties = {
   background: "var(--muted)",
   display: "inline-block",
   animation: "spark-pulse 1.3s ease-in-out infinite",
-};
-
-const LIVE_TOOL_LIST_STYLE: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 4,
-  marginTop: 4,
-  marginLeft: 3,
-  paddingLeft: 11,
-  borderLeft: "1px solid color-mix(in oklch, var(--accent) 24%, var(--rule-soft))",
 };
 
 const LIVE_TOOL_ROW_STYLE: React.CSSProperties = {
@@ -3455,13 +3300,6 @@ const LIVE_NOTE_LABEL_STYLE: React.CSSProperties = {
   letterSpacing: "0.06em",
   textTransform: "uppercase",
   color: "var(--muted-2)",
-};
-
-const LIVE_ERROR_LIST_STYLE: React.CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 4,
-  marginTop: 2,
 };
 
 const LIVE_ERROR_STYLE: React.CSSProperties = {

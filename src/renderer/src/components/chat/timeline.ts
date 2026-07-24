@@ -6,10 +6,10 @@ import type {
   StepStatus,
   WorkerAttempt,
   WorkerRuntime,
-  WorkerTask,
   WorkerTaskStatus,
 } from "@shared/types";
 import { resolveOpenRunQuestion } from "@shared/run-questions";
+import { logicalWorkers, type LogicalWorker } from "../../lib/worker-identity";
 
 // Timeline model for the chat conversation. A chat is a RunState: its
 // humanMessages are the back-and-forth, and its sparkCalls, worker attempts,
@@ -31,6 +31,19 @@ export interface ChatWorker {
    * whether the chip is shown.
    */
   runtimeState?: RuntimeState;
+  /** How many attempts have run for this logical worker (retries included). */
+  attemptCount?: number;
+}
+
+// One beat of a logical worker's retry lineage, for the expanded worker row:
+// "Attempt 1 — feedback", "Attempt 2 — accepted". `number` is the ordinal in
+// the collapsed supersedes chain, not the raw attemptNumber (a runtime
+// fallback restarts attemptNumber at 1 on the replacement task).
+export interface ChatToolAttempt {
+  id: string;
+  number: number;
+  outcome: string;
+  failed: boolean;
 }
 
 export interface ChatToolFile {
@@ -75,6 +88,9 @@ export type ChatTimelineItem =
       at: string;
       meta: ChatToolMeta[];
       files: ChatToolFile[];
+      // Retry lineage for worker rows: one entry per attempt in the logical
+      // worker's chain, oldest first. Absent on context/manager rows.
+      attempts?: ChatToolAttempt[];
     }
   | {
       kind: "step";
@@ -143,33 +159,28 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
     items.push(sparkCallTimelineItem(call));
   }
 
-  const taskById = new Map(run.workerTasks.map((task) => [task.id, task]));
-  for (const attempt of run.workerAttempts) {
-    items.push(workerAttemptTimelineItem(attempt, taskById.get(attempt.workerTaskId), run.createdAt));
-  }
-
-  // Build a "latest attempt per task" map once so the per-step mapper below
-  // doesn't redo this scan for every step. Attempts are keyed by workerTaskId
-  // and we keep the one with the highest attemptNumber — that's the one whose
-  // pty is currently on screen (older attempts have either finished or were
-  // disposed when the task was retried).
-  const latestAttemptByTask = new Map<string, WorkerAttempt>();
-  for (const attempt of run.workerAttempts) {
-    const prior = latestAttemptByTask.get(attempt.workerTaskId);
-    if (!prior || attempt.attemptNumber > prior.attemptNumber) {
-      latestAttemptByTask.set(attempt.workerTaskId, attempt);
+  // One row per logical worker (task collapsed over its supersedes chain),
+  // never per attempt — retries surface as lineage inside the same row so the
+  // chat counts workers the same way the graph does. A worker with no attempt
+  // yet has nothing to show; its step chip already covers "queued".
+  const workers = logicalWorkers(run);
+  for (const worker of workers) {
+    if (worker.attempts.length > 0) {
+      items.push(logicalWorkerTimelineItem(worker, run.createdAt));
     }
   }
+
   const orderedSteps = [...run.steps].sort((a, b) => a.index - b.index);
   orderedSteps.forEach((step, i) => {
-    const workers: ChatWorker[] = run.workerTasks
-      .filter((task) => task.stepId === step.id)
-      .map((task) => ({
-        id: task.id,
-        title: task.title,
-        runtime: task.runtimePreference,
-        status: task.status,
-        runtimeState: latestAttemptByTask.get(task.id)?.runtimeState,
+    const stepWorkers: ChatWorker[] = workers
+      .filter((worker) => worker.task.stepId === step.id)
+      .map((worker) => ({
+        id: worker.task.id,
+        title: worker.task.title,
+        runtime: worker.task.runtimePreference,
+        status: worker.task.status,
+        runtimeState: worker.latestAttempt?.runtimeState,
+        attemptCount: worker.attempts.length,
       }));
     items.push({
       kind: "step",
@@ -178,7 +189,7 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
       title: step.title,
       goal: step.goal,
       status: step.status,
-      workers,
+      workers: stepWorkers,
       at: step.createdAt,
     });
   });
@@ -270,37 +281,72 @@ function sparkCallTimelineItem(call: SparkCall): Extract<ChatTimelineItem, { kin
   };
 }
 
-function workerAttemptTimelineItem(
-  attempt: WorkerAttempt,
-  task: WorkerTask | undefined,
+function logicalWorkerTimelineItem(
+  worker: LogicalWorker,
   fallbackAt: string,
 ): Extract<ChatTimelineItem, { kind: "tool" }> {
-  const status = workerAttemptToolStatus(attempt);
+  const attempts = worker.attempts;
+  const latest = attempts[attempts.length - 1];
+  const status = workerAttemptToolStatus(latest);
   const live = status === "started";
   const failed = status === "failed";
-  const title = `${runtimeLabel(attempt.runtime)} worker`;
-  const detail = task?.title || `Attempt ${attempt.attemptNumber}`;
-  const meta: ChatToolMeta[] = [
-    { label: "Runtime", value: runtimeLabel(attempt.runtime) },
-    { label: "Attempt", value: `#${attempt.attemptNumber}` },
-    { label: "Status", value: attempt.status.replace(/_/g, " ") },
-  ];
-  const duration = formatAttemptDuration(attempt);
-  if (duration) meta.push({ label: "Duration", value: duration });
-  if (typeof attempt.exitCode === "number") meta.push({ label: "Exit", value: String(attempt.exitCode) });
+  const runtime = runtimeLabel(latest.runtime);
+  // "of N" counts attempts that actually exist in the lineage, not the
+  // main-process retry cap — the renderer never learns that constant.
+  const ordinal = `attempt ${attempts.length} of ${attempts.length}`;
+  const detailParts: string[] = [];
+  if (attempts.length > 1) detailParts.push(`${runtime} · ${ordinal}`);
+  if (failed && latest.error) detailParts.push(latest.error);
 
+  const meta: ChatToolMeta[] = [{ label: "Runtime", value: runtime }];
+  if (attempts.length > 1) meta.push({ label: "Attempt", value: ordinal });
+  meta.push({ label: "Status", value: latest.status.replace(/_/g, " ") });
+  const duration = formatAttemptDuration(latest);
+  if (duration) meta.push({ label: "Duration", value: duration });
+  if (typeof latest.exitCode === "number") meta.push({ label: "Exit", value: `exit ${latest.exitCode}` });
+
+  // The earliest task in the chain anchors the row where the worker first
+  // appeared in the conversation, even after a runtime fallback replaced it.
+  const firstTask = worker.supersededTasks[0] ?? worker.task;
   return {
     kind: "tool",
-    id: `worker-attempt:${attempt.id}`,
+    id: `worker:${worker.task.id}`,
     activity: "worker",
-    title,
-    detail: failed && attempt.error ? `${detail}: ${attempt.error}` : detail,
+    title: worker.task.title,
+    detail: detailParts.join(" · "),
     status,
     tone: failed ? "failed" : live ? "live" : "done",
-    at: attempt.startedAt ?? task?.createdAt ?? fallbackAt,
+    at: attempts[0].startedAt ?? firstTask.createdAt ?? fallbackAt,
     meta,
     files: [],
+    attempts: attempts.map((attempt, index) => ({
+      id: attempt.id,
+      number: index + 1,
+      outcome: attemptOutcome(attempt, index === attempts.length - 1, worker.task.status),
+      failed:
+        attempt.status === "failed" ||
+        attempt.status === "timed_out" ||
+        attempt.status === "cancelled",
+    })),
   };
+}
+
+// Reads an attempt the way a reviewer would: a succeeded attempt that was
+// followed by another try means the verifier sent it back with feedback; the
+// final succeeded attempt takes its label from where the task landed.
+function attemptOutcome(
+  attempt: WorkerAttempt,
+  isLast: boolean,
+  taskStatus: WorkerTaskStatus,
+): string {
+  if (attempt.status === "succeeded") {
+    if (!isLast) return "feedback";
+    if (taskStatus === "accepted") return "accepted";
+    if (taskStatus === "needs_review") return "in review";
+    return "succeeded";
+  }
+  if (attempt.status === "timed_out") return "timed out";
+  return attempt.status.replace(/_/g, " ");
 }
 
 function workerAttemptToolStatus(attempt: WorkerAttempt): "started" | "completed" | "failed" {
@@ -309,7 +355,7 @@ function workerAttemptToolStatus(attempt: WorkerAttempt): "started" | "completed
   return "started";
 }
 
-function runtimeLabel(runtime: WorkerRuntime): string {
+export function runtimeLabel(runtime: WorkerRuntime): string {
   switch (runtime) {
     case "claude":
       return "Claude";
